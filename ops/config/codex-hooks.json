@@ -2,6 +2,16 @@
   "hooks": {
     "PreToolUse": [
       {
+        "matcher": "^(Bash|functions\\.exec|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|mcp__.*)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 {{REPO}}/hooks/rule-pack-preuse-reselection.py",
+            "timeout": 20
+          }
+        ]
+      },
+      {
         "matcher": "^(Bash|functions\\.exec)$",
         "hooks": [
           {
@@ -70,6 +80,11 @@
             "type": "command",
             "command": "/usr/bin/env python3 {{REPO}}/hooks/chat-lint-gate.py",
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 {{REPO}}/hooks/rule-pack-drift-gate.py",
+            "timeout": 20
           }
         ]
       }

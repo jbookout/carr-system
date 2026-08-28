@@ -49,6 +49,7 @@ begin
     'carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence',
     'carr_calendar_prebrief_jobs','carr_calendar_prebrief_canary_jobs',
     'carr_calendar_prebrief_attestors','carr_calendar_prebrief_email_resolver',
+    'carr_program5_forward_fix_verifiers',
     'carr_renewal_source_attestors'
   ] loop
     if not exists (select 1 from pg_roles where rolname = r) then
@@ -227,7 +228,13 @@ begin
      or ar.work_request_id is distinct from w.id or ar.plan_id is distinct from p.id
      or ar.result_version is distinct from w.version or ar.plan_hash is distinct from p.plan_hash
      or ar.accepted_by_actor_id is null
-     or w.shape_fixed_surface_ref is distinct from ar.shape_fixed_surface_ref then
+     or (w.shape_fixed_surface_ref is distinct from ar.shape_fixed_surface_ref
+         and not exists (
+           select 1 from ops.sourced_work_request_plan_shape_binding_receipt sb
+            where sb.plan_acceptance_receipt_id = ar.id
+              and sb.work_request_id = w.id
+              and sb.disposition is not distinct from w.shape_disposition
+              and sb.fixed_surface_ref is not distinct from w.shape_fixed_surface_ref)) then
     raise exception 'only an exact current ready sourced plan may receive human outcome-feedback acceptance';
   end if;
   canonical_preimage := ops.sourced_work_request_outcome_feedback_preimage(
@@ -669,6 +676,123 @@ end $$;
 
 
 --
+-- Name: amend_rule_statement(uuid, text, text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.amend_rule_statement(p_rule_id uuid, p_new_statement text, p_idempotency_key text, p_reason text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare
+  v_actor_slug text;
+  v_actor_id uuid;
+  v_rule rule%rowtype;
+  v_prior ops.rule_amendment_receipt%rowtype;
+  v_receipt ops.rule_amendment_receipt%rowtype;
+  v_prior_hash text;
+  v_new_hash text;
+  v_new_statement text;
+  v_legacy_note text;
+  v_contract jsonb;
+  v_contract_hash text;
+  v_amended_at timestamptz;
+begin
+  v_actor_slug := ops.authority_actor_slug();
+  if v_actor_slug <> 'joe' then
+    raise exception 'system rule amendment requires Joe authority; % may teach and participate but cannot replace Joe approval',
+      v_actor_slug;
+  end if;
+  select id into v_actor_id from actor
+   where slug=v_actor_slug and kind='human' and active;
+  if v_actor_id is null then
+    raise exception 'authority actor % is not an active human',v_actor_slug;
+  end if;
+  if btrim(coalesce(p_idempotency_key,''))='' or btrim(coalesce(p_reason,''))='' then
+    raise exception 'amendment idempotency key and rationale are required';
+  end if;
+  v_new_statement := btrim(coalesce(p_new_statement,''));
+  if v_new_statement='' then
+    raise exception 'a rule cannot be amended to empty text';
+  end if;
+
+  perform pg_advisory_xact_lock(hashtextextended('rule-amendment:'||p_idempotency_key,0));
+  select * into v_prior from ops.rule_amendment_receipt
+   where idempotency_key=p_idempotency_key;
+  if found then
+    if v_prior.rule_id is distinct from p_rule_id
+       or v_prior.new_statement is distinct from v_new_statement
+       or v_prior.rationale is distinct from btrim(p_reason)
+       or v_prior.amended_by is distinct from v_actor_id then
+      raise exception 'rule amendment idempotency key was reused with different input';
+    end if;
+    select * into v_rule from rule where id=p_rule_id for update;
+    if not found
+       or v_rule.version is distinct from v_prior.rule_version_after
+       or v_rule.statement is distinct from v_prior.new_statement then
+      raise exception 'rule amendment replay refused: current rule no longer matches the immutable amendment';
+    end if;
+    return jsonb_build_object('ok',true,'replayed',true,'rule_id',p_rule_id,
+      'rule_version_before',v_prior.rule_version_before,
+      'rule_version_after',v_prior.rule_version_after,
+      'amendment_receipt_id',v_prior.id,'legacy_admission',v_prior.legacy_admission);
+  end if;
+
+  select * into v_rule from rule where id=p_rule_id for update;
+  if not found then raise exception 'rule % not found',p_rule_id; end if;
+  if v_rule.status='retired' then
+    raise exception 'rule % is retired; a withdrawn rule stays as written',p_rule_id;
+  end if;
+  if v_rule.status not in ('proposed','active') then
+    raise exception 'rule % is %, expected proposed or active',p_rule_id,v_rule.status;
+  end if;
+
+  v_prior_hash := encode(digest(v_rule.statement,'sha256'),'hex');
+  v_new_hash   := encode(digest(v_new_statement,'sha256'),'hex');
+  if v_prior_hash = v_new_hash then
+    raise exception 'rule % amendment is a no-op: the new statement hashes identically to the current one',p_rule_id;
+  end if;
+
+  -- (0351) Purely descriptive here: unlike ops.retire_rule, nothing below
+  -- branches on v_legacy_note -- it is recorded whenever it applies, never
+  -- required.
+  v_legacy_note := ops.legacy_rule_admission_note(v_rule.id,v_rule.status,v_rule.activated_at);
+
+  v_amended_at := now();
+  v_contract := jsonb_build_object(
+    'rule_id',v_rule.id,'rule_version_before',v_rule.version,'rule_version_after',v_rule.version+1,
+    'prior_statement_hash',v_prior_hash,'new_statement_hash',v_new_hash,
+    'actor_id',v_actor_id,'rationale',btrim(p_reason),'legacy_admission',v_legacy_note,'amended_at',v_amended_at);
+  v_contract_hash := encode(digest(v_contract::text,'sha256'),'hex');
+
+  insert into ops.rule_amendment_receipt
+    (idempotency_key,rule_id,rule_version_before,rule_version_after,prior_statement_hash,
+     new_statement,new_statement_hash,amended_by,rationale,legacy_admission,contract_hash,amended_at)
+  values (p_idempotency_key,v_rule.id,v_rule.version,v_rule.version+1,v_prior_hash,
+          v_new_statement,v_new_hash,v_actor_id,btrim(p_reason),v_legacy_note,v_contract_hash,v_amended_at)
+  returning * into v_receipt;
+
+  insert into ops.authority_receipt
+    (idempotency_key,kind,subject_type,subject_id,actor_id,decision,contract_hash,evidence_refs)
+  values ('amendment:'||p_idempotency_key,'amendment','rule',v_rule.id,v_actor_id,
+          'statement amended by Joe authority: '||btrim(p_reason),v_contract_hash,'{}'::text[]);
+
+  update rule set statement=v_new_statement where id=v_rule.id and version=v_rule.version;
+  if not found then raise exception 'rule % amendment raced',v_rule.id; end if;
+
+  return jsonb_build_object('ok',true,'replayed',false,'rule_id',v_rule.id,
+    'rule_version_before',v_rule.version,'rule_version_after',v_rule.version+1,
+    'amendment_receipt_id',v_receipt.id,'legacy_admission',v_receipt.legacy_admission);
+end $$;
+
+
+--
+-- Name: FUNCTION amend_rule_statement(p_rule_id uuid, p_new_statement text, p_idempotency_key text, p_reason text); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.amend_rule_statement(p_rule_id uuid, p_new_statement text, p_idempotency_key text, p_reason text) IS 'Guarded like ops.approve_rule and ops.retire_rule: Joe-authority actor only, refuses a retired rule, writes an immutable ops.rule_amendment_receipt hashing the PRIOR statement, then updates rule.statement atomically. human_quote/scope/taught_by/personal_to/supersedes and every activation/retirement field are untouched. (0351) Records legacy_admission via the same shared predicate ops.retire_rule uses, though this function never required a receipt to run -- ops.require_rule_admission''s strict immutability branch only engages once a receipt exists, so a legacy rule was already amendable; this only names that fact honestly in the ledger.';
+
+
+--
 -- Name: applicable_rules(text, text, text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -681,12 +805,23 @@ CREATE FUNCTION ops.applicable_rules(p_workflow text DEFAULT NULL::text, p_surfa
     join ops.rule_admission a on a.rule_id=r.id
     join ops.rule_approval_receipt ar
       on ar.rule_id=r.id and ar.actor_id=r.activated_by
-     and (ar.rule_version=r.version or exists (
-       select 1 from ops.rule_approval_lifecycle_anchor legacy
-        where legacy.approval_receipt_id=ar.id and legacy.rule_id=r.id
-          and legacy.rule_version_after=r.version
-          and legacy.statement_hash=ar.statement_hash))
-     and ar.statement_hash=encode(digest(r.statement,'sha256'),'hex')
+     and (
+       (
+         (ar.rule_version=r.version or exists (
+           select 1 from ops.rule_approval_lifecycle_anchor legacy
+            where legacy.approval_receipt_id=ar.id and legacy.rule_id=r.id
+              and legacy.rule_version_after=r.version
+              and legacy.statement_hash=ar.statement_hash))
+         and ar.statement_hash=encode(digest(r.statement,'sha256'),'hex')
+       )
+       -- (0349) An amended active rule's VERSION and STATEMENT both moved
+       -- together, so both the version-match and the hash-match above are
+       -- expected to fail for it -- rule_amendment_reaches() proves the two
+       -- moved together through a genuine, tamper-evident chain rather than
+       -- checking either number in isolation.
+       or ops.rule_amendment_reaches(r.id,ar.rule_version,ar.statement_hash,
+                                      r.version,encode(digest(r.statement,'sha256'),'hex'))
+     )
      and ar.policy_kind=a.enforcement_class
      and ar.enforcement_status=a.enforcement_status
      and ar.normalized_contract->>'binding_moment'=a.binding_moment
@@ -730,7 +865,7 @@ $$;
 -- Name: FUNCTION applicable_rules(p_workflow text, p_surface text, p_tier text); Type: COMMENT; Schema: ops; Owner: -
 --
 
-COMMENT ON FUNCTION ops.applicable_rules(p_workflow text, p_surface text, p_tier text) IS 'Compiles the active admitted rule set for a workflow/surface/tier. SECURITY DEFINER with a pinned search_path (0188): the caller is the worker''s carr_reader role, which is views-only by design and cannot read public.rule or ops.rule_admission directly. Read-only, no dynamic SQL.';
+COMMENT ON FUNCTION ops.applicable_rules(p_workflow text, p_surface text, p_tier text) IS 'Compiles the active admitted rule set for a workflow/surface/tier. SECURITY DEFINER with a pinned search_path (0188): the caller is the worker''s carr_reader role, which is views-only by design and cannot read public.rule or ops.rule_admission directly. Read-only, no dynamic SQL. Statement match accepts the original exact approval hash OR (0349) a proven ops.rule_amendment_receipt chain, so an amended active rule keeps reciting instead of silently dropping out.';
 
 
 --
@@ -856,103 +991,41 @@ CREATE FUNCTION ops.approve_program5_release(p_release_key text, p_plan_hash tex
     SET search_path TO 'ops', 'public', 'pg_temp'
     AS $$
 declare actor_slug text; rel ops.release%rowtype; existing ops.release_approval_receipt%rowtype;
-  rehearsal_run ops.run%rowtype; approval_uuid uuid; approved_time timestamptz;
-  expiry_time timestamptz; projection jsonb; approval_hash text; approval_ref text;
-  supplied_verifier_actor text; supplied_verifier_evidence text;
-  candidate_verifier_actor text; candidate_verifier_evidence text;
-  verifier_actor_value text; verifier_evidence_value text;
+  rehearsal_run ops.run%rowtype; approval_uuid uuid; approved_time timestamptz; expiry_time timestamptz;
+  projection jsonb; approval_hash text; approval_ref text; supplied_verifier_actor text; supplied_verifier_evidence text;
+  candidate_verifier_actor text; candidate_verifier_evidence text; verifier_actor_value text; verifier_evidence_value text;
 begin
   actor_slug:=ops.authority_actor_slug();
   if actor_slug<>'joe' then raise exception 'Program 5 Production approval requires Joe authority'; end if;
-  if p_idempotency_key is null or coalesce(p_release_key,'')='' or coalesce(p_plan_hash,'')=''
-     or coalesce(p_expires_hours,0) not between 1 and 24 then
-    raise exception 'invalid Program 5 approval input';
-  end if;
-  if (p_verifier_actor is null) <> (p_verifier_evidence_ref is null)
-     or (p_verifier_actor is not null
-         and (btrim(p_verifier_actor)='' or btrim(p_verifier_evidence_ref)='')) then
-    raise exception 'supplied verifier actor and evidence must be an atomic nonblank pair';
-  end if;
+  if p_idempotency_key is null or coalesce(p_release_key,'')='' or coalesce(p_plan_hash,'')='' or coalesce(p_expires_hours,0) not between 1 and 24 then raise exception 'invalid Program 5 approval input'; end if;
+  if (p_verifier_actor is null)<>(p_verifier_evidence_ref is null) or (p_verifier_actor is not null and (btrim(p_verifier_actor)='' or btrim(p_verifier_evidence_ref)='')) then raise exception 'supplied verifier actor and evidence must be an atomic nonblank pair'; end if;
   supplied_verifier_actor:=case when p_verifier_actor is null then null else lower(btrim(p_verifier_actor)) end;
   supplied_verifier_evidence:=case when p_verifier_evidence_ref is null then null else btrim(p_verifier_evidence_ref) end;
   perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,202));
   select * into existing from ops.release_approval_receipt where idempotency_key=p_idempotency_key;
   if found then
-    if existing.plan_hash<>p_plan_hash
-       or existing.approval_expires_at-existing.approved_at
-          <> make_interval(hours=>p_expires_hours)
-       or not exists (
-      select 1 from ops.release where id=existing.release_id and release_key=p_release_key
-        and plan_hash=existing.plan_hash and approval_receipt_id=existing.id
-        and state in ('approved','deploying','verifying','complete')
-        and approved_at=existing.approved_at
-        and approval_expires_at=existing.approval_expires_at
-        and (supplied_verifier_actor is null or existing.verifier_actor=supplied_verifier_actor)
-        and (supplied_verifier_evidence is null or existing.verifier_evidence_ref=supplied_verifier_evidence)) then
-      raise exception 'Program 5 approval idempotency key was reused with changed input';
-    end if;
-    return jsonb_build_object('approval_receipt_id',existing.id,
-      'approval_ref',existing.evidence_ref,'approval_expires_at',existing.approval_expires_at,
-      'replayed',true);
+    if existing.plan_hash<>p_plan_hash or existing.approval_expires_at-existing.approved_at<>make_interval(hours=>p_expires_hours)
+       or not exists(select 1 from ops.release where id=existing.release_id and release_key=p_release_key and plan_hash=existing.plan_hash and approval_receipt_id=existing.id and state in ('approved','deploying','verifying','complete') and approved_at=existing.approved_at and approval_expires_at=existing.approval_expires_at and (supplied_verifier_actor is null or existing.verifier_actor=supplied_verifier_actor) and (supplied_verifier_evidence is null or existing.verifier_evidence_ref=supplied_verifier_evidence)) then raise exception 'Program 5 approval idempotency key was reused with changed input'; end if;
+    return jsonb_build_object('approval_receipt_id',existing.id,'approval_ref',existing.evidence_ref,'approval_expires_at',existing.approval_expires_at,'replayed',true);
   end if;
   select * into rel from ops.release where release_key=p_release_key for update;
-  if not found or rel.environment<>'production' or rel.state<>'candidate'
-     or rel.plan_hash is distinct from p_plan_hash then
-    raise exception 'release is not the exact Production candidate plan requested';
-  end if;
-  if (rel.verifier_actor is null) <> (rel.verifier_evidence_ref is null)
-     or (rel.verifier_actor is not null
-         and (btrim(rel.verifier_actor)='' or btrim(rel.verifier_evidence_ref)='')) then
-    raise exception 'candidate verifier actor and evidence must be an atomic nonblank pair';
-  end if;
+  if not found or rel.environment<>'production' or rel.state<>'candidate' or rel.plan_hash is distinct from p_plan_hash then raise exception 'release is not the exact Production candidate plan requested'; end if;
+  if (rel.verifier_actor is null)<>(rel.verifier_evidence_ref is null) or (rel.verifier_actor is not null and (btrim(rel.verifier_actor)='' or btrim(rel.verifier_evidence_ref)='')) then raise exception 'candidate verifier actor and evidence must be an atomic nonblank pair'; end if;
   candidate_verifier_actor:=case when rel.verifier_actor is null then null else lower(btrim(rel.verifier_actor)) end;
   candidate_verifier_evidence:=case when rel.verifier_evidence_ref is null then null else btrim(rel.verifier_evidence_ref) end;
   verifier_actor_value:=coalesce(supplied_verifier_actor,candidate_verifier_actor);
   verifier_evidence_value:=coalesce(supplied_verifier_evidence,candidate_verifier_evidence);
-  if verifier_actor_value is null or verifier_evidence_value is null then
-    raise exception 'release cannot be approved without an INDEPENDENT VERIFIER and verification evidence';
-  end if;
-  if rel.maker_actor is not null
-     and verifier_actor_value=lower(btrim(rel.maker_actor)) then
-    raise exception 'maker cannot independently verify their own release';
-  end if;
-  select r.* into rehearsal_run from ops.run r
-   join ops.staging_recovery_rehearsal_bundle b on b.id=r.recovery_rehearsal_bundle_id
-   where r.release_id=rel.id and r.service_id=rel.service_id
-     and r.environment='staging' and r.run_key='recovery.rehearsal.worker'
-     and r.state='succeeded' and r.evidence_ref=b.evidence_ref
-     and b.current_release_id=rel.id and b.service_id=rel.service_id
-     and b.recovery_strategy=rel.recovery_strategy
-     and b.recovery_plan_ref=rel.rollback_plan_ref and b.plan_hash=rel.plan_hash
-     and b.declared_migration_set_sha256=ops.program5_migration_set_sha256(rel.migration_set)
-     and b.declared_migration_count=cardinality(rel.migration_set)
-     and b.declared_schema_highest_migration=rel.schema_highest_migration
-     and b.declared_schema_applied_count=rel.schema_applied_count
-     and b.declared_schema_ledger_sha256=rel.schema_ledger_sha256
-     and b.completed_at between clock_timestamp()-interval '24 hours' and clock_timestamp()
-   order by r.ended_at desc limit 1;
+  if verifier_actor_value is null or verifier_evidence_value is null then raise exception 'release cannot be approved without an INDEPENDENT VERIFIER and verification evidence'; end if;
+  if rel.maker_actor is not null and verifier_actor_value=lower(btrim(rel.maker_actor)) then raise exception 'maker cannot independently verify their own release'; end if;
+  select * into rehearsal_run from ops.run where id=ops.program5_exact_recovery_rehearsal(rel.id,clock_timestamp()-interval '24 hours');
   if not found then raise exception 'release has no exact typed recovery rehearsal'; end if;
   approved_time:=clock_timestamp(); expiry_time:=approved_time+make_interval(hours=>p_expires_hours);
-  projection:=jsonb_build_object('release_id',rel.id,'plan_hash',rel.plan_hash,
-    'recovery_run_id',rehearsal_run.id,'recovery_bundle_id',rehearsal_run.recovery_rehearsal_bundle_id,
-    'approved_by_actor',actor_slug,'approved_at',approved_time,'approval_expires_at',expiry_time,
-    'verifier_actor',verifier_actor_value,'verifier_evidence_ref',verifier_evidence_value);
-  approval_hash:='sha256:'||encode(public.digest(projection::text,'sha256'),'hex');
-  approval_ref:='ops.program5-release-approval:'||approval_hash;
-  insert into ops.release_approval_receipt(idempotency_key,release_id,recovery_run_id,
-    recovery_bundle_id,plan_hash,approved_by_actor,approved_at,approval_expires_at,
-    verifier_actor,verifier_evidence_ref,
-    approval_sha256,evidence_ref)
-  values(p_idempotency_key,rel.id,rehearsal_run.id,rehearsal_run.recovery_rehearsal_bundle_id,
-    rel.plan_hash,actor_slug,approved_time,expiry_time,verifier_actor_value,verifier_evidence_value,
-    approval_hash,approval_ref)
-  returning id into approval_uuid;
-  update ops.release set verifier_actor=verifier_actor_value,
-    verifier_evidence_ref=verifier_evidence_value,state='approved',approved_by_actor=actor_slug,
-    approved_at=approved_time,approval_expires_at=expiry_time,
-    approval_receipt_id=approval_uuid where id=rel.id;
-  return jsonb_build_object('approval_receipt_id',approval_uuid,'approval_ref',approval_ref,
-    'approval_expires_at',expiry_time,'replayed',false);
+  projection:=jsonb_build_object('release_id',rel.id,'plan_hash',rel.plan_hash,'recovery_run_id',rehearsal_run.id,'recovery_bundle_id',rehearsal_run.recovery_rehearsal_bundle_id,'approved_by_actor',actor_slug,'approved_at',approved_time,'approval_expires_at',expiry_time,'verifier_actor',verifier_actor_value,'verifier_evidence_ref',verifier_evidence_value);
+  approval_hash:='sha256:'||encode(public.digest(projection::text,'sha256'),'hex'); approval_ref:='ops.program5-release-approval:'||approval_hash;
+  insert into ops.release_approval_receipt(idempotency_key,release_id,recovery_run_id,recovery_bundle_id,plan_hash,approved_by_actor,approved_at,approval_expires_at,verifier_actor,verifier_evidence_ref,approval_sha256,evidence_ref)
+  values(p_idempotency_key,rel.id,rehearsal_run.id,rehearsal_run.recovery_rehearsal_bundle_id,rel.plan_hash,actor_slug,approved_time,expiry_time,verifier_actor_value,verifier_evidence_value,approval_hash,approval_ref) returning id into approval_uuid;
+  update ops.release set verifier_actor=verifier_actor_value,verifier_evidence_ref=verifier_evidence_value,state='approved',approved_by_actor=actor_slug,approved_at=approved_time,approval_expires_at=expiry_time,approval_receipt_id=approval_uuid where id=rel.id;
+  return jsonb_build_object('approval_receipt_id',approval_uuid,'approval_ref',approval_ref,'approval_expires_at',expiry_time,'replayed',false);
 end $$;
 
 
@@ -1916,10 +1989,10 @@ CREATE TABLE ops.job (
     CONSTRAINT job_attempt_check CHECK ((attempt >= 0)),
     CONSTRAINT job_max_attempts_check CHECK ((max_attempts > 0)),
     CONSTRAINT job_mode_check CHECK ((mode = ANY (ARRAY['shadow'::text, 'canary'::text, 'live'::text, 'replay'::text]))),
-    CONSTRAINT job_state_check CHECK ((state = ANY (ARRAY['queued'::text, 'running'::text, 'retry_wait'::text, 'waiting_approval'::text, 'succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'dead_lettered'::text]))),
+    CONSTRAINT job_state_check CHECK ((state = ANY (ARRAY['queued'::text, 'running'::text, 'retry_wait'::text, 'waiting_approval'::text, 'succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'dead_lettered'::text, 'skipped'::text]))),
     CONSTRAINT job_timeout_seconds_check CHECK ((timeout_seconds > 0)),
     CONSTRAINT running_job_has_a_lease CHECK (((state <> 'running'::text) OR ((lease_owner IS NOT NULL) AND (lease_token IS NOT NULL) AND (leased_until IS NOT NULL)))),
-    CONSTRAINT terminal_job_has_ended CHECK (((state <> ALL (ARRAY['succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'dead_lettered'::text])) OR (ended_at IS NOT NULL)))
+    CONSTRAINT terminal_job_has_ended CHECK (((state <> ALL (ARRAY['succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'dead_lettered'::text, 'skipped'::text])) OR (ended_at IS NOT NULL)))
 );
 
 
@@ -2097,6 +2170,22 @@ $$;
 
 
 --
+-- Name: capability_agent_session_lease_immutable(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.capability_agent_session_lease_immutable() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+begin
+  if tg_op='UPDATE' and new.lease_expires_at is distinct from old.lease_expires_at then
+    raise exception 'capability agent session lease is immutable';
+  end if;
+  return new;
+end $$;
+
+
+--
 -- Name: capability_attestation_guard(); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -2173,6 +2262,14 @@ begin
   if old.program_key = 'carr-ai-engineering-suite-v1'
      and old.state = 'confirmed_closed'
      and new is distinct from old then
+    if coalesce(current_setting('carr.legacy_program_tenant_backfill', true), '') = 'on'
+       and old.organization_tenant_id is null
+       and new.organization_tenant_id = 'carr-internal'
+       and (to_jsonb(new) - 'organization_tenant_id')
+           is not distinct from
+           (to_jsonb(old) - 'organization_tenant_id') then
+      return new;
+    end if;
     raise exception 'closed capability programme evidence is immutable';
   end if;
   return new;
@@ -2366,6 +2463,7 @@ begin
     select j.id from ops.job j join ops.job_definition d
       on d.key=j.definition_key and d.version=j.definition_version
      where d.enabled and j.state in ('queued','retry_wait') and j.next_attempt_at<=now()
+       and j.definition_key<>'engineering-slice'
        and not (j.definition_key='calendar-prebrief-projection-joe-daily' and j.definition_version=1)
      order by j.scheduled_for,j.created_at for update of j,d skip locked limit p_limit
   ), claimed as (
@@ -2405,7 +2503,7 @@ begin
     select j.id from ops.job j join ops.job_definition d
       on d.key=j.definition_key and d.version=j.definition_version
      where d.enabled and j.state in ('queued','retry_wait') and j.next_attempt_at<=now()
-       and j.mode=p_mode
+       and j.mode=p_mode and j.definition_key<>'engineering-slice'
        and not (j.definition_key='calendar-prebrief-projection-joe-daily' and j.definition_version=1)
      order by j.scheduled_for,j.created_at for update of j,d skip locked limit p_limit
   ), claimed as (
@@ -2458,6 +2556,30 @@ end $$;
 
 
 --
+-- Name: claim_staging_forward_fix_rehearsal(uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.claim_staging_forward_fix_rehearsal(p_idempotency_key uuid) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare attempt ops.staging_forward_fix_rehearsal_attempt%rowtype; result_row ops.staging_forward_fix_rehearsal_result%rowtype; inserted_count integer;
+begin
+  if session_user<>'carr_jobs' then raise exception 'forward-fix rehearsal claim requires the carr_jobs session'; end if;
+  perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,315));
+  select * into attempt from ops.staging_forward_fix_rehearsal_attempt where idempotency_key=p_idempotency_key;
+  if not found then raise exception 'forward-fix rehearsal must be prepared before claim'; end if;
+  select * into result_row from ops.staging_forward_fix_rehearsal_result where rehearsal_attempt_id=attempt.id;
+  if found then return jsonb_build_object('forward_fix_rehearsal_attempt_id',attempt.id,'mutation_allowed',false,'state','observed','replayed',true); end if;
+  insert into ops.staging_forward_fix_rehearsal_claim(rehearsal_attempt_id,writer_session_user)
+  values(attempt.id,session_user) on conflict do nothing;
+  get diagnostics inserted_count=row_count;
+  return jsonb_build_object('forward_fix_rehearsal_attempt_id',attempt.id,'mutation_allowed',inserted_count=1,
+    'state',case when inserted_count=1 then 'claimed' else 'claimed_pending_result' end,'replayed',inserted_count=0);
+end $$;
+
+
+--
 -- Name: claim_staging_restore_only_attempt(uuid); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -2477,6 +2599,29 @@ begin
   get diagnostics inserted_count=row_count;
   return jsonb_build_object('restore_attempt_id',attempt.id,'mutation_allowed',inserted_count=1,'state',case when inserted_count=1 then 'claimed' else 'claimed_pending_result' end,'replayed',inserted_count=0);
 end $$;
+
+
+--
+-- Name: classify_sourced_work_request_build(text, integer, text, jsonb, jsonb); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.classify_sourced_work_request_build(p_work_request text, p_base_version integer, p_scope_summary text, p_dependency_refs jsonb, p_caps jsonb) RETURNS TABLE(work_request_id uuid, ref text, tier text, reasons jsonb, shape_disposition text, shape_ready boolean)
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+declare
+  w ops.work_request%rowtype;
+  classification jsonb;
+begin
+  select x.* into w from ops.work_request x
+   where x.ref = p_work_request and x.state = 'triaged' and x.version = p_base_version
+     and x.capture_idempotency_key is not null and x.organization_tenant_id = 'carr-internal';
+  if not found then return; end if;
+  classification := ops.heavy_build_classification(w.id, p_scope_summary, p_dependency_refs, p_caps);
+  return query select w.id, w.ref, classification->>'tier', classification->'reasons',
+    classification->>'shape_disposition', (classification->>'shape_ready')::boolean;
+end;
+$$;
 
 
 --
@@ -2653,6 +2798,9 @@ CREATE FUNCTION ops.complete_job(p_job_id uuid, p_lease_token uuid, p_evidence j
 declare j ops.job%rowtype;
 begin
   select * into j from ops.job where id=p_job_id for update;
+  if found and j.definition_key='engineering-slice' then
+    raise exception 'engineering jobs require scoped controller functions';
+  end if;
   if not found or j.state <> 'running' or j.lease_token <> p_lease_token
      or j.leased_until < now() then
     raise exception 'job % does not hold this live lease',p_job_id;
@@ -3765,45 +3913,147 @@ $$;
 -- Name: engineering_claim_slice(text, integer, integer); Type: FUNCTION; Schema: ops; Owner: -
 --
 
-CREATE FUNCTION ops.engineering_claim_slice(p_worker text, p_limit integer DEFAULT 1, p_lease_seconds integer DEFAULT 1800) RETURNS TABLE(job_id uuid, lease_token uuid, definition_key text, definition_version integer, payload jsonb, execution_kind text, execution_contract jsonb, attempt integer, timeout_seconds integer, mode text)
+CREATE FUNCTION ops.engineering_claim_slice(p_worker text, p_limit integer DEFAULT 1, p_lease_seconds integer DEFAULT 960) RETURNS TABLE(job_id uuid, lease_token uuid, definition_key text, definition_version integer, payload jsonb, execution_kind text, execution_contract jsonb, attempt integer, timeout_seconds integer, mode text)
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'ops', 'public', 'pg_temp'
     AS $$
+declare v_job_id uuid; v_envelope_id uuid; v_slice_plan_id uuid; v_slice_ref text;
+        v_work_request_id uuid; v_executor_actor_id uuid;
+        v_currentness jsonb; v_claim_at timestamptz; v_runway_sufficient boolean;
 begin
-  if btrim(coalesce(p_worker,''))='' or p_limit < 1 or p_lease_seconds < 1 then
-    raise exception 'worker, positive limit and positive lease are required';
-  end if;
-  perform ops.reap_expired_jobs();
-  return query
-  with candidate as (
-    select j.id
-      from ops.job j
-      join ops.job_definition d
-        on d.key=j.definition_key and d.version=j.definition_version
-      join ops.engineering_execution_envelope e on e.job_id=j.id
-     where d.enabled and j.definition_key='engineering-slice'
-       and j.definition_version=1 and j.state in ('queued','retry_wait')
-       and j.next_attempt_at <= now()
-     order by j.scheduled_for,j.created_at
-     for update of j,d skip locked limit p_limit
-  ), claimed as (
-    update ops.job j set
-      state='running',attempt=j.attempt+1,lease_owner=p_worker,
-      lease_token=gen_random_uuid(),
-      leased_until=now()+make_interval(secs=>p_lease_seconds),
-      started_at=coalesce(j.started_at,now()),updated_at=now()
-    from candidate c where j.id=c.id
+  if btrim(coalesce(p_worker,''))='' or p_limit is distinct from 1 then raise exception 'worker and exactly one claim are required'; end if;
+  if p_lease_seconds is distinct from 960 then raise exception 'engineering controller lease must be 960 seconds'; end if;
+  -- Identifier lookup is deliberately unlocked.  Every authority predicate is
+  -- re-read only after the global session-first lock order below.
+  select j.id,e.id,e.slice_plan_id,e.slice_ref,e.work_request_id
+    into v_job_id,v_envelope_id,v_slice_plan_id,v_slice_ref,v_work_request_id
+    from ops.job j
+    join ops.job_definition d on d.key=j.definition_key and d.version=j.definition_version
+    join ops.engineering_execution_envelope e on e.job_id=j.id
+   where d.enabled and j.definition_key='engineering-slice' and j.definition_version=1
+     and j.state in ('queued','retry_wait') and j.next_attempt_at<=now()
+     and j.attempt<j.max_attempts
+     and ops.engineering_envelope_is_executable(e.id,j.id)
+     and coalesce((ops.engineering_envelope_currentness(e.id,j.id)
+                    ->>'dispatch_runway_sufficient')::boolean,false)
+   order by j.scheduled_for,j.created_at limit 1;
+  if not found then return; end if;
+  select s.executor_actor_id into v_executor_actor_id
+    from ops.capability_agent_session s
+    join ops.engineering_execution_envelope e on e.agent_session_id=s.id
+   where e.id=v_envelope_id and e.job_id=v_job_id for share of s;
+  if not found then return; end if;
+  perform 1 from public.actor a
+   where a.id=v_executor_actor_id and a.active and a.kind='automation' and a.slug='codex'
+   order by a.id for share;
+  if not found then return; end if;
+  perform pg_advisory_xact_lock(hashtextextended(
+    'engineering-envelope:'||v_slice_plan_id::text||':'||v_slice_ref,0));
+  perform 1 from ops.engineering_execution_envelope e
+    join ops.engineering_slice_plan sp on sp.id=e.slice_plan_id
+   where e.id=v_envelope_id and e.job_id=v_job_id
+   for key share of e,sp;
+  if not found then return; end if;
+  perform 1 from ops.work_request where id=v_work_request_id for share;
+  if not found then return; end if;
+  perform 1 from ops.job_definition d
+   where d.key='engineering-slice' and d.version=1 for share;
+  if not found then return; end if;
+  perform 1 from ops.job j
+   where j.id=v_job_id for update;
+  if not found then return; end if;
+  v_claim_at:=clock_timestamp();
+  perform 1 from ops.job j
+    join ops.job_definition d on d.key=j.definition_key and d.version=j.definition_version
+   where j.id=v_job_id and d.enabled and j.definition_key='engineering-slice'
+     and j.definition_version=1 and j.state in ('queued','retry_wait')
+     and j.next_attempt_at<=v_claim_at and j.attempt<j.max_attempts;
+  if not found then return; end if;
+  v_currentness:=ops.engineering_envelope_currentness(v_envelope_id,v_job_id);
+  select e.expires_at>=v_claim_at+make_interval(secs=>p_lease_seconds)
+         and s.lease_expires_at is not null
+         and s.lease_expires_at>=v_claim_at+make_interval(secs=>p_lease_seconds)
+    into v_runway_sufficient
+    from ops.engineering_execution_envelope e
+    join ops.capability_agent_session s on s.id=e.agent_session_id
+   where e.id=v_envelope_id and e.job_id=v_job_id;
+  if coalesce((v_currentness->>'eligible')::boolean,false) is not true
+     or coalesce(v_runway_sufficient,false) is not true then return; end if;
+  return query with claimed as (
+    update ops.job j set state='running',attempt=j.attempt+1,lease_owner=p_worker,
+      lease_token=gen_random_uuid(),leased_until=v_claim_at+make_interval(secs=>p_lease_seconds),
+      started_at=coalesce(j.started_at,v_claim_at),updated_at=v_claim_at
+    where j.id=v_job_id and j.state in ('queued','retry_wait')
     returning j.*
   ), attempts as (
-    insert into ops.job_attempt(job_id,attempt,lease_owner,lease_token,state)
-    select c.id,c.attempt,c.lease_owner,c.lease_token,'running' from claimed c
-    returning job_id
-  )
-  select c.id,c.lease_token,c.definition_key,c.definition_version,c.payload,
-         d.execution_kind,d.execution_contract,c.attempt,c.timeout_seconds,c.mode
-    from claimed c
-    join ops.job_definition d on d.key=c.definition_key and d.version=c.definition_version
-    join attempts a on a.job_id=c.id;
+    insert into ops.job_attempt as claimed_attempt(job_id,attempt,lease_owner,lease_token,state)
+    select c.id,c.attempt,c.lease_owner,c.lease_token,'running' from claimed c returning claimed_attempt.job_id
+  ) select c.id,c.lease_token,c.definition_key,c.definition_version,c.payload,d.execution_kind,d.execution_contract,c.attempt,c.timeout_seconds,c.mode from claimed c join ops.job_definition d on d.key=c.definition_key and d.version=c.definition_version join attempts a on a.job_id=c.id;
+end $$;
+
+
+--
+-- Name: engineering_controller_binding(uuid, uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.engineering_controller_binding(p_envelope_id uuid, p_job_id uuid, p_lease_token uuid) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+declare binding jsonb; lineage_plan uuid; lineage_slice text; lineage_work_request uuid;
+        v_executor_actor_id uuid; v_binding_at timestamptz;
+begin
+  if p_lease_token is null then return null; end if;
+  -- Unlocked identifiers first; all mutable authority is re-read after locks.
+  select e.slice_plan_id,e.slice_ref,e.work_request_id,e.agent_session_id
+    into lineage_plan,lineage_slice,lineage_work_request,v_executor_actor_id
+    from ops.engineering_execution_envelope e
+   where e.id=p_envelope_id and e.job_id=p_job_id;
+  if not found then return null; end if;
+  select s.executor_actor_id into v_executor_actor_id
+    from ops.capability_agent_session s
+    join ops.engineering_execution_envelope e on e.agent_session_id=s.id
+   where e.id=p_envelope_id and e.job_id=p_job_id for share of s;
+  if not found then return null; end if;
+  perform 1 from public.actor a
+   where a.id=v_executor_actor_id and a.active and a.kind='automation' and a.slug='codex'
+   order by a.id for share;
+  if not found then return null; end if;
+  perform pg_advisory_xact_lock(hashtextextended(
+    'engineering-envelope:'||lineage_plan::text||':'||lineage_slice,0));
+  perform 1 from ops.engineering_execution_envelope e
+    join ops.engineering_slice_plan sp on sp.id=e.slice_plan_id
+   where e.id=p_envelope_id and e.job_id=p_job_id for key share of e,sp;
+  if not found then return null; end if;
+  perform 1 from ops.work_request where id=lineage_work_request for share;
+  if not found then return null; end if;
+  perform 1 from ops.job_definition d
+   where d.key='engineering-slice' and d.version=1 and d.enabled for share;
+  if not found then return null; end if;
+  perform 1 from ops.job where id=p_job_id for share;
+  if not found then return null; end if;
+  v_binding_at:=clock_timestamp();
+  if not ops.engineering_envelope_is_executable(p_envelope_id,p_job_id) then return null; end if;
+  select jsonb_build_object(
+    'envelope_id',e.id::text,'envelope_digest',e.envelope_digest,
+    'slice_ref',e.slice_ref,'plan_digest',sp.plan_digest,'slice_plan',sp.plan,
+    'executor_actor',jsonb_build_object('id',a.id::text,'slug',a.slug),
+    'agent_session_id',s.id::text,
+    'agent_session_lease_expires_at',to_char(s.lease_expires_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+    'job_lease_expires_at',to_char(j.leased_until at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"')
+  ) into binding
+    from ops.engineering_execution_envelope e
+    join ops.job j on j.id=e.job_id
+    join ops.job_definition d on d.key=j.definition_key and d.version=j.definition_version
+    join ops.engineering_slice_plan sp on sp.id=e.slice_plan_id
+    join ops.capability_agent_session s on s.id=e.agent_session_id
+    join public.actor a on a.id=s.executor_actor_id
+   where e.id=p_envelope_id and e.job_id=p_job_id
+     and a.active and a.kind='automation' and a.slug='codex'
+     and d.enabled and d.key='engineering-slice' and d.version=1
+     and j.state='running' and j.lease_token=p_lease_token
+     and j.leased_until>=v_binding_at+interval '930 seconds';
+  return binding;
 end $$;
 
 
@@ -3865,33 +4115,539 @@ end $_$;
 
 
 --
--- Name: engineering_passport_facts(text); Type: FUNCTION; Schema: ops; Owner: -
+-- Name: engineering_enqueue_slice_job(text, text, text, text, integer); Type: FUNCTION; Schema: ops; Owner: -
 --
 
-CREATE FUNCTION ops.engineering_passport_facts(p_work_request text) RETURNS jsonb
+CREATE FUNCTION ops.engineering_enqueue_slice_job(p_work_request text, p_slice_ref text, p_plan_digest text, p_idempotency_key text, p_generation integer) RETURNS ops.job
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $_$
+declare row ops.job%rowtype;
+        slice_plan ops.engineering_slice_plan%rowtype;
+        dependency_ref text;
+        job_key text;
+        current_source jsonb;
+begin
+  if btrim(coalesce(p_work_request,''))='' or btrim(coalesce(p_slice_ref,''))=''
+     or p_plan_digest is null or p_plan_digest !~ '^sha256:[0-9a-f]{64}$'
+     or btrim(coalesce(p_idempotency_key,''))='' or p_generation is null or p_generation<1 then
+    raise exception 'engineering job admission fields are invalid';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended(
+    'engineering-slice:'||p_plan_digest||':'||p_slice_ref,0));
+  current_source:=ops.engineering_admission_source(p_work_request);
+  if current_source is null then
+    raise exception 'engineering job admission source is not current';
+  end if;
+  select sp.* into slice_plan
+    from ops.engineering_slice_plan sp
+   where sp.plan_digest=p_plan_digest
+     and sp.work_request_id=regexp_replace(current_source->'work_request'->>'id','^wr:','')::uuid
+     and sp.accepted_plan_id=(current_source->'accepted_plan'->>'record_id')::uuid
+     and sp.accepted_plan_hash=current_source->'accepted_plan'->>'digest'
+     and sp.work_request_version=(current_source->'work_request'->>'version')::integer
+     and sp.plan->'work_request'->>'canonical_record_digest'=
+         current_source->'work_request'->>'canonical_record_digest'
+     and sp.plan->'accepted_plan_revision'->>'id'=
+         current_source->'accepted_plan'->>'plan_ref'
+     and sp.plan->'accepted_plan_revision'->>'digest'=
+         current_source->'accepted_plan'->>'digest'
+     and exists (
+       select 1
+         from jsonb_array_elements(case when jsonb_typeof(sp.plan->'slices')='array'
+                                        then sp.plan->'slices' else '[]'::jsonb end) slice_item
+        where slice_item->>'slice_ref'=p_slice_ref
+     )
+   for key share;
+  if not found then
+    raise exception 'engineering slice is not registered for the exact current plan';
+  end if;
+  perform 1 from ops.work_request w
+   where w.id=slice_plan.work_request_id and w.ref=p_work_request for share;
+  if not found or ops.engineering_admission_source(p_work_request) is distinct from current_source then
+    raise exception 'engineering job admission source changed during serialization';
+  end if;
+
+  for dependency_ref in
+    select dependency#>>'{}'
+      from jsonb_array_elements(
+        coalesce((select slice_item->'dependency_refs'
+                    from jsonb_array_elements(slice_plan.plan->'slices') slice_item
+                   where slice_item->>'slice_ref'=p_slice_ref),'[]'::jsonb)) dependency
+     order by dependency#>>'{}'
+  loop
+    perform pg_advisory_xact_lock(hashtextextended(
+      'engineering-envelope:'||slice_plan.id::text||':'||dependency_ref,0));
+  end loop;
+
+  if exists (
+    select 1
+      from jsonb_array_elements(slice_plan.plan->'slices') slice_item,
+           jsonb_array_elements_text(coalesce(slice_item->'dependency_refs','[]'::jsonb)) dependency
+     where slice_item->>'slice_ref'=p_slice_ref
+       and not exists (
+         select 1
+           from ops.engineering_slice_receipt receipt
+           join ops.engineering_execution_envelope envelope
+             on envelope.id=receipt.envelope_id
+            and envelope.slice_plan_id=slice_plan.id
+            and envelope.work_request_id=slice_plan.work_request_id
+            and envelope.slice_ref=dependency
+           join ops.capability_agent_session executor_session
+             on executor_session.id=envelope.agent_session_id
+            and executor_session.executor_actor_id=receipt.executor_actor_id
+           join public.actor executor_actor
+             on executor_actor.id=receipt.executor_actor_id
+            and executor_actor.active
+           join ops.engineering_reviewer_fact review
+             on review.receipt_id=receipt.id
+            and review.work_request_id=receipt.work_request_id
+            and review.slice_ref=receipt.slice_ref
+           join public.actor reviewer_actor
+             on reviewer_actor.id=review.reviewer_actor_id
+            and reviewer_actor.active
+          where receipt.work_request_id=slice_plan.work_request_id
+            and receipt.slice_ref=dependency
+            and receipt.outcome='claimed_complete'
+            and receipt.receipt->>'outcome'='claimed_complete'
+            and coalesce(ops.engineering_receipt_exact_object(receipt.receipt,array[
+                  'actual_component_refs','actual_resource_refs','artifact_refs','attribution','attempt_id','checks',
+                  'deviations','envelope_digest','evidence_refs','executor_claim','independent_verification_required',
+                  'outcome','plan_digest','planned_component_refs','planned_resource_refs','reset_reconstruction',
+                  'schema_version','slice_ref','source_evidence'
+                ]),false)
+            and receipt.receipt->>'schema_version'='engineering-slice-receipt.v1'
+            and receipt.receipt_digest=
+                ('sha256:'||encode(public.digest(ops.guidance_import_canonical_json(receipt.receipt),'sha256'),'hex'))
+            and receipt.receipt->>'plan_digest'=slice_plan.plan_digest
+            and receipt.receipt->>'slice_ref'=receipt.slice_ref
+            and receipt.receipt->>'attempt_id'=receipt.attempt_id
+            and receipt.receipt->>'envelope_digest'=envelope.envelope_digest
+            and envelope.envelope->>'envelope_id'='env:'||envelope.id::text
+            and envelope.envelope#>>'{request,job_ref}'='job:'||envelope.job_id::text
+            and envelope.envelope#>>'{agent_session,id}'='session:'||executor_session.id::text
+            and receipt.receipt->'independent_verification_required'='true'::jsonb
+            and coalesce(ops.engineering_receipt_exact_object(receipt.receipt->'attribution',array[
+                  'actor_ref','adapter_ref','session_ref'
+                ]),false)
+            and receipt.receipt#>>'{attribution,actor_ref}'=
+                envelope.envelope#>>'{server_binding,identity,agent_principal_id}'
+            and receipt.receipt#>>'{attribution,session_ref}'=
+                envelope.envelope#>>'{agent_session,id}'
+            and receipt.receipt#>>'{attribution,adapter_ref}'=
+                envelope.envelope#>>'{server_binding,adapter,adapter_id}'
+            and jsonb_typeof(receipt.receipt->'deviations')='array'
+            and not exists (
+              select 1
+                from jsonb_array_elements(case when jsonb_typeof(receipt.receipt->'deviations')='array'
+                                               then receipt.receipt->'deviations' else '[]'::jsonb end) deviation
+               where not coalesce(ops.engineering_receipt_exact_object(deviation,array[
+                       'category','deviation_ref','evidence_refs','impact','out_of_scope_component_refs',
+                       'out_of_scope_resource_refs','plan_revision_required','reason','review_state'
+                     ]),false)
+                  or not coalesce((deviation->>'deviation_ref') ~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$',false)
+                  or exists (
+                    select 1 from unnest(array['category','reason','impact']) field
+                     where jsonb_typeof(deviation->field) is distinct from 'string'
+                        or not coalesce(btrim(deviation->>field)<>'',false)
+                  )
+                  or jsonb_typeof(deviation->'plan_revision_required') is distinct from 'boolean'
+                  or not coalesce(ops.engineering_receipt_evidence_array(deviation->'evidence_refs'),false)
+                  or not coalesce(ops.engineering_receipt_identifier_array(deviation->'out_of_scope_resource_refs'),false)
+                  or not coalesce(ops.engineering_receipt_identifier_array(deviation->'out_of_scope_component_refs'),false)
+                  or not coalesce(deviation->>'review_state'=any(array['unreviewed','reviewed','resolved']),false)
+            )
+            and not exists (
+              select 1
+                from jsonb_array_elements(case when jsonb_typeof(receipt.receipt->'deviations')='array'
+                                               then receipt.receipt->'deviations' else '[]'::jsonb end) deviation
+               group by deviation->>'deviation_ref'
+              having count(*)>1
+            )
+            and coalesce(ops.engineering_receipt_identifier_array(receipt.receipt->'planned_resource_refs'),false)
+            and coalesce(ops.engineering_receipt_identifier_array(receipt.receipt->'actual_resource_refs'),false)
+            and coalesce(ops.engineering_receipt_identifier_array(receipt.receipt->'planned_component_refs'),false)
+            and coalesce(ops.engineering_receipt_identifier_array(receipt.receipt->'actual_component_refs'),false)
+            and coalesce(ops.engineering_receipt_identifier_sets_equal(
+                  receipt.receipt->'planned_resource_refs',(
+                    select dependency_slice->'declared_resource_refs'
+                      from jsonb_array_elements(slice_plan.plan->'slices') dependency_slice
+                     where dependency_slice->>'slice_ref'=receipt.slice_ref
+                  )),false)
+            and coalesce(ops.engineering_receipt_identifier_sets_equal(
+                  receipt.receipt->'planned_component_refs',(
+                    select dependency_slice->'declared_component_refs'
+                      from jsonb_array_elements(slice_plan.plan->'slices') dependency_slice
+                     where dependency_slice->>'slice_ref'=receipt.slice_ref
+                  )),false)
+            and not exists (
+              select 1
+                from jsonb_array_elements(case when jsonb_typeof(receipt.receipt->'actual_resource_refs')='array'
+                                               then receipt.receipt->'actual_resource_refs' else '[]'::jsonb end) actual_ref
+               where not exists (
+                 select 1
+                   from jsonb_array_elements(slice_plan.plan->'slices') dependency_slice,
+                        jsonb_array_elements(dependency_slice->'declared_resource_refs') declared_ref
+                  where dependency_slice->>'slice_ref'=receipt.slice_ref and declared_ref=actual_ref
+               ) and not exists (
+                 select 1
+                   from jsonb_array_elements(receipt.receipt->'deviations') deviation,
+                        jsonb_array_elements(deviation->'out_of_scope_resource_refs') approved_ref
+                  where deviation->>'review_state'='resolved' and approved_ref=actual_ref
+               )
+            )
+            and not exists (
+              select 1
+                from jsonb_array_elements(case when jsonb_typeof(receipt.receipt->'actual_component_refs')='array'
+                                               then receipt.receipt->'actual_component_refs' else '[]'::jsonb end) actual_ref
+               where not exists (
+                 select 1
+                   from jsonb_array_elements(slice_plan.plan->'slices') dependency_slice,
+                        jsonb_array_elements(dependency_slice->'declared_component_refs') declared_ref
+                  where dependency_slice->>'slice_ref'=receipt.slice_ref and declared_ref=actual_ref
+               ) and not exists (
+                 select 1
+                   from jsonb_array_elements(receipt.receipt->'deviations') deviation,
+                        jsonb_array_elements(deviation->'out_of_scope_component_refs') approved_ref
+                  where deviation->>'review_state'='resolved' and approved_ref=actual_ref
+               )
+            )
+            and coalesce(ops.engineering_receipt_identifier_array(receipt.receipt->'artifact_refs'),false)
+            and coalesce(case when jsonb_typeof(receipt.receipt->'artifact_refs')='array'
+                              then jsonb_array_length(receipt.receipt->'artifact_refs')>0 else false end,false)
+            and coalesce(ops.engineering_receipt_evidence_array(receipt.receipt->'evidence_refs'),false)
+            and coalesce(case when jsonb_typeof(receipt.receipt->'evidence_refs')='array'
+                              then jsonb_array_length(receipt.receipt->'evidence_refs')>0 else false end,false)
+            and jsonb_typeof(receipt.receipt->'checks')='array'
+            and coalesce(case when jsonb_typeof(receipt.receipt->'checks')='array'
+                              then jsonb_array_length(receipt.receipt->'checks')>0 else false end,false)
+            and not exists (
+              select 1
+                from jsonb_array_elements(case when jsonb_typeof(receipt.receipt->'checks')='array'
+                                               then receipt.receipt->'checks' else '[]'::jsonb end) receipt_check
+               where not coalesce(ops.engineering_receipt_exact_object(receipt_check,array[
+                       'check_ref','evidence_refs','state'
+                     ]),false)
+                  or not coalesce((receipt_check->>'check_ref') ~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$',false)
+                  or receipt_check->>'state' is distinct from 'passed'
+                  or not coalesce(ops.engineering_receipt_evidence_array(receipt_check->'evidence_refs'),false)
+                  or not coalesce(case when jsonb_typeof(receipt_check->'evidence_refs')='array'
+                                       then jsonb_array_length(receipt_check->'evidence_refs')>0 else false end,false)
+            )
+            and not exists (
+              select 1
+                from jsonb_array_elements(case when jsonb_typeof(receipt.receipt->'checks')='array'
+                                               then receipt.receipt->'checks' else '[]'::jsonb end) receipt_check
+               group by receipt_check->>'check_ref'
+              having count(*)>1
+            )
+            and not exists (
+              select 1
+                from jsonb_array_elements(case when jsonb_typeof(receipt.receipt->'checks')='array'
+                                               then receipt.receipt->'checks' else '[]'::jsonb end) receipt_check
+               where not exists (
+                 select 1
+                   from jsonb_array_elements(slice_plan.plan->'slices') dependency_slice,
+                        jsonb_array_elements(dependency_slice->'planned_checks') planned_check
+                  where dependency_slice->>'slice_ref'=receipt.slice_ref
+                    and planned_check->>'check_ref'=receipt_check->>'check_ref'
+               )
+            )
+            and not exists (
+              select 1
+                from jsonb_array_elements(slice_plan.plan->'slices') dependency_slice,
+                     jsonb_array_elements(dependency_slice->'planned_checks') planned_check
+               where dependency_slice->>'slice_ref'=receipt.slice_ref
+                 and not exists (
+                   select 1 from jsonb_array_elements(case when jsonb_typeof(receipt.receipt->'checks')='array'
+                                                          then receipt.receipt->'checks' else '[]'::jsonb end) receipt_check
+                    where receipt_check->>'check_ref'=planned_check->>'check_ref'
+                 )
+            )
+            and not exists (
+              select 1
+                from jsonb_array_elements(case when jsonb_typeof(receipt.receipt->'checks')='array'
+                                               then receipt.receipt->'checks' else '[]'::jsonb end) receipt_check
+                join lateral (
+                  select planned_check
+                    from jsonb_array_elements(slice_plan.plan->'slices') dependency_slice,
+                         jsonb_array_elements(dependency_slice->'planned_checks') planned_check
+                   where dependency_slice->>'slice_ref'=receipt.slice_ref
+                     and planned_check->>'check_ref'=receipt_check->>'check_ref'
+                ) planned on true
+               where not exists (
+                 select 1 from jsonb_array_elements(case when jsonb_typeof(receipt_check->'evidence_refs')='array'
+                                                        then receipt_check->'evidence_refs' else '[]'::jsonb end) evidence
+                  where evidence->>'redaction_class'=case planned.planned_check->>'evidence_requirement'
+                    when 'redacted_evidence_required' then 'redacted_evidence' else 'metadata_only' end
+               )
+            )
+            and coalesce(ops.engineering_receipt_exact_object(receipt.receipt->'source_evidence',array[
+                  'branch_ref','evidence_refs','source_sha','worktree_ref'
+                ]),false)
+            and not exists (
+              select 1 from unnest(array['worktree_ref','branch_ref','source_sha']) field
+               where jsonb_typeof(receipt.receipt->'source_evidence'->field) is distinct from 'string'
+                  or not coalesce(btrim(receipt.receipt->'source_evidence'->>field)<>'',false)
+                  or (field<>'source_sha' and not coalesce(
+                       (receipt.receipt->'source_evidence'->>field) ~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$',false))
+            )
+            and coalesce(ops.engineering_receipt_evidence_array(receipt.receipt->'source_evidence'->'evidence_refs'),false)
+            and coalesce(ops.engineering_receipt_exact_object(receipt.receipt->'reset_reconstruction',array[
+                  'fresh_session','inherited_transcript_used','reconstruction_free','remediation_action'
+                ]),false)
+            and receipt.receipt->'reset_reconstruction'->'fresh_session'='true'::jsonb
+            and receipt.receipt->'reset_reconstruction'->'inherited_transcript_used'='false'::jsonb
+            and jsonb_typeof(receipt.receipt->'reset_reconstruction'->'reconstruction_free')='boolean'
+            and (
+              (receipt.receipt->'reset_reconstruction'->'reconstruction_free'='false'::jsonb and
+               jsonb_typeof(receipt.receipt->'reset_reconstruction'->'remediation_action')='string' and
+               btrim(receipt.receipt->'reset_reconstruction'->>'remediation_action')<>'')
+              or
+              (receipt.receipt->'reset_reconstruction'->'reconstruction_free'='true'::jsonb and
+               (receipt.receipt->'reset_reconstruction'->'remediation_action'='null'::jsonb or
+                (jsonb_typeof(receipt.receipt->'reset_reconstruction'->'remediation_action')='string' and
+                 btrim(receipt.receipt->'reset_reconstruction'->>'remediation_action')<>'')))
+            )
+            and coalesce(ops.engineering_receipt_exact_object(receipt.receipt->'executor_claim',array[
+                  'claim_state','claimed_at','claimed_by'
+                ]),false)
+            and receipt.receipt->'executor_claim'->>'claim_state'='executor_claim'
+            and receipt.receipt->'executor_claim'->>'claimed_by'=executor_actor.slug
+            and jsonb_typeof(receipt.receipt->'executor_claim'->'claimed_at')='string'
+            and btrim(receipt.receipt->'executor_claim'->>'claimed_at')<>''
+            and review.state='passed'
+            and review.contract_version='engineering-review.v1'
+            and review.fact->>'state'='passed'
+            and coalesce(ops.engineering_receipt_exact_object(review.fact,array[
+                  'attempt_id','evidence_refs','is_independent','resolved_deviation_refs',
+                  'reviewed_deviation_refs','reviewer_ref','session_ref','slice_ref','state'
+                ]),false)
+            and review.fact->>'slice_ref'=receipt.slice_ref
+            and review.fact->>'attempt_id'=receipt.attempt_id
+            and review.reviewer_actor_id<>receipt.executor_actor_id
+            and review.fact->>'reviewer_ref'=any(array[
+                  reviewer_actor.slug,'actor:'||reviewer_actor.slug,'reviewer:'||reviewer_actor.slug
+                ])
+            and review.reviewer_session_ref=review.fact->>'session_ref'
+            and review.reviewer_session_ref<>receipt.receipt#>>'{attribution,session_ref}'
+            and review.reviewer_session_ref ~ '^session:[A-Za-z0-9][A-Za-z0-9._:-]{1,119}$'
+            and review.fact->>'reviewer_ref' ~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$'
+            and review.fact->'is_independent'='true'::jsonb
+            and coalesce(ops.engineering_receipt_evidence_array(review.fact->'evidence_refs'),false)
+            and coalesce(case when jsonb_typeof(review.fact->'evidence_refs')='array'
+                              then jsonb_array_length(review.fact->'evidence_refs')>0 else false end,false)
+            and coalesce(ops.engineering_receipt_identifier_sets_equal(
+                  review.fact->'reviewed_deviation_refs',
+                  coalesce((
+                    select jsonb_agg(to_jsonb(deviation->>'deviation_ref') order by deviation->>'deviation_ref')
+                      from jsonb_array_elements(case when jsonb_typeof(receipt.receipt->'deviations')='array'
+                                                     then receipt.receipt->'deviations' else '[]'::jsonb end) deviation
+                  ),'[]'::jsonb)),false)
+            and coalesce(ops.engineering_receipt_identifier_sets_equal(
+                  review.fact->'resolved_deviation_refs',
+                  coalesce((
+                    select jsonb_agg(to_jsonb(deviation->>'deviation_ref') order by deviation->>'deviation_ref')
+                      from jsonb_array_elements(case when jsonb_typeof(receipt.receipt->'deviations')='array'
+                                                     then receipt.receipt->'deviations' else '[]'::jsonb end) deviation
+                  ),'[]'::jsonb)),false)
+            and not exists (
+              select 1
+                from jsonb_array_elements(case when jsonb_typeof(receipt.receipt->'deviations')='array'
+                                               then receipt.receipt->'deviations' else '[]'::jsonb end) deviation
+               where deviation->>'review_state' is distinct from 'resolved'
+                  or deviation->'plan_revision_required' is distinct from 'false'::jsonb
+            )
+            and not exists (
+              select 1 from ops.engineering_execution_envelope successor
+               where successor.supersedes_envelope_id=envelope.id
+            )
+            and 1=(
+              select count(*)
+                from ops.engineering_execution_envelope leaf
+               where leaf.slice_plan_id=slice_plan.id
+                 and leaf.slice_ref=receipt.slice_ref
+                 and not exists (
+                   select 1 from ops.engineering_execution_envelope successor
+                    where successor.supersedes_envelope_id=leaf.id
+                 )
+            )
+       )
+  ) then
+    raise exception 'engineering slice dependencies are not independently verified';
+  end if;
+
+  job_key := 'engineering-slice:'||p_plan_digest||':'||p_work_request||':'||
+             p_slice_ref||':generation:'||p_generation;
+  select * into row from ops.job where idempotency_key=job_key;
+  if row.id is not null then return row; end if;
+  select * into row from ops.enqueue_job(
+    'engineering-slice',1,now(),
+    jsonb_build_object('work_request',p_work_request,'slice_ref',p_slice_ref,
+                       'plan_digest',p_plan_digest,'generation',p_generation),
+    job_key,'shadow');
+  return row;
+end $_$;
+
+
+--
+-- Name: engineering_envelope_currentness(uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.engineering_envelope_currentness(p_envelope_id uuid, p_job_id uuid) RETURNS jsonb
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'ops', 'public'
-    AS $$
+    AS $_$
+  with candidate as (
+    select e.*, j.id as queue_job_id, j.payload, j.definition_key, j.definition_version, j.mode,
+           d.enabled, sp.plan_digest, sp.accepted_plan_hash,
+           sp.accepted_plan_id as slice_plan_accepted_plan_id, sp.work_request_id as slice_plan_work_request_id,
+           sp.work_request_version as slice_plan_work_request_version, sp.plan as slice_plan,
+           s.state as session_state,
+           s.lease_expires_at as session_lease_expires_at, s.work_request_id as session_work_request_id,
+           s.source_commit_sha as session_source_commit_sha, s.worktree_ref as session_worktree_ref,
+           s.scope_ref as session_scope_ref,
+           actor.slug as executor_slug, actor.active as executor_active,
+           actor.kind as executor_kind, ops.engineering_admission_source(w.ref) as source
+      from ops.engineering_execution_envelope e
+      join ops.job j on j.id=e.job_id
+      join ops.job_definition d on d.key=j.definition_key and d.version=j.definition_version
+      join ops.engineering_slice_plan sp on sp.id=e.slice_plan_id
+      join ops.work_request w on w.id=e.work_request_id
+      join ops.capability_agent_session s on s.id=e.agent_session_id
+      join public.actor actor on actor.id=s.executor_actor_id
+     where e.id=p_envelope_id and e.job_id=p_job_id
+  ), checked as (
+    select c.*,
+      ops.engineering_safe_timestamptz(c.envelope->>'expires_at') as json_expires_at,
+      ops.engineering_safe_timestamptz(c.envelope->>'issued_at') as json_issued_at,
+      ops.engineering_safe_timestamptz(c.envelope->'agent_session'->>'lease_expires_at') as json_session_expires_at,
+      exists(select 1 from ops.engineering_execution_envelope successor
+               where successor.supersedes_envelope_id=c.id) as has_successor,
+      exists(select 1 from ops.engineering_slice_receipt receipt
+               where receipt.envelope_id=c.id
+                 and receipt.outcome='claimed_complete') as has_receipt
+    from candidate c
+  )
   select jsonb_build_object(
-    'source', ops.engineering_admission_source(p_work_request),
-    'slice_plans', coalesce((select jsonb_agg(to_jsonb(sp) order by sp.created_at)
-       from ops.engineering_slice_plan sp
-       join ops.work_request w on w.id=sp.work_request_id
-      where w.ref=p_work_request),'[]'::jsonb),
-    'envelopes', coalesce((select jsonb_agg(to_jsonb(e) order by e.created_at)
-       from ops.engineering_execution_envelope e
-       join ops.work_request w on w.id=e.work_request_id
-      where w.ref=p_work_request),'[]'::jsonb),
-    'receipts', coalesce((select jsonb_agg(to_jsonb(r) order by r.created_at)
-       from ops.engineering_slice_receipt r
-       join ops.work_request w on w.id=r.work_request_id
-      where w.ref=p_work_request),'[]'::jsonb),
-    'reviewer_facts', coalesce((select jsonb_agg(to_jsonb(f) order by f.created_at)
-       from ops.engineering_reviewer_fact f
-       join ops.work_request w on w.id=f.work_request_id
-      where w.ref=p_work_request),'[]'::jsonb)
-  );
-$$;
+    'eligible',
+      enabled and definition_key='engineering-slice' and definition_version=1 and mode='shadow'
+      and payload->>'work_request' = source->'work_request'->>'ref'
+      and payload->>'slice_ref'=slice_ref and payload->>'plan_digest'=plan_digest
+      and jsonb_typeof(payload->'generation')='number' and (payload->>'generation') ~ '^[1-9][0-9]*$'
+      and source is not null
+      and source->'work_request'->>'id'='wr:'||work_request_id::text
+      and (source->'work_request'->>'version') ~ '^[1-9][0-9]*$'
+      and (source->'work_request'->>'version')::integer=state_version
+      and source->'work_request'->>'canonical_record_digest'=canonical_record_digest
+      and source->'accepted_plan'->>'record_id'=accepted_plan_id::text
+      and source->'accepted_plan'->>'digest'=accepted_plan_hash
+      and slice_plan_accepted_plan_id=accepted_plan_id and slice_plan_accepted_plan_id::text=source->'accepted_plan'->>'record_id'
+      and slice_plan_work_request_id=work_request_id and slice_plan_work_request_id::text=regexp_replace(source->'work_request'->>'id','^wr:','')
+      and slice_plan_work_request_version=state_version
+      and slice_plan->>'plan_digest'=plan_digest
+      and slice_plan->'accepted_plan_revision'->>'id'=source->'accepted_plan'->>'plan_ref'
+      and slice_plan->'accepted_plan_revision'->>'revision'=source->'accepted_plan'->>'revision'
+      and slice_plan->'accepted_plan_revision'->>'digest'=source->'accepted_plan'->>'digest'
+      and jsonb_typeof(envelope)='object' and envelope->>'schema_version'='execution-envelope.v1'
+      and envelope->>'envelope_id'='env:'||id::text
+      and envelope->>'work_request_id'='wr:'||work_request_id::text
+      and envelope->'request'->>'job_ref'='job:'||queue_job_id::text
+      and envelope->'request'->>'input_digest' is not null
+      and envelope->'plan_revision'->>'id'=source->'accepted_plan'->>'plan_ref'
+      and envelope->'plan_revision'->>'revision'=source->'accepted_plan'->>'revision'
+      and envelope->'plan_revision'->>'digest'=source->'accepted_plan'->>'digest'
+      and envelope->'plan_revision'->>'digest'=accepted_plan_hash
+      and envelope->'phase_binding'->>'phase_id'='phase:'||slice_ref
+      and envelope->'state_binding'->>'state_version'=state_version::text
+      and envelope->'state_binding'->>'canonical_record_digest'=canonical_record_digest
+      and envelope->'agent_session'->>'id'='session:'||agent_session_id::text
+      and json_issued_at is not null and envelope->>'issued_at'=to_char(issued_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"')
+      and json_issued_at=issued_at
+      and json_expires_at is not null and envelope->>'expires_at'=to_char(expires_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"')
+      and json_expires_at=expires_at and expires_at>issued_at and expires_at<=issued_at+interval '30 minutes' and json_expires_at>statement_timestamp()
+      and json_session_expires_at is not null and session_lease_expires_at is not null
+      and envelope->'agent_session'->>'lease_expires_at'=to_char(session_lease_expires_at at time zone 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"')
+      and json_session_expires_at=session_lease_expires_at and json_session_expires_at=expires_at and json_session_expires_at>statement_timestamp()
+      and session_work_request_id=work_request_id and session_state in ('claimed','in_progress')
+      and session_source_commit_sha=repeat('0',40) and session_worktree_ref='engineering:server-admission'
+      and session_scope_ref='slice:'||slice_ref
+      and executor_active and executor_kind='automation' and executor_slug='codex'
+      and envelope->'server_binding'->'authority'->>'read_only'='false'
+      and envelope->'server_binding'->'authority'->>'capability_profile'='capability:engineering-repository-write'
+      and envelope->'server_binding'->'adapter'->>'surface'='codex_desktop'
+      and envelope#>>'{server_binding,adapter,adapter_id}'='adapter:codex-desktop'
+      and envelope->'server_binding'->'identity'->>'agent_principal_id'='agent:codex'
+      and envelope->'server_binding'->'identity'->>'runtime_principal'='runtime:codex'
+      and envelope->'request'->'allowed_actions'=
+        '["repository:create-worktree","repository:create-branch","repository:write-declared-scope","repository:run-checks","repository:commit","repository:push-branch","repository:open-pr"]'::jsonb
+      and not has_successor and not has_receipt,
+    'dispatch_runway_sufficient',
+      expires_at>=statement_timestamp()+interval '960 seconds'
+      and session_lease_expires_at>=statement_timestamp()+interval '960 seconds',
+    'reason', case
+      when id is null then 'envelope_or_job_not_found'
+      when has_successor then 'superseded_envelope'
+      when has_receipt then 'already_receipted'
+      when jsonb_typeof(envelope)<>'object' or envelope->>'schema_version'<>'execution-envelope.v1' then 'malformed_envelope_schema'
+      when json_issued_at is null or json_issued_at<>issued_at or json_expires_at is null or json_expires_at<>expires_at or expires_at<=issued_at or expires_at>issued_at+interval '30 minutes' or json_expires_at<=statement_timestamp() then 'envelope_expired_or_mismatched'
+      when json_session_expires_at is null or session_lease_expires_at is null or json_session_expires_at<>session_lease_expires_at or json_session_expires_at<=statement_timestamp() then 'agent_session_lease_expired_or_mismatched'
+      when session_state not in ('claimed','in_progress') or session_work_request_id<>work_request_id then 'agent_session_not_active'
+      when envelope->'server_binding'->'authority'->>'read_only'<>'false' then 'read_only_authority'
+      when source is null then 'source_not_current'
+      else 'identity_or_currentness_mismatch' end
+  ) from checked;
+$_$;
+
+
+--
+-- Name: engineering_envelope_is_executable(uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.engineering_envelope_is_executable(p_envelope_id uuid, p_job_id uuid) RETURNS boolean
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$ select coalesce((ops.engineering_envelope_currentness(p_envelope_id,p_job_id)->>'eligible')::boolean,false) $$;
+
+
+--
+-- Name: engineering_fail_claim(uuid, uuid, text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.engineering_fail_claim(p_job_id uuid, p_lease_token uuid, p_failure_class text, p_detail text) RETURNS text
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+declare j ops.job%rowtype; next_state text; transitioned integer; v_now timestamptz;
+begin
+  select * into j from ops.job where id=p_job_id for update;
+  v_now:=clock_timestamp();
+  if not found or j.definition_key<>'engineering-slice' or j.state<>'running'
+     or j.lease_token<>p_lease_token or j.leased_until<=v_now then
+    raise exception 'engineering job does not hold this live scoped lease';
+  end if;
+  next_state:=case when j.attempt<j.max_attempts then 'retry_wait' else 'dead_lettered' end;
+  update ops.job_attempt set state='failed',ended_at=v_now,
+         failure_class=p_failure_class,detail=left(coalesce(p_detail,''),1000)
+   where job_id=j.id and attempt=j.attempt and lease_token=p_lease_token and state='running';
+  get diagnostics transitioned=row_count;
+  if transitioned<>1 then raise exception 'engineering failure attempt is not current'; end if;
+  update ops.job set state=next_state,
+         next_attempt_at=case when next_state='retry_wait'
+           then v_now+make_interval(secs=>ops.retry_delay_seconds(j)) else next_attempt_at end,
+         ended_at=case when next_state='dead_lettered' then v_now else null end,
+         last_failure_class=p_failure_class,last_failure_detail=left(coalesce(p_detail,''),1000),
+         lease_owner=null,lease_token=null,leased_until=null,updated_at=v_now
+   where id=j.id and state='running' and lease_token=p_lease_token;
+  get diagnostics transitioned=row_count;
+  if transitioned<>1 then raise exception 'engineering failure did not transition the claimed job'; end if;
+  insert into ops.job_receipt(job_id,attempt,kind,receipt_ref,evidence)
+  values(j.id,j.attempt,case when next_state='dead_lettered' then 'dead_letter' else 'failure' end,
+         concat('engineering-failure:',j.id,':',j.attempt),
+         jsonb_build_object('failure_class',p_failure_class,
+           'detail',left(coalesce(p_detail,''),1000),'next_state',next_state));
+  return next_state;
+end $$;
 
 
 --
@@ -3919,39 +4675,536 @@ CREATE TABLE ops.engineering_slice_receipt (
 
 
 --
+-- Name: engineering_finalize_slice_receipt(uuid, uuid, jsonb, text, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.engineering_finalize_slice_receipt(p_envelope_id uuid, p_lease_token uuid, p_receipt jsonb, p_receipt_digest text, p_executor_actor_id uuid) RETURNS ops.engineering_slice_receipt
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+declare e ops.engineering_execution_envelope%rowtype;
+        row ops.engineering_slice_receipt%rowtype;
+        j ops.job%rowtype;
+        terminal_state text;
+        transitioned integer;
+        v_transition_at timestamptz;
+begin
+  select * into e from ops.engineering_execution_envelope where id=p_envelope_id;
+  if not found then raise exception 'engineering envelope not found'; end if;
+  select * into row from ops.engineering_record_slice_receipt(
+    p_envelope_id,p_lease_token,p_receipt,p_receipt_digest,p_executor_actor_id);
+  select * into j from ops.job where id=e.job_id for update;
+  v_transition_at:=clock_timestamp();
+  if not found or j.definition_key<>'engineering-slice' or j.state<>'running'
+     or j.lease_token<>p_lease_token or j.leased_until<=v_transition_at then
+    raise exception 'engineering job does not hold this live scoped lease';
+  end if;
+  if row.outcome='claimed_complete' then
+    update ops.job_attempt set state='succeeded',ended_at=v_transition_at
+     where id=row.job_attempt_id and job_id=j.id and attempt=j.attempt
+       and lease_token=p_lease_token and state='running';
+    get diagnostics transitioned=row_count;
+    if transitioned<>1 then raise exception 'engineering completion attempt is not current'; end if;
+    update ops.job set state='succeeded',ended_at=v_transition_at,
+           lease_owner=null,lease_token=null,leased_until=null,updated_at=v_transition_at
+     where id=j.id and state='running' and lease_token=p_lease_token;
+    get diagnostics transitioned=row_count;
+    if transitioned<>1 then raise exception 'engineering completion did not transition the claimed job'; end if;
+    insert into ops.job_receipt(job_id,attempt,kind,receipt_ref,evidence)
+    values(j.id,j.attempt,'completion','engineering:'||row.id::text,
+           jsonb_build_object('engineering_receipt_id',row.id,'receipt_digest',p_receipt_digest));
+    update ops.capability_agent_session
+       set state='cancelled',cancelled_at=v_transition_at,version=version+1
+     where id=e.agent_session_id and work_request_id=e.work_request_id
+       and state in ('claimed','in_progress');
+    get diagnostics transitioned=row_count;
+    if transitioned<>1 then raise exception 'engineering agent session could not be atomically retired'; end if;
+  else
+    terminal_state:=case when j.attempt<j.max_attempts then 'retry_wait' else 'dead_lettered' end;
+    update ops.job_attempt set state='failed',ended_at=v_transition_at,
+           failure_class='engineering_'||row.outcome,
+           detail='typed engineering receipt reported non-complete outcome'
+     where id=row.job_attempt_id and job_id=j.id and attempt=j.attempt
+       and lease_token=p_lease_token and state='running';
+    get diagnostics transitioned=row_count;
+    if transitioned<>1 then raise exception 'engineering failure attempt is not current'; end if;
+    update ops.job set state=terminal_state,
+           next_attempt_at=case when terminal_state='retry_wait'
+             then v_transition_at+make_interval(secs=>ops.retry_delay_seconds(j)) else next_attempt_at end,
+           ended_at=case when terminal_state='dead_lettered' then v_transition_at else null end,
+           last_failure_class='engineering_'||row.outcome,
+           last_failure_detail='typed engineering receipt reported non-complete outcome',
+           lease_owner=null,lease_token=null,leased_until=null,updated_at=v_transition_at
+     where id=j.id and state='running' and lease_token=p_lease_token;
+    get diagnostics transitioned=row_count;
+    if transitioned<>1 then raise exception 'engineering failure did not transition the claimed job'; end if;
+    insert into ops.job_receipt(job_id,attempt,kind,receipt_ref,evidence)
+    values(j.id,j.attempt,case when terminal_state='dead_lettered' then 'dead_letter' else 'failure' end,
+           concat('engineering-failure:',j.id,':',j.attempt),
+           jsonb_build_object('failure_class','engineering_'||row.outcome,
+             'detail','typed engineering receipt reported non-complete outcome','next_state',terminal_state));
+  end if;
+  return row;
+end $$;
+
+
+--
+-- Name: engineering_passport_facts(text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.engineering_passport_facts(p_work_request text) RETURNS jsonb
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+  select jsonb_build_object(
+    'source',ops.engineering_admission_source(p_work_request),
+    'slice_plans',coalesce((
+      select jsonb_agg(to_jsonb(sp) order by sp.created_at)
+        from ops.engineering_slice_plan sp
+        join ops.work_request w on w.id=sp.work_request_id
+       where w.ref=p_work_request
+    ),'[]'::jsonb),
+    'envelopes',coalesce((
+      select jsonb_agg(to_jsonb(e) order by e.created_at)
+        from ops.engineering_execution_envelope e
+        join ops.work_request w on w.id=e.work_request_id
+       where w.ref=p_work_request
+    ),'[]'::jsonb),
+    'receipts',coalesce((
+      select jsonb_agg(
+               to_jsonb(r)||jsonb_build_object(
+                 'executor_actor_active',executor.active,
+                 'executor_actor_slug',executor.slug
+               ) order by r.created_at
+             )
+        from ops.engineering_slice_receipt r
+        join ops.work_request w on w.id=r.work_request_id
+        join public.actor executor on executor.id=r.executor_actor_id
+       where w.ref=p_work_request
+    ),'[]'::jsonb),
+    'reviewer_facts',coalesce((
+      select jsonb_agg(
+               to_jsonb(f)||jsonb_build_object(
+                 'contract_version',f.contract_version,
+                 'reviewer_actor_active',reviewer.active,
+                 'reviewer_actor_slug',reviewer.slug
+               ) order by f.created_at
+             )
+        from ops.engineering_reviewer_fact f
+        join ops.work_request w on w.id=f.work_request_id
+        join public.actor reviewer on reviewer.id=f.reviewer_actor_id
+       where w.ref=p_work_request
+    ),'[]'::jsonb)
+  );
+$$;
+
+
+--
+-- Name: engineering_receipt_evidence_array(jsonb); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.engineering_receipt_evidence_array(p_value jsonb) RETURNS boolean
+    LANGUAGE sql IMMUTABLE STRICT SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $_$
+  select jsonb_typeof(p_value)='array'
+     and not exists (
+       select 1
+         from jsonb_array_elements(case when jsonb_typeof(p_value)='array' then p_value else '[]'::jsonb end) evidence
+        where not ops.engineering_receipt_exact_object(
+                evidence,array['content_digest','redaction_class','ref'])
+           or not coalesce((evidence->>'ref') ~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$',false)
+           or not coalesce(evidence->>'redaction_class'=any(array['metadata_only','redacted_evidence']),false)
+           or not coalesce((evidence->>'content_digest') ~ '^sha256:[0-9a-f]{64}$',false)
+     );
+$_$;
+
+
+--
+-- Name: engineering_receipt_exact_object(jsonb, text[]); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.engineering_receipt_exact_object(p_value jsonb, p_keys text[]) RETURNS boolean
+    LANGUAGE sql IMMUTABLE STRICT SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+  select jsonb_typeof(p_value)='object'
+     and (select array_agg(key order by key)
+            from jsonb_object_keys(case when jsonb_typeof(p_value)='object' then p_value else '{}'::jsonb end) as keys(key))
+         is not distinct from
+         (select array_agg(key order by key) from unnest(p_keys) as keys(key));
+$$;
+
+
+--
+-- Name: engineering_receipt_identifier_array(jsonb); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.engineering_receipt_identifier_array(p_value jsonb) RETURNS boolean
+    LANGUAGE sql IMMUTABLE STRICT SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $_$
+  select jsonb_typeof(p_value)='array'
+     and not exists (
+       select 1
+         from jsonb_array_elements(case when jsonb_typeof(p_value)='array' then p_value else '[]'::jsonb end) value
+        where jsonb_typeof(value)<>'string'
+           or not coalesce((value#>>'{}') ~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$',false)
+     )
+     and (select count(*)=count(distinct (value#>>'{}'))
+            from jsonb_array_elements(case when jsonb_typeof(p_value)='array'
+                                           then p_value else '[]'::jsonb end) value);
+$_$;
+
+
+--
+-- Name: engineering_receipt_identifier_sets_equal(jsonb, jsonb); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.engineering_receipt_identifier_sets_equal(p_left jsonb, p_right jsonb) RETURNS boolean
+    LANGUAGE sql IMMUTABLE STRICT SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+  select coalesce(ops.engineering_receipt_identifier_array(p_left),false)
+     and coalesce(ops.engineering_receipt_identifier_array(p_right),false)
+     and not exists (
+       (select value#>>'{}'
+         from jsonb_array_elements(case when jsonb_typeof(p_left)='array' then p_left else '[]'::jsonb end) value)
+       except
+       (select value#>>'{}'
+         from jsonb_array_elements(case when jsonb_typeof(p_right)='array' then p_right else '[]'::jsonb end) value)
+     )
+     and not exists (
+       (select value#>>'{}'
+         from jsonb_array_elements(case when jsonb_typeof(p_right)='array' then p_right else '[]'::jsonb end) value)
+       except
+       (select value#>>'{}'
+         from jsonb_array_elements(case when jsonb_typeof(p_left)='array' then p_left else '[]'::jsonb end) value)
+     );
+$$;
+
+
+--
 -- Name: engineering_record_slice_receipt(uuid, uuid, jsonb, text, uuid); Type: FUNCTION; Schema: ops; Owner: -
 --
 
 CREATE FUNCTION ops.engineering_record_slice_receipt(p_envelope_id uuid, p_lease_token uuid, p_receipt jsonb, p_receipt_digest text, p_executor_actor_id uuid) RETURNS ops.engineering_slice_receipt
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'ops', 'public'
-    AS $$
-declare e ops.engineering_execution_envelope%rowtype;
-        a ops.job_attempt%rowtype;
+    AS $_$
+declare e ops.engineering_execution_envelope%rowtype; s ops.capability_agent_session%rowtype;
+        j ops.job%rowtype; a ops.job_attempt%rowtype; v_checked_at timestamptz; v_append_at timestamptz;
+        session_executor uuid; session_slug text; receipt_plan_digest text; receipt_plan jsonb; receipt_slice jsonb;
+        receipt_outcome text; slice_count integer;
         row ops.engineering_slice_receipt%rowtype;
 begin
+  -- One atomic seam: lineage, session, job, receipt append, and terminal job
+  -- transition all succeed together or roll back together.
   select * into e from ops.engineering_execution_envelope where id=p_envelope_id;
   if not found then raise exception 'engineering envelope not found'; end if;
-  select attempt_row.* into a
-    from ops.job_attempt attempt_row join ops.job j on j.id=attempt_row.job_id
-   where attempt_row.job_id=e.job_id and attempt_row.attempt=j.attempt
-     and attempt_row.lease_token=p_lease_token and attempt_row.state='running'
+  if p_lease_token is null then raise exception 'engineering claim or lease is not current'; end if;
+  if jsonb_typeof(p_receipt) is distinct from 'object'
+     or p_receipt->>'schema_version' is distinct from 'engineering-slice-receipt.v1'
+     or p_receipt_digest is null or p_receipt_digest !~ '^sha256:[0-9a-f]{64}$'
+     or p_receipt_digest is distinct from
+        ('sha256:'||encode(public.digest(ops.guidance_import_canonical_json(p_receipt),'sha256'),'hex'))
+     or not coalesce(ops.engineering_receipt_exact_object(p_receipt,array[
+       'actual_component_refs','actual_resource_refs','artifact_refs','attribution','attempt_id','checks',
+       'deviations','envelope_digest','evidence_refs','executor_claim','independent_verification_required',
+       'outcome','plan_digest','planned_component_refs','planned_resource_refs','reset_reconstruction',
+       'schema_version','slice_ref','source_evidence'
+     ]),false) then
+    raise exception 'engineering receipt is malformed';
+  end if;
+  -- The identifier lookup above is intentionally unlocked.  From here through
+  -- append we retain the global session -> actor -> lineage lock order.
+  select * into s from ops.capability_agent_session where id=e.agent_session_id for update;
+  if not found then raise exception 'engineering agent session is not current'; end if;
+  session_executor := s.executor_actor_id;
+  select actor.slug into session_slug
+    from public.actor actor
+   where actor.id=s.executor_actor_id and actor.active and actor.kind='automation' and actor.slug='codex'
+   order by actor.id for share;
+  if not found then raise exception 'engineering executor actor is not current'; end if;
+  perform pg_advisory_xact_lock(hashtextextended('engineering-envelope:' || e.slice_plan_id::text || ':' || e.slice_ref,0));
+  select * into e from ops.engineering_execution_envelope where id=p_envelope_id for key share;
+  if not found or e.agent_session_id is distinct from s.id then
+    raise exception 'engineering envelope or agent session binding changed';
+  end if;
+  select plan_digest,plan into receipt_plan_digest,receipt_plan
+    from ops.engineering_slice_plan where id=e.slice_plan_id for key share;
+  if not found then raise exception 'engineering receipt slice plan is not current'; end if;
+  perform 1 from ops.work_request where id=e.work_request_id for share;
+  if not found then raise exception 'engineering Work Request is not current'; end if;
+  select * into j from ops.job where id=e.job_id for update;
+  if not found then raise exception 'engineering claim or lease is not current'; end if;
+  select * into a from ops.job_attempt
+   where job_id=j.id and attempt=j.attempt and lease_token is not distinct from p_lease_token
+     and state is not distinct from 'running'
    for update;
   if not found then raise exception 'engineering claim or lease is not current'; end if;
-  if p_receipt->>'envelope_digest' <> e.envelope_digest
-     or p_receipt->>'slice_ref' <> e.slice_ref
-     or p_receipt->>'attempt_id' <> ('attempt:' || a.attempt)
-     or p_receipt->>'outcome' not in ('claimed_complete','failed','blocked','reopened') then
+  -- statement_timestamp() is fixed at function entry and can be stale after a
+  -- session/actor/lineage/job lock wait.  Sample only after all ordered locks.
+  v_checked_at := clock_timestamp();
+  if j.state is distinct from 'running' or j.lease_token is distinct from p_lease_token
+     or j.leased_until is null or j.leased_until<v_checked_at
+     or e.expires_at<=v_checked_at or s.lease_expires_at is null or s.lease_expires_at<=v_checked_at
+     or (s.state is distinct from 'claimed' and s.state is distinct from 'in_progress') then
+    raise exception 'engineering claim, envelope, or agent-session lease is not current';
+  end if;
+  if not ops.engineering_envelope_is_executable(e.id,e.job_id) then raise exception 'engineering envelope is no longer executable'; end if;
+  if session_executor is null or p_executor_actor_id is distinct from session_executor then raise exception 'engineering receipt executor is not the server-bound agent session'; end if;
+  if not found or p_receipt->>'plan_digest' is distinct from receipt_plan_digest
+     or p_receipt->>'envelope_digest' is distinct from e.envelope_digest
+     or p_receipt->>'slice_ref' is distinct from e.slice_ref
+     or p_receipt->>'attempt_id' is distinct from ('attempt:'||a.attempt) then
     raise exception 'engineering receipt is not bound to the claimed envelope';
   end if;
-  insert into ops.engineering_slice_receipt
-    (job_attempt_id,envelope_id,work_request_id,slice_ref,attempt_id,
-     executor_actor_id,receipt_digest,outcome,receipt)
-  values (a.id,e.id,e.work_request_id,e.slice_ref,p_receipt->>'attempt_id',
-          p_executor_actor_id,p_receipt_digest,p_receipt->>'outcome',p_receipt)
-  returning * into row;
+  -- The immutable slice-plan projection is the only declaration of what the
+  -- direct receipt seam may claim.  Re-validate the narrow plan surface here
+  -- rather than trusting a caller-side Passport validator.
+  if not coalesce(ops.engineering_receipt_exact_object(receipt_plan,array[
+       'accepted_plan_revision','plan_digest','schema_version','slices','work_request'
+     ]),false)
+     or receipt_plan->>'schema_version' is distinct from 'engineering-slice-plan.v1'
+     or receipt_plan->>'plan_digest' is distinct from receipt_plan_digest
+     or not coalesce(ops.engineering_receipt_exact_object(receipt_plan->'work_request',array[
+       'canonical_record_digest','id','state_version'
+     ]),false)
+     or receipt_plan->'work_request' is distinct from jsonb_build_object(
+       'id','wr:'||e.work_request_id::text,
+       'state_version',e.state_version,
+       'canonical_record_digest',e.canonical_record_digest)
+     or not coalesce(ops.engineering_receipt_exact_object(receipt_plan->'accepted_plan_revision',array[
+       'digest','id','revision'
+     ]),false)
+     or receipt_plan->'accepted_plan_revision' is distinct from e.envelope->'plan_revision'
+     or jsonb_typeof(receipt_plan->'slices') is distinct from 'array'
+     or not coalesce(case when jsonb_typeof(receipt_plan->'slices')='array'
+                          then jsonb_array_length(receipt_plan->'slices')>0 else false end,false) then
+    raise exception 'engineering receipt slice plan is malformed or not bound to the envelope';
+  end if;
+  select count(*) into slice_count
+    from jsonb_array_elements(case when jsonb_typeof(receipt_plan->'slices')='array'
+                                   then receipt_plan->'slices' else '[]'::jsonb end) candidate
+   where candidate->>'slice_ref'=e.slice_ref;
+  if slice_count<>1 then
+    raise exception 'engineering receipt slice plan does not name exactly one bound slice';
+  end if;
+  select candidate into receipt_slice
+    from jsonb_array_elements(receipt_plan->'slices') candidate
+   where candidate->>'slice_ref'=e.slice_ref;
+  if not coalesce(ops.engineering_receipt_exact_object(receipt_slice,array[
+       'baseline_evidence_refs','concurrency_posture','declared_component_refs','declared_plan_step_refs',
+       'declared_resource_refs','definition_of_done','dependency_refs','forbidden_change_refs','manual_qa_required',
+       'objective','ordinal','planned_checks','release_requirement','risk_class','scope_boundary','slice_ref'
+     ]),false)
+     or receipt_slice->>'slice_ref' is distinct from e.slice_ref
+     or jsonb_typeof(receipt_slice->'ordinal') is distinct from 'number'
+     or not coalesce((receipt_slice->>'ordinal') ~ '^[1-9][0-9]*$',false)
+     or exists (select 1 from unnest(array['objective','definition_of_done','scope_boundary']) field
+                 where jsonb_typeof(receipt_slice->field) is distinct from 'string'
+                    or not coalesce(btrim(receipt_slice->>field)<>'',false))
+     or not coalesce(ops.engineering_receipt_identifier_array(receipt_slice->'dependency_refs'),false)
+     or not coalesce(ops.engineering_receipt_identifier_array(receipt_slice->'declared_resource_refs'),false)
+     or not coalesce(ops.engineering_receipt_identifier_array(receipt_slice->'declared_component_refs'),false)
+     or not coalesce(ops.engineering_receipt_identifier_array(receipt_slice->'declared_plan_step_refs'),false)
+     or not coalesce(ops.engineering_receipt_identifier_array(receipt_slice->'forbidden_change_refs'),false)
+     or not coalesce(ops.engineering_receipt_evidence_array(receipt_slice->'baseline_evidence_refs'),false)
+     or jsonb_typeof(receipt_slice->'planned_checks') is distinct from 'array'
+     or not coalesce(case when jsonb_typeof(receipt_slice->'planned_checks')='array'
+                          then jsonb_array_length(receipt_slice->'planned_checks')>0 else false end,false)
+     or exists (
+       select 1
+         from jsonb_array_elements(case when jsonb_typeof(receipt_slice->'planned_checks')='array'
+                                        then receipt_slice->'planned_checks' else '[]'::jsonb end) planned_check
+        where not coalesce(ops.engineering_receipt_exact_object(planned_check,array[
+                'check_ref','evidence_requirement','failure_condition'
+              ]),false)
+           or not coalesce((planned_check->>'check_ref') ~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$',false)
+           or jsonb_typeof(planned_check->'failure_condition') is distinct from 'string'
+           or not coalesce(btrim(planned_check->>'failure_condition')<>'',false)
+           or not coalesce(planned_check->>'evidence_requirement'=any(array['redacted_evidence_required','metadata_only_sufficient']),false)
+     )
+     or exists (
+       select 1 from jsonb_array_elements(receipt_slice->'planned_checks') planned_check
+       group by planned_check->>'check_ref' having count(*)>1
+     )
+     or not coalesce(receipt_slice->>'concurrency_posture'=any(array['parallel_safe','serial_after_dependencies','exclusive_resource']),false)
+     or jsonb_typeof(receipt_slice->'manual_qa_required') is distinct from 'boolean'
+     or not coalesce(receipt_slice->>'risk_class'=any(array['R0','R1','R2','R3','R4','R5','R6']),false)
+     or not coalesce(receipt_slice->>'release_requirement'=any(array['required','not_required']),false) then
+    raise exception 'engineering receipt bound slice plan is not fully typed';
+  end if;
+  receipt_outcome := p_receipt->>'outcome';
+  if receipt_outcome is null or not coalesce(receipt_outcome=any(array['claimed_complete','failed','blocked','reopened']),false) then
+    raise exception 'engineering receipt outcome is invalid';
+  end if;
+  if not coalesce(ops.engineering_receipt_identifier_array(p_receipt->'planned_resource_refs'),false)
+     or not coalesce(ops.engineering_receipt_identifier_array(p_receipt->'actual_resource_refs'),false)
+     or not coalesce(ops.engineering_receipt_identifier_array(p_receipt->'planned_component_refs'),false)
+     or not coalesce(ops.engineering_receipt_identifier_array(p_receipt->'actual_component_refs'),false)
+     or not coalesce(ops.engineering_receipt_identifier_array(p_receipt->'artifact_refs'),false)
+     or not coalesce(ops.engineering_receipt_evidence_array(p_receipt->'evidence_refs'),false)
+     or jsonb_typeof(p_receipt->'checks') is distinct from 'array'
+     or not coalesce(case when jsonb_typeof(p_receipt->'checks')='array'
+                          then jsonb_array_length(p_receipt->'checks')>0 else false end,false)
+     or exists (
+       select 1
+         from jsonb_array_elements(case when jsonb_typeof(p_receipt->'checks')='array'
+                                        then p_receipt->'checks' else '[]'::jsonb end) receipt_check
+        where not coalesce(ops.engineering_receipt_exact_object(receipt_check,array[
+                'check_ref','evidence_refs','state'
+              ]),false)
+           or not coalesce((receipt_check->>'check_ref') ~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$',false)
+           or not coalesce(receipt_check->>'state'=any(array['passed','failed','blocked','not_run']),false)
+           or not coalesce(ops.engineering_receipt_evidence_array(receipt_check->'evidence_refs'),false)
+     )
+     or exists (
+       select 1 from jsonb_array_elements(p_receipt->'checks') receipt_check
+       group by receipt_check->>'check_ref' having count(*)>1
+     )
+     or exists (
+       select 1 from jsonb_array_elements(p_receipt->'checks') receipt_check
+        where not exists (
+          select 1 from jsonb_array_elements(receipt_slice->'planned_checks') planned_check
+           where planned_check->>'check_ref'=receipt_check->>'check_ref'
+        )
+     )
+     or exists (
+       select 1 from jsonb_array_elements(receipt_slice->'planned_checks') planned_check
+        where not exists (
+          select 1 from jsonb_array_elements(p_receipt->'checks') receipt_check
+           where receipt_check->>'check_ref'=planned_check->>'check_ref'
+        )
+     )
+     or exists (
+       select 1
+         from jsonb_array_elements(p_receipt->'checks') receipt_check
+         join jsonb_array_elements(receipt_slice->'planned_checks') planned_check
+           on planned_check->>'check_ref'=receipt_check->>'check_ref'
+        where receipt_check->>'state'='passed'
+          and (jsonb_array_length(receipt_check->'evidence_refs')=0
+               or not exists (
+                 select 1 from jsonb_array_elements(receipt_check->'evidence_refs') evidence
+                  where evidence->>'redaction_class'=case planned_check->>'evidence_requirement'
+                    when 'redacted_evidence_required' then 'redacted_evidence' else 'metadata_only' end
+               ))
+     )
+     or jsonb_typeof(p_receipt->'deviations') is distinct from 'array'
+     or exists (
+       select 1
+         from jsonb_array_elements(case when jsonb_typeof(p_receipt->'deviations')='array'
+                                        then p_receipt->'deviations' else '[]'::jsonb end) deviation
+        where not coalesce(ops.engineering_receipt_exact_object(deviation,array[
+                'category','deviation_ref','evidence_refs','impact','out_of_scope_component_refs',
+                'out_of_scope_resource_refs','plan_revision_required','reason','review_state'
+              ]),false)
+           or not coalesce((deviation->>'deviation_ref') ~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$',false)
+           or exists (select 1 from unnest(array['category','reason','impact']) field
+                       where jsonb_typeof(deviation->field) is distinct from 'string'
+                          or not coalesce(btrim(deviation->>field)<>'',false))
+           or jsonb_typeof(deviation->'plan_revision_required') is distinct from 'boolean'
+           or not coalesce(ops.engineering_receipt_evidence_array(deviation->'evidence_refs'),false)
+           or not coalesce(ops.engineering_receipt_identifier_array(deviation->'out_of_scope_resource_refs'),false)
+           or not coalesce(ops.engineering_receipt_identifier_array(deviation->'out_of_scope_component_refs'),false)
+           or not coalesce(deviation->>'review_state'=any(array['unreviewed','reviewed','resolved']),false)
+     )
+     or exists (
+       select 1 from jsonb_array_elements(p_receipt->'deviations') deviation
+       group by deviation->>'deviation_ref' having count(*)>1
+     )
+     or not coalesce(ops.engineering_receipt_identifier_sets_equal(
+          p_receipt->'planned_resource_refs',receipt_slice->'declared_resource_refs'),false)
+     or not coalesce(ops.engineering_receipt_identifier_sets_equal(
+          p_receipt->'planned_component_refs',receipt_slice->'declared_component_refs'),false)
+     or exists (
+       select 1 from jsonb_array_elements(p_receipt->'actual_resource_refs') actual_ref
+        where not exists (
+          select 1 from jsonb_array_elements(receipt_slice->'declared_resource_refs') declared_ref
+           where declared_ref=actual_ref
+        ) and not exists (
+          select 1 from jsonb_array_elements(p_receipt->'deviations') deviation,
+                        jsonb_array_elements(deviation->'out_of_scope_resource_refs') approved_ref
+           where deviation->>'review_state'='resolved' and approved_ref=actual_ref
+        )
+     )
+     or exists (
+       select 1 from jsonb_array_elements(p_receipt->'actual_component_refs') actual_ref
+        where not exists (
+          select 1 from jsonb_array_elements(receipt_slice->'declared_component_refs') declared_ref
+           where declared_ref=actual_ref
+        ) and not exists (
+          select 1 from jsonb_array_elements(p_receipt->'deviations') deviation,
+                        jsonb_array_elements(deviation->'out_of_scope_component_refs') approved_ref
+           where deviation->>'review_state'='resolved' and approved_ref=actual_ref
+        )
+     )
+     or (receipt_outcome='claimed_complete' and (
+       jsonb_array_length(p_receipt->'artifact_refs')=0
+       or jsonb_array_length(p_receipt->'evidence_refs')=0
+       or exists (select 1 from jsonb_array_elements(p_receipt->'checks') receipt_check
+                   where receipt_check->>'state' is distinct from 'passed')
+     ))
+     or not coalesce(ops.engineering_receipt_exact_object(p_receipt->'source_evidence',array[
+          'branch_ref','evidence_refs','source_sha','worktree_ref'
+        ]),false)
+     or exists (select 1 from unnest(array['worktree_ref','branch_ref','source_sha']) field
+                 where jsonb_typeof(p_receipt->'source_evidence'->field) is distinct from 'string'
+                    or not coalesce(btrim(p_receipt->'source_evidence'->>field)<>'',false)
+                    or (field<>'source_sha' and not coalesce(
+                         (p_receipt->'source_evidence'->>field) ~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$',false)))
+     or not coalesce(ops.engineering_receipt_evidence_array(p_receipt->'source_evidence'->'evidence_refs'),false)
+     or not coalesce(ops.engineering_receipt_exact_object(p_receipt->'reset_reconstruction',array[
+          'fresh_session','inherited_transcript_used','reconstruction_free','remediation_action'
+        ]),false)
+     or p_receipt->'reset_reconstruction'->'fresh_session' is distinct from 'true'::jsonb
+     or p_receipt->'reset_reconstruction'->'inherited_transcript_used' is distinct from 'false'::jsonb
+     or jsonb_typeof(p_receipt->'reset_reconstruction'->'reconstruction_free') is distinct from 'boolean'
+     or (p_receipt->'reset_reconstruction'->'reconstruction_free'='false'::jsonb and
+         (jsonb_typeof(p_receipt->'reset_reconstruction'->'remediation_action') is distinct from 'string'
+          or not coalesce(btrim(p_receipt->'reset_reconstruction'->>'remediation_action')<>'',false)))
+     or (p_receipt->'reset_reconstruction'->'reconstruction_free'='true'::jsonb and
+         p_receipt->'reset_reconstruction'->'remediation_action' is distinct from 'null'::jsonb
+         and (jsonb_typeof(p_receipt->'reset_reconstruction'->'remediation_action') is distinct from 'string'
+              or not coalesce(btrim(p_receipt->'reset_reconstruction'->>'remediation_action')<>'',false)))
+     or not coalesce(ops.engineering_receipt_exact_object(p_receipt->'executor_claim',array[
+          'claim_state','claimed_at','claimed_by'
+        ]),false)
+     or p_receipt->'executor_claim'->>'claim_state' is distinct from 'executor_claim'
+     or not coalesce((p_receipt->'executor_claim'->>'claimed_by') ~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$',false)
+     or jsonb_typeof(p_receipt->'executor_claim'->'claimed_at') is distinct from 'string'
+     or not coalesce(btrim(p_receipt->'executor_claim'->>'claimed_at')<>'',false)
+     or p_receipt->'independent_verification_required' is distinct from 'true'::jsonb
+     or not coalesce(ops.engineering_receipt_exact_object(p_receipt->'attribution',array[
+          'actor_ref','adapter_ref','session_ref'
+        ]),false)
+     or exists (select 1 from unnest(array['actor_ref','session_ref','adapter_ref']) field
+                 where not coalesce((p_receipt->'attribution'->>field) ~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$',false))
+     or session_slug is null or p_receipt->'executor_claim'->>'claimed_by' is distinct from session_slug
+     or e.envelope#>>'{server_binding,identity,agent_principal_id}' is null
+     or e.envelope#>>'{agent_session,id}' is null
+     or e.envelope#>>'{server_binding,adapter,adapter_id}' is null
+     or p_receipt->'attribution'->>'actor_ref' is distinct from e.envelope#>>'{server_binding,identity,agent_principal_id}'
+     or p_receipt->'attribution'->>'session_ref' is distinct from e.envelope#>>'{agent_session,id}'
+     or p_receipt->'attribution'->>'adapter_ref' is distinct from e.envelope#>>'{server_binding,adapter,adapter_id}' then
+    raise exception 'engineering receipt typed contract is invalid';
+  end if;
+  -- No receipt may cross the append boundary on authority sampled only before
+  -- JSON validation.  All rows remain locked from the first ordered check.
+  v_append_at := clock_timestamp();
+  if j.state is distinct from 'running' or j.lease_token is distinct from p_lease_token
+     or j.leased_until is null or j.leased_until<v_append_at
+     or e.expires_at<=v_append_at or s.lease_expires_at is null or s.lease_expires_at<=v_append_at
+     or (s.state is distinct from 'claimed' and s.state is distinct from 'in_progress') then
+    raise exception 'engineering claim, envelope, or agent-session lease is not current at receipt append';
+  end if;
+  if not ops.engineering_envelope_is_executable(e.id,e.job_id) then
+    raise exception 'engineering envelope is no longer executable at receipt append';
+  end if;
+  insert into ops.engineering_slice_receipt(job_attempt_id,envelope_id,work_request_id,slice_ref,attempt_id,executor_actor_id,receipt_digest,outcome,receipt) values(a.id,e.id,e.work_request_id,e.slice_ref,p_receipt->>'attempt_id',session_executor,p_receipt_digest,p_receipt->>'outcome',p_receipt) returning * into row;
   return row;
-end $$;
+end $_$;
 
 
 --
@@ -4022,6 +5275,77 @@ end $_$;
 
 
 --
+-- Name: engineering_retire_permanently_ineligible_jobs(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.engineering_retire_permanently_ineligible_jobs() RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+declare retired integer;
+begin
+  with doomed as (
+    select j.id,j.attempt,case when e.id is null then 'engineering_orphaned_job' else 'engineering_superseded_predecessor' end reason
+      from ops.job j left join ops.engineering_execution_envelope e on e.job_id=j.id
+     where j.definition_key='engineering-slice' and j.definition_version=1
+       and j.state in ('queued','retry_wait')
+       and (e.id is null or exists(select 1 from ops.engineering_execution_envelope successor where successor.supersedes_envelope_id=e.id))
+     for update of j skip locked
+  ), changed as (
+    update ops.job j set state='dead_lettered',ended_at=now(),lease_owner=null,lease_token=null,
+      leased_until=null,last_failure_class=d.reason,last_failure_detail='permanently ineligible engineering job',updated_at=now()
+      from doomed d where j.id=d.id returning j.id,j.attempt,d.reason
+  ), receipts as (
+    insert into ops.job_receipt(job_id,attempt,kind,receipt_ref,evidence)
+    select id,attempt,'dead_letter','engineering-currentness:'||id::text||':'||attempt::text,
+      jsonb_build_object('reason',reason,'derived_by','ops.engineering_retire_permanently_ineligible_jobs') from changed
+    returning 1
+  ) select count(*) into retired from receipts;
+  return retired;
+end $$;
+
+
+--
+-- Name: engineering_safe_timestamptz(text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.engineering_safe_timestamptz(p_value text) RETURNS timestamp with time zone
+    LANGUAGE plpgsql IMMUTABLE STRICT
+    SET search_path TO 'pg_catalog'
+    AS $$
+begin
+  return p_value::timestamptz;
+exception when others then
+  return null;
+end $$;
+
+
+--
+-- Name: engineering_work_request_currentness_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.engineering_work_request_currentness_guard() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+begin
+  if (new.ref,new.state,new.version,new.title,new.desired_outcome,new.acceptance_criteria)
+       is distinct from
+     (old.ref,old.state,old.version,old.title,old.desired_outcome,old.acceptance_criteria)
+     and exists (
+       select 1 from ops.engineering_execution_envelope e
+       join ops.job j on j.id=e.job_id
+       where e.work_request_id=old.id
+         and j.definition_key='engineering-slice' and j.definition_version=1
+         and j.state='running' and j.leased_until>=clock_timestamp()
+     ) then
+    raise exception 'Work Request currentness is reserved by a live Engineering claim';
+  end if;
+  return new;
+end $$;
+
+
+--
 -- Name: enqueue_job(text, integer, timestamp with time zone, jsonb, text, text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -4032,6 +5356,7 @@ CREATE FUNCTION ops.enqueue_job(p_definition_key text, p_definition_version inte
 declare
   d ops.job_definition%rowtype;
   j ops.job%rowtype;
+  canary_disabled boolean;
 begin
   select * into d from ops.job_definition
    where key=p_definition_key and version=p_definition_version and enabled;
@@ -4040,6 +5365,42 @@ begin
   end if;
   if p_mode not in ('shadow','canary','live','replay') then
     raise exception 'invalid job mode %',p_mode;
+  end if;
+  -- A missing canary key (every cognition contract, and any deterministic
+  -- contract that never named one) is not the same claim as an explicit
+  -- canary.enabled=false; only the explicit false is a contractual refusal.
+  canary_disabled := (d.execution_contract #>> '{canary,enabled}') = 'false';
+  if p_mode='canary' then
+    if canary_disabled then
+      raise exception 'workflow % cannot enqueue canary mode: canary is contractually disabled for definition v%',
+        p_definition_key,p_definition_version;
+    end if;
+    if not exists (
+      select 1 from ops.workflow_acceptance
+       where workflow_key=p_definition_key and workflow_version=p_definition_version
+         and mode='shadow' and status='accepted'
+    ) then
+      raise exception 'workflow % cannot enqueue canary mode: no accepted shadow acceptance evidence for definition v%',
+        p_definition_key,p_definition_version;
+    end if;
+  elsif p_mode='live' then
+    if canary_disabled then
+      if not exists (
+        select 1 from ops.workflow_acceptance
+         where workflow_key=p_definition_key and workflow_version=p_definition_version
+           and mode='shadow' and status='accepted'
+      ) then
+        raise exception 'workflow % cannot enqueue live mode: canary is contractually disabled and no accepted shadow acceptance evidence exists for definition v%',
+          p_definition_key,p_definition_version;
+      end if;
+    elsif not exists (
+      select 1 from ops.workflow_acceptance
+       where workflow_key=p_definition_key and workflow_version=p_definition_version
+         and mode='canary' and status='accepted'
+    ) then
+      raise exception 'workflow % cannot enqueue live mode: no accepted canary acceptance evidence for definition v%',
+        p_definition_key,p_definition_version;
+    end if;
   end if;
   insert into ops.job
     (definition_key,definition_version,idempotency_key,scheduled_for,mode,payload,
@@ -4119,6 +5480,9 @@ CREATE FUNCTION ops.fail_job(p_job_id uuid, p_lease_token uuid, p_failure_class 
 declare j ops.job%rowtype; next_state text;
 begin
   select * into j from ops.job where id=p_job_id for update;
+  if found and j.definition_key='engineering-slice' then
+    raise exception 'engineering jobs require scoped controller functions';
+  end if;
   if not found or j.state <> 'running' or j.lease_token <> p_lease_token
      or j.leased_until < now() then
     raise exception 'job % does not hold this live lease',p_job_id;
@@ -4272,6 +5636,568 @@ end $$;
 
 
 --
+-- Name: guard_engineering_actor_authority_update(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.guard_engineering_actor_authority_update() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+begin
+  if (new.active,new.kind,new.slug) is distinct from (old.active,old.kind,old.slug)
+     and exists (
+       select 1 from ops.capability_agent_session s
+       join ops.engineering_execution_envelope e on e.agent_session_id=s.id
+       join ops.job j on j.id=e.job_id
+       where s.executor_actor_id=old.id
+         and j.definition_key='engineering-slice' and j.definition_version=1
+         and j.state='running' and j.lease_token is not null
+         and j.leased_until>clock_timestamp()
+     ) then
+    raise exception 'Engineering actor authority is reserved by a live scoped lease';
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: guard_engineering_envelope_supersession(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.guard_engineering_envelope_supersession() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+declare prior ops.engineering_execution_envelope%rowtype;
+        current_plan ops.engineering_slice_plan%rowtype;
+        prior_count integer; v_executor_actor_id uuid;
+        current_source jsonb; current_work_ref text;
+begin
+  select s.executor_actor_id into v_executor_actor_id
+    from ops.capability_agent_session s where s.id=new.agent_session_id for share;
+  if not found then raise exception 'engineering envelope session is not current'; end if;
+  perform 1 from public.actor a
+   where a.id=v_executor_actor_id and a.active and a.kind='automation' and a.slug='codex'
+   order by a.id for share;
+  if not found then raise exception 'engineering envelope executor actor is not current'; end if;
+  perform pg_advisory_xact_lock(hashtextextended(
+    'engineering-envelope:' || new.slice_plan_id::text || ':' || new.slice_ref,0));
+  select * into current_plan from ops.engineering_slice_plan
+   where id=new.slice_plan_id for key share;
+  if not found then raise exception 'engineering envelope slice plan is not current'; end if;
+  select ref into current_work_ref from ops.work_request
+   where id=new.work_request_id for share;
+  if not found then raise exception 'engineering envelope Work Request is not current'; end if;
+  current_source:=ops.engineering_admission_source(current_work_ref);
+  if current_source is null
+     or new.work_request_id is distinct from
+        regexp_replace(current_source->'work_request'->>'id','^wr:','')::uuid
+     or new.accepted_plan_id is distinct from
+        (current_source->'accepted_plan'->>'record_id')::uuid
+     or new.state_version is distinct from
+        (current_source->'work_request'->>'version')::integer
+     or new.canonical_record_digest is distinct from
+        current_source->'work_request'->>'canonical_record_digest'
+     or current_plan.work_request_id is distinct from new.work_request_id
+     or current_plan.accepted_plan_id is distinct from new.accepted_plan_id
+     or current_plan.accepted_plan_hash is distinct from
+        current_source->'accepted_plan'->>'digest'
+     or current_plan.work_request_version is distinct from new.state_version
+     or current_plan.plan->'accepted_plan_revision'->>'id' is distinct from
+        current_source->'accepted_plan'->>'plan_ref'
+     or current_plan.plan->'accepted_plan_revision'->>'digest' is distinct from
+        current_source->'accepted_plan'->>'digest' then
+    raise exception 'engineering envelope source or accepted plan is not current';
+  end if;
+  select count(*) into prior_count from ops.engineering_execution_envelope
+   where slice_plan_id=new.slice_plan_id and slice_ref=new.slice_ref;
+  if prior_count=0 then
+    if new.supersedes_envelope_id is not null then raise exception 'first engineering envelope cannot supersede another envelope'; end if;
+    return new;
+  end if;
+  if new.supersedes_envelope_id is null then raise exception 'later engineering envelope must name its immutable predecessor'; end if;
+  select * into prior from ops.engineering_execution_envelope where id=new.supersedes_envelope_id for key share;
+  if not found or prior.slice_plan_id<>new.slice_plan_id or prior.slice_ref<>new.slice_ref
+     or prior.accepted_plan_id<>new.accepted_plan_id or prior.work_request_id<>new.work_request_id then
+    raise exception 'engineering envelope predecessor is outside the exact slice binding';
+  end if;
+  if exists (select 1 from ops.engineering_execution_envelope where supersedes_envelope_id=prior.id) then raise exception 'engineering envelope predecessor already has a successor'; end if;
+  if exists (select 1 from ops.job j where j.id=prior.job_id and j.state='running' and j.lease_token is not null and j.leased_until>clock_timestamp()) then raise exception 'leased engineering envelope cannot be superseded'; end if;
+  if prior.expires_at>clock_timestamp()
+     and prior.envelope->'server_binding'->'authority'->>'read_only'='false'
+     and exists (select 1 from ops.capability_agent_session s where s.id=prior.agent_session_id and s.state not in ('completed','cancelled'))
+     and not exists (select 1 from ops.engineering_slice_receipt r where r.envelope_id=prior.id and r.outcome in ('failed','blocked','reopened')) then
+    raise exception 'current executable engineering envelope cannot be superseded';
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: guard_engineering_job_definition_currentness_update(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.guard_engineering_job_definition_currentness_update() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+begin
+  if (to_jsonb(new)-'updated_at') is distinct from (to_jsonb(old)-'updated_at')
+     and old.key='engineering-slice' and old.version=1
+     and exists (
+       select 1 from ops.job j
+        where j.definition_key=old.key and j.definition_version=old.version
+          and j.state='running' and j.lease_token is not null
+          and j.leased_until>clock_timestamp()
+     ) then
+    raise exception 'Engineering job definition currentness is reserved by a live scoped lease';
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: guard_engineering_reviewer_fact_insert(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.guard_engineering_reviewer_fact_insert() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $_$
+declare r ops.engineering_slice_receipt%rowtype;
+        e ops.engineering_execution_envelope%rowtype;
+        sp ops.engineering_slice_plan%rowtype;
+        executor_session ops.capability_agent_session%rowtype;
+        executor_slug text; reviewer_slug text; receipt_deviation_refs jsonb;
+        locked_actor_count integer;
+begin
+  if new.contract_version is not null then
+    raise exception 'engineering reviewer contract version is caller-controlled';
+  end if;
+  if not coalesce(ops.engineering_receipt_exact_object(new.fact,array[
+       'attempt_id','evidence_refs','is_independent','resolved_deviation_refs',
+       'reviewed_deviation_refs','reviewer_ref','session_ref','slice_ref','state'
+     ]),false)
+     or not coalesce(new.fact->>'state'=any(array['passed','failed','blocked']),false)
+     or new.state is distinct from new.fact->>'state'
+     or jsonb_typeof(new.fact->'is_independent') is distinct from 'boolean'
+     or new.fact->'is_independent' is distinct from 'true'::jsonb
+     or not coalesce((new.fact->>'attempt_id') ~ '^attempt:[1-9][0-9]*$',false)
+     or not coalesce((new.fact->>'slice_ref') ~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$',false)
+     or not coalesce((new.fact->>'reviewer_ref') ~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$',false)
+     or not coalesce((new.fact->>'session_ref') ~ '^session:[A-Za-z0-9][A-Za-z0-9._:-]{1,119}$',false)
+     or not coalesce(ops.engineering_receipt_evidence_array(new.fact->'evidence_refs'),false)
+     or not coalesce(ops.engineering_receipt_identifier_array(new.fact->'reviewed_deviation_refs'),false)
+     or not coalesce(ops.engineering_receipt_identifier_array(new.fact->'resolved_deviation_refs'),false) then
+    raise exception 'engineering reviewer fact is malformed';
+  end if;
+  -- Derive identifiers unlocked, then retain session -> actor -> lineage order.
+  select * into r from ops.engineering_slice_receipt where id=new.receipt_id;
+  if not found then raise exception 'engineering reviewer receipt not found'; end if;
+  if new.reviewer_actor_id is not distinct from r.executor_actor_id then
+    raise exception 'engineering reviewer cannot be the receipt executor';
+  end if;
+  select * into e from ops.engineering_execution_envelope where id=r.envelope_id;
+  if not found then raise exception 'engineering reviewer envelope not found'; end if;
+  select * into executor_session from ops.capability_agent_session where id=e.agent_session_id for share;
+  if not found then raise exception 'engineering reviewer executor session not found'; end if;
+  perform 1 from public.actor actor
+   where (actor.id=r.executor_actor_id and actor.active and actor.kind='automation' and actor.slug='codex')
+      or (actor.id=new.reviewer_actor_id and actor.active)
+   order by actor.id for share;
+  select count(*) into locked_actor_count from public.actor actor
+   where (actor.id=r.executor_actor_id and actor.active and actor.kind='automation' and actor.slug='codex')
+      or (actor.id=new.reviewer_actor_id and actor.active);
+  if locked_actor_count<>2 then raise exception 'engineering reviewer actor authority is not current'; end if;
+  select actor.slug into executor_slug from public.actor actor where actor.id=r.executor_actor_id;
+  select actor.slug into reviewer_slug from public.actor actor where actor.id=new.reviewer_actor_id;
+  perform pg_advisory_xact_lock(hashtextextended(
+    'engineering-envelope:'||e.slice_plan_id::text||':'||e.slice_ref,0));
+  select * into e from ops.engineering_execution_envelope where id=r.envelope_id for key share;
+  if not found then raise exception 'engineering reviewer envelope changed'; end if;
+  select * into sp from ops.engineering_slice_plan where id=e.slice_plan_id for key share;
+  if not found then raise exception 'engineering reviewer slice plan not found'; end if;
+  perform 1 from ops.work_request where id=e.work_request_id for share;
+  if not found then raise exception 'engineering reviewer Work Request is not current'; end if;
+  select * into r from ops.engineering_slice_receipt where id=new.receipt_id for key share;
+  if not found then raise exception 'engineering reviewer receipt changed'; end if;
+
+  if not coalesce(ops.engineering_receipt_exact_object(r.receipt,array[
+       'actual_component_refs','actual_resource_refs','artifact_refs','attribution','attempt_id','checks',
+       'deviations','envelope_digest','evidence_refs','executor_claim','independent_verification_required',
+       'outcome','plan_digest','planned_component_refs','planned_resource_refs','reset_reconstruction',
+       'schema_version','slice_ref','source_evidence'
+     ]),false)
+     or r.receipt->>'schema_version' is distinct from 'engineering-slice-receipt.v1'
+     or r.receipt_digest is distinct from
+        ('sha256:'||encode(public.digest(ops.guidance_import_canonical_json(r.receipt),'sha256'),'hex'))
+     or not coalesce(ops.engineering_receipt_exact_object(r.receipt->'attribution',array[
+          'actor_ref','adapter_ref','session_ref'
+        ]),false)
+     or not coalesce((r.receipt#>>'{attribution,session_ref}') ~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$',false)
+     or r.receipt->'independent_verification_required' is distinct from 'true'::jsonb
+     or jsonb_typeof(r.receipt->'deviations') is distinct from 'array'
+     or exists (
+       select 1
+         from jsonb_array_elements(case when jsonb_typeof(r.receipt->'deviations')='array'
+                                        then r.receipt->'deviations' else '[]'::jsonb end) deviation
+        where not coalesce(ops.engineering_receipt_exact_object(deviation,array[
+                'category','deviation_ref','evidence_refs','impact','out_of_scope_component_refs',
+                'out_of_scope_resource_refs','plan_revision_required','reason','review_state'
+              ]),false)
+           or not coalesce((deviation->>'deviation_ref') ~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$',false)
+           or exists (
+             select 1 from unnest(array['category','reason','impact']) field
+              where jsonb_typeof(deviation->field) is distinct from 'string'
+                 or not coalesce(btrim(deviation->>field)<>'',false)
+           )
+           or jsonb_typeof(deviation->'plan_revision_required') is distinct from 'boolean'
+           or not coalesce(ops.engineering_receipt_evidence_array(deviation->'evidence_refs'),false)
+           or not coalesce(ops.engineering_receipt_identifier_array(deviation->'out_of_scope_resource_refs'),false)
+           or not coalesce(ops.engineering_receipt_identifier_array(deviation->'out_of_scope_component_refs'),false)
+           or not coalesce(deviation->>'review_state'=any(array['unreviewed','reviewed','resolved']),false)
+     )
+     or exists (
+       select 1 from jsonb_array_elements(case when jsonb_typeof(r.receipt->'deviations')='array'
+                                               then r.receipt->'deviations' else '[]'::jsonb end) deviation
+        group by deviation->>'deviation_ref' having count(*)>1
+     )
+     or new.work_request_id is distinct from r.work_request_id
+     or new.slice_ref is distinct from r.slice_ref
+     or new.fact->>'slice_ref' is distinct from r.slice_ref
+     or new.fact->>'attempt_id' is distinct from r.attempt_id
+     or new.reviewer_session_ref is distinct from new.fact->>'session_ref'
+     or new.reviewer_actor_id is not distinct from r.executor_actor_id
+     or reviewer_slug is null
+     or not coalesce(new.fact->>'reviewer_ref'=any(array[
+          reviewer_slug,'actor:'||reviewer_slug,'reviewer:'||reviewer_slug
+        ]),false)
+     or new.reviewer_session_ref is not distinct from r.receipt#>>'{attribution,session_ref}'
+     or r.receipt->>'slice_ref' is distinct from r.slice_ref
+     or r.receipt->>'attempt_id' is distinct from r.attempt_id
+     or r.receipt->>'outcome' is distinct from r.outcome
+     or r.receipt->>'plan_digest' is distinct from sp.plan_digest
+     or r.receipt->>'envelope_digest' is distinct from e.envelope_digest
+     or e.work_request_id is distinct from r.work_request_id
+     or e.slice_ref is distinct from r.slice_ref
+     or e.envelope->>'envelope_id' is distinct from 'env:'||e.id::text
+     or e.envelope#>>'{request,job_ref}' is distinct from 'job:'||e.job_id::text
+     or e.envelope#>>'{agent_session,id}' is distinct from 'session:'||e.agent_session_id::text
+     or executor_session.executor_actor_id is distinct from r.executor_actor_id
+     or executor_slug is null
+     or r.receipt#>>'{attribution,actor_ref}' is distinct from e.envelope#>>'{server_binding,identity,agent_principal_id}'
+     or r.receipt#>>'{attribution,session_ref}' is distinct from e.envelope#>>'{agent_session,id}'
+     or r.receipt#>>'{attribution,adapter_ref}' is distinct from e.envelope#>>'{server_binding,adapter,adapter_id}' then
+    raise exception 'engineering reviewer fact is not independently bound to the exact receipt';
+  end if;
+
+  select coalesce(jsonb_agg(to_jsonb(deviation_ref) order by deviation_ref),'[]'::jsonb)
+    into receipt_deviation_refs
+    from (
+      select deviation->>'deviation_ref' as deviation_ref
+        from jsonb_array_elements(case when jsonb_typeof(r.receipt->'deviations')='array'
+                                       then r.receipt->'deviations' else '[]'::jsonb end) deviation
+    ) refs;
+  if not coalesce(ops.engineering_receipt_identifier_sets_equal(
+       new.fact->'reviewed_deviation_refs',receipt_deviation_refs),false)
+     or exists (
+       select 1
+         from jsonb_array_elements(new.fact->'resolved_deviation_refs') resolved
+        where not exists (
+          select 1 from jsonb_array_elements(receipt_deviation_refs) expected
+           where expected=resolved
+        )
+     ) then
+    raise exception 'engineering reviewer fact does not cover the receipt deviations';
+  end if;
+
+  if new.state='passed' and (
+       r.outcome is distinct from 'claimed_complete'
+       or r.receipt->>'outcome' is distinct from 'claimed_complete'
+       or not coalesce(ops.engineering_receipt_identifier_array(r.receipt->'planned_resource_refs'),false)
+       or not coalesce(ops.engineering_receipt_identifier_array(r.receipt->'actual_resource_refs'),false)
+       or not coalesce(ops.engineering_receipt_identifier_array(r.receipt->'planned_component_refs'),false)
+       or not coalesce(ops.engineering_receipt_identifier_array(r.receipt->'actual_component_refs'),false)
+       or not coalesce(ops.engineering_receipt_identifier_sets_equal(
+            r.receipt->'planned_resource_refs',(
+              select dependency_slice->'declared_resource_refs'
+                from jsonb_array_elements(sp.plan->'slices') dependency_slice
+               where dependency_slice->>'slice_ref'=r.slice_ref
+            )),false)
+       or not coalesce(ops.engineering_receipt_identifier_sets_equal(
+            r.receipt->'planned_component_refs',(
+              select dependency_slice->'declared_component_refs'
+                from jsonb_array_elements(sp.plan->'slices') dependency_slice
+               where dependency_slice->>'slice_ref'=r.slice_ref
+            )),false)
+       or exists (
+         select 1 from jsonb_array_elements(r.receipt->'actual_resource_refs') actual_ref
+          where not exists (
+            select 1
+              from jsonb_array_elements(sp.plan->'slices') dependency_slice,
+                   jsonb_array_elements(dependency_slice->'declared_resource_refs') declared_ref
+             where dependency_slice->>'slice_ref'=r.slice_ref and declared_ref=actual_ref
+          ) and not exists (
+            select 1
+              from jsonb_array_elements(r.receipt->'deviations') deviation,
+                   jsonb_array_elements(deviation->'out_of_scope_resource_refs') approved_ref
+             where deviation->>'review_state'='resolved' and approved_ref=actual_ref
+          )
+       )
+       or exists (
+         select 1 from jsonb_array_elements(r.receipt->'actual_component_refs') actual_ref
+          where not exists (
+            select 1
+              from jsonb_array_elements(sp.plan->'slices') dependency_slice,
+                   jsonb_array_elements(dependency_slice->'declared_component_refs') declared_ref
+             where dependency_slice->>'slice_ref'=r.slice_ref and declared_ref=actual_ref
+          ) and not exists (
+            select 1
+              from jsonb_array_elements(r.receipt->'deviations') deviation,
+                   jsonb_array_elements(deviation->'out_of_scope_component_refs') approved_ref
+             where deviation->>'review_state'='resolved' and approved_ref=actual_ref
+          )
+       )
+       or not coalesce(ops.engineering_receipt_identifier_array(r.receipt->'artifact_refs'),false)
+       or not coalesce(case when jsonb_typeof(r.receipt->'artifact_refs')='array'
+                            then jsonb_array_length(r.receipt->'artifact_refs')>0 else false end,false)
+       or not coalesce(ops.engineering_receipt_evidence_array(r.receipt->'evidence_refs'),false)
+       or not coalesce(case when jsonb_typeof(r.receipt->'evidence_refs')='array'
+                            then jsonb_array_length(r.receipt->'evidence_refs')>0 else false end,false)
+       or jsonb_typeof(r.receipt->'checks') is distinct from 'array'
+       or not coalesce(case when jsonb_typeof(r.receipt->'checks')='array'
+                            then jsonb_array_length(r.receipt->'checks')>0 else false end,false)
+       or exists (
+         select 1
+           from jsonb_array_elements(case when jsonb_typeof(r.receipt->'checks')='array'
+                                          then r.receipt->'checks' else '[]'::jsonb end) receipt_check
+          where not coalesce(ops.engineering_receipt_exact_object(receipt_check,array[
+                  'check_ref','evidence_refs','state'
+                ]),false)
+             or not coalesce((receipt_check->>'check_ref') ~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$',false)
+             or receipt_check->>'state' is distinct from 'passed'
+             or not coalesce(ops.engineering_receipt_evidence_array(receipt_check->'evidence_refs'),false)
+             or not coalesce(case when jsonb_typeof(receipt_check->'evidence_refs')='array'
+                                  then jsonb_array_length(receipt_check->'evidence_refs')>0 else false end,false)
+       )
+       or exists (
+         select 1
+           from jsonb_array_elements(case when jsonb_typeof(r.receipt->'checks')='array'
+                                          then r.receipt->'checks' else '[]'::jsonb end) receipt_check
+          group by receipt_check->>'check_ref' having count(*)>1
+       )
+       or exists (
+         select 1
+           from jsonb_array_elements(case when jsonb_typeof(r.receipt->'checks')='array'
+                                          then r.receipt->'checks' else '[]'::jsonb end) receipt_check
+          where not exists (
+            select 1
+              from jsonb_array_elements(sp.plan->'slices') dependency_slice,
+                   jsonb_array_elements(dependency_slice->'planned_checks') planned_check
+             where dependency_slice->>'slice_ref'=r.slice_ref
+               and planned_check->>'check_ref'=receipt_check->>'check_ref'
+          )
+       )
+       or exists (
+         select 1
+           from jsonb_array_elements(sp.plan->'slices') dependency_slice,
+                jsonb_array_elements(dependency_slice->'planned_checks') planned_check
+          where dependency_slice->>'slice_ref'=r.slice_ref
+            and not exists (
+              select 1
+                from jsonb_array_elements(case when jsonb_typeof(r.receipt->'checks')='array'
+                                               then r.receipt->'checks' else '[]'::jsonb end) receipt_check
+               where receipt_check->>'check_ref'=planned_check->>'check_ref'
+            )
+       )
+       or exists (
+         select 1
+           from jsonb_array_elements(case when jsonb_typeof(r.receipt->'checks')='array'
+                                          then r.receipt->'checks' else '[]'::jsonb end) receipt_check
+           join lateral (
+             select planned_check
+               from jsonb_array_elements(sp.plan->'slices') dependency_slice,
+                    jsonb_array_elements(dependency_slice->'planned_checks') planned_check
+              where dependency_slice->>'slice_ref'=r.slice_ref
+                and planned_check->>'check_ref'=receipt_check->>'check_ref'
+           ) planned on true
+          where not exists (
+            select 1
+              from jsonb_array_elements(case when jsonb_typeof(receipt_check->'evidence_refs')='array'
+                                             then receipt_check->'evidence_refs' else '[]'::jsonb end) evidence
+             where evidence->>'redaction_class'=case planned.planned_check->>'evidence_requirement'
+               when 'redacted_evidence_required' then 'redacted_evidence' else 'metadata_only' end
+          )
+       )
+       or not coalesce(ops.engineering_receipt_exact_object(r.receipt->'source_evidence',array[
+            'branch_ref','evidence_refs','source_sha','worktree_ref'
+          ]),false)
+       or exists (
+         select 1 from unnest(array['worktree_ref','branch_ref','source_sha']) field
+          where jsonb_typeof(r.receipt->'source_evidence'->field) is distinct from 'string'
+             or not coalesce(btrim(r.receipt->'source_evidence'->>field)<>'',false)
+             or (field<>'source_sha' and not coalesce(
+                  (r.receipt->'source_evidence'->>field) ~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$',false))
+       )
+       or not coalesce(ops.engineering_receipt_evidence_array(r.receipt->'source_evidence'->'evidence_refs'),false)
+       or not coalesce(ops.engineering_receipt_exact_object(r.receipt->'reset_reconstruction',array[
+            'fresh_session','inherited_transcript_used','reconstruction_free','remediation_action'
+          ]),false)
+       or r.receipt->'reset_reconstruction'->'fresh_session' is distinct from 'true'::jsonb
+       or r.receipt->'reset_reconstruction'->'inherited_transcript_used' is distinct from 'false'::jsonb
+       or jsonb_typeof(r.receipt->'reset_reconstruction'->'reconstruction_free') is distinct from 'boolean'
+       or (r.receipt->'reset_reconstruction'->'reconstruction_free'='false'::jsonb and
+           (jsonb_typeof(r.receipt->'reset_reconstruction'->'remediation_action') is distinct from 'string'
+            or not coalesce(btrim(r.receipt->'reset_reconstruction'->>'remediation_action')<>'',false)))
+       or (r.receipt->'reset_reconstruction'->'reconstruction_free'='true'::jsonb and
+           r.receipt->'reset_reconstruction'->'remediation_action' is distinct from 'null'::jsonb
+           and (jsonb_typeof(r.receipt->'reset_reconstruction'->'remediation_action') is distinct from 'string'
+            or not coalesce(btrim(r.receipt->'reset_reconstruction'->>'remediation_action')<>'',false)))
+       or not coalesce(ops.engineering_receipt_exact_object(r.receipt->'executor_claim',array[
+            'claim_state','claimed_at','claimed_by'
+          ]),false)
+       or r.receipt->'executor_claim'->>'claim_state' is distinct from 'executor_claim'
+       or r.receipt->'executor_claim'->>'claimed_by' is distinct from executor_slug
+       or jsonb_typeof(r.receipt->'executor_claim'->'claimed_at') is distinct from 'string'
+       or not coalesce(btrim(r.receipt->'executor_claim'->>'claimed_at')<>'',false)
+       or jsonb_array_length(new.fact->'evidence_refs')=0
+       or not coalesce(ops.engineering_receipt_identifier_sets_equal(
+            new.fact->'resolved_deviation_refs',receipt_deviation_refs),false)
+       or exists (
+         select 1
+           from jsonb_array_elements(case when jsonb_typeof(r.receipt->'deviations')='array'
+                                          then r.receipt->'deviations' else '[]'::jsonb end) deviation
+          where deviation->>'review_state' is distinct from 'resolved'
+             or deviation->'plan_revision_required' is distinct from 'false'::jsonb
+       )
+     ) then
+    raise exception 'engineering reviewer pass requires a complete exact receipt and resolved deviations';
+  end if;
+  new.contract_version:='engineering-review.v1';
+  return new;
+end $_$;
+
+
+--
+-- Name: guard_engineering_session_terminalization(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.guard_engineering_session_terminalization() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+declare lineage record;
+begin
+  if new.state not in ('completed','cancelled') or new.state=old.state then
+    return new;
+  end if;
+  for lineage in
+    select distinct e.slice_plan_id,e.slice_ref
+     from ops.engineering_execution_envelope e
+     where e.agent_session_id=old.id
+     order by e.slice_plan_id,e.slice_ref
+  loop
+    perform pg_advisory_xact_lock(hashtextextended(
+      'engineering-envelope:' || lineage.slice_plan_id::text || ':' || lineage.slice_ref,0));
+    if exists (
+      select 1 from ops.engineering_execution_envelope e
+      join ops.job j on j.id=e.job_id
+       where e.agent_session_id=old.id and e.slice_plan_id=lineage.slice_plan_id
+         and e.slice_ref=lineage.slice_ref and j.state='running'
+         and j.lease_token is not null and j.leased_until>statement_timestamp()
+    ) then
+      raise exception 'engineering session terminalization deferred while its dispatch lease is live';
+    end if;
+  end loop;
+  return new;
+end $$;
+
+
+--
+-- Name: guard_siep_engineering_evidence_binding(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.guard_siep_engineering_evidence_binding() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+declare v_envelope_id uuid; v_plan_id uuid; v_slice_ref text; v_work_request_id uuid;
+        v_session_id uuid; v_executor_actor_id uuid; v_reviewer_actor_id uuid;
+        v_actor_count integer;
+begin
+  if new.engineering_contract_version is not null then
+    raise exception 'SIEP Engineering contract version is caller-controlled';
+  end if;
+  -- IDs are read unlocked; every authority condition is re-read after the
+  -- session/actor/lineage/envelope/Work-Request lock chain.
+  select e.id,e.slice_plan_id,e.slice_ref,e.work_request_id,e.agent_session_id,
+         r.executor_actor_id,review.reviewer_actor_id
+    into v_envelope_id,v_plan_id,v_slice_ref,v_work_request_id,v_session_id,
+         v_executor_actor_id,v_reviewer_actor_id
+    from ops.job j
+    join ops.engineering_execution_envelope e on e.job_id=j.id
+    join ops.engineering_slice_receipt r on r.envelope_id=e.id
+    join ops.engineering_reviewer_fact review on review.receipt_id=r.id
+   where j.id=new.job_id and j.definition_key='engineering-slice'
+   order by r.created_at desc,r.id desc limit 1;
+  if not found then raise exception 'SIEP evidence binding requires an Engineering receipt and review'; end if;
+  perform 1 from ops.capability_agent_session s where s.id=v_session_id for share;
+  if not found then raise exception 'SIEP Engineering session is not current'; end if;
+  perform 1 from public.actor a
+   where a.id=any(array[v_executor_actor_id,v_reviewer_actor_id]) and a.active
+   order by a.id for share;
+  select count(*) into v_actor_count from public.actor a
+   where a.id=any(array[v_executor_actor_id,v_reviewer_actor_id]) and a.active;
+  if v_executor_actor_id is null or v_reviewer_actor_id is null or v_executor_actor_id=v_reviewer_actor_id
+     or v_actor_count<>2 then raise exception 'SIEP Engineering actor authority is not current'; end if;
+  perform pg_advisory_xact_lock(hashtextextended(
+    'engineering-envelope:'||v_plan_id::text||':'||v_slice_ref,0));
+  perform 1 from ops.engineering_execution_envelope e
+    join ops.engineering_slice_plan sp on sp.id=e.slice_plan_id
+   where e.id=v_envelope_id and e.job_id=new.job_id for key share of e,sp;
+  if not found then raise exception 'SIEP Engineering envelope is not current'; end if;
+  perform 1 from ops.work_request where id=v_work_request_id for share;
+  if not found then raise exception 'SIEP Engineering Work Request is not current'; end if;
+  if new.definition_key is distinct from 'engineering-slice'
+     or new.definition_version is distinct from 1
+     or not exists (
+       select 1 from ops.job j
+       join ops.engineering_execution_envelope e on e.job_id=j.id
+       join ops.engineering_slice_plan sp on sp.id=e.slice_plan_id and sp.work_request_id=e.work_request_id
+       join ops.engineering_slice_receipt receipt on receipt.envelope_id=e.id and receipt.work_request_id=e.work_request_id
+       join ops.job_attempt attempt on attempt.id=receipt.job_attempt_id and attempt.job_id=j.id and attempt.attempt=j.attempt and attempt.state='succeeded'
+       join ops.engineering_reviewer_fact review on review.receipt_id=receipt.id and review.work_request_id=receipt.work_request_id and review.slice_ref=receipt.slice_ref
+       join public.actor reviewer on reviewer.id=review.reviewer_actor_id and reviewer.slug='joe' and reviewer.active
+       join ops.siep_package_contract package on package.package_key=new.package_key and package.work_request_id=e.work_request_id
+      where j.id=new.job_id and j.definition_key='engineering-slice' and j.definition_version=1 and j.state='succeeded'
+        and e.state_version=new.work_request_version and sp.work_request_version=new.work_request_version
+        and receipt.outcome='claimed_complete' and review.state='passed'
+        and review.contract_version='engineering-review.v1'
+        and review.reviewer_actor_id<>receipt.executor_actor_id
+        and exists (select 1 from ops.job_receipt jr where jr.job_id=j.id and jr.attempt=j.attempt and jr.kind='completion')
+        and e.id=v_envelope_id
+        and not exists (
+          select 1 from ops.engineering_execution_envelope successor
+           where successor.supersedes_envelope_id=e.id
+        )
+        and 1=(
+          select count(*) from ops.engineering_execution_envelope leaf
+           where leaf.slice_plan_id=e.slice_plan_id
+             and leaf.slice_ref=e.slice_ref
+             and not exists (
+               select 1 from ops.engineering_execution_envelope successor
+                where successor.supersedes_envelope_id=leaf.id
+             )
+        )
+     ) then
+    raise exception 'SIEP evidence binding requires a 0335-verified Engineering receipt and review';
+  end if;
+  new.engineering_contract_version:='engineering-review.v1';
+  return new;
+end $$;
+
+
+--
 -- Name: guidance_import_canonical_json(jsonb); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -4366,14 +6292,185 @@ CREATE FUNCTION ops.heartbeat_job(p_job_id uuid, p_lease_token uuid, p_lease_sec
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO 'ops', 'public', 'pg_temp'
     AS $$
-declare n integer;
+declare j ops.job%rowtype; n integer;
 begin
+  select * into j from ops.job where id=p_job_id for update;
+  if found and j.definition_key='engineering-slice' then
+    raise exception 'engineering jobs require scoped controller functions';
+  end if;
   update ops.job set leased_until=now()+make_interval(secs=>p_lease_seconds),updated_at=now()
    where id=p_job_id and state='running' and lease_token=p_lease_token
-     and leased_until >= now();
+     and leased_until>=now();
   get diagnostics n=row_count;
   return n=1;
 end $$;
+
+
+--
+-- Name: heavy_build_admission_rows_immutable(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.heavy_build_admission_rows_immutable() RETURNS trigger
+    LANGUAGE plpgsql
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+begin
+  raise exception 'heavy-build admission and review receipts are append-only';
+end;
+$$;
+
+
+--
+-- Name: heavy_build_classification(uuid, text, jsonb, jsonb); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.heavy_build_classification(p_work_request_id uuid, p_scope_summary text, p_dependency_refs jsonb, p_caps jsonb) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $_$
+declare
+  w ops.work_request%rowtype;
+  signal_text text;
+  reasons jsonb := '[]'::jsonb;
+  criteria_count integer;
+  dependency_count integer;
+  step_count integer;
+  shape_ready boolean;
+begin
+  select x.* into w from ops.work_request x where x.id = p_work_request_id;
+  if not found then return null; end if;
+  if jsonb_typeof(coalesce(p_dependency_refs, '[]'::jsonb)) is distinct from 'array'
+     or jsonb_typeof(coalesce(p_caps, '{}'::jsonb)) is distinct from 'object' then
+    raise exception 'heavy-build classification requires typed dependency refs and caps';
+  end if;
+
+  -- THE PLAN'S WORDING IS NOT EVIDENCE ABOUT THE WORK. p_scope_summary used to
+  -- join this signal text, which meant the tier could be flipped by rewording the
+  -- summary while the change itself stayed identical. Observed 2026-08-27: the
+  -- same four-step additive guard classified heavy with the word "schema" in its
+  -- summary and standard without it, and the plan was accepted on the second
+  -- wording. A gate that a rewrite can pass teaches sessions to write around it
+  -- rather than through it. Heaviness is now a property of the REQUEST -- its
+  -- title, its desired outcome, its acceptance criteria -- plus the plan's SHAPE,
+  -- which the scale signals below still read from caps and dependency refs.
+  -- Nothing is relaxed: every signal that fired before still fires, and a request
+  -- that was heavy is heavy no matter how its plan is phrased.
+  signal_text := lower(concat_ws(' ', w.title, w.desired_outcome,
+    coalesce(w.acceptance_criteria::text, '')));
+  criteria_count := case when jsonb_typeof(w.acceptance_criteria) = 'array' then jsonb_array_length(w.acceptance_criteria) else 0 end;
+  dependency_count := jsonb_array_length(coalesce(p_dependency_refs, '[]'::jsonb));
+  step_count := case when coalesce(p_caps->>'max_steps','') ~ '^[0-9]+$' then (p_caps->>'max_steps')::integer else 0 end;
+
+  if signal_text ~ '\m(heavy[ -]build|first[ -]of[ -](its|the)[ -]kind|first[ -]of[ -]kind)\M' then
+    reasons := reasons || jsonb_build_array('signal:first_of_kind_or_explicit_heavy');
+  end if;
+  if signal_text ~ '\m(build|create|extend|implement|ship|design)\M.{0,80}\m(new |complete |governed )?(capability|system|platform|engine|service|workflow|kernel)\M' then
+    reasons := reasons || jsonb_build_array('signal:new_capability');
+  end if;
+  if signal_text ~ '\m(architecture|architectural|system design|multi[ -]surface|end[ -]to[ -]end)\M' then
+    reasons := reasons || jsonb_build_array('signal:architecture_or_multi_surface');
+  end if;
+  if signal_text ~ '\m(migration|schema|deploy|deployment|rebuild|refactor|integration)\M' then
+    reasons := reasons || jsonb_build_array('signal:structural_change');
+  end if;
+  if signal_text ~ '\m(agent learning|memory kernel|learning system|memory engine)\M' then
+    reasons := reasons || jsonb_build_array('signal:agent_learning');
+  end if;
+  if criteria_count >= 5 then reasons := reasons || jsonb_build_array('scale:acceptance_criteria'); end if;
+  if dependency_count >= 3 then reasons := reasons || jsonb_build_array('scale:dependency_refs'); end if;
+  if step_count >= 5 then reasons := reasons || jsonb_build_array('scale:max_steps'); end if;
+
+  shape_ready := w.shape_disposition = 'required'
+    and exists (
+      select 1 from ops.work_shape_revision sr
+       where sr.work_request_id = w.id and sr.work_request_version = w.version
+         and sr.version = (select max(current_sr.version) from ops.work_shape_revision current_sr where current_sr.work_request_id = w.id)
+    );
+  return jsonb_build_object(
+    'tier', case when jsonb_array_length(reasons) > 0 then 'heavy' else 'standard' end,
+    'reasons', reasons,
+    'shape_disposition', w.shape_disposition,
+    'shape_ready', shape_ready,
+    'acceptance_criteria_count', criteria_count,
+    'dependency_ref_count', dependency_count,
+    'max_steps', step_count
+  );
+end;
+$_$;
+
+
+--
+-- Name: heavy_build_digest(jsonb); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.heavy_build_digest(p_preimage jsonb) RETURNS text
+    LANGUAGE sql IMMUTABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+  select 'sha256:' || encode(public.digest(p_preimage::text, 'sha256'), 'hex');
+$$;
+
+
+--
+-- Name: heavy_build_jsonb_has_exact_keys(jsonb, text[]); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.heavy_build_jsonb_has_exact_keys(p_document jsonb, p_keys text[]) RETURNS boolean
+    LANGUAGE sql IMMUTABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+  select jsonb_typeof(p_document) = 'object'
+     and (select array_agg(k order by k) from jsonb_object_keys(p_document) k)
+         is not distinct from
+         (select array_agg(k order by k) from unnest(p_keys) k);
+$$;
+
+
+--
+-- Name: heavy_build_ready_plan_gate(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.heavy_build_ready_plan_gate() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+declare
+  p ops.sourced_work_request_plan%rowtype;
+  a ops.heavy_build_admission_revision%rowtype;
+  r ops.heavy_build_plan_review%rowtype;
+  classification jsonb;
+  heavy boolean;
+  admission_found boolean;
+begin
+  if old.state = 'triaged' and new.state = 'ready' and old.capture_idempotency_key is not null then
+    select plan.* into p
+      from ops.sourced_work_request_plan_acceptance_receipt acceptance
+      join ops.sourced_work_request_plan plan on plan.id=acceptance.plan_id
+     where acceptance.work_request_id=old.id and acceptance.base_version=old.version and acceptance.result_version=new.version
+     order by acceptance.accepted_at desc limit 1;
+    if not found then return new; end if;
+    classification := ops.heavy_build_classification(old.id,p.scope_summary,p.dependency_refs,p.caps);
+    select x.* into a from ops.heavy_build_admission_revision x where x.plan_id=p.id order by x.version desc limit 1;
+    admission_found := found;
+    heavy := classification->>'tier'='heavy' or admission_found;
+    if heavy then
+      if new.shape_disposition is distinct from 'required'
+         or not exists (select 1 from ops.work_shape_revision sr where sr.work_request_id=old.id and sr.work_request_version=old.version
+                         and sr.version=(select max(current_sr.version) from ops.work_shape_revision current_sr where current_sr.work_request_id=old.id)) then
+        raise exception 'heavy build plan requires a current evidence-backed Work Shape';
+      end if;
+      if a.id is null then
+        raise exception 'heavy build plan requires a typed research and master-plan admission receipt';
+      end if;
+      select x.* into r from ops.heavy_build_plan_review x where x.admission_id=a.id order by x.version desc limit 1;
+      if r.id is null or r.verdict <> 'pass' then
+        raise exception 'heavy build plan requires a fresh passing independent review';
+      end if;
+    end if;
+  end if;
+  return new;
+end;
+$$;
 
 
 --
@@ -5176,6 +7273,36 @@ end $$;
 
 
 --
+-- Name: legacy_rule_admission_note(uuid, text, timestamp with time zone); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.legacy_rule_admission_note(p_rule_id uuid, p_status text, p_activated_at timestamp with time zone) RETURNS text
+    LANGUAGE sql STABLE
+    AS $$
+  select case
+    when p_status is distinct from 'active' then null
+    when exists (select 1 from ops.rule_approval_receipt where rule_id=p_rule_id) then null
+    when not exists (select 1 from ops.rule_approval_receipt) then
+      'legacy_admission: rule '||p_rule_id||' carries no approval receipt and the approval-receipt system has never issued one; accepted as predating the ledger'
+    when p_activated_at is not null
+         and p_activated_at < (select min(created_at) from ops.rule_approval_receipt) then
+      'legacy_admission: rule '||p_rule_id||' was activated at '||p_activated_at::text||
+      ', before the approval-receipt system''s earliest receipt at '||
+      (select min(created_at) from ops.rule_approval_receipt)::text||
+      '; it predates the receipt cutover and carries none'
+    else null
+  end
+$$;
+
+
+--
+-- Name: FUNCTION legacy_rule_admission_note(p_rule_id uuid, p_status text, p_activated_at timestamp with time zone); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.legacy_rule_admission_note(p_rule_id uuid, p_status text, p_activated_at timestamp with time zone) IS 'Shared legacy predicate for ops.retire_rule and ops.amend_rule_statement (0351). Non-null only for an ACTIVE rule with no ops.rule_approval_receipt row that also predates the receipt system''s own cutover (or predates a receipt system that has never issued any receipt at all). An active, receiptless rule that postdates the cutover returns null -- that is a real defect, not a historical fact, and both callers keep refusing it exactly as before.';
+
+
+--
 -- Name: nightly_availability_canary_live_job(uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -5404,6 +7531,206 @@ end $_$;
 
 
 --
+-- Name: prepare_staging_forward_fix_rehearsal(uuid, uuid, text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.prepare_staging_forward_fix_rehearsal(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_git_sha text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare rel ops.release%rowtype; existing ops.staging_forward_fix_rehearsal_attempt%rowtype;
+  result_row ops.staging_forward_fix_rehearsal_result%rowtype; migration_hash text;
+  migration_count integer; provider_uuid uuid; attempt_uuid uuid; expected_tag text;
+begin
+  if session_user<>'carr_jobs' then raise exception 'forward-fix rehearsal writer requires the carr_jobs session'; end if;
+  if p_idempotency_key is null or p_correlation_id is null or coalesce(p_release_key,'')=''
+     or coalesce(p_git_sha,'') !~ '^[0-9a-f]{40}$' then
+    raise exception 'invalid typed forward-fix rehearsal input';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,315));
+  perform pg_advisory_xact_lock(hashtextextended(p_correlation_id::text,315));
+  select * into rel from ops.release where release_key=p_release_key;
+  if not found or rel.environment<>'production' or rel.state<>'candidate'
+     or rel.recovery_strategy<>'forward_fix' or rel.rollback_ready is not true
+     or coalesce(btrim(rel.rollback_plan_ref),'')='' or coalesce(btrim(rel.plan_hash),'')=''
+     or rel.service_id is null or rel.provider<>'cloudflare-workers'
+     or coalesce(btrim(rel.provider_version_id),'')='' then
+    raise exception 'forward-fix rehearsal target is not an exact forward-fix Production candidate';
+  end if;
+  provider_uuid:=rel.provider_version_id::uuid;
+  if p_git_sha<>rel.git_sha or coalesce(cardinality(rel.migration_set),0)<=0
+     or coalesce(rel.schema_highest_migration,'') !~ '^[0-9]{4}[a-z]?_[a-z0-9_.-]+\.sql$'
+     or coalesce(rel.schema_applied_count,0)<=0
+     or coalesce(rel.schema_ledger_sha256,'') !~ '^sha256:[0-9a-f]{64}$' then
+    raise exception 'forward-fix rehearsal target lacks the exact declared candidate identity';
+  end if;
+  migration_hash:=ops.program5_migration_set_sha256(rel.migration_set);
+  migration_count:=cardinality(rel.migration_set);
+  expected_tag:='carr-staging-forward-fix-'||replace(p_idempotency_key::text,'-','');
+  select * into existing from ops.staging_forward_fix_rehearsal_attempt where idempotency_key=p_idempotency_key;
+  if found then
+    if (existing.correlation_id,existing.release_id,existing.service_id,existing.git_sha,
+        existing.candidate_provider_version_id,existing.recovery_strategy,existing.recovery_plan_ref,
+        existing.plan_hash,existing.expected_provider_tag,existing.declared_migration_set_sha256,
+        existing.declared_migration_count,existing.declared_schema_highest_migration,
+        existing.declared_schema_applied_count,existing.declared_schema_ledger_sha256) is distinct from
+       (p_correlation_id,rel.id,rel.service_id,p_git_sha,provider_uuid,'forward_fix',rel.rollback_plan_ref,
+        rel.plan_hash,expected_tag,migration_hash,migration_count,rel.schema_highest_migration,
+        rel.schema_applied_count,rel.schema_ledger_sha256) then
+      raise exception 'forward-fix rehearsal idempotency key was reused with changed input';
+    end if;
+    select * into result_row from ops.staging_forward_fix_rehearsal_result where rehearsal_attempt_id=existing.id;
+    return jsonb_build_object('forward_fix_rehearsal_attempt_id',existing.id,
+      'expected_provider_tag',existing.expected_provider_tag,
+      'state',case when result_row.id is null then 'prepared' else 'observed' end,
+      'mutation_claimed',exists(select 1 from ops.staging_forward_fix_rehearsal_claim where rehearsal_attempt_id=existing.id),
+      'result_ref',result_row.evidence_ref,'replayed',true);
+  end if;
+  insert into ops.staging_forward_fix_rehearsal_attempt(
+    idempotency_key,correlation_id,release_id,service_id,environment,git_sha,provider,
+    candidate_provider_version_id,recovery_strategy,recovery_plan_ref,plan_hash,expected_provider_tag,
+    declared_migration_set_sha256,declared_migration_count,declared_schema_highest_migration,
+    declared_schema_applied_count,declared_schema_ledger_sha256,writer_session_user)
+  values(p_idempotency_key,p_correlation_id,rel.id,rel.service_id,'staging',p_git_sha,'cloudflare-workers',
+    provider_uuid,'forward_fix',rel.rollback_plan_ref,rel.plan_hash,expected_tag,migration_hash,migration_count,
+    rel.schema_highest_migration,rel.schema_applied_count,rel.schema_ledger_sha256,session_user)
+  returning id into attempt_uuid;
+  return jsonb_build_object('forward_fix_rehearsal_attempt_id',attempt_uuid,
+    'expected_provider_tag',expected_tag,'state','prepared','mutation_claimed',false,
+    'result_ref',null,'replayed',false);
+end $_$;
+
+
+--
+-- Name: prepare_staging_replacement_project(uuid, jsonb); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.prepare_staging_replacement_project(p_idempotency_key uuid, p_contract jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $_$
+declare
+  expected_keys constant text[] := array[
+    'artifact_sha256','config_sha256','dependency_sha256',
+    'expected_production_overlap_count','expected_synthetic_data_count','git_sha',
+    'migration_count','migration_highest','migration_ledger','migration_ledger_sha256',
+    'prior_staging_project_id','replacement_branch_id','replacement_endpoint_id',
+    'replacement_project_id','schema_version','source_tree_entry_count',
+    'source_tree_oid','source_tree_sha256','tree_mode'
+  ];
+  production_project_id constant text := 'steep-field-48688294';
+  supplied_keys text[]; ledger jsonb; declared_ledger_digest text;
+  declared_count integer; declared_highest text; invalid_entries integer;
+  existing ops.staging_replacement_project_contract%rowtype;
+  receipt ops.staging_replacement_project_receipt%rowtype; contract_uuid uuid;
+begin
+  if session_user<>'carr_jobs' then
+    raise exception 'staging replacement preparation requires the carr_jobs session';
+  end if;
+  if p_idempotency_key is null or jsonb_typeof(p_contract)<>'object' then
+    raise exception 'invalid staging replacement preparation input';
+  end if;
+  select array_agg(k order by k collate "C") into supplied_keys
+    from jsonb_object_keys(p_contract) as keys(k);
+  if supplied_keys is distinct from expected_keys then
+    raise exception 'staging replacement contract has missing or unknown keys';
+  end if;
+  if jsonb_typeof(p_contract->'migration_ledger')<>'object'
+     or jsonb_typeof(p_contract->'migration_count')<>'number'
+     or jsonb_typeof(p_contract->'source_tree_entry_count')<>'number'
+     or jsonb_typeof(p_contract->'expected_synthetic_data_count')<>'number'
+     or jsonb_typeof(p_contract->'expected_production_overlap_count')<>'number' then
+    raise exception 'staging replacement contract has invalid typed values';
+  end if;
+  ledger:=p_contract->'migration_ledger';
+  select count(*)::integer, max(e.key collate "C"),
+         count(*) filter (where e.key !~ '^[0-9]{4}[a-z]?_[a-z0-9_.-]+\.sql$'
+                           or e.value !~ '^[0-9a-f]{64}$')::integer,
+         'sha256:'||encode(public.digest(
+           coalesce(string_agg(
+             convert_to(e.key,'UTF8')||decode('00','hex')||
+             convert_to(e.value,'UTF8')||decode('0a','hex'),
+             ''::bytea order by e.key collate "C"),''::bytea),'sha256'),'hex')
+    into declared_count,declared_highest,invalid_entries,declared_ledger_digest
+    from jsonb_each_text(ledger) e;
+  if declared_count=0 or invalid_entries<>0
+     or (p_contract->>'migration_count')::integer<>declared_count
+     or p_contract->>'migration_highest' is distinct from declared_highest
+     or p_contract->>'migration_ledger_sha256' is distinct from declared_ledger_digest then
+    raise exception 'staging replacement contract is not the exact full migration tree';
+  end if;
+  if p_contract->>'schema_version'<>'clean-staging-replacement-contract.v1'
+     or p_contract->>'tree_mode'<>'full'
+     or coalesce(p_contract->>'git_sha','') !~ '^[0-9a-f]{40}$'
+     or coalesce(p_contract->>'source_tree_oid','') !~ '^[0-9a-f]{40}$'
+     or coalesce(p_contract->>'source_tree_sha256','') !~ '^sha256:[0-9a-f]{64}$'
+     or (p_contract->>'source_tree_entry_count')::integer<=0
+     or coalesce(p_contract->>'artifact_sha256','') !~ '^sha256:[0-9a-f]{64}$'
+     or coalesce(p_contract->>'config_sha256','') !~ '^sha256:[0-9a-f]{64}$'
+     or coalesce(p_contract->>'dependency_sha256','') !~ '^sha256:[0-9a-f]{64}$'
+     or coalesce(btrim(p_contract->>'prior_staging_project_id'),'')=''
+     or coalesce(btrim(p_contract->>'replacement_project_id'),'')=''
+     or coalesce(btrim(p_contract->>'replacement_branch_id'),'')=''
+     or coalesce(btrim(p_contract->>'replacement_endpoint_id'),'')=''
+     or p_contract->>'prior_staging_project_id'=p_contract->>'replacement_project_id'
+     or p_contract->>'prior_staging_project_id'=production_project_id
+     or p_contract->>'replacement_project_id'=production_project_id
+     or (p_contract->>'expected_synthetic_data_count')::bigint<=0
+     or (p_contract->>'expected_production_overlap_count')::bigint<>0 then
+    raise exception 'staging replacement contract identity or isolation assertion is invalid';
+  end if;
+
+  perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,322));
+  select * into existing from ops.staging_replacement_project_contract
+   where idempotency_key=p_idempotency_key;
+  if found then
+    if (existing.schema_version,existing.tree_mode,existing.git_sha,
+        existing.source_tree_oid,existing.source_tree_sha256,existing.source_tree_entry_count,
+        existing.artifact_sha256,existing.config_sha256,existing.dependency_sha256,
+        existing.migration_ledger,existing.migration_count,existing.migration_highest,
+        existing.migration_ledger_sha256,existing.prior_staging_project_id,
+        existing.replacement_project_id,existing.replacement_branch_id,
+        existing.replacement_endpoint_id,existing.expected_synthetic_data_count,
+        existing.expected_production_overlap_count) is distinct from
+       (p_contract->>'schema_version',p_contract->>'tree_mode',p_contract->>'git_sha',
+        p_contract->>'source_tree_oid',p_contract->>'source_tree_sha256',
+        (p_contract->>'source_tree_entry_count')::integer,p_contract->>'artifact_sha256',
+        p_contract->>'config_sha256',p_contract->>'dependency_sha256',ledger,
+        declared_count,declared_highest,declared_ledger_digest,
+        p_contract->>'prior_staging_project_id',p_contract->>'replacement_project_id',
+        p_contract->>'replacement_branch_id',p_contract->>'replacement_endpoint_id',
+        (p_contract->>'expected_synthetic_data_count')::bigint,0::bigint) then
+      raise exception 'staging replacement idempotency key was reused with changed input';
+    end if;
+    select * into receipt from ops.staging_replacement_project_receipt
+     where contract_id=existing.id;
+    return jsonb_build_object('contract_id',existing.id,
+      'state',case when receipt.id is null then 'prepared' else 'observed' end,
+      'receipt_id',receipt.id,'evidence_ref',receipt.evidence_ref,'replayed',true);
+  end if;
+
+  insert into ops.staging_replacement_project_contract(
+    idempotency_key,schema_version,tree_mode,git_sha,source_tree_oid,
+    source_tree_sha256,source_tree_entry_count,artifact_sha256,config_sha256,
+    dependency_sha256,migration_ledger,migration_count,migration_highest,
+    migration_ledger_sha256,prior_staging_project_id,replacement_project_id,
+    replacement_branch_id,replacement_endpoint_id,expected_synthetic_data_count,
+    expected_production_overlap_count,writer_session_user)
+  values(p_idempotency_key,p_contract->>'schema_version',p_contract->>'tree_mode',
+    p_contract->>'git_sha',p_contract->>'source_tree_oid',p_contract->>'source_tree_sha256',
+    (p_contract->>'source_tree_entry_count')::integer,p_contract->>'artifact_sha256',
+    p_contract->>'config_sha256',p_contract->>'dependency_sha256',ledger,
+    declared_count,declared_highest,declared_ledger_digest,
+    p_contract->>'prior_staging_project_id',p_contract->>'replacement_project_id',
+    p_contract->>'replacement_branch_id',p_contract->>'replacement_endpoint_id',
+    (p_contract->>'expected_synthetic_data_count')::bigint,0,session_user)
+  returning id into contract_uuid;
+  return jsonb_build_object('contract_id',contract_uuid,'state','prepared',
+    'receipt_id',null,'evidence_ref',null,'replayed',false);
+end $_$;
+
+
+--
 -- Name: prepare_staging_restore_only_attempt(uuid, uuid, text, text, uuid, text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -5495,6 +7822,35 @@ begin
   return jsonb_build_object('restore_attempt_id',attempt_uuid,'expected_provider_tag',expected_tag,
     'state','prepared','mutation_claimed',false,'result_ref',null,'replayed',false);
 end $_$;
+
+
+--
+-- Name: program5_exact_recovery_rehearsal(uuid, timestamp with time zone); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.program5_exact_recovery_rehearsal(p_release_id uuid, p_not_before timestamp with time zone DEFAULT NULL::timestamp with time zone) RETURNS uuid
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+  select r.id
+    from ops.release rel
+    join ops.run r on r.release_id=rel.id and r.service_id=rel.service_id
+    join ops.staging_recovery_rehearsal_bundle b on b.id=r.recovery_rehearsal_bundle_id
+   where rel.id=$1 and r.environment='staging' and r.state='succeeded' and r.evidence_ref=b.evidence_ref
+     and r.run_key=case when rel.recovery_strategy='rollback' then 'recovery.rehearsal.worker' else 'recovery.rehearsal.forward-fix' end
+     and b.current_release_id=rel.id and b.service_id=rel.service_id and b.recovery_strategy=rel.recovery_strategy
+     and b.recovery_plan_ref=rel.rollback_plan_ref and b.plan_hash=rel.plan_hash
+     and b.declared_migration_set_sha256=ops.program5_migration_set_sha256(rel.migration_set)
+     and b.declared_migration_count=cardinality(rel.migration_set)
+     and b.declared_schema_highest_migration=rel.schema_highest_migration
+     and b.declared_schema_applied_count=rel.schema_applied_count
+     and b.declared_schema_ledger_sha256=rel.schema_ledger_sha256
+     and (rel.recovery_strategy='rollback' or (b.candidate_git_sha=rel.git_sha
+          and b.candidate_provider_version_id::text=rel.provider_version_id
+          and exists(select 1 from ops.staging_forward_fix_rehearsal_result x where x.id=b.forward_fix_result_id)))
+     and (p_not_before is null or b.completed_at>=p_not_before)
+   order by b.completed_at desc limit 1
+$_$;
 
 
 --
@@ -5773,7 +8129,13 @@ begin
      or w.state is distinct from 'ready' or w.version is distinct from p_base_version
      or p.work_request_version >= w.version or ar.result_version is distinct from w.version
      or ar.plan_hash is distinct from p.plan_hash
-     or w.shape_fixed_surface_ref is distinct from ar.shape_fixed_surface_ref then
+     or (w.shape_fixed_surface_ref is distinct from ar.shape_fixed_surface_ref
+         and not exists (
+           select 1 from ops.sourced_work_request_plan_shape_binding_receipt sb
+            where sb.plan_acceptance_receipt_id = ar.id
+              and sb.work_request_id = w.id
+              and sb.disposition is not distinct from w.shape_disposition
+              and sb.fixed_surface_ref is not distinct from w.shape_fixed_surface_ref)) then
     raise exception 'only an exact current ready sourced plan may receive outcome feedback';
   end if;
   if (select array_agg(v->>'id' order by v->>'id') from jsonb_array_elements(p_criterion_results) v)
@@ -6173,6 +8535,110 @@ $$;
 
 
 --
+-- Name: read_governance_queue(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.read_governance_queue() RETURNS jsonb
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+  select jsonb_build_object(
+    'pending_rule_approvals', coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'rule_id', r.id, 'statement', r.statement, 'human_quote', r.human_quote,
+        'scope', r.scope, 'taught_at', r.created_at,
+        'enforcement_class', ra.enforcement_class, 'binding_moment', ra.binding_moment,
+        'admission_reason', ra.reason, 'enforcement_status', ra.enforcement_status,
+        'fixture_refs', ra.fixture_refs, 'admitted_at', ra.admitted_at
+      ) order by ra.admitted_at asc, r.id)
+      from rule r join ops.rule_admission ra on ra.rule_id = r.id
+      where r.status = 'proposed' and ra.state = 'admitted'
+    ), '[]'::jsonb),
+    'pending_guidance_import_batches', coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'batch_id', b.id, 'manifest_digest', b.manifest_digest, 'reason', b.reason,
+        'staging_key', b.staging_key, 'staged_at', b.created_at,
+        'entry_count', (select count(*) from ops.guidance_import_entry e where e.batch_id = b.id)
+      ) order by b.created_at asc, b.id)
+      from ops.guidance_import_batch b
+      where not exists (select 1 from ops.guidance_import_decision_event d where d.batch_id = b.id)
+    ), '[]'::jsonb),
+    'pending_retrieval_proposals', coalesce((
+      select jsonb_agg(jsonb_build_object(
+        'proposal_id', p.id, 'proposal_type', p.proposal_type, 'payload', p.payload,
+        'reason', p.reason, 'proposer_actor_id', p.proposer_id, 'version', p.version,
+        'proposed_at', p.created_at
+      ) order by p.created_at asc, p.id)
+      from retrieval_proposal p
+      where p.status = 'pending'
+    ), '[]'::jsonb)
+  )
+$$;
+
+
+--
+-- Name: read_staging_forward_fix_rehearsal_declaration(uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.read_staging_forward_fix_rehearsal_declaration(p_idempotency_key uuid) RETURNS TABLE(expected_provider_tag text, declared_migration_set_sha256 text, declared_migration_count integer, declared_schema_highest_migration text, declared_schema_applied_count integer, declared_schema_ledger_sha256 text)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+begin
+  if session_user<>'carr_program5_forward_fix_verifier'
+     or not pg_has_role(session_user,'carr_program5_forward_fix_verifiers','member') then
+    raise exception using errcode='42501',message='forward-fix declaration projection requires the exact scoped verifier capability';
+  end if;
+  return query select a.expected_provider_tag,a.declared_migration_set_sha256,
+    a.declared_migration_count,a.declared_schema_highest_migration,
+    a.declared_schema_applied_count,a.declared_schema_ledger_sha256
+  from ops.staging_forward_fix_rehearsal_attempt a where a.idempotency_key=p_idempotency_key;
+end $$;
+
+
+--
+-- Name: read_staging_replacement_project_receipt(uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.read_staging_replacement_project_receipt(p_receipt_id uuid) RETURNS jsonb
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+declare result jsonb;
+begin
+  if session_user<>'carr_jobs' and not (
+       session_user='carr_program5_forward_fix_verifier'
+       and pg_has_role(session_user,'carr_program5_forward_fix_verifiers','member')) then
+    raise exception 'staging replacement receipt read requires a scoped session';
+  end if;
+  select jsonb_build_object(
+      'contract_id',c.id,'receipt_id',r.id,'evidence_ref',r.evidence_ref,
+      'receipt_sha256',r.receipt_sha256,'git_sha',r.git_sha,
+      'source_tree_oid',r.source_tree_oid,'source_tree_sha256',r.source_tree_sha256,
+      'source_tree_entry_count',r.source_tree_entry_count,
+      'artifact_sha256',r.artifact_sha256,'config_sha256',r.config_sha256,
+      'dependency_sha256',r.dependency_sha256,
+      'prior_staging_project_id',r.prior_staging_project_id,
+      'replacement_project_id',r.replacement_project_id,
+      'replacement_branch_id',r.replacement_branch_id,
+      'replacement_endpoint_id',r.replacement_endpoint_id,
+      'live_migration_ledger',r.live_migration_ledger,
+      'live_migration_count',r.live_migration_count,
+      'live_migration_highest',r.live_migration_highest,
+      'live_migration_ledger_sha256',r.live_migration_ledger_sha256,
+      'synthetic_data_count',r.synthetic_data_count,
+      'production_overlap_count',r.production_overlap_count,
+      'observed_at',r.observed_at)
+    into result
+    from ops.staging_replacement_project_receipt r
+    join ops.staging_replacement_project_contract c on c.id=r.contract_id
+   where r.id=p_receipt_id;
+  if result is null then raise exception 'staging replacement receipt not found'; end if;
+  return result;
+end $$;
+
+
+--
 -- Name: reap_expired_jobs(); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -6217,6 +8683,104 @@ begin
   select count(*) into n from transitioned;
   return n;
 end $$;
+
+
+--
+-- Name: reclassify_legacy_rule_admission(uuid, text, uuid, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.reclassify_legacy_rule_admission(p_rule_id uuid, p_new_class text, p_idempotency_key uuid, p_reason text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare
+  v_actor_slug text;
+  v_actor_id uuid;
+  v_rule rule%rowtype;
+  v_admission ops.rule_admission%rowtype;
+  v_prior ops.rule_admission_reclassification_receipt%rowtype;
+  v_receipt ops.rule_admission_reclassification_receipt%rowtype;
+  v_legacy_note text;
+  v_contract jsonb;
+  v_contract_hash text;
+begin
+  v_actor_slug := ops.authority_actor_slug();
+  if v_actor_slug<>'joe' then
+    raise exception 'legacy admission reclassification requires Joe authority';
+  end if;
+  select id into v_actor_id from actor
+   where slug=v_actor_slug and kind='human' and active;
+  if v_actor_id is null then raise exception 'Joe authority actor is not active'; end if;
+  if btrim(coalesce(p_reason,''))='' or p_idempotency_key is null then
+    raise exception 'reclassification reason and idempotency key are required';
+  end if;
+  if p_new_class not in ('machine_enforceable','judgment_advisory','human_only') then
+    raise exception 'unknown enforcement class %',p_new_class;
+  end if;
+
+  perform pg_advisory_xact_lock(hashtextextended('rule-reclassification:'||p_idempotency_key::text,0));
+  select * into v_prior from ops.rule_admission_reclassification_receipt
+   where idempotency_key=p_idempotency_key;
+  if found then
+    if v_prior.rule_id is distinct from p_rule_id
+       or v_prior.enforcement_class_after is distinct from p_new_class
+       or v_prior.reason is distinct from btrim(p_reason)
+       or v_prior.actor_id is distinct from v_actor_id then
+      raise exception 'reclassification idempotency key was reused with different input';
+    end if;
+    return jsonb_build_object('ok',true,'replayed',true,'rule_id',p_rule_id,
+      'enforcement_class',v_prior.enforcement_class_after,
+      'reclassification_receipt_id',v_prior.id);
+  end if;
+
+  select * into v_rule from rule where id=p_rule_id for update;
+  if not found then raise exception 'rule % not found',p_rule_id; end if;
+  if v_rule.status<>'active' then
+    raise exception 'rule % is %, only an active rule''s admission is reclassified here',p_rule_id,v_rule.status;
+  end if;
+  if exists (select 1 from ops.rule_approval_receipt where rule_id=v_rule.id) then
+    raise exception 'rule % carries an approval receipt; its class is bound to the receipt and does not move through the legacy path',p_rule_id;
+  end if;
+  v_legacy_note := ops.legacy_rule_admission_note(v_rule.id,v_rule.status,v_rule.activated_at);
+  if v_legacy_note is null then
+    raise exception 'rule % is not a legacy admission; reclassification refused',p_rule_id;
+  end if;
+
+  select * into v_admission from ops.rule_admission where rule_id=v_rule.id for update;
+  if not found then raise exception 'rule % has no admission row',p_rule_id; end if;
+  if v_admission.enforcement_class=p_new_class then
+    raise exception 'rule % is already classified %; a no-op reclassification is refused',p_rule_id,p_new_class;
+  end if;
+
+  v_contract := jsonb_build_object(
+    'rule_id',v_rule.id,'enforcement_class_before',v_admission.enforcement_class,
+    'enforcement_class_after',p_new_class,'actor_id',v_actor_id,
+    'reason',btrim(p_reason),'legacy_admission',v_legacy_note);
+  v_contract_hash := encode(digest(v_contract::text,'sha256'),'hex');
+
+  insert into ops.rule_admission_reclassification_receipt
+    (idempotency_key,rule_id,enforcement_class_before,enforcement_class_after,
+     actor_id,reason,legacy_admission,contract_hash)
+  values (p_idempotency_key,v_rule.id,v_admission.enforcement_class,p_new_class,
+          v_actor_id,btrim(p_reason),v_legacy_note,v_contract_hash)
+  returning * into v_receipt;
+
+  update ops.rule_admission set enforcement_class=p_new_class
+   where rule_id=v_rule.id;
+
+  return jsonb_build_object('ok',true,'replayed',false,'rule_id',v_rule.id,
+    'enforcement_class_before',v_receipt.enforcement_class_before,
+    'enforcement_class',p_new_class,
+    'reclassification_receipt_id',v_receipt.id,
+    'legacy_admission',v_receipt.legacy_admission);
+end $$;
+
+
+--
+-- Name: FUNCTION reclassify_legacy_rule_admission(p_rule_id uuid, p_new_class text, p_idempotency_key uuid, p_reason text); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.reclassify_legacy_rule_admission(p_rule_id uuid, p_new_class text, p_idempotency_key uuid, p_reason text) IS 'Joe-authority-guarded correction of a LEGACY active rule''s admission enforcement_class (0352). Requires ops.legacy_rule_admission_note to prove the rule predates the receipt system; a receipted rule refuses (its class is bound to the receipt). Append-only receipt records before, after, and the legacy fact.';
 
 
 --
@@ -6957,6 +9521,284 @@ end $$;
 
 
 --
+-- Name: record_sourced_heavy_build_admission(uuid, text, integer, jsonb, jsonb, uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.record_sourced_heavy_build_admission(p_plan_id uuid, p_work_request text, p_base_version integer, p_classifier_reasons jsonb, p_contract jsonb, p_proposed_by_actor_id uuid, p_idempotency_key uuid) RETURNS TABLE(work_request_id uuid, ref text, plan_id uuid, plan_ref text, admission_ref text, admission_hash text, tier text, classifier_reasons jsonb, builder_session_ref text, replayed boolean)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $_$
+declare
+  w ops.work_request%rowtype;
+  p ops.sourced_work_request_plan%rowtype;
+  a ops.heavy_build_admission_revision%rowtype;
+  actor public.actor%rowtype;
+  classification jsonb;
+  expected_reasons jsonb;
+  research jsonb;
+  master_plan jsonb;
+  field text;
+  minimum integer;
+  next_version integer;
+  preimage jsonb;
+  digest text;
+begin
+  if p_plan_id is null or coalesce(p_work_request,'') !~ '^WR-[0-9]{1,12}$'
+     or p_base_version is null or p_base_version < 1 or p_idempotency_key is null
+     or p_proposed_by_actor_id is null or jsonb_typeof(p_classifier_reasons) is distinct from 'array'
+     or jsonb_array_length(p_classifier_reasons) = 0
+     or not ops.heavy_build_jsonb_has_exact_keys(p_contract, array['builder_session_ref','master_plan','research_manifest'])
+     or coalesce(p_contract->>'builder_session_ref','') !~ '^session:[a-z0-9][a-z0-9:._/-]{8,199}$' then
+    raise exception 'heavy build admission requires exact plan, Work Request version, classifier reasons, typed contract, actor, and idempotency key';
+  end if;
+
+  research := p_contract->'research_manifest';
+  master_plan := p_contract->'master_plan';
+  if not ops.heavy_build_jsonb_has_exact_keys(research,
+       array['conclusion','current_baseline','failure_modes','maintained_repositories','practitioner_evidence','primary_sources','unresolved_contradictions'])
+     or char_length(btrim(coalesce(research->>'conclusion',''))) not between 20 and 1000
+     or jsonb_typeof(research->'unresolved_contradictions') is distinct from 'array'
+     or jsonb_array_length(research->'unresolved_contradictions') > 12
+     or exists (select 1 from jsonb_array_elements(research->'unresolved_contradictions') item
+                 where jsonb_typeof(item) <> 'string' or char_length(btrim(item #>> '{}')) not between 10 and 500) then
+    raise exception 'heavy build research manifest is incomplete';
+  end if;
+
+  foreach field in array array['primary_sources','maintained_repositories','practitioner_evidence','current_baseline','failure_modes'] loop
+    minimum := case when field = 'maintained_repositories' then 2 else 1 end;
+    if jsonb_typeof(research->field) is distinct from 'array'
+       or jsonb_array_length(research->field) not between minimum and 12 then
+      raise exception 'heavy build research class % requires % to 12 evidence items', field, minimum;
+    end if;
+  end loop;
+
+  if exists (
+    select 1
+      from (values
+        ('primary_sources','primary_source'),
+        ('maintained_repositories','maintained_repository'),
+        ('practitioner_evidence','practitioner_evidence'),
+        ('current_baseline','current_baseline'),
+        ('failure_modes','failure_mode')
+      ) expected(field_name, class_name)
+      cross join lateral jsonb_array_elements(research->expected.field_name) item
+     where not ops.heavy_build_jsonb_has_exact_keys(item, array['content_digest','finding','locator','observed_at','source_class','source_ref'])
+        or coalesce(item->>'source_ref','') !~ '^safe:[a-z0-9][a-z0-9:_./-]*$'
+        or item->>'source_class' is distinct from expected.class_name
+        or coalesce(item->>'locator','') !~ '^https://'
+        or coalesce(item->>'observed_at','') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'
+        or case when coalesce(item->>'observed_at','') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'
+             then (item->>'observed_at')::timestamptz > now() + interval '5 minutes' else true end
+        or coalesce(item->>'content_digest','') !~ '^sha256:[0-9a-f]{64}$'
+        or char_length(btrim(coalesce(item->>'finding',''))) not between 20 and 1000
+  ) then raise exception 'heavy build research evidence item is invalid or in the wrong source class'; end if;
+
+  if exists (
+    select source_ref from (
+      select item->>'source_ref' source_ref
+        from (values ('primary_sources'),('maintained_repositories'),('practitioner_evidence'),('current_baseline'),('failure_modes')) fields(field_name)
+        cross join lateral jsonb_array_elements(research->fields.field_name) item
+    ) refs group by source_ref having count(*) > 1
+  ) then raise exception 'heavy build research source refs must be unique across classes'; end if;
+
+  if not ops.heavy_build_jsonb_has_exact_keys(master_plan,
+       array['architecture','authority_boundaries','baseline_comparison','dependency_dag','fully_shipped_definition','non_goals','observability_strategy','planned_checks','prerequisite_policy','product_goal','release_strategy','rollback_strategy']) then
+    raise exception 'heavy build master plan must name the complete target-product contract';
+  end if;
+  foreach field in array array['product_goal','baseline_comparison','release_strategy','rollback_strategy','observability_strategy','fully_shipped_definition','prerequisite_policy'] loop
+    if char_length(btrim(coalesce(master_plan->>field,''))) not between 20 and 2000 then
+      raise exception 'heavy build master plan field % is incomplete', field;
+    end if;
+  end loop;
+  foreach field in array array['non_goals','architecture','authority_boundaries'] loop
+    minimum := case when field = 'architecture' then 2 else 1 end;
+    if jsonb_typeof(master_plan->field) is distinct from 'array'
+       or jsonb_array_length(master_plan->field) not between minimum and (case when field='architecture' then 20 else 12 end)
+       or exists (select 1 from jsonb_array_elements(master_plan->field) item
+                   where jsonb_typeof(item) <> 'string' or char_length(btrim(item #>> '{}')) not between 10 and 1000) then
+      raise exception 'heavy build master plan field % requires substantive entries', field;
+    end if;
+  end loop;
+  if jsonb_typeof(master_plan->'dependency_dag') is distinct from 'array'
+     or jsonb_array_length(master_plan->'dependency_dag') not between 1 and 20
+     or exists (select 1 from jsonb_array_elements(master_plan->'dependency_dag') step
+                 where not ops.heavy_build_jsonb_has_exact_keys(step,array['depends_on','step_ref'])
+                    or coalesce(step->>'step_ref','') !~ '^step:[a-z0-9][a-z0-9:._/-]*$'
+                    or jsonb_typeof(step->'depends_on') <> 'array'
+                    or exists (select 1 from jsonb_array_elements(step->'depends_on') dep
+                                where jsonb_typeof(dep) <> 'string' or dep #>> '{}' !~ '^step:[a-z0-9][a-z0-9:._/-]*$' or dep #>> '{}' = step->>'step_ref'))
+     or exists (select step->>'step_ref' from jsonb_array_elements(master_plan->'dependency_dag') step group by step->>'step_ref' having count(*) > 1)
+     or exists (select 1 from jsonb_array_elements(master_plan->'dependency_dag') step
+                 cross join lateral jsonb_array_elements_text(step->'depends_on') dep
+                where not exists (select 1 from jsonb_array_elements(master_plan->'dependency_dag') declared where declared->>'step_ref'=dep)) then
+    raise exception 'heavy build dependency DAG is invalid';
+  end if;
+  if exists (
+    with recursive edges(src,dst) as (
+      select step->>'step_ref', dep
+        from jsonb_array_elements(master_plan->'dependency_dag') step
+        cross join lateral jsonb_array_elements_text(step->'depends_on') dep
+    ), walk(start_node,node,path,cycle) as (
+      select src,dst,array[src,dst],dst=src from edges
+      union all
+      select walk.start_node,edges.dst,walk.path||edges.dst,edges.dst=any(walk.path)
+        from walk join edges on edges.src=walk.node where not walk.cycle
+    ) select 1 from walk where cycle limit 1
+  ) then raise exception 'heavy build dependency graph contains a cycle'; end if;
+  if jsonb_typeof(master_plan->'planned_checks') is distinct from 'array'
+     or jsonb_array_length(master_plan->'planned_checks') not between 1 and 20
+     or exists (select 1 from jsonb_array_elements(master_plan->'planned_checks') check_item
+                 where not ops.heavy_build_jsonb_has_exact_keys(check_item,array['artifact','comparator','failure_condition'])
+                    or char_length(btrim(coalesce(check_item->>'artifact',''))) not between 5 and 500
+                    or char_length(btrim(coalesce(check_item->>'comparator',''))) not between 5 and 500
+                    or char_length(btrim(coalesce(check_item->>'failure_condition',''))) not between 5 and 500) then
+    raise exception 'heavy build planned checks must name artifact, comparator, and failure condition';
+  end if;
+
+  select x.* into actor from public.actor x where x.id=p_proposed_by_actor_id and x.active for share;
+  if not found then raise exception 'heavy build admission actor is not active'; end if;
+  perform pg_advisory_xact_lock(hashtextextended('heavy-build-admission:' || p_idempotency_key,0));
+  select x.* into a from ops.heavy_build_admission_revision x where x.idempotency_key=p_idempotency_key for share;
+  if found then
+    select x.* into w from ops.work_request x where x.id=a.work_request_id;
+    select x.* into p from ops.sourced_work_request_plan x where x.id=a.plan_id;
+    if not found or w.ref is distinct from p_work_request or p.id is distinct from p_plan_id
+       or p.work_request_version is distinct from p_base_version or a.classifier_reasons is distinct from p_classifier_reasons
+       or a.contract is distinct from p_contract or a.proposed_by_actor_id is distinct from p_proposed_by_actor_id then
+      raise exception 'idempotency key already names a different heavy build admission';
+    end if;
+    return query select w.id,w.ref,p.id,p.plan_ref,a.admission_ref,a.admission_hash,a.tier,a.classifier_reasons,a.builder_session_ref,true;
+    return;
+  end if;
+
+  select w0.* into w from ops.work_request w0 where w0.ref=p_work_request for update;
+  if not found or w.state is distinct from 'triaged' or w.version is distinct from p_base_version then
+    raise exception 'exact current triaged Work Request and immutable plan required for heavy build admission';
+  end if;
+  select p0.* into p from ops.sourced_work_request_plan p0 where p0.id=p_plan_id and p0.work_request_id=w.id for share;
+  if not found or p.work_request_version is distinct from w.version then
+    raise exception 'exact current triaged Work Request and immutable plan required for heavy build admission';
+  end if;
+  classification := ops.heavy_build_classification(w.id,p.scope_summary,p.dependency_refs,p.caps);
+  if coalesce((classification->>'shape_ready')::boolean,false) is not true then
+    raise exception 'heavy build requires a current evidence-backed Work Shape before plan proposal';
+  end if;
+  expected_reasons := case when classification->>'tier'='heavy' then classification->'reasons' else jsonb_build_array('caller:explicit-heavy-contract') end;
+  if p_classifier_reasons is distinct from expected_reasons then raise exception 'heavy build classifier reasons must be server-derived'; end if;
+
+  select coalesce(max(x.version),0)+1 into next_version from ops.heavy_build_admission_revision x where x.plan_id=p.id;
+  preimage := jsonb_build_object('contract','carr-heavy-build-admission/v1','work_request_id',w.id,'work_request_version',w.version,
+    'plan_id',p.id,'plan_hash',p.plan_hash,'classifier_reasons',expected_reasons,'heavy_build',p_contract,
+    'proposed_by_actor_id',p_proposed_by_actor_id,'version',next_version);
+  digest := ops.heavy_build_digest(preimage);
+  if exists (select 1 from ops.heavy_build_admission_revision x where x.plan_id=p.id and x.admission_hash=digest) then
+    raise exception 'the exact heavy build admission already exists under a different idempotency key';
+  end if;
+  insert into ops.heavy_build_admission_revision
+    (admission_ref,work_request_id,plan_id,version,idempotency_key,tier,classifier_reasons,contract,builder_session_ref,admission_hash,proposed_by_actor_id)
+  values ('HBA-'||substr(digest,8,12)||'-v'||next_version,w.id,p.id,next_version,p_idempotency_key,'heavy',expected_reasons,p_contract,p_contract->>'builder_session_ref',digest,p_proposed_by_actor_id)
+  returning * into a;
+  return query select w.id,w.ref,p.id,p.plan_ref,a.admission_ref,a.admission_hash,a.tier,a.classifier_reasons,a.builder_session_ref,false;
+end;
+$_$;
+
+
+--
+-- Name: record_staging_forward_fix_rehearsal(uuid, uuid, text, integer, text, integer, text, bigint, boolean); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.record_staging_forward_fix_rehearsal(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_schema_ledger_sha256 text, p_doctrine_generation bigint, p_program6_actions_enabled boolean) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $_$
+declare attempt ops.staging_forward_fix_rehearsal_attempt%rowtype; existing ops.staging_forward_fix_rehearsal_result%rowtype;
+  result_uuid uuid; bundle_uuid uuid; run_uuid uuid; observed_time timestamptz:=clock_timestamp();
+  projection jsonb; projection_hash text; result_ref text; bundle_projection jsonb; bundle_hash text; bundle_ref text;
+begin
+  if session_user<>'carr_program5_forward_fix_verifier'
+     or not pg_has_role(session_user,'carr_program5_forward_fix_verifiers','member') then
+    raise exception using errcode='42501',message='forward-fix rehearsal result requires the exact scoped verifier capability';
+  end if;
+  if p_idempotency_key is null or p_provider_version_id is null or coalesce(p_provider_tag,'') !~ '^carr-staging-forward-fix-[0-9a-f]{32}$'
+     or coalesce(p_verb_count,0)<=0 or coalesce(p_schema_highest_migration,'') !~ '^[0-9]{4}[a-z]?_[a-z0-9_.-]+\.sql$'
+     or coalesce(p_schema_applied_count,0)<=0 or coalesce(p_schema_ledger_sha256,'') !~ '^sha256:[0-9a-f]{64}$'
+     or coalesce(p_doctrine_generation,-1)<0 or p_program6_actions_enabled is null then
+    raise exception 'invalid typed forward-fix staging readback input';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,315));
+  select * into attempt from ops.staging_forward_fix_rehearsal_attempt where idempotency_key=p_idempotency_key;
+  if not found then raise exception 'forward-fix rehearsal result has no prepared attempt'; end if;
+  if not exists(select 1 from ops.staging_forward_fix_rehearsal_claim where rehearsal_attempt_id=attempt.id) then
+    raise exception 'forward-fix rehearsal result was never claimed';
+  end if;
+  select * into existing from ops.staging_forward_fix_rehearsal_result where rehearsal_attempt_id=attempt.id;
+  if found then
+    if (existing.provider_version_id,existing.provider_tag,existing.verb_count,existing.schema_highest_migration,
+        existing.schema_applied_count,existing.schema_ledger_sha256,existing.doctrine_generation,existing.program6_actions_enabled) is distinct from
+       (p_provider_version_id,p_provider_tag,p_verb_count,p_schema_highest_migration,p_schema_applied_count,
+        p_schema_ledger_sha256,p_doctrine_generation,p_program6_actions_enabled) then
+      raise exception 'forward-fix rehearsal result idempotency key was reused with changed input';
+    end if;
+    return jsonb_build_object('forward_fix_rehearsal_result_id',existing.id,'result_ref',existing.evidence_ref,
+      'bundle_id',(select id from ops.staging_recovery_rehearsal_bundle where forward_fix_result_id=existing.id),
+      'recovery_run_id',(select id from ops.run where recovery_rehearsal_bundle_id=(select id from ops.staging_recovery_rehearsal_bundle where forward_fix_result_id=existing.id)),
+      'replayed',true);
+  end if;
+  if p_provider_version_id=attempt.candidate_provider_version_id or p_provider_tag<>attempt.expected_provider_tag
+     or p_schema_highest_migration<>attempt.declared_schema_highest_migration
+     or p_schema_applied_count<>attempt.declared_schema_applied_count
+     or p_schema_ledger_sha256<>attempt.declared_schema_ledger_sha256 then
+    raise exception 'forward-fix rehearsal readback does not match the exact staging candidate boundary';
+  end if;
+  projection:=jsonb_build_object('forward_fix_rehearsal_attempt_id',attempt.id,'release_id',attempt.release_id,
+    'service_id',attempt.service_id,'environment','staging','git_sha',attempt.git_sha,
+    'candidate_provider_version_id',attempt.candidate_provider_version_id,'provider_version_id',p_provider_version_id,
+    'provider_tag',p_provider_tag,'verb_count',p_verb_count,'schema_highest_migration',p_schema_highest_migration,
+    'schema_applied_count',p_schema_applied_count,'schema_ledger_sha256',p_schema_ledger_sha256,
+    'doctrine_generation',p_doctrine_generation,'program6_actions_enabled',p_program6_actions_enabled);
+  projection_hash:='sha256:'||encode(public.digest(projection::text,'sha256'),'hex');
+  result_ref:='ops.staging-forward-fix-readback:'||projection_hash;
+  insert into ops.staging_forward_fix_rehearsal_result(
+    idempotency_key,rehearsal_attempt_id,provider_version_id,provider_tag,verb_count,schema_highest_migration,
+    schema_applied_count,schema_ledger_sha256,doctrine_generation,program6_actions_enabled,
+    projection_sha256,evidence_ref,observed_at,writer_session_user)
+  values(p_idempotency_key,attempt.id,p_provider_version_id,p_provider_tag,p_verb_count,p_schema_highest_migration,
+    p_schema_applied_count,p_schema_ledger_sha256,p_doctrine_generation,p_program6_actions_enabled,
+    projection_hash,result_ref,observed_time,session_user) returning id into result_uuid;
+  bundle_projection:=jsonb_build_object('forward_fix_rehearsal_attempt_id',attempt.id,'forward_fix_result_id',result_uuid,
+    'current_release_id',attempt.release_id,'service_id',attempt.service_id,'environment','staging','git_sha',attempt.git_sha,
+    'candidate_provider_version_id',attempt.candidate_provider_version_id,'recovery_strategy','forward_fix',
+    'recovery_plan_ref',attempt.recovery_plan_ref,'plan_hash',attempt.plan_hash,
+    'declared_migration_set_sha256',attempt.declared_migration_set_sha256,
+    'declared_migration_count',attempt.declared_migration_count,
+    'declared_schema_highest_migration',attempt.declared_schema_highest_migration,
+    'declared_schema_applied_count',attempt.declared_schema_applied_count,
+    'declared_schema_ledger_sha256',attempt.declared_schema_ledger_sha256);
+  bundle_hash:='sha256:'||encode(public.digest(bundle_projection::text,'sha256'),'hex');
+  bundle_ref:='ops.staging-recovery-bundle:'||bundle_hash;
+  insert into ops.staging_recovery_rehearsal_bundle(
+    recovery_attempt_id,correlation_id,current_release_id,prior_release_id,service_id,environment,
+    current_before_receipt_id,prior_after_rollback_receipt_id,current_after_restore_receipt_id,
+    forward_fix_result_id,candidate_git_sha,candidate_provider_version_id,recovery_strategy,recovery_plan_ref,
+    plan_hash,declared_migration_set_sha256,declared_migration_count,declared_schema_highest_migration,
+    declared_schema_applied_count,declared_schema_ledger_sha256,bundle_sha256,evidence_ref,completed_at,writer_session_user)
+  values(attempt.id,attempt.correlation_id,attempt.release_id,null,attempt.service_id,'staging',null,null,null,
+    result_uuid,attempt.git_sha,attempt.candidate_provider_version_id,'forward_fix',attempt.recovery_plan_ref,
+    attempt.plan_hash,attempt.declared_migration_set_sha256,attempt.declared_migration_count,
+    attempt.declared_schema_highest_migration,attempt.declared_schema_applied_count,
+    attempt.declared_schema_ledger_sha256,bundle_hash,bundle_ref,observed_time,session_user)
+  returning id into bundle_uuid;
+  insert into ops.run(correlation_id,kind,service_id,environment,run_key,state,started_at,ended_at,source_kind,
+    source_ref,observed_at,evidence_ref,release_id,recovery_strategy,recovery_plan_ref,recovery_rehearsal_bundle_id)
+  values(attempt.correlation_id,'check',attempt.service_id,'staging','recovery.rehearsal.forward-fix','succeeded',
+    observed_time,observed_time,'wrapper','ops.record_staging_forward_fix_rehearsal',observed_time,bundle_ref,
+    attempt.release_id,'forward_fix',attempt.recovery_plan_ref,bundle_uuid) returning id into run_uuid;
+  return jsonb_build_object('forward_fix_rehearsal_result_id',result_uuid,'result_ref',result_ref,
+    'bundle_id',bundle_uuid,'recovery_run_id',run_uuid,'replayed',false);
+end $_$;
+
+
+--
 -- Name: record_staging_release_readback(uuid, uuid, text, integer, text, integer, bigint); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -7174,6 +10016,159 @@ end $_$;
 
 
 --
+-- Name: record_staging_replacement_project(uuid, jsonb); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.record_staging_replacement_project(p_idempotency_key uuid, p_observation jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+declare
+  expected_keys constant text[] := array[
+    'artifact_sha256','config_sha256','dependency_sha256','git_sha',
+    'prior_staging_project_id','production_overlap_count','replacement_branch_id',
+    'replacement_endpoint_id','replacement_project_id','schema_version',
+    'source_tree_entry_count','source_tree_oid','source_tree_sha256','synthetic_data_count'
+  ];
+  supplied_keys text[]; contract ops.staging_replacement_project_contract%rowtype;
+  existing ops.staging_replacement_project_receipt%rowtype; receipt_uuid uuid;
+  live_ledger jsonb; live_count integer; live_highest text; live_digest text;
+  derived_synthetic_count bigint; observed_at_value timestamptz;
+  projection jsonb; receipt_digest text; receipt_ref text;
+begin
+  if session_user<>'carr_program5_forward_fix_verifier'
+     or not pg_has_role(session_user,'carr_program5_forward_fix_verifiers','member') then
+    raise exception 'staging replacement recording requires the scoped verifier session';
+  end if;
+  if p_idempotency_key is null or jsonb_typeof(p_observation)<>'object' then
+    raise exception 'invalid staging replacement observation input';
+  end if;
+  select array_agg(k order by k collate "C") into supplied_keys
+    from jsonb_object_keys(p_observation) as keys(k);
+  if supplied_keys is distinct from expected_keys
+     or jsonb_typeof(p_observation->'source_tree_entry_count')<>'number'
+     or jsonb_typeof(p_observation->'synthetic_data_count')<>'number'
+     or jsonb_typeof(p_observation->'production_overlap_count')<>'number' then
+    raise exception 'staging replacement observation has missing, unknown, or invalid typed keys';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended(p_idempotency_key::text,322));
+  select * into contract from ops.staging_replacement_project_contract
+   where idempotency_key=p_idempotency_key;
+  if not found then raise exception 'staging replacement contract was not prepared'; end if;
+
+  if (p_observation->>'schema_version',p_observation->>'git_sha',
+      p_observation->>'source_tree_oid',p_observation->>'source_tree_sha256',
+      (p_observation->>'source_tree_entry_count')::integer,
+      p_observation->>'artifact_sha256',p_observation->>'config_sha256',
+      p_observation->>'dependency_sha256',p_observation->>'prior_staging_project_id',
+      p_observation->>'replacement_project_id',p_observation->>'replacement_branch_id',
+      p_observation->>'replacement_endpoint_id') is distinct from
+     ('clean-staging-replacement-observation.v1',contract.git_sha,
+      contract.source_tree_oid,contract.source_tree_sha256,contract.source_tree_entry_count,
+      contract.artifact_sha256,contract.config_sha256,contract.dependency_sha256,
+      contract.prior_staging_project_id,contract.replacement_project_id,
+      contract.replacement_branch_id,contract.replacement_endpoint_id) then
+    raise exception 'staging replacement observation does not match the prepared immutable identity';
+  end if;
+
+  -- The local count is derived here from the replacement database. Production
+  -- overlap is cross-project evidence: this function can only require the
+  -- controller's governed G1 table-ID comparison assertion to be exactly zero.
+  if to_regclass('public.party') is null or to_regclass('public.client') is null
+     or to_regclass('public.deal') is null or to_regclass('public.lead') is null
+     or to_regclass('public.vendor') is null then
+    raise exception 'replacement database lacks a required synthetic-data table';
+  end if;
+  select (select count(*) from public.party)
+       + (select count(*) from public.client)
+       + (select count(*) from public.deal)
+       + (select count(*) from public.lead)
+       + (select count(*) from public.vendor)
+    into derived_synthetic_count;
+  if derived_synthetic_count<=0
+     or (p_observation->>'synthetic_data_count')::bigint<>derived_synthetic_count
+     or derived_synthetic_count<>contract.expected_synthetic_data_count
+     or (p_observation->>'production_overlap_count')::bigint<>0
+     or contract.expected_production_overlap_count<>0 then
+    raise exception 'staging replacement synthetic-data or no-Production-overlap assertion failed';
+  end if;
+
+  select coalesce(jsonb_object_agg(filename,sha256 order by filename collate "C"),'{}'::jsonb),
+         count(*)::integer,max(filename collate "C"),
+         'sha256:'||encode(public.digest(
+           coalesce(string_agg(convert_to(filename,'UTF8')||decode('00','hex')||
+             convert_to(sha256,'UTF8')||decode('0a','hex'),''::bytea
+             order by filename collate "C"),''::bytea),'sha256'),'hex')
+    into live_ledger,live_count,live_highest,live_digest
+    from public.schema_migrations;
+  if live_ledger is distinct from contract.migration_ledger
+     or live_count is distinct from contract.migration_count
+     or live_highest is distinct from contract.migration_highest
+     or live_digest is distinct from contract.migration_ledger_sha256 then
+    raise exception 'replacement database live full migration ledger does not match the exact declared tree';
+  end if;
+
+  select * into existing from ops.staging_replacement_project_receipt
+   where contract_id=contract.id;
+  if found then
+    if (existing.schema_version,existing.git_sha,existing.source_tree_oid,
+        existing.source_tree_sha256,existing.source_tree_entry_count,
+        existing.artifact_sha256,existing.config_sha256,existing.dependency_sha256,
+        existing.prior_staging_project_id,existing.replacement_project_id,
+        existing.replacement_branch_id,existing.replacement_endpoint_id,
+        existing.live_migration_ledger,existing.live_migration_count,
+        existing.live_migration_highest,existing.live_migration_ledger_sha256,
+        existing.synthetic_data_count,existing.production_overlap_count) is distinct from
+       (p_observation->>'schema_version',contract.git_sha,contract.source_tree_oid,
+        contract.source_tree_sha256,contract.source_tree_entry_count,contract.artifact_sha256,
+        contract.config_sha256,contract.dependency_sha256,contract.prior_staging_project_id,
+        contract.replacement_project_id,contract.replacement_branch_id,
+        contract.replacement_endpoint_id,live_ledger,live_count,live_highest,live_digest,
+        derived_synthetic_count,0::bigint) then
+      raise exception 'staging replacement observation replay changed recorded evidence';
+    end if;
+    return jsonb_build_object('contract_id',contract.id,'receipt_id',existing.id,
+      'evidence_ref',existing.evidence_ref,'state','observed','replayed',true);
+  end if;
+
+  observed_at_value:=clock_timestamp();
+  projection:=jsonb_build_object('contract_id',contract.id,'git_sha',contract.git_sha,
+    'source_tree_oid',contract.source_tree_oid,'source_tree_sha256',contract.source_tree_sha256,
+    'source_tree_entry_count',contract.source_tree_entry_count,
+    'artifact_sha256',contract.artifact_sha256,'config_sha256',contract.config_sha256,
+    'dependency_sha256',contract.dependency_sha256,
+    'prior_staging_project_id',contract.prior_staging_project_id,
+    'replacement_project_id',contract.replacement_project_id,
+    'replacement_branch_id',contract.replacement_branch_id,
+    'replacement_endpoint_id',contract.replacement_endpoint_id,
+    'live_migration_ledger',live_ledger,'live_migration_count',live_count,
+    'live_migration_highest',live_highest,'live_migration_ledger_sha256',live_digest,
+    'synthetic_data_count',derived_synthetic_count,'production_overlap_count',0,
+    'observed_at',observed_at_value);
+  receipt_digest:='sha256:'||encode(public.digest(projection::text,'sha256'),'hex');
+  receipt_ref:='ops.staging-replacement-project:'||receipt_digest;
+  insert into ops.staging_replacement_project_receipt(
+    idempotency_key,contract_id,schema_version,git_sha,source_tree_oid,
+    source_tree_sha256,source_tree_entry_count,artifact_sha256,config_sha256,
+    dependency_sha256,prior_staging_project_id,replacement_project_id,
+    replacement_branch_id,replacement_endpoint_id,live_migration_ledger,
+    live_migration_count,live_migration_highest,live_migration_ledger_sha256,
+    synthetic_data_count,production_overlap_count,receipt_sha256,evidence_ref,
+    writer_session_user,observed_at)
+  values(p_idempotency_key,contract.id,p_observation->>'schema_version',contract.git_sha,
+    contract.source_tree_oid,contract.source_tree_sha256,contract.source_tree_entry_count,
+    contract.artifact_sha256,contract.config_sha256,contract.dependency_sha256,
+    contract.prior_staging_project_id,contract.replacement_project_id,
+    contract.replacement_branch_id,contract.replacement_endpoint_id,live_ledger,
+    live_count,live_highest,live_digest,derived_synthetic_count,0,receipt_digest,
+    receipt_ref,session_user,observed_at_value)
+  returning id into receipt_uuid;
+  return jsonb_build_object('contract_id',contract.id,'receipt_id',receipt_uuid,
+    'evidence_ref',receipt_ref,'state','observed','replayed',false);
+end $$;
+
+
+--
 -- Name: record_staging_restore_only_result(uuid, text, uuid, text, integer, text, integer, bigint, boolean, text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -7387,6 +10382,21 @@ end $$;
 
 
 --
+-- Name: refuse_direct_rule_delivery_policy_update(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.refuse_direct_rule_delivery_policy_update() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if current_setting('carr.rule_delivery_cutover',true) is distinct from 'on' then
+    raise exception 'direct rule-delivery policy update refused; use ops.set_rule_delivery_mode';
+  end if;
+  return new;
+end $$;
+
+
+--
 -- Name: refuse_engineering_evidence_rewrite(); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -7478,6 +10488,18 @@ end $$;
 
 
 --
+-- Name: refuse_rule_delivery_activation_receipt_rewrite(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.refuse_rule_delivery_activation_receipt_rewrite() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  raise exception 'rule-delivery activation receipts are append-only';
+end $$;
+
+
+--
 -- Name: refuse_staging_release_approval_mutation(); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -7496,15 +10518,21 @@ CREATE FUNCTION ops.register_execution_environment_provider(p_manifest jsonb, p_
     SET search_path TO 'ops', 'public', 'pg_temp'
     AS $_$
 declare actor_row actor%rowtype; existing ops.execution_environment_provider%rowtype;
-  row_out ops.execution_environment_provider%rowtype; digest_value text; allowed text[] := array[
+  row_out ops.execution_environment_provider%rowtype; digest_value text; v_actor_slug text; allowed text[] := array[
     'schema_version','provider_key','provider_version','display_name','source_class','backend_kind',
     'implementation_ref','implementation_digest','capability_refs','operation_refs','isolation_class',
     'egress_policy_ref','secret_policy_ref','persistence_mode','resource_policy_ref','cleanup_policy_ref',
     'threat_model_ref','conformance_contract_ref','conformance_contract_digest','configuration_schema_digest',
     'package_provenance','collision_policy','contains_secrets','manifest_digest'];
 begin
-  if session_user !~ '^carr_authority_' then raise exception 'provider registration requires human authority'; end if;
-  select * into actor_row from actor where slug=regexp_replace(session_user,'^carr_authority_','') and kind='human' and active;
+  if session_user ~ '^carr_authority_' then
+    v_actor_slug := regexp_replace(session_user,'^carr_authority_','');
+  elsif session_user = 'carr_writer' then
+    v_actor_slug := nullif(btrim(current_setting('carr.acting_actor_slug', true)), '');
+  else
+    raise exception 'provider registration requires the authority connection or a sponsored writer session';
+  end if;
+  select * into actor_row from actor where slug=v_actor_slug and kind in ('human','automation') and active;
   if actor_row.id is null or jsonb_typeof(p_manifest)<>'object'
      or not (p_manifest ?& allowed)
      or exists(select 1 from jsonb_object_keys(p_manifest) k where k<>all(allowed))
@@ -7590,23 +10618,8 @@ CREATE FUNCTION ops.release_approval_requires_recovery_rehearsal() RETURNS trigg
     AS $$
 begin
   if new.environment='production' and new.state='approved'
-     and (tg_op='INSERT' or old.environment is distinct from 'production'
-          or old.state is distinct from 'approved')
-     and not exists (
-       select 1 from ops.run r
-       join ops.staging_recovery_rehearsal_bundle b
-         on b.id=r.recovery_rehearsal_bundle_id
-       where r.release_id=new.id and r.service_id=new.service_id
-        and r.environment='staging' and r.run_key='recovery.rehearsal.worker'
-        and r.state='succeeded' and r.evidence_ref=b.evidence_ref
-        and b.current_release_id=new.id and b.service_id=new.service_id
-        and b.recovery_strategy=new.recovery_strategy
-        and b.recovery_plan_ref=new.rollback_plan_ref and b.plan_hash=new.plan_hash
-        and b.declared_migration_set_sha256=ops.program5_migration_set_sha256(new.migration_set)
-        and b.declared_migration_count=cardinality(new.migration_set)
-        and b.declared_schema_highest_migration=new.schema_highest_migration
-        and b.declared_schema_applied_count=new.schema_applied_count
-        and b.declared_schema_ledger_sha256=new.schema_ledger_sha256) then
+     and (tg_op='INSERT' or old.environment is distinct from 'production' or old.state is distinct from 'approved')
+     and ops.program5_exact_recovery_rehearsal(new.id) is null then
     raise exception 'Production release % cannot be approved: no exact typed recovery bundle',new.release_key;
   end if;
   return new;
@@ -7665,39 +10678,19 @@ CREATE FUNCTION ops.release_completion_requires_a_read_back() RETURNS trigger
     AS $$
 begin
   if new.state='complete' and (tg_op='INSERT' or old.state is distinct from 'complete') then
-    if not exists (select 1 from ops.deployment d where d.release_id=new.id
-      and d.service_id=new.service_id and d.environment='production'
-      and d.state='complete' and d.read_back_at is not null and d.git_sha=new.git_sha
+    if not exists(select 1 from ops.deployment d where d.release_id=new.id and d.service_id=new.service_id
+      and d.environment='production' and d.state='complete' and d.read_back_at is not null and d.git_sha=new.git_sha
       and d.provider=new.provider and d.provider_version_id=new.provider_version_id) then
       raise exception 'release % cannot be complete: no exact Production read-back',new.release_key;
     end if;
-    if not exists (select 1 from ops.run r join ops.deployment d
-      on d.release_id=r.release_id and d.service_id=r.service_id
-      and d.correlation_id=r.correlation_id
-      where r.release_id=new.id and r.service_id=new.service_id
-      and r.environment='production' and r.run_key like 'performance.%'
-      and r.state='succeeded' and r.evidence_ref is not null
-      and r.budget_ms=new.performance_budget_ms and r.duration_ms>0
-      and r.duration_ms<=r.budget_ms and d.environment='production'
-      and d.state='complete' and d.read_back_at is not null
-      and d.git_sha=new.git_sha and d.provider=new.provider
-      and d.provider_version_id=new.provider_version_id) then
+    if not exists(select 1 from ops.run r join ops.deployment d on d.release_id=r.release_id and d.service_id=r.service_id and d.correlation_id=r.correlation_id
+      where r.release_id=new.id and r.service_id=new.service_id and r.environment='production' and r.run_key like 'performance.%'
+        and r.state='succeeded' and r.evidence_ref is not null and r.budget_ms=new.performance_budget_ms
+        and r.duration_ms>0 and r.duration_ms<=r.budget_ms and d.environment='production' and d.state='complete'
+        and d.read_back_at is not null and d.git_sha=new.git_sha and d.provider=new.provider and d.provider_version_id=new.provider_version_id) then
       raise exception 'release % cannot be complete: no within-budget Production performance receipt',new.release_key;
     end if;
-    if not exists (select 1 from ops.run r
-      join ops.staging_recovery_rehearsal_bundle b on b.id=r.recovery_rehearsal_bundle_id
-      where r.release_id=new.id and r.service_id=new.service_id
-      and r.environment='staging' and r.run_key='recovery.rehearsal.worker'
-      and r.state='succeeded' and r.evidence_ref=b.evidence_ref
-      and b.current_release_id=new.id and b.service_id=new.service_id
-      and b.recovery_strategy=new.recovery_strategy
-      and b.recovery_plan_ref=new.rollback_plan_ref and b.plan_hash=new.plan_hash
-      and b.declared_migration_set_sha256=ops.program5_migration_set_sha256(new.migration_set)
-      and b.declared_migration_count=cardinality(new.migration_set)
-      and b.declared_schema_highest_migration=new.schema_highest_migration
-      and b.declared_schema_applied_count=new.schema_applied_count
-      and b.declared_schema_ledger_sha256=new.schema_ledger_sha256
-      and b.completed_at between new.approved_at-interval '24 hours' and new.approved_at) then
+    if ops.program5_exact_recovery_rehearsal(new.id,new.approved_at-interval '24 hours') is null then
       raise exception 'release % cannot be complete: no exact typed recovery bundle',new.release_key;
     end if;
   end if;
@@ -8063,10 +11056,12 @@ begin
     raise exception 'retired rule % is immutable',old.id;
   end if;
   -- Once the approval receipt exists, the entire rule row is immutable except
-  -- for the two exact authority transitions owned below: proposed -> active in
-  -- ops.approve_rule, and proposed/active -> retired in ops.retire_rule. This
-  -- also blocks no-op UPDATEs that would otherwise bump the optimistic version
-  -- and silently make an active receipt stale through trg_touch_row.
+  -- for the three exact authority transitions owned below: proposed -> active
+  -- in ops.approve_rule, proposed/active -> retired in ops.retire_rule, and
+  -- (new, 0349) active -> active with ONLY the statement changed, in
+  -- ops.amend_rule_statement. This also blocks no-op UPDATEs that would
+  -- otherwise bump the optimistic version and silently make an active receipt
+  -- stale through trg_touch_row.
   if tg_op='UPDATE'
      and exists (select 1 from ops.rule_approval_receipt where rule_id=old.id) then
     if old.status='proposed' and new.status='active'
@@ -8098,8 +11093,32 @@ begin
        and new.version is not distinct from old.version
        and new.updated_at is not distinct from old.updated_at then
       null; -- exact retirement actor/receipt is validated below
+    elsif old.status='active' and new.status='active'
+       and new.id is not distinct from old.id
+       and new.statement is distinct from old.statement
+       and new.human_quote is not distinct from old.human_quote
+       and new.taught_by is not distinct from old.taught_by
+       and new.scope is not distinct from old.scope
+       and new.personal_to is not distinct from old.personal_to
+       and new.activated_by is not distinct from old.activated_by
+       and new.activated_at is not distinct from old.activated_at
+       and new.enforcement is not distinct from old.enforcement
+       and new.supersedes is not distinct from old.supersedes
+       and new.created_at is not distinct from old.created_at
+       and new.version is not distinct from old.version
+       and new.updated_at is not distinct from old.updated_at
+       and new.retired_by is not distinct from old.retired_by
+       and new.retired_at is not distinct from old.retired_at
+       and exists (
+         select 1 from ops.rule_amendment_receipt ar
+          where ar.rule_id=old.id
+            and ar.rule_version_before=old.version
+            and ar.prior_statement_hash=encode(digest(old.statement,'sha256'),'hex')
+            and ar.new_statement=new.statement
+       ) then
+      null; -- exact amendment receipt is validated below
     else
-      raise exception 'approved rule % is immutable except through exact Joe approval or retirement',new.id;
+      raise exception 'approved rule % is immutable except through exact Joe approval, retirement or amendment',new.id;
     end if;
   end if;
   if tg_op='UPDATE' and old.status is distinct from 'retired' and new.status='retired' then
@@ -8316,6 +11335,7 @@ declare
   v_prior ops.rule_retirement_receipt%rowtype;
   v_receipt ops.rule_retirement_receipt%rowtype;
   v_approval_id uuid;
+  v_legacy_note text;
   v_contract jsonb;
   v_contract_hash text;
   v_retired_at timestamptz;
@@ -8355,7 +11375,7 @@ begin
     end if;
     return jsonb_build_object('ok',true,'replayed',true,'rule_id',p_rule_id,
       'previous_status',v_prior.previous_status,'status','retired',
-      'retirement_receipt_id',v_prior.id);
+      'retirement_receipt_id',v_prior.id,'legacy_admission',v_prior.legacy_admission);
   end if;
 
   select * into v_rule from rule where id=p_rule_id for update;
@@ -8377,7 +11397,13 @@ begin
        and statement_hash=encode(digest(v_rule.statement,'sha256'),'hex')
      order by created_at desc limit 1;
     if v_approval_id is null then
-      raise exception 'active rule % lacks its exact approval receipt',v_rule.id;
+      -- (0351) Not every receiptless active rule is a defect: 217 of 219
+      -- were activated before the receipt system existed at all. Fall
+      -- through to the shared legacy predicate before refusing outright.
+      v_legacy_note := ops.legacy_rule_admission_note(v_rule.id,v_rule.status,v_rule.activated_at);
+      if v_legacy_note is null then
+        raise exception 'active rule % lacks its exact approval receipt',v_rule.id;
+      end if;
     end if;
   end if;
 
@@ -8389,14 +11415,14 @@ begin
     'statement_hash',encode(digest(v_rule.statement,'sha256'),'hex'),
     'previous_status',v_rule.status,'actor_id',v_actor_id,
     'reason',btrim(p_reason),'superseded_by',p_superseded_by,
-    'approval_receipt_id',v_approval_id,'retired_at',v_retired_at);
+    'approval_receipt_id',v_approval_id,'legacy_admission',v_legacy_note,'retired_at',v_retired_at);
   v_contract_hash := encode(digest(v_contract::text,'sha256'),'hex');
   insert into ops.rule_retirement_receipt
     (idempotency_key,rule_id,rule_version_before,rule_version_after,statement_hash,previous_status,
-     actor_id,reason,superseded_by,approval_receipt_id,contract_hash,retired_at)
+     actor_id,reason,superseded_by,approval_receipt_id,legacy_admission,contract_hash,retired_at)
   values (p_idempotency_key,v_rule.id,v_rule.version,v_rule.version+1,
           encode(digest(v_rule.statement,'sha256'),'hex'),v_rule.status,
-          v_actor_id,btrim(p_reason),p_superseded_by,v_approval_id,v_contract_hash,v_retired_at)
+          v_actor_id,btrim(p_reason),p_superseded_by,v_approval_id,v_legacy_note,v_contract_hash,v_retired_at)
   returning * into v_receipt;
   insert into ops.authority_receipt
     (idempotency_key,kind,subject_type,subject_id,actor_id,decision,contract_hash,evidence_refs)
@@ -8409,8 +11435,15 @@ begin
   if not found then raise exception 'rule % retirement raced',v_rule.id; end if;
   return jsonb_build_object('ok',true,'replayed',false,'rule_id',v_rule.id,
     'previous_status',v_rule.status,'status','retired',
-    'retirement_receipt_id',v_receipt.id);
+    'retirement_receipt_id',v_receipt.id,'legacy_admission',v_receipt.legacy_admission);
 end $$;
+
+
+--
+-- Name: FUNCTION retire_rule(p_rule_id uuid, p_reason text, p_superseded_by uuid, p_idempotency_key text); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.retire_rule(p_rule_id uuid, p_reason text, p_superseded_by uuid, p_idempotency_key text) IS 'Joe-authority-guarded retirement. An ACTIVE rule normally requires its exact ops.rule_approval_receipt; (0351) an active rule with none is still accepted when ops.legacy_rule_admission_note proves it predates the receipt system, and the retirement receipt records that fact in legacy_admission instead of an approval_receipt_id. A rule that postdates the cutover and still lacks a receipt keeps failing -- this is not a general relaxation.';
 
 
 --
@@ -8431,6 +11464,182 @@ CREATE FUNCTION ops.retry_delay_seconds(p_job ops.job) RETURNS integer
   from ops.job_definition d
   where d.key=p_job.definition_key and d.version=p_job.definition_version
 $$;
+
+
+--
+-- Name: review_sourced_heavy_build_plan(text, text, text, uuid, text, text, text, jsonb, jsonb, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.review_sourced_heavy_build_plan(p_work_request text, p_plan_hash text, p_admission_hash text, p_reviewer_actor_id uuid, p_verdict text, p_reviewer_session_ref text, p_review_summary text, p_evidence_refs jsonb, p_gaps jsonb, p_idempotency_key uuid) RETURNS TABLE(work_request_id uuid, ref text, plan_id uuid, admission_ref text, admission_hash text, review_ref text, review_hash text, verdict text, reviewer_session_ref text, replayed boolean)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $_$
+declare
+  w ops.work_request%rowtype;
+  p ops.sourced_work_request_plan%rowtype;
+  a ops.heavy_build_admission_revision%rowtype;
+  r ops.heavy_build_plan_review%rowtype;
+  actor public.actor%rowtype;
+  next_version integer;
+  preimage jsonb;
+  digest text;
+begin
+  if coalesce(p_work_request,'') !~ '^WR-[0-9]{1,12}$' or coalesce(p_plan_hash,'') !~ '^sha256:[0-9a-f]{64}$'
+     or coalesce(p_admission_hash,'') !~ '^sha256:[0-9a-f]{64}$' or p_reviewer_actor_id is null or p_idempotency_key is null
+     or p_verdict not in ('pass','fail') or coalesce(p_reviewer_session_ref,'') !~ '^session:[a-z0-9][a-z0-9:._/-]{8,199}$'
+     or char_length(btrim(coalesce(p_review_summary,''))) not between 20 and 1000
+     or jsonb_typeof(p_evidence_refs) is distinct from 'array' or jsonb_array_length(p_evidence_refs) not between 1 and 12
+     or exists (select 1 from jsonb_array_elements(p_evidence_refs) item where jsonb_typeof(item)<>'string' or item #>> '{}' !~ '^safe:[a-z0-9][a-z0-9:_./-]*$')
+     or exists (select item #>> '{}' from jsonb_array_elements(p_evidence_refs) item group by item #>> '{}' having count(*)>1)
+     or jsonb_typeof(p_gaps) is distinct from 'array' or jsonb_array_length(p_gaps)>12
+     or exists (select 1 from jsonb_array_elements(p_gaps) item where jsonb_typeof(item)<>'string' or char_length(btrim(item #>> '{}')) not between 10 and 500)
+     or (p_verdict='pass' and jsonb_array_length(p_gaps)<>0) or (p_verdict='fail' and jsonb_array_length(p_gaps)=0) then
+    raise exception 'heavy build review requires exact hashes, fresh session, verdict-consistent gaps, evidence, actor, and idempotency key';
+  end if;
+  select x.* into actor from public.actor x where x.id=p_reviewer_actor_id and x.active for share;
+  if not found then raise exception 'heavy build reviewer actor is not active'; end if;
+  perform pg_advisory_xact_lock(hashtextextended('heavy-build-review:'||p_idempotency_key,0));
+  select x.* into r from ops.heavy_build_plan_review x where x.idempotency_key=p_idempotency_key for share;
+  if found then
+    select x.* into a from ops.heavy_build_admission_revision x where x.id=r.admission_id;
+    select x.* into p from ops.sourced_work_request_plan x where x.id=a.plan_id;
+    select x.* into w from ops.work_request x where x.id=a.work_request_id;
+    if not found or w.ref is distinct from p_work_request or p.plan_hash is distinct from p_plan_hash
+       or a.admission_hash is distinct from p_admission_hash or r.reviewer_actor_id is distinct from p_reviewer_actor_id
+       or r.verdict is distinct from p_verdict or r.reviewer_session_ref is distinct from p_reviewer_session_ref
+       or r.review_summary is distinct from btrim(p_review_summary) or r.evidence_refs is distinct from p_evidence_refs or r.gaps is distinct from p_gaps then
+      raise exception 'idempotency key already names a different heavy build review';
+    end if;
+    return query select w.id,w.ref,p.id,a.admission_ref,a.admission_hash,r.review_ref,r.review_hash,r.verdict,r.reviewer_session_ref,true;
+    return;
+  end if;
+  select w0.* into w from ops.work_request w0 where w0.ref=p_work_request and w0.state='triaged' for share;
+  if not found then raise exception 'exact current heavy build review target not found'; end if;
+  select p0.* into p from ops.sourced_work_request_plan p0 where p0.work_request_id=w.id and p0.plan_hash=p_plan_hash for share;
+  if not found then raise exception 'exact current heavy build review target not found'; end if;
+  select a0.* into a from ops.heavy_build_admission_revision a0
+   where a0.plan_id=p.id and a0.admission_hash=p_admission_hash
+     and a0.version=(select max(latest.version) from ops.heavy_build_admission_revision latest where latest.plan_id=p.id)
+   for share;
+  if not found then raise exception 'exact current heavy build review target not found'; end if;
+  if p_reviewer_session_ref=a.builder_session_ref then raise exception 'heavy build review requires a fresh session distinct from the builder context'; end if;
+  select coalesce(max(x.version),0)+1 into next_version from ops.heavy_build_plan_review x where x.admission_id=a.id;
+  preimage := jsonb_build_object('contract','carr-heavy-build-review/v1','admission_id',a.id,'admission_hash',a.admission_hash,
+    'plan_hash',p.plan_hash,'verdict',p_verdict,'reviewer_actor_id',p_reviewer_actor_id,'reviewer_session_ref',p_reviewer_session_ref,
+    'review_summary',btrim(p_review_summary),'evidence_refs',p_evidence_refs,'gaps',p_gaps,'version',next_version);
+  digest := ops.heavy_build_digest(preimage);
+  insert into ops.heavy_build_plan_review
+    (review_ref,admission_id,version,idempotency_key,verdict,reviewer_actor_id,reviewer_session_ref,review_summary,evidence_refs,gaps,review_hash)
+  values ('HBR-'||substr(digest,8,12)||'-v'||next_version,a.id,next_version,p_idempotency_key,p_verdict,p_reviewer_actor_id,p_reviewer_session_ref,btrim(p_review_summary),p_evidence_refs,p_gaps,digest)
+  returning * into r;
+  return query select w.id,w.ref,p.id,a.admission_ref,a.admission_hash,r.review_ref,r.review_hash,r.verdict,r.reviewer_session_ref,false;
+end;
+$_$;
+
+
+--
+-- Name: rule_amendment_reaches(uuid, integer, text, integer, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.rule_amendment_reaches(p_rule_id uuid, p_from_version integer, p_from_hash text, p_to_version integer, p_to_hash text) RETURNS boolean
+    LANGUAGE sql STABLE
+    AS $$
+  with recursive chain(rule_version_after, new_statement_hash) as (
+    select r.rule_version_after, r.new_statement_hash
+      from ops.rule_amendment_receipt r
+     where r.rule_id = p_rule_id
+       and r.rule_version_before = p_from_version
+       and r.prior_statement_hash = p_from_hash
+    union all
+    select nx.rule_version_after, nx.new_statement_hash
+      from ops.rule_amendment_receipt nx
+      join chain c on nx.rule_version_before = c.rule_version_after
+     where nx.rule_id = p_rule_id
+  )
+  select exists (
+    select 1 from chain
+     where rule_version_after = p_to_version
+       and new_statement_hash = p_to_hash
+  )
+$$;
+
+
+--
+-- Name: FUNCTION rule_amendment_reaches(p_rule_id uuid, p_from_version integer, p_from_hash text, p_to_version integer, p_to_hash text); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.rule_amendment_reaches(p_rule_id uuid, p_from_version integer, p_from_hash text, p_to_version integer, p_to_hash text) IS 'True when an unbroken chain of ops.rule_amendment_receipt rows connects the approval receipt''s frozen (version, statement_hash) to the rule''s CURRENT (version, statement_hash). Used only by ops.applicable_rules() so an amended active rule keeps reciting.';
+
+
+--
+-- Name: rule_delivery_audit_counts(integer); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.rule_delivery_audit_counts(p_layer0_shared_cap integer DEFAULT 35) RETURNS TABLE(total bigint, untagged bigint, orphaned bigint, layer0 bigint, control bigint, pack bigint, layer0_shared bigint, layer0_shared_cap integer, wildcarded bigint, packless bigint, packs bigint, emptypack bigint, scope_mismatch bigint, mode text)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'ops'
+    AS $$
+  select
+    (select count(*) from public.rule r where r.status = 'active'),
+    (select count(*)
+       from public.rule r
+       left join ops.rule_load_layer l on l.rule_id = r.id
+      where r.status = 'active' and l.rule_id is null),
+    (select count(*)
+       from ops.rule_load_layer l
+      where not exists (
+        select 1 from public.rule r
+         where r.id = l.rule_id and r.status = 'active')),
+    (select count(*)
+       from ops.rule_load_layer l
+       join public.rule r on r.id = l.rule_id and r.status = 'active'
+      where l.load_layer = 'layer0'),
+    (select count(*)
+       from ops.rule_load_layer l
+       join public.rule r on r.id = l.rule_id and r.status = 'active'
+      where l.load_layer = 'control'),
+    (select count(*)
+       from ops.rule_load_layer l
+       join public.rule r on r.id = l.rule_id and r.status = 'active'
+      where l.load_layer = 'pack'),
+    (select count(*)
+       from ops.rule_load_layer l
+       join public.rule r on r.id = l.rule_id and r.status = 'active'
+      where l.load_layer = 'layer0' and l.scope = 'shared'),
+    p_layer0_shared_cap,
+    (select count(*)
+       from ops.rule_load_layer l
+       join public.rule r on r.id = l.rule_id and r.status = 'active'
+      where '*' = any(l.packs)),
+    (select count(*)
+       from ops.rule_load_layer l
+       join public.rule r on r.id = l.rule_id and r.status = 'active'
+      where l.load_layer = 'pack' and cardinality(l.packs) = 0),
+    (select count(*) from ops.rule_pack),
+    (select count(*)
+       from ops.rule_pack p
+      where not exists (
+        select 1
+          from ops.rule_load_layer l
+          join public.rule r on r.id = l.rule_id and r.status = 'active'
+         where p.pack = any(l.packs))),
+    (select count(*)
+       from public.rule r
+       join ops.rule_load_layer l on l.rule_id = r.id
+       left join public.actor owner on owner.id = r.personal_to
+      where r.status = 'active'
+        and l.scope is distinct from coalesce(owner.slug, 'shared')),
+    coalesce(
+      (select p.mode from ops.rule_delivery_policy p limit 1),
+      '(none)')
+$$;
+
+
+--
+-- Name: FUNCTION rule_delivery_audit_counts(p_layer0_shared_cap integer); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.rule_delivery_audit_counts(p_layer0_shared_cap integer) IS 'Aggregate delivery coverage, layer, scope and policy health. SECURITY DEFINER so carr_jobs can detect missing current rules and personal-scope drift without receiving SELECT on rule text or actor rows.';
 
 
 --
@@ -8641,6 +11850,142 @@ $$;
 
 
 --
+-- Name: set_rule_delivery_mode(text, text, text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.set_rule_delivery_mode(p_mode text, p_changed_by text, p_reason text, p_expected_map_digest text) RETURNS TABLE(mode text, changed_controls bigint, receipt_id uuid)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'public', 'ops'
+    AS $$
+declare
+  v_from_mode text;
+  v_expected_control text;
+  v_expected_class text;
+  v_next_control text;
+  v_next_class text;
+  v_count bigint;
+  v_receipt uuid;
+  v_health record;
+begin
+  if p_mode not in ('shadow','enforced') then
+    raise exception 'unknown rule-delivery mode %',p_mode;
+  end if;
+  if coalesce(btrim(p_changed_by),'')='' or coalesce(btrim(p_reason),'')='' then
+    raise exception 'changed_by and reason are required';
+  end if;
+  if (select count(*) from ops.rule_delivery_activation_target) <> 8 then
+    raise exception 'activation target set is not exactly eight';
+  end if;
+  if exists (select 1 from ops.rule_delivery_activation_target
+              where map_digest<>p_expected_map_digest) then
+    raise exception 'activation map digest preimage differs';
+  end if;
+
+  select p.mode into v_from_mode
+    from ops.rule_delivery_policy p where p.singleton for update;
+  if v_from_mode is null then raise exception 'delivery policy singleton is absent'; end if;
+  if v_from_mode=p_mode then
+    raise exception 'delivery policy already %; refusing a receipt-free no-op',p_mode;
+  end if;
+  if v_from_mode='shadow' and p_mode='enforced' then
+    v_expected_control:='session_boot'; v_expected_class:='surfacing';
+    v_next_control:='pack_delivery'; v_next_class:='stop_gate';
+  elsif v_from_mode='enforced' and p_mode='shadow' then
+    v_expected_control:='pack_delivery'; v_expected_class:='stop_gate';
+    v_next_control:='session_boot'; v_next_class:='surfacing';
+  else
+    raise exception 'unsupported delivery transition % -> %',v_from_mode,p_mode;
+  end if;
+
+  select * into v_health from ops.rule_delivery_audit_counts(35);
+  if v_health.total=0 or v_health.untagged<>0 or v_health.orphaned<>0
+     or v_health.wildcarded<>0 or v_health.packless<>0 or v_health.emptypack<>0
+     or v_health.scope_mismatch<>0 then
+    raise exception 'delivery coverage is not activation-safe: %',row_to_json(v_health);
+  end if;
+
+  perform r.id from public.rule r
+    join ops.rule_delivery_activation_target t on left(r.id::text,8)=t.short_id
+   where r.status='active' for update of r;
+  get diagnostics v_count=row_count;
+  if v_count<>8 then raise exception 'active target preimage count is %, expected 8',v_count; end if;
+
+  perform l.rule_id from ops.rule_load_layer l
+    join ops.rule_delivery_activation_target t on t.short_id=l.short_id
+   where l.scope=t.expected_scope and l.packs=array[t.expected_pack]
+     and l.load_layer='pack' and l.map_digest=t.map_digest
+   for update of l;
+  get diagnostics v_count=row_count;
+  if v_count<>8 then raise exception 'delivery target tag preimage count is %, expected 8',v_count; end if;
+
+  perform a.rule_id from ops.rule_admission a
+    join public.rule r on r.id=a.rule_id
+    join ops.rule_delivery_activation_target t on left(r.id::text,8)=t.short_id
+   where a.state='admitted'
+     and a.reason='Backfilled from the reviewed active rule enforcement map'
+     and a.enforcement_status='blocked'
+     and not exists (select 1 from ops.rule_approval_receipt ar where ar.rule_id=r.id)
+   for update of a;
+  get diagnostics v_count=row_count;
+  if v_count<>8 then raise exception 'admission target preimage count is %, expected 8',v_count; end if;
+
+  select count(*) into v_count
+    from ops.rule_enforcement_point ep
+    join public.rule r on r.id=ep.rule_id
+    join ops.rule_delivery_activation_target t on left(r.id::text,8)=t.short_id
+   where ep.control_key=v_expected_control
+     and ep.enforcement_class=v_expected_class and ep.installed;
+  if v_count<>8 or (select count(*) from ops.rule_enforcement_point ep
+      join public.rule r on r.id=ep.rule_id
+      join ops.rule_delivery_activation_target t on left(r.id::text,8)=t.short_id)<>8 then
+    raise exception 'enforcement-point preimage is not the exact eight %/% rows',
+      v_expected_control,v_expected_class;
+  end if;
+  if p_mode='enforced' and not exists (
+      select 1 from ops.enforcement_control_catalog c
+       where c.control_key='pack_delivery' and c.enforcement_class='stop_gate'
+         and c.installed and c.verified_at is not null) then
+    raise exception 'pack_delivery is not an installed, verified stop gate';
+  end if;
+
+  delete from ops.rule_enforcement_point ep using public.rule r,
+      ops.rule_delivery_activation_target t
+   where ep.rule_id=r.id and left(r.id::text,8)=t.short_id;
+  insert into ops.rule_enforcement_point
+    (rule_id,control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at)
+  select r.id,
+         case when p_mode='enforced' then t.to_control else t.from_control end,
+         case when p_mode='enforced' then t.to_implementation_ref else t.from_implementation_ref end,
+         case when p_mode='enforced' then t.to_test_ref else t.from_test_ref end,
+         case when p_mode='enforced' then t.to_enforcement_class else t.from_enforcement_class end,
+         true,now()
+    from public.rule r join ops.rule_delivery_activation_target t
+      on left(r.id::text,8)=t.short_id where r.status='active';
+
+  update ops.rule_admission a
+     set coverage_detail=jsonb_set(a.coverage_detail,'{rule_delivery}',
+           jsonb_build_object('mode',p_mode,'control',v_next_control,
+                              'changed_by',p_changed_by,'changed_at',now()),true),
+         version=a.version+1,updated_at=now()
+    from public.rule r join ops.rule_delivery_activation_target t
+      on left(r.id::text,8)=t.short_id
+   where a.rule_id=r.id;
+
+  perform set_config('carr.rule_delivery_cutover','on',true);
+  update ops.rule_delivery_policy
+     set mode=p_mode,changed_by=p_changed_by,reason=p_reason,changed_at=now()
+   where singleton;
+
+  insert into ops.rule_delivery_activation_receipt
+    (from_mode,to_mode,changed_by,reason,map_digest,target_short_ids)
+  select v_from_mode,p_mode,p_changed_by,p_reason,p_expected_map_digest,
+         array_agg(t.short_id order by t.short_id)
+    from ops.rule_delivery_activation_target t returning id into v_receipt;
+  return query select p_mode,8::bigint,v_receipt;
+end $$;
+
+
+--
 -- Name: set_sourced_work_request_shape_disposition(text, integer, text, text, text, uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -8764,6 +12109,1037 @@ begin
    where job_id=j.id and attempt=j.attempt and lease_token=p_lease_token;
   return true;
 end $$;
+
+
+--
+-- Name: siep_acquire_lane_lock(text, text, integer, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.siep_acquire_lane_lock(p_component text, p_session_ref text, p_lease_seconds integer, p_idempotency_key uuid) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $_$
+declare k text; aid uuid; tok uuid; current_lock ops.siep_lane_lock%rowtype;
+        c ops.siep_package_contract%rowtype; w ops.work_request%rowtype;
+        prior ops.siep_command_receipt%rowtype; request_digest text; result jsonb;
+begin
+  k:=ops.siep_resolve_package(p_component);
+  select * into c from ops.siep_package_contract where package_key=k;
+  select id into aid from public.actor where slug='system' and active;
+  if k is null or aid is null
+     or coalesce(p_session_ref,'') !~ '^session:[a-zA-Z0-9._:-]{1,240}$' or p_lease_seconds not between 60 and 3600
+     or p_idempotency_key is null then raise exception 'bounded typed SIEP lane lock fields are required'; end if;
+  perform pg_advisory_xact_lock(hashtextextended('siep-idempotency:'||p_idempotency_key,0));
+  perform pg_advisory_xact_lock(hashtextextended('siep-package:'||k,0));
+  perform pg_advisory_xact_lock(hashtextextended('siep-lane:'||c.lane_key,0));
+  request_digest:=ops.siep_request_digest(jsonb_build_object(
+    'package_key',k,'session_ref',p_session_ref,'lease_seconds',p_lease_seconds));
+  if exists(select 1 from ops.siep_evidence_link where idempotency_key=p_idempotency_key) then
+    raise exception 'idempotency_key_reuse: SIEP evidence key cannot be reused for a command';
+  end if;
+  select * into prior from ops.siep_command_receipt where idempotency_key=p_idempotency_key;
+  if found then
+    if prior.verb<>'acquire_lane' or prior.package_key<>k or prior.request_digest<>request_digest then
+      raise exception 'idempotency_key_reuse: SIEP lane-lock inputs changed';
+    end if;
+    return prior.result||jsonb_build_object('replayed',true);
+  end if;
+  select * into w from ops.work_request where id=c.work_request_id for update;
+  select * into current_lock from ops.siep_lane_lock where lane_key=c.lane_key for update;
+  if current_lock.lane_key is not null and current_lock.expires_at>now() then
+    raise exception 'SIEP lane % is already locked by another lease',c.lane_key;
+  end if;
+  if current_lock.lane_key is not null and current_lock.package_key<>k and exists(
+    select 1 from ops.siep_package_contract pc join ops.work_request pw on pw.id=pc.work_request_id
+     where pc.package_key=current_lock.package_key and pw.state not in ('ready','confirmed_closed')
+  ) then raise exception 'SIEP lane recovery must resume the prior nonterminal package'; end if;
+  if exists(select 1 from ops.siep_package_contract pc join ops.work_request pw on pw.id=pc.work_request_id
+     where pc.lane_key=c.lane_key and pc.package_key<>k
+       and pw.state not in ('ready','confirmed_closed')) then
+    raise exception 'SIEP lane has another nonterminal package requiring recovery';
+  end if;
+  if w.state not in ('ready','claimed','in_progress','verification','awaiting_release','released') then raise exception 'SIEP package cannot acquire a lane in state %',w.state; end if;
+  tok:=gen_random_uuid();
+  insert into ops.siep_lane_lock(lane_key,package_key,work_request_version,holder_actor_id,executor_tier,session_ref,lease_token,expires_at,idempotency_key)
+  values(c.lane_key,k,w.version,aid,c.minimum_executor_tier,p_session_ref,tok,now()+make_interval(secs=>p_lease_seconds),p_idempotency_key)
+  on conflict(lane_key) do update set package_key=excluded.package_key,work_request_version=excluded.work_request_version,
+    holder_actor_id=excluded.holder_actor_id,executor_tier=excluded.executor_tier,
+    session_ref=excluded.session_ref,lease_token=excluded.lease_token,acquired_at=now(),expires_at=excluded.expires_at,idempotency_key=excluded.idempotency_key;
+  insert into public.event(occurred_at,actor_id,verb,subject_type,subject_id,field,old_value,new_value,cause,agent_rationale,idempotency_key)
+  values(now(),aid,'siep-acquire-lane-lock','work_request',w.id,'lane_lock',null,
+    jsonb_build_object('package_key',k,
+      'session_digest','sha256:'||encode(public.digest(p_session_ref,'sha256'),'hex'),
+      'lease_seconds',p_lease_seconds,
+      'lane_key',c.lane_key,'work_request_version',w.version),
+    'system','typed SIEP lane acquisition',null);
+  select jsonb_build_object('lane_key',c.lane_key,'package_key',k,'work_request_version',w.version,
+    'lease_digest','sha256:'||encode(public.digest(lease_token::text,'sha256'),'hex'),
+    'expires_at',expires_at) into result
+    from ops.siep_lane_lock where lane_key=c.lane_key and package_key=k;
+  insert into ops.siep_command_receipt(idempotency_key,verb,package_key,request_digest,result,recorded_actor_id)
+  values(p_idempotency_key,'acquire_lane',k,request_digest,result,aid);
+  -- The raw lease token is a one-time delivery secret.  Exact replay remains a
+  -- no-op and returns the stable safe result, never a shared-role token oracle.
+  return result||jsonb_build_object('lease_token',tok,'replayed',false);
+end $_$;
+
+
+--
+-- Name: siep_append_only_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.siep_append_only_guard() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+begin
+  raise exception 'SIEP program contracts, dependencies, aliases, and evidence links are append-only';
+end $$;
+
+
+--
+-- Name: siep_attach_evidence(text, text, uuid, text, text, text, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.siep_attach_evidence(p_component text, p_evidence_kind text, p_ledger_id uuid, p_ledger_kind text, p_evidence_digest text, p_note text, p_idempotency_key uuid) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $_$
+declare k text; aid uuid; prior ops.siep_evidence_link%rowtype; eid uuid; actor_slug text;
+        w ops.work_request%rowtype; c ops.siep_package_contract%rowtype;
+        source_row jsonb; source_at timestamptz;
+        server_digest text;
+begin
+  k:=ops.siep_resolve_package(p_component);
+  if k is null or p_idempotency_key is null or p_note !~ '^safe:[a-z0-9][a-z0-9:_./-]*$' or char_length(p_note)>300 then
+    raise exception 'known SIEP package, safe reference, and UUID idempotency key are required';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended('siep-idempotency:'||p_idempotency_key,0));
+  select * into prior from ops.siep_evidence_link where idempotency_key=p_idempotency_key;
+  if found then
+    if (prior.package_key,prior.evidence_kind,prior.ledger_kind,prior.ledger_id,prior.evidence_digest,prior.note)
+       is distinct from (k,p_evidence_kind,p_ledger_kind,p_ledger_id,p_evidence_digest,p_note) then
+      raise exception 'idempotency_key_reuse: SIEP evidence inputs changed';
+    end if;
+    return jsonb_build_object('id',prior.id,'package_key',prior.package_key,'replayed',true);
+  end if;
+  if exists(select 1 from ops.siep_command_receipt where idempotency_key=p_idempotency_key) then
+    raise exception 'idempotency_key_reuse: SIEP command key cannot be reused for evidence';
+  end if;
+  select w0.* into w from ops.work_request w0 join ops.siep_package_contract pc on pc.work_request_id=w0.id where pc.package_key=k for share;
+  select * into c from ops.siep_package_contract where package_key=k;
+  case p_ledger_kind
+    when 'job_receipt' then
+      select system_actor.id,jsonb_build_object('receipt',to_jsonb(r),'job',to_jsonb(j),
+                                                'attempt',to_jsonb(ja),'binding',to_jsonb(b)),r.created_at
+        into aid,source_row,source_at
+        from ops.job_receipt r join ops.job j on j.id=r.job_id
+        join ops.job_attempt ja on ja.job_id=j.id and ja.attempt=r.attempt
+        join ops.siep_job_evidence_binding b on b.job_id=j.id
+        join public.actor system_actor on system_actor.slug='system' and system_actor.active
+       where r.id=p_ledger_id and j.payload->>'work_request'=w.ref
+         and j.state='succeeded' and ja.state='succeeded'
+         and j.attempt=r.attempt and r.kind='completion'
+         and b.package_key=k and b.work_request_version=w.version
+         and b.manifest_digest=ops.siep_manifest_digest()
+         and b.evidence_kind=p_evidence_kind
+         and b.definition_key=j.definition_key and b.definition_version=j.definition_version;
+    when 'decision_event' then
+      select e.actor_id,to_jsonb(e),e.occurred_at into aid,source_row,source_at
+        from public.event e where e.id=p_ledger_id and e.verb='siep-joe-decision'
+          and e.new_value->>'package_key'=k;
+    else source_row:=null;
+  end case;
+  if source_row is null or aid is null then raise exception 'evidence target is not a valid package-bound canonical fact'; end if;
+  if source_at>now()+interval '1 minute' then raise exception 'future SIEP evidence is refused'; end if;
+  if source_at < (case when p_evidence_kind in ('joe_approval','joe_go_no_go') then w.captured_at
+                       else coalesce(w.claimed_at,w.captured_at) end) then
+    raise exception 'stale SIEP evidence predates the package execution boundary';
+  end if;
+  server_digest:=ops.siep_current_evidence_digest(p_ledger_kind,p_ledger_id);
+  if p_evidence_digest is distinct from server_digest then raise exception 'SIEP evidence digest does not match its canonical ledger row'; end if;
+  if p_ledger_kind='job_receipt' and not (
+       source_row#>>'{job,definition_key}'='engineering-slice'
+       and source_row#>>'{job,definition_version}'='1'
+       and source_row#>>'{job,payload,manifest_digest}'=ops.siep_manifest_digest()
+     ) then
+    raise exception 'SIEP evidence requires the fixed package-purpose verifier contract';
+  end if;
+  select slug into actor_slug from public.actor where id=aid;
+  if p_evidence_kind in ('joe_approval','joe_go_no_go')
+     and (session_user<>'carr_authority_joe' or p_ledger_kind<>'decision_event' or actor_slug<>'joe') then
+    raise exception 'Joe approval evidence requires the authenticated Joe authority session and a package-bound Joe decision';
+  end if;
+  if p_evidence_kind in ('joe_approval','joe_go_no_go') and not (
+       source_row#>>'{new_value,package_key}'=k
+       and source_row#>>'{new_value,gate}'=p_evidence_kind
+       and source_row#>>'{new_value,manifest_digest}'=ops.siep_manifest_digest()
+       and source_row#>>'{new_value,decision}'=case when p_evidence_kind='joe_go_no_go' then 'go' else 'approved' end
+     ) then raise exception 'Joe approval evidence requires an exact positive typed decision'; end if;
+  if p_evidence_kind in ('independent_review','live_readback','zero_unresolved_findings',
+                         'zero_blockers','two_clean_audit_cycles') then
+    if session_user<>'carr_authority_joe' then
+      raise exception 'SIEP independent and terminal evidence requires the authenticated Joe authority session';
+    end if;
+    select id into aid from public.actor where slug='joe' and active;
+    if aid is null or w.executor_actor='joe' then
+      raise exception 'independent authority evidence requires active Joe distinct from the package executor';
+    end if;
+  end if;
+  if p_evidence_kind not in ('joe_approval','joe_go_no_go') and not (
+       p_ledger_kind='job_receipt' and source_row#>>'{receipt,evidence,status}'='pass'
+       and source_row#>>'{receipt,evidence,operation}'=
+         case when p_evidence_kind='two_clean_audit_cycles' then 'clean_audit_cycle' else p_evidence_kind end
+     ) then raise exception 'SIEP evidence requires a successful package-bound lease completion receipt'; end if;
+  if p_evidence_kind='source' and coalesce(source_row#>>'{receipt,evidence,commit_sha}','') !~ '^[0-9a-f]{40,64}$'
+    then raise exception 'source evidence requires a commit-bound receipt'; end if;
+  if p_evidence_kind='tests' and coalesce(source_row#>>'{receipt,evidence,result_digest}','') !~ '^sha256:[0-9a-f]{64}$'
+    then raise exception 'test evidence requires a result-bound receipt'; end if;
+  if p_evidence_kind in ('readback','live_readback')
+     and coalesce(source_row#>>'{receipt,evidence,target_ref}','') !~ '^safe:[a-z0-9][a-z0-9:_./-]*$'
+    then raise exception 'readback evidence requires a typed target'; end if;
+  if p_evidence_kind='rollback'
+     and coalesce(source_row#>>'{receipt,evidence,recovery_ref}','') !~ '^safe:[a-z0-9][a-z0-9:_./-]*$'
+    then raise exception 'rollback evidence requires a typed recovery reference'; end if;
+  if p_evidence_kind='independent_review'
+     and coalesce(source_row#>>'{receipt,evidence,reviewed_artifact_digest}','') !~ '^sha256:[0-9a-f]{64}$'
+    then raise exception 'independent review requires an authority-attested artifact-bound receipt'; end if;
+  if p_evidence_kind in ('zero_unresolved_findings','zero_blockers') and not (
+       source_row#>>'{receipt,evidence,count}'='0'
+       and coalesce(source_row#>>'{receipt,evidence,baseline_digest}','') ~ '^sha256:[0-9a-f]{64}$'
+     ) then raise exception 'zero-state evidence requires a baseline-bound canonical zero count'; end if;
+  if p_evidence_kind='material_fix' and not (
+       coalesce(source_row#>>'{receipt,evidence,commit_sha}','') ~ '^[0-9a-f]{40,64}$'
+     ) then raise exception 'material-fix evidence requires a commit-bound receipt';
+  end if;
+  if p_evidence_kind='two_clean_audit_cycles' and not (
+    (source_row#>>'{receipt,evidence,cycle}') in ('1','2')
+    and (source_row#>>'{receipt,evidence,unresolved_count}')='0'
+    and (source_row#>>'{receipt,evidence,blocker_count}')='0'
+    and coalesce(source_row#>>'{receipt,evidence,baseline_digest}','') ~ '^sha256:[0-9a-f]{64}$'
+    and coalesce(source_row#>>'{receipt,evidence,run_id}','') ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+  ) then raise exception 'clean audit evidence must be a zero-finding zero-blocker canonical cycle'; end if;
+  insert into ops.siep_evidence_link(package_key,evidence_kind,ledger_kind,ledger_id,work_request_version,
+    manifest_digest,evidence_digest,note,linked_actor_id,attested_session_principal,source_observed_at,idempotency_key)
+  values(k,p_evidence_kind,p_ledger_kind,p_ledger_id,w.version,ops.siep_manifest_digest(),
+    p_evidence_digest,p_note,aid,session_user,source_at,p_idempotency_key)
+  returning id into eid;
+  return jsonb_build_object('id',eid,'package_key',k,'replayed',false);
+end $_$;
+
+
+--
+-- Name: siep_bind_evidence_job(text, integer, text, uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.siep_bind_evidence_job(p_component text, p_base_version integer, p_evidence_kind text, p_job_id uuid, p_idempotency_key uuid) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+declare result jsonb; contract_version text;
+begin
+  result:=ops.siep_bind_evidence_job_unchecked_0324(p_component,p_base_version,p_evidence_kind,p_job_id,p_idempotency_key);
+  select b.engineering_contract_version into contract_version
+    from ops.siep_job_evidence_binding b
+    join ops.engineering_execution_envelope envelope on envelope.job_id=b.job_id
+   where b.job_id=p_job_id
+     and not exists (
+       select 1 from ops.engineering_execution_envelope successor
+        where successor.supersedes_envelope_id=envelope.id
+     )
+     and 1=(
+       select count(*) from ops.engineering_execution_envelope leaf
+        where leaf.slice_plan_id=envelope.slice_plan_id
+          and leaf.slice_ref=envelope.slice_ref
+          and not exists (
+            select 1 from ops.engineering_execution_envelope successor
+             where successor.supersedes_envelope_id=leaf.id
+          )
+     );
+  if contract_version is distinct from 'engineering-review.v1' then
+    raise exception 'historical or superseded SIEP Engineering evidence binding is not 0335 verified';
+  end if;
+  return result;
+end $$;
+
+
+--
+-- Name: siep_bind_evidence_job_unchecked_0324(text, integer, text, uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.siep_bind_evidence_job_unchecked_0324(p_component text, p_base_version integer, p_evidence_kind text, p_job_id uuid, p_idempotency_key uuid) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+declare k text; w ops.work_request%rowtype; existing ops.siep_job_evidence_binding%rowtype;
+        aid uuid; result jsonb;
+begin
+  if session_user<>'carr_authority_joe' then
+    raise exception 'SIEP evidence binding requires the authenticated Joe authority session';
+  end if;
+  k:=ops.siep_resolve_package(p_component);
+  if k is null or p_base_version is null or p_job_id is null or p_idempotency_key is null
+     or p_evidence_kind not in ('source','tests','migration','deploy','readback','live_readback',
+       'rollback','independent_review','zero_unresolved_findings','zero_blockers',
+       'two_clean_audit_cycles','material_fix') then
+    raise exception 'known package, version, purpose, admitted job, and idempotency key are required';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended('siep-idempotency:'||p_idempotency_key,0));
+  perform pg_advisory_xact_lock(hashtextextended('siep-evidence-job:'||p_job_id,0));
+  select * into existing from ops.siep_job_evidence_binding
+   where idempotency_key=p_idempotency_key or job_id=p_job_id order by bound_at limit 1;
+  if found then
+    if (existing.package_key,existing.work_request_version,existing.evidence_kind,existing.job_id)
+       is distinct from (k,p_base_version,p_evidence_kind,p_job_id) then
+      raise exception 'idempotency_key_reuse: SIEP evidence binding inputs changed';
+    end if;
+    return jsonb_build_object('job_id',existing.job_id,'package_key',existing.package_key,
+      'evidence_kind',existing.evidence_kind,'replayed',true);
+  end if;
+  select w0.* into w from ops.work_request w0 join ops.siep_package_contract c
+    on c.work_request_id=w0.id where c.package_key=k for share;
+  if w.version<>p_base_version then raise exception 'SIEP evidence binding requires the exact Work Request version'; end if;
+  select id into aid from public.actor where slug='joe' and active;
+  if aid is null then raise exception 'active Joe actor is required'; end if;
+  if not exists(
+    select 1 from ops.job j
+      join ops.engineering_execution_envelope env on env.job_id=j.id and env.work_request_id=w.id
+      join ops.engineering_slice_plan sp on sp.id=env.slice_plan_id and sp.work_request_id=w.id
+      join ops.engineering_slice_receipt er on er.envelope_id=env.id and er.work_request_id=w.id
+      join ops.job_attempt ja on ja.id=er.job_attempt_id and ja.job_id=j.id
+        and ja.attempt=j.attempt and ja.state='succeeded'
+      join ops.engineering_reviewer_fact rf on rf.receipt_id=er.id and rf.work_request_id=w.id
+     where j.id=p_job_id and j.definition_key='engineering-slice' and j.definition_version=1
+       and j.payload->>'work_request'=w.ref and j.state='succeeded'
+       and env.state_version=p_base_version and sp.work_request_version=p_base_version
+       and er.outcome='claimed_complete' and rf.state='passed'
+       and rf.reviewer_actor_id=aid and rf.reviewer_actor_id<>er.executor_actor_id
+       and exists(select 1 from ops.job_receipt jr where jr.job_id=j.id
+                    and jr.attempt=j.attempt and jr.kind='completion')
+  ) then
+    raise exception 'SIEP evidence binding requires an exact independently reviewed engineering envelope and completion';
+  end if;
+  insert into ops.siep_job_evidence_binding(job_id,package_key,work_request_version,
+    manifest_digest,evidence_kind,definition_key,definition_version,bound_by_actor_id,idempotency_key)
+  values(p_job_id,k,p_base_version,ops.siep_manifest_digest(),p_evidence_kind,
+    'engineering-slice',1,aid,p_idempotency_key);
+  result:=jsonb_build_object('job_id',p_job_id,'package_key',k,
+    'evidence_kind',p_evidence_kind,'replayed',false);
+  return result;
+end $$;
+
+
+--
+-- Name: siep_claim_package(text, text, uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.siep_claim_package(p_component text, p_session_ref text, p_lease_token uuid, p_idempotency_key uuid) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $_$
+declare k text; w ops.work_request%rowtype; c ops.siep_package_contract%rowtype;
+        a public.actor%rowtype; prior ops.siep_command_receipt%rowtype; lane ops.siep_lane_lock%rowtype;
+        result jsonb; request_digest text;
+begin
+  k:=ops.siep_resolve_package(p_component);
+  if k is null or p_idempotency_key is null or p_lease_token is null
+     or coalesce(p_session_ref,'') !~ '^session:[a-zA-Z0-9._:-]{1,240}$' then
+    raise exception 'known SIEP package, bounded session, lease token, and UUID idempotency key are required';
+  end if;
+  select * into c from ops.siep_package_contract where package_key=k;
+  select * into a from public.actor where slug='system' and active for share;
+  if not found then raise exception 'active system actor is required'; end if;
+  perform pg_advisory_xact_lock(hashtextextended('siep-idempotency:'||p_idempotency_key,0));
+  perform pg_advisory_xact_lock(hashtextextended('siep-package:'||k,0));
+  perform pg_advisory_xact_lock(hashtextextended('siep-lane:'||c.lane_key,0));
+  request_digest:=ops.siep_request_digest(jsonb_build_object(
+    'package_key',k,'session_ref',p_session_ref,'lease_token',p_lease_token));
+  if exists(select 1 from ops.siep_evidence_link where idempotency_key=p_idempotency_key) then
+    raise exception 'idempotency_key_reuse: SIEP evidence key cannot be reused for a command';
+  end if;
+  select * into prior from ops.siep_command_receipt where idempotency_key=p_idempotency_key;
+  if found then
+    if prior.verb<>'claim' or prior.package_key<>k or prior.request_digest<>request_digest then
+      raise exception 'idempotency_key_reuse: SIEP claim inputs changed';
+    end if;
+    return prior.result||jsonb_build_object('replayed',true);
+  end if;
+  select w0.* into w from ops.work_request w0 where w0.id=c.work_request_id for update;
+  if w.state<>'ready' then raise exception 'SIEP package % is %, not ready',k,w.state; end if;
+  select * into lane from ops.siep_lane_lock where lane_key=c.lane_key for update;
+  if not found or lane.package_key<>k or lane.holder_actor_id<>a.id
+     or lane.executor_tier<>c.minimum_executor_tier or lane.work_request_version<>w.version
+     or lane.session_ref<>p_session_ref or lane.lease_token<>p_lease_token
+     or lane.expires_at<=now() then
+    raise exception 'SIEP claim requires the exact live server-derived lane lock and Work Request version';
+  end if;
+  if exists (select 1 from ops.siep_program_dependency d join ops.siep_package_contract dc on dc.package_key=d.depends_on_package_key
+             join ops.work_request dw on dw.id=dc.work_request_id where d.package_key=k and dw.state<>'confirmed_closed') then
+    raise exception 'SIEP package % has unresolved dependencies',k;
+  end if;
+  if c.approval_gate<>'none' and not ops.siep_current_approval(k,w.version,c.approval_gate)
+    then raise exception 'SIEP package % admission requires %',k,c.approval_gate; end if;
+  result:=jsonb_build_object('package_key',k,'state','claimed','version',w.version+1,
+                             'executor_actor','system','executor_tier',c.minimum_executor_tier,
+                             'lane_key',c.lane_key,'session_ref',p_session_ref,
+                             'lease_digest','sha256:'||encode(public.digest(p_lease_token::text,'sha256'),'hex'));
+  insert into public.event(occurred_at,actor_id,verb,subject_type,subject_id,field,old_value,new_value,cause,agent_rationale,idempotency_key)
+  values(now(),a.id,'siep-claim-package','work_request',w.id,'state',to_jsonb(w.state),
+         result,
+         'system','typed SIEP dependency-first claim',p_idempotency_key::text);
+  update ops.work_request set state='claimed',executor_actor='system',claimed_at=now(),updated_at=now(),version=version+1 where id=w.id;
+  update ops.siep_lane_lock set work_request_version=w.version+1
+   where lane_key=c.lane_key and lease_token=p_lease_token and session_ref=p_session_ref;
+  insert into ops.siep_command_receipt(idempotency_key,verb,package_key,request_digest,result,recorded_actor_id)
+  values(p_idempotency_key,'claim',k,request_digest,result,a.id);
+  return result||jsonb_build_object('replayed',false);
+end $_$;
+
+
+--
+-- Name: siep_current_approval(text, integer, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.siep_current_approval(p_package_key text, p_work_request_version integer, p_gate text) RETURNS boolean
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+  select exists(
+    select 1 from ops.siep_package_contract c
+      join ops.work_request w on w.id=c.work_request_id
+      join ops.siep_evidence_link e on e.package_key=c.package_key
+      join public.event d on d.id=e.ledger_id and e.ledger_kind='decision_event'
+      join public.actor joe on joe.id=d.actor_id and joe.slug='joe' and joe.active
+     where c.package_key=p_package_key and c.approval_gate=p_gate
+       and p_gate in ('joe_approval','joe_go_no_go')
+       and e.work_request_version=p_work_request_version and e.evidence_kind=p_gate
+       and e.manifest_digest=ops.siep_manifest_digest()
+       and e.evidence_digest=ops.siep_current_evidence_digest(e.ledger_kind,e.ledger_id)
+       and e.source_observed_at=d.occurred_at and d.verb='siep-joe-decision'
+       and d.new_value->>'package_key'=c.package_key
+       and d.new_value->>'gate'=c.approval_gate
+       and d.new_value->>'manifest_digest'=ops.siep_manifest_digest()
+       and d.new_value->>'decision'=case when p_gate='joe_go_no_go' then 'go' else 'approved' end
+       and d.occurred_at>=coalesce((
+         select max(dw.closed_at) from ops.siep_program_dependency dep
+           join ops.siep_package_contract dc on dc.package_key=dep.depends_on_package_key
+           join ops.work_request dw on dw.id=dc.work_request_id
+          where dep.package_key=c.package_key
+       ),w.captured_at)
+       and not exists(
+         select 1 from public.event later
+          where later.actor_id=joe.id and later.verb='siep-joe-decision'
+            and later.new_value->>'package_key'=c.package_key
+            and later.new_value->>'gate'=c.approval_gate
+            and (later.occurred_at,later.id)>(d.occurred_at,d.id)
+       )
+  )
+$$;
+
+
+--
+-- Name: siep_current_evidence_digest(text, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.siep_current_evidence_digest(p_ledger_kind text, p_ledger_id uuid) RETURNS text
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+  select 'sha256:'||encode(public.digest(ops.guidance_import_canonical_json(source_row),'sha256'),'hex')
+    from (
+      select jsonb_build_object('receipt',to_jsonb(r),'job',to_jsonb(j),'attempt',to_jsonb(a),
+                                'binding',to_jsonb(b)) source_row
+        from ops.job_receipt r join ops.job j on j.id=r.job_id
+        join ops.job_attempt a on a.job_id=j.id and a.attempt=r.attempt
+        join ops.siep_job_evidence_binding b on b.job_id=j.id
+        join ops.engineering_execution_envelope envelope on envelope.job_id=j.id
+       where p_ledger_kind='job_receipt' and r.id=p_ledger_id
+         and b.engineering_contract_version='engineering-review.v1'
+         and not exists (
+           select 1 from ops.engineering_execution_envelope successor
+            where successor.supersedes_envelope_id=envelope.id
+         )
+         and 1=(
+           select count(*) from ops.engineering_execution_envelope leaf
+            where leaf.slice_plan_id=envelope.slice_plan_id
+              and leaf.slice_ref=envelope.slice_ref
+              and not exists (
+                select 1 from ops.engineering_execution_envelope successor
+                 where successor.supersedes_envelope_id=leaf.id
+              )
+         )
+      union all select to_jsonb(e) from public.event e
+       where p_ledger_kind='decision_event' and e.id=p_ledger_id
+    ) canonical
+$$;
+
+
+--
+-- Name: siep_evidence_actor(text, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.siep_evidence_actor(p_ledger_kind text, p_ledger_id uuid) RETURNS uuid
+    LANGUAGE plpgsql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+declare aid uuid;
+begin
+  case p_ledger_kind
+    when 'job_receipt' then select a.id into aid from ops.job_receipt r join ops.job j on j.id=r.job_id join public.actor a on a.slug=coalesce(j.lease_owner,'system') where r.id=p_ledger_id;
+    when 'decision_event' then select actor_id into aid from public.event where id=p_ledger_id and verb='siep-joe-decision';
+    else aid:=null;
+  end case;
+  if aid is null then raise exception 'evidence target does not exist in its canonical ledger'; end if;
+  return aid;
+end $$;
+
+
+--
+-- Name: siep_joe_decision_event_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.siep_joe_decision_event_guard() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+declare old_scoped boolean:=false; new_scoped boolean:=false;
+begin
+  if tg_op<>'INSERT' then
+    select old.verb='siep-joe-decision'
+      and old.new_value->>'program_key'='carr-system-integrity-elimination-v1'
+      and ops.siep_resolve_package(old.new_value->>'package_key') is not null
+      and old.new_value->>'gate' in ('joe_approval','joe_go_no_go')
+      into old_scoped;
+  end if;
+  if tg_op<>'DELETE' then
+    select new.verb='siep-joe-decision'
+      and new.new_value->>'program_key'='carr-system-integrity-elimination-v1'
+      and ops.siep_resolve_package(new.new_value->>'package_key') is not null
+      and new.new_value->>'gate' in ('joe_approval','joe_go_no_go')
+      into new_scoped;
+  end if;
+  if tg_op='INSERT' and new_scoped and session_user<>'carr_authority_joe' then
+    raise exception 'SIEP Joe decisions require the authenticated Joe authority session';
+  end if;
+  if tg_op in ('UPDATE','DELETE') and (old_scoped or new_scoped) then
+    raise exception 'SIEP Joe decision events are immutable';
+  end if;
+  return case when tg_op='DELETE' then old else new end;
+end $$;
+
+
+--
+-- Name: siep_manifest_digest(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.siep_manifest_digest() RETURNS text
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+  select 'sha256:'||encode(public.digest(ops.guidance_import_canonical_json(jsonb_build_object(
+    'program_key','carr-system-integrity-elimination-v1',
+    'packages',(select jsonb_agg(jsonb_build_object('key',c.package_key,'work_request',w.ref,
+      'ordinal',w.program_ordinal,'title',w.title,'lane',c.lane_key,'tier',c.minimum_executor_tier,
+      'approval_gate',c.approval_gate,'test_contract',c.test_contract,
+      'delivery_contract',c.delivery_contract,'rollback_contract',c.rollback_contract,
+      'required_evidence_kinds',to_jsonb(c.required_evidence_kinds)) order by w.program_ordinal)
+      from ops.siep_package_contract c join ops.work_request w on w.id=c.work_request_id),
+    'dependencies',(select jsonb_agg(jsonb_build_array(package_key,depends_on_package_key)
+      order by package_key,depends_on_package_key) from ops.siep_program_dependency),
+    'aliases',(select jsonb_agg(jsonb_build_array(alias_key,package_key) order by alias_key)
+      from ops.siep_component_alias)
+  )),'sha256'),'hex')
+$$;
+
+
+--
+-- Name: siep_manifest_insert_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.siep_manifest_insert_guard() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+begin
+  raise exception 'the reviewed SIEP package, dependency, and alias manifest is sealed';
+end $$;
+
+
+--
+-- Name: siep_program_identity_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.siep_program_identity_guard() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+begin
+  if old.program_key='carr-system-integrity-elimination-v1'
+     and (to_jsonb(new)-array['state','executor_actor','claimed_at','started_at','closed_at','updated_at','version',
+                                  'completion_kind','completion_evidence','verification_accepted_at','verification_evidence_ref'])
+         is distinct from
+         (to_jsonb(old)-array['state','executor_actor','claimed_at','started_at','closed_at','updated_at','version',
+                                  'completion_kind','completion_evidence','verification_accepted_at','verification_evidence_ref']) then
+    raise exception 'SIEP package identity and contract projection are immutable';
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: siep_program_transition_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.siep_program_transition_guard() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+begin
+  if old.program_key is distinct from 'carr-system-integrity-elimination-v1' then return new; end if;
+  if old.state='confirmed_closed' and new is distinct from old then raise exception 'closed SIEP package is immutable'; end if;
+  if old.state is not distinct from new.state and new is distinct from old then raise exception 'SIEP package mutations require a typed state transition'; end if;
+  if old.state is distinct from new.state and (old.state,new.state) not in (
+    ('ready','claimed'),('claimed','in_progress'),('in_progress','verification'),
+    ('verification','awaiting_release'),('awaiting_release','released'),('released','confirmed_closed')
+  ) then raise exception 'invalid SIEP package state transition'; end if;
+  if new.version<>old.version+1 then raise exception 'SIEP package transitions require exact version plus one'; end if;
+  if old.state='ready' and (new.executor_actor is distinct from 'system' or old.executor_actor is not null) then
+    raise exception 'SIEP claim executor is server-derived';
+  end if;
+  if old.state<>'ready' and new.executor_actor is distinct from old.executor_actor then
+    raise exception 'SIEP executor binding is immutable after claim';
+  end if;
+  if not exists(
+    select 1 from public.event e where e.subject_type='work_request' and e.subject_id=old.id
+      and e.verb=case when old.state='ready' then 'siep-claim-package' else 'siep-transition-package' end
+      and e.old_value=to_jsonb(old.state) and e.new_value->>'state'=new.state
+      and (e.new_value->>'version')::integer=new.version
+  ) then raise exception 'SIEP package transition requires its exact command event'; end if;
+  if new.state<>'confirmed_closed' and (
+    new.completion_kind is distinct from old.completion_kind
+    or new.completion_evidence is distinct from old.completion_evidence
+    or new.verification_accepted_at is distinct from old.verification_accepted_at
+    or new.verification_evidence_ref is distinct from old.verification_evidence_ref
+    or new.closed_at is distinct from old.closed_at
+  ) then raise exception 'SIEP completion fields may change only at terminal package closure'; end if;
+  return new;
+end $$;
+
+
+--
+-- Name: siep_read_program(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.siep_read_program() RETURNS jsonb
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+  select jsonb_build_object(
+    'program_key','carr-system-integrity-elimination-v1',
+    'manifest_digest',ops.siep_manifest_digest(),
+    'packages',coalesce(jsonb_agg(jsonb_build_object(
+      'package_key',c.package_key,'work_request_ref',w.ref,'title',w.title,'state',w.state,
+      'version',w.version,'owner',w.owner_actor,'executor',w.executor_actor,
+      'minimum_executor_tier',c.minimum_executor_tier,'approval_gate',c.approval_gate,
+      'dependencies',(select coalesce(jsonb_agg(d.depends_on_package_key order by d.depends_on_package_key),'[]'::jsonb)
+                        from ops.siep_program_dependency d where d.package_key=c.package_key),
+      'evidence',(select coalesce(jsonb_object_agg(e.evidence_kind,e.count),'{}'::jsonb)
+                    from (select evidence_kind,count(*) from ops.siep_evidence_link
+                           where package_key=c.package_key group by evidence_kind) e),
+      'delivery_contract',c.delivery_contract
+    ) order by w.program_ordinal),'[]'::jsonb)
+  ) from ops.siep_package_contract c join ops.work_request w on w.id=c.work_request_id
+$$;
+
+
+--
+-- Name: siep_record_joe_decision(text, text, text, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.siep_record_joe_decision(p_component text, p_gate text, p_decision text, p_idempotency_key uuid) RETURNS uuid
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+declare k text; c ops.siep_package_contract%rowtype; w ops.work_request%rowtype;
+        joe_id uuid; existing public.event%rowtype; eid uuid; payload jsonb;
+        decision_at timestamptz;
+begin
+  if session_user<>'carr_authority_joe' then
+    raise exception 'SIEP decisions require the authenticated Joe authority session';
+  end if;
+  k:=ops.siep_resolve_package(p_component);
+  select * into c from ops.siep_package_contract where package_key=k;
+  select * into w from ops.work_request where id=c.work_request_id;
+  if k is null or p_idempotency_key is null or p_gate<>c.approval_gate
+     or p_gate not in ('joe_approval','joe_go_no_go')
+     or (p_gate='joe_approval' and p_decision not in ('approved','rejected','revoked'))
+     or (p_gate='joe_go_no_go' and p_decision not in ('go','no_go','revoked')) then
+    raise exception 'exact SIEP approval gate and typed decision are required';
+  end if;
+  select id into joe_id from public.actor where slug='joe' and active;
+  if joe_id is null then raise exception 'active Joe actor is required'; end if;
+  perform pg_advisory_xact_lock(hashtextextended('siep-joe-decision:'||p_idempotency_key,0));
+  perform pg_advisory_xact_lock(hashtextextended('siep-joe-decision-package:'||k,0));
+  payload:=jsonb_build_object('program_key','carr-system-integrity-elimination-v1',
+    'package_key',k,'work_request_version',w.version,'gate',p_gate,'decision',p_decision,
+    'manifest_digest',ops.siep_manifest_digest());
+  select * into existing from public.event where actor_id=joe_id and verb='siep-joe-decision'
+    and idempotency_key=p_idempotency_key::text order by occurred_at,id limit 1;
+  if found then
+    if existing.subject_id<>w.id or existing.new_value<>payload then
+      raise exception 'idempotency_key_reuse: SIEP Joe decision inputs changed';
+    end if;
+    return existing.id;
+  end if;
+  select greatest(clock_timestamp(),coalesce(max(e.occurred_at)+interval '1 microsecond',clock_timestamp()))
+    into decision_at from public.event e
+   where e.actor_id=joe_id and e.verb='siep-joe-decision'
+     and e.new_value->>'package_key'=k and e.new_value->>'gate'=p_gate;
+  insert into public.event(occurred_at,actor_id,verb,subject_type,subject_id,field,
+                           old_value,new_value,cause,agent_rationale,idempotency_key)
+  values(decision_at,joe_id,'siep-joe-decision','work_request',w.id,'decision',null,payload,
+         'human_stated','typed SIEP authority decision',p_idempotency_key::text)
+  returning id into eid;
+  return eid;
+end $$;
+
+
+--
+-- Name: siep_release_lane_lock(text, text, uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.siep_release_lane_lock(p_component text, p_session_ref text, p_lease_token uuid, p_idempotency_key uuid) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $_$
+declare k text; n integer; c ops.siep_package_contract%rowtype; w ops.work_request%rowtype;
+        prior ops.siep_command_receipt%rowtype; aid uuid; released boolean;
+        request_digest text; result jsonb; lane ops.siep_lane_lock%rowtype;
+begin
+  k:=ops.siep_resolve_package(p_component);
+  select * into c from ops.siep_package_contract where package_key=k;
+  if k is null or p_lease_token is null or p_idempotency_key is null
+     or coalesce(p_session_ref,'') !~ '^session:[a-zA-Z0-9._:-]{1,240}$' then
+    raise exception 'known package, bounded session, lease token, and idempotency key are required';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended('siep-idempotency:'||p_idempotency_key,0));
+  perform pg_advisory_xact_lock(hashtextextended('siep-package:'||k,0));
+  perform pg_advisory_xact_lock(hashtextextended('siep-lane:'||c.lane_key,0));
+  request_digest:=ops.siep_request_digest(jsonb_build_object(
+    'package_key',k,'session_ref',p_session_ref,'lease_token',p_lease_token));
+  if exists(select 1 from ops.siep_evidence_link where idempotency_key=p_idempotency_key) then
+    raise exception 'idempotency_key_reuse: SIEP evidence key cannot be reused for a command';
+  end if;
+  select * into prior from ops.siep_command_receipt where idempotency_key=p_idempotency_key;
+  if found then
+    if prior.verb<>'release_lane' or prior.package_key<>k or prior.request_digest<>request_digest then
+      raise exception 'idempotency_key_reuse: SIEP lane-release inputs changed';
+    end if;
+    return (prior.result->>'released')::boolean;
+  end if;
+  select w0.* into w from ops.work_request w0 where w0.id=c.work_request_id for update;
+  select * into lane from ops.siep_lane_lock where lane_key=c.lane_key for update;
+  delete from ops.siep_lane_lock where lane_key=c.lane_key and package_key=k
+    and session_ref=p_session_ref and lease_token=p_lease_token
+    and (expires_at<=now() or w.state in ('ready','confirmed_closed','declined','superseded'));
+  get diagnostics n=row_count; released:=n=1;
+  select id into aid from public.actor where slug='system' and active;
+  result:=jsonb_build_object('package_key',k,'session_ref',p_session_ref,
+      'lease_digest','sha256:'||encode(public.digest(p_lease_token::text,'sha256'),'hex'),'released',released);
+  insert into public.event(occurred_at,actor_id,verb,subject_type,subject_id,field,old_value,new_value,cause,agent_rationale,idempotency_key)
+  values(now(),aid,'siep-release-lane-lock','work_request',w.id,'lane_lock',null,
+    result,
+    'system','typed SIEP lane release',p_idempotency_key::text);
+  insert into ops.siep_command_receipt(idempotency_key,verb,package_key,request_digest,result,recorded_actor_id)
+  values(p_idempotency_key,'release_lane',k,request_digest,result,aid);
+  return released;
+end $_$;
+
+
+--
+-- Name: siep_request_digest(jsonb); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.siep_request_digest(p_request jsonb) RETURNS text
+    LANGUAGE sql IMMUTABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $$
+  select 'sha256:'||encode(public.digest(ops.guidance_import_canonical_json(p_request),'sha256'),'hex')
+$$;
+
+
+--
+-- Name: siep_resolve_package(text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.siep_resolve_package(p_component text) RETURNS text
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+  select coalesce(
+    (select package_key from ops.siep_package_contract where package_key=p_component),
+    (select package_key from ops.siep_component_alias where alias_key=p_component)
+  )
+$$;
+
+
+--
+-- Name: siep_terminal_status(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.siep_terminal_status() RETURNS jsonb
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+  with facts as (
+    select count(*) filter(where w.state<>'confirmed_closed') as open_packages,
+           count(*) as contract_packages,
+           (select count(*) from ops.work_request sw where sw.program_key='carr-system-integrity-elimination-v1') as program_rows,
+           count(*) filter(where w.state='blocked' or w.blocker_code is not null) as blocked_packages,
+           bool_or(c.package_key='06B' and w.state='confirmed_closed') as closure_authority_closed,
+           bool_or(c.package_key='44' and w.state='confirmed_closed') as retirement_closed
+      from ops.siep_package_contract c join ops.work_request w on w.id=c.work_request_id
+  ), audit as (
+    select count(distinct (r.evidence->>'cycle')) as clean_cycles,
+           count(distinct (r.evidence->>'baseline_digest')) as baseline_count,
+           count(distinct (r.evidence->>'run_id')) as audit_run_count,
+           min(e.source_observed_at) filter(where r.evidence->>'cycle'='1') as cycle_one_at,
+           min(e.source_observed_at) filter(where r.evidence->>'cycle'='2') as cycle_two_at
+      from ops.siep_evidence_link e join ops.job_receipt r on r.id=e.ledger_id
+     where e.package_key='44' and e.evidence_kind='two_clean_audit_cycles'
+       and e.ledger_kind='job_receipt' and r.evidence->>'operation'='clean_audit_cycle'
+       and r.evidence->>'cycle' in ('1','2') and r.evidence->>'unresolved_count'='0'
+       and r.evidence->>'blocker_count'='0'
+       and e.evidence_digest=ops.siep_current_evidence_digest(e.ledger_kind,e.ledger_id)
+  ), mutation as (
+    select max(source_observed_at) as last_material_fix_at
+      from ops.siep_evidence_link e where evidence_kind='material_fix'
+       and e.evidence_digest=ops.siep_current_evidence_digest(e.ledger_kind,e.ledger_id)
+  ), zeroes as (
+    select exists(select 1 from ops.siep_evidence_link e join ops.job_receipt r on r.id=e.ledger_id
+      where e.package_key='44' and e.evidence_kind='zero_unresolved_findings'
+        and r.evidence->>'operation'='zero_unresolved_findings' and r.evidence->>'count'='0'
+        and e.evidence_digest=ops.siep_current_evidence_digest(e.ledger_kind,e.ledger_id)) as zero_findings,
+      exists(select 1 from ops.siep_evidence_link e join ops.job_receipt r on r.id=e.ledger_id
+      where e.package_key='44' and e.evidence_kind='zero_blockers'
+        and r.evidence->>'operation'='zero_blockers' and r.evidence->>'count'='0'
+        and e.evidence_digest=ops.siep_current_evidence_digest(e.ledger_kind,e.ledger_id)) as zero_blockers
+  ), live as (
+    select exists(select 1 from ops.siep_lane_lock where expires_at>now()) as live_lane_lock,
+           exists(select 1 from ops.incident i join ops.incident_link l on l.incident_id=i.id
+                   where l.kind='work_request' and l.ref like 'WR-SIEP-%'
+                     and i.state not in ('resolved','reviewed')) as open_incident,
+           exists(select 1 from ops.siep_evidence_link e join ops.job_receipt r on r.id=e.ledger_id
+             where e.package_key='44' and e.evidence_kind='live_readback'
+               and r.evidence->>'operation'='live_readback' and r.evidence->>'status'='pass'
+               and e.evidence_digest=ops.siep_current_evidence_digest(e.ledger_kind,e.ledger_id)) as live_readback
+  )
+  select jsonb_build_object(
+    'complete',open_packages=0 and contract_packages=40 and program_rows=40 and blocked_packages=0
+      and closure_authority_closed and retirement_closed and zero_findings and zero_blockers
+      and clean_cycles=2 and audit_run_count=2 and baseline_count=1
+      and cycle_one_at>coalesce(last_material_fix_at,'-infinity'::timestamptz) and cycle_two_at>cycle_one_at
+      and not live_lane_lock and not open_incident and live_readback,
+    'open_packages',open_packages,'closure_authority_closed',closure_authority_closed,
+    'retirement_closed',retirement_closed,'blocked_packages',blocked_packages,
+    'clean_audit_cycles',clean_cycles,'audit_run_count',audit_run_count,'audit_baseline_count',baseline_count,
+    'exact_program_rowset',contract_packages=40 and program_rows=40,
+    'last_material_fix_at',last_material_fix_at,'live_lane_lock',live_lane_lock,
+    'open_incident',open_incident,'live_readback',live_readback,
+    'required_terminal_evidence',jsonb_build_array('zero_unresolved_findings','zero_blockers','two_clean_audit_cycles','live_readback')
+  ) from facts cross join audit cross join mutation cross join zeroes cross join live
+$$;
+
+
+--
+-- Name: siep_transition_package(text, integer, text, text, uuid, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.siep_transition_package(p_component text, p_base_version integer, p_target_state text, p_session_ref text, p_lease_token uuid, p_idempotency_key uuid) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public'
+    AS $_$
+declare k text; w ops.work_request%rowtype; c ops.siep_package_contract%rowtype;
+        actor_id uuid; prior ops.siep_command_receipt%rowtype; review_id uuid; missing text[];
+        lane ops.siep_lane_lock%rowtype; result jsonb; clean_cycles integer; baselines integer; audit_runs integer;
+        last_fix timestamptz; cycle_one timestamptz; cycle_two timestamptz; attestor text; request_digest text;
+begin
+  k:=ops.siep_resolve_package(p_component);
+  if k is null or p_idempotency_key is null or p_lease_token is null or p_base_version<1
+     or coalesce(p_session_ref,'') !~ '^session:[a-zA-Z0-9._:-]{1,240}$' then
+    raise exception 'known package, positive base version, bounded session, lease token, and UUID idempotency key are required';
+  end if;
+  select * into c from ops.siep_package_contract where package_key=k;
+  perform pg_advisory_xact_lock(hashtextextended('siep-idempotency:'||p_idempotency_key,0));
+  perform pg_advisory_xact_lock(hashtextextended('siep-package:'||k,0));
+  perform pg_advisory_xact_lock(hashtextextended('siep-lane:'||c.lane_key,0));
+  request_digest:=ops.siep_request_digest(jsonb_build_object(
+    'package_key',k,'base_version',p_base_version,'target_state',p_target_state,
+    'session_ref',p_session_ref,'lease_token',p_lease_token));
+  if exists(select 1 from ops.siep_evidence_link where idempotency_key=p_idempotency_key) then
+    raise exception 'idempotency_key_reuse: SIEP evidence key cannot be reused for a command';
+  end if;
+  select * into prior from ops.siep_command_receipt where idempotency_key=p_idempotency_key;
+  if found then
+    if prior.verb<>'transition' or prior.package_key<>k or prior.request_digest<>request_digest then
+      raise exception 'idempotency_key_reuse: SIEP transition inputs changed';
+    end if;
+    return prior.result||jsonb_build_object('replayed',true);
+  end if;
+  select w0.* into w from ops.work_request w0
+    join ops.siep_package_contract c0 on c0.work_request_id=w0.id
+   where c0.package_key=k for update of w0;
+  if w.version<>p_base_version then raise exception 'version_conflict: expected %, current %',p_base_version,w.version; end if;
+  select * into lane from ops.siep_lane_lock where lane_key=c.lane_key for update;
+  if not found or lane.package_key<>k or lane.work_request_version<>p_base_version
+     or lane.session_ref<>p_session_ref or lane.lease_token<>p_lease_token or lane.expires_at<=now() then
+    raise exception 'SIEP transition requires the exact live holder-bound package lane lock';
+  end if;
+  if (w.state,p_target_state) not in (('claimed','in_progress'),('in_progress','verification'),('verification','awaiting_release'),('awaiting_release','released'),('released','confirmed_closed')) then
+    raise exception 'invalid SIEP transition % -> %',w.state,p_target_state;
+  end if;
+  if p_target_state in ('released','confirmed_closed') then
+    select array_agg(req) into missing from unnest(c.required_evidence_kinds) req
+     where not exists(select 1 from ops.siep_evidence_link e where e.package_key=k and e.evidence_kind=req
+       and e.manifest_digest=ops.siep_manifest_digest()
+       and e.evidence_digest=ops.siep_current_evidence_digest(e.ledger_kind,e.ledger_id)
+       and (req in ('joe_approval','joe_go_no_go')
+            or e.work_request_version>=w.version-case when p_target_state='confirmed_closed' then 1 else 0 end));
+    if missing is not null then raise exception 'SIEP package % missing evidence: %',k,missing; end if;
+    if not exists(select 1 from ops.siep_evidence_link e
+                   where e.package_key=k and e.evidence_kind='independent_review'
+                     and e.evidence_digest=ops.siep_current_evidence_digest(e.ledger_kind,e.ledger_id)) then
+      raise exception 'SIEP package % requires independent evidence',k;
+    end if;
+  end if;
+  if p_target_state='confirmed_closed' then
+    if exists(select 1 from ops.siep_program_dependency d join ops.siep_package_contract dc on dc.package_key=d.depends_on_package_key
+              join ops.work_request dw on dw.id=dc.work_request_id where d.package_key=k and dw.state<>'confirmed_closed') then
+      raise exception 'SIEP package % cannot close before its dependencies',k;
+    end if;
+    if k='44' and exists(select 1 from ops.siep_package_contract pc join ops.work_request pw on pw.id=pc.work_request_id
+                          where pc.package_key<>'44' and pw.state<>'confirmed_closed') then
+      raise exception 'SIEP terminal authority refuses completion: packages remain open';
+    end if;
+    if k='44' and ((select count(*) from ops.work_request where program_key='carr-system-integrity-elimination-v1')<>40
+                   or (select count(*) from ops.siep_package_contract)<>40) then
+      raise exception 'SIEP terminal authority refuses completion: program rowset is not exact';
+    end if;
+    if k='44' then
+      select count(distinct r.evidence->>'cycle'),count(distinct r.evidence->>'baseline_digest'),
+             count(distinct r.evidence->>'run_id'),
+             min(e.source_observed_at) filter(where r.evidence->>'cycle'='1'),
+             min(e.source_observed_at) filter(where r.evidence->>'cycle'='2')
+        into clean_cycles,baselines,audit_runs,cycle_one,cycle_two
+        from ops.siep_evidence_link e join ops.job_receipt r on r.id=e.ledger_id
+       where e.package_key='44' and e.evidence_kind='two_clean_audit_cycles' and e.ledger_kind='job_receipt'
+         and r.evidence->>'operation'='clean_audit_cycle' and r.evidence->>'cycle' in ('1','2')
+         and r.evidence->>'unresolved_count'='0' and r.evidence->>'blocker_count'='0'
+         and e.evidence_digest=ops.siep_current_evidence_digest(e.ledger_kind,e.ledger_id);
+      select max(source_observed_at) into last_fix from ops.siep_evidence_link e where evidence_kind='material_fix'
+       and e.evidence_digest=ops.siep_current_evidence_digest(e.ledger_kind,e.ledger_id);
+      if clean_cycles<>2 or audit_runs<>2 or baselines<>1
+         or cycle_one<=coalesce(last_fix,'-infinity'::timestamptz) or cycle_two<=cycle_one
+         or exists(select 1 from ops.siep_lane_lock where expires_at>now() and package_key<>'44')
+         or exists(select 1 from ops.incident i join ops.incident_link l on l.incident_id=i.id
+                   where l.kind='work_request' and l.ref like 'WR-SIEP-%' and i.state not in ('resolved','reviewed'))
+         or exists(select 1 from ops.siep_package_contract pc join ops.work_request pw on pw.id=pc.work_request_id
+                   where pw.state='blocked' or pw.blocker_code is not null) then
+        raise exception 'SIEP terminal authority refuses completion: final clean-cycle, blocker, incident, or lane predicate failed';
+      end if;
+    end if;
+    select e.id,a.slug into review_id,attestor from ops.siep_evidence_link e
+      join public.actor a on a.id=e.linked_actor_id
+     where e.package_key=k and e.evidence_kind='independent_review' order by e.linked_at desc limit 1;
+  end if;
+  select id into actor_id from public.actor where slug=coalesce(w.executor_actor,'system') and active;
+  if actor_id is null then raise exception 'SIEP transition requires an active claimed executor'; end if;
+  result:=jsonb_build_object('package_key',k,'base_version',p_base_version,'state',p_target_state,
+    'version',w.version+1,'session_ref',p_session_ref,
+    'lease_digest','sha256:'||encode(public.digest(p_lease_token::text,'sha256'),'hex'));
+  insert into public.event(occurred_at,actor_id,verb,subject_type,subject_id,field,old_value,new_value,cause,agent_rationale,idempotency_key)
+  values(now(),actor_id,'siep-transition-package','work_request',w.id,'state',to_jsonb(w.state),result,
+         'system','typed SIEP transition',p_idempotency_key::text);
+  update ops.work_request set state=p_target_state,version=version+1,updated_at=now(),
+    started_at=case when p_target_state='in_progress' then coalesce(started_at,now()) else started_at end,
+    closed_at=case when p_target_state='confirmed_closed' then now() else closed_at end,
+    completion_kind=case when p_target_state='confirmed_closed' then 'extended' else completion_kind end,
+    completion_evidence=case when p_target_state='confirmed_closed' then jsonb_build_object(
+      'acceptance_predicates',to_jsonb(c.required_evidence_kinds),
+      'change_ref',ops.siep_manifest_digest(),'user_facing',false,'attested_by',attestor,
+      'siep_package',k,'evidence_links',(select jsonb_agg(id order by linked_at) from ops.siep_evidence_link where package_key=k)) else completion_evidence end,
+    verification_accepted_at=case when p_target_state='confirmed_closed' then now() else verification_accepted_at end,
+    verification_evidence_ref=case when p_target_state='confirmed_closed' then review_id::text else verification_evidence_ref end
+   where id=w.id;
+  if p_target_state='confirmed_closed' then
+    delete from ops.siep_lane_lock where lane_key=c.lane_key and package_key=k
+      and session_ref=p_session_ref and lease_token=p_lease_token;
+  else
+    update ops.siep_lane_lock set work_request_version=w.version+1
+     where lane_key=c.lane_key and package_key=k
+       and session_ref=p_session_ref and lease_token=p_lease_token;
+  end if;
+  insert into ops.siep_command_receipt(idempotency_key,verb,package_key,request_digest,result,recorded_actor_id)
+  values(p_idempotency_key,'transition',k,request_digest,result,actor_id);
+  return result||jsonb_build_object('replayed',false);
+end $_$;
+
+
+--
+-- Name: skip_job(uuid, uuid, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.skip_job(p_job_id uuid, p_lease_token uuid, p_detail text) RETURNS text
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'ops', 'public', 'pg_temp'
+    AS $$
+declare j ops.job%rowtype;
+begin
+  select * into j from ops.job where id=p_job_id for update;
+  if not found or j.state <> 'running' or j.lease_token <> p_lease_token
+     or j.leased_until < now() then
+    raise exception 'job % does not hold this live lease',p_job_id;
+  end if;
+  -- NOT A FAILURE. This is terminal on the attempt that just ran, always --
+  -- never the fail_job/timeout_job branch that checks attempt < max_attempts
+  -- and routes back through retry_wait. A missing credential does not
+  -- self-heal on a timer, so spending retry budget on it only delays the
+  -- honest dead_lettered outcome a real failure deserves, and this job never
+  -- reaches dead_lettered for this reason at all.
+  --
+  -- last_failure_class/last_failure_detail are deliberately left untouched:
+  -- those columns are read as failure evidence elsewhere (0308's health
+  -- view), and a not-configured run is not that. The message lives only in
+  -- the immutable 'skipped' receipt below, where a reader has to ask for it
+  -- by name instead of tripping over it in a failure surface.
+  update ops.job_attempt set state='skipped',ended_at=now(),detail=p_detail
+   where job_id=j.id and attempt=j.attempt and lease_token=p_lease_token;
+  update ops.job set state='skipped',ended_at=now(),
+         lease_owner=null,lease_token=null,leased_until=null,updated_at=now()
+   where id=j.id;
+  insert into ops.job_receipt(job_id,attempt,kind,receipt_ref,evidence)
+    values(j.id,j.attempt,'skipped',concat('skipped:',j.id,':',j.attempt),
+           jsonb_build_object('detail',p_detail));
+  return 'skipped';
+end $$;
+
+
+--
+-- Name: sourced_heavy_build_review_target(text, text, text); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.sourced_heavy_build_review_target(p_work_request text, p_plan_hash text, p_admission_hash text) RETURNS TABLE(work_request_id uuid, ref text, plan_id uuid, admission_id uuid, admission_ref text, builder_session_ref text)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+  select w.id,w.ref,p.id,a.id,a.admission_ref,a.builder_session_ref
+    from ops.work_request w
+    join ops.sourced_work_request_plan p on p.work_request_id=w.id
+    join ops.heavy_build_admission_revision a on a.plan_id=p.id
+   where w.ref=p_work_request and w.state='triaged' and p.plan_hash=p_plan_hash and a.admission_hash=p_admission_hash
+     and a.version=(select max(latest.version) from ops.heavy_build_admission_revision latest where latest.plan_id=p.id)
+     and w.organization_tenant_id='carr-internal';
+$$;
 
 
 --
@@ -9146,14 +13522,15 @@ end $$;
 --
 
 CREATE FUNCTION ops.standing_guidance(p_actor text, p_workflow text DEFAULT NULL::text, p_surface text DEFAULT NULL::text, p_tier text DEFAULT NULL::text) RETURNS TABLE(source_rule_id uuid, statement text, human_quote text, taught_by text, personal_to text, scope jsonb, guidance_type text, is_constitution boolean)
-    LANGUAGE sql STABLE
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops', 'public', 'pg_temp'
     AS $$
   select r.id,r.statement,r.human_quote,teacher.display_name,owner.slug,g.scope,
          g.guidance_type,g.is_constitution
     from ops.v_guidance_current g
-    join rule r on r.id=g.source_rule_id and r.status='active'
-    join actor teacher on teacher.id=r.taught_by
-    left join actor owner on owner.id=r.personal_to
+    join public.rule r on r.id=g.source_rule_id and r.status='active'
+    join public.actor teacher on teacher.id=r.taught_by
+    left join public.actor owner on owner.id=r.personal_to
    where exists (
            select 1
              from ops.v_guidance_registry_state s
@@ -9170,6 +13547,13 @@ CREATE FUNCTION ops.standing_guidance(p_actor text, p_workflow text DEFAULT NULL
      )
    order by g.is_constitution desc,r.personal_to nulls first,r.created_at,r.id
 $$;
+
+
+--
+-- Name: FUNCTION standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text); Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON FUNCTION ops.standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text) IS 'Reader-facing active Guidance Registry projection. SECURITY DEFINER with a fixed search_path so carr_reader can consume the sanctioned projection without receiving direct public.rule or public.actor table access.';
 
 
 --
@@ -9335,6 +13719,9 @@ CREATE FUNCTION ops.timeout_job(p_job_id uuid, p_lease_token uuid, p_detail text
 declare j ops.job%rowtype; next_state text;
 begin
   select * into j from ops.job where id=p_job_id for update;
+  if found and j.definition_key='engineering-slice' then
+    raise exception 'engineering jobs require scoped controller functions';
+  end if;
   if not found or j.state <> 'running' or j.lease_token <> p_lease_token
      or j.leased_until < now() then
     raise exception 'job % does not hold this live lease',p_job_id;
@@ -9356,6 +13743,184 @@ begin
            concat('timeout:',j.id,':',j.attempt),
            jsonb_build_object('failure_class','execution_timeout','detail',p_detail,'next_state',next_state));
   return next_state;
+end $$;
+
+
+--
+-- Name: tour_assertion_rights_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_assertion_rights_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if not exists (select 1 from ops.tour_rights_receipt r where r.id=new.rights_receipt_id and r.organization_tenant_id=new.organization_tenant_id and r.status='active' and r.effective_at <= new.observed_at and (r.expires_at is null or r.expires_at > new.observed_at) and r.revoked_at is null and r.allowed_use_classes ? 'canonical_fact' and (r.allowed_field_classes ? new.field_key or r.allowed_field_classes ? '*') and not exists (select 1 from ops.tour_rights_receipt newer where newer.organization_tenant_id=r.organization_tenant_id and newer.policy_key=r.policy_key and newer.receipt_version > r.receipt_version and newer.effective_at <= new.observed_at)) then raise exception 'rights receipt refuses asserted field/use'; end if;
+  return new;
+end $$;
+
+
+--
+-- Name: tour_conflict_participant_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_conflict_participant_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if not exists (select 1 from ops.tour_fact_conflict c join ops.tour_field_assertion a on a.id=new.field_assertion_id and a.organization_tenant_id=new.organization_tenant_id where c.id=new.conflict_id and c.organization_tenant_id=new.organization_tenant_id and c.property_id=a.property_id and c.field_key=a.field_key) then raise exception 'conflict participant does not match conflict property and field'; end if;
+  return new;
+end $$;
+
+
+--
+-- Name: tour_conflict_resolution_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_conflict_resolution_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if not exists (select 1 from ops.tour_fact_conflict_participant p join ops.tour_fact_conflict c on c.id=p.conflict_id and c.organization_tenant_id=p.organization_tenant_id join ops.tour_field_assertion a on a.id=p.field_assertion_id and a.organization_tenant_id=p.organization_tenant_id where p.conflict_id=new.conflict_id and p.organization_tenant_id=new.organization_tenant_id and p.field_assertion_id=new.selected_field_assertion_id and a.property_id=c.property_id and a.field_key=c.field_key) then raise exception 'conflict resolution selection is not a matching participant'; end if;
+  return new;
+end $$;
+
+
+--
+-- Name: tour_membership_seal_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_membership_seal_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  perform 1 from ops.tour where id=new.tour_id and organization_tenant_id=new.organization_tenant_id for update;
+  if exists (select 1 from ops.tour_public_projection p where p.organization_tenant_id=new.organization_tenant_id and p.tour_id=new.tour_id and p.route_version=new.route_version) then raise exception 'tour route version is sealed by an existing projection'; end if;
+  return new;
+end $$;
+
+
+--
+-- Name: tour_projection_creation_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_projection_creation_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  perform 1 from ops.tour where id=new.tour_id and organization_tenant_id=new.organization_tenant_id for update;
+  if not exists (select 1 from ops.tour_property_membership m where m.organization_tenant_id=new.organization_tenant_id and m.tour_id=new.tour_id and m.route_version=new.route_version) or exists (select 1 from ops.tour_property_membership m where m.organization_tenant_id=new.organization_tenant_id and m.tour_id=new.tour_id and m.route_version=new.route_version and m.selected_at > new.as_of) then raise exception 'projection requires a complete membership set selected by as_of'; end if;
+  return new;
+end $$;
+
+
+--
+-- Name: tour_projection_fact_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_projection_fact_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare p_tour_id uuid; p ops.tour_public_projection%rowtype;
+begin
+  if tg_op <> 'INSERT' then raise exception 'tour_public_projection_fact is append-only'; end if;
+  select tour_id into p_tour_id from ops.tour_public_projection where id=new.projection_id and organization_tenant_id=new.organization_tenant_id;
+  if not found then raise exception 'projection fact projection is unavailable'; end if;
+  perform 1 from ops.tour where id=p_tour_id and organization_tenant_id=new.organization_tenant_id for update;
+  select * into p from ops.tour_public_projection where id=new.projection_id and organization_tenant_id=new.organization_tenant_id for update;
+  if not exists (select 1 from ops.tour_field_assertion a join ops.tour_rights_receipt r on r.id=a.rights_receipt_id and r.organization_tenant_id=a.organization_tenant_id join ops.tour_property_membership m on m.tour_id=p.tour_id and m.property_id=new.property_id and m.organization_tenant_id=new.organization_tenant_id and m.route_version=p.route_version where p.status='draft' and not exists (select 1 from ops.tour_public_projection_seal_receipt seal where seal.organization_tenant_id=p.organization_tenant_id and seal.projection_id=p.id) and new.route_version=p.route_version and a.id=new.field_assertion_id and a.organization_tenant_id=new.organization_tenant_id and a.property_id=new.property_id and a.field_key=new.display_field_key and a.review_state='reviewed' and a.data_classification='public' and m.selected_at <= p.as_of and a.effective_from <= p.as_of and (a.effective_to is null or a.effective_to > p.as_of) and r.status='active' and r.effective_at <= p.as_of and (r.expires_at is null or r.expires_at > p.as_of) and r.revoked_at is null and r.allowed_use_classes ? 'client_public_display' and (r.allowed_field_classes ? a.field_key or r.allowed_field_classes ? '*') and not exists (select 1 from ops.tour_rights_receipt newer where newer.organization_tenant_id=r.organization_tenant_id and newer.policy_key=r.policy_key and newer.receipt_version > r.receipt_version and newer.effective_at <= p.as_of) and ops.tour_public_value_safe(a.field_key,a.value)) then raise exception 'projection fact lacks current public assertion, rights, or safe value'; end if;
+  return new;
+end $$;
+
+
+--
+-- Name: tour_projection_seal_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_projection_seal_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare p_tour_id uuid; p ops.tour_public_projection%rowtype;
+begin
+  select tour_id into p_tour_id from ops.tour_public_projection where id=new.projection_id and organization_tenant_id=new.organization_tenant_id;
+  if not found then raise exception 'projection seal target is unavailable'; end if;
+  perform 1 from ops.tour where id=p_tour_id and organization_tenant_id=new.organization_tenant_id for update;
+  select * into p from ops.tour_public_projection where id=new.projection_id and organization_tenant_id=new.organization_tenant_id for update;
+  if p.status <> 'draft' or exists (select 1 from ops.tour_public_projection_seal_receipt s where s.organization_tenant_id=p.organization_tenant_id and s.projection_id=p.id) then raise exception 'projection is not an unsealed draft'; end if;
+  return new;
+end $$;
+
+
+--
+-- Name: tour_public_value_safe(text, jsonb); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_public_value_safe(p_field_key text, p_value jsonb) RETURNS boolean
+    LANGUAGE sql IMMUTABLE
+    AS $$
+  select case
+    when p_field_key in ('display.name','display.address','suite','property_type','availability','parking','access','source_attribution','as_of','caveat') then jsonb_typeof(p_value) = 'string'
+    when p_field_key in ('size','asking_economics') then jsonb_typeof(p_value) = 'object' and not exists (select 1 from jsonb_each(p_value) e where e.key not in ('value','unit','min','max','currency','period','label') or jsonb_typeof(e.value) not in ('string','number','boolean','null'))
+    when p_field_key in ('photos','floor_plan') then jsonb_typeof(p_value) = 'array' and not exists (select 1 from jsonb_array_elements(p_value) item where jsonb_typeof(item) <> 'object' or exists (select 1 from jsonb_each(item) e where e.key not in ('url','alt','caption','source') or jsonb_typeof(e.value) <> 'string'))
+    else false end;
+$$;
+
+
+--
+-- Name: tour_reject_mutation(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_reject_mutation() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$ begin raise exception '% is append-only', tg_table_name; end $$;
+
+
+--
+-- Name: tour_rights_lineage_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_rights_lineage_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare prior ops.tour_rights_receipt%rowtype;
+begin
+  if new.supersedes_receipt_id is null and new.receipt_version <> 1 then raise exception 'rights receipt version requires supersession lineage'; end if;
+  if new.supersedes_receipt_id is not null then
+    select * into prior from ops.tour_rights_receipt where id=new.supersedes_receipt_id and organization_tenant_id=new.organization_tenant_id for update;
+    if not found or prior.policy_key <> new.policy_key or prior.provider <> new.provider or new.receipt_version <> prior.receipt_version + 1 then raise exception 'rights receipt supersession lineage is invalid'; end if;
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: tour_share_rotation_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_share_rotation_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+declare prior ops.tour_share_grant%rowtype;
+begin
+  if new.rotated_from_grant_id is null and new.grant_version <> 1 then raise exception 'share grant version requires rotation lineage'; end if;
+  if new.rotated_from_grant_id is not null then
+    if new.rotated_from_grant_id = new.id then raise exception 'share grant cannot rotate itself'; end if;
+    select * into prior from ops.tour_share_grant where id=new.rotated_from_grant_id and organization_tenant_id=new.organization_tenant_id for update;
+    if not found or prior.projection_id <> new.projection_id or new.grant_version <> prior.grant_version + 1 then raise exception 'share grant rotation lineage is invalid'; end if;
+  end if;
+  return new;
+end $$;
+
+
+--
+-- Name: tour_source_rights_guard(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.tour_source_rights_guard() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+begin
+  if not exists (select 1 from ops.tour_rights_receipt r where r.id=new.rights_receipt_id and r.organization_tenant_id=new.organization_tenant_id and r.status='active' and r.effective_at <= new.retrieved_at and (r.expires_at is null or r.expires_at > new.retrieved_at) and r.revoked_at is null and r.allowed_use_classes ? 'source_intake' and not exists (select 1 from ops.tour_rights_receipt newer where newer.organization_tenant_id=r.organization_tenant_id and newer.policy_key=r.policy_key and newer.receipt_version > r.receipt_version and newer.effective_at <= new.retrieved_at)) then raise exception 'rights receipt refuses source intake'; end if;
+  return new;
 end $$;
 
 
@@ -9415,10 +13980,16 @@ CREATE FUNCTION ops.transition_proposed_eval_candidate(p_work_request text, p_ca
     SET search_path TO 'ops', 'public', 'pg_temp'
     AS $$
 declare tenant text := current_setting('carr.organization_tenant_id', true); candidate ops.proposed_eval_candidate%rowtype; actor_row actor%rowtype;
-  current_state text; replay_event ops.proposed_eval_candidate_event%rowtype;
+  current_state text; replay_event ops.proposed_eval_candidate_event%rowtype; v_actor_slug text;
 begin
-  if session_user !~ '^carr_authority_' then raise exception 'eval candidate transition requires human authority'; end if;
-  select * into actor_row from actor where slug=regexp_replace(session_user,'^carr_authority_','') and kind='human' and active;
+  if session_user ~ '^carr_authority_' then
+    v_actor_slug := regexp_replace(session_user,'^carr_authority_','');
+  elsif session_user = 'carr_writer' then
+    v_actor_slug := nullif(btrim(current_setting('carr.acting_actor_slug', true)), '');
+  else
+    raise exception 'eval candidate transition requires the authority connection or a sponsored writer session';
+  end if;
+  select * into actor_row from actor where slug=v_actor_slug and kind in ('human','automation') and active;
   select p.* into candidate from ops.proposed_eval_candidate p join ops.attempt_receipt r on r.id=p.attempt_receipt_id join ops.work_request w on w.id=r.work_request_id
    where p.organization_tenant_id=tenant and p.candidate_ref=p_candidate_ref and w.ref=p_work_request and w.organization_tenant_id=tenant for update of p;
   if actor_row.id is null or candidate.id is null or jsonb_typeof(p_decision_basis)<>'object' then raise exception 'eval candidate transition lacks visible authority/candidate/basis'; end if;
@@ -9966,20 +14537,22 @@ end $$;
 CREATE FUNCTION ops.validate_recovery_rehearsal_run() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
-declare b ops.staging_recovery_rehearsal_bundle%rowtype;
+declare b ops.staging_recovery_rehearsal_bundle%rowtype; expected_started timestamptz;
 begin
+  if new.run_key like 'recovery.rehearsal.%' and new.state='succeeded'
+     and new.recovery_rehearsal_bundle_id is null then
+    raise exception 'successful recovery rehearsal run requires a typed bundle';
+  end if;
   if new.recovery_rehearsal_bundle_id is null then return new; end if;
-  select * into strict b from ops.staging_recovery_rehearsal_bundle
-   where id=new.recovery_rehearsal_bundle_id;
-  if new.kind <> 'check' or new.run_key <> 'recovery.rehearsal.worker'
-     or new.state <> 'succeeded' or new.environment <> 'staging'
-     or new.release_id <> b.current_release_id or new.service_id <> b.service_id
-     or new.correlation_id <> b.correlation_id
-     or new.recovery_strategy <> b.recovery_strategy
-     or new.recovery_plan_ref <> b.recovery_plan_ref
-     or new.evidence_ref <> b.evidence_ref
-     or new.started_at is distinct from (
-       select observed_at from ops.staging_release_readback_receipt where id=b.current_before_receipt_id)
+  select * into strict b from ops.staging_recovery_rehearsal_bundle where id=new.recovery_rehearsal_bundle_id;
+  expected_started:=case when b.recovery_strategy='rollback' then
+    (select observed_at from ops.staging_release_readback_receipt where id=b.current_before_receipt_id)
+    else (select observed_at from ops.staging_forward_fix_rehearsal_result where id=b.forward_fix_result_id) end;
+  if new.kind<>'check' or new.run_key<>(case when b.recovery_strategy='rollback' then 'recovery.rehearsal.worker' else 'recovery.rehearsal.forward-fix' end)
+     or new.state<>'succeeded' or new.environment<>'staging' or new.release_id<>b.current_release_id
+     or new.service_id<>b.service_id or new.correlation_id<>b.correlation_id
+     or new.recovery_strategy<>b.recovery_strategy or new.recovery_plan_ref<>b.recovery_plan_ref
+     or new.evidence_ref<>b.evidence_ref or new.started_at is distinct from expected_started
      or new.ended_at is distinct from b.completed_at then
     raise exception 'recovery rehearsal run does not exactly match its typed bundle';
   end if;
@@ -11548,6 +16121,7 @@ CREATE TABLE ops.capability_agent_session (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     version integer DEFAULT 1 NOT NULL,
+    lease_expires_at timestamp with time zone,
     CONSTRAINT capability_agent_session_candidate_kind_check CHECK ((candidate_kind = ANY (ARRAY['built'::text, 'extended'::text, 'adopted'::text, 'declined'::text]))),
     CONSTRAINT capability_agent_session_candidate_travels_together CHECK ((((candidate_kind IS NULL) = (candidate_evidence IS NULL)) AND ((candidate_kind IS NULL) = (candidate_fingerprint IS NULL)))),
     CONSTRAINT capability_agent_session_source_commit_sha_check CHECK ((source_commit_sha ~ '^[0-9a-f]{40}$'::text)),
@@ -11563,6 +16137,13 @@ CREATE TABLE ops.capability_agent_session (
 --
 
 COMMENT ON TABLE ops.capability_agent_session IS 'Server-created, actor-bound build-session evidence for the fixed capability programme. A session starts claimed, is separately started, then freezes one candidate for independent verification. It never stores code or secrets: only worktree, commit and evidence references.';
+
+
+--
+-- Name: COLUMN capability_agent_session.lease_expires_at; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.capability_agent_session.lease_expires_at IS 'Server-issued bounded execution lease for Engineering Passport dispatch. NULL legacy sessions are never executable.';
 
 
 --
@@ -11935,8 +16516,11 @@ CREATE TABLE ops.engineering_execution_envelope (
     issued_at timestamp with time zone NOT NULL,
     expires_at timestamp with time zone NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    supersedes_envelope_id uuid,
+    supersession_reason text,
     CONSTRAINT engineering_envelope_expiry_after_issue CHECK ((expires_at > issued_at)),
     CONSTRAINT engineering_envelope_slice_plan_matches CHECK (((regexp_replace((envelope ->> 'work_request_id'::text), '^wr:'::text, ''::text) = (work_request_id)::text) AND (((envelope -> 'state_binding'::text) ->> 'state_version'::text) = (state_version)::text) AND (((envelope -> 'state_binding'::text) ->> 'canonical_record_digest'::text) = canonical_record_digest))),
+    CONSTRAINT engineering_envelope_supersession_travels_together CHECK ((((supersedes_envelope_id IS NULL) = (supersession_reason IS NULL)) AND ((supersession_reason IS NULL) OR (btrim(supersession_reason) <> ''::text)))),
     CONSTRAINT engineering_execution_envelope_canonical_record_digest_check CHECK ((canonical_record_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT engineering_execution_envelope_envelope_check CHECK ((jsonb_typeof(envelope) = 'object'::text)),
     CONSTRAINT engineering_execution_envelope_envelope_digest_check CHECK ((envelope_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
@@ -11960,6 +16544,8 @@ CREATE TABLE ops.engineering_reviewer_fact (
     fact jsonb NOT NULL,
     idempotency_key uuid NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    contract_version text,
+    CONSTRAINT engineering_reviewer_fact_contract_version_check CHECK (((contract_version IS NULL) OR (contract_version = 'engineering-review.v1'::text))),
     CONSTRAINT engineering_reviewer_fact_fact_check CHECK ((jsonb_typeof(fact) = 'object'::text)),
     CONSTRAINT engineering_reviewer_fact_reviewer_session_ref_check CHECK ((btrim(reviewer_session_ref) <> ''::text)),
     CONSTRAINT engineering_reviewer_fact_slice_ref_check CHECK ((btrim(slice_ref) <> ''::text)),
@@ -12390,6 +16976,76 @@ ALTER TABLE ops.guidance_situation_mapping ALTER COLUMN mapping_seq ADD GENERATE
 
 
 --
+-- Name: heavy_build_admission_revision; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.heavy_build_admission_revision (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    admission_ref text NOT NULL,
+    work_request_id uuid NOT NULL,
+    plan_id uuid NOT NULL,
+    version integer NOT NULL,
+    idempotency_key uuid NOT NULL,
+    tier text NOT NULL,
+    classifier_reasons jsonb NOT NULL,
+    contract jsonb NOT NULL,
+    builder_session_ref text NOT NULL,
+    admission_hash text NOT NULL,
+    proposed_by_actor_id uuid NOT NULL,
+    proposed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT heavy_build_admission_revision_admission_hash_check CHECK ((admission_hash ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT heavy_build_admission_revision_builder_session_ref_check CHECK ((builder_session_ref ~ '^session:[a-z0-9][a-z0-9:._/-]{8,199}$'::text)),
+    CONSTRAINT heavy_build_admission_revision_classifier_reasons_check CHECK (((jsonb_typeof(classifier_reasons) = 'array'::text) AND (jsonb_array_length(classifier_reasons) > 0))),
+    CONSTRAINT heavy_build_admission_revision_contract_check CHECK ((jsonb_typeof(contract) = 'object'::text)),
+    CONSTRAINT heavy_build_admission_revision_tier_check CHECK ((tier = 'heavy'::text)),
+    CONSTRAINT heavy_build_admission_revision_version_check CHECK ((version > 0))
+);
+
+
+--
+-- Name: TABLE heavy_build_admission_revision; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.heavy_build_admission_revision IS 'Append-only typed research manifest and complete target-product plan bound to one exact sourced ready-plan proposal. It grants no acceptance or execution authority.';
+
+
+--
+-- Name: heavy_build_plan_review; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.heavy_build_plan_review (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    review_ref text NOT NULL,
+    admission_id uuid NOT NULL,
+    version integer NOT NULL,
+    idempotency_key uuid NOT NULL,
+    verdict text NOT NULL,
+    reviewer_actor_id uuid NOT NULL,
+    reviewer_session_ref text NOT NULL,
+    review_summary text NOT NULL,
+    evidence_refs jsonb NOT NULL,
+    gaps jsonb NOT NULL,
+    review_hash text NOT NULL,
+    reviewed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT heavy_build_plan_review_check CHECK ((((verdict = 'pass'::text) AND (jsonb_array_length(gaps) = 0)) OR ((verdict = 'fail'::text) AND (jsonb_array_length(gaps) > 0)))),
+    CONSTRAINT heavy_build_plan_review_evidence_refs_check CHECK (((jsonb_typeof(evidence_refs) = 'array'::text) AND ((jsonb_array_length(evidence_refs) >= 1) AND (jsonb_array_length(evidence_refs) <= 12)))),
+    CONSTRAINT heavy_build_plan_review_gaps_check CHECK (((jsonb_typeof(gaps) = 'array'::text) AND (jsonb_array_length(gaps) <= 12))),
+    CONSTRAINT heavy_build_plan_review_review_hash_check CHECK ((review_hash ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT heavy_build_plan_review_review_summary_check CHECK (((char_length(btrim(review_summary)) >= 20) AND (char_length(btrim(review_summary)) <= 1000))),
+    CONSTRAINT heavy_build_plan_review_reviewer_session_ref_check CHECK ((reviewer_session_ref ~ '^session:[a-z0-9][a-z0-9:._/-]{8,199}$'::text)),
+    CONSTRAINT heavy_build_plan_review_verdict_check CHECK ((verdict = ANY (ARRAY['pass'::text, 'fail'::text]))),
+    CONSTRAINT heavy_build_plan_review_version_check CHECK ((version > 0))
+);
+
+
+--
+-- Name: TABLE heavy_build_plan_review; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.heavy_build_plan_review IS 'Append-only fresh-context review of one exact heavy-build admission revision. Only the latest passing review can admit human ready-plan acceptance.';
+
+
+--
 -- Name: incident; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -12557,7 +17213,7 @@ CREATE TABLE ops.job_attempt (
     CONSTRAINT job_attempt_cost_usd_check CHECK (((cost_usd IS NULL) OR (cost_usd >= (0)::numeric))),
     CONSTRAINT job_attempt_input_tokens_check CHECK (((input_tokens IS NULL) OR (input_tokens >= 0))),
     CONSTRAINT job_attempt_output_tokens_check CHECK (((output_tokens IS NULL) OR (output_tokens >= 0))),
-    CONSTRAINT job_attempt_state_check CHECK ((state = ANY (ARRAY['running'::text, 'succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text])))
+    CONSTRAINT job_attempt_state_check CHECK ((state = ANY (ARRAY['running'::text, 'succeeded'::text, 'failed'::text, 'timed_out'::text, 'cancelled'::text, 'skipped'::text])))
 );
 
 
@@ -12619,7 +17275,7 @@ CREATE TABLE ops.job_receipt (
     receipt_ref text NOT NULL,
     evidence jsonb DEFAULT '{}'::jsonb NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT job_receipt_kind_check CHECK ((kind = ANY (ARRAY['completion'::text, 'failure'::text, 'timeout'::text, 'dead_letter'::text, 'approval'::text, 'override'::text])))
+    CONSTRAINT job_receipt_kind_check CHECK ((kind = ANY (ARRAY['completion'::text, 'failure'::text, 'timeout'::text, 'dead_letter'::text, 'approval'::text, 'override'::text, 'skipped'::text])))
 );
 
 
@@ -13147,6 +17803,79 @@ COMMENT ON TABLE ops.rule_admission IS 'Normalized authority contract for one ru
 
 
 --
+-- Name: rule_admission_reclassification_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.rule_admission_reclassification_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key uuid CONSTRAINT rule_admission_reclassification_receip_idempotency_key_not_null NOT NULL,
+    rule_id uuid NOT NULL,
+    enforcement_class_before text CONSTRAINT rule_admission_reclassificati_enforcement_class_before_not_null NOT NULL,
+    enforcement_class_after text CONSTRAINT rule_admission_reclassificatio_enforcement_class_after_not_null NOT NULL,
+    actor_id uuid NOT NULL,
+    reason text NOT NULL,
+    legacy_admission text CONSTRAINT rule_admission_reclassification_recei_legacy_admission_not_null NOT NULL,
+    contract_hash text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT reclassification_class_vocabulary CHECK ((enforcement_class_after = ANY (ARRAY['machine_enforceable'::text, 'judgment_advisory'::text, 'human_only'::text]))),
+    CONSTRAINT reclassification_is_a_change CHECK ((enforcement_class_before <> enforcement_class_after))
+);
+
+
+--
+-- Name: TABLE rule_admission_reclassification_receipt; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.rule_admission_reclassification_receipt IS 'Append-only ledger of legacy admission reclassifications (0352). Only an ACTIVE rule with no ops.rule_approval_receipt row that predates the receipt system (ops.legacy_rule_admission_note non-null) can be reclassified, and only by Joe authority. legacy_admission is NOT NULL by design: a receipted rule''s class is bound to its approval receipt and never moves through this path.';
+
+
+--
+-- Name: rule_amendment_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.rule_amendment_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key text NOT NULL,
+    rule_id uuid NOT NULL,
+    rule_version_before integer NOT NULL,
+    rule_version_after integer NOT NULL,
+    prior_statement_hash text NOT NULL,
+    new_statement text NOT NULL,
+    new_statement_hash text NOT NULL,
+    amended_by uuid NOT NULL,
+    rationale text NOT NULL,
+    contract_hash text NOT NULL,
+    amended_at timestamp with time zone NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    legacy_admission text,
+    CONSTRAINT rule_amendment_receipt_contract_hash_check CHECK ((contract_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT rule_amendment_receipt_idempotency_key_check CHECK ((btrim(idempotency_key) <> ''::text)),
+    CONSTRAINT rule_amendment_receipt_legacy_admission_check CHECK (((legacy_admission IS NULL) OR (btrim(legacy_admission) <> ''::text))),
+    CONSTRAINT rule_amendment_receipt_new_hash_check CHECK ((new_statement_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT rule_amendment_receipt_new_statement_check CHECK ((btrim(new_statement) <> ''::text)),
+    CONSTRAINT rule_amendment_receipt_not_noop CHECK ((prior_statement_hash <> new_statement_hash)),
+    CONSTRAINT rule_amendment_receipt_prior_hash_check CHECK ((prior_statement_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT rule_amendment_receipt_rationale_check CHECK ((btrim(rationale) <> ''::text)),
+    CONSTRAINT rule_amendment_receipt_rule_version_before_check CHECK ((rule_version_before > 0)),
+    CONSTRAINT rule_amendment_receipt_version_check CHECK ((rule_version_after = (rule_version_before + 1)))
+);
+
+
+--
+-- Name: TABLE rule_amendment_receipt; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.rule_amendment_receipt IS 'Append-only ledger of statement-only amendments to an already-taught rule (proposed or active). Each row hashes the PRIOR statement (tamper-evident chain) and records the new text, the Joe-authority actor, and the rationale. human_quote, scope, taught_by and every activation/retirement field are untouched by this path -- see ops.amend_rule_statement.';
+
+
+--
+-- Name: COLUMN rule_amendment_receipt.legacy_admission; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.rule_amendment_receipt.legacy_admission IS 'Null for the ordinary amendment path (proposed rule, or an active rule carrying an approval receipt). Populated only when ops.amend_rule_statement amended an ACTIVE rule that has no ops.rule_approval_receipt row because it predates the receipt system entirely -- see ops.legacy_rule_admission_note. amend_rule_statement never required a receipt to function; this column exists purely so the ledger names the legacy fact rather than staying silent about it.';
+
+
+--
 -- Name: rule_approval_lifecycle_anchor; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -13216,6 +17945,48 @@ CREATE TABLE ops.rule_control_binding (
 --
 
 COMMENT ON TABLE ops.rule_control_binding IS 'Owner/deployment-authored exact semantic binding. A globally installed gate cannot be claimed for an unrelated rule or changed statement.';
+
+
+--
+-- Name: rule_delivery_activation_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.rule_delivery_activation_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    from_mode text NOT NULL,
+    to_mode text NOT NULL,
+    changed_by text NOT NULL,
+    reason text NOT NULL,
+    map_digest text NOT NULL,
+    target_short_ids text[] NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT rule_delivery_activation_receipt_changed_by_check CHECK ((btrim(changed_by) <> ''::text)),
+    CONSTRAINT rule_delivery_activation_receipt_reason_check CHECK ((btrim(reason) <> ''::text)),
+    CONSTRAINT rule_delivery_activation_receipt_target_short_ids_check CHECK ((cardinality(target_short_ids) = ANY (ARRAY[8, 9])))
+);
+
+
+--
+-- Name: rule_delivery_activation_target; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.rule_delivery_activation_target (
+    short_id text NOT NULL,
+    expected_scope text NOT NULL,
+    expected_pack text NOT NULL,
+    from_control text NOT NULL,
+    from_enforcement_class text NOT NULL,
+    from_implementation_ref text CONSTRAINT rule_delivery_activation_targe_from_implementation_ref_not_null NOT NULL,
+    from_test_ref text NOT NULL,
+    to_control text NOT NULL,
+    to_enforcement_class text NOT NULL,
+    to_implementation_ref text NOT NULL,
+    to_test_ref text NOT NULL,
+    map_digest text NOT NULL,
+    CONSTRAINT rule_delivery_activation_target_expected_scope_check CHECK ((expected_scope = ANY (ARRAY['shared'::text, 'joe'::text, 'dell'::text]))),
+    CONSTRAINT rule_delivery_activation_target_map_digest_check CHECK ((map_digest ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT rule_delivery_activation_target_short_id_check CHECK ((short_id ~ '^[0-9a-f]{8}$'::text))
+);
 
 
 --
@@ -13331,15 +18102,25 @@ CREATE TABLE ops.rule_retirement_receipt (
     contract_hash text NOT NULL,
     retired_at timestamp with time zone NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
-    CONSTRAINT active_retirement_has_approval CHECK (((previous_status <> 'active'::text) OR (approval_receipt_id IS NOT NULL))),
+    legacy_admission text,
+    CONSTRAINT active_retirement_has_approval CHECK (((previous_status <> 'active'::text) OR (approval_receipt_id IS NOT NULL) OR (legacy_admission IS NOT NULL))),
+    CONSTRAINT retirement_legacy_excludes_receipt CHECK (((legacy_admission IS NULL) OR (approval_receipt_id IS NULL))),
     CONSTRAINT rule_retirement_receipt_check CHECK ((rule_version_after = (rule_version_before + 1))),
     CONSTRAINT rule_retirement_receipt_contract_hash_check CHECK ((contract_hash ~ '^[0-9a-f]{64}$'::text)),
     CONSTRAINT rule_retirement_receipt_idempotency_key_check CHECK ((btrim(idempotency_key) <> ''::text)),
+    CONSTRAINT rule_retirement_receipt_legacy_admission_check CHECK (((legacy_admission IS NULL) OR (btrim(legacy_admission) <> ''::text))),
     CONSTRAINT rule_retirement_receipt_previous_status_check CHECK ((previous_status = ANY (ARRAY['proposed'::text, 'active'::text]))),
     CONSTRAINT rule_retirement_receipt_reason_check CHECK ((btrim(reason) <> ''::text)),
     CONSTRAINT rule_retirement_receipt_rule_version_before_check CHECK ((rule_version_before > 0)),
     CONSTRAINT rule_retirement_receipt_statement_hash_check CHECK ((statement_hash ~ '^[0-9a-f]{64}$'::text))
 );
+
+
+--
+-- Name: COLUMN rule_retirement_receipt.legacy_admission; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON COLUMN ops.rule_retirement_receipt.legacy_admission IS 'Null for the ordinary receipted retirement path. Populated only when ops.retire_rule accepted an ACTIVE rule that has no ops.rule_approval_receipt row because it predates the receipt system entirely (see ops.legacy_rule_admission_note) -- records the rule''s activation time and the receipt-system cutover it predates, so the tamper-evident chain shows what actually happened rather than implying a receipt that never existed.';
 
 
 --
@@ -13501,6 +18282,164 @@ COMMENT ON TABLE ops.settings_change IS 'Every change to a control plane this sy
 --
 
 COMMENT ON COLUMN ops.settings_change.reason IS 'Why the change was made, in the words of whoever made it. The 2026-08-14 ruleset incident was not a missing change log — it was a missing REASON: the change itself was discoverable from GitHub''s own version history within minutes, and still nobody could tell an authorised change from tampering.';
+
+
+--
+-- Name: siep_command_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.siep_command_receipt (
+    idempotency_key uuid NOT NULL,
+    verb text NOT NULL,
+    package_key text NOT NULL,
+    request_digest text NOT NULL,
+    result jsonb NOT NULL,
+    recorded_actor_id uuid NOT NULL,
+    recorded_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT siep_command_receipt_never_stores_lease_token CHECK ((NOT (result ? 'lease_token'::text))),
+    CONSTRAINT siep_command_receipt_request_digest_check CHECK ((request_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT siep_command_receipt_result_check CHECK ((jsonb_typeof(result) = 'object'::text)),
+    CONSTRAINT siep_command_receipt_verb_check CHECK ((verb = ANY (ARRAY['claim'::text, 'transition'::text, 'acquire_lane'::text, 'release_lane'::text])))
+);
+
+
+--
+-- Name: siep_component_alias; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.siep_component_alias (
+    alias_key text NOT NULL,
+    package_key text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT siep_component_alias_alias_key_check CHECK ((alias_key ~ '^(SCAC-[0-9]{2}|MPE-17[A-H])$'::text))
+);
+
+
+--
+-- Name: siep_evidence_link; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.siep_evidence_link (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    package_key text NOT NULL,
+    evidence_kind text NOT NULL,
+    ledger_kind text NOT NULL,
+    ledger_id uuid NOT NULL,
+    work_request_version integer NOT NULL,
+    manifest_digest text NOT NULL,
+    evidence_digest text NOT NULL,
+    note text NOT NULL,
+    linked_actor_id uuid NOT NULL,
+    attested_session_principal text NOT NULL,
+    source_observed_at timestamp with time zone NOT NULL,
+    idempotency_key uuid NOT NULL,
+    linked_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT siep_evidence_link_evidence_digest_check CHECK ((evidence_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT siep_evidence_link_evidence_kind_check CHECK ((evidence_kind = ANY (ARRAY['source'::text, 'tests'::text, 'migration'::text, 'deploy'::text, 'readback'::text, 'live_readback'::text, 'rollback'::text, 'independent_review'::text, 'joe_approval'::text, 'joe_go_no_go'::text, 'zero_unresolved_findings'::text, 'zero_blockers'::text, 'two_clean_audit_cycles'::text, 'material_fix'::text]))),
+    CONSTRAINT siep_evidence_link_ledger_kind_check CHECK ((ledger_kind = ANY (ARRAY['job_receipt'::text, 'decision_event'::text]))),
+    CONSTRAINT siep_evidence_link_manifest_digest_check CHECK ((manifest_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT siep_evidence_link_note_check CHECK (((note ~ '^safe:[a-z0-9][a-z0-9:_./-]*$'::text) AND (char_length(note) <= 300))),
+    CONSTRAINT siep_evidence_link_work_request_version_check CHECK ((work_request_version > 0))
+);
+
+
+--
+-- Name: TABLE siep_evidence_link; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.siep_evidence_link IS 'Typed links into existing receipt, event, decision, and finding ledgers. Evidence bodies are never copied here.';
+
+
+--
+-- Name: siep_job_evidence_binding; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.siep_job_evidence_binding (
+    job_id uuid NOT NULL,
+    package_key text NOT NULL,
+    work_request_version integer NOT NULL,
+    manifest_digest text NOT NULL,
+    evidence_kind text NOT NULL,
+    definition_key text NOT NULL,
+    definition_version integer NOT NULL,
+    bound_by_actor_id uuid NOT NULL,
+    idempotency_key uuid NOT NULL,
+    bound_at timestamp with time zone DEFAULT now() NOT NULL,
+    engineering_contract_version text,
+    CONSTRAINT siep_job_evidence_binding_check CHECK (((definition_key = 'engineering-slice'::text) AND (definition_version = 1))),
+    CONSTRAINT siep_job_evidence_binding_engineering_contract_check CHECK (((engineering_contract_version IS NULL) OR (engineering_contract_version = 'engineering-review.v1'::text))),
+    CONSTRAINT siep_job_evidence_binding_evidence_kind_check CHECK ((evidence_kind = ANY (ARRAY['source'::text, 'tests'::text, 'migration'::text, 'deploy'::text, 'readback'::text, 'live_readback'::text, 'rollback'::text, 'independent_review'::text, 'zero_unresolved_findings'::text, 'zero_blockers'::text, 'two_clean_audit_cycles'::text, 'material_fix'::text]))),
+    CONSTRAINT siep_job_evidence_binding_manifest_digest_check CHECK ((manifest_digest ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT siep_job_evidence_binding_work_request_version_check CHECK ((work_request_version > 0))
+);
+
+
+--
+-- Name: siep_lane_lock; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.siep_lane_lock (
+    lane_key text NOT NULL,
+    package_key text NOT NULL,
+    work_request_version integer NOT NULL,
+    holder_actor_id uuid NOT NULL,
+    executor_tier text NOT NULL,
+    session_ref text NOT NULL,
+    lease_token uuid NOT NULL,
+    acquired_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    idempotency_key uuid NOT NULL,
+    CONSTRAINT siep_lane_lock_check CHECK ((expires_at > acquired_at)),
+    CONSTRAINT siep_lane_lock_executor_tier_check CHECK ((executor_tier = ANY (ARRAY['luna'::text, 'terra'::text, 'sol'::text, 'main'::text]))),
+    CONSTRAINT siep_lane_lock_lane_key_check CHECK ((lane_key = ANY (ARRAY['program-control'::text, 'heavy-build'::text, 'scac-core'::text, 'dell-mpe'::text]))),
+    CONSTRAINT siep_lane_lock_session_ref_check CHECK (((btrim(session_ref) <> ''::text) AND (char_length(session_ref) <= 300))),
+    CONSTRAINT siep_lane_lock_work_request_version_check CHECK ((work_request_version > 0))
+);
+
+
+--
+-- Name: siep_package_contract; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.siep_package_contract (
+    package_key text NOT NULL,
+    work_request_id uuid NOT NULL,
+    lane_key text NOT NULL,
+    minimum_executor_tier text NOT NULL,
+    test_contract jsonb NOT NULL,
+    delivery_contract jsonb NOT NULL,
+    rollback_contract jsonb NOT NULL,
+    required_evidence_kinds text[] NOT NULL,
+    approval_gate text DEFAULT 'none'::text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT siep_package_contract_approval_gate_check CHECK ((approval_gate = ANY (ARRAY['none'::text, 'joe_approval'::text, 'joe_go_no_go'::text]))),
+    CONSTRAINT siep_package_contract_delivery_contract_check CHECK (((jsonb_typeof(delivery_contract) = 'object'::text) AND (delivery_contract ?& ARRAY['source'::text, 'migration'::text, 'deploy'::text, 'readback'::text, 'rollback'::text]))),
+    CONSTRAINT siep_package_contract_lane_key_check CHECK ((lane_key = ANY (ARRAY['program-control'::text, 'heavy-build'::text, 'scac-core'::text, 'dell-mpe'::text]))),
+    CONSTRAINT siep_package_contract_minimum_executor_tier_check CHECK ((minimum_executor_tier = ANY (ARRAY['luna'::text, 'terra'::text, 'sol'::text, 'main'::text, 'human_authority'::text]))),
+    CONSTRAINT siep_package_contract_package_key_check CHECK ((package_key ~ '^(B0|00|0[1-5]|06A|06B|1[0-9]|2[0-3]|24A|24B|25|26|3[0-7]|4[0-4])$'::text)),
+    CONSTRAINT siep_package_contract_required_evidence_kinds_check CHECK ((cardinality(required_evidence_kinds) > 0)),
+    CONSTRAINT siep_package_contract_rollback_contract_check CHECK ((jsonb_typeof(rollback_contract) = 'object'::text)),
+    CONSTRAINT siep_package_contract_test_contract_check CHECK ((jsonb_typeof(test_contract) = 'object'::text))
+);
+
+
+--
+-- Name: TABLE siep_package_contract; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.siep_package_contract IS 'Immutable SIEP package contract linked one-to-one to the sole lifecycle row in ops.work_request; it is not a task tracker.';
+
+
+--
+-- Name: siep_program_dependency; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.siep_program_dependency (
+    package_key text NOT NULL,
+    depends_on_package_key text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT siep_program_dependency_check CHECK ((package_key <> depends_on_package_key))
+);
 
 
 --
@@ -13762,6 +18701,89 @@ CREATE TABLE ops.staging_deployment_claim (
 
 
 --
+-- Name: staging_forward_fix_rehearsal_attempt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.staging_forward_fix_rehearsal_attempt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key uuid NOT NULL,
+    correlation_id uuid NOT NULL,
+    release_id uuid NOT NULL,
+    service_id uuid NOT NULL,
+    environment text NOT NULL,
+    git_sha text NOT NULL,
+    provider text NOT NULL,
+    candidate_provider_version_id uuid CONSTRAINT staging_forward_fix_rehears_candidate_provider_version_not_null NOT NULL,
+    recovery_strategy text CONSTRAINT staging_forward_fix_rehearsal_attemp_recovery_strategy_not_null NOT NULL,
+    recovery_plan_ref text CONSTRAINT staging_forward_fix_rehearsal_attemp_recovery_plan_ref_not_null NOT NULL,
+    plan_hash text NOT NULL,
+    expected_provider_tag text CONSTRAINT staging_forward_fix_rehearsal_at_expected_provider_tag_not_null NOT NULL,
+    declared_migration_set_sha256 text CONSTRAINT staging_forward_fix_rehears_declared_migration_set_sha_not_null NOT NULL,
+    declared_migration_count integer CONSTRAINT staging_forward_fix_rehearsal_declared_migration_count_not_null NOT NULL,
+    declared_schema_highest_migration text CONSTRAINT staging_forward_fix_rehears_declared_schema_highest_mi_not_null NOT NULL,
+    declared_schema_applied_count integer CONSTRAINT staging_forward_fix_rehears_declared_schema_applied_co_not_null NOT NULL,
+    declared_schema_ledger_sha256 text CONSTRAINT staging_forward_fix_rehears_declared_schema_ledger_sha_not_null NOT NULL,
+    writer_session_user text DEFAULT SESSION_USER CONSTRAINT staging_forward_fix_rehearsal_atte_writer_session_user_not_null NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT staging_forward_fix_rehearsa_declared_migration_set_sha25_check CHECK ((declared_migration_set_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_forward_fix_rehearsa_declared_schema_applied_coun_check CHECK ((declared_schema_applied_count > 0)),
+    CONSTRAINT staging_forward_fix_rehearsa_declared_schema_highest_migr_check CHECK ((declared_schema_highest_migration ~ '^[0-9]{4}[a-z]?_[a-z0-9_.-]+\.sql$'::text)),
+    CONSTRAINT staging_forward_fix_rehearsa_declared_schema_ledger_sha25_check CHECK ((declared_schema_ledger_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_forward_fix_rehearsal_at_declared_migration_count_check CHECK ((declared_migration_count > 0)),
+    CONSTRAINT staging_forward_fix_rehearsal_attem_expected_provider_tag_check CHECK ((expected_provider_tag ~ '^carr-staging-forward-fix-[0-9a-f]{32}$'::text)),
+    CONSTRAINT staging_forward_fix_rehearsal_attempt_environment_check CHECK ((environment = 'staging'::text)),
+    CONSTRAINT staging_forward_fix_rehearsal_attempt_git_sha_check CHECK ((git_sha ~ '^[0-9a-f]{40}$'::text)),
+    CONSTRAINT staging_forward_fix_rehearsal_attempt_plan_hash_check CHECK ((btrim(plan_hash) <> ''::text)),
+    CONSTRAINT staging_forward_fix_rehearsal_attempt_provider_check CHECK ((provider = 'cloudflare-workers'::text)),
+    CONSTRAINT staging_forward_fix_rehearsal_attempt_recovery_plan_ref_check CHECK ((btrim(recovery_plan_ref) <> ''::text)),
+    CONSTRAINT staging_forward_fix_rehearsal_attempt_recovery_strategy_check CHECK ((recovery_strategy = 'forward_fix'::text)),
+    CONSTRAINT staging_forward_fix_rehearsal_attempt_writer_session_user_check CHECK ((writer_session_user = 'carr_jobs'::text))
+);
+
+
+--
+-- Name: staging_forward_fix_rehearsal_claim; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.staging_forward_fix_rehearsal_claim (
+    rehearsal_attempt_id uuid CONSTRAINT staging_forward_fix_rehearsal_cla_rehearsal_attempt_id_not_null NOT NULL,
+    writer_session_user text DEFAULT SESSION_USER CONSTRAINT staging_forward_fix_rehearsal_clai_writer_session_user_not_null NOT NULL,
+    claimed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT staging_forward_fix_rehearsal_claim_writer_session_user_check CHECK ((writer_session_user = 'carr_jobs'::text))
+);
+
+
+--
+-- Name: staging_forward_fix_rehearsal_result; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.staging_forward_fix_rehearsal_result (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key uuid NOT NULL,
+    rehearsal_attempt_id uuid CONSTRAINT staging_forward_fix_rehearsal_res_rehearsal_attempt_id_not_null NOT NULL,
+    provider_version_id uuid CONSTRAINT staging_forward_fix_rehearsal_resu_provider_version_id_not_null NOT NULL,
+    provider_tag text NOT NULL,
+    verb_count integer NOT NULL,
+    schema_highest_migration text CONSTRAINT staging_forward_fix_rehearsal_schema_highest_migration_not_null NOT NULL,
+    schema_applied_count integer CONSTRAINT staging_forward_fix_rehearsal_res_schema_applied_count_not_null NOT NULL,
+    schema_ledger_sha256 text CONSTRAINT staging_forward_fix_rehearsal_res_schema_ledger_sha256_not_null NOT NULL,
+    doctrine_generation bigint CONSTRAINT staging_forward_fix_rehearsal_resu_doctrine_generation_not_null NOT NULL,
+    program6_actions_enabled boolean CONSTRAINT staging_forward_fix_rehearsal_program6_actions_enabled_not_null NOT NULL,
+    projection_sha256 text NOT NULL,
+    evidence_ref text NOT NULL,
+    observed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    writer_session_user text DEFAULT SESSION_USER CONSTRAINT staging_forward_fix_rehearsal_resu_writer_session_user_not_null NOT NULL,
+    CONSTRAINT staging_forward_fix_rehearsal_result_doctrine_generation_check CHECK ((doctrine_generation >= 0)),
+    CONSTRAINT staging_forward_fix_rehearsal_result_evidence_ref_check CHECK ((evidence_ref ~ '^ops\.staging-forward-fix-readback:sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_forward_fix_rehearsal_result_projection_sha256_check CHECK ((projection_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_forward_fix_rehearsal_result_schema_applied_count_check CHECK ((schema_applied_count > 0)),
+    CONSTRAINT staging_forward_fix_rehearsal_result_schema_ledger_sha256_check CHECK ((schema_ledger_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_forward_fix_rehearsal_result_verb_count_check CHECK ((verb_count > 0)),
+    CONSTRAINT staging_forward_fix_rehearsal_result_writer_session_user_check CHECK ((writer_session_user = 'carr_program5_forward_fix_verifier'::text))
+);
+
+
+--
 -- Name: staging_recovery_rehearsal_bundle; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -13770,12 +18792,12 @@ CREATE TABLE ops.staging_recovery_rehearsal_bundle (
     recovery_attempt_id uuid NOT NULL,
     correlation_id uuid NOT NULL,
     current_release_id uuid NOT NULL,
-    prior_release_id uuid NOT NULL,
+    prior_release_id uuid,
     service_id uuid NOT NULL,
     environment text NOT NULL,
-    current_before_receipt_id uuid CONSTRAINT staging_recovery_rehearsal_b_current_before_receipt_id_not_null NOT NULL,
-    prior_after_rollback_receipt_id uuid CONSTRAINT staging_recovery_rehearsal__prior_after_rollback_recei_not_null NOT NULL,
-    current_after_restore_receipt_id uuid CONSTRAINT staging_recovery_rehearsal__current_after_restore_rece_not_null NOT NULL,
+    current_before_receipt_id uuid,
+    prior_after_rollback_receipt_id uuid,
+    current_after_restore_receipt_id uuid,
     recovery_strategy text NOT NULL,
     recovery_plan_ref text NOT NULL,
     plan_hash text NOT NULL,
@@ -13789,17 +18811,18 @@ CREATE TABLE ops.staging_recovery_rehearsal_bundle (
     completed_at timestamp with time zone NOT NULL,
     recorded_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     writer_session_user text NOT NULL,
-    CONSTRAINT recovery_bundle_distinct_receipts CHECK (((current_before_receipt_id <> prior_after_rollback_receipt_id) AND (current_before_receipt_id <> current_after_restore_receipt_id) AND (prior_after_rollback_receipt_id <> current_after_restore_receipt_id))),
-    CONSTRAINT recovery_bundle_distinct_releases CHECK ((current_release_id <> prior_release_id)),
+    forward_fix_result_id uuid,
+    candidate_git_sha text,
+    candidate_provider_version_id uuid,
+    CONSTRAINT recovery_bundle_strategy_shape CHECK ((((recovery_strategy = 'rollback'::text) AND (prior_release_id IS NOT NULL) AND (current_before_receipt_id IS NOT NULL) AND (prior_after_rollback_receipt_id IS NOT NULL) AND (current_after_restore_receipt_id IS NOT NULL) AND (forward_fix_result_id IS NULL) AND (candidate_git_sha IS NULL) AND (candidate_provider_version_id IS NULL) AND (current_release_id <> prior_release_id) AND (current_before_receipt_id <> prior_after_rollback_receipt_id) AND (current_before_receipt_id <> current_after_restore_receipt_id) AND (prior_after_rollback_receipt_id <> current_after_restore_receipt_id)) OR ((recovery_strategy = 'forward_fix'::text) AND (prior_release_id IS NULL) AND (current_before_receipt_id IS NULL) AND (prior_after_rollback_receipt_id IS NULL) AND (current_after_restore_receipt_id IS NULL) AND (forward_fix_result_id IS NOT NULL) AND (candidate_git_sha IS NOT NULL) AND (candidate_git_sha ~ '^[0-9a-f]{40}$'::text) AND (candidate_provider_version_id IS NOT NULL)))),
+    CONSTRAINT recovery_bundle_writer_strategy CHECK ((((recovery_strategy = 'rollback'::text) AND (writer_session_user = 'carr_jobs'::text)) OR ((recovery_strategy = 'forward_fix'::text) AND (writer_session_user = 'carr_program5_forward_fix_verifier'::text)))),
     CONSTRAINT staging_recovery_rehearsal_b_declared_migration_set_sha25_check CHECK ((declared_migration_set_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT staging_recovery_rehearsal_b_declared_schema_applied_coun_check CHECK ((declared_schema_applied_count > 0)),
     CONSTRAINT staging_recovery_rehearsal_b_declared_schema_ledger_sha25_check CHECK ((declared_schema_ledger_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT staging_recovery_rehearsal_bundl_declared_migration_count_check CHECK ((declared_migration_count > 0)),
     CONSTRAINT staging_recovery_rehearsal_bundle_bundle_sha256_check CHECK ((bundle_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT staging_recovery_rehearsal_bundle_environment_check CHECK ((environment = 'staging'::text)),
-    CONSTRAINT staging_recovery_rehearsal_bundle_evidence_ref_check CHECK ((evidence_ref ~ '^ops\.staging-recovery-bundle:sha256:[0-9a-f]{64}$'::text)),
-    CONSTRAINT staging_recovery_rehearsal_bundle_recovery_strategy_check CHECK ((recovery_strategy = 'rollback'::text)),
-    CONSTRAINT staging_recovery_rehearsal_bundle_writer_session_user_check CHECK ((writer_session_user = 'carr_jobs'::text))
+    CONSTRAINT staging_recovery_rehearsal_bundle_evidence_ref_check CHECK ((evidence_ref ~ '^ops\.staging-recovery-bundle:sha256:[0-9a-f]{64}$'::text))
 );
 
 
@@ -13891,6 +18914,106 @@ COMMENT ON COLUMN ops.staging_release_readback_receipt.program6_actions_enabled 
 
 
 --
+-- Name: staging_replacement_project_contract; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.staging_replacement_project_contract (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key uuid NOT NULL,
+    schema_version text NOT NULL,
+    tree_mode text NOT NULL,
+    git_sha text NOT NULL,
+    source_tree_oid text NOT NULL,
+    source_tree_sha256 text CONSTRAINT staging_replacement_project_contrac_source_tree_sha256_not_null NOT NULL,
+    source_tree_entry_count integer CONSTRAINT staging_replacement_project_co_source_tree_entry_count_not_null NOT NULL,
+    artifact_sha256 text NOT NULL,
+    config_sha256 text NOT NULL,
+    dependency_sha256 text NOT NULL,
+    migration_ledger jsonb NOT NULL,
+    migration_count integer NOT NULL,
+    migration_highest text NOT NULL,
+    migration_ledger_sha256 text CONSTRAINT staging_replacement_project_co_migration_ledger_sha256_not_null NOT NULL,
+    prior_staging_project_id text CONSTRAINT staging_replacement_project_c_prior_staging_project_id_not_null NOT NULL,
+    replacement_project_id text CONSTRAINT staging_replacement_project_con_replacement_project_id_not_null NOT NULL,
+    replacement_branch_id text CONSTRAINT staging_replacement_project_cont_replacement_branch_id_not_null NOT NULL,
+    replacement_endpoint_id text CONSTRAINT staging_replacement_project_co_replacement_endpoint_id_not_null NOT NULL,
+    expected_synthetic_data_count bigint CONSTRAINT staging_replacement_project_expected_synthetic_data_co_not_null NOT NULL,
+    expected_production_overlap_count bigint CONSTRAINT staging_replacement_project_expected_production_overla_not_null NOT NULL,
+    writer_session_user text DEFAULT SESSION_USER CONSTRAINT staging_replacement_project_contra_writer_session_user_not_null NOT NULL,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT staging_replacement_project__expected_production_overlap__check CHECK ((expected_production_overlap_count = 0)),
+    CONSTRAINT staging_replacement_project__expected_synthetic_data_coun_check CHECK ((expected_synthetic_data_count > 0)),
+    CONSTRAINT staging_replacement_project_cont_prior_staging_project_id_check CHECK ((btrim(prior_staging_project_id) <> ''::text)),
+    CONSTRAINT staging_replacement_project_contr_migration_ledger_sha256_check CHECK ((migration_ledger_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_contr_replacement_endpoint_id_check CHECK ((btrim(replacement_endpoint_id) <> ''::text)),
+    CONSTRAINT staging_replacement_project_contr_source_tree_entry_count_check CHECK ((source_tree_entry_count > 0)),
+    CONSTRAINT staging_replacement_project_contra_replacement_project_id_check CHECK ((btrim(replacement_project_id) <> ''::text)),
+    CONSTRAINT staging_replacement_project_contrac_replacement_branch_id_check CHECK ((btrim(replacement_branch_id) <> ''::text)),
+    CONSTRAINT staging_replacement_project_contract_artifact_sha256_check CHECK ((artifact_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_contract_config_sha256_check CHECK ((config_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_contract_dependency_sha256_check CHECK ((dependency_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_contract_git_sha_check CHECK ((git_sha ~ '^[0-9a-f]{40}$'::text)),
+    CONSTRAINT staging_replacement_project_contract_migration_count_check CHECK ((migration_count > 0)),
+    CONSTRAINT staging_replacement_project_contract_migration_highest_check CHECK ((migration_highest ~ '^[0-9]{4}[a-z]?_[a-z0-9_.-]+\.sql$'::text)),
+    CONSTRAINT staging_replacement_project_contract_migration_ledger_check CHECK ((jsonb_typeof(migration_ledger) = 'object'::text)),
+    CONSTRAINT staging_replacement_project_contract_schema_version_check CHECK ((schema_version = 'clean-staging-replacement-contract.v1'::text)),
+    CONSTRAINT staging_replacement_project_contract_source_tree_oid_check CHECK ((source_tree_oid ~ '^[0-9a-f]{40}$'::text)),
+    CONSTRAINT staging_replacement_project_contract_source_tree_sha256_check CHECK ((source_tree_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_contract_tree_mode_check CHECK ((tree_mode = 'full'::text)),
+    CONSTRAINT staging_replacement_project_contract_writer_session_user_check CHECK ((writer_session_user = 'carr_jobs'::text))
+);
+
+
+--
+-- Name: staging_replacement_project_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.staging_replacement_project_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    idempotency_key uuid NOT NULL,
+    contract_id uuid NOT NULL,
+    schema_version text NOT NULL,
+    git_sha text NOT NULL,
+    source_tree_oid text NOT NULL,
+    source_tree_sha256 text NOT NULL,
+    source_tree_entry_count integer CONSTRAINT staging_replacement_project_re_source_tree_entry_count_not_null NOT NULL,
+    artifact_sha256 text NOT NULL,
+    config_sha256 text NOT NULL,
+    dependency_sha256 text NOT NULL,
+    prior_staging_project_id text CONSTRAINT staging_replacement_project_r_prior_staging_project_id_not_null NOT NULL,
+    replacement_project_id text CONSTRAINT staging_replacement_project_rec_replacement_project_id_not_null NOT NULL,
+    replacement_branch_id text CONSTRAINT staging_replacement_project_rece_replacement_branch_id_not_null NOT NULL,
+    replacement_endpoint_id text CONSTRAINT staging_replacement_project_re_replacement_endpoint_id_not_null NOT NULL,
+    live_migration_ledger jsonb CONSTRAINT staging_replacement_project_rece_live_migration_ledger_not_null NOT NULL,
+    live_migration_count integer CONSTRAINT staging_replacement_project_recei_live_migration_count_not_null NOT NULL,
+    live_migration_highest text CONSTRAINT staging_replacement_project_rec_live_migration_highest_not_null NOT NULL,
+    live_migration_ledger_sha256 text CONSTRAINT staging_replacement_project_live_migration_ledger_sha2_not_null NOT NULL,
+    synthetic_data_count bigint CONSTRAINT staging_replacement_project_recei_synthetic_data_count_not_null NOT NULL,
+    production_overlap_count bigint CONSTRAINT staging_replacement_project_r_production_overlap_count_not_null NOT NULL,
+    receipt_sha256 text NOT NULL,
+    evidence_ref text NOT NULL,
+    writer_session_user text DEFAULT SESSION_USER CONSTRAINT staging_replacement_project_receip_writer_session_user_not_null NOT NULL,
+    observed_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT staging_replacement_project__live_migration_ledger_sha256_check CHECK ((live_migration_ledger_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_rece_production_overlap_count_check CHECK ((production_overlap_count = 0)),
+    CONSTRAINT staging_replacement_project_recei_source_tree_entry_count_check CHECK ((source_tree_entry_count > 0)),
+    CONSTRAINT staging_replacement_project_receipt_artifact_sha256_check CHECK ((artifact_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_receipt_config_sha256_check CHECK ((config_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_receipt_dependency_sha256_check CHECK ((dependency_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_receipt_evidence_ref_check CHECK ((evidence_ref ~ '^ops\.staging-replacement-project:sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_receipt_git_sha_check CHECK ((git_sha ~ '^[0-9a-f]{40}$'::text)),
+    CONSTRAINT staging_replacement_project_receipt_live_migration_count_check CHECK ((live_migration_count > 0)),
+    CONSTRAINT staging_replacement_project_receipt_live_migration_ledger_check CHECK ((jsonb_typeof(live_migration_ledger) = 'object'::text)),
+    CONSTRAINT staging_replacement_project_receipt_receipt_sha256_check CHECK ((receipt_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_receipt_schema_version_check CHECK ((schema_version = 'clean-staging-replacement-observation.v1'::text)),
+    CONSTRAINT staging_replacement_project_receipt_source_tree_oid_check CHECK ((source_tree_oid ~ '^[0-9a-f]{40}$'::text)),
+    CONSTRAINT staging_replacement_project_receipt_source_tree_sha256_check CHECK ((source_tree_sha256 ~ '^sha256:[0-9a-f]{64}$'::text)),
+    CONSTRAINT staging_replacement_project_receipt_synthetic_data_count_check CHECK ((synthetic_data_count > 0)),
+    CONSTRAINT staging_replacement_project_receipt_writer_session_user_check CHECK ((writer_session_user = 'carr_program5_forward_fix_verifier'::text))
+);
+
+
+--
 -- Name: staging_restore_only_attempt; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -13975,6 +19098,385 @@ CREATE TABLE ops.staging_restore_only_result (
 
 
 --
+-- Name: tour; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    tour_name text NOT NULL,
+    tour_status text NOT NULL,
+    route_version integer NOT NULL,
+    canonical_dataset_version text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_route_version_check CHECK ((route_version > 0)),
+    CONSTRAINT tour_tour_status_check CHECK ((tour_status = ANY (ARRAY['draft'::text, 'active'::text, 'completed'::text, 'cancelled'::text, 'archived'::text])))
+);
+
+
+--
+-- Name: tour_audit_event; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_audit_event (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    event_type text NOT NULL,
+    entity_type text NOT NULL,
+    entity_id uuid NOT NULL,
+    actor_id text,
+    occurred_at timestamp with time zone NOT NULL,
+    event_digest text NOT NULL,
+    payload jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_audit_event_event_digest_check CHECK ((event_digest ~ '^sha256:[a-f0-9]{64}$'::text)),
+    CONSTRAINT tour_audit_event_payload_check CHECK ((jsonb_typeof(payload) = 'object'::text))
+);
+
+
+--
+-- Name: tour_cheat_sheet_revision; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_cheat_sheet_revision (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    tour_id uuid NOT NULL,
+    revision_number integer NOT NULL,
+    content jsonb NOT NULL,
+    editor_actor_id text NOT NULL,
+    status text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_cheat_sheet_revision_content_check CHECK ((jsonb_typeof(content) = 'object'::text)),
+    CONSTRAINT tour_cheat_sheet_revision_revision_number_check CHECK ((revision_number > 0)),
+    CONSTRAINT tour_cheat_sheet_revision_status_check CHECK ((status = ANY (ARRAY['draft'::text, 'saved'::text, 'superseded'::text])))
+);
+
+
+--
+-- Name: tour_conflict_resolution_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_conflict_resolution_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text CONSTRAINT tour_conflict_resolution_receip_organization_tenant_id_not_null NOT NULL,
+    conflict_id uuid NOT NULL,
+    selected_field_assertion_id uuid CONSTRAINT tour_conflict_resolution_re_selected_field_assertion_i_not_null NOT NULL,
+    rationale text NOT NULL,
+    evidence jsonb NOT NULL,
+    resolver_actor_id text NOT NULL,
+    resolved_at timestamp with time zone NOT NULL,
+    receipt_digest text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_conflict_resolution_receipt_evidence_check CHECK ((jsonb_typeof(evidence) = 'object'::text)),
+    CONSTRAINT tour_conflict_resolution_receipt_receipt_digest_check CHECK ((receipt_digest ~ '^sha256:[a-f0-9]{64}$'::text))
+);
+
+
+--
+-- Name: tour_fact_conflict; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_fact_conflict (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    property_id uuid NOT NULL,
+    field_key text NOT NULL,
+    state text NOT NULL,
+    opened_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_fact_conflict_state_check CHECK ((state = ANY (ARRAY['open'::text, 'resolved'::text, 'superseded'::text])))
+);
+
+
+--
+-- Name: tour_fact_conflict_participant; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_fact_conflict_participant (
+    conflict_id uuid NOT NULL,
+    organization_tenant_id text NOT NULL,
+    field_assertion_id uuid NOT NULL,
+    participant_role text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_fact_conflict_participant_participant_role_check CHECK ((participant_role = ANY (ARRAY['candidate'::text, 'selected'::text, 'rejected'::text])))
+);
+
+
+--
+-- Name: tour_field_assertion; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_field_assertion (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    property_id uuid NOT NULL,
+    field_key text NOT NULL,
+    value jsonb NOT NULL,
+    source_evidence_id uuid NOT NULL,
+    rights_receipt_id uuid NOT NULL,
+    observed_at timestamp with time zone NOT NULL,
+    effective_from timestamp with time zone NOT NULL,
+    effective_to timestamp with time zone,
+    confidence text NOT NULL,
+    data_classification text NOT NULL,
+    review_state text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_field_assertion_check CHECK (((effective_to IS NULL) OR (effective_to >= effective_from))),
+    CONSTRAINT tour_field_assertion_confidence_check CHECK ((confidence = ANY (ARRAY['low'::text, 'medium'::text, 'high'::text, 'unknown'::text]))),
+    CONSTRAINT tour_field_assertion_data_classification_check CHECK ((data_classification = ANY (ARRAY['public'::text, 'client_authorized'::text, 'internal'::text, 'restricted'::text]))),
+    CONSTRAINT tour_field_assertion_review_state_check CHECK ((review_state = ANY (ARRAY['unreviewed'::text, 'reviewed'::text, 'conflicted'::text, 'superseded'::text, 'withdrawn'::text]))),
+    CONSTRAINT tour_field_assertion_value_check CHECK ((jsonb_typeof(value) = ANY (ARRAY['object'::text, 'array'::text, 'string'::text, 'number'::text, 'boolean'::text, 'null'::text])))
+);
+
+
+--
+-- Name: tour_property; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_property (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    property_status text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    retired_at timestamp with time zone,
+    CONSTRAINT tour_property_property_status_check CHECK ((property_status = ANY (ARRAY['active'::text, 'inactive'::text, 'withdrawn'::text, 'unknown'::text])))
+);
+
+
+--
+-- Name: tour_property_membership; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_property_membership (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    tour_id uuid NOT NULL,
+    property_id uuid NOT NULL,
+    route_version integer NOT NULL,
+    route_sequence integer NOT NULL,
+    route_label text NOT NULL,
+    assertion_set_digest text NOT NULL,
+    selected_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_property_membership_assertion_set_digest_check CHECK ((assertion_set_digest ~ '^sha256:[a-f0-9]{64}$'::text)),
+    CONSTRAINT tour_property_membership_route_sequence_check CHECK ((route_sequence > 0)),
+    CONSTRAINT tour_property_membership_route_version_check CHECK ((route_version > 0))
+);
+
+
+--
+-- Name: tour_public_projection; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_public_projection (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    tour_id uuid NOT NULL,
+    projection_version integer NOT NULL,
+    route_version integer NOT NULL,
+    as_of timestamp with time zone NOT NULL,
+    facts_only boolean NOT NULL,
+    projection_digest text NOT NULL,
+    derived_render_digest text,
+    status text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_public_projection_facts_only_check CHECK (facts_only),
+    CONSTRAINT tour_public_projection_projection_digest_check CHECK ((projection_digest ~ '^sha256:[a-f0-9]{64}$'::text)),
+    CONSTRAINT tour_public_projection_projection_version_check CHECK ((projection_version > 0)),
+    CONSTRAINT tour_public_projection_route_version_check CHECK ((route_version > 0)),
+    CONSTRAINT tour_public_projection_status_check CHECK ((status = ANY (ARRAY['draft'::text, 'qc_blocked'::text, 'approved'::text, 'published'::text, 'superseded'::text, 'quarantined'::text, 'rolled_back'::text])))
+);
+
+
+--
+-- Name: TABLE tour_public_projection; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.tour_public_projection IS 'Client renderer cache metadata only. Facts exist only in normalized tour_public_projection_fact rows.';
+
+
+--
+-- Name: tour_public_projection_fact; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_public_projection_fact (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    projection_id uuid NOT NULL,
+    property_id uuid NOT NULL,
+    field_assertion_id uuid NOT NULL,
+    route_version integer NOT NULL,
+    display_field_key text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_public_projection_fact_display_field_key_check CHECK ((display_field_key = ANY (ARRAY['display.name'::text, 'display.address'::text, 'suite'::text, 'property_type'::text, 'size'::text, 'asking_economics'::text, 'availability'::text, 'parking'::text, 'access'::text, 'photos'::text, 'floor_plan'::text, 'source_attribution'::text, 'as_of'::text, 'caveat'::text])))
+);
+
+
+--
+-- Name: tour_public_projection_seal_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_public_projection_seal_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text CONSTRAINT tour_public_projection_seal_rec_organization_tenant_id_not_null NOT NULL,
+    projection_id uuid NOT NULL,
+    sealed_at timestamp with time zone NOT NULL,
+    sealed_state text NOT NULL,
+    actor_id text NOT NULL,
+    receipt_digest text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_public_projection_seal_receipt_receipt_digest_check CHECK ((receipt_digest ~ '^sha256:[a-f0-9]{64}$'::text)),
+    CONSTRAINT tour_public_projection_seal_receipt_sealed_state_check CHECK ((sealed_state = ANY (ARRAY['approved'::text, 'published'::text, 'quarantined'::text, 'rolled_back'::text])))
+);
+
+
+--
+-- Name: tour_publication; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_publication (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    projection_id uuid NOT NULL,
+    publication_state text NOT NULL,
+    projection_digest text NOT NULL,
+    actor_id text,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    state_changed_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_publication_projection_digest_check CHECK ((projection_digest ~ '^sha256:[a-f0-9]{64}$'::text)),
+    CONSTRAINT tour_publication_publication_state_check CHECK ((publication_state = ANY (ARRAY['draft'::text, 'pending_qc'::text, 'approved'::text, 'published'::text, 'quarantined'::text, 'rolled_back'::text])))
+);
+
+
+--
+-- Name: tour_qc_finding; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_qc_finding (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    artifact_type text NOT NULL,
+    artifact_id uuid NOT NULL,
+    check_id text NOT NULL,
+    severity text NOT NULL,
+    state text NOT NULL,
+    evidence jsonb NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    resolved_at timestamp with time zone,
+    CONSTRAINT tour_qc_finding_artifact_type_check CHECK ((artifact_type = ANY (ARRAY['public_projection'::text, 'pdf'::text, 'map'::text, 'cheat_sheet'::text, 'share_grant'::text]))),
+    CONSTRAINT tour_qc_finding_evidence_check CHECK ((jsonb_typeof(evidence) = 'object'::text)),
+    CONSTRAINT tour_qc_finding_severity_check CHECK ((severity = ANY (ARRAY['blocker'::text, 'error'::text, 'warning'::text, 'info'::text]))),
+    CONSTRAINT tour_qc_finding_state_check CHECK ((state = ANY (ARRAY['open'::text, 'accepted_risk'::text, 'resolved'::text, 'superseded'::text])))
+);
+
+
+--
+-- Name: tour_rights_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_rights_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    provider text NOT NULL,
+    sku text,
+    policy_key text NOT NULL,
+    receipt_version integer NOT NULL,
+    receipt_digest text NOT NULL,
+    terms_url text NOT NULL,
+    reviewed_at timestamp with time zone NOT NULL,
+    reviewer text NOT NULL,
+    intended_use text NOT NULL,
+    allowed_field_classes jsonb NOT NULL,
+    allowed_use_classes jsonb NOT NULL,
+    effective_at timestamp with time zone NOT NULL,
+    expires_at timestamp with time zone,
+    revoked_at timestamp with time zone,
+    supersedes_receipt_id uuid,
+    status text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_rights_receipt_check CHECK (((jsonb_typeof(allowed_field_classes) = 'array'::text) AND (jsonb_typeof(allowed_use_classes) = 'array'::text))),
+    CONSTRAINT tour_rights_receipt_check1 CHECK (((expires_at IS NULL) OR (expires_at > effective_at))),
+    CONSTRAINT tour_rights_receipt_check2 CHECK (((status <> 'revoked'::text) OR (revoked_at IS NOT NULL))),
+    CONSTRAINT tour_rights_receipt_receipt_digest_check CHECK ((receipt_digest ~ '^sha256:[a-f0-9]{64}$'::text)),
+    CONSTRAINT tour_rights_receipt_receipt_version_check CHECK ((receipt_version > 0)),
+    CONSTRAINT tour_rights_receipt_status_check CHECK ((status = ANY (ARRAY['active'::text, 'expired'::text, 'revoked'::text, 'unknown'::text])))
+);
+
+
+--
+-- Name: tour_share_grant; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_share_grant (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    projection_id uuid NOT NULL,
+    grant_version integer NOT NULL,
+    token_digest text NOT NULL,
+    audience text NOT NULL,
+    permission_scopes jsonb NOT NULL,
+    rotated_from_grant_id uuid,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone,
+    revoked_at timestamp with time zone,
+    status text NOT NULL,
+    CONSTRAINT tour_share_grant_audience_check CHECK ((audience = ANY (ARRAY['client'::text, 'internal'::text]))),
+    CONSTRAINT tour_share_grant_check CHECK (((expires_at IS NULL) OR (expires_at > created_at))),
+    CONSTRAINT tour_share_grant_check1 CHECK (((status <> 'revoked'::text) OR (revoked_at IS NOT NULL))),
+    CONSTRAINT tour_share_grant_grant_version_check CHECK ((grant_version > 0)),
+    CONSTRAINT tour_share_grant_permission_scopes_check CHECK (((jsonb_typeof(permission_scopes) = 'array'::text) AND (jsonb_array_length(permission_scopes) > 0) AND (permission_scopes <@ '["view_packet", "view_map"]'::jsonb))),
+    CONSTRAINT tour_share_grant_status_check CHECK ((status = ANY (ARRAY['active'::text, 'revoked'::text, 'expired'::text, 'rotated'::text]))),
+    CONSTRAINT tour_share_grant_token_digest_check CHECK ((token_digest ~ '^sha256:[a-f0-9]{64}$'::text))
+);
+
+
+--
+-- Name: TABLE tour_share_grant; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.tour_share_grant IS 'Stores opaque-token digests and scope/version/rotation lineage; never plaintext tokens.';
+
+
+--
+-- Name: tour_share_grant_revocation_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_share_grant_revocation_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text CONSTRAINT tour_share_grant_revocation_rec_organization_tenant_id_not_null NOT NULL,
+    share_grant_id uuid NOT NULL,
+    revoked_at timestamp with time zone NOT NULL,
+    actor_id text NOT NULL,
+    reason text NOT NULL,
+    receipt_digest text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_share_grant_revocation_receipt_receipt_digest_check CHECK ((receipt_digest ~ '^sha256:[a-f0-9]{64}$'::text))
+);
+
+
+--
+-- Name: tour_source_evidence; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.tour_source_evidence (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    organization_tenant_id text NOT NULL,
+    stable_locator text NOT NULL,
+    evidence_class text NOT NULL,
+    retrieved_at timestamp with time zone NOT NULL,
+    retrieval_status text NOT NULL,
+    content_digest text NOT NULL,
+    rights_receipt_id uuid NOT NULL,
+    data_classification text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tour_source_evidence_content_digest_check CHECK ((content_digest ~ '^sha256:[a-f0-9]{64}$'::text)),
+    CONSTRAINT tour_source_evidence_data_classification_check CHECK ((data_classification = ANY (ARRAY['public'::text, 'client_authorized'::text, 'internal'::text, 'restricted'::text]))),
+    CONSTRAINT tour_source_evidence_evidence_class_check CHECK ((evidence_class = ANY (ARRAY['direct_source'::text, 'linked_artifact'::text, 'public_mirror'::text, 'inference'::text]))),
+    CONSTRAINT tour_source_evidence_retrieval_status_check CHECK ((retrieval_status = ANY (ARRAY['read'::text, 'partial'::text, 'inaccessible'::text, 'failed'::text])))
+);
+
+
+--
 -- Name: work_request; Type: TABLE; Schema: ops; Owner: -
 --
 
@@ -14034,6 +19536,7 @@ CREATE TABLE ops.work_request (
     CONSTRAINT work_request_program_ordinal_positive CHECK (((program_ordinal IS NULL) OR (program_ordinal > 0))),
     CONSTRAINT work_request_shape_disposition_complete CHECK ((((shape_disposition IS NULL) AND (shape_fixed_surface_ref IS NULL) AND (shape_rationale IS NULL) AND (shape_decided_by_actor_id IS NULL) AND (shape_decided_at IS NULL)) OR ((shape_disposition = 'required'::text) AND (shape_fixed_surface_ref IS NULL) AND (shape_rationale IS NOT NULL) AND (btrim(shape_rationale) <> ''::text) AND (shape_decided_by_actor_id IS NOT NULL) AND (shape_decided_at IS NOT NULL)) OR ((shape_disposition = 'not_required'::text) AND (shape_fixed_surface_ref IS NOT NULL) AND (btrim(shape_fixed_surface_ref) <> ''::text) AND (shape_rationale IS NOT NULL) AND (btrim(shape_rationale) <> ''::text) AND (shape_decided_by_actor_id IS NOT NULL) AND (shape_decided_at IS NOT NULL)))),
     CONSTRAINT work_request_shape_disposition_valid CHECK (((shape_disposition IS NULL) OR (shape_disposition = ANY (ARRAY['required'::text, 'not_required'::text])))),
+    CONSTRAINT work_request_sourced_capture_shape CHECK ((((capture_idempotency_key IS NULL) AND (organization_tenant_id IS NULL) AND (doctrine_section_id IS NULL) AND (doctrine_revision_id IS NULL) AND (sourced_capture_sequence IS NULL) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL) AND (program_key IS NULL) AND (program_ordinal IS NULL)) OR ((capture_idempotency_key IS NULL) AND (NOT (organization_tenant_id IS DISTINCT FROM 'carr-internal'::text)) AND (doctrine_section_id IS NULL) AND (doctrine_revision_id IS NULL) AND (sourced_capture_sequence IS NULL) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL) AND (program_key = ANY (ARRAY['carr-ai-engineering-suite-v1'::text, 'carr-system-integrity-elimination-v1'::text])) AND (program_ordinal IS NOT NULL) AND (program_ordinal > 0) AND (NOT (requester_actor IS DISTINCT FROM 'joe'::text)) AND (NOT (owner_actor IS DISTINCT FROM 'joe'::text))) OR ((capture_idempotency_key IS NOT NULL) AND (NOT (organization_tenant_id IS DISTINCT FROM 'carr-internal'::text)) AND (doctrine_section_id IS NOT NULL) AND (doctrine_revision_id IS NOT NULL) AND (sourced_capture_sequence IS NOT NULL) AND (program_key IS NULL) AND (program_ordinal IS NULL) AND (origin_ref IS NOT NULL) AND (origin_ref ~ '^doctrine:[a-z0-9][a-z0-9-]*#[a-z0-9][a-z0-9-]*$'::text) AND (((state = 'captured'::text) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL)) OR ((state = ANY (ARRAY['triaged'::text, 'ready'::text])) AND (triage_classification = ANY (ARRAY['operational'::text, 'needs_judgment'::text, 'safety_review'::text])) AND (triaged_by_actor_id IS NOT NULL) AND (triaged_at IS NOT NULL)))))),
     CONSTRAINT work_request_state_check CHECK ((state = ANY (ARRAY['captured'::text, 'triaged'::text, 'ready'::text, 'claimed'::text, 'in_progress'::text, 'verification'::text, 'awaiting_release'::text, 'released'::text, 'confirmed_closed'::text, 'needs_joe'::text, 'blocked'::text, 'declined'::text, 'superseded'::text, 'failed'::text])))
 );
 
@@ -14070,7 +19573,7 @@ COMMENT ON COLUMN ops.work_request.shape_disposition IS 'Mandatory before a requ
 -- Name: COLUMN work_request.organization_tenant_id; Type: COMMENT; Schema: ops; Owner: -
 --
 
-COMMENT ON COLUMN ops.work_request.organization_tenant_id IS 'Server-derived CARR organization tenant for sourced Program 6 capture. Historical rows remain null.';
+COMMENT ON COLUMN ops.work_request.organization_tenant_id IS 'Server-derived CARR tenant for sourced Program 6 plus the exact fixed AI and SIEP programs. Other historical rows remain null.';
 
 
 --
@@ -14085,40 +19588,104 @@ COMMENT ON COLUMN ops.work_request.doctrine_revision_id IS 'Exact current doctri
 --
 
 CREATE VIEW ops.v_capability_program_next AS
- SELECT id,
-    ref,
-    state,
-    title,
-    desired_outcome,
-    acceptance_criteria,
-    origin_ref,
-    requester_actor,
-    owner_actor,
-    executor_actor,
-    blocker_code,
-    blocker_detail,
-    verification_accepted_at,
-    verification_evidence_ref,
-    exit_reason,
-    superseded_by,
-    captured_at,
-    claimed_at,
-    started_at,
-    closed_at,
-    updated_at,
-    correlation_id,
-    program_key,
-    program_ordinal,
-    disposition,
-    existing_status,
-    project_context,
-    completion_kind,
-    completion_evidence,
-    version
+ SELECT w.id,
+    w.ref,
+    w.state,
+    w.title,
+    w.desired_outcome,
+    w.acceptance_criteria,
+    w.origin_ref,
+    w.requester_actor,
+    w.owner_actor,
+    w.executor_actor,
+    w.blocker_code,
+    w.blocker_detail,
+    w.verification_accepted_at,
+    w.verification_evidence_ref,
+    w.exit_reason,
+    w.superseded_by,
+    w.captured_at,
+    w.claimed_at,
+    w.started_at,
+    w.closed_at,
+    w.updated_at,
+    w.correlation_id,
+    w.program_key,
+    w.program_ordinal,
+    w.disposition,
+    w.existing_status,
+    w.project_context,
+    w.completion_kind,
+    w.completion_evidence,
+    w.version,
+    w.shape_disposition,
+    w.shape_fixed_surface_ref,
+    w.shape_rationale,
+    w.shape_decided_by_actor_id,
+    w.shape_decided_at,
+    w.organization_tenant_id,
+    w.doctrine_section_id,
+    w.doctrine_revision_id,
+    w.capture_idempotency_key,
+    w.sourced_capture_sequence,
+    w.triage_classification,
+    w.triaged_by_actor_id,
+    w.triaged_at
    FROM ops.work_request w
-  WHERE ((program_key IS NOT NULL) AND (state <> 'confirmed_closed'::text) AND (NOT (EXISTS ( SELECT 1
+  WHERE ((w.program_key IS NOT NULL) AND (w.program_key <> 'carr-system-integrity-elimination-v1'::text) AND (w.state <> 'confirmed_closed'::text) AND (NOT (EXISTS ( SELECT 1
            FROM ops.work_request p
-          WHERE ((p.program_key = w.program_key) AND (p.program_ordinal < w.program_ordinal) AND (p.state <> 'confirmed_closed'::text))))));
+          WHERE ((p.program_key = w.program_key) AND (p.program_ordinal < w.program_ordinal) AND (p.state <> 'confirmed_closed'::text))))))
+UNION ALL
+ SELECT w.id,
+    w.ref,
+    w.state,
+    w.title,
+    w.desired_outcome,
+    w.acceptance_criteria,
+    w.origin_ref,
+    w.requester_actor,
+    w.owner_actor,
+    w.executor_actor,
+    w.blocker_code,
+    w.blocker_detail,
+    w.verification_accepted_at,
+    w.verification_evidence_ref,
+    w.exit_reason,
+    w.superseded_by,
+    w.captured_at,
+    w.claimed_at,
+    w.started_at,
+    w.closed_at,
+    w.updated_at,
+    w.correlation_id,
+    w.program_key,
+    w.program_ordinal,
+    w.disposition,
+    w.existing_status,
+    w.project_context,
+    w.completion_kind,
+    w.completion_evidence,
+    w.version,
+    w.shape_disposition,
+    w.shape_fixed_surface_ref,
+    w.shape_rationale,
+    w.shape_decided_by_actor_id,
+    w.shape_decided_at,
+    w.organization_tenant_id,
+    w.doctrine_section_id,
+    w.doctrine_revision_id,
+    w.capture_idempotency_key,
+    w.sourced_capture_sequence,
+    w.triage_classification,
+    w.triaged_by_actor_id,
+    w.triaged_at
+   FROM (ops.work_request w
+     JOIN ops.siep_package_contract c ON ((c.work_request_id = w.id)))
+  WHERE ((w.state <> 'confirmed_closed'::text) AND (NOT (EXISTS ( SELECT 1
+           FROM ((ops.siep_program_dependency d
+             JOIN ops.siep_package_contract dc ON ((dc.package_key = d.depends_on_package_key)))
+             JOIN ops.work_request dw ON ((dw.id = dc.work_request_id)))
+          WHERE ((d.package_key = c.package_key) AND (dw.state <> 'confirmed_closed'::text))))));
 
 
 --
@@ -19515,10 +25082,11 @@ CREATE VIEW public.v_control_plane_deal_history_queue AS
             'receipt_missing'::text AS text
           WHERE (NOT (EXISTS ( SELECT 1
                    FROM weekly)))
-        ), raw AS (
-         SELECT 'client'::text AS subject_type,
+        ), salesforce_clients AS (
+         SELECT 1 AS tier_rank,
+            'client'::text AS subject_type,
             c.id AS subject_id,
-            max(d.created_at) AS newest_deal_at
+            row_number() OVER (ORDER BY (max(d.created_at)) DESC NULLS LAST, c.id) AS tier_seq
            FROM ((public.client c
              JOIN public.party p ON ((p.id = c.party_id)))
              JOIN public.deal d ON ((d.client_id = c.id)))
@@ -19526,10 +25094,23 @@ CREATE VIEW public.v_control_plane_deal_history_queue AS
                    FROM public.record_flag f
                   WHERE ((f.subject_type = 'client'::text) AND (f.subject_id = c.id) AND (f.kind = 'verified'::text) AND ((f.expires_on IS NULL) OR (f.expires_on >= CURRENT_DATE)))))))
           GROUP BY c.id
-        UNION ALL
-         SELECT 'party'::text AS text,
-            dp.party_id,
-            max(d.created_at) AS max
+        ), pipeline_clients AS (
+         SELECT 2 AS tier_rank,
+            'client'::text AS subject_type,
+            c.id AS subject_id,
+            row_number() OVER (ORDER BY c.created_at DESC, c.id) AS tier_seq
+           FROM (public.client c
+             JOIN public.party p ON ((p.id = c.party_id)))
+          WHERE ((c.status = ANY (ARRAY['active_deal'::text, 'engaged'::text])) AND (p.contact_state <> 'do_not_contact'::text) AND (NOT (EXISTS ( SELECT 1
+                   FROM salesforce_clients sc
+                  WHERE (sc.subject_id = c.id)))) AND (NOT (EXISTS ( SELECT 1
+                   FROM public.record_flag f
+                  WHERE ((f.subject_type = 'client'::text) AND (f.subject_id = c.id) AND (f.kind = 'verified'::text) AND ((f.expires_on IS NULL) OR (f.expires_on >= CURRENT_DATE)))))))
+        ), counterparties AS (
+         SELECT 3 AS tier_rank,
+            'party'::text AS subject_type,
+            dp.party_id AS subject_id,
+            row_number() OVER (ORDER BY (max(d.created_at)) DESC NULLS LAST, dp.party_id) AS tier_seq
            FROM ((public.deal_participant dp
              JOIN public.deal d ON ((d.id = dp.deal_id)))
              JOIN public.party p ON ((p.id = dp.party_id)))
@@ -19537,12 +25118,46 @@ CREATE VIEW public.v_control_plane_deal_history_queue AS
                    FROM public.record_flag f
                   WHERE ((f.subject_type = 'party'::text) AND (f.subject_id = dp.party_id) AND (f.kind = 'verified'::text) AND ((f.expires_on IS NULL) OR (f.expires_on >= CURRENT_DATE)))))))
           GROUP BY dp.party_id
+        ), identity_anomalies AS (
+         SELECT 4 AS tier_rank,
+            'client'::text AS subject_type,
+            c.id AS subject_id,
+            row_number() OVER (ORDER BY c.created_at DESC, c.id) AS tier_seq
+           FROM (public.client c
+             JOIN public.party p ON ((p.id = c.party_id)))
+          WHERE ((c.roster_ref IS NULL) AND (p.contact_state <> 'do_not_contact'::text) AND (NOT (EXISTS ( SELECT 1
+                   FROM salesforce_clients sc
+                  WHERE (sc.subject_id = c.id)))) AND (NOT (EXISTS ( SELECT 1
+                   FROM pipeline_clients pc
+                  WHERE (pc.subject_id = c.id)))))
         ), ranked AS (
-         SELECT r_1.subject_type,
-            r_1.subject_id,
-            r_1.newest_deal_at,
-            (row_number() OVER (ORDER BY r_1.newest_deal_at DESC NULLS LAST, r_1.subject_type, r_1.subject_id))::integer AS priority
-           FROM raw r_1
+         SELECT tiers.tier_rank,
+            tiers.subject_type,
+            tiers.subject_id,
+            (row_number() OVER (ORDER BY tiers.tier_rank, tiers.tier_seq))::integer AS priority
+           FROM ( SELECT salesforce_clients.tier_rank,
+                    salesforce_clients.tier_seq,
+                    salesforce_clients.subject_type,
+                    salesforce_clients.subject_id
+                   FROM salesforce_clients
+                UNION ALL
+                 SELECT pipeline_clients.tier_rank,
+                    pipeline_clients.tier_seq,
+                    pipeline_clients.subject_type,
+                    pipeline_clients.subject_id
+                   FROM pipeline_clients
+                UNION ALL
+                 SELECT counterparties.tier_rank,
+                    counterparties.tier_seq,
+                    counterparties.subject_type,
+                    counterparties.subject_id
+                   FROM counterparties
+                UNION ALL
+                 SELECT identity_anomalies.tier_rank,
+                    identity_anomalies.tier_seq,
+                    identity_anomalies.subject_type,
+                    identity_anomalies.subject_id
+                   FROM identity_anomalies) tiers
         )
  SELECT r.subject_type,
     r.subject_id,
@@ -19563,7 +25178,7 @@ CREATE VIEW public.v_control_plane_deal_history_queue AS
 -- Name: VIEW v_control_plane_deal_history_queue; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.v_control_plane_deal_history_queue IS 'Deal-history research queue. receipt_missing keeps an unverified backlog visible when no typed Thursday completion receipt exists, but supplies no execution cap or receipt metadata. receipt_bound rows carry the exact 15/25 cap and receipt evidence required by the execution collector.';
+COMMENT ON VIEW public.v_control_plane_deal_history_queue IS 'Deal-history research queue, four priority bands in the order deal-history-research-weekly.SKILL.md documents: (1) clients on a Salesforce-tagged deal with no verified flag, newest-imported first, (2) any active_deal/engaged client never verified, (3) deal_participant counterparties with no verified flag, (4) clients missing roster_ref. receipt_missing keeps an unverified backlog visible when no typed Thursday completion receipt exists, but supplies no execution cap or receipt metadata. receipt_bound rows carry the exact 15/25 cap and receipt evidence required by the execution collector.';
 
 
 --
@@ -19615,20 +25230,147 @@ COMMENT ON VIEW public.v_expired_verification IS 'The re-verify queue (0071, ord
 --
 
 CREATE VIEW public.v_control_plane_enrichment_queue AS
+ WITH reverify_scoped AS (
+         SELECT q.subject_type,
+            q.subject_id,
+            q.reason,
+            q.observed_at,
+            q.expires_on,
+            q.past_age_floor,
+            q.subject_touches,
+                CASE q.subject_type
+                    WHEN 'party'::text THEN q.subject_id
+                    WHEN 'vendor'::text THEN v.party_id
+                    WHEN 'lead'::text THEN l.party_id
+                    WHEN 'client'::text THEN c.party_id
+                    ELSE NULL::uuid
+                END AS resolved_party_id
+           FROM (((public.v_expired_verification q
+             LEFT JOIN public.vendor v ON (((q.subject_type = 'vendor'::text) AND (v.id = q.subject_id))))
+             LEFT JOIN public.lead l ON (((q.subject_type = 'lead'::text) AND (l.id = q.subject_id))))
+             LEFT JOIN public.client c ON (((q.subject_type = 'client'::text) AND (c.id = q.subject_id))))
+          WHERE (q.subject_type = ANY (ARRAY['party'::text, 'vendor'::text, 'lead'::text, 'client'::text]))
+        ), reverify AS (
+         SELECT 0 AS tier_rank,
+            row_number() OVER (ORDER BY rs.past_age_floor DESC, rs.subject_touches DESC, rs.observed_at, rs.subject_id) AS tier_seq,
+            rs.subject_type,
+            rs.subject_id,
+            rs.reason AS reverification_due,
+            COALESCE((rs.expires_on)::timestamp with time zone, rs.observed_at) AS expired_at
+           FROM (reverify_scoped rs
+             JOIN public.party p ON ((p.id = rs.resolved_party_id)))
+          WHERE (p.contact_state <> 'do_not_contact'::text)
+        ), needs_type AS (
+         SELECT 1 AS tier_rank,
+            row_number() OVER (ORDER BY v.is_target DESC, v.relationship_level DESC NULLS LAST, p.name) AS tier_seq,
+            'vendor'::text AS subject_type,
+            v.id AS subject_id,
+            'not_recorded'::text AS reverification_due,
+            v.created_at AS expired_at
+           FROM (public.vendor v
+             JOIN public.party p ON ((p.id = v.party_id)))
+          WHERE ((v.category_slug IS NULL) AND (v.disposition = 'active'::text) AND (p.contact_state <> 'do_not_contact'::text))
+        ), needs_location AS (
+         SELECT 2 AS tier_rank,
+            row_number() OVER (ORDER BY p.name, v.id) AS tier_seq,
+            'vendor'::text AS subject_type,
+            v.id AS subject_id,
+            'not_recorded'::text AS reverification_due,
+            v.created_at AS expired_at
+           FROM (public.vendor v
+             JOIN public.party p ON ((p.id = v.party_id)))
+          WHERE ((v.disposition = 'active'::text) AND ((p.city IS NULL) OR (p.county IS NULL)) AND (p.contact_state <> 'do_not_contact'::text) AND (NOT (EXISTS ( SELECT 1
+                   FROM needs_type nt
+                  WHERE (nt.subject_id = v.id)))))
+        ), needs_verticals AS (
+         SELECT 3 AS tier_rank,
+            row_number() OVER (ORDER BY p.name, v.id) AS tier_seq,
+            'vendor'::text AS subject_type,
+            v.id AS subject_id,
+            'not_recorded'::text AS reverification_due,
+            v.created_at AS expired_at
+           FROM (public.vendor v
+             JOIN public.party p ON ((p.id = v.party_id)))
+          WHERE ((v.disposition = 'active'::text) AND ((v.verticals IS NULL) OR (cardinality(v.verticals) = 0)) AND (p.contact_state <> 'do_not_contact'::text) AND (NOT (EXISTS ( SELECT 1
+                   FROM needs_type nt
+                  WHERE (nt.subject_id = v.id)))) AND (NOT (EXISTS ( SELECT 1
+                   FROM needs_location nl
+                  WHERE (nl.subject_id = v.id)))))
+        ), lead_client_gaps AS (
+         SELECT 4 AS tier_rank,
+            row_number() OVER (ORDER BY x.expired_at, x.subject_type, x.subject_id) AS tier_seq,
+            x.subject_type,
+            x.subject_id,
+            'not_recorded'::text AS reverification_due,
+            x.expired_at
+           FROM ( SELECT 'lead'::text AS subject_type,
+                    l.id AS subject_id,
+                    l.created_at AS expired_at
+                   FROM (public.lead l
+                     JOIN public.party p ON ((p.id = l.party_id)))
+                  WHERE ((p.contact_state <> 'do_not_contact'::text) AND ((p.title IS NULL) OR (p.org_id IS NULL) OR (p.email IS NULL) OR ((p.phone IS NULL) AND (p.cell IS NULL))))
+                UNION ALL
+                 SELECT 'client'::text AS text,
+                    c.id,
+                    c.created_at
+                   FROM (public.client c
+                     JOIN public.party p ON ((p.id = c.party_id)))
+                  WHERE ((p.contact_state <> 'do_not_contact'::text) AND ((p.title IS NULL) OR (p.org_id IS NULL) OR (p.email IS NULL) OR ((p.phone IS NULL) AND (p.cell IS NULL))))) x
+        ), combined AS (
+         SELECT reverify.tier_rank,
+            reverify.tier_seq,
+            reverify.subject_type,
+            reverify.subject_id,
+            reverify.reverification_due,
+            reverify.expired_at
+           FROM reverify
+        UNION ALL
+         SELECT needs_type.tier_rank,
+            needs_type.tier_seq,
+            needs_type.subject_type,
+            needs_type.subject_id,
+            needs_type.reverification_due,
+            needs_type.expired_at
+           FROM needs_type
+        UNION ALL
+         SELECT needs_location.tier_rank,
+            needs_location.tier_seq,
+            needs_location.subject_type,
+            needs_location.subject_id,
+            needs_location.reverification_due,
+            needs_location.expired_at
+           FROM needs_location
+        UNION ALL
+         SELECT needs_verticals.tier_rank,
+            needs_verticals.tier_seq,
+            needs_verticals.subject_type,
+            needs_verticals.subject_id,
+            needs_verticals.reverification_due,
+            needs_verticals.expired_at
+           FROM needs_verticals
+        UNION ALL
+         SELECT lead_client_gaps.tier_rank,
+            lead_client_gaps.tier_seq,
+            lead_client_gaps.subject_type,
+            lead_client_gaps.subject_id,
+            lead_client_gaps.reverification_due,
+            lead_client_gaps.expired_at
+           FROM lead_client_gaps
+        )
  SELECT subject_type,
     subject_id,
-    reason AS reverification_due,
+    reverification_due,
     'not_current'::text AS current_verification_status,
-    (row_number() OVER (ORDER BY past_age_floor DESC, subject_touches DESC, observed_at, subject_id))::integer AS priority,
-    COALESCE((expires_on)::timestamp with time zone, observed_at) AS expired_at
-   FROM public.v_expired_verification q;
+    (row_number() OVER (ORDER BY tier_rank, tier_seq))::integer AS priority,
+    expired_at
+   FROM combined;
 
 
 --
 -- Name: VIEW v_control_plane_enrichment_queue; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON VIEW public.v_control_plane_enrichment_queue IS 'Control-plane re-verification projection. Every row is expired or unstamped volatile evidence, so this view never calls a fact verified or current.';
+COMMENT ON VIEW public.v_control_plane_enrichment_queue IS 'Control-plane re-verification/enrichment projection, five priority bands in the order contact-enrichment-weekly.SKILL.md documents: (0) scoped expired/unstamped-volatile re-verifications, (1) active vendors with no category, (2) active vendors missing city/county, (3) active vendors missing verticals, (4) leads/clients missing title, org, email, or phone. do_not_contact parties are excluded from every band. priority is one contiguous row_number() across all bands, so a short queue is a valid 1..N prefix, never a gap.';
 
 
 --
@@ -22830,7 +28572,8 @@ COMMENT ON VIEW public.v_role_timeouts IS 'Per-role statement and idle-transacti
 
 CREATE VIEW public.v_schema_ledger AS
  SELECT filename,
-    applied_at
+    applied_at,
+    sha256
    FROM public.schema_migrations;
 
 
@@ -23701,14 +29444,6 @@ ALTER TABLE ONLY ops.engineering_execution_envelope
 
 
 --
--- Name: engineering_execution_envelope engineering_execution_envelope_slice_plan_id_slice_ref_key; Type: CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ONLY ops.engineering_execution_envelope
-    ADD CONSTRAINT engineering_execution_envelope_slice_plan_id_slice_ref_key UNIQUE (slice_plan_id, slice_ref);
-
-
---
 -- Name: engineering_reviewer_fact engineering_reviewer_fact_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -24162,6 +29897,86 @@ ALTER TABLE ONLY ops.guidance_situation_mapping
 
 ALTER TABLE ONLY ops.guidance_situation_mapping
     ADD CONSTRAINT guidance_situation_mapping_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: heavy_build_admission_revision heavy_build_admission_revision_admission_ref_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_admission_revision
+    ADD CONSTRAINT heavy_build_admission_revision_admission_ref_key UNIQUE (admission_ref);
+
+
+--
+-- Name: heavy_build_admission_revision heavy_build_admission_revision_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_admission_revision
+    ADD CONSTRAINT heavy_build_admission_revision_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: heavy_build_admission_revision heavy_build_admission_revision_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_admission_revision
+    ADD CONSTRAINT heavy_build_admission_revision_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: heavy_build_admission_revision heavy_build_admission_revision_plan_id_admission_hash_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_admission_revision
+    ADD CONSTRAINT heavy_build_admission_revision_plan_id_admission_hash_key UNIQUE (plan_id, admission_hash);
+
+
+--
+-- Name: heavy_build_admission_revision heavy_build_admission_revision_plan_id_version_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_admission_revision
+    ADD CONSTRAINT heavy_build_admission_revision_plan_id_version_key UNIQUE (plan_id, version);
+
+
+--
+-- Name: heavy_build_plan_review heavy_build_plan_review_admission_id_review_hash_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_plan_review
+    ADD CONSTRAINT heavy_build_plan_review_admission_id_review_hash_key UNIQUE (admission_id, review_hash);
+
+
+--
+-- Name: heavy_build_plan_review heavy_build_plan_review_admission_id_version_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_plan_review
+    ADD CONSTRAINT heavy_build_plan_review_admission_id_version_key UNIQUE (admission_id, version);
+
+
+--
+-- Name: heavy_build_plan_review heavy_build_plan_review_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_plan_review
+    ADD CONSTRAINT heavy_build_plan_review_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: heavy_build_plan_review heavy_build_plan_review_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_plan_review
+    ADD CONSTRAINT heavy_build_plan_review_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: heavy_build_plan_review heavy_build_plan_review_review_ref_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_plan_review
+    ADD CONSTRAINT heavy_build_plan_review_review_ref_key UNIQUE (review_ref);
 
 
 --
@@ -24621,7 +30436,7 @@ ALTER TABLE ONLY ops.provider_route
 --
 
 ALTER TABLE ops.run
-    ADD CONSTRAINT recovery_rehearsal_assurance CHECK (((run_key !~~ 'recovery.rehearsal.%'::text) OR ((release_id IS NOT NULL) AND (environment = 'staging'::text) AND (evidence_ref IS NOT NULL) AND (recovery_strategy = 'rollback'::text) AND (recovery_plan_ref IS NOT NULL) AND ((state <> 'succeeded'::text) OR (recovery_rehearsal_bundle_id IS NOT NULL))))) NOT VALID;
+    ADD CONSTRAINT recovery_rehearsal_assurance CHECK (((run_key !~~ 'recovery.rehearsal.%'::text) OR ((release_id IS NOT NULL) AND (environment = 'staging'::text) AND (evidence_ref IS NOT NULL) AND (recovery_strategy = ANY (ARRAY['rollback'::text, 'forward_fix'::text])) AND (recovery_plan_ref IS NOT NULL) AND ((state <> 'succeeded'::text) OR (recovery_rehearsal_bundle_id IS NOT NULL))))) NOT VALID;
 
 
 --
@@ -24769,6 +30584,38 @@ ALTER TABLE ONLY ops.rule_admission
 
 
 --
+-- Name: rule_admission_reclassification_receipt rule_admission_reclassification_receipt_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_admission_reclassification_receipt
+    ADD CONSTRAINT rule_admission_reclassification_receipt_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: rule_admission_reclassification_receipt rule_admission_reclassification_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_admission_reclassification_receipt
+    ADD CONSTRAINT rule_admission_reclassification_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rule_amendment_receipt rule_amendment_receipt_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_amendment_receipt
+    ADD CONSTRAINT rule_amendment_receipt_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: rule_amendment_receipt rule_amendment_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_amendment_receipt
+    ADD CONSTRAINT rule_amendment_receipt_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: rule_approval_lifecycle_anchor rule_approval_lifecycle_anchor_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -24806,6 +30653,22 @@ ALTER TABLE ONLY ops.rule_approval_receipt
 
 ALTER TABLE ONLY ops.rule_control_binding
     ADD CONSTRAINT rule_control_binding_pkey PRIMARY KEY (rule_id, control_key);
+
+
+--
+-- Name: rule_delivery_activation_receipt rule_delivery_activation_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_delivery_activation_receipt
+    ADD CONSTRAINT rule_delivery_activation_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: rule_delivery_activation_target rule_delivery_activation_target_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_delivery_activation_target
+    ADD CONSTRAINT rule_delivery_activation_target_pkey PRIMARY KEY (short_id);
 
 
 --
@@ -24918,6 +30781,126 @@ ALTER TABLE ONLY ops.service
 
 ALTER TABLE ONLY ops.settings_change
     ADD CONSTRAINT settings_change_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: siep_command_receipt siep_command_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_command_receipt
+    ADD CONSTRAINT siep_command_receipt_pkey PRIMARY KEY (idempotency_key);
+
+
+--
+-- Name: siep_component_alias siep_component_alias_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_component_alias
+    ADD CONSTRAINT siep_component_alias_pkey PRIMARY KEY (alias_key);
+
+
+--
+-- Name: siep_evidence_link siep_evidence_link_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_evidence_link
+    ADD CONSTRAINT siep_evidence_link_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: siep_evidence_link siep_evidence_link_package_key_evidence_kind_ledger_kind_le_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_evidence_link
+    ADD CONSTRAINT siep_evidence_link_package_key_evidence_kind_ledger_kind_le_key UNIQUE (package_key, evidence_kind, ledger_kind, ledger_id);
+
+
+--
+-- Name: siep_evidence_link siep_evidence_link_package_key_ledger_kind_ledger_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_evidence_link
+    ADD CONSTRAINT siep_evidence_link_package_key_ledger_kind_ledger_id_key UNIQUE (package_key, ledger_kind, ledger_id);
+
+
+--
+-- Name: siep_evidence_link siep_evidence_link_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_evidence_link
+    ADD CONSTRAINT siep_evidence_link_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: siep_job_evidence_binding siep_job_evidence_binding_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_job_evidence_binding
+    ADD CONSTRAINT siep_job_evidence_binding_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: siep_job_evidence_binding siep_job_evidence_binding_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_job_evidence_binding
+    ADD CONSTRAINT siep_job_evidence_binding_pkey PRIMARY KEY (job_id);
+
+
+--
+-- Name: siep_lane_lock siep_lane_lock_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_lane_lock
+    ADD CONSTRAINT siep_lane_lock_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: siep_lane_lock siep_lane_lock_lease_token_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_lane_lock
+    ADD CONSTRAINT siep_lane_lock_lease_token_key UNIQUE (lease_token);
+
+
+--
+-- Name: siep_lane_lock siep_lane_lock_package_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_lane_lock
+    ADD CONSTRAINT siep_lane_lock_package_key_key UNIQUE (package_key);
+
+
+--
+-- Name: siep_lane_lock siep_lane_lock_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_lane_lock
+    ADD CONSTRAINT siep_lane_lock_pkey PRIMARY KEY (lane_key);
+
+
+--
+-- Name: siep_package_contract siep_package_contract_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_package_contract
+    ADD CONSTRAINT siep_package_contract_pkey PRIMARY KEY (package_key);
+
+
+--
+-- Name: siep_package_contract siep_package_contract_work_request_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_package_contract
+    ADD CONSTRAINT siep_package_contract_work_request_id_key UNIQUE (work_request_id);
+
+
+--
+-- Name: siep_program_dependency siep_program_dependency_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_program_dependency
+    ADD CONSTRAINT siep_program_dependency_pkey PRIMARY KEY (package_key, depends_on_package_key);
 
 
 --
@@ -25145,6 +31128,86 @@ ALTER TABLE ONLY ops.staging_deployment_claim
 
 
 --
+-- Name: staging_forward_fix_rehearsal_attempt staging_forward_fix_rehearsal_attempt_correlation_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_attempt
+    ADD CONSTRAINT staging_forward_fix_rehearsal_attempt_correlation_id_key UNIQUE (correlation_id);
+
+
+--
+-- Name: staging_forward_fix_rehearsal_attempt staging_forward_fix_rehearsal_attempt_expected_provider_tag_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_attempt
+    ADD CONSTRAINT staging_forward_fix_rehearsal_attempt_expected_provider_tag_key UNIQUE (expected_provider_tag);
+
+
+--
+-- Name: staging_forward_fix_rehearsal_attempt staging_forward_fix_rehearsal_attempt_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_attempt
+    ADD CONSTRAINT staging_forward_fix_rehearsal_attempt_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: staging_forward_fix_rehearsal_attempt staging_forward_fix_rehearsal_attempt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_attempt
+    ADD CONSTRAINT staging_forward_fix_rehearsal_attempt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: staging_forward_fix_rehearsal_claim staging_forward_fix_rehearsal_claim_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_claim
+    ADD CONSTRAINT staging_forward_fix_rehearsal_claim_pkey PRIMARY KEY (rehearsal_attempt_id);
+
+
+--
+-- Name: staging_forward_fix_rehearsal_result staging_forward_fix_rehearsal_result_evidence_ref_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_result
+    ADD CONSTRAINT staging_forward_fix_rehearsal_result_evidence_ref_key UNIQUE (evidence_ref);
+
+
+--
+-- Name: staging_forward_fix_rehearsal_result staging_forward_fix_rehearsal_result_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_result
+    ADD CONSTRAINT staging_forward_fix_rehearsal_result_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: staging_forward_fix_rehearsal_result staging_forward_fix_rehearsal_result_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_result
+    ADD CONSTRAINT staging_forward_fix_rehearsal_result_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: staging_forward_fix_rehearsal_result staging_forward_fix_rehearsal_result_projection_sha256_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_result
+    ADD CONSTRAINT staging_forward_fix_rehearsal_result_projection_sha256_key UNIQUE (projection_sha256);
+
+
+--
+-- Name: staging_forward_fix_rehearsal_result staging_forward_fix_rehearsal_result_rehearsal_attempt_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_result
+    ADD CONSTRAINT staging_forward_fix_rehearsal_result_rehearsal_attempt_id_key UNIQUE (rehearsal_attempt_id);
+
+
+--
 -- Name: staging_recovery_rehearsal_bundle staging_recovery_rehearsal_bu_current_after_restore_receipt_key; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -25313,6 +31376,62 @@ ALTER TABLE ONLY ops.staging_release_readback_receipt
 
 
 --
+-- Name: staging_replacement_project_contract staging_replacement_project_contract_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_replacement_project_contract
+    ADD CONSTRAINT staging_replacement_project_contract_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: staging_replacement_project_contract staging_replacement_project_contract_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_replacement_project_contract
+    ADD CONSTRAINT staging_replacement_project_contract_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: staging_replacement_project_receipt staging_replacement_project_receipt_contract_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_replacement_project_receipt
+    ADD CONSTRAINT staging_replacement_project_receipt_contract_id_key UNIQUE (contract_id);
+
+
+--
+-- Name: staging_replacement_project_receipt staging_replacement_project_receipt_evidence_ref_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_replacement_project_receipt
+    ADD CONSTRAINT staging_replacement_project_receipt_evidence_ref_key UNIQUE (evidence_ref);
+
+
+--
+-- Name: staging_replacement_project_receipt staging_replacement_project_receipt_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_replacement_project_receipt
+    ADD CONSTRAINT staging_replacement_project_receipt_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: staging_replacement_project_receipt staging_replacement_project_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_replacement_project_receipt
+    ADD CONSTRAINT staging_replacement_project_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: staging_replacement_project_receipt staging_replacement_project_receipt_receipt_sha256_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_replacement_project_receipt
+    ADD CONSTRAINT staging_replacement_project_receipt_receipt_sha256_key UNIQUE (receipt_sha256);
+
+
+--
 -- Name: staging_restore_only_attempt staging_restore_only_attempt_expected_provider_tag_key; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -25377,6 +31496,406 @@ ALTER TABLE ONLY ops.staging_restore_only_result
 
 
 --
+-- Name: tour_audit_event tour_audit_event_organization_tenant_id_event_digest_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_audit_event
+    ADD CONSTRAINT tour_audit_event_organization_tenant_id_event_digest_key UNIQUE (organization_tenant_id, event_digest);
+
+
+--
+-- Name: tour_audit_event tour_audit_event_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_audit_event
+    ADD CONSTRAINT tour_audit_event_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_audit_event tour_audit_event_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_audit_event
+    ADD CONSTRAINT tour_audit_event_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_cheat_sheet_revision tour_cheat_sheet_revision_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_cheat_sheet_revision
+    ADD CONSTRAINT tour_cheat_sheet_revision_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_cheat_sheet_revision tour_cheat_sheet_revision_organization_tenant_id_tour_id_re_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_cheat_sheet_revision
+    ADD CONSTRAINT tour_cheat_sheet_revision_organization_tenant_id_tour_id_re_key UNIQUE (organization_tenant_id, tour_id, revision_number);
+
+
+--
+-- Name: tour_cheat_sheet_revision tour_cheat_sheet_revision_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_cheat_sheet_revision
+    ADD CONSTRAINT tour_cheat_sheet_revision_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_conflict_resolution_receipt tour_conflict_resolution_rece_organization_tenant_id_confli_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_conflict_resolution_receipt
+    ADD CONSTRAINT tour_conflict_resolution_rece_organization_tenant_id_confli_key UNIQUE (organization_tenant_id, conflict_id);
+
+
+--
+-- Name: tour_conflict_resolution_receipt tour_conflict_resolution_receipt_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_conflict_resolution_receipt
+    ADD CONSTRAINT tour_conflict_resolution_receipt_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_conflict_resolution_receipt tour_conflict_resolution_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_conflict_resolution_receipt
+    ADD CONSTRAINT tour_conflict_resolution_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_fact_conflict tour_fact_conflict_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_fact_conflict
+    ADD CONSTRAINT tour_fact_conflict_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_fact_conflict_participant tour_fact_conflict_participant_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_fact_conflict_participant
+    ADD CONSTRAINT tour_fact_conflict_participant_pkey PRIMARY KEY (organization_tenant_id, conflict_id, field_assertion_id);
+
+
+--
+-- Name: tour_fact_conflict tour_fact_conflict_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_fact_conflict
+    ADD CONSTRAINT tour_fact_conflict_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_field_assertion tour_field_assertion_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_field_assertion
+    ADD CONSTRAINT tour_field_assertion_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_field_assertion tour_field_assertion_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_field_assertion
+    ADD CONSTRAINT tour_field_assertion_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour tour_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour
+    ADD CONSTRAINT tour_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour tour_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour
+    ADD CONSTRAINT tour_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_property_membership tour_property_membership_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_property_membership
+    ADD CONSTRAINT tour_property_membership_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_property_membership tour_property_membership_organization_tenant_id_tour_id_ro_key1; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_property_membership
+    ADD CONSTRAINT tour_property_membership_organization_tenant_id_tour_id_ro_key1 UNIQUE (organization_tenant_id, tour_id, route_version, route_sequence);
+
+
+--
+-- Name: tour_property_membership tour_property_membership_organization_tenant_id_tour_id_ro_key2; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_property_membership
+    ADD CONSTRAINT tour_property_membership_organization_tenant_id_tour_id_ro_key2 UNIQUE (organization_tenant_id, tour_id, route_version, route_label);
+
+
+--
+-- Name: tour_property_membership tour_property_membership_organization_tenant_id_tour_id_rou_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_property_membership
+    ADD CONSTRAINT tour_property_membership_organization_tenant_id_tour_id_rou_key UNIQUE (organization_tenant_id, tour_id, route_version, property_id);
+
+
+--
+-- Name: tour_property_membership tour_property_membership_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_property_membership
+    ADD CONSTRAINT tour_property_membership_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_property tour_property_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_property
+    ADD CONSTRAINT tour_property_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_property tour_property_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_property
+    ADD CONSTRAINT tour_property_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_public_projection_fact tour_public_projection_fact_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection_fact
+    ADD CONSTRAINT tour_public_projection_fact_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_public_projection_fact tour_public_projection_fact_organization_tenant_id_projecti_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection_fact
+    ADD CONSTRAINT tour_public_projection_fact_organization_tenant_id_projecti_key UNIQUE (organization_tenant_id, projection_id, property_id, display_field_key);
+
+
+--
+-- Name: tour_public_projection_fact tour_public_projection_fact_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection_fact
+    ADD CONSTRAINT tour_public_projection_fact_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_public_projection tour_public_projection_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection
+    ADD CONSTRAINT tour_public_projection_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_public_projection tour_public_projection_organization_tenant_id_tour_id_proje_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection
+    ADD CONSTRAINT tour_public_projection_organization_tenant_id_tour_id_proje_key UNIQUE (organization_tenant_id, tour_id, projection_version);
+
+
+--
+-- Name: tour_public_projection tour_public_projection_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection
+    ADD CONSTRAINT tour_public_projection_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_public_projection_seal_receipt tour_public_projection_seal_r_organization_tenant_id_projec_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection_seal_receipt
+    ADD CONSTRAINT tour_public_projection_seal_r_organization_tenant_id_projec_key UNIQUE (organization_tenant_id, projection_id);
+
+
+--
+-- Name: tour_public_projection_seal_receipt tour_public_projection_seal_recei_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection_seal_receipt
+    ADD CONSTRAINT tour_public_projection_seal_recei_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_public_projection_seal_receipt tour_public_projection_seal_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection_seal_receipt
+    ADD CONSTRAINT tour_public_projection_seal_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_publication tour_publication_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_publication
+    ADD CONSTRAINT tour_publication_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_publication tour_publication_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_publication
+    ADD CONSTRAINT tour_publication_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_qc_finding tour_qc_finding_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_qc_finding
+    ADD CONSTRAINT tour_qc_finding_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_qc_finding tour_qc_finding_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_qc_finding
+    ADD CONSTRAINT tour_qc_finding_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_rights_receipt tour_rights_receipt_one_successor; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_rights_receipt
+    ADD CONSTRAINT tour_rights_receipt_one_successor UNIQUE (organization_tenant_id, supersedes_receipt_id);
+
+
+--
+-- Name: tour_rights_receipt tour_rights_receipt_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_rights_receipt
+    ADD CONSTRAINT tour_rights_receipt_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_rights_receipt tour_rights_receipt_organization_tenant_id_provider_policy__key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_rights_receipt
+    ADD CONSTRAINT tour_rights_receipt_organization_tenant_id_provider_policy__key UNIQUE (organization_tenant_id, provider, policy_key, receipt_version);
+
+
+--
+-- Name: tour_rights_receipt tour_rights_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_rights_receipt
+    ADD CONSTRAINT tour_rights_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_share_grant tour_share_grant_one_successor; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_share_grant
+    ADD CONSTRAINT tour_share_grant_one_successor UNIQUE (organization_tenant_id, rotated_from_grant_id);
+
+
+--
+-- Name: tour_share_grant tour_share_grant_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_share_grant
+    ADD CONSTRAINT tour_share_grant_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_share_grant tour_share_grant_organization_tenant_id_projection_id_grant_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_share_grant
+    ADD CONSTRAINT tour_share_grant_organization_tenant_id_projection_id_grant_key UNIQUE (organization_tenant_id, projection_id, grant_version);
+
+
+--
+-- Name: tour_share_grant tour_share_grant_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_share_grant
+    ADD CONSTRAINT tour_share_grant_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_share_grant_revocation_receipt tour_share_grant_revocation_r_organization_tenant_id_share__key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_share_grant_revocation_receipt
+    ADD CONSTRAINT tour_share_grant_revocation_r_organization_tenant_id_share__key UNIQUE (organization_tenant_id, share_grant_id);
+
+
+--
+-- Name: tour_share_grant_revocation_receipt tour_share_grant_revocation_recei_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_share_grant_revocation_receipt
+    ADD CONSTRAINT tour_share_grant_revocation_recei_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_share_grant_revocation_receipt tour_share_grant_revocation_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_share_grant_revocation_receipt
+    ADD CONSTRAINT tour_share_grant_revocation_receipt_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: tour_share_grant tour_share_grant_token_digest_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_share_grant
+    ADD CONSTRAINT tour_share_grant_token_digest_key UNIQUE (token_digest);
+
+
+--
+-- Name: tour_source_evidence tour_source_evidence_organization_tenant_id_id_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_source_evidence
+    ADD CONSTRAINT tour_source_evidence_organization_tenant_id_id_key UNIQUE (organization_tenant_id, id);
+
+
+--
+-- Name: tour_source_evidence tour_source_evidence_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_source_evidence
+    ADD CONSTRAINT tour_source_evidence_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: work_request_execution_assignment work_request_execution_assignment_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -25430,14 +31949,6 @@ ALTER TABLE ONLY ops.work_request
 
 ALTER TABLE ONLY ops.work_request
     ADD CONSTRAINT work_request_ref_key UNIQUE (ref);
-
-
---
--- Name: work_request work_request_sourced_capture_shape; Type: CHECK CONSTRAINT; Schema: ops; Owner: -
---
-
-ALTER TABLE ops.work_request
-    ADD CONSTRAINT work_request_sourced_capture_shape CHECK ((((capture_idempotency_key IS NULL) AND (organization_tenant_id IS NULL) AND (doctrine_section_id IS NULL) AND (doctrine_revision_id IS NULL) AND (sourced_capture_sequence IS NULL) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL)) OR ((capture_idempotency_key IS NOT NULL) AND (organization_tenant_id = 'carr-internal'::text) AND (doctrine_section_id IS NOT NULL) AND (doctrine_revision_id IS NOT NULL) AND (sourced_capture_sequence IS NOT NULL) AND (program_key IS NULL) AND (program_ordinal IS NULL) AND (origin_ref ~ '^doctrine:[a-z0-9][a-z0-9-]*#[a-z0-9][a-z0-9-]*$'::text) AND (((state = 'captured'::text) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL)) OR ((state = ANY (ARRAY['triaged'::text, 'ready'::text])) AND (triage_classification = ANY (ARRAY['operational'::text, 'needs_judgment'::text, 'safety_review'::text])) AND (triaged_by_actor_id IS NOT NULL) AND (triaged_at IS NOT NULL)))))) NOT VALID;
 
 
 --
@@ -26977,6 +33488,20 @@ CREATE INDEX deployment_release_idx ON ops.deployment USING btree (release_id);
 
 
 --
+-- Name: engineering_envelope_one_successor; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE UNIQUE INDEX engineering_envelope_one_successor ON ops.engineering_execution_envelope USING btree (supersedes_envelope_id) WHERE (supersedes_envelope_id IS NOT NULL);
+
+
+--
+-- Name: engineering_envelope_session_attempt; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE UNIQUE INDEX engineering_envelope_session_attempt ON ops.engineering_execution_envelope USING btree (slice_plan_id, slice_ref, agent_session_id);
+
+
+--
 -- Name: engineering_envelope_work_request_idx; Type: INDEX; Schema: ops; Owner: -
 --
 
@@ -27117,6 +33642,13 @@ CREATE UNIQUE INDEX release_staging_approval_receipt_once ON ops.release USING b
 
 
 --
+-- Name: rule_amendment_receipt_rule_id_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX rule_amendment_receipt_rule_id_idx ON ops.rule_amendment_receipt USING btree (rule_id, rule_version_before);
+
+
+--
 -- Name: run_correlation_idx; Type: INDEX; Schema: ops; Owner: -
 --
 
@@ -27170,6 +33702,20 @@ CREATE INDEX settings_change_kind_idx ON ops.settings_change USING btree (kind, 
 --
 
 CREATE INDEX settings_change_recorded_idx ON ops.settings_change USING btree (recorded_at DESC);
+
+
+--
+-- Name: staging_recovery_bundle_forward_fix_result_once; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE UNIQUE INDEX staging_recovery_bundle_forward_fix_result_once ON ops.staging_recovery_rehearsal_bundle USING btree (forward_fix_result_id) WHERE (forward_fix_result_id IS NOT NULL);
+
+
+--
+-- Name: tour_field_assertion_property_field_active_idx; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE INDEX tour_field_assertion_property_field_active_idx ON ops.tour_field_assertion USING btree (organization_tenant_id, property_id, field_key, effective_from DESC) WHERE (review_state = ANY (ARRAY['unreviewed'::text, 'reviewed'::text, 'conflicted'::text]));
 
 
 --
@@ -28134,6 +34680,13 @@ CREATE TRIGGER capability_agent_session_guard_before_write BEFORE INSERT OR UPDA
 
 
 --
+-- Name: capability_agent_session capability_agent_session_lease_immutable_before_write; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER capability_agent_session_lease_immutable_before_write BEFORE UPDATE ON ops.capability_agent_session FOR EACH ROW EXECUTE FUNCTION ops.capability_agent_session_lease_immutable();
+
+
+--
 -- Name: capability_verification capability_attestation_guard_before_insert; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -28232,6 +34785,13 @@ CREATE TRIGGER device_evidence_receipt_append_only BEFORE DELETE OR UPDATE ON op
 
 
 --
+-- Name: engineering_execution_envelope engineering_envelope_supersession_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER engineering_envelope_supersession_guard BEFORE INSERT ON ops.engineering_execution_envelope FOR EACH ROW EXECUTE FUNCTION ops.guard_engineering_envelope_supersession();
+
+
+--
 -- Name: engineering_execution_envelope engineering_execution_envelope_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -28239,10 +34799,31 @@ CREATE TRIGGER engineering_execution_envelope_append_only BEFORE DELETE OR UPDAT
 
 
 --
+-- Name: job_definition engineering_job_definition_currentness_guard_before_update; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER engineering_job_definition_currentness_guard_before_update BEFORE UPDATE ON ops.job_definition FOR EACH ROW EXECUTE FUNCTION ops.guard_engineering_job_definition_currentness_update();
+
+
+--
 -- Name: engineering_reviewer_fact engineering_reviewer_fact_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
 CREATE TRIGGER engineering_reviewer_fact_append_only BEFORE DELETE OR UPDATE ON ops.engineering_reviewer_fact FOR EACH ROW EXECUTE FUNCTION ops.refuse_engineering_evidence_rewrite();
+
+
+--
+-- Name: engineering_reviewer_fact engineering_reviewer_fact_contract_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER engineering_reviewer_fact_contract_guard BEFORE INSERT ON ops.engineering_reviewer_fact FOR EACH ROW EXECUTE FUNCTION ops.guard_engineering_reviewer_fact_insert();
+
+
+--
+-- Name: capability_agent_session engineering_session_terminalization_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER engineering_session_terminalization_guard BEFORE UPDATE OF state ON ops.capability_agent_session FOR EACH ROW EXECUTE FUNCTION ops.guard_engineering_session_terminalization();
 
 
 --
@@ -28257,6 +34838,13 @@ CREATE TRIGGER engineering_slice_plan_append_only BEFORE DELETE OR UPDATE ON ops
 --
 
 CREATE TRIGGER engineering_slice_receipt_append_only BEFORE DELETE OR UPDATE ON ops.engineering_slice_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_engineering_evidence_rewrite();
+
+
+--
+-- Name: work_request engineering_work_request_currentness_guard_before_update; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER engineering_work_request_currentness_guard_before_update BEFORE UPDATE ON ops.work_request FOR EACH ROW EXECUTE FUNCTION ops.engineering_work_request_currentness_guard();
 
 
 --
@@ -28400,6 +34988,20 @@ CREATE TRIGGER guidance_situation_mapping_validate BEFORE INSERT ON ops.guidance
 
 
 --
+-- Name: heavy_build_admission_revision heavy_build_admission_revision_immutable; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER heavy_build_admission_revision_immutable BEFORE DELETE OR UPDATE ON ops.heavy_build_admission_revision FOR EACH ROW EXECUTE FUNCTION ops.heavy_build_admission_rows_immutable();
+
+
+--
+-- Name: heavy_build_plan_review heavy_build_plan_review_immutable; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER heavy_build_plan_review_immutable BEFORE DELETE OR UPDATE ON ops.heavy_build_plan_review FOR EACH ROW EXECUTE FUNCTION ops.heavy_build_admission_rows_immutable();
+
+
+--
 -- Name: job_attempt job_attempt_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -28519,6 +35121,13 @@ CREATE TRIGGER provider_observation_append_only BEFORE DELETE OR UPDATE ON ops.p
 
 
 --
+-- Name: rule_admission_reclassification_receipt refuse_rule_admission_reclassification_rewrite; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER refuse_rule_admission_reclassification_rewrite BEFORE DELETE OR UPDATE ON ops.rule_admission_reclassification_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_rule_approval_receipt_rewrite();
+
+
+--
 -- Name: run reject_fabricated_drill_row; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -28617,6 +35226,13 @@ CREATE TRIGGER renewal_source_snapshot_member_append_only BEFORE DELETE OR UPDAT
 
 
 --
+-- Name: rule_amendment_receipt rule_amendment_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER rule_amendment_receipt_append_only BEFORE DELETE OR UPDATE ON ops.rule_amendment_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_rule_approval_receipt_rewrite();
+
+
+--
 -- Name: rule_approval_lifecycle_anchor rule_approval_lifecycle_anchor_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -28638,6 +35254,20 @@ CREATE TRIGGER rule_approval_receipt_append_only BEFORE DELETE OR UPDATE ON ops.
 
 
 --
+-- Name: rule_delivery_activation_receipt rule_delivery_activation_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER rule_delivery_activation_receipt_append_only BEFORE DELETE OR UPDATE ON ops.rule_delivery_activation_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_rule_delivery_activation_receipt_rewrite();
+
+
+--
+-- Name: rule_delivery_policy rule_delivery_policy_cutover_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER rule_delivery_policy_cutover_only BEFORE UPDATE ON ops.rule_delivery_policy FOR EACH ROW EXECUTE FUNCTION ops.refuse_direct_rule_delivery_policy_update();
+
+
+--
 -- Name: rule_load_layer rule_load_layer_packs_exist; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -28649,6 +35279,90 @@ CREATE TRIGGER rule_load_layer_packs_exist BEFORE INSERT OR UPDATE ON ops.rule_l
 --
 
 CREATE TRIGGER rule_retirement_receipt_append_only BEFORE DELETE OR UPDATE ON ops.rule_retirement_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_rule_approval_receipt_rewrite();
+
+
+--
+-- Name: siep_command_receipt siep_command_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER siep_command_receipt_append_only BEFORE DELETE OR UPDATE ON ops.siep_command_receipt FOR EACH ROW EXECUTE FUNCTION ops.siep_append_only_guard();
+
+
+--
+-- Name: siep_component_alias siep_component_alias_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER siep_component_alias_append_only BEFORE DELETE OR UPDATE ON ops.siep_component_alias FOR EACH ROW EXECUTE FUNCTION ops.siep_append_only_guard();
+
+
+--
+-- Name: siep_component_alias siep_component_alias_sealed_before_insert; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER siep_component_alias_sealed_before_insert BEFORE INSERT ON ops.siep_component_alias FOR EACH ROW EXECUTE FUNCTION ops.siep_manifest_insert_guard();
+
+
+--
+-- Name: siep_job_evidence_binding siep_engineering_evidence_binding_contract_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER siep_engineering_evidence_binding_contract_guard BEFORE INSERT ON ops.siep_job_evidence_binding FOR EACH ROW EXECUTE FUNCTION ops.guard_siep_engineering_evidence_binding();
+
+
+--
+-- Name: siep_evidence_link siep_evidence_link_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER siep_evidence_link_append_only BEFORE DELETE OR UPDATE ON ops.siep_evidence_link FOR EACH ROW EXECUTE FUNCTION ops.siep_append_only_guard();
+
+
+--
+-- Name: siep_job_evidence_binding siep_job_evidence_binding_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER siep_job_evidence_binding_append_only BEFORE DELETE OR UPDATE ON ops.siep_job_evidence_binding FOR EACH ROW EXECUTE FUNCTION ops.siep_append_only_guard();
+
+
+--
+-- Name: siep_package_contract siep_package_contract_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER siep_package_contract_append_only BEFORE DELETE OR UPDATE ON ops.siep_package_contract FOR EACH ROW EXECUTE FUNCTION ops.siep_append_only_guard();
+
+
+--
+-- Name: siep_package_contract siep_package_contract_sealed_before_insert; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER siep_package_contract_sealed_before_insert BEFORE INSERT ON ops.siep_package_contract FOR EACH ROW EXECUTE FUNCTION ops.siep_manifest_insert_guard();
+
+
+--
+-- Name: siep_program_dependency siep_program_dependency_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER siep_program_dependency_append_only BEFORE DELETE OR UPDATE ON ops.siep_program_dependency FOR EACH ROW EXECUTE FUNCTION ops.siep_append_only_guard();
+
+
+--
+-- Name: siep_program_dependency siep_program_dependency_sealed_before_insert; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER siep_program_dependency_sealed_before_insert BEFORE INSERT ON ops.siep_program_dependency FOR EACH ROW EXECUTE FUNCTION ops.siep_manifest_insert_guard();
+
+
+--
+-- Name: work_request siep_program_identity_guard_before_update; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER siep_program_identity_guard_before_update BEFORE UPDATE ON ops.work_request FOR EACH ROW EXECUTE FUNCTION ops.siep_program_identity_guard();
+
+
+--
+-- Name: work_request siep_program_transition_guard_before_update; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER siep_program_transition_guard_before_update BEFORE UPDATE ON ops.work_request FOR EACH ROW EXECUTE FUNCTION ops.siep_program_transition_guard();
 
 
 --
@@ -28715,6 +35429,27 @@ CREATE TRIGGER staging_deployment_claim_append_only BEFORE DELETE OR UPDATE ON o
 
 
 --
+-- Name: staging_forward_fix_rehearsal_attempt staging_forward_fix_rehearsal_attempt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER staging_forward_fix_rehearsal_attempt_append_only BEFORE DELETE OR UPDATE ON ops.staging_forward_fix_rehearsal_attempt FOR EACH ROW EXECUTE FUNCTION ops.refuse_program5_evidence_mutation();
+
+
+--
+-- Name: staging_forward_fix_rehearsal_claim staging_forward_fix_rehearsal_claim_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER staging_forward_fix_rehearsal_claim_append_only BEFORE DELETE OR UPDATE ON ops.staging_forward_fix_rehearsal_claim FOR EACH ROW EXECUTE FUNCTION ops.refuse_program5_evidence_mutation();
+
+
+--
+-- Name: staging_forward_fix_rehearsal_result staging_forward_fix_rehearsal_result_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER staging_forward_fix_rehearsal_result_append_only BEFORE DELETE OR UPDATE ON ops.staging_forward_fix_rehearsal_result FOR EACH ROW EXECUTE FUNCTION ops.refuse_program5_evidence_mutation();
+
+
+--
 -- Name: staging_recovery_rehearsal_bundle staging_recovery_bundle_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -28743,6 +35478,20 @@ CREATE TRIGGER staging_release_readback_append_only BEFORE DELETE OR UPDATE ON o
 
 
 --
+-- Name: staging_replacement_project_contract staging_replacement_project_contract_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER staging_replacement_project_contract_append_only BEFORE DELETE OR UPDATE ON ops.staging_replacement_project_contract FOR EACH ROW EXECUTE FUNCTION ops.refuse_program5_evidence_mutation();
+
+
+--
+-- Name: staging_replacement_project_receipt staging_replacement_project_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER staging_replacement_project_receipt_append_only BEFORE DELETE OR UPDATE ON ops.staging_replacement_project_receipt FOR EACH ROW EXECUTE FUNCTION ops.refuse_program5_evidence_mutation();
+
+
+--
 -- Name: staging_restore_only_attempt staging_restore_only_attempt_append_only; Type: TRIGGER; Schema: ops; Owner: -
 --
 
@@ -28761,6 +35510,174 @@ CREATE TRIGGER staging_restore_only_claim_append_only BEFORE DELETE OR UPDATE ON
 --
 
 CREATE TRIGGER staging_restore_only_result_append_only BEFORE DELETE OR UPDATE ON ops.staging_restore_only_result FOR EACH ROW EXECUTE FUNCTION ops.refuse_program5_evidence_mutation();
+
+
+--
+-- Name: tour_field_assertion tour_assertion_rights_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_assertion_rights_guard BEFORE INSERT ON ops.tour_field_assertion FOR EACH ROW EXECUTE FUNCTION ops.tour_assertion_rights_guard();
+
+
+--
+-- Name: tour_audit_event tour_audit_event_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_audit_event_append_only BEFORE DELETE OR UPDATE ON ops.tour_audit_event FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_cheat_sheet_revision tour_cheat_sheet_revision_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_cheat_sheet_revision_append_only BEFORE DELETE OR UPDATE ON ops.tour_cheat_sheet_revision FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_fact_conflict_participant tour_conflict_participant_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_conflict_participant_guard BEFORE INSERT ON ops.tour_fact_conflict_participant FOR EACH ROW EXECUTE FUNCTION ops.tour_conflict_participant_guard();
+
+
+--
+-- Name: tour_conflict_resolution_receipt tour_conflict_resolution_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_conflict_resolution_guard BEFORE INSERT ON ops.tour_conflict_resolution_receipt FOR EACH ROW EXECUTE FUNCTION ops.tour_conflict_resolution_guard();
+
+
+--
+-- Name: tour_conflict_resolution_receipt tour_conflict_resolution_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_conflict_resolution_receipt_append_only BEFORE DELETE OR UPDATE ON ops.tour_conflict_resolution_receipt FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_fact_conflict tour_fact_conflict_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_fact_conflict_append_only BEFORE DELETE OR UPDATE ON ops.tour_fact_conflict FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_fact_conflict_participant tour_fact_conflict_participant_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_fact_conflict_participant_append_only BEFORE DELETE OR UPDATE ON ops.tour_fact_conflict_participant FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_field_assertion tour_field_assertion_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_field_assertion_append_only BEFORE DELETE OR UPDATE ON ops.tour_field_assertion FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_property_membership tour_membership_seal_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_membership_seal_guard BEFORE INSERT ON ops.tour_property_membership FOR EACH ROW EXECUTE FUNCTION ops.tour_membership_seal_guard();
+
+
+--
+-- Name: tour_public_projection tour_projection_creation_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_projection_creation_guard BEFORE INSERT ON ops.tour_public_projection FOR EACH ROW EXECUTE FUNCTION ops.tour_projection_creation_guard();
+
+
+--
+-- Name: tour_public_projection_fact tour_projection_fact_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_projection_fact_guard BEFORE INSERT OR UPDATE ON ops.tour_public_projection_fact FOR EACH ROW EXECUTE FUNCTION ops.tour_projection_fact_guard();
+
+
+--
+-- Name: tour_public_projection_seal_receipt tour_projection_seal_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_projection_seal_guard BEFORE INSERT ON ops.tour_public_projection_seal_receipt FOR EACH ROW EXECUTE FUNCTION ops.tour_projection_seal_guard();
+
+
+--
+-- Name: tour_property_membership tour_property_membership_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_property_membership_append_only BEFORE DELETE OR UPDATE ON ops.tour_property_membership FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_public_projection tour_public_projection_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_public_projection_append_only BEFORE DELETE OR UPDATE ON ops.tour_public_projection FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_public_projection_fact tour_public_projection_fact_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_public_projection_fact_append_only BEFORE DELETE OR UPDATE ON ops.tour_public_projection_fact FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_public_projection_seal_receipt tour_public_projection_seal_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_public_projection_seal_receipt_append_only BEFORE DELETE OR UPDATE ON ops.tour_public_projection_seal_receipt FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_rights_receipt tour_rights_lineage_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_rights_lineage_guard BEFORE INSERT ON ops.tour_rights_receipt FOR EACH ROW EXECUTE FUNCTION ops.tour_rights_lineage_guard();
+
+
+--
+-- Name: tour_rights_receipt tour_rights_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_rights_receipt_append_only BEFORE DELETE OR UPDATE ON ops.tour_rights_receipt FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_share_grant tour_share_grant_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_share_grant_append_only BEFORE DELETE OR UPDATE ON ops.tour_share_grant FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_share_grant_revocation_receipt tour_share_grant_revocation_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_share_grant_revocation_receipt_append_only BEFORE DELETE OR UPDATE ON ops.tour_share_grant_revocation_receipt FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_share_grant tour_share_rotation_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_share_rotation_guard BEFORE INSERT ON ops.tour_share_grant FOR EACH ROW EXECUTE FUNCTION ops.tour_share_rotation_guard();
+
+
+--
+-- Name: tour_source_evidence tour_source_evidence_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_source_evidence_append_only BEFORE DELETE OR UPDATE ON ops.tour_source_evidence FOR EACH ROW EXECUTE FUNCTION ops.tour_reject_mutation();
+
+
+--
+-- Name: tour_source_evidence tour_source_rights_guard; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER tour_source_rights_guard BEFORE INSERT ON ops.tour_source_evidence FOR EACH ROW EXECUTE FUNCTION ops.tour_source_rights_guard();
 
 
 --
@@ -28789,6 +35706,13 @@ CREATE TRIGGER work_request_execution_environment_bind AFTER INSERT ON ops.work_
 --
 
 CREATE TRIGGER work_request_execution_environment_binding_append_only BEFORE DELETE OR UPDATE ON ops.work_request_execution_environment_binding FOR EACH ROW EXECUTE FUNCTION ops.execution_environment_append_only_guard();
+
+
+--
+-- Name: work_request work_request_heavy_build_ready_plan_gate; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER work_request_heavy_build_ready_plan_gate BEFORE UPDATE ON ops.work_request FOR EACH ROW EXECUTE FUNCTION ops.heavy_build_ready_plan_gate();
 
 
 --
@@ -28911,6 +35835,13 @@ CREATE TRIGGER doctrine_section_retrieval_repair_after_update AFTER UPDATE OF st
 
 
 --
+-- Name: actor engineering_actor_authority_guard_before_update; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER engineering_actor_authority_guard_before_update BEFORE UPDATE ON public.actor FOR EACH ROW EXECUTE FUNCTION ops.guard_engineering_actor_authority_update();
+
+
+--
 -- Name: lead lead_touch; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -29020,6 +35951,13 @@ CREATE TRIGGER rule_touch BEFORE UPDATE ON public.rule FOR EACH ROW EXECUTE FUNC
 --
 
 CREATE TRIGGER session_work_touch BEFORE UPDATE ON public.session_work FOR EACH ROW EXECUTE FUNCTION public.trg_touch_row();
+
+
+--
+-- Name: event siep_joe_decision_event_guard_before_write; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER siep_joe_decision_event_guard_before_write BEFORE INSERT OR DELETE OR UPDATE ON public.event FOR EACH ROW EXECUTE FUNCTION ops.siep_joe_decision_event_guard();
 
 
 --
@@ -29532,6 +36470,14 @@ ALTER TABLE ONLY ops.engineering_execution_envelope
 
 
 --
+-- Name: engineering_execution_envelope engineering_execution_envelope_supersedes_envelope_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.engineering_execution_envelope
+    ADD CONSTRAINT engineering_execution_envelope_supersedes_envelope_id_fkey FOREIGN KEY (supersedes_envelope_id) REFERENCES ops.engineering_execution_envelope(id) ON DELETE RESTRICT;
+
+
+--
 -- Name: engineering_execution_envelope engineering_execution_envelope_work_request_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -29932,6 +36878,46 @@ ALTER TABLE ONLY ops.guidance_situation_mapping
 
 
 --
+-- Name: heavy_build_admission_revision heavy_build_admission_revision_plan_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_admission_revision
+    ADD CONSTRAINT heavy_build_admission_revision_plan_id_fkey FOREIGN KEY (plan_id) REFERENCES ops.sourced_work_request_plan(id);
+
+
+--
+-- Name: heavy_build_admission_revision heavy_build_admission_revision_proposed_by_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_admission_revision
+    ADD CONSTRAINT heavy_build_admission_revision_proposed_by_actor_id_fkey FOREIGN KEY (proposed_by_actor_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: heavy_build_admission_revision heavy_build_admission_revision_work_request_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_admission_revision
+    ADD CONSTRAINT heavy_build_admission_revision_work_request_id_fkey FOREIGN KEY (work_request_id) REFERENCES ops.work_request(id);
+
+
+--
+-- Name: heavy_build_plan_review heavy_build_plan_review_admission_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_plan_review
+    ADD CONSTRAINT heavy_build_plan_review_admission_id_fkey FOREIGN KEY (admission_id) REFERENCES ops.heavy_build_admission_revision(id);
+
+
+--
+-- Name: heavy_build_plan_review heavy_build_plan_review_reviewer_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.heavy_build_plan_review
+    ADD CONSTRAINT heavy_build_plan_review_reviewer_actor_id_fkey FOREIGN KEY (reviewer_actor_id) REFERENCES public.actor(id);
+
+
+--
 -- Name: incident incident_duplicate_of_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -30308,11 +37294,43 @@ ALTER TABLE ONLY ops.rule_admission
 
 
 --
+-- Name: rule_admission_reclassification_receipt rule_admission_reclassification_receipt_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_admission_reclassification_receipt
+    ADD CONSTRAINT rule_admission_reclassification_receipt_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: rule_admission_reclassification_receipt rule_admission_reclassification_receipt_rule_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_admission_reclassification_receipt
+    ADD CONSTRAINT rule_admission_reclassification_receipt_rule_id_fkey FOREIGN KEY (rule_id) REFERENCES public.rule(id);
+
+
+--
 -- Name: rule_admission rule_admission_rule_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
 --
 
 ALTER TABLE ONLY ops.rule_admission
     ADD CONSTRAINT rule_admission_rule_id_fkey FOREIGN KEY (rule_id) REFERENCES public.rule(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: rule_amendment_receipt rule_amendment_receipt_amended_by_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_amendment_receipt
+    ADD CONSTRAINT rule_amendment_receipt_amended_by_fkey FOREIGN KEY (amended_by) REFERENCES public.actor(id);
+
+
+--
+-- Name: rule_amendment_receipt rule_amendment_receipt_rule_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.rule_amendment_receipt
+    ADD CONSTRAINT rule_amendment_receipt_rule_id_fkey FOREIGN KEY (rule_id) REFERENCES public.rule(id) ON DELETE RESTRICT;
 
 
 --
@@ -30457,6 +37475,118 @@ ALTER TABLE ONLY ops.service_dependency
 
 ALTER TABLE ONLY ops.service_environment
     ADD CONSTRAINT service_environment_service_id_fkey FOREIGN KEY (service_id) REFERENCES ops.service(id) ON DELETE CASCADE;
+
+
+--
+-- Name: siep_command_receipt siep_command_receipt_package_key_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_command_receipt
+    ADD CONSTRAINT siep_command_receipt_package_key_fkey FOREIGN KEY (package_key) REFERENCES ops.siep_package_contract(package_key) ON DELETE RESTRICT;
+
+
+--
+-- Name: siep_command_receipt siep_command_receipt_recorded_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_command_receipt
+    ADD CONSTRAINT siep_command_receipt_recorded_actor_id_fkey FOREIGN KEY (recorded_actor_id) REFERENCES public.actor(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: siep_component_alias siep_component_alias_package_key_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_component_alias
+    ADD CONSTRAINT siep_component_alias_package_key_fkey FOREIGN KEY (package_key) REFERENCES ops.siep_package_contract(package_key) ON DELETE RESTRICT;
+
+
+--
+-- Name: siep_evidence_link siep_evidence_link_linked_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_evidence_link
+    ADD CONSTRAINT siep_evidence_link_linked_actor_id_fkey FOREIGN KEY (linked_actor_id) REFERENCES public.actor(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: siep_evidence_link siep_evidence_link_package_key_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_evidence_link
+    ADD CONSTRAINT siep_evidence_link_package_key_fkey FOREIGN KEY (package_key) REFERENCES ops.siep_package_contract(package_key) ON DELETE RESTRICT;
+
+
+--
+-- Name: siep_job_evidence_binding siep_job_evidence_binding_bound_by_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_job_evidence_binding
+    ADD CONSTRAINT siep_job_evidence_binding_bound_by_actor_id_fkey FOREIGN KEY (bound_by_actor_id) REFERENCES public.actor(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: siep_job_evidence_binding siep_job_evidence_binding_definition_key_definition_versio_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_job_evidence_binding
+    ADD CONSTRAINT siep_job_evidence_binding_definition_key_definition_versio_fkey FOREIGN KEY (definition_key, definition_version) REFERENCES ops.job_definition(key, version);
+
+
+--
+-- Name: siep_job_evidence_binding siep_job_evidence_binding_job_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_job_evidence_binding
+    ADD CONSTRAINT siep_job_evidence_binding_job_id_fkey FOREIGN KEY (job_id) REFERENCES ops.job(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: siep_job_evidence_binding siep_job_evidence_binding_package_key_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_job_evidence_binding
+    ADD CONSTRAINT siep_job_evidence_binding_package_key_fkey FOREIGN KEY (package_key) REFERENCES ops.siep_package_contract(package_key) ON DELETE RESTRICT;
+
+
+--
+-- Name: siep_lane_lock siep_lane_lock_holder_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_lane_lock
+    ADD CONSTRAINT siep_lane_lock_holder_actor_id_fkey FOREIGN KEY (holder_actor_id) REFERENCES public.actor(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: siep_lane_lock siep_lane_lock_package_key_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_lane_lock
+    ADD CONSTRAINT siep_lane_lock_package_key_fkey FOREIGN KEY (package_key) REFERENCES ops.siep_package_contract(package_key) ON DELETE RESTRICT;
+
+
+--
+-- Name: siep_package_contract siep_package_contract_work_request_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_package_contract
+    ADD CONSTRAINT siep_package_contract_work_request_id_fkey FOREIGN KEY (work_request_id) REFERENCES ops.work_request(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: siep_program_dependency siep_program_dependency_depends_on_package_key_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_program_dependency
+    ADD CONSTRAINT siep_program_dependency_depends_on_package_key_fkey FOREIGN KEY (depends_on_package_key) REFERENCES ops.siep_package_contract(package_key) ON DELETE RESTRICT;
+
+
+--
+-- Name: siep_program_dependency siep_program_dependency_package_key_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.siep_program_dependency
+    ADD CONSTRAINT siep_program_dependency_package_key_fkey FOREIGN KEY (package_key) REFERENCES ops.siep_package_contract(package_key) ON DELETE RESTRICT;
 
 
 --
@@ -30636,6 +37766,38 @@ ALTER TABLE ONLY ops.staging_deployment_claim
 
 
 --
+-- Name: staging_forward_fix_rehearsal_attempt staging_forward_fix_rehearsal_attempt_release_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_attempt
+    ADD CONSTRAINT staging_forward_fix_rehearsal_attempt_release_id_fkey FOREIGN KEY (release_id) REFERENCES ops.release(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_forward_fix_rehearsal_attempt staging_forward_fix_rehearsal_attempt_service_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_attempt
+    ADD CONSTRAINT staging_forward_fix_rehearsal_attempt_service_id_fkey FOREIGN KEY (service_id) REFERENCES ops.service(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_forward_fix_rehearsal_claim staging_forward_fix_rehearsal_claim_rehearsal_attempt_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_claim
+    ADD CONSTRAINT staging_forward_fix_rehearsal_claim_rehearsal_attempt_id_fkey FOREIGN KEY (rehearsal_attempt_id) REFERENCES ops.staging_forward_fix_rehearsal_attempt(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_forward_fix_rehearsal_result staging_forward_fix_rehearsal_result_rehearsal_attempt_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_forward_fix_rehearsal_result
+    ADD CONSTRAINT staging_forward_fix_rehearsal_result_rehearsal_attempt_id_fkey FOREIGN KEY (rehearsal_attempt_id) REFERENCES ops.staging_forward_fix_rehearsal_attempt(id) ON DELETE RESTRICT;
+
+
+--
 -- Name: staging_recovery_rehearsal_bundle staging_recovery_rehearsal_bu_current_after_restore_receip_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -30665,6 +37827,14 @@ ALTER TABLE ONLY ops.staging_recovery_rehearsal_bundle
 
 ALTER TABLE ONLY ops.staging_recovery_rehearsal_bundle
     ADD CONSTRAINT staging_recovery_rehearsal_bundle_current_release_id_fkey FOREIGN KEY (current_release_id) REFERENCES ops.release(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: staging_recovery_rehearsal_bundle staging_recovery_rehearsal_bundle_forward_fix_result_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_recovery_rehearsal_bundle
+    ADD CONSTRAINT staging_recovery_rehearsal_bundle_forward_fix_result_id_fkey FOREIGN KEY (forward_fix_result_id) REFERENCES ops.staging_forward_fix_rehearsal_result(id) ON DELETE RESTRICT;
 
 
 --
@@ -30740,6 +37910,14 @@ ALTER TABLE ONLY ops.staging_release_readback_receipt
 
 
 --
+-- Name: staging_replacement_project_receipt staging_replacement_project_receipt_contract_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.staging_replacement_project_receipt
+    ADD CONSTRAINT staging_replacement_project_receipt_contract_id_fkey FOREIGN KEY (contract_id) REFERENCES ops.staging_replacement_project_contract(id) ON DELETE RESTRICT;
+
+
+--
 -- Name: staging_restore_only_attempt staging_restore_only_attempt_prior_release_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -30777,6 +37955,182 @@ ALTER TABLE ONLY ops.staging_restore_only_claim
 
 ALTER TABLE ONLY ops.staging_restore_only_result
     ADD CONSTRAINT staging_restore_only_result_restore_attempt_id_fkey FOREIGN KEY (restore_attempt_id) REFERENCES ops.staging_restore_only_attempt(id) ON DELETE RESTRICT;
+
+
+--
+-- Name: tour_cheat_sheet_revision tour_cheat_sheet_revision_organization_tenant_id_tour_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_cheat_sheet_revision
+    ADD CONSTRAINT tour_cheat_sheet_revision_organization_tenant_id_tour_id_fkey FOREIGN KEY (organization_tenant_id, tour_id) REFERENCES ops.tour(organization_tenant_id, id);
+
+
+--
+-- Name: tour_conflict_resolution_receipt tour_conflict_resolution_rece_organization_tenant_id_confl_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_conflict_resolution_receipt
+    ADD CONSTRAINT tour_conflict_resolution_rece_organization_tenant_id_confl_fkey FOREIGN KEY (organization_tenant_id, conflict_id) REFERENCES ops.tour_fact_conflict(organization_tenant_id, id);
+
+
+--
+-- Name: tour_conflict_resolution_receipt tour_conflict_resolution_rece_organization_tenant_id_selec_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_conflict_resolution_receipt
+    ADD CONSTRAINT tour_conflict_resolution_rece_organization_tenant_id_selec_fkey FOREIGN KEY (organization_tenant_id, selected_field_assertion_id) REFERENCES ops.tour_field_assertion(organization_tenant_id, id);
+
+
+--
+-- Name: tour_fact_conflict tour_fact_conflict_organization_tenant_id_property_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_fact_conflict
+    ADD CONSTRAINT tour_fact_conflict_organization_tenant_id_property_id_fkey FOREIGN KEY (organization_tenant_id, property_id) REFERENCES ops.tour_property(organization_tenant_id, id);
+
+
+--
+-- Name: tour_fact_conflict_participant tour_fact_conflict_participan_organization_tenant_id_confl_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_fact_conflict_participant
+    ADD CONSTRAINT tour_fact_conflict_participan_organization_tenant_id_confl_fkey FOREIGN KEY (organization_tenant_id, conflict_id) REFERENCES ops.tour_fact_conflict(organization_tenant_id, id);
+
+
+--
+-- Name: tour_fact_conflict_participant tour_fact_conflict_participan_organization_tenant_id_field_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_fact_conflict_participant
+    ADD CONSTRAINT tour_fact_conflict_participan_organization_tenant_id_field_fkey FOREIGN KEY (organization_tenant_id, field_assertion_id) REFERENCES ops.tour_field_assertion(organization_tenant_id, id);
+
+
+--
+-- Name: tour_field_assertion tour_field_assertion_organization_tenant_id_property_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_field_assertion
+    ADD CONSTRAINT tour_field_assertion_organization_tenant_id_property_id_fkey FOREIGN KEY (organization_tenant_id, property_id) REFERENCES ops.tour_property(organization_tenant_id, id);
+
+
+--
+-- Name: tour_field_assertion tour_field_assertion_organization_tenant_id_rights_receipt_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_field_assertion
+    ADD CONSTRAINT tour_field_assertion_organization_tenant_id_rights_receipt_fkey FOREIGN KEY (organization_tenant_id, rights_receipt_id) REFERENCES ops.tour_rights_receipt(organization_tenant_id, id);
+
+
+--
+-- Name: tour_field_assertion tour_field_assertion_organization_tenant_id_source_evidenc_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_field_assertion
+    ADD CONSTRAINT tour_field_assertion_organization_tenant_id_source_evidenc_fkey FOREIGN KEY (organization_tenant_id, source_evidence_id) REFERENCES ops.tour_source_evidence(organization_tenant_id, id);
+
+
+--
+-- Name: tour_property_membership tour_property_membership_organization_tenant_id_property_i_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_property_membership
+    ADD CONSTRAINT tour_property_membership_organization_tenant_id_property_i_fkey FOREIGN KEY (organization_tenant_id, property_id) REFERENCES ops.tour_property(organization_tenant_id, id);
+
+
+--
+-- Name: tour_property_membership tour_property_membership_organization_tenant_id_tour_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_property_membership
+    ADD CONSTRAINT tour_property_membership_organization_tenant_id_tour_id_fkey FOREIGN KEY (organization_tenant_id, tour_id) REFERENCES ops.tour(organization_tenant_id, id);
+
+
+--
+-- Name: tour_public_projection_fact tour_public_projection_fact_organization_tenant_id_field_a_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection_fact
+    ADD CONSTRAINT tour_public_projection_fact_organization_tenant_id_field_a_fkey FOREIGN KEY (organization_tenant_id, field_assertion_id) REFERENCES ops.tour_field_assertion(organization_tenant_id, id);
+
+
+--
+-- Name: tour_public_projection_fact tour_public_projection_fact_organization_tenant_id_project_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection_fact
+    ADD CONSTRAINT tour_public_projection_fact_organization_tenant_id_project_fkey FOREIGN KEY (organization_tenant_id, projection_id) REFERENCES ops.tour_public_projection(organization_tenant_id, id);
+
+
+--
+-- Name: tour_public_projection_fact tour_public_projection_fact_organization_tenant_id_propert_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection_fact
+    ADD CONSTRAINT tour_public_projection_fact_organization_tenant_id_propert_fkey FOREIGN KEY (organization_tenant_id, property_id) REFERENCES ops.tour_property(organization_tenant_id, id);
+
+
+--
+-- Name: tour_public_projection tour_public_projection_organization_tenant_id_tour_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection
+    ADD CONSTRAINT tour_public_projection_organization_tenant_id_tour_id_fkey FOREIGN KEY (organization_tenant_id, tour_id) REFERENCES ops.tour(organization_tenant_id, id);
+
+
+--
+-- Name: tour_public_projection_seal_receipt tour_public_projection_seal_r_organization_tenant_id_proje_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_public_projection_seal_receipt
+    ADD CONSTRAINT tour_public_projection_seal_r_organization_tenant_id_proje_fkey FOREIGN KEY (organization_tenant_id, projection_id) REFERENCES ops.tour_public_projection(organization_tenant_id, id);
+
+
+--
+-- Name: tour_publication tour_publication_organization_tenant_id_projection_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_publication
+    ADD CONSTRAINT tour_publication_organization_tenant_id_projection_id_fkey FOREIGN KEY (organization_tenant_id, projection_id) REFERENCES ops.tour_public_projection(organization_tenant_id, id);
+
+
+--
+-- Name: tour_rights_receipt tour_rights_receipt_organization_tenant_id_supersedes_rece_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_rights_receipt
+    ADD CONSTRAINT tour_rights_receipt_organization_tenant_id_supersedes_rece_fkey FOREIGN KEY (organization_tenant_id, supersedes_receipt_id) REFERENCES ops.tour_rights_receipt(organization_tenant_id, id);
+
+
+--
+-- Name: tour_share_grant tour_share_grant_organization_tenant_id_projection_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_share_grant
+    ADD CONSTRAINT tour_share_grant_organization_tenant_id_projection_id_fkey FOREIGN KEY (organization_tenant_id, projection_id) REFERENCES ops.tour_public_projection(organization_tenant_id, id);
+
+
+--
+-- Name: tour_share_grant tour_share_grant_organization_tenant_id_rotated_from_grant_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_share_grant
+    ADD CONSTRAINT tour_share_grant_organization_tenant_id_rotated_from_grant_fkey FOREIGN KEY (organization_tenant_id, rotated_from_grant_id) REFERENCES ops.tour_share_grant(organization_tenant_id, id);
+
+
+--
+-- Name: tour_share_grant_revocation_receipt tour_share_grant_revocation_r_organization_tenant_id_share_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_share_grant_revocation_receipt
+    ADD CONSTRAINT tour_share_grant_revocation_r_organization_tenant_id_share_fkey FOREIGN KEY (organization_tenant_id, share_grant_id) REFERENCES ops.tour_share_grant(organization_tenant_id, id);
+
+
+--
+-- Name: tour_source_evidence tour_source_evidence_organization_tenant_id_rights_receipt_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.tour_source_evidence
+    ADD CONSTRAINT tour_source_evidence_organization_tenant_id_rights_receipt_fkey FOREIGN KEY (organization_tenant_id, rights_receipt_id) REFERENCES ops.tour_rights_receipt(organization_tenant_id, id);
 
 
 --
@@ -33004,6 +40358,33 @@ ALTER TABLE ONLY public.vendor
 
 
 --
+-- Name: work_request; Type: ROW SECURITY; Schema: ops; Owner: -
+--
+
+ALTER TABLE ops.work_request ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: work_request work_request_read_all; Type: POLICY; Schema: ops; Owner: -
+--
+
+CREATE POLICY work_request_read_all ON ops.work_request FOR SELECT USING (true);
+
+
+--
+-- Name: work_request work_request_writer_non_siep_insert; Type: POLICY; Schema: ops; Owner: -
+--
+
+CREATE POLICY work_request_writer_non_siep_insert ON ops.work_request FOR INSERT WITH CHECK ((program_key IS DISTINCT FROM 'carr-system-integrity-elimination-v1'::text));
+
+
+--
+-- Name: work_request work_request_writer_non_siep_update; Type: POLICY; Schema: ops; Owner: -
+--
+
+CREATE POLICY work_request_writer_non_siep_update ON ops.work_request FOR UPDATE USING ((program_key IS DISTINCT FROM 'carr-system-integrity-elimination-v1'::text)) WITH CHECK ((program_key IS DISTINCT FROM 'carr-system-integrity-elimination-v1'::text));
+
+
+--
 -- PostgreSQL database dump complete
 --
 
@@ -33026,6 +40407,7 @@ revoke all on function ops.activate_context_bundle(p_work_request text, p_plan_r
 revoke all on function ops.activate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.activate_guidance_situation_mapping(p_proposed_mapping_id uuid, p_authority_binding_id uuid, p_reason text) from public;
 revoke all on function ops.admit_job_cost(p_job_id uuid, p_lease_token uuid, p_route_key text, p_estimated_cost_usd numeric) from public;
+revoke all on function ops.amend_rule_statement(p_rule_id uuid, p_new_statement text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) from public;
 revoke all on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) from public;
@@ -33045,12 +40427,15 @@ revoke all on function ops.calendar_prebrief_attestor_sponsor() from public;
 revoke all on function ops.calendar_prebrief_canonical_event_digest(p_events jsonb) from public;
 revoke all on function ops.calendar_prebrief_joe_live_due_at(p_now timestamp with time zone) from public;
 revoke all on function ops.calendar_prebrief_resolver_sponsor() from public;
+revoke all on function ops.capability_agent_session_lease_immutable() from public;
 revoke all on function ops.capture_sourced_work_request(p_origin_ref text, p_title text, p_desired_outcome text, p_acceptance_criteria jsonb, p_doctrine_section_id uuid, p_doctrine_revision_id uuid, p_idempotency_key uuid) from public;
 revoke all on function ops.claim_calendar_prebrief_joe_live_job(p_worker text, p_lease_seconds integer) from public;
 revoke all on function ops.claim_job(p_worker text, p_limit integer, p_lease_seconds integer) from public;
 revoke all on function ops.claim_job_mode(p_worker text, p_mode text, p_limit integer, p_lease_seconds integer) from public;
 revoke all on function ops.claim_staging_deployment_attempt(p_idempotency_key uuid) from public;
+revoke all on function ops.claim_staging_forward_fix_rehearsal(p_idempotency_key uuid) from public;
 revoke all on function ops.claim_staging_restore_only_attempt(p_idempotency_key uuid) from public;
+revoke all on function ops.classify_sourced_work_request_build(p_work_request text, p_base_version integer, p_scope_summary text, p_dependency_refs jsonb, p_caps jsonb) from public;
 revoke all on function ops.clear_recovered_incident(p_ref text, p_required integer) from public;
 revoke all on function ops.compile_context_bundle(p_work_request text, p_plan_ref text, p_tenant text) from public;
 revoke all on function ops.complete_calendar_prebrief_joe_live_job(p_job uuid, p_lease uuid, p_attestation uuid, p_receipt uuid) from public;
@@ -33067,16 +40452,41 @@ revoke all on function ops.current_sourced_work_requests(p_organization_tenant_i
 revoke all on function ops.deactivate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.decide_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_state text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.disable_legacy_schedule(p_workflow_key text, p_surface_id text, p_locator text, p_reason text, p_pre_observation_ref text, p_post_observation_ref text, p_sibling_surface_id text, p_sibling_locator text, p_sibling_pre_observation_ref text, p_sibling_post_observation_ref text, p_idempotency_key text) from public;
+revoke all on function ops.engineering_claim_slice(p_worker text, p_limit integer, p_lease_seconds integer) from public;
+revoke all on function ops.engineering_controller_binding(p_envelope_id uuid, p_job_id uuid, p_lease_token uuid) from public;
+revoke all on function ops.engineering_enqueue_slice_job(p_work_request text, p_slice_ref text, p_plan_digest text, p_idempotency_key text) from public;
+revoke all on function ops.engineering_enqueue_slice_job(p_work_request text, p_slice_ref text, p_plan_digest text, p_idempotency_key text, p_generation integer) from public;
+revoke all on function ops.engineering_envelope_currentness(p_envelope_id uuid, p_job_id uuid) from public;
+revoke all on function ops.engineering_envelope_is_executable(p_envelope_id uuid, p_job_id uuid) from public;
+revoke all on function ops.engineering_fail_claim(p_job_id uuid, p_lease_token uuid, p_failure_class text, p_detail text) from public;
+revoke all on function ops.engineering_finalize_slice_receipt(p_envelope_id uuid, p_lease_token uuid, p_receipt jsonb, p_receipt_digest text, p_executor_actor_id uuid) from public;
+revoke all on function ops.engineering_receipt_evidence_array(p_value jsonb) from public;
+revoke all on function ops.engineering_receipt_exact_object(p_value jsonb, p_keys text[]) from public;
+revoke all on function ops.engineering_receipt_identifier_array(p_value jsonb) from public;
+revoke all on function ops.engineering_receipt_identifier_sets_equal(p_left jsonb, p_right jsonb) from public;
+revoke all on function ops.engineering_record_slice_receipt(p_envelope_id uuid, p_lease_token uuid, p_receipt jsonb, p_receipt_digest text, p_executor_actor_id uuid) from public;
+revoke all on function ops.engineering_retire_permanently_ineligible_jobs() from public;
+revoke all on function ops.engineering_safe_timestamptz(p_value text) from public;
+revoke all on function ops.engineering_work_request_currentness_guard() from public;
 revoke all on function ops.enqueue_job(p_definition_key text, p_definition_version integer, p_scheduled_for timestamp with time zone, p_payload jsonb, p_idempotency_key text, p_mode text) from public;
 revoke all on function ops.fail_job(p_job_id uuid, p_lease_token uuid, p_failure_class text, p_detail text) from public;
 revoke all on function ops.fence_definition_jobs(p_definition_key text, p_definition_version integer) from public;
 revoke all on function ops.get_cognition_cache(p_cache_key text) from public;
 revoke all on function ops.get_cognition_cache_for_job(p_job_id uuid, p_lease_token uuid, p_cache_key text) from public;
+revoke all on function ops.guard_engineering_actor_authority_update() from public;
+revoke all on function ops.guard_engineering_envelope_supersession() from public;
+revoke all on function ops.guard_engineering_job_definition_currentness_update() from public;
+revoke all on function ops.guard_engineering_reviewer_fact_insert() from public;
+revoke all on function ops.guard_engineering_session_terminalization() from public;
+revoke all on function ops.guard_siep_engineering_evidence_binding() from public;
 revoke all on function ops.guidance_import_canonical_json(p_value jsonb) from public;
 revoke all on function ops.guidance_import_manifest_digest(p_manifest_text text) from public;
 revoke all on function ops.guidance_import_split_group_id(p_key text) from public;
 revoke all on function ops.guidance_revision_contract_hash(p_revision_id uuid) from public;
 revoke all on function ops.heartbeat_job(p_job_id uuid, p_lease_token uuid, p_lease_seconds integer) from public;
+revoke all on function ops.heavy_build_classification(p_work_request_id uuid, p_scope_summary text, p_dependency_refs jsonb, p_caps jsonb) from public;
+revoke all on function ops.heavy_build_digest(p_preimage jsonb) from public;
+revoke all on function ops.heavy_build_jsonb_has_exact_keys(p_document jsonb, p_keys text[]) from public;
 revoke all on function ops.hermes_runtime_admission_for_brief_v1(p_runtime_slug text, p_profile_key text, p_sponsor_slug text, p_work_request text, p_binding_id text) from public;
 revoke all on function ops.ingest_calendar_prebrief_canary_projection(p_job_id uuid, p_lease uuid, p_destination text, p_observed_calendar_keys text[], p_events jsonb) from public;
 revoke all on function ops.ingest_calendar_prebrief_projection(p_job_id uuid, p_lease uuid, p_observed_calendar_keys text[], p_events jsonb) from public;
@@ -33088,7 +40498,10 @@ revoke all on function ops.issue_execution_envelope_v1_without_environment_gate(
 revoke all on function ops.nightly_availability_canary_live_job(p_job_id uuid, p_lease uuid) from public;
 revoke all on function ops.pending_sourced_work_request_outcome_feedback(p_work_request text, p_organization_tenant_id text) from public;
 revoke all on function ops.prepare_staging_deployment_attempt(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_prior_release_key text, p_recovery_attempt_id uuid, p_recovery_step text, p_git_sha text) from public;
+revoke all on function ops.prepare_staging_forward_fix_rehearsal(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_git_sha text) from public;
+revoke all on function ops.prepare_staging_replacement_project(p_idempotency_key uuid, p_contract jsonb) from public;
 revoke all on function ops.prepare_staging_restore_only_attempt(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_prior_release_key text, p_recovery_attempt_id uuid, p_git_sha text) from public;
+revoke all on function ops.program5_exact_recovery_rehearsal(p_release_id uuid, p_not_before timestamp with time zone) from public;
 revoke all on function ops.program5_migration_set_sha256(p_migration_set text[]) from public;
 revoke all on function ops.program6_browser_action_challenge_redemptions_immutable() from public;
 revoke all on function ops.propose_eval_candidate(p_attempt_id text, p_fact_event_ref text, p_idempotency_key uuid) from public;
@@ -33101,7 +40514,10 @@ revoke all on function ops.read_attempt_receipt_reliability(p_attempt_id text) f
 revoke all on function ops.read_calendar_prebrief_joe_activation(p_id uuid) from public;
 revoke all on function ops.read_context_activation(p_work_request text, p_binding_id text) from public;
 revoke all on function ops.read_execution_environment_providers() from public;
+revoke all on function ops.read_staging_forward_fix_rehearsal_declaration(p_idempotency_key uuid) from public;
+revoke all on function ops.read_staging_replacement_project_receipt(p_receipt_id uuid) from public;
 revoke all on function ops.reap_expired_jobs() from public;
+revoke all on function ops.reclassify_legacy_rule_admission(p_rule_id uuid, p_new_class text, p_idempotency_key uuid, p_reason text) from public;
 revoke all on function ops.record_attempt_receipt(p_work_request text, p_plan_hash text, p_envelope_digest text, p_activation_binding_id uuid, p_receipt jsonb, p_idempotency_key uuid) from public;
 revoke all on function ops.record_calendar_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_exact integer, p_domain integer, p_unknown integer) from public;
 revoke all on function ops.record_calendar_prebrief_verified_envelope(p_job_id uuid, p_lease uuid, p_challenge_id uuid, p_scheduled_for timestamp with time zone, p_window_starts_at timestamp with time zone, p_window_ends_at timestamp with time zone, p_allowlist_revision_id uuid, p_allowlist_digest text, p_calendar_keys text[], p_observed_calendar_keys text[], p_events jsonb, p_destination text, p_collector_key_fingerprint text, p_signature_sha256 text, p_collector_version text) from public;
@@ -33113,9 +40529,12 @@ revoke all on function ops.record_launchd_scheduler_observation(p_surface_id tex
 revoke all on function ops.record_nightly_availability_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_match_count integer) from public;
 revoke all on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) from public;
 revoke all on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) from public;
+revoke all on function ops.record_sourced_heavy_build_admission(p_plan_id uuid, p_work_request text, p_base_version integer, p_classifier_reasons jsonb, p_contract jsonb, p_proposed_by_actor_id uuid, p_idempotency_key uuid) from public;
+revoke all on function ops.record_staging_forward_fix_rehearsal(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_schema_ledger_sha256 text, p_doctrine_generation bigint, p_program6_actions_enabled boolean) from public;
 revoke all on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) from public;
 revoke all on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) from public;
 revoke all on function ops.record_staging_release_readback_program6(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) from public;
+revoke all on function ops.record_staging_replacement_project(p_idempotency_key uuid, p_observation jsonb) from public;
 revoke all on function ops.record_staging_restore_only_result(p_idempotency_key uuid, p_status text, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean, p_reason text) from public;
 revoke all on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) from public;
 revoke all on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text, p_actor text) from public;
@@ -33131,12 +40550,38 @@ revoke all on function ops.resolve_calendar_canary_receipt(p_job_id uuid, p_atte
 revoke all on function ops.resolve_calendar_prebrief_email_ref(p_email text) from public;
 revoke all on function ops.resolve_nightly_availability_canary_receipt(p_job_id uuid, p_attempt integer) from public;
 revoke all on function ops.retire_rule(p_rule_id uuid, p_reason text, p_superseded_by uuid, p_idempotency_key text) from public;
+revoke all on function ops.review_sourced_heavy_build_plan(p_work_request text, p_plan_hash text, p_admission_hash text, p_reviewer_actor_id uuid, p_verdict text, p_reviewer_session_ref text, p_review_summary text, p_evidence_refs jsonb, p_gaps jsonb, p_idempotency_key uuid) from public;
+revoke all on function ops.rule_delivery_audit_counts(p_layer0_shared_cap integer) from public;
 revoke all on function ops.schedule_calendar_prebrief_joe_live_job() from public;
 revoke all on function ops.seal_renewal_decision_source_run(p_job_id uuid, p_lease uuid) from public;
 revoke all on function ops.seal_renewal_decision_source_run(p_job_id uuid, p_lease uuid, p_snapshot_id uuid) from public;
 revoke all on function ops.select_provider_routes(p_requested text[]) from public;
+revoke all on function ops.set_rule_delivery_mode(p_mode text, p_changed_by text, p_reason text, p_expected_map_digest text) from public;
 revoke all on function ops.set_sourced_work_request_shape_disposition(p_work_request text, p_base_version integer, p_disposition text, p_fixed_surface_ref text, p_rationale text, p_decided_by_actor_id uuid, p_idempotency_key uuid) from public;
 revoke all on function ops.settle_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid, p_input_tokens integer, p_output_tokens integer, p_actual_cost_usd numeric) from public;
+revoke all on function ops.siep_acquire_lane_lock(p_component text, p_session_ref text, p_lease_seconds integer, p_idempotency_key uuid) from public;
+revoke all on function ops.siep_append_only_guard() from public;
+revoke all on function ops.siep_attach_evidence(p_component text, p_evidence_kind text, p_ledger_id uuid, p_ledger_kind text, p_evidence_digest text, p_note text, p_idempotency_key uuid) from public;
+revoke all on function ops.siep_bind_evidence_job(p_component text, p_base_version integer, p_evidence_kind text, p_job_id uuid, p_idempotency_key uuid) from public;
+revoke all on function ops.siep_bind_evidence_job_unchecked_0324(p_component text, p_base_version integer, p_evidence_kind text, p_job_id uuid, p_idempotency_key uuid) from public;
+revoke all on function ops.siep_claim_package(p_component text, p_session_ref text, p_lease_token uuid, p_idempotency_key uuid) from public;
+revoke all on function ops.siep_current_approval(p_package_key text, p_work_request_version integer, p_gate text) from public;
+revoke all on function ops.siep_current_evidence_digest(p_ledger_kind text, p_ledger_id uuid) from public;
+revoke all on function ops.siep_evidence_actor(p_ledger_kind text, p_ledger_id uuid) from public;
+revoke all on function ops.siep_joe_decision_event_guard() from public;
+revoke all on function ops.siep_manifest_digest() from public;
+revoke all on function ops.siep_manifest_insert_guard() from public;
+revoke all on function ops.siep_program_identity_guard() from public;
+revoke all on function ops.siep_program_transition_guard() from public;
+revoke all on function ops.siep_read_program() from public;
+revoke all on function ops.siep_record_joe_decision(p_component text, p_gate text, p_decision text, p_idempotency_key uuid) from public;
+revoke all on function ops.siep_release_lane_lock(p_component text, p_session_ref text, p_lease_token uuid, p_idempotency_key uuid) from public;
+revoke all on function ops.siep_request_digest(p_request jsonb) from public;
+revoke all on function ops.siep_resolve_package(p_component text) from public;
+revoke all on function ops.siep_terminal_status() from public;
+revoke all on function ops.siep_transition_package(p_component text, p_base_version integer, p_target_state text, p_session_ref text, p_lease_token uuid, p_idempotency_key uuid) from public;
+revoke all on function ops.skip_job(p_job_id uuid, p_lease_token uuid, p_detail text) from public;
+revoke all on function ops.sourced_heavy_build_review_target(p_work_request text, p_plan_hash text, p_admission_hash text) from public;
 revoke all on function ops.sourced_work_request_outcome_feedback_digest(p_preimage jsonb) from public;
 revoke all on function ops.sourced_work_request_outcome_feedback_preimage(p_work_request_id uuid, p_plan_id uuid, p_plan_acceptance_receipt_id uuid, p_criterion_results jsonb, p_evidence_refs jsonb, p_outcome text, p_blocker_code text, p_result_summary text, p_observed_minutes integer, p_interaction_surface text, p_heavy_session_used boolean, p_manual_context_transfers integer) from public;
 revoke all on function ops.sourced_work_request_plan_digest(p_preimage jsonb) from public;
@@ -33170,6 +40615,7 @@ grant usage on schema ops to carr_calendar_prebrief_email_resolver;
 grant usage on schema ops to carr_calendar_prebrief_jobs;
 grant usage on schema ops to carr_device_evidence;
 grant usage on schema ops to carr_jobs;
+grant usage on schema ops to carr_program5_forward_fix_verifiers;
 grant usage on schema ops to carr_reader;
 grant usage on schema ops to carr_renewal_source_attestors;
 grant usage on schema ops to carr_writer;
@@ -33180,6 +40626,7 @@ grant usage on schema public to carr_calendar_prebrief_email_resolver;
 grant usage on schema public to carr_calendar_prebrief_jobs;
 grant usage on schema public to carr_exporter;
 grant usage on schema public to carr_jobs;
+grant usage on schema public to carr_program5_forward_fix_verifiers;
 grant usage on schema public to carr_reader;
 grant usage on schema public to carr_renewal_source_attestors;
 grant usage on schema public to carr_writer;
@@ -33308,9 +40755,14 @@ grant select on table ops.release_approval_receipt to carr_authority;
 grant select on table ops.release_approval_receipt to carr_jobs;
 grant select on table ops.release_approval_receipt to carr_reader;
 grant select on table ops.release_approval_receipt to carr_writer;
+grant select on table ops.rule_admission to carr_authority;
 grant select on table ops.rule_admission to carr_jobs;
 grant select on table ops.rule_admission to carr_reader;
 grant insert, select, update on table ops.rule_admission to carr_writer;
+grant select on table ops.rule_amendment_receipt to carr_authority;
+grant select on table ops.rule_amendment_receipt to carr_jobs;
+grant select on table ops.rule_amendment_receipt to carr_reader;
+grant select on table ops.rule_amendment_receipt to carr_writer;
 grant select on table ops.rule_approval_receipt to carr_authority;
 grant select on table ops.rule_approval_receipt to carr_jobs;
 grant select on table ops.rule_approval_receipt to carr_reader;
@@ -33319,9 +40771,14 @@ grant select on table ops.rule_control_binding to carr_authority;
 grant select on table ops.rule_control_binding to carr_jobs;
 grant select on table ops.rule_control_binding to carr_reader;
 grant select on table ops.rule_control_binding to carr_writer;
+grant select on table ops.rule_delivery_activation_receipt to carr_reader;
+grant select on table ops.rule_delivery_activation_receipt to carr_writer;
+grant select on table ops.rule_delivery_activation_target to carr_reader;
+grant select on table ops.rule_delivery_activation_target to carr_writer;
 grant select on table ops.rule_delivery_policy to carr_jobs;
 grant select on table ops.rule_delivery_policy to carr_reader;
 grant select on table ops.rule_delivery_policy to carr_writer;
+grant select on table ops.rule_enforcement_point to carr_authority;
 grant select on table ops.rule_enforcement_point to carr_jobs;
 grant select on table ops.rule_enforcement_point to carr_reader;
 grant insert, select, update on table ops.rule_enforcement_point to carr_writer;
@@ -33360,6 +40817,18 @@ grant select on table ops.staging_deployment_claim to carr_authority;
 grant select on table ops.staging_deployment_claim to carr_jobs;
 grant select on table ops.staging_deployment_claim to carr_reader;
 grant select on table ops.staging_deployment_claim to carr_writer;
+grant select on table ops.staging_forward_fix_rehearsal_attempt to carr_authority;
+grant select on table ops.staging_forward_fix_rehearsal_attempt to carr_jobs;
+grant select on table ops.staging_forward_fix_rehearsal_attempt to carr_reader;
+grant select on table ops.staging_forward_fix_rehearsal_attempt to carr_writer;
+grant select on table ops.staging_forward_fix_rehearsal_claim to carr_authority;
+grant select on table ops.staging_forward_fix_rehearsal_claim to carr_jobs;
+grant select on table ops.staging_forward_fix_rehearsal_claim to carr_reader;
+grant select on table ops.staging_forward_fix_rehearsal_claim to carr_writer;
+grant select on table ops.staging_forward_fix_rehearsal_result to carr_authority;
+grant select on table ops.staging_forward_fix_rehearsal_result to carr_jobs;
+grant select on table ops.staging_forward_fix_rehearsal_result to carr_reader;
+grant select on table ops.staging_forward_fix_rehearsal_result to carr_writer;
 grant select on table ops.staging_recovery_rehearsal_bundle to carr_authority;
 grant select on table ops.staging_recovery_rehearsal_bundle to carr_jobs;
 grant select on table ops.staging_recovery_rehearsal_bundle to carr_reader;
@@ -33553,7 +41022,7 @@ grant select on table public.doctrine_snapshot to carr_reader;
 grant insert, select, update on table public.doctrine_snapshot to carr_writer;
 grant select on table public.document to carr_jobs;
 grant insert, select, update on table public.document to carr_writer;
-grant insert on table public.event to carr_authority;
+grant insert, select on table public.event to carr_authority;
 grant insert, select on table public.event to carr_jobs;
 grant insert, select, update on table public.event to carr_writer;
 grant insert, select, update on table public.experiment to carr_writer;
@@ -33626,7 +41095,7 @@ grant insert, select, update on table public.retrieval_proposal to carr_writer;
 grant insert on table public.retrieval_query_log to carr_writer;
 grant select on table public.retrieval_ranking_policy to carr_reader;
 grant select on table public.retrieval_ranking_policy to carr_writer;
-grant select on table public.rule to carr_authority;
+grant select, update on table public.rule to carr_authority;
 grant insert, select, update on table public.rule to carr_writer;
 grant insert, select, update on table public.schema_migrations to carr_writer;
 grant insert, select, update on table public.search_candidate to carr_writer;
@@ -33846,10 +41315,12 @@ grant execute on function ops.activate_context_bundle(p_work_request text, p_pla
 grant execute on function ops.activate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.activate_guidance_situation_mapping(p_proposed_mapping_id uuid, p_authority_binding_id uuid, p_reason text) to carr_authority;
 grant execute on function ops.admit_job_cost(p_job_id uuid, p_lease_token uuid, p_route_key text, p_estimated_cost_usd numeric) to carr_jobs;
+grant execute on function ops.amend_rule_statement(p_rule_id uuid, p_new_statement text, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_authority;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_jobs;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_reader;
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_writer;
+grant execute on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_writer;
 grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
@@ -33865,7 +41336,9 @@ grant execute on function ops.claim_calendar_prebrief_joe_live_job(p_worker text
 grant execute on function ops.claim_job(p_worker text, p_limit integer, p_lease_seconds integer) to carr_jobs;
 grant execute on function ops.claim_job_mode(p_worker text, p_mode text, p_limit integer, p_lease_seconds integer) to carr_jobs;
 grant execute on function ops.claim_staging_deployment_attempt(p_idempotency_key uuid) to carr_jobs;
+grant execute on function ops.claim_staging_forward_fix_rehearsal(p_idempotency_key uuid) to carr_jobs;
 grant execute on function ops.claim_staging_restore_only_attempt(p_idempotency_key uuid) to carr_jobs;
+grant execute on function ops.classify_sourced_work_request_build(p_work_request text, p_base_version integer, p_scope_summary text, p_dependency_refs jsonb, p_caps jsonb) to carr_writer;
 grant execute on function ops.clear_recovered_incident(p_ref text, p_required integer) to carr_jobs;
 grant execute on function ops.compile_context_bundle(p_work_request text, p_plan_ref text, p_tenant text) to carr_writer;
 grant execute on function ops.complete_calendar_prebrief_joe_live_job(p_job uuid, p_lease uuid, p_attestation uuid, p_receipt uuid) to carr_jobs;
@@ -33884,12 +41357,17 @@ grant execute on function ops.engineering_admission_source(p_work_request text) 
 grant execute on function ops.engineering_admission_source(p_work_request text) to carr_reader;
 grant execute on function ops.engineering_admission_source(p_work_request text) to carr_writer;
 grant execute on function ops.engineering_claim_slice(p_worker text, p_limit integer, p_lease_seconds integer) to carr_jobs;
-grant execute on function ops.engineering_enqueue_slice_job(p_work_request text, p_slice_ref text, p_plan_digest text, p_idempotency_key text) to carr_writer;
+grant execute on function ops.engineering_controller_binding(p_envelope_id uuid, p_job_id uuid, p_lease_token uuid) to carr_jobs;
+grant execute on function ops.engineering_enqueue_slice_job(p_work_request text, p_slice_ref text, p_plan_digest text, p_idempotency_key text, p_generation integer) to carr_writer;
+grant execute on function ops.engineering_envelope_currentness(p_envelope_id uuid, p_job_id uuid) to carr_reader;
+grant execute on function ops.engineering_envelope_currentness(p_envelope_id uuid, p_job_id uuid) to carr_writer;
+grant execute on function ops.engineering_fail_claim(p_job_id uuid, p_lease_token uuid, p_failure_class text, p_detail text) to carr_jobs;
+grant execute on function ops.engineering_finalize_slice_receipt(p_envelope_id uuid, p_lease_token uuid, p_receipt jsonb, p_receipt_digest text, p_executor_actor_id uuid) to carr_jobs;
 grant execute on function ops.engineering_passport_facts(p_work_request text) to carr_jobs;
 grant execute on function ops.engineering_passport_facts(p_work_request text) to carr_reader;
 grant execute on function ops.engineering_passport_facts(p_work_request text) to carr_writer;
-grant execute on function ops.engineering_record_slice_receipt(p_envelope_id uuid, p_lease_token uuid, p_receipt jsonb, p_receipt_digest text, p_executor_actor_id uuid) to carr_jobs;
 grant execute on function ops.engineering_register_slice_plan(p_work_request text, p_plan jsonb, p_plan_digest text, p_idempotency_key uuid) to carr_writer;
+grant execute on function ops.engineering_retire_permanently_ineligible_jobs() to carr_jobs;
 grant execute on function ops.enqueue_job(p_definition_key text, p_definition_version integer, p_scheduled_for timestamp with time zone, p_payload jsonb, p_idempotency_key text, p_mode text) to carr_jobs;
 grant execute on function ops.fail_job(p_job_id uuid, p_lease_token uuid, p_failure_class text, p_detail text) to carr_jobs;
 grant execute on function ops.get_cognition_cache(p_cache_key text) to carr_jobs;
@@ -33914,7 +41392,11 @@ grant execute on function ops.issue_execution_envelope_v1(p_work_request text, p
 grant execute on function ops.pending_sourced_work_request_outcome_feedback(p_work_request text, p_organization_tenant_id text) to carr_reader;
 grant execute on function ops.pending_sourced_work_request_outcome_feedback(p_work_request text, p_organization_tenant_id text) to carr_writer;
 grant execute on function ops.prepare_staging_deployment_attempt(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_prior_release_key text, p_recovery_attempt_id uuid, p_recovery_step text, p_git_sha text) to carr_jobs;
+grant execute on function ops.prepare_staging_forward_fix_rehearsal(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_git_sha text) to carr_jobs;
+grant execute on function ops.prepare_staging_replacement_project(p_idempotency_key uuid, p_contract jsonb) to carr_jobs;
 grant execute on function ops.prepare_staging_restore_only_attempt(p_idempotency_key uuid, p_correlation_id uuid, p_release_key text, p_prior_release_key text, p_recovery_attempt_id uuid, p_git_sha text) to carr_jobs;
+grant execute on function ops.program5_exact_recovery_rehearsal(p_release_id uuid, p_not_before timestamp with time zone) to carr_authority;
+grant execute on function ops.program5_exact_recovery_rehearsal(p_release_id uuid, p_not_before timestamp with time zone) to carr_jobs;
 grant execute on function ops.program5_migration_set_sha256(p_migration_set text[]) to carr_jobs;
 grant execute on function ops.propose_eval_candidate(p_attempt_id text, p_fact_event_ref text, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.propose_guidance_situation_mapping(p_revision_id uuid, p_concept_id uuid, p_doctrine_section_id uuid, p_reason text) to carr_writer;
@@ -33931,7 +41413,14 @@ grant execute on function ops.read_context_activation(p_work_request text, p_bin
 grant execute on function ops.read_execution_environment_providers() to carr_authority;
 grant execute on function ops.read_execution_environment_providers() to carr_reader;
 grant execute on function ops.read_execution_environment_providers() to carr_writer;
+grant execute on function ops.read_governance_queue() to carr_authority;
+grant execute on function ops.read_governance_queue() to carr_reader;
+grant execute on function ops.read_governance_queue() to carr_writer;
+grant execute on function ops.read_staging_forward_fix_rehearsal_declaration(p_idempotency_key uuid) to carr_program5_forward_fix_verifiers;
+grant execute on function ops.read_staging_replacement_project_receipt(p_receipt_id uuid) to carr_jobs;
+grant execute on function ops.read_staging_replacement_project_receipt(p_receipt_id uuid) to carr_program5_forward_fix_verifiers;
 grant execute on function ops.reap_expired_jobs() to carr_jobs;
+grant execute on function ops.reclassify_legacy_rule_admission(p_rule_id uuid, p_new_class text, p_idempotency_key uuid, p_reason text) to carr_authority;
 grant execute on function ops.record_attempt_receipt(p_work_request text, p_plan_hash text, p_envelope_digest text, p_activation_binding_id uuid, p_receipt jsonb, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.record_calendar_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_exact integer, p_domain integer, p_unknown integer) to carr_jobs;
 grant execute on function ops.record_calendar_prebrief_verified_envelope(p_job_id uuid, p_lease uuid, p_challenge_id uuid, p_scheduled_for timestamp with time zone, p_window_starts_at timestamp with time zone, p_window_ends_at timestamp with time zone, p_allowlist_revision_id uuid, p_allowlist_digest text, p_calendar_keys text[], p_observed_calendar_keys text[], p_events jsonb, p_destination text, p_collector_key_fingerprint text, p_signature_sha256 text, p_collector_version text) to carr_calendar_prebrief_attestors;
@@ -33943,12 +41432,16 @@ grant execute on function ops.record_launchd_scheduler_observation(p_surface_id 
 grant execute on function ops.record_nightly_availability_canary_receipt(p_job_id uuid, p_lease uuid, p_source_snapshot_id uuid, p_output_digest text, p_match_count integer) to carr_jobs;
 grant execute on function ops.record_npi_device_evidence(p_job_id uuid, p_observed_at timestamp with time zone, p_source_release text, p_source_checksum text, p_results jsonb, p_idempotency_key text) to carr_device_evidence;
 grant execute on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) to carr_jobs;
+grant execute on function ops.record_sourced_heavy_build_admission(p_plan_id uuid, p_work_request text, p_base_version integer, p_classifier_reasons jsonb, p_contract jsonb, p_proposed_by_actor_id uuid, p_idempotency_key uuid) to carr_writer;
+grant execute on function ops.record_staging_forward_fix_rehearsal(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_schema_ledger_sha256 text, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_program5_forward_fix_verifiers;
 grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_jobs;
 grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
+grant execute on function ops.record_staging_replacement_project(p_idempotency_key uuid, p_observation jsonb) to carr_program5_forward_fix_verifiers;
 grant execute on function ops.record_staging_restore_only_result(p_idempotency_key uuid, p_status text, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean, p_reason text) to carr_jobs;
 grant execute on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) to carr_authority;
 grant execute on function ops.redeem_program6_browser_action_challenge(p_token_digest text, p_session_digest text, p_action text, p_material_digest text, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.register_execution_environment_provider(p_manifest jsonb, p_idempotency_key uuid) to carr_authority;
+grant execute on function ops.register_execution_environment_provider(p_manifest jsonb, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.release_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid) to carr_jobs;
 grant execute on function ops.render_context_activation_for_brief(p_work_request text, p_binding_id text) to carr_reader;
 grant execute on function ops.render_context_activation_for_brief(p_work_request text, p_binding_id text) to carr_writer;
@@ -33959,6 +41452,10 @@ grant execute on function ops.resolve_calendar_canary_receipt(p_job_id uuid, p_a
 grant execute on function ops.resolve_calendar_prebrief_email_ref(p_email text) to carr_calendar_prebrief_email_resolver;
 grant execute on function ops.resolve_nightly_availability_canary_receipt(p_job_id uuid, p_attempt integer) to carr_jobs;
 grant execute on function ops.retire_rule(p_rule_id uuid, p_reason text, p_superseded_by uuid, p_idempotency_key text) to carr_authority;
+grant execute on function ops.review_sourced_heavy_build_plan(p_work_request text, p_plan_hash text, p_admission_hash text, p_reviewer_actor_id uuid, p_verdict text, p_reviewer_session_ref text, p_review_summary text, p_evidence_refs jsonb, p_gaps jsonb, p_idempotency_key uuid) to carr_writer;
+grant execute on function ops.rule_delivery_audit_counts(p_layer0_shared_cap integer) to carr_jobs;
+grant execute on function ops.rule_delivery_audit_counts(p_layer0_shared_cap integer) to carr_reader;
+grant execute on function ops.rule_delivery_audit_counts(p_layer0_shared_cap integer) to carr_writer;
 grant execute on function ops.rule_delivery_plan(p_actor text, p_packs text[]) to carr_reader;
 grant execute on function ops.rule_delivery_plan(p_actor text, p_packs text[]) to carr_writer;
 grant execute on function ops.rule_pack_index() to carr_jobs;
@@ -33967,14 +41464,39 @@ grant execute on function ops.rule_pack_index() to carr_writer;
 grant execute on function ops.schedule_calendar_prebrief_joe_live_job() to carr_jobs;
 grant execute on function ops.seal_renewal_decision_source_run(p_job_id uuid, p_lease uuid, p_snapshot_id uuid) to carr_renewal_source_attestors;
 grant execute on function ops.select_provider_routes(p_requested text[]) to carr_jobs;
+grant execute on function ops.set_rule_delivery_mode(p_mode text, p_changed_by text, p_reason text, p_expected_map_digest text) to carr_authority;
 grant execute on function ops.set_sourced_work_request_shape_disposition(p_work_request text, p_base_version integer, p_disposition text, p_fixed_surface_ref text, p_rationale text, p_decided_by_actor_id uuid, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.settle_job_cost(p_reservation_id uuid, p_job_id uuid, p_lease_token uuid, p_input_tokens integer, p_output_tokens integer, p_actual_cost_usd numeric) to carr_jobs;
+grant execute on function ops.siep_acquire_lane_lock(p_component text, p_session_ref text, p_lease_seconds integer, p_idempotency_key uuid) to carr_writer;
+grant execute on function ops.siep_attach_evidence(p_component text, p_evidence_kind text, p_ledger_id uuid, p_ledger_kind text, p_evidence_digest text, p_note text, p_idempotency_key uuid) to carr_authority;
+grant execute on function ops.siep_attach_evidence(p_component text, p_evidence_kind text, p_ledger_id uuid, p_ledger_kind text, p_evidence_digest text, p_note text, p_idempotency_key uuid) to carr_writer;
+grant execute on function ops.siep_bind_evidence_job(p_component text, p_base_version integer, p_evidence_kind text, p_job_id uuid, p_idempotency_key uuid) to carr_authority;
+grant execute on function ops.siep_claim_package(p_component text, p_session_ref text, p_lease_token uuid, p_idempotency_key uuid) to carr_writer;
+grant execute on function ops.siep_manifest_digest() to carr_authority;
+grant execute on function ops.siep_manifest_digest() to carr_jobs;
+grant execute on function ops.siep_manifest_digest() to carr_reader;
+grant execute on function ops.siep_manifest_digest() to carr_writer;
+grant execute on function ops.siep_read_program() to carr_authority;
+grant execute on function ops.siep_read_program() to carr_jobs;
+grant execute on function ops.siep_read_program() to carr_reader;
+grant execute on function ops.siep_read_program() to carr_writer;
+grant execute on function ops.siep_record_joe_decision(p_component text, p_gate text, p_decision text, p_idempotency_key uuid) to carr_authority;
+grant execute on function ops.siep_release_lane_lock(p_component text, p_session_ref text, p_lease_token uuid, p_idempotency_key uuid) to carr_writer;
+grant execute on function ops.siep_terminal_status() to carr_authority;
+grant execute on function ops.siep_terminal_status() to carr_jobs;
+grant execute on function ops.siep_terminal_status() to carr_reader;
+grant execute on function ops.siep_terminal_status() to carr_writer;
+grant execute on function ops.siep_transition_package(p_component text, p_base_version integer, p_target_state text, p_session_ref text, p_lease_token uuid, p_idempotency_key uuid) to carr_writer;
+grant execute on function ops.skip_job(p_job_id uuid, p_lease_token uuid, p_detail text) to carr_jobs;
+grant execute on function ops.sourced_heavy_build_review_target(p_work_request text, p_plan_hash text, p_admission_hash text) to carr_writer;
+grant execute on function ops.stage_guidance_import_batch(p_manifest_digest text, p_canonical_manifest_text text, p_classifier_actor_id uuid, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.stage_guidance_import_batch(p_manifest_digest text, p_canonical_manifest_text text, p_classifier_actor_id uuid, p_idempotency_key text, p_reason text) to carr_writer;
 grant execute on function ops.standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text) to carr_reader;
 grant execute on function ops.standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text) to carr_writer;
 grant execute on function ops.timeout_job(p_job_id uuid, p_lease_token uuid, p_detail text) to carr_jobs;
 grant execute on function ops.transition_execution_environment_provider(p_provider_ref text, p_expected_state text, p_target_state text, p_evidence_refs jsonb, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.transition_proposed_eval_candidate(p_work_request text, p_candidate_ref text, p_next_state text, p_decision_basis jsonb, p_idempotency_key uuid) to carr_authority;
+grant execute on function ops.transition_proposed_eval_candidate(p_work_request text, p_candidate_ref text, p_next_state text, p_decision_basis jsonb, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.triage_sourced_work_request(p_work_request text, p_base_version integer, p_classification text, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.work_request_card(p_work_request text, p_organization_tenant_id text) to carr_reader;
 grant execute on function ops.work_request_card(p_work_request text, p_organization_tenant_id text) to carr_writer;
@@ -34003,6 +41525,7 @@ grant carr_calendar_prebrief_jobs to neondb_owner;
 grant carr_device_evidence to neondb_owner;
 grant carr_exporter to neondb_owner;
 grant carr_jobs to neondb_owner;
+grant carr_program5_forward_fix_verifiers to neondb_owner;
 grant carr_reader to carr_exporter;
 grant carr_reader to neondb_owner;
 grant carr_renewal_source_attestors to neondb_owner;
@@ -34276,6 +41799,39 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0308_calendar_prebrief_service_health.sql	d4339ed5e43218806c0366adb5c19cb66c2cf8f51e3ce4622fa786448b49ef6c	2026-08-25 16:03:16.887415+00
 0309_governed_execution_environment_providers.sql	e2d738f00ef8e2cbce8d77ad2f6fb5596dc1951de7f0e918a927ccc25b32eb47	2026-08-25 16:19:58.553035+00
 0310_engineering_execution_fabric.sql	f321288d38550d5d82598d6c335690d54c2c3acbb035c339387fe3f128a69e55	2026-08-25 16:46:49.704808+00
+0311_sponsored_engineering_executor_authority.sql	c465664010c578da8201a536887e0bf2a21f7573d5706ff62e943b460b3992c5	2026-08-25 19:06:06.825594+00
+0312_engineering_dispatch_controller.sql	96a9aed7dd38c11d0c9886fc88ba0fb62c647be7bdc194489a765e0083b8a500	2026-08-25 20:25:47.711357+00
+0314_doctorcre_home_legacy_program_tenant.sql	4a69a1fbed9da29d93e5da899ba2a14eff542c792a388eaa248d9a551434cbf7	2026-08-26 00:33:57.465684+00
+0315_program5_forward_fix_rehearsal.sql	ff7d032af80eeab2ffbb44d777492ef5e62a6eee932eaa30799c411e02c29b37	2026-08-26 00:37:55.578346+00
+0316_rule_delivery_audit_counts.sql	fcfb7d9c823d846f4e1cb26623895f69128c9e0eb7b13d35af06c2ba400a965e	2026-08-26 00:37:55.866314+00
+0317_atomic_rule_delivery_cutover.sql	1fb3ae5dcbf006e76120750889617ccf59f358490c493993a90332ecb906ba54	2026-08-26 00:37:56.090239+00
+0318_tour_operations_foundation.sql	8cdb4b2127f7dcd6bdc265a402db6471465b10f35c6b06f2707e776f58bed8d6	2026-08-26 00:52:52.888614+00
+0319_engineering_envelope_writer_successor.sql	f45b50d9471153d25b07064055ef638b24e463866ef1e311cbe06d3fe930e097	2026-08-26 00:52:53.168213+00
+0320_heavy_build_admission.sql	f3db5160c88db372fd58fc8e73eaa2671c7c8997dd3bee2753d5b636cd074465	2026-08-26 02:22:40.923301+00
+0321_rule_delivery_policy_seed_repair.sql	98494c4715a09ed735524a97f8bd3a1d0323df4adda690f5f06abcc6e971b482	2026-08-26 02:22:41.137134+00
+0322_clean_staging_replacement_contract.sql	8be25e17aed9fbc665a2ac226f95b26cb66b9abbe32865c021a83fed7ef65659	2026-08-26 03:43:35.495345+00
+0323_engineering_claim_output_qualification.sql	85c828bc82197ec14fa82871cc9bf7c17282c1807e3b17b6c9fc61080e3d5ff6	2026-08-26 03:43:35.712334+00
+0324_siep_program_authority.sql	e86613bcde40a5fa26d4ce92e09829f6e2b9b5f911dbf6d086d69a28bfe5c523	2026-08-26 22:03:37.415578+00
+0325_engineering_claim_envelope_eligibility.sql	bfaf7f7f89643a432754ba60a3b7ec48943ac6c6554276b83cd90c02e9282d4b	2026-08-26 22:03:37.643079+00
+0331_a_batch_close_must_not_outrank_a_live_ruling.sql	aed173c81a2cbba988c94ebe4c403558ad633f881f2bb527641517c732d02fb1	2026-08-26 23:45:31.312548+00
+0332_refresh_rule_delivery_activation_preimage.sql	7a2a97a26705dd67ae9d77e7acb7338f53673cb0aec86b9e2fd6b809f1729865	2026-08-27 01:41:41.462294+00
+0333_shape_preserving_outcome_guards.sql	431e77ebd8889172bb29493d7ec2833d0d8b3f7e64b9ba591cbec29742d624b5	2026-08-27 01:46:42.744359+00
+0334_workflow_mode_ladder.sql	7c3ce4ca157941fe0c2ea06813f4baf0bacf4d4581b7427082ae4c255c83268d	2026-08-27 02:05:01.710842+00
+0335_engineering_controller_currentness.sql	c372a8432d91a47b37433553fed92dabdb3d2986ac59635ff115b5af6fcb116f	2026-08-27 10:45:13.641044+00
+0344_demote_evidence_activation_bookkeeping.sql	50e2b885db6b92e0a24f0a90fad7b48449f347007d8683c27adf0a4be1a75def	2026-08-27 10:45:13.850245+00
+0345_governance_queue_projection.sql	c1788dd8ee23d7a7a6dfc88b17d4a11c67a9ad5057c8bb97e3112035863be3ba	2026-08-27 10:45:14.153307+00
+0348_pr_only_main_ruleset_control.sql	ab901c8e528109bb56375403f0ebb350758678079d7727c9ba24042b0d0bbcdb	2026-08-27 11:28:27.687848+00
+0349_versioned_rule_amendment.sql	4fb76045cf8ce46ba793a90d0582e6b095a17ba63edf57e91c548e7850ba37f0	2026-08-27 11:28:27.939452+00
+0351_legacy_rule_lifecycle_admission.sql	59439e1a12c035e61578b85c765d7bbd131bf555b95bbecd49c6d675b5c4d808	2026-08-27 12:11:30.871136+00
+0352_legacy_admission_reclassification_and_staging_authority.sql	0e93b3974bd6d808049e52f36878fd4939388f2f47fa59c40f5afd756a249e62	2026-08-27 12:11:30.95728+00
+0353_authority_rule_row_lock_grant.sql	8d103a1d06215486cab6cbd4dc4e63d723f5898f8a481b42110570ebb556a574	2026-08-27 13:32:55.359113+00
+0354_authority_event_ledger_grant.sql	4a1464fd5b8f42cd89895d7344c7f7156791e5c88e44740e991beb33661c1d28	2026-08-27 13:45:57.014435+00
+0355_rename_cognition_control_to_installed_reality.sql	348df25a24014ba1d2f096a0ea88aadd2575ad2f387801b3339afc13849b24d3	2026-08-27 14:09:26.564721+00
+0363_rule_delivery_activation_digest_repin.sql	03133d0627cf63d2a0a2a7dd8a392065bc19ba17d56d0b2cfabd3dbccafdcb65	2026-08-27 18:56:57.366645+00
+0382_standing_guidance_reader_boundary.sql	a6ffe5f29e9224f263b0c6a90c414b4828915a5ed3265e52e8fadbe31ef8c2bc	2026-08-27 20:40:05.019334+00
+0383_control_plane_not_configured_state.sql	f0cb86f97fcd87db8412be1f4c36544fe40f1ba9e524182bb3cb3b9ad3148bfa	2026-08-27 20:40:05.784788+00
+0387_control_plane_record_queue_priority_tiers.sql	ba2f9ce18e54f8ceca330a5478ad66d72b76bbc832aba9c20734ebe8a701310e	2026-08-28 00:10:44.481308+00
+0388_heaviness_is_a_property_of_the_request_repin.sql	c0e0d353ef0a5f8363b15f41a51ccae7cad4aabe3176929c46e2741e7f51f3f8	2026-08-28 00:10:44.565762+00
 \.
 
 
@@ -34329,6 +41885,31 @@ e6d681d4-ceac-43ed-a830-d86749e64814	hermes-pilot	automation	Hermes Agent (R0 ev
 
 COPY ops.guidance_registry (id, singleton, created_by, created_at) FROM stdin;
 67aa96b6-3cf8-45ce-b73c-6965d36a664c	t	b6c38b27-d006-4fad-9c38-49edf3130a07	2026-08-16 18:19:38.132972+00
+\.
+
+
+--
+-- Data for Name: rule_delivery_activation_target; Type: TABLE DATA; Schema: ops; Owner: -
+--
+
+COPY ops.rule_delivery_activation_target (short_id, expected_scope, expected_pack, from_control, from_enforcement_class, from_implementation_ref, from_test_ref, to_control, to_enforcement_class, to_implementation_ref, to_test_ref, map_digest) FROM stdin;
+25fcddee	shared	governance-rules	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904
+3fa17fa0	shared	client-deal	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904
+72e06bdf	shared	client-deal	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904
+113b3833	joe	governance-rules	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904
+57d13061	joe	joe-comms	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904
+c66dc739	joe	joe-comms	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904
+49533583	joe	joe-comms	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904
+557838a5	joe	joe-comms	session_boot	surfacing	hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js	command:python3 hooks/gate-integrity.py --selftest	pack_delivery	stop_gate	hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py	ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py	f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904
+\.
+
+
+--
+-- Data for Name: rule_delivery_policy; Type: TABLE DATA; Schema: ops; Owner: -
+--
+
+COPY ops.rule_delivery_policy (singleton, mode, changed_by, reason, changed_at) FROM stdin;
+t	shadow	migration:0291	Shadow first: the selector runs beside full recitation until a week of observations shows no consequential rule was omitted.	2026-08-24 16:04:55.847781+00
 \.
 
 
@@ -34576,15 +42157,8 @@ a5c64024-d679-41c2-979b-6e707eec657b	mapping	{"role": "governs", "weight": 1, "r
 b4188a13-123f-4897-bbe0-c45dfcec2602	concept	{"label": "Record layer outage diagnosis", "definition": "Diagnosing an unavailable or failing CARR record layer before attempting repair.", "concept_key": "record-layer-outage-diagnosis"}	RET-002 measured conceptual miss	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{425482a0-1109-4434-8343-8ec6485f9212}	13500000-0000-4000-8000-000000000001	2	2026-08-16 14:49:59.066172+00	2026-08-22 17:44:56.197601+00
 227897ce-1025-42d6-b96f-f9338fac3197	concept	{"label": "Relationship path finding", "definition": "Finding who can introduce whom: walking the party intro graph to answer 'who do we know that can reach X'. Served by the who-do-we-know verb over v_party_graph edges; distinct from name lookup (find) and from deal context (catch-me-up).", "concept_key": "relationship-path-finding", "review_after": null}	Golden-miss probe 2026-08-22: partner-phrased question 'who can introduce me to a hospital decision maker' returned ZERO hits on search-doctrine despite a live who-do-we-know verb and doctrine covering the intro graph.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{ab4ef440-b834-454d-993b-93cf5883a418}	1743e0b3-0b23-4bf0-947e-017a9853f3c0	2	2026-08-22 16:32:49.703719+00	2026-08-22 17:44:56.197601+00
 fe5c7f51-b71c-41b8-92f8-61f315471d77	phrase	{"phrase": "lead system", "source": "golden_miss", "weight": 1, "match_mode": "exact", "source_ref": "RET-008, failing on production baseline 2026-08-22", "concept_key": "lead-system", "min_similarity": 0.35}	The exact words a partner and the golden suite use for this system.	b6c38b27-d006-4fad-9c38-49edf3130a07	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{b91e6244-df5e-466c-8e9b-8ce5c49ecbcc}	e4bfffb5-82cc-4e6d-9dce-0eab64bbfc5f	2	2026-08-22 17:29:26.725705+00	2026-08-22 17:44:56.197601+00
-7ba92102-48ce-4f9f-adbb-b628a6889c56	concept	{"label": "Source-study capability proof", "definition": "Testing an existing-system capability claim property by property against a supplied source, with the burden on the claim that the capability already exists.", "concept_key": "source-study-capability-proof", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	34a1afa6-d67b-596a-a53a-f303333ca826	1	2026-08-24 00:11:06.812529+00	\N
-d48e543d-0026-4b85-9278-3b1fe5d1997c	phrase	{"phrase": "prove an existing capability against the source", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "source-study-capability-proof", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	ad01d8d6-c18b-507c-847f-41ad2689c4d4	1	2026-08-24 00:11:09.831275+00	\N
-3b883519-f3b2-48af-984d-7e57f17216c8	mapping	{"role": "supports", "weight": 1, "rationale": "The active corrected study is the proof example and provenance; the source rule remains authoritative across every Joe-provided source.", "concept_key": "source-study-capability-proof", "section_address": "2026-08-07-tenex-metaharness-sdlc-takeaways#preamble"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	0a62921a-07b5-5429-b739-9d02fffe04b2	1	2026-08-24 00:11:15.089212+00	\N
-b60fdc59-3e48-4d91-b291-d345aa176004	concept	{"label": "Partner calibration without profiling", "definition": "Adapting to a partner's directly stated preferences and corrections without inferring hidden psychology, motivation, mood, or personality.", "concept_key": "partner-calibration-without-profiling", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	4a26d2e5-4ff2-58bb-95d0-381570826785	1	2026-08-24 00:11:20.172679+00	\N
-6b38f514-4172-4180-bb0d-eeb998ba6f3b	phrase	{"phrase": "adapt to Dell without personality profiling", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "partner-calibration-without-profiling", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	3f752654-6a73-5865-a8c6-e7899941f94a	1	2026-08-24 00:11:24.119225+00	\N
-30046271-2917-4073-86f0-0b0dd5b47a35	mapping	{"role": "governs", "weight": 1, "rationale": "The active memory doctrine supports Dell-specific calibration from directly stated or demonstrated preferences while forbidding personality, motive, mood, or state inference.", "concept_key": "partner-calibration-without-profiling", "section_address": "dr-cre-doctrine-2026-08-01#iii-memory-what-he-keeps-and-the-line-he-never-crosses"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	fc37b865-a5fe-5838-a002-09a05430f1b0	1	2026-08-24 00:11:29.230662+00	\N
-eb34968e-bc1d-42bd-9217-f7da073f8bd8	concept	{"label": "One implementation for every write path", "definition": "Keeping manual and automated callers on the same governed implementation so configuration, validation, and evidence cannot drift between paths.", "concept_key": "one-implementation-for-every-write-path", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	30d5d7bb-0eac-586b-b1bf-30b513908e78	1	2026-08-24 00:11:31.982531+00	\N
-7ef8a7fc-3d79-424e-ba30-ef50cc49e7d9	phrase	{"phrase": "manual and automated paths use the same implementation", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "one-implementation-for-every-write-path", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	ce14e6aa-8925-5423-93f1-936a628e57ef	1	2026-08-24 00:11:35.663231+00	\N
-787b4b47-bc3d-4cc9-a248-d60891f89db7	phrase	{"phrase": "capture reusable knowledge for later", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "capture-reusable-deferred-knowledge", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	e0dbb452-d38e-59fc-8bfe-cf23bb89d1d1	1	2026-08-24 00:12:40.667031+00	\N
+7ba92102-48ce-4f9f-adbb-b628a6889c56	concept	{"label": "Source-study capability proof", "definition": "Testing an existing-system capability claim property by property against a supplied source, with the burden on the claim that the capability already exists.", "concept_key": "source-study-capability-proof", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{04d46639-cd91-4caa-a79d-a8abe596a5d8}	34a1afa6-d67b-596a-a53a-f303333ca826	2	2026-08-24 00:11:06.812529+00	2026-08-26 00:30:55.219671+00
+b60fdc59-3e48-4d91-b291-d345aa176004	concept	{"label": "Partner calibration without profiling", "definition": "Adapting to a partner's directly stated preferences and corrections without inferring hidden psychology, motivation, mood, or personality.", "concept_key": "partner-calibration-without-profiling", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{d84f6920-8407-4480-80c2-5110f37a4eb7}	4a26d2e5-4ff2-58bb-95d0-381570826785	2	2026-08-24 00:11:20.172679+00	2026-08-26 00:30:55.219671+00
 c25b1976-3068-4048-a7ba-dc143b41b7b2	concept	{"label": "National accounts", "definition": "The national-account client type: a parent organization spanning many markets, with per-market deals under one account owner. Ruled first-class by Joe on the Musicologie case (2026-08-02); served by create-national-account, set-national-account-owner, set-market-agent and the Lead Board's national-accounts lane.", "concept_key": "national-accounts", "review_after": null}	Golden-miss probe 2026-08-22: 'national account modelling musicologie' returned ZERO hits on search-doctrine although the ruling exists in precedent search and the lane is built — the doctrine side never names the concept the way partners say it.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{e0083f58-b3fa-4127-a430-db35ac514c64}	d67ae31e-a5fc-4998-87b5-6e1a487c2a2b	2	2026-08-22 16:36:37.606914+00	2026-08-22 17:44:56.197601+00
 4d7e4d6f-5be4-46cd-8c3e-efe5c6418460	concept	{"label": "Lead system", "definition": "The shared lead pipeline machinery as one system: the lead board, claim-before-touch protocol, drips, weekly refresh duties, and the handoff document that consolidates how leads move from sweep to claimed work.", "concept_key": "lead-system", "review_after": null}	The golden question "lead system" has failed against production since the corpus grew competing sections that tie it lexically out of the top three; the handoff document is the governing answer and needs concept evidence to say so.	b6c38b27-d006-4fad-9c38-49edf3130a07	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{8aa41aa1-ccca-4560-9f96-927ffd37d894}	9ca38048-0f88-4a71-8d26-d14308b3d19d	2	2026-08-22 17:28:55.901014+00	2026-08-22 17:44:56.197601+00
 6801daff-1f32-4ad1-8e6c-91afdfa8d3b0	concept	{"label": "Authoritative record ownership", "definition": "Choosing one canonical home for a record or fact and making every other surface a governed consumer instead of a competing copy — the single-source-of-truth discipline.", "concept_key": "authoritative-record-ownership", "review_after": null}	The golden question "single source of truth" has failed against production since a social-media section began outranking the enrichment rules lexically; the standing rule needs its governing section reachable by its own name.	b6c38b27-d006-4fad-9c38-49edf3130a07	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{3658ad6c-2d93-4107-a4bf-0f380de7a97c}	097f6450-9fa4-43cf-a59f-4aa02f21ca0c	2	2026-08-22 17:29:07.47438+00	2026-08-22 17:44:56.197601+00
@@ -34601,35 +42175,42 @@ d00bf818-02e6-467b-8739-0e4e48a1eb2e	phrase	{"phrase": "single source of truth",
 6494680d-07a3-445e-b64b-85a86723b96b	mapping	{"role": "governs", "weight": 1, "rationale": "The current preamble states the playbook review and improvement cycle.", "concept_key": "playbook-self-improvement-review", "section_address": "playbook-review#preamble"}	RET-003 target mapping	9e45d3ef-1f24-45c8-b5d8-cd31fafceb2f	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{dade0b55-03ac-4d96-8dea-18a67e23f0a4}	13500000-0000-4000-8000-000000000008	2	2026-08-16 14:49:59.066172+00	2026-08-22 17:44:56.197601+00
 926cdffa-2477-452d-baf7-ba2f0700ea25	mapping	{"role": "governs", "weight": 1, "rationale": "The handoff document's opening section is the consolidated statement of how the lead system works end to end; the sibling sections (claim protocol, drips, weekly duties) are parts of it.", "concept_key": "lead-system", "section_address": "lead-system-handoff#preamble"}	Binds the lead-system concept to the section the golden suite names as its governing answer.	b6c38b27-d006-4fad-9c38-49edf3130a07	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{12cb4791-c775-4c06-898b-05e022b28383}	f968566b-14ec-43a2-baaa-3a41e699ff9e	2	2026-08-22 17:29:59.543131+00	2026-08-22 17:44:56.197601+00
 5f83aa52-8901-4a0b-8cc0-83d51a841401	mapping	{"role": "governs", "weight": 1, "rationale": "The enrichment rules section states the single-source-of-truth discipline as an operating rule for deal data — where the question \\"what is our single source of truth\\" is actually answered.", "concept_key": "authoritative-record-ownership", "section_address": "deal-enrichment-sop#rules"}	Binds the authoritative-record-ownership concept to the section the golden suite names as its governing answer.	b6c38b27-d006-4fad-9c38-49edf3130a07	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{68ec37b8-f301-4bd3-b34b-edf7fef8088d}	72f3fdb2-681d-470f-a891-35d8918330b7	2	2026-08-22 17:30:01.93936+00	2026-08-22 17:44:56.197601+00
-c25d5333-7111-4a10-acf8-31cca41d6320	concept	{"label": "Partner complementarity reasoning", "definition": "Reasoning about how Joe and Dell's demonstrated strengths fit together without profiling either partner in isolation.", "concept_key": "partner-complementarity-reasoning", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	092cef0b-799b-5910-9bc9-ed482f065fed	1	2026-08-24 00:10:15.618415+00	\N
-c7674241-e986-4562-8d6f-c0738831dc45	phrase	{"phrase": "Joe and Dell partner complementarity", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "partner-complementarity-reasoning", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	0648bb96-f1d7-5c39-bcc8-f270a9db9111	1	2026-08-24 00:10:20.885324+00	\N
-c43c937f-d247-4744-b4cb-d20a4a99f8ea	mapping	{"role": "supports", "weight": 1, "rationale": "The active collaboration-model section supports partner-complementarity reasoning, while the source rule remains authoritative for evidence, symmetry, no profiling, and visibility requirements.", "concept_key": "partner-complementarity-reasoning", "section_address": "twin-system-playbook#collaboration-model-designed-with-joe-july-6-2026-the-max-efficiency-layer"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	cf623396-afb2-5424-b5ba-64224c11a9ab	1	2026-08-24 00:10:25.003703+00	\N
-ad70fc8a-3c8e-4815-af65-250c82d9b8f3	mapping	{"role": "supports", "weight": 1, "rationale": "The active knowledge-architecture section supports authoritative ownership during change; it does not replace the source rule's universal anti-duplication and generated-view mandate.", "concept_key": "authoritative-record-ownership", "section_address": "carr-production-maturity-baseline#s15-deprecation-decisions-and-knowledge-architecture"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	9fb86288-cc27-55b6-b49b-5fa3ee921201	1	2026-08-24 00:10:28.949747+00	\N
-23eecdde-9cbe-4c9d-8f75-4fe2a57d7a8d	concept	{"label": "Joe brokerage priority context", "definition": "Interpreting Joe's priorities from his healthcare brokerage role and current pipeline-building work rather than over-weighting recent system construction.", "concept_key": "joe-brokerage-priority-context", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	e0ac3e63-560d-50e2-a903-f9fd4e265d60	1	2026-08-24 00:10:32.204027+00	\N
-5e1cc7c7-765a-437a-a34a-b32a86eece41	phrase	{"phrase": "Joe brokerage priorities and current focus", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "joe-brokerage-priority-context", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	f05a6e62-cc21-5873-bf7a-f69170a3c770	1	2026-08-24 00:10:35.582595+00	\N
-8644c978-8d25-4932-8508-a900226c67f0	mapping	{"role": "governs", "weight": 1, "rationale": "The active profile section states Joe's present brokerage stage and primary prospecting, outreach, follow-up, and market-work focus without treating historical system-building residue as his defining work or unfinished-project behavior.", "concept_key": "joe-brokerage-priority-context", "section_address": "carr-profile#current-stage"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	2053e5ee-89d5-590c-a681-229612de451e	1	2026-08-24 00:10:39.630231+00	\N
-4f2573bc-ee34-43de-ac34-71825fb33bbf	concept	{"label": "Session work-shape assessment", "definition": "Assessing an agent session from its actual scope, authority, tools, and actions rather than inferring behavior from its title.", "concept_key": "session-work-shape-assessment", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	517598e5-2edd-5091-93d7-e41cf4916546	1	2026-08-24 00:10:45.045187+00	\N
-ad6b4235-0e70-478d-9d46-2a991ee0e98b	phrase	{"phrase": "assess the actual session work shape", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "session-work-shape-assessment", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	996b5b91-45eb-50a8-8f6a-c20fd42cb450	1	2026-08-24 00:10:48.05803+00	\N
-0fc908bc-1780-471d-8864-fbea47a907cd	mapping	{"role": "governs", "weight": 1, "rationale": "The active AgentOps contract supports judging actual tool use, dirty paths, transcript, concurrency, and worktree risk rather than trusting a session label.", "concept_key": "session-work-shape-assessment", "section_address": "carr-production-maturity-baseline#s13-agentops-doc-and-engineering-sessions"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	617d2462-eefc-56f1-9956-722a67621e47	1	2026-08-24 00:10:51.647008+00	\N
-eccae8c1-ff93-4a72-948d-0cbd44e17459	concept	{"label": "LOI term negotiation posture", "definition": "Treating every LOI term and template value as a deal-specific negotiable position rather than fixed policy.", "concept_key": "loi-term-negotiation-posture", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	f0c49626-78c5-5f9d-bcc9-be5b41d316b3	1	2026-08-24 00:10:56.036341+00	\N
-8db78c9a-cd18-4ed6-a8e9-874640296aee	phrase	{"phrase": "negotiate LOI template terms", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "loi-term-negotiation-posture", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	b53857b7-4614-5890-8489-9bfa285de4b8	1	2026-08-24 00:11:00.526241+00	\N
-8ebde12c-2384-4a08-aa87-e0f14e25cee6	mapping	{"role": "governs", "weight": 1, "rationale": "The active negotiation section supports deal-specific LOI judgment; templates remain overridable defaults rather than fixed policy, and one client's documents do not establish common terms.", "concept_key": "loi-term-negotiation-posture", "section_address": "negotiation#5-documents-rfp-vs-loi"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	67728535-7646-5381-a46c-942455a49a38	1	2026-08-24 00:11:03.33502+00	\N
-59d2b498-4000-41a5-8234-2fdb3feb1a01	mapping	{"role": "governs", "weight": 1, "rationale": "The active domain-data write law governs shared write services; the source rule's broader anti-drift scope still covers scripts, documented commands, environment setup, and duplicated configuration contracts.", "concept_key": "one-implementation-for-every-write-path", "section_address": "carr-mature-software-end-state-bduf#s14-domain-data"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	3eb67a52-cd26-5c4f-b9c5-c84163867903	1	2026-08-24 00:11:39.978452+00	\N
-1b2c02ef-8d5a-4221-871b-3fdc3fd6a6a5	concept	{"label": "Architecture for the planned trajectory", "definition": "Sizing durable foundations for the practice's intended future scale while keeping unproven workflow details reversible.", "concept_key": "architecture-for-the-planned-trajectory", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	0cffcedb-ed7f-5904-bdc7-6dd12ff8a9fe	1	2026-08-24 00:11:44.929701+00	\N
-0ee22eb0-4f3a-4e4e-950c-c90c75cfe67e	phrase	{"phrase": "design for the planned future trajectory", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "architecture-for-the-planned-trajectory", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	69deb2f1-a908-55fe-bc51-403cbebe0977	1	2026-08-24 00:11:49.477258+00	\N
-6a82c7c6-ba5a-4aec-a65b-9aefc3b24de6	mapping	{"role": "governs", "weight": 1, "rationale": "The active end-state ruling governs real planned growth while preserving the source rule's discipline against speculative complexity and its requirement to state cost and complexity honestly.", "concept_key": "architecture-for-the-planned-trajectory", "section_address": "carr-mature-software-end-state-bduf#s40-owner-controlled-tenant-readiness-evolving-workflows-and-low-toil-end-state"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	4374b1c5-fea6-54fb-9b87-66cb555752e2	1	2026-08-24 00:11:54.187531+00	\N
-b9bb1437-e49a-4d11-aed4-68a967e2bb63	concept	{"label": "Consolidate duplicate authorities", "definition": "Choosing one surviving authority, migrating its consumers, and retiring parallel versions instead of maintaining two sources of truth.", "concept_key": "consolidate-duplicate-authorities", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	5d539d32-9123-501a-a40a-cfeceba45394	1	2026-08-24 00:11:58.715956+00	\N
-62b93b26-0e1c-4d17-982d-1e97cf45caf9	phrase	{"phrase": "consolidate duplicate sources of truth", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "consolidate-duplicate-authorities", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	6467a1d4-2828-536c-bbe3-7cebedd3fb6d	1	2026-08-24 00:12:03.107857+00	\N
-e8332363-e8bc-4715-bcea-38f0a9a5943b	mapping	{"role": "governs", "weight": 1, "rationale": "The active deprecation and knowledge-architecture section governs consolidation while preserving the proactive rule not to create two maintained authorities in the first place.", "concept_key": "consolidate-duplicate-authorities", "section_address": "carr-production-maturity-baseline#s15-deprecation-decisions-and-knowledge-architecture"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	db6655ee-fc9c-5a65-a91c-3d92b4bccb8e	1	2026-08-24 00:12:06.389684+00	\N
-3fc61f51-95f3-4f3d-83ec-b7c29a3cf359	concept	{"label": "Constraint-preserving alternative route", "definition": "Continuing to solve the underlying problem after one route is refused by finding another route that preserves the binding constraint and authority boundary.", "concept_key": "constraint-preserving-alternative-route", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	3a3671f9-95ec-5f89-b179-9127458babbb	1	2026-08-24 00:12:09.529671+00	\N
-0843ca0a-bbd7-4d03-bde6-05b9f9847399	phrase	{"phrase": "find another route after a refusal", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "constraint-preserving-alternative-route", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	b70b5acd-34a7-519d-aaba-0ffbb38f2cb7	1	2026-08-24 00:12:13.126376+00	\N
-f2516c3b-e6cf-406d-ad15-6c5c64e17417	mapping	{"role": "governs", "weight": 1, "rationale": "The active judgment doctrine governs safe sanctioned alternative routes while preserving the requirement to stop for actions that genuinely require human authority.", "concept_key": "constraint-preserving-alternative-route", "section_address": "dr-cre-doctrine-2026-08-01#iv-judgment-how-he-pushes-back-and-how-he-acts-alone"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	12d7c24f-f16e-5eb8-a04e-7b6a075a3bca	1	2026-08-24 00:12:15.758401+00	\N
-8d350185-39ac-4204-96db-30d6e973a53d	concept	{"label": "Mobility and privacy architecture choice", "definition": "Designing for cross-device mobility while presenting the specific data, exposure, and consequences of privacy choices for a human decision.", "concept_key": "mobility-privacy-architecture-choice", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	3bc9b55d-7366-5b00-a5c6-a93905074b5b	1	2026-08-24 00:12:19.990575+00	\N
-a170d862-5fe4-4a1e-b52c-7d0d2ded3450	phrase	{"phrase": "choose between mobility and privacy architecture", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "mobility-privacy-architecture-choice", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	4e26921e-697e-55d4-916f-683ec16c0c89	1	2026-08-24 00:12:24.072295+00	\N
-57c5a043-fc1c-4313-bc76-b700bc305f1d	mapping	{"role": "governs", "weight": 1, "rationale": "The active cross-device section governs mobile continuity while preserving explicit privacy disclosure and all non-negotiable legal and trust safeguards.", "concept_key": "mobility-privacy-architecture-choice", "section_address": "carr-workspace-bduf#s14-cross-device-continuity"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	59458807-a257-56e3-9827-fc0e78bed6cd	1	2026-08-24 00:12:29.163849+00	\N
-f2cce7a5-9a24-4c81-bdd8-af0ca10a1c03	mapping	{"role": "supports", "weight": 1, "rationale": "The active privacy section supplies the exact identity, data-classification, retention, provider, and threat-model facts that must be presented with the mobility option.", "concept_key": "mobility-privacy-architecture-choice", "section_address": "carr-workspace-bduf#s17-security-privacy-and-retention"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	12bbe51b-050c-54ab-852e-112645fe0bac	1	2026-08-24 00:12:33.327469+00	\N
-aef50308-749a-4ff2-81d1-1e40cd6620b3	concept	{"label": "Capture reusable deferred knowledge", "definition": "Placing useful knowledge outside today's task into its canonical durable home with enough context to retrieve and apply it later.", "concept_key": "capture-reusable-deferred-knowledge", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	2a55f866-583c-574d-aca2-6e66c65bc63d	1	2026-08-24 00:12:36.84024+00	\N
-71b5dbdd-b108-48f9-bcda-c954919baf3d	mapping	{"role": "governs", "weight": 1, "rationale": "The active knowledge-placement section governs the related durable home, provenance, review triggers, and generated consumers; the source rule remains authoritative for proactive capture, future-use proposals, and Joe's sole authority over scope expansion.", "concept_key": "capture-reusable-deferred-knowledge", "section_address": "carr-production-maturity-baseline#s15-deprecation-decisions-and-knowledge-architecture"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	pending	\N	{}	5242f7be-7fe7-5cca-a65a-afce684b1f8c	1	2026-08-24 00:12:45.383156+00	\N
+c25d5333-7111-4a10-acf8-31cca41d6320	concept	{"label": "Partner complementarity reasoning", "definition": "Reasoning about how Joe and Dell's demonstrated strengths fit together without profiling either partner in isolation.", "concept_key": "partner-complementarity-reasoning", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{f36774db-8dfe-4e3b-a49f-d0b9767a0a23}	092cef0b-799b-5910-9bc9-ed482f065fed	2	2026-08-24 00:10:15.618415+00	2026-08-26 00:30:55.219671+00
+23eecdde-9cbe-4c9d-8f75-4fe2a57d7a8d	concept	{"label": "Joe brokerage priority context", "definition": "Interpreting Joe's priorities from his healthcare brokerage role and current pipeline-building work rather than over-weighting recent system construction.", "concept_key": "joe-brokerage-priority-context", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{49ffac2e-60a6-4dcc-bfea-c6bfce2f72fc}	e0ac3e63-560d-50e2-a903-f9fd4e265d60	2	2026-08-24 00:10:32.204027+00	2026-08-26 00:30:55.219671+00
+4f2573bc-ee34-43de-ac34-71825fb33bbf	concept	{"label": "Session work-shape assessment", "definition": "Assessing an agent session from its actual scope, authority, tools, and actions rather than inferring behavior from its title.", "concept_key": "session-work-shape-assessment", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{7cbdbcf3-df3f-4b60-b32b-39ecd36bf771}	517598e5-2edd-5091-93d7-e41cf4916546	2	2026-08-24 00:10:45.045187+00	2026-08-26 00:30:55.219671+00
+eccae8c1-ff93-4a72-948d-0cbd44e17459	concept	{"label": "LOI term negotiation posture", "definition": "Treating every LOI term and template value as a deal-specific negotiable position rather than fixed policy.", "concept_key": "loi-term-negotiation-posture", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{e7cf8c6a-80d9-4052-9efa-a98cd438e9ec}	f0c49626-78c5-5f9d-bcc9-be5b41d316b3	2	2026-08-24 00:10:56.036341+00	2026-08-26 00:30:55.219671+00
+eb34968e-bc1d-42bd-9217-f7da073f8bd8	concept	{"label": "One implementation for every write path", "definition": "Keeping manual and automated callers on the same governed implementation so configuration, validation, and evidence cannot drift between paths.", "concept_key": "one-implementation-for-every-write-path", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{b88d39a4-9d52-43e0-8065-2fa3834cdd1a}	30d5d7bb-0eac-586b-b1bf-30b513908e78	2	2026-08-24 00:11:31.982531+00	2026-08-26 00:30:55.219671+00
+1b2c02ef-8d5a-4221-871b-3fdc3fd6a6a5	concept	{"label": "Architecture for the planned trajectory", "definition": "Sizing durable foundations for the practice's intended future scale while keeping unproven workflow details reversible.", "concept_key": "architecture-for-the-planned-trajectory", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{0990e445-e767-4316-843c-94c02691fb0c}	0cffcedb-ed7f-5904-bdc7-6dd12ff8a9fe	2	2026-08-24 00:11:44.929701+00	2026-08-26 00:30:55.219671+00
+b9bb1437-e49a-4d11-aed4-68a967e2bb63	concept	{"label": "Consolidate duplicate authorities", "definition": "Choosing one surviving authority, migrating its consumers, and retiring parallel versions instead of maintaining two sources of truth.", "concept_key": "consolidate-duplicate-authorities", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{4a644b05-835e-4739-ac5c-30d881882752}	5d539d32-9123-501a-a40a-cfeceba45394	2	2026-08-24 00:11:58.715956+00	2026-08-26 00:30:55.219671+00
+3fc61f51-95f3-4f3d-83ec-b7c29a3cf359	concept	{"label": "Constraint-preserving alternative route", "definition": "Continuing to solve the underlying problem after one route is refused by finding another route that preserves the binding constraint and authority boundary.", "concept_key": "constraint-preserving-alternative-route", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{0e11fc3f-8cb2-4af2-8fac-f1d45602fa6e}	3a3671f9-95ec-5f89-b179-9127458babbb	2	2026-08-24 00:12:09.529671+00	2026-08-26 00:30:55.219671+00
+8d350185-39ac-4204-96db-30d6e973a53d	concept	{"label": "Mobility and privacy architecture choice", "definition": "Designing for cross-device mobility while presenting the specific data, exposure, and consequences of privacy choices for a human decision.", "concept_key": "mobility-privacy-architecture-choice", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{95a97cc6-dde0-44d0-bb8c-41926797f2c4}	3bc9b55d-7366-5b00-a5c6-a93905074b5b	2	2026-08-24 00:12:19.990575+00	2026-08-26 00:30:55.219671+00
+aef50308-749a-4ff2-81d1-1e40cd6620b3	concept	{"label": "Capture reusable deferred knowledge", "definition": "Placing useful knowledge outside today's task into its canonical durable home with enough context to retrieve and apply it later.", "concept_key": "capture-reusable-deferred-knowledge", "review_after": null}	Reviewed WR-AI-006 curation package for the typed Guidance Registry; the registry cannot import without this bridge.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{2868a25d-540f-4e53-b35e-385cb22e10f3}	2a55f866-583c-574d-aca2-6e66c65bc63d	2	2026-08-24 00:12:36.84024+00	2026-08-26 00:30:55.219671+00
+c7674241-e986-4562-8d6f-c0738831dc45	phrase	{"phrase": "Joe and Dell partner complementarity", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "partner-complementarity-reasoning", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{e5740fb4-2f17-49a0-a651-20005ddad66c}	0648bb96-f1d7-5c39-bcc8-f270a9db9111	2	2026-08-24 00:10:20.885324+00	2026-08-26 00:30:55.219671+00
+5e1cc7c7-765a-437a-a34a-b32a86eece41	phrase	{"phrase": "Joe brokerage priorities and current focus", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "joe-brokerage-priority-context", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{99688361-4017-41e4-b585-398ca0feb85e}	f05a6e62-cc21-5873-bf7a-f69170a3c770	2	2026-08-24 00:10:35.582595+00	2026-08-26 00:30:55.219671+00
+ad6b4235-0e70-478d-9d46-2a991ee0e98b	phrase	{"phrase": "assess the actual session work shape", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "session-work-shape-assessment", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{1d6f44bc-c8a4-4c3a-8a4f-18cb17a3d311}	996b5b91-45eb-50a8-8f6a-c20fd42cb450	2	2026-08-24 00:10:48.05803+00	2026-08-26 00:30:55.219671+00
+8db78c9a-cd18-4ed6-a8e9-874640296aee	phrase	{"phrase": "negotiate LOI template terms", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "loi-term-negotiation-posture", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{60890a80-14cd-489b-8cd5-98e9023889c7}	b53857b7-4614-5890-8489-9bfa285de4b8	2	2026-08-24 00:11:00.526241+00	2026-08-26 00:30:55.219671+00
+d48e543d-0026-4b85-9278-3b1fe5d1997c	phrase	{"phrase": "prove an existing capability against the source", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "source-study-capability-proof", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{b7019c8f-9745-42a3-9fd7-f2ed2dec7023}	ad01d8d6-c18b-507c-847f-41ad2689c4d4	2	2026-08-24 00:11:09.831275+00	2026-08-26 00:30:55.219671+00
+6b38f514-4172-4180-bb0d-eeb998ba6f3b	phrase	{"phrase": "adapt to Dell without personality profiling", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "partner-calibration-without-profiling", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{cfe76151-abdc-4493-95f6-85c82c588376}	3f752654-6a73-5865-a8c6-e7899941f94a	2	2026-08-24 00:11:24.119225+00	2026-08-26 00:30:55.219671+00
+7ef8a7fc-3d79-424e-ba30-ef50cc49e7d9	phrase	{"phrase": "manual and automated paths use the same implementation", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "one-implementation-for-every-write-path", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{8ede45ea-1d83-4d08-9879-9c48630a610b}	ce14e6aa-8925-5423-93f1-936a628e57ef	2	2026-08-24 00:11:35.663231+00	2026-08-26 00:30:55.219671+00
+0ee22eb0-4f3a-4e4e-950c-c90c75cfe67e	phrase	{"phrase": "design for the planned future trajectory", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "architecture-for-the-planned-trajectory", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{31d7f0fc-cac6-4722-9f0e-538d3c246062}	69deb2f1-a908-55fe-bc51-403cbebe0977	2	2026-08-24 00:11:49.477258+00	2026-08-26 00:30:55.219671+00
+62b93b26-0e1c-4d17-982d-1e97cf45caf9	phrase	{"phrase": "consolidate duplicate sources of truth", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "consolidate-duplicate-authorities", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{ef59f4b5-bcd7-42a6-ab3c-8d6b86ec4af9}	6467a1d4-2828-536c-bbe3-7cebedd3fb6d	2	2026-08-24 00:12:03.107857+00	2026-08-26 00:30:55.219671+00
+0843ca0a-bbd7-4d03-bde6-05b9f9847399	phrase	{"phrase": "find another route after a refusal", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "constraint-preserving-alternative-route", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{fc1a0c99-801e-47a9-8e19-ba6b6056721b}	b70b5acd-34a7-519d-aaba-0ffbb38f2cb7	2	2026-08-24 00:12:13.126376+00	2026-08-26 00:30:55.219671+00
+a170d862-5fe4-4a1e-b52c-7d0d2ded3450	phrase	{"phrase": "choose between mobility and privacy architecture", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "mobility-privacy-architecture-choice", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{1c2ac066-8982-4864-a9bc-20e2bf8a9465}	4e26921e-697e-55d4-916f-683ec16c0c89	2	2026-08-24 00:12:24.072295+00	2026-08-26 00:30:55.219671+00
+787b4b47-bc3d-4cc9-a248-d60891f89db7	phrase	{"phrase": "capture reusable knowledge for later", "source": "manual", "weight": 1, "match_mode": "fts", "source_ref": "audits/guidance-situation-curation-review.v1.json", "concept_key": "capture-reusable-deferred-knowledge", "min_similarity": 0.35}	The reviewed real-world phrase for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{a8c1d29d-d50c-4e74-9bb2-1efc00b07130}	e0dbb452-d38e-59fc-8bfe-cf23bb89d1d1	2	2026-08-24 00:12:40.667031+00	2026-08-26 00:30:55.219671+00
+c43c937f-d247-4744-b4cb-d20a4a99f8ea	mapping	{"role": "supports", "weight": 1, "rationale": "The active collaboration-model section supports partner-complementarity reasoning, while the source rule remains authoritative for evidence, symmetry, no profiling, and visibility requirements.", "concept_key": "partner-complementarity-reasoning", "section_address": "twin-system-playbook#collaboration-model-designed-with-joe-july-6-2026-the-max-efficiency-layer"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{46269778-73ce-4a65-9859-593faf59b74b}	cf623396-afb2-5424-b5ba-64224c11a9ab	2	2026-08-24 00:10:25.003703+00	2026-08-26 00:30:55.219671+00
+ad70fc8a-3c8e-4815-af65-250c82d9b8f3	mapping	{"role": "supports", "weight": 1, "rationale": "The active knowledge-architecture section supports authoritative ownership during change; it does not replace the source rule's universal anti-duplication and generated-view mandate.", "concept_key": "authoritative-record-ownership", "section_address": "carr-production-maturity-baseline#s15-deprecation-decisions-and-knowledge-architecture"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{8dcf290f-16fa-4b97-84df-bbf972abc7fd}	9fb86288-cc27-55b6-b49b-5fa3ee921201	2	2026-08-24 00:10:28.949747+00	2026-08-26 00:30:55.219671+00
+8644c978-8d25-4932-8508-a900226c67f0	mapping	{"role": "governs", "weight": 1, "rationale": "The active profile section states Joe's present brokerage stage and primary prospecting, outreach, follow-up, and market-work focus without treating historical system-building residue as his defining work or unfinished-project behavior.", "concept_key": "joe-brokerage-priority-context", "section_address": "carr-profile#current-stage"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{cada5dd0-10a3-4e3c-abb5-e764f8a9a9f6}	2053e5ee-89d5-590c-a681-229612de451e	2	2026-08-24 00:10:39.630231+00	2026-08-26 00:30:55.219671+00
+0fc908bc-1780-471d-8864-fbea47a907cd	mapping	{"role": "governs", "weight": 1, "rationale": "The active AgentOps contract supports judging actual tool use, dirty paths, transcript, concurrency, and worktree risk rather than trusting a session label.", "concept_key": "session-work-shape-assessment", "section_address": "carr-production-maturity-baseline#s13-agentops-doc-and-engineering-sessions"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{1862f3a0-be60-431e-8461-3f20856fc8d7}	617d2462-eefc-56f1-9956-722a67621e47	2	2026-08-24 00:10:51.647008+00	2026-08-26 00:30:55.219671+00
+8ebde12c-2384-4a08-aa87-e0f14e25cee6	mapping	{"role": "governs", "weight": 1, "rationale": "The active negotiation section supports deal-specific LOI judgment; templates remain overridable defaults rather than fixed policy, and one client's documents do not establish common terms.", "concept_key": "loi-term-negotiation-posture", "section_address": "negotiation#5-documents-rfp-vs-loi"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{d5ef45e7-4158-4c69-aee4-03ffcb7bb1af}	67728535-7646-5381-a46c-942455a49a38	2	2026-08-24 00:11:03.33502+00	2026-08-26 00:30:55.219671+00
+3b883519-f3b2-48af-984d-7e57f17216c8	mapping	{"role": "supports", "weight": 1, "rationale": "The active corrected study is the proof example and provenance; the source rule remains authoritative across every Joe-provided source.", "concept_key": "source-study-capability-proof", "section_address": "2026-08-07-tenex-metaharness-sdlc-takeaways#preamble"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{62d10585-7e19-49dc-8ea9-75f8d69ec692}	0a62921a-07b5-5429-b739-9d02fffe04b2	2	2026-08-24 00:11:15.089212+00	2026-08-26 00:30:55.219671+00
+30046271-2917-4073-86f0-0b0dd5b47a35	mapping	{"role": "governs", "weight": 1, "rationale": "The active memory doctrine supports Dell-specific calibration from directly stated or demonstrated preferences while forbidding personality, motive, mood, or state inference.", "concept_key": "partner-calibration-without-profiling", "section_address": "dr-cre-doctrine-2026-08-01#iii-memory-what-he-keeps-and-the-line-he-never-crosses"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{877bcb8e-0e39-4742-b356-c8c33c4db2fa}	fc37b865-a5fe-5838-a002-09a05430f1b0	2	2026-08-24 00:11:29.230662+00	2026-08-26 00:30:55.219671+00
+59d2b498-4000-41a5-8234-2fdb3feb1a01	mapping	{"role": "governs", "weight": 1, "rationale": "The active domain-data write law governs shared write services; the source rule's broader anti-drift scope still covers scripts, documented commands, environment setup, and duplicated configuration contracts.", "concept_key": "one-implementation-for-every-write-path", "section_address": "carr-mature-software-end-state-bduf#s14-domain-data"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{15b883ea-55e7-4adc-8dd3-01fd271541ba}	3eb67a52-cd26-5c4f-b9c5-c84163867903	2	2026-08-24 00:11:39.978452+00	2026-08-26 00:30:55.219671+00
+6a82c7c6-ba5a-4aec-a65b-9aefc3b24de6	mapping	{"role": "governs", "weight": 1, "rationale": "The active end-state ruling governs real planned growth while preserving the source rule's discipline against speculative complexity and its requirement to state cost and complexity honestly.", "concept_key": "architecture-for-the-planned-trajectory", "section_address": "carr-mature-software-end-state-bduf#s40-owner-controlled-tenant-readiness-evolving-workflows-and-low-toil-end-state"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{b22f7309-16d5-4e31-a7df-0bf292a36031}	4374b1c5-fea6-54fb-9b87-66cb555752e2	2	2026-08-24 00:11:54.187531+00	2026-08-26 00:30:55.219671+00
+e8332363-e8bc-4715-bcea-38f0a9a5943b	mapping	{"role": "governs", "weight": 1, "rationale": "The active deprecation and knowledge-architecture section governs consolidation while preserving the proactive rule not to create two maintained authorities in the first place.", "concept_key": "consolidate-duplicate-authorities", "section_address": "carr-production-maturity-baseline#s15-deprecation-decisions-and-knowledge-architecture"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{66324b26-774d-4dd2-86b2-fb7a3cc04bfc}	db6655ee-fc9c-5a65-a91c-3d92b4bccb8e	2	2026-08-24 00:12:06.389684+00	2026-08-26 00:30:55.219671+00
+f2516c3b-e6cf-406d-ad15-6c5c64e17417	mapping	{"role": "governs", "weight": 1, "rationale": "The active judgment doctrine governs safe sanctioned alternative routes while preserving the requirement to stop for actions that genuinely require human authority.", "concept_key": "constraint-preserving-alternative-route", "section_address": "dr-cre-doctrine-2026-08-01#iv-judgment-how-he-pushes-back-and-how-he-acts-alone"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{628b07db-4bf7-4c87-90a8-8259fec37dfe}	12d7c24f-f16e-5eb8-a04e-7b6a075a3bca	2	2026-08-24 00:12:15.758401+00	2026-08-26 00:30:55.219671+00
+57c5a043-fc1c-4313-bc76-b700bc305f1d	mapping	{"role": "governs", "weight": 1, "rationale": "The active cross-device section governs mobile continuity while preserving explicit privacy disclosure and all non-negotiable legal and trust safeguards.", "concept_key": "mobility-privacy-architecture-choice", "section_address": "carr-workspace-bduf#s14-cross-device-continuity"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{3e52de6c-0e30-4af8-a797-1fac9fc319ef}	59458807-a257-56e3-9827-fc0e78bed6cd	2	2026-08-24 00:12:29.163849+00	2026-08-26 00:30:55.219671+00
+f2cce7a5-9a24-4c81-bdd8-af0ca10a1c03	mapping	{"role": "supports", "weight": 1, "rationale": "The active privacy section supplies the exact identity, data-classification, retention, provider, and threat-model facts that must be presented with the mobility option.", "concept_key": "mobility-privacy-architecture-choice", "section_address": "carr-workspace-bduf#s17-security-privacy-and-retention"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{a84e2aad-fdec-4b6d-b2d9-853fcabfc5fa}	12bbe51b-050c-54ab-852e-112645fe0bac	2	2026-08-24 00:12:33.327469+00	2026-08-26 00:30:55.219671+00
+71b5dbdd-b108-48f9-bcda-c954919baf3d	mapping	{"role": "governs", "weight": 1, "rationale": "The active knowledge-placement section governs the related durable home, provenance, review triggers, and generated consumers; the source rule remains authoritative for proactive capture, future-use proposals, and Joe's sole authority over scope expansion.", "concept_key": "capture-reusable-deferred-knowledge", "section_address": "carr-production-maturity-baseline#s15-deprecation-decisions-and-knowledge-architecture"}	The reviewed doctrine bridge for this concept.	63923291-cea4-426f-8a78-d21512e15a45	approved	b6c38b27-d006-4fad-9c38-49edf3130a07	{d2b0623c-d6cf-4c80-89f4-2a4a43b71239}	5242f7be-7fe7-5cca-a65a-afce684b1f8c	2	2026-08-24 00:12:45.383156+00	2026-08-26 00:30:55.219671+00
 \.
 
 
@@ -34718,17 +42299,15 @@ insert into ops.enforcement_control_catalog (control_key,implementation_ref,test
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('blocker_decider','hooks/blocker-decider-gate.py','ops/blocker-decider-gate-selftest.py','deny_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('calendar_intake','tools/calendar-intake-gate.py; bin/calendar-eventkit-capture.sh','ops/calendar-intake-gate-selftest.py','deny_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('candidate_match','pipelines/import_candidate_pool.py','ops/candidate-match-threshold-selftest.py','judgment_ambient','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
-insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('canonical_edit','hooks/canonical-edit-gate.py; hooks/worktree-self-plumb.py','ops/canonical-edit-gate-selftest.py','deny_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('chat_lint','hooks/chat-lint-gate.py; hooks/chat-lint-carryover.py','ops/chat-lint-gate-selftest.py; ops/unlinked-file-ask-selftest.py','surfacing','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('ci_gates','ops/ci.sh','ops/hermes-autonomy-check-selftest.py','surfacing','t','2026-08-19T03:38:59.844809Z'::timestamptz,'2026-08-22T11:37:19.935580Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('client_asset_packet','lib/client_asset_controls.py; pipelines/build-space-search.py','ops/client-asset-controls-selftest.py','deny_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('close_before_open','hooks/close-before-open-gate.py; hooks/session-brief.py; ops/built_unclosed.py','ops/close-before-open-gate-selftest.py; ops/built-unclosed-selftest.py; ops/session-brief-selftest.py','deny_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
-insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('cognition_token_admission','ops/config/control-plane-workflows.v1.json; lib/control_plane.py; lib/control_plane_runner.py; tools/control-plane.py','ops/control-plane-selftest.py; ops/control-plane-db-gate.py','transactional_schema','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('commit_claims','ops/githooks/commit-claims-check.py; ops/githooks/commit-msg','ops/commit-claims-selftest.py','deny_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('completion_evidence','hooks/completion-evidence-gate.py','ops/completion-evidence-gate-selftest.py','stop_gate','t','2026-08-16T20:27:36.901127Z'::timestamptz,'2026-08-20T15:09:01.704306Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('conduct_stop','hooks/conduct-stop-gate.py','ops/conduct-gate-selftest.py; ops/delta-resend-selftest.py','stop_gate','t','2026-08-22T03:04:18.355680Z'::timestamptz,'2026-08-22T03:04:18.355680Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('context_rail','hooks/context-handoff-gate.py','ops/context-handoff-gate-selftest.py','stop_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
-insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('control-plane-workflow-manifest','ops/config/control-plane-workflows.v1.json','ops/control-plane-selftest.py','deny_gate','t','2026-08-16T18:19:32.447964Z'::timestamptz,'2026-08-20T15:09:01.704306Z'::timestamptz) on conflict (control_key) do nothing;
+insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('control-plane-workflow-manifest','ops/config/control-plane-workflows.v1.json','ops/control-plane-selftest.py; ops/control-plane-db-gate.py','deny_gate','t','2026-08-27T14:09:26.564721Z'::timestamptz,'2026-08-20T15:09:01.704306Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('costar_lane','hooks/costar-lane-gate.py','ops/costar-lane-gate-selftest.py','deny_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('deal_guard','mcp-server/src/tools.js; migrations/0079_deal_room_api.sql; migrations/0091_deal_reconciliation_read.sql','mcp-server/test/dealroom.test.js','transactional_schema','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('delegation_names_model_and_effort','tools/room-bridge/dispatch.py; tools/room-bridge/desks.py','ops/room-bridge-selftest.py','deny_gate','t','2026-08-24T12:22:03.304333Z'::timestamptz,'2026-08-24T12:22:03.304333Z'::timestamptz) on conflict (control_key) do nothing;
@@ -34740,7 +42319,6 @@ insert into ops.enforcement_control_catalog (control_key,implementation_ref,test
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('executor_tier','hooks/executor-tier-gate.py','external:no dedicated suite yet','deny_gate','f',NULL::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('gate_edit','hooks/gate-edit-gate.py','ops/gate-edit-gate-selftest.py','deny_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('gate_integrity','hooks/gate-integrity.py','command:python3 hooks/gate-integrity.py --selftest','stop_gate','f',NULL::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
-insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('git_writer','hooks/git-writer-gate.py','ops/git-writer-gate-selftest.py','deny_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('glanceable_lead','ops/glanceable-lead-check.py','ops/glanceable-lead-selftest.py','schema','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('human_authority_runtime','migrations/0161_control_plane_authority_boundary.sql; mcp-server/src/mcp.js','mcp-server/test/control-plane-authority-boundary.test.mjs; ops/control-plane-authority-runtime-preflight-selftest.py','transactional_schema','t','2026-08-20T15:09:01.704306Z'::timestamptz,'2026-08-20T15:09:01.704306Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('index_upkeep','ops/githooks/index-upkeep-check.py; ops/githooks/pre-commit','ops/path-index-hygiene-selftest.py','deny_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
@@ -34748,17 +42326,18 @@ insert into ops.enforcement_control_catalog (control_key,implementation_ref,test
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('ledger_capture','hooks/ledger-sweep.py','external:ledger scope regressions','stop_gate','f',NULL::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('loop_guard','migrations/0081_loop_blocker.sql; mcp-server/src/tools.js','external:migration probes','transactional_schema','f',NULL::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('loop_successor','mcp-server/src/tools.js','mcp-server/test/loop-version-and-marker.test.mjs','transactional_schema','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
-insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('loose_work','hooks/loose-work-gate.py; hooks/staging-attribution-gate.py; hooks/staging-observation-tracker.py','ops/loose-work-gate-selftest.py','stop_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
+insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('loose_work','hooks/loose-work-gate.py; hooks/staging-observation-tracker.py','ops/loose-work-gate-selftest.py','stop_gate','t','2026-08-27T13:22:25.132713Z'::timestamptz,'2026-08-27T13:22:25.132713Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('map_architecture','hooks/map-architecture-gate.py','ops/map-architecture-gate-selftest.py; mcp-server/test/map-architecture.test.mjs','stop_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('merge_survivor','mcp-server/src/tools.js','mcp-server/test/confirm-merge-lead-client.test.mjs','transactional_schema','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('model_floor','hooks/model-floor-gate.py','external:no dedicated suite yet','deny_gate','f',NULL::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('no_send_worker','mcp-server/src/mcp.js','glob:mcp-server/test/*.test.js','judgment_ambient','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('one_repo','hooks/one-repo-gate.py; hooks/bash-write-gate.py','ops/one-repo-gate-selftest.py; ops/bash-write-gate-selftest.py','deny_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('outbound_format','mcp-server/src/tools.js','mcp-server/test/document-outbound-format.test.mjs','transactional_schema','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
-insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('pack_delivery','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','stop_gate','t','2026-08-24T16:04:56.103125Z'::timestamptz,'2026-08-24T16:04:56.103125Z'::timestamptz) on conflict (control_key) do nothing;
+insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('pack_delivery','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','stop_gate','t','2026-08-24T16:04:56.103125Z'::timestamptz,'2026-08-27T01:41:41.176469Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('path_hygiene','ops/githooks/path-hygiene-check.py; ops/githooks/pre-commit','ops/path-index-hygiene-selftest.py','deny_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('peer_broadcast','hooks/peer-broadcast-gate.py','ops/peer-broadcast-gate-selftest.py','deny_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('platform_metering_pre_dispatch','lib/platform_metering.py; ops/platform-metering-gate.py; hooks/guard-unattended.py','ops/platform-metering-gate-selftest.py; ops/platform-metering-policy-selftest.py; ops/guard-selftest.py','deny_gate','t','2026-08-20T15:09:01.704306Z'::timestamptz,'2026-08-20T15:09:01.704306Z'::timestamptz) on conflict (control_key) do nothing;
+insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('pr_only_main_ruleset','external:GitHub branch ruleset 20824501 on jbookout/carr-system''s main branch — PR-only, direct pushes rejected server-side with required status checks; ops/githooks/pre-commit','ops/main-commit-gate-selftest.py; external:a direct `git push origin main` from a local clone is rejected by GitHub before it reaches the branch','deny_gate','t','2026-08-27T11:28:27.421558Z'::timestamptz,'2026-08-27T11:28:27.421558Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('record_home','hooks/record-home-gate.py; hooks/bash-write-gate.py; hooks/guard-unattended.py; hooks/write-effect-check.py','tools/test-record-home-gate.py; ops/bash-write-gate-selftest.py; ops/guard-selftest.py; ops/write-effect-check-selftest.py','deny_gate','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-24T16:04:55.510694Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('record_research','mcp-server/src/tools.js','mcp-server/test/intake-research-gates.test.mjs','transactional_schema','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
 insert into ops.enforcement_control_catalog (control_key,implementation_ref,test_ref,enforcement_class,installed,verified_at,updated_at) values ('rule_shape','hooks/rule-shape-gate.py; migrations/0194_atomic_rule_approval.sql; migrations/0228_atomic_rule_lifecycle_forward_upgrade.sql; mcp-server/src/tools.js','ops/rule-shape-gate-selftest.py; ops/atomic-rule-approval-selftest.py; mcp-server/test/rule-admission.test.mjs','transactional_schema','t','2026-08-22T10:55:23.365715Z'::timestamptz,'2026-08-22T10:55:23.365715Z'::timestamptz) on conflict (control_key) do nothing;
@@ -34801,6 +42380,31 @@ values
    '{"key":"facts.all_true","spec":{"all_of":["renewal.source_run_sealed"]},"receipt_kind":"renewal_source_run"}'::jsonb,
    '{"provider":"none","status":"disabled","activation":"explicit source-run adapter required"}'::jsonb)
 on conflict (key,version) do nothing;
+
+-- CARR RULE DELIVERY POLICY (bin/schema-snapshot.sh) — safe rebuild default.
+-- The bounded vocabulary dump preserves an existing singleton. If the source
+-- store lacks it, 0291 will not replay once its ledger row is in the snapshot,
+-- so this fallback creates only the fail-safe shadow default.
+insert into ops.rule_delivery_policy (singleton,mode,changed_by,reason)
+values (true,'shadow','schema-snapshot',
+        'Fresh rebuild default: scoped delivery remains shadow until governed cutover evidence exists.')
+on conflict (singleton) do nothing;
+
+-- CARR RULE DELIVERY ACTIVATION TARGETS POST-0363 (bin/schema-snapshot.sh) — exact reviewed cutover config.
+insert into ops.rule_delivery_activation_target
+  (short_id,expected_scope,expected_pack,
+   from_control,from_enforcement_class,from_implementation_ref,from_test_ref,
+   to_control,to_enforcement_class,to_implementation_ref,to_test_ref,map_digest)
+values
+ ('25fcddee','shared','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('3fa17fa0','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('72e06bdf','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('113b3833','joe','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('57d13061','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('c66dc739','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('49533583','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('557838a5','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904')
+on conflict (short_id) do nothing;
 
 -- CARR GOVERNED EXECUTION SEEDS (bin/schema-snapshot.sh) — exact bounded repository declarations.
 -- 0309's protected hermes-local provider, its passed conformance, and its
@@ -34861,23 +42465,28 @@ begin
 end
 $carr_governed_execution_seeds$;
 
--- 0310's exact enabled on-demand engineering-slice:v1 job contract.  This is
--- the existing ops.job queue projection, not a second workflow or task store.
+-- The exact enabled on-demand engineering-slice:v1 job contract through 0312.
+-- A post-0312 snapshot marks 0311/0312 applied in its migration ledger, so a
+-- fresh rebuild will not replay their contract updates.  This INSERT uses
+-- ON CONFLICT DO NOTHING deliberately: it must therefore already be the final
+-- sponsored, lease-bound controller declaration rather than the old 0310 row.
+-- It remains the existing ops.job queue projection, not a second workflow or
+-- task store.
 insert into ops.job_definition
   (key,version,enabled,risk,owner_actor,execution_kind,execution_contract,
    inventory_contract,state_contract,routing_contract,filtering_contract,
    recurrence,validation_contract,retry_policy,deduplication,completion_contract,legacy_schedule)
 values
   ('engineering-slice',1,true,'yellow','hermes','deterministic',
-   '{"entrypoint":"mcp-server/src/engineering-runtime.js","export":"runCodexSlice","args":[],"shadow_args":[],"canary":{"enabled":false,"reason":"fresh native Codex execution has no isolated canary adapter"}}'::jsonb,
-   '{"trigger":"MCP admission only; no scheduler","owner":"ops.job dispatcher","inputs":["accepted Work Request","accepted plan revision","typed engineering slice"],"canonical_reads":["ops.work_request","ops.sourced_work_request_plan","ops.engineering_slice_plan","ops.job_definition"],"canonical_writes":["ops.job","ops.engineering_execution_envelope","ops.engineering_slice_receipt","ops.engineering_reviewer_fact"],"external_dependencies":["Codex Desktop fresh-native-session adapter"],"authority":"server-derived shadow execution only; no caller-selected identity, model, authority, or native session","current_completion_signal":"lease-bound typed receipt plus independent reviewer fact","replacement_program":"ops.job_definition:engineering-slice:v1","acceptance":"typed envelope, receipt, dependency, and independent-review gates","retirement_approval":"Joe approval after replacement evidence"}'::jsonb,
+   '{"entrypoint":"mcp-server/src/engineering-runtime.js","export":"runEngineeringWorker","args":["room-bridge-engineering-controller"],"shadow_args":[],"canary":{"enabled":false,"reason":"fresh native Codex execution has no isolated canary adapter"}}'::jsonb,
+   '{"trigger":"MCP admission only; no scheduler","owner":"ops.job dispatcher","inputs":["accepted Work Request","accepted plan revision","typed engineering slice"],"canonical_reads":["ops.work_request","ops.sourced_work_request_plan","ops.engineering_slice_plan","ops.job_definition"],"canonical_writes":["ops.job","ops.engineering_execution_envelope","ops.engineering_slice_receipt","ops.engineering_reviewer_fact"],"external_dependencies":["room-bridge lease-bound controller","Codex Desktop fresh-native-session adapter"],"authority":"server-derived sponsored Codex execution with a closed repository action allowlist; no caller-selected identity, authority, model, action, or native session","current_completion_signal":"lease-bound typed receipt plus independent reviewer fact","replacement_program":"ops.job_definition:engineering-slice:v1","acceptance":"typed envelope, receipt, dependency, and independent-review gates","retirement_approval":"Joe approval after replacement evidence"}'::jsonb,
    '{"states":["queued","running","succeeded","failed","timed_out"]}'::jsonb,
    '{"key":"facts.all_true","spec":{"all_of":["capability.candidate_admitted","runner.identity_bound"]},"description":"an accepted capability candidate and bound runner identity admit the slice"}'::jsonb,
    '{"key":"facts.all_true","spec":{"all_of":["command.registered_args_selected"]},"description":"only the registered fresh Codex adapter is selected"}'::jsonb,
    '{"kind":"on_demand","schedule":null,"cron":null,"timezone":"America/Chicago","source":"MCP admit-engineering-slice only"}'::jsonb,
    '{"key":"facts.all_true","spec":{"all_of":["command.exit_zero","command.workflow_marker_valid"]},"description":"the bounded adapter succeeds and returns its typed workflow marker"}'::jsonb,
    '{"max_attempts":2,"backoff":"constant","base_seconds":30,"cap_seconds":300,"timeout_seconds":1800}'::jsonb,
-   '{"key_template":"engineering-slice:{plan_digest}:{work_request}:{slice_ref}"}'::jsonb,
+   '{"key_template":"engineering-slice:{plan_digest}:{work_request}:{slice_ref}:generation:{generation}"}'::jsonb,
    '{"key":"facts.all_true","spec":{"all_of":["command.receipt_persisted","command.execution_evidence_reconciles"]},"description":"lease-bound typed receipt persists and reconciles to the issued envelope","receipt_kind":"engineering_slice"}'::jsonb,
    '{"provider":"none","status":"disabled","disable_requires":"no scheduler exists; on-demand MCP admission only"}'::jsonb)
 on conflict (key,version) do nothing;
@@ -34887,3 +42496,249 @@ on conflict (key,version) do nothing;
 --
 
 insert into public.doctrine_meta (id, generation) values (1, 0);
+
+-- CARR SIEP MANIFEST AND PROGRAM WORK REQUESTS (bin/schema-snapshot.sh) —
+-- exact sealed rows, digest-verified below. The seals and the work-request
+-- insert guards are disabled ONLY for this byte-exact restore of rows that
+-- already passed them on production; the closing DO block refuses the whole
+-- rebuild if the restored manifest does not hash to production's reviewed
+-- digest. Never dump receipt, lock, or evidence tables here.
+alter table ops.work_request disable trigger work_request_shape_gate;
+alter table ops.work_request disable trigger work_in_progress_limit;
+alter table ops.work_request disable trigger completion_capsule;
+alter table ops.siep_package_contract disable trigger siep_package_contract_sealed_before_insert;
+alter table ops.siep_program_dependency disable trigger siep_program_dependency_sealed_before_insert;
+alter table ops.siep_component_alias disable trigger siep_component_alias_sealed_before_insert;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "2a977386-6197-426f-a500-d72ce880a07e", "ref": "WR-SIEP-00", "state": "ready", "title": "Live collision reconciliation", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Live collision reconciliation", "existing_status": "reviewed", "program_ordinal": 1, "project_context": {"package_key": "00", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "1f06a295-dab6-4433-8b94-7a1849328d22", "ref": "WR-SIEP-01", "state": "ready", "title": "Heavy-build good versus half-executed reproduction", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Heavy-build good versus half-executed reproduction", "existing_status": "reviewed", "program_ordinal": 3, "project_context": {"package_key": "01", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "06749302-d632-417d-9315-6c53b775ec3b", "ref": "WR-SIEP-02", "state": "ready", "title": "Deterministic trigger classifier and scoped delivery", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Deterministic trigger classifier and scoped delivery", "existing_status": "reviewed", "program_ordinal": 4, "project_context": {"package_key": "02", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "480cd4a0-34f3-4620-a45d-6e7756ddffed", "ref": "WR-SIEP-03", "state": "ready", "title": "Signed Session Passport", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Signed Session Passport", "existing_status": "reviewed", "program_ordinal": 5, "project_context": {"package_key": "03", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "5dbd38d7-355d-4b05-b203-73799a030a64", "ref": "WR-SIEP-04", "state": "ready", "title": "Runtime enforcement and truthful completion", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Runtime enforcement and truthful completion", "existing_status": "reviewed", "program_ordinal": 6, "project_context": {"package_key": "04", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "69d769c9-f4bc-4311-9313-e5b616fe8e1a", "ref": "WR-SIEP-05", "state": "ready", "title": "Scheduler incidents nightly and self-healing", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Scheduler incidents nightly and self-healing", "existing_status": "reviewed", "program_ordinal": 7, "project_context": {"package_key": "05", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "c652a068-a830-4976-84cf-325cd126e013", "ref": "WR-SIEP-06A", "state": "ready", "title": "Evidence graph", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Evidence graph", "existing_status": "reviewed", "program_ordinal": 8, "project_context": {"package_key": "06A", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "2d01373a-2569-4f71-bfae-66c73a4bc6a8", "ref": "WR-SIEP-06B", "state": "ready", "title": "Terminal closure authority", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Terminal closure authority", "existing_status": "reviewed", "program_ordinal": 9, "project_context": {"package_key": "06B", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "20a25ede-cbdc-421b-a186-0a40673d10c2", "ref": "WR-SIEP-10", "state": "ready", "title": "SCAC charter and taxonomy", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "SCAC charter and taxonomy", "existing_status": "reviewed", "program_ordinal": 10, "project_context": {"package_key": "10", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "a2897ddf-9faa-46bc-88af-33d95f0b2321", "ref": "WR-SIEP-11", "state": "ready", "title": "Mutation registry and default-deny ingress", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Mutation registry and default-deny ingress", "existing_status": "reviewed", "program_ordinal": 11, "project_context": {"package_key": "11", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "d0367405-8cab-4d13-b843-0296f5010b13", "ref": "WR-SIEP-12", "state": "ready", "title": "Monotonic transactional epoch and compatibility state", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Monotonic transactional epoch and compatibility state", "existing_status": "reviewed", "program_ordinal": 12, "project_context": {"package_key": "12", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "91b6806d-1f0e-426f-964a-0ea5ec4bb6c5", "ref": "WR-SIEP-13", "state": "ready", "title": "Immutable artifact registry signing and transparency", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Immutable artifact registry signing and transparency", "existing_status": "reviewed", "program_ordinal": 13, "project_context": {"package_key": "13", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "d32933d5-8737-40b4-98c1-ae9b5cb8febb", "ref": "WR-SIEP-14", "state": "ready", "title": "Root trust ceremony and offline recovery custodians", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Root trust ceremony and offline recovery custodians", "existing_status": "reviewed", "program_ordinal": 14, "project_context": {"package_key": "14", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "661cc41d-7650-441c-bc67-8644b6540b9f", "ref": "WR-SIEP-15", "state": "ready", "title": "Device enrollment lifecycle and assurance", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Device enrollment lifecycle and assurance", "existing_status": "reviewed", "program_ordinal": 15, "project_context": {"package_key": "15", "availability": "optional_non_blocking", "benchmark_gated": ["thermal_sustained_cpu_gpu", "ssd", "vm_isolation", "mlx_inference_context_memory", "concurrent_jobs", "reboot_power_loss", "network_egress", "workload_quotas", "failover"], "hard_boundaries": ["not_source_of_truth", "not_critical_dependency", "no_offline_root_signing_authority", "Dell filesystem and admin actions remain on Dell MPE", "outage_does_not_affect_record_access_dell_or_central_core", "no_performance_or_security_claim_before_receipts"], "terminal_authority": "SIEP-06B", "permitted_after_receipts": ["isolated_build_test_vms", "governed_model_gateway_mlx_metal_provider", "classification_redaction_indexing_evals", "signed_artifact_builds", "clean_room_install_verification", "compute_heavy_routing", "provider_egress_sensitive_routing", "warm_ci_cache", "recovery_standby"], "hardware_facts_discovered": ["exact_model", "cpu", "gpu", "memory", "storage", "os", "filevault", "sip", "virtualization_entitlement"], "optional_capability_profile": "studio-executor"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "e69753fc-59c2-4e59-b1a1-6a66353f8cc3", "ref": "WR-SIEP-16", "state": "ready", "title": "SCAC-POP verifier libraries and golden vectors", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "SCAC-POP verifier libraries and golden vectors", "existing_status": "reviewed", "program_ordinal": 16, "project_context": {"package_key": "16", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "e83d52c5-da0c-479e-ab7e-7c47bfe0ee2d", "ref": "WR-SIEP-17", "state": "ready", "title": "Token challenge revocation and kill switch", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Token challenge revocation and kill switch", "existing_status": "reviewed", "program_ordinal": 17, "project_context": {"package_key": "17", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "d6e91999-fca6-42f0-a035-b2e2a43533ab", "ref": "WR-SIEP-18", "state": "ready", "title": "Atomic database reference monitor and grant cutover", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Atomic database reference monitor and grant cutover", "existing_status": "reviewed", "program_ordinal": 18, "project_context": {"package_key": "18", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "84f932d0-fca0-4e45-8655-9ad76eb333d0", "ref": "WR-SIEP-19", "state": "ready", "title": "Signed updater and convergence", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Signed updater and convergence", "existing_status": "reviewed", "program_ordinal": 19, "project_context": {"package_key": "19", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "e83f452a-0a84-4eda-8324-905ae7446474", "ref": "WR-SIEP-20", "state": "ready", "title": "Shared rules tools source projection and declared overlays", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Shared rules tools source projection and declared overlays", "existing_status": "reviewed", "program_ordinal": 20, "project_context": {"package_key": "20", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "6b1c9d17-0e5e-4c3b-bba0-8d3723896ba5", "ref": "WR-SIEP-21", "state": "ready", "title": "Workload identities", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Workload identities", "existing_status": "reviewed", "program_ordinal": 21, "project_context": {"package_key": "21", "availability": "optional_non_blocking", "benchmark_gated": ["thermal_sustained_cpu_gpu", "ssd", "vm_isolation", "mlx_inference_context_memory", "concurrent_jobs", "reboot_power_loss", "network_egress", "workload_quotas", "failover"], "hard_boundaries": ["not_source_of_truth", "not_critical_dependency", "no_offline_root_signing_authority", "Dell filesystem and admin actions remain on Dell MPE", "outage_does_not_affect_record_access_dell_or_central_core", "no_performance_or_security_claim_before_receipts"], "terminal_authority": "SIEP-06B", "permitted_after_receipts": ["isolated_build_test_vms", "governed_model_gateway_mlx_metal_provider", "classification_redaction_indexing_evals", "signed_artifact_builds", "clean_room_install_verification", "compute_heavy_routing", "provider_egress_sensitive_routing", "warm_ci_cache", "recovery_standby"], "hardware_facts_discovered": ["exact_model", "cpu", "gpu", "memory", "storage", "os", "filevault", "sip", "virtualization_entitlement"], "optional_capability_profile": "studio-executor"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "1aff4074-9898-46f5-843a-63d4202787c9", "ref": "WR-SIEP-22", "state": "ready", "title": "Offline and partition drafts-only policy", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Offline and partition drafts-only policy", "existing_status": "reviewed", "program_ordinal": 22, "project_context": {"package_key": "22", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "8099abc4-3159-486f-ac47-63deeb90ba3c", "ref": "WR-SIEP-23", "state": "ready", "title": "Health SLO alerts runbooks and Completion Register evidence", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Health SLO alerts runbooks and Completion Register evidence", "existing_status": "reviewed", "program_ordinal": 23, "project_context": {"package_key": "23", "availability": "optional_non_blocking", "benchmark_gated": ["thermal_sustained_cpu_gpu", "ssd", "vm_isolation", "mlx_inference_context_memory", "concurrent_jobs", "reboot_power_loss", "network_egress", "workload_quotas", "failover"], "hard_boundaries": ["not_source_of_truth", "not_critical_dependency", "no_offline_root_signing_authority", "Dell filesystem and admin actions remain on Dell MPE", "outage_does_not_affect_record_access_dell_or_central_core", "no_performance_or_security_claim_before_receipts"], "terminal_authority": "SIEP-06B", "permitted_after_receipts": ["isolated_build_test_vms", "governed_model_gateway_mlx_metal_provider", "classification_redaction_indexing_evals", "signed_artifact_builds", "clean_room_install_verification", "compute_heavy_routing", "provider_egress_sensitive_routing", "warm_ci_cache", "recovery_standby"], "hardware_facts_discovered": ["exact_model", "cpu", "gpu", "memory", "storage", "os", "filevault", "sip", "virtualization_entitlement"], "optional_capability_profile": "studio-executor"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "9c512d1a-609f-4bbd-885e-b5a416ebeaf9", "ref": "WR-SIEP-24A", "state": "ready", "title": "SCAC integrated adversarial verification", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "SCAC integrated adversarial verification", "existing_status": "reviewed", "program_ordinal": 24, "project_context": {"package_key": "24A", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "1e476ab8-5d18-4c95-b485-9400904604b7", "ref": "WR-SIEP-24B", "state": "ready", "title": "Dell MPE integrated adversarial verification", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Dell MPE integrated adversarial verification", "existing_status": "reviewed", "program_ordinal": 38, "project_context": {"package_key": "24B", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "8f66ceef-02b7-428f-bcec-87fe14b26214", "ref": "WR-SIEP-25", "state": "ready", "title": "SCAC staged canary and enforcement", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "SCAC staged canary and enforcement", "existing_status": "reviewed", "program_ordinal": 25, "project_context": {"package_key": "25", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "fa28095b-b973-4138-9941-c10b9a4a3179", "ref": "WR-SIEP-26", "state": "ready", "title": "SCAC legacy retirement and drift scans", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "SCAC legacy retirement and drift scans", "existing_status": "reviewed", "program_ordinal": 26, "project_context": {"package_key": "26", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "d7c0963c-297b-4b33-9d02-a1900af3b6bb", "ref": "WR-SIEP-30", "state": "ready", "title": "Dell signed consent and policy enrollment", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Dell signed consent and policy enrollment", "existing_status": "reviewed", "program_ordinal": 30, "project_context": {"package_key": "30", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "dffc8753-67ec-4643-a11b-8dfa24e0dc1a", "ref": "WR-SIEP-31", "state": "ready", "title": "Dell managed typed task broker", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Dell managed typed task broker", "existing_status": "reviewed", "program_ordinal": 31, "project_context": {"package_key": "31", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "84a55b66-6b89-45f4-94c6-f2d331caa5e0", "ref": "WR-SIEP-32", "state": "ready", "title": "Signed Host Broker and isolated VM", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Signed Host Broker and isolated VM", "existing_status": "reviewed", "program_ordinal": 32, "project_context": {"package_key": "32", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "7aa7720e-c53a-4f09-a5d3-bf2e5c5fc428", "ref": "WR-SIEP-33", "state": "ready", "title": "Claude typed adapter and governed Model Gateway", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Claude typed adapter and governed Model Gateway", "existing_status": "reviewed", "program_ordinal": 33, "project_context": {"package_key": "33", "availability": "optional_non_blocking", "benchmark_gated": ["thermal_sustained_cpu_gpu", "ssd", "vm_isolation", "mlx_inference_context_memory", "concurrent_jobs", "reboot_power_loss", "network_egress", "workload_quotas", "failover"], "hard_boundaries": ["not_source_of_truth", "not_critical_dependency", "no_offline_root_signing_authority", "Dell filesystem and admin actions remain on Dell MPE", "outage_does_not_affect_record_access_dell_or_central_core", "no_performance_or_security_claim_before_receipts"], "terminal_authority": "SIEP-06B", "permitted_after_receipts": ["isolated_build_test_vms", "governed_model_gateway_mlx_metal_provider", "classification_redaction_indexing_evals", "signed_artifact_builds", "clean_room_install_verification", "compute_heavy_routing", "provider_egress_sensitive_routing", "warm_ci_cache", "recovery_standby"], "hardware_facts_discovered": ["exact_model", "cpu", "gpu", "memory", "storage", "os", "filevault", "sip", "virtualization_entitlement"], "optional_capability_profile": "studio-executor"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "48802261-7b72-4298-9f37-86ac0fef03f5", "ref": "WR-SIEP-34", "state": "ready", "title": "Encrypted stale-file quarantine and restore", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Encrypted stale-file quarantine and restore", "existing_status": "reviewed", "program_ordinal": 34, "project_context": {"package_key": "34", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "b1eb68f7-d773-4a8e-b33e-8888234437b2", "ref": "WR-SIEP-35", "state": "ready", "title": "Capability build install and rollback", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Capability build install and rollback", "existing_status": "reviewed", "program_ordinal": 35, "project_context": {"package_key": "35", "availability": "optional_non_blocking", "benchmark_gated": ["thermal_sustained_cpu_gpu", "ssd", "vm_isolation", "mlx_inference_context_memory", "concurrent_jobs", "reboot_power_loss", "network_egress", "workload_quotas", "failover"], "hard_boundaries": ["not_source_of_truth", "not_critical_dependency", "no_offline_root_signing_authority", "Dell filesystem and admin actions remain on Dell MPE", "outage_does_not_affect_record_access_dell_or_central_core", "no_performance_or_security_claim_before_receipts"], "terminal_authority": "SIEP-06B", "permitted_after_receipts": ["isolated_build_test_vms", "governed_model_gateway_mlx_metal_provider", "classification_redaction_indexing_evals", "signed_artifact_builds", "clean_room_install_verification", "compute_heavy_routing", "provider_egress_sensitive_routing", "warm_ci_cache", "recovery_standby"], "hardware_facts_discovered": ["exact_model", "cpu", "gpu", "memory", "storage", "os", "filevault", "sip", "virtualization_entitlement"], "optional_capability_profile": "studio-executor"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "36db2255-38c8-4ba1-a17f-6ec0b8e2907e", "ref": "WR-SIEP-36", "state": "ready", "title": "Structured evidence redaction and Completion Register", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Structured evidence redaction and Completion Register", "existing_status": "reviewed", "program_ordinal": 36, "project_context": {"package_key": "36", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "43d41fdd-2f8e-427d-bc12-37dd4a474965", "ref": "WR-SIEP-37", "state": "ready", "title": "MPE SLO runbooks incidents offboarding and recovery", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "MPE SLO runbooks incidents offboarding and recovery", "existing_status": "reviewed", "program_ordinal": 37, "project_context": {"package_key": "37", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "5709b1be-46b4-4ead-b8b5-b73942341da8", "ref": "WR-SIEP-40", "state": "ready", "title": "Exhaustive system integrity audit", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Exhaustive system integrity audit", "existing_status": "reviewed", "program_ordinal": 40, "project_context": {"package_key": "40", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "2ee0cbef-c006-4d97-b7a5-2846148888d6", "ref": "WR-SIEP-41", "state": "ready", "title": "Dependency-first finding elimination", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Dependency-first finding elimination", "existing_status": "reviewed", "program_ordinal": 41, "project_context": {"package_key": "41", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "ec8429ab-b4d1-4e07-bbff-237ee8f298f2", "ref": "WR-SIEP-42", "state": "ready", "title": "Full end-to-end verification", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Full end-to-end verification", "existing_status": "reviewed", "program_ordinal": 42, "project_context": {"package_key": "42", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "3c74e385-e344-4788-96b9-386594808a59", "ref": "WR-SIEP-43", "state": "ready", "title": "Staged Production rollout", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Staged Production rollout", "existing_status": "reviewed", "program_ordinal": 43, "project_context": {"package_key": "43", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "0dd3ace1-1c9c-4ea1-81f7-5cf75a10832b", "ref": "WR-SIEP-44", "state": "ready", "title": "Retirement and continuous prevention", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Retirement and continuous prevention", "existing_status": "reviewed", "program_ordinal": 44, "project_context": {"package_key": "44", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, '{"id": "ee62fd13-b7ac-4cda-9797-ba943935e15e", "ref": "WR-SIEP-B0", "state": "ready", "title": "Canonical ledger and DAG bootstrap", "version": 1, "closed_at": null, "claimed_at": null, "origin_ref": null, "started_at": null, "triaged_at": null, "updated_at": "2026-08-26T22:03:36.801503+00:00", "captured_at": "2026-08-26T22:03:36.801503+00:00", "disposition": "extend", "exit_reason": null, "owner_actor": "joe", "program_key": "carr-system-integrity-elimination-v1", "blocker_code": null, "superseded_by": null, "blocker_detail": null, "correlation_id": null, "executor_actor": null, "completion_kind": null, "desired_outcome": "Canonical ledger and DAG bootstrap", "existing_status": "reviewed", "program_ordinal": 2, "project_context": {"package_key": "B0", "terminal_authority": "SIEP-06B"}, "requester_actor": "joe", "shape_rationale": "The integrated SIEP architecture and exact DAG were reviewed before this bootstrap; package implementation follows that fixed surface.", "shape_decided_at": "2026-08-26T22:03:36.801503+00:00", "shape_disposition": "not_required", "acceptance_criteria": ["Dependencies closed", "Tests pass", "Rollback proven", "Independent evidence linked"], "completion_evidence": null, "doctrine_section_id": null, "triaged_by_actor_id": null, "doctrine_revision_id": null, "triage_classification": null, "organization_tenant_id": "carr-internal", "capture_idempotency_key": null, "shape_fixed_surface_ref": "decision:e1e04703-4de6-4947-b2fa-ea0133c6bd74", "sourced_capture_sequence": null, "verification_accepted_at": null, "shape_decided_by_actor_id": "b6c38b27-d006-4fad-9c38-49edf3130a07", "verification_evidence_ref": null}'::jsonb) on conflict (id) do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "program-control", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "00", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "2a977386-6197-426f-a500-d72ce880a07e", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "main", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "heavy-build", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "01", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "1f06a295-dab6-4433-8b94-7a1849328d22", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "sol", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "heavy-build", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "02", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "06749302-d632-417d-9315-6c53b775ec3b", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "sol", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "heavy-build", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "03", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "480cd4a0-34f3-4620-a45d-6e7756ddffed", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "sol", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "heavy-build", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "04", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "5dbd38d7-355d-4b05-b203-73799a030a64", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "sol", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "heavy-build", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "05", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "69d769c9-f4bc-4311-9313-e5b616fe8e1a", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "terra", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "program-control", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "06A", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "c652a068-a830-4976-84cf-325cd126e013", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "sol", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "program-control", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "06B", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "2d01373a-2569-4f71-bfae-66c73a4bc6a8", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "main", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "scac-core", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "10", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "20a25ede-cbdc-421b-a186-0a40673d10c2", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "terra", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "scac-core", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "11", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "a2897ddf-9faa-46bc-88af-33d95f0b2321", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "sol", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "scac-core", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "12", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "d0367405-8cab-4d13-b843-0296f5010b13", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "sol", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "scac-core", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "13", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "91b6806d-1f0e-426f-964a-0ea5ec4bb6c5", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "sol", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "scac-core", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "14", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "d32933d5-8737-40b4-98c1-ae9b5cb8febb", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "main", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "scac-core", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "15", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "661cc41d-7650-441c-bc67-8644b6540b9f", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "sol", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "scac-core", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "16", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "e69753fc-59c2-4e59-b1a1-6a66353f8cc3", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "sol", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "scac-core", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "17", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "e83d52c5-da0c-479e-ab7e-7c47bfe0ee2d", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "sol", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "scac-core", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "18", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "d6e91999-fca6-42f0-a035-b2e2a43533ab", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "sol", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "scac-core", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "19", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "84f932d0-fca0-4e45-8655-9ad76eb333d0", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "sol", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "scac-core", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "20", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "e83f452a-0a84-4eda-8324-905ae7446474", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "sol", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "scac-core", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "21", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "6b1c9d17-0e5e-4c3b-bba0-8d3723896ba5", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "sol", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "scac-core", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "22", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "1aff4074-9898-46f5-843a-63d4202787c9", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "terra", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "scac-core", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "23", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "8099abc4-3159-486f-ac47-63deeb90ba3c", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "sol", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "scac-core", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24A", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "9c512d1a-609f-4bbd-885e-b5a416ebeaf9", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "main", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "dell-mpe", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24B", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "1e476ab8-5d18-4c95-b485-9400904604b7", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "main", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "scac-core", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "25", "approval_gate": "joe_approval", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "8f66ceef-02b7-428f-bcec-87fe14b26214", "delivery_contract": {"deploy": "approval_gated", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "main", "required_evidence_kinds": ["source", "tests", "deploy", "readback", "rollback", "independent_review", "joe_approval"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "scac-core", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "26", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "fa28095b-b973-4138-9941-c10b9a4a3179", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "sol", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "dell-mpe", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "30", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "d7c0963c-297b-4b33-9d02-a1900af3b6bb", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "main", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "dell-mpe", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "31", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "dffc8753-67ec-4643-a11b-8dfa24e0dc1a", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "sol", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "dell-mpe", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "32", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "84a55b66-6b89-45f4-94c6-f2d331caa5e0", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "sol", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "dell-mpe", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "33", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "7aa7720e-c53a-4f09-a5d3-bf2e5c5fc428", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "sol", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "dell-mpe", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "34", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "48802261-7b72-4298-9f37-86ac0fef03f5", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "sol", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "dell-mpe", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "35", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "b1eb68f7-d773-4a8e-b33e-8888234437b2", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "sol", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "dell-mpe", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "36", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "36db2255-38c8-4ba1-a17f-6ec0b8e2907e", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "sol", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "dell-mpe", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "37", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "43d41fdd-2f8e-427d-bc12-37dd4a474965", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "terra", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "program-control", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "40", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "5709b1be-46b4-4ead-b8b5-b73942341da8", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "main", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "program-control", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "41", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "2ee0cbef-c006-4d97-b7a5-2846148888d6", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "main", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review", "material_fix"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "program-control", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "42", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "ec8429ab-b4d1-4e07-bbff-237ee8f298f2", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "main", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "program-control", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "43", "approval_gate": "joe_go_no_go", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "3c74e385-e344-4788-96b9-386594808a59", "delivery_contract": {"deploy": "approval_gated", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "main", "required_evidence_kinds": ["source", "tests", "deploy", "readback", "rollback", "independent_review", "joe_go_no_go"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "program-control", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "44", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "0dd3ace1-1c9c-4ea1-81f7-5cf75a10832b", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "main", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review", "live_readback", "zero_unresolved_findings", "zero_blockers", "two_clean_audit_cycles"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, '{"lane_key": "program-control", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "B0", "approval_gate": "none", "test_contract": {"required": ["unit", "contract", "independent"]}, "work_request_id": "ee62fd13-b7ac-4cda-9797-ba943935e15e", "delivery_contract": {"deploy": "declared", "source": "required", "readback": "required", "rollback": "required", "migration": "declared"}, "rollback_contract": {"required": true, "forward_compensating": true}, "minimum_executor_tier": "main", "required_evidence_kinds": ["source", "tests", "readback", "rollback", "independent_review"]}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "01", "depends_on_package_key": "B0"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "02", "depends_on_package_key": "01"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "03", "depends_on_package_key": "02"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "03", "depends_on_package_key": "12"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "03", "depends_on_package_key": "15"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "03", "depends_on_package_key": "17"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "03", "depends_on_package_key": "20"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "04", "depends_on_package_key": "03"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "04", "depends_on_package_key": "11"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "04", "depends_on_package_key": "18"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "05", "depends_on_package_key": "04"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "05", "depends_on_package_key": "17"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "05", "depends_on_package_key": "18"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "05", "depends_on_package_key": "21"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "05", "depends_on_package_key": "23"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "06A", "depends_on_package_key": "B0"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "06B", "depends_on_package_key": "04"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "06B", "depends_on_package_key": "06A"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "06B", "depends_on_package_key": "23"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "10", "depends_on_package_key": "B0"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "11", "depends_on_package_key": "10"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "12", "depends_on_package_key": "11"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "13", "depends_on_package_key": "12"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "14", "depends_on_package_key": "13"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "15", "depends_on_package_key": "14"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "16", "depends_on_package_key": "15"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "17", "depends_on_package_key": "16"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "18", "depends_on_package_key": "17"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "19", "depends_on_package_key": "18"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "20", "depends_on_package_key": "19"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "21", "depends_on_package_key": "20"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "22", "depends_on_package_key": "21"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "23", "depends_on_package_key": "06A"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "23", "depends_on_package_key": "12"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "23", "depends_on_package_key": "17"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "23", "depends_on_package_key": "18"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "23", "depends_on_package_key": "19"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "23", "depends_on_package_key": "20"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "23", "depends_on_package_key": "21"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "23", "depends_on_package_key": "22"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24A", "depends_on_package_key": "14"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24A", "depends_on_package_key": "16"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24A", "depends_on_package_key": "17"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24A", "depends_on_package_key": "18"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24A", "depends_on_package_key": "19"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24A", "depends_on_package_key": "20"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24A", "depends_on_package_key": "21"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24A", "depends_on_package_key": "22"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24A", "depends_on_package_key": "23"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24B", "depends_on_package_key": "24A"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24B", "depends_on_package_key": "30"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24B", "depends_on_package_key": "31"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24B", "depends_on_package_key": "32"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24B", "depends_on_package_key": "33"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24B", "depends_on_package_key": "34"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24B", "depends_on_package_key": "35"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24B", "depends_on_package_key": "36"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24B", "depends_on_package_key": "37"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "25", "depends_on_package_key": "24A"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "26", "depends_on_package_key": "25"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "30", "depends_on_package_key": "15"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "30", "depends_on_package_key": "23"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "31", "depends_on_package_key": "30"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "32", "depends_on_package_key": "31"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "33", "depends_on_package_key": "32"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "34", "depends_on_package_key": "33"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "35", "depends_on_package_key": "34"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "36", "depends_on_package_key": "35"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "37", "depends_on_package_key": "36"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "40", "depends_on_package_key": "05"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "40", "depends_on_package_key": "06B"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "40", "depends_on_package_key": "24A"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "40", "depends_on_package_key": "24B"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "40", "depends_on_package_key": "25"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "40", "depends_on_package_key": "26"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "40", "depends_on_package_key": "37"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "41", "depends_on_package_key": "40"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "42", "depends_on_package_key": "05"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "42", "depends_on_package_key": "06B"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "42", "depends_on_package_key": "24A"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "42", "depends_on_package_key": "24B"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "42", "depends_on_package_key": "25"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "42", "depends_on_package_key": "26"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "42", "depends_on_package_key": "37"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "42", "depends_on_package_key": "41"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "43", "depends_on_package_key": "42"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "44", "depends_on_package_key": "43"}'::jsonb) on conflict do nothing;
+insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, '{"created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "B0", "depends_on_package_key": "00"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "MPE-17A", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "30"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "MPE-17B", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "31"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "MPE-17C", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "32"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "MPE-17D", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "33"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "MPE-17E", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "34"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "MPE-17F", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "35"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "MPE-17G", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "36"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "MPE-17H", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "37"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-00", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "10"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-01", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "11"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-02", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "12"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-03", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "13"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-04", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "14"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-05", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "15"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-06", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "16"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-07", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "17"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-08", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "18"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-09", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "19"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-10", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "20"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-11", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "21"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-12", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "22"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-13", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "23"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-14", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24A"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-15", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "25"}'::jsonb) on conflict do nothing;
+insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-16", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "26"}'::jsonb) on conflict do nothing;
+select pg_catalog.setval('ops.work_request_ref_seq', 35, true);
+alter table ops.siep_component_alias enable trigger siep_component_alias_sealed_before_insert;
+alter table ops.siep_program_dependency enable trigger siep_program_dependency_sealed_before_insert;
+alter table ops.siep_package_contract enable trigger siep_package_contract_sealed_before_insert;
+alter table ops.work_request enable trigger completion_capsule;
+alter table ops.work_request enable trigger work_in_progress_limit;
+alter table ops.work_request enable trigger work_request_shape_gate;
+do $carr_siep_manifest$
+begin
+  if ops.siep_manifest_digest() is distinct from 'sha256:0472f54ded435270cf85ac1b237c51ac1d23f1c536db60c6988d059a3d14fbca' then
+    raise exception 'SIEP manifest restore does not match the reviewed production digest sha256:0472f54ded435270cf85ac1b237c51ac1d23f1c536db60c6988d059a3d14fbca — refuse the rebuild';
+  end if;
+end
+$carr_siep_manifest$;
+
+-- CARR DOCTRINE VALIDATION REGISTRY (bin/schema-snapshot.sh) — the gate rows
+-- themselves, not their findings. Without these a rebuilt database enforces no
+-- doctrine gates and says nothing about it.
+insert into public.doctrine_gate_check select * from jsonb_populate_record(null::public.doctrine_gate_check, '{"config": {"note": "scoped OFF internal classes 2026-08-08: rule ede4c735 binds writing-rules to PROSPECT-VISIBLE surfaces only, and all current store classes are internal doctrine (the gate blocked the first legitimate doctrine write for an em-dash). Re-scope by adding a client-facing content class here when one exists."}, "enabled": true, "impl_key": "gates.banned_phrases", "severity": "block", "check_key": "banned_phrases", "applies_to": {"ops": ["write"], "content_classes": []}, "created_at": "2026-08-08T03:20:20.503334+00:00", "description": "writing-rules lint on prospect-visible content classes"}'::jsonb) on conflict (check_key) do nothing;
+insert into public.doctrine_gate_check select * from jsonb_populate_record(null::public.doctrine_gate_check, '{"config": {}, "enabled": true, "impl_key": "gates.base_version_match", "severity": "block", "check_key": "base_version_match", "applies_to": {"ops": ["write", "move", "retire"]}, "created_at": "2026-08-08T03:20:20.503334+00:00", "description": "expected_version equals current_version (also SQL-enforced)"}'::jsonb) on conflict (check_key) do nothing;
+insert into public.doctrine_gate_check select * from jsonb_populate_record(null::public.doctrine_gate_check, '{"config": {}, "enabled": true, "impl_key": "gates.body_schema", "severity": "block", "check_key": "body_schema", "applies_to": {"ops": ["write"]}, "created_at": "2026-08-08T03:20:20.503334+00:00", "description": "body validates against its content_class JSON schema"}'::jsonb) on conflict (check_key) do nothing;
+insert into public.doctrine_gate_check select * from jsonb_populate_record(null::public.doctrine_gate_check, '{"config": {}, "enabled": true, "impl_key": "gates.claim_holder_or_free", "severity": "block", "check_key": "claim_holder_or_free", "applies_to": {"ops": ["write", "move", "retire"]}, "created_at": "2026-08-08T03:20:20.503334+00:00", "description": "no foreign unexpired claim on the section"}'::jsonb) on conflict (check_key) do nothing;
+insert into public.doctrine_gate_check select * from jsonb_populate_record(null::public.doctrine_gate_check, '{"config": {}, "enabled": true, "impl_key": "gates.edge_acyclic", "severity": "block", "check_key": "edge_acyclic", "applies_to": {"ops": ["refs_set"]}, "created_at": "2026-08-08T03:20:20.503334+00:00", "description": "acyclic edge types stay acyclic after the write"}'::jsonb) on conflict (check_key) do nothing;
+insert into public.doctrine_gate_check select * from jsonb_populate_record(null::public.doctrine_gate_check, '{"config": {}, "enabled": true, "impl_key": "gates.edge_class_allowed", "severity": "block", "check_key": "edge_class_allowed", "applies_to": {"ops": ["refs_set"]}, "created_at": "2026-08-08T03:20:20.503334+00:00", "description": "edge source/target classes legal for the edge_type"}'::jsonb) on conflict (check_key) do nothing;
+insert into public.doctrine_gate_check select * from jsonb_populate_record(null::public.doctrine_gate_check, '{"config": {}, "enabled": true, "impl_key": "gates.no_md_escape", "severity": "block", "check_key": "no_md_escape", "applies_to": {"ops": ["write"]}, "created_at": "2026-08-08T03:20:20.503334+00:00", "description": "body text does not instruct writing vault .md outside the manifest"}'::jsonb) on conflict (check_key) do nothing;
+insert into public.doctrine_gate_check select * from jsonb_populate_record(null::public.doctrine_gate_check, '{"config": {}, "enabled": true, "impl_key": "gates.personal_owner_required", "severity": "block", "check_key": "personal_owner_required", "applies_to": {"ops": ["create", "write"]}, "created_at": "2026-08-08T03:20:20.503334+00:00", "description": "visibility=personal requires owner_actor_id"}'::jsonb) on conflict (check_key) do nothing;
+insert into public.doctrine_gate_check select * from jsonb_populate_record(null::public.doctrine_gate_check, '{"config": {}, "enabled": true, "impl_key": "gates.slug_unique", "severity": "block", "check_key": "slug_unique", "applies_to": {"ops": ["create", "rename"]}, "created_at": "2026-08-08T03:20:20.503334+00:00", "description": "document slug free among documents and aliases"}'::jsonb) on conflict (check_key) do nothing;
+insert into public.doctrine_gate_check select * from jsonb_populate_record(null::public.doctrine_gate_check, '{"config": {}, "enabled": true, "impl_key": "gates.target_exists", "severity": "block", "check_key": "target_exists", "applies_to": {"ops": ["refs_set", "write"]}, "created_at": "2026-08-08T03:20:20.503334+00:00", "description": "every link/edge target resolves to a live row"}'::jsonb) on conflict (check_key) do nothing;
+insert into public.doctrine_gate_check select * from jsonb_populate_record(null::public.doctrine_gate_check, '{"config": {}, "enabled": true, "impl_key": "gates.unresolved_conflict", "severity": "block", "check_key": "unresolved_conflict", "applies_to": {"ops": ["refs_set"]}, "created_at": "2026-08-08T03:20:20.503334+00:00", "description": "CONFLICTS_WITH present without a resolving edge"}'::jsonb) on conflict (check_key) do nothing;
+
+-- CARR NAMED AGENT PROFILES (bin/schema-snapshot.sh) — the seeded roster. No
+-- runtime path creates these; a rebuild without them breaks the bot brief.
+insert into public.agent_profile select * from jsonb_populate_record(null::public.agent_profile, '{"id": "1f116c08-8e2c-4ab3-834a-6b4a5c7deea1", "status": "active", "charter": ["implementation in the repo worktree lanes", "migrations and Worker verbs", "tests written before the thing", "release mechanics through the sanctioned doors"], "version": 3, "created_at": "2026-08-23T03:20:17.201266+00:00", "updated_at": "2026-08-25T03:31:03.957747+00:00", "profile_key": "builder", "current_desk": "hermes-desktop", "display_name": "Builder", "current_model": "openrouter/stealth/ox-alpha", "sponsor_scope": "shared"}'::jsonb) on conflict (profile_key) do nothing;
+insert into public.agent_profile select * from jsonb_populate_record(null::public.agent_profile, '{"id": "d01a2a96-70d9-42d8-beb3-82fe26eb079c", "status": "active", "charter": ["deal watch and next-action hygiene", "critical-date and follow-up triage", "draft-only partner escalations"], "version": 2, "created_at": "2026-08-25T03:31:03.957747+00:00", "updated_at": "2026-08-25T03:31:03.957747+00:00", "profile_key": "deal-steward", "current_desk": "hermes-desktop", "display_name": "Deal Steward", "current_model": "xai-oauth/grok-4.6", "sponsor_scope": "shared"}'::jsonb) on conflict (profile_key) do nothing;
+insert into public.agent_profile select * from jsonb_populate_record(null::public.agent_profile, '{"id": "1427c2c4-64bb-4090-8b21-f1bc96e8a830", "status": "active", "charter": ["surface and interaction design under the CARR surface constraints", "doctrine-governed visual work", "concept documents to order level"], "version": 2, "created_at": "2026-08-23T03:20:17.201266+00:00", "updated_at": "2026-08-25T03:31:03.957747+00:00", "profile_key": "designer", "current_desk": "hermes-desktop", "display_name": "Designer", "current_model": "nous/moonshotai/kimi-k3", "sponsor_scope": "shared"}'::jsonb) on conflict (profile_key) do nothing;
+insert into public.agent_profile select * from jsonb_populate_record(null::public.agent_profile, '{"id": "95aaf923-f0cb-44b1-948d-c5c2bfd3f1bf", "status": "active", "charter": ["the doctorcre app persona (Dr. CRE)", "prospect-facing product surfaces under Doc''s own product rules", "hermes-app runtime once the October machine arrives"], "version": 2, "created_at": "2026-08-23T03:20:17.201266+00:00", "updated_at": "2026-08-25T03:31:03.957747+00:00", "profile_key": "doc", "current_desk": "hermes-desktop", "display_name": "Doc", "current_model": "xai-oauth/grok-4.6", "sponsor_scope": "shared"}'::jsonb) on conflict (profile_key) do nothing;
+insert into public.agent_profile select * from jsonb_populate_record(null::public.agent_profile, '{"id": "8fb63424-05d1-498b-bb83-a9bb44467a43", "status": "active", "charter": ["structured intake and normalization", "record completeness checks", "research queue preparation"], "version": 2, "created_at": "2026-08-25T03:31:03.957747+00:00", "updated_at": "2026-08-25T03:31:03.957747+00:00", "profile_key": "intake-clerk", "current_desk": "hermes-desktop", "display_name": "Intake Clerk", "current_model": "nous/deepseek/deepseek-v4-pro", "sponsor_scope": "shared"}'::jsonb) on conflict (profile_key) do nothing;
+insert into public.agent_profile select * from jsonb_populate_record(null::public.agent_profile, '{"id": "df274c25-f590-41c9-ae78-89290a96fd5c", "status": "active", "charter": ["marketing queue operations", "content repurposing and scheduling drafts", "campaign evidence capture"], "version": 2, "created_at": "2026-08-25T03:31:03.957747+00:00", "updated_at": "2026-08-25T03:31:03.957747+00:00", "profile_key": "marketing-ops", "current_desk": "hermes-desktop", "display_name": "Marketing Ops", "current_model": "xai-oauth/grok-4.6", "sponsor_scope": "shared"}'::jsonb) on conflict (profile_key) do nothing;
+insert into public.agent_profile select * from jsonb_populate_record(null::public.agent_profile, '{"id": "7325c706-580a-40e2-a62f-db68332da99d", "status": "active", "charter": ["independent verification with fresh context", "adversarial reading of finished work", "attestation of builds it did not make"], "version": 2, "created_at": "2026-08-23T03:20:17.201266+00:00", "updated_at": "2026-08-25T03:31:03.957747+00:00", "profile_key": "reviewer", "current_desk": "hermes-desktop", "display_name": "Reviewer", "current_model": "nous/deepseek/deepseek-v4-pro", "sponsor_scope": "shared"}'::jsonb) on conflict (profile_key) do nothing;
+insert into public.agent_profile select * from jsonb_populate_record(null::public.agent_profile, '{"id": "4b3ccb10-ae39-4a9a-a3c7-48c69d593d28", "status": "active", "charter": ["routine system health observation", "scheduled-run and freshness checks", "incident draft preparation"], "version": 2, "created_at": "2026-08-25T03:31:03.957747+00:00", "updated_at": "2026-08-25T03:31:03.957747+00:00", "profile_key": "system-watch", "current_desk": "hermes-desktop", "display_name": "System Watch", "current_model": "nous/deepseek/deepseek-v4-pro", "sponsor_scope": "shared"}'::jsonb) on conflict (profile_key) do nothing;

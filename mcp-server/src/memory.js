@@ -1,9 +1,10 @@
 // CARR-native learning memory kernel (Phase 1).
 // Memory is evidence-backed context, never authority. Candidates can be
-// observed by an agent; promotion remains an interactive human act. Personal
+// observed by an agent; promotion remains a partner-authority act. Personal
 // scope is resolved from the verified sponsor, never from caller claims.
 
 import { personalScopeForActor, organizationTenantForActor } from "./identity.js";
+import { canExercisePartnerAuthority } from "./partner-authority.js";
 
 const KINDS = ["preference", "fact", "episodic", "procedural"];
 const SCOPES = ["shared", "personal"];
@@ -25,10 +26,13 @@ async function planAnchor(c, actor, planId, ToolError) {
   return r.rows[0];
 }
 
-function humanOnlyDirect(actor, ToolError) {
-  if (!actor?.human) throw new ToolError({ error: "human_only",
-    hint: "this memory transition requires an interactive human partner" });
-}
+// RETIRED 2026-08-26 BY JOE'S RULING (decision dc57f62d), same as the gate in
+// tools.js — see that comment for what the refusal did and what giving it up
+// costs. Kept as a no-op rather than deleted so the three call sites below
+// still read as the deliberate transitions they are: promote, correct and
+// forget a memory are the writes that rewrite what the system believes about
+// itself, and a future ruling that wants a check back has one place to put it.
+function humanOnlyDirect(_actor, _ToolError) {}
 
 function requireUuid(value, field, ToolError) {
   if (typeof value !== "string" || !UUID_RE.test(value))
@@ -147,7 +151,7 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
     },
 
     "promote-memory": {
-      write: true, humanOnly: true,
+      write: true,
       description: "Promote one candidate memory after a human confirms it. Requires a fresh memory version; promotion changes recall eligibility, never authority.",
       inputSchema: { type: "object", properties: {
         idempotency_key: { type: "string" }, memory_id: { type: "string" }, base_version: { type: "integer" }, reason: { type: "string" },
@@ -166,7 +170,7 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
     },
 
     "correct-memory": {
-      write: true, humanOnly: true,
+      write: true,
       description: "Correct a memory without rewriting history. The prior row becomes corrected and a new version carries the replacement statement.",
       inputSchema: { type: "object", properties: {
         idempotency_key: { type: "string" }, memory_id: { type: "string" }, base_version: { type: "integer" }, statement: { type: "string" }, reason: { type: "string" },
@@ -198,7 +202,7 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
     },
 
     "forget-memory": {
-      write: true, humanOnly: true,
+      write: true,
       description: "Forget a memory by suppressing it from recall while retaining its evidence and audit history. This is not a DELETE.",
       inputSchema: { type: "object", properties: {
         idempotency_key: { type: "string" }, memory_id: { type: "string" }, base_version: { type: "integer" }, reason: { type: "string" },

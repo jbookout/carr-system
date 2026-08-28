@@ -81,6 +81,15 @@ fi
 # credentials already there. Until he does, the fallback is the old interactive
 # path, so nothing breaks in the meantime; it just still needs a browser.
 if [ -z "${NEON_API_KEY:-}" ] && [ -f "$HOME/.config/carr/db.env" ]; then
+  # THE NEXT LINE IS A `source`, WHICH MAKES THAT FILE PART OF THIS SCRIPT, and a
+  # credential file that does not parse is therefore a syntax error in this one.
+  # See carr_require_sourceable_db_env for what that cost and why the check is
+  # one shared function rather than an inlined copy per caller.
+  . "$REPO/bin/routine-credential-env.sh"
+  carr_require_sourceable_db_env "migrate-prod" || {
+    stamp "FAIL db.env is not sourceable — nothing applied"
+    exit 78
+  }
   set -a; . "$HOME/.config/carr/db.env"; set +a
 fi
 if [ -z "${NEON_API_KEY:-}" ]; then

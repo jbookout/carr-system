@@ -283,7 +283,7 @@ def main() -> int:
                     record, re.DOTALL) is not None)
 
     resolve_at = deploy.find("RELEASE_BINDING=")
-    rebuild_at = deploy.find('release-manifest.py" build --sha "$HEAD_SHA"', resolve_at)
+    rebuild_at = deploy.find('build_release_manifest "$HEAD_SHA" production', resolve_at)
     bind_at = deploy.find('release-manifest.py" bind-provider', rebuild_at)
     recheck_at = deploy.find("RECONFIRMED_BINDING=", bind_at)
     promote_at = deploy.find('"$WRANGLER" versions deploy', recheck_at)

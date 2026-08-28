@@ -13,6 +13,7 @@
 
 import { neon, Pool } from "@neondatabase/serverless";
 import { TOOLS, ToolError, executeRegisteredTool, auditIdentity, assertNoCallerAuthorityFields } from "./tools.js";
+import { partnerAuthoritySlugForActor } from "./partner-authority.js";
 import { actorFromProps, authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
 import { scheduleFailureRecord, rpcInternalErrorFailureClass, actorUnresolvedFailureClass, RPC_INTERNAL_ERROR_CODE } from "./trace.js";
 
@@ -21,6 +22,7 @@ const json = (body, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
 
 const PROTOCOL = "2025-06-18";
+const RULE_DELIVERY_RAIL = ` RULE DELIVERY: use only exact canonical pack names from standing-context rule_delivery.pack_index. A name in packs_not_found is unknown and is NOT loaded. If observed work enters a pack absent from rule_delivery.declared_packs, call standing-context again with that canonical pack and read the result before acting. Shadow mode records drift without blocking, but does not waive this recall protocol.`;
 
 // ---------- capability profiles (2026-08-02) ----------
 //
@@ -224,6 +226,17 @@ export const PROFILES = {
     // A runtime-only door: exact queue receipts, fixed provenance, no raw room prose.
     "project-room-queue",
   ]),
+
+  // HERMES CoS (loop #459). This is a separate server-locked capability door,
+  // never a request-side profile override. It inherits the ordinary Hermes
+  // business-write set and adds exactly the two bounded brief/premises verbs.
+  // Keep this explicit rather than spreading the set so a future ordinary
+  // Hermes write cannot silently land in the CoS credential.
+  "hermes-cos": new Set([
+    "log-activity", "stamp-touch", "add-loop", "update-loop",
+    "set-next-action", "complete-action", "add-critical-date", "record-finding",
+    "record-defect", "project-room-queue", "update-deal", "add-premises",
+  ]),
 };
 
 const PROFILE_NOTICE = {
@@ -276,6 +289,13 @@ const PROFILE_NOTICE = {
     "widened by this token under any request. You carry Joe's personal brain and never Dell's. " +
     "File what he tells you to file; for anything outside those nine verbs, say what you would have " +
     "written and hand it back for a human.</notice>",
+  "hermes-cos":
+    "\n\n<notice>This session runs on the HERMES CoS profile: the ordinary Hermes business-write set " +
+    "plus exactly update-deal (deal_type, segment, city and lane only) and add-premises against " +
+    "existing parties only. Its server-issued door cannot be widened by ?profile= or caller fields. " +
+    "It may hand a next action to Joe, its verified sponsor, but never Dell; created_by remains the " +
+    "Hermes runtime. Phase, outcome, close/value, identity, merge, teach, authority-only and send " +
+    "operations remain refused.</notice>",
 };
 
 /** Resolve ?profile= to a name, defaulting to full. An unknown value fails CLOSED to read. */
@@ -302,6 +322,7 @@ function profileFor(request) {
 export function profileForActor(actor, request) {
   if (actor?.probe) return "probe";
   if (actor?.review) return "reviewer";
+  if (actor?.hermesCos === true && actor?.via === "hermes-cos-token") return "hermes-cos";
   if (actor?.hermes) return "hermes";
   return profileFor(request);
 }
@@ -311,6 +332,24 @@ export function allowedIn(profile, name, tool) {
   if (tool.fullOnly) return false;            // sensitive operational reads stay off probe/reviewer/read
   if (!tool.write) return true;              // reads are allowed in every profile
   return PROFILES[profile].has(name);
+}
+
+// update-deal is globally allowed for interactive sessions, including its
+// closed deal_type vocabulary. The CoS door is field-locked separately: one
+// extra field refuses the whole call rather than applying a silent subset.
+export const HERMES_COS_DEAL_FIELDS = Object.freeze(["deal_type", "segment", "city", "lane"]);
+
+export function hermesCosDealFieldRefusal(profile, name, args) {
+  if (profile !== "hermes-cos" || name !== "update-deal") return null;
+  const fields = args?.fields;
+  if (!fields || typeof fields !== "object" || Array.isArray(fields)) return null;
+  const refused = Object.keys(fields).filter((key) => !HERMES_COS_DEAL_FIELDS.includes(key));
+  return refused.length ? refused : null;
+}
+
+export function hermesCosPremisesRefusal(profile, name, args) {
+  return profile === "hermes-cos" && name === "add-premises" &&
+    Array.isArray(args?.ownership) && args.ownership.some((row) => row && row.new_party);
 }
 
 function toolList(profile = "full") {
@@ -382,11 +421,15 @@ export async function recordReadCall(insertFn, actor, verb, ok, errorKind) {
 // login identities. The unscoped value is deliberately Joe-only: letting a
 // Dell-attributed call fall back to a Joe login would make the application actor
 // and database principal disagree, bypassing DB-enforced Joe-only operations.
-export function authorityDsnForActor(env, actor) {
-  if (!actor?.human || !["joe", "dell"].includes(actor.slug)) return null;
+export function authorityDsnForActor(env, runtimeActor) {
+  const partner = partnerAuthoritySlugForActor(runtimeActor);
+  if (!partner) return null;
+  // Preserve the provisioning contract's actor-shaped binding while selecting
+  // the server-derived sponsor, never the runtime agent or caller input.
+  const actor = { slug: partner };
   const scoped = env?.[`CARR_DB_AUTHORITY_${actor.slug.toUpperCase()}_URL`];
   if (scoped) return scoped;
-  return actor.slug === "joe" ? env?.CARR_DB_AUTHORITY_URL || null : null;
+  return partner === "joe" ? env?.CARR_DB_AUTHORITY_URL || null : null;
 }
 
 // Exported for deterministic no-network identity-gate tests. It remains the
@@ -453,7 +496,7 @@ export async function callTool(env, actor, name, args, profile = "full") {
       hint: "this session is scoped; report what you would have done and let an interactive partner session do it" });
   if (tool.authorityOnly && !authorityDsnForActor(env, actor))
     throw new ToolError({ error: "authority_connection_unavailable",
-      hint: "this human-only authority operation requires the actor's partner-scoped authority URL; Joe may use the single-seat CARR_DB_AUTHORITY_URL fallback, while Dell requires CARR_DB_AUTHORITY_DELL_URL. Routine writer credentials cannot perform it" });
+      hint: "this partner-authority operation requires a verified Joe/Dell principal or sponsored Codex/Claude identity plus the sponsor-scoped authority database binding" });
   // Payload-aware profile guard (2026-08-05). Name-level gating cannot see that
   // add-premises' ownership[].new_party path CREATES a party row — the exact act
   // the away profile's own charter excludes (asserting a new identity while the
@@ -464,6 +507,14 @@ export async function callTool(env, actor, name, args, profile = "full") {
       Array.isArray(args?.ownership) && args.ownership.some(o => o && o.new_party))
     throw new ToolError({ error: "not_in_profile", verb: "add-premises (new_party)", profile,
       hint: "away mode may not create a party — file the ownership facts with add-loop and let an interactive partner session create the party, then re-run add-premises by ref" });
+  if (hermesCosPremisesRefusal(profile, name, args))
+    throw new ToolError({ error: "not_in_profile", verb: "add-premises (new_party)", profile,
+      hint: "the Hermes CoS door may capture premises against existing party refs only; a human session must create a new party first" });
+  const refusedDealFields = hermesCosDealFieldRefusal(profile, name, args);
+  if (refusedDealFields)
+    throw new ToolError({ error: "not_in_profile", verb: "update-deal", profile,
+      refused_fields: refusedDealFields, allowed_fields: HERMES_COS_DEAL_FIELDS,
+      hint: "the Hermes CoS door may correct deal_type and search criteria only; phase, outcome, close/value, identity and narrative fields remain human-owned" });
   // [#214 RED-4, 2026-08-06] The same payload-aware pattern, eleven lines down
   // from its model: log-activity's links[] array runs link-parties' exact INSERT
   // (writeLinks, tools.js), so a profile that refuses link-parties BY NAME could
@@ -477,7 +528,7 @@ export async function callTool(env, actor, name, args, profile = "full") {
       Array.isArray(args?.links) && args.links.length)
     throw new ToolError({ error: "not_in_profile", verb: "log-activity (links[])", profile,
       hint: "a narrow profile may log the activity but not assert relationships — drop links[] from this call and file the introduction facts with add-loop for an interactive partner session to link-parties" });
-  if (!tool.write) {
+  if (!tool.write && !tool.writerConnection) {
     const sql = neon(env.DATABASE_URL_READER);
     // sideWrite is the ONLY way a read verb may write, and it is deliberately
     // awkward: a separate credential, never awaited, failure isolated. A read
@@ -520,7 +571,7 @@ export async function callTool(env, actor, name, args, profile = "full") {
   const pool = new Pool({ connectionString });
   const client = await pool.connect();
   try {
-    await client.query("begin");
+    await client.query(tool.writerConnection && !tool.write ? "begin read only" : "begin");
     const a = await client.query("select id from actor where slug=$1", [actor.slug]);
     // Guarded 2026-08-03. Unguarded, a missing actor row made this a raw
     // TypeError on `undefined.id` — a 500 with a stack trace where the real
@@ -624,7 +675,7 @@ export async function dispatch(request, env, ctx, actor) {
             "correctly; this may be a peer-tier agent, never a forced downgrade. The main seat " +
             "orchestrates, verifies and performs authorized " +
             "writes; it does not reclaim the mechanical sweep. State the executor before each phase; " +
-            "a second inline mechanical tool call is the tripwire." +
+            "a second inline mechanical tool call is the tripwire." + RULE_DELIVERY_RAIL +
             (profile === "full" ? "" : ` ACTIVE PROFILE: ${profile}.` + (PROFILE_NOTICE[profile] || "")),
         });
       case "notifications/initialized":
@@ -664,7 +715,10 @@ export async function dispatch(request, env, ctx, actor) {
             .replace(/\b\w+:\/\/[^\s'"]+/gi, "[redacted]");
           scheduleFailureRecord(env, ctx, {
             routeKey: `mcp:tools/call:${rpc?.params?.name || "unknown"}`,
-            failureClass: rpcInternalErrorFailureClass(RPC_INTERNAL_ERROR_CODE),
+            failureClass: rpcInternalErrorFailureClass(RPC_INTERNAL_ERROR_CODE, {
+              verb: rpc?.params?.name || null,
+              error: e,
+            }),
             detail: cause.slice(0, 300),
           });
           return reply({ isError: true, content: [{ type: "text", text: JSON.stringify({
@@ -692,7 +746,10 @@ export async function dispatch(request, env, ctx, actor) {
     const detail = String(e).slice(0, 300);
     scheduleFailureRecord(env, ctx, {
       routeKey: `mcp:${rpc?.method || "unknown"}${rpc?.params?.name ? ":" + rpc.params.name : ""}`,
-      failureClass: rpcInternalErrorFailureClass(RPC_INTERNAL_ERROR_CODE),
+      failureClass: rpcInternalErrorFailureClass(RPC_INTERNAL_ERROR_CODE, {
+        verb: rpc?.params?.name || null,
+        error: e,
+      }),
       detail,
     });
     return rpcError(-32603, "internal error", detail);

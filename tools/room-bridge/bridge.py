@@ -58,6 +58,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -87,6 +88,37 @@ DEFAULT_ROOM = os.environ.get("CARR_ROOM_BRIDGE_ROOM", "partner-line")
 PENDING_TIMEOUT_S = float(os.environ.get("CARR_ROOM_BRIDGE_PENDING_TIMEOUT", "1800"))
 READ_LIMIT = int(os.environ.get("CARR_ROOM_BRIDGE_READ_LIMIT", "50"))
 _RECONCILIATION_CODES = {"queue_metadata_malformed", "queue_task_identity_invalid"}
+ENGINEERING_DISPATCH = HERE.parents[1] / "bin" / "run-engineering-dispatch.sh"
+
+
+def run_engineering_dispatch(*, command: Path = ENGINEERING_DISPATCH,
+                             timeout_s: float = 1850.0) -> dict:
+    """Run the fixed lease-bound controller after a normal bridge cycle.
+
+    The bridge itself retains its no-direct-DB stance.  The child loads the
+    narrow carr_jobs credential from the protected routine file, and the child
+    in turn strips that credential before sending a fresh execution packet to
+    Codex.  A job is never manufactured here: no admitted work means the
+    controller returns the compact ``claimed: 0`` readback.
+    """
+    try:
+        proc = subprocess.run([str(command)], capture_output=True, text=True,
+                              timeout=timeout_s, env=os.environ.copy())
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("engineering controller did not complete") from exc
+    if proc.returncode != 0:
+        # The controller deliberately emits only its typed error class.  Do
+        # not relay a subprocess stderr blob into a room receipt or service
+        # log, where a future dependency could accidentally expose context.
+        raise RuntimeError("engineering controller refused or failed")
+    try:
+        value = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("engineering controller returned invalid readback") from exc
+    if not isinstance(value, dict) or value.get("ok") is not True or not isinstance(value.get("claimed"), int):
+        raise RuntimeError("engineering controller returned unsupported readback")
+    return {"claimed": value["claimed"], "completed": value.get("completed", 0),
+            "results": value.get("results", [])}
 
 
 def _validated_reconciliation(value: object) -> kanban_adapter.ReconciliationResult | None:
@@ -469,6 +501,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
              queue_service: kanban_adapter.QueueService | None = None,
              queue_executor: queue_dispatch.QueueDeskExecutor | None = None,
              queue_projector=queue_projection.project_once,
+             engineering_dispatcher=run_engineering_dispatch,
              now_fn=_now,
              log=print) -> dict:
     registry = registry or desks.Registry()
@@ -719,7 +752,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
         except Exception as exc:  # projection failure must be visible, never a live-looking board
             state["queue_projection_error"] = "queue_projection_failed"
             errors.append({"desk": "(queue-projector)", "error": "queue_projection_failed",
-                           "detail": "queue projector failed"})
+                           "detail": str(exc)[:500] or "queue projector failed"})
 
     # Read the registry back AFTER the heartbeat stamps above, so the roster the
     # observatory sees carries this cycle's own liveness rather than the values
@@ -749,6 +782,23 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
 
     state_mod.save_state(state_path, state)
 
+    # This is deliberately after the ordinary room work, state save, and
+    # heartbeat: a bounded fresh Codex execution may run for minutes, but it
+    # must never delay the room's own cursor/health truth.  The existing 60s
+    # launchd wake is merely an opportunity to drain an already-admitted job;
+    # it does not create a second schedule or queue.
+    engineering = {"claimed": 0, "completed": 0, "results": []}
+    # Keep ad-hoc/manual bridge invocations observational.  The reviewed
+    # LaunchAgent explicitly opts in below; this makes the only live claim
+    # opportunity visible in its installed configuration and prevents a test
+    # or an operator's diagnostic one-shot from unexpectedly leasing work.
+    if os.environ.get("CARR_ENGINEERING_DISPATCH_ENABLED") == "true":
+        try:
+            engineering = engineering_dispatcher()
+        except Exception:
+            errors.append({"desk": "(engineering-controller)", "error": "engineering_controller_failed",
+                           "detail": "engineering controller failed"})
+
     summary = {
         "turns_read": len(turns), "last_seq": state["last_seq"], "routed": routed,
         "assignments": assignments, "delivered": delivered, "errors": errors,
@@ -756,6 +806,7 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
         "auth": auth_by_desk, "queue": queue_events,
         "queue_projection": projection_events,
         "queue_reconciliation": queue_reconciliation,
+        "engineering": engineering,
     }
     log(f"room-bridge: {len(turns)} turn(s), {len(delivered)} desk action(s), "
         f"{len(assignments)} assignment event(s), {len(queue_events)} queue event(s), {len(controls)} control(s), "

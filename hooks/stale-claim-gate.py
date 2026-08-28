@@ -60,6 +60,24 @@ a correction, a status report, a summary of what landed — has plainly read it
 and passes untouched. Without this the gate would block the very message that
 corrects the error it exists to catch.
 
+IT ANNOUNCES, IT NO LONGER REOPENS (2026-08-23, Joe's Stop-gate rationing off
+the gates-audit council). It used to exit 2, which forces a whole extra
+assistant message. Eleven Stop hooks held that power and one measured shipped
+session paid nine such reopens for findings that changed nothing, against this
+system's standing constraint of no steady-state token ceremony. Three keep it:
+core conduct, completion-evidence, drift-assertion.
+
+WHY THIS ONE LOST IT, and the reasoning is specific to what this gate finds. A
+reopen earns its cost when the next message is the RESULT OF WORK rather than a
+restatement — the split hooks/chat-lint-carryover.py drew on 2026-08-16. Here
+the work is a re-check the session runs anyway once it knows the commit exists,
+and by Stop the stale sentence has already reached Joe and cannot be unsent. So
+the reopen bought a second copy of a message he had read, plus the re-check;
+announcing buys the re-check alone, at the same moment, with the commit subjects
+in hand. If a week of hook telemetry shows announced staleness findings being
+carried past uncorrected where reopened ones were fixed, the register goes back
+and this paragraph is the record of why it was tried.
+
 NEVER LOOPS: stop_hook_active short-circuits, same as every Stop gate here.
 FAILS OPEN on any error, including no git, no repo, and a git call that hangs.
 Audit rows share out/conduct-gate.jsonl; fixtures (session 'selftest') do not
@@ -75,6 +93,9 @@ import sys
 from datetime import datetime, timezone
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from stop_latch import announce  # noqa: E402
 LOG = os.path.join(REPO, "out", "conduct-gate.jsonl")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:                                    # telemetry only — never load-bearing
@@ -348,7 +369,7 @@ def main():
             # silence is the correct output.
             sys.exit(0)
 
-        audit({"ts": now(), "hook": "stale-claim-gate",
+        audit({"ts": now(), "hook": "stale-claim-gate", "register": "announce",
                "session": payload.get("session_id"),
                "commits": [h for h, _, _ in hits],
                "excerpt": (STALE.search(prose).group(0) if STALE.search(prose)
@@ -379,9 +400,11 @@ def main():
             "check, read the file, or show the commit does not cover it. Then "
             "either correct the claim, or quote the commit and say why it "
             "leaves the problem open — citing it clears this gate.",
+            "",
+            "This does not reopen your turn. Act on it in the next thing you "
+            "do rather than restating the last thing you said.",
         ]
-        print("\n".join(lines), file=sys.stderr)
-        sys.exit(2)
+        raise SystemExit(announce("\n".join(lines)))
 
     except SystemExit:
         raise

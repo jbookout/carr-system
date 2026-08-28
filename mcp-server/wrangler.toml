@@ -59,6 +59,34 @@
 #                         HERMES_TOKENS just to add this client: secret values
 #                         cannot be read back, so replacement could invalidate
 #                         the existing Hermes runtime.
+#   HERMES_COS_TOKENS — separate JSON map for the server-locked Hermes
+#                       chief-of-staff door, e.g. { "hermes-pilot": "<token>" }.
+#                       This map is checked before HERMES_TOKENS and selects only
+#                       the `hermes-cos` profile (ordinary Hermes/projector
+#                       credentials remain on their existing profile). Joe
+#                       provisions the secret value; it never appears here.
+#                       Local proof uses CARR_MCP_CLIENT_PROFILE=hermes-cos and
+#                       CARR_HERMES_COS_MCP_TOKEN in the existing 0600
+#                       ~/.config/carr/mcp-tokens.env. It must never reuse
+#                       CARR_HERMES_MCP_TOKEN / HERMES_TOKENS_EXTRA.
+#                       Native Hermes Desktop is provisioned separately through
+#                       its sanctioned CLI:
+#                         hermes mcp add carr-cos \
+#                           --url https://api.doctorcre.com/mcp --auth header
+#                       Enter the same dedicated CoS bearer only at the prompt.
+#                       Hermes stores it as MCP_CARR_COS_API_KEY in its 0600
+#                       ~/.hermes/.env and stores only ${MCP_CARR_COS_API_KEY}
+#                       interpolation in ~/.hermes/config.yaml. Post-merge:
+#                         hermes config path; hermes config env-path
+#                         stat -f %Lp ~/.hermes/.env ~/.hermes/config.yaml
+#                         hermes mcp list; hermes mcp test carr-cos
+#                       Both files must read 600, carr-cos must be enabled, and
+#                       a fresh native session's tools/list must include
+#                       update-deal/add-premises. The ordinary/projector server
+#                       must remain distinct and must omit both verbs. Rollback:
+#                         hermes mcp remove carr-cos
+#                       then remove only MCP_CARR_COS_API_KEY through the Hermes
+#                       credential owner; never edit or reuse the plain token.
 #   (PARTNER_TOKENS     — RETIRED 2026-08-03. Was an interim per-partner bearer
 #                         for /mcp during the OAuth rollout. Both partners are on
 #                         provider-issued tokens; the secret is deleted and the

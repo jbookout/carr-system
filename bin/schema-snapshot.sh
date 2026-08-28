@@ -143,6 +143,46 @@ case "$RENEWAL_SOURCE_APPLIED" in
   *) echo "schema-snapshot: could not read the renewal-delivery ledger state" >&2; exit 1 ;;
 esac
 
+RULE_DELIVERY_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0291_rule_delivery_layers.sql')" \
+  2>/dev/null)"
+case "$RULE_DELIVERY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the rule-delivery ledger state" >&2; exit 1 ;;
+esac
+
+RULE_DELIVERY_CUTOVER_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0317_atomic_rule_delivery_cutover.sql')" \
+  2>/dev/null)"
+case "$RULE_DELIVERY_CUTOVER_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the rule-delivery cutover ledger state" >&2; exit 1 ;;
+esac
+
+RULE_DELIVERY_REFRESH_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0332_refresh_rule_delivery_activation_preimage.sql')" \
+  2>/dev/null)"
+case "$RULE_DELIVERY_REFRESH_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the rule-delivery refresh ledger state" >&2; exit 1 ;;
+esac
+
+RULE_DELIVERY_RULESET_CONTROL_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0348_pr_only_main_ruleset_control.sql')" \
+  2>/dev/null)"
+case "$RULE_DELIVERY_RULESET_CONTROL_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the rule-delivery ruleset-control ledger state" >&2; exit 1 ;;
+esac
+
+RULE_DELIVERY_DIGEST_REPIN_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0363_rule_delivery_activation_digest_repin.sql')" \
+  2>/dev/null)"
+case "$RULE_DELIVERY_DIGEST_REPIN_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the rule-delivery digest-repin ledger state" >&2; exit 1 ;;
+esac
+
 # pg_dump renders timestamptz in the server session timezone; pin it so the
 # Production and disposable-local paths serialize identical instants alike.
 export PGOPTIONS='-c timezone=UTC'
@@ -204,6 +244,7 @@ begin
     'carr_reader','carr_writer','carr_exporter','carr_authority','carr_device_evidence',
     'carr_calendar_prebrief_jobs','carr_calendar_prebrief_canary_jobs',
     'carr_calendar_prebrief_attestors','carr_calendar_prebrief_email_resolver',
+    'carr_program5_forward_fix_verifiers',
     'carr_renewal_source_attestors'
   ] loop
     if not exists (select 1 from pg_roles where rolname = r) then
@@ -333,6 +374,7 @@ with app(rolname) as (
   values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'),
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
+         ('carr_program5_forward_fix_verifiers'),
          ('carr_renewal_source_attestors')
 )
 select format('grant %s on schema %s to %s;',
@@ -350,6 +392,7 @@ with app(rolname) as (
   values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'),
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
+         ('carr_program5_forward_fix_verifiers'),
          ('carr_renewal_source_attestors')
 )
 select format('grant %s on %s %s.%s to %s;',
@@ -369,6 +412,7 @@ with app(rolname) as (
   values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'),
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
+         ('carr_program5_forward_fix_verifiers'),
          ('carr_renewal_source_attestors')
 )
 select format('grant %s (%s) on table %s.%s to %s;',
@@ -389,6 +433,7 @@ with app(rolname) as (
   values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'),
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
+         ('carr_program5_forward_fix_verifiers'),
          ('carr_renewal_source_attestors')
 )
 select format('grant execute on function %s.%s(%s) to %s;',
@@ -406,6 +451,7 @@ with app(rolname) as (
   values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'),
          ('carr_calendar_prebrief_jobs'), ('carr_calendar_prebrief_canary_jobs'),
          ('carr_calendar_prebrief_attestors'), ('carr_calendar_prebrief_email_resolver'),
+         ('carr_program5_forward_fix_verifiers'),
          ('carr_renewal_source_attestors')
 )
 -- pg_auth_members permits different grantors for the same role/member pair.
@@ -516,6 +562,14 @@ fi
 #     controlled block the 0228 lifecycle cannot validate pinned rules. Do not
 #     add rule_control_binding or any receipt/rule table: those are per-rule
 #     history, not bounded internal control configuration.
+#   * ops.rule_delivery_policy (exactly 1 row) and
+#     ops.rule_delivery_activation_target (the exact ledger-appropriate row set) are the bounded
+#     configuration for the already-existing scoped rule-delivery cutover.
+#     0291 and 0317 seed them, but once those migrations enter this snapshot's
+#     ledger they no longer replay. Omitting the rows produced mode:null and no
+#     cutover target set on a fresh rebuild. Carry these two tables only; never
+#     add ops.rule_delivery_observation, ops.rule_delivery_activation_receipt,
+#     or any other runtime/evidence table to this list.
 #   * The disabled renewal-radar-source-daily v1 job definition is a fixed
 #     internal contract required by 0230's lease-bound delivery gate. Carry
 #     only that exact row; never widen this to arbitrary job/runtime rows.
@@ -542,7 +596,8 @@ deal_phase deal_type_ref lead_lane lead_stage loop_domain negotiation_claim_type
 participant_role party_link_kind vendor_category vendor_disposition \
 vendor_relationship_level diagnostic_route submarket_condition doctrine_edge_type \
 doctrine_review_policy actor retrieval_proposal retrieval_ranking_policy \
-ops.guidance_registry"
+ops.guidance_registry ops.rule_delivery_policy \
+ops.rule_delivery_activation_target"
 
 VOCAB_ARGS=""
 for t in $VOCAB_TABLES; do
@@ -749,6 +804,108 @@ on conflict (key,version) do nothing;
 RENEWAL_SOURCE_JOB
 fi
 
+if [ "$RULE_DELIVERY_APPLIED" = t ]; then
+cat >> "$TMP" <<'RULE_DELIVERY_POLICY'
+-- CARR RULE DELIVERY POLICY (bin/schema-snapshot.sh) — safe rebuild default.
+-- The bounded vocabulary dump preserves an existing singleton. If the source
+-- store lacks it, 0291 will not replay once its ledger row is in the snapshot,
+-- so this fallback creates only the fail-safe shadow default.
+insert into ops.rule_delivery_policy (singleton,mode,changed_by,reason)
+values (true,'shadow','schema-snapshot',
+        'Fresh rebuild default: scoped delivery remains shadow until governed cutover evidence exists.')
+on conflict (singleton) do nothing;
+
+RULE_DELIVERY_POLICY
+fi
+
+if [ "$RULE_DELIVERY_CUTOVER_APPLIED" = t ]; then
+  # Preserve the exact ledger-visible postimage. A source with 0363 already
+  # applied gets the current eight-row set; earlier ledgers keep the historical
+  # nine-row preimages needed by their pending guarded transitions.
+  if [ "$RULE_DELIVERY_DIGEST_REPIN_APPLIED" = t ]; then
+cat >> "$TMP" <<'RULE_DELIVERY_ACTIVATION_TARGETS_POST_0363'
+-- CARR RULE DELIVERY ACTIVATION TARGETS POST-0363 (bin/schema-snapshot.sh) — exact reviewed cutover config.
+insert into ops.rule_delivery_activation_target
+  (short_id,expected_scope,expected_pack,
+   from_control,from_enforcement_class,from_implementation_ref,from_test_ref,
+   to_control,to_enforcement_class,to_implementation_ref,to_test_ref,map_digest)
+values
+ ('25fcddee','shared','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('3fa17fa0','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('72e06bdf','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('113b3833','joe','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('57d13061','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('c66dc739','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('49533583','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
+ ('557838a5','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904')
+on conflict (short_id) do nothing;
+
+RULE_DELIVERY_ACTIVATION_TARGETS_POST_0363
+  elif [ "$RULE_DELIVERY_REFRESH_APPLIED" = t ]; then
+  if [ "$RULE_DELIVERY_RULESET_CONTROL_APPLIED" = t ]; then
+cat >> "$TMP" <<'RULE_DELIVERY_ACTIVATION_TARGETS_POST_0348'
+-- CARR RULE DELIVERY ACTIVATION TARGETS POST-0348 (bin/schema-snapshot.sh) — exact reviewed cutover config.
+insert into ops.rule_delivery_activation_target
+  (short_id,expected_scope,expected_pack,
+   from_control,from_enforcement_class,from_implementation_ref,from_test_ref,
+   to_control,to_enforcement_class,to_implementation_ref,to_test_ref,map_digest)
+values
+ ('25fcddee','shared','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
+ ('3fa17fa0','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
+ ('72e06bdf','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
+ ('581cb3fe','shared','delegation-council','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
+ ('113b3833','joe','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
+ ('57d13061','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
+ ('c66dc739','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
+ ('49533583','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'),
+ ('557838a5','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218')
+on conflict (short_id) do nothing;
+
+RULE_DELIVERY_ACTIVATION_TARGETS_POST_0348
+  else
+cat >> "$TMP" <<'RULE_DELIVERY_ACTIVATION_TARGETS_POST_0332'
+-- CARR RULE DELIVERY ACTIVATION TARGETS POST-0332 (bin/schema-snapshot.sh) — exact reviewed cutover config.
+insert into ops.rule_delivery_activation_target
+  (short_id,expected_scope,expected_pack,
+   from_control,from_enforcement_class,from_implementation_ref,from_test_ref,
+   to_control,to_enforcement_class,to_implementation_ref,to_test_ref,map_digest)
+values
+ ('25fcddee','shared','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','c0f3a9cc4fd407b346f44f09d7f05885051cfcc6c14c3f6c077e54a2a5448997'),
+ ('3fa17fa0','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','c0f3a9cc4fd407b346f44f09d7f05885051cfcc6c14c3f6c077e54a2a5448997'),
+ ('72e06bdf','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','c0f3a9cc4fd407b346f44f09d7f05885051cfcc6c14c3f6c077e54a2a5448997'),
+ ('581cb3fe','shared','delegation-council','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','c0f3a9cc4fd407b346f44f09d7f05885051cfcc6c14c3f6c077e54a2a5448997'),
+ ('113b3833','joe','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','c0f3a9cc4fd407b346f44f09d7f05885051cfcc6c14c3f6c077e54a2a5448997'),
+ ('57d13061','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','c0f3a9cc4fd407b346f44f09d7f05885051cfcc6c14c3f6c077e54a2a5448997'),
+ ('c66dc739','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','c0f3a9cc4fd407b346f44f09d7f05885051cfcc6c14c3f6c077e54a2a5448997'),
+ ('49533583','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','c0f3a9cc4fd407b346f44f09d7f05885051cfcc6c14c3f6c077e54a2a5448997'),
+ ('557838a5','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','c0f3a9cc4fd407b346f44f09d7f05885051cfcc6c14c3f6c077e54a2a5448997')
+on conflict (short_id) do nothing;
+
+RULE_DELIVERY_ACTIVATION_TARGETS_POST_0332
+  fi
+  else
+cat >> "$TMP" <<'RULE_DELIVERY_ACTIVATION_TARGETS_PRE_0332'
+-- CARR RULE DELIVERY ACTIVATION TARGETS PRE-0332 (bin/schema-snapshot.sh) — exact reviewed cutover config.
+insert into ops.rule_delivery_activation_target
+  (short_id,expected_scope,expected_pack,
+   from_control,from_enforcement_class,from_implementation_ref,from_test_ref,
+   to_control,to_enforcement_class,to_implementation_ref,to_test_ref,map_digest)
+values
+ ('25fcddee','shared','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('3fa17fa0','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('72e06bdf','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('581cb3fe','shared','delegation-council','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('113b3833','joe','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('57d13061','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('c66dc739','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('49533583','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a'),
+ ('557838a5','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py','266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a')
+on conflict (short_id) do nothing;
+
+RULE_DELIVERY_ACTIVATION_TARGETS_PRE_0332
+  fi
+fi
+
 # TWO GOVERNED EXECUTION SEEDS JOINED ON 2026-08-25, after 0309 and 0310
 # entered the production ledger.  Neither is a vocabulary row and neither is
 # safe to recover by dumping the whole table: execution-environment tables
@@ -758,7 +915,7 @@ fi
 # active Hermes local environment or admit an Engineering Passport slice.
 #
 # The values below are the exact reviewed built-in seed from 0309 and the
-# exact engineering-slice:v1 contract from 0310.  They are deliberately
+# final engineering-slice:v1 contract from 0310 through 0312.  They are deliberately
 # rendered from repository text, with no production payload or observed
 # timestamp copied into the tracked snapshot.  The fixed conformance time is
 # a historical source observation, not a freshness claim; the provider's
@@ -823,23 +980,28 @@ begin
 end
 $carr_governed_execution_seeds$;
 
--- 0310's exact enabled on-demand engineering-slice:v1 job contract.  This is
--- the existing ops.job queue projection, not a second workflow or task store.
+-- The exact enabled on-demand engineering-slice:v1 job contract through 0312.
+-- A post-0312 snapshot marks 0311/0312 applied in its migration ledger, so a
+-- fresh rebuild will not replay their contract updates.  This INSERT uses
+-- ON CONFLICT DO NOTHING deliberately: it must therefore already be the final
+-- sponsored, lease-bound controller declaration rather than the old 0310 row.
+-- It remains the existing ops.job queue projection, not a second workflow or
+-- task store.
 insert into ops.job_definition
   (key,version,enabled,risk,owner_actor,execution_kind,execution_contract,
    inventory_contract,state_contract,routing_contract,filtering_contract,
    recurrence,validation_contract,retry_policy,deduplication,completion_contract,legacy_schedule)
 values
   ('engineering-slice',1,true,'yellow','hermes','deterministic',
-   '{"entrypoint":"mcp-server/src/engineering-runtime.js","export":"runCodexSlice","args":[],"shadow_args":[],"canary":{"enabled":false,"reason":"fresh native Codex execution has no isolated canary adapter"}}'::jsonb,
-   '{"trigger":"MCP admission only; no scheduler","owner":"ops.job dispatcher","inputs":["accepted Work Request","accepted plan revision","typed engineering slice"],"canonical_reads":["ops.work_request","ops.sourced_work_request_plan","ops.engineering_slice_plan","ops.job_definition"],"canonical_writes":["ops.job","ops.engineering_execution_envelope","ops.engineering_slice_receipt","ops.engineering_reviewer_fact"],"external_dependencies":["Codex Desktop fresh-native-session adapter"],"authority":"server-derived shadow execution only; no caller-selected identity, model, authority, or native session","current_completion_signal":"lease-bound typed receipt plus independent reviewer fact","replacement_program":"ops.job_definition:engineering-slice:v1","acceptance":"typed envelope, receipt, dependency, and independent-review gates","retirement_approval":"Joe approval after replacement evidence"}'::jsonb,
+   '{"entrypoint":"mcp-server/src/engineering-runtime.js","export":"runEngineeringWorker","args":["room-bridge-engineering-controller"],"shadow_args":[],"canary":{"enabled":false,"reason":"fresh native Codex execution has no isolated canary adapter"}}'::jsonb,
+   '{"trigger":"MCP admission only; no scheduler","owner":"ops.job dispatcher","inputs":["accepted Work Request","accepted plan revision","typed engineering slice"],"canonical_reads":["ops.work_request","ops.sourced_work_request_plan","ops.engineering_slice_plan","ops.job_definition"],"canonical_writes":["ops.job","ops.engineering_execution_envelope","ops.engineering_slice_receipt","ops.engineering_reviewer_fact"],"external_dependencies":["room-bridge lease-bound controller","Codex Desktop fresh-native-session adapter"],"authority":"server-derived sponsored Codex execution with a closed repository action allowlist; no caller-selected identity, authority, model, action, or native session","current_completion_signal":"lease-bound typed receipt plus independent reviewer fact","replacement_program":"ops.job_definition:engineering-slice:v1","acceptance":"typed envelope, receipt, dependency, and independent-review gates","retirement_approval":"Joe approval after replacement evidence"}'::jsonb,
    '{"states":["queued","running","succeeded","failed","timed_out"]}'::jsonb,
    '{"key":"facts.all_true","spec":{"all_of":["capability.candidate_admitted","runner.identity_bound"]},"description":"an accepted capability candidate and bound runner identity admit the slice"}'::jsonb,
    '{"key":"facts.all_true","spec":{"all_of":["command.registered_args_selected"]},"description":"only the registered fresh Codex adapter is selected"}'::jsonb,
    '{"kind":"on_demand","schedule":null,"cron":null,"timezone":"America/Chicago","source":"MCP admit-engineering-slice only"}'::jsonb,
    '{"key":"facts.all_true","spec":{"all_of":["command.exit_zero","command.workflow_marker_valid"]},"description":"the bounded adapter succeeds and returns its typed workflow marker"}'::jsonb,
    '{"max_attempts":2,"backoff":"constant","base_seconds":30,"cap_seconds":300,"timeout_seconds":1800}'::jsonb,
-   '{"key_template":"engineering-slice:{plan_digest}:{work_request}:{slice_ref}"}'::jsonb,
+   '{"key_template":"engineering-slice:{plan_digest}:{work_request}:{slice_ref}:generation:{generation}"}'::jsonb,
    '{"key":"facts.all_true","spec":{"all_of":["command.receipt_persisted","command.execution_evidence_reconciles"]},"description":"lease-bound typed receipt persists and reconciles to the issued envelope","receipt_kind":"engineering_slice"}'::jsonb,
    '{"provider":"none","status":"disabled","disable_requires":"no scheduler exists; on-demand MCP admission only"}'::jsonb)
 on conflict (key,version) do nothing;
@@ -858,6 +1020,107 @@ cat >> "$TMP" <<'DOCTRINE_META'
 insert into public.doctrine_meta (id, generation) values (1, 0);
 
 DOCTRINE_META
+
+# THE SIEP MANIFEST AND ITS WORK REQUESTS joined on 2026-08-27, the sixth entry
+# in the seeded-configuration category above, and the first whose seed is SEALED.
+# The trap is the control-catalog one a level deeper (incident INC-20260827-04's
+# sibling, defect class snapshot-cannot-rebuild-sealed-seeded-manifest): 0324
+# seeds ops.siep_package_contract / siep_program_dependency / siep_component_alias
+# and then seals all three with unconditional before-insert triggers, and the
+# package contract carries NOT NULL foreign keys into ops.work_request rows that
+# 0324 itself creates. Once 0324 enters this snapshot's ledger nothing replays,
+# the vocabulary dump cannot pass the seals, and a rebuilt database has SIEP
+# structure with an empty, unseedable manifest — siep-program-local-pg-gate
+# fails on the full package set (found live on the first post-0324 snapshot,
+# pull request 712, closed unmerged).
+#
+# THE SHAPE CHOSEN, of the three recorded on WR-000016: a deterministic block
+# that restores the exact production rows with the seals and the two
+# work-request insert guards (plus the shape gate) disabled for the restore
+# only, then re-enabled, then VERIFIED — the block ends by asserting
+# ops.siep_manifest_digest() equals the digest read from production at snapshot
+# time, so the seal's intent (no unreviewed manifest) survives the trip: a
+# tampered block fails the rebuild instead of building quietly. The manifest
+# rows are literal in reviewed migration 0324, so the production dump IS the
+# reviewed content, and the digest proves it twice — here at write time and
+# again at load time. The SIEP work requests are internal program rows created
+# by 0324's own literal package list (requester joe, owner joe, no client,
+# party, deal, event, doctrine or credential reference; their only outbound
+# foreign key is public.actor, which this snapshot already carries).
+# jsonb_populate_record keeps the block column-list-free so a later work_request
+# column cannot silently rot it. The ref sequence is advanced to production's
+# value so a rebuilt database cannot mint a colliding WR ref. Never widen this
+# to siep_command_receipt, siep_lane_lock, or any other runtime/evidence table.
+SIEP_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0324_siep_program_authority.sql')" \
+  2>/dev/null)"
+case "$SIEP_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the SIEP ledger state" >&2; exit 1 ;;
+esac
+
+if [ "$SIEP_APPLIED" = t ]; then
+  SIEP_DIGEST="$("$PSQL" "$URL" -Atqc "select ops.siep_manifest_digest()" 2>/dev/null)"
+  case "$SIEP_DIGEST" in
+    sha256:*) ;;
+    *) echo "schema-snapshot: SIEP manifest digest unreadable — nothing written" >&2; exit 1 ;;
+  esac
+  SIEP_PKG_COUNT="$("$PSQL" "$URL" -Atqc "select count(*) from ops.siep_package_contract" 2>/dev/null)"
+  if [ -z "$SIEP_PKG_COUNT" ] || [ "$SIEP_PKG_COUNT" -lt 40 ]; then
+    echo "schema-snapshot: SIEP package set implausibly small ($SIEP_PKG_COUNT) — nothing written" >&2
+    exit 1
+  fi
+
+  cat >> "$TMP" <<'SIEP_HEADER'
+-- CARR SIEP MANIFEST AND PROGRAM WORK REQUESTS (bin/schema-snapshot.sh) —
+-- exact sealed rows, digest-verified below. The seals and the work-request
+-- insert guards are disabled ONLY for this byte-exact restore of rows that
+-- already passed them on production; the closing DO block refuses the whole
+-- rebuild if the restored manifest does not hash to production's reviewed
+-- digest. Never dump receipt, lock, or evidence tables here.
+alter table ops.work_request disable trigger work_request_shape_gate;
+alter table ops.work_request disable trigger work_in_progress_limit;
+alter table ops.work_request disable trigger completion_capsule;
+alter table ops.siep_package_contract disable trigger siep_package_contract_sealed_before_insert;
+alter table ops.siep_program_dependency disable trigger siep_program_dependency_sealed_before_insert;
+alter table ops.siep_component_alias disable trigger siep_component_alias_sealed_before_insert;
+SIEP_HEADER
+
+  if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" >> "$TMP" <<'SIEP_ROWS'
+select format('insert into ops.work_request select * from jsonb_populate_record(null::ops.work_request, %L::jsonb) on conflict (id) do nothing;', to_jsonb(w))
+  from ops.work_request w
+ where exists (select 1 from ops.siep_package_contract c where c.work_request_id = w.id)
+ order by w.ref;
+select format('insert into ops.siep_package_contract select * from jsonb_populate_record(null::ops.siep_package_contract, %L::jsonb) on conflict do nothing;', to_jsonb(c))
+  from ops.siep_package_contract c order by c.package_key;
+select format('insert into ops.siep_program_dependency select * from jsonb_populate_record(null::ops.siep_program_dependency, %L::jsonb) on conflict do nothing;', to_jsonb(d))
+  from ops.siep_program_dependency d order by d.package_key, d.depends_on_package_key;
+select format('insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, %L::jsonb) on conflict do nothing;', to_jsonb(a))
+  from ops.siep_component_alias a order by a.alias_key;
+select format('select pg_catalog.setval(%L, %s, true);', 'ops.work_request_ref_seq', last_value) from ops.work_request_ref_seq;
+SIEP_ROWS
+  then
+    echo "schema-snapshot: could not render the SIEP manifest block — nothing written" >&2
+    exit 1
+  fi
+
+  cat >> "$TMP" <<SIEP_FOOTER
+alter table ops.siep_component_alias enable trigger siep_component_alias_sealed_before_insert;
+alter table ops.siep_program_dependency enable trigger siep_program_dependency_sealed_before_insert;
+alter table ops.siep_package_contract enable trigger siep_package_contract_sealed_before_insert;
+alter table ops.work_request enable trigger completion_capsule;
+alter table ops.work_request enable trigger work_in_progress_limit;
+alter table ops.work_request enable trigger work_request_shape_gate;
+do \$carr_siep_manifest\$
+begin
+  if ops.siep_manifest_digest() is distinct from '$SIEP_DIGEST' then
+    raise exception 'SIEP manifest restore does not match the reviewed production digest $SIEP_DIGEST — refuse the rebuild';
+  end if;
+end
+\$carr_siep_manifest\$;
+
+SIEP_FOOTER
+fi
 
 # A truncated dump is the failure mode that matters: pg_dump has lost a Neon
 # connection mid-stream before (2026-08-07, on the nightly backup). A short file
@@ -881,6 +1144,85 @@ sed -e '/^-- Dumped from database version/d' \
     -e '/^\\restrict /d' \
     -e '/^\\unrestrict /d' "$TMP" | normalise_eof > "$TMP.clean"
 mv "$TMP.clean" "$TMP"
+
+# THE DOCTRINE VALIDATION REGISTRY — the seventh instance, and the first one the
+# check below found by being WRONG rather than by being silent. It sat in the
+# classification as "runtime evidence", which it is not: doctrine_gate_check is
+# the registry itself, and 0075's own comment states the contract — "A NEW GATE
+# IS A FUNCTION AND A ROW". Results live in doctrine_gate_finding.
+#
+# WHAT A REBUILD LOST. 0075 seeds 11 rows, every one severity=block and enabled,
+# and nothing writes the table at runtime. runGates() in mcp-server/src/doctrine.js
+# selects the enabled checks and treats an empty set as nothing to enforce, so a
+# database rebuilt from a snapshot carrying 0075's ledger row but not its rows ran
+# NO doctrine gates at all and let every write through — silently, because zero
+# findings is indistinguishable from zero problems.
+#
+# Rendered from the source rather than hand-listed, and column-list-free so a
+# later column cannot rot the block.
+cat >> "$TMP" <<'DOCTRINE_GATE_CHECK_HEADER'
+
+-- CARR DOCTRINE VALIDATION REGISTRY (bin/schema-snapshot.sh) — the gate rows
+-- themselves, not their findings. Without these a rebuilt database enforces no
+-- doctrine gates and says nothing about it.
+DOCTRINE_GATE_CHECK_HEADER
+
+if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" >> "$TMP" <<'DOCTRINE_GATE_CHECK_ROWS'
+select format(
+  'insert into public.doctrine_gate_check select * from jsonb_populate_record(null::public.doctrine_gate_check, %L::jsonb) on conflict (check_key) do nothing;',
+  to_jsonb(g)) from public.doctrine_gate_check g order by g.check_key;
+DOCTRINE_GATE_CHECK_ROWS
+then
+  echo "schema-snapshot: could not render the doctrine validation registry — nothing written" >&2
+  exit 1
+fi
+
+# THE NAMED AGENT PROFILE ROSTER — the eighth instance, and the second found by
+# the classification being WRONG rather than silent. It sat excluded on the claim
+# that its readers tolerate an empty set. They do not: bot-brief throws
+# profile_not_found and its hint says "new profiles are a migration", and nothing
+# inserts the table at runtime — agent-profiles.js only UPDATEs. A rebuild
+# without these rows fails the bot brief for every named profile.
+cat >> "$TMP" <<'AGENT_PROFILE_HEADER'
+
+-- CARR NAMED AGENT PROFILES (bin/schema-snapshot.sh) — the seeded roster. No
+-- runtime path creates these; a rebuild without them breaks the bot brief.
+AGENT_PROFILE_HEADER
+
+if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" >> "$TMP" <<'AGENT_PROFILE_ROWS'
+select format(
+  'insert into public.agent_profile select * from jsonb_populate_record(null::public.agent_profile, %L::jsonb) on conflict (profile_key) do nothing;',
+  to_jsonb(p)) from public.agent_profile p order by p.profile_key;
+AGENT_PROFILE_ROWS
+then
+  echo "schema-snapshot: could not render the named agent profiles — nothing written" >&2
+  exit 1
+fi
+
+# THE SIXTH INSTANCE WAS CAUGHT BY HAND; THE SEVENTH IS CAUGHT HERE. Every block
+# above this line was written one at a time, each after a database rebuilt from
+# this file failed a db-gate days later: the role preamble, the control catalog,
+# the guidance registry and retrieval seeds, the rule-delivery policy and
+# targets, the governed execution providers, and now the sealed SIEP manifest.
+# Six blocks, one shape — a migration seeds rows, this snapshot's ledger absorbs
+# the migration so it never replays, and the rows are simply gone. Until now
+# nothing would have noticed the next one.
+#
+# It runs HERE, against the composed artifact and before the write/--check
+# branch, for two reasons. The artifact is the only place holding both halves of
+# the question — the applied-migration ledger and the data statements — so the
+# check reads the exact bytes about to be committed rather than asking
+# production a second question whose answer could differ. And refusing before
+# the write means a rejected run leaves db/schema.sql untouched.
+#
+# IT NEVER ADDS A TABLE. What a table carries into a tracked file stays a
+# reviewed decision, per the rule this file already lives by: a table qualifies
+# because someone read its rows and can say what is in them, never because a
+# migration seeded it. All this does is refuse to let an unclassified one pass
+# in silence.
+if ! "$CATALOG_PY" "$REPO/ops/snapshot-seed-coverage.py" "$REPO" "$TMP"; then
+  exit 1
+fi
 
 if [ "$CHECK" = "1" ]; then
   if [ ! -f "$OUT" ]; then

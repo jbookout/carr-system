@@ -190,10 +190,21 @@ export function botBriefTools({ ToolError, assertNoCallerAuthorityFields }) {
         let runtimeRegistration = { status: "not_registered", authorized: false };
         let boundContext = null;
         if (args.work_request) {
-          await c.query("select set_config('carr.organization_tenant_id',$1::text,true)", [identity.organization_tenant_id]);
-          const assignment = await c.query("select ops.context_activation_brief_assignment($1::text,$2::text) as profile_key", [args.work_request, args.activation_binding_id]);
+          const assignment = await c.query(
+            `with tenant_scope as materialized (
+               select set_config('carr.organization_tenant_id',$1::text,true) /* bot-brief:tenant-assignment */
+             )
+             select ops.context_activation_brief_assignment($2::text,$3::text) as profile_key
+               from tenant_scope`,
+            [identity.organization_tenant_id, args.work_request, args.activation_binding_id]);
           if (assignment.rows[0]?.profile_key !== profileKey) throw new ToolError({ error: "activation_profile_binding_mismatch" });
-          const rendered = await c.query("select ops.render_context_activation_for_brief($1::text,$2::text) as items", [args.work_request, args.activation_binding_id]);
+          const rendered = await c.query(
+            `with tenant_scope as materialized (
+               select set_config('carr.organization_tenant_id',$1::text,true) /* bot-brief:tenant-render */
+             )
+             select ops.render_context_activation_for_brief($2::text,$3::text) as items
+               from tenant_scope`,
+            [identity.organization_tenant_id, args.work_request, args.activation_binding_id]);
           if (!Array.isArray(rendered.rows[0]?.items)) throw new ToolError({ error: "required_context_render_refused" });
           boundContext = { work_request: args.work_request, binding_id: args.activation_binding_id, ephemeral: true, items: rendered.rows[0].items.map((item) => {
             if (item.delivery_mode === "inline") return item;
@@ -206,8 +217,12 @@ export function botBriefTools({ ToolError, assertNoCallerAuthorityFields }) {
             // remain intact; the immutable envelope proves only which bot
             // profile/configuration may consume this accepted-plan packet.
             const registrationResult = await c.query(
-              "select ops.hermes_runtime_admission_for_brief($1::text,$2::text,$3::text,$4::text,$5::text) as registration /* bot-brief:hermes-runtime-admission */",
-              [actor.slug, profileKey, scope.status === "personal" ? scope.sponsor : null,
+              `with tenant_scope as materialized (
+                 select set_config('carr.organization_tenant_id',$1::text,true) /* bot-brief:tenant-admission */
+               )
+               select ops.hermes_runtime_admission_for_brief($2::text,$3::text,$4::text,$5::text,$6::text) as registration
+                 from tenant_scope /* bot-brief:hermes-runtime-admission */`,
+              [identity.organization_tenant_id, actor.slug, profileKey, scope.status === "personal" ? scope.sponsor : null,
                 args.work_request, args.activation_binding_id]);
             const rawRegistration = registrationResult.rows[0]?.registration;
             runtimeRegistration = await admittedHermesRuntime(rawRegistration, {

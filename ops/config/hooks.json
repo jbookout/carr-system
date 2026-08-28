@@ -1,6 +1,16 @@
 {
   "PreToolUse": [
     {
+      "matcher": "Bash|Write|Edit|MultiEdit|Agent|WebFetch|WebSearch|mcp__.*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/rule-pack-preuse-reselection.py",
+          "timeout": 20
+        }
+      ]
+    },
+    {
       "matcher": "Bash|WebFetch",
       "hooks": [
         {
@@ -35,11 +45,6 @@
         },
         {
           "type": "command",
-          "command": "/usr/bin/env python3 {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/canonical-edit-gate.py",
-          "timeout": 15
-        },
-        {
-          "type": "command",
           "command": "/usr/bin/env python3 {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/close-before-open-gate.py",
           "timeout": 15
         },
@@ -63,16 +68,6 @@
     {
       "matcher": "Bash",
       "hooks": [
-        {
-          "type": "command",
-          "command": "/usr/bin/env python3 {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/git-writer-gate.py",
-          "timeout": 20
-        },
-        {
-          "type": "command",
-          "command": "/usr/bin/env python3 {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/staging-attribution-gate.py",
-          "timeout": 20
-        },
         {
           "type": "command",
           "command": "/usr/bin/env python3 {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/staging-observation-tracker.py",

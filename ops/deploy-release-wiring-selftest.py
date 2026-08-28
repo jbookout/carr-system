@@ -182,7 +182,10 @@ def main() -> int:
     # 5. one digest decision, not two
     check("5. the manifest comes from tools/release-manifest.py",
           "tools/release-manifest.py" in source
-          and "sha256" not in source,
+          # The wrapper may validate the manifest's declared schema_ledger_sha256
+          # field, but it must not compute a competing digest itself.
+          and "sha256(" not in source
+          and "digest(" not in source,
           "the wrapper appears to compute a digest of its own")
 
     # 6. a source rehearsal still refuses without a SHA, with no DB in sight
@@ -193,6 +196,22 @@ def main() -> int:
     check("6. staging `release require` refuses with no --sha",
           out.returncode == 2 and "needs --sha" in (out.stderr + out.stdout),
           f"rc={out.returncode} err={out.stderr.strip()[:120]}")
+
+    check("6a. one builder binds target and assurance for every deploy rebuild",
+          "build_release_manifest()" in source
+          and source.count("build_release_manifest ") >= 3
+          and 'build --sha "$BUILD_MANIFEST_SHA"' in source
+          and '--environment "$BUILD_MANIFEST_ENVIRONMENT"' in source,
+          "candidate and deploy can recompute different approval preimages")
+    check("6b. standalone staging requires the full assurance preimage",
+          "standalone staging release requires performance/recovery assurance" in source,
+          "staging can still approve a recovery plan the deploy does not rebuild")
+    record_source = RECORD.read_text(encoding="utf-8")
+    check("6c. staging refusal prints an explicit target and assurance build",
+          "--environment staging --performance-budget-ref <immutable-ref>" in record_source
+          and "--performance-budget-ms <milliseconds>" in record_source
+          and "--rollback-plan-ref <immutable-ref>" in record_source,
+          "the recovery instruction can recreate the production-default manifest defect")
 
     check("7. rollback instruction uses immutable provider promotion",
           "bin/deploy-worker.sh --promote-version "

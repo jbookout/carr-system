@@ -171,6 +171,122 @@ def regression_cases():
     ]
 
 
+def _tmp_lifecycle(mode):
+    """A gate-lifecycle.json fixture naming only the shadow-writing key, so a
+    real edit to the real 37-gate file never has to happen for this test to
+    exercise every mode. mode=None omits the key entirely (the "never added"
+    shape); any other value is written verbatim, including a deliberately
+    wrong one ("announce") to prove the check only reads the literal string
+    "shadow"."""
+    fd, path = tempfile.mkstemp(suffix=".json")
+    gates = {}
+    if mode is not None:
+        gates["conduct-stop-gate.py:chat-writing-shadow"] = {"mode": mode}
+    with os.fdopen(fd, "w") as fh:
+        json.dump({"gates": gates}, fh)
+    return path
+
+
+def run_shadow_case(assistant, mode, session="shadow-selftest"):
+    """(decision_is_block, shadow_rows) for one turn, with
+    CARR_GATE_LIFECYCLE_PATH/CARR_CONDUCT_SHADOW_LOG redirected to fixtures —
+    the real out/conduct-gate-shadow.jsonl and the real 37-gate
+    ops/config/gate-lifecycle.json are never touched by this test."""
+    fd, path = tempfile.mkstemp(suffix=".jsonl")
+    lifecycle_path = _tmp_lifecycle(mode)
+    shadow_log_fd, shadow_log_path = tempfile.mkstemp(suffix=".jsonl")
+    os.close(shadow_log_fd)
+    os.unlink(shadow_log_path)          # the check creates it on first write
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps({"type": "user", "origin": {"kind": "user"},
+                "message": {"content": [{"type": "text", "text": "status?"}]}}) + "\n")
+            fh.write(json.dumps({"type": "assistant",
+                "message": {"content": [{"type": "text", "text": assistant}]}}) + "\n")
+        env = dict(os.environ)
+        env["CARR_GATE_LIFECYCLE_PATH"] = lifecycle_path
+        env["CARR_CONDUCT_SHADOW_LOG"] = shadow_log_path
+        p = subprocess.run([sys.executable, HOOK],
+            input=json.dumps({"transcript_path": path, "stop_hook_active": False,
+                              "session_id": session}),
+            capture_output=True, text=True, timeout=30, env=env)
+        out = (p.stdout or "").strip()
+        blocked = False
+        if out:
+            try:
+                blocked = json.loads(out).get("decision") == "block"
+            except Exception:
+                blocked = False
+        rows = []
+        if os.path.exists(shadow_log_path):
+            with open(shadow_log_path) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line:
+                        rows.append(json.loads(line))
+        return blocked, rows
+    finally:
+        for p_ in (path, lifecycle_path, shadow_log_path):
+            try: os.unlink(p_)
+            except Exception: pass
+
+
+VOCAB_TEXT = ("This will unlock seamless growth for the practice and streamline "
+              "the whole leasing pipeline going forward.")
+CONTRAST_TEXT = ("It's not about the schema, it's about the underlying data model "
+                  "that the whole export chain depends on.")
+CLEAN_TEXT = ("Fixed the exporter. It wrote to draft because CARR_EXPORT_LIVE was "
+              "unset; refresh-rules.sh sets it. Verified: counts match.")
+# A vocab word inside INLINE single-backtick code, nowhere else in the
+# message. Triple-fenced code is already removed one step earlier by
+# strip_fences() regardless of masking, so that shape does not actually
+# exercise mask() at all -- caught by a mutation run (masked=prose instead of
+# mask(prose)) that this exact case originally still passed. Only mask()'s
+# own inline-backtick pattern blanks a SINGLE-backtick span, so this is the
+# case that actually depends on mask() running.
+MASKED_VOCAB_TEXT = ("Renamed the helper. The old one was called `delve`, "
+                     "nothing else changed.")
+
+
+def shadow_writing_cases():
+    """(name, assert_fn) — the WR-000019 S8 pre-send writing-shadow check."""
+    results = []
+
+    # Shadow mode ON, a real 5be2f462 construction: one row, never blocks.
+    blocked, rows = run_shadow_case(VOCAB_TEXT, mode="shadow")
+    results.append(("shadow-on-vocab-logs-not-blocks",
+                     (not blocked) and len(rows) == 1 and rows[0]["rule"] == "5be2f462"
+                     and "vocab" in rows[0]["classes"]))
+
+    blocked, rows = run_shadow_case(CONTRAST_TEXT, mode="shadow")
+    results.append(("shadow-on-contrast-logs-not-blocks",
+                     (not blocked) and len(rows) == 1
+                     and "contrast-reframe" in rows[0]["classes"]))
+
+    # Shadow mode ON, clean prose: no row at all (false-positive baseline).
+    blocked, rows = run_shadow_case(CLEAN_TEXT, mode="shadow")
+    results.append(("shadow-on-clean-no-row", (not blocked) and len(rows) == 0))
+
+    # A vocab word that exists ONLY inside a fence: masking must suppress it.
+    blocked, rows = run_shadow_case(MASKED_VOCAB_TEXT, mode="shadow")
+    results.append(("shadow-on-fenced-vocab-masked", (not blocked) and len(rows) == 0))
+
+    # Shadow mode OFF (announce, wrong string) — the check must not even look.
+    blocked, rows = run_shadow_case(VOCAB_TEXT, mode="announce")
+    results.append(("shadow-off-mode-announce-no-row", (not blocked) and len(rows) == 0))
+
+    # Key entirely absent — same as off, never a KeyError.
+    blocked, rows = run_shadow_case(VOCAB_TEXT, mode=None)
+    results.append(("shadow-key-absent-no-row", (not blocked) and len(rows) == 0))
+
+    # session=='selftest' is skipped even with shadow on — the production skip
+    # this feature relies on instead of a second isolation mechanism.
+    blocked, rows = run_shadow_case(VOCAB_TEXT, mode="shadow", session="selftest")
+    results.append(("shadow-selftest-session-skipped", (not blocked) and len(rows) == 0))
+
+    return results
+
+
 def main():
     if not os.path.exists(HOOK):
         print(f"FAIL: hook not found at {HOOK}"); return 1
@@ -196,6 +312,11 @@ def main():
         if not ok: bad.append(name)
         print(f"  {'ok  ' if ok else 'FAIL'} {name:28} "
               f"want={'BLOCK' if expect else 'allow'} got={'BLOCK' if got else 'allow'}")
+
+    for name, ok in shadow_writing_cases():
+        passed, failed = (passed+1, failed) if ok else (passed, failed+1)
+        if not ok: bad.append(name)
+        print(f"  {'ok  ' if ok else 'FAIL'} {name:28} (WR-000019 S8 writing shadow)")
 
     print()
     print(f"conduct-gate-selftest: {passed}/{passed+failed} passed")

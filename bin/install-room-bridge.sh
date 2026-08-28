@@ -93,6 +93,16 @@ if [ "$RENDER_ONLY" -eq 1 ]; then
   exit 0
 fi
 
+# The bridge's reviewed activation path owns the one-time bootstrap of its
+# dedicated Engineering Passport desk.  This is intentionally here—not in a
+# normal 60-second bridge cycle—so an operator can inspect the exact desk
+# readback before the LaunchAgent gets a chance to seek admitted work.  A
+# refusal leaves the existing LaunchAgent untouched.
+if ! "$REPO/bin/install-engineering-codex-desk.sh"; then
+  print -u2 -- "install-room-bridge: Engineering Codex desk bootstrap refused; LaunchAgent unchanged"
+  exit 1
+fi
+
 mkdir -p "$HOME/Library/LaunchAgents" "$REPO/out"
 /usr/bin/install -m 644 "$TMP" "$DEST"
 

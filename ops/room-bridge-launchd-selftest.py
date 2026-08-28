@@ -9,10 +9,12 @@ verb.
 """
 from __future__ import annotations
 
+import json
 import os
 import plistlib
 import re
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -76,6 +78,8 @@ def main() -> int:
     launch_path = environment.get("PATH", "")
     check("template PATH includes the home-relative Hermes bin",
           "{{HOME}}/.local/bin:" in launch_path, failures)
+    check("template explicitly enables the lease-bound Engineering controller",
+          environment.get("CARR_ENGINEERING_DISPATCH_ENABLED") == "true", failures)
     check("template has no concrete user home", not CONCRETE_HOME.search(template), failures)
     check("template retains the repository placeholder", "{{REPO}}" in template, failures)
     check("installer renders {{REPO}}", "s|{{REPO}}|$REPO_REPLACEMENT|g" in installer, failures)
@@ -83,6 +87,8 @@ def main() -> int:
     check("installer has no concrete user home", not CONCRETE_HOME.search(installer), failures)
     check("installer refuses unresolved tokens", r"grep -Eq '\{\{[^}]+\}\}'" in installer, failures)
     check("installer exposes a render-only seam", "--render-only" in installer, failures)
+    check("normal room-bridge activation bootstraps the dedicated Engineering desk",
+          '"$REPO/bin/install-engineering-codex-desk.sh"' in installer, failures)
     check("installer exposes a named plist validator", "validate_plist()" in installer, failures)
     portable_mktemp = 'mktemp "${TMPDIR:-/tmp}/carr-room-bridge-plist.XXXXXX"'
     check("installer pins a GNU/macOS portable mktemp template",
@@ -108,6 +114,8 @@ def main() -> int:
     concrete_path = concrete.get("EnvironmentVariables", {}).get("PATH", "")
     check("rendered PATH points at the fixture home-local bin",
           concrete_path.startswith(f"{fixture_home}/.local/bin:"), failures)
+    check("rendered controller enablement remains explicit",
+          concrete.get("EnvironmentVariables", {}).get("CARR_ENGINEERING_DISPATCH_ENABLED") == "true", failures)
     arguments = concrete.get("ProgramArguments", [])
     check("rendered program arguments point at the fixture checkout",
           any(fixture_repo in str(arg) for arg in arguments), failures)
@@ -127,6 +135,24 @@ def main() -> int:
     validator = installer.index("validate_plist \"$TMP\"")
     check("plist validation precedes destination install",
           validator >= 0 and validator < install, failures)
+    engineering_bootstrap = installer.index('"$REPO/bin/install-engineering-codex-desk.sh"')
+    check("Engineering desk bootstrap precedes destination install",
+          engineering_bootstrap >= 0 and engineering_bootstrap < install, failures)
+
+    # The installer lane is only truthful if this non-CI activation path is
+    # visible to the repository reachability audit, not just to this test.
+    reachability = subprocess.run(
+        [sys.executable, str(REPO / "ops" / "reachability-check.py"), "--repo", str(REPO), "--json"],
+        capture_output=True, text=True,
+    )
+    try:
+        reachability_payload = json.loads(reachability.stdout or "{}")
+        reachability_rows = reachability_payload.get("findings", []) if isinstance(reachability_payload, dict) else []
+    except json.JSONDecodeError:
+        reachability_rows = [{"entry": "unparseable"}]
+    check("Engineering desk installer has a live room-bridge activation door",
+          not any(row.get("lane") == "installer" and row.get("entry") == "bin/install-engineering-codex-desk.sh"
+                  for row in reachability_rows), failures)
 
     # Exercise the actual zsh/sed renderer, not a Python reimplementation.
     # A valid spaced HOME must produce a parseable plist and never touch the

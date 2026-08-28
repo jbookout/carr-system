@@ -324,13 +324,21 @@ def main() -> int:
                 if fetchone_required(cur.fetchone(), f"PUBLIC collector read {relation}")[0]:
                     fail(f"PUBLIC can read collector projection {relation}")
 
-            # An expired or unstamped re-verification queue is not a current
-            # verified queue.  A model input must therefore refuse it instead
-            # of relabeling its provenance as verification.
+            # An expired, unstamped, or never-recorded re-verification queue
+            # is not a current verified queue.  A model input must therefore
+            # refuse it instead of relabeling its provenance as verification.
+            # 0387 added bands 1-4 (active vendors/leads/clients with a
+            # never-filled profile field -- no category/city/county/
+            # verticals/title/org/email/phone on file): those rows carry no
+            # record_flag at all, so 'not_recorded' is their honest,
+            # DISTINCT reason -- never 'expired'/'unstamped_volatile' (both
+            # of which claim a stale record_flag exists) and never silently
+            # folded into either. Keep this allowlist identical to
+            # lib.control_plane_collectors_records.REVERIFICATION_DUE_REASONS.
             cur.execute("""
                 select count(*) from public.v_control_plane_enrichment_queue
                  where current_verification_status='verified'
-                    or reverification_due not in ('expired','unstamped_volatile')
+                    or reverification_due not in ('expired','unstamped_volatile','not_recorded')
             """)
             if fetchone_required(cur.fetchone(), "enrichment truthfulness")[0] != 0:
                 fail("expired verification evidence is represented as current verified evidence")
@@ -782,6 +790,16 @@ def main() -> int:
                         '{"predicate":"fixture","receipt_kind":"fixture"}',
                         '{"status":"enabled"}')
             """, (fenced_definition,))
+            # ops.enqueue_job (0332) gates canary behind an accepted shadow
+            # acceptance row.  carr_jobs/carr_writer hold SELECT only on
+            # ops.workflow_acceptance, so this evidence is seeded directly as
+            # the owner, before the role switch below -- exactly what a real
+            # cutover would have on file before this fixture's canary mode.
+            cur.execute("""
+                insert into ops.workflow_acceptance
+                  (workflow_key,workflow_version,mode,status,receipt_ref,accepted_by)
+                values (%s,1,'shadow','accepted','fixture:db-gate-fenced-shadow','db-gate-fixture')
+            """, (fenced_definition,))
             set_local_role(cur, "carr_jobs")
             cur.execute("select (ops.enqueue_job(%s,1,%s,%s,%s,'canary')).id",
                         (fenced_definition, "2026-08-15T11:59:00Z",
@@ -1024,6 +1042,18 @@ def main() -> int:
                 fail("successful job did not produce exactly one receipt")
             cur.execute("reset role")
 
+            # This fixture definition is about to enqueue canary and live
+            # (here, and again below for the canary-completion and mode-
+            # isolation fixtures).  Seed both acceptance tiers as the owner,
+            # exactly once, before any of that: carr_jobs/carr_writer hold
+            # SELECT only on ops.workflow_acceptance.
+            cur.execute("""
+                insert into ops.workflow_acceptance
+                  (workflow_key,workflow_version,mode,status,receipt_ref,accepted_by)
+                values (%s,1,'shadow','accepted','fixture:db-gate-definition-shadow','db-gate-fixture'),
+                       (%s,1,'canary','accepted','fixture:db-gate-definition-canary','db-gate-fixture')
+            """, (definition, definition))
+
             # Shadow, canary, and live replacements at one scheduled instant
             # are distinct ledger identities.  Per-mode scheduler idempotency
             # must not collapse the evidence required for cutover.
@@ -1193,6 +1223,101 @@ def main() -> int:
                         (timeout_job,))
             if cur.fetchone() != ("timed_out","execution_timeout"):
                 fail("timeout attempt evidence was not preserved")
+
+            # ops.enqueue_job's mode ladder (migration 0332): canary needs an
+            # accepted shadow acceptance row and an enabled canary contract;
+            # live needs accepted canary, except a workflow whose contract
+            # explicitly disables canary, where accepted shadow alone
+            # suffices.  Two fixture definitions cover both contract shapes.
+            ladder_enabled_definition = f"db-gate-ladder-enabled-{uuid.uuid4()}"
+            cur.execute("""
+                insert into ops.job_definition
+                  (key,version,enabled,risk,execution_kind,execution_contract,
+                   recurrence,retry_policy,deduplication,completion_contract,
+                   legacy_schedule)
+                values (%s,1,true,'green','deterministic','{"entrypoint":"fixture"}',
+                        '{"cron":"* * * * *","timezone":"UTC"}',
+                        '{"max_attempts":2,"base_seconds":1,"cap_seconds":2,"timeout_seconds":30,"backoff":"exponential"}',
+                        '{"key_template":"ladder-enabled-fixture"}',
+                        '{"predicate":"fixture","receipt_kind":"fixture"}',
+                        '{"status":"enabled"}')
+            """, (ladder_enabled_definition,))
+            ladder_disabled_definition = f"db-gate-ladder-disabled-{uuid.uuid4()}"
+            cur.execute("""
+                insert into ops.job_definition
+                  (key,version,enabled,risk,execution_kind,execution_contract,
+                   recurrence,retry_policy,deduplication,completion_contract,
+                   legacy_schedule)
+                values (%s,1,true,'green','deterministic',
+                        '{"entrypoint":"fixture","canary":{"enabled":false,"reason":"db-gate fixture: no isolated destination"}}',
+                        '{"cron":"* * * * *","timezone":"UTC"}',
+                        '{"max_attempts":2,"base_seconds":1,"cap_seconds":2,"timeout_seconds":30,"backoff":"exponential"}',
+                        '{"key_template":"ladder-disabled-fixture"}',
+                        '{"predicate":"fixture","receipt_kind":"fixture"}',
+                        '{"status":"enabled"}')
+            """, (ladder_disabled_definition,))
+
+            set_local_role(cur, "carr_jobs")
+            cur.execute("savepoint ladder_canary_without_evidence_refusal")
+            try:
+                cur.execute("select (ops.enqueue_job(%s,1,%s,%s,%s,'canary')).id",
+                            (ladder_enabled_definition, "2026-08-15T12:03:00Z",
+                             '{"fixture":"ladder-canary-no-evidence"}',
+                             f"fixture-ladder-canary-no-evidence-{uuid.uuid4()}"))
+                fail("canary enqueue with no acceptance evidence was admitted")
+            except psycopg.Error as exc:
+                if "no accepted shadow acceptance evidence" not in str(exc):
+                    fail(f"canary refusal without evidence raised the wrong exception: {exc}")
+                cur.execute("rollback to savepoint ladder_canary_without_evidence_refusal")
+            cur.execute("reset role")
+
+            # As the owner: seed accepted shadow for the canary-enabled
+            # fixture only.  It must not yet be enough for live.
+            cur.execute("""
+                insert into ops.workflow_acceptance
+                  (workflow_key,workflow_version,mode,status,receipt_ref,accepted_by)
+                values (%s,1,'shadow','accepted','fixture:db-gate-ladder-enabled-shadow','db-gate-fixture')
+            """, (ladder_enabled_definition,))
+
+            set_local_role(cur, "carr_jobs")
+            cur.execute("select (ops.enqueue_job(%s,1,%s,%s,%s,'canary')).id",
+                        (ladder_enabled_definition, "2026-08-15T12:03:00Z",
+                         '{"fixture":"ladder-canary-with-shadow"}',
+                         f"fixture-ladder-canary-with-shadow-{uuid.uuid4()}"))
+            if fetchone_required(cur.fetchone(), "canary enqueue with accepted shadow")[0] is None:
+                fail("canary enqueue with accepted shadow evidence was refused")
+            cur.execute("savepoint ladder_live_without_canary_evidence_refusal")
+            try:
+                cur.execute("select (ops.enqueue_job(%s,1,%s,%s,%s,'live')).id",
+                            (ladder_enabled_definition, "2026-08-15T12:03:00Z",
+                             '{"fixture":"ladder-live-shadow-only"}',
+                             f"fixture-ladder-live-shadow-only-{uuid.uuid4()}"))
+                fail("live enqueue with only accepted shadow, canary contractually enabled, was admitted")
+            except psycopg.Error as exc:
+                if "no accepted canary acceptance evidence" not in str(exc):
+                    fail(f"live refusal without canary evidence raised the wrong exception: {exc}")
+                cur.execute("rollback to savepoint ladder_live_without_canary_evidence_refusal")
+            cur.execute("reset role")
+
+            # As the owner: seed accepted shadow for the canary-disabled
+            # fixture.  Its contract's explicit canary.enabled=false makes
+            # this the highest evidence it can ever produce, so it alone
+            # must satisfy live.
+            cur.execute("""
+                insert into ops.workflow_acceptance
+                  (workflow_key,workflow_version,mode,status,receipt_ref,accepted_by)
+                values (%s,1,'shadow','accepted','fixture:db-gate-ladder-disabled-shadow','db-gate-fixture')
+            """, (ladder_disabled_definition,))
+
+            set_local_role(cur, "carr_jobs")
+            cur.execute("select (ops.enqueue_job(%s,1,%s,%s,%s,'live')).id",
+                        (ladder_disabled_definition, "2026-08-15T12:03:00Z",
+                         '{"fixture":"ladder-live-canary-disabled"}',
+                         f"fixture-ladder-live-canary-disabled-{uuid.uuid4()}"))
+            if fetchone_required(cur.fetchone(),
+                                 "live enqueue for a canary-disabled contract with accepted shadow")[0] is None:
+                fail("live enqueue was refused for a contract whose canary is disabled with accepted shadow evidence")
+            cur.execute("reset role")
 
             # Retirement remains shut until accepted shadow AND canary receipts.
             cur.execute("savepoint early_cutover")

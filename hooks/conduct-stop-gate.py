@@ -72,6 +72,41 @@ AUDIT SIGNAL (the thing the rule-shape gate demands, and the reason the
 development-kit ledgers died silently): every fire appends one JSON line to
 out/conduct-gate.jsonl. Zero fires and zero instrumentation look identical
 without it. `run.sh health` reads the count; the return-brief prints it.
+
+WR-000019 SLICE S8 — THE WRITING SHADOW CHECK (rule 5be2f462). The 47-message
+carry corpus in out/chat-lint-carry/ is chat-lint-gate.py's own post-hoc
+record: it fires at Stop but only ever CARRIES a note to the next turn
+(hooks/chat-lint-carryover.py), because the finding surfaces after the message
+has already reached Joe and "cannot be unsent" — the exact phrase its own
+carried note uses. Of that corpus, 25 of 48 recorded findings are rule
+5be2f462's own vocab / contrast-reframe / contrast-reframe-split
+constructions — the only class in that corpus this gate does not already
+reach some other way (bare ids are conduct's own bare_id_hits() below,
+already blocking; the rest — multi-clause-task, unlinked-file-ask,
+unnamed-deal-question, confidentiality-access-boundary — are rules
+38b15dc6/8c1e6057/c315befa/d7f74c93, out of this slice's DoD).
+
+shadow_writing_check() reuses chat-lint-gate.py's OWN writing_rules() /
+strip_fences() — the identical RULES-table lookup, not a second copy of the
+regex (rule a8c55a47) — so the SAME 5be2f462 detection that carries a note
+post-send there also runs PRE-SEND here, at the Stop boundary this file
+already owns. It is folded into THIS gate rather than given its own Stop
+reopener, because Joe's 2026-08-23 rationing capped Stop reopeners at three
+(core conduct — this file — completion-evidence, drift-assertion) and a
+banned-construction finding on the turn's own final message is a conduct
+shape, not a new one.
+
+BORN SHADOW, LOG-ONLY, NEVER A BLOCKING INPUT. A gate-lifecycle.json entry
+keyed "conduct-stop-gate.py:chat-writing-shadow" carries the mode flag;
+shadow_writing_check() consults it and, only when it reads "shadow", appends
+a finding row to the DEDICATED out/conduct-gate-shadow.jsonl — never to
+out/conduct-gate.jsonl, whose catch_metric for this gate's OWN lifecycle
+entry already treats every row there as "genuine detection" (row_exists);
+mixing an unpromoted, log-only finding into that stream would corrupt the
+existing enforcing metric. The finding never enters `classes`/`findings` and
+never changes whether this turn blocks — Joe promotes it from
+ops/config/gate-lifecycle.json once the shadow window shows an acceptable
+false-positive rate, the same lifecycle every other shadow gate here follows.
 """
 import json
 import os
@@ -80,6 +115,7 @@ import sys
 from datetime import datetime, timezone
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HOOKS = os.path.dirname(os.path.abspath(__file__))
 LOG = os.path.join(REPO, "out", "conduct-gate.jsonl")
 DEBUG = os.path.join(REPO, "out", "conduct-gate.log")
 
@@ -87,11 +123,23 @@ DEBUG = os.path.join(REPO, "out", "conduct-gate.log")
 # hooks/escalation-gate.py, which catches the same behaviour one moment earlier
 # (as an AskUserQuestion tool call rather than as prose). Two moments, one rule,
 # one copy.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, HOOKS)
+sys.path.insert(0, REPO)
 from conduct_patterns import (  # noqa: E402
     OFFLOAD, SOFT_WAIT, FENCE, BARE_FENCE_CMD, HANDOFF_PROSE,
     HUMAN_WANTS_COMMAND, HUMAN_WANTS_CHOICE, PROTECTED, bare_id_hits,
 )
+
+# ── WR-000019 S8: the writing shadow check (rule 5be2f462) ─────────────────
+# Overridable by env for the selftest, same convention chat-lint-gate.py's
+# repo_root() and stop_latch.py's CARR_STOP_LATCH_STATE use: a fixture gets its
+# own files so two concurrent runs — or a real session running alongside a
+# selftest — never share, and can never leave a real trace behind.
+GATE_LIFECYCLE_PATH = (os.environ.get("CARR_GATE_LIFECYCLE_PATH")
+                        or os.path.join(REPO, "ops", "config", "gate-lifecycle.json"))
+SHADOW_LOG = (os.environ.get("CARR_CONDUCT_SHADOW_LOG")
+              or os.path.join(REPO, "out", "conduct-gate-shadow.jsonl"))
+SHADOW_GATE_KEY = "conduct-stop-gate.py:chat-writing-shadow"
 
 
 def now():
@@ -404,6 +452,95 @@ def scan(assistant, human_last, denied=()):
     return (len(findings) > 0), findings
 
 
+def _shadow_mode_enabled():
+    """Read the SHADOW_GATE_KEY's mode from ops/config/gate-lifecycle.json.
+
+    FAILS CLOSED TO "DO NOTHING", the opposite direction from every blocking
+    check in this file. Every other fail-open in this module means "let the
+    turn end" because a wedged session is the worse failure; here the worse
+    failure would be a missing or corrupt config silently turning ON a scan
+    every turn pays for. So unreadable, missing, or malformed config all mean
+    the same thing: the shadow check does not run this turn, same as if the
+    entry did not exist. Never raises.
+    """
+    try:
+        with open(GATE_LIFECYCLE_PATH) as fh:
+            data = json.load(fh)
+        entry = (data.get("gates") or {}).get(SHADOW_GATE_KEY) or {}
+        return entry.get("mode") == "shadow"
+    except Exception:
+        return False
+
+
+def _writing_shadow_findings(assistant):
+    """[(rule_id, quote)] for 5be2f462's vocab / contrast-reframe /
+    contrast-reframe-split constructions, on the SAME final assistant message
+    this gate already scans.
+
+    Imports chat-lint-gate.py's own writing_rules()/strip_fences() through
+    lib.loadpy (the same route loose-work-gate.py uses for delegation-gate.py
+    and ledger-sweep.py) rather than a second copy of writing-lint.py's RULES
+    table — one detector, two moments (rule a8c55a47). A rule added to that
+    table reaches both surfaces with nobody editing this file.
+    """
+    try:
+        from lib.loadpy import load_module_from_path
+        chat_lint = load_module_from_path(
+            "_csg_chat_lint", os.path.join(HOOKS, "chat-lint-gate.py"))
+    except Exception as exc:
+        dlog(f"shadow-writing ALLOW(import-failed) {exc}")
+        return []
+    try:
+        prose = chat_lint.strip_fences(assistant)
+        rules, mask = chat_lint.writing_rules()
+        masked = mask(prose)
+        found = []
+        for rid, pat, what, fix in rules:
+            m = re.search(pat, masked, re.I)
+            if m:
+                quote = prose[max(0, m.start() - 20):m.end() + 20].replace("\n", " ")
+                found.append((rid, quote.strip()[:90]))
+        return found
+    except Exception as exc:
+        dlog(f"shadow-writing ALLOW(scan-failed) {exc}")
+        return []
+
+
+def shadow_writing_check(assistant, session):
+    """Log-only pre-send measurement for rule 5be2f462, born SHADOW this slice
+    (WR-000019 S8). NEVER contributes to `classes`/`findings` and NEVER blocks
+    — it exists so Joe can see the false-positive rate before promoting it
+    from ops/config/gate-lifecycle.json, the same lifecycle every shadow gate
+    in that file follows. Writes to the DEDICATED out/conduct-gate-shadow.jsonl,
+    never to out/conduct-gate.jsonl (see module docstring for why mixing them
+    would be wrong). Fixtures (session 'selftest') are skipped, same convention
+    audit() uses elsewhere in this file — the selftest for this feature
+    redirects CARR_GATE_LIFECYCLE_PATH/CARR_CONDUCT_SHADOW_LOG to its own
+    files and uses a distinct session id instead of relying on this skip.
+    """
+    if session == "selftest":
+        return
+    if not _shadow_mode_enabled():
+        return
+    try:
+        findings = _writing_shadow_findings(assistant)
+        if not findings:
+            return
+        os.makedirs(os.path.dirname(SHADOW_LOG), exist_ok=True)
+        with open(SHADOW_LOG, "a") as fh:
+            fh.write(json.dumps({
+                "ts": now(),
+                "hook": "conduct-stop-gate-shadow",
+                "rule": "5be2f462",
+                "classes": sorted({f[0] for f in findings}),
+                "session": session,
+                "excerpt": findings[0][1][:200],
+                "would_have_blocked": True,
+            }) + "\n")
+    except Exception as exc:
+        dlog(f"shadow-writing ALLOW(log-failed) {exc}")
+
+
 REASON_HEAD = (
     "CONDUCT GATE — this turn is not finished. The session is being held open, "
     "not punished; fix the turn and it will close.\n\n"
@@ -536,6 +673,12 @@ def main():
             sys.exit(0)
 
         fired, findings = scan(assistant, last_human, denied_commands(recs, start))
+
+        # WR-000019 S8: the writing shadow check runs regardless of whether
+        # any OTHER conduct class fired — it is measuring its own catch rate
+        # independently, and it never influences `fired` either way.
+        shadow_writing_check(assistant, payload.get("session_id"))
+
         if not fired:
             sys.exit(0)
 

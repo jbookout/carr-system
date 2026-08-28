@@ -203,10 +203,15 @@ def compile_catalog(path: pathlib.Path = MAP) -> list[dict[str, Any]]:
     return compile_rows(load_map(path), tracked_files())
 
 
+# %s, not $1. psycopg3 binds by %s and this module always used the numbered form,
+# so --apply raised "the query has 0 placeholders but 5 parameters were passed" on
+# its first statement and had never once written a row — while
+# ops/control-catalog-parity-gate.py names this exact command as the remedy for the
+# drift it reports. The advertised fix was broken for as long as it existed.
 UPSERT = """
 insert into ops.enforcement_control_catalog
     (control_key, implementation_ref, test_ref, enforcement_class, installed, verified_at, updated_at)
-values ($1, $2, $3, $4, $5, case when $5 then now() else null end, now())
+values (%s, %s, %s, %s, %s, case when %s then now() else null end, now())
 on conflict (control_key) do update set
     implementation_ref = excluded.implementation_ref,
     test_ref           = excluded.test_ref,
@@ -257,13 +262,31 @@ def main() -> int:
         # is a decision, not a sync's business.
         cur.execute("select control_key from ops.enforcement_control_catalog")
         existing = {r[0] for r in cur.fetchall()}
+        # EACH ROW ON ITS OWN SAVEPOINT. ops.refuse_live_approved_control_rewrite()
+        # makes a control that backs an approved rule immutable, so a single such
+        # row aborted the whole transaction and the sync could never apply against
+        # a production that had approved anything. A refusal is reported and the
+        # remaining rows still land; rewriting a live approved control is a
+        # deliberate act, not something a sync should force.
+        refused = []
         for r in rows:
-            cur.execute(UPSERT, (r["control_key"], r["implementation_ref"], r["test_ref"],
-                                 r["enforcement_class"], r["installed"]))
+            cur.execute("savepoint sync_row")
+            try:
+                cur.execute(UPSERT, (r["control_key"], r["implementation_ref"], r["test_ref"],
+                                     r["enforcement_class"], r["installed"], r["installed"]))
+                cur.execute("release savepoint sync_row")
+            except psycopg.errors.RaiseException as exc:
+                cur.execute("rollback to savepoint sync_row")
+                refused.append((r["control_key"], str(exc).splitlines()[0]))
         conn.commit()
         stranded = sorted(existing - {r["control_key"] for r in rows})
 
-    print(f"applied {len(rows)} control(s)")
+    print(f"applied {len(rows) - len(refused)} of {len(rows)} control(s)")
+    if refused:
+        print("  REFUSED by the live-approved-control guard — these back an approved rule "
+              "and are immutable; changing one is a deliberate act:")
+        for key, why in refused:
+            print(f"    {key}: {why}")
     if stranded:
         print("  IN THE DATABASE BUT NO LONGER DECLARED — left in place deliberately; "
               "removing one could un-enforce an active rule:")

@@ -35,13 +35,15 @@ from typing import Any
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from lib.control_plane import deterministic_args, validate_manifest  # noqa: E402
+from lib.control_plane import (EntrypointFailure, EntrypointNotConfigured, deterministic_args,
+                               resolve_auto_mode, validate_manifest)  # noqa: E402
 from pipelines.availability_matcher import canary_report  # noqa: E402
+from lib.control_plane_collectors_records import REVERIFICATION_DUE_REASONS  # noqa: E402
 from lib.control_plane_content_fuel import (ContentFuelContractError,
                                             validate_content_fuel_proposal,
                                             validate_rotation_policy)  # noqa: E402
 from lib.control_plane_facts import CompositeFactCollector, evaluate_stage, fact_envelope  # noqa: E402
-from lib.control_plane_inputs import build_input  # noqa: E402
+from lib.control_plane_inputs import NoEligibleRecords, build_input  # noqa: E402
 from lib.control_plane_proposal_contracts import (ProposalContractError,
                                                   validate_proposal_contract)  # noqa: E402
 from lib.control_plane_runner import BudgetExceeded, CognitionDispatcher, due_workflows  # noqa: E402
@@ -49,9 +51,15 @@ from lib.control_plane_runtime_collectors import RuntimeCanonicalEvidenceCollect
 from lib.control_plane_scheduler_cutover import (CutoverRefusal, scheduler_launchd_rows,
                                                   scheduler_provider_rows,
                                                   scheduler_surface_rows)  # noqa: E402
+from lib.secret_redaction import redacted_tail, sensitive_env_values  # noqa: E402
 
 MANIFEST_PATH = REPO / "ops" / "config" / "control-plane-workflows.v1.json"
 SCHEDULER_CUTOVER_REGISTRY_PATH = REPO / "ops" / "config" / "control-plane-scheduler-cutover.v1.json"
+
+# EX_CONFIG -- this repo's standing convention (bin/nightly.sh and every other
+# launchd chain) for "the step ran, found a credential or setting it needs
+# absent, wrote nothing, and said so". Not a failure; see EntrypointNotConfigured.
+EX_CONFIG = 78
 
 
 def load_manifest() -> dict[str, Any]:
@@ -382,6 +390,53 @@ def enqueue_due(manifest: dict[str, Any], instant: datetime,
             cur.execute("select (ops.enqueue_job(%s,%s,%s,%s,%s,%s)).id",
                         (key,version,instant,json.dumps(payload),idem,mode))
             rows.append({"workflow": key, "job_id": str(cur.fetchone()[0])})
+        conn.commit()
+    return rows
+
+
+def _resolve_auto_modes(cur: Any, due: list[dict[str, Any]]) -> dict[str, str]:
+    """Look up each due workflow's own acceptance ladder tier, per workflow.
+
+    One query per workflow keeps this legible; ``due`` is bounded by cron
+    matches for a single minute, never the whole manifest.
+    """
+    resolved: dict[str, str] = {}
+    for workflow in due:
+        key, version = workflow["key"], workflow["version"]
+        cur.execute(
+            "select mode,status from ops.workflow_acceptance "
+            "where workflow_key=%s and workflow_version=%s",
+            (key, version),
+        )
+        acceptance_rows = [{"mode": row[0], "status": row[1]} for row in cur.fetchall()]
+        canary_contract = workflow.get("execution", {}).get("canary")
+        resolved[key] = resolve_auto_mode(canary_contract, acceptance_rows)
+    return resolved
+
+
+def enqueue_due_auto(manifest: dict[str, Any], instant: datetime) -> list[dict[str, str]]:
+    """Enqueue every due workflow at its own ladder-resolved tier.
+
+    Unlike ``enqueue_due``, which pins one mode for the whole batch, each
+    workflow here is resolved independently from its own acceptance evidence.
+    ``ops.enqueue_job`` (migration 0332) remains the authoritative guard: a
+    stale or wrong resolution here only produces a refused enqueue for that
+    one workflow, never an ungated one.
+    """
+    due = due_workflows(manifest, instant)
+    rows: list[dict[str, str]] = []
+    with connect() as conn, conn.cursor() as cur:
+        resolved = _resolve_auto_modes(cur, due)
+        for workflow in due:
+            key, version = workflow["key"], workflow["version"]
+            mode = resolved[key]
+            if mode == "canary" and workflow.get("execution", {}).get("kind") == "deterministic":
+                deterministic_args(workflow["execution"], mode)
+            idem = f"schedule:{mode}:{key}:v{version}:{instant.isoformat()}"
+            payload = {"workflow_key": key, "scheduled_for": instant.isoformat()}
+            cur.execute("select (ops.enqueue_job(%s,%s,%s,%s,%s,%s)).id",
+                        (key,version,instant,json.dumps(payload),idem,mode))
+            rows.append({"workflow": key, "job_id": str(cur.fetchone()[0]), "mode": mode})
         conn.commit()
     return rows
 
@@ -719,8 +774,18 @@ class RuntimeWorkflowFactCollector:
             subjects = self.input_payload.get('subjects')
             lanes = self.input_payload.get('lanes')
             posts = self.input_payload.get('source_posts')
-            if fact == 'enrichment.reverification_due_nonempty': return isinstance(subjects, list) and bool(subjects) and all(isinstance(x, dict) and x.get('current_verification_status') == 'not_current' and x.get('reverification_due') in {'expired','unstamped_volatile'} for x in subjects)
-            if fact == 'enrichment.exactly_40_prioritized': return isinstance(subjects, list) and len(subjects) == 40 and all(isinstance(x, dict) and isinstance(x.get('priority'), int) for x in subjects)
+            # 'not_recorded' (0387) is a never-verified profile gap (bands
+            # 1-4: no category/city/county/verticals/title/org/email/phone
+            # on file), not a stale record_flag row -- it is exactly as
+            # "not current" as 'expired'/'unstamped_volatile' and must stay
+            # admissible here. Keep this set identical to
+            # lib.control_plane_collectors_records.REVERIFICATION_DUE_REASONS.
+            if fact == 'enrichment.reverification_due_nonempty': return isinstance(subjects, list) and bool(subjects) and all(isinstance(x, dict) and x.get('current_verification_status') == 'not_current' and x.get('reverification_due') in REVERIFICATION_DUE_REASONS for x in subjects)
+            # Name predates 0387: a short week (fewer than 40 eligible
+            # records) is the normal end state as the book gets covered, so
+            # this admits 1..40, not only exactly 40 -- matching
+            # control_plane_collectors_records._values's own relaxation.
+            if fact == 'enrichment.exactly_40_prioritized': return isinstance(subjects, list) and 1 <= len(subjects) <= 40 and all(isinstance(x, dict) and isinstance(x.get('priority'), int) for x in subjects)
             if fact == 'enrichment.reverification_priority_ordered': return isinstance(subjects, list) and bool(subjects) and all(isinstance(x, dict) for x in subjects) and [x.get('priority') for x in subjects] == list(range(1, len(subjects) + 1))
             if fact == 'deal_history.unverified_counterparties_exist': return isinstance(subjects, list) and bool(subjects) and all(isinstance(x, dict) and x.get('verification') == 'unverified' for x in subjects)
             if fact == 'deal_history.slice_size_within_policy':
@@ -960,7 +1025,17 @@ def _execute_deterministic(workflow: dict[str, Any], payload: dict[str, Any],
     proc = subprocess.run([str(path), *args], cwd=REPO, env=env,
                           input=stdin_text, capture_output=True, text=True, timeout=timeout)
     if proc.returncode:
-        raise RuntimeError(f"entrypoint exited {proc.returncode}")
+        # The child ran uncredentialed (see the env build above), but its
+        # stdout/stderr can still ECHO a secret from a misconfigured call or a
+        # stack trace. known_secrets draws on THIS process's own environment
+        # -- the runner's -- not the child's deliberately-scrubbed one.
+        known_secrets = sensitive_env_values(os.environ)
+        stdout_tail = redacted_tail(proc.stdout, known_secrets=known_secrets)
+        stderr_tail = redacted_tail(proc.stderr, known_secrets=known_secrets)
+        if proc.returncode == EX_CONFIG:
+            raise EntrypointNotConfigured(stdout_tail=stdout_tail, stderr_tail=stderr_tail)
+        raise EntrypointFailure(
+            proc.returncode, stdout_tail=stdout_tail, stderr_tail=stderr_tail)
     return {"entrypoint": execution["entrypoint"], "mode": mode,
             "args": args, "exit_code": proc.returncode,
             "stdout_tail": proc.stdout[-2000:]}
@@ -1170,6 +1245,24 @@ def _post_execution_facts(
         input_payload=input_payload, mode=claim["mode"], **receipt)
 
 
+def _failure_detail(exc: Exception) -> str:
+    """Text stored as ``p_detail`` for ``ops.fail_job`` or ``ops.skip_job`` --
+    and therefore inside the failure/dead-letter/skipped receipt's evidence
+    jsonb.
+
+    An EntrypointFailure (EntrypointNotConfigured included -- it subclasses
+    EntrypointFailure) carries its own bounded, already-redacted stdout and
+    stderr tails; encode them as JSON so they LAND in the receipt instead of
+    being silently dropped by the flat 1000-character cap every other
+    exception keeps (rule 1f3a7372: a failure receipt that cannot say why is
+    the defect).
+    """
+    if isinstance(exc, EntrypointFailure):
+        return json.dumps({"message": str(exc), "stdout_tail": exc.stdout_tail,
+                           "stderr_tail": exc.stderr_tail}, sort_keys=True)
+    return str(exc)[:1000]
+
+
 def run_once(manifest: dict[str, Any], worker: str, mode: str | None = None) -> dict[str, Any]:
     with connect() as conn, conn.cursor() as cur:
         if mode is None:
@@ -1350,12 +1443,24 @@ def run_once(manifest: dict[str, Any], worker: str, mode: str | None = None) -> 
             # Start a fresh transaction and fail only if the committed lease
             # still owns the job; an expired/reaped token is correctly refused.
             with conn.cursor() as fail_cur:
-                if isinstance(exc,(subprocess.TimeoutExpired,TimeoutError)):
+                if isinstance(exc, (EntrypointNotConfigured, NoEligibleRecords)):
+                    # NOT A FAILURE (rule 88e9b5eb). ops.skip_job is terminal
+                    # on this attempt unconditionally -- it never checks
+                    # attempt against max_attempts the way ops.fail_job does,
+                    # so a missing credential (EntrypointNotConfigured) or a
+                    # genuinely empty canonical queue (NoEligibleRecords --
+                    # 0387: contact-enrichment-weekly and
+                    # deal-history-research-weekly both report "done" and
+                    # stop finding work once the book is covered) never
+                    # burns retry budget and never reaches dead_lettered.
+                    fail_cur.execute("select ops.skip_job(%s,%s,%s)",
+                                     (job_id,lease,_failure_detail(exc)))
+                elif isinstance(exc,(subprocess.TimeoutExpired,TimeoutError)):
                     fail_cur.execute("select ops.timeout_job(%s,%s,%s)",
                                      (job_id,lease,str(exc)[:1000]))
                 else:
                     fail_cur.execute("select ops.fail_job(%s,%s,%s,%s)",
-                                     (job_id,lease,type(exc).__name__,str(exc)[:1000]))
+                                     (job_id,lease,type(exc).__name__,_failure_detail(exc)))
                 state = fail_cur.fetchone()[0]
             conn.commit()
             return {"claimed":1,"job_id":str(job_id),"state":state,
@@ -1429,10 +1534,18 @@ def inspect_job(job_id: str) -> dict[str, Any]:
 
 
 def tick(manifest: dict[str,Any],max_jobs: int=4,mode: str="shadow") -> dict[str,Any]:
-    scheduled=enqueue_due(manifest,parse_instant(None),mode)
+    if mode=="auto":
+        # Each due workflow already carries its own resolved tier on its job
+        # row; claiming must not filter to one mode the way single-mode tick
+        # does, or it would only ever run whichever tier happened first.
+        scheduled=enqueue_due_auto(manifest,parse_instant(None))
+        run_mode=None
+    else:
+        scheduled=enqueue_due(manifest,parse_instant(None),mode)
+        run_mode=mode
     runs=[]
     for _ in range(max_jobs):
-        result=run_once(manifest,f"tick:{os.getpid()}",mode=mode)
+        result=run_once(manifest,f"tick:{os.getpid()}",mode=run_mode)
         if result.get("claimed")==0:
             break
         runs.append(result)
@@ -1454,7 +1567,7 @@ def main() -> int:
     inspect_parser.add_argument("--job-id",required=True)
     tick_parser=sub.add_parser("tick")
     tick_parser.add_argument("--max-jobs",type=int,default=4)
-    tick_parser.add_argument("--mode",choices=("shadow","canary","live"),default="shadow")
+    tick_parser.add_argument("--mode",choices=("shadow","canary","live","auto"),default="shadow")
     args = parser.parse_args()
     manifest = load_manifest()
     if args.command == "validate": result: Any = {"ok":True,"workflows":len(manifest["workflows"])}

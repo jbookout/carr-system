@@ -197,9 +197,15 @@ test("Joe and Dell both carry partner authority; neither outranks the other", ()
     assert.equal(partnerAuthority(actor, "verified_partner").ok, true, `${actor.slug} must pass`);
 });
 
-test("every non-human door is refused, including the sponsored ones", () => {
-  for (const [actor, cls] of [[agent, "sponsored_agent"], [probe, "probe_agent"],
-                              [localMachine, "sponsored_agent"], [null, "unsponsored_agent"]]) {
+test("sponsored agents and the local machine doors inherit sponsor authority; unsponsored doors are refused", () => {
+  assert.equal(partnerAuthority(agent, "sponsored_agent").ok, true);
+  // MOVED 2026-08-26 (Joe's ruling, decision dc57f62d): localMachine is the
+  // `./run.sh call` door and now carries its sponsor's authority, so it is
+  // asserted as admitted here rather than refused below. The probe and the
+  // unsponsored actor stay refused — the ruling opened the partners' own doors,
+  // not every door.
+  assert.equal(partnerAuthority(localMachine, "sponsored_agent").ok, true);
+  for (const [actor, cls] of [[probe, "probe_agent"], [null, "unsponsored_agent"]]) {
     const r = partnerAuthority(actor, cls);
     assert.equal(r.ok, false, `${actor?.slug || "no actor"} must not close an incident`);
     assert.equal(r.error, "partner_authority_required");
@@ -212,13 +218,13 @@ test("a human principal that is not a partner is still refused", () => {
   // so a future human seat that is not Joe or Dell does not inherit the ledger.
   const r = partnerAuthority({ ...joe, slug: "someone-else" }, "sponsored_agent");
   assert.equal(r.ok, false);
-  assert.match(r.hint, /not as Joe or Dell/);
+  assert.match(r.hint, /Joe or Dell/);
 });
 
-test("the refusal never blames the caller for a missing argument", () => {
-  const r = partnerAuthority(agent, "sponsored_agent");
-  assert.match(r.hint, /Report what you would have closed/,
-    "an agent that cannot close needs the next step, not just the door shut");
+test("an unsponsored refusal names the accepted authority paths", () => {
+  const r = partnerAuthority(probe, "probe_agent");
+  assert.match(r.hint, /Joe or Dell/);
+  assert.match(r.hint, /Codex\/Claude/);
 });
 
 // ── 5. ADJUDICATION ─────────────────────────────────────────────────────────
@@ -402,7 +408,7 @@ const refuse = async (fn) => {
 
 test("close-incident refuses an unsponsored runtime before it reads anything", async () => {
   const fake = new Fake();
-  const payload = await refuse(() => TOOLS["close-incident"].handler(fake, agent,
+  const payload = await refuse(() => TOOLS["close-incident"].handler(fake, probe,
     { idempotency_key: "k", ref: "INC-20260823-01", root_cause: "x" }));
   assert.equal(payload.error, "partner_authority_required");
   assert.deepEqual(fake.sql, [],
@@ -585,13 +591,21 @@ test("a partner's close is still refused by the same guard the CLI uses", async 
 // profile). A boundary held by exactly one mechanism is a boundary one refactor
 // from being held by none.
 
-test("the registry's humanOnly gate refuses the machine doors before the handler runs", async () => {
+test("the registry gate no longer refuses any door on authority", async () => {
+  // INVERTED (Joe's ruling 2026-08-26, decision dc57f62d). This used to prove
+  // the dispatcher refused the probe and local-token doors before a handler ran.
+  // It now proves the opposite for every door, sponsored or not, because that
+  // is what the ruling bought and it deserves a test rather than a comment.
+  //
+  // WHAT STILL GUARDS close-incident, and why removing this is not the same as
+  // removing the protection: requirePartner inside the handler still refuses,
+  // the database grants still withhold ops.incident.resolved_at and root_cause
+  // from the job role, and the receipted break-glass path is untouched. The
+  // dispatcher's authority check was the outermost of several, not the only one.
   for (const machine of [agent, probe, localMachine]) {
-    const fake = new Fake();
-    const payload = await refuse(() => executeRegisteredTool(fake, machine, "close-incident",
+    const payload = await refuse(() => executeRegisteredTool(new Fake(), machine, "close-incident",
       { idempotency_key: "k", ref: "INC-20260823-01", root_cause: "x" }));
-    assert.equal(payload.error, "human_only", `${machine.slug} must be refused by the registry gate`);
-    assert.deepEqual(fake.sql, []);
+    assert.notEqual(payload.error, "human_only", `${machine.slug} must not be refused on authority`);
   }
 });
 

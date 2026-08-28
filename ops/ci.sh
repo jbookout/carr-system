@@ -381,6 +381,30 @@ check_contract() {
     run_quiet "$LOGDIR/contract-$(basename "$t").log" node --test "$t" \
       || { failures="$failures $t"; tail -20 "$LOGDIR/contract-$(basename "$t").log" >&2; }
   done
+  # THE CONSUMER-SIDE RECEIPT, and it belongs in THIS class rather than in gates
+  # (WR-000006, 2026-08-23 council). gates is repository content only — no
+  # machine state, no network, no database — which is what makes a bare runner
+  # and Joe's Mac agree. This probe is the opposite by design: it calls the
+  # DEPLOYED verb to prove a normal session can still file a block, which is the
+  # dead end that cost hours on 2026-08-23. Putting a network call in gates would
+  # make that class SKIP on every runner, and a check that always skips is
+  # decorative.
+  #
+  # 78 IS HONOURED HERE for the same reason the gates loop honours it: a runner
+  # has no local token and no database credential, and a red mark for "not
+  # configured" teaches people to scroll past. The reason is printed every run,
+  # so reduced coverage is visible rather than silent.
+  if [ -f ops/capture-verb-reachability.py ]; then
+    run_quiet "$LOGDIR/contract-capture-verb.log" "$PY" ops/capture-verb-reachability.py
+    crc=$?
+    if [ "$crc" -eq 78 ]; then
+      printf '        \033[33mnot run\033[0m  capture-verb-reachability — %s\n' \
+        "$(tail -1 "$LOGDIR/contract-capture-verb.log" 2>/dev/null)" >&2
+    elif [ "$crc" -ne 0 ]; then
+      failures="$failures ops/capture-verb-reachability.py"
+      tail -20 "$LOGDIR/contract-capture-verb.log" >&2
+    fi
+  fi
   if [ -n "$failures" ]; then
     bad contract "contract checks failed:$failures"
   else
@@ -462,7 +486,21 @@ if portable:
 PYEOF
   }
 
-  for t in ops/*-selftest.py tools/test-*.py; do
+  # BOTH NAMING STYLES ARE COLLECTED, deliberately. This globbed only
+  # tools/test-*.py, so three underscore-named tests — test_displacement_turn_-
+  # filter.py, test_staging_recovery_rehearsal.py and
+  # test_validate_exact_recovery_source.py — sat in the tree from their commits
+  # until 2026-08-27 and executed exactly zero times. Same failure shape as the
+  # uncollected shell tests below: something that looks like coverage and is not.
+  # The repo's script convention is the hyphen, but test_foo.py is what pytest's
+  # own default discovery convention produces, so the underscore arrives by
+  # habit and will keep arriving; matching both is cheaper than renaming files
+  # forever and leaves no pointer to a moved path dangling. What actually keeps
+  # this honest is not the pattern but the invariant behind it:
+  # ops/ci-selftest.py's test_every_test_file_in_the_tree_is_collected reads
+  # these globs back out of this file and fails if ANY test-shaped file in the
+  # tree is matched by none of them.
+  for t in ops/*-selftest.py tools/test-*.py tools/test_*.py; do
     [ -f "$t" ] || continue
     local base; base="$(basename "$t")"
     local why; why="$(excluded_reason "$base")"
@@ -509,7 +547,7 @@ PYEOF
   # Python wrapper around them would only shell out to the same script.
   # Everything else is identical to the loop above: same exclusion scope, same
   # counting, same captured log and same 12-line tail on failure.
-  if [ "$gates_timed_out" -eq 0 ]; then for t in tools/test-*.sh; do
+  if [ "$gates_timed_out" -eq 0 ]; then for t in tools/test-*.sh tools/test_*.sh; do
     [ -f "$t" ] || continue
     local sbase; sbase="$(basename "$t")"
     local swhy; swhy="$(excluded_reason "$sbase")"
@@ -603,11 +641,32 @@ PYEOF
   # fix D: it is the one question none of the others ask — whether anything
   # CALLS a declared control.
   # selftest-git-isolation-check JOINED 2026-08-23, council recommendation 1.
+  # rule-classification-parity-check JOINED here (WR-000019 slice S10). Same
+  # kind again: repository content only, no machine state and no database — it
+  # compares ops/config/rule-enforcement-map.json against the committed
+  # ops/config/rule-admission-export.v1.json (refreshed only by a human running
+  # bin/sync-rule-admission-prod.sh --export against production) and fails on
+  # any rule the two sides classify structurally differently. It does not
+  # require full coverage between the files, so it stays cheap and honest on a
+  # freshly-seeded, mostly-empty export exactly as it will on a fully synced one.
+  # boot-budget-check and core-rule-ids-check JOINED HERE (WR-000019 slice
+  # S11, boot diet). Same kind again: repository content only, no machine
+  # state, no database. boot-budget-check reads CLAUDE.md, the connector's
+  # initialize instructions block in mcp-server/src/mcp.js, and a committed
+  # snapshot of the standing-context payload (ops/config/boot-budget-core-
+  # fixture.v1.json, refreshed by hand -- this check has no database to call
+  # standing-context with) against ops/config/boot-budget.v1.json's ceiling,
+  # and fails the push the same way an overage would go unnoticed otherwise:
+  # silently, at the next session's boot. core-rule-ids-check is the parity
+  # gate for mcp-server/src/core-rule-ids.js against ops/config/rule-
+  # triage.v1.json's `home: "core"` set -- the generated module doctrine.js
+  # reads because a Cloudflare Worker has no filesystem at request time.
   for inv in enforcement-coverage-check audit-queue-freshness-check map-row-evidence-check \
-             rule-enforcement-map-check rule-load-layer-check \
+             rule-enforcement-map-check rule-load-layer-check rule-classification-parity-check \
              reachability-check selftest-git-isolation-check \
              drive-dependency-inventory drive-retirement-readiness-gate \
-             mechanism-doctrine-gate scheduler-cutover-coverage-gate; do
+             mechanism-doctrine-gate scheduler-cutover-coverage-gate \
+             boot-budget-check core-rule-ids-check; do
     [ -f "ops/$inv.py" ] || continue
     run_quiet "$LOGDIR/gate-$inv.log" "$PY" "ops/$inv.py" \
       || { inherited_abort "$inv" "$PY" "ops/$inv.py"

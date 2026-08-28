@@ -135,7 +135,21 @@ def main():
         check("a green floor allows the push", r.returncode == 0, r.stderr)
         calls = log.read_text() if log.exists() else ""
         check("the hook selected the fast subset, not the whole suite",
-              "args:--only pushfloor,secret" in calls, calls)
+              "args:--only pushfloor secret" in calls, calls)
+        # THE SEPARATOR IS LOAD-BEARING, so it is pinned rather than left to the
+        # substring above to imply. ci.sh has only understood a COMMA list since
+        # the push-floor change that taught --only to split them; before that
+        # --only was a plain assignment and a comma list arrived as one token,
+        # refused as "no such class: pushfloor,secret,freshness". This hook is
+        # always canonical's (core.hooksPath is one shared path for every
+        # worktree) while ci.sh comes from the tree being pushed, so a worktree
+        # branched before that change runs today's hook against that day's
+        # ci.sh. Observed 2026-08-26: every push from such a worktree refused,
+        # naming a class that does not exist. Spaces parse correctly on BOTH
+        # versions. A future edit that "tidies" these back to commas re-breaks
+        # every older worktree on the machine, silently, so it fails here first.
+        check("the class list is space-separated, parseable by every ci.sh version",
+              "--only pushfloor,secret" not in calls, calls)
         check("the hook did NOT run the full ten-class suite",
               "args:\n" not in calls, calls)
 
@@ -166,7 +180,7 @@ def main():
         #     part of it. Asserted on the recorded argv rather than by reading
         #     the hook, so a change to the list has to change this line too.
         check("the floor runs the ruled classes",
-              "args:--only pushfloor,secret,freshness" in calls, calls)
+              "args:--only pushfloor secret freshness" in calls, calls)
         check("the floor does NOT run the full suite",
               "args:--only\n" not in calls and "gates" not in calls, calls)
 

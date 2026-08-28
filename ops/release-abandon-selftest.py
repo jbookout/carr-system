@@ -32,7 +32,6 @@ while hosted CI executes them against its already-running local service.
 from __future__ import annotations
 
 import importlib.util
-import json
 import os
 import subprocess
 import sys
@@ -127,17 +126,26 @@ def isolated_ci_database(base_dsn: str) -> Iterator[str]:
 
 def _cases(dsn: str) -> None:
     record(dsn, "sync-registry")
-    # A full manifest supplies the CHECK-constrained artifact fields required
-    # by case 4's synthetic completed-history fixture. A thin manifest once
-    # left that row at `candidate`, letting abandon pass for the wrong reason.
-    manifest = {"service": "carr-mcp", "environment": "staging",
-                "git_sha": "a" * 40, "plan_hash": "plan:selftest",
-                "artifact_digest": "d" * 64,
-                "dependency_lock_digest": "e" * 64, "migration_set": []}
+    # Candidate intake verifies every environment before opening the database,
+    # so the abandonment fixtures use one real staging manifest rather than a
+    # synthetic shape that the release door must refuse.
     mpath = Path(os.environ.get("TMPDIR", "/tmp")) / "abandon-manifest.json"
-    mpath.write_text(json.dumps(manifest))
+    staging_built = subprocess.run(
+        [sys.executable, str(REPO / "tools" / "release-manifest.py"),
+         "build", "--sha", "HEAD", "--environment", "staging",
+         "--performance-budget-ref", "runbook:worker-performance-v1",
+         "--performance-budget-ms", "1500",
+         "--recovery-strategy", "rollback",
+         "--rollback-plan-ref", "runbook:rollback-worker-v1"],
+        cwd=REPO, capture_output=True, text=True, timeout=300)
+    check("0. canonical staging source manifest builds",
+          staging_built.returncode == 0,
+          (staging_built.stderr or staging_built.stdout).strip()[:160])
+    if staging_built.returncode != 0:
+        return
+    mpath.write_text(staging_built.stdout)
 
-    for k in ("rel-abandon-a", "rel-abandon-b"):
+    for k in ("rel-abandon-a", "rel-abandon-b", "rel-malformed", "rel-successor"):
         record(dsn, "release", "candidate", "--key", k, "--manifest", str(mpath),
                "--service", "carr-mcp", "--environment", "staging",
                "--maker", "selftest", "--maker-verification", "ref",
@@ -216,6 +224,32 @@ def _cases(dsn: str) -> None:
     r = record(dsn, "release", "abandon", "--key", "rel-abandon-b")
     check("2. abandoning without a reason is REFUSED", r.returncode != 0,
           "a terminal state with no recorded reason is the thing this exists to prevent")
+
+    # A malformed immutable candidate is never rewritten into the successor.
+    # The governed path names an already-recorded same-target successor and
+    # terminalizes only the old row, preserving its exact plan as evidence.
+    before = psql(dsn, "-At", "-c",
+                  "select plan_hash from ops.release where release_key='rel-malformed'")
+    r = record(dsn, "release", "abandon", "--key", "rel-malformed",
+               "--superseded-by", "rel-successor")
+    after = psql(dsn, "-At", "-c",
+                 "select state,plan_hash,abandoned_reason "
+                 "from ops.release where release_key='rel-malformed'")
+    fields = after.stdout.strip().split("|", 2)
+    check("2a. named successor abandons the malformed candidate immutably",
+          r.returncode == 0 and len(fields) == 3
+          and fields[0] == "abandoned" and fields[1] == before.stdout.strip()
+          and "rel-successor" in fields[2],
+          (r.stderr or after.stdout).strip()[:200])
+
+    r = record(dsn, "release", "abandon", "--key", "rel-abandon-b",
+               "--superseded-by", "does-not-exist")
+    still_candidate = psql(
+        dsn, "-At", "-c",
+        "select state from ops.release where release_key='rel-abandon-b'",
+    )
+    check("2b. absent successor refuses without changing the old candidate",
+          r.returncode != 0 and still_candidate.stdout.strip() == "candidate")
 
     # ── 3. an APPROVED release can still be abandoned before it ships ──
     # Typed approval and recovery are exercised by staging-release-readback-gate.

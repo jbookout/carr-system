@@ -89,7 +89,7 @@ if [ "${1:-}" = "--preflight" ]; then
     ops/vendor-level-drift-check.py bin/backup-dump.sh bin/archive-calendar.sh
     bin/sync-settings.sh bin/type-check.sh ops/store-markup-scan.py
     generators/build-open-items-dashboard.py ops/nightly-verb-probe.py
-    bin/smoke-and-record.sh tools/ops-record.py
+    bin/smoke-and-record.sh tools/ops-record.py ops/staging-observed-prune.py
     # bin/routine-canonical-seam-refusal.sh came off this list on 2026-08-23: the
     # chain stopped launching it when the refusals became tombstones, and a
     # preflight that requires a file no step runs is checking the wrong thing.
@@ -697,6 +697,34 @@ tombstone "environment integration proof" \
   "admin capability — the same rehearsal lane the rebuild proof above cannot open" \
   "an admin credential is provisioned here and ops/p1-integration-gate.py is restored to this line"
 
+# ── THE ENFORCEMENT STACK'S OTHER COST: DISK (2026-08-27) ────────────────────
+# On 2026-08-27 out/staging-observed held 152 orphaned temp files over 1MB
+# apiece (~3.2GB) beside per-session observation files, one of them 110MB. The
+# disk filled and no new worktree could be created — a hard stop on every
+# session on this Mac, not a slow morning.
+#
+# hooks/staging-observation-tracker.py now sweeps abandoned temps before each
+# of its own writes and bounds its state files in bytes. That handles the
+# machine while sessions are running on it and cannot handle anything else: a
+# hook only runs while a session runs, so the state file of a session that has
+# ENDED is precisely the one nothing will ever touch again. Reaping by
+# absence-of-activity is a question only something outside the sessions can
+# ask, which is why it is a line here and not more code in the hook.
+#
+# IT RUNS HERE, AHEAD OF EVERYTHING THAT WRITES, and the position is the point.
+# The first cut of this put it beside the hook telemetry rollup near the bottom,
+# on the reasoning that both price the enforcement stack — one in latency, one
+# in bytes. That is a tidy grouping and it is the wrong order: the encrypted
+# backup is the LAST step and it writes a dump, so a full disk fails the backup
+# and then frees 3.2GB immediately afterwards. Reclamation belongs before the
+# steps that need the space, not beside the report it rhymes with.
+#
+# NO NEW SCHEDULED JOB, same argument the rollup makes: one more step on a chain
+# that is already awake. It exits 0 whether or not it removes anything — a
+# housekeeping step that reddens the chain is a check people learn to skip.
+step "staging-observed prune (temp orphans + idle sessions)" \
+    ./.venv/bin/python ops/staging-observed-prune.py
+
 # ── ORDER 14: the two writing steps, BEFORE the exports ──────────────────────
 # The cadence engine WRITES (next_action + event), so the read-only exporter
 # credential above cannot run it. Both steps look for CARR_DB_JOBS_URL first
@@ -1092,6 +1120,16 @@ step "type-check tripwire (mypy)"                    ./bin/type-check.sh
 # first and each parameter returned to its own field, per row.
 step "tool-call markup sweep (records)"              ./.venv/bin/python ops/store-markup-scan.py
 
+# Added 2026-08-25 (loop #314's named work). tools/check.sh verifies code
+# integrity (every manifest.tsv row clean vs HEAD), canonical export receipts,
+# and the manifest-governed runtime fork. It is read-only. Both of its
+# historical blockers are gone: the twin-copy SPLIT retired as an intentional
+# runtime fork (manifest-governed) and export receipts are current. A chronically
+# red check detects nothing; it is green today and wired so a new drift is seen
+# by the chain that runs every night, not only by a session that remembers to
+# run it.
+step "code integrity (manifest rows vs HEAD)"        ./tools/check.sh
+
 # The legacy one-page file is recovery-only. Normal dashboard delivery is the
 # record-native Front Door composition (today-triage, deal-room-board, and
 # loop-board), so the nightly chain must not call a missing-seam refusal for a
@@ -1214,6 +1252,19 @@ step "healthchecks dead-man pings"               ./bin/hc-ping.sh
 # cleared by 09:06 rather than by the next night.
 step "incident assessment (latest run of every job)"  ./.venv/bin/python tools/ops-record.py assess --environment production
 
+# ── PR-NAMED RECOVERY EVIDENCE (WR-000019 slice S1, Obedience & Autonomy,
+# 2026-08-27) ─────────────────────────────────────────────────────────────
+# A merged PR naming an INC-<id> in its title or body is itself evidence the
+# fix shipped, and until this step existed nothing carried that fact onto the
+# incident row — recovery_evidence_ref stayed null until a human typed it in
+# at close time. Same boundary as the assessment step just above: carr_jobs
+# already holds 0117's grant on recovery_evidence_ref and nothing more, so this
+# can attach evidence and structurally cannot resolve, reclassify, or theorise
+# about the incident it attaches to. `resolve`/`sweep` remain the only close
+# path. --since-hours 36 overlaps this step's own ~24h cadence on purpose, so
+# a PR merged just before or after midnight is never missed by a boundary.
+step "pr recovery evidence (merged PRs -> incident evidence)"  ./.venv/bin/python tools/ops-record.py pr-evidence --since-hours 36
+
 # WHAT IS LEFT FOR A HUMAN. 0293 closes recovered lower-severity collector
 # incidents from their own three-run evidence. It deliberately does not touch:
 #
@@ -1249,6 +1300,34 @@ tombstone "incident sweep" \
 # NO NEW SCHEDULED JOB: this is the council's "piggyback on what already runs",
 # and one more step on a chain that is already awake is the whole cost.
 step "hook telemetry rollup (reports, never retires)"  ./.venv/bin/python ops/hook-telemetry-rollup.py --days 7
+
+# ── RULE REPLAY + WEEKLY RE-SORT (WR-000019 slice S12, Obedience & Autonomy,
+# 2026-08-27) ─────────────────────────────────────────────────────────────
+# The measurement loop that makes the 219-rule rulebook a MANAGED population
+# rather than a fixed one. Every night, ops/rule-replay-nightly.py scores the
+# prior day's real transcripts for this repo against the rules that were live
+# for each turn -- reusing hooks/rule-pack-preuse-reselection.py's own
+# trigger matcher and ops/gate-lifecycle-report.py's own read_rows()/
+# is_true_positive() rather than a second copy of either. It writes one row
+# per (session, fired rule-signal) plus a summary row to
+# out/rule-replay-nightly.jsonl, and stages -- never files -- defect
+# proposals to out/rule-replay-defect-proposals.jsonl for the two named
+# failure-class signatures (shadow writing-check findings, materially
+# under-delegated sessions); a human morning session reviews and files them
+# through record-defect with its own fresh idempotency_key, same reasoning
+# as this file's own "WHAT IS LEFT FOR A HUMAN" note two steps up.
+step "rule replay (nightly transcript scoring, deterministic, reports only)" \
+    ./.venv/bin/python ops/rule-replay-nightly.py --since-hours 24
+
+# The weekly re-sort report reads that ledger plus gate-lifecycle-report.py's
+# own build() (imported, not duplicated) plus the JIT shadow ledger, and
+# proposes exact ops/config/rule-triage.v1.json / gate-lifecycle.json edits
+# for a PR -- nothing here self-applies. The Monday-only cadence is guarded
+# INSIDE the script itself (same convention bin/notes-sweep-post.sh's own
+# business-hours guard uses), so this step call is unconditional every
+# night and a non-Monday run prints SKIP and exits 0.
+step "rule re-sort (weekly proposals: gate/jit/core moves, reports only)" \
+    ./.venv/bin/python ops/rule-resort-weekly.py --days 7
 
 if [ "$seam_blocked" -gt 0 ]; then
   say "===== $seam_blocked step(s) BLOCKED on a missing canonical seam — not counted as failures ====="

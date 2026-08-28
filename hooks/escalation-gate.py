@@ -205,6 +205,37 @@ def parks_a_decision(tool_input):
             or tool_input.get("blocker") == "ruling")
 
 
+def classify_per_item(tool_input, human_last):
+    """Classify a multi-question call ONE ITEM AT A TIME, and deny if ANY
+    item is internal.
+
+    THE BLIND SPOT THIS CLOSES. classify() reads one flattened blob, so in a
+    two-question interview the FIRST item's allow class exempted the whole
+    call: "what did the vendor say" (fact capture — legitimately Joe's) rode
+    in the same AskUserQuestion as "should we rename the loop table"
+    (internal — the system's to decide), and the internal question reached
+    Joe wearing the first question's exemption. The audience gate is drawn
+    per DECISION, not per tool call; a batch is allowed only when every item
+    in it is.
+    """
+    worst = (True, "empty")
+    for q in (tool_input.get("questions") or []) if isinstance(tool_input, dict) else []:
+        if not isinstance(q, dict):
+            continue
+        parts = [str(q.get("question", "")), str(q.get("header", ""))]
+        for o in (q.get("options") or []):
+            if isinstance(o, dict):
+                parts.append(str(o.get("label", "")))
+                parts.append(str(o.get("description", "")))
+        blob = "\n".join(p for p in parts if p)
+        allow, why = classify(blob, human_last)
+        if not allow:
+            return False, why      # one internal item refuses the whole call
+        if blob.strip():
+            worst = (allow, why)   # remember the last non-empty classification
+    return worst
+
+
 def classify(blob, human_last):
     """Return (allow: bool, why: str)."""
     if not blob.strip():
@@ -283,12 +314,6 @@ def main():
             sys.exit(0)
 
         ti = payload.get("tool_input") or payload.get("toolInput") or {}
-        if is_ask:
-            blob = question_text(ti)
-        else:
-            if not parks_a_decision(ti):
-                sys.exit(0)
-            blob = loop_text(ti)
 
         # The human's own last turn, for the "he asked" exemption. Best-effort:
         # if the transcript is unreadable we simply lose one exemption and the
@@ -324,7 +349,17 @@ def main():
             except Exception:
                 pass
 
-        allow, why = classify(blob, human_last)
+        if is_ask:
+            # Per-item classification: one fact-capture question must not
+            # exempt an internal question riding in the same interview.
+            allow, why = classify_per_item(ti, human_last)
+            blob = question_text(ti)
+        else:
+            if not parks_a_decision(ti):
+                sys.exit(0)
+            blob = loop_text(ti)
+            allow, why = classify(blob, human_last)
+
         if allow:
             dlog(f"ALLOW({why}) :: {' '.join(blob.split())[:160]}")
             sys.exit(0)

@@ -43,7 +43,8 @@
 #       # upload a Production candidate without changing traffic
 #   bin/deploy-worker.sh --promote-version <cloudflare-version-id>
 #       # promote that exact approved version to 100% of Production traffic
-#   # Both Production modes also require the approval preimage inputs:
+#   # Production modes and a standalone staging release require the approval
+#   # preimage inputs:
 #       --performance-budget-ref <immutable-ref> --performance-budget-ms <ms>
 #       --recovery-strategy <rollback|forward_fix>
 #       --rollback-plan-ref <immutable-runbook-ref>
@@ -174,7 +175,7 @@ while [ "$#" -gt 0 ]; do
       [ "$#" -ge 2 ] || { echo "deploy-worker: --recovery-attempt-id needs a UUID" >&2; exit 64; }
       RECOVERY_ATTEMPT_ID="$2"; shift ;;
     --recovery-step)
-      [ "$#" -ge 2 ] || { echo "deploy-worker: --recovery-step needs current_before|prior|current_after|restore_only" >&2; exit 64; }
+      [ "$#" -ge 2 ] || { echo "deploy-worker: --recovery-step needs current_before|prior|current_after|forward_fix|restore_only" >&2; exit 64; }
       RECOVERY_STEP="$2"; shift ;;
     --recovery-prior-release-key)
       [ "$#" -ge 2 ] || { echo "deploy-worker: --recovery-prior-release-key needs a key" >&2; exit 64; }
@@ -205,6 +206,26 @@ while [ "$#" -gt 0 ]; do
 done
 
 fail() { echo ""; echo "REFUSED: $1" >&2; echo "" >&2; exit 1; }
+
+# One builder owns the exact source/environment/assurance preimage for every
+# release-manifest reconstruction.  A caller may supply either the complete
+# assurance group or none; the admission rules below require the complete group
+# for Production and standalone staging releases.
+build_release_manifest() {
+  BUILD_MANIFEST_SHA="$1"
+  BUILD_MANIFEST_ENVIRONMENT="$2"
+  if [ -n "$PERFORMANCE_BUDGET_REF" ]; then
+    "$PY" "$REPO/tools/release-manifest.py" build --sha "$BUILD_MANIFEST_SHA" \
+      --environment "$BUILD_MANIFEST_ENVIRONMENT" \
+      --performance-budget-ref "$PERFORMANCE_BUDGET_REF" \
+      --performance-budget-ms "$PERFORMANCE_BUDGET_MS" \
+      --recovery-strategy "$RECOVERY_STRATEGY" \
+      --rollback-plan-ref "$ROLLBACK_PLAN_REF"
+  else
+    "$PY" "$REPO/tools/release-manifest.py" build --sha "$BUILD_MANIFEST_SHA" \
+      --environment "$BUILD_MANIFEST_ENVIRONMENT"
+  fi
+}
 
 # A temporary verb-count drop is authorized only after the DB writer for the
 # exact typed recovery step has durably prepared the attempt and returned its
@@ -237,9 +258,16 @@ prepare_typed_recovery_shrink() {
         --correlation "$RECOVERY_ATTEMPT_ID" --field expected_provider_tag)" \
         || fail "the typed restore-only repair was not durably prepared; verb shrink is refused."
       ;;
+    forward_fix)
+      TYPED_RECOVERY_TAG="$("$PY" "$REPO/tools/ops-record.py" staging-forward-fix prepare \
+        --idempotency-key "$STAGING_RECEIPT_KEY" --release-key "$REQUESTED_RELEASE_KEY" \
+        --git-sha "$HEAD_SHA" --correlation "$STAGING_RECEIPT_KEY" \
+        --field expected_provider_tag)" \
+        || fail "the typed forward-fix rehearsal was not durably prepared; deploy is refused."
+      ;;
     *) fail "standalone deploys cannot authorize verb shrink." ;;
   esac
-  printf '%s\n' "$TYPED_RECOVERY_TAG" | grep -Eq '^carr-staging-[0-9a-f]{32}$' \
+  printf '%s\n' "$TYPED_RECOVERY_TAG" | grep -Eq '^carr-staging(-forward-fix)?-[0-9a-f]{32}$' \
     || fail "the prepared typed recovery step returned no exact provider tag; verb shrink is refused."
   echo "  !!  shrinking by $LOST verb(s), allowed only by the exact prepared typed recovery step"
 }
@@ -252,16 +280,21 @@ case "$RECOVERY_STEP" in
     [ -z "$RECOVERY_ATTEMPT_ID$RECOVERY_PRIOR_RELEASE_KEY" ] \
       || fail "standalone staging deploy cannot carry recovery attempt/prior fields."
     ;;
-  current_before|prior|current_after|restore_only)
-    [ "$TARGET_ENV" = "staging" ] && [ -n "$RECOVERY_ATTEMPT_ID" ] \
-      && [ -n "$RECOVERY_PRIOR_RELEASE_KEY" ] && [ -n "$REQUESTED_RELEASE_KEY" ] \
-      || fail "recovery deploy requires staging plus --release-key, --recovery-attempt-id, --recovery-prior-release-key and --recovery-step."
-    printf '%s\n' "$RECOVERY_ATTEMPT_ID" | grep -Eq \
-      '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$' \
-      || fail "--recovery-attempt-id must be an exact UUID."
-    RECOVERY_ATTEMPT_ID="$(printf '%s' "$RECOVERY_ATTEMPT_ID" | tr 'A-F' 'a-f')"
+  current_before|prior|current_after|forward_fix|restore_only)
+    [ "$TARGET_ENV" = "staging" ] && [ -n "$REQUESTED_RELEASE_KEY" ] \
+      || fail "recovery deploy requires staging plus --release-key and --recovery-step."
+    if [ "$RECOVERY_STEP" != "forward_fix" ]; then
+      [ -n "$RECOVERY_ATTEMPT_ID" ] && [ -n "$RECOVERY_PRIOR_RELEASE_KEY" ] \
+        || fail "rollback recovery deploy requires --recovery-attempt-id and --recovery-prior-release-key."
+    fi
+    if [ "$RECOVERY_STEP" != "forward_fix" ]; then
+      printf '%s\n' "$RECOVERY_ATTEMPT_ID" | grep -Eq \
+        '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$' \
+        || fail "--recovery-attempt-id must be an exact UUID."
+      RECOVERY_ATTEMPT_ID="$(printf '%s' "$RECOVERY_ATTEMPT_ID" | tr 'A-F' 'a-f')"
+    fi
     ;;
-  *) fail "--recovery-step must be standalone|current_before|prior|current_after|restore_only." ;;
+  *) fail "--recovery-step must be standalone|current_before|prior|current_after|forward_fix|restore_only." ;;
 esac
 if [ -n "$EXACT_SOURCE_ROOT" ]; then
   [ "$VERSION_MODE" = "ordinary" ] && [ "$TARGET_ENV" = "staging" ] \
@@ -306,10 +339,18 @@ fi
 cd "$REPO"
 [ -x "$WRANGLER" ] || fail "wrangler not found at $WRANGLER (run npm install in mcp-server/)."
 [ -x "$PY" ] || fail "python not found; release truth cannot be checked."
-if [ "$TARGET_ENV" = "production" ]; then
+if [ -n "$PERFORMANCE_BUDGET_REF$PERFORMANCE_BUDGET_MS$RECOVERY_STRATEGY$ROLLBACK_PLAN_REF" ]; then
   [ -n "$PERFORMANCE_BUDGET_REF" ] && [ -n "$PERFORMANCE_BUDGET_MS" ] \
     && [ -n "$RECOVERY_STRATEGY" ] && [ -n "$ROLLBACK_PLAN_REF" ] \
+    || fail "performance budget/ref, recovery strategy, and rollback plan ref must be supplied together."
+fi
+if [ "$TARGET_ENV" = "production" ]; then
+  [ -n "$PERFORMANCE_BUDGET_REF" ] \
     || fail "Production performance budget/ref, recovery strategy, and rollback plan ref are required; they are approval inputs, not deploy defaults."
+fi
+if [ "$TARGET_ENV" = "staging" ] && [ "$RECOVERY_STEP" = "standalone" ]; then
+  [ -n "$PERFORMANCE_BUDGET_REF" ] \
+    || fail "standalone staging release requires performance/recovery assurance; the exact inputs are approval-bound, not deploy defaults."
 fi
 
 HEAD_SHA=""
@@ -636,11 +677,7 @@ if [ "$VERSION_MODE" = "promote" ]; then
   # with every immutable dimension and the freshly computed plan hash.
   PROMOTION_SOURCE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-promotion-source-manifest.XXXXXX")"
   PROMOTION_BOUND_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-promotion-bound-manifest.XXXXXX")"
-  if ! "$PY" "$REPO/tools/release-manifest.py" build --sha "$HEAD_SHA" \
-      --environment production --performance-budget-ref "$PERFORMANCE_BUDGET_REF" \
-      --performance-budget-ms "$PERFORMANCE_BUDGET_MS" \
-      --recovery-strategy "$RECOVERY_STRATEGY" \
-      --rollback-plan-ref "$ROLLBACK_PLAN_REF" > "$PROMOTION_SOURCE_MANIFEST"; then
+  if ! build_release_manifest "$HEAD_SHA" production > "$PROMOTION_SOURCE_MANIFEST"; then
     fail "approved release evidence cannot be rebuilt from git SHA $HEAD_SHA."
   fi
   if ! "$PY" "$REPO/tools/release-manifest.py" bind-provider \
@@ -672,21 +709,14 @@ elif [ "$RECOVERY_STEP" != "standalone" ]; then
   echo "  prior release: $RECOVERY_PRIOR_RELEASE_KEY"
   echo "  recovery attempt/step: $RECOVERY_ATTEMPT_ID / $RECOVERY_STEP"
   RELEASE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-recovery-release-manifest.XXXXXX")"
-  "$PY" "$REPO/tools/release-manifest.py" build --sha "$HEAD_SHA" \
-    --environment staging > "$RELEASE_MANIFEST" \
+  build_release_manifest "$HEAD_SHA" staging > "$RELEASE_MANIFEST" \
     || fail "recovery release evidence cannot be rebuilt from git SHA $HEAD_SHA."
 elif [ -f "$REPO/tools/release-manifest.py" ]; then
   echo ""
   echo "== preflight: release truth =="
   RELEASE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/carr-release-manifest.XXXXXX")"
-  if [ "$TARGET_ENV" = "production" ]; then
-    manifest_build_args="--performance-budget-ref $PERFORMANCE_BUDGET_REF --performance-budget-ms $PERFORMANCE_BUDGET_MS --recovery-strategy $RECOVERY_STRATEGY --rollback-plan-ref $ROLLBACK_PLAN_REF"
-  else
-    manifest_build_args=""
-  fi
-  # shellcheck disable=SC2086
-  if "$PY" "$REPO/tools/release-manifest.py" build --sha "$HEAD_SHA" \
-       --environment "$TARGET_ENV" $manifest_build_args > "$RELEASE_MANIFEST" 2>/dev/null; then
+  if build_release_manifest "$HEAD_SHA" "$TARGET_ENV" \
+       > "$RELEASE_MANIFEST" 2>/dev/null; then
     RELEASE_PLAN_HASH="$("$PY" "$REPO/tools/release-manifest.py" plan-hash \
                           --manifest "$RELEASE_MANIFEST" 2>/dev/null)"
     echo "  manifest built for ${HEAD_SHA} — plan ${RELEASE_PLAN_HASH:-unknown}"
@@ -735,12 +765,18 @@ EXPECTED_SCHEMA_APPLIED_COUNT="$("$PY" -c \
   'import json,sys; print(json.load(open(sys.argv[1]))["schema_applied_count"])' \
   "$RELEASE_MANIFEST")" \
   || fail "release manifest has no declared schema applied count."
+EXPECTED_SCHEMA_LEDGER_SHA256="$("$PY" -c \
+  'import json,sys; print(json.load(open(sys.argv[1]))["schema_ledger_sha256"])' \
+  "$RELEASE_MANIFEST")" \
+  || fail "release manifest has no declared schema ledger digest."
 printf '%s' "$EXPECTED_SCHEMA_HIGHEST_MIGRATION" \
   | grep -Eq '^[0-9]{4}[a-z]?_[a-z0-9_.-]+\.sql$' \
   || fail "release manifest declared an invalid schema highest migration."
 printf '%s' "$EXPECTED_SCHEMA_APPLIED_COUNT" \
   | grep -Eq '^[1-9][0-9]*$' \
   || fail "release manifest declared an invalid schema applied count."
+printf '%s' "$EXPECTED_SCHEMA_LEDGER_SHA256" | grep -Eq '^sha256:[0-9a-f]{64}$' \
+  || fail "release manifest declared an invalid schema ledger digest."
 
 if [ "$CHECK_ONLY" = "1" ]; then
   echo ""
@@ -796,10 +832,10 @@ if [ "$VERSION_MODE" = "upload" ]; then
   echo "  .venv/bin/python tools/ops-record.py release candidate --key <key> \\"
   echo "    --environment production --provider $PROVIDER \\"
   echo "    --provider-version-id $PROVIDER_VERSION_ID --manifest $RELEASE_MANIFEST ..."
-  echo "Then record the actual release-linked recovery rehearsal before Joe approves:"
-  echo "  .venv/bin/python tools/ops-record.py run --kind check --service carr-mcp \\"
-  echo "    --key recovery.rehearsal.worker --state succeeded --environment staging \\"
-  echo "    --release-key <key> --source-ref <rehearsal-run> --evidence-ref <receipt>"
+  echo "Before Joe approves, use the typed staging wrapper to record the exact recovery strategy:"
+  echo "  rollback: bin/deploy-worker.sh --env staging --recovery-step current_before|prior|current_after ..."
+  echo "  forward_fix: bin/deploy-worker.sh --env staging --recovery-step forward_fix --release-key <key> ..."
+  echo "The wrapper, not a generic ops-record run, writes approval-eligible rehearsal evidence."
   exit 0
 fi
 
@@ -822,6 +858,8 @@ else
       || fail "--staging-receipt-idempotency-key must be a lowercase canonical UUID."
     if [ "$RECOVERY_STEP" = "standalone" ]; then
       CARR_CORRELATION_ID="${CARR_CORRELATION_ID:-$(uuidgen | tr 'A-Z' 'a-z')}"
+    elif [ "$RECOVERY_STEP" = "forward_fix" ]; then
+      CARR_CORRELATION_ID="$STAGING_RECEIPT_KEY"
     else
       [ -z "${CARR_CORRELATION_ID:-}" ] || [ "$CARR_CORRELATION_ID" = "$RECOVERY_ATTEMPT_ID" ] \
         || fail "ambient CARR_CORRELATION_ID differs from the recovery attempt."
@@ -837,6 +875,10 @@ else
           --prior-release-key "$RECOVERY_PRIOR_RELEASE_KEY" \
           --recovery-attempt-id "$RECOVERY_ATTEMPT_ID" --git-sha "$HEAD_SHA" \
           --correlation "$CARR_CORRELATION_ID" "$@"
+      elif [ "$RECOVERY_STEP" = "forward_fix" ]; then
+        "$PY" "$REPO/tools/ops-record.py" staging-forward-fix "$attempt_action" \
+          --idempotency-key "$STAGING_RECEIPT_KEY" --release-key "$RELEASE_KEY" \
+          --git-sha "$HEAD_SHA" --correlation "$CARR_CORRELATION_ID" "$@"
       elif [ "$RECOVERY_STEP" = "standalone" ]; then
         "$PY" "$REPO/tools/ops-record.py" staging-attempt "$attempt_action" \
           --idempotency-key "$STAGING_RECEIPT_KEY" --release-key "$RELEASE_KEY" \
@@ -859,6 +901,7 @@ else
     fi
     ATTEMPT_CLAIM_FIELD="deploy_claimed"
     [ "$RECOVERY_STEP" != "restore_only" ] || ATTEMPT_CLAIM_FIELD="mutation_claimed"
+    [ "$RECOVERY_STEP" != "forward_fix" ] || ATTEMPT_CLAIM_FIELD="mutation_claimed"
     ATTEMPT_DEPLOY_CLAIMED="$(staging_attempt prepare --field "$ATTEMPT_CLAIM_FIELD")" \
       || fail "the prepared staging attempt claim state could not be read."
     if [ "$RECOVERY_STEP" = "restore_only" ]; then
@@ -899,6 +942,18 @@ else
           --git-sha "$HEAD_SHA" --expected-provider-tag "$DEPLOY_TAG" \
           --expected-program6-actions "$EXPECTED_PROGRAM6_ACTIONS" \
           --staging-readback-file "$receipt_file"
+      elif [ "$RECOVERY_STEP" = "forward_fix" ]; then
+        provider_versions="$(mktemp "${TMPDIR:-/tmp}/carr-staging-forward-fix-versions.XXXXXX")" || return 1
+        chmod 600 "$provider_versions"
+        "$WRANGLER" versions list --env "$TARGET_ENV" --json > "$provider_versions" 2>/dev/null || { rm -f "$provider_versions"; return 1; }
+        "$PY" "$REPO/tools/ops-record.py" staging-forward-fix result \
+          --idempotency-key "$STAGING_RECEIPT_KEY" --git-sha "$HEAD_SHA" \
+          --expected-provider-tag "$DEPLOY_TAG" --expected-program6-actions "$EXPECTED_PROGRAM6_ACTIONS" \
+          --manifest "$RELEASE_MANIFEST" --staging-readback-file "$receipt_file" \
+          --provider-versions-file "$provider_versions"
+        result_rc=$?
+        rm -f "$provider_versions"
+        return "$result_rc"
       elif [ "$RECOVERY_STEP" = "standalone" ]; then
         "$PY" "$REPO/tools/ops-record.py" deployment --service carr-mcp \
           --environment staging --state complete --git-sha "$HEAD_SHA" \
@@ -947,6 +1002,7 @@ else
     else
       DEPLOY_CLAIM_FIELD="deploy_allowed"
       [ "$RECOVERY_STEP" != "restore_only" ] || DEPLOY_CLAIM_FIELD="mutation_allowed"
+      [ "$RECOVERY_STEP" != "forward_fix" ] || DEPLOY_CLAIM_FIELD="mutation_allowed"
       DEPLOY_ALLOWED="$(staging_attempt claim --field "$DEPLOY_CLAIM_FIELD")" \
         || fail "the prepared staging attempt could not be claimed."
       [ "$DEPLOY_ALLOWED" = "true" ] \

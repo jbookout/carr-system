@@ -108,6 +108,31 @@ test("a declared pack ADDS rules and never subtracts Layer 0", async () => {
     "the pack's own rule must arrive");
 });
 
+test("vendor-intros is a real pack, not 14 selected rows absent from the consumer pool", async () => {
+  const introId = "e6e0b0e7";
+  const introRow = { ...rows([introId], false)[0], scope: { kind: "intro_politics" } };
+  const plan = [...PLAN, { short_id: introId, load_layer: "pack",
+    packs: ["vendor-intros"], scope: "shared" }];
+  const packIndex = [...PACK_INDEX, { pack: "vendor-intros", title: "Vendor intros",
+    triggers: ["introduction"], rule_count: 1 }];
+  const make = () => {
+    const c = client({ mode: "enforced", plan, packIndex });
+    const inner = c.query;
+    c.query = async (sql, params = []) => {
+      if (/from v_compiled_rules/i.test(sql) && !/intro_politics/i.test(sql))
+        return { rows: [...rows(SHARED, false), ...rows(PERSONAL, true), introRow] };
+      return inner(sql, params);
+    };
+    return c;
+  };
+  const bare = await call(make());
+  assert.equal(bare.shared_rules.some(r => r.id === introId), false,
+    "intro politics must not leak into an ordinary boot");
+  const loaded = await call(make(), { packs: ["vendor-intros"] });
+  assert.equal(loaded.shared_rules.some(r => r.id === introId), true,
+    "declaring vendor-intros must deliver its actual rule body");
+});
+
 test("workflow= is read as a pack, so the council's compile path works as written", async () => {
   const out = await call(client({ mode: "enforced" }), { workflow: "engineering-git" });
   assert.ok(out.shared_rules.some(r => r.id === "4a53ff82"));

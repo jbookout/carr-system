@@ -214,7 +214,7 @@
     {
       "key": "room-bridge",
       "name": "Partner room bridge",
-      "purpose": "Polls the shared partner room (add-room-turn/read-room, Idea 78) and routes new turns to local desks (claude-session, codex-session), captures each desk's reply and posts it back, and runs the assignment grammar. Queue projection alone uses the locked, shape-checked project-room-queue door; ordinary room traffic remains on the local-machine identity. The live wire between the room and the desks registered in ~/.config/carr/hermes-desks.json.",
+      "purpose": "Polls the shared partner room (add-room-turn/read-room, Idea 78) and routes new turns to local desks (claude-session, codex-session), captures each desk's reply and posts it back, and runs the assignment grammar. On the same existing wake, the separate lease-bound Engineering Passport controller may drain one already-admitted engineering-slice job through the fixed fresh Codex desk; it never creates work or exposes its carr_jobs credential to that desk. Queue projection alone uses the locked, shape-checked project-room-queue door; ordinary room traffic remains on the local-machine identity. The live wire between the room and the desks registered in ~/.config/carr/hermes-desks.json.",
       "family": "Local Mac edge",
       "criticality": "medium",
       "owner_actor": "joe",
@@ -339,6 +339,25 @@
           "expected_cadence_seconds": 3600,
           "cadence_grace_seconds": 3600,
           "notes": "Grace widened 1800→3600 on 2026-08-18: run rows now ride the local spool (tools/ops-spool.py) and land at the next run-spool-flush, so a row can be inserted up to 1800s after its fire; the old grace put the worst honest gap exactly at the window edge."
+        }
+      ]
+    },
+    {
+      "key": "cutover-watch",
+      "name": "Control-plane cutover watch",
+      "purpose": "Unattended report-only watch over the control-plane cutover: completed jobs whose receipts are not yet accepted, jobs newly dead-lettered, and the acceptance table. Writes a loop update to open loop #532 and notifies Joe locally on any change; never accepts, promotes, disables, or dispatches anything (rule 1f3a7372, rule 847f9995). See bin/cutover-watch.sh and tools/cutover-watch.py.",
+      "family": "Local Mac edge",
+      "criticality": "medium",
+      "owner_actor": "joe",
+      "repo_path": "bin/cutover-watch.sh",
+      "runtime": "launchd",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "ops/launchd/com.carr.cutover-watch.plist",
+          "expected_cadence_seconds": 1800,
+          "cadence_grace_seconds": 3600,
+          "notes": "Grace is 2x the 1800s interval, same reasoning as cc-version-sentinel: run rows ride the local spool (tools/ops-spool.py) and land at the next run-spool-flush, so a row can be inserted up to ~1800s after its fire. NOT YET INSTALLED (built in worktree cutover-watch, 2026-08-27) — the orchestrating session installs it after this branch merges to main; see tools/scheduler-truth.py's INSTALL_EXEMPT for the same statement in machine-checkable form."
         }
       ]
     },

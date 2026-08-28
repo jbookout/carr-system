@@ -37,6 +37,10 @@ WHAT IT DOES
   health          Read the derived health of every registered service and
                   environment, with the freshness that produced it.
 
+  pr-evidence     Attach recovery_evidence_ref to any incident a merged PR's
+                  title or body names (WR-000019 slice S1). Same carr_jobs
+                  boundary as assess: it can attach evidence, never close.
+
 WHAT IT DELIBERATELY DOES NOT DO
 
   It never invents a service. An unknown --service is refused with the registry
@@ -67,12 +71,14 @@ meant to be run through tools/db-tap.py.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import stat
 import subprocess
 import sys
+import tempfile
 import tomllib
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -96,6 +102,7 @@ DSN_FOR = {
     "owner": ("DATABASE_URL", "CARR_DB_EXPORTER_URL"),
     "read":  ("DATABASE_URL", "CARR_DB_EXPORTER_URL", "CARR_DB_JOBS_URL"),
     "authority": ("CARR_DB_AUTHORITY_JOE_URL",),
+    "forward_fix_verifier": ("CARR_DB_PROGRAM5_FORWARD_FIX_VERIFIER_URL",),
 }
 
 TERMINAL_RUN_STATES = {"succeeded", "failed", "timed_out", "cancelled", "skipped"}
@@ -208,6 +215,10 @@ def staging_readback_projection(path: str, expected_sha: str,
             or not migration.endswith(".sql")
             or any(ch not in "abcdefghijklmnopqrstuvwxyz0123456789_-." for ch in migration)):
         raise ValueError("staging readback schema identity is invalid")
+    schema_ledger = schema.get("ledger_sha256")
+    if (not isinstance(schema_ledger, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", schema_ledger) is None):
+        raise ValueError("staging readback schema ledger is invalid")
     doctrine_value = _object_field(raw.get("doctrine_generation")).get("value")
     return {
         "git_sha": expected_sha,
@@ -217,6 +228,7 @@ def staging_readback_projection(path: str, expected_sha: str,
         "verb_count": _exact_int(raw.get("verb_count"), "verb_count", minimum=1),
         "schema_highest_migration": migration,
         "schema_applied_count": _exact_int(schema.get("applied_count"), "schema applied count", minimum=1),
+        "schema_ledger_sha256": schema_ledger,
         "doctrine_generation": _exact_int(doctrine_value, "doctrine generation"),
         # The boolean is the only database type: posture text is derived from
         # it and malformed values have already been refused above.
@@ -325,6 +337,60 @@ def claim_staging_deployment_attempt(cur, idempotency_key: str) -> dict:
     return row[0]
 
 
+def prepare_staging_forward_fix_rehearsal(cur, args) -> dict:
+    cur.execute("select ops.prepare_staging_forward_fix_rehearsal(%s::uuid,%s::uuid,%s,%s)",
+                (args.idempotency_key, args.correlation, args.release_key, args.git_sha))
+    row = cur.fetchone()
+    if not row or not isinstance(row[0], dict):
+        raise RuntimeError("forward-fix rehearsal writer returned no durable state")
+    return row[0]
+
+
+def claim_staging_forward_fix_rehearsal(cur, idempotency_key: str) -> dict:
+    cur.execute("select ops.claim_staging_forward_fix_rehearsal(%s::uuid)", (idempotency_key,))
+    row = cur.fetchone()
+    if not row or not isinstance(row[0], dict):
+        raise RuntimeError("forward-fix rehearsal claim returned no durable state")
+    return row[0]
+
+
+def record_staging_forward_fix_rehearsal(cur, args, projection: dict) -> dict:
+    cur.execute("""select ops.record_staging_forward_fix_rehearsal(
+      %s::uuid,%s::uuid,%s,%s,%s,%s,%s,%s,%s)""",
+                (args.idempotency_key, projection["provider_version_id"], projection["provider_tag"],
+                 projection["verb_count"], projection["schema_highest_migration"],
+                 projection["schema_applied_count"], projection["schema_ledger_sha256"],
+                 projection["doctrine_generation"], projection["program6_actions_enabled"]))
+    row = cur.fetchone()
+    if not row or not isinstance(row[0], dict):
+        raise RuntimeError("forward-fix rehearsal result writer returned no durable state")
+    return row[0]
+
+
+def forward_fix_rehearsal_declaration(cur, idempotency_key: str) -> dict:
+    """Read only the verifier-scoped immutable declaration projection."""
+    cur.execute("""select * from ops.read_staging_forward_fix_rehearsal_declaration(%s::uuid)""",
+                (idempotency_key,))
+    row = cur.fetchone()
+    if not row:
+        raise RuntimeError("forward-fix rehearsal has no immutable prepared declaration")
+    # The function RETURNS TABLE with six columns (0315); building the dict
+    # here mirrors that exact shape. Until 2026-08-26 this returned row[0]
+    # as if the projection were one composite column, so every real read
+    # died with "string indices must be integers" — unseen because the
+    # selftest's fake cursor returned a dict in column zero.
+    if len(row) != 6:
+        raise RuntimeError("forward-fix declaration projection has an unexpected shape")
+    return {
+        "expected_provider_tag": row[0],
+        "declared_migration_set_sha256": row[1],
+        "declared_migration_count": row[2],
+        "declared_schema_highest_migration": row[3],
+        "declared_schema_applied_count": row[4],
+        "declared_schema_ledger_sha256": row[5],
+    }
+
+
 def prepare_staging_restore_only_attempt(cur, args) -> dict:
     """Persist a recovery repair that is structurally outside bundle evidence."""
     cur.execute(
@@ -410,6 +476,8 @@ def dsn(kind: str) -> str:
                 raise SystemExit("ops-record: CARR_DB_JOBS_URL must authenticate as carr_jobs")
             if kind == "authority" and not _is_authority_dsn(value):
                 raise SystemExit("ops-record: CARR_DB_AUTHORITY_JOE_URL must authenticate as carr_authority_joe")
+            if kind == "forward_fix_verifier" and not _is_forward_fix_verifier_dsn(value):
+                raise SystemExit("ops-record: CARR_DB_PROGRAM5_FORWARD_FIX_VERIFIER_URL must authenticate as carr_program5_forward_fix_verifier")
             return value
     raise SystemExit(
         f"ops-record: no credential — set one of {', '.join(DSN_FOR[kind])} "
@@ -431,20 +499,32 @@ def _is_authority_dsn(value: str) -> bool:
     return any(part == "user=carr_authority_joe" for part in value.split())
 
 
+def _is_forward_fix_verifier_dsn(value: str) -> bool:
+    parsed = urlsplit(value)
+    if parsed.scheme:
+        return unquote(parsed.username or "") == "carr_program5_forward_fix_verifier"
+    return any(part == "user=carr_program5_forward_fix_verifier" for part in value.split())
+
+
 def connect(kind: str):
     try:
         import psycopg
     except ImportError:
         raise SystemExit("ops-record: psycopg not installed (pip install 'psycopg[binary]')")
     conn = psycopg.connect(dsn(kind), autocommit=True)
-    if kind in ("routine", "authority"):
+    if kind in ("routine", "authority", "forward_fix_verifier"):
         with conn.cursor() as cur:
-            cur.execute("select session_user,current_user")
+            if kind == "forward_fix_verifier":
+                cur.execute("select session_user,current_user,pg_has_role(session_user,'carr_program5_forward_fix_verifiers','member')")
+            else:
+                cur.execute("select session_user,current_user")
             row = cur.fetchone()
-        expected = "carr_jobs" if kind == "routine" else "carr_authority_joe"
-        if row != (expected, expected):
+        expected = ("carr_jobs" if kind == "routine" else "carr_authority_joe"
+                    if kind == "authority" else "carr_program5_forward_fix_verifier")
+        exact_row = (expected, expected) if kind != "forward_fix_verifier" else (expected, expected, True)
+        if row != exact_row:
             conn.close()
-            raise SystemExit(f"ops-record: {kind} connection is not {expected}")
+            raise SystemExit(f"ops-record: {kind} connection is not the exact scoped identity")
     return conn
 
 
@@ -1641,6 +1721,142 @@ def cmd_assess(args) -> int:
     return 0
 
 
+# ── PR-NAMED RECOVERY EVIDENCE (WR-000019 slice S1, 2026-08-27) ─────────────
+# The gap this closes: recovery_evidence_ref stayed null on almost every
+# non-SEV-1 incident until a human typed something in at close time (or `run`/
+# `assess` happened to touch the same job again). But the incident is often
+# ALREADY fixed by then — a merged PR that names the incident IS the evidence,
+# and until now nothing carried that fact onto the row. `resolve`/`sweep` still
+# do the actual closing; this only makes sure the evidence is sitting there
+# when a human runs one of them, exactly the way assess() above pre-populates
+# it for the run-ledger's own recoveries.
+#
+# THE SAME BOUNDARY AS assess(), REUSED RATHER THAN REINVENTED. connect
+# ("routine") is carr_jobs, and 0117's grant already covers exactly the column
+# this writes (recovery_evidence_ref) — no new grant, no new credential, no
+# new CI secret. carr_jobs cannot write resolved_at or root_cause, so this
+# cannot close, reclassify, or theorise about an incident even if the code
+# tried to; the interlock 0117 built is what makes that a database fact
+# instead of a promise about this file's behaviour.
+#
+# NEVER CLOBBERS. An incident that already carries recovery_evidence_ref (from
+# assess(), a duplicate adjudication, or a human's own resolve --evidence)
+# keeps what it has — a PR mentioning INC-x in passing is corroboration, not a
+# reason to overwrite investigation another writer already recorded.
+INCIDENT_REF_RE = re.compile(r"\bINC-\d{8}-\d{2,}\b")
+
+
+def extract_incident_refs(*texts: str | None) -> list[str]:
+    """Pure. Every distinct INC-<8-digit-day>-<seq> reference named across the
+    given strings (title, body, ...), in first-seen order. No I/O, so this is
+    exercised directly by tools/test-pr-incident-evidence.py without a gh
+    binary, a database, or a network in the loop."""
+    seen: dict[str, None] = {}
+    for text in texts:
+        for match in INCIDENT_REF_RE.findall(text or ""):
+            seen.setdefault(match, None)
+    return list(seen.keys())
+
+
+def pr_evidence_decision(existing_evidence: str | None, state: str, pr_number: int) -> tuple[str, str | None]:
+    """Pure. (action, evidence_ref) for one incident a merged PR names —
+    "attach" carries the ref to write, everything else is a reason to leave
+    the row alone. Factored out so tools/test-pr-incident-evidence.py can
+    prove the never-clobber and never-close rules directly, the same way
+    resolve_preconditions above is tested apart from the connection that
+    executes it."""
+    if state in ("resolved", "reviewed"):
+        return ("skip_closed", None)
+    if existing_evidence:
+        return ("skip_evidenced", None)
+    return ("attach", f"pr:{pr_number}")
+
+
+def _fetch_prs_for_evidence(pr_number: int | None, since_hours: int, repo: str | None) -> list[dict]:
+    """One explicit PR (any state — a pre-merge probe is a legitimate dry run
+    and reports "not merged" rather than erroring), or every PR merged within
+    the trailing window. Same gh-CLI shape as ops/pr-hygiene-check.py's own
+    fetch(), so a reader who knows that one already knows this one."""
+    fields = "number,title,body,url,mergedAt,state"
+    if pr_number is not None:
+        cmd = ["gh", "pr", "view", str(pr_number), "--json", fields]
+    else:
+        cmd = ["gh", "pr", "list", "--state", "merged", "--limit", "100", "--json", fields]
+    if repo:
+        cmd += ["--repo", repo]
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+    if p.returncode != 0:
+        raise RuntimeError((p.stderr or p.stdout or "gh failed").strip()[:300])
+    data = json.loads(p.stdout or ("null" if pr_number is not None else "[]"))
+    rows = [data] if pr_number is not None else data
+    if pr_number is None and since_hours > 0:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+        rows = [r for r in rows if (merged_at := parse_ts(r.get("mergedAt"))) is not None and merged_at >= cutoff]
+    return rows
+
+
+def cmd_pr_evidence(args) -> int:
+    try:
+        prs = _fetch_prs_for_evidence(args.pr, args.since_hours, args.repo)
+    except Exception as e:                                    # noqa: BLE001
+        print(f"ops-record: could not read pull requests ({type(e).__name__}: {e})",
+              file=sys.stderr)
+        return 1
+
+    attached = already_evidenced = closed_already = not_found = 0
+    with connect("routine") as conn, conn.cursor() as cur:
+        for pr in prs:
+            if pr.get("state") != "MERGED":
+                print(f"  skip  PR #{pr.get('number')} is not merged (state={pr.get('state')})")
+                continue
+            refs = extract_incident_refs(pr.get("title"), pr.get("body"))
+            for ref in refs:
+                cur.execute(
+                    """select recovery_evidence_ref, state from ops.incident where ref = %s""",
+                    (ref,))
+                row = cur.fetchone()
+                if not row:
+                    not_found += 1
+                    print(f"  ?     {ref} — no such incident (named in PR #{pr['number']}, nothing to attach)")
+                    continue
+                existing_evidence, state = row
+                action, evidence_ref = pr_evidence_decision(existing_evidence, state, pr["number"])
+                if action == "skip_closed":
+                    closed_already += 1
+                    print(f"  --    {ref} is already {state}; evidence not needed")
+                    continue
+                if action == "skip_evidenced":
+                    already_evidenced += 1
+                    print(f"  --    {ref} already carries recovery evidence — not overwritten")
+                    continue
+                cur.execute(
+                    """update ops.incident set recovery_evidence_ref = %s
+                        where ref = %s and recovery_evidence_ref is null""",
+                    (evidence_ref, ref))
+                if cur.rowcount:
+                    cur.execute(
+                        """insert into ops.incident_fact (incident_id, text, source_ref)
+                           select id, %s, %s from ops.incident where ref = %s""",
+                        (f"recovery evidence attached: PR #{pr['number']} "
+                         f"\"{(pr.get('title') or '').strip()[:200]}\" merged "
+                         f"{pr.get('mergedAt') or ''} — {pr.get('url') or ''}".strip(),
+                         "ops-record.py pr-evidence", ref))
+                    attached += 1
+                    print(f"  +     {ref}  recovery_evidence_ref = {evidence_ref}")
+                else:
+                    # Lost a race with another writer between the select and the
+                    # update above (assess(), a duplicate adjudication, a human's
+                    # resolve) — the row now has evidence from somewhere, which is
+                    # the same outcome this call was trying to produce.
+                    already_evidenced += 1
+                    print(f"  --    {ref} gained recovery evidence from another writer just now — not overwritten")
+        conn.commit()
+
+    print(f"pr-evidence: {attached} attached · {already_evidenced} already evidenced · "
+          f"{closed_already} already closed · {not_found} not found")
+    return 0
+
+
 def cmd_staging_target(args) -> int:
     try:
         target = staging_worker_target()
@@ -1746,6 +1962,80 @@ def cmd_staging_restore_only(args) -> int:
             print("true" if value else "false")
         else:
             print(value)
+    else:
+        print(json.dumps(result, sort_keys=True))
+    return 0
+
+
+def cmd_staging_forward_fix(args) -> int:
+    """The sole staging controller for an approval-eligible forward-fix proof."""
+    try:
+        args.idempotency_key = str(uuid.UUID(args.idempotency_key))
+        if args.action == "prepare":
+            if not args.release_key or not args.git_sha:
+                raise ValueError("forward-fix prepare is missing exact release inputs")
+            args.correlation = correlation_of(args.correlation)
+            with connect("routine") as conn, conn.transaction(), conn.cursor() as cur:
+                result = prepare_staging_forward_fix_rehearsal(cur, args)
+        elif args.action == "claim":
+            with connect("routine") as conn, conn.transaction(), conn.cursor() as cur:
+                result = claim_staging_forward_fix_rehearsal(cur, args.idempotency_key)
+        else:
+            if (not args.git_sha or not args.expected_provider_tag or not args.expected_program6_actions
+                    or not args.staging_readback_file or not args.provider_versions_file or not args.manifest):
+                raise ValueError("forward-fix result requires manifest, readback, provider versions, and exact identity")
+            projection = staging_readback_projection(args.staging_readback_file, args.git_sha,
+                                                     args.expected_provider_tag,
+                                                     args.expected_program6_actions)
+            staging_provider_version(args.provider_versions_file, args.expected_provider_tag,
+                                     projection["provider_version_id"])
+            manifest = json.loads(_read_bounded_regular_file(args.manifest))
+            if not isinstance(manifest, dict):
+                raise ValueError("forward-fix manifest is not an object")
+            for key, observed in (("git_sha", projection["git_sha"]),
+                                  ("schema_highest_migration", projection["schema_highest_migration"]),
+                                  ("schema_applied_count", projection["schema_applied_count"]),
+                                  ("schema_ledger_sha256", projection["schema_ledger_sha256"])):
+                if manifest.get(key) != observed:
+                    raise ValueError("forward-fix readback does not match the exact candidate manifest")
+            migration_set = manifest.get("migration_set")
+            # tools/release-manifest.py migration_set() emits NUMBER BASES
+            # ("0315"), not filenames — accept that canonical form (and full
+            # filenames for older hand-built fixtures). Until 2026-08-26 this
+            # check demanded filenames the builder never produced, so the
+            # typed forward-fix readback refused every real manifest.
+            if (not isinstance(migration_set, list) or not migration_set
+                    or any(not isinstance(item, str)
+                           or not re.fullmatch(r"[0-9]{4}[a-z]?(_[a-z0-9_.-]+\.sql)?", item)
+                           for item in migration_set)):
+                raise ValueError("forward-fix manifest lacks its exact migration set")
+            if manifest.get("program6_actions") != {"enabled": args.expected_program6_actions == "enabled",
+                                                    "posture": args.expected_program6_actions}:
+                raise ValueError("forward-fix manifest Program 6 posture is not exact")
+            with connect("forward_fix_verifier") as conn, conn.transaction(), conn.cursor() as cur:
+                declared = forward_fix_rehearsal_declaration(cur, args.idempotency_key)
+                # ops.program5_migration_set_sha256 is the canon: it hashes
+                # to_jsonb(text[])::text, which PostgreSQL renders with ", "
+                # between elements — not compact JSON. Until 2026-08-26 this
+                # hashed compact JSON, so the boundary comparison could never
+                # match a real declaration.
+                manifest_set_hash = "sha256:" + hashlib.sha256(
+                    json.dumps(migration_set, separators=(", ", ": ")).encode()).hexdigest()
+                if (declared["expected_provider_tag"] != args.expected_provider_tag
+                        or declared["declared_migration_set_sha256"] != manifest_set_hash
+                        or declared["declared_migration_count"] != len(migration_set)):
+                    raise ValueError("forward-fix manifest does not match the immutable candidate migration boundary")
+                result = record_staging_forward_fix_rehearsal(cur, args, projection)
+    except (ValueError, RuntimeError, json.JSONDecodeError) as exc:
+        print(f"ops-record: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print("ops-record: could not persist forward-fix rehearsal: "
+              f"{str(exc).splitlines()[0][:240]}", file=sys.stderr)
+        return 1
+    if args.field:
+        value = result.get(args.field)
+        print("" if value is None else ("true" if value is True else "false" if value is False else value))
     else:
         print(json.dumps(result, sort_keys=True))
     return 0
@@ -1943,6 +2233,96 @@ def cmd_deployment(args) -> int:
 
 
 # ── release ──────────────────────────────────────────────────────────────────
+def release_candidate_manifest_refusal(args, manifest: dict) -> str | None:
+    """Return a fail-closed candidate-manifest refusal, or ``None``.
+
+    The release row's target and approval preimage must come from the same
+    verified manifest.  Keeping this check outside the database block proves a
+    malformed candidate cannot consume a writer credential or leave a row.
+    """
+    if not isinstance(manifest, dict):
+        return "release candidate manifest must be a JSON object"
+
+    manifest_target = (manifest.get("service"), manifest.get("environment"))
+    requested_target = (args.service, args.environment)
+    if manifest_target != requested_target:
+        return ("release candidate manifest service/environment must exactly "
+                f"match the requested target; manifest={manifest_target!r} "
+                f"requested={requested_target!r}")
+
+    manifest_identity = (manifest.get("provider"),
+                         manifest.get("provider_version_id"))
+    requested_identity = (args.provider, args.provider_version_id)
+    if manifest_identity != requested_identity:
+        return ("release candidate provider/version must exactly match the bound "
+                "release manifest so the approval plan hash covers the version "
+                "that can be promoted")
+
+    # A release row is an immutable source binding, not a movable Git ref.  The
+    # manifest verifier can rebuild HEAD, tags, and abbreviated SHAs, so reject
+    # those forms here before either verification or a database credential is
+    # reached.  Also prove that the recorded object is a commit present in this
+    # exact checkout rather than trusting its shape alone.
+    recorded_sha = manifest.get("git_sha")
+    if (not isinstance(recorded_sha, str)
+            or re.fullmatch(r"[0-9a-f]{40}", recorded_sha) is None):
+        return "release candidate manifest git_sha must be an exact lowercase 40-hex commit SHA"
+    resolved = subprocess.run(
+        ["git", "-C", str(REPO), "rev-parse", "--verify",
+         f"{recorded_sha}^{{commit}}"],
+        capture_output=True, text=True, check=False,
+    )
+    if resolved.returncode != 0 or resolved.stdout.strip() != recorded_sha:
+        return ("release candidate manifest git_sha must resolve to that exact "
+                "commit in the canonical source checkout")
+
+    assurance_fields = (
+        manifest.get("performance_budget_ref"),
+        manifest.get("performance_budget_ms"),
+        manifest.get("recovery_strategy"),
+        manifest.get("rollback_plan_ref"),
+    )
+    if args.environment in ("staging", "production"):
+        if (not isinstance(assurance_fields[0], str)
+                or not assurance_fields[0].strip()
+                or isinstance(assurance_fields[1], bool)
+                or not isinstance(assurance_fields[1], int)
+                or assurance_fields[1] <= 0
+                or assurance_fields[2] not in ("rollback", "forward_fix")
+                or not isinstance(assurance_fields[3], str)
+                or not assurance_fields[3].strip()
+                or manifest.get("rollback_ready") is not True):
+            return (f"{args.environment} candidate manifest requires complete "
+                    "performance/recovery assurance and a ready rollback plan")
+
+    # Legacy flags are accepted only as exact repetitions of the manifest. They
+    # no longer supply a second, unhashed staging recovery plan.
+    if (getattr(args, "rollback_ready", False)
+            and manifest.get("rollback_ready") is not True):
+        return "--rollback-ready differs from the candidate manifest"
+    supplied_plan = getattr(args, "rollback_plan", None)
+    if supplied_plan is not None and supplied_plan != manifest.get("rollback_plan_ref"):
+        return "--rollback-plan differs from the candidate manifest"
+
+    # Verify the already-parsed object that will be inserted, not a second read
+    # of a caller-controlled path that could change between parse and verify.
+    with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", prefix="carr-release-candidate-",
+            suffix=".json") as exact_manifest:
+        json.dump(manifest, exact_manifest, sort_keys=True, separators=(",", ":"))
+        exact_manifest.flush()
+        verified = subprocess.run(
+            [sys.executable, str(REPO / "tools" / "release-manifest.py"),
+             "verify", "--manifest", exact_manifest.name],
+            cwd=REPO, capture_output=True, text=True, check=False,
+        )
+    if verified.returncode != 0:
+        detail = (verified.stdout + verified.stderr).strip().splitlines()
+        summary = detail[-1][:240] if detail else "verification returned no evidence"
+        return f"release candidate manifest verification failed: {summary}"
+    return None
+
+
 def cmd_release(args) -> int:
     """Record one release candidate from a manifest built by
     tools/release-manifest.py, or approve / read one back.
@@ -1994,46 +2374,10 @@ def cmd_release(args) -> int:
         except Exception as e:                                   # noqa: BLE001
             print(f"ops-record: could not read the manifest: {e}", file=sys.stderr)
             return 2
-    if args.action == "candidate" and args.environment == "production":
-        manifest_target = (manifest.get("service"), manifest.get("environment"))
-        requested_target = (args.service, args.environment)
-        if manifest_target != requested_target:
-            print("ops-record: Production candidate manifest service/environment "
-                  "must exactly match the requested release target", file=sys.stderr)
-            return 2
-        manifest_identity = (manifest.get("provider"),
-                             manifest.get("provider_version_id"))
-        requested_identity = (args.provider, args.provider_version_id)
-        if manifest_identity != requested_identity:
-            print("ops-record: Production candidate provider/version must exactly "
-                  "match the bound release manifest so the approval plan hash "
-                  "covers the version that can be promoted", file=sys.stderr)
-            return 2
-        assurance = (manifest.get("performance_budget_ref"),
-                     manifest.get("performance_budget_ms"),
-                     manifest.get("recovery_strategy"),
-                     manifest.get("rollback_ready"),
-                     manifest.get("rollback_plan_ref"))
-        if (not isinstance(assurance[0], str) or not assurance[0].strip()
-                or isinstance(assurance[1], bool)
-                or not isinstance(assurance[1], int) or assurance[1] <= 0
-                or assurance[2] not in ("rollback", "forward_fix")
-                or assurance[3] is not True
-                or not isinstance(assurance[4], str) or not assurance[4].strip()):
-            print("ops-record: Production candidate manifest requires a positive "
-                  "performance budget/ref, recovery strategy "
-                  "(rollback or forward_fix), and ready recovery plan",
-                  file=sys.stderr)
-            return 2
-        verified = subprocess.run(
-            [sys.executable, str(REPO / "tools" / "release-manifest.py"),
-             "verify", "--manifest", args.manifest],
-            cwd=REPO, capture_output=True, text=True, check=False)
-        if verified.returncode != 0:
-            detail = (verified.stdout + verified.stderr).strip().splitlines()
-            summary = detail[-1][:240] if detail else "verification returned no evidence"
-            print("ops-record: Production candidate manifest verification failed "
-                  f"before ledger intake: {summary}", file=sys.stderr)
+    if args.action == "candidate":
+        refusal = release_candidate_manifest_refusal(args, manifest)
+        if refusal:
+            print(f"ops-record: {refusal}", file=sys.stderr)
             return 2
 
     try:
@@ -2088,10 +2432,8 @@ def cmd_release(args) -> int:
                      # now explains it instead of surfacing a raw constraint name.
                      args.verifier, args.verifier_evidence,
                      args.test_evidence, args.security_evidence,
-                     (manifest.get("rollback_ready") if args.environment == "production"
-                      else args.rollback_ready),
-                     (manifest.get("rollback_plan_ref") if args.environment == "production"
-                      else args.rollback_plan),
+                     manifest.get("rollback_ready"),
+                     manifest.get("rollback_plan_ref"),
                      args.work_request, manifest.get("plan_hash"),
                      parse_ts(args.expires_at) if args.expires_at else None))
                 row = cur.fetchone()
@@ -2175,17 +2517,35 @@ def cmd_release(args) -> int:
                               "--plan-hash <bound-hash> --idempotency-key <uuid>",
                               file=sys.stderr)
                     else:
+                        if args.environment == "staging":
+                            build_instruction = (
+                                f"    tools/release-manifest.py build --sha {args.sha} "
+                                "--environment staging --performance-budget-ref <immutable-ref> "
+                                "--performance-budget-ms <milliseconds> "
+                                "--recovery-strategy <rollback|forward_fix> "
+                                "--rollback-plan-ref <immutable-ref> > out/release.json\n"
+                            )
+                            approval_instruction = (
+                                "    tools/ops-record.py release staging-approve --key <key> "
+                                "--environment staging --plan-hash <hash> "
+                                "--idempotency-key <uuid>"
+                            )
+                        else:
+                            build_instruction = (
+                                f"    tools/release-manifest.py build --sha {args.sha} "
+                                f"--environment {args.environment} > out/release.json\n"
+                            )
+                            approval_instruction = (
+                                "    no staging approval door exists for this non-serving "
+                                "environment"
+                            )
                         print(f"NO LIVE APPROVAL for {release_identity} in {args.environment}.\n"
-                              "  Build the manifest, record the candidate, and have Joe "
-                              "approve the plan hash it prints:\n"
-                              f"    tools/release-manifest.py build --sha {args.sha} "
-                              "> out/release.json\n"
+                              "  Build the exact-target manifest, record the candidate, "
+                              "and use that environment's governed approval door:\n"
+                              f"{build_instruction}"
                               "    tools/ops-record.py release candidate --key <key> "
-                              "--environment staging --manifest out/release.json\n"
-                              "    tools/ops-record.py release staging-approve --key <key> "
-                              "--environment staging "
-                              "--plan-hash <hash> --idempotency-key <uuid>",
-                              file=sys.stderr)
+                              f"--environment {args.environment} --manifest out/release.json\n"
+                              f"{approval_instruction}", file=sys.stderr)
                     return 3
                 key, state, expires, stored_plan, release_sha = row
                 if args.plan_hash and args.plan_hash != stored_plan:
@@ -2229,19 +2589,46 @@ def cmd_release(args) -> int:
                 # candidate overtaken before signing has none of that evidence and
                 # is not superseded in the sense this table means; it is abandoned,
                 # and its reason can name the successor in words.
-                if not args.reason or len(args.reason.strip()) < 12:
+                successor_key = (getattr(args, "superseded_by", None) or "").strip()
+                supplied_reason = (args.reason or "").strip()
+                if successor_key and supplied_reason:
+                    print("ops-record: release abandon accepts either --reason or "
+                          "--superseded-by, not both", file=sys.stderr)
+                    return 2
+                if successor_key == args.key:
+                    print("ops-record: a release cannot supersede itself", file=sys.stderr)
+                    return 2
+                if successor_key:
+                    supplied_reason = ("superseded before approval by recorded release "
+                                       f"{successor_key}")
+                if len(supplied_reason) < 12:
                     print("ops-record: release abandon needs --reason (at least a "
-                          "dozen characters). A terminal row nobody can explain is "
-                          "the thing this action exists to prevent.", file=sys.stderr)
+                          "dozen characters) or --superseded-by naming an existing "
+                          "same-target release. A terminal row nobody can explain "
+                          "is the thing this action exists to prevent.", file=sys.stderr)
                     return 2
                 cur.execute(
-                    """update ops.release
+                    """with eligible_successor as (
+                          select id, service_id, environment
+                            from ops.release
+                           where release_key = %s
+                             and state in
+                                 ('candidate','approved','deploying','verifying','complete')
+                             for share
+                        )
+                        update ops.release target
                           set state = 'abandoned', abandoned_reason = %s,
                               ended_at = now()
-                        where release_key = %s
-                          and state in ('draft','candidate','approved')
+                        where target.release_key = %s
+                          and target.state in ('draft','candidate','approved')
+                          and (%s = '' or exists (
+                                select 1 from eligible_successor successor
+                                 where successor.id <> target.id
+                                   and successor.service_id = target.service_id
+                                   and successor.environment = target.environment
+                              ))
                     returning state""",
-                    (args.reason.strip(), args.key))
+                    (successor_key, supplied_reason, args.key, successor_key))
                 row = cur.fetchone()
                 if not row:
                     cur.execute("select state from ops.release where release_key = %s",
@@ -2250,10 +2637,16 @@ def cmd_release(args) -> int:
                     if not existing:
                         print(f"ops-record: no release {args.key!r}", file=sys.stderr)
                     else:
-                        print(f"ops-record: {args.key!r} is {existing[0]} and cannot be "
-                              f"abandoned. Only a release that never shipped can be "
-                              f"ended this way; one that deployed is history.",
-                              file=sys.stderr)
+                        if successor_key:
+                            print(f"ops-record: {successor_key!r} is not an eligible "
+                                  "same-service, same-environment successor for "
+                                  f"{args.key!r}; the original release is unchanged.",
+                                  file=sys.stderr)
+                        else:
+                            print(f"ops-record: {args.key!r} is {existing[0]} and cannot be "
+                                  f"abandoned. Only a release that never shipped can be "
+                                  f"ended this way; one that deployed is history.",
+                                  file=sys.stderr)
                     return 2
                 print(f"{args.key} {row[0]}")
                 return 0
@@ -2551,6 +2944,9 @@ def main() -> int:
     rel.add_argument("--reason", help="abandon only: why this release will never "
                                       "ship. Required unless --superseded-by names "
                                       "the release that replaced it.")
+    rel.add_argument("--superseded-by", dest="superseded_by",
+                     help="abandon only: an existing same-service, same-environment "
+                          "release that replaces this unshipped candidate")
     rel.add_argument("--expires-hours", type=int, default=24,
                      help="approve/staging-approve: how long the approval stays live. An "
                           "approval that never expires is how a plan-hash check "
@@ -2597,6 +2993,22 @@ def main() -> int:
                                             "mutation_allowed", "expected_provider_tag", "result_ref",
                                             "status"])
 
+    sff = sub.add_parser("staging-forward-fix",
+                         help="prepare, claim, and record one verified forward-fix staging rehearsal")
+    sff.add_argument("action", choices=["prepare", "claim", "result"])
+    sff.add_argument("--idempotency-key", required=True)
+    sff.add_argument("--release-key")
+    sff.add_argument("--git-sha")
+    sff.add_argument("--correlation")
+    sff.add_argument("--staging-readback-file")
+    sff.add_argument("--provider-versions-file")
+    sff.add_argument("--manifest")
+    sff.add_argument("--expected-provider-tag")
+    sff.add_argument("--expected-program6-actions", choices=["enabled", "disabled"])
+    sff.add_argument("--field", choices=["forward_fix_rehearsal_attempt_id", "state", "mutation_claimed",
+                                            "mutation_allowed", "expected_provider_tag", "result_ref",
+                                            "bundle_id", "recovery_run_id"])
+
     srv = sub.add_parser("staging-readback-verify",
                          help="verify one bounded staging /release file without writing")
     srv.add_argument("--file", required=True)
@@ -2637,6 +3049,14 @@ def main() -> int:
     a.add_argument("--window-hours", type=int, default=24,
                    help="how far back to look for each job's latest run")
 
+    pe = sub.add_parser("pr-evidence",
+                         help="attach recovery evidence to any incident a merged PR names")
+    pe.add_argument("--pr", type=int, default=None,
+                     help="one explicit PR number; default is every PR merged in --since-hours")
+    pe.add_argument("--since-hours", type=int, default=48,
+                     help="how far back to look for merged PRs when --pr is not given")
+    pe.add_argument("--repo", default=None, help="OWNER/REPO; default is gh's own repo resolution")
+
     args = p.parse_args()
     return {
         "sync-registry": cmd_sync_registry,
@@ -2648,9 +3068,11 @@ def main() -> int:
         "staging-target": cmd_staging_target,
         "staging-attempt": cmd_staging_attempt,
         "staging-restore-only": cmd_staging_restore_only,
+        "staging-forward-fix": cmd_staging_forward_fix,
         "staging-readback-verify": cmd_staging_readback_verify,
         "staging-provider-version": cmd_staging_provider_version,
         "assess": cmd_assess,
+        "pr-evidence": cmd_pr_evidence,
         "resolve": cmd_resolve,
         "sweep": cmd_sweep,
         "settings-change": cmd_settings_change,

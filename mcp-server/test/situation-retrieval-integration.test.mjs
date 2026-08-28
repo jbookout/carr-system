@@ -21,6 +21,16 @@ const MEMORY_WRITE_LITERAL_PATTERNS = [
 const memoryWriteLiteralClassified = literal =>
   MEMORY_WRITE_LITERAL_PATTERNS.some(pattern => pattern.test(literal));
 
+// engineering-runtime.js has two exact actor lookup shapes inside the
+// write:true admitEngineeringSlice path. Keep this content-specific: a future
+// actor lookup elsewhere in that file must still be reviewed by the scanner.
+const ENGINEERING_ADMISSION_LITERAL_PATTERNS = [
+  /select id,\s*slug from actor where id=\$1::uuid and slug='codex' and active and kind='automation' for share/i,
+  /select id,\s*slug from actor where slug=\$1 and active and kind='automation' for share/i,
+];
+const engineeringAdmissionLiteralClassified = literal =>
+  ENGINEERING_ADMISSION_LITERAL_PATTERNS.some(pattern => pattern.test(literal));
+
 test("registered search-doctrine resolves joe-local sponsorship to Joe's human actor", async () => {
   const calls = [];
   const client = {
@@ -213,7 +223,9 @@ test("no read verb filters the actor table on a column carr_reader cannot read",
   assert.ok(found.length > 0, "the scanner itself must still match something, or it has silently rotted");
 
   const unclassified = found.filter(f =>
-    !(CLASSIFIED[f.name] || (f.name === "memory.js" && memoryWriteLiteralClassified(f.literal))));
+    !(CLASSIFIED[f.name] ||
+      (f.name === "memory.js" && memoryWriteLiteralClassified(f.literal)) ||
+      (f.name === "engineering-runtime.js" && engineeringAdmissionLiteralClassified(f.literal))));
   assert.deepEqual(unclassified, [],
     `these filter the actor table on kind or active and are not classified as write-only paths. ` +
     `If any belongs to a READ verb it is the outage of 2026-08-17 again: ` +
@@ -232,6 +244,16 @@ test("memory actor classification is literal-specific, not filename-wide", () =>
   assert.equal(memoryWriteLiteralClassified(writeUpdate), true);
   assert.equal(memoryWriteLiteralClassified(readShape), false,
     "a future memory read literal must remain unclassified and fail the architectural gate");
+});
+
+test("engineering admission actor classification is literal-specific", () => {
+  const priorSession = "select id, slug from actor where id=$1::uuid and slug='codex' and active and kind='automation' for share";
+  const executor = "select id, slug from actor where slug=$1 and active and kind='automation' for share";
+  const readShape = "select id from actor where slug=$1 and kind='human' and active=true";
+  assert.equal(engineeringAdmissionLiteralClassified(priorSession), true);
+  assert.equal(engineeringAdmissionLiteralClassified(executor), true);
+  assert.equal(engineeringAdmissionLiteralClassified(readShape), false,
+    "a future Engineering read literal must remain unclassified and fail the architectural gate");
 });
 
 // The contract above is only worth its allowlist if the scanner cannot be

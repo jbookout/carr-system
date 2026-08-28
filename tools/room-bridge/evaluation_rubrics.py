@@ -5,6 +5,8 @@ does not impose one rubric on every governed workflow. Adding a workflow needs
 an explicit immutable rubric/case-set binding, not an ad-hoc scorer.
 """
 
+from __future__ import annotations
+
 WORKFLOW_RUBRICS = {
     "workflow:job-passport": {
         "rubric_id": "rubric:job-passport-visual",

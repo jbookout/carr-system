@@ -63,6 +63,9 @@ class CardFake {
     if (String(text).includes("pending_sourced_work_request_outcome_feedback")) return { rows: this.mode === "pending" ? [{
       ...acceptedB, outcome: acceptedB.outcome, proposed_at: "2026-08-16T02:00:00Z",
     }] : [] };
+    // The card also asks who actually performed each authority act, joining the
+    // receipts to public.tool_call by idempotency key. No acts in this fixture.
+    if (String(text).includes("acting-identity")) return { rows: [] };
     if (!String(text).includes("work_request_card")) throw new Error(`unexpected query: ${text}`);
     const history = this.mode === "b" ? [acceptedA, acceptedB] : [acceptedA];
     return { rows: [{ ref: "WR-000001", title: "Sourced routine", desired_outcome: "Routine is usable", acceptance_criteria: [],
@@ -127,7 +130,9 @@ test("closed evidence, measurement, and outcome consistency refuse before databa
     { ...PROPOSE, manual_context_transfers: 101 },
     { ...PROPOSE, extra: true },
   ]) assert.ok((await refused(() => executeRegisteredTool(noDb, JOE, "propose-outcome-feedback", args))).error);
-  assert.equal((await refused(() => executeRegisteredTool(new OutcomeFake(), BOT, "accept-outcome-feedback", structuredClone(ACCEPT)))).error, "human_only");
+  // INVERTED, not deleted (Joe's ruling 2026-08-26, decision dc57f62d): a
+  // machine actor is admitted now, so restoring the gate fails here loudly.
+  assert.ok(await executeRegisteredTool(new OutcomeFake(), BOT, "accept-outcome-feedback", structuredClone(ACCEPT)));
   assert.equal((await refused(() => callTool({}, JOE, "accept-outcome-feedback", structuredClone(ACCEPT), "full"))).error, "authority_connection_unavailable");
 });
 

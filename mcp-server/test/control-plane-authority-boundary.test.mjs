@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { TOOLS, ToolError } from "../src/tools.js";
+import { TOOLS, ToolError, canExercisePartnerAuthority } from "../src/tools.js";
 import { authorityDsnForActor, callTool } from "../src/mcp.js";
 
 const joe = { id: "10000000-0000-0000-0000-000000000002", slug: "joe", display: "Joe", human: true, via: "test" };
 const dell = { id: "10000000-0000-0000-0000-000000000003", slug: "dell", display: "Dell", human: true, via: "test" };
+const codexForJoe = { id: "10000000-0000-0000-0000-000000000004", slug: "codex", display: "Codex", human: false, sponsoring_human_slug: "joe", via: "oauth-agent" };
+const claudeForDell = { id: "10000000-0000-0000-0000-000000000005", slug: "claude", display: "Claude", human: false, sponsoring_human_slug: "dell", via: "oauth-agent" };
 
 class AcceptanceAuthorityFake {
   constructor(sessionSlug) {
@@ -41,19 +43,46 @@ class AcceptanceAuthorityFake {
 }
 
 test("control-plane authority operations are explicit human authority verbs", () => {
+  // humanOnly LABEL RETIRED, authorityOnly UNCHANGED (WR-000019 slice S1,
+  // 2026-08-27): the label was dead since executeRegisteredTool stopped
+  // reading it 2026-08-26 (decision dc57f62d); this slice drops the stale
+  // declarations from tools.js. authorityOnly is the live gate here.
   for (const name of ["accept-workflow", "disable-legacy-schedule", "activate-guidance-registry",
     "decide-guidance-import-batch", "deactivate-guidance-registry"]) {
-    assert.equal(TOOLS[name].humanOnly, true);
+    assert.equal(TOOLS[name].humanOnly, undefined);
     assert.equal(TOOLS[name].authorityOnly, true);
   }
 });
 
-test("authority DSNs are partner-scoped and the single-seat fallback is Joe-only", () => {
+test("authority DSNs follow verified partners and their sponsored Codex or Claude agents", () => {
   assert.equal(authorityDsnForActor({ CARR_DB_AUTHORITY_JOE_URL: "joe-dsn" }, joe), "joe-dsn");
   assert.equal(authorityDsnForActor({ CARR_DB_AUTHORITY_URL: "fallback" }, joe), "fallback");
   assert.equal(authorityDsnForActor({ CARR_DB_AUTHORITY_DELL_URL: "dell-dsn" }, dell), "dell-dsn");
   assert.equal(authorityDsnForActor({ CARR_DB_AUTHORITY_URL: "joe-fallback" }, dell), null);
+  assert.equal(authorityDsnForActor({ CARR_DB_AUTHORITY_JOE_URL: "joe-dsn" }, codexForJoe), "joe-dsn");
+  assert.equal(authorityDsnForActor({ CARR_DB_AUTHORITY_DELL_URL: "dell-dsn" }, claudeForDell), "dell-dsn");
+  assert.equal(authorityDsnForActor({ CARR_DB_AUTHORITY_URL: "fallback" }, codexForJoe), "fallback");
+  assert.equal(authorityDsnForActor({ CARR_DB_AUTHORITY_URL: "fallback" }, claudeForDell), null);
   assert.equal(authorityDsnForActor({ CARR_DB_AUTHORITY_URL: "fallback" }, { slug: "codex", human: false }), null);
+  assert.equal(authorityDsnForActor({ CARR_DB_AUTHORITY_JOE_URL: "joe-dsn" }, { slug: "grok", human: false, sponsoring_human_slug: "joe" }), null);
+});
+
+test("partners, sponsored native agents, and the local machine doors cross the partner boundary", () => {
+  assert.equal(canExercisePartnerAuthority(joe), true);
+  assert.equal(canExercisePartnerAuthority(dell), true);
+  assert.equal(canExercisePartnerAuthority(codexForJoe), true);
+  assert.equal(canExercisePartnerAuthority(claudeForDell), true);
+  // ADDED 2026-08-26 (Joe's ruling, decision dc57f62d): the `./run.sh call`
+  // doors. Their sponsor is server-derived through LOCAL_SPONSOR, never
+  // asserted by the Mac, which is why admitting them is safe.
+  assert.equal(canExercisePartnerAuthority({ slug: "joe-local", human: false, sponsoring_human_slug: "joe" }), true);
+  assert.equal(canExercisePartnerAuthority({ slug: "dell-local", human: false, sponsoring_human_slug: "dell" }), true);
+  // STILL REFUSED, and these are the ones that matter: a slug with no sponsor
+  // at all, and a sponsored slug that is not an admitted door. The ruling
+  // removed a human-only gate; it did not make the boundary meaningless.
+  assert.equal(canExercisePartnerAuthority({ slug: "codex", human: false }), false);
+  assert.equal(canExercisePartnerAuthority({ slug: "grok", human: false, sponsoring_human_slug: "joe" }), false);
+  assert.equal(canExercisePartnerAuthority({ slug: "joe-local", human: false }), false);
 });
 
 test("authority operation fails closed instead of falling back to writer credentials", async () => {

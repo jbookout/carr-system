@@ -265,6 +265,57 @@ test("add-premises new_party org collision surfaces the survivor as needs_confir
   assert.equal(c.rollbacks.length, 1, "add-premises' insert is savepoint-guarded too");
 });
 
+// ── decisive needs_confirm auto-resolution (WR-000019 slice S6) ─────────────
+//
+// The ONLY signal strong enough to resolve without a human is an EXACT match
+// on a real identifier (email) — trigram name similarity alone is exactly the
+// ambiguous case this queue exists to catch, so it must never auto-resolve on
+// its own, no matter how high it ranks.
+
+test("a single exact-email candidate auto-resolves without creating a duplicate", async () => {
+  const existing = { id: ids.survivor, name: "Dana Alt", email: "dana@example.test", city: "Mobile",
+    exact_email_match: true };
+  const c = new Fake({ similar: [existing] });
+  const res = await addParty(c, { name: "Dana Altman", email: "Dana@Example.test" });
+  assert.equal(res.ok, true);
+  assert.equal(res.party_id, ids.survivor);
+  assert.equal(res.auto_resolved, true);
+  assert.equal(res.needs_confirm, undefined);
+  assert.equal(c.partyInserts.length, 0, "no duplicate party is created");
+});
+
+test("force_new:true still creates a separate party even over an exact email match", async () => {
+  const existing = { id: ids.survivor, name: "Dana Alt", email: "dana@example.test", city: "Mobile",
+    exact_email_match: true };
+  const c = new Fake({ similar: [existing] });
+  const res = await addParty(c, { name: "Dana Altman", email: "dana@example.test", force_new: true });
+  assert.equal(res.ok, true);
+  assert.equal(res.auto_resolved, undefined);
+  assert.equal(c.partyInserts.length, 1, "force_new bypasses the candidate lookup entirely, as before");
+});
+
+test("multiple candidates never auto-resolve even when one is an exact email match", async () => {
+  const first = { id: ids.survivor, name: "Dana Alt", email: "dana@example.test", city: "Mobile",
+    exact_email_match: true };
+  const second = { id: ids.employerOrg, name: "Dana Altmann", email: null, city: "Mobile",
+    exact_email_match: false };
+  const c = new Fake({ similar: [first, second] });
+  const res = await addParty(c, { name: "Dana Altman", email: "dana@example.test" });
+  assert.equal(res.needs_confirm, true);
+  assert.deepEqual(res.candidates, [first, second]);
+  assert.equal(c.partyInserts.length, 0);
+});
+
+test("a single fuzzy-name-only candidate (no exact email match) still asks — ambiguity is never auto-resolved", async () => {
+  const nameOnly = { id: ids.survivor, name: "Ruff House Resort", email: null, city: "PCB",
+    exact_email_match: false };
+  const c = new Fake({ similar: [nameOnly] });
+  const res = await addParty(c, { name: "Ruff House Resort", kind: "org" });
+  assert.equal(res.needs_confirm, true);
+  assert.deepEqual(res.candidates, [nameOnly]);
+  assert.equal(c.partyInserts.length, 0);
+});
+
 test("add-premises refuses a thin new ownership party before its party insert", async () => {
   const c = new Fake();
   await assert.rejects(

@@ -19,6 +19,8 @@ spec = importlib.util.spec_from_file_location(
 assert spec and spec.loader
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
+NIGHTLY_SOURCE = (Path(REPO) / "ops/scheduled-tasks/nightly-record-layer.SKILL.md").read_text(
+    encoding="utf-8")
 # The fixture below tests config reconciliation. Machine dependencies have their
 # own hermetic suite and must not be inferred from a temporary HOME.
 setattr(mod, "PREREQUISITE_CHECK", lambda _repo: [])
@@ -135,6 +137,7 @@ def main():
             f"task-{number:02d}": f"---\nname: task-{number:02d}\n---\nCARR managed {number}\n"
             for number in range(1, 17)
         }
+        primary_tasks["nightly-record-layer"] = NIGHTLY_SOURCE
         for name, body in primary_tasks.items():
             (tasks / f"{name}.SKILL.md").write_text(body, encoding="utf-8")
         original_primary = mod.IS_PRIMARY
@@ -143,9 +146,13 @@ def main():
             primary_task_install_rc = mod.cmd_install(True)
             primary_task_check_rc = mod.cmd_check()
         primary_task_rendered = all(
-            (Path(mod.TASKS_SRC) / name / "SKILL.md").read_text(encoding="utf-8") == body
+            (Path(mod.TASKS_SRC) / name / "SKILL.md").read_text(encoding="utf-8")
+            == mod.concrete(body)
             for name, body in primary_tasks.items()
         )
+        nightly_task_rendered = (
+            Path(mod.TASKS_SRC) / "nightly-record-layer" / "SKILL.md"
+        ).read_text(encoding="utf-8") == mod.concrete(NIGHTLY_SOURCE)
 
         mod.IS_PRIMARY = False
         secondary_task_source = Path(mod.TASKS_SRC)
@@ -284,12 +291,20 @@ def main():
         # A selftest must assert the same thing everywhere; the real role is
         # restored after the block instead.
         mod.IS_PRIMARY = True
+        # The definition-only mechanism is pinned with a SYNTHETIC entry since
+        # the 2026-08-26 cutover released the real tick plist from the hold
+        # (decision f4af0c87); tick_released below pins that release itself.
+        tick_released = "com.carr.control-plane-tick.plist" not in mod.DEFINITION_ONLY
+        original_definition_only = dict(mod.DEFINITION_ONLY)
+        mod.DEFINITION_ONLY["com.carr.synthetic-definition-only.plist"] = (
+            "synthetic hold for the selftest"
+        )
         definition_only_plist = {
-            "Label": "com.carr.control-plane-tick",
+            "Label": "com.carr.synthetic-definition-only",
             "ProgramArguments": ["/usr/bin/true"],
             "RunAtLoad": False,
         }
-        (launchd / "com.carr.control-plane-tick.plist").write_bytes(
+        (launchd / "com.carr.synthetic-definition-only.plist").write_bytes(
             plistlib.dumps(definition_only_plist)
         )
         failing_plist = {
@@ -335,9 +350,11 @@ def main():
                 ["launchctl", "bootout", f"gui/{os.getuid()}/com.carr.synthetic-load-failure"],
                 capture_output=True, text=True, check=False)
         mod.IS_PRIMARY = original_primary
+        mod.DEFINITION_ONLY.clear()
+        mod.DEFINITION_ONLY.update(original_definition_only)
         launchd_dir_created = Path(mod.LAUNCHD_SRC).is_dir()
         definition_only_absent = not (
-            Path(mod.LAUNCHD_SRC) / "com.carr.control-plane-tick.plist"
+            Path(mod.LAUNCHD_SRC) / "com.carr.synthetic-definition-only.plist"
         ).exists()
 
         # THE TWO SCHEDULED-TASK GUARDS LANDED WITHOUT COVERAGE (PR 430). Both
@@ -515,12 +532,14 @@ def main():
         ("fresh primary install renders all tracked scheduled-task definitions",
          primary_task_install_rc == 0 and primary_task_rendered
          and "WRITE  scheduled task task-01" in primary_task_out.getvalue()),
+        ("nightly consumer installs as an exact concrete render of canonical source",
+         nightly_task_rendered),
         ("fresh primary scheduled-task install leaves check clean",
          primary_task_check_rc == 0),
         ("secondary dry run names quarantine work without moving active tasks",
          secondary_dry_rc == 0 and secondary_dry_preserves_active
          and "would quarantine  scheduled task task-01" in secondary_dry_output),
-        ("secondary quarantines all 16 exact managed definitions",
+        ("secondary quarantines every exact managed definition",
          secondary_quarantine_complete),
         ("secondary exact-task retry is idempotent",
          secondary_retry_rc == 0 and "QUARANTINE" not in secondary_retry_output),
@@ -546,9 +565,11 @@ def main():
          and "launchd com.carr.literal-comment-token.plist" in token_comment_drift_output),
         ("LaunchAgent load failure and idempotent retry both stay nonzero",
          launchd_failure_rc == 1 and launchd_retry_rc == 1 and len(load_attempts) == 2),
-        ("definition-only control-plane tick is not installed before cutover",
+        ("definition-only hold skips a held plist without installing it",
          definition_only_absent
-         and "SKIP  com.carr.control-plane-tick.plist (definition only:" in launchd_out.getvalue()),
+         and "SKIP  com.carr.synthetic-definition-only.plist (definition only:" in launchd_out.getvalue()),
+        ("control-plane tick released from definition-only hold (cutover 2026-08-26)",
+         tick_released),
         ("fresh install creates the LaunchAgents directory",
          launchd_dir_created),
         # THE PLIST PARSE CHECK MOVED OUT, to ops/launchd-plist-portable-selftest.py.

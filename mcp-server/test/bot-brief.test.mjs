@@ -155,14 +155,21 @@ test("parked profile preserves null model and status, and reports unknown packs"
 
 test("governed bot brief refuses a mismatched assigned profile or unavailable required context", async () => {
   const governedClient = (assignment, rendered) => ({
-    query: async (sql) => {
+    query: async (sql, params = []) => {
       if (/from agent_profile/.test(sql)) return { rows: [profile()] };
       if (/from doctrine_meta/.test(sql)) return { rows: [{ generation: "42" }] };
       if (/rule_delivery_policy/.test(sql)) return { rows: [{ mode: "shadow" }] };
       if (/rule_pack_index/.test(sql)) return { rows: [] };
-      if (/set_config/.test(sql)) return { rows: [] };
-      if (/context_activation_brief_assignment/.test(sql)) return { rows: [{ profile_key: assignment }] };
-      if (/render_context_activation_for_brief/.test(sql)) return { rows: [{ items: rendered }] };
+      if (/context_activation_brief_assignment/.test(sql)) {
+        assert.match(sql, /with tenant_scope as materialized/);
+        assert.deepEqual(params, ["carr-internal", "WR-7", "ctx-0123456789abcdef"]);
+        return { rows: [{ profile_key: assignment }] };
+      }
+      if (/render_context_activation_for_brief/.test(sql)) {
+        assert.match(sql, /with tenant_scope as materialized/);
+        assert.deepEqual(params, ["carr-internal", "WR-7", "ctx-0123456789abcdef"]);
+        return { rows: [{ items: rendered }] };
+      }
       throw new Error(`unexpected query: ${sql}`);
     },
   });
@@ -191,10 +198,21 @@ function hermesClient(registration) {
       if (/from doctrine_meta/.test(sql)) return { rows: [{ generation: "42" }] };
       if (/rule_delivery_policy/.test(sql)) return { rows: [{ mode: "shadow" }] };
       if (/rule_pack_index/.test(sql)) return { rows: [] };
-      if (/set_config/.test(sql)) return { rows: [] };
-      if (/hermes_runtime_admission_for_brief/.test(sql)) return { rows: [{ registration }] };
-      if (/context_activation_brief_assignment/.test(sql)) return { rows: [{ profile_key: "deal-steward" }] };
-      if (/render_context_activation_for_brief/.test(sql)) return { rows: [{ items: [] }] };
+      if (/hermes_runtime_admission_for_brief/.test(sql)) {
+        assert.match(sql, /with tenant_scope as materialized/);
+        assert.equal(params[0], "carr-internal");
+        return { rows: [{ registration }] };
+      }
+      if (/context_activation_brief_assignment/.test(sql)) {
+        assert.match(sql, /with tenant_scope as materialized/);
+        assert.equal(params[0], "carr-internal");
+        return { rows: [{ profile_key: "deal-steward" }] };
+      }
+      if (/render_context_activation_for_brief/.test(sql)) {
+        assert.match(sql, /with tenant_scope as materialized/);
+        assert.equal(params[0], "carr-internal");
+        return { rows: [{ items: [] }] };
+      }
       throw new Error(`unexpected query: ${sql}`);
     },
   };

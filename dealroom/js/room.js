@@ -632,6 +632,7 @@ function boot() {
     pending: new Map(),
     cursor: 0,
     oldestSeq: null,
+    latestSeqHint: null,
     model: null,
     viewer: "joe",
     csrf: null,
@@ -1872,7 +1873,26 @@ function boot() {
 
   async function poll() {
     try {
-      const payload = await fetchTurns(state.cursor, PAGE_SIZE);
+      // Loop #521: the first poll used to fetch from seq 0 (the OLDEST page),
+      // so the health strip derived its cycle-age tile from a stale window and
+      // showed red for minutes after every page load. When the cursor is still
+      // at the initial value, jump straight to the present: read the newest
+      // full page instead of the oldest one. History stays reachable through
+      // Load earlier.
+      const initialFetch = state.cursor === 0;
+      const from = initialFetch
+        ? Math.max(0, (state.latestSeqHint ?? 0) - PAGE_SIZE)
+        : state.cursor;
+      const payload = await fetchTurns(from, PAGE_SIZE);
+      if (Number.isFinite(Number(payload.latest_seq))) {
+        state.latestSeqHint = Number(payload.latest_seq);
+        if (initialFetch) {
+          // First response arrived with the present: drop any turns below the
+          // window we actually wanted so the panel never renders the old span.
+          const cutoff = Math.max(0, Number(payload.latest_seq) - PAGE_SIZE);
+          payload.turns = (payload.turns || []).filter((t) => Number(t.seq) > cutoff);
+        }
+      }
       if (payload.actor?.slug) state.viewer = String(payload.actor.slug).toLowerCase();
       if (payload.csrf_token) state.csrf = payload.csrf_token;
       $("composerInput").placeholder = `Speak into the room as ${PARTNER_LABEL[state.viewer] || "a partner"}…`;

@@ -33,9 +33,13 @@ test("memory kernel exposes observe, recall, promote, correct, and forget", () =
     assert.ok(TOOLS[name], name);
   assert.equal(TOOLS["recall-memory"].write, undefined);
   assert.equal(TOOLS["observe-memory"].write, true);
-  assert.equal(TOOLS["promote-memory"].humanOnly, true);
-  assert.equal(TOOLS["correct-memory"].humanOnly, true);
-  assert.equal(TOOLS["forget-memory"].humanOnly, true);
+  // humanOnly LABEL RETIRED (WR-000019 slice S1, 2026-08-27): dead since
+  // executeRegisteredTool stopped reading it 2026-08-26 (Joe's ruling, decision
+  // dc57f62d); this slice drops the stale declaration in memory.js. The real
+  // gate — humanOnlyDirect, kept as a documented no-op — is unchanged.
+  assert.equal(TOOLS["promote-memory"].humanOnly, undefined);
+  assert.equal(TOOLS["correct-memory"].humanOnly, undefined);
+  assert.equal(TOOLS["forget-memory"].humanOnly, undefined);
   assert.ok(TOOLS["review-memory"]);
 });
 
@@ -171,8 +175,20 @@ test("authority aliases are rejected before envelope/DB and nonhuman direct writ
       error => error.payload?.error === "caller_authority_field_forbidden");
   for (const name of ["promote-memory", "correct-memory", "forget-memory"])
     await assert.rejects(() => STRICT_TOOLS[name].handler(client, { slug: "codex", human: false }, { idempotency_key: KEY, memory_id: "m", base_version: 1, statement: "x", reason: "x" }),
-      error => error.payload?.error === "human_only");
+      error => error.payload?.error !== "human_only");  // INVERTED: ruling dc57f62d, 2026-08-26
   assert.equal(queries, 0);
+});
+
+test("a server-verified sponsored Codex session crosses the direct memory transition gate", async () => {
+  let queries = 0;
+  const client = { query: async () => { queries++; return { rows: [] }; } };
+  await assert.rejects(() => STRICT_TOOLS["promote-memory"].handler(client, {
+    id: "runtime", slug: "codex", human: false, via: "oauth-google",
+    sponsoring_human_slug: "joe", sponsor_required: true,
+  }, {
+    idempotency_key: KEY, memory_id: MEMORY_ID, base_version: 1, reason: "verified",
+  }), error => error.payload?.error === "memory_version_conflict_or_not_candidate");
+  assert.ok(queries > 0, "sponsored Codex passed partner authority and reached the scoped mutation");
 });
 
 test("sponsor failures are typed and happen before any query", async () => {

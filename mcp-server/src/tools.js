@@ -21,7 +21,10 @@ import { incidentTools } from "./incident.js";
 import { evidenceActivationTools } from "./evidence-activation.js";
 import { engineeringRuntimeTools } from "./engineering-runtime.js";
 import { stripDealPlaceholders } from "./dealroom.js";
-import { authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
+import { authorizationClassForActor, organizationTenantForActor, permittedActionOwnerSlugs,
+         personalScopeForActor } from "./identity.js";
+import { canExercisePartnerAuthority, partnerAuthoritySlugForActor } from "./partner-authority.js";
+export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
 // ---------- envelope helpers ----------
 
@@ -164,7 +167,7 @@ async function withEnvelope(client, actor, verb, args, fn) {
   // reports a version conflict instead of the promised replay.
   // Keep this scoped until the shared envelope's existing fake-client suites
   // are migrated to model the extra query for every historical write verb.
-  if (verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "propose-ready-plan" || verb === "accept-ready-plan" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice")
+  if (verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice")
     await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
   const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
   if (prior.rows.length) {
@@ -659,7 +662,32 @@ export function coerceArgsToSchema(schema, args, path = "") {
   return args;
 }
 
-async function versionGuard(client, table, id, baseVersion) {
+// AUTO-REBASE FOR A PURE VERSION-NUMBER RACE (WR-000019 slice S6, CONFLICT
+// TIERING). version_conflict is deliberately "ask the human, never auto-retry"
+// (rule 14181e60) whenever the intervening write touched a field THIS call is
+// also about to touch — that is a real collision and must surface. But most
+// verbs bump `version` on every write regardless of which columns changed, so
+// two callers editing DISJOINT fields (Joe corrects `city` while a nightly
+// sweep updates `salesforce_id`) still collide on version alone even though
+// nothing they wrote actually conflicts. That shape is mechanical bookkeeping,
+// not a judgment call, and this is where it is caught.
+//
+// touchedFields is OPT IN and defaults to null, which preserves every existing
+// caller's exact behaviour (14 sites call this with 3 args; none of them
+// change). Only a caller that can name, up front, exactly which columns its
+// own write is about to set may opt in — passing the wrong set would let a
+// real collision rebase silently, so this is deliberately per-verb, not a
+// blanket default. update-deal is the first (and, for now, only) caller wired
+// this way: its `fields{}` PATCH already computes the exact touched-column set
+// before it needs a version at all.
+export function disjointFromIntervening(touchedFields, interveningEvents) {
+  if (!Array.isArray(touchedFields) || !touchedFields.length) return false;
+  if (!interveningEvents.length) return false; // nothing intervened at all — not a race, just a stale read of nothing
+  const touched = new Set(touchedFields);
+  return interveningEvents.every(row => !row.field || !touched.has(row.field));
+}
+
+async function versionGuard(client, table, id, baseVersion, touchedFields = null) {
   // Every write handler runs inside mcp.js's writer transaction.  Locking the
   // row makes the optimistic check real: a concurrent writer waits, then sees
   // the incremented version instead of letting two same-version writes through.
@@ -693,11 +721,25 @@ async function versionGuard(client, table, id, baseVersion) {
        from event e join actor a on a.id=e.actor_id
        where e.subject_id=$1 and e.recorded_at > $2 order by e.recorded_at desc limit 5`,
       [id, created.rows[0]?.created_at ?? null]);
+    // TRIVIAL RACE: every intervening event's field lies outside this call's
+    // own touched set. Rebase transparently onto the row this transaction
+    // already holds locked (current is fresh and safe to act on — the `for
+    // update` above means nobody else can move it again until this
+    // transaction commits) and hand the caller a receipt instead of a refusal.
+    // SAME-FIELD OR UNDECLARED: unchanged, still asks the human.
+    if (disjointFromIntervening(touchedFields, ev.rows)) {
+      return { version: current, rebased: true, rebase_receipt: {
+        from_base_version: Number(baseVersion), rebased_to_version: current,
+        disjoint_intervening_events: ev.rows.map(row => ({
+          actor: row.actor, verb: row.verb, field: row.field, recorded_at: row.recorded_at })),
+        hint: "version advanced from a write to a different field; re-applied against the current row with no human confirmation needed",
+      } };
+    }
     throw new ToolError({ error: "version_conflict", current_version: current,
       intervening_events: ev.rows,
       hint: "surface this to the human and re-read; NEVER auto-retry" });
   }
-  return current;
+  return { version: current, rebased: false, rebase_receipt: null };
 }
 
 async function config(client, key, fallback) {
@@ -3148,35 +3190,52 @@ export const TOOLS = {
 
   "set-next-action": {
     write: true,
-    description: "Set YOUR one open ball on a subject (replaces your previous open one; Dell's stays untouched — one ball per person per subject). Say whose turn it is and by when. Writes next_action (owner, due_on); set hold_until to keep a dated row from surfacing in today-triage.",
+    description: "Set ONE open ball on a subject (replaces that owner's previous open one; the other partner's stays untouched). Defaults to your ball. Only the server-issued Hermes CoS door may name its Joe sponsor as owner; created_by remains the runtime.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, ref: { type: "string" },
-      description: { type: "string" }, due_on: { type: "string", description: "YYYY-MM-DD, optional" } },
+      description: { type: "string" }, due_on: { type: "string", description: "YYYY-MM-DD, optional" },
+      owner: { type: "string", description: "optional server-derived owner; only the caller or a Hermes CoS runtime's Joe sponsor" } },
       required: ["idempotency_key","ref","description"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "set-next-action", args, async () => {
       const s = await resolveSubject(c, args.ref);
+      const permitted = permittedActionOwnerSlugs(actor);
+      const ownerSlug = args.owner === undefined || args.owner === null || args.owner === ""
+        ? actor.slug : String(args.owner).trim().toLowerCase();
+      if (!permitted.includes(ownerSlug))
+        throw new ToolError({ error: "owner_not_permitted", owner: ownerSlug, permitted,
+          hint: "a ball may be set for yourself; only the Hermes CoS door may hand one to its verified Joe sponsor, never Dell" });
+      let ownerId = actor.id;
+      if (ownerSlug !== actor.slug) {
+        const owner = await c.query("select id from actor where slug=$1", [ownerSlug]);
+        if (!owner.rows.length) throw new ToolError({ error: "actor_not_provisioned", slug: ownerSlug,
+          hint: "the selected owner has no actor row" });
+        ownerId = owner.rows[0].id;
+      }
       // [amendment 8] Replacing an unfinished ball used to record the old one as
       // 'done'. It wasn't done — it was superseded. No-fabrication applies to
       // metadata too, and 'done' would inflate any completion measure built on this.
       await c.query(
-        `update next_action set status='dropped', updated_by=$1 where subject_type=$2 and subject_id=$3
-         and owner_id=$1 and status='open'`, [actor.id, s.type, s.id]);
+        `update next_action set status='dropped', updated_by=$4 where subject_type=$2 and subject_id=$3
+         and owner_id=$1 and status='open'`, [ownerId, s.type, s.id, actor.id]);
       const droppedPostCall = s.type === "deal" ? (await c.query(
         `update capture_post_call_action
             set status='dropped',updated_at=now(),completed_at=null
           where deal_id=$1 and owner_id=$2 and status='open'
           returning id,description /* capture:replace-post-call-actions */`,
-        [s.id, actor.id])).rows : [];
+        [s.id, ownerId])).rows : [];
       const r = await c.query(
         `insert into next_action (subject_type, subject_id, owner_id, due_on, description, created_by)
-         values ($1,$2,$3,$4,$5,$3) returning id`, [s.type, s.id, actor.id, args.due_on || null, args.description]);
+         values ($1,$2,$3,$4,$5,$6) returning id`,
+        [s.type, s.id, ownerId, args.due_on || null, args.description, actor.id]);
       await writeEvent(c, actor, "set-next-action", s.type, s.id,
         { old: droppedPostCall.length ? { post_call_actions: droppedPostCall.map(x =>
             ({ id: x.id, description: x.description, status: "open" })) } : null,
-          new: { next_action: args.description, due: args.due_on,
+          new: { summary: `ball → ${ownerSlug}: ${args.description}`,
+            next_action: args.description, due: args.due_on, owner: ownerSlug,
+            set_by: actor.slug,
             dropped_post_call_action_ids: droppedPostCall.map(x => x.id) },
           idempotency_key: args.idempotency_key });
-      return { ok: true, next_action_id: r.rows[0].id, subject: s,
+      return { ok: true, next_action_id: r.rows[0].id, subject: s, owner: ownerSlug,
         dropped_post_call_action_ids: droppedPostCall.map(x => x.id) };
     }),
   },
@@ -3263,7 +3322,6 @@ export const TOOLS = {
 
   "record-executed-lease": {
     write: true,
-    humanOnly: true,
     authorityOnly: true,
     description: "Record the current executed lease/abstract that CARR actually holds for a deal. This is the authenticated first-party renewal authority: expiration_on must be an exact sourced date, evidence_kind/evidence_ref are mandatory, and a replacement needs the current lease version. It never infers a date from a term, listing, comp, NPPES, or web research. Only the deal's current owning partner may write it.",
     inputSchema: { type: "object", properties: {
@@ -3332,25 +3390,28 @@ export const TOOLS = {
 
   "update-deal": {
     write: true,
-    description: "Field-level change to a deal (phase, segment, outcome, notes_path, salesforce_id). Requires base_version from a fresh read; a conflict means someone else wrote — ask the human, never retry blind. Phase must be an existing slug (list: pending/research/site_selection/negotiation/closing/closed + imported). salesforce_id is the reconciliation key back to the system of record and was NULL on all 40 deals as of 2026-08-02, which forced salesforce-diff to match on name — the matching that mis-filed thirteen deals in the first place; fill it during the Salesforce read. To move a deal to a DIFFERENT CLIENT, use reassign-deal: client_id is deliberately not settable here.",
+    description: "Field-level change to a deal (deal_type, phase, segment, outcome, notes_path, salesforce_id, city, lane). deal_type uses the closed deal_type_ref vocabulary. Requires base_version from a fresh read; a same-field conflict means someone else wrote the same column — ask the human, never retry blind. A version bump from a DIFFERENT field (someone else's disjoint edit) is rebased automatically and reported back as `rebased`/`rebase_receipt`; nothing about this call's own fields is ever silently changed. To move a deal to a DIFFERENT CLIENT, use reassign-deal: client_id is deliberately not settable here.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, deal: { type: "string" },
       base_version: { type: "integer" },
-      fields: { type: "object", description: "subset of: phase, segment, outcome, closed_on, won_value, notes_path, salesforce_id, city, lane" } },
+      fields: { type: "object", description: "subset of: deal_type, phase, segment, outcome, closed_on, won_value, notes_path, salesforce_id, city, lane" } },
       required: ["idempotency_key","deal","base_version","fields"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "update-deal", args, async () => {
       const s = await resolveSubject(c, args.deal);
       if (s.type !== "deal") throw new ToolError({ error: "not_a_deal", resolved: s });
-      await versionGuard(c, "deal", s.id, args.base_version);
       // city and lane joined the list in 0074, when they stopped being source_row
       // passthrough and became real columns. Before that they were unsettable,
       // which is why salesforce-diff could only ever REPORT a city move.
-      const allowed = ["phase","segment","outcome","closed_on","won_value","notes_path",
+      const allowed = ["deal_type","phase","segment","outcome","closed_on","won_value","notes_path",
                        "salesforce_id","city","lane"];
       if ("client_id" in args.fields) throw new ToolError({ error: "use_reassign_deal",
         hint: "moving a deal between clients is structural, not a field edit — use reassign-deal" });
       const keys = Object.keys(args.fields).filter(k => allowed.includes(k));
       if (!keys.length) throw new ToolError({ error: "no_updatable_fields", allowed });
+      // touchedFields = keys: computed BEFORE the guard so a version bump from
+      // some OTHER field can be told apart from a bump on one of THESE fields.
+      // See versionGuard's own comment (CONFLICT TIERING, slice S6).
+      const guard = await versionGuard(c, "deal", s.id, args.base_version, keys);
       const old = (await c.query(`select ${keys.join(",")} from deal where id=$1`, [s.id])).rows[0];
       const sets = keys.map((k, i) => `${k}=$${i + 2}`).join(", ");
       await c.query(`update deal set ${sets}, updated_by=$1 where id=$${keys.length + 2}`,
@@ -3358,12 +3419,13 @@ export const TOOLS = {
       for (const k of keys)
         await writeEvent(c, actor, "update-deal", "deal", s.id,
           { field: k, old: { [k]: old[k] }, new: { [k]: args.fields[k] }, idempotency_key: args.idempotency_key });
-      return { ok: true, updated: keys };
+      return { ok: true, updated: keys,
+               ...(guard.rebased ? { rebased: true, rebase_receipt: guard.rebase_receipt } : {}) };
     }),
   },
 
   "new-deal": {
-    write: true, humanOnly: true,
+    write: true,
     description: "Create a deal on an existing client. THE GAP THIS CLOSES: until 2026-08-07 nothing in the record layer could create a deal — new-client makes only a client row, reassign-deal and set-lead both need a deal that already exists, and the ONLY insert into `deal` in the whole repo was pipelines/import_wave1.py, the one-time bulk import. So every deal in the book traced back to that import, and the six deals the 2026-08-07 Salesforce read found had nowhere to land. The client must exist first (new-client over a party): a deal hangs off a client, never free-floating, and this verb will not invent one. humanOnly on purpose — a new deal is a real commitment in a partner's book, and salesforce-diff deliberately never auto-adds one. deal_type and phase are validated by the database against deal_type_ref and deal_phase, so a bad slug is refused with the live list rather than guessed at. Refuses a duplicate name and a salesforce_id already in use, naming the deal that holds it. Commission and close date from Salesforce are PLACEHOLDERS and land in the two labelled placeholder columns, never in won_value.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
@@ -3446,7 +3508,7 @@ export const TOOLS = {
   },
 
   "reassign-deal": {
-    write: true, humanOnly: true,
+    write: true,
     description: "Move a deal onto the client it actually belongs to. THIS IS THE ONLY VERB THAT CHANGES deal.client_id — update-deal refuses that field on purpose, because re-pointing a deal changes whose book it sits in and is structural, not a field edit (the same reason set-lead owns the owner). Built 2026-08-02 for the Musicologie finding: an import filed THIRTEEN deals under C-131, twelve of them belonging to other franchisees who each had their own client record, so nine clients rendered as 'Active deal – no deal on file' while their deals sat under someone else's name. Requires base_version from a fresh read. Refuses a no-op, refuses a merged-away target, and records the old and new client on the event so the move is auditable. It does NOT touch the client rows themselves: a parent/sub-client structure (a national account over its franchisees) is expressed by party.org_id, not by moving deals up to the parent.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, deal: { type: "string" },
@@ -3495,7 +3557,7 @@ export const TOOLS = {
   },
 
   "set-lead": {
-    write: true, humanOnly: true,
+    write: true,
     description: "THE human ownership handoff: make joe or dell the current lead on a deal. THIS IS THE ONLY VERB THAT SETS A DEAL'S OWNER — it writes the deal_participant row (role='lead') that v_deal_board exposes as lead_owner, so a null lead_owner is fixed here and NOT through update-deal. Ownership is a matter between the two humans, never a machine's call. Requires base_version from a fresh read; the locked deal version makes simultaneous handoffs conflict instead of silently replacing one another. Closes the old lead row, opens the new one, one event. The database enforces exactly one current lead.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, deal: { type: "string" },
@@ -3536,12 +3598,30 @@ export const TOOLS = {
         throw new ToolError({ error: "placeholder_phone", hint: "205-643-6555 is never stored as a contact" });
       if (!args.force_new) {
         const cand = await c.query(
-          `select id, name, email, city from party where merged_into is null and
-             (($1::text is not null and lower(email)=lower($1)) or name % $2)
-           order by similarity(name,$2) desc limit 5`, [args.email || null, args.name]);
-        if (cand.rows.length)
+          `select id, name, email, city,
+                  ($1::text is not null and lower(email)=lower($1)) as exact_email_match
+             from party where merged_into is null and
+               (($1::text is not null and lower(email)=lower($1)) or name % $2)
+           order by exact_email_match desc, similarity(name,$2) desc limit 5`, [args.email || null, args.name]);
+        if (cand.rows.length) {
+          // DECISIVE AUTO-RESOLUTION ONLY (WR-000019 slice S6, CONFLICT TIERING).
+          // The single signal in this query strong enough to resolve without a
+          // human is an EXACT match on a real identifier (email) — never
+          // trigram name similarity alone, which routinely scores two
+          // different real people or orgs as "similar" (that is the whole
+          // reason this query exists). Auto-resolve only when there is
+          // EXACTLY ONE candidate and it is that exact-identifier match;
+          // anything else — multiple candidates, or a candidate that matched
+          // on name similarity only — stays needs_confirm exactly as before.
+          if (cand.rows.length === 1 && cand.rows[0].exact_email_match) {
+            const existing = cand.rows[0];
+            return { ok: true, party_id: existing.id, auto_resolved: true,
+                     reason: "exact email match to an existing party; no duplicate created",
+                     hint: "pass force_new:true to create a separate party anyway (e.g. a shared team inbox)" };
+          }
           return { needs_confirm: true, candidates: cand.rows,
                    hint: "existing similar parties; reuse one, or resubmit force_new:true" };
+        }
       }
       // THE GENERATOR, CLOSED (0059, 2026-08-02). This line used to INSERT an org
       // unconditionally with no lookup, so every contact minted a private copy of
@@ -3872,7 +3952,6 @@ export const TOOLS = {
 
   "decline-candidate": {
     write: true,
-    humanOnly: true,
     description: "Record that a HUMAN looked at a candidate and said no. This is promote-pool's missing counterpart, and it is the only thing that makes the claim card shorter. Measured 2026-08-09: six lanes had accumulated 9,870 candidates and promoted zero, ever, because a candidate rejected at the board stayed exactly as claimable as before and came back on every future card forever. A decline is NOT a suppression: suppression is a machine's assertion about identity and can be wrong, a decline is a human's judgment about fit and no sweep re-litigates it. The reason is REQUIRED and is the input to the lane-retirement decision, since 'no contact channel' is a fixable lane defect, 'out of territory' is a mis-scoped lane, and 'not a fit' is a lane working correctly with a low hit rate. Nothing is deleted: the row keeps its research and its provenance, it just stops being presented. Read the row from v_claim_card or v_pool first and pass its version as base_version.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
@@ -3932,7 +4011,6 @@ export const TOOLS = {
 
   "log-outreach": {
     write: true,
-    humanOnly: true,
     description: "THE DISPOSITION STEP: say what happened after you actually tried to reach someone, in ONE action. Completes your open ball on that subject, logs the touch at its real time, and either sets the next ball or closes the lead out. Use this instead of calling log-activity and set-next-action separately, because separately is how a touch gets logged with no next step or a next step gets set with no touch, and both halves are needed for the follow-up cadence to run. Outcomes: 'connected' you spoke with them · 'left_message' you tried and did not reach them · 'sent' you sent an email or text · 'no_channel' the number or address does not work · 'not_interested' they said no · 'do_not_contact' they asked you to stop. The first four REQUIRE a next date, because a touch with no next step is how a lead dies quietly. The last two close the lead and refuse a next date.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
@@ -4199,7 +4277,7 @@ export const TOOLS = {
         throw new ToolError({ error: "suppression_clear_required",
           hint: "moving a do_not_contact lead requires the same explicit human correction to set suppressed=false" });
       }
-      if (current.suppressed && nextSuppressed === false && !actor.human) {
+      if (current.suppressed && nextSuppressed === false && !canExercisePartnerAuthority(actor)) {
         throw new ToolError({ error: "suppression_clear_requires_human",
           hint: "a standing suppression instruction may be cleared only by an authenticated human" });
       }
@@ -4765,7 +4843,7 @@ export const TOOLS = {
   },
 
   "confirm-merge": {
-    write: true, humanOnly: true,
+    write: true,
     description: "HUMAN-confirmed merge of two duplicate parties: sets merged_into on the loser so it becomes a pointer to the survivor. Only after a human has looked at both records — the Garabadian rule means nothing auto-merges, ever.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, survivor_party: { type: "string" }, merged_party: { type: "string" },
@@ -4928,7 +5006,7 @@ export const TOOLS = {
   // V-MSC-024), and the build sweep found a third pair the loop never named
   // (T-004+T-040). Backlog #119/#120's "executed" claims were true-but-incomplete.
   "merge-vendor-rows": {
-    write: true, humanOnly: true,
+    write: true,
     description: "HUMAN-confirmed merge of two vendor rows that ride the SAME party — a duplicate role, not a duplicate person. Survivorship is deterministic (rule 4c21d86b applied at role level): the survivor keeps every value it has, its NULLs fill from the loser, and a field where both rows disagree is REPORTED untouched for a human to settle — never coin-flipped. Activities, findings and next actions move to the survivor; the loser becomes a tombstone (merged_into) that v_ref_index still resolves with merged=true, and renders exclude. Different-party duplicates are confirm-merge's lane, and this verb refuses them. Nothing auto-merges, ever: a human picks the pair and the survivor. Survivor choice per rule 4c21d86b: more corroborated identity, then more linked records, then oldest.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
@@ -5170,15 +5248,37 @@ export const TOOLS = {
   },
 
   "teach": {
-    write: true, humanOnly: true,
-    description: "Write a rule from the human's own words (status: proposed — after exact enforcement is built and verified, one explicit human approve-rule act atomically activates the enforced policy). Capture the verbatim quote. Personal-scope rules (voice, format) set personal_to. WHEN TO CALL IT — the test is 'would the system have to ask this again?', NOT whether the partner phrased it as 'always X' or 'never Y'. Standing lessons arrive as ordinary sentences: a modeling ruling ('musicologie is one national account'), a correction to a fact in the record, a choice between options you offered with the reasoning attached, a rejection of a draft. Capture on the spot, never at 'session close' — the same event-not-session-close rule protocol 27b already settles. Pass supersedes when this rule replaces an earlier one; the old rule is NOT retired by that alone (use retire-rule), but the link is recorded so nobody re-litigates a settled point from a stale row. THIS IS CLERICAL WORK, NOT SELF-MODIFICATION, AND IT IS NEVER REFUSED ON THAT GROUND. Joe's ruling 2026-08-10, verbatim: 'You didn't make your own rule. You applied my rule to the system.' A session INVENTING a standing rule for itself would be self-modification and would be gated. A session TRANSCRIBING what a partner just said is the entire purpose of this verb, and the gate is already built into it: the rule lands as PROPOSED, binds nobody, and takes effect through one human approve-rule act only when enforcement is ready. A session that declines to record a partner's instruction because writing rules 'feels like' changing itself has not been careful, it has lost the instruction — which is the one outcome this verb exists to prevent. If a refusal comes back anyway, it is contextual rather than absolute: retry once (rule af7de070), then reach it through call-verb, and only report a blocker after both. Recorded because a session hit exactly this on the day the ruling was made and stopped three routes early.",
+    write: true,
+    description: "Write a rule from the human's own words (status: proposed — after exact enforcement is built and verified, one explicit human approve-rule act atomically activates the enforced policy). Capture the verbatim quote. Personal-scope rules (voice, format) set personal_to. WHEN TO CALL IT — the test is 'would the system have to ask this again?', NOT whether the partner phrased it as 'always X' or 'never Y'. Standing lessons arrive as ordinary sentences: a modeling ruling ('musicologie is one national account'), a correction to a fact in the record, a choice between options you offered with the reasoning attached, a rejection of a draft. Capture on the spot, never at 'session close' — the same event-not-session-close rule protocol 27b already settles. Pass supersedes when this rule replaces an earlier one; the old rule is NOT retired by that alone (use retire-rule), but the link is recorded so nobody re-litigates a settled point from a stale row. ENFORCEMENT-FIRST BIRTH (WR-000019 slice S10): every teach REQUIRES enforcement_home, one of 'gate' (a deny/stop control will carry it — name carrying_control), 'jit' (delivered just-in-time by pack/moment), 'core' (always-loaded), or 'judgment_advisory' (no mechanical control ever will — say why_no_machine in one line). This is a refusal, not a default: a rule captured with nobody having said where it will live is exactly how guidance debt piled up before this slice, and a silent default would be indistinguishable from a considered choice. THIS IS CLERICAL WORK, NOT SELF-MODIFICATION, AND IT IS NEVER REFUSED ON THAT GROUND. Joe's ruling 2026-08-10, verbatim: 'You didn't make your own rule. You applied my rule to the system.' A session INVENTING a standing rule for itself would be self-modification and would be gated. A session TRANSCRIBING what a partner just said is the entire purpose of this verb, and the gate is already built into it: the rule lands as PROPOSED, binds nobody, and takes effect through one human approve-rule act only when enforcement is ready. A session that declines to record a partner's instruction because writing rules 'feels like' changing itself has not been careful, it has lost the instruction — which is the one outcome this verb exists to prevent. If a refusal comes back anyway, it is contextual rather than absolute: retry once (rule af7de070), then reach it through call-verb, and only report a blocker after both. Recorded because a session hit exactly this on the day the ruling was made and stopped three routes early.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, statement: { type: "string" },
       human_quote: { type: "string" }, scope: { type: "object" },
       personal: { type: "boolean", description: "true = applies to this partner only" },
-      supersedes: { type: "string", description: "rule_id this one replaces; recorded as a link, does not retire it" } },
-      required: ["idempotency_key","statement","human_quote"] },
+      supersedes: { type: "string", description: "rule_id this one replaces; recorded as a link, does not retire it" },
+      enforcement_home: { type: "string", enum: ["gate","jit","core","judgment_advisory"],
+        description: "REQUIRED. Where this rule will be enforced: 'gate' (a deny/stop control — pass carrying_control), 'jit' (delivered just-in-time by pack/moment), 'core' (always-loaded), or 'judgment_advisory' (no mechanical control — pass why_no_machine)." },
+      carrying_control: { type: "string", description: "REQUIRED when enforcement_home is 'gate'. The control this rule's enforcement will carry — an existing control_key, or the one about to be built." },
+      why_no_machine: { type: "string", description: "REQUIRED when enforcement_home is 'judgment_advisory'. One line: why no mechanical control can carry this rule." } },
+      required: ["idempotency_key","statement","human_quote","enforcement_home"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "teach", args, async () => {
+      // ENFORCEMENT-FIRST BIRTH (WR-000019 slice S10). See the description
+      // above: a clear, named refusal rather than a silent default, so an
+      // existing caller that has not been told about this yet gets an error
+      // that IS the migration path, not a rule quietly filed with no home.
+      const ENFORCEMENT_HOMES = ["gate", "jit", "core", "judgment_advisory"];
+      const enforcementHome = args.enforcement_home;
+      if (!ENFORCEMENT_HOMES.includes(enforcementHome))
+        throw new ToolError({ error: "enforcement_home_required",
+          hint: "pass enforcement_home: one of 'gate' (a deny/stop control will carry it — also pass carrying_control), 'jit' (delivered just-in-time by pack/moment), 'core' (always-loaded), or 'judgment_advisory' (no mechanical control — also pass why_no_machine)" });
+      const carryingControl = String(args.carrying_control || "").trim();
+      if (enforcementHome === "gate" && !carryingControl)
+        throw new ToolError({ error: "carrying_control_required",
+          hint: "enforcement_home 'gate' means a deny/stop control carries this rule; name it in carrying_control — an existing control_key, or the one about to be built" });
+      const whyNoMachine = String(args.why_no_machine || "").trim();
+      if (enforcementHome === "judgment_advisory" && !whyNoMachine)
+        throw new ToolError({ error: "why_no_machine_required",
+          hint: "enforcement_home 'judgment_advisory' means no mechanical control will ever back this rule; say why not in why_no_machine, one line" });
+
       // A supersedes pointer at a rule that does not exist is a silent lie in the
       // audit trail, so it is checked rather than trusted.
       if (args.supersedes) {
@@ -5208,7 +5308,10 @@ export const TOOLS = {
          values ('rule','human',$1,$2,'captured',$3)`,
         [`rule:${r.rows[0].id}`, args.statement, actor.id]);
       await writeEvent(c, actor, "teach", "rule", r.rows[0].id,
-        { new: { statement: args.statement, supersedes: args.supersedes || null },
+        { new: { statement: args.statement, supersedes: args.supersedes || null,
+                 enforcement_home: enforcementHome,
+                 carrying_control: enforcementHome === "gate" ? carryingControl : null,
+                 why_no_machine: enforcementHome === "judgment_advisory" ? whyNoMachine : null },
           human_quote: args.human_quote, idempotency_key: args.idempotency_key });
       // SCOPE IS ECHOED BACK, added 2026-08-03, because it defaulted silently
       // once and nothing in the response could show it. A rule taught with
@@ -5227,6 +5330,9 @@ export const TOOLS = {
                scope_applied: scopeApplied,
                personal_requested: args.personal === true,
                supersedes: args.supersedes || null,
+               enforcement_home: enforcementHome,
+               carrying_control: enforcementHome === "gate" ? carryingControl : null,
+               why_no_machine: enforcementHome === "judgment_advisory" ? whyNoMachine : null,
                ...(scopeMismatch ? { warning:
                  "personal:true was requested but this rule was stored SHARED — activating it " +
                  "will bind BOTH partners, including any wording specific to one of them or to " +
@@ -5235,7 +5341,7 @@ export const TOOLS = {
   },
 
   "admit-rule": {
-    write: true, humanOnly: true,
+    write: true,
     description: "Normalize and admit one PROPOSED rule into executable authority. Capture remains free; this is the separate human gate. Applicability, projection, reachability, input contract, binding moment, fixtures, and enforcement points are all explicit. A machine-enforceable rule is refused unless at least one installed enforcement point and fixture are named. Admission writes an immutable authority receipt but does not activate the rule; activate-rule remains a second explicit human act.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
@@ -5348,7 +5454,7 @@ export const TOOLS = {
   },
 
   "approve-rule": {
-    write: true, humanOnly: true, authorityOnly: true,
+    write: true, authorityOnly: true,
     description: "Approve one captured system rule in a single Joe-authority act. Approval means the server atomically verifies exact registered enforcement, records the immutable authority receipt, and activates the rule in the same transaction. There is no approved-but-inactive or active-but-pending state. If enforcement is missing, approval refuses so the system must build and verify the control before carrying Joe's already-recorded approval. Dell retains teaching, review and optional participation capability but cannot replace Joe as the required system authority. Advisory guidance is not mislabeled as an unbreakable rule.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
@@ -5376,7 +5482,7 @@ export const TOOLS = {
   },
 
   "activate-rule": {
-    write: true, humanOnly: true,
+    write: true,
     description: "Retired compatibility verb. Direct activation is forbidden because it could separate human approval from verified enforcement. Use approve-rule, which succeeds only when it can enforce and activate the rule atomically.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
@@ -5402,8 +5508,43 @@ export const TOOLS = {
     },
   },
 
+  // BATCH REVIEW QUEUE (WR-000019 slice S6). Every pending governance decision
+  // in one payload, so Joe reviews on his own schedule rather than one verb at
+  // a time: rules admitted and waiting on approve-rule, guidance import
+  // batches staged and waiting on decide-guidance-import-batch, retrieval
+  // proposals waiting on approve-retrieval-proposals. Read-only projection —
+  // it opens no new write path and changes nothing. carr_reader (the read-verb
+  // credential) has no grant on `rule` or `retrieval_proposal`, so this reads
+  // through a SECURITY DEFINER function (migration 0345), the same reason
+  // read-execution-environment-providers is a function rather than a direct
+  // multi-table read.
+  "governance-queue": {
+    write: false,
+    description: "Read every pending governance decision in one payload: rules admitted and awaiting approve-rule, guidance import batches staged and awaiting decide-guidance-import-batch, and retrieval proposals awaiting approve-retrieval-proposals — each with enough context to decide. Read-only; grants no authority and performs no decision itself.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    handler: async (c) => {
+      const row = (await c.query("select ops.read_governance_queue() as queue /* governance-queue */")).rows[0];
+      const queue = row?.queue || {};
+      const rules = queue.pending_rule_approvals || [];
+      const batches = queue.pending_guidance_import_batches || [];
+      const proposals = queue.pending_retrieval_proposals || [];
+      return {
+        ok: true,
+        pending_rule_approvals: rules,
+        pending_guidance_import_batches: batches,
+        pending_retrieval_proposals: proposals,
+        counts: {
+          pending_rule_approvals: rules.length,
+          pending_guidance_import_batches: batches.length,
+          pending_retrieval_proposals: proposals.length,
+          total: rules.length + batches.length + proposals.length,
+        },
+      };
+    },
+  },
+
   "accept-workflow": {
-    write: true, humanOnly: true, authorityOnly: true,
+    write: true, authorityOnly: true,
     description: "Authority acceptance of a completed workflow run. Shadow acceptance remains available to either admitted human partner; canary acceptance is Joe-only and is enforced by the authenticated authority database session, never a caller field. Uses the authority connection, derives the partner from that connection's authenticated session, and refuses an arbitrary receipt reference.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, workflow_key: { type: "string" },
@@ -5421,7 +5562,7 @@ export const TOOLS = {
   },
 
   "disable-legacy-schedule": {
-    write: true, humanOnly: true, authorityOnly: true,
+    write: true, authorityOnly: true,
     description: "Joe-only authority readback after native legacy schedules are disabled. Requires accepted shadow/canary evidence plus immutable enabled and disabled observations for the exact registered surface; a duplicate group additionally requires all four observations for both surfaces. It never performs a native disable.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, workflow_key: { type: "string" }, reason: { type: "string" },
@@ -5457,7 +5598,7 @@ export const TOOLS = {
   },
 
   "activate-guidance-registry": {
-    write: true, humanOnly: true, authorityOnly: true,
+    write: true, authorityOnly: true,
     description: "Activate the typed Guidance Registry after its 5–10-item constitution and complete coverage pass. Uses the human authority connection, derives the approving partner from its authenticated database session, and atomically records the registry-bound manifest-digest receipt and activation event.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, registry_id: { type: "string" },
@@ -5477,7 +5618,7 @@ export const TOOLS = {
   },
 
   "decide-guidance-import-batch": {
-    write: true, humanOnly: true, authorityOnly: true,
+    write: true, authorityOnly: true,
     description: "Joe-only authority decision for one staged typed-guidance import batch. The human authority database session derives Joe; the caller supplies only the exact reviewed batch id, manifest digest, idempotency key, and recorded reason. It activates the batch's immutable decisions but does not activate the registry itself.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, batch_id: { type: "string" },
@@ -5497,7 +5638,7 @@ export const TOOLS = {
   },
 
   "deactivate-guidance-registry": {
-    write: true, humanOnly: true, authorityOnly: true,
+    write: true, authorityOnly: true,
     description: "Joe-only authority operation to deactivate the active typed Guidance Registry. The authority database session derives Joe and the supplied digest must exactly bind the registry activation being withdrawn. This is append-only history; it never edits a guidance revision.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, registry_id: { type: "string" },
@@ -5517,7 +5658,7 @@ export const TOOLS = {
   },
 
   "retire-rule": {
-    write: true, humanOnly: true, authorityOnly: true,
+    write: true, authorityOnly: true,
     description: "Joe-authority retirement of a proposed or active rule through one database transaction. It writes an immutable retirement receipt bound to the exact rule version, statement hash, prior approval, reason and replacement before changing status. Direct writer updates cannot retire a rule. Retirement preserves the frozen rule text and history; a changed rule must be taught and approved separately.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
@@ -5575,8 +5716,8 @@ export const TOOLS = {
   // already established that a durable record can be corrected rather than
   // re-litigated; rules simply never got the same affordance.
   "amend-rule": {
-    write: true, humanOnly: true,
-    description: "Correct the WORDS of a PROPOSED rule in place, keeping its id, created_at, taught_by and quote. THE LINE: amend = same proposed rule, better words; teach + retire = a different rule. Once approved, the exact statement, quote, scope, audience and enforcement preimage are frozen by the database: changing any of them would make an old receipt appear to approve new substance. Correct an ACTIVE rule by teaching and approving the corrected replacement, then retiring the old rule. human_quote is immutable once set and may only be filled when absent on a proposed import. Requires base_version from a fresh read; a conflict is never retried blind.",
+    write: true, authorityOnly: true,
+    description: "Correct the WORDS of a rule in place, keeping its id, created_at, taught_by and quote. THE LINE: amend = same rule, better words; teach + retire = a different rule. A PROPOSED rule's statement, human_quote (fill-only) and scope may all be corrected directly, no authority principal required beyond the write itself. An ACTIVE rule's quote, scope, audience and enforcement preimage stay frozen — changing any of them would make the old approval receipt appear to bless new substance — but its STATEMENT ALONE may now be amended (WR-000019 slice S10) through a Joe-authority-guarded, receipted path (ops.amend_rule_statement): an append-only ops.rule_amendment_receipt hashes the prior words, and the enforced rule keeps reciting under its old approval. To change an active rule's scope, quote or audience, still teach and approve a corrected replacement, then retire this one. Requires base_version from a fresh read; a conflict is never retried blind.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       rule_id: { type: "string" },
@@ -5626,9 +5767,41 @@ export const TOOLS = {
       if (!changed.length) throw new ToolError({ error: "no_change",
         hint: "nothing was written; the rule already reads exactly this way" });
 
-      if (row.status === "active")
-        throw new ToolError({ error: "active_rule_approval_frozen", rule_id: args.rule_id,
-          hint: "an enforced rule cannot change substance under its old approval; teach the corrected rule, approve it, and retire this one" });
+      if (row.status === "active") {
+        // The old approval's preimage — quote, scope, audience, enforcement —
+        // stays frozen exactly as before. Only the ONE axis the versioned
+        // amendment path exists to correct (statement) may move; a request
+        // that also touches scope or quote still refuses, same as always.
+        if (changed.includes("scope"))
+          throw new ToolError({ error: "active_rule_scope_frozen", rule_id: args.rule_id,
+            hint: "scope is part of the approval preimage and stays frozen on an active rule; teach the corrected rule, approve it, and retire this one to change scope" });
+        if (changed.includes("human_quote"))
+          throw new ToolError({ error: "active_rule_quote_frozen", rule_id: args.rule_id,
+            hint: "the partner's words are testimony, not prose, and stay fixed once a rule is active" });
+
+        // changed is now exactly ["statement"] — ops.amend_rule_statement,
+        // guarded like ops.approve_rule (Joe authority, refuses a retired
+        // rule), writes the receipt and updates rule.statement atomically.
+        const amended = await c.query(
+          "select ops.amend_rule_statement($1,$2,$3,$4) as result",
+          [args.rule_id, nextStatement, args.idempotency_key, reason]);
+        const result = amended.rows[0]?.result;
+        if (!result || !result.ok)
+          throw new ToolError({ error: "rule_amendment_failed", rule_id: args.rule_id });
+
+        await writeEvent(c, actor, "amend-rule", "rule", args.rule_id, {
+          field: "statement",
+          old: { statement: row.statement },
+          new: { statement: nextStatement },
+          agent_rationale: reason,
+          idempotency_key: args.idempotency_key });
+
+        return { ok: true, rule_id: args.rule_id, status: "active",
+                 changed: ["statement"], version: result.rule_version_after, reason,
+                 replayed: !!result.replayed,
+                 amendment_receipt_id: result.amendment_receipt_id,
+                 note: "amended under Joe authority and receipted; the rule stays active and keeps reciting under its old approval" };
+      }
 
       await c.query("update rule set statement=$1, human_quote=$2, scope=$3 where id=$4",
         [nextStatement, nextQuote, JSON.stringify(nextScope), args.rule_id]);
@@ -7214,6 +7387,12 @@ const RESERVED_AUTHORITY_ARGUMENT_FIELDS = new Set([
   "write", "writes_records", "calls_models", "call_models",
 ]);
 
+// Partner-authority operations are performed through agent sessions in normal
+// use.  The server already resolves and audits the sponsor separately from the
+// runtime actor; do not force a second interactive OAuth seat after that exact
+// identity binding exists.  Keep the delegation deliberately closed to the two
+// native implementation agents.  Local tokens, reviewers, probes, Hermes, Grok,
+// and unsponsored runtimes remain outside this boundary.
 export function assertNoCallerAuthorityFields(args) {
   if (args && typeof args === "object" && !Array.isArray(args) &&
       Object.keys(args).some((key) => RESERVED_AUTHORITY_ARGUMENT_FIELDS.has(key)))
@@ -7230,21 +7409,35 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   const tool = TOOLS[name];
   if (!tool) throw new ToolError({ error: "unknown_tool", name });
   assertNoCallerAuthorityFields(args);
-  // Phase 1, 2026-08-13 (decision 97e76a2f): the hint now names the remedy,
-  // not just the refusal. Every non-human door (probe/reviewer/agent-token,
-  // and — since this same day — the LOCAL_TOKENS machine door local-verb.mjs
-  // now uses) refuses here identically, actor.human being the only switch;
-  // this is the one message all of them show. A credential in a config file
-  // must never be able to teach a rule, retire one, confirm a merge, or
-  // reassign a deal — that refusal is a feature. The one deliberate exception
-  // is a receipted local break-glass act (mcp-server/local-verb.mjs), which
-  // still authenticates as a human via ~/.config/carr/local-actor.json, so it
-  // is named too.
-  if (tool.humanOnly && !actor.human)
-    throw new ToolError({ error: "human_only",
-      hint: "this verb never accepts automation — reconnect through the interactive OAuth " +
-            "connector (Joe's or Dell's own Claude session), or, if there is truly no interactive " +
-            "session available, use a receipted local break-glass act (see mcp-server/local-verb.mjs)" });
+  // RETIRED 2026-08-26 BY JOE'S RULING, and the flag is kept only as a label.
+  // His words: "Nothing is human only from now on. I don't want anything to be
+  // human only in this entire system. I'm so sick of the roadblocks. I'm
+  // literally telling you to do things and I'm getting blocked bc it's human
+  // only. It doesn't make any sense."
+  //
+  // WHAT THE REFUSAL ACTUALLY DID, because it was thinner than it read. It
+  // admitted a verified partner OR any sponsored Codex/Claude session, so an
+  // agent session of Joe's was never turned away by it — review-and-triage,
+  // marked HUMAN-ONLY, went through the connector the same hour this was
+  // written and the ledger recorded actor_slug 'joe'. What it DID refuse was
+  // the local-token door: `./run.sh call <verb>` authenticates as a machine
+  // actor and got authority_connection_unavailable. Same verb, two doors,
+  // opposite answers — that inconsistency is what read as senseless, and it is
+  // why removing this alone was not the whole fix.
+  //
+  // WHAT THIS GIVES UP, stated once so nobody rediscovers it as a surprise.
+  // Two of the forty-four verbs carry real commitment: new-deal writes a deal
+  // into a partner's book, and approve-rule admits a rule that then binds every
+  // future session. Memory correction is a third class. An agent can now do all
+  // of them unsupervised. Joe was told this explicitly before ruling and ruled
+  // anyway; it reopens if an agent-made deal or rule admission ever has to be
+  // reversed. Logged as decision dc57f62d with the full rationale.
+  //
+  // NOT IN SCOPE: the credentialed break-glass path (CARR_BREAK_GLASS with
+  // db-tap) stays separately receipted and outside this change, and the
+  // database grants that stop the job role writing ops.incident.resolved_at
+  // are untouched. Those are enforced elsewhere and were never this gate.
+  void canExercisePartnerAuthority;
   // TYPE COERCION AT THE CHOKE POINT (loop 353, 2026-08-13). See
   // coerceArgsToSchema above for what this fixes and why it is here rather than
   // in the seventeen handlers that would otherwise each need to remember. It
@@ -7638,7 +7831,6 @@ Object.assign(TOOLS, {
 
   "create-national-account": {
     write: true,
-    humanOnly: true,
     description: "Create one national-account parent org/client and assign its accountable partner. It does not create market deals or duplicate a brand that already exists.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, name: { type: "string" },
@@ -7678,7 +7870,6 @@ Object.assign(TOOLS, {
 
   "create-national-market-deal": {
     write: true,
-    humanOnly: true,
     description: "Create one market transaction under a national account: reuse or create the named franchisee sub-client under the parent org, then create exactly one deal and optional stated market-agent assignment.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, account_client_id: { type: "string" },
@@ -7796,7 +7987,6 @@ Object.assign(TOOLS, {
 
   "resolve-candidate": {
     write: true,
-    humanOnly: true,
     description: "Human gate for one capture proposal. Rejecting only skips it. Accepting invokes its mapped live verb as the confirming partner, then confirms the candidate only after that write returns a real record reference.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, candidate_id: { type: "string" },
@@ -7855,14 +8045,14 @@ Object.assign(TOOLS, {
 
   "resolve-post-call-candidate": {
     write: true,
-    humanOnly: true,
     description: "Human-only resolution for one Call Mode proposal. assigned_action creates a real next action for the explicit Joe or Dell assignee. email_draft only confirms metadata and its local body hash: it never creates or sends an email or Outlook draft.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" }, candidate_id: { type: "string" },
       accept: { type: "boolean" }, note: { type: "string" },
     }, required: ["idempotency_key", "candidate_id", "accept"] },
     handler: async (c, actor, args) => withEnvelope(c, actor, "resolve-post-call-candidate", args, async () => {
-      if (!actor.human) throw new ToolError({ error: "human_only", hint: "this verb never accepts automation" });
+      if (!canExercisePartnerAuthority(actor)) throw new ToolError({ error: "human_only",
+        hint: "this verb requires a partner or a server-verified Codex/Claude session sponsored by one" });
       if (typeof args.accept !== "boolean") throw new ToolError({ error: "accept_required" });
       const found = await c.query(
         `select id,kind,deal_id,assignee_slug,action_description,due_on,recipient_party_id,

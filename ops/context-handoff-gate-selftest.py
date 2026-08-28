@@ -56,6 +56,23 @@ def run(payload, env=None, statefile=None):
     return p.returncode, parsed
 
 
+def said(out):
+    """The gate's announcement text, or "" for silence.
+
+    DEMOTED 2026-08-23 (the gates-audit council's Stop-gate rationing, Joe's
+    order). This gate emitted {"decision": "block"}, which reopens the turn; it
+    now announces the same text into context without forcing another message.
+    So every "fires" assertion below reads the announcement, and a payload still
+    carrying `decision` reads as SILENCE on purpose — a block wearing an
+    announce's clothes must fail these, not pass them.
+    """
+    if not isinstance(out, dict):
+        return ""
+    if "decision" in out:
+        return ""
+    return (out.get("hookSpecificOutput") or {}).get("additionalContext") or ""
+
+
 def check(name, cond, detail=""):
     (PASS if cond else FAIL).append(name)
     print(f"  {'ok  ' if cond else 'FAIL'} {name}{(' :: ' + detail) if detail and not cond else ''}")
@@ -73,31 +90,31 @@ def main():
 
         t70 = transcript([usage_row(700_000)], tmp, "t70.jsonl")
         rc, out = run({"session_id": "s-at70", "transcript_path": t70}, statefile=state)
-        check("exactly 70% fires", rc == 0 and out and out.get("decision") == "block",
+        check("exactly 70% fires", rc == 0 and bool(said(out)),
               f"rc={rc} out={out}")
         check("70% reason names the band and the real numbers",
-              bool(out) and "70%" in out.get("reason", "") and "700,000" in out.get("reason", ""))
+              "70%" in said(out) and "700,000" in said(out))
         check("70% reason orders the packet + the chip",
-              bool(out) and "handoff" in out.get("reason", "")
-              and "spawn_task" in out.get("reason", ""))
+              "handoff" in said(out)
+              and "spawn_task" in said(out))
         check("70% reason is NOT the hard-line text",
-              bool(out) and "HARD LINE" not in out.get("reason", ""))
+              "HARD LINE" not in said(out))
         # THE LAST MILE (2026-08-10, decision aa6c00fa). The chip renders on the
         # desktop app only, so a handoff delivered by chip alone is invisible to
         # Joe in the field. Every band must order the push; without this
         # assertion the delivery half is exactly as untested as it was the night
         # Joe found the defect by looking at his phone.
         check("70% reason orders the phone push",
-              bool(out) and "PushNotification" in out.get("reason", ""))
+              "PushNotification" in said(out))
         check("70% reason says why the push is needed (desktop-only chip)",
-              bool(out) and "desktop app only" in out.get("reason", ""))
+              "desktop app only" in said(out))
         # The 70% band must NOT queue a scheduled continuation: the session
         # usually keeps working past 70, so a queued run would duplicate it.
         check("70% band does NOT queue a scheduled continuation",
-              bool(out) and "create_scheduled_task" not in out.get("reason", ""))
+              "create_scheduled_task" not in said(out))
         check("70% reason leads the push with the disposition",
-              bool(out) and "LEAD WITH THE DISPOSITION" in out.get("reason", "")
-              and "truncates the TAIL" in out.get("reason", ""))
+              "LEAD WITH THE DISPOSITION" in said(out)
+              and "truncates the TAIL" in said(out))
 
         # --- fires once per band, then escalates ----------------------------
         # Guards the loop risk (a Stop hook that blocks forever strands Joe)
@@ -105,25 +122,30 @@ def main():
         s = "s-bands"
         t75 = transcript([usage_row(750_000)], tmp, "t75.jsonl")
         rc, out = run({"session_id": s, "transcript_path": t75}, statefile=state)
-        check("first crossing of band 70 blocks", out and out.get("decision") == "block")
+        check("first crossing of band 70 speaks", bool(said(out)))
+        # The top-level key, not a substring search: the packet instructions
+        # themselves say "decisions already settled", which made the first
+        # version of this assertion fail on its own fixture text.
+        check("...and it does not reopen the turn to speak",
+              rc == 0 and "decision" not in (out or {}), f"rc={rc} keys={list((out or {}))}")
         rc, out = run({"session_id": s, "transcript_path": t75}, statefile=state)
-        check("band 70 does not fire twice (no loop)", out is None, f"out={out}")
+        check("band 70 does not fire twice (no nag)", out is None, f"out={out}")
 
         t90 = transcript([usage_row(900_000)], tmp, "t90.jsonl")
         rc, out = run({"session_id": s, "transcript_path": t90}, statefile=state)
-        check("same session escalates to band 88", out and out.get("decision") == "block")
+        check("same session escalates to band 88", bool(said(out)))
         check("band 88 uses the hard-line text",
-              bool(out) and "HARD LINE" in out.get("reason", ""))
+              "HARD LINE" in said(out))
         # At the hard line the session IS stopping, so both delivery routes are
         # required: the push so Joe learns of it wherever he is, and the
         # one-time scheduled task so the continuation resumes with no click.
         check("band 88 orders the phone push",
-              bool(out) and "PushNotification" in out.get("reason", ""))
+              "PushNotification" in said(out))
         check("band 88 queues a scheduled continuation (removes the click)",
-              bool(out) and "create_scheduled_task" in out.get("reason", "")
-              and "fireAt" in out.get("reason", ""))
+              "create_scheduled_task" in said(out)
+              and "fireAt" in said(out))
         check("band 88 names a collision-proof taskId for it",
-              bool(out) and "handoff-continuation-" in out.get("reason", ""))
+              "handoff-continuation-" in said(out))
         # The overclaim guard. A scheduled task does not run on a closed
         # machine, so the text must promise that the work RESUMES, never that
         # it runs at a particular time. This is the same class of honesty the
@@ -137,15 +159,15 @@ def main():
         # which is exactly what the first corrected push got wrong (163 chars,
         # "Nothing needed from you" at the end).
         check("band 88 orders disposition FIRST, not merely present",
-              bool(out) and "DISPOSITION FIRST" in out.get("reason", ""))
+              "DISPOSITION FIRST" in said(out))
         check("band 88 gives both permitted opening stems",
-              bool(out) and "Nothing needed from you" in out.get("reason", "")
-              and "Need your call on" in out.get("reason", ""))
+              "Nothing needed from you" in said(out)
+              and "Need your call on" in said(out))
         check("band 88 names the truncation limit that forces the order",
-              bool(out) and "100 characters" in out.get("reason", ""))
+              "100 characters" in said(out))
         check("band 88 does not promise the continuation runs unattended",
-              bool(out) and "unattended" not in out.get("reason", "").lower()
-              and "only while the app is open" in out.get("reason", ""))
+              "unattended" not in said(out).lower()
+              and "only while the app is open" in said(out))
         rc, out = run({"session_id": s, "transcript_path": t90}, statefile=state)
         check("band 88 does not fire twice", out is None, f"out={out}")
 
@@ -153,7 +175,7 @@ def main():
         # key collision that would silently disable the gate for everyone after
         # the first session crossed.
         rc, out = run({"session_id": "s-other", "transcript_path": t90}, statefile=state)
-        check("state is per-session, not global", out and out.get("decision") == "block")
+        check("state is per-session, not global", bool(said(out)))
 
         # --- reads the LAST usage row, not the largest ----------------------
         # Guards a max() implementation: after a compaction the context DROPS,
@@ -189,7 +211,7 @@ def main():
         torn = transcript(["{not json", usage_row(800_000), "]]broken"], tmp, "torn.jsonl")
         rc, out = run({"session_id": "s-torn", "transcript_path": torn}, statefile=state)
         check("torn lines are skipped, good rows still counted",
-              out and out.get("decision") == "block", f"out={out}")
+              bool(said(out)), f"out={out}")
 
         # --- window override is honoured -------------------------------------
         # Guards the 200K-window case: if the harness ever changes, the gate
@@ -197,7 +219,7 @@ def main():
         rc, out = run({"session_id": "s-200k", "transcript_path": transcript(
             [usage_row(150_000)], tmp, "small.jsonl")},
             env={"CARR_CONTEXT_WINDOW": "200000"}, statefile=state)
-        check("200K window: 150K fires at 75%", out and out.get("decision") == "block")
+        check("200K window: 150K fires at 75%", bool(said(out)))
 
         # --- against a REAL transcript ---------------------------------------
         # The synthetic rows above are my own shape assumption; this is the only

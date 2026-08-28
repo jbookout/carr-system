@@ -274,6 +274,57 @@ def run_local_ci(
                         file=sys.stderr,
                     )
                 else:
+                    delivery_script = repo / "ops/rule-delivery-local-pg-acceptance.py"
+                    delivery = command_runner.run(
+                        [acceptance_python, delivery_script],
+                        env=acceptance_env,
+                        cwd=repo,
+                        capture=True,
+                    )
+                    if delivery.returncode:
+                        print(
+                            f"local-db-ci: rule-delivery acceptance failed: "
+                            f"{_failure_detail(delivery)}",
+                            file=sys.stderr,
+                        )
+                        exit_code = delivery.returncode
+                    else:
+                        print("local-db-ci: atomic rule-delivery cutover acceptance passed")
+                if exit_code == 0:
+                    engineering_claim_script = repo / "ops/engineering-claim-local-pg-gate.py"
+                    engineering_claim = command_runner.run(
+                        [acceptance_python, engineering_claim_script],
+                        env=acceptance_env,
+                        cwd=repo,
+                        capture=True,
+                    )
+                    if engineering_claim.returncode:
+                        print(
+                            f"local-db-ci: engineering claim acceptance failed: "
+                            f"{_failure_detail(engineering_claim)}",
+                            file=sys.stderr,
+                        )
+                        exit_code = engineering_claim.returncode
+                    else:
+                        print("local-db-ci: scoped engineering claim acceptance passed")
+                if exit_code == 0:
+                    engineering_race_script = repo / "ops/engineering-envelope-race-local-pg-gate.py"
+                    engineering_race = command_runner.run(
+                        [acceptance_python, engineering_race_script],
+                        env=acceptance_env,
+                        cwd=repo,
+                        capture=True,
+                    )
+                    if engineering_race.returncode:
+                        print(
+                            f"local-db-ci: engineering envelope race acceptance failed: "
+                            f"{_failure_detail(engineering_race)}",
+                            file=sys.stderr,
+                        )
+                        exit_code = engineering_race.returncode
+                    else:
+                        print("local-db-ci: Engineering envelope race acceptance passed")
+                if exit_code == 0:
                     canary_script = repo / "ops/calendar-canary-local-pg-acceptance.py"
                     canary = command_runner.run(
                         [acceptance_python, canary_script],

@@ -26,10 +26,12 @@ def check(name, cond, detail=""):
         failures.append(name)
 
 
-def run(to, state_dir, tool="SendMessage", transcript=None, transcript_key="transcript_path"):
+def run(to, state_dir, tool="SendMessage", transcript=None, transcript_key="transcript_path", session=None):
     """Invoke the gate with an isolated HOME so the real state file is untouched."""
     env = {**os.environ, "HOME": state_dir}
     body = {"tool_name": tool, "tool_input": {"to": to}}
+    if session is not None:
+        body["session_id"] = session
     if transcript is not None:
         body[transcript_key] = transcript
     p = subprocess.run([sys.executable, GATE], input=json.dumps(body),
@@ -261,6 +263,23 @@ check("a malformed payload fails open, never blocks", p.returncode == 0,
 with tempfile.TemporaryDirectory() as d:
     rc, _ = run("", d)
     check("an empty recipient is ignored", rc == 0, f"rc={rc}")
+
+# 8. THE BUDGET IS PER SESSION (2026-08-23, this task's phase-2 scoping).
+# The state used to be one shared file, so parallel sessions spent ONE combined
+# budget: session B's first targeted ask was refused because sessions A and C
+# had messaged someone. Two distinct session ids must now hold two independent
+# budgets, and the same peer reached from two sessions must cost each of them
+# one slot — not be deduplicated into a shared ledger entry.
+with tempfile.TemporaryDirectory() as d:
+    run("carr-ai-01 [aaa]", d, session="sess-a")
+    run("carr-ai-02 [bbb]", d, session="sess-a")     # A's budget full
+    rc_a, _ = run("carr-ai-03 [ccc]", d, session="sess-a")
+    rc_b1, _ = run("carr-ai-01 [aaa]", d, session="sess-b")
+    rc_b2, _ = run("carr-ai-02 [bbb]", d, session="sess-b")
+    check("a full budget in session A does not refuse session B's first ask",
+          rc_b1 == 0, f"rc={rc_b1}")
+    check("session B holds its OWN two-peer budget", rc_b2 == 0 and rc_a == 2,
+          f"a3={rc_a} b1={rc_b1} b2={rc_b2}")
 
 print()
 if failures:
