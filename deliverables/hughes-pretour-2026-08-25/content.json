@@ -8,7 +8,7 @@
     "kicker": "Healthcare Real Estate",
     "title": "Pre-Tour Briefing",
     "subtitle": "Dental Practice Space Search",
-    "markets": "Niceville · Destin · Miramar Beach · Santa Rosa Beach · Freeport · lease or purchase",
+    "markets": "Niceville · Miramar Beach · Santa Rosa Beach · Freeport · lease or purchase",
     "where": "Walton & Okaloosa County, FL",
     "lead": "",
     "snapshot": [],
@@ -57,7 +57,7 @@
       "Floor"
     ],
     "bold_column": 5,
-    "intro": "Side by side in the order you drive them, south from Crestview through Niceville, Destin, and the beach corridor, then back north to Freeport.",
+    "intro": "Side by side in the order you drive them, south from Crestview through Niceville and the beach corridor, then back north to Freeport.",
     "note": "Base monthly rent is the working total. Anything marked Unlisted is not published by the landlord or the listing service, and we confirm it directly before any comparison, because on your budget an unpriced expense is the difference between two spaces that look identical. Full-buildout spaces carry a medical or office fit-out benchmark of roughly $180 a foot, and a dental fit-out typically runs higher.",
     "rows": [
       [
@@ -102,16 +102,6 @@
       ],
       [
         "05",
-        "4399 Commons Drive, Unit 200A",
-        "Destin",
-        "2,200 SF",
-        "$30.00 gross",
-        "$5,500",
-        "Included",
-        "Second"
-      ],
-      [
-        "06",
         "10916 Emerald Coast Pkwy",
         "Miramar Beach",
         "3,000 SF x 2",
@@ -121,7 +111,7 @@
         "Unlisted"
       ],
       [
-        "07",
+        "06",
         "11275 Emerald Coast Pkwy, Suite 6",
         "Miramar Beach",
         "2,600 SF",
@@ -131,7 +121,7 @@
         "Ground"
       ],
       [
-        "08",
+        "07",
         "Baytowne Office, 215 Grand Blvd",
         "Miramar Beach",
         "3,830 SF",
@@ -141,7 +131,7 @@
         "First"
       ],
       [
-        "09",
+        "08",
         "4935 West Highway 98",
         "Santa Rosa Beach",
         "3,600 SF",
@@ -151,7 +141,7 @@
         "Ground"
       ],
       [
-        "10",
+        "09",
         "Corporate Woods, State Hwy 20",
         "Freeport",
         "4,482 SF",
@@ -485,79 +475,6 @@
     },
     {
       "n": "05",
-      "addr": "4399 Commons Drive, Unit 200A",
-      "city": "Destin, FL 32541",
-      "location": {
-        "street": "4399 Commons Drive, Unit 200A, Destin, FL 32541",
-        "near": "Runnels Professional Building at Kelly Plantation."
-      },
-      "copy": "A move-in ready professional suite in a three-storey building at Kelly Plantation, already home to orthodontists, financial advisors, attorneys, a title company, and an accountant, so the professional co-tenancy is strong. 2,200 SF with a reception area off the elevator foyer, six offices, a conference room with covered patio access, and a kitchen. The gross rent folds in base rent, triple net, water, sewer, trash, and electricity, which makes budgeting unusually clean. The catch for a dental use is the floor: it is on the second storey, the same constraint that shaped the rest of this list.",
-      "facts": [
-        [
-          "Available",
-          "2,200 SF"
-        ],
-        [
-          "Contiguous",
-          "2,200 SF"
-        ],
-        [
-          "Asking rate",
-          "About $30 /SF (gross)"
-        ],
-        [
-          "Base rent / mo",
-          "$5,500 (gross)"
-        ],
-        [
-          "Operating exp.",
-          "Included in gross"
-        ],
-        [
-          "Structure",
-          "Gross, NNN and utilities included"
-        ],
-        [
-          "Floor",
-          "Second of three"
-        ],
-        [
-          "Condition",
-          "Move-in ready"
-        ],
-        [
-          "Available from",
-          "Existing"
-        ],
-        [
-          "Property type",
-          "Professional / Office"
-        ],
-        [
-          "Year built",
-          "2006"
-        ]
-      ],
-      "about": [
-        "Reception area off the elevator foyer, six offices, conference room with covered patio access, and a kitchen.",
-        "Gross rent includes water, sewer, trash, and electricity.",
-        "Professional co-tenancy including orthodontists and a title company.",
-        "Elevator served."
-      ],
-      "confirm": [
-        "Whether operatory plumbing and vacuum lines can be run on a second storey, and what that costs.",
-        "Equipment delivery route and elevator capacity.",
-        "Post-sedation patient egress from the second floor.",
-        "Whether the landlord has any ground floor space coming available.",
-        "What the gross rent excludes, if anything."
-      ],
-      "agent": "Unlisted",
-      "src": "ECAR / FlexMLS",
-      "photo": "commons.jpg",
-      "limit": "The catch for a dental use is the floor: it is on the second storey"
-    },
-    {
-      "n": "06",
       "addr": "10916 Emerald Coast Parkway",
       "city": "Miramar Beach, FL 32550",
       "location": {
@@ -621,7 +538,7 @@
       "limit": "The landlord is in negotiation with another prospec"
     },
     {
-      "n": "07",
+      "n": "06",
       "addr": "11275 Emerald Coast Parkway, Suite 6",
       "city": "Miramar Beach, FL 32550",
       "location": {
@@ -703,7 +620,7 @@
       "limit": "The published figures on this one do not hold up, including the size"
     },
     {
-      "n": "08",
+      "n": "07",
       "addr": "Baytowne Office, 215 Grand Boulevard, Suite 102",
       "city": "Miramar Beach, FL 32550",
       "location": {
@@ -772,7 +689,7 @@
       "limit": "it does not deliver until February 2027"
     },
     {
-      "n": "09",
+      "n": "08",
       "addr": "4935 West Highway 98",
       "city": "Santa Rosa Beach, FL 32459",
       "location": {
@@ -853,7 +770,7 @@
       "limit": "Some units carry a 730 SF second floor office mezzanine"
     },
     {
-      "n": "10",
+      "n": "09",
       "addr": "Corporate Woods, State Highway 20",
       "city": "Freeport, FL 32439",
       "location": {
