@@ -1141,6 +1141,14 @@ def main():
             if one(cur, "select supersedes_envelope_id from ops.engineering_execution_envelope where id=%s", (malformed_read_only_successor[1],))[0] != malformed_read_only[1]:
                 raise RuntimeError("malformed read_only predecessor was not superseded by the exact successor")
         good_claim = claim_one(conn, good[0], "engineering-controller-receipt-good", isolation_ids)
+        # Binding requires 930 seconds of runway from a 960-second claim.  Prove
+        # the exact live binding at the launch boundary, before the deliberately
+        # long negative-receipt fixture loop consumes that 30-second margin.
+        with conn.cursor() as cur:
+            set_jobs(cur)
+            if one(cur, "select ops.engineering_controller_binding(%s,%s,%s) is not null", (good[1], good[0], good_claim[1]))[0] is not True:
+                raise RuntimeError("actor lifecycle fixture could not read the exact live binding")
+            reset_role(cur)
         dag_a_claim = claim_one(conn, dag_a[0], "engineering-controller-dag-a", isolation_ids)
         lineage_a_claim = claim_one(conn, lineage_a[0], "engineering-controller-lineage-a", isolation_ids)
         weak_missing_claim = claim_one(conn, weak_missing[0], "engineering-controller-weak-missing", isolation_ids)
@@ -1194,10 +1202,6 @@ def main():
                 cur.execute("rollback to savepoint engineering_work_request_reservation")
                 cur.execute("release savepoint engineering_work_request_reservation")
                 raise RuntimeError("live Engineering claim did not reserve Work Request currentness")
-            set_jobs(cur)
-            if one(cur, "select ops.engineering_controller_binding(%s,%s,%s) is not null", (good[1], good[0], good_claim[1]))[0] is not True:
-                raise RuntimeError("actor lifecycle fixture could not read the exact live binding")
-            reset_role(cur)
             cur.execute("savepoint engineering_live_actor_authority")
             try:
                 cur.execute("update public.actor set active=false where id=%s", (good[3],))

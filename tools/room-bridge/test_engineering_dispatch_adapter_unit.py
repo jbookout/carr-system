@@ -149,6 +149,10 @@ def test_success_is_fresh_and_database_capability_is_not_forwarded():
     assert "RULE-DELIVERY WORKFLOW: engineering-slice" in seen["prompt"]
     assert ("RULE-DELIVERY PACKS: engineering-git,delegation-council,"
             "scheduled-automation,source-study") in seen["prompt"]
+    assert ('{"packs":["engineering-git","delegation-council",'
+            '"scheduled-automation","source-study"]}') in seen["prompt"]
+    assert "Do not pass `workflow`" in seen["prompt"]
+    assert "`engineering-slice` is a workflow label rather than a canonical rule pack" in seen["prompt"]
     assert "REFUSE before inspecting the envelope, source, or job" in seen["prompt"]
     prompt_record = {"type": "response_item", "payload": {"type": "message",
                      "role": "user", "content": [
