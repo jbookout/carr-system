@@ -147,6 +147,9 @@ def test_bridge_auth_observations_are_allowed_but_malformed_metadata_refuses():
 
 
 def test_success_is_fresh_and_database_capability_is_not_forwarded():
+    assert adapter.EXECUTOR_TIMEOUT_SECONDS == 900
+    assert adapter.EXECUTOR_RECEIPT_RESERVE_SECONDS == 120
+    assert adapter.dispatch.CODEX_TIMEOUT_S == adapter.EXECUTOR_TIMEOUT_SECONDS
     seen = {}
 
     def fake_dispatch(desk, prompt, **kwargs):
@@ -177,10 +180,15 @@ def test_success_is_fresh_and_database_capability_is_not_forwarded():
     assert f"stops this native turn after {adapter.EXECUTOR_TIMEOUT_SECONDS} seconds" in seen["prompt"]
     assert f"Reserve the final {adapter.EXECUTOR_RECEIPT_RESERVE_SECONDS} seconds" in seen["prompt"]
     assert "Never begin a broad or unbounded check late in the turn" in seen["prompt"]
+    assert "Run the smallest declared-scope fixture/snapshot checks first" in seen["prompt"]
+    assert "broader repository gates belong after those bounded checks" in seen["prompt"]
     assert "return a typed blocked receipt before the adapter deadline" in seen["prompt"]
     assert "RECOVERY FIRST:" in seen["prompt"]
+    assert "inspect the current branch and Git status" in seen["prompt"]
     assert "treat them as an untrusted checkpoint" in seen["prompt"]
+    assert "review them, continue them, and cite fresh checks" in seen["prompt"]
     assert "never inherit the predecessor transcript" in seen["prompt"]
+    assert "or its unverified conclusions" in seen["prompt"]
     prompt_record = {"type": "response_item", "payload": {"type": "message",
                      "role": "user", "content": [
                          {"type": "input_text", "text": seen["prompt"]}]}}
