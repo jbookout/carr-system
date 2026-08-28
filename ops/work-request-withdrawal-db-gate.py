@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # ci: db-gate
+# doctrine: work-request-withdrawal
 """Rollback-only Postgres gate for withdrawing a Work Request captured in error.
 
 A sourced Work Request could only ever move FORWARD. Every intake verb advanced
