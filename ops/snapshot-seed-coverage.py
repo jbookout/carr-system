@@ -104,6 +104,23 @@ WRITES_ANYWHERE = (
                + TABLE + r"[^;]{0,4000}?\bas\s+(?:with|select)", re.I | re.S),
 )
 
+# WHAT COUNTS AS ROWS *IN THE ARTIFACT* IS A NARROWER QUESTION than what counts
+# as a seeding write in a migration, and conflating them left the carried
+# direction a NAME test for one statement shape.
+#
+# `copy public.deal_phase from '/tmp/x.csv';` is a real write when a migration
+# runs it — the rows land — so WRITES_ANYWHERE must keep matching it. But an
+# artifact carrying that line carries no rows at all; the data is in a file the
+# snapshot does not contain and a rebuild would never see. Counting it as
+# presence let a carried table read as carried on the strength of its name.
+#
+# COPY FROM stdin is absent here on purpose rather than by oversight:
+# copy_blocks() already counts those blocks, and it counts ROWS, which is the
+# whole reason the carried direction is a row test.
+ARTIFACT_ROW_WRITES = tuple(
+    pattern for pattern in WRITES_ANYWHERE
+    if "copy" not in pattern.pattern[:8].lower())
+
 # SELECT ... INTO IS DELIBERATELY NOT DETECTED, and the reason is worth stating so
 # nobody adds it back. In plain SQL it creates a table; in PL/pgSQL the identical
 # syntax assigns a variable. Every occurrence across all 264 migrations is the
@@ -417,11 +434,22 @@ def copy_blocks(region):
     blocks = []
     for head in COPY_BLOCK.finditer(region):
         end = region.find("\n\\.", head.end())
-        stop = len(region) if end == -1 else end + 3
-        body = region[head.end():end] if end != -1 else region[head.end():]
+        if end == -1:
+            # AN UNTERMINATED COPY IS NOT A BLOCK THAT RUNS TO EOF. Blanking to
+            # the end of the region was the old behaviour and it is the quiet
+            # kind of wrong: every table below the break reads ABSENT, so a
+            # carried table refuses for a reason that is not true, and an
+            # excluded table whose rows really are present passes in silence.
+            # pg_dump always closes its blocks, so reaching here means the
+            # artifact is malformed and no verdict read from it can be trusted.
+            raise ValueError(
+                f"unterminated COPY block for {normalise(head.group(1))}: no "
+                "closing \\. marker. The artifact is malformed; every table "
+                "below this point would read as absent.")
+        body = region[head.end():end]
         blocks.append((normalise(head.group(1)),
                        any(line.strip() for line in body.split("\n")),
-                       head.start(), stop))
+                       head.start(), end + 3))
     return blocks
 
 
@@ -459,7 +487,7 @@ def tables_with_data(artifact):
     for bodies in routines.values():
         segments.extend(bodies)
     for segment in segments:
-        for pattern in WRITES_ANYWHERE:
+        for pattern in ARTIFACT_ROW_WRITES:
             found.update(normalise(hit.group(1)) for hit in pattern.finditer(segment))
     return found
 

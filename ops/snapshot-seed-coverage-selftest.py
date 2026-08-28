@@ -582,6 +582,61 @@ def main():
         case("calling the longer routine does not drag in the one whose name it contains",
              any("ops.long_one" in f for f in found) and not any("ops.short_one" in f for f in found))
 
+        # M30. A ROUTINE BODY IS SCANNED, NOT STORED RAW, and until now nothing
+        # held that. The module docstring claimed the has_function_privilege case
+        # pinned it; storing bodies raw survives that case and the committed
+        # artifact both, which is a defence documented as tested that no case
+        # actually killed. A body carrying an INSERT inside a STRING LITERAL is
+        # the shape that separates the two: scanned, the literal is blanked and
+        # the table is invisible; raw, the literal reads as a statement and the
+        # table is reported by a routine that never touches it.
+        raw_body = ("create function ops.logger() returns void language plpgsql as $$\n"
+                    "begin\n"
+                    "  raise notice 'ran: insert into ops.literal_ghost (k) values (1);';\n"
+                    "  insert into ops.logger_real (k) values (1);\n"
+                    "end $$;\n"
+                    "select ops.logger();\n")
+        repo = build_repo(tmp + "/r6m30", {"0100_m30.sql": raw_body}, {"carried": {}, "excluded": {}})
+        found = module.check(repo, artifact(["0100_m30.sql"]))
+        case("an INSERT inside a string literal in a routine body is not a write",
+             any("ops.logger_real" in f for f in found)
+             and not any("ops.literal_ghost" in f for f in found))
+
+        # M37. THE SHORT-NAME CALL TEST IS THE UNDER-DETECTION DIRECTION. A
+        # schema-qualified routine called WITHOUT its schema, which search_path
+        # makes legal and which this corpus does, is still a call: dropping the
+        # short-name fallback and matching only the qualified name loses the
+        # body, and with it every table the body seeds. That is a seeded table
+        # going unclassified in silence, which is the whole trap.
+        short = ("create function ops.seed_unqualified() returns void language plpgsql as $$\n"
+                 "begin\n  insert into ops.reached_by_short_name (k) values (1);\nend $$;\n"
+                 "select seed_unqualified();\n")
+        repo = build_repo(tmp + "/r6m37", {"0100_m37.sql": short}, {"carried": {}, "excluded": {}})
+        case("an unqualified call to a schema-qualified routine still seeds its tables",
+             any("ops.reached_by_short_name" in f
+                 for f in module.check(repo, artifact(["0100_m37.sql"]))))
+
+        # An unterminated COPY block is a malformed artifact, not a block that
+        # runs to end of file. Blanking to EOF made every table below it read
+        # ABSENT, so a carried table refused for a reason that was not true and an
+        # excluded table whose rows were really there passed in silence.
+        try:
+            module.copy_blocks("COPY public.deal_phase (k) FROM stdin;\n1\n")
+            unterminated_refused = False
+        except ValueError:
+            unterminated_refused = True
+        case("an unterminated COPY block refuses instead of blanking to end of file",
+             unterminated_refused)
+
+        # A file-sourced COPY lands rows when a MIGRATION runs it, so detection
+        # must keep matching it — but an artifact carrying that line carries no
+        # rows at all, and counting it as presence made the carried direction a
+        # NAME test for that one statement shape.
+        case("a file-sourced COPY is a seeding write but is not rows in the artifact",
+             any("copy" in pattern.pattern[:8].lower() for pattern in module.WRITES_ANYWHERE)
+             and not any("copy" in pattern.pattern[:8].lower()
+                         for pattern in module.ARTIFACT_ROW_WRITES))
+
         # Whitespace is legal around the schema separator.
         repo = build_repo(tmp + "/r6sp",
                           {"0100_sp.sql": "insert into ops . spaced_table (k) values (1);\n"},

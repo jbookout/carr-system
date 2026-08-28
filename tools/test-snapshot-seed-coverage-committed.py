@@ -53,17 +53,37 @@ def main() -> int:
 
     # A guard that passes because it read nothing is the failure mode this whole
     # file exists to prevent, so the inputs are asserted before the verdict is
-    # trusted. An empty ledger would make every seeded table undetectable and the
-    # check would report clean on a file that carries nothing.
+    # trusted.
+    #
+    # THE FLOORS THAT USED TO LIVE HERE WERE SLACK AND REDUNDANT, and the seventh
+    # review was right about both halves. `len(applied) >= 100` and
+    # `len(seeds) >= 50` could not fire before check() already had: every
+    # classified table is currently seeded, so any detection collapse trips
+    # CLASSIFICATION ENTRY NO LONGER APPLIES for each table that dropped out, and
+    # an empty ledger trips it for all of them at once. Worse, the thresholds had
+    # room to spare — detection could lose 44 percent of the seeded set and still
+    # clear `>= 50`, so as a tripwire they measured nothing anybody had reasoned
+    # about.
+    #
+    # What replaces them is exact rather than approximate. Detection and the
+    # classification must describe the SAME set of tables: check() fails an
+    # unclassified seeded table in one direction and a classification entry with
+    # nothing behind it in the other, so the two counts agreeing is the invariant
+    # both directions already imply. Asserting it here states it once, in a form
+    # with no threshold to drift, and any collapse breaks it immediately.
     applied = module.applied_migrations(artifact)
-    if len(applied) < 100:
-        print(f"  FAIL the committed snapshot's ledger holds only {len(applied)} migrations; "
-              f"the check would be reading almost nothing")
+    if not applied:
+        print("  FAIL the committed snapshot carries no applied-migration ledger; "
+              "every seeded table would be undetectable and a clean verdict would "
+              "mean nothing")
         return 1
     seeds, _missing = module.seeded_tables(str(ROOT), applied)
-    if len(seeds) < 50:
-        print(f"  FAIL only {len(seeds)} seeded tables detected from {len(applied)} applied "
-              f"migrations; detection has collapsed and a clean verdict would mean nothing")
+    carried, subset, excluded, _forbidden, _path = module.load_classification(str(ROOT))
+    classified = len(carried) + len(subset) + len(excluded)
+    if len(seeds) != classified:
+        print(f"  FAIL detection found {len(seeds)} seeded tables and the classification "
+              f"names {classified}; the two must describe the same set, so one of them "
+              f"has moved without the other")
         return 1
 
     # A BUDGET, because the cost of this check is not a fixed price. scan_sql was
