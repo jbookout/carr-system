@@ -68,7 +68,9 @@ COPY_BLOCK = re.compile(r"^COPY\s+" + TABLE + r"\s*(?:\([^)]*\)\s*)?FROM\s+stdin
 # lands rows, and so does `execute format('insert into t ...', ...)`. The scanner
 # blanked both and detected nothing, while scan_sql's own docstring justified the
 # blanking with "no row-landing statement hides inside a string" -- which is
-# precisely false here. Twelve applied migrations already use EXECUTE.
+# precisely false here. 43 applied migrations already use EXECUTE over a string
+# literal or a dollar-quoted body; an earlier revision of this comment said
+# twelve, understating its own blast radius by 3.5x.
 #
 # format() is matched as an optional wrapper rather than a separate case because
 # the literal is still the FIRST argument; a table interpolated as %s cannot be
@@ -153,11 +155,18 @@ def normalise(table):
     return table[len("public."):] if table.startswith("public.") else table
 
 
-# HOW FAR BACK THE TWO BACKWARD-LOOKING TESTS MAY REACH. Both are anchored to
-# the END of the accumulated buffer, so the cut is always thousands of characters
-# away from what they inspect: the keyword test reads the word immediately before
-# the dollar-quote, and the `do language <lang>` form spans well under a hundred
-# characters. Neither can see the truncation.
+# HOW FAR BACK THE THREE BACKWARD-LOOKING TESTS MAY REACH. All are anchored to
+# the END of the accumulated buffer: the keyword test reads the word immediately
+# before the dollar-quote, the `do language <lang>` form spans well under a
+# hundred characters, and EXECUTE_ARGUMENT reads one word plus an optional
+# `format(`.
+#
+# THE COUNT IS OF SIGNIFICANT CHARACTERS, NOT RAW ONES, and an earlier revision
+# of this comment claimed only two consumers and that neither could see the
+# truncation. A third had been added and every one of them looks back past
+# optional whitespace, so a raw bound let a long whitespace run push the word out
+# of the window and lose a seed. _tail_significant discards the trailing run
+# before counting.
 HEAD_TAIL = 4096
 
 # The routine-header scan is bounded far more generously because it looks for the
@@ -172,6 +181,41 @@ HEAD_TAIL = 4096
 # That is a false alarm at worst, never a missed seed, and this file's whole
 # purpose is to refuse rather than to miss.
 ROUTINE_TAIL = 65536
+
+
+def _tail_significant(parts, count):
+    r"""The last `count` characters that are not part of a trailing whitespace run.
+
+    WHY THIS EXISTS, AND WHY _tail ALONE WAS WRONG. Every consumer of the tail
+    looks BACKWARD PAST OPTIONAL WHITESPACE: the keyword test is
+    `([A-Za-z_]+)\s*$`, the do-language form ends `\s*$`, and EXECUTE_ARGUMENT
+    ends `\s*(?:format\s*\()?\s*$`. A raw character bound therefore measures the
+    wrong thing -- the whitespace, not the token -- so a long enough run of it
+    pushes the word out of the window and the test reads as though the word were
+    not there.
+
+    That is not academic. `execute` followed by 4200 spaces and an INSERT literal
+    detected nothing while 4000 spaces detected it: a MISSED SEED, which is the
+    one direction this file is not allowed to fail in, and it was introduced by
+    the bound that was added to fix the quadratic scan. Found by the ninth
+    independent review.
+
+    Trailing whitespace is discarded first and only then are characters counted,
+    so the window is measured in the text the patterns actually read. The scan
+    stays linear: the discarded run is walked once, backwards, and never rejoined.
+    """
+    out, size, seen_significant = [], 0, False
+    for chunk in reversed(parts):
+        if not seen_significant:
+            stripped = chunk.rstrip()
+            if not stripped:
+                continue
+            chunk, seen_significant = stripped, True
+        out.append(chunk)
+        size += len(chunk)
+        if size >= count:
+            break
+    return "".join(reversed(out))[-count:]
 
 
 def _tail(parts, count):
@@ -281,7 +325,7 @@ def scan_sql(sql):
             # IS THIS LITERAL AN ARGUMENT TO EXECUTE? If so its text is not inert
             # -- it is SQL that runs. Decided BEFORE the literal is consumed,
             # because `top` still ends at the character before the quote here.
-            dynamic = bool(EXECUTE_ARGUMENT.search(_tail(top, HEAD_TAIL)))
+            dynamic = bool(EXECUTE_ARGUMENT.search(_tail_significant(top, HEAD_TAIL)))
             opened = i
             i += 1
             while i < n:
@@ -314,7 +358,7 @@ def scan_sql(sql):
                 top.append(sql[i:])
                 break
             body = sql[match.end():end]
-            head = _tail(top, HEAD_TAIL)
+            head = _tail_significant(top, HEAD_TAIL)
             previous = re.search(r"([A-Za-z_]+)\s*$", head)
             keyword = previous.group(1).lower() if previous else ""
             # `do language plpgsql $$ ... $$` is the same statement as `do $$ ... $$`.

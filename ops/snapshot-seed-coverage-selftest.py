@@ -756,6 +756,115 @@ def main():
         case("the data region starts at the ledger COPY header, so its rows are excised",
              module.data_region(artifact(["0100_x.sql"])).startswith("COPY public.schema_migrations"))
 
+        # THE TAIL BOUND IS COUNTED IN SIGNIFICANT CHARACTERS. Every consumer looks
+        # back past optional whitespace, so a raw-character bound measures the
+        # whitespace rather than the token, and a long enough run loses the seed.
+        # 4200 spaces missed where 4000 detected, which is the missed-seed
+        # direction this file is not allowed to fail in.
+        pad = " " * 9000
+        padded = ("do $$ begin execute" + pad + "'insert into ops.padded_exec values (1)'; end $$;\n"
+                  "create function ops.padded_fn() returns void language plpgsql as" + pad +
+                  "$$ begin insert into ops.padded_body values (1); end $$;\n"
+                  "select ops.padded_fn();\n")
+        repo = build_repo(tmp + "/r6pad", {"0100_pad.sql": padded}, {"carried": {}, "excluded": {}})
+        found = module.check(repo, artifact(["0100_pad.sql"]))
+        case("whitespace between EXECUTE and its literal cannot push the seed out of the window",
+             any("ops.padded_exec" in f for f in found))
+        case("whitespace between AS and a routine body cannot push the seed out of the window",
+             any("ops.padded_body" in f for f in found))
+
+        # N5. The boundary refusal names the EARLIEST data statement in the segment,
+        # not the first pattern in WRITES_ANYWHERE that happens to match. #803 fixed
+        # the ordering ACROSS segments and left this half with no case. The two must
+        # disagree to be worth testing: MERGE comes first in the text and second in
+        # the pattern list, so min() names it and hits[0] names the INSERT.
+        two_stmts = ("merge into ops.earliest_merge t using (select 1) s on true "
+                     "when not matched then insert values (1);\n"
+                     "insert into ops.later_insert (k) values (1);\n\n")
+        repo_ord = build_repo(tmp + "/r6ord",
+                              {"0100_ord.sql": "insert into deal_phase (name) values ('x');\n"},
+                              {"carried": {}, "excluded": {}})
+        art = artifact(["0100_ord.sql"])
+        art = art.replace("COPY public.schema_migrations", two_stmts + "COPY public.schema_migrations", 1)
+        found = module.check(repo_ord, art)
+        case("the boundary refusal names the earliest statement, not the first pattern to match",
+             any("ops.earliest_merge" in f for f in found))
+
+        # N20. The COPY block's TERMINATOR is newline-anchored, the twin of the
+        # header anchor T49 pinned. A backslash-dot inside a data row would end
+        # the block early and expose its tail to the SQL scanner.
+        early_end = ("COPY public.deal_phase (name) FROM stdin;\n"
+                     "a\\.b\n"
+                     "O'Brien\n"
+                     "\\.\n\ninsert into party (name) values ('acme');\n\n")
+        repo_t = build_repo(tmp + "/r6term",
+                            {"0100_t.sql": "insert into deal_phase (name) values ('x');\n"},
+                            {"carried": {"deal_phase": "closed vocabulary"},
+                             "excluded": {"party": "business data"}})
+        found = module.check(repo_t, artifact(["0100_t.sql"], [early_end]))
+        case("a backslash-dot inside a data row does not end the COPY block early",
+             any("DECLARED EXCLUDED BUT PRESENT" in f and "party" in f for f in found))
+
+        # N3. EXECUTE_ARGUMENT needs its leading word boundary. Without it an
+        # identifier merely ENDING in execute -- last_execute, pre_execute -- turns
+        # the literal beside it into statements, which is the false-alarm direction.
+        false_exec = "select last_execute 'insert into ops.ghost_exec values (1)' from ops.real_one;\n"
+        repo_fe = build_repo(tmp + "/r6fe", {"0100_fe.sql": false_exec}, {"carried": {}, "excluded": {}})
+        case("a word merely ENDING in execute does not make its literal into statements",
+             not any("ops.ghost_exec" in f for f in module.check(repo_fe, artifact(["0100_fe.sql"]))))
+
+        # N12. A dynamic literal's doubled quotes are how a single quote is spelled
+        # inside it, and undoubling them changes what the scanned text MEANS. Here
+        # the undoubled form opens a literal that swallows the rest of the string,
+        # so only the first table is really written; leaving them doubled reads the
+        # tail as a second statement and reports a table the database never touches.
+        doubled = ("do $$ begin execute "
+                   "'insert into ops.dq_first values (''); insert into ops.dq_phantom values (1)'; "
+                   "end $$;\n")
+        repo_dq = build_repo(tmp + "/r6dq", {"0100_dq.sql": doubled}, {"carried": {}, "excluded": {}})
+        found = module.check(repo_dq, artifact(["0100_dq.sql"]))
+        case("a dynamic literal's doubled quotes are undoubled before it is scanned",
+             any("ops.dq_first" in f for f in found)
+             and not any("ops.dq_phantom" in f for f in found))
+
+        # N14. A THIRD LENGTH BOUND, and until now the only undocumented one. The
+        # CTAS pattern allows up to 4000 characters between the table name and
+        # `as select`, which is where a long column specification lives. Narrowing
+        # it loses the seed, so the width is load-bearing and gets a case.
+        wide_ctas = ("create table ops.wide_ctas (\n"
+                     + "".join(f"  col_{i} integer,\n" for i in range(60))
+                     + "  last_col integer\n) as select * from ops.some_source;\n")
+        repo_ct = build_repo(tmp + "/r6ct", {"0100_ct.sql": wide_ctas}, {"carried": {}, "excluded": {}})
+        case("a CREATE TABLE AS with a long column list is still a seed",
+             any("ops.wide_ctas" in f for f in module.check(repo_ct, artifact(["0100_ct.sql"]))))
+
+        # N16. SECURITY LABEL ON FUNCTION names a routine without calling it, the
+        # same shape as GRANT and REVOKE. Losing that alternative makes a defined
+        # but never-called routine look invoked, and its body a seed.
+        seclabel = ("create function ops.labelled() returns void language plpgsql as $$\n"
+                    "begin\n  insert into ops.seclabel_ghost (k) values (1);\nend $$;\n"
+                    "security label on function ops.labelled() is 'classified';\n")
+        repo_sl = build_repo(tmp + "/r6sl", {"0100_sl.sql": seclabel}, {"carried": {}, "excluded": {}})
+        case("SECURITY LABEL ON FUNCTION names a routine, it does not call it",
+             not any("ops.seclabel_ghost" in f for f in module.check(repo_sl, artifact(["0100_sl.sql"]))))
+
+        # N19. _blank must PRESERVE LENGTH. Nested COPY headers produce genuinely
+        # overlapping spans -- the outer block ends at the inner block's terminator,
+        # so the inner header sits inside the outer span. Without the overlap guard
+        # the negative slice re-emits the overlapped stretch and the text GROWS,
+        # which duplicates whatever statements sit in it. Measured: 130 bytes in,
+        # 178 out.
+        nested_copy = ("COPY public.outer_tbl (a) FROM stdin;\n"
+                       "COPY public.inner_tbl (b) FROM stdin;\n"
+                       "datarow\n\\.\n\n"
+                       "insert into party (name) values ('acme');\n")
+        blocks, _rest = module.copy_blocks(nested_copy)
+        spans = [(b[2], b[3]) for b in blocks]
+        case("nested COPY headers really do produce overlapping spans",
+             len(spans) > 1 and spans[1][0] < spans[0][1])
+        case("_blank preserves length, so an overlap cannot duplicate a statement",
+             len(module._blank(nested_copy, spans)) == len(nested_copy))
+
         # Whitespace is legal around the schema separator.
         repo = build_repo(tmp + "/r6sp",
                           {"0100_sp.sql": "insert into ops . spaced_table (k) values (1);\n"},
