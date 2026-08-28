@@ -106,8 +106,18 @@ test("route seams enforce their exact body contracts", async () => {
   const body = { tour_id: tourId, expected_route_version: 0, stop_ids: [stopA, stopB], idempotency_key: routeId };
   const response = await surface.fetch(request("/api/tours/route-version", { method: "POST", headers: postHeaders, body: JSON.stringify(body) }), { APP_HOST: "app.doctorcre.com" }, {}, ACTOR, SESSION);
   assert.equal(response.status, 200); assert.deepEqual(calls[0].input, body);
+  const oneStop = { ...body, stop_ids: [stopA] };
+  assert.equal((await surface.fetch(request("/api/tours/route-version", { method: "POST", headers: postHeaders, body: JSON.stringify(oneStop) }), { APP_HOST: "app.doctorcre.com" }, {}, ACTOR, SESSION)).status, 200);
   const duplicate = { ...body, stop_ids: [stopA, stopA] };
   assert.equal((await surface.fetch(request("/api/tours/route-version", { method: "POST", headers: postHeaders, body: JSON.stringify(duplicate) }), { APP_HOST: "app.doctorcre.com" }, {}, ACTOR, SESSION)).status, 400);
+});
+
+test("known optimistic races remain conflicts rather than service outages", async () => {
+  const surface = handler({ createRouteVersionFn: async () => { throw new Error("tour route preparation refuses stale state"); } });
+  const body = { tour_id: tourId, expected_route_version: 1, stop_ids: [stopA], idempotency_key: routeId };
+  const response = await surface.fetch(request("/api/tours/route-version", { method: "POST", headers: postHeaders, body: JSON.stringify(body) }), { APP_HOST: "app.doctorcre.com" }, {}, ACTOR, SESSION);
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), { error: "conflict" });
 });
 
 test("internal PDF routes require exact authority-safe contracts and accepted download state", async () => {

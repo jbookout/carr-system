@@ -140,6 +140,7 @@ const schema = (properties, required) => ({ type: "object", additionalProperties
 export function tourPropertySearchTools({ withEnvelope, writeEvent, ToolError }) {
   return {
     "search-tour-properties": {
+      writerConnection: true,
       description: "Search facts-only property candidates in the initial five Florida counties. Results contain no broker conclusion and do not mutate a Tour.",
       inputSchema: schema({
         query: { type: ["string", "null"], maxLength: 200 },
@@ -217,6 +218,7 @@ export function tourPropertySearchTools({ withEnvelope, writeEvent, ToolError })
       },
     },
     "read-tour-selection-cart": {
+      writerConnection: true,
       description: "Read the latest authenticated internal selection cart for a Tour.",
       inputSchema: schema({ tour_id: { type: "string" } }, [...READ_CART_FIELDS]),
       handler: async (client, actor, args) => {

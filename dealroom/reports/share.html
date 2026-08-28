@@ -7,6 +7,7 @@
     <title>Tour report</title>
     <link rel="stylesheet" href="/vendor/maplibre-gl-6.1.0/maplibre-gl.css">
     <link rel="stylesheet" href="/share.css">
+    <script src="/share-bootstrap.js"></script>
     <script type="module" src="/share.js"></script>
   </head>
   <body>
@@ -21,7 +22,7 @@
       <button id="open-tour" type="button" disabled>Open tour</button>
       <section id="map-section" aria-labelledby="map-title" hidden>
         <h2 id="map-title">Tour map</h2>
-        <p id="map-note" class="status">Only verified entrance, driveway, or parking-access coordinates are shown.</p>
+        <p id="map-note" class="status">Ordered markers show only verified entrance, driveway, or parking-access coordinates. No road-route geometry is implied.</p>
         <div id="tour-map" role="application" aria-label="Interactive map of the ordered tour stops"></div>
       </section>
       <section aria-labelledby="items-title">

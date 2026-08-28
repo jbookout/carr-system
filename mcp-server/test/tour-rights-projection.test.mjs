@@ -81,6 +81,7 @@ test("write tools derive tenant and actor/reviewer identity and call only bounde
   assert.equal(h.tools["append-tour-source-evidence"].authorityOnly, undefined);
   assert.equal(h.tools["append-tour-field-assertion"].authorityOnly, true);
   assert.equal(h.tools["create-tour-public-projection-draft"].authorityOnly, undefined);
+  assert.equal(h.tools["read-tour-public-projection"].writerConnection, true);
 
   assert.deepEqual(await h.tools["append-tour-rights-receipt"].handler(h.client, actor, rightsArgs), { ok: true, rights_receipt_id: ids.rights });
   const rightsPayload = JSON.parse(h.calls.at(-1).params[0]);

@@ -104,7 +104,7 @@ function validContent(value) {
 }
 
 const VALID = {
-  "/api/tours/route-version": (v) => exact(v, ["tour_id", "expected_route_version", "stop_ids", "idempotency_key"]) && validId(v.tour_id) && Number.isInteger(v.expected_route_version) && v.expected_route_version >= 0 && ids(v.stop_ids, 2) && validId(v.idempotency_key),
+  "/api/tours/route-version": (v) => exact(v, ["tour_id", "expected_route_version", "stop_ids", "idempotency_key"]) && validId(v.tour_id) && Number.isInteger(v.expected_route_version) && v.expected_route_version >= 0 && ids(v.stop_ids, 1) && validId(v.idempotency_key),
   "/api/tours/route-reorder": (v) => exact(v, ["tour_id", "route_version_id", "expected_route_version", "stop_ids", "idempotency_key"]) && validId(v.tour_id) && validId(v.route_version_id) && Number.isInteger(v.expected_route_version) && v.expected_route_version >= 0 && ids(v.stop_ids, 1) && validId(v.idempotency_key),
   "/api/tours/route-accept": (v) => exact(v, ["route_version_id", "expected_prior_route_version", "acceptance_digest", "idempotency_key"]) && validId(v.route_version_id) && Number.isInteger(v.expected_prior_route_version) && v.expected_prior_route_version >= 0 && validDigest(v.acceptance_digest) && validId(v.idempotency_key),
   "/api/tours/cheat-sheet/autosave": (v) => exact(v, ["tour_id", "content", "expected_revision_number", "idempotency_key"]) && validId(v.tour_id) && validContent(v.content) && Number.isInteger(v.expected_revision_number) && v.expected_revision_number >= 0 && validId(v.idempotency_key),
@@ -142,6 +142,19 @@ const SEAMS = {
 function safeFailure(result) {
   const status = [403, 404, 409].includes(result?.status) ? result.status : 503;
   return json({ error: status === 403 ? "forbidden" : status === 404 ? "not_found" : status === 409 ? "conflict" : "tour_unavailable" }, status);
+}
+const CONFLICT_MESSAGES = new Set([
+  "tour route preparation refuses stale state",
+  "route version refuses concurrent or stale route state",
+  "route acceptance refuses stale state",
+  "cheat sheet autosave refuses stale revision",
+  "cheat sheet restore refuses stale revision",
+  "tour selection refuses stale version",
+]);
+function dependencyFailure(error) {
+  const code = typeof error?.payload?.error === "string" ? error.payload.error : "";
+  const message = typeof error?.message === "string" ? error.message : "";
+  return { status: code === "version_conflict" || CONFLICT_MESSAGES.has(message) ? 409 : 503 };
 }
 async function staticAsset(env, request, pathname) {
   if (!env?.ASSETS?.fetch) return json({ error: "not_found" }, 404);
@@ -186,7 +199,7 @@ async function api(request, env, ctx, actor, session, dependencies, pathname) {
     if ((pathname === "/api/tours/pdf/preview" || pathname === "/api/tours/pdf/download") && result?.ok && result.response instanceof Response) return result.response;
     if (!result?.ok || !plain(result.data)) return safeFailure(result);
     return json({ data: result.data, csrf_token: request.method === "GET" ? session.csrfToken : undefined });
-  } catch { return json({ error: "tour_unavailable" }, 503); }
+  } catch (error) { return safeFailure(dependencyFailure(error)); }
 }
 
 function withSecurityHeaders(response) {

@@ -38,6 +38,8 @@ test("specialist search is five-county, facts-only, deterministic, and sanitized
   assert.deepEqual(TOUR_SEARCH_COUNTIES, ["Escambia", "Santa Rosa", "Okaloosa", "Walton", "Bay"]);
   const h = harness();
   assert.deepEqual(Object.keys(h.tools).sort(), ["append-tour-selection-cart-version", "read-tour-selection-cart", "search-tour-properties"]);
+  assert.equal(h.tools["search-tour-properties"].writerConnection, true);
+  assert.equal(h.tools["read-tour-selection-cart"].writerConnection, true);
   const result = await h.tools["search-tour-properties"].handler(h.client, actor, searchArgs);
   assert.equal(result.search.items[0].property_id, ids.propertyA);
   assert.equal(result.search.items[0].property_ref, propertyRef);

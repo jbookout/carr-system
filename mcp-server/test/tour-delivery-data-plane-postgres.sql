@@ -9,6 +9,10 @@ insert into ops.tour(id,organization_tenant_id,tour_name,tour_status,route_versi
 values('a2000000-0000-4000-8000-000000000001','tour-delivery-proof','Delivery proof','draft',1,'proof-v1','work','proof',now());
 insert into ops.tour_route_version(id,organization_tenant_id,tour_id,route_version,start_point,end_point,routing_source,routing_request,created_by_actor_id)
 values('a3000000-0000-4000-8000-000000000001','tour-delivery-proof','a2000000-0000-4000-8000-000000000001',1,'{}','{}','manual','{}','tour-delivery-proof');
+insert into ops.tour_route_stop(id,organization_tenant_id,route_version_id,property_id,route_sequence,route_label,stop_state,appointment_start,appointment_end,locked_appointment,dwell_minutes,buffer_minutes,access_coordinate_status,assertion_set_digest,created_by_actor_id)
+values
+('a4000000-0000-4000-8000-000000000001','tour-delivery-proof','a3000000-0000-4000-8000-000000000001','a1000000-0000-4000-8000-000000000001',1,'A','active','2026-08-28 14:00:00+00','2026-08-28 14:30:00+00',true,30,10,'approved','sha256:'||repeat('d',64),'tour-delivery-proof'),
+('a4000000-0000-4000-8000-000000000002','tour-delivery-proof','a3000000-0000-4000-8000-000000000001','a1000000-0000-4000-8000-000000000002',2,'B','active','2026-08-28 15:00:00+00','2026-08-28 15:30:00+00',true,30,10,'approved','sha256:'||repeat('e',64),'tour-delivery-proof');
 insert into ops.tour_route_version_acceptance(organization_tenant_id,tour_id,route_version_id,expected_prior_route_version,accepted_by_actor_id,acceptance_digest)
 values('tour-delivery-proof','a2000000-0000-4000-8000-000000000001','a3000000-0000-4000-8000-000000000001',0,'tour-delivery-proof','sha256:'||repeat('c',64));
 
@@ -17,6 +21,15 @@ set local carr.acting_actor_slug='tour-delivery-proof';
 do $writer$
 declare v_version uuid; v_cart jsonb; v_search jsonb; v_projection_meta jsonb;
 begin
+  begin
+    perform ops.prepare_tour_route_version(
+      'tour-delivery-proof','a2000000-0000-4000-8000-000000000001',
+      'a3000000-0000-4000-8000-000000000001',1,
+      '["a4000000-0000-4000-8000-000000000002","a4000000-0000-4000-8000-000000000001"]');
+    raise exception 'expected locked appointment order refusal';
+  exception when raise_exception then
+    if sqlerrm<>'tour route preparation violates locked appointment order' then raise; end if;
+  end;
   v_version:=ops.append_tour_selection_cart_version(
     'tour-delivery-proof','a2000000-0000-4000-8000-000000000001',null,
     '["a1000000-0000-4000-8000-000000000001","a1000000-0000-4000-8000-000000000002"]',0,

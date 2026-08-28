@@ -1,7 +1,3 @@
-import { LngLatBounds, Map as MapLibreMap, Marker, NavigationControl, Popup, setWorkerUrl } from "/vendor/maplibre-gl-6.1.0/maplibre-gl.mjs";
-
-setWorkerUrl("/vendor/maplibre-gl-6.1.0/maplibre-gl-worker.mjs");
-
 (() => {
   "use strict";
 
@@ -9,23 +5,12 @@ setWorkerUrl("/vendor/maplibre-gl-6.1.0/maplibre-gl-worker.mjs");
   const summary = document.querySelector("#report-summary");
   const list = document.querySelector("#report-list");
   const openButton = document.querySelector("#open-tour");
-  let shareToken = "";
+  let shareToken = typeof globalThis.__CARR_TOUR_TAKE_SHARE_TOKEN__ === "function"
+    ? globalThis.__CARR_TOUR_TAKE_SHARE_TOKEN__() : "";
   let reportProperties = new globalThis.Map();
   let mapInstance = null;
 
   function setStatus(message) { status.textContent = message; }
-
-  function fragmentToken() {
-    const fragment = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
-    const params = new URLSearchParams(fragment);
-    if (/^[A-Za-z0-9_-]{43}$/.test(fragment)) return fragment;
-    const token = params.size === 1 && params.has("token") ? params.get("token") : "";
-    return /^[A-Za-z0-9_-]{43}$/.test(token || "") ? token : "";
-  }
-
-  function removeFragment() {
-    window.history.replaceState(null, document.title, `${window.location.pathname}${window.location.search}`);
-  }
 
   async function request(path, options = {}) {
     const response = await fetch(path, { credentials: "same-origin", ...options });
@@ -81,10 +66,13 @@ setWorkerUrl("/vendor/maplibre-gl-6.1.0/maplibre-gl-worker.mjs");
       Number.isFinite(point?.longitude) && point.longitude >= -180 && point.longitude <= 180;
   }
 
-  function renderMap(payload) {
+  async function renderMap(payload) {
     const points = (Array.isArray(payload?.points) ? payload.points : []).filter(validMapPoint)
       .sort((left, right) => left.route_sequence - right.route_sequence);
     if (!points.length) return;
+    const { LngLatBounds, Map: MapLibreMap, Marker, NavigationControl, Popup, setWorkerUrl } =
+      await import("/vendor/maplibre-gl-6.1.0/maplibre-gl.mjs");
+    setWorkerUrl("/vendor/maplibre-gl-6.1.0/maplibre-gl-worker.mjs");
     const mapSection = document.querySelector("#map-section");
     mapSection.hidden = false;
     if (mapInstance) mapInstance.remove();
@@ -94,11 +82,9 @@ setWorkerUrl("/vendor/maplibre-gl-6.1.0/maplibre-gl-worker.mjs");
       center: [points[0].longitude, points[0].latitude], zoom: 11, attributionControl: false,
     });
     mapInstance.addControl(new NavigationControl({ showCompass: false }), "top-right");
-    const routeCoordinates = [];
     const bounds = new LngLatBounds();
     for (const point of points) {
       const coordinate = [point.longitude, point.latitude];
-      routeCoordinates.push(coordinate);
       bounds.extend(coordinate);
       const property = reportProperties.get(point.property_ref) || {};
       const marker = document.createElement("button");
@@ -115,11 +101,7 @@ setWorkerUrl("/vendor/maplibre-gl-6.1.0/maplibre-gl-worker.mjs");
         .setPopup(new Popup({ offset: 18 }).setDOMContent(popupBody)).addTo(mapInstance);
     }
     mapInstance.on("load", () => {
-      if (routeCoordinates.length > 1) {
-        mapInstance.addSource("tour-route", { type: "geojson", data: { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: routeCoordinates } } });
-        mapInstance.addLayer({ id: "tour-route", type: "line", source: "tour-route", paint: { "line-color": "#F57F29", "line-width": 4, "line-opacity": .9 } });
-        mapInstance.fitBounds(bounds, { padding: 56, maxZoom: 14, duration: 0 });
-      }
+      if (points.length > 1) mapInstance.fitBounds(bounds, { padding: 56, maxZoom: 14, duration: 0 });
     });
   }
 
@@ -129,7 +111,7 @@ setWorkerUrl("/vendor/maplibre-gl-6.1.0/maplibre-gl-worker.mjs");
   }
 
   async function loadMap() {
-    try { const payload = await request("/api/share/map"); renderMap(payload.data || {}); }
+    try { const payload = await request("/api/share/map"); await renderMap(payload.data || {}); }
     catch { document.querySelector("#map-section").hidden = true; }
   }
 
@@ -154,8 +136,6 @@ setWorkerUrl("/vendor/maplibre-gl-6.1.0/maplibre-gl-worker.mjs");
   }
 
   function bootstrap() {
-    shareToken = fragmentToken();
-    removeFragment();
     if (!shareToken) {
       setStatus("This shared report link is incomplete or has expired.");
       list.setAttribute("aria-busy", "false");

@@ -41,6 +41,7 @@ export function projectTourDetail(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return raw;
   const routes = Array.isArray(raw.routes) ? raw.routes : [];
   const latestRoute = routes[0] || null;
+  const acceptedRoute = routes.find(route => route?.accepted === true) || null;
   const approvedProjection = (Array.isArray(raw.projections) ? raw.projections : [])
     .find(projection => projection?.status === "approved" || projection?.status === "published");
   const draftProjection = (Array.isArray(raw.projections) ? raw.projections : [])
@@ -54,6 +55,7 @@ export function projectTourDetail(raw) {
     route_version_id: latestRoute?.id || null,
     route_version_label: latestRoute ? `Version ${latestRoute.route_version}${latestRoute.accepted ? " · accepted" : " · draft"}` : null,
     route_version_state: latestRoute?.accepted ? "accepted" : latestRoute ? "draft" : "missing",
+    accepted_route_version: Number.isInteger(acceptedRoute?.route_version) ? acceptedRoute.route_version : 0,
     stops: Array.isArray(latestRoute?.stops) ? latestRoute.stops.map(stop => ({
       ...stop, label: stop.route_label || (Number.isInteger(stop.route_sequence) ? `Stop ${stop.route_sequence}` : "Tour stop"),
     })) : [],

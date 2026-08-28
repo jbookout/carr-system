@@ -68,4 +68,13 @@ test("route preparation always derives transitions from the accepted canonical b
   assert.match(migration, /append_tour_route_stop_transition\(p_tenant,v_base\.id,v_new,v_old_stop\.id,v_new_stop/i);
   assert.match(migration, /append_tour_route_stop_transition\(p_tenant,null,v_new,null,v_new_stop,'added'\)/i);
   assert.match(migration, /chr\(64\+v_stop\.new_sequence\)/i);
+  assert.match(migration, /lag\(s\.appointment_start\) over \(order by x\.ordinality\)/i);
+  assert.match(migration, /tour route preparation violates locked appointment order/i);
+});
+
+test("sharing history uses a bounded offset cursor and advertises continuation", () => {
+  assert.match(migration, /p_cursor !~ '\^\[0-9\]\{1,9\}\$'/i);
+  assert.match(migration, /limit v_limit\+1 offset v_offset/i);
+  assert.match(migration, /'has_more',v_count>v_limit/i);
+  assert.match(migration, /'cursor',case when v_count>v_limit then \(v_offset\+v_limit\)::text end/i);
 });

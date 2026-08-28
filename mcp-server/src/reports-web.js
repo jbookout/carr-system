@@ -14,6 +14,7 @@ const MAX_BODY_BYTES = 16 * 1024;
 const SESSION_TTL_MS = 60 * 60 * 1000;
 const STATIC_ASSETS = new Map([
   ["/share", "/reports/share.html"],
+  ["/share-bootstrap.js", "/reports/share-bootstrap.js"],
   ["/share.js", "/reports/share.js"],
   ["/share.css", "/reports/share.css"],
   ["/vendor/maplibre-gl-6.1.0/maplibre-gl.mjs", "/reports/vendor/maplibre-gl-6.1.0/maplibre-gl.mjs"],
@@ -217,4 +218,8 @@ export function isReportsRequest(request) {
   if (!reportsRequest(request)) return false;
   const pathname = new URL(request.url).pathname;
   return STATIC_ASSETS.has(pathname) || API_METHODS.has(pathname);
+}
+
+export function isReportsHostRequest(request) {
+  return reportsRequest(request);
 }

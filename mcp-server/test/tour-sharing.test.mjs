@@ -59,6 +59,8 @@ test("MCP factory excludes public session paths and keeps only authority/interna
   assert.deepEqual(Object.keys(tools).sort(), ["issue-tour-share-grant", "read-tour-sharing-library", "revoke-tour-share-grant", "rotate-tour-share-grant"]);
   for (const name of ["issue-tour-share-grant", "rotate-tour-share-grant", "revoke-tour-share-grant"])
     assert.equal(tools[name].authorityOnly, true);
+  assert.equal(tools["read-tour-sharing-library"].writerConnection, true);
+  assert.equal(tools["read-tour-sharing-library"].inputSchema.properties.cursor.pattern, "^[0-9]{1,9}$");
 });
 
 test("share authority lifecycle permits only foundation read scopes", async () => {

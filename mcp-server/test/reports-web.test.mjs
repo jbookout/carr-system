@@ -2,10 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { createReportsWebHandler, isReportsRequest, REPORTS_ORIGIN } from "../src/reports-web.js";
+import { createReportsWebHandler, isReportsHostRequest, isReportsRequest, REPORTS_ORIGIN } from "../src/reports-web.js";
 
 const REPORTS_ROOT = fileURLToPath(new URL("../../dealroom/", import.meta.url));
 const SHARE_JS = fileURLToPath(new URL("../../dealroom/reports/share.js", import.meta.url));
+const SHARE_BOOTSTRAP_JS = fileURLToPath(new URL("../../dealroom/reports/share-bootstrap.js", import.meta.url));
 
 class ReportAssets {
   constructor() { this.requests = []; }
@@ -43,6 +44,9 @@ test("reports adapter is limited to the reports origin and scoped read-only rout
   for (const path of ["/api/share/pdf", "/api/share/comment", "/api/share/reaction", "/sw.js"])
     assert.equal(isReportsRequest(request(path)), false, path);
   assert.equal(isReportsRequest(new Request("https://app.doctorcre.com/share")), false);
+  assert.equal(isReportsHostRequest(request("/mcp")), true);
+  assert.equal(isReportsHostRequest(request("/oauth/authorize")), true);
+  assert.equal(isReportsHostRequest(new Request("https://api.doctorcre.com/mcp")), false);
 
   let exchanges = 0;
   const surface = handler({ exchangeShareTokenFn: async () => { exchanges += 1; return { ok: true }; } });
@@ -99,20 +103,24 @@ test("authenticated report read forwards only the opaque session digest", async 
 });
 
 test("static bootstrap removes the fragment and exposes no ungoverned client mutation or PDF controls", async () => {
-  const [html, script, css] = await Promise.all([
-    readFile(`${REPORTS_ROOT}reports/share.html`, "utf8"), readFile(SHARE_JS, "utf8"), readFile(`${REPORTS_ROOT}reports/share.css`, "utf8"),
+  const [html, bootstrapScript, script, css] = await Promise.all([
+    readFile(`${REPORTS_ROOT}reports/share.html`, "utf8"), readFile(SHARE_BOOTSTRAP_JS, "utf8"),
+    readFile(SHARE_JS, "utf8"), readFile(`${REPORTS_ROOT}reports/share.css`, "utf8"),
   ]);
   assert.match(html, /<button id="open-tour" type="button" disabled>Open tour<\/button>/);
-  assert.match(script, /window\.location\.hash/);
-  assert.match(script, /history\.replaceState/);
-  const bootstrap = script.slice(script.indexOf("function bootstrap()"), script.indexOf("openButton.addEventListener"));
-  assert.doesNotMatch(bootstrap, /\/api\/share\/exchange|loadReport\(/);
+  assert.match(html, /<script src="\/share-bootstrap\.js"><\/script>[\s\S]*<script type="module" src="\/share\.js"><\/script>/);
+  assert.match(bootstrapScript, /window\.location\.hash/);
+  assert.match(bootstrapScript, /history\.replaceState/);
+  assert.match(bootstrapScript, /__CARR_TOUR_TAKE_SHARE_TOKEN__/);
+  assert.doesNotMatch(bootstrapScript, /maplibre|\/api\/share\/exchange|loadReport\(/i);
   assert.match(script, /\/api\/share\/exchange/);
   assert.match(script, /route_sequence/);
   assert.match(script, /property:public/);
   assert.match(script, /maplibre-gl-6\.1\.0/);
   assert.match(script, /setWorkerUrl\("\/vendor\/maplibre-gl-6\.1\.0\/maplibre-gl-worker\.mjs"\)/);
   assert.match(script, /\/api\/share\/map/);
+  assert.match(script, /await import\("\/vendor\/maplibre-gl-6\.1\.0\/maplibre-gl\.mjs"\)/);
+  assert.doesNotMatch(script, /LineString|addSource\("tour-route"|addLayer\(\{ id: "tour-route"/);
   assert.match(html, /id="tour-map"/);
   assert.doesNotMatch(script + html, /\/api\/share\/(?:pdf|comment|reaction)|allow_(?:comments|reactions|pdf_download)|latest_reaction/);
   assert.doesNotMatch(script, /authorization|serviceWorker|\/sw\.js|register\s*\(/i);

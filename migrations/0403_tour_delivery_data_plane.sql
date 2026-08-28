@@ -348,6 +348,18 @@ begin
     if not found then raise exception 'tour route preparation base is unavailable'; end if;
   end if;
   if exists(select 1 from jsonb_array_elements_text(p_stop_ids) x(value) left join ops.tour_route_stop s on s.organization_tenant_id=p_tenant and s.route_version_id=v_source.id and s.id=x.value::uuid and s.stop_state='active' where s.id is null) then raise exception 'tour route preparation stop is unavailable'; end if;
+  if exists(
+    select 1 from (
+      select s.appointment_start,
+        lag(s.appointment_start) over (order by x.ordinality) as prior_appointment_start
+      from jsonb_array_elements_text(p_stop_ids) with ordinality x(value,ordinality)
+      join ops.tour_route_stop s on s.organization_tenant_id=p_tenant
+        and s.route_version_id=v_source.id and s.id=x.value::uuid
+      where s.stop_state='active' and s.locked_appointment
+    ) locked
+    where locked.prior_appointment_start is not null
+      and locked.appointment_start < locked.prior_appointment_start
+  ) then raise exception 'tour route preparation violates locked appointment order'; end if;
   select coalesce(max(route_version),0)+1 into v_next from ops.tour_route_version where organization_tenant_id=p_tenant and tour_id=p_tour_id;
   v_new:=ops.append_tour_route_version(p_tenant,p_tour_id,v_next,v_base.id,v_base.start_point,v_base.end_point,'manual',null,null,'{}',null,p_expected_route_version,null);
   for v_stop in select s.*,x.ordinality::integer new_sequence from jsonb_array_elements_text(p_stop_ids) with ordinality x(value,ordinality) join ops.tour_route_stop s on s.organization_tenant_id=p_tenant and s.route_version_id=v_source.id and s.id=x.value::uuid order by x.ordinality loop
@@ -457,15 +469,31 @@ begin
 end $$;
 
 create or replace function ops.read_tour_sharing_library(p_tenant text,p_projection_id uuid,p_actor_id text,p_cursor text,p_limit integer)
-returns jsonb language sql stable security definer set search_path=pg_catalog,ops,public,pg_temp as $$
-  select jsonb_build_object('items',coalesce(jsonb_agg(jsonb_build_object(
-    'status',case when r.id is not null then 'revoked' when successor.id is not null then 'rotated' when g.expires_at<=now() then 'expired' else 'active' end,
-    'permission_scopes',g.permission_scopes,'expires_at',g.expires_at,'revoked_at',r.revoked_at,'reason',r.reason,'created_at',g.created_at
-  ) order by g.grant_version desc),'[]'::jsonb),'has_more',false)
-  from (select * from ops.tour_share_grant where organization_tenant_id=p_tenant and projection_id=p_projection_id order by grant_version desc limit least(greatest(p_limit,1),100)) g
-  left join ops.tour_share_grant_revocation_receipt r on r.organization_tenant_id=g.organization_tenant_id and r.share_grant_id=g.id
-  left join ops.tour_share_grant successor on successor.organization_tenant_id=g.organization_tenant_id and successor.rotated_from_grant_id=g.id
-  where nullif(btrim(p_actor_id),'') is not null and (p_cursor is null or p_cursor ~ '^[A-Za-z0-9_-]{1,256}$');
+returns jsonb language plpgsql stable security definer set search_path=pg_catalog,ops,public,pg_temp as $$
+declare v_limit integer; v_offset integer; v_count integer; v_items jsonb;
+begin
+  if nullif(btrim(p_actor_id),'') is null or p_limit is null or p_limit<1 or p_limit>100
+     or (p_cursor is not null and p_cursor !~ '^[0-9]{1,9}$') then return null; end if;
+  v_limit:=p_limit; v_offset:=coalesce(p_cursor::integer,0);
+  with selected as (
+    select g.*,r.id revocation_id,r.revoked_at,r.reason,successor.id successor_id
+    from ops.tour_share_grant g
+    left join ops.tour_share_grant_revocation_receipt r on r.organization_tenant_id=g.organization_tenant_id and r.share_grant_id=g.id
+    left join ops.tour_share_grant successor on successor.organization_tenant_id=g.organization_tenant_id and successor.rotated_from_grant_id=g.id
+    where g.organization_tenant_id=p_tenant and g.projection_id=p_projection_id
+    order by g.grant_version desc,g.id desc limit v_limit+1 offset v_offset
+  ), page as (
+    select selected.*,row_number() over (order by grant_version desc,id desc) page_row from selected
+  )
+  select count(*),coalesce(jsonb_agg(jsonb_build_object(
+    'status',case when revocation_id is not null then 'revoked' when successor_id is not null then 'rotated' when expires_at<=now() then 'expired' else 'active' end,
+    'permission_scopes',permission_scopes,'expires_at',expires_at,'revoked_at',revoked_at,'reason',reason,'created_at',created_at
+  ) order by grant_version desc,id desc) filter(where page_row<=v_limit),'[]'::jsonb)
+  into v_count,v_items from page;
+  return jsonb_strip_nulls(jsonb_build_object(
+    'items',v_items,'has_more',v_count>v_limit,
+    'cursor',case when v_count>v_limit then (v_offset+v_limit)::text end));
+end;
 $$;
 
 create or replace function ops.exchange_tour_share_token(p_token_digest text,p_session_digest text,p_session_expires_at timestamptz,p_audit_digest text)

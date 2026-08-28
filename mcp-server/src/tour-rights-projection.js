@@ -390,6 +390,7 @@ export function tourRightsProjectionTools({ withEnvelope, writeEvent, ToolError 
     },
 
     "read-tour-public-projection": {
+      writerConnection: true,
       description: "Read one tenant-scoped approved Tour public projection with its reviewed public values and bounded provenance. Draft, unsealed, quarantined, and internal material are absent.",
       inputSchema: schema({ projection_id: { type: "string" } }, ["projection_id"]),
       handler: async (c, actor, args) => {

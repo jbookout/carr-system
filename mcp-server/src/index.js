@@ -93,7 +93,7 @@ import { readCommandCenterSummary } from "./workspace-command-center.js";
 import { wrapWithCorrelation } from "./correlation.js";
 import { withFailureRecording, scheduleFailureRecord, actorUnresolvedFailureClass } from "./trace.js";
 import { createTourInternalWebHandler } from "./tour-internal-web.js";
-import { createReportsWebHandler, isReportsRequest } from "./reports-web.js";
+import { createReportsWebHandler, isReportsHostRequest } from "./reports-web.js";
 import { createReportsRuntimeAdapters, createTourRuntimeAdapters } from "./tour-runtime.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
@@ -614,6 +614,9 @@ const dealroomHandler = createDealroomHandler({
 // owned by OAuthProvider/defaultHandler.
 async function routeRequest(request, env, ctx) {
   const url = new URL(request.url);
+  // The confidential reports host is an isolated leaf. Unknown paths close as
+  // report-surface 404s and can never alias MCP, OAuth, capture, or Deal Room.
+  if (isReportsHostRequest(request)) return reportsHandler.fetch(request, env, ctx);
   // The old Deal Room hostname is a browser bookmark bridge only. Keep it
   // ahead of machine-token doors so /mcp and other API paths fail closed on
   // that hostname instead of reaching an unrelated machine surface.
@@ -636,7 +639,6 @@ async function routeRequest(request, env, ctx) {
     if (localActor) return dispatch(request, env, ctx, localActor);
   }
   if (isDealroomRequest(request, env)) return dealroomHandler.fetch(request, env, ctx);
-  if (isReportsRequest(request)) return reportsHandler.fetch(request, env, ctx);
   return oauthProvider.fetch(request, env, ctx);
 }
 

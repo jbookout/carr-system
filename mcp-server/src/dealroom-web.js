@@ -753,7 +753,8 @@ async function handleRequest(request, env, ctx, dependencies) {
           return json({ error: "AUTHENTICATION_REQUIRED" }, 401);
         }
         if (url.pathname === "/mcp" || url.pathname === "/pipeline/changes" ||
-            url.pathname.startsWith(SYSTEM_WORK_PREFIX) || url.pathname.startsWith(ROOM_PREFIX)) {
+            url.pathname.startsWith(SYSTEM_WORK_PREFIX) || url.pathname.startsWith(ROOM_PREFIX) ||
+            url.pathname.startsWith("/api/tours/")) {
           return json({ error: "unauthorized", state: "sign_in_required" }, 401);
         }
         return redirect(`${origin}/auth/login?return_to=${encodeURIComponent(url.pathname + url.search)}`);
