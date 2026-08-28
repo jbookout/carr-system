@@ -63,6 +63,20 @@ TABLE = r"(\"?[a-z_][a-z0-9_]*\"?(?:\s*\.\s*\"?[a-z_][a-z0-9_]*\"?)?)"
 LEDGER_COPY = re.compile(r"^COPY\s+public\.schema_migrations\s*\(", re.M)
 COPY_BLOCK = re.compile(r"^COPY\s+" + TABLE + r"\s*(?:\([^)]*\)\s*)?FROM\s+stdin\s*;", re.I | re.M)
 
+# EXECUTE MAKES A STRING LITERAL INTO STATEMENTS. Blanking literals is right for
+# every other case and wrong for exactly this one: `execute 'insert into t ...'`
+# lands rows, and so does `execute format('insert into t ...', ...)`. The scanner
+# blanked both and detected nothing, while scan_sql's own docstring justified the
+# blanking with "no row-landing statement hides inside a string" -- which is
+# precisely false here. Twelve applied migrations already use EXECUTE.
+#
+# format() is matched as an optional wrapper rather than a separate case because
+# the literal is still the FIRST argument; a table interpolated as %s cannot be
+# recovered by anyone and is not pretended to be, but a literal table name in the
+# format string is read exactly like any other.
+EXECUTE_ARGUMENT = re.compile(
+    r"(?:^|[^A-Za-z0-9_])execute\s*(?:format\s*\(\s*)?$", re.I)
+
 CREATE_ROUTINE = re.compile(
     r"create\s+(?:or\s+replace\s+)?(?:function|procedure)\s+"
     r"([a-z_][a-z0-9_]*(?:\s*\.\s*[a-z_][a-z0-9_]*)?)\s*\(", re.I)
@@ -221,9 +235,15 @@ def scan_sql(sql):
     You cannot find comments without knowing where strings are, and you cannot
     find strings without knowing where comments are. Alternating regular
     expressions will always lose that race; a single pass that handles both, plus
-    dollar quoting, cannot. Literals are blanked rather than kept because a
-    table name is an identifier -- no row-landing statement hides inside a
-    string, and an `insert into` quoted in prose is not one either.
+    dollar quoting, cannot.
+
+    Literals are blanked rather than kept, because a table name is an identifier
+    and an `insert into` quoted in prose is not a statement. THE ONE EXCEPTION IS
+    EXECUTE, and an earlier version of this docstring stated the rule without it:
+    "no row-landing statement hides inside a string" is false for
+    `execute 'insert into t ...'`, which is a string and does land rows. A
+    literal that is an argument to EXECUTE is scanned as SQL; every other literal
+    is still blanked.
 
     Bodies are scanned too, not stored raw. A DO block or a routine body has its
     own comments and its own string literals, and leaving them unscanned put the
@@ -258,6 +278,11 @@ def scan_sql(sql):
             # INSERT went unreported. That is the apostrophe class of R4 one escape
             # form over, and it swallowed real DML rather than only a call.
             escaped = bool(re.search(r"(?:^|[^A-Za-z0-9_])[Ee]$", _tail(top, 4)))
+            # IS THIS LITERAL AN ARGUMENT TO EXECUTE? If so its text is not inert
+            # -- it is SQL that runs. Decided BEFORE the literal is consumed,
+            # because `top` still ends at the character before the quote here.
+            dynamic = bool(EXECUTE_ARGUMENT.search(_tail(top, HEAD_TAIL)))
+            opened = i
             i += 1
             while i < n:
                 if escaped and sql[i] == "\\" and i + 1 < n:
@@ -270,7 +295,13 @@ def scan_sql(sql):
                     i += 1
                     break
                 i += 1
-            top.append(" ")
+            if dynamic:
+                # The literal's own doubled quotes are how a quote is spelled
+                # inside it; undo that before reading the text as SQL.
+                inner = sql[opened + 1:i - 1].replace("''", "'")
+                top.append(" " + _scanned(inner) + " ")
+            else:
+                top.append(" ")
         elif ch == "$":
             match = DOLLAR.match(sql, i)
             if not match:
@@ -291,6 +322,13 @@ def scan_sql(sql):
             # and the block invisible.
             if keyword != "do" and re.search(r"(?:^|;|\s)do\s+language\s+[a-z_]+\s*$", head, re.I):
                 keyword = "do"
+            # `execute $$ ... $$` is the same statement as `execute '...'`, with the
+            # other spelling of a string. Handled here rather than by widening the
+            # literal branch, because a dollar-quote is consumed by this branch.
+            if keyword == "execute" or EXECUTE_ARGUMENT.search(head):
+                top.append(" " + _scanned(body) + " ")
+                i = end + len(tag)
+                continue
             if keyword == "as":
                 headers = list(CREATE_ROUTINE.finditer(_tail(top, ROUTINE_TAIL)))
                 if headers:
@@ -423,13 +461,23 @@ def check_region_boundary(artifact):
     # real artifact is equally clean, so all it did was give a mutation somewhere to
     # hide. Literals and comments are already gone from prefix_top, so a table merely
     # NAMED in prose cannot reach here.
-    candidates = []
+    # ONE ORDERED LIST, NOT A MINIMUM OVER SEVERAL. An earlier version took
+    # min(...) by match.start() across every segment, and those offsets are
+    # positions in DIFFERENT strings: a DO body's offset 10 is not earlier than
+    # top-level text's offset 400, and comparing them named whichever table the
+    # arithmetic happened to favour. Segments are searched in order instead --
+    # top-level text, then each DO body -- which is a real order and a stable one.
+    #
+    # re.M is NOT passed. No WRITES_ANYWHERE pattern is anchored, so it changed
+    # nothing and only gave a mutation a place to hide.
+    first = None
     for segment in [prefix_top, *prefix_dos]:
-        for pattern in WRITES_ANYWHERE:
-            candidates.append(re.search(pattern.pattern, segment, pattern.flags | re.M))
-    first = min((c for c in candidates if c), key=lambda c: c.start(), default=None)
+        hits = [m for m in (pattern.search(segment) for pattern in WRITES_ANYWHERE) if m]
+        if hits:
+            first = min(hits, key=lambda m: m.start())
+            break
     if first:
-        return (f"DATA REGION BOUNDARY MOVED: the first data statement in the artifact is "
+        return (f"DATA REGION BOUNDARY MOVED: a data statement in the artifact is "
                 f"{normalise(first.group(1))}, above public.schema_migrations.\n"
                 f"    This check reads data statements from the ledger COPY to EOF. With data\n"
                 f"    above it, rows in that block are invisible here and an excluded table\n"
