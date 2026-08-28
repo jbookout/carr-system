@@ -14580,50 +14580,6 @@ end $$;
 
 
 --
--- Name: work_request_acting_identity(text); Type: FUNCTION; Schema: ops; Owner: -
---
-
-CREATE FUNCTION ops.work_request_acting_identity(p_ref text) RETURNS TABLE(act text, recorded_slug text, acted_at timestamp with time zone, actor_slug text, authorization_class text, via text)
-    LANGUAGE sql STABLE SECURITY DEFINER
-    SET search_path TO 'pg_catalog', 'ops', 'public', 'pg_temp'
-    AS $$
-  select act, recorded_slug, acted_at, actor_slug, authorization_class, via from (
-    select 'review-and-triage' as act, ha.slug as recorded_slug, r.triaged_at as acted_at,
-           a.slug as actor_slug, t.authorization_class, t.via
-      from ops.work_request_triage_receipt r
-      join ops.work_request w on w.id = r.work_request_id
-      join public.actor ha on ha.id = r.triaged_by_actor_id
-      left join public.tool_call t on t.idempotency_key = r.idempotency_key::text
-      left join public.actor a on a.id = t.actor_id
-     where w.ref = p_ref
-    union all
-    select 'accept-ready-plan', ha.slug, r.accepted_at, a.slug, t.authorization_class, t.via
-      from ops.sourced_work_request_plan_acceptance_receipt r
-      join ops.work_request w on w.id = r.work_request_id
-      join public.actor ha on ha.id = r.accepted_by_actor_id
-      left join public.tool_call t on t.idempotency_key = r.idempotency_key::text
-      left join public.actor a on a.id = t.actor_id
-     where w.ref = p_ref
-    union all
-    select 'accept-outcome-feedback', ha.slug, r.accepted_at, a.slug, t.authorization_class, t.via
-      from ops.sourced_work_request_outcome_feedback_acceptance_receipt r
-      join ops.work_request w on w.id = r.work_request_id
-      join public.actor ha on ha.id = r.accepted_by_actor_id
-      left join public.tool_call t on t.idempotency_key = r.idempotency_key::text
-      left join public.actor a on a.id = t.actor_id
-     where w.ref = p_ref
-  ) acts order by acted_at
-$$;
-
-
---
--- Name: FUNCTION work_request_acting_identity(p_ref text); Type: COMMENT; Schema: ops; Owner: -
---
-
-COMMENT ON FUNCTION ops.work_request_acting_identity(p_ref text) IS 'Reader-facing acting-identity projection for one Work Request card. SECURITY DEFINER with a fixed search_path so carr_reader can read who actually performed each authority act without receiving direct public.actor or public.tool_call table access. Same boundary shape as ops.standing_guidance (0382).';
-
-
---
 -- Name: work_request_card(text, text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -40643,7 +40599,6 @@ revoke all on function ops.validate_guidance_lifecycle_event() from public;
 revoke all on function ops.validate_guidance_revision() from public;
 revoke all on function ops.validate_guidance_situation_mapping() from public;
 revoke all on function ops.validate_rule_load_layer_packs() from public;
-revoke all on function ops.work_request_acting_identity(p_ref text) from public;
 revoke all on function ops.work_request_card(p_work_request text, p_organization_tenant_id text) from public;
 revoke all on function public.assert_situation_retrieval_golden(p_suite_digest text) from public;
 revoke all on function public.capture_call_context(requested_deal_ids uuid[]) from public;
@@ -40855,9 +40810,7 @@ grant insert, select on table ops.settings_change to carr_jobs;
 grant select on table ops.settings_change to carr_reader;
 grant insert, select on table ops.settings_change to carr_writer;
 grant select on table ops.sourced_work_request_outcome_feedback_acceptance_receipt to carr_reader;
-grant select on table ops.sourced_work_request_outcome_feedback_acceptance_receipt to carr_writer;
 grant select on table ops.sourced_work_request_plan_acceptance_receipt to carr_reader;
-grant select on table ops.sourced_work_request_plan_acceptance_receipt to carr_writer;
 grant select on table ops.staging_deployment_attempt to carr_authority;
 grant select on table ops.staging_deployment_attempt to carr_jobs;
 grant select on table ops.staging_deployment_attempt to carr_reader;
@@ -40970,7 +40923,6 @@ grant select on table ops.work_request to carr_reader;
 grant select, update on table ops.work_request to carr_writer;
 grant select on table ops.work_request_execution_environment_binding to carr_authority;
 grant select on table ops.work_request_triage_receipt to carr_reader;
-grant select on table ops.work_request_triage_receipt to carr_writer;
 grant select on table ops.work_shape_revision to carr_reader;
 grant insert, select on table ops.work_shape_revision to carr_writer;
 grant select on table ops.workflow_acceptance to carr_jobs;
@@ -40978,7 +40930,6 @@ grant select on table ops.workflow_acceptance to carr_reader;
 grant select on table ops.workflow_acceptance to carr_writer;
 grant insert, select, update on table public.activity to carr_writer;
 grant select on table public.actor to carr_authority;
-grant select on table public.actor to carr_reader;
 grant insert, select, update on table public.actor to carr_writer;
 grant insert, select, update on table public.actor_profile to carr_writer;
 grant select on table public.agent_profile to carr_reader;
@@ -41164,7 +41115,6 @@ grant select on table public.submarket_condition to carr_writer;
 grant select on table public.system_config to carr_exporter;
 grant insert, select, update on table public.system_config to carr_writer;
 grant insert, select on table public.tool_call to carr_authority;
-grant select on table public.tool_call to carr_reader;
 grant insert, select, update on table public.tool_call to carr_writer;
 grant select on table public.tool_read_call to carr_exporter;
 grant select on table public.tool_read_call to carr_reader;
@@ -41360,6 +41310,7 @@ grant select (id) on table public.placement to carr_jobs;
 grant select (id, status) on table public.rule to carr_jobs;
 grant select (id, building_id, suite, area_amount) on table public.space to carr_jobs;
 grant select (key, value) on table public.system_config to carr_jobs;
+grant select (idempotency_key, actor_id, via, authorization_class) on table public.tool_call to carr_reader;
 grant select (id, vendor_ref, party_id, owner_id) on table public.vendor to carr_jobs;
 grant execute on function ops.accept_sourced_work_request_outcome_feedback(p_work_request text, p_base_version integer, p_feedback_hash text, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.accept_sourced_work_request_plan(p_work_request text, p_base_version integer, p_plan_hash text, p_idempotency_key uuid) to carr_authority;
@@ -41551,8 +41502,6 @@ grant execute on function ops.transition_execution_environment_provider(p_provid
 grant execute on function ops.transition_proposed_eval_candidate(p_work_request text, p_candidate_ref text, p_next_state text, p_decision_basis jsonb, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.transition_proposed_eval_candidate(p_work_request text, p_candidate_ref text, p_next_state text, p_decision_basis jsonb, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.triage_sourced_work_request(p_work_request text, p_base_version integer, p_classification text, p_idempotency_key uuid) to carr_authority;
-grant execute on function ops.work_request_acting_identity(p_ref text) to carr_reader;
-grant execute on function ops.work_request_acting_identity(p_ref text) to carr_writer;
 grant execute on function ops.work_request_card(p_work_request text, p_organization_tenant_id text) to carr_reader;
 grant execute on function ops.work_request_card(p_work_request text, p_organization_tenant_id text) to carr_writer;
 grant execute on function public.assert_situation_retrieval_golden(p_suite_digest text) to carr_writer;
@@ -41890,6 +41839,8 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0389_acting_identity_receipt_read_grants.sql	f1f9cd9f3b3a517d6658228fcd987749f0663e8cf66bcb98a03dd55f49fc144a	2026-08-28 04:10:58.095773+00
 0390_acting_identity_reader_ledger_grants.sql	dee8bbd22ff4c130e5ff166cdbe0b61bfbb5d6ea22a20d218a139c3e9c536f81	2026-08-28 04:13:08.703849+00
 0391_acting_identity_definer_projection.sql	a785566265e1e6198c2d231bef329c08a5b09735f9420aa899c41c3dde590283	2026-08-28 04:30:44.093845+00
+0392_acting_identity_grant_rollback.sql	144da15fa947384eb92abd9081957704eb84cad16dbd8fcc2ba862d7d72ee375	2026-08-28 04:35:05.900703+00
+0393_work_request_card_receipt_reads.sql	b9556d0589d78b95b6f46b707f82d8f747eb119f2e7b87b02c08f3c58480af2a	2026-08-28 04:35:06.161008+00
 \.
 
 
