@@ -17,7 +17,7 @@ declare t uuid; r1 uuid; a uuid; h uuid;
 begin
  t:=ops.create_tour_domain('tour-slice4-proof','typed','work','opaque','proof','{}','{}');
  select id into r1 from ops.tour_route_version where tour_id=t and route_version=1;
- a:=ops.append_tour_route_stop('tour-slice4-proof',r1,'40000000-0000-4000-8000-000000000001',1,'A','active',null,null,false,20,5,'approved','sha256:'||repeat('1',64));
+ a:=ops.append_tour_route_stop('tour-slice4-proof',r1,'40000000-0000-4000-8000-000000000001',1,'A','active','2026-08-28T14:00:00Z','2026-08-28T14:30:00Z',true,20,5,'approved','sha256:'||repeat('1',64));
  h:=ops.append_tour_route_stop('tour-slice4-proof',r1,'40000000-0000-4000-8000-000000000002',null,null,'held',null,null,false,0,0,'unknown','sha256:'||repeat('2',64));
  perform ops.append_tour_route_stop_transition('tour-slice4-proof',null,r1,null,a,'added');
  perform ops.append_tour_route_stop_transition('tour-slice4-proof',null,r1,null,h,'added');
@@ -32,20 +32,41 @@ end $authority$;
 set local session authorization carr_writer;
 set local carr.acting_actor_slug='tour-proof';
 do $writer$
-declare t uuid; r1 uuid; abandoned_r2 uuid;
+declare t uuid; r1 uuid; abandoned_r2 uuid; oa uuid; oh uuid; replacement uuid;
 begin
  select id into t from ops.tour where organization_tenant_id='tour-slice4-proof';
  select id into r1 from ops.tour_route_version where tour_id=t and route_version=1;
  abandoned_r2:=ops.append_tour_route_version('tour-slice4-proof',t,2,r1,'{}','{}','manual',null,null,'{}',null,1,null);
  if abandoned_r2 is null then raise exception 'abandoned route draft was not retained'; end if;
+ replacement:=ops.append_tour_route_stop('tour-slice4-proof',abandoned_r2,'40000000-0000-4000-8000-000000000003',1,'A','active',null,null,false,10,5,'approved','sha256:'||repeat('4',64));
+ select id into oa from ops.tour_route_stop where route_version_id=r1 and property_id='40000000-0000-4000-8000-000000000001';
+ select id into oh from ops.tour_route_stop where route_version_id=r1 and property_id='40000000-0000-4000-8000-000000000002';
+ perform ops.append_tour_route_stop_transition('tour-slice4-proof',r1,abandoned_r2,oa,null,'removed');
+ perform ops.append_tour_route_stop_transition('tour-slice4-proof',r1,abandoned_r2,oh,null,'removed');
+ perform ops.append_tour_route_stop_transition('tour-slice4-proof',null,abandoned_r2,null,replacement,'added');
 end $writer$;
+set local session authorization carr_authority;
+set local carr.acting_actor_slug='tour-proof';
+do $authority$
+declare r2 uuid;
+begin
+ select id into r2 from ops.tour_route_version where organization_tenant_id='tour-slice4-proof' and route_version=2;
+ begin
+   perform ops.accept_tour_route_version('tour-slice4-proof',r2,1,'sha256:'||repeat('4',64));
+   raise exception 'expected locked appointment preservation refusal';
+ exception when raise_exception then
+   if sqlerrm<>'route acceptance must preserve every locked appointment window, dwell, and buffer' then raise; end if;
+ end;
+end $authority$;
+set local session authorization carr_writer;
+set local carr.acting_actor_slug='tour-proof';
 do $writer$
 declare t uuid; r1 uuid; r3 uuid; oa uuid; oh uuid; na uuid; nh uuid; n uuid;
 begin
  select id into t from ops.tour where organization_tenant_id='tour-slice4-proof';
  select id into r1 from ops.tour_route_version where tour_id=t and route_version=1;
  r3:=ops.append_tour_route_version('tour-slice4-proof',t,3,r1,'{}','{}','provider','route-proof','40000000-0000-4000-8000-000000000010','{}','sha256:'||repeat('4',64),1,'route-policy');
- na:=ops.append_tour_route_stop('tour-slice4-proof',r3,'40000000-0000-4000-8000-000000000001',2,'B','active',null,null,false,20,5,'approved','sha256:'||repeat('5',64));
+ na:=ops.append_tour_route_stop('tour-slice4-proof',r3,'40000000-0000-4000-8000-000000000001',2,'B','active','2026-08-28T14:00:00Z','2026-08-28T14:30:00Z',true,20,5,'approved','sha256:'||repeat('5',64));
  nh:=ops.append_tour_route_stop('tour-slice4-proof',r3,'40000000-0000-4000-8000-000000000002',null,null,'held',null,null,false,0,0,'unknown','sha256:'||repeat('6',64));
  n:=ops.append_tour_route_stop('tour-slice4-proof',r3,'40000000-0000-4000-8000-000000000003',1,'A','active',null,null,false,10,5,'approved','sha256:'||repeat('7',64));
  select id into oa from ops.tour_route_stop where route_version_id=r1 and property_id='40000000-0000-4000-8000-000000000001';

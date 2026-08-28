@@ -119,6 +119,24 @@ test("canonical projection digest binds immutable public-map coordinate selectio
   assert.throws(() => assertProjectionDigest({ ...base, map_points: [{ ...base.map_points[0], coordinate_candidate_id: "10000000-0000-4000-8000-000000000072" }] }, digest), /PROJECTION_DIGEST_MISMATCH/);
 });
 
+test("complete-projection validation includes sealed public-map points in digest parity", () => {
+  const sealed = sealedProjectionInput();
+  const map_points = [{
+    property_id: membership.property_id,
+    coordinate_candidate_id: "10000000-0000-4000-8000-000000000070",
+    entrance_verification_receipt_id: "10000000-0000-4000-8000-000000000071",
+    route_version: projection.route_version,
+  }];
+  const digest = canonicalProjectionDigest({ ...sealed.input, map_points });
+  const projectionWithMap = {
+    ...sealed.projection,
+    projection_digest: digest,
+    seal_receipt: { ...sealed.projection.seal_receipt, canonical_projection_digest: digest },
+  };
+  assert.equal(validateProjectionComplete({ ...sealed.input, projection: projectionWithMap, map_points }), true);
+  assert.throws(() => validateProjectionComplete({ ...sealed.input, projection: projectionWithMap }), /PROJECTION_DIGEST_MISMATCH/);
+});
+
 test("projection creation is draft-only and a complete seal requires the full selected, rights-checked fact set", () => {
   assert.equal(validateProjectionDraft(projection), true);
   assert.throws(() => validateProjectionDraft({ ...projection, status: "approved" }), /PROJECTION_DRAFT_REQUIRED|DRAFT/);

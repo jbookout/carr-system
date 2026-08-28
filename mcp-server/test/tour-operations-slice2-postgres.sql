@@ -27,6 +27,8 @@ declare
   v_address_two constant uuid := '10000000-0000-4000-8000-000000000031';
   v_address_one constant uuid := '10000000-0000-4000-8000-000000000032';
   v_name_two constant uuid := '10000000-0000-4000-8000-000000000033';
+  v_coordinate constant uuid := '10000000-0000-4000-8000-000000000070';
+  v_coordinate_receipt constant uuid := '10000000-0000-4000-8000-000000000071';
   v_as_of constant timestamptz := '2026-08-25T12:00:00Z';
   v_digest text;
   v_read jsonb;
@@ -35,6 +37,10 @@ declare
   v_expected_vector constant text :=
     'sha256:73c90187e235a2e7262bf8de28ea4b61f69721cb8e60e8876092d3337d134bb7';
 begin
+  if ops.tour_public_value_safe('display.name','"   "'::jsonb)
+     or ops.tour_public_value_safe('display.address',to_jsonb(repeat('A',361))) then
+    raise exception 'required public display identity accepted blank or oversized text';
+  end if;
   -- Direct approved projection DML is refused by the database-owned
   -- draft-only creation guard, even for the owner session.
   begin
@@ -136,6 +142,24 @@ begin
       '2026-08-25T11:00:00Z'
     );
 
+  -- A human-verified entrance candidate still cannot become client-visible
+  -- when the governing receipt lacks the explicit coordinates field class.
+  insert into ops.tour_property_coordinate_candidate (
+    id,organization_tenant_id,property_id,coordinate_role,latitude,longitude,
+    precision_class,source_evidence_id,rights_receipt_id,observed_at,review_state
+  ) values (
+    v_coordinate,v_tenant,v_property_one,'entrance',30.4156,-87.2169,
+    'entrance',v_evidence_id,v_rights_id,'2026-08-25T11:00:00Z','reviewed'
+  );
+  insert into ops.tour_coordinate_entrance_verification_receipt (
+    id,organization_tenant_id,property_id,coordinate_candidate_id,verifier_actor_id,
+    verified_at,evidence_reference,native_navigation_proof,receipt_digest
+  ) values (
+    v_coordinate_receipt,v_tenant,v_property_one,v_coordinate,'actor:proof',
+    '2026-08-25T11:05:00Z','native-nav:proof',
+    '{"platform":"apple_maps","device_tested":true}'::jsonb,'sha256:'||repeat('9',64)
+  );
+
   -- Build the exact cross-language vector in normalized rows.  This draft is
   -- deliberately not sealed: the successful projection below proves the
   -- tightened complete name/address requirement separately.
@@ -210,6 +234,12 @@ begin
   if v_fact_count <> 4 or v_seal_count <> 1 then
     raise exception 'complete seal row counts are wrong: facts %, seals %',
       v_fact_count, v_seal_count;
+  end if;
+  if exists (
+    select 1 from ops.tour_public_projection_map_point
+    where organization_tenant_id=v_tenant and projection_id=v_success_projection_id
+  ) then
+    raise exception 'coordinate without explicit field rights entered the public projection';
   end if;
   if (select status from ops.tour_public_projection
        where organization_tenant_id = v_tenant and id = v_success_projection_id)

@@ -28,6 +28,7 @@ test("slice 4 preserves immutable accepted route versions and explicit reorder l
   assert.match(migration, /stop_state.*active.*held.*excluded/i);
   assert.match(migration, /disposition.*unchanged.*reordered.*removed.*held.*excluded.*merged/i);
   assert.match(migration, /route acceptance requires an explicit disposition for every prior route stop/i);
+  assert.match(migration, /route acceptance must preserve every locked appointment window, dwell, and buffer/i);
   assert.match(migration, /route acceptance refuses concurrent or stale route state/i);
   assert.match(migration, /route transition property identity mismatch/i);
   assert.match(migration, /tour_property_identity_lineage/i);

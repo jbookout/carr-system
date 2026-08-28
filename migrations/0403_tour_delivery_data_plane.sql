@@ -189,6 +189,9 @@ begin
       and c.coordinate_role in ('entrance','driveway','parking_access') and c.review_state='reviewed'
       and r.status='active' and r.revoked_at is null and r.effective_at<=now() and (r.expires_at is null or r.expires_at>now())
       and r.allowed_use_classes ? 'client_public_display'
+      -- Coordinates are a separately governed public field class, not an
+      -- implicit consequence of broad display permission.
+      and (r.allowed_field_classes ? 'coordinates' or r.allowed_field_classes ? '*')
       and not exists(select 1 from ops.tour_rights_receipt newer where newer.organization_tenant_id=r.organization_tenant_id and newer.provider=r.provider and newer.policy_key=r.policy_key and newer.receipt_version>r.receipt_version and newer.effective_at<=now())
     order by er.verified_at desc,er.id desc,c.id desc limit 1
   ) chosen on true
@@ -570,6 +573,7 @@ returns jsonb language sql stable security definer set search_path=pg_catalog,op
         where invalid.organization_tenant_id=p.organization_tenant_id and invalid.projection_id=p.id and
           (ir.status<>'active' or ir.effective_at>now() or (ir.expires_at is not null and ir.expires_at<=now()) or (ir.revoked_at is not null and ir.revoked_at<=now())
            or not (ir.allowed_use_classes ? 'client_public_display')
+           or not (ir.allowed_field_classes ? 'coordinates' or ir.allowed_field_classes ? '*')
            or exists(select 1 from ops.tour_rights_receipt newer where newer.organization_tenant_id=ir.organization_tenant_id and newer.provider=ir.provider and newer.policy_key=ir.policy_key and newer.receipt_version>ir.receipt_version and newer.effective_at<=now()))
       )
   ) select jsonb_build_object('as_of',p.as_of,'points',coalesce(jsonb_agg(jsonb_build_object(

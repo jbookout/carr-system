@@ -47,6 +47,7 @@ test("public packet and map reads remain sealed facts-only projections", () => {
   assert.match(migration, /tour_public_projection_map_point/i);
   assert.match(migration, /ops\.read_tour_public_projection\(p\.organization_tenant_id,p\.id\) is not null/i);
   assert.match(migration, /tour map share requires one sealed entrance coordinate per property/i);
+  assert.match(migration, /allowed_field_classes \? 'coordinates'/i);
   assert.match(migration, /tour_share_session_grant\(p_session_digest,'view_packet'\)/i);
   assert.match(migration, /tour_share_session_grant\(p_session_digest,'view_map'\)/i);
   assert.doesNotMatch(migration, /tour_cheat_sheet_revision[\s\S]{0,200}read_tour_share_packet/i);

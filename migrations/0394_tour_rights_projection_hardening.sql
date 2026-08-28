@@ -123,7 +123,9 @@ end $$;
 create or replace function ops.tour_public_value_safe(p_field_key text, p_value jsonb)
 returns boolean language sql immutable as $$
   select case
-    when p_field_key in ('display.name','display.address','suite','property_type','availability','parking','access','source_attribution','as_of','caveat') then jsonb_typeof(p_value) = 'string'
+    when p_field_key in ('display.name','display.address') then
+      jsonb_typeof(p_value) = 'string' and btrim(p_value #>> '{}') <> '' and char_length(btrim(p_value #>> '{}')) <= 360
+    when p_field_key in ('suite','property_type','availability','parking','access','source_attribution','as_of','caveat') then jsonb_typeof(p_value) = 'string'
     when p_field_key in ('size','asking_economics') then
       jsonb_typeof(p_value) = 'object'
       and (p_value ? 'value' or p_value ? 'min' or p_value ? 'max')

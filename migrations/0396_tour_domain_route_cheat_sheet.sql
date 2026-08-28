@@ -177,6 +177,19 @@ begin
   if exists(select 1 from ops.tour_route_stop s where s.organization_tenant_id=p_tenant and s.route_version_id=v_route.id and not exists(select 1 from ops.tour_route_stop_transition x where x.organization_tenant_id=p_tenant and x.new_route_version_id=v_route.id and x.new_route_stop_id=s.id)) then raise exception 'route acceptance requires an explicit transition for every new route stop'; end if;
   if v_route.routing_source='provider' and not exists(select 1 from ops.tour_rights_receipt r where r.id=v_route.routing_rights_receipt_id and r.organization_tenant_id=p_tenant and r.status='active' and r.revoked_at is null and r.effective_at<=now() and (r.expires_at is null or r.expires_at>now()) and r.allowed_use_classes ? 'route_planning') then raise exception 'provider route cannot become canonical without an active route-planning rights receipt'; end if;
   if v_prior.id is not null and exists(select 1 from ops.tour_route_stop old_stop where old_stop.organization_tenant_id=p_tenant and old_stop.route_version_id=v_prior.route_version_id and not exists(select 1 from ops.tour_route_stop_transition x where x.organization_tenant_id=p_tenant and x.new_route_version_id=v_route.id and x.old_route_stop_id=old_stop.id)) then raise exception 'route acceptance requires an explicit disposition for every prior route stop'; end if;
+  if v_prior.id is not null and exists(
+    select 1 from ops.tour_route_stop old_stop
+    where old_stop.organization_tenant_id=p_tenant and old_stop.route_version_id=v_prior.route_version_id
+      and old_stop.locked_appointment
+      and not exists(
+        select 1 from ops.tour_route_stop_transition x
+        join ops.tour_route_stop new_stop on new_stop.organization_tenant_id=x.organization_tenant_id and new_stop.id=x.new_route_stop_id
+        where x.organization_tenant_id=p_tenant and x.new_route_version_id=v_route.id and x.old_route_stop_id=old_stop.id
+          and new_stop.stop_state='active' and new_stop.property_id=old_stop.property_id and new_stop.locked_appointment
+          and new_stop.appointment_start=old_stop.appointment_start and new_stop.appointment_end=old_stop.appointment_end
+          and new_stop.dwell_minutes=old_stop.dwell_minutes and new_stop.buffer_minutes=old_stop.buffer_minutes
+      )
+  ) then raise exception 'route acceptance must preserve every locked appointment window, dwell, and buffer'; end if;
   insert into ops.tour_route_version_acceptance(organization_tenant_id,tour_id,route_version_id,supersedes_acceptance_id,expected_prior_route_version,accepted_by_actor_id,acceptance_digest) values(p_tenant,v_route.tour_id,v_route.id,v_prior.id,p_expected_prior_route_version,v_actor,p_acceptance_digest) returning id into v_id; return v_id;
 end $$;
 
@@ -305,6 +318,19 @@ begin
     if not exists(select 1 from ops.tour_rights_receipt r where r.id=v_route.routing_rights_receipt_id and r.organization_tenant_id=p_tenant and r.provider=v_route.routing_provider and r.policy_key=v_route.routing_policy_key and r.status='active' and r.revoked_at is null and r.effective_at<=now() and (r.expires_at is null or r.expires_at>now()) and r.allowed_use_classes ? 'route_planning' and not exists(select 1 from ops.tour_rights_receipt newer where newer.organization_tenant_id=r.organization_tenant_id and newer.provider=r.provider and newer.policy_key=r.policy_key and newer.receipt_version>r.receipt_version and newer.effective_at<=now())) then raise exception 'provider route cannot become canonical without an exact current provider-policy route-planning rights receipt'; end if;
   end if;
   if v_prior.id is not null and exists(select 1 from ops.tour_route_stop old_stop where old_stop.organization_tenant_id=p_tenant and old_stop.route_version_id=v_prior.route_version_id and not exists(select 1 from ops.tour_route_stop_transition x where x.organization_tenant_id=p_tenant and x.new_route_version_id=v_route.id and x.old_route_stop_id=old_stop.id)) then raise exception 'route acceptance requires an explicit disposition for every prior route stop'; end if;
+  if v_prior.id is not null and exists(
+    select 1 from ops.tour_route_stop old_stop
+    where old_stop.organization_tenant_id=p_tenant and old_stop.route_version_id=v_prior.route_version_id
+      and old_stop.locked_appointment
+      and not exists(
+        select 1 from ops.tour_route_stop_transition x
+        join ops.tour_route_stop new_stop on new_stop.organization_tenant_id=x.organization_tenant_id and new_stop.id=x.new_route_stop_id
+        where x.organization_tenant_id=p_tenant and x.new_route_version_id=v_route.id and x.old_route_stop_id=old_stop.id
+          and new_stop.stop_state='active' and new_stop.property_id=old_stop.property_id and new_stop.locked_appointment
+          and new_stop.appointment_start=old_stop.appointment_start and new_stop.appointment_end=old_stop.appointment_end
+          and new_stop.dwell_minutes=old_stop.dwell_minutes and new_stop.buffer_minutes=old_stop.buffer_minutes
+      )
+  ) then raise exception 'route acceptance must preserve every locked appointment window, dwell, and buffer'; end if;
   if exists(select 1 from ops.tour_route_stop s where s.organization_tenant_id=p_tenant and s.route_version_id=v_route.id and s.stop_state='active' and s.assertion_set_digest is null) then raise exception 'route acceptance requires an assertion-set digest for every active stop'; end if;
   insert into ops.tour_property_membership(organization_tenant_id,tour_id,property_id,route_version,route_sequence,route_label,assertion_set_digest)
     select p_tenant,v_route.tour_id,s.property_id,v_route.route_version,s.route_sequence,s.route_label,s.assertion_set_digest from ops.tour_route_stop s where s.organization_tenant_id=p_tenant and s.route_version_id=v_route.id and s.stop_state='active';

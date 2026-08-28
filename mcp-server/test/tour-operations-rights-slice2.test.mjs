@@ -63,6 +63,15 @@ test("public metrics match the deterministic packet renderer contract", () => {
   ]) assert.equal(publicValueIsSafe("size", value), false, JSON.stringify(value));
 });
 
+test("required public display identity rejects blank or oversized text", () => {
+  assert.equal(publicValueIsSafe("display.name", "Medical Plaza"), true);
+  assert.equal(publicValueIsSafe("display.address", "1 Synthetic Way"), true);
+  for (const value of ["", "   ", "A".repeat(361)]) {
+    assert.equal(publicValueIsSafe("display.name", value), false, JSON.stringify(value));
+    assert.equal(publicValueIsSafe("display.address", value), false, JSON.stringify(value));
+  }
+});
+
 test("existing projection fact validation retains established fail-closed rights errors", () => {
   const { projection_fact: fact, field_assertion: assertion, membership, projection, rights_receipt: rights } = fixture;
   assert.equal(validateProjectionFact(fact, assertion, membership, projection, rights), true);

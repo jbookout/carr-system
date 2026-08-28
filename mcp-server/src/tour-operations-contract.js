@@ -100,7 +100,9 @@ function publicAssetIsSafe(item) {
 }
 
 export function publicValueIsSafe(fieldKey, value) {
-  if (["display.name", "display.address", "suite", "property_type", "availability",
+  if (["display.name", "display.address"].includes(fieldKey))
+    return typeof value === "string" && value.trim().length > 0 && value.trim().length <= 360;
+  if (["suite", "property_type", "availability",
     "parking", "access", "source_attribution", "as_of", "caveat"].includes(fieldKey))
     return typeof value === "string";
   if (["size", "asking_economics"].includes(fieldKey))
@@ -224,7 +226,7 @@ const mapById = values =>
 
 export function validateProjectionComplete({
   projection, memberships = [], facts = [], assertions = [], evidence = [], rights = [],
-  lineage = [], revocations = [], requiredFieldKeys = REQUIRED_PUBLIC_PROPERTY_FIELDS,
+  lineage = [], revocations = [], map_points = [], requiredFieldKeys = REQUIRED_PUBLIC_PROPERTY_FIELDS,
 } = {}) {
   if (!projection || projection.status !== "approved")
     throw new Error("PROJECTION_STATUS_APPROVED_REQUIRED");
@@ -271,6 +273,6 @@ export function validateProjectionComplete({
       effective_from: assertion.effective_from, effective_to: assertion.effective_to,
     };
   });
-  assertProjectionDigest({ projection, memberships, facts: digestFacts });
+  assertProjectionDigest({ projection, memberships, facts: digestFacts, map_points });
   return true;
 }

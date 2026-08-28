@@ -115,7 +115,7 @@ function canonicalProperty(property, index, packetAsOf, packetCaveat) {
     if (property[field] !== undefined && property[field] !== null) output[field] = approvedMetric(property[field], `properties[${index}].${field}`);
   }
   output.as_of = property.as_of === undefined ? packetAsOf : timestamp(property.as_of, `properties[${index}].as_of`);
-  output.caveat = property.caveat === undefined ? packetCaveat : plainText(property.caveat, `properties[${index}].caveat`, 500);
+  output.caveat = property.caveat == null ? packetCaveat : plainText(property.caveat, `properties[${index}].caveat`, 500);
 
   const displayValues = Object.values(output).map(value => typeof value === "object" ? formatApprovedMetric(value) : String(value));
   const totalChars = displayValues.reduce((total, item) => total + item.length, 0);

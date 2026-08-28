@@ -46,6 +46,11 @@ test("Tour packet preserves allowlisted structured metrics with deterministic fo
   assert.throws(() => renderTourPacket({ ...packet, properties: [{ ...packet.properties[0], size: { value: { nested: "no" } } }] }), error => error instanceof TourPacketRenderError && error.code === "tour_packet_invalid_text");
 });
 
+test("Tour packet treats a null optional property caveat as absent", () => {
+  const result = renderTourPacket({ ...packet, properties: [{ ...packet.properties[0], caveat: null }] });
+  assert.equal(result.facts.properties[0].caveat, packet.caveat);
+});
+
 test("Tour packet refuses unsafe facts, duplicate public identity/route order, and overflow", () => {
   assert.throws(() => renderTourPacket({ ...packet, properties: [{ ...packet.properties[0], provider: "Private vendor" }] }), error => error instanceof TourPacketRenderError && error.code === "tour_packet_forbidden_field");
   assert.throws(() => renderTourPacket({ ...packet, properties: [{ ...packet.properties[0], availability: "Call agent@example.test" }] }), error => error instanceof TourPacketRenderError && error.code === "tour_packet_forbidden_contact");

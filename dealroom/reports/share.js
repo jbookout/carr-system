@@ -120,17 +120,8 @@
     return payload.data || {};
   }
 
-  async function openTour() {
-    const token = shareToken;
-    shareToken = "";
-    openButton.disabled = true;
-    if (!token) return;
+  async function loadTour() {
     try {
-      await request("/api/share/exchange", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ token }),
-      });
       // Packet and map are independently scoped. Fetch both, then render in a
       // stable order so a valid map-only or packet-only grant still opens.
       const [reportResult, mapResult] = await Promise.allSettled([fetchReport(), fetchMap()]);
@@ -153,10 +144,29 @@
     }
   }
 
+  async function openTour() {
+    const token = shareToken;
+    shareToken = "";
+    openButton.disabled = true;
+    if (!token) return;
+    try {
+      await request("/api/share/exchange", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+      await loadTour();
+    } catch {
+      setStatus("This shared report is unavailable.");
+      list.setAttribute("aria-busy", "false");
+    }
+  }
+
   function bootstrap() {
     if (!shareToken) {
-      setStatus("This shared report link is incomplete or has expired.");
-      list.setAttribute("aria-busy", "false");
+      openButton.hidden = true;
+      setStatus("Opening your shared report…");
+      void loadTour();
       return;
     }
     openButton.disabled = false;
