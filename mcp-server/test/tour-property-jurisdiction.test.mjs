@@ -48,7 +48,7 @@ const source = {
   observed_at: "2026-08-27T12:00:00Z",
 };
 
-test("Slice 3 exposes only the three reviewed 0390 seams and sends exact database payload keys", async () => {
+test("Slice 3 exposes only the three reviewed 0395 seams and sends exact database payload keys", async () => {
   const h = harness();
   assert.deepEqual(Object.keys(h.tools).sort(), [
     "append-tour-coordinate-candidate",
