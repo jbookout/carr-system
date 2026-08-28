@@ -40809,6 +40809,10 @@ grant insert, select, update on table ops.service_environment to carr_writer;
 grant insert, select on table ops.settings_change to carr_jobs;
 grant select on table ops.settings_change to carr_reader;
 grant insert, select on table ops.settings_change to carr_writer;
+grant select on table ops.sourced_work_request_outcome_feedback_acceptance_receipt to carr_reader;
+grant select on table ops.sourced_work_request_outcome_feedback_acceptance_receipt to carr_writer;
+grant select on table ops.sourced_work_request_plan_acceptance_receipt to carr_reader;
+grant select on table ops.sourced_work_request_plan_acceptance_receipt to carr_writer;
 grant select on table ops.staging_deployment_attempt to carr_authority;
 grant select on table ops.staging_deployment_attempt to carr_jobs;
 grant select on table ops.staging_deployment_attempt to carr_reader;
@@ -40920,6 +40924,8 @@ grant select on table ops.v_work_shape_current to carr_writer;
 grant select on table ops.work_request to carr_reader;
 grant select, update on table ops.work_request to carr_writer;
 grant select on table ops.work_request_execution_environment_binding to carr_authority;
+grant select on table ops.work_request_triage_receipt to carr_reader;
+grant select on table ops.work_request_triage_receipt to carr_writer;
 grant select on table ops.work_shape_revision to carr_reader;
 grant insert, select on table ops.work_shape_revision to carr_writer;
 grant select on table ops.workflow_acceptance to carr_jobs;
@@ -40927,6 +40933,7 @@ grant select on table ops.workflow_acceptance to carr_reader;
 grant select on table ops.workflow_acceptance to carr_writer;
 grant insert, select, update on table public.activity to carr_writer;
 grant select on table public.actor to carr_authority;
+grant select on table public.actor to carr_reader;
 grant insert, select, update on table public.actor to carr_writer;
 grant insert, select, update on table public.actor_profile to carr_writer;
 grant select on table public.agent_profile to carr_reader;
@@ -41112,6 +41119,7 @@ grant select on table public.submarket_condition to carr_writer;
 grant select on table public.system_config to carr_exporter;
 grant insert, select, update on table public.system_config to carr_writer;
 grant insert, select on table public.tool_call to carr_authority;
+grant select on table public.tool_call to carr_reader;
 grant insert, select, update on table public.tool_call to carr_writer;
 grant select on table public.tool_read_call to carr_exporter;
 grant select on table public.tool_read_call to carr_reader;
@@ -41832,6 +41840,8 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0383_control_plane_not_configured_state.sql	f0cb86f97fcd87db8412be1f4c36544fe40f1ba9e524182bb3cb3b9ad3148bfa	2026-08-27 20:40:05.784788+00
 0387_control_plane_record_queue_priority_tiers.sql	ba2f9ce18e54f8ceca330a5478ad66d72b76bbc832aba9c20734ebe8a701310e	2026-08-28 00:10:44.481308+00
 0388_heaviness_is_a_property_of_the_request_repin.sql	c0e0d353ef0a5f8363b15f41a51ccae7cad4aabe3176929c46e2741e7f51f3f8	2026-08-28 00:10:44.565762+00
+0389_acting_identity_receipt_read_grants.sql	f1f9cd9f3b3a517d6658228fcd987749f0663e8cf66bcb98a03dd55f49fc144a	2026-08-28 04:10:58.095773+00
+0390_acting_identity_reader_ledger_grants.sql	dee8bbd22ff4c130e5ff166cdbe0b61bfbb5d6ea22a20d218a139c3e9c536f81	2026-08-28 04:13:08.703849+00
 \.
 
 
@@ -42702,7 +42712,7 @@ insert into ops.siep_component_alias select * from jsonb_populate_record(null::o
 insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-14", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24A"}'::jsonb) on conflict do nothing;
 insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-15", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "25"}'::jsonb) on conflict do nothing;
 insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-16", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "26"}'::jsonb) on conflict do nothing;
-select pg_catalog.setval('ops.work_request_ref_seq', 35, true);
+select pg_catalog.setval('ops.work_request_ref_seq', 36, true);
 alter table ops.siep_component_alias enable trigger siep_component_alias_sealed_before_insert;
 alter table ops.siep_program_dependency enable trigger siep_program_dependency_sealed_before_insert;
 alter table ops.siep_package_contract enable trigger siep_package_contract_sealed_before_insert;
