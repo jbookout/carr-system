@@ -10,21 +10,14 @@
 --
 -- The card needs a projection, not table access. This is the 0382 shape applied
 -- to the same question one verb over: the joins move inside a SECURITY DEFINER
--- function with a pinned search_path, and every grant 0389 and 0390 handed out
--- is taken back. The app roles end this migration no wider than they began, and
--- the reader reaches acting identity the only way it reaches standing guidance.
+-- function with a pinned search_path.
 --
--- WHY THE RECEIPT GRANTS GO TOO. A definer function runs as its owner, so it
--- needs nothing from the caller. Leaving 0389's grants in place would leave the
--- reader and writer holding table reads that nothing uses, which is how a
--- boundary erodes: not by a decision, but by a grant nobody later remembers is
--- unnecessary.
-
-revoke select on table public.actor from carr_reader;
-revoke select on table public.tool_call from carr_reader;
-revoke select on table ops.work_request_triage_receipt from carr_reader, carr_writer;
-revoke select on table ops.sourced_work_request_plan_acceptance_receipt from carr_reader, carr_writer;
-revoke select on table ops.sourced_work_request_outcome_feedback_acceptance_receipt from carr_reader, carr_writer;
+-- ADDITIVE ONLY, AND THAT IS THE POINT OF SPLITTING IT. The revokes that undo
+-- 0389 and 0390 live in 0392, because the Worker serving production today still
+-- runs the INLINE joins and reads those tables directly. Dropping the grants in
+-- the same migration that adds the function would break the card for the window
+-- between the migration and the deploy. This half can be applied at any time;
+-- 0392 is applied only once the Worker calling this function is live.
 
 create or replace function ops.work_request_acting_identity(p_ref text)
 returns table(act text, recorded_slug text, acted_at timestamptz,
@@ -71,16 +64,6 @@ grant execute on function ops.work_request_acting_identity(text) to carr_reader,
 
 do $$
 begin
-  if has_table_privilege('carr_reader','public.actor','select') then
-    raise exception '0391 FAILED: carr_reader still holds direct public.actor select';
-  end if;
-  if has_table_privilege('carr_reader','public.tool_call','select') then
-    raise exception '0391 FAILED: carr_reader still holds direct public.tool_call select';
-  end if;
-  if has_table_privilege('carr_reader','ops.work_request_triage_receipt','select')
-     or has_table_privilege('carr_writer','ops.work_request_triage_receipt','select') then
-    raise exception '0391 FAILED: a receipt-table grant from 0389 survived';
-  end if;
   if not has_function_privilege('carr_reader','ops.work_request_acting_identity(text)','execute')
      or not has_function_privilege('carr_writer','ops.work_request_acting_identity(text)','execute') then
     raise exception '0391 FAILED: the app roles cannot execute the projection';
