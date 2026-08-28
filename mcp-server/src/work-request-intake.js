@@ -243,38 +243,23 @@ const HEAVY_BUILD_SCHEMA = { type: "object", additionalProperties: false,
 //
 // Nothing new is captured to fix it. public.tool_call already stores actor_id,
 // authorization_class and via under the SAME idempotency key each receipt
-// stores; the two were simply never joined. This is that join.
+// stores; the two were simply never joined.
+//
+// THE JOIN LIVES IN THE DATABASE, not here, and that is a boundary rather than a
+// style choice. This card is served on the reader connection, and carr_reader is
+// deliberately denied direct public.actor and public.tool_call access — 0382
+// established that line for standing guidance and
+// ops/guidance-registry-db-gate.py fails by name if it is crossed. Shipping
+// these joins inline first broke the verb outright for want of grants, then
+// broke the boundary when 0390 supplied them. 0391 moved the joins into
+// ops.work_request_acting_identity, a SECURITY DEFINER projection with a pinned
+// search_path, and took every one of those grants back.
 //
 // A row is reported only where the call ledger actually has the key. Acts
 // predating the ledger, or performed by a path that does not write it, come back
 // as null rather than as a guess.
-const ACTING_IDENTITY = `
-  select act, recorded_slug, acted_at, actor_slug, authorization_class, via from (
-    select 'review-and-triage' as act, ha.slug as recorded_slug, r.triaged_at as acted_at,
-           a.slug as actor_slug, t.authorization_class, t.via
-      from ops.work_request_triage_receipt r
-      join ops.work_request w on w.id = r.work_request_id
-      join public.actor ha on ha.id = r.triaged_by_actor_id
-      left join public.tool_call t on t.idempotency_key = r.idempotency_key::text
-      left join public.actor a on a.id = t.actor_id
-     where w.ref = $1
-    union all
-    select 'accept-ready-plan', ha.slug, r.accepted_at, a.slug, t.authorization_class, t.via
-      from ops.sourced_work_request_plan_acceptance_receipt r
-      join ops.work_request w on w.id = r.work_request_id
-      join public.actor ha on ha.id = r.accepted_by_actor_id
-      left join public.tool_call t on t.idempotency_key = r.idempotency_key::text
-      left join public.actor a on a.id = t.actor_id
-     where w.ref = $1
-    union all
-    select 'accept-outcome-feedback', ha.slug, r.accepted_at, a.slug, t.authorization_class, t.via
-      from ops.sourced_work_request_outcome_feedback_acceptance_receipt r
-      join ops.work_request w on w.id = r.work_request_id
-      join public.actor ha on ha.id = r.accepted_by_actor_id
-      left join public.tool_call t on t.idempotency_key = r.idempotency_key::text
-      left join public.actor a on a.id = t.actor_id
-     where w.ref = $1
-  ) acts order by acted_at`;
+const ACTING_IDENTITY = `select act, recorded_slug, acted_at, actor_slug, authorization_class, via
+    from ops.work_request_acting_identity($1)`;
 
 export function actingIdentityProjection(rows) {
   return rows.map((row) => ({
