@@ -129,7 +129,7 @@ def notes_block(note, lines=3):
 FACT_COLUMNS = 4  # .factgrid is repeat(4,1fr), collapsing to 2 under 760px
 
 
-def facts(rows):
+def facts(rows, limit=None):
     """The fact grid draws its own rules by letting the container colour show through
     1px gaps, which works only while every row is full. A last row that stops short
     leaves the remaining track painted in line grey, so the card ends in a slab of
@@ -143,7 +143,8 @@ def facts(rows):
     two. Anything that changes .factgrid's column count has to change FACT_COLUMNS
     with it, which is why the number is named here rather than written inline.
     """
-    cells = [f'<div class="f"><span class="fk">{e(k)}</span>'
+    cells = [f'<div class="f{" flim" if limit and str(k).strip() == limit else ""}">'
+             f'<span class="fk">{e(k)}</span>'
              f'<span class="fv">{e(v)}</span></div>' for k, v in rows]
     if cells:
         cells += ['<div class="f" aria-hidden="true"></div>'] * (-len(cells) % FACT_COLUMNS)
@@ -179,6 +180,9 @@ def plans_block(folder, p):
 
 
 def card(folder, p):
+    # The written paragraph is optional. Dell removed it on 2026-08-27: the facts
+    # about a space stay, our reading of the space does not.
+    copy_block = f'<p class="pcopy">{e(p["copy"])}</p>' if (p.get("copy") or "").strip() else ""
     about = "".join(f"<li>{e(x)}</li>" for x in p.get("about", []))
     conf = "".join(f"<li>{e(x)}</li>" for x in p.get("confirm", []))
     ctr = f'<div class="pctr">{e(p["ctr"])}</div>' if p.get("ctr") else ""
@@ -205,8 +209,8 @@ def card(folder, p):
       {address_line(p)}
       {media(folder, p)}
       </div>
-      <p class="pcopy">{e(p["copy"])}</p>
-      <div class="factgrid">{facts(p.get("facts", []))}</div>
+      {copy_block}
+      <div class="factgrid">{facts(p.get("facts", []), p.get("limit"))}</div>
       {two}
       {plans_block(folder, p)}
       {notes_block(p.get("note", ""))}
@@ -246,45 +250,43 @@ def require_packet_commentary(c):
             'glance.note is empty. With no takeaways section, the comparison note is '
             'what keeps this from being a bare property list, which is the thing '
             "Joe's market-commentary rule refuses. Say what the figures mean.")
-    thin = [p["addr"] for p in c["options"] if len((p.get("copy") or "").split()) < 40]
-    if thin:
-        raise PacketRefusal(
-            f'these options carry no real reasoning in their copy, so the packet has '
-            f'no commentary left anywhere: {", ".join(thin)}')
+    # The per-option reasoning check that used to sit here is gone. Dell removed the
+    # written paragraph from every card on 2026-08-27, so requiring "real reasoning in
+    # its copy" would refuse the document he asked for. What remains is the check that
+    # actually matters: the comparison note is now the ONLY prose commentary in the
+    # packet, so losing it really would leave a bare property list, which is the thing
+    # Joe's rule refuses. Each card also flags the one fact that is its own limit, so
+    # the honest-limit rule is carried by require_option_limit rather than by prose.
 
 
 def require_option_limit(p):
-    """One honest limit per option, carried by the option itself.
+    """One honest limit per option, named as one of that option's own facts.
 
     Joe's rule is that every client-facing recommendation names at least one thing
-    we would not do and why, as "one honest limit per option, stated in the document
-    rather than saved for the meeting," and it names search packets and tour
-    shortlists explicitly. Until now this packet discharged that with a back section
-    listing properties we had ruled out.
+    we would not do and why, as one honest limit per option stated in the document.
+    The card used to carry that in its written paragraph.
 
-    Dell, 2026-08-25: "please remove the entire last section of the report. do not
-    give additional opinion and especially on a properrty that has been deleted and
-    we arent even touring." He is right that the back section was not what the rule
-    asks for. The rule wants the limit attached to the option being recommended,
-    where the client meets it while deciding, rather than opinions about properties
-    that are not on the drive.
+    Dell, 2026-08-27: "keep the facts on the space but remove your context about
+    each space." The paragraph was my reading of the space rather than the space, so
+    it is gone, and the limit cannot live in prose that no longer exists.
 
-    So the requirement moves rather than relaxes, and gets stricter in moving: every
-    option must name its limit in a `limit` field, and that text must appear verbatim
-    in the card's own copy. The field is a pointer to a sentence the client actually
-    reads, never a second version of it that can drift away from the page.
+    So the limit moves into the fact grid, which is where the client is looking
+    anyway. Each option names the fact that IS its limit, by that fact's own label,
+    and the renderer marks that cell so the number carrying the bad news is the one
+    the eye lands on. The gate refuses a label the option does not actually have,
+    which is what stops the field drifting away from the grid it points into.
     """
     limit = (p.get("limit") or "").strip()
+    keys = [str(k).strip() for k, _ in p.get("facts", [])]
     if not limit:
         raise PacketRefusal(
-            f'{p["addr"]}: no limit. Every option names one honest thing against it, '
-            f'in the client\'s own words on the card (Joe\'s rule). Add "limit" with '
-            f'the sentence from this option\'s copy that states the catch.')
-    if limit not in (p.get("copy") or ""):
+            f'{p["addr"]}: no limit. Every option names one honest thing against it '
+            f"(Joe's rule). Set \"limit\" to the label of the fact that carries it, "
+            f'one of: {", ".join(keys)}.')
+    if limit not in keys:
         raise PacketRefusal(
-            f'{p["addr"]}: the "limit" text does not appear in this option\'s copy. '
-            f'It must quote the card verbatim, so the limit the client reads and the '
-            f'limit we claim to have given cannot drift apart. Got: {limit!r}')
+            f'{p["addr"]}: limit names {limit!r}, which is not a fact on this card. '
+            f'Use one of: {", ".join(keys)}.')
 
 
 def require_photo(p):
@@ -438,8 +440,8 @@ def main():
   <div class="tblwrap"><table><thead><tr>{thead}</tr></thead><tbody>{tbody}</tbody></table></div>
   <p class="tnote">{e(c["glance"].get("note", ""))}</p>
 
-  <h2><span class="secnum">The options</span> &nbsp;<span style="font-weight:400;color:#5b6675;font-size:14px">{len(c["options"])} to tour</span></h2>
-  <div class="h2sub">{e(c["options_intro"])}</div>
+  <h2 class="optshead"><span class="secnum">The options</span> &nbsp;<span style="font-weight:400;color:#5b6675;font-size:14px">{len(c["options"])} to tour</span></h2>
+  <div class="h2sub optshead">{e(c["options_intro"])}</div>
   {cards}
 
   {take_block}
