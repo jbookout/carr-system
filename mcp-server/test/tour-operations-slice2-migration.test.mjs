@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 
 const root = path.resolve(import.meta.dirname, "../..");
-const migration = fs.readFileSync(path.join(root, "migrations/0394_tour_rights_projection_hardening.sql"), "utf8");
+const migration = fs.readFileSync(path.join(root, "migrations/0427_tour_rights_projection_hardening.sql"), "utf8");
 
 test("slice 2 hardening is forward-only and preserves exact provider-policy-receipt lineage", () => {
   assert.match(migration, /^begin;/m);
@@ -16,7 +16,7 @@ test("slice 2 hardening is forward-only and preserves exact provider-policy-rece
   assert.match(migration, /pg_advisory_xact_lock/i);
   assert.match(migration, /rights receipt refuses source intake/i);
   assert.match(migration, /rights receipt refuses asserted field\/use/i);
-  assert.match(migration, /0394 requires zero pre-existing projection seal receipts/i);
+  assert.match(migration, /0427 requires zero pre-existing projection seal receipts/i);
   assert.doesNotMatch(migration, /canonical_projection_digest[\s\S]{0,240}not valid/i);
   assert.doesNotMatch(migration, /drop\s+table|truncate\s+table/i);
   assert.match(migration, /commit;/i);

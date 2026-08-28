@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 
 const root = path.resolve(import.meta.dirname, "../..");
-const migration = fs.readFileSync(path.join(root, "migrations/0403_tour_delivery_data_plane.sql"), "utf8");
+const migration = fs.readFileSync(path.join(root, "migrations/0430_tour_delivery_data_plane.sql"), "utf8");
 const ci = fs.readFileSync(path.join(root, "ops/ci.sh"), "utf8");
 
 test("Tour delivery data plane implements every registered SQL seam", () => {
@@ -82,7 +82,7 @@ test("property search uses only effective facts and timestamps every displayed f
   assert.match(migration, /ops\.read_tour_public_projection\(pp\.organization_tenant_id,pp\.id\) is not null\) as public_projection_ready/i);
 });
 
-test("the repository migration class executes the 0403 PostgreSQL acceptance proof", () => {
+test("the repository migration class executes the 0430 PostgreSQL acceptance proof", () => {
   assert.match(ci, /mcp-server\/test\/tour-delivery-data-plane-postgres\.sql/);
 });
 
