@@ -48,6 +48,7 @@ import glob
 import json
 import os
 import plistlib
+import re
 
 import subprocess
 import sys
@@ -203,6 +204,28 @@ def wrapper_service(pl: dict[str, Any]) -> str:
     return ""
 
 
+
+def disabled_labels():
+    """Labels launchd itself reports as disabled, in either vocabulary.
+
+    macOS 26 prints `"label" => disabled`; older releases print `=> true`.
+    lib/launchd_scheduler_native.py learned this the same week; the two readers
+    stay in step because both accept both spellings and neither guesses.
+    """
+    try:
+        out = subprocess.run(["/bin/launchctl", "print-disabled", f"gui/{os.getuid()}"],
+                             capture_output=True, text=True, check=False)
+    except OSError:
+        return set()
+    if out.returncode != 0:
+        return set()
+    found = set()
+    for line in out.stdout.splitlines():
+        m = re.match(r'\s*"?([A-Za-z0-9._-]+)"?\s*=>\s*([A-Za-z]+)\b', line)
+        if m and m.group(2).lower() in ("true", "disabled"):
+            found.add(m.group(1))
+    return found
+
 def main() -> int:
     quiet = "--quiet" in sys.argv
 
@@ -249,7 +272,22 @@ def main() -> int:
 
     # ── installed vs loaded ──────────────────────────────────────────────────
     if live is not None:
+        disabled = disabled_labels()
         for lbl in sorted(set(inst) - live):
+            # A RETIRED SCHEDULE IS NOT DRIFT. Once a legacy agent is switched
+            # off — disabled in launchd's registry and unloaded — its plist
+            # stays on disk on purpose, so the retirement is auditable and
+            # reversible. Read as drift it would tell every future run to
+            # bootstrap the very job the cutover just retired, and each
+            # retirement would leave a permanent false alarm behind it.
+            # Measured 2026-08-28 on the first real retirement,
+            # com.carr.calendar-eventkit.
+            if lbl in disabled:
+                if not quiet:
+                    print(f"\n  n/a  {lbl}: retired on purpose — disabled in launchd's "
+                          f"registry and unloaded; the plist is kept so the switch-off "
+                          f"stays auditable and reversible")
+                continue
             drift(f"INSTALLED, NOT LOADED    {lbl} — launchctl bootstrap "
                   f"gui/$UID {INSTALLED}/{lbl}.plist")
         for lbl in sorted(live - set(inst)):
