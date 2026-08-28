@@ -62,26 +62,6 @@
     "rows": [
       [
         "01",
-        "Palm Plaza, Suite 1039",
-        "Niceville",
-        "2,500 SF",
-        "$19.00",
-        "$3,958",
-        "$2.02",
-        "Ground"
-      ],
-      [
-        "02",
-        "Palm Plaza, Suite 1047",
-        "Niceville",
-        "5,000 SF",
-        "$17.00",
-        "$7,083",
-        "$2.02",
-        "Ground"
-      ],
-      [
-        "03",
         "Bluewater Bay, Suite 4536",
         "Niceville",
         "4,000 SF",
@@ -91,7 +71,7 @@
         "Ground"
       ],
       [
-        "04",
+        "02",
         "Bluewater Bay, Suite 1507",
         "Niceville",
         "4,000 SF",
@@ -101,27 +81,17 @@
         "Ground"
       ],
       [
-        "05",
+        "03",
         "10916 Emerald Coast Pkwy",
         "Miramar Beach",
         "3,000 SF x 2",
         "$30.00",
         "Unlisted",
         "Unlisted",
-        "Unlisted"
+        "One side legal"
       ],
       [
-        "06",
-        "11275 Emerald Coast Pkwy, Suite 6",
-        "Miramar Beach",
-        "2,600 SF",
-        "Unlisted",
-        "Unlisted",
-        "Unlisted",
-        "Ground"
-      ],
-      [
-        "07",
+        "04",
         "Baytowne Office, 215 Grand Blvd",
         "Miramar Beach",
         "3,830 SF",
@@ -131,7 +101,7 @@
         "First"
       ],
       [
-        "08",
+        "05",
         "4935 West Highway 98",
         "Santa Rosa Beach",
         "3,600 SF",
@@ -141,7 +111,7 @@
         "Ground"
       ],
       [
-        "09",
+        "06",
         "Corporate Woods, State Hwy 20",
         "Freeport",
         "4,482 SF",
@@ -156,168 +126,6 @@
   "options": [
     {
       "n": "01",
-      "addr": "Palm Plaza, Suite 1039",
-      "city": "Niceville, FL 32578",
-      "location": {
-        "street": "1003-1047 East John Sims Parkway, Suite 1039, Niceville, FL 32578",
-        "near": "Retail and office plaza in the heart of Niceville, daily traffic count near 40,000."
-      },
-      "copy": "One of the two lowest base rents in the entire search, and the only space on this tour that lands squarely inside your target band without demising. The suite measures 25 feet by 100 feet with open retail across the front, one ADA restroom, and a storage area at the rear. Operating expenses are published at $2.02 a foot, which is the lowest here by a wide margin and unusual for this market, so the all in number is close to $21. The building dates to 1974, and that is the thing to weigh against the price.",
-      "facts": [
-        [
-          "Available",
-          "2,500 SF"
-        ],
-        [
-          "Contiguous",
-          "2,500 SF"
-        ],
-        [
-          "Asking rate",
-          "$19.00 /SF/yr"
-        ],
-        [
-          "Base rent / mo",
-          "$3,958"
-        ],
-        [
-          "Operating exp.",
-          "$2.02 /SF"
-        ],
-        [
-          "All in",
-          "$21.02 /SF, about $4,379 /mo"
-        ],
-        [
-          "Structure",
-          "Triple Net (NNN)"
-        ],
-        [
-          "Floor",
-          "Ground"
-        ],
-        [
-          "Condition",
-          "Open retail"
-        ],
-        [
-          "Available from",
-          "1 July 2026"
-        ],
-        [
-          "Year built",
-          "1974"
-        ],
-        [
-          "Center size",
-          "116,999 SF"
-        ],
-        [
-          "Traffic count",
-          "About 40,000 daily"
-        ]
-      ],
-      "about": [
-        "25 feet by 100 feet, open retail at the front.",
-        "One ADA restroom and a storage area to the rear.",
-        "Ground floor, and inside your target size band as it stands.",
-        "Roughly 97 parking spaces attributed to the suite."
-      ],
-      "confirm": [
-        "Electrical service, roof, and HVAC, given the 1974 construction.",
-        "Whether the slab will take operatory plumbing without major work.",
-        "What the landlord will contribute to a dental fit-out at this rate.",
-        "Parking count and how it is shared across the plaza.",
-        "Whether the storage area at the rear can become a sterilisation or mechanical room."
-      ],
-      "agent": "Ruckel Properties, Inc., Dora Cawood",
-      "src": "Moody's CRE",
-      "photo": "palmplaza.jpg",
-      "limit": "The building dates to 1974, and that is the thing to weigh against the price."
-    },
-    {
-      "n": "02",
-      "addr": "Palm Plaza, Suite 1047",
-      "city": "Niceville, FL 32578",
-      "location": {
-        "street": "1003-1047 East John Sims Parkway, Suite 1047, Niceville, FL 32578",
-        "near": "Same plaza as Suite 1039, at the eastern end of the address range."
-      },
-      "copy": "The move-in ready office suite in the same plaza, at the lowest asking rate in the whole search. At 5,000 SF it is well above your target band, so this only makes sense if you are building for eight operatories from day one or if the landlord will demise it. The rate is low enough that the monthly still lands near the middle of this list rather than the top. Available now, and on the market long enough that there should be room to negotiate.",
-      "facts": [
-        [
-          "Available",
-          "5,000 SF"
-        ],
-        [
-          "Contiguous",
-          "5,000 SF"
-        ],
-        [
-          "Asking rate",
-          "$17.00 /SF/yr"
-        ],
-        [
-          "Base rent / mo",
-          "$7,083"
-        ],
-        [
-          "Operating exp.",
-          "$2.02 /SF"
-        ],
-        [
-          "All in",
-          "$19.02 /SF, about $7,925 /mo"
-        ],
-        [
-          "Structure",
-          "Triple Net (NNN)"
-        ],
-        [
-          "Floor",
-          "Ground"
-        ],
-        [
-          "Condition",
-          "Move-in ready office"
-        ],
-        [
-          "Available from",
-          "Now"
-        ],
-        [
-          "Occupancy",
-          "30 days"
-        ],
-        [
-          "Time on market",
-          "149 days"
-        ],
-        [
-          "Year built",
-          "1974"
-        ]
-      ],
-      "about": [
-        "Lowest asking rate in the search at $17.00 a foot.",
-        "Move-in ready as office space, ground floor.",
-        "Roughly 149 parking spaces attributed to the suite.",
-        "On the market 149 days, which is leverage."
-      ],
-      "confirm": [
-        "Whether the landlord will demise toward your band, which is the whole question here.",
-        "Electrical service, roof, and HVAC, given the 1974 construction.",
-        "What an office to dental conversion costs in this shell.",
-        "Whether the 30 day occupancy is firm.",
-        "Free rent or fit-out contribution, given the time on market."
-      ],
-      "agent": "Ruckel Properties, Inc., Dora Cawood",
-      "src": "Moody's CRE",
-      "photo": "palmplaza.jpg",
-      "limit": "At 5,000 SF it is well above your target band"
-    },
-    {
-      "n": "03",
       "addr": "Bluewater Bay Shopping Center, Suite 4536",
       "city": "Niceville, FL 32578",
       "location": {
@@ -398,7 +206,7 @@
       "limit": "At 4,000 SF it sits above your target band"
     },
     {
-      "n": "04",
+      "n": "02",
       "addr": "Bluewater Bay Office Complex, Suite 1507",
       "city": "Niceville, FL 32578",
       "location": {
@@ -474,18 +282,26 @@
       "limit": "the operating expenses are materially higher at $9.03 a foot"
     },
     {
-      "n": "05",
+      "n": "03",
       "addr": "10916 Emerald Coast Parkway",
       "city": "Miramar Beach, FL 32550",
       "location": {
         "street": "10916 Emerald Coast Parkway, Miramar Beach, FL 32550",
         "near": "Highway 98 corridor, Miramar Beach."
       },
-      "copy": "An off market opportunity on the Highway 98 corridor, not published on any listing service, brought to us directly. Two units of roughly 3,000 SF each, which means the combined footprint is well above your band but a single unit sits just under it. The landlord is in negotiation with another prospective tenant, so this one moves on their timeline rather than ours. We are including it because an unlisted space is a space you are not bidding against the whole market for, and that is worth a look even under time pressure.",
+      "copy": "An off market opportunity on the Highway 98 corridor, not published on any listing service, brought to us directly. Two units of roughly 3,000 SF each, and one side is now in the legal phase with another party, which is further along than a negotiation and means you should plan on the remaining unit rather than the pair. That single unit sits inside your band on its own. Everything else about it, the rate, the expenses, the floor and the condition, is unpublished and has to come straight from the landlord. We are including it because an unlisted space is a space you are not bidding against the whole market for, and that is worth a look even under time pressure.",
       "facts": [
         [
           "Available",
           "Two units, about 3,000 SF each"
+        ],
+        [
+          "Status",
+          "One side in legal phase"
+        ],
+        [
+          "Realistically available",
+          "One unit, about 3,000 SF"
         ],
         [
           "Asking rate",
@@ -512,115 +328,30 @@
           "Unlisted"
         ],
         [
-          "Availability",
-          "In negotiation with another party"
-        ],
-        [
           "Listing status",
           "Not listed on any service"
         ]
       ],
       "about": [
         "Off market, not published on CoStar, Crexi, ECAR, or Moody's.",
-        "Two units of roughly 3,000 SF, so a single unit lands near your band.",
+        "One of the two units is in the legal phase with another party.",
+        "The remaining unit is about 3,000 SF, which lands inside your band on its own.",
         "Highway 98 corridor position in Miramar Beach."
       ],
       "confirm": [
+        "How far along the legal phase is on the other side, and whether it can still fall through.",
         "Everything on the fact grid above, none of which is published.",
-        "Where the landlord's other negotiation stands and whether there is room.",
-        "Whether the two units can be taken separately.",
+        "Whether the remaining unit can be taken on its own, and on what terms.",
         "Floor level, parking, and electrical service.",
         "Whether dental use is permitted."
       ],
       "agent": "Direct to landlord",
       "src": "Off market",
       "photo_absent_reason": "No photograph exists for this one. It is off market, never published on CoStar, Crexi, ECAR, or Moody's, and it came to us directly. We will see it for the first time together on the tour.",
-      "limit": "The landlord is in negotiation with another prospec"
+      "limit": "one side is now in the legal phase with another party, which is further along than a negotiation and means you should plan on the remaining unit rather than the pair"
     },
     {
-      "n": "06",
-      "addr": "11275 Emerald Coast Parkway, Suite 6",
-      "city": "Miramar Beach, FL 32550",
-      "location": {
-        "street": "11275 US Highway 98 West, Suite 6, Miramar Beach, FL 32550",
-        "parcel": "28-2S-21-42000-003-0030",
-        "near": "Rufus Ray Plaza, on Highway 98 just west of Silver Sands Outlet."
-      },
-      "copy": "Your Miramar Beach option, ground floor in a single storey plaza on Highway 98 with strong drive-by visibility just west of Silver Sands Outlet. 2,600 SF sits inside your target band with no demising, in a building put up in 2017, which is the newest existing space on this tour. The published figures on this one do not hold up, including the size, so we are taking the rate, the expenses, and the exact square footage straight from the listing broker before it gets compared against the others.",
-      "facts": [
-        [
-          "Available",
-          "2,600 SF"
-        ],
-        [
-          "Contiguous",
-          "2,600 SF"
-        ],
-        [
-          "Asking rate",
-          "Unlisted"
-        ],
-        [
-          "Base rent / mo",
-          "Unlisted"
-        ],
-        [
-          "Operating exp.",
-          "Unlisted"
-        ],
-        [
-          "Structure",
-          "Triple Net (NNN)"
-        ],
-        [
-          "Floor",
-          "Ground, single storey"
-        ],
-        [
-          "Condition",
-          "Existing retail"
-        ],
-        [
-          "Availability",
-          "Immediately"
-        ],
-        [
-          "Property type",
-          "Retail plaza"
-        ],
-        [
-          "Building class",
-          "B"
-        ],
-        [
-          "Year built",
-          "2017"
-        ],
-        [
-          "Building size",
-          "28,000 SF"
-        ]
-      ],
-      "about": [
-        "Single storey throughout, ground floor, which suits an operatory layout.",
-        "Highway 98 frontage with strong visibility.",
-        "Built 2017, the newest existing building on the tour.",
-        "Multi tenant plaza just west of Silver Sands Outlet."
-      ],
-      "confirm": [
-        "The asking rate and the operating expenses, both of which the published sheet gets wrong.",
-        "Whether the suite is 2,600 SF or 1,600 SF, which the same sheet states inconsistently.",
-        "Parking count and the shared load across the plaza.",
-        "Electrical service to the suite.",
-        "Whether dental use is permitted under the retail zoning."
-      ],
-      "agent": "NBI Properties, Inc., Craig Barrett",
-      "src": "CoStar",
-      "photo": "11275.jpg",
-      "limit": "The published figures on this one do not hold up, including the size"
-    },
-    {
-      "n": "07",
+      "n": "04",
       "addr": "Baytowne Office, 215 Grand Boulevard, Suite 102",
       "city": "Miramar Beach, FL 32550",
       "location": {
@@ -689,7 +420,7 @@
       "limit": "it does not deliver until February 2027"
     },
     {
-      "n": "08",
+      "n": "05",
       "addr": "4935 West Highway 98",
       "city": "Santa Rosa Beach, FL 32459",
       "location": {
@@ -770,7 +501,7 @@
       "limit": "Some units carry a 730 SF second floor office mezzanine"
     },
     {
-      "n": "09",
+      "n": "06",
       "addr": "Corporate Woods, State Highway 20",
       "city": "Freeport, FL 32439",
       "location": {
