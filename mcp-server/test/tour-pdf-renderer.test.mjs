@@ -3,8 +3,9 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import fontkit from "@pdf-lib/fontkit";
 import {
-  beginText, clip, degrees, endPath, endText, PDFDocument, PDFName, popGraphicsState,
-  pushGraphicsState, rectangle, setFontAndSize, setTextMatrix, showText, StandardFonts,
+  beginText, clip, concatTransformationMatrix, degrees, endPath, endText, lineTo, moveTo,
+  PDFDocument, PDFName, popGraphicsState, pushGraphicsState, rectangle, setFontAndSize,
+  setLineWidth, setTextMatrix, showText, StandardFonts, stroke,
 } from "pdf-lib";
 import { inspectStoredTourPacketPdf, renderTourPacketPdf, TOUR_PDF_RENDERER_VERSION, TOUR_PDF_TEMPLATE_VERSION } from "../src/tour-pdf-renderer.js";
 
@@ -129,6 +130,14 @@ test("stored inspection fails closed on clipping paths and Form XObjects", async
   stroked.getPage(0).drawLine({ start: { x: 0, y: 400 }, end: { x: 500, y: 400 }, thickness: 40 });
   const strokedBytes = await stroked.save({ addDefaultPage: false, useObjectStreams: false, objectsPerTick: Infinity });
   assert.equal((await inspectStoredTourPacketPdf(strokedBytes)).pages[0].clipped_box_count, 1);
+
+  const shearedMiter = await PDFDocument.load(rendered.bytes, { updateMetadata: false });
+  shearedMiter.getPage(0).pushOperators(
+    pushGraphicsState(), concatTransformationMatrix(1, 0.1, 1, -0.1, 60, 300), setLineWidth(10),
+    moveTo(77.714596, 62.932039), lineTo(0, 0), lineTo(62.932039, 77.714596), stroke(), popGraphicsState(),
+  );
+  const shearedMiterBytes = await shearedMiter.save({ addDefaultPage: false, useObjectStreams: false, objectsPerTick: Infinity });
+  assert.equal((await inspectStoredTourPacketPdf(shearedMiterBytes)).pages[0].clipped_box_count, 1);
 
   const donor = await PDFDocument.create();
   const donorPage = donor.addPage([20, 20]);

@@ -277,9 +277,16 @@ function decodedGeometryWithinPage(document, page, content, width, height) {
   const numbers = (count) => operands.length === count && operands.every(Number.isFinite) ? operands : null;
   const pointInside = (x, y) => inside(transformPoint(state.ctm, x, y));
   const transformed = (x, y) => transformPoint(state.ctm, x, y);
+  const maximumLinearScale = () => {
+    const [a, b, c, d] = state.ctm;
+    const sumSquares = (a * a) + (b * b) + (c * c) + (d * d);
+    const determinant = (a * d) - (b * c);
+    const discriminant = Math.max(0, (sumSquares * sumSquares) - (4 * determinant * determinant));
+    return Math.sqrt((sumSquares + Math.sqrt(discriminant)) / 2);
+  };
   const strokeWithinPage = () => {
     if (!path.length || !Number.isFinite(state.lineWidth) || state.lineWidth < 0) return false;
-    const scale = Math.max(Math.hypot(state.ctm[0], state.ctm[1]), Math.hypot(state.ctm[2], state.ctm[3]));
+    const scale = maximumLinearScale();
     const margin = Math.max(state.lineWidth, 1) * scale * 5;
     return Number.isFinite(margin) && path.every(([x, y]) => x >= margin && y >= margin && x <= width - margin && y <= height - margin);
   };
@@ -291,13 +298,13 @@ function decodedGeometryWithinPage(document, page, content, width, height) {
       if (/^[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)$/.test(token)) { operands.push(Number(token)); continue; }
       if (token.startsWith("/") || token.startsWith("<") || token.startsWith("[")) { operands.push(token); continue; }
       if (token === "q") {
-        if (operands.length) return false;
+        if (operands.length || path.length) return false;
         graphics.push({ ctm: [...state.ctm], lineWidth: state.lineWidth });
       } else if (token === "Q") {
         if (operands.length || !graphics.length || path.length) return false;
         state = graphics.pop();
       } else if (token === "cm") {
-        const values = numbers(6); if (!values) return false;
+        const values = numbers(6); if (!values || path.length) return false;
         state.ctm = multiplyMatrix(state.ctm, values);
       } else if (["rg", "RG"].includes(token)) {
         if (!numbers(3)) return false;
