@@ -1,4 +1,4 @@
--- 0394_tour_rights_projection_hardening.sql
+-- 0427_tour_rights_projection_hardening.sql
 -- Forward-only hardening of 0318.  Public projections are draft containers;
 -- a complete, rights-checked fact selection is sealed atomically by one typed
 -- authority command.  No application role retains raw mutation privileges.
@@ -12,7 +12,7 @@ begin;
 do $$
 begin
   if exists (select 1 from ops.tour_public_projection_seal_receipt) then
-    raise exception '0394 requires zero pre-existing projection seal receipts';
+    raise exception '0427 requires zero pre-existing projection seal receipts';
   end if;
 end $$;
 

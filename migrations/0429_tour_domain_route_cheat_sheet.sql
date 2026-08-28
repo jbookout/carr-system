@@ -1,4 +1,4 @@
--- 0396: additive immutable Tour domain, route, and internal notebook slice.
+-- 0429: additive immutable Tour domain, route, and internal notebook slice.
 begin;
 
 alter table ops.tour add column if not exists subject_type text;
@@ -242,7 +242,7 @@ grant execute on function ops.accept_tour_route_version(text,uuid,integer,text) 
 grant execute on function ops.append_tour_cheat_sheet_revision(text,uuid,jsonb,integer) to carr_writer;
 
 -- Second-pass canonical bridge.  Existing tour_property_membership is the
--- normalized source for 0394 projections, so only accepted active stops enter it.
+-- normalized source for 0427 projections, so only accepted active stops enter it.
 alter table ops.tour_route_version add column if not exists routing_policy_key text;
 alter table ops.tour_route_stop add column if not exists assertion_set_digest text;
 alter table ops.tour_route_stop alter column assertion_set_digest set not null;

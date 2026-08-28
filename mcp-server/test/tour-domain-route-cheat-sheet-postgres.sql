@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- Disposable typed lifecycle proof for 0396; every fixture is rolled back.
+-- Disposable typed lifecycle proof for 0429; every fixture is rolled back.
 begin;
 do $owner$
 begin

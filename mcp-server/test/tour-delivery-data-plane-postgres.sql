@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- Disposable least-privilege proof for 0403. All rows are rolled back.
+-- Disposable least-privilege proof for 0430. All rows are rolled back.
 begin;
 
 insert into ops.tour_property(id,organization_tenant_id,property_status,created_at) values

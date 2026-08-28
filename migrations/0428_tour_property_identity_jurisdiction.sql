@@ -1,4 +1,4 @@
--- 0395_tour_property_identity_jurisdiction.sql
+-- 0428_tour_property_identity_jurisdiction.sql
 -- Additive Tour Slice 3 foundation.  A canonical CARR property UUID remains
 -- distinct from mutable address, parcel, building, provider, map and route
 -- projections.  This migration deliberately has no PostGIS dependency and

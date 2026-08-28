@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 
 const root = path.resolve(import.meta.dirname, "../..");
-const migration = fs.readFileSync(path.join(root, "migrations/0396_tour_domain_route_cheat_sheet.sql"), "utf8");
+const migration = fs.readFileSync(path.join(root, "migrations/0429_tour_domain_route_cheat_sheet.sql"), "utf8");
 
 test("slice 4 is additive and binds new tours to an opaque client/work subject", () => {
   assert.match(migration, /^begin;/m);

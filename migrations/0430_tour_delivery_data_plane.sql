@@ -1,4 +1,4 @@
--- 0403: least-privilege data plane for authenticated Tour search/cart,
+-- 0430: least-privilege data plane for authenticated Tour search/cart,
 -- confidential digest-only shares, and immutable PDF render/review records.
 begin;
 
