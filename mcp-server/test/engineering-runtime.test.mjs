@@ -580,6 +580,10 @@ test("successful admission persists its event through the injected writer", asyn
   assert.equal(result.envelope_id, envelopeId);
   assert.equal(events.length, 1);
   assert.equal(events[0][2], "admit-engineering-slice");
+  const planRead = calls.find(sql => sql.trimStart().startsWith("select id from ops.engineering_slice_plan"));
+  assert.ok(planRead, "admission must verify the registered immutable slice plan");
+  assert.doesNotMatch(planRead, /for\s+(?:key\s+)?share|for\s+update/i,
+    "carr_writer has SELECT-only plan authority, so admission must not request a row lock");
 });
 
 test("admission refuses source drift after serialization before any write", async () => {

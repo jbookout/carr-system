@@ -754,12 +754,18 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
       error(ToolError, { error: "engineering_envelope_insufficient_runway", envelope_id: priorEnvelope.id });
   }
 
-  const lockedPlan = await c.query(
+  // engineering_slice_plan is append-only: its trigger forbids UPDATE/DELETE,
+  // and carr_writer intentionally has SELECT but no UPDATE authority. A row
+  // lock therefore adds no currentness guarantee here and makes this governed
+  // admission impossible (PostgreSQL row locks require UPDATE privilege).
+  // The transaction-scoped advisory lock plus the repeated passport digest
+  // check above are the serialization boundary; keep this lookup read-only.
+  const registeredPlan = await c.query(
     `select id from ops.engineering_slice_plan
-      where accepted_plan_id=$1::uuid and plan_digest=$2::text for key share`,
+      where accepted_plan_id=$1::uuid and plan_digest=$2::text`,
     [source.plan.record_id, plan.plan_digest],
   );
-  if (!lockedPlan.rows.length) error(ToolError, { error: "engineering_slice_plan_not_registered" });
+  if (!registeredPlan.rows.length) error(ToolError, { error: "engineering_slice_plan_not_registered" });
   const lockedWork = await c.query("select id from ops.work_request where id=$1::uuid for share", [source.work.id.replace(/^wr:/, "")]);
   if (!lockedWork.rows.length) error(ToolError, { error: "engineering_work_request_not_found_or_not_ready" });
   refreshed = await c.query("select ops.engineering_passport_facts($1::text) as facts", [workRequest]);
