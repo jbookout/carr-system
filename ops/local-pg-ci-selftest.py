@@ -172,6 +172,26 @@ check(
     "Engineering terminalization race runs after the scoped claim",
     events[8][-1].endswith("ops/engineering-envelope-race-local-pg-gate.py"),
 )
+completion_event = next(
+    index for index, event in enumerate(events)
+    if event[-1].endswith("ops/completion-register-schema-local-pg-gate.py")
+)
+snapshot_event = next(
+    index for index, event in enumerate(events)
+    if event[0].endswith("bin/schema-snapshot.sh")
+)
+check(
+    "completion register fixture runs before schema snapshot",
+    completion_event < snapshot_event,
+)
+check(
+    "disposable schema snapshot proof cannot rewrite the tracked artifact",
+    "--verify-only" in events[snapshot_event],
+)
+check(
+    "disposable snapshot uses clients from the server toolchain",
+    child_envs[snapshot_event].get("PATH", "").split(os.pathsep)[0] == "/fake",
+)
 check(
     "authority acceptance receives only the local disposable DSN",
     child_envs[5].get("CARR_LOCAL_PG_DSN")

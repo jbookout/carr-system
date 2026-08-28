@@ -304,6 +304,11 @@ def run_local_ci(
                 exit_code = 78
             else:
                 acceptance_env = dict(clean_env)
+                # Keep every disposable-database client on the same PostgreSQL toolchain
+                # as the server. Hosted runners expose several client majors on PATH.
+                acceptance_env["PATH"] = (
+                    f"{binaries.psql.parent}{os.pathsep}{acceptance_env.get('PATH', '')}"
+                )
                 acceptance_env["CARR_LOCAL_PG_DSN"] = dsn
                 acceptance = command_runner.run(
                     [acceptance_python, acceptance_script],
@@ -454,6 +459,44 @@ def run_local_ci(
                         exit_code = incident_recovery.returncode
                     else:
                         print("local-db-ci: incident fingerprint and success-clears acceptance passed")
+                        completion_schema_script = (
+                            repo / "ops/completion-register-schema-local-pg-gate.py"
+                        )
+                        completion_schema = command_runner.run(
+                            [acceptance_python, completion_schema_script],
+                            env=acceptance_env,
+                            cwd=repo,
+                            capture=True,
+                        )
+                        if completion_schema.returncode:
+                            print(
+                                "local-db-ci: completion register schema fixture failed: "
+                                f"{_failure_detail(completion_schema)}",
+                                file=sys.stderr,
+                            )
+                            exit_code = completion_schema.returncode
+                        else:
+                            print(completion_schema.stdout, end="")
+                if exit_code == 0:
+                    snapshot = command_runner.run(
+                        [
+                            repo / "bin/schema-snapshot.sh",
+                            "--from-disposable-local",
+                            dsn,
+                            "--verify-only",
+                        ],
+                        env=acceptance_env,
+                        cwd=repo,
+                        capture=True,
+                    )
+                    if snapshot.returncode:
+                        print(
+                            f"local-db-ci: schema snapshot failed: {_failure_detail(snapshot)}",
+                            file=sys.stderr,
+                        )
+                        exit_code = snapshot.returncode
+                    else:
+                        print(snapshot.stdout, end="")
                 if exit_code == 0:
                     print(
                         f"local-db-ci: {ci_class} proof and atomic Joe authority lifecycle "

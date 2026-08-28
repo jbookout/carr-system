@@ -141,6 +141,57 @@ def main():
         case("negative control: a PENDING seeding migration is not a finding "
              "(it still replays, so a rebuild loses nothing)", found == [])
 
+        repo = build_repo(
+            tmp + "/pending-carried",
+            {"0100_seed.sql": seeding},
+            {
+                "carried": {},
+                "carried_after_apply": {"ops.widget": "bounded future config"},
+                "excluded": {},
+            },
+        )
+        case(
+            "carried_after_apply permits absence only while its seed migration is pending",
+            module.check(repo, artifact([])) == [],
+        )
+        case(
+            "carried_after_apply refuses data before the migration ledger entry",
+            any(
+                "PRESENT BEFORE ITS LEDGER ENTRY" in finding
+                for finding in module.check(repo, artifact([], [copy_block("ops.widget")]))
+            ),
+        )
+        case(
+            "carried_after_apply requires rows immediately after ledger application",
+            any(
+                "CARRIED AFTER APPLY BUT ABSENT" in finding
+                for finding in module.check(repo, artifact(["0100_seed.sql"]))
+            ),
+        )
+        case(
+            "carried_after_apply passes after the applied seed and bounded rows agree",
+            module.check(
+                repo,
+                artifact(["0100_seed.sql"], [copy_block("ops.widget")]),
+            ) == [],
+        )
+        stale_pending = build_repo(
+            tmp + "/pending-stale",
+            {"0100_runtime.sql": runtime_only},
+            {
+                "carried": {},
+                "carried_after_apply": {"ops.widget": "stale declaration"},
+                "excluded": {},
+            },
+        )
+        case(
+            "carried_after_apply refuses a declaration with no applied or pending seed",
+            any(
+                "HAS NO SOURCE SEED" in finding
+                for finding in module.check(stale_pending, artifact([]))
+            ),
+        )
+
         # ---------------------------------------------------------------- 3
         repo = build_repo(tmp + "/b", {"0100_seed.sql": seeding},
                           {"carried": {}, "excluded": {"ops.widget": "runtime data"}})
@@ -921,6 +972,20 @@ def main():
             case("a table in two buckets is rejected whichever pair it is", False)
         except ValueError:
             case("a table in two buckets is rejected whichever pair it is", True)
+        repo = build_repo(
+            tmp + "/j-after-apply",
+            {"0100_seed.sql": seeding},
+            {
+                "carried": {"ops.widget": "already carried"},
+                "carried_after_apply": {"ops.widget": "future carried"},
+                "excluded": {},
+            },
+        )
+        try:
+            module.check(repo, artifact(["0100_seed.sql"], [copy_block("ops.widget")]))
+            case("carried_after_apply cannot overlap another classification bucket", False)
+        except ValueError:
+            case("carried_after_apply cannot overlap another classification bucket", True)
 
     # -------------------------------------------------------------------- 9b
     # Carried-presence must be a ROW test, not a NAME test. pg_dump --data-only
