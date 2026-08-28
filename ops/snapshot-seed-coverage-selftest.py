@@ -582,6 +582,39 @@ def main():
         case("calling the longer routine does not drag in the one whose name it contains",
              any("ops.long_one" in f for f in found) and not any("ops.short_one" in f for f in found))
 
+        # M30. A ROUTINE BODY IS SCANNED, NOT STORED RAW, and nothing held that.
+        # The module docstring credited the has_function_privilege case with
+        # pinning it; storing bodies raw survives that case and the committed
+        # artifact both, which is a defence documented as tested that no case
+        # actually killed. A body carrying an INSERT inside a STRING LITERAL
+        # separates them: scanned, the literal is blanked and the table is
+        # invisible; raw, the literal reads as a statement and a routine that
+        # never touches the table reports it.
+        raw_body = ("create function ops.logger() returns void language plpgsql as $$\n"
+                    "begin\n"
+                    "  raise notice 'ran: insert into ops.literal_ghost (k) values (1);';\n"
+                    "  insert into ops.logger_real (k) values (1);\n"
+                    "end $$;\n"
+                    "select ops.logger();\n")
+        repo = build_repo(tmp + "/r6m30", {"0100_m30.sql": raw_body}, {"carried": {}, "excluded": {}})
+        found = module.check(repo, artifact(["0100_m30.sql"]))
+        case("an INSERT inside a string literal in a routine body is not a write",
+             any("ops.logger_real" in f for f in found)
+             and not any("ops.literal_ghost" in f for f in found))
+
+        # M37. THE SHORT-NAME CALL TEST IS THE UNDER-DETECTION DIRECTION. A
+        # schema-qualified routine called WITHOUT its schema, which search_path
+        # makes legal and which this corpus does, is still a call: matching only
+        # the qualified name loses the body, and with it every table the body
+        # seeds. That is a seeded table going unclassified in silence.
+        short = ("create function ops.seed_unqualified() returns void language plpgsql as $$\n"
+                 "begin\n  insert into ops.reached_by_short_name (k) values (1);\nend $$;\n"
+                 "select seed_unqualified();\n")
+        repo = build_repo(tmp + "/r6m37", {"0100_m37.sql": short}, {"carried": {}, "excluded": {}})
+        case("an unqualified call to a schema-qualified routine still seeds its tables",
+             any("ops.reached_by_short_name" in f
+                 for f in module.check(repo, artifact(["0100_m37.sql"]))))
+
         # Whitespace is legal around the schema separator.
         repo = build_repo(tmp + "/r6sp",
                           {"0100_sp.sql": "insert into ops . spaced_table (k) values (1);\n"},
@@ -896,6 +929,19 @@ def main():
         found = module.check(repo, artifact(["0100_seed.sql"], [from_file]))
         case("a file-based COPY still registers the table as present",
              any("DECLARED EXCLUDED BUT PRESENT" in f and "party" in f for f in found))
+
+        # ...and the same statement is NOT enough for a CARRIED table. The two
+        # directions read different sets on purpose: presence stays broad, because
+        # an excluded table named in the artifact is business data arriving and a
+        # name is reason enough to stop. Carried is a ROW test, because the failure
+        # there is a snapshot that cannot rebuild its own database, and a file the
+        # snapshot does not contain rebuilds nothing.
+        carried_from_file = "COPY deal_phase (name) FROM '/tmp/phase.csv';\n\n"
+        repo_cf = build_repo(tmp + "/r6cf", {"0100_cf.sql": "insert into deal_phase (name) values ('x');\n"},
+                             {"carried": {"deal_phase": "closed vocabulary"}, "excluded": {}})
+        found = module.check(repo_cf, artifact(["0100_cf.sql"], [carried_from_file]))
+        case("a carried table is NOT satisfied by a file-based COPY, which carries no rows",
+             any("DECLARED CARRIED BUT ABSENT" in f and "deal_phase" in f for f in found))
 
     # -------------------------------------------------------------------- 10
     # The live classification must actually cover the live tree, or the check
