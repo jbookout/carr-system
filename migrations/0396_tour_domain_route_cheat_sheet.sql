@@ -152,7 +152,7 @@ begin
   if exists(select 1 from ops.tour_route_version_acceptance where organization_tenant_id=p_tenant and route_version_id=p_new_route_version_id) then raise exception 'route transition cannot alter an accepted route version'; end if;
   select property_id,route_sequence into v_old_property,v_old_seq from ops.tour_route_stop where id=p_old_route_stop_id and organization_tenant_id=p_tenant and route_version_id=p_old_route_version_id; if p_old_route_stop_id is not null and not found then raise exception 'route transition old stop is unavailable'; end if;
   select property_id,route_sequence into v_new_property,v_new_seq from ops.tour_route_stop where id=p_new_route_stop_id and organization_tenant_id=p_tenant and route_version_id=p_new_route_version_id; if p_new_route_stop_id is not null and not found then raise exception 'route transition new stop is unavailable'; end if;
-  if p_disposition in ('unchanged','reordered','held','excluded') and v_old_property is distinct from v_new_property then raise exception 'route transition property identity mismatch'; end if;
+  if (p_disposition in ('unchanged','reordered') or (p_disposition in ('held','excluded') and p_new_route_stop_id is not null)) and v_old_property is distinct from v_new_property then raise exception 'route transition property identity mismatch'; end if;
   if p_disposition='unchanged' and v_old_seq is distinct from v_new_seq then raise exception 'unchanged route transition requires the same sequence'; end if;
   if p_disposition='reordered' and v_old_seq is not distinct from v_new_seq then raise exception 'reordered route transition requires a sequence change'; end if;
   if p_disposition='merged' and (v_old_property is not distinct from v_new_property or not exists(

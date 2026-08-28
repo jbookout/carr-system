@@ -97,6 +97,7 @@ test("static shell has no raw-token persistence/logging and stays in dealroom/to
   assert.match(js, /grant\.status === "active"/);
   assert.match(js, /dataset\.shareGrantId/);
   assert.match(js, /issueShare\(id\(state\.shareGrantId\)\)/);
+  assert.match(js, /stops\(\)\.filter\(\(stop\) => stop\.stop_state === "active"\)\.map/);
   assert.doesNotMatch(html, /value="(?:download_pdf|comment|react)"/);
   assert.match(html, /future governed scope amendment/);
   assert.match(css, /#002F6C/); assert.match(css, /#F57F29/);

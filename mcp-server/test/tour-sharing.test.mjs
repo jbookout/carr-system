@@ -39,7 +39,7 @@ function harness() {
     if (sql.includes("read_tour_share_packet")) return { rows: [{ packet: packetFixture }] };
     if (sql.includes("read_tour_share_map")) return { rows: [{ map: mapFixture }] };
     if (sql.includes("resolve_tour_public_asset")) return { rows: [{ asset: { media_type: "image/jpeg", content_length: 12, provider_url: "private" } }] };
-    if (sql.includes("read_tour_sharing_library")) return { rows: [{ library: { grants: [{ status: "active", permission_scopes: ["view_packet", "comment"], expires_at: "2026-08-28T00:00:00Z", provider: "private" }] } }] };
+    if (sql.includes("read_tour_sharing_library")) return { rows: [{ library: { grants: [{ share_grant_id: ids.grant, status: "active", permission_scopes: ["view_packet", "comment"], expires_at: "2026-08-28T00:00:00Z", provider: "private" }] } }] };
     if (sql.includes("read_tour_sharing_interactions")) return { rows: [{ interactions: { items: [] } }] };
     throw new Error(sql);
   } };
@@ -105,7 +105,7 @@ test("public and internal projections strip secrets and unsupported scopes", asy
     { asset_ref: "asset:public:abcdefghijklmnop", media_type: "image/jpeg" });
   const h = harness();
   const library = await h.tools["read-tour-sharing-library"].handler(h.client, actor, { projection_id: ids.projection, cursor: null, limit: 10 });
-  assert.deepEqual(library.library.grants, [{ status: "active", permission_scopes: ["view_packet"], expires_at: "2026-08-28T00:00:00Z" }]);
+  assert.deepEqual(library.library.grants, [{ share_grant_id: ids.grant, status: "active", permission_scopes: ["view_packet"], expires_at: "2026-08-28T00:00:00Z" }]);
   assert.doesNotMatch(JSON.stringify(library), /provider|token_digest|session_digest|r2_key|rights|evidence/);
 });
 

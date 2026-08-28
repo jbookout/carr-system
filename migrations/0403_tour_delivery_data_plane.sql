@@ -219,20 +219,25 @@ begin
       exists(select 1 from ops.tour_coordinate_entrance_verification_receipt er where er.organization_tenant_id=p_tenant and er.property_id=p.id) as entrance_verified,
       exists(select 1 from ops.tour_public_projection_fact pf join ops.tour_public_projection pp on pp.id=pf.projection_id and pp.organization_tenant_id=pf.organization_tenant_id where pf.organization_tenant_id=p_tenant and pf.property_id=p.id and pp.status='approved' and exists(select 1 from ops.tour_public_projection_seal_receipt ps where ps.organization_tenant_id=pp.organization_tenant_id and ps.projection_id=pp.id)) as public_projection_ready,
       coalesce(jsonb_array_length(case when jsonb_typeof(photos.value)='array' then photos.value else '[]'::jsonb end),0) as photo_count,
-      greatest(p.created_at,coalesce(name.created_at,p.created_at),coalesce(address.created_at,p.created_at)) as updated_at
+      greatest(p.created_at,j.created_at,name.created_at,address.created_at,type.created_at,
+        size_fact.created_at,econ.created_at,avail.created_at,photos.created_at) as updated_at,
+      greatest(j.as_of,name.observed_at,name.effective_from,address.observed_at,address.effective_from,
+        type.observed_at,type.effective_from,size_fact.observed_at,size_fact.effective_from,
+        econ.observed_at,econ.effective_from,avail.observed_at,avail.effective_from,
+        photos.observed_at,photos.effective_from) as fact_as_of
     from ops.tour_property p
     join lateral (
-      select d.county_name from ops.tour_property_jurisdiction_assertion a join ops.tour_jurisdiction_dataset d on d.id=a.jurisdiction_dataset_id and d.organization_tenant_id=a.organization_tenant_id
+      select d.county_name,a.created_at,a.as_of from ops.tour_property_jurisdiction_assertion a join ops.tour_jurisdiction_dataset d on d.id=a.jurisdiction_dataset_id and d.organization_tenant_id=a.organization_tenant_id
        where a.organization_tenant_id=p.organization_tenant_id and a.property_id=p.id and a.review_state='reviewed' and d.review_state='reviewed' and d.state_code='FL'
        order by a.as_of desc,a.id desc limit 1
     ) j on true
-    left join lateral (select value,created_at from ops.tour_field_assertion a where a.organization_tenant_id=p.organization_tenant_id and a.property_id=p.id and a.field_key='display.name' and a.review_state='reviewed' order by a.effective_from desc,a.id desc limit 1) name on true
-    left join lateral (select value,created_at from ops.tour_field_assertion a where a.organization_tenant_id=p.organization_tenant_id and a.property_id=p.id and a.field_key='display.address' and a.review_state='reviewed' order by a.effective_from desc,a.id desc limit 1) address on true
-    left join lateral (select value from ops.tour_field_assertion a where a.organization_tenant_id=p.organization_tenant_id and a.property_id=p.id and a.field_key='property_type' and a.review_state='reviewed' order by a.effective_from desc,a.id desc limit 1) type on true
-    left join lateral (select value from ops.tour_field_assertion a where a.organization_tenant_id=p.organization_tenant_id and a.property_id=p.id and a.field_key='size' and a.review_state='reviewed' order by a.effective_from desc,a.id desc limit 1) size_fact on true
-    left join lateral (select value from ops.tour_field_assertion a where a.organization_tenant_id=p.organization_tenant_id and a.property_id=p.id and a.field_key='asking_economics' and a.review_state='reviewed' order by a.effective_from desc,a.id desc limit 1) econ on true
-    left join lateral (select value from ops.tour_field_assertion a where a.organization_tenant_id=p.organization_tenant_id and a.property_id=p.id and a.field_key='availability' and a.review_state='reviewed' order by a.effective_from desc,a.id desc limit 1) avail on true
-    left join lateral (select value from ops.tour_field_assertion a where a.organization_tenant_id=p.organization_tenant_id and a.property_id=p.id and a.field_key='photos' and a.review_state='reviewed' order by a.effective_from desc,a.id desc limit 1) photos on true
+    left join lateral (select value,created_at,observed_at,effective_from from ops.tour_field_assertion a where a.organization_tenant_id=p.organization_tenant_id and a.property_id=p.id and a.field_key='display.name' and a.review_state='reviewed' and a.effective_from<=now() and (a.effective_to is null or a.effective_to>now()) order by a.effective_from desc,a.id desc limit 1) name on true
+    left join lateral (select value,created_at,observed_at,effective_from from ops.tour_field_assertion a where a.organization_tenant_id=p.organization_tenant_id and a.property_id=p.id and a.field_key='display.address' and a.review_state='reviewed' and a.effective_from<=now() and (a.effective_to is null or a.effective_to>now()) order by a.effective_from desc,a.id desc limit 1) address on true
+    left join lateral (select value,created_at,observed_at,effective_from from ops.tour_field_assertion a where a.organization_tenant_id=p.organization_tenant_id and a.property_id=p.id and a.field_key='property_type' and a.review_state='reviewed' and a.effective_from<=now() and (a.effective_to is null or a.effective_to>now()) order by a.effective_from desc,a.id desc limit 1) type on true
+    left join lateral (select value,created_at,observed_at,effective_from from ops.tour_field_assertion a where a.organization_tenant_id=p.organization_tenant_id and a.property_id=p.id and a.field_key='size' and a.review_state='reviewed' and a.effective_from<=now() and (a.effective_to is null or a.effective_to>now()) order by a.effective_from desc,a.id desc limit 1) size_fact on true
+    left join lateral (select value,created_at,observed_at,effective_from from ops.tour_field_assertion a where a.organization_tenant_id=p.organization_tenant_id and a.property_id=p.id and a.field_key='asking_economics' and a.review_state='reviewed' and a.effective_from<=now() and (a.effective_to is null or a.effective_to>now()) order by a.effective_from desc,a.id desc limit 1) econ on true
+    left join lateral (select value,created_at,observed_at,effective_from from ops.tour_field_assertion a where a.organization_tenant_id=p.organization_tenant_id and a.property_id=p.id and a.field_key='availability' and a.review_state='reviewed' and a.effective_from<=now() and (a.effective_to is null or a.effective_to>now()) order by a.effective_from desc,a.id desc limit 1) avail on true
+    left join lateral (select value,created_at,observed_at,effective_from from ops.tour_field_assertion a where a.organization_tenant_id=p.organization_tenant_id and a.property_id=p.id and a.field_key='photos' and a.review_state='reviewed' and a.effective_from<=now() and (a.effective_to is null or a.effective_to>now()) order by a.effective_from desc,a.id desc limit 1) photos on true
     where p.organization_tenant_id=p_tenant and p.property_status='active'
   ), filtered as (
     select * from candidates c where
@@ -263,7 +268,7 @@ begin
     'property_type',type_value#>>'{}','size',size_value,'asking_economics',econ_value,
     'availability',coalesce(availability_value#>>'{}','unknown'),'entrance_verified',entrance_verified,
     'public_projection_ready',public_projection_ready,'photos_available',photo_count>0,'photo_count',photo_count,
-    'updated_at',updated_at,'fact_as_of',updated_at,'caveat','Facts shown are source-reviewed as of the displayed timestamp.'
+    'updated_at',updated_at,'fact_as_of',fact_as_of,'caveat','Facts shown are source-reviewed as of the displayed timestamp.'
   )) order by result_position),'[]'::jsonb),
   exists(select 1 from page_plus_one where result_position>v_offset+v_limit)
   into v_count,v_items,v_has_more from page;
@@ -437,6 +442,32 @@ returns jsonb language sql stable security definer set search_path=pg_catalog,op
   from projection p cross join selected_json s cross join preview v;
 $$;
 
+create or replace function ops.tour_public_map_projection_ready(p_tenant text,p_projection_id uuid)
+returns boolean language sql stable security definer set search_path=pg_catalog,ops,public,pg_temp as $$
+  select exists (
+    select 1 from ops.tour_public_projection p
+    where p.organization_tenant_id=p_tenant and p.id=p_projection_id
+      and exists(select 1 from ops.tour_property_membership m where m.organization_tenant_id=p.organization_tenant_id and m.tour_id=p.tour_id and m.route_version=p.route_version)
+      and (select count(*) from ops.tour_public_projection_map_point mp where mp.organization_tenant_id=p.organization_tenant_id and mp.projection_id=p.id)
+        = (select count(*) from ops.tour_property_membership m where m.organization_tenant_id=p.organization_tenant_id and m.tour_id=p.tour_id and m.route_version=p.route_version)
+      and not exists (
+        select 1 from ops.tour_public_projection_map_point mp
+        where mp.organization_tenant_id=p.organization_tenant_id and mp.projection_id=p.id
+          and not exists (
+            select 1 from ops.tour_property_coordinate_candidate c
+            join ops.tour_coordinate_entrance_verification_receipt er on er.organization_tenant_id=c.organization_tenant_id and er.coordinate_candidate_id=c.id and er.property_id=c.property_id
+            join ops.tour_source_evidence e on e.organization_tenant_id=c.organization_tenant_id and e.id=c.source_evidence_id and e.rights_receipt_id=c.rights_receipt_id
+            join ops.tour_rights_receipt r on r.organization_tenant_id=e.organization_tenant_id and r.id=e.rights_receipt_id and r.provider=e.rights_provider and r.policy_key=e.rights_policy_key
+            where c.organization_tenant_id=mp.organization_tenant_id and c.id=mp.coordinate_candidate_id and c.property_id=mp.property_id
+              and er.id=mp.entrance_verification_receipt_id and c.coordinate_role in ('entrance','driveway','parking_access') and c.review_state='reviewed'
+              and r.status='active' and r.effective_at<=now() and (r.expires_at is null or r.expires_at>now()) and (r.revoked_at is null or r.revoked_at>now())
+              and r.allowed_use_classes ? 'client_public_display' and (r.allowed_field_classes ? 'coordinates' or r.allowed_field_classes ? '*')
+              and not exists(select 1 from ops.tour_rights_receipt newer where newer.organization_tenant_id=r.organization_tenant_id and newer.provider=r.provider and newer.policy_key=r.policy_key and newer.receipt_version>r.receipt_version and newer.effective_at<=now())
+          )
+      )
+  );
+$$;
+
 create or replace function ops.issue_tour_share_grant(p_tenant text,p_projection_id uuid,p_token_digest text,p_permission_scopes jsonb,p_expires_at timestamptz,p_receipt_digest text,p_actor_id text)
 returns uuid language plpgsql security definer set search_path=pg_catalog,ops,public,pg_temp as $$
 declare v_id uuid; v_projection ops.tour_public_projection%rowtype;
@@ -444,10 +475,8 @@ begin
   if p_token_digest !~ '^sha256:[a-f0-9]{64}$' or p_receipt_digest !~ '^sha256:[a-f0-9]{64}$' or p_expires_at<=now() or jsonb_typeof(p_permission_scopes)<>'array' or not (p_permission_scopes <@ '["view_packet","view_map"]'::jsonb) or jsonb_array_length(p_permission_scopes)=0 or nullif(btrim(p_actor_id),'') is null then raise exception 'tour share payload is invalid'; end if;
   select * into v_projection from ops.tour_public_projection p where p.organization_tenant_id=p_tenant and p.id=p_projection_id and p.status='approved' and exists(select 1 from ops.tour_public_projection_seal_receipt s where s.organization_tenant_id=p.organization_tenant_id and s.projection_id=p.id and s.canonical_projection_digest=p.projection_digest) and ops.read_tour_public_projection(p.organization_tenant_id,p.id) is not null for update;
   if not found then raise exception 'tour share requires a sealed projection'; end if;
-  if p_permission_scopes ? 'view_map' and
-     (select count(*) from ops.tour_public_projection_map_point mp where mp.organization_tenant_id=p_tenant and mp.projection_id=p_projection_id)
-       <> (select count(*) from ops.tour_property_membership m where m.organization_tenant_id=p_tenant and m.tour_id=v_projection.tour_id and m.route_version=v_projection.route_version)
-  then raise exception 'tour map share requires one sealed entrance coordinate per property'; end if;
+  if p_permission_scopes ? 'view_map' and not ops.tour_public_map_projection_ready(p_tenant,p_projection_id)
+  then raise exception 'tour map share requires current rights and one sealed entrance coordinate per property'; end if;
   if exists(select 1 from ops.tour_share_grant where organization_tenant_id=p_tenant and projection_id=p_projection_id) then raise exception 'tour share issue requires rotation'; end if;
   insert into ops.tour_share_grant(organization_tenant_id,projection_id,grant_version,token_digest,audience,permission_scopes,expires_at,status,receipt_digest,created_by_actor_id)
   values(p_tenant,p_projection_id,1,p_token_digest,'client',p_permission_scopes,p_expires_at,'active',p_receipt_digest,p_actor_id) returning id into v_id;
@@ -463,10 +492,8 @@ begin
   if p_token_digest !~ '^sha256:[a-f0-9]{64}$' or p_receipt_digest !~ '^sha256:[a-f0-9]{64}$' or p_expires_at<=now() or jsonb_typeof(p_permission_scopes)<>'array' or not (p_permission_scopes <@ '["view_packet","view_map"]'::jsonb) or jsonb_array_length(p_permission_scopes)=0 or nullif(btrim(p_actor_id),'') is null then raise exception 'tour share payload is invalid'; end if;
   select * into v_projection from ops.tour_public_projection where organization_tenant_id=p_tenant and id=p_projection_id;
   if not found or ops.read_tour_public_projection(p_tenant,p_projection_id) is null then raise exception 'tour share requires a current sealed projection'; end if;
-  if p_permission_scopes ? 'view_map' and
-     (select count(*) from ops.tour_public_projection_map_point mp where mp.organization_tenant_id=p_tenant and mp.projection_id=p_projection_id)
-       <> (select count(*) from ops.tour_property_membership m where m.organization_tenant_id=p_tenant and m.tour_id=v_projection.tour_id and m.route_version=v_projection.route_version)
-  then raise exception 'tour map share requires one sealed entrance coordinate per property'; end if;
+  if p_permission_scopes ? 'view_map' and not ops.tour_public_map_projection_ready(p_tenant,p_projection_id)
+  then raise exception 'tour map share requires current rights and one sealed entrance coordinate per property'; end if;
   insert into ops.tour_share_grant(organization_tenant_id,projection_id,grant_version,token_digest,audience,permission_scopes,rotated_from_grant_id,expires_at,status,receipt_digest,created_by_actor_id)
   values(p_tenant,p_projection_id,v_prior.grant_version+1,p_token_digest,'client',p_permission_scopes,v_prior.id,p_expires_at,'active',p_receipt_digest,p_actor_id) returning id into v_id;
   return v_id;
@@ -500,7 +527,7 @@ begin
     select selected.*,row_number() over (order by grant_version desc,id desc) page_row from selected
   )
   select count(*),coalesce(jsonb_agg(jsonb_build_object(
-    'status',case when revocation_id is not null then 'revoked' when successor_id is not null then 'rotated' when expires_at<=now() then 'expired' else 'active' end,
+    'share_grant_id',id,'status',case when revocation_id is not null then 'revoked' when successor_id is not null then 'rotated' when expires_at<=now() then 'expired' else 'active' end,
     'permission_scopes',permission_scopes,'expires_at',expires_at,'revoked_at',revoked_at,'reason',reason,'created_at',created_at
   ) order by grant_version desc,id desc) filter(where page_row<=v_limit),'[]'::jsonb)
   into v_count,v_items from page;
@@ -565,17 +592,7 @@ returns jsonb language sql stable security definer set search_path=pg_catalog,op
     select p.* from grant_row g join ops.tour_public_projection p on p.organization_tenant_id=g.organization_tenant_id and p.id=g.projection_id
     where p.status='approved' and exists(select 1 from ops.tour_public_projection_seal_receipt s where s.organization_tenant_id=p.organization_tenant_id and s.projection_id=p.id and s.canonical_projection_digest=p.projection_digest)
       and ops.read_tour_public_projection(p.organization_tenant_id,p.id) is not null
-      and not exists (
-        select 1 from ops.tour_public_projection_map_point invalid
-        join ops.tour_property_coordinate_candidate ic on ic.organization_tenant_id=invalid.organization_tenant_id and ic.id=invalid.coordinate_candidate_id
-        join ops.tour_source_evidence ie on ie.organization_tenant_id=ic.organization_tenant_id and ie.id=ic.source_evidence_id and ie.rights_receipt_id=ic.rights_receipt_id
-        join ops.tour_rights_receipt ir on ir.organization_tenant_id=ie.organization_tenant_id and ir.id=ie.rights_receipt_id and ir.provider=ie.rights_provider and ir.policy_key=ie.rights_policy_key
-        where invalid.organization_tenant_id=p.organization_tenant_id and invalid.projection_id=p.id and
-          (ir.status<>'active' or ir.effective_at>now() or (ir.expires_at is not null and ir.expires_at<=now()) or (ir.revoked_at is not null and ir.revoked_at<=now())
-           or not (ir.allowed_use_classes ? 'client_public_display')
-           or not (ir.allowed_field_classes ? 'coordinates' or ir.allowed_field_classes ? '*')
-           or exists(select 1 from ops.tour_rights_receipt newer where newer.organization_tenant_id=ir.organization_tenant_id and newer.provider=ir.provider and newer.policy_key=ir.policy_key and newer.receipt_version>ir.receipt_version and newer.effective_at<=now()))
-      )
+      and ops.tour_public_map_projection_ready(p.organization_tenant_id,p.id)
   ) select jsonb_build_object('as_of',p.as_of,'points',coalesce(jsonb_agg(jsonb_build_object(
     'property_ref','property:public:'||substr(encode(public.digest(p.organization_tenant_id||':'||p.id::text||':'||m.property_id::text,'sha256'),'hex'),1,32),
     'route_sequence',m.route_sequence,'route_label',m.route_label,'latitude',c.latitude::double precision,'longitude',c.longitude::double precision
@@ -701,7 +718,7 @@ begin
 end $$;
 
 revoke all on table ops.tour_selection_cart_version,ops.tour_share_session,ops.tour_public_asset,ops.tour_public_projection_map_point,ops.tour_pdf_render_job,ops.tour_pdf_render_result,ops.tour_pdf_human_review from public,carr_reader,carr_writer,carr_jobs,carr_authority;
-revoke all on function ops.tour_delivery_append_only_guard(),ops.search_tour_properties(text,text,jsonb),ops.append_tour_selection_cart_version(text,uuid,uuid,jsonb,integer,text),ops.read_tour_selection_cart(text,uuid,text),ops.list_tour_library(text,text),ops.read_tour_internal_detail(text,uuid,text),ops.prepare_tour_route_version(text,uuid,uuid,integer,jsonb),ops.read_tour_projection_creation_metadata(text,uuid,uuid,text),ops.read_tour_projection_seal_candidates(text,uuid,text),ops.issue_tour_share_grant(text,uuid,text,jsonb,timestamp with time zone,text,text),ops.rotate_tour_share_grant(text,uuid,uuid,text,jsonb,timestamp with time zone,text,text),ops.revoke_tour_share_grant(text,uuid,text,text,timestamp with time zone,text),ops.read_tour_sharing_library(text,uuid,text,text,integer),ops.exchange_tour_share_token(text,text,timestamp with time zone,text),ops.tour_share_session_grant(text,text),ops.read_tour_share_packet(text),ops.read_tour_share_map(text),ops.resolve_tour_public_asset(text,text),ops.request_tour_pdf_render(text,text,jsonb),ops.read_tour_packet_for_render(text,uuid,text),ops.record_tour_pdf_render_result(text,uuid,text,text,text,text,integer,integer,integer,text,text),ops.read_tour_pdf_artifact_for_review(text,uuid,text),ops.read_tour_pdf_artifact_for_download(text,uuid,text),ops.read_tour_pdf_render(text,uuid,text),ops.record_tour_pdf_human_review(text,uuid,text,text,timestamp with time zone,text,text,text) from public,carr_reader,carr_writer,carr_jobs,carr_authority;
+revoke all on function ops.tour_delivery_append_only_guard(),ops.search_tour_properties(text,text,jsonb),ops.append_tour_selection_cart_version(text,uuid,uuid,jsonb,integer,text),ops.read_tour_selection_cart(text,uuid,text),ops.list_tour_library(text,text),ops.read_tour_internal_detail(text,uuid,text),ops.prepare_tour_route_version(text,uuid,uuid,integer,jsonb),ops.read_tour_projection_creation_metadata(text,uuid,uuid,text),ops.read_tour_projection_seal_candidates(text,uuid,text),ops.tour_public_map_projection_ready(text,uuid),ops.issue_tour_share_grant(text,uuid,text,jsonb,timestamp with time zone,text,text),ops.rotate_tour_share_grant(text,uuid,uuid,text,jsonb,timestamp with time zone,text,text),ops.revoke_tour_share_grant(text,uuid,text,text,timestamp with time zone,text),ops.read_tour_sharing_library(text,uuid,text,text,integer),ops.exchange_tour_share_token(text,text,timestamp with time zone,text),ops.tour_share_session_grant(text,text),ops.read_tour_share_packet(text),ops.read_tour_share_map(text),ops.resolve_tour_public_asset(text,text),ops.request_tour_pdf_render(text,text,jsonb),ops.read_tour_packet_for_render(text,uuid,text),ops.record_tour_pdf_render_result(text,uuid,text,text,text,text,integer,integer,integer,text,text),ops.read_tour_pdf_artifact_for_review(text,uuid,text),ops.read_tour_pdf_artifact_for_download(text,uuid,text),ops.read_tour_pdf_render(text,uuid,text),ops.record_tour_pdf_human_review(text,uuid,text,text,timestamp with time zone,text,text,text) from public,carr_reader,carr_writer,carr_jobs,carr_authority;
 grant execute on function ops.search_tour_properties(text,text,jsonb),ops.append_tour_selection_cart_version(text,uuid,uuid,jsonb,integer,text),ops.read_tour_selection_cart(text,uuid,text),ops.list_tour_library(text,text),ops.read_tour_internal_detail(text,uuid,text),ops.prepare_tour_route_version(text,uuid,uuid,integer,jsonb),ops.read_tour_projection_creation_metadata(text,uuid,uuid,text),ops.read_tour_projection_seal_candidates(text,uuid,text),ops.read_tour_sharing_library(text,uuid,text,text,integer),ops.request_tour_pdf_render(text,text,jsonb),ops.read_tour_packet_for_render(text,uuid,text),ops.read_tour_pdf_artifact_for_review(text,uuid,text),ops.read_tour_pdf_artifact_for_download(text,uuid,text),ops.read_tour_pdf_render(text,uuid,text) to carr_writer,carr_authority;
 grant execute on function ops.issue_tour_share_grant(text,uuid,text,jsonb,timestamp with time zone,text,text),ops.rotate_tour_share_grant(text,uuid,uuid,text,jsonb,timestamp with time zone,text,text),ops.revoke_tour_share_grant(text,uuid,text,text,timestamp with time zone,text),ops.record_tour_pdf_render_result(text,uuid,text,text,text,text,integer,integer,integer,text,text),ops.record_tour_pdf_human_review(text,uuid,text,text,timestamp with time zone,text,text,text) to carr_authority;
 grant execute on function ops.exchange_tour_share_token(text,text,timestamp with time zone,text),ops.read_tour_share_packet(text),ops.read_tour_share_map(text),ops.resolve_tour_public_asset(text,text) to carr_writer;

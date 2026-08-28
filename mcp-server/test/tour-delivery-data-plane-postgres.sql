@@ -2,9 +2,27 @@
 -- Disposable least-privilege proof for 0403. All rows are rolled back.
 begin;
 
-insert into ops.tour_property(id,organization_tenant_id,property_status) values
-('a1000000-0000-4000-8000-000000000001','tour-delivery-proof','active'),
-('a1000000-0000-4000-8000-000000000002','tour-delivery-proof','active');
+insert into ops.tour_property(id,organization_tenant_id,property_status,created_at) values
+('a1000000-0000-4000-8000-000000000001','tour-delivery-proof','active',now()-interval '30 days'),
+('a1000000-0000-4000-8000-000000000002','tour-delivery-proof','active',now()-interval '30 days');
+insert into ops.tour_rights_receipt(id,organization_tenant_id,provider,policy_key,receipt_version,receipt_digest,terms_url,reviewed_at,reviewer,intended_use,allowed_field_classes,allowed_use_classes,effective_at,status)
+values('a5000000-0000-4000-8000-000000000001','tour-delivery-proof','search-proof','search-policy',1,'sha256:'||repeat('1',64),'https://example.invalid/search',now()-interval '1 year','proof','search proof','["*"]','["source_intake","canonical_fact"]',now()-interval '1 year','active');
+insert into ops.tour_source_evidence(id,organization_tenant_id,stable_locator,evidence_class,retrieved_at,retrieval_status,content_digest,rights_receipt_id,data_classification,rights_provider,rights_policy_key)
+values('a6000000-0000-4000-8000-000000000001','tour-delivery-proof','proof:search','direct_source',now()-interval '31 days','read','sha256:'||repeat('2',64),'a5000000-0000-4000-8000-000000000001','public','search-proof','search-policy');
+insert into ops.tour_jurisdiction_dataset(id,organization_tenant_id,jurisdiction_type,state_code,county_name,authoritative_source_locator,dataset_version,dataset_digest,source_evidence_id,rights_receipt_id,as_of,review_state,created_at)
+values('a7000000-0000-4000-8000-000000000001','tour-delivery-proof','county','FL','Escambia','proof:county','v1','sha256:'||repeat('3',64),'a6000000-0000-4000-8000-000000000001','a5000000-0000-4000-8000-000000000001',now()-interval '25 days','reviewed',now()-interval '25 days');
+insert into ops.tour_property_jurisdiction_assertion(id,organization_tenant_id,property_id,jurisdiction_dataset_id,jurisdiction_name,assertion_method,source_evidence_id,rights_receipt_id,as_of,review_state,created_at)
+values('a8000000-0000-4000-8000-000000000001','tour-delivery-proof','a1000000-0000-4000-8000-000000000001','a7000000-0000-4000-8000-000000000001','Escambia','manual_review','a6000000-0000-4000-8000-000000000001','a5000000-0000-4000-8000-000000000001',now()-interval '25 days','reviewed',now()-interval '25 days');
+insert into ops.tour_field_assertion(id,organization_tenant_id,property_id,field_key,value,source_evidence_id,rights_receipt_id,observed_at,effective_from,effective_to,confidence,data_classification,review_state,created_at) values
+('a9000000-0000-4000-8000-000000000001','tour-delivery-proof','a1000000-0000-4000-8000-000000000001','display.name','"Current Medical Plaza"','a6000000-0000-4000-8000-000000000001','a5000000-0000-4000-8000-000000000001',now()-interval '20 days',now()-interval '20 days',null,'high','public','reviewed',now()-interval '20 days'),
+('a9000000-0000-4000-8000-000000000002','tour-delivery-proof','a1000000-0000-4000-8000-000000000001','display.name','"Future Medical Plaza"','a6000000-0000-4000-8000-000000000001','a5000000-0000-4000-8000-000000000001',now(),now()+interval '1 day',null,'high','public','reviewed',now()),
+('a9000000-0000-4000-8000-000000000003','tour-delivery-proof','a1000000-0000-4000-8000-000000000001','display.address','"100 Current Way"','a6000000-0000-4000-8000-000000000001','a5000000-0000-4000-8000-000000000001',now()-interval '19 days',now()-interval '19 days',null,'high','public','reviewed',now()-interval '19 days'),
+('a9000000-0000-4000-8000-000000000004','tour-delivery-proof','a1000000-0000-4000-8000-000000000001','property_type','"medical_office"','a6000000-0000-4000-8000-000000000001','a5000000-0000-4000-8000-000000000001',now()-interval '18 days',now()-interval '18 days',null,'high','public','reviewed',now()-interval '18 days'),
+('a9000000-0000-4000-8000-000000000005','tour-delivery-proof','a1000000-0000-4000-8000-000000000001','size','{"value":4200,"unit":"SF"}','a6000000-0000-4000-8000-000000000001','a5000000-0000-4000-8000-000000000001',now()-interval '17 days',now()-interval '17 days',null,'high','public','reviewed',now()-interval '17 days'),
+('a9000000-0000-4000-8000-000000000006','tour-delivery-proof','a1000000-0000-4000-8000-000000000001','asking_economics','{"value":24,"currency":"USD","period":"NNN"}','a6000000-0000-4000-8000-000000000001','a5000000-0000-4000-8000-000000000001',now()-interval '16 days',now()-interval '16 days',null,'high','public','reviewed',now()-interval '16 days'),
+('a9000000-0000-4000-8000-000000000007','tour-delivery-proof','a1000000-0000-4000-8000-000000000001','availability','"available"','a6000000-0000-4000-8000-000000000001','a5000000-0000-4000-8000-000000000001',now()-interval '1 day',now()-interval '10 days',null,'high','public','reviewed',now()-interval '1 day'),
+('a9000000-0000-4000-8000-000000000008','tour-delivery-proof','a1000000-0000-4000-8000-000000000001','availability','"withdrawn"','a6000000-0000-4000-8000-000000000001','a5000000-0000-4000-8000-000000000001',now()-interval '3 days',now()-interval '5 days',now()-interval '2 days','high','public','reviewed',now()-interval '2 days'),
+('a9000000-0000-4000-8000-000000000009','tour-delivery-proof','a1000000-0000-4000-8000-000000000001','photos','[{"asset_ref":"asset:public:abcdefghijklmnop"}]','a6000000-0000-4000-8000-000000000001','a5000000-0000-4000-8000-000000000001',now()-interval '15 days',now()-interval '15 days',null,'high','public','reviewed',now()-interval '15 days');
 insert into ops.tour(id,organization_tenant_id,tour_name,tour_status,route_version,canonical_dataset_version,subject_type,subject_id,subject_bound_at)
 values('a2000000-0000-4000-8000-000000000001','tour-delivery-proof','Delivery proof','draft',1,'proof-v1','work','proof',now());
 insert into ops.tour_route_version(id,organization_tenant_id,tour_id,route_version,start_point,end_point,routing_source,routing_request,created_by_actor_id)
@@ -46,6 +64,9 @@ begin
   end;
   v_search:=ops.search_tour_properties('tour-delivery-proof','tour-delivery-proof','{"query":null,"counties":[],"property_types":[],"min_square_feet":null,"max_square_feet":null,"availability":[],"entrance_verified":null,"public_projection_ready":null,"photos_available":null,"sort":"updated_desc","cursor":null,"limit":25}');
   if jsonb_typeof(v_search->'items')<>'array' then raise exception 'search did not return a bounded item array'; end if;
+  if v_search#>>'{items,0,name}'<>'Current Medical Plaza' or v_search#>>'{items,0,availability}'<>'available' then raise exception 'search selected a future-effective or expired assertion'; end if;
+  if (v_search#>>'{items,0,updated_at}')::timestamptz not between now()-interval '26 hours' and now()-interval '22 hours' then raise exception 'search update timestamp omitted a displayed fact'; end if;
+  if (v_search#>>'{items,0,fact_as_of}')::timestamptz not between now()-interval '26 hours' and now()-interval '22 hours' then raise exception 'search factual as-of timestamp omitted a displayed fact'; end if;
   v_projection_meta:=ops.read_tour_projection_creation_metadata('tour-delivery-proof','a2000000-0000-4000-8000-000000000001','a3000000-0000-4000-8000-000000000001','tour-delivery-proof');
   if v_projection_meta->>'route_version'<>'1' or v_projection_meta->>'projection_version'<>'1' then raise exception 'projection creation metadata is incomplete'; end if;
 end $writer$;

@@ -42,7 +42,7 @@ begin
  select id into oa from ops.tour_route_stop where route_version_id=r1 and property_id='40000000-0000-4000-8000-000000000001';
  select id into oh from ops.tour_route_stop where route_version_id=r1 and property_id='40000000-0000-4000-8000-000000000002';
  perform ops.append_tour_route_stop_transition('tour-slice4-proof',r1,abandoned_r2,oa,null,'removed');
- perform ops.append_tour_route_stop_transition('tour-slice4-proof',r1,abandoned_r2,oh,null,'removed');
+ perform ops.append_tour_route_stop_transition('tour-slice4-proof',r1,abandoned_r2,oh,null,'held');
  perform ops.append_tour_route_stop_transition('tour-slice4-proof',null,abandoned_r2,null,replacement,'added');
 end $writer$;
 set local session authorization carr_authority;

@@ -46,7 +46,9 @@ test("public packet and map reads remain sealed facts-only projections", () => {
   assert.match(migration, /public-tour-projection-digest\.v2/i);
   assert.match(migration, /tour_public_projection_map_point/i);
   assert.match(migration, /ops\.read_tour_public_projection\(p\.organization_tenant_id,p\.id\) is not null/i);
-  assert.match(migration, /tour map share requires one sealed entrance coordinate per property/i);
+  assert.match(migration, /tour map share requires current rights and one sealed entrance coordinate per property/i);
+  assert.equal((migration.match(/not ops\.tour_public_map_projection_ready\(p_tenant,p_projection_id\)/g) || []).length, 2);
+  assert.match(migration, /and ops\.tour_public_map_projection_ready\(p\.organization_tenant_id,p\.id\)/i);
   assert.match(migration, /allowed_field_classes \? 'coordinates'/i);
   assert.match(migration, /tour_share_session_grant\(p_session_digest,'view_packet'\)/i);
   assert.match(migration, /tour_share_session_grant\(p_session_digest,'view_map'\)/i);
@@ -58,6 +60,13 @@ test("property search cursor paginates in the requested stable order", () => {
   assert.match(migration, /result_position>v_offset/i);
   assert.match(migration, /limit v_limit\+1/i);
   assert.match(migration, /jsonb_build_object\('count',v_count,'has_more',v_has_more,'cursor',v_cursor/i);
+});
+
+test("property search uses only effective facts and timestamps every displayed fact", () => {
+  assert.equal((migration.match(/a\.effective_from<=now\(\) and \(a\.effective_to is null or a\.effective_to>now\(\)\)/g) || []).length, 7);
+  assert.match(migration, /greatest\(p\.created_at,j\.created_at,name\.created_at,address\.created_at,type\.created_at,[\s\S]*photos\.created_at\) as updated_at/i);
+  assert.match(migration, /greatest\(j\.as_of,name\.observed_at,name\.effective_from[\s\S]*photos\.observed_at,photos\.effective_from\) as fact_as_of/i);
+  assert.match(migration, /'updated_at',updated_at,'fact_as_of',fact_as_of/i);
 });
 
 test("the repository migration class executes the 0403 PostgreSQL acceptance proof", () => {
@@ -80,6 +89,7 @@ test("sharing history uses a bounded offset cursor and advertises continuation",
   assert.match(migration, /limit v_limit\+1 offset v_offset/i);
   assert.match(migration, /'has_more',v_count>v_limit/i);
   assert.match(migration, /'cursor',case when v_count>v_limit then \(v_offset\+v_limit\)::text end/i);
+  assert.match(migration, /'share_grant_id',id,'status'/i);
 });
 
 test("internal detail binds route and PDF controls to visible property and projection identity", () => {
