@@ -285,7 +285,7 @@ function decodedGeometryWithinPage(document, page, content, width, height) {
     return Math.sqrt((sumSquares + Math.sqrt(discriminant)) / 2);
   };
   const strokeWithinPage = () => {
-    if (!path.length || !Number.isFinite(state.lineWidth) || state.lineWidth < 0) return false;
+    if (!path.length || !Number.isFinite(state.lineWidth) || state.lineWidth <= 0) return false;
     const scale = maximumLinearScale();
     const margin = Math.max(state.lineWidth, 1) * scale * 5;
     return Number.isFinite(margin) && path.every(([x, y]) => x >= margin && y >= margin && x <= width - margin && y <= height - margin);

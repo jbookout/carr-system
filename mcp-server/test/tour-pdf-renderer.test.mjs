@@ -139,6 +139,14 @@ test("stored inspection fails closed on clipping paths and Form XObjects", async
   const shearedMiterBytes = await shearedMiter.save({ addDefaultPage: false, useObjectStreams: false, objectsPerTick: Infinity });
   assert.equal((await inspectStoredTourPacketPdf(shearedMiterBytes)).pages[0].clipped_box_count, 1);
 
+  const deviceHairline = await PDFDocument.load(rendered.bytes, { updateMetadata: false });
+  deviceHairline.getPage(0).pushOperators(
+    pushGraphicsState(), concatTransformationMatrix(0.01, 0, 0, 0.01, 0.1, 0.1), setLineWidth(0),
+    moveTo(0, 0), lineTo(100, 0), stroke(), popGraphicsState(),
+  );
+  const deviceHairlineBytes = await deviceHairline.save({ addDefaultPage: false, useObjectStreams: false, objectsPerTick: Infinity });
+  assert.equal((await inspectStoredTourPacketPdf(deviceHairlineBytes)).pages[0].clipped_box_count, 1);
+
   const donor = await PDFDocument.create();
   const donorPage = donor.addPage([20, 20]);
   const donorFont = await donor.embedFont(StandardFonts.Helvetica);
