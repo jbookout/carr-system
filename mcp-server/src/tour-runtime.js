@@ -4,6 +4,7 @@
 import { Pool } from "@neondatabase/serverless";
 import { callTool } from "./mcp.js";
 import { ToolError } from "./tool-error.js";
+import { trustedTourRendererResult } from "./tour-artifacts.js";
 import { tourSharingBrowserAccess } from "./tour-sharing.js";
 import { organizationTenantForActor } from "./identity.js";
 
@@ -46,8 +47,13 @@ export function projectTourDetail(raw) {
     .find(projection => projection?.status === "approved" || projection?.status === "published");
   const draftProjection = (Array.isArray(raw.projections) ? raw.projections : [])
     .find(projection => projection?.status === "draft");
-  const activeShare = (Array.isArray(raw.shares) ? raw.shares : [])
-    .find(share => share?.status === "active" && share.projection_id === approvedProjection?.id);
+  const projectionShares = (Array.isArray(raw.shares) ? raw.shares : [])
+    .filter(share => share?.projection_id === approvedProjection?.id);
+  const activeShare = projectionShares.find(share => share?.status === "active");
+  // The SQL projection is newest-first. Keep the latest expired grant visible
+  // so the operator can rotate it; issue is intentionally unique per sealed
+  // projection and cannot recover an expired row without this immutable ID.
+  const rotatableShare = activeShare || projectionShares.find(share => share?.status === "expired");
   return {
     ...raw,
     name: raw.tour_name,
@@ -62,8 +68,8 @@ export function projectTourDetail(raw) {
     projection_id: approvedProjection?.id || null,
     projection_draft_id: draftProjection?.id || null,
     projection_status: approvedProjection?.status || draftProjection?.status || "missing",
-    share_grant_id: activeShare?.share_grant_id || null,
-    share_status: activeShare?.status || "missing",
+    share_grant_id: rotatableShare?.share_grant_id || null,
+    share_status: rotatableShare?.status || "missing",
     pdf_render_job_id: raw.pdf_render?.render_job_id || null,
     pdf_status: raw.pdf_render?.status || "missing",
     pdf_qc_run_digest: raw.pdf_render?.qc_run_digest || null,
@@ -120,6 +126,60 @@ async function pdfArtifactResponse(context, mode) {
   return { ok: true, response: new Response(bytes, { headers: { "content-type": "application/pdf", "content-length": String(bytes.byteLength), "content-disposition": `${read.disposition}; filename="CARR-tour-${context.input.render_job_id}.pdf"`, "cache-control": "no-store" } }) };
 }
 
+export async function runTourPdfRender(context, dependencies = {}) {
+  const read = dependencies.internalReadFn || internalRead;
+  const call = dependencies.invokeFn || invoke;
+  const tenant = (dependencies.tenantFn || organizationTenantForActor)(context.actor);
+  const renderInput = await read(context,
+    "select ops.read_tour_packet_for_render($1::text,$2::uuid,$3::text) as data", [tenant, context.input.projection_id]);
+  if (!renderInput?.packet || !renderInput?.projection_digest) return { ok: false, status: 404 };
+  let prepare = dependencies.prepareTourPdfArtifactFn;
+  let store = dependencies.storeAndVerifyTourPdfFn;
+  if (!prepare || !store) {
+    const service = await import("./tour-pdf-service.js");
+    prepare ||= service.prepareTourPdfArtifact;
+    store ||= service.storeAndVerifyTourPdf;
+  }
+  const prepared = await prepare(renderInput);
+  const request = await call(context, "request-tour-pdf-render", {
+    idempotency_key: context.input.idempotency_key, projection_id: context.input.projection_id,
+    projection_digest: renderInput.projection_digest, packet_digest: prepared.packetDigest,
+    template_version: prepared.rendered.templateVersion, template_digest: prepared.templateDigest,
+    renderer_version: prepared.rendered.rendererVersion, renderer_digest: prepared.rendererDigest,
+    qc_ruleset_version: prepared.qcRulesetVersion, qc_ruleset_digest: prepared.qcRulesetDigest,
+    expected_property_count: prepared.rendered.propertyCount, expected_markers_digest: prepared.markersDigest,
+    expected_asset_digests: [], expected_font_digests: prepared.rendered.fontDigests,
+  });
+  if (!request.ok || !request.data.render_job_id) return request;
+  const renderJobId = request.data.render_job_id;
+  const resultIdempotencyKey = await derivedIdempotencyUuid("tour-pdf-render-result", context.input.idempotency_key);
+  try {
+    const stored = await store(context.env, tenant, renderJobId, prepared);
+    const artifactRef = `artifact:tour-pdf:${renderJobId.replaceAll("-", "")}`;
+    const recorded = await call(context, "record-tour-pdf-render-result", trustedTourRendererResult({
+      idempotency_key: resultIdempotencyKey, render_job_id: renderJobId,
+      status: stored.qc.blocked ? "qc_blocked" : "review_ready", artifact_ref: artifactRef,
+      artifact_digest: prepared.rendered.artifactDigest, storage_ref: stored.storageRef,
+      content_length: stored.contentLength, page_count: prepared.rendered.propertyCount,
+      blocking_finding_count: stored.qc.findings.length, qc_run_digest: stored.qcRunDigest,
+    }));
+    return recorded.ok ? { ok: true, data: { render_job_id: renderJobId, status: recorded.data.status, qc_run_digest: stored.qcRunDigest } } : recorded;
+  } catch (error) {
+    // The queue row already exists. Persist one terminal, non-sensitive
+    // failure receipt so operators never see an immortal "queued" job.
+    const failureClass = error instanceof Error ? error.name : "UnknownError";
+    const failureDigest = await sha256Bytes(new TextEncoder().encode(`tour-pdf-render-failure:v1:${failureClass}`));
+    const failed = await call(context, "record-tour-pdf-render-result", trustedTourRendererResult({
+      idempotency_key: resultIdempotencyKey, render_job_id: renderJobId, status: "failed",
+      artifact_ref: null, artifact_digest: null, storage_ref: null,
+      content_length: null, page_count: null, blocking_finding_count: 0,
+      qc_run_digest: failureDigest,
+    }));
+    if (!failed.ok) return failed;
+    return { ok: false, status: 500, data: { render_job_id: renderJobId, status: "failed" } };
+  }
+}
+
 export function createTourRuntimeAdapters() {
   return {
     listToursFn: async context => ({ ok: true, data: projectTourLibrary(await internalRead(context,
@@ -169,35 +229,7 @@ export function createTourRuntimeAdapters() {
     issueShareGrantFn: context => invoke(context, "issue-tour-share-grant", context.input),
     rotateShareGrantFn: context => invoke(context, "rotate-tour-share-grant", context.input),
     revokeShareGrantFn: context => invoke(context, "revoke-tour-share-grant", context.input),
-    renderPdfFn: async context => {
-      const tenant = organizationTenantForActor(context.actor);
-      const renderInput = await internalRead(context,
-        "select ops.read_tour_packet_for_render($1::text,$2::uuid,$3::text) as data", [tenant, context.input.projection_id]);
-      if (!renderInput?.packet || !renderInput?.projection_digest) return { ok: false, status: 404 };
-      const { prepareTourPdfArtifact, storeAndVerifyTourPdf } = await import("./tour-pdf-service.js");
-      const prepared = await prepareTourPdfArtifact(renderInput);
-      const request = await invoke(context, "request-tour-pdf-render", {
-        idempotency_key: context.input.idempotency_key, projection_id: context.input.projection_id,
-        projection_digest: renderInput.projection_digest, packet_digest: prepared.packetDigest,
-        template_version: prepared.rendered.templateVersion, template_digest: prepared.templateDigest,
-        renderer_version: prepared.rendered.rendererVersion, renderer_digest: prepared.rendererDigest,
-        qc_ruleset_version: prepared.qcRulesetVersion, qc_ruleset_digest: prepared.qcRulesetDigest,
-        expected_property_count: prepared.rendered.propertyCount, expected_markers_digest: prepared.markersDigest,
-        expected_asset_digests: [], expected_font_digests: prepared.rendered.fontDigests,
-      });
-      if (!request.ok || !request.data.render_job_id) return request;
-      const renderJobId = request.data.render_job_id;
-      const stored = await storeAndVerifyTourPdf(context.env, tenant, renderJobId, prepared);
-      const artifactRef = `artifact:tour-pdf:${renderJobId.replaceAll("-", "")}`;
-      const recorded = await invoke(context, "record-tour-pdf-render-result", {
-        idempotency_key: await derivedIdempotencyUuid("tour-pdf-render-result", context.input.idempotency_key), render_job_id: renderJobId,
-        status: stored.qc.blocked ? "qc_blocked" : "review_ready", artifact_ref: artifactRef,
-        artifact_digest: prepared.rendered.artifactDigest, storage_ref: stored.storageRef,
-        content_length: stored.contentLength, page_count: prepared.rendered.propertyCount,
-        blocking_finding_count: stored.qc.findings.length, qc_run_digest: stored.qcRunDigest,
-      });
-      return recorded.ok ? { ok: true, data: { render_job_id: renderJobId, status: recorded.data.status, qc_run_digest: stored.qcRunDigest } } : recorded;
-    },
+    renderPdfFn: context => runTourPdfRender(context),
     readPdfRenderFn: async context => invoke(context, "read-tour-pdf-render", context.input),
     reviewPdfFn: async context => invoke(context, "record-tour-pdf-human-review", context.input),
     previewPdfFn: context => pdfArtifactResponse(context, "review"),

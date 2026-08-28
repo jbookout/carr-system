@@ -57,6 +57,25 @@ function tenant(actor, ToolError) {
   if (typeof value !== "string" || !value) fail(ToolError, { error: "tour_tenant_context_required" });
   return value;
 }
+function verifiedHuman(actor, ToolError) {
+  if (actor?.human !== true || actor?.authorization_class !== "verified_partner")
+    fail(ToolError, { error: "tour_verified_human_required" });
+}
+
+// The renderer result verb remains in the common registry so it receives the
+// normal authority connection, transaction, envelope, and audit treatment.
+// Only the in-process renderer can attach this non-serializable capability;
+// JSON arriving through MCP or the browser can never reproduce it.
+const TRUSTED_RENDERER_RESULT = Symbol("trusted-tour-renderer-result");
+export function trustedTourRendererResult(args) {
+  const value = { ...args };
+  Object.defineProperty(value, TRUSTED_RENDERER_RESULT, { value: true });
+  return value;
+}
+function requireTrustedRendererResult(args, ToolError) {
+  if (args?.[TRUSTED_RENDERER_RESULT] !== true)
+    fail(ToolError, { error: "tour_trusted_renderer_required" });
+}
 function projectRender(value) {
   if (!value || typeof value !== "object" || Array.isArray(value) || !UUID.test(value.render_job_id || "") || !STATUSES.has(value.status)) return null;
   const output = { render_job_id: value.render_job_id, status: value.status };
@@ -132,13 +151,23 @@ export function tourArtifactTools({ withEnvelope, writeEvent, ToolError }) {
       write: true,
       authorityOnly: true,
       description: "Authority-bound server renderer receipt after exact R2 readback and deterministic QC. This cannot approve, publish, or grant client download authority.",
-      inputSchema: schema({ ...idempotency, render_job_id: { type: "string" }, status: { type: "string", enum: ["review_ready", "qc_blocked", "failed"] }, artifact_ref: { type: "string" }, artifact_digest: { type: "string" }, storage_ref: { type: "string" }, content_length: { type: "integer", minimum: 1 }, page_count: { type: "integer", minimum: 1, maximum: 50 }, blocking_finding_count: { type: "integer", minimum: 0 }, qc_run_digest: { type: "string" } }, [...RESULT_FIELDS]),
+      inputSchema: schema({ ...idempotency, render_job_id: { type: "string" }, status: { type: "string", enum: ["review_ready", "qc_blocked", "failed"] }, artifact_ref: { type: ["string", "null"] }, artifact_digest: { type: ["string", "null"] }, storage_ref: { type: ["string", "null"] }, content_length: { type: ["integer", "null"], minimum: 1 }, page_count: { type: ["integer", "null"], minimum: 1, maximum: 50 }, blocking_finding_count: { type: "integer", minimum: 0 }, qc_run_digest: { type: "string" } }, [...RESULT_FIELDS]),
       handler: async (client, actor, args) => {
+        requireTrustedRendererResult(args, ToolError);
         exact(args, RESULT_FIELDS, ToolError);
         uuid(args.idempotency_key, "idempotency_key", ToolError);
         const renderJobId = uuid(args.render_job_id, "render_job_id", ToolError);
-        if (!["review_ready", "qc_blocked", "failed"].includes(args.status) || !ARTIFACT_REF.test(args.artifact_ref || "") || !STORAGE_REF.test(args.storage_ref || "") || !Number.isInteger(args.content_length) || args.content_length < 1 || !Number.isInteger(args.page_count) || args.page_count < 1 || args.page_count > 50 || !Number.isInteger(args.blocking_finding_count) || args.blocking_finding_count < 0 || (args.status === "review_ready" && args.blocking_finding_count !== 0)) fail(ToolError, { error: "tour_input_invalid", field: "render_result" });
-        const artifactDigest = digest(args.artifact_digest, "artifact_digest", ToolError);
+        const failed = args.status === "failed";
+        if (!["review_ready", "qc_blocked", "failed"].includes(args.status) ||
+            !Number.isInteger(args.blocking_finding_count) || args.blocking_finding_count < 0 ||
+            (failed && (args.artifact_ref !== null || args.artifact_digest !== null || args.storage_ref !== null ||
+              args.content_length !== null || args.page_count !== null || args.blocking_finding_count !== 0)) ||
+            (!failed && (!ARTIFACT_REF.test(args.artifact_ref || "") || !STORAGE_REF.test(args.storage_ref || "") ||
+              !Number.isInteger(args.content_length) || args.content_length < 1 || !Number.isInteger(args.page_count) ||
+              args.page_count < 1 || args.page_count > 50 ||
+              (args.status === "review_ready" && args.blocking_finding_count !== 0))))
+          fail(ToolError, { error: "tour_input_invalid", field: "render_result" });
+        const artifactDigest = failed ? null : digest(args.artifact_digest, "artifact_digest", ToolError);
         const qcRunDigest = digest(args.qc_run_digest, "qc_run_digest", ToolError);
         return withEnvelope(client, actor, "record-tour-pdf-render-result", args, async () => {
           const result = await client.query(
@@ -147,17 +176,19 @@ export function tourArtifactTools({ withEnvelope, writeEvent, ToolError }) {
           );
           const id = result.rows[0]?.render_result_id;
           if (!UUID.test(id || "")) fail(ToolError, { error: "tour_write_refused", entity: "pdf_render_result" });
-          await writeEvent(client, actor, "record-tour-pdf-render-result", "tour_pdf_render_result", id, { field: "status", new: { render_job_id: renderJobId, status: args.status, artifact_digest: artifactDigest, page_count: args.page_count, blocking_finding_count: args.blocking_finding_count, qc_run_digest: qcRunDigest }, idempotency_key: args.idempotency_key });
+          await writeEvent(client, actor, "record-tour-pdf-render-result", "tour_pdf_render_result", id, { field: "status", new: { render_job_id: renderJobId, status: args.status, ...(artifactDigest ? { artifact_digest: artifactDigest } : {}), ...(args.page_count ? { page_count: args.page_count } : {}), blocking_finding_count: args.blocking_finding_count, qc_run_digest: qcRunDigest }, idempotency_key: args.idempotency_key });
           return { ok: true, render_result_id: id, render_job_id: renderJobId, status: args.status };
         });
       },
     },
     "record-tour-pdf-human-review": {
       write: true,
+      humanOnly: true,
       authorityOnly: true,
       description: "Authority-only human review receipt for a completed QC run. Acceptance is not client publication or share promotion.",
       inputSchema: schema({ ...idempotency, render_job_id: { type: "string" }, qc_run_digest: { type: "string" }, decision: { type: "string", enum: [...DECISIONS] }, reviewed_at: { type: "string" }, review_receipt_digest: { type: "string" }, reason: { type: "string" } }, [...REVIEW_FIELDS]),
       handler: async (client, actor, args) => {
+        verifiedHuman(actor, ToolError);
         exact(args, REVIEW_FIELDS, ToolError);
         uuid(args.idempotency_key, "idempotency_key", ToolError);
         if (!DECISIONS.has(args.decision)) fail(ToolError, { error: "tour_input_invalid", field: "decision" });

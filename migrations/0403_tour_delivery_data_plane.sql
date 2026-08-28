@@ -627,12 +627,17 @@ begin
   perform pg_advisory_xact_lock(hashtextextended(p_tenant||':'||p_render_job_id::text||':pdf-result',403));
   select * into v_job from ops.tour_pdf_render_job where organization_tenant_id=p_tenant and id=p_render_job_id for share;
   if not found or p_status not in ('review_ready','qc_blocked','failed') or nullif(btrim(p_actor_id),'') is null
-     or p_artifact_digest !~ '^sha256:[a-f0-9]{64}$' or p_qc_run_digest !~ '^sha256:[a-f0-9]{64}$'
-     or p_page_count<>v_job.expected_property_count or p_content_length<=0 or p_blocking_finding_count<0
-     or (p_status='review_ready' and p_blocking_finding_count<>0)
+     or p_qc_run_digest !~ '^sha256:[a-f0-9]{64}$' or p_blocking_finding_count<0
      or exists(select 1 from ops.tour_pdf_human_review h where h.organization_tenant_id=p_tenant and h.render_job_id=p_render_job_id)
-     or p_artifact_ref !~ '^artifact:tour-pdf:[A-Za-z0-9_-]{16,128}$'
-     or p_storage_ref !~ '^tour-pdf/[A-Za-z0-9._/-]{16,400}\.pdf$' then raise exception 'tour PDF render result is invalid'; end if;
+     or (p_status='failed' and (p_artifact_ref is not null or p_artifact_digest is not null or p_storage_ref is not null
+       or p_content_length is not null or p_page_count is not null or p_blocking_finding_count<>0))
+     or (p_status<>'failed' and (p_artifact_digest !~ '^sha256:[a-f0-9]{64}$'
+       or p_page_count<>v_job.expected_property_count or p_content_length<=0
+       or (p_status='review_ready' and p_blocking_finding_count<>0)
+       or p_artifact_ref !~ '^artifact:tour-pdf:[A-Za-z0-9_-]{16,128}$'
+       or p_storage_ref !~ '^tour-pdf/[A-Za-z0-9._/-]{16,400}\.pdf$')) then
+    raise exception 'tour PDF render result is invalid';
+  end if;
   select coalesce(max(attempt_count),0)+1 into v_attempt from ops.tour_pdf_render_result where organization_tenant_id=p_tenant and render_job_id=p_render_job_id;
   insert into ops.tour_pdf_render_result(organization_tenant_id,render_job_id,status,artifact_ref,artifact_digest,storage_ref,content_length,page_count,blocking_finding_count,qc_run_digest,attempt_count,completed_at)
   values(p_tenant,p_render_job_id,p_status,p_artifact_ref,p_artifact_digest,p_storage_ref,p_content_length,p_page_count,p_blocking_finding_count,p_qc_run_digest,v_attempt,now()) returning id into v_id;
@@ -666,8 +671,13 @@ $$;
 
 create or replace function ops.record_tour_pdf_human_review(p_tenant text,p_render_job_id uuid,p_qc_run_digest text,p_decision text,p_reviewed_at timestamptz,p_review_receipt_digest text,p_reason text,p_actor_id text)
 returns uuid language plpgsql security definer set search_path=pg_catalog,ops,public,pg_temp as $$
-declare v_result ops.tour_pdf_render_result%rowtype; v_id uuid;
+declare v_result ops.tour_pdf_render_result%rowtype; v_id uuid; v_verified_slug text; v_verified_actor_id text;
 begin
+  v_verified_slug:=nullif(btrim(current_setting('carr.verified_human_actor_slug',true)),'');
+  select id::text into v_verified_actor_id from public.actor where slug=v_verified_slug;
+  if v_verified_actor_id is null or v_verified_actor_id is distinct from p_actor_id then
+    raise exception 'tour PDF review requires a verified human authority session';
+  end if;
   select * into v_result from ops.tour_pdf_render_result where organization_tenant_id=p_tenant and render_job_id=p_render_job_id and status='review_ready' and qc_run_digest=p_qc_run_digest order by attempt_count desc,id desc limit 1 for update;
   if not found or p_decision not in ('accept','reject') or p_review_receipt_digest !~ '^sha256:[a-f0-9]{64}$' or nullif(btrim(p_reason),'') is null or nullif(btrim(p_actor_id),'') is null then raise exception 'tour PDF human review is invalid'; end if;
   insert into ops.tour_pdf_human_review(organization_tenant_id,render_job_id,render_result_id,qc_run_digest,decision,reviewed_at,review_receipt_digest,reason,reviewer_actor_id)

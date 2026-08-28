@@ -34,6 +34,8 @@ test("Tour delivery state is append-only, tenant-qualified, digest-only, and lea
   assert.match(migration, /grant execute on function ops\.exchange_tour_share_token/i);
   assert.match(migration, /grant execute on function ops\.issue_tour_share_grant[\s\S]*ops\.record_tour_pdf_human_review[\s\S]*to carr_authority/i);
   assert.match(migration, /record_tour_pdf_render_result[\s\S]*exists\(select 1 from ops\.tour_pdf_human_review h where h\.organization_tenant_id=p_tenant and h\.render_job_id=p_render_job_id\)/i);
+  assert.match(migration, /p_status='failed'[\s\S]*p_artifact_ref is not null[\s\S]*p_page_count is not null/i);
+  assert.match(migration, /current_setting\('carr\.verified_human_actor_slug',true\)[\s\S]*tour PDF review requires a verified human authority session/i);
 });
 
 test("public packet and map reads remain sealed facts-only projections", () => {

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { TOOLS } from "../src/tools.js";
-import { projectTourDetail, projectTourLibrary } from "../src/tour-runtime.js";
+import { projectTourDetail, projectTourLibrary, runTourPdfRender } from "../src/tour-runtime.js";
 
 const root = path.resolve(import.meta.dirname, "../..");
 const read = file => fs.readFileSync(path.join(root, file), "utf8");
@@ -44,6 +44,37 @@ test("production Tour runtime preserves tool envelopes and digest-only public ac
   assert.doesNotMatch(runtime, /raw_token|plaintext_token|authorization\s*:/i);
 });
 
+test("trusted PDF orchestration records a terminal failure after a queued job", async () => {
+  const digest = character => `sha256:${character.repeat(64)}`;
+  const jobId = "20000000-0000-4000-8000-000000000001";
+  const calls = [];
+  const result = await runTourPdfRender({
+    env: {}, actor: { slug: "codex" },
+    input: { projection_id: "10000000-0000-4000-8000-000000000001", idempotency_key: "40000000-0000-4000-8000-000000000001" },
+  }, {
+    tenantFn: () => "carr-internal",
+    internalReadFn: async () => ({ packet: { properties: [{}] }, projection_digest: digest("1") }),
+    prepareTourPdfArtifactFn: async () => ({
+      packetDigest: digest("2"), templateDigest: digest("3"), rendererDigest: digest("4"),
+      qcRulesetVersion: "1.0.0", qcRulesetDigest: digest("5"), markersDigest: digest("6"),
+      rendered: { templateVersion: "1.0.0", rendererVersion: "1.0.0", propertyCount: 1, fontDigests: [digest("7")], artifactDigest: digest("8") },
+    }),
+    storeAndVerifyTourPdfFn: async () => { throw new Error("private storage detail"); },
+    invokeFn: async (_context, verb, args) => {
+      calls.push({ verb, args });
+      if (verb === "request-tour-pdf-render") return { ok: true, data: { render_job_id: jobId } };
+      return { ok: true, data: { status: args.status } };
+    },
+  });
+  assert.deepEqual(result, { ok: false, status: 500, data: { render_job_id: jobId, status: "failed" } });
+  assert.deepEqual(calls.map(call => call.verb), ["request-tour-pdf-render", "record-tour-pdf-render-result"]);
+  const failure = calls[1].args;
+  assert.equal(failure.status, "failed");
+  assert.equal(failure.artifact_ref, null); assert.equal(failure.storage_ref, null);
+  assert.match(failure.qc_run_digest, /^sha256:[0-9a-f]{64}$/);
+  assert.doesNotMatch(JSON.stringify(failure), /private storage detail/);
+});
+
 test("production Tour runtime presents the exact browser view without promoting drafts", () => {
   assert.deepEqual(projectTourLibrary({ tours: [{ id: "tour", tour_name: "Bay County", tour_status: "draft" }] }), {
     tours: [{ id: "tour", tour_name: "Bay County", tour_status: "draft", name: "Bay County", status: "draft" }],
@@ -67,4 +98,14 @@ test("production Tour runtime presents the exact browser view without promoting 
   assert.equal(detail.stops[0].label, "A");
   assert.equal(detail.projection_id, "approved-projection", "draft projections never become share authority");
   assert.equal(detail.share_grant_id, "active-share");
+});
+
+test("expired sharing projection retains the immutable grant ID for rotation", () => {
+  const detail = projectTourDetail({
+    tour_name: "Escambia", tour_status: "draft", routes: [],
+    projections: [{ id: "approved-projection", status: "approved" }],
+    shares: [{ share_grant_id: "expired-share", projection_id: "approved-projection", status: "expired" }],
+  });
+  assert.equal(detail.share_grant_id, "expired-share");
+  assert.equal(detail.share_status, "expired");
 });
