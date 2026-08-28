@@ -32,7 +32,7 @@ function handler(overrides = {}) {
     listToursFn: async () => ({ ok: true, data: { tours: [] } }), readTourFn: async () => ({ ok: true, data: { id: tourId } }),
     createRouteVersionFn: success, reorderRouteStopsFn: success, acceptRouteVersionFn: success,
     autosaveCheatSheetFn: success, restoreCheatSheetFn: success, createProjectionFn: success,
-    issueShareGrantFn: success, rotateShareGrantFn: success, revokeShareGrantFn: success, reviewTourInteractionsFn: success, ...overrides,
+    issueShareGrantFn: success, rotateShareGrantFn: success, revokeShareGrantFn: success, ...overrides,
   });
 }
 const postHeaders = { origin: ORIGIN, "sec-fetch-site": "same-origin", "content-type": "application/json", "x-carr-csrf": SESSION.csrfToken };
@@ -54,6 +54,7 @@ test("exact routes, methods, CSRF, and JSON bodies remain bounded", async () => 
   assert.equal(isTourInternalRequest(request("/api/tours/library")), true);
   assert.equal(isTourInternalRequest(request("/api/v1/tours")), false);
   assert.equal(isTourInternalRequest(request("/api/tours/library/extra")), false);
+  assert.equal(isTourInternalRequest(request("/api/tours/interactions/review")), false);
   assert.equal((await surface.fetch(request("/api/tours/share/issue"), env, {}, ACTOR, SESSION)).status, 405);
   assert.equal((await surface.fetch(request("/api/tours/nope"), env, {}, ACTOR, SESSION)).status, 404);
   assert.equal((await surface.fetch(request("/api/tours/share/issue", { method: "POST", headers: { ...postHeaders, "x-carr-csrf": "wrong" }, body: JSON.stringify(issueBody) }), env, {}, ACTOR, SESSION)).status, 403);
@@ -87,13 +88,15 @@ test("static shell has no raw-token persistence/logging and stays in dealroom/to
   assert.match(js, /new Uint8Array\(32\)/); assert.match(js, /crypto\.getRandomValues/); assert.match(js, /crypto\.subtle\.digest\("SHA-256"/);
   assert.match(js, /https:\/\/reports\.doctorcre\.com\/share#token=\$\{raw\}/);
   assert.match(html, /value="view_map"/);
+  assert.doesNotMatch(html, /value="(?:download_pdf|comment|react)"/);
+  assert.match(html, /future governed scope amendment/);
   assert.match(css, /#002F6C/); assert.match(css, /#F57F29/);
   for (const source of [js, handlerSource]) { assert.doesNotMatch(source, /localStorage|sessionStorage|indexedDB|console\.(?:log|warn|error)/); }
   assert.doesNotMatch(handlerSource, /\/api\/v1/);
   assert.doesNotMatch(js, /\/api\/v1|(?:mapbox|leaflet|google\.maps)/i);
 });
 
-test("route and interaction seams enforce their exact body contracts", async () => {
+test("route seams enforce their exact body contracts", async () => {
   const calls = []; const surface = handler({ createRouteVersionFn: async (value) => { calls.push(value); return { ok: true, data: { route_version_id: routeId } }; } });
   const body = { tour_id: tourId, expected_route_version: 0, stop_ids: [stopA, stopB], idempotency_key: routeId };
   const response = await surface.fetch(request("/api/tours/route-version", { method: "POST", headers: postHeaders, body: JSON.stringify(body) }), { APP_HOST: "app.doctorcre.com" }, {}, ACTOR, SESSION);

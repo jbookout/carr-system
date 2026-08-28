@@ -420,9 +420,14 @@ end $$;
 
 create or replace function ops.append_tour_entrance_verification_receipt(p_payload jsonb)
 returns uuid language plpgsql security definer set search_path=pg_catalog,ops,public,pg_temp as $$
-declare v_id uuid;
+declare v_id uuid; v_verified_slug text; v_verified_actor_id text;
 begin
   if jsonb_typeof(p_payload)<>'object' or (select array_agg(k order by k) from jsonb_object_keys(p_payload) k) is distinct from array['coordinate_candidate_id','evidence_reference','native_navigation_proof','organization_tenant_id','property_id','receipt_digest','verified_at','verifier_actor_id'] then raise exception 'entrance verification receipt payload is invalid'; end if;
+  v_verified_slug:=nullif(btrim(current_setting('carr.verified_human_actor_slug',true)),'');
+  select id::text into v_verified_actor_id from public.actor where slug=v_verified_slug;
+  if v_verified_actor_id is null or v_verified_actor_id is distinct from p_payload->>'verifier_actor_id' then
+    raise exception 'entrance verification requires a verified human authority session';
+  end if;
   insert into ops.tour_coordinate_entrance_verification_receipt (organization_tenant_id,property_id,coordinate_candidate_id,verifier_actor_id,verified_at,evidence_reference,native_navigation_proof,receipt_digest)
   values (p_payload->>'organization_tenant_id',(p_payload->>'property_id')::uuid,(p_payload->>'coordinate_candidate_id')::uuid,p_payload->>'verifier_actor_id',(p_payload->>'verified_at')::timestamptz,p_payload->>'evidence_reference',p_payload->'native_navigation_proof',p_payload->>'receipt_digest') returning id into v_id;
   return v_id;

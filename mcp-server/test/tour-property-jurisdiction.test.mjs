@@ -6,7 +6,7 @@ class ToolError extends Error {
   constructor(payload) { super(payload.error); this.payload = payload; }
 }
 
-const actor = { id: "actor-00000000-0000-4000-8000-000000000001", slug: "codex" };
+const actor = { id: "actor-00000000-0000-4000-8000-000000000001", slug: "joe", human: true };
 const ids = {
   property: "10000000-0000-4000-8000-000000000001",
   identifier: "20000000-0000-4000-8000-000000000001",
@@ -119,6 +119,26 @@ test("tenant and verifier are server-derived; caller authority selectors are ref
     assert.equal(h.calls.length, 0);
     assert.equal(h.envelopes.length, 0);
   }
+});
+
+test("entrance verification refuses sponsored and machine actors before database access", async () => {
+  const h = harness();
+  await assert.rejects(
+    h.tools["append-tour-entrance-verification-receipt"].handler(h.client, {
+      id: "actor-00000000-0000-4000-8000-000000000002", slug: "codex", human: false,
+      sponsoring_human_slug: "joe",
+    }, {
+      idempotency_key: idempotency, property_id: ids.property, coordinate_candidate_id: ids.candidate,
+      verified_at: "2026-08-27T12:30:00Z", evidence_reference: "inspection:2026-08-27:entrance",
+      native_navigation_proof: {
+        platform: "apple_maps", tested_at: "2026-08-27T12:31:00Z", travel_mode: "driving", evidence_digest: digest("b"),
+      },
+      receipt_digest: digest("c"),
+    }),
+    error => error instanceof ToolError && error.payload.error === "tour_human_verification_required",
+  );
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.envelopes.length, 0);
 });
 
 test("unknown fields, noncanonical provider roles, unnormalized identifiers, and malformed receipt fields fail closed", async () => {

@@ -48,6 +48,8 @@ test("Slice 3 separates coordinate candidates from human entrance verification a
   assert.match(migration, /create or replace function ops\.append_tour_property_identifier_assertion\(p_payload jsonb\)/i);
   assert.match(migration, /create or replace function ops\.append_tour_coordinate_candidate\(p_payload jsonb\)/i);
   assert.match(migration, /create or replace function ops\.append_tour_entrance_verification_receipt\(p_payload jsonb\)/i);
+  assert.match(migration, /current_setting\('carr\.verified_human_actor_slug',true\)/i);
+  assert.match(migration, /entrance verification requires a verified human authority session/i);
   assert.match(migration, /security definer set search_path=pg_catalog,ops,public,pg_temp/i);
   assert.match(migration, /revoke all on table ops\.tour_property_identifier_assertion/i);
   assert.match(migration, /grant execute on function ops\.append_tour_property_identifier_assertion\(jsonb\) to carr_authority/i);

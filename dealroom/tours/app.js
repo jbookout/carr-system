@@ -39,9 +39,6 @@
     const list = $("#route-stops"); list.replaceChildren();
     for (const stop of stops()) { const row = document.createElement("li"); row.className = "stop"; row.dataset.stopId = text(stop.id); const label = document.createElement("span"); label.textContent = text(stop.label, text(stop.name, "Tour stop")); const controls = document.createElement("span"); for (const [word, delta] of [["Up", -1], ["Down", 1]]) { const button = document.createElement("button"); button.type = "button"; button.textContent = word; button.addEventListener("click", () => moveStop(stop.id, delta)); controls.append(button); } row.append(label, controls); list.append(row); }
     if (!stops().length) list.textContent = "No stops in this route cart.";
-    const interactions = $("#interaction-list"); interactions.replaceChildren();
-    for (const item of Array.isArray(tour.interactions) ? tour.interactions : []) { const li = document.createElement("li"); li.dataset.interactionId = text(item.id); li.textContent = `${text(item.kind, "Interaction")} · ${text(item.summary, "No details")}`; interactions.append(li); }
-    if (!interactions.children.length) interactions.textContent = "No interactions to review.";
   }
   async function loadLibrary() { status("Loading tours…"); const data = await request("/api/tours/library"); state.tours = Array.isArray(data.tours) ? data.tours.filter((tour) => id(tour?.id)) : []; renderLibrary(); status("Tour library ready."); }
   async function loadTour(tourId) { status("Loading tour…"); state.tour = await request(`/api/tours/detail?tour_id=${encodeURIComponent(tourId)}`); renderTour(); status("Tour ready."); }
@@ -57,6 +54,5 @@
   $("#share-form").addEventListener("submit", (event) => { event.preventDefault(); void action(() => issueShare(false)); }); $("#rotate-share").addEventListener("click", () => void action(() => issueShare(true)));
   $("#revoke-share").addEventListener("click", () => void action(async () => { if (!id(state.shareGrantId)) return; await post("/api/tours/share/revoke", { share_grant_id: state.shareGrantId, reason: "Internal operator revoked link", revoked_at: new Date().toISOString(), receipt_digest: $("#receipt-digest").value.trim(), idempotency_key: uuid() }); state.rawShareToken = ""; $("#share-link").hidden = true; $("#share-state").textContent = "Revoked"; status("Share link revoked."); }));
   $("#copy-share").addEventListener("click", () => void action(async () => { await navigator.clipboard.writeText($("#share-url").value); status("Confidential link copied."); }));
-  $("#review-interactions").addEventListener("click", () => void action(async () => { if (!state.tour) return; const interactionIds = [...document.querySelectorAll("#interaction-list [data-interaction-id]")].map((item) => item.dataset.interactionId).filter(id); if (!interactionIds.length) return; await post("/api/tours/interactions/review", { tour_id: state.tour.id, interaction_ids: interactionIds, reviewed_at: new Date().toISOString(), idempotency_key: uuid() }); await loadTour(state.tour.id); status("Interactions marked reviewed."); }));
   $("#share-expiry").value = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 16); void action(loadLibrary);
 })();

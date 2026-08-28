@@ -8,7 +8,7 @@ export const TOUR_INTERNAL_ASSET_DIRECTORY = "../dealroom/tours";
 const MAX_BODY_BYTES = 32 * 1024;
 const ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
-const SHARE_SCOPES = new Set(["view_packet", "view_map", "download_pdf", "comment", "react"]);
+const SHARE_SCOPES = new Set(["view_packet", "view_map"]);
 const AUTHORITY_FIELDS = new Set(["actor", "actor_id", "tenant", "tenant_id", "organization_tenant_id", "authorization", "authorization_class", "identity", "reviewer", "sponsor", "human_slug"]);
 
 const STATIC = new Map([
@@ -28,7 +28,6 @@ const METHODS = new Map([
   ["/api/tours/share/issue", "POST"],
   ["/api/tours/share/rotate", "POST"],
   ["/api/tours/share/revoke", "POST"],
-  ["/api/tours/interactions/review", "POST"],
 ]);
 
 function json(body, status = 200, headers = {}) {
@@ -107,7 +106,6 @@ const VALID = {
   "/api/tours/share/issue": (v) => exact(v, ["projection_id", "token_digest", "permission_scopes", "expires_at", "receipt_digest", "idempotency_key"]) && validId(v.projection_id) && validDigest(v.token_digest) && scopes(v.permission_scopes) && iso(v.expires_at) && validDigest(v.receipt_digest) && validId(v.idempotency_key),
   "/api/tours/share/rotate": (v) => exact(v, ["share_grant_id", "projection_id", "token_digest", "permission_scopes", "expires_at", "receipt_digest", "idempotency_key"]) && validId(v.share_grant_id) && validId(v.projection_id) && validDigest(v.token_digest) && scopes(v.permission_scopes) && iso(v.expires_at) && validDigest(v.receipt_digest) && validId(v.idempotency_key),
   "/api/tours/share/revoke": (v) => exact(v, ["share_grant_id", "reason", "revoked_at", "receipt_digest", "idempotency_key"]) && validId(v.share_grant_id) && typeof v.reason === "string" && v.reason.trim().length > 0 && v.reason.length <= 240 && iso(v.revoked_at) && validDigest(v.receipt_digest) && validId(v.idempotency_key),
-  "/api/tours/interactions/review": (v) => exact(v, ["tour_id", "interaction_ids", "reviewed_at", "idempotency_key"]) && validId(v.tour_id) && ids(v.interaction_ids, 1) && iso(v.reviewed_at) && validId(v.idempotency_key),
 };
 
 const SEAMS = {
@@ -122,7 +120,6 @@ const SEAMS = {
   "/api/tours/share/issue": "issueShareGrantFn",
   "/api/tours/share/rotate": "rotateShareGrantFn",
   "/api/tours/share/revoke": "revokeShareGrantFn",
-  "/api/tours/interactions/review": "reviewTourInteractionsFn",
 };
 
 function safeFailure(result) {

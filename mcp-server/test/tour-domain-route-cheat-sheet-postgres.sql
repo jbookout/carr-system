@@ -32,29 +32,37 @@ end $authority$;
 set local session authorization carr_writer;
 set local carr.acting_actor_slug='tour-proof';
 do $writer$
-declare t uuid; r1 uuid; r2 uuid; oa uuid; oh uuid; na uuid; nh uuid; n uuid;
+declare t uuid; r1 uuid; abandoned_r2 uuid;
 begin
  select id into t from ops.tour where organization_tenant_id='tour-slice4-proof';
  select id into r1 from ops.tour_route_version where tour_id=t and route_version=1;
- r2:=ops.append_tour_route_version('tour-slice4-proof',t,2,r1,'{}','{}','provider','route-proof','40000000-0000-4000-8000-000000000010','{}','sha256:'||repeat('4',64),1,'route-policy');
- na:=ops.append_tour_route_stop('tour-slice4-proof',r2,'40000000-0000-4000-8000-000000000001',2,'B','active',null,null,false,20,5,'approved','sha256:'||repeat('5',64));
- nh:=ops.append_tour_route_stop('tour-slice4-proof',r2,'40000000-0000-4000-8000-000000000002',null,null,'held',null,null,false,0,0,'unknown','sha256:'||repeat('6',64));
- n:=ops.append_tour_route_stop('tour-slice4-proof',r2,'40000000-0000-4000-8000-000000000003',1,'A','active',null,null,false,10,5,'approved','sha256:'||repeat('7',64));
+ abandoned_r2:=ops.append_tour_route_version('tour-slice4-proof',t,2,r1,'{}','{}','manual',null,null,'{}',null,1,null);
+ if abandoned_r2 is null then raise exception 'abandoned route draft was not retained'; end if;
+end $writer$;
+do $writer$
+declare t uuid; r1 uuid; r3 uuid; oa uuid; oh uuid; na uuid; nh uuid; n uuid;
+begin
+ select id into t from ops.tour where organization_tenant_id='tour-slice4-proof';
+ select id into r1 from ops.tour_route_version where tour_id=t and route_version=1;
+ r3:=ops.append_tour_route_version('tour-slice4-proof',t,3,r1,'{}','{}','provider','route-proof','40000000-0000-4000-8000-000000000010','{}','sha256:'||repeat('4',64),1,'route-policy');
+ na:=ops.append_tour_route_stop('tour-slice4-proof',r3,'40000000-0000-4000-8000-000000000001',2,'B','active',null,null,false,20,5,'approved','sha256:'||repeat('5',64));
+ nh:=ops.append_tour_route_stop('tour-slice4-proof',r3,'40000000-0000-4000-8000-000000000002',null,null,'held',null,null,false,0,0,'unknown','sha256:'||repeat('6',64));
+ n:=ops.append_tour_route_stop('tour-slice4-proof',r3,'40000000-0000-4000-8000-000000000003',1,'A','active',null,null,false,10,5,'approved','sha256:'||repeat('7',64));
  select id into oa from ops.tour_route_stop where route_version_id=r1 and property_id='40000000-0000-4000-8000-000000000001';
  select id into oh from ops.tour_route_stop where route_version_id=r1 and property_id='40000000-0000-4000-8000-000000000002';
- perform ops.append_tour_route_stop_transition('tour-slice4-proof',r1,r2,oa,na,'reordered');
- perform ops.append_tour_route_stop_transition('tour-slice4-proof',r1,r2,oh,nh,'held');
- perform ops.append_tour_route_stop_transition('tour-slice4-proof',null,r2,null,n,'added');
+ perform ops.append_tour_route_stop_transition('tour-slice4-proof',r1,r3,oa,na,'reordered');
+ perform ops.append_tour_route_stop_transition('tour-slice4-proof',r1,r3,oh,nh,'held');
+ perform ops.append_tour_route_stop_transition('tour-slice4-proof',null,r3,null,n,'added');
  perform ops.append_tour_cheat_sheet_revision('tour-slice4-proof',t,'{"internal":"contact"}',0);
 end $writer$;
 set local session authorization carr_authority;
 set local carr.acting_actor_slug='tour-proof';
 do $authority$
-declare r2 uuid; t uuid; begin
- select id into r2 from ops.tour_route_version where organization_tenant_id='tour-slice4-proof' and route_version=2;
- perform ops.accept_tour_route_version('tour-slice4-proof',r2,1,'sha256:'||repeat('8',64));
+declare r3 uuid; t uuid; begin
+ select id into r3 from ops.tour_route_version where organization_tenant_id='tour-slice4-proof' and route_version=3;
+ perform ops.accept_tour_route_version('tour-slice4-proof',r3,1,'sha256:'||repeat('8',64));
  select id into t from ops.tour where organization_tenant_id='tour-slice4-proof';
- if (select count(*) from ops.tour_property_membership where tour_id=t and route_version=2)<>2 then raise exception 'held/excluded stop entered canonical membership'; end if;
+ if (select count(*) from ops.tour_property_membership where tour_id=t and route_version=3)<>2 then raise exception 'held/excluded stop entered canonical membership'; end if;
 end $authority$;
 set local session authorization carr_writer;
 set local carr.acting_actor_slug='tour-proof';

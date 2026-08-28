@@ -42,6 +42,7 @@ function sealedProjectionInput() {
     digest,
     projection: {
       ...input.projection,
+      status: "approved",
       projection_digest: digest,
       seal_receipt: {
         id: "seal-1",
@@ -49,6 +50,7 @@ function sealedProjectionInput() {
         projection_id: projection.id,
         sealed_at: "2026-08-25T12:05:00Z",
         sealed_state: "approved",
+        canonical_projection_digest: digest,
         actor_id: "actor:joe",
         receipt_digest: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       },
@@ -117,7 +119,14 @@ test("projection creation is draft-only and a complete seal requires the full se
   assert.throws(() => validateProjectionComplete({ ...sealed.input, projection: sealed.projection, memberships: [] }), /PROJECTION_INCOMPLETE|MEMBERSHIP|COMPLETE/);
   assert.throws(() => validateProjectionComplete({ ...sealed.input, projection: sealed.projection, facts: [] }), /PROJECTION_INCOMPLETE|FACT|COMPLETE/);
   assert.throws(() => validateProjectionComplete({ ...sealed.input, projection: (({ seal_receipt: _ignored, ...withoutSeal }) => withoutSeal)(sealed.projection) }), /PROJECTION_SEAL_REQUIRED|SEAL|INCOMPLETE|PROJECTION/);
-  assert.throws(() => validateProjectionComplete({ ...sealed.input, projection: { ...sealed.projection, projection_digest: "sha256:" + "0".repeat(64) } }), /PROJECTION_DIGEST_MISMATCH|DIGEST/);
+  assert.throws(() => validateProjectionComplete({ ...sealed.input, projection: { ...sealed.projection, status: "draft" } }), /PROJECTION_STATUS_APPROVED_REQUIRED/);
+  assert.throws(() => validateProjectionComplete({ ...sealed.input, projection: { ...sealed.projection, seal_receipt: { ...sealed.projection.seal_receipt, canonical_projection_digest: "sha256:" + "0".repeat(64) } } }), /PROJECTION_SEAL_REQUIRED/);
+  const tamperedDigest = "sha256:" + "0".repeat(64);
+  assert.throws(() => validateProjectionComplete({ ...sealed.input, projection: {
+    ...sealed.projection,
+    projection_digest: tamperedDigest,
+    seal_receipt: { ...sealed.projection.seal_receipt, canonical_projection_digest: tamperedDigest },
+  } }), /PROJECTION_DIGEST_MISMATCH|DIGEST/);
 });
 
 test("internal-only assertions neither enter nor perturb the public projection, but an internal fact is refused", () => {

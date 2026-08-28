@@ -10,7 +10,6 @@ export const REPORTS_ASSET_DIRECTORY = "../dealroom/reports";
 
 const SESSION_COOKIE = "__Host-tour_share_session";
 const MAX_BODY_BYTES = 16 * 1024;
-const MAX_PDF_BYTES = 25 * 1024 * 1024;
 const SESSION_TTL_MS = 60 * 60 * 1000;
 const STATIC_ASSETS = new Map([
   ["/share", "/reports/share.html"],
@@ -20,9 +19,6 @@ const STATIC_ASSETS = new Map([
 const API_METHODS = new Map([
   ["/api/share/exchange", "POST"],
   ["/api/share/report", "GET"],
-  ["/api/share/pdf", "GET"],
-  ["/api/share/comment", "POST"],
-  ["/api/share/reaction", "POST"],
 ]);
 const REPORTS_CSP = [
   "default-src 'none'",
@@ -86,37 +82,14 @@ function sameOriginPost(request) {
   return request.headers.get("origin") === REPORTS_ORIGIN && request.headers.get("sec-fetch-site") === "same-origin";
 }
 
-function equalStrings(left, right) {
-  if (typeof left !== "string" || typeof right !== "string" || left.length !== right.length) return false;
-  let mismatch = 0;
-  for (let index = 0; index < left.length; index += 1) mismatch |= left.charCodeAt(index) ^ right.charCodeAt(index);
-  return mismatch === 0;
-}
-
 function isJsonContentType(value) {
   return /^application\/json(?:\s*;|$)/i.test(value || "");
 }
 
-const OPAQUE_PROPERTY_REF = /^property:public:[A-Za-z0-9_-]{16,128}$/;
-const IDEMPOTENCY_KEY = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
-const REACTIONS = new Set(["interested", "discuss", "remove"]);
 const SHARE_BEARER = /^[A-Za-z0-9_-]{43}$/;
 
 function isPlainRecord(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
-}
-
-function hasUnsafeControlCharacters(value) {
-  return /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(value);
-}
-
-function validMutationBody(body, dependencyName) {
-  const expected = dependencyName === "commentShareFn" ? ["body", "idempotency_key", "property_ref"] : ["idempotency_key", "property_ref", "reaction"];
-  if (Object.keys(body).sort().join(",") !== expected.join(",")) return false;
-  if (typeof body.property_ref !== "string" || !OPAQUE_PROPERTY_REF.test(body.property_ref) ||
-      typeof body.idempotency_key !== "string" || !IDEMPOTENCY_KEY.test(body.idempotency_key)) return false;
-  if (dependencyName === "commentShareFn") return typeof body.body === "string" && body.body.trim().length > 0 && body.body.length <= 4000 && !hasUnsafeControlCharacters(body.body);
-  return typeof body.reaction === "string" && REACTIONS.has(body.reaction);
 }
 
 async function jsonBody(request) {
@@ -145,7 +118,7 @@ function dependencyFailure(result) {
 function publicResponse(result) {
   // Dependencies return the already-redacted projection only in `data`; the
   // session and the original share bearer are never a response shape here.
-  return json({ data: result.data, csrf_token: result.csrfToken });
+  return json({ data: result.data });
 }
 
 async function staticAsset(env, request, pathname) {
@@ -194,50 +167,8 @@ async function read(request, env, dependencies) {
   let result;
   try { result = await dependencies.readShareFn({ env, sessionDigest: await sha256Digest(session) }); }
   catch { return json({ error: "share_unavailable" }, 503); }
-  if (!result?.ok || !isPlainRecord(result.data) || typeof result.csrfToken !== "string" || !result.csrfToken || result.csrfToken.length > 256) return dependencyFailure(result);
-  return publicResponse(result);
-}
-
-async function downloadPdf(request, env, dependencies) {
-  const session = cookieValue(request, SESSION_COOKIE);
-  if (!session) return json({ error: "unauthorized" }, 401);
-  if (typeof dependencies.readPdfFn !== "function") return json({ error: "not_found" }, 404);
-  let result;
-  try { result = await dependencies.readPdfFn({ env, sessionDigest: await sha256Digest(session) }); }
-  catch { return json({ error: "share_unavailable" }, 503); }
-  if (!result?.ok || typeof result.artifactDigest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(result.artifactDigest)) return dependencyFailure(result);
-  let bytes;
-  if (result.body instanceof ArrayBuffer) bytes = new Uint8Array(result.body);
-  else if (ArrayBuffer.isView(result.body)) bytes = new Uint8Array(result.body.buffer, result.body.byteOffset, result.body.byteLength);
-  else return json({ error: "share_unavailable" }, 503);
-  if (bytes.byteLength < 8 || bytes.byteLength > MAX_PDF_BYTES || new TextDecoder().decode(bytes.subarray(0, 5)) !== "%PDF-") return json({ error: "share_unavailable" }, 503);
-  if (!equalStrings(await sha256Digest(bytes), result.artifactDigest)) return json({ error: "share_unavailable" }, 503);
-  return new Response(bytes, { headers: {
-    "content-type": "application/pdf", "content-length": String(bytes.byteLength),
-    "content-disposition": 'attachment; filename="CARR-Tour-Packet.pdf"', "cache-control": "no-store",
-  } });
-}
-
-async function mutation(request, env, dependencies, dependencyName) {
-  if (!sameOriginPost(request)) return json({ error: "forbidden" }, 403);
-  const session = cookieValue(request, SESSION_COOKIE);
-  if (!session) return json({ error: "unauthorized" }, 401);
-  const body = await jsonBody(request);
-  if (body.error) return body.error;
-  // A bearer has exactly one permitted ingress: the exchange endpoint.  Do
-  // not allow a token-shaped field to drift into comments or reactions.
-  if (Object.prototype.hasOwnProperty.call(body.value, "token") || !validMutationBody(body.value, dependencyName)) return json({ error: "invalid_request" }, 400);
-  if (typeof dependencies.readShareFn !== "function" || typeof dependencies[dependencyName] !== "function") return json({ error: "not_found" }, 404);
-  const sessionDigest = await sha256Digest(session);
-  let state;
-  try { state = await dependencies.readShareFn({ env, sessionDigest, csrfOnly: true }); }
-  catch { return json({ error: "share_unavailable" }, 503); }
-  if (!state?.ok || typeof state.csrfToken !== "string" || !equalStrings(request.headers.get("x-tour-share-csrf"), state.csrfToken)) return json({ error: "forbidden" }, 403);
-  let result;
-  try { result = await dependencies[dependencyName]({ env, sessionDigest, body: body.value }); }
-  catch { return json({ error: "share_unavailable" }, 503); }
   if (!result?.ok || !isPlainRecord(result.data)) return dependencyFailure(result);
-  return json({ data: result.data });
+  return publicResponse(result);
 }
 
 function withSecurityHeaders(response) {
@@ -266,9 +197,7 @@ async function handleRequest(request, env, dependencies) {
   if (!method) return json({ error: "not_found" }, 404);
   if (request.method !== method) return methodNotAllowed(method);
   if (pathname === "/api/share/exchange") return exchange(request, env, dependencies);
-  if (pathname === "/api/share/report") return read(request, env, dependencies);
-  if (pathname === "/api/share/pdf") return downloadPdf(request, env, dependencies);
-  return mutation(request, env, dependencies, pathname.endsWith("/comment") ? "commentShareFn" : "reactionShareFn");
+  return read(request, env, dependencies);
 }
 
 /** Injectable seams keep this browser gate independent from Worker, DB, and MCP wiring. */

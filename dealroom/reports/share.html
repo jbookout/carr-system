@@ -18,21 +18,11 @@
       </header>
       <p id="status" class="status" role="status" aria-live="polite"></p>
       <button id="open-tour" type="button" disabled>Open tour</button>
-      <a id="download-pdf" class="download-link" href="/api/share/pdf" hidden>Download PDF packet</a>
       <section aria-labelledby="items-title">
         <h2 id="items-title">Properties</h2>
         <ol id="report-list" class="report-list" aria-busy="true"></ol>
       </section>
-      <section id="comment-panel" class="comment-panel" hidden aria-labelledby="comment-title">
-        <h2 id="comment-title">Add a note</h2>
-        <form id="comment-form">
-          <label for="property-ref">Property</label>
-          <select id="property-ref" name="property_ref" required></select>
-          <label for="comment-body">Your note</label>
-          <textarea id="comment-body" name="body" rows="4" maxlength="4000" required></textarea>
-          <button type="submit">Send note</button>
-        </form>
-      </section>
+      <p class="status">This foundation share is read-only. PDF download and client feedback require a future governed permission-scope amendment.</p>
     </main>
   </body>
 </html>

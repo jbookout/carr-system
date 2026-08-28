@@ -2,6 +2,7 @@
 -- 2 migrations. It makes no durable record because the final rollback is part
 -- of the proof contract.
 begin;
+set local carr.verified_human_actor_slug='joe';
 
 do $proof$
 declare
@@ -142,9 +143,23 @@ begin
     'rights_receipt_id',v_rights,'provider',null,'observed_at','2026-08-27T10:00:00Z',
     'review_state','reviewed','access_notes','north drive'
   ));
+  perform set_config('carr.verified_human_actor_slug','',true);
+  begin
+    perform ops.append_tour_entrance_verification_receipt(jsonb_build_object(
+      'organization_tenant_id',v_tenant,'property_id',v_property_one,
+      'coordinate_candidate_id',v_coordinate,'verifier_actor_id',(select id::text from actor where slug='joe'),
+      'verified_at','2026-08-27T10:05:00Z','evidence_reference','imagery:proof',
+      'native_navigation_proof',jsonb_build_object('platform','apple_maps','device_tested',true),
+      'receipt_digest','sha256:' || repeat('0',64)
+    ));
+    raise exception 'proof expected sponsored entrance verification refusal';
+  exception when raise_exception then
+    if sqlerrm <> 'entrance verification requires a verified human authority session' then raise; end if;
+  end;
+  perform set_config('carr.verified_human_actor_slug','joe',true);
   perform ops.append_tour_entrance_verification_receipt(jsonb_build_object(
     'organization_tenant_id',v_tenant,'property_id',v_property_one,
-    'coordinate_candidate_id',v_coordinate,'verifier_actor_id','actor:proof',
+    'coordinate_candidate_id',v_coordinate,'verifier_actor_id',(select id::text from actor where slug='joe'),
     'verified_at','2026-08-27T10:05:00Z','evidence_reference','imagery:proof',
     'native_navigation_proof',jsonb_build_object('platform','apple_maps','device_tested',true),
     'receipt_digest','sha256:' || repeat('1',64)

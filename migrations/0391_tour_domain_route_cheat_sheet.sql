@@ -107,14 +107,21 @@ end $$;
 
 create or replace function ops.append_tour_route_version(p_tenant text,p_tour_id uuid,p_route_version integer,p_base_route_version_id uuid,p_start_point jsonb,p_end_point jsonb,p_routing_source text,p_routing_provider text,p_routing_rights_receipt_id uuid,p_routing_request jsonb,p_routing_response_digest text,p_expected_route_version integer)
 returns uuid language plpgsql security definer set search_path=pg_catalog,ops,public,pg_temp as $$
-declare v_id uuid; v_actor text; v_current integer;
+declare v_id uuid; v_actor text; v_latest integer; v_accepted integer;
 begin
   v_actor:=ops.tour_server_actor_id();
   if p_tenant is null or p_tour_id is null or p_route_version is null or p_expected_route_version is null or jsonb_typeof(p_start_point)<>'object' or jsonb_typeof(p_end_point)<>'object' or jsonb_typeof(p_routing_request)<>'object' or p_routing_source not in ('manual','provider') then raise exception 'route version payload is invalid'; end if;
   perform pg_advisory_xact_lock(hashtextextended(p_tenant || ':' || p_tour_id::text,386));
-  select coalesce(max(route_version),0) into v_current from ops.tour_route_version where organization_tenant_id=p_tenant and tour_id=p_tour_id;
-  if p_expected_route_version<>v_current or p_route_version<>v_current+1 then raise exception 'route version refuses concurrent or stale route state'; end if;
-  if p_base_route_version_id is null or not exists(select 1 from ops.tour_route_version where organization_tenant_id=p_tenant and id=p_base_route_version_id and tour_id=p_tour_id and route_version=v_current) then raise exception 'route version base is invalid'; end if;
+  select route_version into v_accepted from ops.tour where organization_tenant_id=p_tenant and id=p_tour_id for update;
+  if not found then raise exception 'route version tour is unavailable'; end if;
+  select coalesce(max(route_version),0) into v_latest from ops.tour_route_version where organization_tenant_id=p_tenant and tour_id=p_tour_id;
+  if p_expected_route_version<>v_accepted or p_route_version<>v_latest+1 then raise exception 'route version refuses concurrent or stale route state'; end if;
+  if p_base_route_version_id is null or not exists(
+    select 1 from ops.tour_route_version v
+     where v.organization_tenant_id=p_tenant and v.id=p_base_route_version_id and v.tour_id=p_tour_id
+       and v.route_version=v_accepted
+       and exists(select 1 from ops.tour_route_version_acceptance a where a.organization_tenant_id=p_tenant and a.route_version_id=v.id)
+  ) then raise exception 'route version base is invalid'; end if;
   if (p_routing_source='manual' and (p_routing_provider is not null or p_routing_rights_receipt_id is not null)) or (p_routing_source='provider' and (p_routing_provider is null or p_routing_provider !~ '^[A-Za-z0-9._:-]{1,120}$' or p_routing_rights_receipt_id is null)) then raise exception 'route provider projection is invalid'; end if;
   insert into ops.tour_route_version(organization_tenant_id,tour_id,route_version,base_route_version_id,start_point,end_point,routing_source,routing_provider,routing_rights_receipt_id,routing_request,routing_response_digest,created_by_actor_id) values(p_tenant,p_tour_id,p_route_version,p_base_route_version_id,p_start_point,p_end_point,p_routing_source,p_routing_provider,p_routing_rights_receipt_id,p_routing_request,p_routing_response_digest,v_actor) returning id into v_id;
   return v_id;
@@ -238,14 +245,21 @@ create or replace function ops.append_tour_route_version(
   p_routing_source text,p_routing_provider text,p_routing_rights_receipt_id uuid,p_routing_request jsonb,p_routing_response_digest text,
   p_expected_route_version integer,p_routing_policy_key text
 ) returns uuid language plpgsql security definer set search_path=pg_catalog,ops,public,pg_temp as $$
-declare v_id uuid; v_actor text; v_current integer;
+declare v_id uuid; v_actor text; v_latest integer; v_accepted integer;
 begin
   v_actor:=ops.tour_server_actor_id();
   if p_tenant is null or p_tour_id is null or p_route_version is null or p_expected_route_version is null or jsonb_typeof(p_start_point)<>'object' or jsonb_typeof(p_end_point)<>'object' or jsonb_typeof(p_routing_request)<>'object' or p_routing_source not in ('manual','provider') then raise exception 'route version payload is invalid'; end if;
   perform pg_advisory_xact_lock(hashtextextended(p_tenant || ':' || p_tour_id::text,386));
-  select coalesce(max(route_version),0) into v_current from ops.tour_route_version where organization_tenant_id=p_tenant and tour_id=p_tour_id;
-  if p_expected_route_version<>v_current or p_route_version<>v_current+1 then raise exception 'route version refuses concurrent or stale route state'; end if;
-  if p_base_route_version_id is null or not exists(select 1 from ops.tour_route_version where organization_tenant_id=p_tenant and id=p_base_route_version_id and tour_id=p_tour_id and route_version=v_current) then raise exception 'route version base is invalid'; end if;
+  select route_version into v_accepted from ops.tour where organization_tenant_id=p_tenant and id=p_tour_id for update;
+  if not found then raise exception 'route version tour is unavailable'; end if;
+  select coalesce(max(route_version),0) into v_latest from ops.tour_route_version where organization_tenant_id=p_tenant and tour_id=p_tour_id;
+  if p_expected_route_version<>v_accepted or p_route_version<>v_latest+1 then raise exception 'route version refuses concurrent or stale route state'; end if;
+  if p_base_route_version_id is null or not exists(
+    select 1 from ops.tour_route_version v
+     where v.organization_tenant_id=p_tenant and v.id=p_base_route_version_id and v.tour_id=p_tour_id
+       and v.route_version=v_accepted
+       and exists(select 1 from ops.tour_route_version_acceptance a where a.organization_tenant_id=p_tenant and a.route_version_id=v.id)
+  ) then raise exception 'route version base is invalid'; end if;
   if (p_routing_source='manual' and (p_routing_provider is not null or p_routing_policy_key is not null or p_routing_rights_receipt_id is not null)) or (p_routing_source='provider' and (p_routing_provider is null or p_routing_provider !~ '^[A-Za-z0-9._:-]{1,120}$' or p_routing_policy_key is null or p_routing_policy_key !~ '^[A-Za-z0-9._:-]{1,160}$' or p_routing_rights_receipt_id is null)) then raise exception 'route provider projection is invalid'; end if;
   insert into ops.tour_route_version(organization_tenant_id,tour_id,route_version,base_route_version_id,start_point,end_point,routing_source,routing_provider,routing_policy_key,routing_rights_receipt_id,routing_request,routing_response_digest,created_by_actor_id) values(p_tenant,p_tour_id,p_route_version,p_base_route_version_id,p_start_point,p_end_point,p_routing_source,p_routing_provider,p_routing_policy_key,p_routing_rights_receipt_id,p_routing_request,p_routing_response_digest,v_actor) returning id into v_id;
   return v_id;

@@ -2,7 +2,7 @@
 // It intentionally exposes neither property creation nor unreviewed identity,
 // lineage, jurisdiction, map, route, publication, or promotion capabilities.
 
-import { organizationTenantForActor } from "./identity.js";
+import { authorizationClassForActor, organizationTenantForActor } from "./identity.js";
 import { requiredTimestamp } from "./tour-operations-contract.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -84,6 +84,13 @@ function actorId(actor, ToolError) {
   if (!actor || typeof actor.id !== "string" || !actor.id.trim())
     fail(ToolError, { error: "tour_actor_context_required" });
   return actor.id;
+}
+
+function verifiedHumanActorId(actor, ToolError) {
+  const id = actorId(actor, ToolError);
+  if (actor?.human !== true || authorizationClassForActor(actor) !== "verified_partner")
+    fail(ToolError, { error: "tour_human_verification_required" });
+  return id;
 }
 
 function tenantFor(actor, ToolError) {
@@ -218,7 +225,7 @@ export function tourPropertyJurisdictionTools({ withEnvelope, writeEvent, ToolEr
           organization_tenant_id: tenantFor(actor, ToolError),
           property_id: uuid(args.property_id, "property_id", ToolError),
           coordinate_candidate_id: uuid(args.coordinate_candidate_id, "coordinate_candidate_id", ToolError),
-          verifier_actor_id: actorId(actor, ToolError),
+          verifier_actor_id: verifiedHumanActorId(actor, ToolError),
           verified_at: timestamp(args.verified_at, "verified_at", ToolError),
           evidence_reference: text(args.evidence_reference, "evidence_reference", ToolError),
           native_navigation_proof: nativeNavigationProof(args.native_navigation_proof, ToolError),

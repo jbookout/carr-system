@@ -5,6 +5,17 @@
 
 begin;
 
+-- 0318 made seal receipts append-only.  Silently adding a required canonical
+-- digest would strand any receipt that predates this migration because there
+-- is no lawful UPDATE path.  Refuse before altering anything; deployment must
+-- prove this count is zero or use a separately reviewed controlled backfill.
+do $$
+begin
+  if exists (select 1 from ops.tour_public_projection_seal_receipt) then
+    raise exception '0389 requires zero pre-existing projection seal receipts';
+  end if;
+end $$;
+
 alter table ops.tour_source_evidence
   add column if not exists rights_provider text,
   add column if not exists rights_policy_key text;
@@ -14,7 +25,7 @@ alter table ops.tour_public_projection_seal_receipt
 
 alter table ops.tour_public_projection_seal_receipt
   add constraint tour_projection_seal_receipt_canonical_digest_shape
-  check (canonical_projection_digest is not null and canonical_projection_digest ~ '^sha256:[a-f0-9]{64}$') not valid;
+  check (canonical_projection_digest is not null and canonical_projection_digest ~ '^sha256:[a-f0-9]{64}$');
 
 -- Every decision about a provider/policy stream takes the same transaction
 -- advisory lock.  This makes successor admission and current-rights checks

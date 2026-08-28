@@ -206,11 +206,13 @@ export function validateProjectionComplete({
   projection, memberships = [], facts = [], assertions = [], evidence = [], rights = [],
   lineage = [], revocations = [], requiredFieldKeys = REQUIRED_PUBLIC_PROPERTY_FIELDS,
 } = {}) {
-  validateProjectionDraft(projection);
+  if (!projection || projection.status !== "approved")
+    throw new Error("PROJECTION_STATUS_APPROVED_REQUIRED");
   const seal = projection.seal_receipt;
   if (!seal || seal.organization_tenant_id !== projection.organization_tenant_id ||
       seal.projection_id !== projection.id || seal.sealed_state !== "approved" ||
       !requiredTimestamp(seal.sealed_at) ||
+      seal.canonical_projection_digest !== projection.projection_digest ||
       !/^sha256:[a-f0-9]{64}$/.test(seal.receipt_digest || "") ||
       typeof seal.actor_id !== "string" || !seal.actor_id)
     throw new Error("PROJECTION_SEAL_REQUIRED");

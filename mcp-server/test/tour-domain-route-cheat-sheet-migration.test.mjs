@@ -29,6 +29,9 @@ test("slice 4 preserves immutable accepted route versions and explicit reorder l
   assert.match(migration, /disposition.*unchanged.*reordered.*removed.*held.*excluded.*merged/i);
   assert.match(migration, /route acceptance requires an explicit disposition for every prior route stop/i);
   assert.match(migration, /route acceptance refuses concurrent or stale route state/i);
+  assert.match(migration, /p_expected_route_version<>v_accepted/i);
+  assert.match(migration, /p_route_version<>v_latest\+1/i);
+  assert.match(migration, /v\.route_version=v_accepted[\s\S]*tour_route_version_acceptance/i);
   assert.match(migration, /pg_advisory_xact_lock/i);
   assert.match(migration, /tour_route_version.*append-only/i);
   assert.match(migration, /tour_route_stop.*append-only/i);

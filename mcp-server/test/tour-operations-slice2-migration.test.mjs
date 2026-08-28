@@ -16,6 +16,8 @@ test("slice 2 hardening is forward-only and preserves exact provider-policy-rece
   assert.match(migration, /pg_advisory_xact_lock/i);
   assert.match(migration, /rights receipt refuses source intake/i);
   assert.match(migration, /rights receipt refuses asserted field\/use/i);
+  assert.match(migration, /0389 requires zero pre-existing projection seal receipts/i);
+  assert.doesNotMatch(migration, /canonical_projection_digest[\s\S]{0,240}not valid/i);
   assert.doesNotMatch(migration, /drop\s+table|truncate\s+table/i);
   assert.match(migration, /commit;/i);
 });
