@@ -278,6 +278,12 @@ test("S0 memory evaluation baseline is frozen, complete, and non-authoritative",
   const resourceDigestDrift = structuredClone(fixture);
   resourceDigestDrift.record_state_binding.accepted_resource_revisions[0].content_digest = `sha256:${"0".repeat(64)}`;
   assert.equal(validate(resourceDigestDrift).valid, false, "unaccepted controller resource digest is rejected");
+  const resourceDigestSwap = structuredClone(fixture);
+  const sourceLockDigest = resourceDigestSwap.record_state_binding.accepted_resource_revisions[0].content_digest;
+  resourceDigestSwap.record_state_binding.accepted_resource_revisions[0].content_digest =
+    resourceDigestSwap.record_state_binding.accepted_resource_revisions[1].content_digest;
+  resourceDigestSwap.record_state_binding.accepted_resource_revisions[1].content_digest = sourceLockDigest;
+  assert.equal(validate(resourceDigestSwap).valid, false, "accepted controller resource digests cannot be permuted across resource refs");
 
   const resourceBindings = new Map(fixture.resource_bindings.map(row => [row.resource_ref, row]));
   const resourceBodies = {
