@@ -6,7 +6,7 @@
   "status": "foundation_contract_not_a_client_surface",
   "canonical_record_policy": {
     "source_of_truth": "versioned CARR records; projections, providers, routes, exports, and models are never canonical facts",
-    "required_fact_metadata": ["property_id", "field_key", "value", "source_evidence_id", "observed_at", "effective_from", "effective_to", "rights_receipt_id", "confidence", "data_classification", "review_state"],
+    "required_fact_metadata": ["organization_tenant_id", "property_id", "field_key", "value", "source_evidence_id", "observed_at", "effective_from", "effective_to", "rights_receipt_id", "confidence", "data_classification", "review_state"],
     "time_policy": "observation time records when CARR saw a claim; effective interval records when the claim is asserted to apply; open effective_to means currently asserted, never permanently true",
     "conflict_policy": "Conflicting assertions are immutable participants in a first-class conflict. A resolution receipt names the selected assertion, rationale, resolver, time and supporting evidence; losing assertions remain preserved.",
     "classification": ["public", "client_authorized", "internal", "restricted"],

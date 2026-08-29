@@ -37,7 +37,7 @@ const FACT_CONFIDENCE = new Set(["low", "medium", "high", "unknown"]);
 const FACT_CLASSIFICATION = new Set(["public", "client_authorized", "internal", "restricted"]);
 const FACT_REVIEW_STATE = new Set(["unreviewed", "reviewed", "conflicted", "superseded", "withdrawn"]);
 export const CANONICAL_FACT_REQUIRED_FIELDS = Object.freeze([
-  "property_id", "field_key", "value", "source_evidence_id", "rights_receipt_id",
+  "organization_tenant_id", "property_id", "field_key", "value", "source_evidence_id", "rights_receipt_id",
   "observed_at", "effective_from", "effective_to", "confidence",
   "data_classification", "review_state",
 ]);
@@ -47,10 +47,14 @@ export function validateCanonicalFieldAssertion(assertion) {
     throw new Error("FACT_ASSERTION_REQUIRED");
   for (const field of CANONICAL_FACT_REQUIRED_FIELDS)
     if (!Object.hasOwn(assertion, field)) throw new Error(`FACT_METADATA_REQUIRED:${field}`);
-  for (const field of ["property_id", "field_key", "source_evidence_id", "rights_receipt_id"])
-    if (typeof assertion[field] !== "string" || !assertion[field].trim())
+  if (typeof assertion.organization_tenant_id !== "string" || !assertion.organization_tenant_id.trim())
+    throw new Error("FACT_METADATA_INVALID:organization_tenant_id");
+  if (typeof assertion.field_key !== "string" || !assertion.field_key.trim())
+    throw new Error("FACT_METADATA_INVALID:field_key");
+  for (const field of ["property_id", "source_evidence_id", "rights_receipt_id"])
+    if (typeof assertion[field] !== "string" || !FOUNDATION_UUID_RE.test(assertion[field]))
       throw new Error(`FACT_METADATA_INVALID:${field}`);
-  if (assertion.value == null) throw new Error("FACT_METADATA_INVALID:value");
+  if (assertion.value === undefined) throw new Error("FACT_METADATA_INVALID:value");
   if (!requiredTimestamp(assertion.observed_at))
     throw new Error("FACT_METADATA_INVALID:observed_at");
   if (!requiredTimestamp(assertion.effective_from))
@@ -121,7 +125,7 @@ const FOUNDATION_DIGEST_FIELDS = new Set([
 ]);
 const FOUNDATION_NULLABLE_FIELDS = new Set([
   "expires_at", "revoked_at", "supersedes_receipt_id", "effective_to",
-  "rotated_from_grant_id",
+  "rotated_from_grant_id", "value",
 ]);
 const FOUNDATION_UUID_FIELDS = new Set([
   "property_id", "rights_receipt_id", "supersedes_receipt_id", "source_evidence_id",

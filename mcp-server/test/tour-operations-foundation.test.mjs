@@ -18,7 +18,7 @@ const rightsHardeningMigration = read("migrations/0427_tour_rights_projection_ha
 
 test("foundation contract preserves provenance, conflicts, audit, rights versions and tenant integrity", () => {
   assert.equal(contract.version, "1.7.0");
-  for (const field of ["property_id", "field_key", "source_evidence_id", "observed_at", "effective_from", "rights_receipt_id", "confidence", "data_classification"]) assert(contract.canonical_record_policy.required_fact_metadata.includes(field), field);
+  for (const field of ["organization_tenant_id", "property_id", "field_key", "source_evidence_id", "observed_at", "effective_from", "rights_receipt_id", "confidence", "data_classification"]) assert(contract.canonical_record_policy.required_fact_metadata.includes(field), field);
   for (const entity of ["FactConflict", "AuditEvent", "TourPropertyMembership", "ProjectionFact"]) assert.ok(contract.entities[entity], entity);
   assert.match(contract.entities.RightsReceipt.rule, /immutable versioned.*fail closed/i);
   assert.match(contract.canonical_record_policy.tenant_integrity, /tenant-qualified/i);
@@ -77,7 +77,7 @@ test("canonical factual fields require provenance, time, rights, confidence and 
   const assertion = fixture.field_assertion;
   assert.equal(validateCanonicalFieldAssertion(assertion), true);
   assert.deepEqual(contract.canonical_record_policy.required_fact_metadata,
-    ["property_id", "field_key", "value", "source_evidence_id", "observed_at", "effective_from", "effective_to", "rights_receipt_id", "confidence", "data_classification", "review_state"]);
+    ["organization_tenant_id", "property_id", "field_key", "value", "source_evidence_id", "observed_at", "effective_from", "effective_to", "rights_receipt_id", "confidence", "data_classification", "review_state"]);
   for (const field of CANONICAL_FACT_REQUIRED_FIELDS) {
     const invalid = {...assertion};
     delete invalid[field];
@@ -85,10 +85,15 @@ test("canonical factual fields require provenance, time, rights, confidence and 
       new RegExp(`FACT_METADATA_REQUIRED:${field}`), field);
   }
   assert.throws(() => validateCanonicalFieldAssertion({...assertion, observed_at: "not-a-time"}), /FACT_METADATA_INVALID:observed_at/);
+  assert.throws(() => validateCanonicalFieldAssertion({...assertion, organization_tenant_id: ""}), /FACT_METADATA_INVALID:organization_tenant_id/);
+  assert.throws(() => validateCanonicalFieldAssertion({...assertion, property_id: "not-a-uuid"}), /FACT_METADATA_INVALID:property_id/);
   assert.throws(() => validateCanonicalFieldAssertion({...assertion, effective_to: "2026-07-31T00:00:00Z"}), /FACT_EFFECTIVE_INTERVAL_INVALID/);
   assert.throws(() => validateCanonicalFieldAssertion({...assertion, rights_receipt_id: ""}), /FACT_METADATA_INVALID:rights_receipt_id/);
   assert.throws(() => validateCanonicalFieldAssertion({...assertion, confidence: "guessed"}), /FACT_METADATA_INVALID:confidence/);
   assert.throws(() => validateCanonicalFieldAssertion({...assertion, data_classification: "publicish"}), /FACT_METADATA_INVALID:data_classification/);
+  assert.equal(validateCanonicalFieldAssertion({...assertion, value: null}), true);
+  assert.equal(validateFoundationEntityFixture("FieldAssertion",
+    {...fixture.contract_entities.FieldAssertion, value: null}, contract.entities.FieldAssertion), true);
 });
 
 test("normalized projection facts refuse cross-tenant, unreviewed, nonpublic, and route-mismatched data", () => {
