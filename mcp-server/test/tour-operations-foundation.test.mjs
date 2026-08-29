@@ -89,6 +89,20 @@ test("foundation fixture validation rejects incomplete, unknown, and schema-inva
     {...fixture.contract_entities.AuditEvent,
       event_digest: {toString: () => "sha256:" + "f".repeat(64)}}, contract.entities.AuditEvent),
   /FOUNDATION_ENTITY_DIGEST_INVALID:AuditEvent\.event_digest/);
+  const shadowedScopes = ["edit_cheat_sheet"];
+  shadowedScopes.some = () => false;
+  assert.throws(() => validateFoundationEntityFixture("ShareGrant",
+    {...fixture.contract_entities.ShareGrant, permission_scopes: shadowedScopes}, contract.entities.ShareGrant),
+  /FOUNDATION_ENTITY_SCOPE_INVALID:ShareGrant\.permission_scopes/);
+  const grantWithSerializer = structuredClone(fixture.contract_entities.ShareGrant);
+  Object.defineProperty(grantWithSerializer, "toJSON", {value: () => ({corrupted: true})});
+  assert.throws(() => validateFoundationEntityFixture("ShareGrant", grantWithSerializer,
+    contract.entities.ShareGrant), /FOUNDATION_ENTITY_SERIALIZATION_INVALID:ShareGrant/);
+  const scopesWithSerializer = ["view_packet"];
+  Object.defineProperty(scopesWithSerializer, "toJSON", {value: () => ["edit_cheat_sheet"]});
+  assert.throws(() => validateFoundationEntityFixture("ShareGrant",
+    {...fixture.contract_entities.ShareGrant, permission_scopes: scopesWithSerializer},
+    contract.entities.ShareGrant), /FOUNDATION_ENTITY_SERIALIZATION_INVALID:ShareGrant/);
 });
 
 test("canonical factual fields require provenance, time, rights, confidence and classification", () => {
@@ -122,6 +136,9 @@ test("canonical factual fields require provenance, time, rights, confidence and 
   for (const value of [arrayWithSerializer, objectWithSerializer, objectWithGetter,
     objectWithSerializerGetter])
     assert.throws(() => validateCanonicalFieldAssertion({...assertion, value}), /FACT_METADATA_INVALID:value/);
+  const assertionWithValueGetter = {...assertion};
+  Object.defineProperty(assertionWithValueGetter, "value", {enumerable: true, get: () => "unstable"});
+  assert.throws(() => validateCanonicalFieldAssertion(assertionWithValueGetter), /FACT_METADATA_REQUIRED:value/);
   assert.equal(validateCanonicalFieldAssertion({...assertion, value: {suite: null}}), true);
   assert.throws(() => validateFoundationEntityFixture("FieldAssertion",
     {...fixture.contract_entities.FieldAssertion, value: null}, contract.entities.FieldAssertion),

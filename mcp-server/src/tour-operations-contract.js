@@ -76,13 +76,29 @@ function canonicalJsonValueIsSafe(value, topLevel = true, seen = new Set()) {
   return safe;
 }
 
+const ownEnumerableDataDescriptor = (record, field) => {
+  const descriptor = Object.getOwnPropertyDescriptor(record, field);
+  return descriptor && descriptor.enumerable && Object.hasOwn(descriptor, "value")
+    ? descriptor : null;
+};
+
+const plainRecordEnvelopeIsSafe = record => {
+  const prototype = Object.getPrototypeOf(record);
+  if (prototype !== Object.prototype && prototype !== null) return false;
+  const descriptor = Object.getOwnPropertyDescriptor(record, "toJSON");
+  return !descriptor || (Object.hasOwn(descriptor, "value") &&
+    typeof descriptor.value !== "function");
+};
+
 export function validateCanonicalFieldAssertion(assertion) {
   // Foundation contract primitive only. Runtime adapter enforcement belongs to
   // the dependency-gated rights-and-public-projection service slice.
   if (!assertion || Array.isArray(assertion) || typeof assertion !== "object")
     throw new Error("FACT_ASSERTION_REQUIRED");
+  if (!plainRecordEnvelopeIsSafe(assertion)) throw new Error("FACT_ASSERTION_UNSAFE");
   for (const field of CANONICAL_FACT_REQUIRED_FIELDS)
-    if (!Object.hasOwn(assertion, field)) throw new Error(`FACT_METADATA_REQUIRED:${field}`);
+    if (!ownEnumerableDataDescriptor(assertion, field))
+      throw new Error(`FACT_METADATA_REQUIRED:${field}`);
   if (typeof assertion.organization_tenant_id !== "string" || !assertion.organization_tenant_id.trim())
     throw new Error("FACT_METADATA_INVALID:organization_tenant_id");
   if (typeof assertion.field_key !== "string" || !assertion.field_key.trim())
@@ -188,7 +204,7 @@ export function validateFoundationEntityFixture(entityName, record, entityContra
     throw new Error(`FOUNDATION_ENTITY_REQUIRED:${entityName}`);
   const fields = [...new Set([...(entityContract.identity || []), ...(entityContract.required || [])])];
   for (const field of fields)
-    if (!Object.hasOwn(record, field))
+    if (!ownEnumerableDataDescriptor(record, field))
       throw new Error(`FOUNDATION_ENTITY_FIELD_REQUIRED:${entityName}.${field}`);
   for (const field of Object.keys(record))
     if (!fields.includes(field))
@@ -232,9 +248,16 @@ export function validateFoundationEntityFixture(entityName, record, entityContra
     throw new Error("FOUNDATION_ENTITY_JSON_INVALID:FieldAssertion.value");
   if (entityName === "PublicTourProjection" && record.facts_only !== true)
     throw new Error("FOUNDATION_ENTITY_FACTS_ONLY_REQUIRED:PublicTourProjection.facts_only");
-  if (entityName === "ShareGrant" && record.permission_scopes.some(scope =>
-    !["view_packet", "view_map"].includes(scope)))
-    throw new Error("FOUNDATION_ENTITY_SCOPE_INVALID:ShareGrant.permission_scopes");
+  if (entityName === "ShareGrant") {
+    const scopes = record.permission_scopes;
+    if (Array.from({length: scopes.length}, (_, index) => index).some(index => {
+      const descriptor = Object.getOwnPropertyDescriptor(scopes, String(index));
+      return !descriptor || !Object.hasOwn(descriptor, "value") ||
+        !["view_packet", "view_map"].includes(descriptor.value);
+    })) throw new Error("FOUNDATION_ENTITY_SCOPE_INVALID:ShareGrant.permission_scopes");
+  }
+  if (!canonicalJsonValueIsSafe(record, false))
+    throw new Error(`FOUNDATION_ENTITY_SERIALIZATION_INVALID:${entityName}`);
   return true;
 }
 const requiredTime = (value, error) => {
