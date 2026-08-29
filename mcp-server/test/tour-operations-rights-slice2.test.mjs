@@ -20,12 +20,18 @@ test("rights are current only when effective, unexpired, unrevoked, and explicit
   assert.throws(() => evaluateRightsReceipt({ ...fixture.rights_receipt, effective_at: "2026-08-26T00:00:00Z" }, rightsRequest), /PUBLIC_RIGHTS_REQUIRED|RIGHTS_(?:NOT_)?YET_EFFECTIVE|NOT_EFFECTIVE/);
   assert.throws(() => evaluateRightsReceipt({ ...fixture.rights_receipt, expires_at: "2026-08-25T12:00:00Z" }, rightsRequest), /PUBLIC_RIGHTS_REQUIRED|RIGHTS_EXPIRED|EXPIRED/);
   assert.throws(() => evaluateRightsReceipt({ ...fixture.rights_receipt, status: "revoked", revoked_at: "2026-08-24T00:00:00Z" }, rightsRequest), /PUBLIC_RIGHTS_REQUIRED|RIGHTS_REVOKED|REVOKED/);
+  assert.throws(() => evaluateRightsReceipt({ ...fixture.rights_receipt, status: "unknown" }, rightsRequest), /RIGHTS_UNKNOWN/);
+  assert.throws(() => evaluateRightsReceipt({ ...fixture.rights_receipt, intended_use: "" }, rightsRequest), /RIGHTS_UNKNOWN/);
   assert.throws(() => evaluateRightsReceipt(fixture.rights_receipt, { ...rightsRequest, useClass: "internal_export" }), /PUBLIC_RIGHTS_REQUIRED|RIGHTS_USE_NOT_ALLOWED|USE_NOT_ALLOWED/);
   assert.throws(() => evaluateRightsReceipt(fixture.rights_receipt, { ...rightsRequest, fieldKey: "internal_note" }), /PUBLIC_RIGHTS_REQUIRED|RIGHTS_FIELD_NOT_ALLOWED|FIELD_NOT_ALLOWED/);
   assert.throws(() => evaluateRightsReceipt(fixture.rights_receipt, {
     ...rightsRequest,
     lineage: [{ ...fixture.rights_receipt, id: "successor", receipt_version: 2, effective_at: "2026-08-20T00:00:00Z", supersedes_receipt_id: fixture.rights_receipt.id }],
   }), /PUBLIC_RIGHTS_SUPERSEDED|RIGHTS_SUPERSEDED|SUPERSEDED/);
+  assert.throws(() => evaluateRightsReceipt(fixture.rights_receipt, {
+    ...rightsRequest,
+    lineage: [{ ...fixture.rights_receipt, id: "conflicting-receipt", receipt_digest: `sha256:${"b".repeat(64)}` }],
+  }), /RIGHTS_CONFLICT/);
   accepts(evaluateRightsReceipt(fixture.rights_receipt, {
     ...rightsRequest,
     lineage: [{ ...fixture.rights_receipt, id: "other-provider-successor", provider: "other-provider", receipt_version: 2, effective_at: "2026-08-20T00:00:00Z" }],
@@ -40,6 +46,7 @@ test("evidence-to-assertion rights lineage binds tenant, receipt, provider, poli
   assert.throws(() => validateEvidenceRightsLineage(fixture.source_evidence, { ...fixture.field_assertion, rights_receipt_id: "wrong" }, fixture.rights_receipt), /ASSERTION_RIGHTS|PROVENANCE|RIGHTS/);
   assert.throws(() => validateEvidenceRightsLineage(fixture.source_evidence, { ...fixture.field_assertion, observed_at: "not-a-time" }, fixture.rights_receipt), /OBSERVED|EFFECTIVE|RIGHTS/);
   assert.throws(() => validateEvidenceRightsLineage({ ...fixture.source_evidence, retrieved_at: "not-a-time" }, fixture.field_assertion, fixture.rights_receipt), /RETRIEVED|EFFECTIVE|RIGHTS/);
+  assert.throws(() => validateEvidenceRightsLineage({ ...fixture.source_evidence, retrieval_status: "partial" }, fixture.field_assertion, fixture.rights_receipt), /EVIDENCE_UNRESOLVED/);
   assert.notEqual(fixture.field_assertion.observed_at, fixture.source_evidence.retrieved_at, "observation and retrieval timestamps must remain distinct provenance facts");
 });
 

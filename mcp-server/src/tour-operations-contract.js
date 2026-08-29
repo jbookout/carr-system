@@ -312,7 +312,11 @@ export function evaluateRightsReceipt(receipt, {
   at, fieldKey = null, useClass, lineage = [], revocations = [],
 } = {}) {
   const evaluationTime = requiredTime(at, "RIGHTS_EVALUATION_TIME_REQUIRED");
-  if (!receipt || typeof receipt !== "object" || !requiredTimestamp(receipt.effective_at))
+  if (!receipt || typeof receipt !== "object" || !requiredTimestamp(receipt.effective_at) ||
+      typeof receipt.intended_use !== "string" || !receipt.intended_use.trim() ||
+      typeof receipt.provider !== "string" || !receipt.provider.trim() ||
+      typeof receipt.policy_key !== "string" || !receipt.policy_key.trim() ||
+      !Number.isInteger(receipt.receipt_version) || receipt.receipt_version < 1)
     throw new Error("RIGHTS_UNKNOWN");
   if (revocationApplies(receipt, evaluationTime, Array.isArray(revocations) ? revocations : []) ||
       receipt.status === "revoked") throw new Error("RIGHTS_REVOKED");
@@ -326,9 +330,16 @@ export function evaluateRightsReceipt(receipt, {
   if (fieldKey != null && (!Array.isArray(receipt.allowed_field_classes) ||
       !(receipt.allowed_field_classes.includes(fieldKey) ||
         receipt.allowed_field_classes.includes("*")))) throw new Error("RIGHTS_FIELD_NOT_ALLOWED");
-  if ((Array.isArray(lineage) ? lineage : []).some(item => item &&
+  const relatedLineage = (Array.isArray(lineage) ? lineage : []).filter(item => item &&
       item.organization_tenant_id === receipt.organization_tenant_id &&
-      item.provider === receipt.provider && item.policy_key === receipt.policy_key &&
+      item.provider === receipt.provider && item.policy_key === receipt.policy_key);
+  if (relatedLineage.some(item => item.id !== receipt.id && item.receipt_version === receipt.receipt_version &&
+      item.status === "active" && requiredTimestamp(item.effective_at) &&
+      new Date(item.effective_at) <= evaluationTime &&
+      (!item.expires_at || (requiredTimestamp(item.expires_at) && new Date(item.expires_at) > evaluationTime)) &&
+      !revocationApplies(item, evaluationTime, Array.isArray(revocations) ? revocations : [])))
+    throw new Error("RIGHTS_CONFLICT");
+  if (relatedLineage.some(item =>
       Number.isInteger(item.receipt_version) && item.receipt_version > receipt.receipt_version &&
       requiredTimestamp(item.effective_at) && new Date(item.effective_at) <= evaluationTime))
     throw new Error("RIGHTS_SUPERSEDED");
@@ -348,6 +359,7 @@ export function validateEvidenceRightsLineage(evidence, assertion, rightsReceipt
        evidence.rights_receipt_digest !== rightsReceipt.receipt_digest))
     throw new Error("EVIDENCE_RIGHTS_LINEAGE_MISMATCH");
   if (!requiredTimestamp(evidence.retrieved_at)) throw new Error("RETRIEVED_AT_REQUIRED");
+  if (evidence.retrieval_status !== "read") throw new Error("EVIDENCE_UNRESOLVED");
   if (!requiredTimestamp(assertion.observed_at)) throw new Error("OBSERVED_AT_REQUIRED");
   return true;
 }
@@ -448,6 +460,7 @@ export function validateProjectionFact(fact, assertion, membership, projection, 
     throw new Error("PROJECTION_PROPERTY_MISMATCH");
   if (fact.field_assertion_id !== assertion.id || assertion.review_state !== "reviewed" ||
       assertion.data_classification !== "public") throw new Error("PUBLIC_ASSERTION_REQUIRED");
+  if (assertion.confidence === "unknown") throw new Error("PUBLIC_ASSERTION_UNRESOLVED");
   if (fact.display_field_key !== assertion.field_key)
     throw new Error("PUBLIC_FIELD_RELABEL_REFUSED");
   if (membership.route_version !== fact.route_version ||
@@ -487,7 +500,8 @@ const mapById = values =>
 
 export function validateProjectionComplete({
   projection, memberships = [], facts = [], assertions = [], evidence = [], rights = [],
-  lineage = [], revocations = [], map_points = [], requiredFieldKeys = REQUIRED_PUBLIC_PROPERTY_FIELDS,
+  lineage = [], revocations = [], conflicts = [], map_points = [],
+  requiredFieldKeys = REQUIRED_PUBLIC_PROPERTY_FIELDS,
 } = {}) {
   if (!projection || projection.status !== "approved")
     throw new Error("PROJECTION_STATUS_APPROVED_REQUIRED");
@@ -521,6 +535,10 @@ export function validateProjectionComplete({
       const source = assertion && evidenceById.get(assertion.source_evidence_id);
       const receipt = assertion && rightsById.get(assertion.rights_receipt_id);
       if (!assertion || !source || !receipt) throw new Error("PROJECTION_INCOMPLETE");
+      if ((Array.isArray(conflicts) ? conflicts : []).some(conflict => conflict &&
+          conflict.organization_tenant_id === projection.organization_tenant_id &&
+          conflict.property_id === fact.property_id && conflict.field_key === fact.display_field_key &&
+          conflict.state === "open")) throw new Error("PUBLIC_ASSERTION_CONFLICTED");
       validateProjectionFact(fact, assertion, membership, projection, receipt, {
         lineage, evidence: source, revocations,
       });

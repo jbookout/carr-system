@@ -18,8 +18,28 @@ const ids = {
 };
 const digest = value => `sha256:${value.repeat(64)}`;
 const idempotency = "70000000-0000-4000-8000-000000000001";
+const publicFact = {
+  property_id: ids.property,
+  field_assertion_id: ids.assertion,
+  display_field_key: "display.name",
+  value: "Medical Plaza",
+  source_evidence_id: ids.evidence,
+  rights_receipt_id: ids.rights,
+  observed_at: "2026-08-27T12:05:00Z",
+  effective_from: "2026-08-27T00:00:00Z",
+  effective_to: null,
+};
+const databaseProjection = {
+  projection_id: ids.projection,
+  tour_id: ids.tour,
+  projection_version: 1,
+  route_version: 1,
+  as_of: "2026-08-27T12:15:00Z",
+  projection_digest: digest("f"),
+  facts: [publicFact],
+};
 
-function harness() {
+function harness({ projection = databaseProjection } = {}) {
   const calls = [];
   const envelopes = [];
   const events = [];
@@ -32,7 +52,7 @@ function harness() {
       if (sql.includes("append_tour_field_assertion")) return { rows: [{ field_assertion_id: ids.assertion }] };
       if (sql.includes("create_tour_public_projection_draft")) return { rows: [{ projection_id: ids.projection }] };
       if (sql.includes("seal_tour_public_projection")) return { rows: [{ projection_digest: digest("f") }] };
-      if (sql.includes("read_tour_public_projection")) return { rows: [{ projection: { projection_id: ids.projection, projection_digest: digest("f"), facts: [] } }] };
+      if (sql.includes("read_tour_public_projection")) return { rows: [{ projection }] };
       throw new Error(`unexpected query: ${sql}`);
     },
   };
@@ -137,6 +157,48 @@ test("read is tenant-scoped, approved-only, and never enters a write envelope", 
   assert.deepEqual(h.calls[0].params, ["carr-internal", ids.projection]);
   assert.equal(h.envelopes.length, 0);
   assert.equal(h.events.length, 0);
+});
+
+test("public read projection ignores internal-only metadata and rejects forbidden fact classes", async () => {
+  const internalOnly = {
+    ...databaseProjection,
+    broker_contact: { email: "internal@example.invalid" },
+    analysis: "broker conclusion",
+    credentials: "secret",
+    notes: "internal note",
+    restrictions: "provider terms",
+    recommendation: "choose this property",
+    ranking: 1,
+    facts: [{ ...publicFact, internal_note: "do not expose", broker_rank: 1 }],
+  };
+  const cleanHarness = harness();
+  const clean = await cleanHarness.tools["read-tour-public-projection"].handler(
+    cleanHarness.client, actor, { projection_id: ids.projection });
+  const h = harness({ projection: internalOnly });
+  const projected = await h.tools["read-tour-public-projection"].handler(
+    h.client, actor, { projection_id: ids.projection });
+  assert.deepEqual(projected.projection, clean.projection);
+  assert.deepEqual(Object.keys(projected.projection).sort(), [
+    "as_of", "facts", "projection_digest", "projection_id", "projection_version", "route_version", "tour_id",
+  ]);
+  assert.deepEqual(Object.keys(projected.projection.facts[0]).sort(), [
+    "display_field_key", "effective_from", "effective_to", "field_assertion_id", "observed_at",
+    "property_id", "rights_receipt_id", "source_evidence_id", "value",
+  ]);
+
+  for (const display_field_key of [
+    "broker_contact", "analysis", "credentials", "notes", "restrictions", "recommendation", "ranking",
+  ]) {
+    const rejected = harness({ projection: {
+      ...databaseProjection,
+      facts: [{ ...publicFact, display_field_key }],
+    } });
+    await assert.rejects(
+      rejected.tools["read-tour-public-projection"].handler(
+        rejected.client, actor, { projection_id: ids.projection }),
+      error => error instanceof ToolError && error.payload.error === "tour_public_projection_invalid",
+    );
+  }
 });
 
 test("authority selectors and actor/reviewer impersonation are refused before database access", async () => {

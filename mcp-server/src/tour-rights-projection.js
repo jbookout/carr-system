@@ -5,7 +5,11 @@
 // capability.
 
 import { organizationTenantForActor } from "./identity.js";
-import { requiredTimestamp } from "./tour-operations-contract.js";
+import {
+  PUBLIC_TOUR_FIELD_KEYS,
+  publicValueIsSafe,
+  requiredTimestamp,
+} from "./tour-operations-contract.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
@@ -91,6 +95,45 @@ function positiveInteger(value, field, ToolError) {
   if (!Number.isInteger(value) || value < 1)
     fail(ToolError, { error: "tour_input_invalid", field });
   return value;
+}
+
+function publicProjection(value, ToolError) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    fail(ToolError, { error: "tour_public_projection_invalid" });
+  const projection = {
+    projection_id: uuid(value.projection_id, "projection_id", ToolError),
+    tour_id: uuid(value.tour_id, "tour_id", ToolError),
+    projection_version: positiveInteger(value.projection_version, "projection_version", ToolError),
+    route_version: positiveInteger(value.route_version, "route_version", ToolError),
+    as_of: timestamp(value.as_of, "as_of", ToolError),
+    projection_digest: digest(value.projection_digest, "projection_digest", ToolError),
+    facts: null,
+  };
+  if (!Array.isArray(value.facts) || value.facts.length === 0)
+    fail(ToolError, { error: "tour_public_projection_invalid", field: "facts" });
+  projection.facts = value.facts.map((fact, index) => {
+    if (!fact || typeof fact !== "object" || Array.isArray(fact))
+      fail(ToolError, { error: "tour_public_projection_invalid", field: `facts[${index}]` });
+    const displayFieldKey = text(fact.display_field_key, `facts[${index}].display_field_key`, ToolError);
+    if (!PUBLIC_TOUR_FIELD_KEYS.has(displayFieldKey) || !publicValueIsSafe(displayFieldKey, fact.value))
+      fail(ToolError, { error: "tour_public_projection_invalid", field: `facts[${index}].display_field_key` });
+    const effectiveFrom = timestamp(fact.effective_from, `facts[${index}].effective_from`, ToolError);
+    const effectiveTo = timestamp(fact.effective_to, `facts[${index}].effective_to`, ToolError, true);
+    if (effectiveTo && Date.parse(effectiveTo) <= Date.parse(effectiveFrom))
+      fail(ToolError, { error: "tour_public_projection_invalid", field: `facts[${index}].effective_to` });
+    return {
+      property_id: uuid(fact.property_id, `facts[${index}].property_id`, ToolError),
+      field_assertion_id: uuid(fact.field_assertion_id, `facts[${index}].field_assertion_id`, ToolError),
+      display_field_key: displayFieldKey,
+      value: fact.value,
+      source_evidence_id: uuid(fact.source_evidence_id, `facts[${index}].source_evidence_id`, ToolError),
+      rights_receipt_id: uuid(fact.rights_receipt_id, `facts[${index}].rights_receipt_id`, ToolError),
+      observed_at: timestamp(fact.observed_at, `facts[${index}].observed_at`, ToolError),
+      effective_from: effectiveFrom,
+      effective_to: effectiveTo,
+    };
+  });
+  return projection;
 }
 
 function stringArray(value, field, ToolError) {
@@ -402,7 +445,7 @@ export function tourRightsProjectionTools({ withEnvelope, writeEvent, ToolError 
           [tenant, projectionId]);
         const projection = result.rows[0]?.projection;
         if (!projection) fail(ToolError, { error: "tour_public_projection_not_found", projection_id: projectionId });
-        return { ok: true, projection };
+        return { ok: true, projection: publicProjection(projection, ToolError) };
       },
     },
   };

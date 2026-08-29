@@ -177,3 +177,27 @@ test("internal-only assertions neither enter nor perturb the public projection, 
   const internalFact = { ...fact, field_assertion_id: internalAssertion.id, display_field_key: "internal_note" };
   assert.throws(() => validateProjectionComplete({ ...sealed.input, projection: sealed.projection, facts: [internalFact], assertions: [internalAssertion] }), /PUBLIC_FIELD|PUBLIC_ASSERTION|INTERNAL|PROJECTION/);
 });
+
+test("unresolved evidence, confidence, and field conflicts are quarantined", () => {
+  const sealed = sealedProjectionInput();
+  assert.throws(() => validateProjectionComplete({
+    ...sealed.input,
+    projection: sealed.projection,
+    evidence: [{ ...evidence, retrieval_status: "partial" }],
+  }), /EVIDENCE_UNRESOLVED/);
+  assert.throws(() => validateProjectionComplete({
+    ...sealed.input,
+    projection: sealed.projection,
+    assertions: completeAssertions.map(item => ({ ...item, confidence: "unknown" })),
+  }), /PUBLIC_ASSERTION_UNRESOLVED/);
+  assert.throws(() => validateProjectionComplete({
+    ...sealed.input,
+    projection: sealed.projection,
+    conflicts: [{
+      organization_tenant_id: fixture.tenant,
+      property_id: membership.property_id,
+      field_key: fact.display_field_key,
+      state: "open",
+    }],
+  }), /PUBLIC_ASSERTION_CONFLICTED/);
+});
