@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://contracts.doctorcre.com/workspace/tour-operations-foundation.v1.json",
   "contract": "carr-tour-operations-foundation",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "status": "foundation_contract_not_a_client_surface",
   "canonical_record_policy": {
     "source_of_truth": "versioned CARR records; projections, providers, routes, exports, and models are never canonical facts",
@@ -17,7 +17,7 @@
     "Property": {"identity": ["property_id", "organization_tenant_id"], "required": ["property_status"], "rule": "Property is identity-only. Names, addresses and every other display fact are FieldAssertions with provenance."},
     "RightsReceipt": {"identity": ["rights_receipt_id", "organization_tenant_id", "policy_key", "receipt_version", "receipt_digest"], "required": ["provider", "terms_url", "reviewed_at", "reviewer", "intended_use", "allowed_field_classes", "allowed_use_classes", "effective_at", "expires_at", "revoked_at", "supersedes_receipt_id", "status"], "rule": "Immutable versioned receipt with one locked contiguous successor chain per policy. Effective/current rights derive from that chain plus immutable revocation receipts, never mutable old active flags; intake and assertions fail closed unless the exact field/use is current."},
     "SourceEvidence": {"identity": ["source_evidence_id", "organization_tenant_id"], "required": ["stable_locator", "evidence_class", "retrieved_at", "retrieval_status", "content_digest", "rights_receipt_id", "data_classification"], "rule": "append-only"},
-    "FieldAssertion": {"identity": ["field_assertion_id", "property_id", "field_key"], "required": ["value", "source_evidence_id", "observed_at", "effective_from", "confidence", "data_classification", "review_state"], "rule": "append-only; resolves display facts only through reviewed, still-effective assertions"},
+    "FieldAssertion": {"identity": ["field_assertion_id", "property_id", "field_key"], "required": ["value", "source_evidence_id", "rights_receipt_id", "observed_at", "effective_from", "effective_to", "confidence", "data_classification", "review_state"], "rule": "append-only; every factual value carries provenance, observation and effective time, rights, confidence, classification and review state; resolves display facts only through reviewed, still-effective assertions"},
     "FactConflict": {"identity": ["conflict_id", "organization_tenant_id", "property_id", "field_key"], "required": ["state", "opened_at"], "rule": "participants and one exclusive resolution receipt are separately immutable; the receipt selects one matching participant, so no mutable participant promotion is required"},
     "Tour": {"identity": ["tour_id", "organization_tenant_id"], "required": ["tour_name", "tour_status", "route_version", "canonical_dataset_version"]},
     "TourPropertyMembership": {"identity": ["tour_stop_id", "tour_id", "property_id", "route_version"], "required": ["route_sequence", "route_label", "selected_at", "assertion_set_digest"], "rule": "Append-only selected property, order, label and route version. Membership and first projection serialize through the tenant-qualified tour row; a route version accepts no late members after its first projection exists."},

@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
-import { validateProjectionFact } from "../src/tour-operations-contract.js";
+import {
+  CANONICAL_FACT_REQUIRED_FIELDS,
+  validateCanonicalFieldAssertion,
+  validateProjectionFact,
+} from "../src/tour-operations-contract.js";
 
 const root = path.resolve(import.meta.dirname, "../..");
 const read = file => fs.readFileSync(path.join(root, file), "utf8");
@@ -11,12 +15,39 @@ const fixture = JSON.parse(read("mcp-server/test/fixtures/tour-operations-founda
 const migration = read("migrations/0318_tour_operations_foundation.sql");
 
 test("foundation contract preserves provenance, conflicts, audit, rights versions and tenant integrity", () => {
-  assert.equal(contract.version, "1.6.0");
+  assert.equal(contract.version, "1.7.0");
   for (const field of ["property_id", "field_key", "source_evidence_id", "observed_at", "effective_from", "rights_receipt_id", "confidence", "data_classification"]) assert(contract.canonical_record_policy.required_fact_metadata.includes(field), field);
   for (const entity of ["FactConflict", "AuditEvent", "TourPropertyMembership", "ProjectionFact"]) assert.ok(contract.entities[entity], entity);
   assert.match(contract.entities.RightsReceipt.rule, /immutable versioned.*fail closed/i);
   assert.match(contract.canonical_record_policy.tenant_integrity, /tenant-qualified/i);
   assert.match(contract.entities.Property.rule, /identity-only/i);
+});
+
+test("foundation fixture covers every accepted entity and its declared fields", () => {
+  assert.deepEqual(Object.keys(fixture.contract_entities).sort(), Object.keys(contract.entities).sort());
+  for (const [entityName, entityContract] of Object.entries(contract.entities)) {
+    const record = fixture.contract_entities[entityName];
+    for (const field of [...entityContract.identity, ...entityContract.required])
+      assert.ok(Object.hasOwn(record, field), `${entityName}.${field}`);
+  }
+});
+
+test("canonical factual fields require provenance, time, rights, confidence and classification", () => {
+  const assertion = fixture.field_assertion;
+  assert.equal(validateCanonicalFieldAssertion(assertion), true);
+  assert.deepEqual(contract.canonical_record_policy.required_fact_metadata,
+    ["property_id", "field_key", "value", "source_evidence_id", "observed_at", "effective_from", "effective_to", "rights_receipt_id", "confidence", "data_classification", "review_state"]);
+  for (const field of CANONICAL_FACT_REQUIRED_FIELDS) {
+    const invalid = {...assertion};
+    delete invalid[field];
+    assert.throws(() => validateCanonicalFieldAssertion(invalid),
+      new RegExp(`FACT_METADATA_REQUIRED:${field}`), field);
+  }
+  assert.throws(() => validateCanonicalFieldAssertion({...assertion, observed_at: "not-a-time"}), /FACT_METADATA_INVALID:observed_at/);
+  assert.throws(() => validateCanonicalFieldAssertion({...assertion, effective_to: "2026-07-31T00:00:00Z"}), /FACT_EFFECTIVE_INTERVAL_INVALID/);
+  assert.throws(() => validateCanonicalFieldAssertion({...assertion, rights_receipt_id: ""}), /FACT_METADATA_INVALID:rights_receipt_id/);
+  assert.throws(() => validateCanonicalFieldAssertion({...assertion, confidence: "guessed"}), /FACT_METADATA_INVALID:confidence/);
+  assert.throws(() => validateCanonicalFieldAssertion({...assertion, data_classification: "publicish"}), /FACT_METADATA_INVALID:data_classification/);
 });
 
 test("normalized projection facts refuse cross-tenant, unreviewed, nonpublic, and route-mismatched data", () => {
@@ -60,5 +91,7 @@ test("migration is additive, tenant-qualified, temporal, rights-safe and append-
   assert.match(migration, /tour_public_value_safe/i);
   for (const table of ["tour_source_evidence", "tour_field_assertion", "tour_cheat_sheet_revision", "tour_audit_event"]) assert.match(migration, new RegExp(`create trigger ${table}_append_only before update or delete`, "i"), table);
   assert.match(migration, /rights receipt refuses source intake/i); assert.match(migration, /rights receipt refuses asserted field\/use/i);
+  assert.match(migration, /nested exception rolls every synthetic row[\s\S]*tour foundation acceptance proof rollback/i);
+  assert.match(migration, /rollback is forward-only: revoke grants and quarantine projections/i);
   assert.doesNotMatch(migration, /drop\s+table|truncate\s+table/i); assert.match(migration, /commit;/i);
 });

@@ -32,6 +32,42 @@ export function requiredTimestamp(value) {
   if (Number.isNaN(parsed.getTime())) return false;
   return parsed.toISOString() === value || parsed.toISOString().replace(".000Z", "Z") === value;
 }
+
+const FACT_CONFIDENCE = new Set(["low", "medium", "high", "unknown"]);
+const FACT_CLASSIFICATION = new Set(["public", "client_authorized", "internal", "restricted"]);
+const FACT_REVIEW_STATE = new Set(["unreviewed", "reviewed", "conflicted", "superseded", "withdrawn"]);
+export const CANONICAL_FACT_REQUIRED_FIELDS = Object.freeze([
+  "property_id", "field_key", "value", "source_evidence_id", "rights_receipt_id",
+  "observed_at", "effective_from", "effective_to", "confidence",
+  "data_classification", "review_state",
+]);
+
+export function validateCanonicalFieldAssertion(assertion) {
+  if (!assertion || Array.isArray(assertion) || typeof assertion !== "object")
+    throw new Error("FACT_ASSERTION_REQUIRED");
+  for (const field of CANONICAL_FACT_REQUIRED_FIELDS)
+    if (!Object.hasOwn(assertion, field)) throw new Error(`FACT_METADATA_REQUIRED:${field}`);
+  for (const field of ["property_id", "field_key", "source_evidence_id", "rights_receipt_id"])
+    if (typeof assertion[field] !== "string" || !assertion[field].trim())
+      throw new Error(`FACT_METADATA_INVALID:${field}`);
+  if (assertion.value == null) throw new Error("FACT_METADATA_INVALID:value");
+  if (!requiredTimestamp(assertion.observed_at))
+    throw new Error("FACT_METADATA_INVALID:observed_at");
+  if (!requiredTimestamp(assertion.effective_from))
+    throw new Error("FACT_METADATA_INVALID:effective_from");
+  if (assertion.effective_to !== null && !requiredTimestamp(assertion.effective_to))
+    throw new Error("FACT_METADATA_INVALID:effective_to");
+  if (assertion.effective_to !== null &&
+      new Date(assertion.effective_to) < new Date(assertion.effective_from))
+    throw new Error("FACT_EFFECTIVE_INTERVAL_INVALID");
+  if (!FACT_CONFIDENCE.has(assertion.confidence))
+    throw new Error("FACT_METADATA_INVALID:confidence");
+  if (!FACT_CLASSIFICATION.has(assertion.data_classification))
+    throw new Error("FACT_METADATA_INVALID:data_classification");
+  if (!FACT_REVIEW_STATE.has(assertion.review_state))
+    throw new Error("FACT_METADATA_INVALID:review_state");
+  return true;
+}
 const requiredTime = (value, error) => {
   if (!requiredTimestamp(value)) throw new Error(error);
   return new Date(value);
