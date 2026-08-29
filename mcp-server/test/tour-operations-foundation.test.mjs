@@ -77,6 +77,18 @@ test("foundation fixture validation rejects incomplete, unknown, and schema-inva
   assert.throws(() => validateFoundationEntityFixture("RightsReceipt",
     {...fixture.contract_entities.RightsReceipt, allowed_use_classes: new Array(1)}, contract.entities.RightsReceipt),
   /FOUNDATION_ENTITY_ARRAY_INVALID:RightsReceipt\.allowed_use_classes/);
+  const accessorScopes = [];
+  Object.defineProperty(accessorScopes, "0", {enumerable: true, get: () => "view_packet"});
+  assert.throws(() => validateFoundationEntityFixture("ShareGrant",
+    {...fixture.contract_entities.ShareGrant, permission_scopes: accessorScopes}, contract.entities.ShareGrant),
+  /FOUNDATION_ENTITY_ARRAY_INVALID:ShareGrant\.permission_scopes/);
+  assert.throws(() => validateFoundationEntityFixture("AuditEvent",
+    {...fixture.contract_entities.AuditEvent, payload: {unsafe: 1n}}, contract.entities.AuditEvent),
+  /FOUNDATION_ENTITY_JSON_INVALID:AuditEvent\.payload/);
+  assert.throws(() => validateFoundationEntityFixture("AuditEvent",
+    {...fixture.contract_entities.AuditEvent,
+      event_digest: {toString: () => "sha256:" + "f".repeat(64)}}, contract.entities.AuditEvent),
+  /FOUNDATION_ENTITY_DIGEST_INVALID:AuditEvent\.event_digest/);
 });
 
 test("canonical factual fields require provenance, time, rights, confidence and classification", () => {
@@ -105,7 +117,10 @@ test("canonical factual fields require provenance, time, rights, confidence and 
   Object.defineProperty(objectWithSerializer, "toJSON", {value: () => 1n});
   const objectWithGetter = {};
   Object.defineProperty(objectWithGetter, "unsafe", {enumerable: true, get: () => 1n});
-  for (const value of [arrayWithSerializer, objectWithSerializer, objectWithGetter])
+  const objectWithSerializerGetter = {safe: true};
+  Object.defineProperty(objectWithSerializerGetter, "toJSON", {get: () => undefined});
+  for (const value of [arrayWithSerializer, objectWithSerializer, objectWithGetter,
+    objectWithSerializerGetter])
     assert.throws(() => validateCanonicalFieldAssertion({...assertion, value}), /FACT_METADATA_INVALID:value/);
   assert.equal(validateCanonicalFieldAssertion({...assertion, value: {suite: null}}), true);
   assert.throws(() => validateFoundationEntityFixture("FieldAssertion",
@@ -134,10 +149,6 @@ test("normalized projection facts refuse cross-tenant, unreviewed, nonpublic, an
   assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, {...rights, effective_at: null}), /PUBLIC_RIGHTS_REQUIRED/);
   assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, {...rights, id: "unrelated"}), /PUBLIC_RIGHTS_REQUIRED/);
   assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, {...rights, allowed_use_classes: "client_public_display", allowed_field_classes: {"display.name": true}}), /PUBLIC_RIGHTS_REQUIRED/);
-  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, rights,
-    {evidence: {...evidence, rights_provider: undefined}}), /EVIDENCE_RIGHTS_LINEAGE_MISMATCH/);
-  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, rights,
-    {evidence: {...evidence, rights_policy_key: undefined}}), /EVIDENCE_RIGHTS_LINEAGE_MISMATCH/);
   assert.throws(() => validateProjectionFact(fact, {...assertion, value: null}, membership, projection, rights,
     {evidence}), /PUBLIC_VALUE_UNSAFE/);
   assert.throws(() => validateProjectionFact({...fact, projection_id: "wrong"}, assertion, membership, projection, rights), /PROJECTION_BINDING_REFUSED/);

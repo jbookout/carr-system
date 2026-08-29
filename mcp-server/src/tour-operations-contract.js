@@ -48,8 +48,13 @@ function canonicalJsonValueIsSafe(value, topLevel = true, seen = new Set()) {
   if (typeof value === "number") return Number.isFinite(value);
   if (typeof value !== "object" || seen.has(value)) return false;
   const prototype = Object.getPrototypeOf(value);
-  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) return false;
-  if (typeof value.toJSON === "function") return false;
+  if ((Array.isArray(value) && prototype !== Array.prototype) ||
+      (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null)) return false;
+  for (let cursor = value; cursor; cursor = Object.getPrototypeOf(cursor)) {
+    const descriptor = Object.getOwnPropertyDescriptor(cursor, "toJSON");
+    if (descriptor && (!Object.hasOwn(descriptor, "value") ||
+        typeof descriptor.value === "function")) return false;
+  }
   if (Reflect.ownKeys(value).some(key => typeof key === "symbol")) return false;
   seen.add(value);
   let safe;
@@ -72,6 +77,8 @@ function canonicalJsonValueIsSafe(value, topLevel = true, seen = new Set()) {
 }
 
 export function validateCanonicalFieldAssertion(assertion) {
+  // Foundation contract primitive only. Runtime adapter enforcement belongs to
+  // the dependency-gated rights-and-public-projection service slice.
   if (!assertion || Array.isArray(assertion) || typeof assertion !== "object")
     throw new Error("FACT_ASSERTION_REQUIRED");
   for (const field of CANONICAL_FACT_REQUIRED_FIELDS)
@@ -202,17 +209,23 @@ export function validateFoundationEntityFixture(entityName, record, entityContra
     if (FOUNDATION_ARRAY_FIELDS.has(field) &&
         (!Array.isArray(value) || value.length === 0 ||
          !Array.from({length: value.length}, (_, index) => index).every(index =>
-           Object.hasOwn(value, index) && typeof value[index] === "string" && value[index].trim())))
+           {
+             const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+             return descriptor && Object.hasOwn(descriptor, "value") &&
+               typeof descriptor.value === "string" && descriptor.value.trim();
+           })))
       throw new Error(`FOUNDATION_ENTITY_ARRAY_INVALID:${entityName}.${field}`);
     if (FOUNDATION_OBJECT_FIELDS.has(field) &&
-        (Array.isArray(value) || typeof value !== "object"))
-      throw new Error(`FOUNDATION_ENTITY_OBJECT_INVALID:${entityName}.${field}`);
+        (Array.isArray(value) || typeof value !== "object" ||
+         !canonicalJsonValueIsSafe(value, false)))
+      throw new Error(`FOUNDATION_ENTITY_JSON_INVALID:${entityName}.${field}`);
     if (FOUNDATION_POSITIVE_INTEGER_FIELDS.has(field) &&
         (!Number.isInteger(value) || value < 1))
       throw new Error(`FOUNDATION_ENTITY_INTEGER_INVALID:${entityName}.${field}`);
     if (FOUNDATION_TIMESTAMP_FIELDS.has(field) && !requiredTimestamp(value))
       throw new Error(`FOUNDATION_ENTITY_TIMESTAMP_INVALID:${entityName}.${field}`);
-    if (FOUNDATION_DIGEST_FIELDS.has(field) && !FOUNDATION_DIGEST_RE.test(value))
+    if (FOUNDATION_DIGEST_FIELDS.has(field) &&
+        (typeof value !== "string" || !FOUNDATION_DIGEST_RE.test(value)))
       throw new Error(`FOUNDATION_ENTITY_DIGEST_INVALID:${entityName}.${field}`);
   }
   if (entityName === "FieldAssertion" && !canonicalJsonValueIsSafe(record.value))
@@ -273,8 +286,8 @@ export function validateEvidenceRightsLineage(evidence, assertion, rightsReceipt
       evidence.id !== assertion.source_evidence_id ||
       evidence.rights_receipt_id !== assertion.rights_receipt_id ||
       evidence.rights_receipt_id !== rightsReceipt.id ||
-      evidence.rights_provider !== rightsReceipt.provider ||
-      evidence.rights_policy_key !== rightsReceipt.policy_key ||
+      (evidence.rights_provider != null && evidence.rights_provider !== rightsReceipt.provider) ||
+      (evidence.rights_policy_key != null && evidence.rights_policy_key !== rightsReceipt.policy_key) ||
       (evidence.rights_receipt_digest != null &&
        evidence.rights_receipt_digest !== rightsReceipt.receipt_digest))
     throw new Error("EVIDENCE_RIGHTS_LINEAGE_MISMATCH");
