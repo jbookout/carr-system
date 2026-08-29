@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   CANONICAL_FACT_REQUIRED_FIELDS,
   validateCanonicalFieldAssertion,
+  validateFoundationEntityFixture,
   validateProjectionFact,
 } from "../src/tour-operations-contract.js";
 
@@ -13,6 +14,7 @@ const read = file => fs.readFileSync(path.join(root, file), "utf8");
 const contract = JSON.parse(read("workspace/contracts/tour-operations-foundation.v1.json"));
 const fixture = JSON.parse(read("mcp-server/test/fixtures/tour-operations-foundation.v1.json"));
 const migration = read("migrations/0318_tour_operations_foundation.sql");
+const rightsHardeningMigration = read("migrations/0427_tour_rights_projection_hardening.sql");
 
 test("foundation contract preserves provenance, conflicts, audit, rights versions and tenant integrity", () => {
   assert.equal(contract.version, "1.7.0");
@@ -23,13 +25,37 @@ test("foundation contract preserves provenance, conflicts, audit, rights version
   assert.match(contract.entities.Property.rule, /identity-only/i);
 });
 
-test("foundation fixture covers every accepted entity and its declared fields", () => {
+test("foundation fixture covers every accepted entity with schema-aligned shapes and enums", () => {
   assert.deepEqual(Object.keys(fixture.contract_entities).sort(), Object.keys(contract.entities).sort());
   for (const [entityName, entityContract] of Object.entries(contract.entities)) {
     const record = fixture.contract_entities[entityName];
-    for (const field of [...entityContract.identity, ...entityContract.required])
-      assert.ok(Object.hasOwn(record, field), `${entityName}.${field}`);
+    assert.equal(validateFoundationEntityFixture(entityName, record, entityContract), true, entityName);
   }
+  assert.match(rightsHardeningMigration, /add column if not exists rights_provider text,[\s\S]*add column if not exists rights_policy_key text/i);
+  assert.deepEqual(contract.entities.SourceEvidence.required.slice(-3),
+    ["rights_provider", "rights_policy_key", "data_classification"]);
+});
+
+test("foundation fixture validation rejects incomplete, unknown, and schema-invalid records", () => {
+  const cases = [
+    ["SourceEvidence", "rights_provider", undefined, /FOUNDATION_ENTITY_FIELD_REQUIRED:SourceEvidence\.rights_provider/],
+    ["ProjectionFact", "route_version", undefined, /FOUNDATION_ENTITY_FIELD_REQUIRED:ProjectionFact\.route_version/],
+    ["ShareGrant", "audience", undefined, /FOUNDATION_ENTITY_FIELD_REQUIRED:ShareGrant\.audience/],
+    ["QualityFinding", "artifact_type", "tour_projection", /FOUNDATION_ENTITY_ENUM_INVALID:QualityFinding\.artifact_type/],
+    ["QualityFinding", "severity", "blocking", /FOUNDATION_ENTITY_ENUM_INVALID:QualityFinding\.severity/],
+    ["AuditEvent", "payload", undefined, /FOUNDATION_ENTITY_FIELD_REQUIRED:AuditEvent\.payload/],
+  ];
+  for (const [entityName, field, value, expected] of cases) {
+    const invalid = structuredClone(fixture.contract_entities[entityName]);
+    if (value === undefined) delete invalid[field]; else invalid[field] = value;
+    assert.throws(() => validateFoundationEntityFixture(entityName, invalid, contract.entities[entityName]), expected);
+  }
+  assert.throws(() => validateFoundationEntityFixture("Property",
+    {...fixture.contract_entities.Property, display_name: "not canonical"}, contract.entities.Property),
+  /FOUNDATION_ENTITY_FIELD_UNKNOWN:Property\.display_name/);
+  assert.throws(() => validateFoundationEntityFixture("ShareGrant",
+    {...fixture.contract_entities.ShareGrant, permission_scopes: ["comment"]}, contract.entities.ShareGrant),
+  /FOUNDATION_ENTITY_SCOPE_INVALID:ShareGrant\.permission_scopes/);
 });
 
 test("canonical factual fields require provenance, time, rights, confidence and classification", () => {

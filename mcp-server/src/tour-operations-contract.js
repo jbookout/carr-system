@@ -68,6 +68,101 @@ export function validateCanonicalFieldAssertion(assertion) {
     throw new Error("FACT_METADATA_INVALID:review_state");
   return true;
 }
+
+const FOUNDATION_ENTITY_ENUMS = Object.freeze({
+  Property: { property_status: ["active", "inactive", "withdrawn", "unknown"] },
+  RightsReceipt: { status: ["active", "expired", "revoked", "unknown"] },
+  SourceEvidence: {
+    evidence_class: ["direct_source", "linked_artifact", "public_mirror", "inference"],
+    retrieval_status: ["read", "partial", "inaccessible", "failed"],
+    data_classification: ["public", "client_authorized", "internal", "restricted"],
+  },
+  FieldAssertion: {
+    confidence: ["low", "medium", "high", "unknown"],
+    data_classification: ["public", "client_authorized", "internal", "restricted"],
+    review_state: ["unreviewed", "reviewed", "conflicted", "superseded", "withdrawn"],
+  },
+  FactConflict: { state: ["open", "resolved", "superseded"] },
+  Tour: { tour_status: ["draft", "active", "completed", "cancelled", "archived"] },
+  PublicTourProjection: {
+    status: ["draft", "qc_blocked", "approved", "published", "superseded", "quarantined", "rolled_back"],
+  },
+  CheatSheetRevision: { status: ["draft", "saved", "superseded"] },
+  ShareGrant: {
+    audience: ["client", "internal"],
+    status: ["active", "revoked", "expired", "rotated"],
+  },
+  QualityFinding: {
+    artifact_type: ["public_projection", "pdf", "map", "cheat_sheet", "share_grant"],
+    severity: ["blocker", "error", "warning", "info"],
+    state: ["open", "accepted_risk", "resolved", "superseded"],
+  },
+  Publication: {
+    publication_state: ["draft", "pending_qc", "approved", "published", "quarantined", "rolled_back"],
+  },
+});
+const FOUNDATION_ARRAY_FIELDS = new Set([
+  "allowed_field_classes", "allowed_use_classes", "permission_scopes",
+]);
+const FOUNDATION_OBJECT_FIELDS = new Set(["content", "evidence", "payload"]);
+const FOUNDATION_POSITIVE_INTEGER_FIELDS = new Set([
+  "receipt_version", "route_version", "route_sequence", "projection_version",
+  "revision_number", "grant_version",
+]);
+const FOUNDATION_TIMESTAMP_FIELDS = new Set([
+  "reviewed_at", "effective_at", "expires_at", "revoked_at", "retrieved_at",
+  "observed_at", "effective_from", "effective_to", "opened_at", "selected_at",
+  "as_of", "created_at", "occurred_at",
+]);
+const FOUNDATION_DIGEST_FIELDS = new Set([
+  "receipt_digest", "content_digest", "assertion_set_digest", "projection_digest",
+  "token_digest", "event_digest",
+]);
+const FOUNDATION_NULLABLE_FIELDS = new Set([
+  "expires_at", "revoked_at", "supersedes_receipt_id", "effective_to",
+  "rotated_from_grant_id",
+]);
+const FOUNDATION_DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
+
+export function validateFoundationEntityFixture(entityName, record, entityContract) {
+  if (!record || Array.isArray(record) || typeof record !== "object" ||
+      !entityContract || typeof entityContract !== "object")
+    throw new Error(`FOUNDATION_ENTITY_REQUIRED:${entityName}`);
+  const fields = [...new Set([...(entityContract.identity || []), ...(entityContract.required || [])])];
+  for (const field of fields)
+    if (!Object.hasOwn(record, field))
+      throw new Error(`FOUNDATION_ENTITY_FIELD_REQUIRED:${entityName}.${field}`);
+  for (const field of Object.keys(record))
+    if (!fields.includes(field))
+      throw new Error(`FOUNDATION_ENTITY_FIELD_UNKNOWN:${entityName}.${field}`);
+  for (const [field, allowed] of Object.entries(FOUNDATION_ENTITY_ENUMS[entityName] || {}))
+    if (!allowed.includes(record[field]))
+      throw new Error(`FOUNDATION_ENTITY_ENUM_INVALID:${entityName}.${field}`);
+  for (const field of fields) {
+    const value = record[field];
+    if (value === null && FOUNDATION_NULLABLE_FIELDS.has(field)) continue;
+    if (value == null) throw new Error(`FOUNDATION_ENTITY_VALUE_REQUIRED:${entityName}.${field}`);
+    if (FOUNDATION_ARRAY_FIELDS.has(field) &&
+        (!Array.isArray(value) || value.length === 0 || value.some(item => typeof item !== "string" || !item)))
+      throw new Error(`FOUNDATION_ENTITY_ARRAY_INVALID:${entityName}.${field}`);
+    if (FOUNDATION_OBJECT_FIELDS.has(field) &&
+        (Array.isArray(value) || typeof value !== "object"))
+      throw new Error(`FOUNDATION_ENTITY_OBJECT_INVALID:${entityName}.${field}`);
+    if (FOUNDATION_POSITIVE_INTEGER_FIELDS.has(field) &&
+        (!Number.isInteger(value) || value < 1))
+      throw new Error(`FOUNDATION_ENTITY_INTEGER_INVALID:${entityName}.${field}`);
+    if (FOUNDATION_TIMESTAMP_FIELDS.has(field) && !requiredTimestamp(value))
+      throw new Error(`FOUNDATION_ENTITY_TIMESTAMP_INVALID:${entityName}.${field}`);
+    if (FOUNDATION_DIGEST_FIELDS.has(field) && !FOUNDATION_DIGEST_RE.test(value))
+      throw new Error(`FOUNDATION_ENTITY_DIGEST_INVALID:${entityName}.${field}`);
+  }
+  if (entityName === "PublicTourProjection" && record.facts_only !== true)
+    throw new Error("FOUNDATION_ENTITY_FACTS_ONLY_REQUIRED:PublicTourProjection.facts_only");
+  if (entityName === "ShareGrant" && record.permission_scopes.some(scope =>
+    !["view_packet", "view_map"].includes(scope)))
+    throw new Error("FOUNDATION_ENTITY_SCOPE_INVALID:ShareGrant.permission_scopes");
+  return true;
+}
 const requiredTime = (value, error) => {
   if (!requiredTimestamp(value)) throw new Error(error);
   return new Date(value);

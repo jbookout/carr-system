@@ -117,10 +117,13 @@
       "retrieval_status": "read",
       "content_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "rights_receipt_id": "22222222-2222-4222-8222-222222222222",
+      "rights_provider": "county-records",
+      "rights_policy_key": "county-property-record",
       "data_classification": "public"
     },
     "FieldAssertion": {
       "field_assertion_id": "44444444-4444-4444-8444-444444444444",
+      "organization_tenant_id": "carr-internal",
       "property_id": "11111111-1111-4111-8111-111111111111",
       "field_key": "display.name",
       "value": "Synthetic Medical Office",
@@ -151,6 +154,7 @@
     },
     "TourPropertyMembership": {
       "tour_stop_id": "55555555-5555-4555-8555-555555555555",
+      "organization_tenant_id": "carr-internal",
       "tour_id": "66666666-6666-4666-8666-666666666666",
       "property_id": "11111111-1111-4111-8111-111111111111",
       "route_version": 1,
@@ -161,6 +165,7 @@
     },
     "PublicTourProjection": {
       "projection_id": "77777777-7777-4777-8777-777777777777",
+      "organization_tenant_id": "carr-internal",
       "tour_id": "66666666-6666-4666-8666-666666666666",
       "projection_version": 1,
       "facts_only": true,
@@ -171,13 +176,16 @@
     },
     "ProjectionFact": {
       "projection_fact_id": "99999999-9999-4999-8999-999999999999",
+      "organization_tenant_id": "carr-internal",
       "projection_id": "77777777-7777-4777-8777-777777777777",
       "property_id": "11111111-1111-4111-8111-111111111111",
       "field_assertion_id": "44444444-4444-4444-8444-444444444444",
+      "route_version": 1,
       "display_field_key": "display.name"
     },
     "CheatSheetRevision": {
       "cheat_sheet_revision_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "organization_tenant_id": "carr-internal",
       "tour_id": "66666666-6666-4666-8666-666666666666",
       "revision_number": 1,
       "content": {"notes": "synthetic"},
@@ -187,9 +195,11 @@
     },
     "ShareGrant": {
       "share_grant_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "organization_tenant_id": "carr-internal",
       "projection_id": "77777777-7777-4777-8777-777777777777",
       "grant_version": 1,
       "token_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "audience": "client",
       "permission_scopes": ["view_packet"],
       "created_at": "2026-08-25T12:10:00Z",
       "expires_at": "2026-08-26T12:10:00Z",
@@ -198,16 +208,18 @@
     },
     "QualityFinding": {
       "qc_finding_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-      "artifact_type": "tour_projection",
+      "organization_tenant_id": "carr-internal",
+      "artifact_type": "public_projection",
       "artifact_id": "77777777-7777-4777-8777-777777777777",
       "check_id": "check:foundation-contracts",
-      "severity": "blocking",
+      "severity": "blocker",
       "state": "open",
       "evidence": {"synthetic": true},
       "created_at": "2026-08-25T12:15:00Z"
     },
     "Publication": {
       "publication_id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "organization_tenant_id": "carr-internal",
       "projection_id": "77777777-7777-4777-8777-777777777777",
       "publication_state": "draft",
       "projection_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
@@ -221,7 +233,8 @@
       "entity_type": "FieldAssertion",
       "entity_id": "44444444-4444-4444-8444-444444444444",
       "occurred_at": "2026-08-25T12:25:00Z",
-      "actor_id": "actor:codex"
+      "actor_id": "actor:codex",
+      "payload": {"synthetic": true}
     }
   }
 }
