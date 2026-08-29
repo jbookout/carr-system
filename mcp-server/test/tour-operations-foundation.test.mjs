@@ -103,6 +103,21 @@ test("foundation fixture validation rejects incomplete, unknown, and schema-inva
   assert.throws(() => validateFoundationEntityFixture("ShareGrant",
     {...fixture.contract_entities.ShareGrant, permission_scopes: scopesWithSerializer},
     contract.entities.ShareGrant), /FOUNDATION_ENTITY_SERIALIZATION_INVALID:ShareGrant/);
+  assert.throws(() => validateFoundationEntityFixture("FieldAssertion",
+    {...fixture.contract_entities.FieldAssertion, effective_to: "2026-07-31T00:00:00Z"},
+    contract.entities.FieldAssertion), /FOUNDATION_ENTITY_INTERVAL_INVALID:FieldAssertion\.effective_to/);
+  assert.throws(() => validateFoundationEntityFixture("RightsReceipt",
+    {...fixture.contract_entities.RightsReceipt, expires_at: fixture.contract_entities.RightsReceipt.effective_at},
+    contract.entities.RightsReceipt), /FOUNDATION_ENTITY_INTERVAL_INVALID:RightsReceipt\.expires_at/);
+  assert.throws(() => validateFoundationEntityFixture("RightsReceipt",
+    {...fixture.contract_entities.RightsReceipt, status: "revoked", revoked_at: null},
+    contract.entities.RightsReceipt), /FOUNDATION_ENTITY_REVOCATION_INVALID:RightsReceipt\.revoked_at/);
+  assert.throws(() => validateFoundationEntityFixture("ShareGrant",
+    {...fixture.contract_entities.ShareGrant, expires_at: "2026-08-24T12:10:00Z"},
+    contract.entities.ShareGrant), /FOUNDATION_ENTITY_INTERVAL_INVALID:ShareGrant\.expires_at/);
+  assert.throws(() => validateFoundationEntityFixture("ShareGrant",
+    {...fixture.contract_entities.ShareGrant, status: "revoked", revoked_at: null},
+    contract.entities.ShareGrant), /FOUNDATION_ENTITY_REVOCATION_INVALID:ShareGrant\.revoked_at/);
 });
 
 test("canonical factual fields require provenance, time, rights, confidence and classification", () => {
@@ -136,9 +151,19 @@ test("canonical factual fields require provenance, time, rights, confidence and 
   for (const value of [arrayWithSerializer, objectWithSerializer, objectWithGetter,
     objectWithSerializerGetter])
     assert.throws(() => validateCanonicalFieldAssertion({...assertion, value}), /FACT_METADATA_INVALID:value/);
+  for (const value of [{nested: "a\u0000b"}, {"bad\u0000key": true}, "\ud800", {"\udc00": true}])
+    assert.throws(() => validateCanonicalFieldAssertion({...assertion, value}), /FACT_METADATA_INVALID:value/);
   const assertionWithValueGetter = {...assertion};
   Object.defineProperty(assertionWithValueGetter, "value", {enumerable: true, get: () => "unstable"});
   assert.throws(() => validateCanonicalFieldAssertion(assertionWithValueGetter), /FACT_METADATA_REQUIRED:value/);
+  const inheritedSerializer = Object.getOwnPropertyDescriptor(Object.prototype, "toJSON");
+  Object.defineProperty(Object.prototype, "toJSON", {configurable: true, value: () => ({corrupted: true})});
+  try {
+    assert.throws(() => validateCanonicalFieldAssertion({...assertion}), /FACT_ASSERTION_UNSAFE/);
+  } finally {
+    if (inheritedSerializer) Object.defineProperty(Object.prototype, "toJSON", inheritedSerializer);
+    else delete Object.prototype.toJSON;
+  }
   assert.equal(validateCanonicalFieldAssertion({...assertion, value: {suite: null}}), true);
   assert.throws(() => validateFoundationEntityFixture("FieldAssertion",
     {...fixture.contract_entities.FieldAssertion, value: null}, contract.entities.FieldAssertion),

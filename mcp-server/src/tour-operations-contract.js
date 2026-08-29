@@ -42,9 +42,23 @@ export const CANONICAL_FACT_REQUIRED_FIELDS = Object.freeze([
   "data_classification", "review_state",
 ]);
 
+function postgresTextIsSafe(value) {
+  if (typeof value !== "string" || value.includes("\u0000")) return false;
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index++;
+    } else if (code >= 0xdc00 && code <= 0xdfff) return false;
+  }
+  return true;
+}
+
 function canonicalJsonValueIsSafe(value, topLevel = true, seen = new Set()) {
   if (value === null) return !topLevel;
-  if (typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "string") return postgresTextIsSafe(value);
+  if (typeof value === "boolean") return true;
   if (typeof value === "number") return Number.isFinite(value);
   if (typeof value !== "object" || seen.has(value)) return false;
   const prototype = Object.getPrototypeOf(value);
@@ -66,11 +80,11 @@ function canonicalJsonValueIsSafe(value, topLevel = true, seen = new Set()) {
           canonicalJsonValueIsSafe(descriptor.value, false, seen);
       });
   } else {
-    safe = Object.keys(value).every(key => {
+    safe = Object.keys(value).every(key => postgresTextIsSafe(key) && (() => {
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
       return descriptor && Object.hasOwn(descriptor, "value") &&
         canonicalJsonValueIsSafe(descriptor.value, false, seen);
-    });
+    })());
   }
   seen.delete(value);
   return safe;
@@ -85,9 +99,12 @@ const ownEnumerableDataDescriptor = (record, field) => {
 const plainRecordEnvelopeIsSafe = record => {
   const prototype = Object.getPrototypeOf(record);
   if (prototype !== Object.prototype && prototype !== null) return false;
-  const descriptor = Object.getOwnPropertyDescriptor(record, "toJSON");
-  return !descriptor || (Object.hasOwn(descriptor, "value") &&
-    typeof descriptor.value !== "function");
+  for (let cursor = record; cursor; cursor = Object.getPrototypeOf(cursor)) {
+    const descriptor = Object.getOwnPropertyDescriptor(cursor, "toJSON");
+    if (descriptor && (!Object.hasOwn(descriptor, "value") ||
+        typeof descriptor.value === "function")) return false;
+  }
+  return true;
 };
 
 export function validateCanonicalFieldAssertion(assertion) {
@@ -220,7 +237,7 @@ export function validateFoundationEntityFixture(entityName, record, entityContra
         (typeof value !== "string" || !FOUNDATION_UUID_RE.test(value)))
       throw new Error(`FOUNDATION_ENTITY_UUID_INVALID:${entityName}.${field}`);
     if (FOUNDATION_TEXT_FIELDS.has(field) &&
-        (typeof value !== "string" || !value.trim()))
+        (typeof value !== "string" || !value.trim() || !postgresTextIsSafe(value)))
       throw new Error(`FOUNDATION_ENTITY_TEXT_INVALID:${entityName}.${field}`);
     if (FOUNDATION_ARRAY_FIELDS.has(field) &&
         (!Array.isArray(value) || value.length === 0 ||
@@ -228,7 +245,8 @@ export function validateFoundationEntityFixture(entityName, record, entityContra
            {
              const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
              return descriptor && Object.hasOwn(descriptor, "value") &&
-               typeof descriptor.value === "string" && descriptor.value.trim();
+               typeof descriptor.value === "string" && descriptor.value.trim() &&
+               postgresTextIsSafe(descriptor.value);
            })))
       throw new Error(`FOUNDATION_ENTITY_ARRAY_INVALID:${entityName}.${field}`);
     if (FOUNDATION_OBJECT_FIELDS.has(field) &&
@@ -246,6 +264,19 @@ export function validateFoundationEntityFixture(entityName, record, entityContra
   }
   if (entityName === "FieldAssertion" && !canonicalJsonValueIsSafe(record.value))
     throw new Error("FOUNDATION_ENTITY_JSON_INVALID:FieldAssertion.value");
+  if (entityName === "FieldAssertion" && record.effective_to !== null &&
+      new Date(record.effective_to) < new Date(record.effective_from))
+    throw new Error("FOUNDATION_ENTITY_INTERVAL_INVALID:FieldAssertion.effective_to");
+  if (entityName === "RightsReceipt" && record.expires_at !== null &&
+      new Date(record.expires_at) <= new Date(record.effective_at))
+    throw new Error("FOUNDATION_ENTITY_INTERVAL_INVALID:RightsReceipt.expires_at");
+  if (entityName === "RightsReceipt" && record.status === "revoked" && record.revoked_at === null)
+    throw new Error("FOUNDATION_ENTITY_REVOCATION_INVALID:RightsReceipt.revoked_at");
+  if (entityName === "ShareGrant" && record.expires_at !== null &&
+      new Date(record.expires_at) <= new Date(record.created_at))
+    throw new Error("FOUNDATION_ENTITY_INTERVAL_INVALID:ShareGrant.expires_at");
+  if (entityName === "ShareGrant" && record.status === "revoked" && record.revoked_at === null)
+    throw new Error("FOUNDATION_ENTITY_REVOCATION_INVALID:ShareGrant.revoked_at");
   if (entityName === "PublicTourProjection" && record.facts_only !== true)
     throw new Error("FOUNDATION_ENTITY_FACTS_ONLY_REQUIRED:PublicTourProjection.facts_only");
   if (entityName === "ShareGrant") {
