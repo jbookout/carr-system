@@ -214,6 +214,11 @@ TOKENS = [(tok, real) for tok, real in
 #                         same partner-ping shape (one watcher, one shared
 #                         record) with the added risk of two update-loop calls
 #                         racing on the same loop's base_version.
+#   canary-ingest-sink  — Joe's machine-local canary destination for the
+#                         notes-sweep CANARY; a second Mac standing up its own
+#                         copy would give the canary tier two different
+#                         "isolated" endpoints to disagree about, not defense
+#                         in depth.
 #
 # What the second machine still needs from the nightly is the record-derived
 # fetch allowlist, which is per-machine and gitignored. That is why
@@ -234,6 +239,9 @@ PRIMARY_ONLY = {
     "com.carr.local-briefs.plist",
     "com.carr.partner-ping.plist",
     "com.carr.cutover-watch.plist",
+    # Joe's machine-local canary destination for the notes-sweep CANARY; a
+    # second Mac must not stand up a second sink.
+    "com.carr.canary-ingest-sink.plist",
 }
 
 
