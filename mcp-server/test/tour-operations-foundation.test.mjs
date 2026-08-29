@@ -74,6 +74,9 @@ test("foundation fixture validation rejects incomplete, unknown, and schema-inva
   assert.throws(() => validateFoundationEntityFixture("RightsReceipt",
     {...fixture.contract_entities.RightsReceipt, allowed_use_classes: ["   "]}, contract.entities.RightsReceipt),
   /FOUNDATION_ENTITY_ARRAY_INVALID:RightsReceipt\.allowed_use_classes/);
+  assert.throws(() => validateFoundationEntityFixture("RightsReceipt",
+    {...fixture.contract_entities.RightsReceipt, allowed_use_classes: new Array(1)}, contract.entities.RightsReceipt),
+  /FOUNDATION_ENTITY_ARRAY_INVALID:RightsReceipt\.allowed_use_classes/);
 });
 
 test("canonical factual fields require provenance, time, rights, confidence and classification", () => {
@@ -95,6 +98,14 @@ test("canonical factual fields require provenance, time, rights, confidence and 
   assert.throws(() => validateCanonicalFieldAssertion({...assertion, confidence: "guessed"}), /FACT_METADATA_INVALID:confidence/);
   assert.throws(() => validateCanonicalFieldAssertion({...assertion, data_classification: "publicish"}), /FACT_METADATA_INVALID:data_classification/);
   for (const value of [null, NaN, Infinity, () => true, Symbol("fact"), 1n, new Date()])
+    assert.throws(() => validateCanonicalFieldAssertion({...assertion, value}), /FACT_METADATA_INVALID:value/);
+  const arrayWithSerializer = ["safe"];
+  Object.defineProperty(arrayWithSerializer, "toJSON", {value: () => 1n});
+  const objectWithSerializer = {safe: true};
+  Object.defineProperty(objectWithSerializer, "toJSON", {value: () => 1n});
+  const objectWithGetter = {};
+  Object.defineProperty(objectWithGetter, "unsafe", {enumerable: true, get: () => 1n});
+  for (const value of [arrayWithSerializer, objectWithSerializer, objectWithGetter])
     assert.throws(() => validateCanonicalFieldAssertion({...assertion, value}), /FACT_METADATA_INVALID:value/);
   assert.equal(validateCanonicalFieldAssertion({...assertion, value: {suite: null}}), true);
   assert.throws(() => validateFoundationEntityFixture("FieldAssertion",

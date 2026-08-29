@@ -49,14 +49,23 @@ function canonicalJsonValueIsSafe(value, topLevel = true, seen = new Set()) {
   if (typeof value !== "object" || seen.has(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) return false;
+  if (typeof value.toJSON === "function") return false;
   if (Reflect.ownKeys(value).some(key => typeof key === "symbol")) return false;
   seen.add(value);
   let safe;
   if (Array.isArray(value)) {
     safe = Array.from({length: value.length}, (_, index) => index)
-      .every(index => Object.hasOwn(value, index) && canonicalJsonValueIsSafe(value[index], false, seen));
+      .every(index => {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        return descriptor && Object.hasOwn(descriptor, "value") &&
+          canonicalJsonValueIsSafe(descriptor.value, false, seen);
+      });
   } else {
-    safe = Object.keys(value).every(key => canonicalJsonValueIsSafe(value[key], false, seen));
+    safe = Object.keys(value).every(key => {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      return descriptor && Object.hasOwn(descriptor, "value") &&
+        canonicalJsonValueIsSafe(descriptor.value, false, seen);
+    });
   }
   seen.delete(value);
   return safe;
@@ -192,7 +201,8 @@ export function validateFoundationEntityFixture(entityName, record, entityContra
       throw new Error(`FOUNDATION_ENTITY_TEXT_INVALID:${entityName}.${field}`);
     if (FOUNDATION_ARRAY_FIELDS.has(field) &&
         (!Array.isArray(value) || value.length === 0 ||
-         value.some(item => typeof item !== "string" || !item.trim())))
+         !Array.from({length: value.length}, (_, index) => index).every(index =>
+           Object.hasOwn(value, index) && typeof value[index] === "string" && value[index].trim())))
       throw new Error(`FOUNDATION_ENTITY_ARRAY_INVALID:${entityName}.${field}`);
     if (FOUNDATION_OBJECT_FIELDS.has(field) &&
         (Array.isArray(value) || typeof value !== "object"))
