@@ -116,9 +116,11 @@ export function validateCanonicalFieldAssertion(assertion) {
   for (const field of CANONICAL_FACT_REQUIRED_FIELDS)
     if (!ownEnumerableDataDescriptor(assertion, field))
       throw new Error(`FACT_METADATA_REQUIRED:${field}`);
-  if (typeof assertion.organization_tenant_id !== "string" || !assertion.organization_tenant_id.trim())
+  if (typeof assertion.organization_tenant_id !== "string" ||
+      !assertion.organization_tenant_id.trim() || !postgresTextIsSafe(assertion.organization_tenant_id))
     throw new Error("FACT_METADATA_INVALID:organization_tenant_id");
-  if (typeof assertion.field_key !== "string" || !assertion.field_key.trim())
+  if (typeof assertion.field_key !== "string" ||
+      !assertion.field_key.trim() || !postgresTextIsSafe(assertion.field_key))
     throw new Error("FACT_METADATA_INVALID:field_key");
   for (const field of ["property_id", "source_evidence_id", "rights_receipt_id"])
     if (typeof assertion[field] !== "string" || !FOUNDATION_UUID_RE.test(assertion[field]))

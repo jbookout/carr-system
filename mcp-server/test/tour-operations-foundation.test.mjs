@@ -133,6 +133,12 @@ test("canonical factual fields require provenance, time, rights, confidence and 
   }
   assert.throws(() => validateCanonicalFieldAssertion({...assertion, observed_at: "not-a-time"}), /FACT_METADATA_INVALID:observed_at/);
   assert.throws(() => validateCanonicalFieldAssertion({...assertion, organization_tenant_id: ""}), /FACT_METADATA_INVALID:organization_tenant_id/);
+  for (const organization_tenant_id of ["tenant\u0000bad", "tenant\ud800"])
+    assert.throws(() => validateCanonicalFieldAssertion({...assertion, organization_tenant_id}),
+      /FACT_METADATA_INVALID:organization_tenant_id/);
+  for (const field_key of ["display.name\u0000bad", "display.name\udc00"])
+    assert.throws(() => validateCanonicalFieldAssertion({...assertion, field_key}),
+      /FACT_METADATA_INVALID:field_key/);
   assert.throws(() => validateCanonicalFieldAssertion({...assertion, property_id: "not-a-uuid"}), /FACT_METADATA_INVALID:property_id/);
   assert.throws(() => validateCanonicalFieldAssertion({...assertion, effective_to: "2026-07-31T00:00:00Z"}), /FACT_EFFECTIVE_INTERVAL_INVALID/);
   assert.throws(() => validateCanonicalFieldAssertion({...assertion, rights_receipt_id: ""}), /FACT_METADATA_INVALID:rights_receipt_id/);
