@@ -19,14 +19,20 @@ declare
   v_vector_projection_id constant uuid := '10000000-0000-4000-8000-000000000060';
   v_success_projection_id constant uuid := '10000000-0000-4000-8000-000000000061';
   v_incomplete_projection_id constant uuid := '10000000-0000-4000-8000-000000000062';
+  v_conflict_projection_id constant uuid := '10000000-0000-4000-8000-000000000066';
+  v_resolved_projection_id constant uuid := '10000000-0000-4000-8000-000000000067';
   v_property_one constant uuid := '10000000-0000-4000-8000-000000000010';
   v_property_two constant uuid := '10000000-0000-4000-8000-000000000011';
   v_rights_id constant uuid := '10000000-0000-4000-8000-000000000021';
   v_evidence_id constant uuid := '10000000-0000-4000-8000-000000000020';
+  v_partial_evidence_id constant uuid := '10000000-0000-4000-8000-000000000022';
   v_name_one constant uuid := '10000000-0000-4000-8000-000000000030';
   v_address_two constant uuid := '10000000-0000-4000-8000-000000000031';
   v_address_one constant uuid := '10000000-0000-4000-8000-000000000032';
   v_name_two constant uuid := '10000000-0000-4000-8000-000000000033';
+  v_partial_name constant uuid := '10000000-0000-4000-8000-000000000034';
+  v_unknown_name constant uuid := '10000000-0000-4000-8000-000000000035';
+  v_future_name constant uuid := '10000000-0000-4000-8000-000000000036';
   v_coordinate constant uuid := '10000000-0000-4000-8000-000000000070';
   v_coordinate_receipt constant uuid := '10000000-0000-4000-8000-000000000071';
   v_as_of constant timestamptz := '2026-08-25T12:00:00Z';
@@ -34,6 +40,7 @@ declare
   v_read jsonb;
   v_fact_count integer;
   v_seal_count integer;
+  v_case record;
   v_expected_vector constant text :=
     'sha256:73c90187e235a2e7262bf8de28ea4b61f69721cb8e60e8876092d3337d134bb7';
 begin
@@ -86,6 +93,16 @@ begin
     'sha256:' || repeat('b', 64), v_rights_id, 'proof-provider',
     'tour-public-v1', 'public'
   );
+  insert into ops.tour_source_evidence (
+    id, organization_tenant_id, stable_locator, evidence_class, retrieved_at,
+    retrieval_status, content_digest, rights_receipt_id, rights_provider,
+    rights_policy_key, data_classification
+  ) values (
+    v_partial_evidence_id, v_tenant, 'https://example.invalid/partial',
+    'direct_source', '2026-08-25T10:00:00Z', 'partial',
+    'sha256:' || repeat('8', 64), v_rights_id, 'proof-provider',
+    'tour-public-v1', 'public'
+  );
 
   -- The first two IDs/fields are the exact JS digest vector.  The additional
   -- two assertions provide the required name/address pair for both selected
@@ -117,6 +134,24 @@ begin
       v_name_two, v_tenant, v_property_two, 'display.name',
       '"Other Clinic"'::jsonb, v_evidence_id, v_rights_id,
       '2026-08-25T11:00:00Z', '2026-08-25T11:00:00Z',
+      'high', 'public', 'reviewed'
+    ),
+    (
+      v_partial_name, v_tenant, v_property_one, 'display.name',
+      '"Partial source"'::jsonb, v_partial_evidence_id, v_rights_id,
+      '2026-08-25T11:00:00Z', '2026-08-25T11:00:00Z',
+      'high', 'public', 'reviewed'
+    ),
+    (
+      v_unknown_name, v_tenant, v_property_one, 'display.name',
+      '"Unknown confidence"'::jsonb, v_evidence_id, v_rights_id,
+      '2026-08-25T11:00:00Z', '2026-08-25T11:00:00Z',
+      'unknown', 'public', 'reviewed'
+    ),
+    (
+      v_future_name, v_tenant, v_property_one, 'display.name',
+      '"Observed later"'::jsonb, v_evidence_id, v_rights_id,
+      '2026-08-25T13:00:00Z', '2026-08-25T11:00:00Z',
       'high', 'public', 'reviewed'
     );
 
@@ -271,6 +306,104 @@ begin
   if v_read::text ~ '(stable_locator|rights_provider|rights_policy_key|terms_url|internal_note)' then
     raise exception 'safe public read leaked internal or provider metadata';
   end if;
+
+  -- Each unresolved factual input is refused by the database-owned fact
+  -- trigger, and the typed seal remains atomic with no partial rows.
+  for v_case in
+    select * from (values
+      ('10000000-0000-4000-8000-000000000063'::uuid, 4, v_partial_name),
+      ('10000000-0000-4000-8000-000000000064'::uuid, 5, v_unknown_name),
+      ('10000000-0000-4000-8000-000000000065'::uuid, 6, v_future_name)
+    ) cases(projection_id, projection_version, assertion_id)
+  loop
+    insert into ops.tour_public_projection (
+      id, organization_tenant_id, tour_id, projection_version, route_version,
+      as_of, facts_only, projection_digest, status
+    ) values (
+      v_case.projection_id, v_tenant, v_tour_id, v_case.projection_version, 2,
+      v_as_of, true, 'sha256:' || repeat('e', 64), 'draft'
+    );
+    begin
+      perform ops.seal_tour_public_projection(
+        v_tenant, v_case.projection_id,
+        jsonb_build_array(
+          jsonb_build_object('property_id',v_property_one,'field_assertion_id',v_case.assertion_id,'display_field_key','display.name'),
+          jsonb_build_object('property_id',v_property_one,'field_assertion_id',v_address_one,'display_field_key','display.address'),
+          jsonb_build_object('property_id',v_property_two,'field_assertion_id',v_name_two,'display_field_key','display.name'),
+          jsonb_build_object('property_id',v_property_two,'field_assertion_id',v_address_two,'display_field_key','display.address')
+        ), 'actor:proof', 'sha256:' || repeat('4',64));
+      raise exception 'proof expected unresolved projection denial';
+    exception when raise_exception then
+      if sqlerrm <> 'projection fact lacks current public assertion, rights, or safe value' then raise; end if;
+    end;
+    if exists (select 1 from ops.tour_public_projection_fact where organization_tenant_id=v_tenant and projection_id=v_case.projection_id)
+       or exists (select 1 from ops.tour_public_projection_seal_receipt where organization_tenant_id=v_tenant and projection_id=v_case.projection_id) then
+      raise exception 'unresolved projection denial left partial rows';
+    end if;
+  end loop;
+
+  -- An immutable conflict quarantines both new seals and an already-approved
+  -- read until a receipt selects the exact assertion being projected.
+  insert into ops.tour_fact_conflict (
+    id,organization_tenant_id,property_id,field_key,state,opened_at
+  ) values (
+    '10000000-0000-4000-8000-000000000072',v_tenant,v_property_one,
+    'display.name','open','2026-08-25T11:30:00Z'
+  );
+  insert into ops.tour_fact_conflict_participant (
+    organization_tenant_id,conflict_id,field_assertion_id,participant_role
+  ) values (
+    v_tenant,'10000000-0000-4000-8000-000000000072',v_name_one,'candidate'
+  );
+  if ops.read_tour_public_projection(v_tenant,v_success_projection_id) is not null then
+    raise exception 'unresolved fact conflict left approved projection readable';
+  end if;
+  insert into ops.tour_public_projection (
+    id,organization_tenant_id,tour_id,projection_version,route_version,
+    as_of,facts_only,projection_digest,status
+  ) values (
+    v_conflict_projection_id,v_tenant,v_tour_id,7,2,v_as_of,true,
+    'sha256:'||repeat('e',64),'draft'
+  );
+  begin
+    perform ops.seal_tour_public_projection(
+      v_tenant,v_conflict_projection_id,
+      jsonb_build_array(
+        jsonb_build_object('property_id',v_property_one,'field_assertion_id',v_name_one,'display_field_key','display.name'),
+        jsonb_build_object('property_id',v_property_one,'field_assertion_id',v_address_one,'display_field_key','display.address'),
+        jsonb_build_object('property_id',v_property_two,'field_assertion_id',v_name_two,'display_field_key','display.name'),
+        jsonb_build_object('property_id',v_property_two,'field_assertion_id',v_address_two,'display_field_key','display.address')
+      ),'actor:proof','sha256:'||repeat('5',64));
+    raise exception 'proof expected unresolved conflict denial';
+  exception when raise_exception then
+    if sqlerrm <> 'projection fact lacks current public assertion, rights, or safe value' then raise; end if;
+  end;
+  insert into ops.tour_conflict_resolution_receipt (
+    organization_tenant_id,conflict_id,selected_field_assertion_id,rationale,
+    evidence,resolver_actor_id,resolved_at,receipt_digest
+  ) values (
+    v_tenant,'10000000-0000-4000-8000-000000000072',v_name_one,
+    'verified source selected','{}'::jsonb,'actor:proof',
+    '2026-08-25T11:45:00Z','sha256:'||repeat('6',64)
+  );
+  if ops.read_tour_public_projection(v_tenant,v_success_projection_id) is null then
+    raise exception 'exact conflict resolution did not restore approved projection read';
+  end if;
+  insert into ops.tour_public_projection (
+    id,organization_tenant_id,tour_id,projection_version,route_version,
+    as_of,facts_only,projection_digest,status
+  ) values (
+    v_resolved_projection_id,v_tenant,v_tour_id,8,2,v_as_of,true,
+    'sha256:'||repeat('e',64),'draft'
+  );
+  perform ops.seal_tour_public_projection(
+    v_tenant,v_resolved_projection_id,
+    jsonb_build_array(
+      jsonb_build_object('property_id',v_property_one,'field_assertion_id',v_name_one,'display_field_key','display.name'),
+      jsonb_build_object('property_id',v_property_one,'field_assertion_id',v_address_one,'display_field_key','display.address'),
+      jsonb_build_object('property_id',v_property_two,'field_assertion_id',v_name_two,'display_field_key','display.name'),
+      jsonb_build_object('property_id',v_property_two,'field_assertion_id',v_address_two,'display_field_key','display.address')
+    ),'actor:proof','sha256:'||repeat('7',64));
 
   -- A seal missing one required field is rejected before fact insertion.  The
   -- caught subtransaction proves no partial fact or seal rows survive.

@@ -204,11 +204,26 @@ begin
       and new.route_version=p.route_version and a.id=new.field_assertion_id and a.organization_tenant_id=new.organization_tenant_id
       and a.property_id=new.property_id and a.field_key=new.display_field_key and a.rights_receipt_id=e.rights_receipt_id
       and r.provider=e.rights_provider and r.policy_key=e.rights_policy_key
-      and a.review_state='reviewed' and a.data_classification='public' and m.selected_at <= p.as_of
+      and e.retrieval_status='read' and e.retrieved_at <= p.as_of
+      and a.review_state='reviewed' and a.data_classification='public' and a.confidence <> 'unknown'
+      and m.selected_at <= p.as_of and a.observed_at <= p.as_of
       and a.effective_from <= p.as_of and (a.effective_to is null or a.effective_to > p.as_of)
       and r.status='active' and r.effective_at <= p.as_of and (r.expires_at is null or r.expires_at > p.as_of) and r.revoked_at is null
       and r.allowed_use_classes ? 'client_public_display' and (r.allowed_field_classes ? a.field_key or r.allowed_field_classes ? '*')
       and not exists (select 1 from ops.tour_rights_receipt newer where newer.organization_tenant_id=r.organization_tenant_id and newer.provider=r.provider and newer.policy_key=r.policy_key and newer.receipt_version > r.receipt_version and newer.effective_at <= p.as_of)
+      and not exists (
+        select 1 from ops.tour_fact_conflict conflict
+        where conflict.organization_tenant_id=a.organization_tenant_id
+          and conflict.property_id=a.property_id and conflict.field_key=a.field_key
+          and conflict.state <> 'superseded' and conflict.opened_at <= p.as_of
+          and not exists (
+            select 1 from ops.tour_conflict_resolution_receipt resolution
+            where resolution.organization_tenant_id=conflict.organization_tenant_id
+              and resolution.conflict_id=conflict.id
+              and resolution.selected_field_assertion_id=a.id
+              and resolution.resolved_at <= p.as_of
+          )
+      )
       and ops.tour_public_value_safe(a.field_key,a.value)
   ) then raise exception 'projection fact lacks current public assertion, rights, or safe value'; end if;
   return new;
@@ -463,6 +478,8 @@ returns jsonb language sql stable security definer set search_path=pg_catalog,op
         and (a.review_state <> 'reviewed' or a.data_classification <> 'public'
           or a.rights_receipt_id <> e.rights_receipt_id
           or r.provider <> e.rights_provider or r.policy_key <> e.rights_policy_key
+          or e.retrieval_status <> 'read' or e.retrieved_at > p.as_of
+          or a.confidence = 'unknown' or a.observed_at > p.as_of
           or r.status <> 'active' or r.effective_at > now()
           or (r.expires_at is not null and r.expires_at <= now())
           or (r.revoked_at is not null and r.revoked_at <= now())
@@ -474,6 +491,19 @@ returns jsonb language sql stable security definer set search_path=pg_catalog,op
               and newer.provider=r.provider and newer.policy_key=r.policy_key
               and newer.receipt_version > r.receipt_version
               and newer.effective_at <= now()
+          )
+          or exists (
+            select 1 from ops.tour_fact_conflict conflict
+            where conflict.organization_tenant_id=a.organization_tenant_id
+              and conflict.property_id=a.property_id and conflict.field_key=a.field_key
+              and conflict.state <> 'superseded' and conflict.opened_at <= now()
+              and not exists (
+                select 1 from ops.tour_conflict_resolution_receipt resolution
+                where resolution.organization_tenant_id=conflict.organization_tenant_id
+                  and resolution.conflict_id=conflict.id
+                  and resolution.selected_field_assertion_id=a.id
+                  and resolution.resolved_at <= now()
+              )
           ))
     );
 $$;

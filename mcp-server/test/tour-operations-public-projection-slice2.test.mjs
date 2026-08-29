@@ -194,10 +194,26 @@ test("unresolved evidence, confidence, and field conflicts are quarantined", () 
     ...sealed.input,
     projection: sealed.projection,
     conflicts: [{
+      id: "conflict-1",
       organization_tenant_id: fixture.tenant,
       property_id: membership.property_id,
       field_key: fact.display_field_key,
       state: "open",
+      opened_at: "2026-08-24T00:00:00Z",
     }],
   }), /PUBLIC_ASSERTION_CONFLICTED/);
+  assert.equal(validateProjectionComplete({
+    ...sealed.input,
+    projection: sealed.projection,
+    conflicts: [{
+      id: "conflict-1", organization_tenant_id: fixture.tenant,
+      property_id: membership.property_id, field_key: fact.display_field_key,
+      state: "open", opened_at: "2026-08-24T00:00:00Z",
+    }],
+    conflict_resolutions: [{
+      organization_tenant_id: fixture.tenant, conflict_id: "conflict-1",
+      selected_field_assertion_id: fact.field_assertion_id,
+      resolved_at: "2026-08-24T12:00:00Z",
+    }],
+  }), true);
 });

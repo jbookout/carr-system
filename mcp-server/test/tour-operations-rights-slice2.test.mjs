@@ -47,6 +47,8 @@ test("evidence-to-assertion rights lineage binds tenant, receipt, provider, poli
   assert.throws(() => validateEvidenceRightsLineage(fixture.source_evidence, { ...fixture.field_assertion, observed_at: "not-a-time" }, fixture.rights_receipt), /OBSERVED|EFFECTIVE|RIGHTS/);
   assert.throws(() => validateEvidenceRightsLineage({ ...fixture.source_evidence, retrieved_at: "not-a-time" }, fixture.field_assertion, fixture.rights_receipt), /RETRIEVED|EFFECTIVE|RIGHTS/);
   assert.throws(() => validateEvidenceRightsLineage({ ...fixture.source_evidence, retrieval_status: "partial" }, fixture.field_assertion, fixture.rights_receipt), /EVIDENCE_UNRESOLVED/);
+  assert.throws(() => validateEvidenceRightsLineage({ ...fixture.source_evidence, rights_provider: undefined }, fixture.field_assertion, fixture.rights_receipt), /EVIDENCE_RIGHTS_LINEAGE_MISMATCH/);
+  assert.throws(() => validateEvidenceRightsLineage({ ...fixture.source_evidence, rights_policy_key: undefined }, fixture.field_assertion, fixture.rights_receipt), /EVIDENCE_RIGHTS_LINEAGE_MISMATCH/);
   assert.notEqual(fixture.field_assertion.observed_at, fixture.source_evidence.retrieved_at, "observation and retrieval timestamps must remain distinct provenance facts");
 });
 
@@ -79,10 +81,14 @@ test("required public display identity rejects blank or oversized text", () => {
   }
 });
 
-test("existing projection fact validation retains established fail-closed rights errors", () => {
+test("projection fact validation requires exact evidence and current public-display rights", () => {
   const { projection_fact: fact, field_assertion: assertion, membership, projection, rights_receipt: rights } = fixture;
-  assert.equal(validateProjectionFact(fact, assertion, membership, projection, rights), true);
-  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, { ...rights, effective_at: "2026-08-26T00:00:00Z" }), /PUBLIC_RIGHTS_REQUIRED/);
-  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, { ...rights, status: "revoked", revoked_at: "2026-08-24T00:00:00Z" }), /PUBLIC_RIGHTS_REQUIRED/);
-  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, rights, [{ ...rights, receipt_version: 2, effective_at: "2026-08-20T00:00:00Z" }]), /PUBLIC_RIGHTS_SUPERSEDED/);
+  const evidence = fixture.source_evidence;
+  assert.equal(validateProjectionFact(fact, assertion, membership, projection, rights, { evidence }), true);
+  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, rights), /PROJECTION_EVIDENCE_REQUIRED/);
+  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, { ...rights, effective_at: "2026-08-26T00:00:00Z" }, { evidence }), /PUBLIC_RIGHTS_REQUIRED/);
+  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, { ...rights, status: "revoked", revoked_at: "2026-08-24T00:00:00Z" }, { evidence }), /PUBLIC_RIGHTS_REQUIRED/);
+  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, rights, { evidence, lineage: [{ ...rights, receipt_version: 2, effective_at: "2026-08-20T00:00:00Z" }] }), /PUBLIC_RIGHTS_SUPERSEDED/);
+  assert.throws(() => validateProjectionFact(fact, { ...assertion, observed_at: "2026-08-26T00:00:00Z" }, membership, projection, rights, { evidence }), /PUBLIC_ASSERTION_NOT_EFFECTIVE/);
+  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, rights, { evidence: { ...evidence, retrieved_at: "2026-08-26T00:00:00Z" } }), /PUBLIC_ASSERTION_NOT_EFFECTIVE/);
 });

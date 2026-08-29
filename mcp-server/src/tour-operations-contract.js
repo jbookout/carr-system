@@ -353,8 +353,10 @@ export function validateEvidenceRightsLineage(evidence, assertion, rightsReceipt
       evidence.id !== assertion.source_evidence_id ||
       evidence.rights_receipt_id !== assertion.rights_receipt_id ||
       evidence.rights_receipt_id !== rightsReceipt.id ||
-      (evidence.rights_provider != null && evidence.rights_provider !== rightsReceipt.provider) ||
-      (evidence.rights_policy_key != null && evidence.rights_policy_key !== rightsReceipt.policy_key) ||
+      typeof evidence.rights_provider !== "string" || !evidence.rights_provider.trim() ||
+      evidence.rights_provider !== rightsReceipt.provider ||
+      typeof evidence.rights_policy_key !== "string" || !evidence.rights_policy_key.trim() ||
+      evidence.rights_policy_key !== rightsReceipt.policy_key ||
       (evidence.rights_receipt_digest != null &&
        evidence.rights_receipt_digest !== rightsReceipt.receipt_digest))
     throw new Error("EVIDENCE_RIGHTS_LINEAGE_MISMATCH");
@@ -472,11 +474,15 @@ export function validateProjectionFact(fact, assertion, membership, projection, 
     throw new Error("PUBLIC_ASSERTION_NOT_EFFECTIVE");
   const asOf = new Date(projection.as_of);
   if (new Date(membership.selected_at) > asOf || new Date(assertion.effective_from) > asOf ||
+      new Date(assertion.observed_at) > asOf ||
       (assertion.effective_to && new Date(assertion.effective_to) <= asOf))
     throw new Error("PUBLIC_ASSERTION_NOT_EFFECTIVE");
   if (assertion.rights_receipt_id !== rightsReceipt.id) throw new Error("PUBLIC_RIGHTS_REQUIRED");
   const options = normalizeProjectionOptions(receiptLineage, evidence, revocations);
-  if (options.evidence) validateEvidenceRightsLineage(options.evidence, assertion, rightsReceipt);
+  if (!options.evidence) throw new Error("PROJECTION_EVIDENCE_REQUIRED");
+  validateEvidenceRightsLineage(options.evidence, assertion, rightsReceipt);
+  if (new Date(options.evidence.retrieved_at) > asOf)
+    throw new Error("PUBLIC_ASSERTION_NOT_EFFECTIVE");
   try {
     evaluateRightsReceipt(rightsReceipt, {
       at: projection.as_of, fieldKey: assertion.field_key,
@@ -500,7 +506,7 @@ const mapById = values =>
 
 export function validateProjectionComplete({
   projection, memberships = [], facts = [], assertions = [], evidence = [], rights = [],
-  lineage = [], revocations = [], conflicts = [], map_points = [],
+  lineage = [], revocations = [], conflicts = [], conflict_resolutions = [], map_points = [],
   requiredFieldKeys = REQUIRED_PUBLIC_PROPERTY_FIELDS,
 } = {}) {
   if (!projection || projection.status !== "approved")
@@ -535,10 +541,21 @@ export function validateProjectionComplete({
       const source = assertion && evidenceById.get(assertion.source_evidence_id);
       const receipt = assertion && rightsById.get(assertion.rights_receipt_id);
       if (!assertion || !source || !receipt) throw new Error("PROJECTION_INCOMPLETE");
-      if ((Array.isArray(conflicts) ? conflicts : []).some(conflict => conflict &&
-          conflict.organization_tenant_id === projection.organization_tenant_id &&
-          conflict.property_id === fact.property_id && conflict.field_key === fact.display_field_key &&
-          conflict.state === "open")) throw new Error("PUBLIC_ASSERTION_CONFLICTED");
+      const unresolvedConflict = (Array.isArray(conflicts) ? conflicts : []).some(conflict => {
+        if (!conflict || conflict.organization_tenant_id !== projection.organization_tenant_id ||
+            conflict.property_id !== fact.property_id || conflict.field_key !== fact.display_field_key ||
+            conflict.state === "superseded") return false;
+        if (requiredTimestamp(conflict.opened_at) &&
+            new Date(conflict.opened_at) > new Date(projection.as_of)) return false;
+        const conflictId = conflict.id ?? conflict.conflict_id;
+        return !(Array.isArray(conflict_resolutions) ? conflict_resolutions : []).some(resolution =>
+          resolution && resolution.organization_tenant_id === projection.organization_tenant_id &&
+          resolution.conflict_id === conflictId &&
+          resolution.selected_field_assertion_id === assertion.id &&
+          requiredTimestamp(resolution.resolved_at) &&
+          new Date(resolution.resolved_at) <= new Date(projection.as_of));
+      });
+      if (unresolvedConflict) throw new Error("PUBLIC_ASSERTION_CONFLICTED");
       validateProjectionFact(fact, assertion, membership, projection, receipt, {
         lineage, evidence: source, revocations,
       });

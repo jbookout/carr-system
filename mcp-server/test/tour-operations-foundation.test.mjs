@@ -187,16 +187,16 @@ test("normalized projection facts refuse cross-tenant, unreviewed, nonpublic, an
   assert.throws(() => validateProjectionFact(fact, {...assertion, data_classification: "internal"}, membership, projection, rights), /PUBLIC_ASSERTION_REQUIRED/);
   assert.throws(() => validateProjectionFact(fact, assertion, {...membership, route_version: 2}, projection, rights), /ROUTE_VERSION_MISMATCH/);
   assert.throws(() => validateProjectionFact(fact, {...assertion, effective_from: "2026-08-26T00:00:00Z"}, membership, projection, rights), /PUBLIC_ASSERTION_NOT_EFFECTIVE/);
-  assert.throws(() => validateProjectionFact(fact, {...assertion, value: {text: "safe", internal_note: "secret"}}, membership, projection, rights), /PUBLIC_VALUE_UNSAFE/);
+  assert.throws(() => validateProjectionFact(fact, {...assertion, value: {text: "safe", internal_note: "secret"}}, membership, projection, rights, {evidence}), /PUBLIC_VALUE_UNSAFE/);
   assert.throws(() => validateProjectionFact(fact, assertion, membership, {...projection, as_of: "not-a-date"}, rights), /PUBLIC_ASSERTION_NOT_EFFECTIVE/);
   assert.throws(() => validateProjectionFact(fact, assertion, membership, {...projection, as_of: "0"}, rights), /PUBLIC_ASSERTION_NOT_EFFECTIVE/);
   assert.throws(() => validateProjectionFact(fact, assertion, membership, {...projection, as_of: "2026-02-30T00:00:00Z"}, rights), /PUBLIC_ASSERTION_NOT_EFFECTIVE/);
   assert.throws(() => validateProjectionFact(fact, assertion, membership, {...projection, as_of: null}, rights), /PUBLIC_ASSERTION_NOT_EFFECTIVE/);
   assert.throws(() => validateProjectionFact(fact, assertion, membership, {...projection, as_of: 0}, rights), /PUBLIC_ASSERTION_NOT_EFFECTIVE/);
-  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, {...rights, effective_at: "not-a-date"}), /PUBLIC_RIGHTS_REQUIRED/);
-  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, {...rights, effective_at: null}), /PUBLIC_RIGHTS_REQUIRED/);
-  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, {...rights, id: "unrelated"}), /PUBLIC_RIGHTS_REQUIRED/);
-  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, {...rights, allowed_use_classes: "client_public_display", allowed_field_classes: {"display.name": true}}), /PUBLIC_RIGHTS_REQUIRED/);
+  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, {...rights, effective_at: "not-a-date"}, {evidence}), /PUBLIC_RIGHTS_REQUIRED/);
+  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, {...rights, effective_at: null}, {evidence}), /PUBLIC_RIGHTS_REQUIRED/);
+  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, {...rights, id: "unrelated"}, {evidence}), /PUBLIC_RIGHTS_REQUIRED/);
+  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, {...rights, allowed_use_classes: "client_public_display", allowed_field_classes: {"display.name": true}}, {evidence}), /PUBLIC_RIGHTS_REQUIRED/);
   assert.throws(() => validateProjectionFact(fact, {...assertion, value: null}, membership, projection, rights,
     {evidence}), /PUBLIC_VALUE_UNSAFE/);
   assert.throws(() => validateProjectionFact({...fact, projection_id: "wrong"}, assertion, membership, projection, rights), /PROJECTION_BINDING_REFUSED/);

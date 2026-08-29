@@ -12,6 +12,7 @@ const ids = {
   revokedRights: "10000000-0000-4000-8000-000000000002",
   evidence: "20000000-0000-4000-8000-000000000001",
   assertion: "30000000-0000-4000-8000-000000000001",
+  addressAssertion: "30000000-0000-4000-8000-000000000002",
   property: "40000000-0000-4000-8000-000000000001",
   tour: "50000000-0000-4000-8000-000000000001",
   projection: "60000000-0000-4000-8000-000000000001",
@@ -29,6 +30,12 @@ const publicFact = {
   effective_from: "2026-08-27T00:00:00Z",
   effective_to: null,
 };
+const publicAddressFact = {
+  ...publicFact,
+  field_assertion_id: ids.addressAssertion,
+  display_field_key: "display.address",
+  value: "100 Clinic Way",
+};
 const databaseProjection = {
   projection_id: ids.projection,
   tour_id: ids.tour,
@@ -36,7 +43,7 @@ const databaseProjection = {
   route_version: 1,
   as_of: "2026-08-27T12:15:00Z",
   projection_digest: digest("f"),
-  facts: [publicFact],
+  facts: [publicFact, publicAddressFact],
 };
 
 function harness({ projection = databaseProjection } = {}) {
@@ -169,7 +176,10 @@ test("public read projection ignores internal-only metadata and rejects forbidde
     restrictions: "provider terms",
     recommendation: "choose this property",
     ranking: 1,
-    facts: [{ ...publicFact, internal_note: "do not expose", broker_rank: 1 }],
+    facts: [
+      { ...publicFact, internal_note: "do not expose", broker_rank: 1 },
+      { ...publicAddressFact, internal_note: "do not expose" },
+    ],
   };
   const cleanHarness = harness();
   const clean = await cleanHarness.tools["read-tour-public-projection"].handler(
@@ -191,11 +201,28 @@ test("public read projection ignores internal-only metadata and rejects forbidde
   ]) {
     const rejected = harness({ projection: {
       ...databaseProjection,
-      facts: [{ ...publicFact, display_field_key }],
+      facts: [{ ...publicFact, display_field_key }, publicAddressFact],
     } });
     await assert.rejects(
       rejected.tools["read-tour-public-projection"].handler(
         rejected.client, actor, { projection_id: ids.projection }),
+      error => error instanceof ToolError && error.payload.error === "tour_public_projection_invalid",
+    );
+  }
+});
+
+test("public read projection refuses incomplete, duplicate, or temporally impossible facts", async () => {
+  for (const facts of [
+    [publicFact],
+    [publicFact, publicAddressFact, { ...publicAddressFact, field_assertion_id: ids.assertion }],
+    [{ ...publicFact, observed_at: "2026-08-28T00:00:00Z" }, publicAddressFact],
+    [{ ...publicFact, effective_from: "2026-08-28T00:00:00Z" }, publicAddressFact],
+    [{ ...publicFact, effective_to: "2026-08-27T12:00:00Z" }, publicAddressFact],
+  ]) {
+    const h = harness({ projection: { ...databaseProjection, facts } });
+    await assert.rejects(
+      h.tools["read-tour-public-projection"].handler(
+        h.client, actor, { projection_id: ids.projection }),
       error => error instanceof ToolError && error.payload.error === "tour_public_projection_invalid",
     );
   }

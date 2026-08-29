@@ -7,6 +7,7 @@
 import { organizationTenantForActor } from "./identity.js";
 import {
   PUBLIC_TOUR_FIELD_KEYS,
+  REQUIRED_PUBLIC_PROPERTY_FIELDS,
   publicValueIsSafe,
   requiredTimestamp,
 } from "./tour-operations-contract.js";
@@ -111,6 +112,7 @@ function publicProjection(value, ToolError) {
   };
   if (!Array.isArray(value.facts) || value.facts.length === 0)
     fail(ToolError, { error: "tour_public_projection_invalid", field: "facts" });
+  const seen = new Set();
   projection.facts = value.facts.map((fact, index) => {
     if (!fact || typeof fact !== "object" || Array.isArray(fact))
       fail(ToolError, { error: "tour_public_projection_invalid", field: `facts[${index}]` });
@@ -121,7 +123,7 @@ function publicProjection(value, ToolError) {
     const effectiveTo = timestamp(fact.effective_to, `facts[${index}].effective_to`, ToolError, true);
     if (effectiveTo && Date.parse(effectiveTo) <= Date.parse(effectiveFrom))
       fail(ToolError, { error: "tour_public_projection_invalid", field: `facts[${index}].effective_to` });
-    return {
+    const projected = {
       property_id: uuid(fact.property_id, `facts[${index}].property_id`, ToolError),
       field_assertion_id: uuid(fact.field_assertion_id, `facts[${index}].field_assertion_id`, ToolError),
       display_field_key: displayFieldKey,
@@ -132,7 +134,23 @@ function publicProjection(value, ToolError) {
       effective_from: effectiveFrom,
       effective_to: effectiveTo,
     };
+    if (Date.parse(projected.observed_at) > Date.parse(projection.as_of) ||
+        Date.parse(projected.effective_from) > Date.parse(projection.as_of) ||
+        (projected.effective_to && Date.parse(projected.effective_to) <= Date.parse(projection.as_of)))
+      fail(ToolError, { error: "tour_public_projection_invalid", field: `facts[${index}]` });
+    const key = `${projected.property_id}\u001f${projected.display_field_key}`;
+    if (seen.has(key))
+      fail(ToolError, { error: "tour_public_projection_invalid", field: `facts[${index}]`, reason: "duplicate_property_field" });
+    seen.add(key);
+    return projected;
   });
+  const properties = new Set(projection.facts.map(fact => fact.property_id));
+  for (const propertyId of properties) {
+    for (const fieldKey of REQUIRED_PUBLIC_PROPERTY_FIELDS) {
+      if (!seen.has(`${propertyId}\u001f${fieldKey}`))
+        fail(ToolError, { error: "tour_public_projection_invalid", field: "facts", reason: "incomplete_property" });
+    }
+  }
   return projection;
 }
 

@@ -58,6 +58,12 @@ test("slice 2 seals one complete fact set atomically with a database-computed di
   assert.match(migration, /join ops\.tour_field_assertion a/i);
   assert.match(migration, /join ops\.tour_source_evidence e/i);
   assert.match(migration, /join ops\.tour_rights_receipt r/i);
+  assert.match(migration, /e\.retrieval_status='read' and e\.retrieved_at <= p\.as_of/i);
+  assert.match(migration, /a\.confidence <> 'unknown'/i);
+  assert.match(migration, /a\.observed_at <= p\.as_of/i);
+  assert.match(migration, /from ops\.tour_fact_conflict conflict/i);
+  assert.match(migration, /resolution\.selected_field_assertion_id=a\.id/i);
+  assert.match(migration, /e\.retrieval_status <> 'read' or e\.retrieved_at > p\.as_of/i);
   for (const field of ["value", "source_evidence_id", "rights_receipt_id", "observed_at", "effective_from", "effective_to"]) assert.match(migration, new RegExp("'" + field + "'", "i"), field);
   assert.doesNotMatch(migration, /'stable_locator'/i);
   assert.match(migration, /drop trigger if exists tour_publication_creation_guard/i);
