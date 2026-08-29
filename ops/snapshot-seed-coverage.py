@@ -12,9 +12,13 @@ was then patched one table at a time, by hand, in bin/schema-snapshot.sh.
 
 WHAT THIS CHECKS, and it is deliberately narrow: every table that an ALREADY
 APPLIED migration writes rows into AT MIGRATION TIME must be CLASSIFIED in
-ops/config/snapshot-seed-coverage.json -- carried, carried_subset, or explicitly
-excluded with a reason. A table that is none of those is the next instance, and
-the snapshot refuses to be written until someone classifies it.
+ops/config/snapshot-seed-coverage.json -- carried, carried_after_apply,
+carried_subset, or explicitly excluded with a reason. carried_after_apply is
+the two-phase source state: absence is allowed only while a repository migration
+that seeds the table remains outside the artifact ledger; once it enters the
+ledger, the same row-presence requirement as carried applies. A table that is
+none of those is the next instance, and the snapshot refuses to be written until
+someone classifies it.
 
 WHAT "AT MIGRATION TIME" MEANS, and the first version of this file got it wrong.
 It is NOT "appears in an INSERT statement in the file". An independent review of
@@ -588,10 +592,16 @@ def load_classification(repo):
     with open(path, encoding="utf-8") as handle:
         doc = json.load(handle)
     carried = dict(doc.get("carried") or {})
+    after_apply = dict(doc.get("carried_after_apply") or {})
     subset = dict(doc.get("carried_subset") or {})
     excluded = dict(doc.get("excluded") or {})
     forbidden = dict(doc.get("carried_subset_must_not_contain") or {})
-    buckets = (("carried", carried), ("carried_subset", subset), ("excluded", excluded))
+    buckets = (
+        ("carried", carried),
+        ("carried_after_apply", after_apply),
+        ("carried_subset", subset),
+        ("excluded", excluded),
+    )
     for index, (name_a, bucket_a) in enumerate(buckets):
         for name_b, bucket_b in buckets[index + 1:]:
             both = sorted(set(bucket_a) & set(bucket_b))
@@ -601,15 +611,21 @@ def load_classification(repo):
     if stray:
         raise ValueError("carried_subset_must_not_contain names a table that is not "
                          "carried_subset: " + ", ".join(stray))
-    return carried, subset, excluded, forbidden, path
+    return carried, after_apply, subset, excluded, forbidden, path
 
 
 def check(repo, artifact_text):
     """Return a list of human-readable failures; empty means the snapshot is sound."""
-    carried, subset, excluded, forbidden, config_path = load_classification(repo)
+    carried, after_apply, subset, excluded, forbidden, config_path = load_classification(repo)
     rel_config = os.path.relpath(config_path, repo)
     applied = applied_migrations(artifact_text)
     seeds, missing = seeded_tables(repo, applied)
+    migration_dir = os.path.join(repo, "migrations")
+    pending = {
+        name for name in os.listdir(migration_dir)
+        if name.endswith(".sql") and name not in applied
+    }
+    pending_seeds, _pending_missing = seeded_tables(repo, pending)
     present, carrying_rows = tables_with_data(artifact_text)
     failures = []
 
@@ -632,7 +648,10 @@ def check(repo, artifact_text):
             f"    It is applied, so a rebuild will not replay it, and its file is gone — so\n"
             f"    whatever it seeded cannot be checked. Restore the file or record the rename.")
 
-    for table in sorted(t for t in seeds if t not in carried and t not in subset and t not in excluded):
+    for table in sorted(
+        t for t in seeds
+        if t not in carried and t not in after_apply and t not in subset and t not in excluded
+    ):
         failures.append(
             f"UNCLASSIFIED SEEDED TABLE: {table}\n"
             f"    written at migration time by: {', '.join(seeds[table])}\n"
@@ -661,6 +680,28 @@ def check(repo, artifact_text):
                 f"    rebuild from this file would come up short. This check reads the ARTIFACT\n"
                 f"    and never the database, so it cannot tell you whether production still\n"
                 f"    holds the rows — do not read it as saying they are gone.")
+
+    for table in sorted(after_apply):
+        if table in seeds:
+            if table not in carrying_rows:
+                failures.append(
+                    f"""DECLARED CARRIED AFTER APPLY BUT ABSENT: {table}
+    An applied migration now seeds this table, so its two-phase allowance
+    is over and the artifact must carry rows for it.
+    Reason on file: {after_apply[table]}
+    Fix the bounded emit block in bin/schema-snapshot.sh; do not weaken
+    the classification or hand-edit the artifact.""")
+        elif table in pending_seeds:
+            if table in present:
+                failures.append(
+                    f"""CARRIED-AFTER-APPLY TABLE PRESENT BEFORE ITS LEDGER ENTRY: {table}
+    The artifact carries data for a table whose seeding migration is still
+    pending. Remove the premature data; source order must stay ledger-first.""")
+        else:
+            failures.append(
+                f"""CARRIED-AFTER-APPLY ENTRY HAS NO SOURCE SEED: {table}
+    No applied or pending migration seeds this table at migration time.
+    Remove the stale classification or restore the migration that justifies it.""")
 
     for table in sorted(excluded):
         if table in present:

@@ -18,8 +18,15 @@
     "carry is client or runtime data in a tracked file. Each entry says why.",
     "",
     "CARRIED_SUBSET means the table is carried in part by a scoped render because it holds",
-    "two kinds of row. It must be present, and the reason states the scope."
+    "two kinds of row. It must be present, and the reason states the scope.",
+    "",
+    "CARRIED_AFTER_APPLY is for a reviewed bounded seed whose source migration is",
+    "not yet in the snapshot ledger. It must be absent while pending and becomes",
+    "row-required automatically when the migration enters the ledger."
   ],
+  "carried_after_apply": {
+    "ops.completion_policy": "the single versioned completion-default policy seeded by migration 0431; it contains only tenant metadata, the closed required-dimension list, freshness, precedence, effective time, and its digest. Without it the completion projection has no policy and emits no subjects. Carried by an exact source-verified block in bin/schema-snapshot.sh; no subjects, observations, relations, dispositions, or receipts are carried"
+  },
   "carried": {
     "activity_kind": "closed vocabulary, foreign-key target; bounded vocabulary pg_dump",
     "actor": "internal actor identities (joe, dell, system, automation) that events point at",
