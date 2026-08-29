@@ -56,6 +56,21 @@ test("foundation fixture validation rejects incomplete, unknown, and schema-inva
   assert.throws(() => validateFoundationEntityFixture("ShareGrant",
     {...fixture.contract_entities.ShareGrant, permission_scopes: ["comment"]}, contract.entities.ShareGrant),
   /FOUNDATION_ENTITY_SCOPE_INVALID:ShareGrant\.permission_scopes/);
+  assert.throws(() => validateFoundationEntityFixture("ProjectionFact",
+    {...fixture.contract_entities.ProjectionFact, display_field_key: "internal_note"}, contract.entities.ProjectionFact),
+  /FOUNDATION_ENTITY_ENUM_INVALID:ProjectionFact\.display_field_key/);
+  assert.throws(() => validateFoundationEntityFixture("Property",
+    {...fixture.contract_entities.Property, property_id: 7}, contract.entities.Property),
+  /FOUNDATION_ENTITY_UUID_INVALID:Property\.property_id/);
+  assert.throws(() => validateFoundationEntityFixture("Property",
+    {...fixture.contract_entities.Property, organization_tenant_id: ""}, contract.entities.Property),
+  /FOUNDATION_ENTITY_TEXT_INVALID:Property\.organization_tenant_id/);
+  assert.throws(() => validateFoundationEntityFixture("Tour",
+    {...fixture.contract_entities.Tour, tour_name: {text: "invalid"}}, contract.entities.Tour),
+  /FOUNDATION_ENTITY_TEXT_INVALID:Tour\.tour_name/);
+  assert.throws(() => validateFoundationEntityFixture("AuditEvent",
+    {...fixture.contract_entities.AuditEvent, entity_id: []}, contract.entities.AuditEvent),
+  /FOUNDATION_ENTITY_UUID_INVALID:AuditEvent\.entity_id/);
 });
 
 test("canonical factual fields require provenance, time, rights, confidence and classification", () => {

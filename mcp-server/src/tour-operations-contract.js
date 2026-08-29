@@ -87,6 +87,7 @@ const FOUNDATION_ENTITY_ENUMS = Object.freeze({
   PublicTourProjection: {
     status: ["draft", "qc_blocked", "approved", "published", "superseded", "quarantined", "rolled_back"],
   },
+  ProjectionFact: { display_field_key: [...PUBLIC_TOUR_FIELD_KEYS] },
   CheatSheetRevision: { status: ["draft", "saved", "superseded"] },
   ShareGrant: {
     audience: ["client", "internal"],
@@ -122,7 +123,24 @@ const FOUNDATION_NULLABLE_FIELDS = new Set([
   "expires_at", "revoked_at", "supersedes_receipt_id", "effective_to",
   "rotated_from_grant_id",
 ]);
+const FOUNDATION_UUID_FIELDS = new Set([
+  "property_id", "rights_receipt_id", "supersedes_receipt_id", "source_evidence_id",
+  "field_assertion_id", "conflict_id", "tour_id", "tour_stop_id", "projection_id",
+  "projection_fact_id", "cheat_sheet_revision_id", "share_grant_id",
+  "rotated_from_grant_id", "qc_finding_id", "artifact_id", "publication_id",
+  "audit_event_id", "entity_id",
+]);
+const FOUNDATION_TEXT_FIELDS = new Set([
+  "organization_tenant_id", "property_status", "provider", "policy_key", "terms_url",
+  "reviewer", "intended_use", "status", "stable_locator", "evidence_class",
+  "retrieval_status", "rights_provider", "rights_policy_key", "data_classification",
+  "field_key", "confidence", "review_state", "state", "tour_name",
+  "tour_status", "canonical_dataset_version", "route_label", "display_field_key",
+  "editor_actor_id", "audience", "artifact_type", "check_id", "severity",
+  "publication_state", "event_type", "entity_type", "actor_id",
+]);
 const FOUNDATION_DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
+const FOUNDATION_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export function validateFoundationEntityFixture(entityName, record, entityContract) {
   if (!record || Array.isArray(record) || typeof record !== "object" ||
@@ -142,6 +160,12 @@ export function validateFoundationEntityFixture(entityName, record, entityContra
     const value = record[field];
     if (value === null && FOUNDATION_NULLABLE_FIELDS.has(field)) continue;
     if (value == null) throw new Error(`FOUNDATION_ENTITY_VALUE_REQUIRED:${entityName}.${field}`);
+    if (FOUNDATION_UUID_FIELDS.has(field) &&
+        (typeof value !== "string" || !FOUNDATION_UUID_RE.test(value)))
+      throw new Error(`FOUNDATION_ENTITY_UUID_INVALID:${entityName}.${field}`);
+    if (FOUNDATION_TEXT_FIELDS.has(field) &&
+        (typeof value !== "string" || !value.trim()))
+      throw new Error(`FOUNDATION_ENTITY_TEXT_INVALID:${entityName}.${field}`);
     if (FOUNDATION_ARRAY_FIELDS.has(field) &&
         (!Array.isArray(value) || value.length === 0 || value.some(item => typeof item !== "string" || !item)))
       throw new Error(`FOUNDATION_ENTITY_ARRAY_INVALID:${entityName}.${field}`);
