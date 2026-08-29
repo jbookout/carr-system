@@ -42,6 +42,26 @@ export const CANONICAL_FACT_REQUIRED_FIELDS = Object.freeze([
   "data_classification", "review_state",
 ]);
 
+function canonicalJsonValueIsSafe(value, topLevel = true, seen = new Set()) {
+  if (value === null) return !topLevel;
+  if (typeof value === "string" || typeof value === "boolean") return true;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (typeof value !== "object" || seen.has(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) return false;
+  if (Reflect.ownKeys(value).some(key => typeof key === "symbol")) return false;
+  seen.add(value);
+  let safe;
+  if (Array.isArray(value)) {
+    safe = Array.from({length: value.length}, (_, index) => index)
+      .every(index => Object.hasOwn(value, index) && canonicalJsonValueIsSafe(value[index], false, seen));
+  } else {
+    safe = Object.keys(value).every(key => canonicalJsonValueIsSafe(value[key], false, seen));
+  }
+  seen.delete(value);
+  return safe;
+}
+
 export function validateCanonicalFieldAssertion(assertion) {
   if (!assertion || Array.isArray(assertion) || typeof assertion !== "object")
     throw new Error("FACT_ASSERTION_REQUIRED");
@@ -54,7 +74,7 @@ export function validateCanonicalFieldAssertion(assertion) {
   for (const field of ["property_id", "source_evidence_id", "rights_receipt_id"])
     if (typeof assertion[field] !== "string" || !FOUNDATION_UUID_RE.test(assertion[field]))
       throw new Error(`FACT_METADATA_INVALID:${field}`);
-  if (assertion.value === undefined) throw new Error("FACT_METADATA_INVALID:value");
+  if (!canonicalJsonValueIsSafe(assertion.value)) throw new Error("FACT_METADATA_INVALID:value");
   if (!requiredTimestamp(assertion.observed_at))
     throw new Error("FACT_METADATA_INVALID:observed_at");
   if (!requiredTimestamp(assertion.effective_from))
@@ -125,7 +145,7 @@ const FOUNDATION_DIGEST_FIELDS = new Set([
 ]);
 const FOUNDATION_NULLABLE_FIELDS = new Set([
   "expires_at", "revoked_at", "supersedes_receipt_id", "effective_to",
-  "rotated_from_grant_id", "value",
+  "rotated_from_grant_id",
 ]);
 const FOUNDATION_UUID_FIELDS = new Set([
   "property_id", "rights_receipt_id", "supersedes_receipt_id", "source_evidence_id",
@@ -171,7 +191,8 @@ export function validateFoundationEntityFixture(entityName, record, entityContra
         (typeof value !== "string" || !value.trim()))
       throw new Error(`FOUNDATION_ENTITY_TEXT_INVALID:${entityName}.${field}`);
     if (FOUNDATION_ARRAY_FIELDS.has(field) &&
-        (!Array.isArray(value) || value.length === 0 || value.some(item => typeof item !== "string" || !item)))
+        (!Array.isArray(value) || value.length === 0 ||
+         value.some(item => typeof item !== "string" || !item.trim())))
       throw new Error(`FOUNDATION_ENTITY_ARRAY_INVALID:${entityName}.${field}`);
     if (FOUNDATION_OBJECT_FIELDS.has(field) &&
         (Array.isArray(value) || typeof value !== "object"))
@@ -184,6 +205,8 @@ export function validateFoundationEntityFixture(entityName, record, entityContra
     if (FOUNDATION_DIGEST_FIELDS.has(field) && !FOUNDATION_DIGEST_RE.test(value))
       throw new Error(`FOUNDATION_ENTITY_DIGEST_INVALID:${entityName}.${field}`);
   }
+  if (entityName === "FieldAssertion" && !canonicalJsonValueIsSafe(record.value))
+    throw new Error("FOUNDATION_ENTITY_JSON_INVALID:FieldAssertion.value");
   if (entityName === "PublicTourProjection" && record.facts_only !== true)
     throw new Error("FOUNDATION_ENTITY_FACTS_ONLY_REQUIRED:PublicTourProjection.facts_only");
   if (entityName === "ShareGrant" && record.permission_scopes.some(scope =>
@@ -240,8 +263,8 @@ export function validateEvidenceRightsLineage(evidence, assertion, rightsReceipt
       evidence.id !== assertion.source_evidence_id ||
       evidence.rights_receipt_id !== assertion.rights_receipt_id ||
       evidence.rights_receipt_id !== rightsReceipt.id ||
-      (evidence.rights_provider != null && evidence.rights_provider !== rightsReceipt.provider) ||
-      (evidence.rights_policy_key != null && evidence.rights_policy_key !== rightsReceipt.policy_key) ||
+      evidence.rights_provider !== rightsReceipt.provider ||
+      evidence.rights_policy_key !== rightsReceipt.policy_key ||
       (evidence.rights_receipt_digest != null &&
        evidence.rights_receipt_digest !== rightsReceipt.receipt_digest))
     throw new Error("EVIDENCE_RIGHTS_LINEAGE_MISMATCH");

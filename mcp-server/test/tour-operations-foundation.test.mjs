@@ -71,6 +71,9 @@ test("foundation fixture validation rejects incomplete, unknown, and schema-inva
   assert.throws(() => validateFoundationEntityFixture("AuditEvent",
     {...fixture.contract_entities.AuditEvent, entity_id: []}, contract.entities.AuditEvent),
   /FOUNDATION_ENTITY_UUID_INVALID:AuditEvent\.entity_id/);
+  assert.throws(() => validateFoundationEntityFixture("RightsReceipt",
+    {...fixture.contract_entities.RightsReceipt, allowed_use_classes: ["   "]}, contract.entities.RightsReceipt),
+  /FOUNDATION_ENTITY_ARRAY_INVALID:RightsReceipt\.allowed_use_classes/);
 });
 
 test("canonical factual fields require provenance, time, rights, confidence and classification", () => {
@@ -91,14 +94,18 @@ test("canonical factual fields require provenance, time, rights, confidence and 
   assert.throws(() => validateCanonicalFieldAssertion({...assertion, rights_receipt_id: ""}), /FACT_METADATA_INVALID:rights_receipt_id/);
   assert.throws(() => validateCanonicalFieldAssertion({...assertion, confidence: "guessed"}), /FACT_METADATA_INVALID:confidence/);
   assert.throws(() => validateCanonicalFieldAssertion({...assertion, data_classification: "publicish"}), /FACT_METADATA_INVALID:data_classification/);
-  assert.equal(validateCanonicalFieldAssertion({...assertion, value: null}), true);
-  assert.equal(validateFoundationEntityFixture("FieldAssertion",
-    {...fixture.contract_entities.FieldAssertion, value: null}, contract.entities.FieldAssertion), true);
+  for (const value of [null, NaN, Infinity, () => true, Symbol("fact"), 1n, new Date()])
+    assert.throws(() => validateCanonicalFieldAssertion({...assertion, value}), /FACT_METADATA_INVALID:value/);
+  assert.equal(validateCanonicalFieldAssertion({...assertion, value: {suite: null}}), true);
+  assert.throws(() => validateFoundationEntityFixture("FieldAssertion",
+    {...fixture.contract_entities.FieldAssertion, value: null}, contract.entities.FieldAssertion),
+  /FOUNDATION_ENTITY_VALUE_REQUIRED:FieldAssertion\.value/);
 });
 
 test("normalized projection facts refuse cross-tenant, unreviewed, nonpublic, and route-mismatched data", () => {
-  const { projection_fact: fact, field_assertion: assertion, membership, projection, rights_receipt: rights } = fixture;
-  assert.equal(validateProjectionFact(fact, assertion, membership, projection, rights), true);
+  const { projection_fact: fact, field_assertion: assertion, membership, projection,
+    rights_receipt: rights, source_evidence: evidence } = fixture;
+  assert.equal(validateProjectionFact(fact, assertion, membership, projection, rights, {evidence}), true);
   assert.throws(() => validateProjectionFact({...fact, display_field_key: "internal_note"}, assertion, membership, projection, rights), /PUBLIC_FIELD_NOT_ALLOWLISTED/);
   assert.throws(() => validateProjectionFact({...fact, display_field_key: "display.address"}, assertion, membership, projection, rights), /PUBLIC_FIELD_RELABEL_REFUSED/);
   assert.throws(() => validateProjectionFact({...fact, organization_tenant_id: "other"}, assertion, membership, projection, rights), /TENANT_SCOPE_REFUSED/);
@@ -116,6 +123,12 @@ test("normalized projection facts refuse cross-tenant, unreviewed, nonpublic, an
   assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, {...rights, effective_at: null}), /PUBLIC_RIGHTS_REQUIRED/);
   assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, {...rights, id: "unrelated"}), /PUBLIC_RIGHTS_REQUIRED/);
   assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, {...rights, allowed_use_classes: "client_public_display", allowed_field_classes: {"display.name": true}}), /PUBLIC_RIGHTS_REQUIRED/);
+  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, rights,
+    {evidence: {...evidence, rights_provider: undefined}}), /EVIDENCE_RIGHTS_LINEAGE_MISMATCH/);
+  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, rights,
+    {evidence: {...evidence, rights_policy_key: undefined}}), /EVIDENCE_RIGHTS_LINEAGE_MISMATCH/);
+  assert.throws(() => validateProjectionFact(fact, {...assertion, value: null}, membership, projection, rights,
+    {evidence}), /PUBLIC_VALUE_UNSAFE/);
   assert.throws(() => validateProjectionFact({...fact, projection_id: "wrong"}, assertion, membership, projection, rights), /PROJECTION_BINDING_REFUSED/);
   assert.throws(() => validateProjectionFact(fact, assertion, {...membership, tour_id: "wrong"}, projection, rights), /PROJECTION_BINDING_REFUSED/);
   assert.throws(() => validateProjectionFact(fact, assertion, {...membership, selected_at: null}, projection, rights), /PUBLIC_ASSERTION_NOT_EFFECTIVE/);
