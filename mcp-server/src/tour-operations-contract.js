@@ -107,7 +107,7 @@ function canonicalJsonSnapshot(value, topLevel = true, seen = new Set()) {
     for (let index = 0; index < ownKeys.length; index++) {
       const key = ownKeys[index];
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
-      if (typeof key !== "string" || !postgresTextIsSafe(key) || !descriptor?.enumerable ||
+      if (typeof key !== "string" || key === "__proto__" || !postgresTextIsSafe(key) || !descriptor?.enumerable ||
           !Object.hasOwn(descriptor, "value")) {
         seen.delete(value);
         return UNSAFE_SNAPSHOT;

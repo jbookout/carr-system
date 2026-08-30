@@ -358,7 +358,7 @@ test("field assertions reject hostile or PostgreSQL-unrepresentable JSON before 
   for (const value of [
     null, "bad\u0000value", "bad\ud800value", { nested: "bad\udc00value" },
     sparse, { amount: Number.NaN }, { amount: Number.POSITIVE_INFINITY },
-    withToJson, changing,
+    withToJson, changing, JSON.parse('{"__proto__":{"a":1}}'),
   ]) {
     const h = harness();
     await assert.rejects(
