@@ -14,6 +14,11 @@ const fixture = JSON.parse(fs.readFileSync(path.join(root, "mcp-server/test/fixt
 const at = fixture.projection.as_of;
 const rightsRequest = { at, fieldKey: "display.name", useClass: "client_public_display", lineage: [], revocations: [] };
 const accepts = result => assert.ok(result, "valid rights/provenance input must be accepted");
+const shadowedArray = (values, method, result) => {
+  const array = [...values];
+  Object.defineProperty(array, method, { value: () => result, enumerable: false });
+  return array;
+};
 
 test("rights are current only when effective, unexpired, unrevoked, and explicitly allowed", () => {
   accepts(evaluateRightsReceipt(fixture.rights_receipt, rightsRequest));
@@ -49,6 +54,39 @@ test("rights are current only when effective, unexpired, unrevoked, and explicit
     ...rightsRequest,
     lineage: [{ ...fixture.rights_receipt, id: "other-provider-successor", provider: "other-provider", receipt_version: 2, effective_at: "2026-08-20T00:00:00Z" }],
   }));
+});
+
+test("rights evaluation rejects caller-controlled array methods and malformed temporal authority", () => {
+  const divergent = { ...fixture.rights_receipt, receipt_digest: `sha256:${"d".repeat(64)}` };
+  const poisonedPrototype = ["client_public_display"];
+  Object.setPrototypeOf(poisonedPrototype, Object.create(Array.prototype));
+  for (const receipt of [
+    { ...fixture.rights_receipt, allowed_use_classes: shadowedArray([], "includes", true) },
+    { ...fixture.rights_receipt, allowed_field_classes: shadowedArray([], "includes", true) },
+    { ...fixture.rights_receipt, allowed_use_classes: poisonedPrototype },
+    { ...fixture.rights_receipt, expires_at: "not-a-time" },
+    { ...fixture.rights_receipt, revoked_at: "not-a-time" },
+    { ...fixture.rights_receipt, reviewed_at: "not-a-time" },
+  ]) assert.throws(() => evaluateRightsReceipt(receipt, rightsRequest),
+    /RIGHTS_UNKNOWN|RIGHTS_USE_NOT_ALLOWED|RIGHTS_FIELD_NOT_ALLOWED/);
+  assert.throws(() => evaluateRightsReceipt(fixture.rights_receipt, {
+    ...rightsRequest, lineage: shadowedArray([divergent], "filter", []),
+  }), /RIGHTS_UNKNOWN|RIGHTS_CONFLICT/);
+  for (const lineageTimestamp of ["effective_at", "expires_at", "revoked_at", "reviewed_at"])
+    assert.throws(() => evaluateRightsReceipt(fixture.rights_receipt, {
+      ...rightsRequest,
+      lineage: [{ ...fixture.rights_receipt, id: "successor", receipt_version: 2,
+        [lineageTimestamp]: "not-a-time" }],
+    }), /RIGHTS_UNKNOWN|RIGHTS_CONFLICT/);
+  assert.throws(() => evaluateRightsReceipt(fixture.rights_receipt, {
+    ...rightsRequest,
+    revocations: shadowedArray([{ rights_receipt_id: fixture.rights_receipt.id,
+      revoked_at: "2026-08-24T00:00:00Z" }], "some", false),
+  }), /RIGHTS_UNKNOWN|RIGHTS_REVOKED/);
+  assert.throws(() => evaluateRightsReceipt(fixture.rights_receipt, {
+    ...rightsRequest,
+    revocations: [{ rights_receipt_id: fixture.rights_receipt.id, revoked_at: "not-a-time" }],
+  }), /RIGHTS_UNKNOWN/);
 });
 
 test("evidence-to-assertion rights lineage binds tenant, receipt, provider, policy, and separate observation/retrieval times", () => {

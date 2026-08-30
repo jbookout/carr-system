@@ -96,6 +96,33 @@ const ownEnumerableDataDescriptor = (record, field) => {
     ? descriptor : null;
 };
 
+function safeArrayValues(value) {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype)
+    return null;
+  const ownKeys = Reflect.ownKeys(value);
+  if (ownKeys.some(key => {
+    if (typeof key !== "string") return true;
+    if (key === "length") return false;
+    if (!/^(?:0|[1-9][0-9]*)$/.test(key)) return true;
+    const index = Number(key);
+    return !Number.isSafeInteger(index) || index >= value.length || String(index) !== key;
+  })) return null;
+  const copy = new Array(value.length);
+  for (let index = 0; index < value.length; index++) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (!descriptor || !descriptor.enumerable || !Object.hasOwn(descriptor, "value"))
+      return null;
+    copy[index] = descriptor.value;
+  }
+  return copy;
+}
+
+function arrayContains(values, candidate) {
+  for (let index = 0; index < values.length; index++)
+    if (values[index] === candidate) return true;
+  return false;
+}
+
 const plainRecordEnvelopeIsSafe = record => {
   const prototype = Object.getPrototypeOf(record);
   if (prototype !== Object.prototype && prototype !== null) return false;
@@ -298,14 +325,26 @@ const requiredTime = (value, error) => {
   return new Date(value);
 };
 
+function rightsTimestampsAreValid(receipt) {
+  return requiredTimestamp(receipt?.effective_at) &&
+    (receipt.reviewed_at == null || requiredTimestamp(receipt.reviewed_at)) &&
+    (receipt.expires_at == null || requiredTimestamp(receipt.expires_at)) &&
+    (receipt.revoked_at == null || requiredTimestamp(receipt.revoked_at));
+}
+
 function revocationApplies(receipt, at, revocations) {
-  if (receipt.revoked_at && requiredTimestamp(receipt.revoked_at) &&
-      new Date(receipt.revoked_at) <= at) return true;
-  return revocations.some(item => {
-    const id = item?.rights_receipt_id ?? item?.receipt_id;
-    return id === receipt.id && requiredTimestamp(item.revoked_at) &&
-      new Date(item.revoked_at) <= at;
-  });
+  if (receipt.revoked_at && new Date(receipt.revoked_at) <= at) return true;
+  for (let index = 0; index < revocations.length; index++) {
+    const item = revocations[index];
+    if (!item || Array.isArray(item) || typeof item !== "object" ||
+        !plainRecordEnvelopeIsSafe(item) || !requiredTimestamp(item.revoked_at))
+      throw new Error("RIGHTS_UNKNOWN");
+    const idDescriptor = ownEnumerableDataDescriptor(item, "rights_receipt_id") ??
+      ownEnumerableDataDescriptor(item, "receipt_id");
+    if (!idDescriptor) throw new Error("RIGHTS_UNKNOWN");
+    if (idDescriptor.value === receipt.id && new Date(item.revoked_at) <= at) return true;
+  }
+  return false;
 }
 
 const RIGHTS_RECEIPT_AUTHORITY_FIELDS = Object.freeze([
@@ -316,56 +355,67 @@ const RIGHTS_RECEIPT_AUTHORITY_FIELDS = Object.freeze([
 ]);
 
 function rightsReceiptExactlyMatches(left, right) {
-  return RIGHTS_RECEIPT_AUTHORITY_FIELDS.every(field => {
+  for (let index = 0; index < RIGHTS_RECEIPT_AUTHORITY_FIELDS.length; index++) {
+    const field = RIGHTS_RECEIPT_AUTHORITY_FIELDS[index];
     const leftValue = left?.[field];
     const rightValue = right?.[field];
-    if (Array.isArray(leftValue) || Array.isArray(rightValue))
-      return Array.isArray(leftValue) && Array.isArray(rightValue) &&
-        leftValue.length === rightValue.length &&
-        leftValue.every((value, index) => value === rightValue[index]);
-    return leftValue === rightValue;
-  });
+    if (Array.isArray(leftValue) || Array.isArray(rightValue)) {
+      const leftValues = safeArrayValues(leftValue);
+      const rightValues = safeArrayValues(rightValue);
+      if (!leftValues || !rightValues || leftValues.length !== rightValues.length)
+        return false;
+      for (let valueIndex = 0; valueIndex < leftValues.length; valueIndex++)
+        if (leftValues[valueIndex] !== rightValues[valueIndex]) return false;
+    } else if (leftValue !== rightValue) return false;
+  }
+  return true;
 }
 
 export function evaluateRightsReceipt(receipt, {
   at, fieldKey = null, useClass, lineage = [], revocations = [],
 } = {}) {
   const evaluationTime = requiredTime(at, "RIGHTS_EVALUATION_TIME_REQUIRED");
-  if (!receipt || typeof receipt !== "object" || !requiredTimestamp(receipt.effective_at) ||
+  const revocationRows = safeArrayValues(revocations);
+  const lineageRows = safeArrayValues(lineage);
+  const allowedUseClasses = safeArrayValues(receipt?.allowed_use_classes);
+  const allowedFieldClasses = safeArrayValues(receipt?.allowed_field_classes);
+  if (!receipt || Array.isArray(receipt) || typeof receipt !== "object" ||
+      !plainRecordEnvelopeIsSafe(receipt) || !rightsTimestampsAreValid(receipt) ||
+      !revocationRows || !lineageRows || !allowedUseClasses || !allowedFieldClasses ||
       typeof receipt.intended_use !== "string" || !receipt.intended_use.trim() ||
       typeof receipt.provider !== "string" || !receipt.provider.trim() ||
       typeof receipt.policy_key !== "string" || !receipt.policy_key.trim() ||
       !Number.isInteger(receipt.receipt_version) || receipt.receipt_version < 1)
     throw new Error("RIGHTS_UNKNOWN");
-  if (revocationApplies(receipt, evaluationTime, Array.isArray(revocations) ? revocations : []) ||
+  for (let index = 0; index < lineageRows.length; index++)
+    if (!lineageRows[index] || Array.isArray(lineageRows[index]) ||
+        typeof lineageRows[index] !== "object" ||
+        !plainRecordEnvelopeIsSafe(lineageRows[index]) ||
+        !rightsTimestampsAreValid(lineageRows[index])) throw new Error("RIGHTS_UNKNOWN");
+  if (revocationApplies(receipt, evaluationTime, revocationRows) ||
       receipt.status === "revoked") throw new Error("RIGHTS_REVOKED");
   if (new Date(receipt.effective_at) > evaluationTime) throw new Error("RIGHTS_NOT_EFFECTIVE");
   if (receipt.status === "expired" ||
       (receipt.expires_at && requiredTimestamp(receipt.expires_at) &&
        new Date(receipt.expires_at) <= evaluationTime)) throw new Error("RIGHTS_EXPIRED");
   if (receipt.status !== "active") throw new Error("RIGHTS_UNKNOWN");
-  if (!Array.isArray(receipt.allowed_use_classes) ||
-      !receipt.allowed_use_classes.includes(useClass)) throw new Error("RIGHTS_USE_NOT_ALLOWED");
-  if (fieldKey != null && (!Array.isArray(receipt.allowed_field_classes) ||
-      !(receipt.allowed_field_classes.includes(fieldKey) ||
-        receipt.allowed_field_classes.includes("*")))) throw new Error("RIGHTS_FIELD_NOT_ALLOWED");
-  const tenantLineage = (Array.isArray(lineage) ? lineage : []).filter(item => item &&
-      item.organization_tenant_id === receipt.organization_tenant_id);
-  if (tenantLineage.some(item => item.id === receipt.id &&
-      !rightsReceiptExactlyMatches(item, receipt)))
-    throw new Error("RIGHTS_CONFLICT");
-  const relatedLineage = tenantLineage.filter(item =>
-      item.provider === receipt.provider && item.policy_key === receipt.policy_key);
-  if (relatedLineage.some(item => item.id !== receipt.id && item.receipt_version === receipt.receipt_version &&
-      item.status === "active" && requiredTimestamp(item.effective_at) &&
-      new Date(item.effective_at) <= evaluationTime &&
-      (!item.expires_at || (requiredTimestamp(item.expires_at) && new Date(item.expires_at) > evaluationTime)) &&
-      !revocationApplies(item, evaluationTime, Array.isArray(revocations) ? revocations : [])))
-    throw new Error("RIGHTS_CONFLICT");
-  if (relatedLineage.some(item =>
-      Number.isInteger(item.receipt_version) && item.receipt_version > receipt.receipt_version &&
-      requiredTimestamp(item.effective_at) && new Date(item.effective_at) <= evaluationTime))
-    throw new Error("RIGHTS_SUPERSEDED");
+  if (!arrayContains(allowedUseClasses, useClass)) throw new Error("RIGHTS_USE_NOT_ALLOWED");
+  if (fieldKey != null && !(arrayContains(allowedFieldClasses, fieldKey) ||
+      arrayContains(allowedFieldClasses, "*"))) throw new Error("RIGHTS_FIELD_NOT_ALLOWED");
+  for (let index = 0; index < lineageRows.length; index++) {
+    const item = lineageRows[index];
+    if (item.organization_tenant_id !== receipt.organization_tenant_id) continue;
+    if (item.id === receipt.id && !rightsReceiptExactlyMatches(item, receipt))
+      throw new Error("RIGHTS_CONFLICT");
+    if (item.provider !== receipt.provider || item.policy_key !== receipt.policy_key) continue;
+    if (item.id !== receipt.id && item.receipt_version === receipt.receipt_version &&
+        item.status === "active" && new Date(item.effective_at) <= evaluationTime &&
+        (!item.expires_at || new Date(item.expires_at) > evaluationTime) &&
+        !revocationApplies(item, evaluationTime, revocationRows))
+      throw new Error("RIGHTS_CONFLICT");
+    if (Number.isInteger(item.receipt_version) && item.receipt_version > receipt.receipt_version &&
+        new Date(item.effective_at) <= evaluationTime) throw new Error("RIGHTS_SUPERSEDED");
+  }
   return true;
 }
 
@@ -405,8 +455,13 @@ export function publicValueIsSafe(fieldKey, value) {
     return typeof value === "string";
   if (["size", "asking_economics"].includes(fieldKey))
     return approvedMetricIsSafe(value);
-  if (["photos", "floor_plan"].includes(fieldKey))
-    return Array.isArray(value) && value.every(publicAssetIsSafe);
+  if (["photos", "floor_plan"].includes(fieldKey)) {
+    const assets = safeArrayValues(value);
+    if (!assets) return false;
+    for (let index = 0; index < assets.length; index++)
+      if (!publicAssetIsSafe(assets[index])) return false;
+    return true;
+  }
   return false;
 }
 
@@ -416,11 +471,14 @@ export function canonicalProjectionDigest(input) {
   if (!requiredTimestamp(projection.as_of)) throw new Error("PROJECTION_AS_OF_REQUIRED");
   const compareUtf8 = (left, right) =>
     Buffer.compare(Buffer.from(String(left), "utf8"), Buffer.from(String(right), "utf8"));
-  const facts = (Array.isArray(input?.facts) ? input.facts : []).slice().sort((left, right) =>
+  const factRows = safeArrayValues(input?.facts ?? []);
+  const mapPointRows = safeArrayValues(input?.map_points ?? []);
+  if (!factRows || !mapPointRows) throw new Error("PROJECTION_INCOMPLETE");
+  const facts = factRows.slice().sort((left, right) =>
     compareUtf8(left.property_id || "", right.property_id || "") ||
     compareUtf8(left.display_field_key || "", right.display_field_key || "") ||
     compareUtf8(left.field_assertion_id || "", right.field_assertion_id || ""));
-  const mapPoints = (Array.isArray(input?.map_points) ? input.map_points : []).slice().sort((left, right) =>
+  const mapPoints = mapPointRows.slice().sort((left, right) =>
     compareUtf8(left.property_id || "", right.property_id || "") ||
     compareUtf8(left.coordinate_candidate_id || "", right.coordinate_candidate_id || "") ||
     compareUtf8(left.entrance_verification_receipt_id || "", right.entrance_verification_receipt_id || ""));
@@ -525,8 +583,13 @@ export function validateProjectionFact(fact, assertion, membership, projection, 
   return true;
 }
 
-const mapById = values =>
-  new Map((Array.isArray(values) ? values : []).map(value => [value.id, value]));
+const mapById = values => {
+  const rows = safeArrayValues(values);
+  if (!rows) return null;
+  const mapped = new Map();
+  for (let index = 0; index < rows.length; index++) mapped.set(rows[index].id, rows[index]);
+  return mapped;
+};
 
 function conflictResolutionIsComplete(resolution, conflictId, assertionId, tenantId,
   conflictParticipants) {
@@ -548,11 +611,17 @@ function conflictResolutionIsComplete(resolution, conflictId, assertionId, tenan
       !requiredTimestamp(resolution.resolved_at) ||
       !requiredTimestamp(resolution.created_at) ||
       !FOUNDATION_DIGEST_RE.test(resolution.receipt_digest || "")) return false;
-  return (Array.isArray(conflictParticipants) ? conflictParticipants : []).some(participant =>
-    participant && participant.organization_tenant_id === tenantId &&
-    participant.conflict_id === conflictId &&
-    participant.field_assertion_id === assertionId &&
-    ["candidate", "selected", "rejected"].includes(participant.participant_role));
+  const participants = safeArrayValues(conflictParticipants);
+  if (!participants) return false;
+  for (let index = 0; index < participants.length; index++) {
+    const participant = participants[index];
+    if (participant && participant.organization_tenant_id === tenantId &&
+        participant.conflict_id === conflictId &&
+        participant.field_assertion_id === assertionId &&
+        ["candidate", "selected", "rejected"].includes(participant.participant_role))
+      return true;
+  }
+  return false;
 }
 
 export function validateProjectionComplete({
@@ -573,19 +642,31 @@ export function validateProjectionComplete({
     throw new Error("PROJECTION_SEAL_REQUIRED");
   if (!requiredTimestamp(projection.as_of) || projection.facts_only !== true)
     throw new Error("PROJECTION_INCOMPLETE");
-  const selected = memberships.filter(item =>
+  const membershipRows = safeArrayValues(memberships);
+  const factRows = safeArrayValues(facts);
+  const assertionRows = safeArrayValues(assertions);
+  const evidenceRows = safeArrayValues(evidence);
+  const rightsRows = safeArrayValues(rights);
+  const conflictRows = safeArrayValues(conflicts);
+  const resolutionRows = safeArrayValues(conflict_resolutions);
+  const participantRows = safeArrayValues(conflict_participants);
+  const requiredFields = safeArrayValues(requiredFieldKeys);
+  if (!membershipRows || !factRows || !assertionRows || !evidenceRows || !rightsRows ||
+      !conflictRows || !resolutionRows || !participantRows || !requiredFields)
+    throw new Error("PROJECTION_INCOMPLETE");
+  const selected = membershipRows.filter(item =>
     item.organization_tenant_id === projection.organization_tenant_id &&
     item.tour_id === projection.tour_id && item.route_version === projection.route_version &&
     requiredTimestamp(item.selected_at) &&
     new Date(item.selected_at) <= new Date(projection.as_of));
-  if (!selected.length || selected.length !== memberships.length)
+  if (!selected.length || selected.length !== membershipRows.length)
     throw new Error("PROJECTION_INCOMPLETE");
-  const assertionById = mapById(assertions);
-  const evidenceById = mapById(evidence);
-  const rightsById = mapById(rights);
+  const assertionById = mapById(assertionRows);
+  const evidenceById = mapById(evidenceRows);
+  const rightsById = mapById(rightsRows);
   for (const membership of selected) {
-    const propertyFacts = facts.filter(fact => fact.property_id === membership.property_id);
-    if (!requiredFieldKeys.every(fieldKey =>
+    const propertyFacts = factRows.filter(fact => fact.property_id === membership.property_id);
+    if (!requiredFields.every(fieldKey =>
       propertyFacts.some(fact => fact.display_field_key === fieldKey)))
       throw new Error("PROJECTION_INCOMPLETE");
     for (const fact of propertyFacts) {
@@ -593,16 +674,16 @@ export function validateProjectionComplete({
       const source = assertion && evidenceById.get(assertion.source_evidence_id);
       const receipt = assertion && rightsById.get(assertion.rights_receipt_id);
       if (!assertion || !source || !receipt) throw new Error("PROJECTION_INCOMPLETE");
-      const unresolvedConflict = (Array.isArray(conflicts) ? conflicts : []).some(conflict => {
+      const unresolvedConflict = conflictRows.some(conflict => {
         if (!conflict || conflict.organization_tenant_id !== projection.organization_tenant_id ||
             conflict.property_id !== fact.property_id || conflict.field_key !== fact.display_field_key ||
             conflict.state === "superseded") return false;
         if (requiredTimestamp(conflict.opened_at) &&
             new Date(conflict.opened_at) > new Date(projection.as_of)) return false;
         const conflictId = conflict.id ?? conflict.conflict_id;
-        return !(Array.isArray(conflict_resolutions) ? conflict_resolutions : []).some(resolution =>
+        return !resolutionRows.some(resolution =>
           conflictResolutionIsComplete(resolution, conflictId, assertion.id,
-            projection.organization_tenant_id, conflict_participants) &&
+            projection.organization_tenant_id, participantRows) &&
           new Date(resolution.resolved_at) <= new Date(projection.as_of));
       });
       if (unresolvedConflict) throw new Error("PUBLIC_ASSERTION_CONFLICTED");
@@ -611,7 +692,7 @@ export function validateProjectionComplete({
       });
     }
   }
-  const digestFacts = facts.map(fact => {
+  const digestFacts = factRows.map(fact => {
     const assertion = assertionById.get(fact.field_assertion_id) || {};
     return {
       ...fact, value: assertion.value, source_evidence_id: assertion.source_evidence_id,

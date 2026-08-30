@@ -256,4 +256,22 @@ test("unresolved evidence, confidence, and field conflicts are quarantined", () 
     conflict_resolutions: [resolution],
     conflict_participants: [{ ...participant, field_assertion_id: addressAssertion.id }],
   }), /PUBLIC_ASSERTION_CONFLICTED/);
+  const shadowedResolutions = [];
+  Object.defineProperty(shadowedResolutions, "some", { value: () => true });
+  assert.throws(() => validateProjectionComplete({
+    ...baseConflictInput,
+    conflict_resolutions: shadowedResolutions,
+  }), /PROJECTION_INCOMPLETE|PUBLIC_ASSERTION_CONFLICTED/);
+  const shadowedConflicts = [];
+  Object.defineProperty(shadowedConflicts, "some", { value: () => false });
+  assert.throws(() => validateProjectionComplete({
+    ...sealed.input, projection: sealed.projection, conflicts: shadowedConflicts,
+  }), /PROJECTION_INCOMPLETE/);
+  const shadowedParticipants = [];
+  Object.defineProperty(shadowedParticipants, "some", { value: () => true });
+  assert.throws(() => validateProjectionComplete({
+    ...baseConflictInput,
+    conflict_resolutions: [resolution],
+    conflict_participants: shadowedParticipants,
+  }), /PROJECTION_INCOMPLETE|PUBLIC_ASSERTION_CONFLICTED/);
 });
