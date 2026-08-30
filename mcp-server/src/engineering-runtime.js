@@ -658,6 +658,7 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
   let priorBinding = null;
   let session = null;
   let executor = null;
+  let priorSessionIsActive = false;
 
   // Locator reads above are intentionally unlocked. Existing mutable authority
   // is acquired in the global session -> exact actor -> lineage order before
@@ -689,9 +690,13 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
         where id=$1::uuid for update`,
       [priorSessionId],
     )).rows[0];
+    priorSessionIsActive = ["claimed", "in_progress"].includes(session?.state);
+    // Completed/cancelled sessions remain immutable, but are still valid
+    // provenance for a fresh envelope generation on the same slice lineage.
+    const priorSessionIsTerminal = ["completed", "cancelled"].includes(session?.state);
     if (!session || session.id !== priorSessionId ||
         session.work_request_id !== source.work.id.replace(/^wr:/, "") ||
-        !["claimed", "in_progress"].includes(session.state) ||
+        (!priorSessionIsActive && !priorSessionIsTerminal) ||
         session.scope_ref !== `slice:${sliceRef}` ||
         session.worktree_ref !== ENGINEERING_SESSION_WORKTREE ||
         session.source_commit_sha !== ENGINEERING_SESSION_SOURCE)
@@ -745,13 +750,17 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
   if (priorEnvelope) {
     const priorSlicePlanId = uuid(priorBinding.slice_plan_id, "prior_envelope.slice_plan_id", ToolError);
     await c.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`engineering-envelope:${priorSlicePlanId}:${sliceRef}`]);
-    const currentness = await c.query("select ops.engineering_envelope_currentness($1::uuid,$2::uuid) as currentness", [priorEnvelope.id, priorEnvelope.job_id]);
-    const priorJobReplayable = ["queued", "retry_wait", "running"].includes(priorBinding.job_state);
-    if (priorJobReplayable && currentness.rows[0]?.currentness?.eligible === true &&
-        currentness.rows[0]?.currentness?.dispatch_runway_sufficient === true)
-      return { ok: true, replayed: true, envelope: priorEnvelope.envelope, envelope_id: priorEnvelope.id, job_id: priorEnvelope.job_id };
-    if (priorJobReplayable && currentness.rows[0]?.currentness?.eligible === true)
-      error(ToolError, { error: "engineering_envelope_insufficient_runway", envelope_id: priorEnvelope.id });
+    // A terminal session is a predecessor, never a replay candidate. Active
+    // sessions retain the existing currentness and dispatch-runway boundary.
+    if (priorSessionIsActive) {
+      const currentness = await c.query("select ops.engineering_envelope_currentness($1::uuid,$2::uuid) as currentness", [priorEnvelope.id, priorEnvelope.job_id]);
+      const priorJobReplayable = ["queued", "retry_wait", "running"].includes(priorBinding.job_state);
+      if (priorJobReplayable && currentness.rows[0]?.currentness?.eligible === true &&
+          currentness.rows[0]?.currentness?.dispatch_runway_sufficient === true)
+        return { ok: true, replayed: true, envelope: priorEnvelope.envelope, envelope_id: priorEnvelope.id, job_id: priorEnvelope.job_id };
+      if (priorJobReplayable && currentness.rows[0]?.currentness?.eligible === true)
+        error(ToolError, { error: "engineering_envelope_insufficient_runway", envelope_id: priorEnvelope.id });
+    }
   }
 
   // engineering_slice_plan is append-only: its trigger forbids UPDATE/DELETE,
@@ -778,10 +787,12 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
   dependenciesSatisfied(facts, source, plan, slice, ToolError);
 
   if (priorEnvelope) {
-    await c.query(
-      `update ops.capability_agent_session set state='cancelled', cancelled_at=now(), version=version+1
-        where id=$1::uuid and work_request_id=$2::uuid and state not in ('completed','cancelled')`,
-      [priorSessionId, source.work.id.replace(/^wr:/, "")]);
+    if (priorSessionIsActive) {
+      await c.query(
+        `update ops.capability_agent_session set state='cancelled', cancelled_at=now(), version=version+1
+          where id=$1::uuid and work_request_id=$2::uuid and state not in ('completed','cancelled')`,
+        [priorSessionId, source.work.id.replace(/^wr:/, "")]);
+    }
     session = null;
   }
   const sessionExpiry = new Date(Date.now() + 30 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
