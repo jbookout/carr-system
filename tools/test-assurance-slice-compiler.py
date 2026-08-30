@@ -82,7 +82,13 @@ def test_valid_compilation_is_deterministic_and_manifest_is_immutable_posture():
     assert manifest["verification_state"] == "unverified"
     assert manifest["self_certification"] is False
     assert manifest["currentness"]["authorizes_action"] is False
+    assert manifest["currentness"]["evaluated_at"] == value["evaluation_time"]
+    assert manifest["currentness"]["snapshot_as_of"] == value["coordination_snapshot"]["as_of"]
+    assert manifest["currentness"]["snapshot_valid_until"] == value["coordination_snapshot"]["valid_until"]
+    assert manifest["currentness"]["lease_expires_at"] == value["coordination_snapshot"]["leases"][0]["expires_at"]
     assert manifest["currentness"]["recompile_against_resulting_commit_tree_before"] == ["commit", "push", "pr_update", "review", "merge", "runtime_action"]
+    assert manifest["slice"]["required_tests"][0]["argv"] == ["python3", "test-assurance-slice-compiler.py"]
+    assert manifest["slice"]["required_tests"][0]["cwd"] == "tools"
     assert manifest["manifest_hash"] == execution_contract.canonical_digest({k: v for k, v in manifest.items() if k != "manifest_hash"})
 
 
@@ -122,6 +128,8 @@ def test_invalid_path_forms_refuse_with_the_exact_path_object(bad):
 
 
 def test_case_alias_and_allowed_forbidden_component_ancestry_refuse():
+    value = valid_input(); value["assurance_slice"]["path_claims"][0]["path"] = "tools/space path.py"
+    refusal(value, "PATH_INVALID", "assurance_slice.path_claims[0].path")
     value = valid_input(); value["assurance_slice"]["forbidden_paths"].append({"path":"Tools/room-bridge/other.py","mode":"file"})
     refusal(value, "PATH_CASE_ALIAS", "assurance_slice.path_claims")
     value = valid_input(); value["assurance_slice"]["forbidden_paths"] = [{"path":"tools","mode":"tree"}]
@@ -141,11 +149,22 @@ def test_active_foreign_file_or_tree_lease_collision_includes_rename_claims(oper
     value["coordination_snapshot"]["leases"].append({"lease_id":"lease:foreign","state":"active","holder_session_id":"session:foreign","holder_host_id":"host:other","expires_at":"2026-08-30T15:30:00Z","fencing_generation":2,"claims":[{"path":"tools/room-bridge","mode":"tree","operation":operation}]})
     seal_coordination(value)
     refusal(value, "FOREIGN_LEASE_COLLISION", "tools/room-bridge/assurance_slice_compiler.py")
+    value = valid_input()
+    value["coordination_snapshot"]["leases"].append({"lease_id":"lease:case-alias","state":"active","holder_session_id":"session:foreign","holder_host_id":"host:other","expires_at":"2026-08-30T15:30:00Z","fencing_generation":2,"claims":[{"path":"Tools/room-bridge/assurance_slice_compiler.py","mode":"file","operation":operation}]})
+    seal_coordination(value)
+    refusal(value, "FOREIGN_LEASE_COLLISION", "tools/room-bridge/assurance_slice_compiler.py")
 
 
 def test_stale_snapshot_expired_lease_and_released_lease_are_not_equivalent():
     value = valid_input(); value["coordination_snapshot"]["valid_until"] = value["coordination_snapshot"]["as_of"]
     refusal(value, "COORDINATION_SNAPSHOT_STALE", "coordination_snapshot.valid_until")
+    value = valid_input(); value["evaluation_time"] = "2026-08-30T21:37:24Z"
+    refusal(value, "COORDINATION_SNAPSHOT_STALE", "coordination_snapshot.valid_until")
+    for field, bad in (("as_of", "2026-13-01T15:00:00Z"), ("valid_until", "2026-02-30T16:00:00Z")):
+        value = valid_input(); value["coordination_snapshot"][field] = bad
+        refusal(value, "FIELD_INVALID", f"coordination_snapshot.{field}")
+    value = valid_input(); value["coordination_snapshot"]["leases"][0]["expires_at"] = "2026-02-30T16:00:00Z"; seal_coordination(value)
+    refusal(value, "FIELD_INVALID", "coordination_snapshot.leases[0].expires_at")
     value = valid_input(); value["coordination_snapshot"]["leases"][0]["expires_at"] = "2026-08-30T14:59:59Z"; seal_coordination(value)
     refusal(value, "LEASE_EXPIRED", "lease:lease:a1a")
     value = valid_input(); value["coordination_snapshot"]["leases"][0]["state"] = "released"; seal_coordination(value)
@@ -167,6 +186,12 @@ def test_owner_acceptance_cannot_substitute_for_independent_review():
 def test_required_commands_refine_exact_planned_checks_and_reviewer_names_executor():
     value = valid_input(); value["assurance_slice"]["required_tests"][0]["check_ref"] = "check:unplanned"; seal_contract(value)
     refusal(value, "SLICE_BINDING_MISMATCH", "assurance_slice.required_tests")
+    value = valid_input(); value["assurance_slice"]["required_tests"][0]["planned_check_digest"] = "sha256:" + "9" * 64; seal_contract(value)
+    refusal(value, "REQUIRED_TEST_BINDING_MISMATCH", "check:compiler")
+    value = valid_input(); value["assurance_slice"]["required_tests"][0]["argv"] = ["true"]; seal_contract(value)
+    refusal(value, "REQUIRED_TEST_BINDING_MISMATCH", "check:compiler")
+    value = valid_input(); value["assurance_slice"]["required_tests"][0]["causal_failure"]["expected"] = "anything exits nonzero"; seal_contract(value)
+    refusal(value, "REQUIRED_TEST_BINDING_MISMATCH", "check:compiler")
     value = valid_input(); value["assurance_slice"]["reviewer_policy"]["executor_actor_ref"] = "actor:someone-else"; seal_contract(value)
     refusal(value, "REVIEWER_POLICY_INVALID", "assurance_slice.reviewer_policy")
 
@@ -174,6 +199,12 @@ def test_required_commands_refine_exact_planned_checks_and_reviewer_names_execut
 def test_lease_holder_is_the_bound_executor_session_and_host():
     value = valid_input(); value["assurance_slice"]["executor_identity"]["host_ref"] = "host:other"; seal_contract(value)
     refusal(value, "LEASE_BINDING_MISMATCH", "assurance_slice.lease_binding")
+    value = valid_input(); value["coordination_snapshot"]["requesting_session_id"] = "session:foreign"; seal_coordination(value)
+    fact = refusal(value, "REQUESTER_IDENTITY_MISMATCH", "coordination_snapshot.requesting_session_id")
+    assert fact["expected"] == "session:a1a" and fact["actual"] == "session:foreign"
+    value = valid_input(); value["coordination_snapshot"]["requesting_host_id"] = "host:other"; seal_coordination(value)
+    fact = refusal(value, "REQUESTER_IDENTITY_MISMATCH", "coordination_snapshot.requesting_host_id")
+    assert fact["expected"] == "host:codex" and fact["actual"] == "host:other"
 
 
 def test_output_cannot_claim_authorization_verification_or_self_certification():
@@ -182,6 +213,12 @@ def test_output_cannot_claim_authorization_verification_or_self_certification():
     assert schema["properties"]["authority_state"]["const"] == manifest["authority_state"]
     assert schema["properties"]["verification_state"]["const"] == manifest["verification_state"]
     assert schema["properties"]["self_certification"]["const"] is manifest["self_certification"] is False
+    for name in ("Risk", "DependencyGate", "EvidenceRequirement", "ReviewerPolicy", "ObservableOutput", "Rollback", "LeaseBinding", "ExecutorIdentity"):
+        assert schema["$defs"][name]["additionalProperties"] is False
+    value = valid_input(); fields = value["assurance_slice"]["required_tests"][0]["evidence_fields"]; fields.append(fields[0]); seal_contract(value)
+    refusal(value, "FIELD_INVALID", "assurance_slice.required_tests[0].evidence_fields")
+    value = valid_input(); value["assurance_slice"]["evidence_requirements"][0]["required_fields"] = [1]; seal_contract(value)
+    refusal(value, "FIELD_INVALID", "assurance_slice.evidence_requirements[0].required_fields")
 
 
 def test_every_bound_category_and_compiler_version_changes_manifest_hash():
@@ -190,7 +227,7 @@ def test_every_bound_category_and_compiler_version_changes_manifest_hash():
     variants = []
     contract_change = copy.deepcopy(baseline); contract_change["assurance_slice"]["unfinished_work"].append("A serial consumer changed"); seal_contract(contract_change); variants.append(contract_change)
     rule_change = copy.deepcopy(baseline); rule_change["applicable_rules"]["rules"][0]["revision"] += 1; seal_rules(rule_change); seal_contract(rule_change); variants.append(rule_change)
-    coord_change = copy.deepcopy(baseline); coord_change["coordination_snapshot"]["valid_until"] = "2026-08-30T16:30:00Z"; seal_coordination(coord_change); variants.append(coord_change)
+    coord_change = copy.deepcopy(baseline); coord_change["coordination_snapshot"]["valid_until"] = "2026-08-30T16:30:00Z"; coord_change["coordination_snapshot"]["leases"][0]["expires_at"] = "2026-08-30T16:30:00Z"; seal_coordination(coord_change); variants.append(coord_change)
     repo_change = copy.deepcopy(baseline); repo_change["repository"]["commit_sha"] = "9" * 40; repo_change["assurance_slice"]["repository_binding"]["commit_sha"] = "9" * 40; seal_contract(repo_change); variants.append(repo_change)
     for value in variants:
         result = compiler.compile_assurance_slice(value)
@@ -204,3 +241,7 @@ def test_module_has_no_provider_network_git_database_model_or_write_imports():
     source = (BRIDGE / "assurance_slice_compiler.py").read_text()
     for forbidden in ("requests", "urllib", "subprocess", "psycopg", "openai", "anthropic", ".write_text(", "open("):
         assert forbidden not in source
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main(["-q", __file__]))

@@ -7,6 +7,7 @@ deterministic, non-authorizing execution manifest.  The module performs no I/O.
 from __future__ import annotations
 
 import copy
+import posixpath
 import re
 from datetime import datetime, timezone
 from typing import Any, NoReturn
@@ -29,14 +30,14 @@ REFUSAL_CODES = (
     "SLICE_BINDING_MISMATCH", "REPOSITORY_IDENTITY_MISMATCH", "RULE_SNAPSHOT_DIGEST_MISMATCH",
     "RULE_SNAPSHOT_STALE", "COORDINATION_SNAPSHOT_DIGEST_MISMATCH", "COORDINATION_SNAPSHOT_STALE",
     "LEASE_NOT_FOUND", "LEASE_RELEASED", "LEASE_EXPIRED", "LEASE_BINDING_MISMATCH",
-    "LEASE_CLAIMS_MISMATCH", "FOREIGN_LEASE_COLLISION", "DEPENDENCY_MISSING",
+    "REQUESTER_IDENTITY_MISMATCH", "LEASE_CLAIMS_MISMATCH", "FOREIGN_LEASE_COLLISION", "DEPENDENCY_MISSING",
     "DEPENDENCY_UNSATISFIED", "PATH_INVALID", "PATH_CASE_ALIAS", "PATH_SCOPE_COLLISION",
-    "REVIEWER_POLICY_INVALID", "COMPILER_INTERNAL_ERROR",
+    "REQUIRED_TEST_BINDING_MISMATCH", "REVIEWER_POLICY_INVALID", "COMPILER_INTERNAL_ERROR",
 )
 
 _INPUT_FIELDS = {
     "schema_version", "work_request", "accepted_plan_revision", "engineering_slice_plan",
-    "assurance_slice", "repository", "applicable_rules", "coordination_snapshot",
+    "assurance_slice", "repository", "applicable_rules", "coordination_snapshot", "evaluation_time",
 }
 _CONTRACT_FIELDS = {
     "schema_version", "contract_digest", "work_request", "accepted_plan_revision",
@@ -97,7 +98,10 @@ def _positive_int(value: Any, label: str) -> int:
 def _timestamp(value: Any, label: str) -> datetime:
     if not isinstance(value, str) or not execution_contract.TIMESTAMP.fullmatch(value):
         _refuse("FIELD_INVALID", label, "UTC timestamp to whole seconds", value)
-    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        _refuse("FIELD_INVALID", label, "calendar-valid UTC timestamp to whole seconds", value)
 
 
 def _sort_set(rows: list[Any]) -> list[Any]:
@@ -163,7 +167,7 @@ def _path(value: Any, label: str) -> str:
     parts = value.split("/")
     if value.startswith("/") or value.endswith("/") or "\\" in value or _GLOB.search(value) or any(p in {"", ".", ".."} for p in parts):
         _refuse("PATH_INVALID", label, "normalized repo-relative path without globs, dot components, or backslashes", value)
-    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+    if any(ord(ch) < 33 or ord(ch) == 127 for ch in value):
         _refuse("PATH_INVALID", label, "printable ASCII repo-relative path", value)
     return value
 
@@ -180,8 +184,20 @@ def _claim(value: Any, label: str, *, forbidden: bool = False) -> dict[str, Any]
 
 
 def _paths_overlap(a: dict[str, Any], b: dict[str, Any]) -> bool:
-    ap, bp = a["path"], b["path"]
+    ap, bp = a["path"].lower(), b["path"].lower()
     return ap == bp or (a["mode"] == "tree" and bp.startswith(ap + "/")) or (b["mode"] == "tree" and ap.startswith(bp + "/"))
+
+
+def _resolved_repo_path(cwd: str, argument: str) -> str | None:
+    if not isinstance(argument, str) or not argument or argument.startswith("-") or argument.startswith("/") or "\\" in argument or _GLOB.search(argument):
+        return None
+    joined = posixpath.normpath(posixpath.join(cwd, argument))
+    if joined == "." or joined == ".." or joined.startswith("../"):
+        return None
+    try:
+        return _path(joined, "required_test.resolved_argv_path")
+    except _Refusal:
+        return None
 
 
 def _validate_paths(allowed: list[dict[str, Any]], forbidden: list[dict[str, Any]]) -> None:
@@ -238,8 +254,10 @@ def _validate_contract(value: Any) -> dict[str, Any]:
         _refuse("FIELD_INVALID", "assurance_slice.required_tests", "non-empty list", row["required_tests"])
     _unique(row["required_tests"], "assurance_slice.required_tests", key="check_ref")
     for index, test in enumerate(row["required_tests"]):
-        item = _exact(test, {"check_ref", "argv", "cwd", "causal_failure", "evidence_fields"}, f"assurance_slice.required_tests[{index}]")
+        item = _exact(test, {"check_ref", "planned_check_digest", "test_artifact_path", "argv", "cwd", "causal_failure", "evidence_fields"}, f"assurance_slice.required_tests[{index}]")
         _string(item["check_ref"], f"assurance_slice.required_tests[{index}].check_ref", identifier=True)
+        _digest(item["planned_check_digest"], f"assurance_slice.required_tests[{index}].planned_check_digest")
+        _path(item["test_artifact_path"], f"assurance_slice.required_tests[{index}].test_artifact_path")
         if not isinstance(item["argv"], list) or not item["argv"] or not all(isinstance(x, str) and x for x in item["argv"]):
             _refuse("FIELD_INVALID", f"assurance_slice.required_tests[{index}].argv", "non-empty argv string list", item["argv"])
         _path(item["cwd"], f"assurance_slice.required_tests[{index}].cwd")
@@ -247,7 +265,8 @@ def _validate_contract(value: Any) -> dict[str, Any]:
         for field in failure:
             _string(failure[field], f"assurance_slice.required_tests[{index}].causal_failure.{field}")
         if not isinstance(item["evidence_fields"], list) or not item["evidence_fields"] or not all(isinstance(x, str) and x for x in item["evidence_fields"]):
-            _refuse("FIELD_INVALID", f"assurance_slice.required_tests[{index}].evidence_fields", "non-empty string list", item["evidence_fields"])
+            _refuse("FIELD_INVALID", f"assurance_slice.required_tests[{index}].evidence_fields", "non-empty unique string list", item["evidence_fields"])
+        _unique(item["evidence_fields"], f"assurance_slice.required_tests[{index}].evidence_fields")
     if not isinstance(row["evidence_requirements"], list) or not row["evidence_requirements"]:
         _refuse("FIELD_INVALID", "assurance_slice.evidence_requirements", "non-empty list", row["evidence_requirements"])
     _unique(row["evidence_requirements"], "assurance_slice.evidence_requirements", key="evidence_ref")
@@ -255,8 +274,9 @@ def _validate_contract(value: Any) -> dict[str, Any]:
         item = _exact(evidence, {"evidence_ref", "artifact_kind", "required_fields"}, f"assurance_slice.evidence_requirements[{index}]")
         _string(item["evidence_ref"], f"assurance_slice.evidence_requirements[{index}].evidence_ref", identifier=True)
         _string(item["artifact_kind"], f"assurance_slice.evidence_requirements[{index}].artifact_kind", identifier=True)
-        if not isinstance(item["required_fields"], list) or not item["required_fields"]:
-            _refuse("FIELD_INVALID", f"assurance_slice.evidence_requirements[{index}].required_fields", "non-empty list", item["required_fields"])
+        if not isinstance(item["required_fields"], list) or not item["required_fields"] or not all(isinstance(x, str) and x for x in item["required_fields"]):
+            _refuse("FIELD_INVALID", f"assurance_slice.evidence_requirements[{index}].required_fields", "non-empty unique string list", item["required_fields"])
+        _unique(item["required_fields"], f"assurance_slice.evidence_requirements[{index}].required_fields")
     policy = _exact(row["reviewer_policy"], {"minimum_independent_reviewers", "executor_actor_ref", "executor_session_ref", "owner_acceptance_is_review", "distinct_actor_and_session"}, "assurance_slice.reviewer_policy")
     _positive_int(policy["minimum_independent_reviewers"], "assurance_slice.reviewer_policy.minimum_independent_reviewers")
     _string(policy["executor_actor_ref"], "assurance_slice.reviewer_policy.executor_actor_ref", identifier=True)
@@ -277,6 +297,7 @@ def _validate_contract(value: Any) -> dict[str, Any]:
         _refuse("FIELD_INVALID", "assurance_slice.release_class", ["none", "repository_only", "runtime", "production"], row["release_class"])
     if not isinstance(row["unfinished_work"], list) or not all(isinstance(x, str) and x for x in row["unfinished_work"]):
         _refuse("FIELD_INVALID", "assurance_slice.unfinished_work", "string list", row["unfinished_work"])
+    _unique(row["unfinished_work"], "assurance_slice.unfinished_work")
     _repository(row["repository_binding"], "assurance_slice.repository_binding")
     rules = _exact(row["rule_snapshot_binding"], {"snapshot_ref", "snapshot_digest"}, "assurance_slice.rule_snapshot_binding")
     _string(rules["snapshot_ref"], "assurance_slice.rule_snapshot_binding.snapshot_ref", identifier=True)
@@ -318,7 +339,7 @@ def _validate_rules(value: Any) -> dict[str, Any]:
     return result
 
 
-def _validate_coordination(value: Any) -> dict[str, Any]:
+def _validate_coordination(value: Any, evaluation_time: datetime, evaluation_text: str) -> dict[str, Any]:
     fields = {"schema_version", "snapshot_digest", "as_of", "valid_until", "manifest_phase", "requesting_session_id", "requesting_host_id", "leases", "dependencies"}
     row = _exact(value, fields, "coordination_snapshot")
     if row["schema_version"] != "assurance-coordination-snapshot.v1":
@@ -328,6 +349,10 @@ def _validate_coordination(value: Any) -> dict[str, Any]:
     valid_until = _timestamp(row["valid_until"], "coordination_snapshot.valid_until")
     if valid_until <= as_of:
         _refuse("COORDINATION_SNAPSHOT_STALE", "coordination_snapshot.valid_until", f"> {row['as_of']}", row["valid_until"])
+    if evaluation_time < as_of:
+        _refuse("COORDINATION_SNAPSHOT_STALE", "evaluation_time", f">= {row['as_of']}", evaluation_text)
+    if evaluation_time >= valid_until:
+        _refuse("COORDINATION_SNAPSHOT_STALE", "coordination_snapshot.valid_until", f"> {evaluation_text}", row["valid_until"])
     if row["manifest_phase"] != "baseline":
         _refuse("FIELD_INVALID", "coordination_snapshot.manifest_phase", "baseline", row["manifest_phase"])
     for field in ("requesting_session_id", "requesting_host_id"):
@@ -369,7 +394,7 @@ def _validate_coordination(value: Any) -> dict[str, Any]:
     return normalized
 
 
-def _enforce_bindings(value: dict[str, Any], contract: dict[str, Any], plan: dict[str, Any], rules: dict[str, Any], coord: dict[str, Any]) -> dict[str, Any]:
+def _enforce_bindings(value: dict[str, Any], contract: dict[str, Any], plan: dict[str, Any], rules: dict[str, Any], coord: dict[str, Any], evaluation_time: datetime) -> tuple[dict[str, Any], dict[str, Any]]:
     if value["work_request"] != plan["work_request"] or contract["work_request"] != value["work_request"]:
         _refuse("WORK_REQUEST_BINDING_MISMATCH", "work_request", plan["work_request"], {"input": value["work_request"], "contract": contract["work_request"]})
     if value["accepted_plan_revision"] != plan["accepted_plan_revision"] or contract["accepted_plan_revision"] != value["accepted_plan_revision"]:
@@ -388,6 +413,19 @@ def _enforce_bindings(value: dict[str, Any], contract: dict[str, Any], plan: dic
     required_checks = sorted(check["check_ref"] for check in contract["required_tests"])
     if planned_checks != required_checks:
         _refuse("SLICE_BINDING_MISMATCH", "assurance_slice.required_tests", planned_checks, required_checks)
+    planned_by_ref = {check["check_ref"]: check for check in selected["planned_checks"]}
+    claimed_paths = {claim["path"] for claim in contract["path_claims"]}
+    for required in contract["required_tests"]:
+        planned = planned_by_ref[required["check_ref"]]
+        planned_digest = execution_contract.canonical_digest(planned)
+        if required["planned_check_digest"] != planned_digest:
+            _refuse("REQUIRED_TEST_BINDING_MISMATCH", required["check_ref"], planned_digest, required["planned_check_digest"])
+        if required["causal_failure"]["expected"] != planned["failure_condition"]:
+            _refuse("REQUIRED_TEST_BINDING_MISMATCH", required["check_ref"], planned["failure_condition"], required["causal_failure"]["expected"])
+        artifact = required["test_artifact_path"]
+        resolved_arguments = {_resolved_repo_path(required["cwd"], argument) for argument in required["argv"]}
+        if artifact not in claimed_paths or artifact not in resolved_arguments:
+            _refuse("REQUIRED_TEST_BINDING_MISMATCH", required["check_ref"], {"claimed_test_artifact": artifact, "argv_resolves_to_artifact": True}, {"claimed": artifact in claimed_paths, "resolved_argv_paths": sorted(path for path in resolved_arguments if path is not None)})
     identity = contract["executor_identity"]
     policy = contract["reviewer_policy"]
     if policy["executor_actor_ref"] != identity["actor_ref"] or policy["executor_session_ref"] != identity["session_ref"]:
@@ -408,19 +446,25 @@ def _enforce_bindings(value: dict[str, Any], contract: dict[str, Any], plan: dic
         _refuse("LEASE_NOT_FOUND", "assurance_slice.lease_binding.lease_id", lease_binding["lease_id"], None)
     if lease["state"] == "released":
         _refuse("LEASE_RELEASED", f"lease:{lease['lease_id']}", "active", "released")
-    if _timestamp(lease["expires_at"], "lease.expires_at") <= _timestamp(coord["as_of"], "coordination_snapshot.as_of"):
-        _refuse("LEASE_EXPIRED", f"lease:{lease['lease_id']}", f"> {coord['as_of']}", lease["expires_at"])
+    lease_expires = _timestamp(lease["expires_at"], "lease.expires_at")
+    if lease_expires <= evaluation_time:
+        _refuse("LEASE_EXPIRED", f"lease:{lease['lease_id']}", f"> {value['evaluation_time']}", lease["expires_at"])
+    if lease_expires < _timestamp(coord["valid_until"], "coordination_snapshot.valid_until"):
+        _refuse("LEASE_EXPIRED", f"lease:{lease['lease_id']}", f">= {coord['valid_until']}", lease["expires_at"])
     actual_binding = {key: lease[key] for key in ("lease_id", "fencing_generation", "holder_session_id", "holder_host_id")}
-    if actual_binding != lease_binding or lease["holder_session_id"] != coord["requesting_session_id"] or lease["holder_host_id"] != coord["requesting_host_id"]:
+    if actual_binding != lease_binding:
         _refuse("LEASE_BINDING_MISMATCH", f"lease:{lease['lease_id']}", lease_binding, actual_binding)
+    if lease["holder_session_id"] != coord["requesting_session_id"]:
+        _refuse("REQUESTER_IDENTITY_MISMATCH", "coordination_snapshot.requesting_session_id", lease["holder_session_id"], coord["requesting_session_id"])
+    if lease["holder_host_id"] != coord["requesting_host_id"]:
+        _refuse("REQUESTER_IDENTITY_MISMATCH", "coordination_snapshot.requesting_host_id", lease["holder_host_id"], coord["requesting_host_id"])
     if _sort_set(lease["claims"]) != _sort_set(contract["path_claims"]):
         _refuse("LEASE_CLAIMS_MISMATCH", f"lease:{lease['lease_id']}.claims", _sort_set(contract["path_claims"]), _sort_set(lease["claims"]))
-    as_of = _timestamp(coord["as_of"], "coordination_snapshot.as_of")
     for foreign in coord["leases"]:
         if foreign["lease_id"] == lease["lease_id"] or foreign["state"] == "released":
             continue
-        if _timestamp(foreign["expires_at"], "foreign lease.expires_at") <= as_of:
-            _refuse("LEASE_EXPIRED", f"lease:{foreign['lease_id']}", f"> {coord['as_of']}", foreign["expires_at"])
+        if _timestamp(foreign["expires_at"], "foreign lease.expires_at") <= evaluation_time:
+            continue
         for own_claim in contract["path_claims"]:
             for foreign_claim in foreign["claims"]:
                 if _paths_overlap(own_claim, foreign_claim):
@@ -433,7 +477,7 @@ def _enforce_bindings(value: dict[str, Any], contract: dict[str, Any], plan: dic
             _refuse("DEPENDENCY_MISSING", dependency["slice_ref"], dependency["required_state"], None)
         if rank[actual["state"]] < rank[dependency["required_state"]] or actual["evidence_digest"] is None:
             _refuse("DEPENDENCY_UNSATISFIED", dependency["slice_ref"], dependency["required_state"], actual)
-    return selected
+    return selected, lease
 
 
 def _compile(value: Any, *, compiler_version: str) -> dict[str, Any]:
@@ -444,6 +488,7 @@ def _compile(value: Any, *, compiler_version: str) -> dict[str, Any]:
         _refuse("INPUT_SCHEMA_UNSUPPORTED", "compiler_input.schema_version", INPUT_SCHEMA, row["schema_version"])
     _binding(row["work_request"], "work_request")
     _plan_binding(row["accepted_plan_revision"], "accepted_plan_revision")
+    evaluation_time = _timestamp(row["evaluation_time"], "evaluation_time")
     if row["assurance_slice"] is None:
         _refuse("ASSURANCE_SLICE_ABSENT", "assurance_slice", CONTRACT_SCHEMA, None)
     try:
@@ -452,8 +497,8 @@ def _compile(value: Any, *, compiler_version: str) -> dict[str, Any]:
         _refuse("ENGINEERING_SLICE_PLAN_INVALID", "engineering_slice_plan", "valid engineering-slice-plan.v1", str(exc))
     contract = _validate_contract(row["assurance_slice"])
     rules = _validate_rules(row["applicable_rules"])
-    coord = _validate_coordination(row["coordination_snapshot"])
-    selected = _enforce_bindings(row, contract, plan, rules, coord)
+    coord = _validate_coordination(row["coordination_snapshot"], evaluation_time, row["evaluation_time"])
+    selected, lease = _enforce_bindings(row, contract, plan, rules, coord, evaluation_time)
     normalized_input = _normalized_input(row)
     input_digest = execution_contract.canonical_digest(normalized_input)
     manifest = {
@@ -490,6 +535,10 @@ def _compile(value: Any, *, compiler_version: str) -> dict[str, Any]:
         },
         "currentness": {
             "manifest_phase": "baseline", "authorizes_action": False,
+            "evaluated_at": row["evaluation_time"],
+            "snapshot_as_of": coord["as_of"],
+            "snapshot_valid_until": coord["valid_until"],
+            "lease_expires_at": lease["expires_at"],
             "usable_only_as_preflight_for": ["write", "test"],
             "recompile_against_resulting_commit_tree_before": ["commit", "push", "pr_update", "review", "merge", "runtime_action"],
         },
