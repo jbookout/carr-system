@@ -128,6 +128,12 @@ function canonicalJsonValueIsSafe(value, topLevel = true) {
   return canonicalJsonSnapshot(value, topLevel) !== UNSAFE_SNAPSHOT;
 }
 
+export function snapshotCanonicalJsonValue(value) {
+  const snapshot = canonicalJsonSnapshot(value);
+  if (snapshot === UNSAFE_SNAPSHOT) throw new Error("CANONICAL_JSON_UNSAFE");
+  return snapshot;
+}
+
 const ownEnumerableDataDescriptor = (record, field) => {
   const descriptor = Object.getOwnPropertyDescriptor(record, field);
   return descriptor && descriptor.enumerable && Object.hasOwn(descriptor, "value")
@@ -407,8 +413,8 @@ const requiredTime = (value, error) => {
 function rightsTimestampsAreValid(receipt) {
   return requiredTimestamp(receipt?.effective_at) &&
     requiredTimestamp(receipt.reviewed_at) &&
-    (receipt.expires_at == null || requiredTimestamp(receipt.expires_at)) &&
-    (receipt.revoked_at == null || requiredTimestamp(receipt.revoked_at));
+    (receipt.expires_at === null || requiredTimestamp(receipt.expires_at)) &&
+    (receipt.revoked_at === null || requiredTimestamp(receipt.revoked_at));
 }
 
 function rightsReceiptAuthorityIsComplete(receipt) {
@@ -855,8 +861,8 @@ export function validateProjectionFact(fact, assertion, membership, projection, 
       projectionSnapshot.route_version !== factSnapshot.route_version) throw new Error("ROUTE_VERSION_MISMATCH");
   if (!requiredTimestamp(projectionSnapshot.as_of) || !requiredTimestamp(membershipSnapshot.selected_at) ||
       !requiredTimestamp(assertionSnapshot.effective_from) ||
-      (assertionSnapshot.observed_at != null && !requiredTimestamp(assertionSnapshot.observed_at)) ||
-      (assertionSnapshot.effective_to != null && !requiredTimestamp(assertionSnapshot.effective_to)))
+      !requiredTimestamp(assertionSnapshot.observed_at) ||
+      (assertionSnapshot.effective_to !== null && !requiredTimestamp(assertionSnapshot.effective_to)))
     throw new Error("PUBLIC_ASSERTION_NOT_EFFECTIVE");
   const asOf = new Date(projectionSnapshot.as_of);
   if (new Date(membershipSnapshot.selected_at) > asOf ||

@@ -85,6 +85,9 @@ test("rights are current only when effective, unexpired, unrevoked, and explicit
     ["allowed_use_classes", ["client_public_display\ud800"]],
   ]) assert.throws(() => evaluateRightsReceipt({ ...fixture.rights_receipt, [field]: value },
     rightsRequest), /RIGHTS_UNKNOWN/, field);
+  for (const field of ["expires_at", "revoked_at"])
+    assert.throws(() => evaluateRightsReceipt({ ...fixture.rights_receipt, [field]: undefined },
+      rightsRequest), /RIGHTS_UNKNOWN/, `${field} must be explicit null or a timestamp`);
 });
 
 test("rights evaluation rejects caller-controlled array methods and malformed temporal authority", () => {
@@ -215,6 +218,9 @@ test("projection fact validation requires exact evidence and current public-disp
   for (const confidence of [undefined, null, "", "unknown", "certain", 1])
     assert.throws(() => validateProjectionFact(fact, { ...assertion, confidence }, membership,
       projection, rights, { evidence }), /PUBLIC_ASSERTION_UNRESOLVED/);
+  assert.throws(() => validateProjectionFact(fact, { ...assertion, effective_to: undefined },
+    membership, projection, rights, { evidence }), /PUBLIC_ASSERTION_NOT_EFFECTIVE/,
+  "required nullable authority must be explicit null or a timestamp");
 
   const originalIterator = Array.prototype[Symbol.iterator];
   let iteratorError;

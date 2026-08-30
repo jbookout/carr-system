@@ -9,6 +9,7 @@ import {
   PUBLIC_TOUR_FIELD_KEYS,
   REQUIRED_PUBLIC_PROPERTY_FIELDS,
   requiredTimestamp,
+  snapshotCanonicalJsonValue,
   snapshotPublicValue,
 } from "./tour-operations-contract.js";
 
@@ -325,17 +326,19 @@ function validateEvidence(args, ToolError) {
 
 function validateAssertion(args, ToolError) {
   exactFields(args, ASSERTION_FIELDS, ToolError);
-  uuid(args.idempotency_key, "idempotency_key", ToolError);
-  if (args.value === undefined) fail(ToolError, { error: "tour_input_invalid", field: "value" });
-  try { JSON.stringify(args.value); } catch { fail(ToolError, { error: "tour_input_invalid", field: "value" }); }
+  const idempotencyKey = uuid(args.idempotency_key, "idempotency_key", ToolError);
+  let value;
+  try { value = snapshotCanonicalJsonValue(args.value); }
+  catch { fail(ToolError, { error: "tour_input_invalid", field: "value" }); }
   const effectiveFrom = timestamp(args.effective_from, "effective_from", ToolError);
   const effectiveTo = timestamp(args.effective_to, "effective_to", ToolError, true);
   if (effectiveTo && Date.parse(effectiveTo) < Date.parse(effectiveFrom))
     fail(ToolError, { error: "tour_input_invalid", field: "effective_to" });
   return {
+    idempotency_key: idempotencyKey,
     property_id: uuid(args.property_id, "property_id", ToolError),
     field_key: text(args.field_key, "field_key", ToolError),
-    value: args.value,
+    value,
     source_evidence_id: uuid(args.source_evidence_id, "source_evidence_id", ToolError),
     rights_receipt_id: uuid(args.rights_receipt_id, "rights_receipt_id", ToolError),
     observed_at: timestamp(args.observed_at, "observed_at", ToolError),
@@ -476,9 +479,10 @@ export function tourRightsProjectionTools({ withEnvelope, writeEvent, ToolError 
         data_classification: { type: "string" }, review_state: { type: "string" },
       }, ["idempotency_key", "property_id", "field_key", "value", "source_evidence_id", "rights_receipt_id", "observed_at", "effective_from", "confidence", "data_classification", "review_state"]),
       handler: async (c, actor, args) => {
-        const validated = validateAssertion(args, ToolError);
+        const validatedRequest = validateAssertion(args, ToolError);
+        const { idempotency_key: idempotencyKey, ...validated } = validatedRequest;
         const tenant = tenantFor(actor, ToolError);
-        return withEnvelope(c, actor, "append-tour-field-assertion", args, async () => {
+        return withEnvelope(c, actor, "append-tour-field-assertion", validatedRequest, async () => {
           const result = await c.query(
             "select ops.append_tour_field_assertion($1::jsonb) as field_assertion_id /* tour-rights-projection:append-assertion */",
             [JSON.stringify({ organization_tenant_id: tenant, ...validated })]);
@@ -486,7 +490,7 @@ export function tourRightsProjectionTools({ withEnvelope, writeEvent, ToolError 
           if (!id) fail(ToolError, { error: "tour_write_refused", entity: "field_assertion" });
           await writeEvent(c, actor, "append-tour-field-assertion", "tour_field_assertion", id, {
             field: validated.field_key, new: { property_id: validated.property_id, source_evidence_id: validated.source_evidence_id, rights_receipt_id: validated.rights_receipt_id, review_state: validated.review_state },
-            idempotency_key: args.idempotency_key,
+            idempotency_key: idempotencyKey,
           });
           return { ok: true, field_assertion_id: id };
         });

@@ -325,3 +325,54 @@ test("PostgreSQL-unrepresentable rights text fails before envelope or database a
     assert.equal(h.envelopes.length, 0);
   }
 });
+
+test("field assertions bind one detached PostgreSQL-safe JSON snapshot to the envelope and database write", async () => {
+  const h = harness();
+  const value = { name: "Medical Plaza", details: [null, true, 4200] };
+  const args = {
+    idempotency_key: idempotency, property_id: ids.property, field_key: "display.name", value,
+    source_evidence_id: ids.evidence, rights_receipt_id: ids.rights,
+    observed_at: "2026-08-27T12:05:00Z", effective_from: "2026-08-27T00:00:00Z",
+    effective_to: null, confidence: "high", data_classification: "public", review_state: "reviewed",
+  };
+  await h.tools["append-tour-field-assertion"].handler(h.client, actor, args);
+  value.name = "changed after validation";
+  value.details[2] = 0;
+  assert.deepEqual(JSON.parse(JSON.stringify(h.envelopes[0].args.value)),
+    { name: "Medical Plaza", details: [null, true, 4200] });
+  assert.notEqual(h.envelopes[0].args.value, value);
+  assert.deepEqual(JSON.parse(h.calls[0].params[0]).value,
+    { name: "Medical Plaza", details: [null, true, 4200] });
+});
+
+test("field assertions reject hostile or PostgreSQL-unrepresentable JSON before envelope or database access", async () => {
+  const changing = {};
+  let reads = 0;
+  Object.defineProperty(changing, "name", {
+    enumerable: true,
+    get() { return reads++ === 0 ? "safe" : "changed"; },
+  });
+  const sparse = new Array(2);
+  sparse[0] = "only";
+  const withToJson = { name: "safe", toJSON() { return { name: "changed" }; } };
+  for (const value of [
+    null, "bad\u0000value", "bad\ud800value", { nested: "bad\udc00value" },
+    sparse, { amount: Number.NaN }, { amount: Number.POSITIVE_INFINITY },
+    withToJson, changing,
+  ]) {
+    const h = harness();
+    await assert.rejects(
+      h.tools["append-tour-field-assertion"].handler(h.client, actor, {
+        idempotency_key: idempotency, property_id: ids.property, field_key: "display.name", value,
+        source_evidence_id: ids.evidence, rights_receipt_id: ids.rights,
+        observed_at: "2026-08-27T12:05:00Z", effective_from: "2026-08-27T00:00:00Z",
+        effective_to: null, confidence: "high", data_classification: "public", review_state: "reviewed",
+      }),
+      error => error instanceof ToolError && error.payload.error === "tour_input_invalid" &&
+        error.payload.field === "value",
+    );
+    assert.equal(h.calls.length, 0);
+    assert.equal(h.envelopes.length, 0);
+  }
+  assert.equal(reads, 0, "rejected assertion accessors must never execute");
+});
