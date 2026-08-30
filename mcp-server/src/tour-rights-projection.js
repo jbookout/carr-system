@@ -92,6 +92,17 @@ function timestamp(value, field, ToolError, nullable = false) {
   return candidate;
 }
 
+function databaseTimestamp(value, field, ToolError, nullable = false) {
+  if (nullable && (value === null || value === undefined)) return null;
+  const candidate = text(value, field, ToolError);
+  if (requiredTimestamp(candidate)) return candidate;
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?[+-]\d{2}:\d{2}$/.test(candidate))
+    fail(ToolError, { error: "tour_input_invalid", field });
+  const parsed = new Date(candidate);
+  if (Number.isNaN(parsed.getTime())) fail(ToolError, { error: "tour_input_invalid", field });
+  return parsed.toISOString().replace(".000Z", "Z");
+}
+
 function positiveInteger(value, field, ToolError) {
   if (!Number.isInteger(value) || value < 1)
     fail(ToolError, { error: "tour_input_invalid", field });
@@ -148,7 +159,7 @@ function publicProjection(value, ToolError) {
     tour_id: uuid(input.tour_id, "tour_id", ToolError),
     projection_version: positiveInteger(input.projection_version, "projection_version", ToolError),
     route_version: positiveInteger(input.route_version, "route_version", ToolError),
-    as_of: timestamp(input.as_of, "as_of", ToolError),
+    as_of: databaseTimestamp(input.as_of, "as_of", ToolError),
     projection_digest: digest(input.projection_digest, "projection_digest", ToolError),
     facts: null,
   };
@@ -171,8 +182,8 @@ function publicProjection(value, ToolError) {
     catch { fail(ToolError, { error: "tour_public_projection_invalid", field: `facts[${index}].display_field_key` }); }
     if (!PUBLIC_TOUR_FIELD_KEYS.has(displayFieldKey))
       fail(ToolError, { error: "tour_public_projection_invalid", field: `facts[${index}].display_field_key` });
-    const effectiveFrom = timestamp(fact.effective_from, `facts[${index}].effective_from`, ToolError);
-    const effectiveTo = timestamp(fact.effective_to, `facts[${index}].effective_to`, ToolError, true);
+    const effectiveFrom = databaseTimestamp(fact.effective_from, `facts[${index}].effective_from`, ToolError);
+    const effectiveTo = databaseTimestamp(fact.effective_to, `facts[${index}].effective_to`, ToolError, true);
     if (effectiveTo && Date.parse(effectiveTo) <= Date.parse(effectiveFrom))
       fail(ToolError, { error: "tour_public_projection_invalid", field: `facts[${index}].effective_to` });
     const projected = {
@@ -182,7 +193,7 @@ function publicProjection(value, ToolError) {
       value: publicValue,
       source_evidence_id: uuid(fact.source_evidence_id, `facts[${index}].source_evidence_id`, ToolError),
       rights_receipt_id: uuid(fact.rights_receipt_id, `facts[${index}].rights_receipt_id`, ToolError),
-      observed_at: timestamp(fact.observed_at, `facts[${index}].observed_at`, ToolError),
+      observed_at: databaseTimestamp(fact.observed_at, `facts[${index}].observed_at`, ToolError),
       effective_from: effectiveFrom,
       effective_to: effectiveTo,
     };

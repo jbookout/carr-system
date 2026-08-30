@@ -75,6 +75,16 @@ test("rights are current only when effective, unexpired, unrevoked, and explicit
       ...rightsRequest, lineage: [incompleteSuccessor],
     }), /RIGHTS_UNKNOWN/, field);
   }
+  for (const [field, value] of [
+    ["organization_tenant_id", "tenant\u0000other"],
+    ["provider", "provider\ud800"],
+    ["policy_key", "policy\u0000other"],
+    ["reviewer", "reviewer\udc00"],
+    ["intended_use", "client\u0000display"],
+    ["allowed_field_classes", ["display.name\u0000internal"]],
+    ["allowed_use_classes", ["client_public_display\ud800"]],
+  ]) assert.throws(() => evaluateRightsReceipt({ ...fixture.rights_receipt, [field]: value },
+    rightsRequest), /RIGHTS_UNKNOWN/, field);
 });
 
 test("rights evaluation rejects caller-controlled array methods and malformed temporal authority", () => {

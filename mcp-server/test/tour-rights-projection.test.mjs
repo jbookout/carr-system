@@ -166,6 +166,25 @@ test("read is tenant-scoped, approved-only, and never enters a write envelope", 
   assert.equal(h.events.length, 0);
 });
 
+test("public read canonicalizes PostgreSQL offset timestamps", async () => {
+  const databaseShaped = {
+    ...databaseProjection,
+    as_of: "2026-08-27T12:15:00+00:00",
+    facts: [publicFact, publicAddressFact].map(item => ({
+      ...item,
+      observed_at: "2026-08-27T07:05:00-05:00",
+      effective_from: "2026-08-26T19:00:00-05:00",
+      effective_to: null,
+    })),
+  };
+  const h = harness({ projection: databaseShaped });
+  const result = await h.tools["read-tour-public-projection"].handler(
+    h.client, actor, { projection_id: ids.projection });
+  assert.equal(result.projection.as_of, "2026-08-27T12:15:00Z");
+  assert.equal(result.projection.facts[0].observed_at, "2026-08-27T12:05:00Z");
+  assert.equal(result.projection.facts[0].effective_from, "2026-08-27T00:00:00Z");
+});
+
 test("public read projection ignores internal-only metadata and rejects forbidden fact classes", async () => {
   const internalOnly = {
     ...databaseProjection,

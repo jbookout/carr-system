@@ -12,8 +12,8 @@ import {
 const root = path.resolve(import.meta.dirname, "../..");
 const fixture = JSON.parse(fs.readFileSync(path.join(root, "mcp-server/test/fixtures/tour-operations-foundation.v1.json"), "utf8"));
 const { projection_fact: fact, field_assertion: assertion, membership, projection, source_evidence: evidence, rights_receipt: rights } = fixture;
-const addressAssertion = { ...assertion, id: "address-assertion", field_key: "display.address", value: "1 Synthetic Way" };
-const addressFact = { ...fact, id: "address-fact", field_assertion_id: addressAssertion.id, display_field_key: addressAssertion.field_key };
+const addressAssertion = { ...assertion, id: "44444444-4444-4444-8444-444444444445", field_key: "display.address", value: "1 Synthetic Way" };
+const addressFact = { ...fact, id: "55555555-5555-4555-8555-555555555556", field_assertion_id: addressAssertion.id, display_field_key: addressAssertion.field_key };
 const completeFacts = [fact, addressFact];
 const completeAssertions = [assertion, addressAssertion];
 const completeInput = {
@@ -131,6 +131,21 @@ test("canonical projection digest refuses authority accessors instead of rereadi
     ...withProjectionBody("approved"), facts: [changingFact],
   }), /PROJECTION_INCOMPLETE/);
   assert.equal(reads, 0, "digest authority accessors must never execute");
+});
+
+test("canonical projection digest refuses coercible identifier objects", () => {
+  let reads = 0;
+  const coercibleId = {
+    toString() {
+      reads++;
+      return reads === 1 ? fact.property_id : membership.property_id;
+    },
+  };
+  assert.throws(() => canonicalProjectionDigest({
+    ...withProjectionBody("approved"),
+    facts: [{ ...fact, property_id: coercibleId }],
+  }), /PROJECTION_INCOMPLETE/);
+  assert.equal(reads, 0, "identifier objects must not be coerced");
 });
 
 test("canonical projection digest ignores inherited Array slice overrides", () => {

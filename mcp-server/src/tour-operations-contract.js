@@ -166,7 +166,8 @@ function arrayContains(values, candidate) {
 function nonemptyStringArrayIsSafe(values) {
   if (!values?.length) return false;
   for (let index = 0; index < values.length; index++)
-    if (typeof values[index] !== "string" || !values[index].trim()) return false;
+    if (typeof values[index] !== "string" || !values[index].trim() ||
+        !postgresTextIsSafe(values[index])) return false;
   return true;
 }
 
@@ -319,6 +320,8 @@ const FOUNDATION_TEXT_FIELDS = new Set([
 ]);
 const FOUNDATION_DIGEST_RE = /^sha256:[a-f0-9]{64}$/;
 const FOUNDATION_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const foundationUuidIsSafe = value => typeof value === "string" && FOUNDATION_UUID_RE.test(value);
+const foundationDigestIsSafe = value => typeof value === "string" && FOUNDATION_DIGEST_RE.test(value);
 
 export function validateFoundationEntityFixture(entityName, record, entityContract) {
   if (!record || Array.isArray(record) || typeof record !== "object" ||
@@ -410,14 +413,22 @@ function rightsTimestampsAreValid(receipt) {
 
 function rightsReceiptAuthorityIsComplete(receipt) {
   if (!receipt || !rightsTimestampsAreValid(receipt) ||
-      !FOUNDATION_UUID_RE.test(receipt.id || "") ||
+      !foundationUuidIsSafe(receipt.id) ||
       typeof receipt.organization_tenant_id !== "string" || !receipt.organization_tenant_id.trim() ||
+      !postgresTextIsSafe(receipt.organization_tenant_id) ||
       typeof receipt.provider !== "string" || !receipt.provider.trim() ||
+      !postgresTextIsSafe(receipt.provider) ||
+      (receipt.sku != null && (typeof receipt.sku !== "string" || !receipt.sku.trim() ||
+       !postgresTextIsSafe(receipt.sku))) ||
       typeof receipt.policy_key !== "string" || !receipt.policy_key.trim() ||
+      !postgresTextIsSafe(receipt.policy_key) ||
       !Number.isInteger(receipt.receipt_version) || receipt.receipt_version < 1 ||
-      !FOUNDATION_DIGEST_RE.test(receipt.receipt_digest || "") ||
+      !foundationDigestIsSafe(receipt.receipt_digest) ||
+      typeof receipt.terms_url !== "string" || !postgresTextIsSafe(receipt.terms_url) ||
       typeof receipt.reviewer !== "string" || !receipt.reviewer.trim() ||
+      !postgresTextIsSafe(receipt.reviewer) ||
       typeof receipt.intended_use !== "string" || !receipt.intended_use.trim() ||
+      !postgresTextIsSafe(receipt.intended_use) ||
       (receipt.status !== "active" && receipt.status !== "revoked" && receipt.status !== "expired") ||
       (receipt.status === "revoked" && receipt.revoked_at == null)) return false;
   try {
@@ -427,7 +438,7 @@ function rightsReceiptAuthorityIsComplete(receipt) {
     return false;
   }
   if ((receipt.receipt_version === 1 && receipt.supersedes_receipt_id !== null) ||
-      (receipt.receipt_version > 1 && !FOUNDATION_UUID_RE.test(receipt.supersedes_receipt_id || "")))
+      (receipt.receipt_version > 1 && !foundationUuidIsSafe(receipt.supersedes_receipt_id)))
     return false;
   return true;
 }
@@ -696,6 +707,30 @@ export function canonicalProjectionDigest(input) {
   const mapPointRows = snapshotRecordArray(inputSnapshot?.map_points ?? [], MAP_POINT_AUTHORITY_FIELDS,
     MAP_POINT_REQUIRED_FIELDS);
   if (!factRows || !mapPointRows) throw new Error("PROJECTION_INCOMPLETE");
+  if (typeof projection.organization_tenant_id !== "string" ||
+      !projection.organization_tenant_id.trim() ||
+      !postgresTextIsSafe(projection.organization_tenant_id) ||
+      !foundationUuidIsSafe(projection.tour_id) ||
+      !foundationUuidIsSafe(projection.id) ||
+      !Number.isInteger(projection.projection_version) || projection.projection_version < 1 ||
+      !Number.isInteger(projection.route_version) || projection.route_version < 1)
+    throw new Error("PROJECTION_INCOMPLETE");
+  for (let index = 0; index < factRows.length; index++) {
+    const fact = factRows[index];
+    if (!foundationUuidIsSafe(fact.property_id) ||
+        !foundationUuidIsSafe(fact.field_assertion_id) ||
+        !Number.isInteger(fact.route_version) || fact.route_version < 1 ||
+        typeof fact.display_field_key !== "string" || !fact.display_field_key.trim() ||
+        !postgresTextIsSafe(fact.display_field_key)) throw new Error("PROJECTION_INCOMPLETE");
+  }
+  for (let index = 0; index < mapPointRows.length; index++) {
+    const point = mapPointRows[index];
+    if (!foundationUuidIsSafe(point.property_id) ||
+        !foundationUuidIsSafe(point.coordinate_candidate_id) ||
+        !foundationUuidIsSafe(point.entrance_verification_receipt_id) ||
+        !Number.isInteger(point.route_version) || point.route_version < 1)
+      throw new Error("PROJECTION_INCOMPLETE");
+  }
   const facts = new Array(factRows.length);
   for (let index = 0; index < factRows.length; index++) facts[index] = factRows[index];
   const mapPoints = new Array(mapPointRows.length);
@@ -858,9 +893,9 @@ function conflictResolutionIsComplete(resolution, conflictId, assertionId, tenan
   if (!snapshot || snapshot.organization_tenant_id !== tenantId ||
       snapshot.conflict_id !== conflictId ||
       snapshot.selected_field_assertion_id !== assertionId ||
-      !FOUNDATION_UUID_RE.test(snapshot.id || "") ||
-      !FOUNDATION_UUID_RE.test(snapshot.conflict_id || "") ||
-      !FOUNDATION_UUID_RE.test(snapshot.selected_field_assertion_id || "") ||
+      !foundationUuidIsSafe(snapshot.id) ||
+      !foundationUuidIsSafe(snapshot.conflict_id) ||
+      !foundationUuidIsSafe(snapshot.selected_field_assertion_id) ||
       typeof snapshot.rationale !== "string" || !snapshot.rationale.trim() ||
       !postgresTextIsSafe(snapshot.rationale) ||
       !snapshot.evidence || Array.isArray(snapshot.evidence) ||
@@ -871,7 +906,7 @@ function conflictResolutionIsComplete(resolution, conflictId, assertionId, tenan
       !postgresTextIsSafe(snapshot.resolver_actor_id) ||
       !requiredTimestamp(snapshot.resolved_at) ||
       !requiredTimestamp(snapshot.created_at) ||
-      !FOUNDATION_DIGEST_RE.test(snapshot.receipt_digest || "")) return false;
+      !foundationDigestIsSafe(snapshot.receipt_digest)) return false;
   for (let index = 0; index < conflictParticipants.length; index++) {
     const participant = conflictParticipants[index];
     if (participant && participant.organization_tenant_id === tenantId &&
