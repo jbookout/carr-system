@@ -87,6 +87,29 @@ test("rights evaluation rejects caller-controlled array methods and malformed te
     ...rightsRequest,
     revocations: [{ rights_receipt_id: fixture.rights_receipt.id, revoked_at: "not-a-time" }],
   }), /RIGHTS_UNKNOWN/);
+
+  for (const [record, field] of [
+    [{ ...fixture.rights_receipt }, "effective_at"],
+    [{ ...fixture.rights_receipt, id: "successor", receipt_version: 2 }, "effective_at"],
+    [{ rights_receipt_id: fixture.rights_receipt.id }, "revoked_at"],
+  ]) {
+    delete record[field];
+    let reads = 0;
+    Object.defineProperty(record, field, {
+      enumerable: true,
+      get() { return reads++ === 0 ? "2026-08-26T00:00:00Z" : "2026-08-24T00:00:00Z"; },
+    });
+    const request = record.rights_receipt_id
+      ? { ...rightsRequest, revocations: [record] }
+      : record.id === "successor"
+        ? { ...rightsRequest, lineage: [record] }
+        : rightsRequest;
+    assert.throws(() => evaluateRightsReceipt(
+      record.id === "successor" || record.rights_receipt_id ? fixture.rights_receipt : record,
+      request,
+    ), /RIGHTS_UNKNOWN/);
+    assert.equal(reads, 0, `${field} accessor must not execute`);
+  }
 });
 
 test("evidence-to-assertion rights lineage binds tenant, receipt, provider, policy, and separate observation/retrieval times", () => {
@@ -109,6 +132,14 @@ test("public assets use opaque public references and never arbitrary URLs", () =
   for (const url of ["https://evil.invalid/photo.jpg", "http://provider.invalid/photo.jpg", "javascript:alert(1)", "asset:private:photo-1"]) {
     assert.equal(publicValueIsSafe("photos", [{ asset_ref: url, alt: "unsafe", source: "untrusted" }]), false, url);
   }
+  let reads = 0;
+  const changingAsset = {};
+  Object.defineProperty(changingAsset, "asset_ref", {
+    enumerable: true,
+    get() { return reads++ === 0 ? "asset:public:photo-0000000001" : "javascript:alert(1)"; },
+  });
+  assert.equal(publicValueIsSafe("photos", [changingAsset]), false);
+  assert.equal(reads, 0, "asset accessors must never execute");
 });
 
 test("public metrics match the deterministic packet renderer contract", () => {

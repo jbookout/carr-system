@@ -119,6 +119,20 @@ test("canonical projection digest binds immutable public-map coordinate selectio
   assert.throws(() => assertProjectionDigest({ ...base, map_points: [{ ...base.map_points[0], coordinate_candidate_id: "10000000-0000-4000-8000-000000000072" }] }, digest), /PROJECTION_DIGEST_MISMATCH/);
 });
 
+test("canonical projection digest refuses authority accessors instead of rereading them", () => {
+  const changingFact = { ...fact };
+  delete changingFact.field_assertion_id;
+  let reads = 0;
+  Object.defineProperty(changingFact, "field_assertion_id", {
+    enumerable: true,
+    get() { return reads++ === 0 ? fact.field_assertion_id : addressAssertion.id; },
+  });
+  assert.throws(() => canonicalProjectionDigest({
+    ...withProjectionBody("approved"), facts: [changingFact],
+  }), /PROJECTION_INCOMPLETE/);
+  assert.equal(reads, 0, "digest authority accessors must never execute");
+});
+
 test("complete-projection validation includes sealed public-map points in digest parity", () => {
   const sealed = sealedProjectionInput();
   const map_points = [{
@@ -251,6 +265,17 @@ test("unresolved evidence, confidence, and field conflicts are quarantined", () 
   ]) assert.throws(() => validateProjectionComplete({
     ...baseConflictInput, conflict_resolutions: [incompleteResolution],
   }), /PUBLIC_ASSERTION_CONFLICTED/);
+  const changingResolution = { ...resolution };
+  delete changingResolution.resolved_at;
+  let resolutionReads = 0;
+  Object.defineProperty(changingResolution, "resolved_at", {
+    enumerable: true,
+    get() { return resolutionReads++ === 0 ? "2026-08-26T12:00:00Z" : "2026-08-24T12:00:00Z"; },
+  });
+  assert.throws(() => validateProjectionComplete({
+    ...baseConflictInput, conflict_resolutions: [changingResolution],
+  }), /PUBLIC_ASSERTION_CONFLICTED|PROJECTION_INCOMPLETE/);
+  assert.equal(resolutionReads, 0, "resolution accessors must never execute");
   assert.throws(() => validateProjectionComplete({
     ...baseConflictInput,
     conflict_resolutions: [resolution],

@@ -8,8 +8,8 @@ import { organizationTenantForActor } from "./identity.js";
 import {
   PUBLIC_TOUR_FIELD_KEYS,
   REQUIRED_PUBLIC_PROPERTY_FIELDS,
-  publicValueIsSafe,
   requiredTimestamp,
+  snapshotPublicValue,
 } from "./tour-operations-contract.js";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -98,26 +98,78 @@ function positiveInteger(value, field, ToolError) {
   return value;
 }
 
+const ownEnumerableDataDescriptor = (record, field) => {
+  const descriptor = Object.getOwnPropertyDescriptor(record, field);
+  return descriptor?.enumerable && Object.hasOwn(descriptor, "value") ? descriptor : null;
+};
+
+function snapshotRecord(record, fields) {
+  if (!record || Array.isArray(record) || typeof record !== "object") return null;
+  const prototype = Object.getPrototypeOf(record);
+  if (prototype !== Object.prototype && prototype !== null) return null;
+  const snapshot = Object.create(null);
+  for (let index = 0; index < fields.length; index++) {
+    const descriptor = ownEnumerableDataDescriptor(record, fields[index]);
+    if (!descriptor) return null;
+    snapshot[fields[index]] = descriptor.value;
+  }
+  return snapshot;
+}
+
+function safeArrayValues(value) {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return null;
+  const ownKeys = Reflect.ownKeys(value);
+  for (let keyIndex = 0; keyIndex < ownKeys.length; keyIndex++) {
+    const key = ownKeys[keyIndex];
+    if (typeof key !== "string") return null;
+    if (key === "length") continue;
+    if (!/^(?:0|[1-9][0-9]*)$/.test(key)) return null;
+    const index = Number(key);
+    if (!Number.isSafeInteger(index) || index >= value.length || String(index) !== key) return null;
+  }
+  const values = new Array(value.length);
+  for (let index = 0; index < value.length; index++) {
+    const descriptor = ownEnumerableDataDescriptor(value, String(index));
+    if (!descriptor) return null;
+    values[index] = descriptor.value;
+  }
+  return values;
+}
+
 function publicProjection(value, ToolError) {
-  if (!value || typeof value !== "object" || Array.isArray(value))
+  const input = snapshotRecord(value, [
+    "projection_id", "tour_id", "projection_version", "route_version", "as_of",
+    "projection_digest", "facts",
+  ]);
+  if (!input)
     fail(ToolError, { error: "tour_public_projection_invalid" });
   const projection = {
-    projection_id: uuid(value.projection_id, "projection_id", ToolError),
-    tour_id: uuid(value.tour_id, "tour_id", ToolError),
-    projection_version: positiveInteger(value.projection_version, "projection_version", ToolError),
-    route_version: positiveInteger(value.route_version, "route_version", ToolError),
-    as_of: timestamp(value.as_of, "as_of", ToolError),
-    projection_digest: digest(value.projection_digest, "projection_digest", ToolError),
+    projection_id: uuid(input.projection_id, "projection_id", ToolError),
+    tour_id: uuid(input.tour_id, "tour_id", ToolError),
+    projection_version: positiveInteger(input.projection_version, "projection_version", ToolError),
+    route_version: positiveInteger(input.route_version, "route_version", ToolError),
+    as_of: timestamp(input.as_of, "as_of", ToolError),
+    projection_digest: digest(input.projection_digest, "projection_digest", ToolError),
     facts: null,
   };
-  if (!Array.isArray(value.facts) || value.facts.length === 0)
+  const factRows = safeArrayValues(input.facts);
+  if (!factRows || factRows.length === 0)
     fail(ToolError, { error: "tour_public_projection_invalid", field: "facts" });
   const seen = new Set();
-  projection.facts = value.facts.map((fact, index) => {
-    if (!fact || typeof fact !== "object" || Array.isArray(fact))
+  projection.facts = new Array(factRows.length);
+  for (let index = 0; index < factRows.length; index++) {
+    const fact = snapshotRecord(factRows[index], [
+      "property_id", "field_assertion_id", "display_field_key", "value",
+      "source_evidence_id", "rights_receipt_id", "observed_at", "effective_from",
+      "effective_to",
+    ]);
+    if (!fact)
       fail(ToolError, { error: "tour_public_projection_invalid", field: `facts[${index}]` });
     const displayFieldKey = text(fact.display_field_key, `facts[${index}].display_field_key`, ToolError);
-    if (!PUBLIC_TOUR_FIELD_KEYS.has(displayFieldKey) || !publicValueIsSafe(displayFieldKey, fact.value))
+    let publicValue;
+    try { publicValue = snapshotPublicValue(displayFieldKey, fact.value); }
+    catch { fail(ToolError, { error: "tour_public_projection_invalid", field: `facts[${index}].display_field_key` }); }
+    if (!PUBLIC_TOUR_FIELD_KEYS.has(displayFieldKey))
       fail(ToolError, { error: "tour_public_projection_invalid", field: `facts[${index}].display_field_key` });
     const effectiveFrom = timestamp(fact.effective_from, `facts[${index}].effective_from`, ToolError);
     const effectiveTo = timestamp(fact.effective_to, `facts[${index}].effective_to`, ToolError, true);
@@ -127,7 +179,7 @@ function publicProjection(value, ToolError) {
       property_id: uuid(fact.property_id, `facts[${index}].property_id`, ToolError),
       field_assertion_id: uuid(fact.field_assertion_id, `facts[${index}].field_assertion_id`, ToolError),
       display_field_key: displayFieldKey,
-      value: fact.value,
+      value: publicValue,
       source_evidence_id: uuid(fact.source_evidence_id, `facts[${index}].source_evidence_id`, ToolError),
       rights_receipt_id: uuid(fact.rights_receipt_id, `facts[${index}].rights_receipt_id`, ToolError),
       observed_at: timestamp(fact.observed_at, `facts[${index}].observed_at`, ToolError),
@@ -142,9 +194,11 @@ function publicProjection(value, ToolError) {
     if (seen.has(key))
       fail(ToolError, { error: "tour_public_projection_invalid", field: `facts[${index}]`, reason: "duplicate_property_field" });
     seen.add(key);
-    return projected;
-  });
-  const properties = new Set(projection.facts.map(fact => fact.property_id));
+    projection.facts[index] = projected;
+  }
+  const properties = new Set();
+  for (let index = 0; index < projection.facts.length; index++)
+    properties.add(projection.facts[index].property_id);
   for (const propertyId of properties) {
     for (const fieldKey of REQUIRED_PUBLIC_PROPERTY_FIELDS) {
       if (!seen.has(`${propertyId}\u001f${fieldKey}`))
@@ -155,11 +209,18 @@ function publicProjection(value, ToolError) {
 }
 
 function stringArray(value, field, ToolError) {
-  if (!Array.isArray(value) || value.length === 0 ||
-      value.some(item => typeof item !== "string" || !item.trim()) ||
-      new Set(value).size !== value.length)
-    fail(ToolError, { error: "tour_input_invalid", field });
-  return value.map(item => item.trim());
+  const values = safeArrayValues(value);
+  if (!values || values.length === 0) fail(ToolError, { error: "tour_input_invalid", field });
+  const normalized = new Array(values.length);
+  const seen = new Set();
+  for (let index = 0; index < values.length; index++) {
+    if (typeof values[index] !== "string" || !values[index].trim())
+      fail(ToolError, { error: "tour_input_invalid", field });
+    normalized[index] = values[index].trim();
+    if (seen.has(normalized[index])) fail(ToolError, { error: "tour_input_invalid", field });
+    seen.add(normalized[index]);
+  }
+  return normalized;
 }
 
 function oneOf(value, field, allowed, ToolError) {
@@ -254,12 +315,14 @@ function validateAssertion(args, ToolError) {
 }
 
 function validateSelectedFacts(value, ToolError) {
-  if (!Array.isArray(value) || value.length === 0)
+  const values = safeArrayValues(value);
+  if (!values || values.length === 0)
     fail(ToolError, { error: "tour_selected_facts_invalid" });
   const seen = new Set();
-  return value.map((item, index) => {
-    if (!item || typeof item !== "object" || Array.isArray(item) ||
-        Object.keys(item).sort().join(",") !== "display_field_key,field_assertion_id,property_id")
+  const selected = new Array(values.length);
+  for (let index = 0; index < values.length; index++) {
+    const item = snapshotRecord(values[index], ["display_field_key", "field_assertion_id", "property_id"]);
+    if (!item || Reflect.ownKeys(values[index]).length !== 3)
       fail(ToolError, { error: "tour_selected_facts_invalid", index });
     const fact = {
       property_id: uuid(item.property_id, `selected_facts[${index}].property_id`, ToolError),
@@ -271,8 +334,9 @@ function validateSelectedFacts(value, ToolError) {
     const key = `${fact.property_id}\u001f${fact.display_field_key}`;
     if (seen.has(key)) fail(ToolError, { error: "tour_selected_facts_invalid", index, reason: "duplicate_property_field" });
     seen.add(key);
-    return fact;
-  });
+    selected[index] = fact;
+  }
+  return selected;
 }
 
 function schema(properties, required) {

@@ -211,6 +211,36 @@ test("public read projection ignores internal-only metadata and rejects forbidde
   }
 });
 
+test("public read snapshots plain data once and rejects hostile arrays or accessors", async () => {
+  const poisonedFacts = [publicFact, publicAddressFact];
+  Object.defineProperty(poisonedFacts, "map", {
+    value: () => [{ ...publicFact, value: { notes: "broker-only", credentials: "secret" } }],
+  });
+  const poisoned = harness({ projection: { ...databaseProjection, facts: poisonedFacts } });
+  await assert.rejects(
+    poisoned.tools["read-tour-public-projection"].handler(
+      poisoned.client, actor, { projection_id: ids.projection }),
+    error => error instanceof ToolError && error.payload.error === "tour_public_projection_invalid",
+  );
+
+  const changingFact = { ...publicFact };
+  delete changingFact.value;
+  let reads = 0;
+  Object.defineProperty(changingFact, "value", {
+    enumerable: true,
+    get() { return reads++ === 0 ? "Medical Plaza" : { notes: "broker-only", credentials: "secret" }; },
+  });
+  const changing = harness({ projection: {
+    ...databaseProjection, facts: [changingFact, publicAddressFact],
+  } });
+  await assert.rejects(
+    changing.tools["read-tour-public-projection"].handler(
+      changing.client, actor, { projection_id: ids.projection }),
+    error => error instanceof ToolError && error.payload.error === "tour_public_projection_invalid",
+  );
+  assert.equal(reads, 0, "rejected accessors must never execute");
+});
+
 test("public read projection refuses incomplete, duplicate, or temporally impossible facts", async () => {
   for (const facts of [
     [publicFact],
