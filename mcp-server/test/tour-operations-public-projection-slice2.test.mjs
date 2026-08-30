@@ -180,6 +180,25 @@ test("internal-only assertions neither enter nor perturb the public projection, 
 
 test("unresolved evidence, confidence, and field conflicts are quarantined", () => {
   const sealed = sealedProjectionInput();
+  const conflictId = "10000000-0000-4000-8000-000000000090";
+  const resolution = {
+    id: "10000000-0000-4000-8000-000000000091",
+    organization_tenant_id: fixture.tenant,
+    conflict_id: conflictId,
+    selected_field_assertion_id: fact.field_assertion_id,
+    rationale: "Verified source selected",
+    evidence: { source_evidence_id: evidence.id },
+    resolver_actor_id: "actor:proof",
+    resolved_at: "2026-08-24T12:00:00Z",
+    receipt_digest: "sha256:" + "d".repeat(64),
+    created_at: "2026-08-24T12:00:01Z",
+  };
+  const participant = {
+    organization_tenant_id: fixture.tenant,
+    conflict_id: conflictId,
+    field_assertion_id: fact.field_assertion_id,
+    participant_role: "candidate",
+  };
   assert.throws(() => validateProjectionComplete({
     ...sealed.input,
     projection: sealed.projection,
@@ -194,7 +213,7 @@ test("unresolved evidence, confidence, and field conflicts are quarantined", () 
     ...sealed.input,
     projection: sealed.projection,
     conflicts: [{
-      id: "conflict-1",
+      id: conflictId,
       organization_tenant_id: fixture.tenant,
       property_id: membership.property_id,
       field_key: fact.display_field_key,
@@ -206,14 +225,35 @@ test("unresolved evidence, confidence, and field conflicts are quarantined", () 
     ...sealed.input,
     projection: sealed.projection,
     conflicts: [{
-      id: "conflict-1", organization_tenant_id: fixture.tenant,
+      id: conflictId, organization_tenant_id: fixture.tenant,
       property_id: membership.property_id, field_key: fact.display_field_key,
       state: "open", opened_at: "2026-08-24T00:00:00Z",
     }],
-    conflict_resolutions: [{
-      organization_tenant_id: fixture.tenant, conflict_id: "conflict-1",
-      selected_field_assertion_id: fact.field_assertion_id,
-      resolved_at: "2026-08-24T12:00:00Z",
-    }],
+    conflict_resolutions: [resolution],
+    conflict_participants: [participant],
   }), true);
+  const baseConflictInput = {
+    ...sealed.input,
+    projection: sealed.projection,
+    conflicts: [{
+      id: conflictId, organization_tenant_id: fixture.tenant,
+      property_id: membership.property_id, field_key: fact.display_field_key,
+      state: "open", opened_at: "2026-08-24T00:00:00Z",
+    }],
+    conflict_participants: [participant],
+  };
+  for (const incompleteResolution of [
+    (({ receipt_digest: _ignored, ...rest }) => rest)(resolution),
+    { ...resolution, rationale: "" },
+    { ...resolution, evidence: null },
+    { ...resolution, resolver_actor_id: "" },
+    { ...resolution, created_at: undefined },
+  ]) assert.throws(() => validateProjectionComplete({
+    ...baseConflictInput, conflict_resolutions: [incompleteResolution],
+  }), /PUBLIC_ASSERTION_CONFLICTED/);
+  assert.throws(() => validateProjectionComplete({
+    ...baseConflictInput,
+    conflict_resolutions: [resolution],
+    conflict_participants: [{ ...participant, field_assertion_id: addressAssertion.id }],
+  }), /PUBLIC_ASSERTION_CONFLICTED/);
 });

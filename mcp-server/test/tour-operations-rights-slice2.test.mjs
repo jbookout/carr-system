@@ -34,6 +34,19 @@ test("rights are current only when effective, unexpired, unrevoked, and explicit
   }), /RIGHTS_CONFLICT/);
   accepts(evaluateRightsReceipt(fixture.rights_receipt, {
     ...rightsRequest,
+    lineage: [{ ...fixture.rights_receipt }],
+  }));
+  for (const divergent of [
+    { receipt_digest: `sha256:${"c".repeat(64)}` },
+    { allowed_field_classes: ["display.name"] },
+    { provider: "divergent-provider" },
+    { receipt_version: 2 },
+  ]) assert.throws(() => evaluateRightsReceipt(fixture.rights_receipt, {
+    ...rightsRequest,
+    lineage: [{ ...fixture.rights_receipt, ...divergent }],
+  }), /RIGHTS_CONFLICT/);
+  accepts(evaluateRightsReceipt(fixture.rights_receipt, {
+    ...rightsRequest,
     lineage: [{ ...fixture.rights_receipt, id: "other-provider-successor", provider: "other-provider", receipt_version: 2, effective_at: "2026-08-20T00:00:00Z" }],
   }));
 });
@@ -88,7 +101,10 @@ test("projection fact validation requires exact evidence and current public-disp
   assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, rights), /PROJECTION_EVIDENCE_REQUIRED/);
   assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, { ...rights, effective_at: "2026-08-26T00:00:00Z" }, { evidence }), /PUBLIC_RIGHTS_REQUIRED/);
   assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, { ...rights, status: "revoked", revoked_at: "2026-08-24T00:00:00Z" }, { evidence }), /PUBLIC_RIGHTS_REQUIRED/);
-  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, rights, { evidence, lineage: [{ ...rights, receipt_version: 2, effective_at: "2026-08-20T00:00:00Z" }] }), /PUBLIC_RIGHTS_SUPERSEDED/);
+  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, rights, { evidence, lineage: [{ ...rights, id: "successor", receipt_version: 2, effective_at: "2026-08-20T00:00:00Z" }] }), /PUBLIC_RIGHTS_SUPERSEDED/);
   assert.throws(() => validateProjectionFact(fact, { ...assertion, observed_at: "2026-08-26T00:00:00Z" }, membership, projection, rights, { evidence }), /PUBLIC_ASSERTION_NOT_EFFECTIVE/);
   assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, rights, { evidence: { ...evidence, retrieved_at: "2026-08-26T00:00:00Z" } }), /PUBLIC_ASSERTION_NOT_EFFECTIVE/);
+  for (const confidence of [undefined, null, "", "unknown", "certain", 1])
+    assert.throws(() => validateProjectionFact(fact, { ...assertion, confidence }, membership,
+      projection, rights, { evidence }), /PUBLIC_ASSERTION_UNRESOLVED/);
 });

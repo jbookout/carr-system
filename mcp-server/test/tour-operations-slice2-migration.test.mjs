@@ -53,8 +53,11 @@ test("slice 2 seals one complete fact set atomically with a database-computed di
   assert.match(migration, /create or replace function ops\.append_tour_field_assertion\(p_payload jsonb\)/i);
   assert.match(migration, /create or replace function ops\.create_tour_public_projection_draft/i);
   assert.match(migration, /create or replace function ops\.read_tour_public_projection/i);
-  assert.match(migration, /r\.expires_at is not null and r\.expires_at <= now\(\)/i);
-  assert.match(migration, /newer\.receipt_version > r\.receipt_version[\s\S]*newer\.effective_at <= now\(\)/i);
+  assert.match(migration, /with clock as materialized \(select statement_timestamp\(\) as evaluated_at\)/i);
+  assert.match(migration, /r\.expires_at is not null and r\.expires_at <= clock\.evaluated_at/i);
+  assert.match(migration, /newer\.receipt_version > r\.receipt_version[\s\S]*newer\.effective_at <= clock\.evaluated_at/i);
+  assert.match(migration, /conflict\.opened_at <= clock\.evaluated_at/i);
+  assert.match(migration, /resolution\.resolved_at <= clock\.evaluated_at/i);
   assert.match(migration, /join ops\.tour_field_assertion a/i);
   assert.match(migration, /join ops\.tour_source_evidence e/i);
   assert.match(migration, /join ops\.tour_rights_receipt r/i);

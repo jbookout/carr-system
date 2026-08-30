@@ -308,6 +308,25 @@ function revocationApplies(receipt, at, revocations) {
   });
 }
 
+const RIGHTS_RECEIPT_AUTHORITY_FIELDS = Object.freeze([
+  "id", "organization_tenant_id", "provider", "sku", "policy_key",
+  "receipt_version", "receipt_digest", "terms_url", "reviewed_at", "reviewer",
+  "intended_use", "allowed_field_classes", "allowed_use_classes", "effective_at",
+  "expires_at", "revoked_at", "supersedes_receipt_id", "status",
+]);
+
+function rightsReceiptExactlyMatches(left, right) {
+  return RIGHTS_RECEIPT_AUTHORITY_FIELDS.every(field => {
+    const leftValue = left?.[field];
+    const rightValue = right?.[field];
+    if (Array.isArray(leftValue) || Array.isArray(rightValue))
+      return Array.isArray(leftValue) && Array.isArray(rightValue) &&
+        leftValue.length === rightValue.length &&
+        leftValue.every((value, index) => value === rightValue[index]);
+    return leftValue === rightValue;
+  });
+}
+
 export function evaluateRightsReceipt(receipt, {
   at, fieldKey = null, useClass, lineage = [], revocations = [],
 } = {}) {
@@ -330,8 +349,12 @@ export function evaluateRightsReceipt(receipt, {
   if (fieldKey != null && (!Array.isArray(receipt.allowed_field_classes) ||
       !(receipt.allowed_field_classes.includes(fieldKey) ||
         receipt.allowed_field_classes.includes("*")))) throw new Error("RIGHTS_FIELD_NOT_ALLOWED");
-  const relatedLineage = (Array.isArray(lineage) ? lineage : []).filter(item => item &&
-      item.organization_tenant_id === receipt.organization_tenant_id &&
+  const tenantLineage = (Array.isArray(lineage) ? lineage : []).filter(item => item &&
+      item.organization_tenant_id === receipt.organization_tenant_id);
+  if (tenantLineage.some(item => item.id === receipt.id &&
+      !rightsReceiptExactlyMatches(item, receipt)))
+    throw new Error("RIGHTS_CONFLICT");
+  const relatedLineage = tenantLineage.filter(item =>
       item.provider === receipt.provider && item.policy_key === receipt.policy_key);
   if (relatedLineage.some(item => item.id !== receipt.id && item.receipt_version === receipt.receipt_version &&
       item.status === "active" && requiredTimestamp(item.effective_at) &&
@@ -462,7 +485,8 @@ export function validateProjectionFact(fact, assertion, membership, projection, 
     throw new Error("PROJECTION_PROPERTY_MISMATCH");
   if (fact.field_assertion_id !== assertion.id || assertion.review_state !== "reviewed" ||
       assertion.data_classification !== "public") throw new Error("PUBLIC_ASSERTION_REQUIRED");
-  if (assertion.confidence === "unknown") throw new Error("PUBLIC_ASSERTION_UNRESOLVED");
+  if (!["low", "medium", "high"].includes(assertion.confidence))
+    throw new Error("PUBLIC_ASSERTION_UNRESOLVED");
   if (fact.display_field_key !== assertion.field_key)
     throw new Error("PUBLIC_FIELD_RELABEL_REFUSED");
   if (membership.route_version !== fact.route_version ||
@@ -504,9 +528,37 @@ export function validateProjectionFact(fact, assertion, membership, projection, 
 const mapById = values =>
   new Map((Array.isArray(values) ? values : []).map(value => [value.id, value]));
 
+function conflictResolutionIsComplete(resolution, conflictId, assertionId, tenantId,
+  conflictParticipants) {
+  if (!resolution || Array.isArray(resolution) || typeof resolution !== "object" ||
+      resolution.organization_tenant_id !== tenantId ||
+      resolution.conflict_id !== conflictId ||
+      resolution.selected_field_assertion_id !== assertionId ||
+      !FOUNDATION_UUID_RE.test(resolution.id || "") ||
+      !FOUNDATION_UUID_RE.test(resolution.conflict_id || "") ||
+      !FOUNDATION_UUID_RE.test(resolution.selected_field_assertion_id || "") ||
+      typeof resolution.rationale !== "string" || !resolution.rationale.trim() ||
+      !postgresTextIsSafe(resolution.rationale) ||
+      !resolution.evidence || Array.isArray(resolution.evidence) ||
+      typeof resolution.evidence !== "object" ||
+      !canonicalJsonValueIsSafe(resolution.evidence, false) ||
+      typeof resolution.resolver_actor_id !== "string" ||
+      !resolution.resolver_actor_id.trim() ||
+      !postgresTextIsSafe(resolution.resolver_actor_id) ||
+      !requiredTimestamp(resolution.resolved_at) ||
+      !requiredTimestamp(resolution.created_at) ||
+      !FOUNDATION_DIGEST_RE.test(resolution.receipt_digest || "")) return false;
+  return (Array.isArray(conflictParticipants) ? conflictParticipants : []).some(participant =>
+    participant && participant.organization_tenant_id === tenantId &&
+    participant.conflict_id === conflictId &&
+    participant.field_assertion_id === assertionId &&
+    ["candidate", "selected", "rejected"].includes(participant.participant_role));
+}
+
 export function validateProjectionComplete({
   projection, memberships = [], facts = [], assertions = [], evidence = [], rights = [],
-  lineage = [], revocations = [], conflicts = [], conflict_resolutions = [], map_points = [],
+  lineage = [], revocations = [], conflicts = [], conflict_resolutions = [],
+  conflict_participants = [], map_points = [],
   requiredFieldKeys = REQUIRED_PUBLIC_PROPERTY_FIELDS,
 } = {}) {
   if (!projection || projection.status !== "approved")
@@ -549,10 +601,8 @@ export function validateProjectionComplete({
             new Date(conflict.opened_at) > new Date(projection.as_of)) return false;
         const conflictId = conflict.id ?? conflict.conflict_id;
         return !(Array.isArray(conflict_resolutions) ? conflict_resolutions : []).some(resolution =>
-          resolution && resolution.organization_tenant_id === projection.organization_tenant_id &&
-          resolution.conflict_id === conflictId &&
-          resolution.selected_field_assertion_id === assertion.id &&
-          requiredTimestamp(resolution.resolved_at) &&
+          conflictResolutionIsComplete(resolution, conflictId, assertion.id,
+            projection.organization_tenant_id, conflict_participants) &&
           new Date(resolution.resolved_at) <= new Date(projection.as_of));
       });
       if (unresolvedConflict) throw new Error("PUBLIC_ASSERTION_CONFLICTED");

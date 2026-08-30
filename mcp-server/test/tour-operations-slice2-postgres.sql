@@ -546,3 +546,129 @@ end
 $proof$;
 
 rollback;
+
+-- A public read evaluates revocations and conflicts at the start of each read
+-- statement, not at the start of a long-running transaction.  The conflict is
+-- deliberately opened with clock_timestamp() after BEGIN; transaction-scoped
+-- now() would predate it and incorrectly leave the packet readable.
+begin;
+
+insert into ops.tour_rights_receipt (
+  id,organization_tenant_id,provider,sku,policy_key,receipt_version,
+  receipt_digest,terms_url,reviewed_at,reviewer,intended_use,
+  allowed_field_classes,allowed_use_classes,effective_at,status
+) values (
+  '20000000-0000-4000-8000-000000000021','tour-long-transaction',
+  'proof-provider','proof-sku','tour-public-v1',1,
+  'sha256:'||repeat('a',64),'https://example.invalid/terms',
+  transaction_timestamp()-interval '2 hours','actor:proof','tour acceptance proof',
+  '["display.name","display.address"]'::jsonb,
+  '["source_intake","canonical_fact","client_public_display"]'::jsonb,
+  transaction_timestamp()-interval '2 hours','active'
+);
+insert into ops.tour_property (id,organization_tenant_id,property_status)
+values ('20000000-0000-4000-8000-000000000010','tour-long-transaction','active');
+insert into ops.tour_source_evidence (
+  id,organization_tenant_id,stable_locator,evidence_class,retrieved_at,
+  retrieval_status,content_digest,rights_receipt_id,rights_provider,
+  rights_policy_key,data_classification
+) values (
+  '20000000-0000-4000-8000-000000000020','tour-long-transaction',
+  'https://example.invalid/source','direct_source',
+  transaction_timestamp()-interval '1 hour','read','sha256:'||repeat('b',64),
+  '20000000-0000-4000-8000-000000000021','proof-provider',
+  'tour-public-v1','public'
+);
+insert into ops.tour_field_assertion (
+  id,organization_tenant_id,property_id,field_key,value,source_evidence_id,
+  rights_receipt_id,observed_at,effective_from,confidence,
+  data_classification,review_state
+) values
+  ('20000000-0000-4000-8000-000000000030','tour-long-transaction',
+   '20000000-0000-4000-8000-000000000010','display.name','"Long Transaction Clinic"'::jsonb,
+   '20000000-0000-4000-8000-000000000020','20000000-0000-4000-8000-000000000021',
+   transaction_timestamp()-interval '30 minutes',transaction_timestamp()-interval '30 minutes',
+   'high','public','reviewed'),
+  ('20000000-0000-4000-8000-000000000031','tour-long-transaction',
+   '20000000-0000-4000-8000-000000000010','display.address','"2 Synthetic Way"'::jsonb,
+   '20000000-0000-4000-8000-000000000020','20000000-0000-4000-8000-000000000021',
+   transaction_timestamp()-interval '30 minutes',transaction_timestamp()-interval '30 minutes',
+   'high','public','reviewed');
+insert into ops.tour (
+  id,organization_tenant_id,tour_name,tour_status,route_version,canonical_dataset_version
+) values (
+  '20000000-0000-4000-8000-000000000040','tour-long-transaction',
+  'Long transaction proof','draft',1,'proof'
+);
+insert into ops.tour_property_membership (
+  id,organization_tenant_id,tour_id,property_id,route_version,route_sequence,
+  route_label,assertion_set_digest,selected_at
+) values (
+  '20000000-0000-4000-8000-000000000050','tour-long-transaction',
+  '20000000-0000-4000-8000-000000000040','20000000-0000-4000-8000-000000000010',
+  1,1,'A','sha256:'||repeat('c',64),transaction_timestamp()-interval '10 minutes'
+);
+insert into ops.tour_public_projection (
+  id,organization_tenant_id,tour_id,projection_version,route_version,as_of,
+  facts_only,projection_digest,status
+) values (
+  '20000000-0000-4000-8000-000000000060','tour-long-transaction',
+  '20000000-0000-4000-8000-000000000040',1,1,transaction_timestamp(),true,
+  'sha256:'||repeat('d',64),'draft'
+);
+select ops.seal_tour_public_projection(
+  'tour-long-transaction','20000000-0000-4000-8000-000000000060',
+  jsonb_build_array(
+    jsonb_build_object(
+      'property_id','20000000-0000-4000-8000-000000000010',
+      'field_assertion_id','20000000-0000-4000-8000-000000000030',
+      'display_field_key','display.name'),
+    jsonb_build_object(
+      'property_id','20000000-0000-4000-8000-000000000010',
+      'field_assertion_id','20000000-0000-4000-8000-000000000031',
+      'display_field_key','display.address')
+  ),'actor:proof','sha256:'||repeat('e',64)
+);
+
+select pg_sleep(0.02);
+insert into ops.tour_fact_conflict (
+  id,organization_tenant_id,property_id,field_key,state,opened_at
+) values (
+  '20000000-0000-4000-8000-000000000070','tour-long-transaction',
+  '20000000-0000-4000-8000-000000000010','display.name','open',clock_timestamp()
+);
+insert into ops.tour_fact_conflict_participant (
+  organization_tenant_id,conflict_id,field_assertion_id,participant_role
+) values (
+  'tour-long-transaction','20000000-0000-4000-8000-000000000070',
+  '20000000-0000-4000-8000-000000000030','candidate'
+);
+do $long_transaction_conflict$
+begin
+  if ops.read_tour_public_projection(
+       'tour-long-transaction','20000000-0000-4000-8000-000000000060') is not null then
+    raise exception 'statement-time conflict left long-transaction projection readable';
+  end if;
+end
+$long_transaction_conflict$;
+
+select pg_sleep(0.02);
+insert into ops.tour_conflict_resolution_receipt (
+  id,organization_tenant_id,conflict_id,selected_field_assertion_id,rationale,
+  evidence,resolver_actor_id,resolved_at,receipt_digest
+) values (
+  '20000000-0000-4000-8000-000000000071','tour-long-transaction',
+  '20000000-0000-4000-8000-000000000070','20000000-0000-4000-8000-000000000030',
+  'verified source selected','{}'::jsonb,'actor:proof',clock_timestamp(),
+  'sha256:'||repeat('f',64)
+);
+do $long_transaction_resolution$
+begin
+  if ops.read_tour_public_projection(
+       'tour-long-transaction','20000000-0000-4000-8000-000000000060') is null then
+    raise exception 'statement-time resolution did not restore long-transaction projection read';
+  end if;
+end
+$long_transaction_resolution$;
+
+rollback;
