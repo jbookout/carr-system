@@ -447,7 +447,7 @@
           "const": "check:compiler"
         },
         "planned_check_digest": {
-          "const": "sha256:9c24ba42a8800e13dca584e204200d1680014b57e401ec0959245d6851268327"
+          "$ref": "#/$defs/Digest"
         },
         "check_profile_ref": {
           "const": "check-profile:assurance-compiler-v1"
@@ -549,10 +549,24 @@
           "const": "."
         },
         "causal_failure": {
-          "const": {
-            "code": "REQUIRED_CHECK_FAILED",
-            "object": "check:compiler",
-            "expected": "invalid input compiles or refusal loses its causal object"
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "object",
+            "expected"
+          ],
+          "properties": {
+            "code": {
+              "const": "REQUIRED_CHECK_FAILED"
+            },
+            "object": {
+              "const": "check:compiler"
+            },
+            "expected": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         },
         "evidence_fields": {

@@ -280,6 +280,19 @@ def test_output_cannot_claim_authorization_verification_or_self_certification():
     assert schema_valid(slice_schema, "RequiredTest", required_schema_value)
     altered = copy.deepcopy(required_schema_value); altered["environment"]["runtime"] = "true"; altered["argv"][0] = "true"
     assert not schema_valid(slice_schema, "RequiredTest", altered)
+    revised = valid_input()
+    planned = revised["engineering_slice_plan"]["slices"][1]["planned_checks"][0]
+    planned["failure_condition"] = "a revised accepted compiler failure condition"
+    seal_plan(revised)
+    revised["assurance_slice"]["engineering_slice_plan_digest"] = revised["engineering_slice_plan"]["plan_digest"]
+    required = revised["assurance_slice"]["required_tests"][0]
+    required["planned_check_digest"] = execution_contract.canonical_digest(planned)
+    required["causal_failure"]["expected"] = planned["failure_condition"]
+    seal_contract(revised)
+    revised_result = compiler.compile_assurance_slice(revised)
+    assert revised_result["ok"] is True, revised_result
+    assert schema_valid(slice_schema, "RequiredTest", required)
+    assert revised_result["manifest"]["slice"]["required_tests"][0] == required
     assert schema_valid(slice_schema, "Risk", {"risk_class":"R1","summary":"bounded"})
     assert not schema_valid(slice_schema, "Risk", {"risk_class":1,"summary":"bounded"})
     for bad in ("tools//test.py", "tools/", "tools/space path.py"):
