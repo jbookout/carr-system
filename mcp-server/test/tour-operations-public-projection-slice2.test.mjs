@@ -133,6 +133,20 @@ test("canonical projection digest refuses authority accessors instead of rereadi
   assert.equal(reads, 0, "digest authority accessors must never execute");
 });
 
+test("canonical projection digest ignores inherited Array slice overrides", () => {
+  const input = withProjectionBody("approved");
+  const expected = canonicalProjectionDigest(input);
+  const originalSlice = Array.prototype.slice;
+  let actual;
+  try {
+    Array.prototype.slice = () => [];
+    actual = canonicalProjectionDigest(input);
+  } finally {
+    Array.prototype.slice = originalSlice;
+  }
+  assert.equal(actual, expected);
+});
+
 test("complete-projection validation includes sealed public-map points in digest parity", () => {
   const sealed = sealedProjectionInput();
   const map_points = [{
@@ -171,6 +185,32 @@ test("projection creation is draft-only and a complete seal requires the full se
     projection_digest: tamperedDigest,
     seal_receipt: { ...sealed.projection.seal_receipt, canonical_projection_digest: tamperedDigest },
   } }), /PROJECTION_DIGEST_MISMATCH|DIGEST/);
+
+  const extraAssertion = {
+    ...assertion,
+    id: "10000000-0000-4000-8000-000000000098",
+    property_id: "10000000-0000-4000-8000-000000000099",
+    field_key: "internal_note",
+    value: "broker-only secret",
+    data_classification: "internal",
+  };
+  const unboundInternalFact = {
+    ...fact,
+    property_id: extraAssertion.property_id,
+    field_assertion_id: extraAssertion.id,
+    display_field_key: extraAssertion.field_key,
+  };
+  assert.throws(() => validateProjectionComplete({
+    ...sealed.input,
+    projection: sealed.projection,
+    facts: [...sealed.input.facts, unboundInternalFact],
+    assertions: [...sealed.input.assertions, extraAssertion],
+  }), /PROJECTION_INCOMPLETE/);
+  assert.throws(() => validateProjectionComplete({
+    ...sealed.input,
+    projection: sealed.projection,
+    facts: [...sealed.input.facts, { ...fact, id: "duplicate-fact" }],
+  }), /PROJECTION_INCOMPLETE/);
 });
 
 test("internal-only assertions neither enter nor perturb the public projection, but an internal fact is refused", () => {

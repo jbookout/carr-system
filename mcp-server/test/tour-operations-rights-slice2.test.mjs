@@ -19,6 +19,9 @@ const shadowedArray = (values, method, result) => {
   Object.defineProperty(array, method, { value: () => result, enumerable: false });
   return array;
 };
+const successorId = "10000000-0000-4000-8000-000000000002";
+const conflictingId = "10000000-0000-4000-8000-000000000003";
+const otherProviderId = "10000000-0000-4000-8000-000000000004";
 
 test("rights are current only when effective, unexpired, unrevoked, and explicitly allowed", () => {
   accepts(evaluateRightsReceipt(fixture.rights_receipt, rightsRequest));
@@ -31,11 +34,11 @@ test("rights are current only when effective, unexpired, unrevoked, and explicit
   assert.throws(() => evaluateRightsReceipt(fixture.rights_receipt, { ...rightsRequest, fieldKey: "internal_note" }), /PUBLIC_RIGHTS_REQUIRED|RIGHTS_FIELD_NOT_ALLOWED|FIELD_NOT_ALLOWED/);
   assert.throws(() => evaluateRightsReceipt(fixture.rights_receipt, {
     ...rightsRequest,
-    lineage: [{ ...fixture.rights_receipt, id: "successor", receipt_version: 2, effective_at: "2026-08-20T00:00:00Z", supersedes_receipt_id: fixture.rights_receipt.id }],
+    lineage: [{ ...fixture.rights_receipt, id: successorId, receipt_version: 2, effective_at: "2026-08-20T00:00:00Z", supersedes_receipt_id: fixture.rights_receipt.id }],
   }), /PUBLIC_RIGHTS_SUPERSEDED|RIGHTS_SUPERSEDED|SUPERSEDED/);
   assert.throws(() => evaluateRightsReceipt(fixture.rights_receipt, {
     ...rightsRequest,
-    lineage: [{ ...fixture.rights_receipt, id: "conflicting-receipt", receipt_digest: `sha256:${"b".repeat(64)}` }],
+    lineage: [{ ...fixture.rights_receipt, id: conflictingId, receipt_digest: `sha256:${"b".repeat(64)}` }],
   }), /RIGHTS_CONFLICT/);
   accepts(evaluateRightsReceipt(fixture.rights_receipt, {
     ...rightsRequest,
@@ -45,15 +48,33 @@ test("rights are current only when effective, unexpired, unrevoked, and explicit
     { receipt_digest: `sha256:${"c".repeat(64)}` },
     { allowed_field_classes: ["display.name"] },
     { provider: "divergent-provider" },
-    { receipt_version: 2 },
+    { receipt_version: 2, supersedes_receipt_id: successorId },
   ]) assert.throws(() => evaluateRightsReceipt(fixture.rights_receipt, {
     ...rightsRequest,
     lineage: [{ ...fixture.rights_receipt, ...divergent }],
   }), /RIGHTS_CONFLICT/);
   accepts(evaluateRightsReceipt(fixture.rights_receipt, {
     ...rightsRequest,
-    lineage: [{ ...fixture.rights_receipt, id: "other-provider-successor", provider: "other-provider", receipt_version: 2, effective_at: "2026-08-20T00:00:00Z" }],
+    lineage: [{ ...fixture.rights_receipt, id: otherProviderId, provider: "other-provider", receipt_version: 2, effective_at: "2026-08-20T00:00:00Z", supersedes_receipt_id: fixture.rights_receipt.id }],
   }));
+  for (const field of ["receipt_digest", "terms_url", "reviewed_at", "reviewer"] ) {
+    const incomplete = { ...fixture.rights_receipt };
+    delete incomplete[field];
+    assert.throws(() => evaluateRightsReceipt(incomplete, rightsRequest), /RIGHTS_UNKNOWN/, field);
+  }
+  for (const field of ["provider", "policy_key"]) {
+    const incompleteSuccessor = {
+      ...fixture.rights_receipt,
+      id: successorId,
+      receipt_version: 2,
+      supersedes_receipt_id: fixture.rights_receipt.id,
+      effective_at: "2026-08-20T00:00:00Z",
+    };
+    delete incompleteSuccessor[field];
+    assert.throws(() => evaluateRightsReceipt(fixture.rights_receipt, {
+      ...rightsRequest, lineage: [incompleteSuccessor],
+    }), /RIGHTS_UNKNOWN/, field);
+  }
 });
 
 test("rights evaluation rejects caller-controlled array methods and malformed temporal authority", () => {
@@ -75,8 +96,8 @@ test("rights evaluation rejects caller-controlled array methods and malformed te
   for (const lineageTimestamp of ["effective_at", "expires_at", "revoked_at", "reviewed_at"])
     assert.throws(() => evaluateRightsReceipt(fixture.rights_receipt, {
       ...rightsRequest,
-      lineage: [{ ...fixture.rights_receipt, id: "successor", receipt_version: 2,
-        [lineageTimestamp]: "not-a-time" }],
+      lineage: [{ ...fixture.rights_receipt, id: successorId, receipt_version: 2,
+        supersedes_receipt_id: fixture.rights_receipt.id, [lineageTimestamp]: "not-a-time" }],
     }), /RIGHTS_UNKNOWN|RIGHTS_CONFLICT/);
   assert.throws(() => evaluateRightsReceipt(fixture.rights_receipt, {
     ...rightsRequest,
@@ -90,7 +111,8 @@ test("rights evaluation rejects caller-controlled array methods and malformed te
 
   for (const [record, field] of [
     [{ ...fixture.rights_receipt }, "effective_at"],
-    [{ ...fixture.rights_receipt, id: "successor", receipt_version: 2 }, "effective_at"],
+    [{ ...fixture.rights_receipt, id: successorId, receipt_version: 2,
+      supersedes_receipt_id: fixture.rights_receipt.id }, "effective_at"],
     [{ rights_receipt_id: fixture.rights_receipt.id }, "revoked_at"],
   ]) {
     delete record[field];
@@ -101,11 +123,11 @@ test("rights evaluation rejects caller-controlled array methods and malformed te
     });
     const request = record.rights_receipt_id
       ? { ...rightsRequest, revocations: [record] }
-      : record.id === "successor"
+      : record.id === successorId
         ? { ...rightsRequest, lineage: [record] }
         : rightsRequest;
     assert.throws(() => evaluateRightsReceipt(
-      record.id === "successor" || record.rights_receipt_id ? fixture.rights_receipt : record,
+      record.id === successorId || record.rights_receipt_id ? fixture.rights_receipt : record,
       request,
     ), /RIGHTS_UNKNOWN/);
     assert.equal(reads, 0, `${field} accessor must not execute`);
@@ -152,6 +174,13 @@ test("public metrics match the deterministic packet renderer contract", () => {
     {}, { value: null }, { value: true }, { unit: "SF" },
     { value: "" }, { min: 25, max: 20 }, { value: 4200, unit: null },
   ]) assert.equal(publicValueIsSafe("size", value), false, JSON.stringify(value));
+  const magicKey = { value: 4200, unit: "SF" };
+  Object.defineProperty(magicKey, "__proto__", {
+    enumerable: true,
+    value: { notes: "broker-only", credentials: "secret" },
+  });
+  assert.equal(publicValueIsSafe("size", magicKey), false,
+    "magic property names must remain visible to the allowlist");
 });
 
 test("required public display identity rejects blank or oversized text", () => {
@@ -170,10 +199,24 @@ test("projection fact validation requires exact evidence and current public-disp
   assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, rights), /PROJECTION_EVIDENCE_REQUIRED/);
   assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, { ...rights, effective_at: "2026-08-26T00:00:00Z" }, { evidence }), /PUBLIC_RIGHTS_REQUIRED/);
   assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, { ...rights, status: "revoked", revoked_at: "2026-08-24T00:00:00Z" }, { evidence }), /PUBLIC_RIGHTS_REQUIRED/);
-  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, rights, { evidence, lineage: [{ ...rights, id: "successor", receipt_version: 2, effective_at: "2026-08-20T00:00:00Z" }] }), /PUBLIC_RIGHTS_SUPERSEDED/);
+  assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, rights, { evidence, lineage: [{ ...rights, id: successorId, receipt_version: 2, effective_at: "2026-08-20T00:00:00Z", supersedes_receipt_id: rights.id }] }), /PUBLIC_RIGHTS_SUPERSEDED/);
   assert.throws(() => validateProjectionFact(fact, { ...assertion, observed_at: "2026-08-26T00:00:00Z" }, membership, projection, rights, { evidence }), /PUBLIC_ASSERTION_NOT_EFFECTIVE/);
   assert.throws(() => validateProjectionFact(fact, assertion, membership, projection, rights, { evidence: { ...evidence, retrieved_at: "2026-08-26T00:00:00Z" } }), /PUBLIC_ASSERTION_NOT_EFFECTIVE/);
   for (const confidence of [undefined, null, "", "unknown", "certain", 1])
     assert.throws(() => validateProjectionFact(fact, { ...assertion, confidence }, membership,
       projection, rights, { evidence }), /PUBLIC_ASSERTION_UNRESOLVED/);
+
+  const originalIterator = Array.prototype[Symbol.iterator];
+  let iteratorError;
+  try {
+    Array.prototype[Symbol.iterator] = function* () {};
+    validateProjectionFact(fact, { ...assertion, organization_tenant_id: "other-tenant" },
+      membership, projection, { ...rights, organization_tenant_id: "other-tenant" },
+      { evidence: { ...evidence, organization_tenant_id: "other-tenant" } });
+  } catch (error) {
+    iteratorError = error;
+  } finally {
+    Array.prototype[Symbol.iterator] = originalIterator;
+  }
+  assert.match(iteratorError?.message || "", /TENANT_SCOPE_REFUSED/);
 });

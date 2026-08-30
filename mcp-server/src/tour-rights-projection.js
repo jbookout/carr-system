@@ -196,11 +196,19 @@ function publicProjection(value, ToolError) {
     seen.add(key);
     projection.facts[index] = projected;
   }
-  const properties = new Set();
-  for (let index = 0; index < projection.facts.length; index++)
-    properties.add(projection.facts[index].property_id);
-  for (const propertyId of properties) {
-    for (const fieldKey of REQUIRED_PUBLIC_PROPERTY_FIELDS) {
+  const properties = [];
+  const propertySet = new Set();
+  for (let index = 0; index < projection.facts.length; index++) {
+    const propertyId = projection.facts[index].property_id;
+    if (!propertySet.has(propertyId)) {
+      propertySet.add(propertyId);
+      properties.push(propertyId);
+    }
+  }
+  for (let propertyIndex = 0; propertyIndex < properties.length; propertyIndex++) {
+    const propertyId = properties[propertyIndex];
+    for (let fieldIndex = 0; fieldIndex < REQUIRED_PUBLIC_PROPERTY_FIELDS.length; fieldIndex++) {
+      const fieldKey = REQUIRED_PUBLIC_PROPERTY_FIELDS[fieldIndex];
       if (!seen.has(`${propertyId}\u001f${fieldKey}`))
         fail(ToolError, { error: "tour_public_projection_invalid", field: "facts", reason: "incomplete_property" });
     }
