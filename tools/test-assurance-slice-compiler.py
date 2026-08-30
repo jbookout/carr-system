@@ -1,0 +1,206 @@
+"""Focused invariants for the pure Assurance Slice Compiler v1."""
+
+from __future__ import annotations
+
+import copy
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+
+ROOT = Path(__file__).parents[1]
+BRIDGE = ROOT / "tools/room-bridge"
+sys.path.insert(0, str(BRIDGE))
+import assurance_slice_compiler as compiler  # noqa: E402
+import execution_contract  # noqa: E402
+
+FIXTURE = ROOT / "control-room/contracts/fixtures/execution-fabric/assurance-compiler.valid.v1.json"
+
+
+def _digest_without(value: dict, field: str) -> str:
+    return execution_contract.canonical_digest({key: item for key, item in value.items() if key != field})
+
+
+def seal_plan(value: dict) -> None:
+    value["engineering_slice_plan"]["plan_digest"] = _digest_without(value["engineering_slice_plan"], "plan_digest")
+
+
+def seal_rules(value: dict, *, update_binding: bool = True) -> None:
+    rules = value["applicable_rules"]
+    rules["rules"] = compiler._sort_set(rules["rules"])
+    rules["snapshot_digest"] = execution_contract.canonical_digest({"snapshot_ref": rules["snapshot_ref"], "rules": rules["rules"]})
+    if update_binding:
+        value["assurance_slice"]["rule_snapshot_binding"] = {"snapshot_ref": rules["snapshot_ref"], "snapshot_digest": rules["snapshot_digest"]}
+
+
+def seal_coordination(value: dict) -> None:
+    coord = value["coordination_snapshot"]
+    coord["leases"] = compiler._sort_set(coord["leases"])
+    for lease in coord["leases"]:
+        lease["claims"] = compiler._sort_set(lease["claims"])
+    coord["dependencies"] = compiler._sort_set(coord["dependencies"])
+    coord["snapshot_digest"] = _digest_without(coord, "snapshot_digest")
+
+
+def seal_contract(value: dict) -> None:
+    contract = compiler._normalized_contract(value["assurance_slice"])
+    contract["contract_digest"] = _digest_without(contract, "contract_digest")
+    value["assurance_slice"] = contract
+
+
+def seal(value: dict) -> dict:
+    seal_plan(value)
+    value["assurance_slice"]["engineering_slice_plan_digest"] = value["engineering_slice_plan"]["plan_digest"]
+    seal_rules(value)
+    seal_coordination(value)
+    seal_contract(value)
+    return value
+
+
+def valid_input() -> dict:
+    return json.loads(FIXTURE.read_text())
+
+
+def refusal(value: dict, code: str, causal_object: str) -> dict:
+    result = compiler.compile_assurance_slice(value)
+    assert result["ok"] is False, result
+    assert result["refusal"]["code"] == code, result
+    assert result["refusal"]["causal_object"] == causal_object, result
+    assert "expected" in result["refusal"] and "actual" in result["refusal"]
+    return result["refusal"]
+
+
+def test_valid_compilation_is_deterministic_and_manifest_is_immutable_posture():
+    value = valid_input()
+    first = compiler.compile_assurance_slice(value)
+    second = compiler.compile_assurance_slice(copy.deepcopy(value))
+    assert first == second and first["ok"] is True
+    manifest = first["manifest"]
+    assert manifest["authority_state"] == "compiled_not_authorized"
+    assert manifest["verification_state"] == "unverified"
+    assert manifest["self_certification"] is False
+    assert manifest["currentness"]["authorizes_action"] is False
+    assert manifest["currentness"]["recompile_against_resulting_commit_tree_before"] == ["commit", "push", "pr_update", "review", "merge", "runtime_action"]
+    assert manifest["manifest_hash"] == execution_contract.canonical_digest({k: v for k, v in manifest.items() if k != "manifest_hash"})
+
+
+def test_declared_set_reordering_preserves_manifest_hash():
+    left = valid_input(); right = copy.deepcopy(left)
+    right["assurance_slice"]["path_claims"].reverse()
+    right["assurance_slice"]["required_tests"][0]["evidence_fields"].reverse()
+    right["applicable_rules"]["rules"].reverse()
+    right["coordination_snapshot"]["leases"][0]["claims"].reverse()
+    assert compiler.compile_assurance_slice(left)["manifest"]["manifest_hash"] == compiler.compile_assurance_slice(right)["manifest"]["manifest_hash"]
+
+
+def test_unknown_missing_and_absent_extension_refuse_exactly():
+    value = valid_input(); value["surprise"] = True
+    refusal(value, "INPUT_UNKNOWN_FIELD", "compiler_input")
+    value = valid_input(); del value["repository"]
+    refusal(value, "INPUT_MISSING_FIELD", "compiler_input")
+    value = valid_input(); value["assurance_slice"] = None
+    refusal(value, "ASSURANCE_SLICE_ABSENT", "assurance_slice")
+
+
+def test_work_request_plan_and_slice_binding_mismatches_are_distinct():
+    value = valid_input(); value["work_request"]["state_version"] += 1
+    refusal(value, "WORK_REQUEST_BINDING_MISMATCH", "work_request")
+    value = valid_input(); value["accepted_plan_revision"]["revision"] += 1
+    refusal(value, "ACCEPTED_PLAN_BINDING_MISMATCH", "accepted_plan_revision")
+    value = valid_input(); value["assurance_slice"]["engineering_slice_plan_digest"] = "sha256:" + "9" * 64; seal_contract(value)
+    refusal(value, "ENGINEERING_SLICE_PLAN_BINDING_MISMATCH", "assurance_slice.engineering_slice_plan_digest")
+    value = valid_input(); value["assurance_slice"]["slice_ref"] = "slice:missing"; seal_contract(value)
+    refusal(value, "SLICE_BINDING_MISMATCH", "assurance_slice.slice_ref")
+
+
+@pytest.mark.parametrize("bad", ["/absolute.py", "./dot.py", "a/../b.py", "a\\b.py", "a/*.py", "unicodé.py"])
+def test_invalid_path_forms_refuse_with_the_exact_path_object(bad):
+    value = valid_input(); value["assurance_slice"]["path_claims"][0]["path"] = bad
+    refusal(value, "PATH_INVALID", "assurance_slice.path_claims[0].path")
+
+
+def test_case_alias_and_allowed_forbidden_component_ancestry_refuse():
+    value = valid_input(); value["assurance_slice"]["forbidden_paths"].append({"path":"Tools/room-bridge/other.py","mode":"file"})
+    refusal(value, "PATH_CASE_ALIAS", "assurance_slice.path_claims")
+    value = valid_input(); value["assurance_slice"]["forbidden_paths"] = [{"path":"tools","mode":"tree"}]
+    refusal(value, "PATH_SCOPE_COLLISION", "tools/room-bridge/assurance_slice_compiler.py")
+
+
+def test_dependency_missing_and_unsatisfied_have_causal_slice_ref():
+    value = valid_input(); value["coordination_snapshot"]["dependencies"] = []; seal_coordination(value)
+    refusal(value, "DEPENDENCY_MISSING", "slice:contracts")
+    value = valid_input(); dep = value["coordination_snapshot"]["dependencies"][0]; dep["state"] = "pending"; dep["evidence_digest"] = None; seal_coordination(value)
+    refusal(value, "DEPENDENCY_UNSATISFIED", "slice:contracts")
+
+
+@pytest.mark.parametrize("operation", ["write", "rename_source", "rename_destination"])
+def test_active_foreign_file_or_tree_lease_collision_includes_rename_claims(operation):
+    value = valid_input()
+    value["coordination_snapshot"]["leases"].append({"lease_id":"lease:foreign","state":"active","holder_session_id":"session:foreign","holder_host_id":"host:other","expires_at":"2026-08-30T15:30:00Z","fencing_generation":2,"claims":[{"path":"tools/room-bridge","mode":"tree","operation":operation}]})
+    seal_coordination(value)
+    refusal(value, "FOREIGN_LEASE_COLLISION", "tools/room-bridge/assurance_slice_compiler.py")
+
+
+def test_stale_snapshot_expired_lease_and_released_lease_are_not_equivalent():
+    value = valid_input(); value["coordination_snapshot"]["valid_until"] = value["coordination_snapshot"]["as_of"]
+    refusal(value, "COORDINATION_SNAPSHOT_STALE", "coordination_snapshot.valid_until")
+    value = valid_input(); value["coordination_snapshot"]["leases"][0]["expires_at"] = "2026-08-30T14:59:59Z"; seal_coordination(value)
+    refusal(value, "LEASE_EXPIRED", "lease:lease:a1a")
+    value = valid_input(); value["coordination_snapshot"]["leases"][0]["state"] = "released"; seal_coordination(value)
+    refusal(value, "LEASE_RELEASED", "lease:lease:a1a")
+
+
+def test_stale_rule_digest_and_repository_identity_mismatch_refuse():
+    value = valid_input(); value["applicable_rules"]["rules"][0]["revision"] += 1; seal_rules(value, update_binding=False)
+    refusal(value, "RULE_SNAPSHOT_STALE", "applicable_rules")
+    value = valid_input(); value["repository"]["tree_sha"] = "9" * 40
+    refusal(value, "REPOSITORY_IDENTITY_MISMATCH", "repository")
+
+
+def test_owner_acceptance_cannot_substitute_for_independent_review():
+    value = valid_input(); value["assurance_slice"]["reviewer_policy"]["owner_acceptance_is_review"] = True
+    refusal(value, "REVIEWER_POLICY_INVALID", "assurance_slice.reviewer_policy")
+
+
+def test_required_commands_refine_exact_planned_checks_and_reviewer_names_executor():
+    value = valid_input(); value["assurance_slice"]["required_tests"][0]["check_ref"] = "check:unplanned"; seal_contract(value)
+    refusal(value, "SLICE_BINDING_MISMATCH", "assurance_slice.required_tests")
+    value = valid_input(); value["assurance_slice"]["reviewer_policy"]["executor_actor_ref"] = "actor:someone-else"; seal_contract(value)
+    refusal(value, "REVIEWER_POLICY_INVALID", "assurance_slice.reviewer_policy")
+
+
+def test_lease_holder_is_the_bound_executor_session_and_host():
+    value = valid_input(); value["assurance_slice"]["executor_identity"]["host_ref"] = "host:other"; seal_contract(value)
+    refusal(value, "LEASE_BINDING_MISMATCH", "assurance_slice.lease_binding")
+
+
+def test_output_cannot_claim_authorization_verification_or_self_certification():
+    manifest = compiler.compile_assurance_slice(valid_input())["manifest"]
+    schema = json.loads((ROOT / "control-room/contracts/assurance-execution-manifest.v1.schema.json").read_text())
+    assert schema["properties"]["authority_state"]["const"] == manifest["authority_state"]
+    assert schema["properties"]["verification_state"]["const"] == manifest["verification_state"]
+    assert schema["properties"]["self_certification"]["const"] is manifest["self_certification"] is False
+
+
+def test_every_bound_category_and_compiler_version_changes_manifest_hash():
+    baseline = valid_input()
+    baseline_hash = compiler.compile_assurance_slice(baseline)["manifest"]["manifest_hash"]
+    variants = []
+    contract_change = copy.deepcopy(baseline); contract_change["assurance_slice"]["unfinished_work"].append("A serial consumer changed"); seal_contract(contract_change); variants.append(contract_change)
+    rule_change = copy.deepcopy(baseline); rule_change["applicable_rules"]["rules"][0]["revision"] += 1; seal_rules(rule_change); seal_contract(rule_change); variants.append(rule_change)
+    coord_change = copy.deepcopy(baseline); coord_change["coordination_snapshot"]["valid_until"] = "2026-08-30T16:30:00Z"; seal_coordination(coord_change); variants.append(coord_change)
+    repo_change = copy.deepcopy(baseline); repo_change["repository"]["commit_sha"] = "9" * 40; repo_change["assurance_slice"]["repository_binding"]["commit_sha"] = "9" * 40; seal_contract(repo_change); variants.append(repo_change)
+    for value in variants:
+        result = compiler.compile_assurance_slice(value)
+        assert result["ok"] is True, result
+        assert result["manifest"]["manifest_hash"] != baseline_hash
+    versioned = compiler.compile_assurance_slice(baseline, compiler_version="1.0.1")
+    assert versioned["ok"] is True and versioned["manifest"]["manifest_hash"] != baseline_hash
+
+
+def test_module_has_no_provider_network_git_database_model_or_write_imports():
+    source = (BRIDGE / "assurance_slice_compiler.py").read_text()
+    for forbidden in ("requests", "urllib", "subprocess", "psycopg", "openai", "anthropic", ".write_text(", "open("):
+        assert forbidden not in source
