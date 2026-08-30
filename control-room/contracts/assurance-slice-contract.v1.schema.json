@@ -55,21 +55,7 @@
       "minLength": 1
     },
     "risk": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "risk_class",
-        "summary"
-      ],
-      "properties": {
-        "risk_class": {
-          "pattern": "^R[0-6]$"
-        },
-        "summary": {
-          "type": "string",
-          "minLength": 1
-        }
-      }
+      "$ref": "#/$defs/Risk"
     },
     "path_claims": {
       "type": "array",
@@ -319,7 +305,7 @@
     },
     "RepoPath": {
       "type": "string",
-      "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*[\\\\*?\\[\\]{}!])[\\x21-\\x7e]+$"
+      "pattern": "^(?!/)(?!.*//)(?!.*/$)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*[\\\\*?\\[\\]{}!])[\\x21-\\x7e]+$"
     },
     "WorkBinding": {
       "type": "object",
@@ -446,7 +432,9 @@
       "required": [
         "check_ref",
         "planned_check_digest",
-        "test_artifact_path",
+        "runner",
+        "test_artifact",
+        "environment",
         "argv",
         "cwd",
         "causal_failure",
@@ -456,11 +444,28 @@
         "check_ref": {
           "$ref": "#/$defs/Id"
         },
+        "planned_check_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "runner": {
+          "enum": [
+            "python_pytest",
+            "python_script",
+            "node_test",
+            "repository_gate"
+          ]
+        },
+        "test_artifact": {
+          "$ref": "#/$defs/ReadBinding"
+        },
+        "environment": {
+          "$ref": "#/$defs/TestEnvironment"
+        },
         "argv": {
           "$ref": "#/$defs/Argv"
         },
         "cwd": {
-          "$ref": "#/$defs/RepoPath"
+          "$ref": "#/$defs/Cwd"
         },
         "causal_failure": {
           "type": "object",
@@ -472,12 +477,10 @@
           ],
           "properties": {
             "code": {
-              "type": "string",
-              "minLength": 1
+              "const": "REQUIRED_CHECK_FAILED"
             },
             "object": {
-              "type": "string",
-              "minLength": 1
+              "$ref": "#/$defs/Id"
             },
             "expected": {
               "type": "string",
@@ -493,12 +496,75 @@
             "type": "string",
             "minLength": 1
           }
+        }
+      }
+    },
+    "Cwd": {
+      "oneOf": [
+        {
+          "const": "."
         },
-        "planned_check_digest": {
-          "$ref": "#/$defs/Digest"
-        },
-        "test_artifact_path": {
+        {
           "$ref": "#/$defs/RepoPath"
+        }
+      ]
+    },
+    "ReadBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "digest"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/RepoPath"
+        },
+        "digest": {
+          "$ref": "#/$defs/Digest"
+        }
+      }
+    },
+    "TestEnvironment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "environment_ref",
+        "runtime",
+        "version_source",
+        "dependency_lock"
+      ],
+      "properties": {
+        "environment_ref": {
+          "$ref": "#/$defs/Id"
+        },
+        "runtime": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version_source": {
+          "$ref": "#/$defs/ReadBinding"
+        },
+        "dependency_lock": {
+          "$ref": "#/$defs/ReadBinding"
+        }
+      }
+    },
+    "Risk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "risk_class",
+        "summary"
+      ],
+      "properties": {
+        "risk_class": {
+          "pattern": "^R[0-6]$",
+          "type": "string"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
         }
       }
     }

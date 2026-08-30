@@ -37,7 +37,7 @@ REFUSAL_CODES = (
 
 _INPUT_FIELDS = {
     "schema_version", "work_request", "accepted_plan_revision", "engineering_slice_plan",
-    "assurance_slice", "repository", "applicable_rules", "coordination_snapshot", "evaluation_time",
+    "assurance_slice", "repository", "applicable_rules", "coordination_snapshot", "declared_evaluation_time",
 }
 _CONTRACT_FIELDS = {
     "schema_version", "contract_digest", "work_request", "accepted_plan_revision",
@@ -188,6 +188,19 @@ def _paths_overlap(a: dict[str, Any], b: dict[str, Any]) -> bool:
     return ap == bp or (a["mode"] == "tree" and bp.startswith(ap + "/")) or (b["mode"] == "tree" and ap.startswith(bp + "/"))
 
 
+def _cwd(value: Any, label: str) -> str:
+    if value == ".":
+        return value
+    return _path(value, label)
+
+
+def _read_binding(value: Any, label: str) -> dict[str, str]:
+    row = _exact(value, {"path", "digest"}, label)
+    _path(row["path"], label + ".path")
+    _digest(row["digest"], label + ".digest")
+    return row
+
+
 def _resolved_repo_path(cwd: str, argument: str) -> str | None:
     if not isinstance(argument, str) or not argument or argument.startswith("-") or argument.startswith("/") or "\\" in argument or _GLOB.search(argument):
         return None
@@ -254,16 +267,24 @@ def _validate_contract(value: Any) -> dict[str, Any]:
         _refuse("FIELD_INVALID", "assurance_slice.required_tests", "non-empty list", row["required_tests"])
     _unique(row["required_tests"], "assurance_slice.required_tests", key="check_ref")
     for index, test in enumerate(row["required_tests"]):
-        item = _exact(test, {"check_ref", "planned_check_digest", "test_artifact_path", "argv", "cwd", "causal_failure", "evidence_fields"}, f"assurance_slice.required_tests[{index}]")
-        _string(item["check_ref"], f"assurance_slice.required_tests[{index}].check_ref", identifier=True)
-        _digest(item["planned_check_digest"], f"assurance_slice.required_tests[{index}].planned_check_digest")
-        _path(item["test_artifact_path"], f"assurance_slice.required_tests[{index}].test_artifact_path")
+        label = f"assurance_slice.required_tests[{index}]"
+        item = _exact(test, {"check_ref", "planned_check_digest", "runner", "test_artifact", "environment", "argv", "cwd", "causal_failure", "evidence_fields"}, label)
+        _string(item["check_ref"], label + ".check_ref", identifier=True)
+        _digest(item["planned_check_digest"], label + ".planned_check_digest")
+        if item["runner"] not in {"python_pytest", "python_script", "node_test", "repository_gate"}:
+            _refuse("FIELD_INVALID", label + ".runner", ["python_pytest", "python_script", "node_test", "repository_gate"], item["runner"])
+        _read_binding(item["test_artifact"], label + ".test_artifact")
+        environment = _exact(item["environment"], {"environment_ref", "runtime", "version_source", "dependency_lock"}, label + ".environment")
+        _string(environment["environment_ref"], label + ".environment.environment_ref", identifier=True)
+        _string(environment["runtime"], label + ".environment.runtime")
+        _read_binding(environment["version_source"], label + ".environment.version_source")
+        _read_binding(environment["dependency_lock"], label + ".environment.dependency_lock")
         if not isinstance(item["argv"], list) or not item["argv"] or not all(isinstance(x, str) and x for x in item["argv"]):
-            _refuse("FIELD_INVALID", f"assurance_slice.required_tests[{index}].argv", "non-empty argv string list", item["argv"])
-        _path(item["cwd"], f"assurance_slice.required_tests[{index}].cwd")
-        failure = _exact(item["causal_failure"], {"code", "object", "expected"}, f"assurance_slice.required_tests[{index}].causal_failure")
+            _refuse("FIELD_INVALID", label + ".argv", "non-empty argv string list", item["argv"])
+        _cwd(item["cwd"], label + ".cwd")
+        failure = _exact(item["causal_failure"], {"code", "object", "expected"}, label + ".causal_failure")
         for field in failure:
-            _string(failure[field], f"assurance_slice.required_tests[{index}].causal_failure.{field}")
+            _string(failure[field], label + ".causal_failure." + field)
         if not isinstance(item["evidence_fields"], list) or not item["evidence_fields"] or not all(isinstance(x, str) and x for x in item["evidence_fields"]):
             _refuse("FIELD_INVALID", f"assurance_slice.required_tests[{index}].evidence_fields", "non-empty unique string list", item["evidence_fields"])
         _unique(item["evidence_fields"], f"assurance_slice.required_tests[{index}].evidence_fields")
@@ -414,18 +435,29 @@ def _enforce_bindings(value: dict[str, Any], contract: dict[str, Any], plan: dic
     if planned_checks != required_checks:
         _refuse("SLICE_BINDING_MISMATCH", "assurance_slice.required_tests", planned_checks, required_checks)
     planned_by_ref = {check["check_ref"]: check for check in selected["planned_checks"]}
-    claimed_paths = {claim["path"] for claim in contract["path_claims"]}
     for required in contract["required_tests"]:
         planned = planned_by_ref[required["check_ref"]]
         planned_digest = execution_contract.canonical_digest(planned)
         if required["planned_check_digest"] != planned_digest:
             _refuse("REQUIRED_TEST_BINDING_MISMATCH", required["check_ref"], planned_digest, required["planned_check_digest"])
-        if required["causal_failure"]["expected"] != planned["failure_condition"]:
-            _refuse("REQUIRED_TEST_BINDING_MISMATCH", required["check_ref"], planned["failure_condition"], required["causal_failure"]["expected"])
-        artifact = required["test_artifact_path"]
-        resolved_arguments = {_resolved_repo_path(required["cwd"], argument) for argument in required["argv"]}
-        if artifact not in claimed_paths or artifact not in resolved_arguments:
-            _refuse("REQUIRED_TEST_BINDING_MISMATCH", required["check_ref"], {"claimed_test_artifact": artifact, "argv_resolves_to_artifact": True}, {"claimed": artifact in claimed_paths, "resolved_argv_paths": sorted(path for path in resolved_arguments if path is not None)})
+        expected_failure = {"code": "REQUIRED_CHECK_FAILED", "object": required["check_ref"], "expected": planned["failure_condition"]}
+        if required["causal_failure"] != expected_failure:
+            _refuse("REQUIRED_TEST_BINDING_MISMATCH", required["check_ref"], expected_failure, required["causal_failure"])
+        artifact = required["test_artifact"]["path"]
+        artifact_arg = next((argument for argument in required["argv"] if _resolved_repo_path(required["cwd"], argument) == artifact), None)
+        runtime = required["environment"]["runtime"]
+        runner = required["runner"]
+        expected_argv: list[str] | None
+        if runner == "python_pytest":
+            expected_argv = [runtime, "-m", "pytest", "-q", artifact_arg] if artifact_arg is not None and (artifact.endswith(".py") and (artifact.rsplit("/", 1)[-1].startswith(("test-", "test_")))) else None
+        elif runner == "python_script":
+            expected_argv = [runtime, artifact_arg] if artifact_arg is not None and artifact.endswith(".py") and artifact.rsplit("/", 1)[-1].startswith(("test-", "test_")) else None
+        elif runner == "node_test":
+            expected_argv = [runtime, "--test", artifact_arg] if artifact_arg is not None and artifact.endswith(".test.mjs") else None
+        else:
+            expected_argv = required["argv"] if artifact_arg == required["argv"][0] else None
+        if expected_argv is None or required["argv"] != expected_argv:
+            _refuse("REQUIRED_TEST_BINDING_MISMATCH", required["check_ref"], {"runner": runner, "runtime": runtime, "executes_test_artifact": artifact}, required["argv"])
     identity = contract["executor_identity"]
     policy = contract["reviewer_policy"]
     if policy["executor_actor_ref"] != identity["actor_ref"] or policy["executor_session_ref"] != identity["session_ref"]:
@@ -448,7 +480,7 @@ def _enforce_bindings(value: dict[str, Any], contract: dict[str, Any], plan: dic
         _refuse("LEASE_RELEASED", f"lease:{lease['lease_id']}", "active", "released")
     lease_expires = _timestamp(lease["expires_at"], "lease.expires_at")
     if lease_expires <= evaluation_time:
-        _refuse("LEASE_EXPIRED", f"lease:{lease['lease_id']}", f"> {value['evaluation_time']}", lease["expires_at"])
+        _refuse("LEASE_EXPIRED", f"lease:{lease['lease_id']}", f"> {value['declared_evaluation_time']}", lease["expires_at"])
     if lease_expires < _timestamp(coord["valid_until"], "coordination_snapshot.valid_until"):
         _refuse("LEASE_EXPIRED", f"lease:{lease['lease_id']}", f">= {coord['valid_until']}", lease["expires_at"])
     actual_binding = {key: lease[key] for key in ("lease_id", "fencing_generation", "holder_session_id", "holder_host_id")}
@@ -488,7 +520,7 @@ def _compile(value: Any, *, compiler_version: str) -> dict[str, Any]:
         _refuse("INPUT_SCHEMA_UNSUPPORTED", "compiler_input.schema_version", INPUT_SCHEMA, row["schema_version"])
     _binding(row["work_request"], "work_request")
     _plan_binding(row["accepted_plan_revision"], "accepted_plan_revision")
-    evaluation_time = _timestamp(row["evaluation_time"], "evaluation_time")
+    evaluation_time = _timestamp(row["declared_evaluation_time"], "declared_evaluation_time")
     if row["assurance_slice"] is None:
         _refuse("ASSURANCE_SLICE_ABSENT", "assurance_slice", CONTRACT_SCHEMA, None)
     try:
@@ -497,7 +529,7 @@ def _compile(value: Any, *, compiler_version: str) -> dict[str, Any]:
         _refuse("ENGINEERING_SLICE_PLAN_INVALID", "engineering_slice_plan", "valid engineering-slice-plan.v1", str(exc))
     contract = _validate_contract(row["assurance_slice"])
     rules = _validate_rules(row["applicable_rules"])
-    coord = _validate_coordination(row["coordination_snapshot"], evaluation_time, row["evaluation_time"])
+    coord = _validate_coordination(row["coordination_snapshot"], evaluation_time, row["declared_evaluation_time"])
     selected, lease = _enforce_bindings(row, contract, plan, rules, coord, evaluation_time)
     normalized_input = _normalized_input(row)
     input_digest = execution_contract.canonical_digest(normalized_input)
@@ -535,11 +567,14 @@ def _compile(value: Any, *, compiler_version: str) -> dict[str, Any]:
         },
         "currentness": {
             "manifest_phase": "baseline", "authorizes_action": False,
-            "evaluated_at": row["evaluation_time"],
+            "currentness_state": "declared_window_consistent_not_live_verified",
+            "live_currentness_verified": False,
+            "declared_evaluation_time": row["declared_evaluation_time"],
             "snapshot_as_of": coord["as_of"],
             "snapshot_valid_until": coord["valid_until"],
             "lease_expires_at": lease["expires_at"],
-            "usable_only_as_preflight_for": ["write", "test"],
+            "usable_only_as_preflight_for": [],
+            "requires_live_currentness_check_before": ["write", "test", "commit", "push", "pr_update", "review", "merge", "runtime_action"],
             "recompile_against_resulting_commit_tree_before": ["commit", "push", "pr_update", "review", "merge", "runtime_action"],
         },
         "refusal_vocabulary": list(REFUSAL_CODES),

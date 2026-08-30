@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -17,6 +19,21 @@ import assurance_slice_compiler as compiler  # noqa: E402
 import execution_contract  # noqa: E402
 
 FIXTURE = ROOT / "control-room/contracts/fixtures/execution-fabric/assurance-compiler.valid.v1.json"
+
+
+def schema_valid(schema: dict, entry: str, value: object) -> bool:
+    source = """
+import fs from "node:fs";
+import {compileSchema} from "./workspace/contracts/schema-validator.mjs";
+const payload = JSON.parse(fs.readFileSync(0, "utf8"));
+process.stdout.write(JSON.stringify(compileSchema(payload.schema, payload.schema.$defs[payload.entry])(payload.value)));
+"""
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", source], cwd=ROOT,
+        input=json.dumps({"schema": schema, "entry": entry, "value": value}),
+        text=True, capture_output=True, check=True,
+    )
+    return json.loads(result.stdout)["valid"] is True
 
 
 def _digest_without(value: dict, field: str) -> str:
@@ -82,13 +99,22 @@ def test_valid_compilation_is_deterministic_and_manifest_is_immutable_posture():
     assert manifest["verification_state"] == "unverified"
     assert manifest["self_certification"] is False
     assert manifest["currentness"]["authorizes_action"] is False
-    assert manifest["currentness"]["evaluated_at"] == value["evaluation_time"]
+    assert manifest["currentness"]["currentness_state"] == "declared_window_consistent_not_live_verified"
+    assert manifest["currentness"]["live_currentness_verified"] is False
+    assert manifest["currentness"]["declared_evaluation_time"] == value["declared_evaluation_time"]
     assert manifest["currentness"]["snapshot_as_of"] == value["coordination_snapshot"]["as_of"]
     assert manifest["currentness"]["snapshot_valid_until"] == value["coordination_snapshot"]["valid_until"]
     assert manifest["currentness"]["lease_expires_at"] == value["coordination_snapshot"]["leases"][0]["expires_at"]
     assert manifest["currentness"]["recompile_against_resulting_commit_tree_before"] == ["commit", "push", "pr_update", "review", "merge", "runtime_action"]
-    assert manifest["slice"]["required_tests"][0]["argv"] == ["python3", "test-assurance-slice-compiler.py"]
-    assert manifest["slice"]["required_tests"][0]["cwd"] == "tools"
+    assert manifest["currentness"]["usable_only_as_preflight_for"] == []
+    assert manifest["currentness"]["requires_live_currentness_check_before"][:2] == ["write", "test"]
+    assert manifest["slice"]["required_tests"][0]["runner"] == "python_pytest"
+    assert manifest["slice"]["required_tests"][0]["argv"] == ["python3", "-m", "pytest", "-q", "tools/test-assurance-slice-compiler.py"]
+    assert manifest["slice"]["required_tests"][0]["cwd"] == "."
+    required = manifest["slice"]["required_tests"][0]
+    for binding in (required["test_artifact"], required["environment"]["version_source"], required["environment"]["dependency_lock"]):
+        actual = "sha256:" + hashlib.sha256((ROOT / binding["path"]).read_bytes()).hexdigest()
+        assert binding["digest"] == actual
     assert manifest["manifest_hash"] == execution_contract.canonical_digest({k: v for k, v in manifest.items() if k != "manifest_hash"})
 
 
@@ -158,13 +184,23 @@ def test_active_foreign_file_or_tree_lease_collision_includes_rename_claims(oper
 def test_stale_snapshot_expired_lease_and_released_lease_are_not_equivalent():
     value = valid_input(); value["coordination_snapshot"]["valid_until"] = value["coordination_snapshot"]["as_of"]
     refusal(value, "COORDINATION_SNAPSHOT_STALE", "coordination_snapshot.valid_until")
-    value = valid_input(); value["evaluation_time"] = "2026-08-30T21:37:24Z"
+    value = valid_input(); value["declared_evaluation_time"] = "2026-08-30T21:37:24Z"
     refusal(value, "COORDINATION_SNAPSHOT_STALE", "coordination_snapshot.valid_until")
     for field, bad in (("as_of", "2026-13-01T15:00:00Z"), ("valid_until", "2026-02-30T16:00:00Z")):
         value = valid_input(); value["coordination_snapshot"][field] = bad
         refusal(value, "FIELD_INVALID", f"coordination_snapshot.{field}")
     value = valid_input(); value["coordination_snapshot"]["leases"][0]["expires_at"] = "2026-02-30T16:00:00Z"; seal_coordination(value)
     refusal(value, "FIELD_INVALID", "coordination_snapshot.leases[0].expires_at")
+    value = valid_input()
+    value["declared_evaluation_time"] = "2000-01-01T00:00:01Z"
+    value["coordination_snapshot"]["as_of"] = "2000-01-01T00:00:00Z"
+    value["coordination_snapshot"]["valid_until"] = "2000-01-01T01:00:00Z"
+    value["coordination_snapshot"]["leases"][0]["expires_at"] = "2000-01-01T01:00:00Z"
+    seal_coordination(value)
+    result = compiler.compile_assurance_slice(value)
+    assert result["ok"] is True
+    assert result["manifest"]["currentness"]["currentness_state"] == "declared_window_consistent_not_live_verified"
+    assert result["manifest"]["currentness"]["usable_only_as_preflight_for"] == []
     value = valid_input(); value["coordination_snapshot"]["leases"][0]["expires_at"] = "2026-08-30T14:59:59Z"; seal_coordination(value)
     refusal(value, "LEASE_EXPIRED", "lease:lease:a1a")
     value = valid_input(); value["coordination_snapshot"]["leases"][0]["state"] = "released"; seal_coordination(value)
@@ -188,10 +224,21 @@ def test_required_commands_refine_exact_planned_checks_and_reviewer_names_execut
     refusal(value, "SLICE_BINDING_MISMATCH", "assurance_slice.required_tests")
     value = valid_input(); value["assurance_slice"]["required_tests"][0]["planned_check_digest"] = "sha256:" + "9" * 64; seal_contract(value)
     refusal(value, "REQUIRED_TEST_BINDING_MISMATCH", "check:compiler")
-    value = valid_input(); value["assurance_slice"]["required_tests"][0]["argv"] = ["true"]; seal_contract(value)
+    value = valid_input(); value["assurance_slice"]["required_tests"][0]["argv"] = ["true", "tools/test-assurance-slice-compiler.py"]; seal_contract(value)
+    refusal(value, "REQUIRED_TEST_BINDING_MISMATCH", "check:compiler")
+    value = valid_input(); required = value["assurance_slice"]["required_tests"][0]; required["test_artifact"] = {"path":"tools/room-bridge/assurance_slice_compiler.py","digest":"sha256:" + "8" * 64}; required["argv"][-1] = required["test_artifact"]["path"]; seal_contract(value)
     refusal(value, "REQUIRED_TEST_BINDING_MISMATCH", "check:compiler")
     value = valid_input(); value["assurance_slice"]["required_tests"][0]["causal_failure"]["expected"] = "anything exits nonzero"; seal_contract(value)
     refusal(value, "REQUIRED_TEST_BINDING_MISMATCH", "check:compiler")
+    value = valid_input(); value["assurance_slice"]["required_tests"][0]["causal_failure"]["code"] = "generic_nonzero"; seal_contract(value)
+    refusal(value, "REQUIRED_TEST_BINDING_MISMATCH", "check:compiler")
+    value = valid_input(); value["assurance_slice"]["required_tests"][0]["causal_failure"]["object"] = "anything"; seal_contract(value)
+    refusal(value, "REQUIRED_TEST_BINDING_MISMATCH", "check:compiler")
+    value = valid_input(); artifact = value["assurance_slice"]["required_tests"][0]["test_artifact"]["path"]
+    value["assurance_slice"]["path_claims"] = [claim for claim in value["assurance_slice"]["path_claims"] if claim["path"] != artifact]
+    value["coordination_snapshot"]["leases"][0]["claims"] = [claim for claim in value["coordination_snapshot"]["leases"][0]["claims"] if claim["path"] != artifact]
+    seal_coordination(value); seal_contract(value)
+    assert compiler.compile_assurance_slice(value)["ok"] is True
     value = valid_input(); value["assurance_slice"]["reviewer_policy"]["executor_actor_ref"] = "actor:someone-else"; seal_contract(value)
     refusal(value, "REVIEWER_POLICY_INVALID", "assurance_slice.reviewer_policy")
 
@@ -215,6 +262,17 @@ def test_output_cannot_claim_authorization_verification_or_self_certification():
     assert schema["properties"]["self_certification"]["const"] is manifest["self_certification"] is False
     for name in ("Risk", "DependencyGate", "EvidenceRequirement", "ReviewerPolicy", "ObservableOutput", "Rollback", "LeaseBinding", "ExecutorIdentity"):
         assert schema["$defs"][name]["additionalProperties"] is False
+    slice_schema = json.loads((ROOT / "control-room/contracts/assurance-slice-contract.v1.schema.json").read_text())
+    input_schema = json.loads((ROOT / "control-room/contracts/assurance-compiler-input.v1.schema.json").read_text())
+    assert schema_valid(slice_schema, "Risk", {"risk_class":"R1","summary":"bounded"})
+    assert not schema_valid(slice_schema, "Risk", {"risk_class":1,"summary":"bounded"})
+    for bad in ("tools//test.py", "tools/", "tools/space path.py"):
+        assert not schema_valid(slice_schema, "RepoPath", bad)
+    assert schema_valid(slice_schema, "RepoPath", "tools/test.py")
+    assert schema_valid(input_schema, "Timestamp", "2026-08-30T15:00:00Z")
+    for bad in ("2026-13-01T15:00:00Z", "2026-02-30T16:00:00Z"):
+        assert not schema_valid(input_schema, "Timestamp", bad)
+        assert not schema_valid(schema, "Timestamp", bad)
     value = valid_input(); fields = value["assurance_slice"]["required_tests"][0]["evidence_fields"]; fields.append(fields[0]); seal_contract(value)
     refusal(value, "FIELD_INVALID", "assurance_slice.required_tests[0].evidence_fields")
     value = valid_input(); value["assurance_slice"]["evidence_requirements"][0]["required_fields"] = [1]; seal_contract(value)
