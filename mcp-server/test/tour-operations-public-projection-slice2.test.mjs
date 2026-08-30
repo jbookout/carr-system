@@ -107,6 +107,24 @@ test("canonical projection digest matches the database UTF-8 byte contract vecto
     "sha256:73c90187e235a2e7262bf8de28ea4b61f69721cb8e60e8876092d3337d134bb7");
 });
 
+test("canonical projection digest matches PostgreSQL lowercase UUID text", () => {
+  const lower = withProjectionBody("approved");
+  const upper = {
+    ...lower,
+    projection: {
+      ...lower.projection,
+      id: lower.projection.id.toUpperCase(),
+      tour_id: lower.projection.tour_id.toUpperCase(),
+    },
+    facts: lower.facts.map(item => ({
+      ...item,
+      property_id: item.property_id.toUpperCase(),
+      field_assertion_id: item.field_assertion_id.toUpperCase(),
+    })),
+  };
+  assert.equal(canonicalProjectionDigest(upper), canonicalProjectionDigest(lower));
+});
+
 test("canonical projection digest binds immutable public-map coordinate selection", () => {
   const base = { ...withProjectionBody("approved"), map_points: [{
     property_id: membership.property_id,
@@ -226,6 +244,22 @@ test("projection creation is draft-only and a complete seal requires the full se
     projection: sealed.projection,
     facts: [...sealed.input.facts, { ...fact, id: "duplicate-fact" }],
   }), /PROJECTION_INCOMPLETE/);
+
+  let coercions = 0;
+  const coerciblePropertyId = {
+    toString() {
+      coercions++;
+      return membership.property_id;
+    },
+  };
+  assert.throws(() => validateProjectionComplete({
+    ...sealed.input,
+    projection: sealed.projection,
+    memberships: [{ ...membership, property_id: coerciblePropertyId }],
+    facts: sealed.input.facts.map(item => ({ ...item, property_id: coerciblePropertyId })),
+    assertions: sealed.input.assertions.map(item => ({ ...item, property_id: coerciblePropertyId })),
+  }), /PROJECTION_INCOMPLETE/);
+  assert.equal(coercions, 0, "complete-projection identity objects must not be coerced");
 });
 
 test("internal-only assertions neither enter nor perturb the public projection, but an internal fact is refused", () => {

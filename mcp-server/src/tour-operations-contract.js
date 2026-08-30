@@ -731,6 +731,18 @@ export function canonicalProjectionDigest(input) {
         !Number.isInteger(point.route_version) || point.route_version < 1)
       throw new Error("PROJECTION_INCOMPLETE");
   }
+  projection.tour_id = projection.tour_id.toLowerCase();
+  projection.id = projection.id.toLowerCase();
+  for (let index = 0; index < factRows.length; index++) {
+    factRows[index].property_id = factRows[index].property_id.toLowerCase();
+    factRows[index].field_assertion_id = factRows[index].field_assertion_id.toLowerCase();
+  }
+  for (let index = 0; index < mapPointRows.length; index++) {
+    mapPointRows[index].property_id = mapPointRows[index].property_id.toLowerCase();
+    mapPointRows[index].coordinate_candidate_id = mapPointRows[index].coordinate_candidate_id.toLowerCase();
+    mapPointRows[index].entrance_verification_receipt_id =
+      mapPointRows[index].entrance_verification_receipt_id.toLowerCase();
+  }
   const facts = new Array(factRows.length);
   for (let index = 0; index < factRows.length; index++) facts[index] = factRows[index];
   const mapPoints = new Array(mapPointRows.length);
@@ -970,6 +982,28 @@ export function validateProjectionComplete({
   }
   if (!selected.length || selected.length !== membershipRows.length)
     throw new Error("PROJECTION_INCOMPLETE");
+  for (let index = 0; index < selected.length; index++) {
+    const membership = selected[index];
+    if (typeof membership.organization_tenant_id !== "string" ||
+        !membership.organization_tenant_id.trim() ||
+        !postgresTextIsSafe(membership.organization_tenant_id) ||
+        !foundationUuidIsSafe(membership.tour_id) ||
+        !foundationUuidIsSafe(membership.property_id) ||
+        !Number.isInteger(membership.route_version) || membership.route_version < 1)
+      throw new Error("PROJECTION_INCOMPLETE");
+  }
+  for (let index = 0; index < factRows.length; index++) {
+    const fact = factRows[index];
+    if (typeof fact.organization_tenant_id !== "string" ||
+        !fact.organization_tenant_id.trim() ||
+        !postgresTextIsSafe(fact.organization_tenant_id) ||
+        !foundationUuidIsSafe(fact.projection_id) ||
+        !foundationUuidIsSafe(fact.property_id) ||
+        !foundationUuidIsSafe(fact.field_assertion_id) ||
+        !Number.isInteger(fact.route_version) || fact.route_version < 1 ||
+        typeof fact.display_field_key !== "string" || !fact.display_field_key.trim() ||
+        !postgresTextIsSafe(fact.display_field_key)) throw new Error("PROJECTION_INCOMPLETE");
+  }
   const selectedPropertyCounts = new Map();
   for (let index = 0; index < selected.length; index++) {
     const propertyId = selected[index].property_id;
