@@ -304,3 +304,24 @@ test("malformed identifiers, digests, timestamps, and selected fact sets fail cl
   }), error => error instanceof ToolError && error.payload.error === "tour_selected_facts_invalid");
   assert.equal(h.calls.length, 0);
 });
+
+test("PostgreSQL-unrepresentable rights text fails before envelope or database access", async () => {
+  const invalidCases = [
+    { provider: "bad\u0000provider" },
+    { provider: "bad\ud800provider" },
+    { policy_key: "bad\udc00policy" },
+    { intended_use: "bad\ud800use" },
+    { allowed_field_classes: ["display.name\u0000internal"] },
+    { allowed_use_classes: ["client_public_display\ud800"] },
+  ];
+  for (const invalid of invalidCases) {
+    const h = harness();
+    await assert.rejects(
+      h.tools["append-tour-rights-receipt"].handler(
+        h.client, actor, { ...rightsArgs, ...invalid }),
+      error => error instanceof ToolError && error.payload.error === "tour_input_invalid",
+    );
+    assert.equal(h.calls.length, 0);
+    assert.equal(h.envelopes.length, 0);
+  }
+});

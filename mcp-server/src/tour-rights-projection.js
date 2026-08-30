@@ -67,8 +67,24 @@ function exactFields(args, allowed, ToolError) {
   if (fields.length) fail(ToolError, { error: "tour_input_unknown_field", fields });
 }
 
+function isPostgresText(value) {
+  for (let index = 0; index < value.length; index++) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit === 0) return false;
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      if (index + 1 >= value.length) return false;
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) return false;
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function text(value, field, ToolError) {
-  if (typeof value !== "string" || !value.trim())
+  if (typeof value !== "string" || !value.trim() || !isPostgresText(value))
     fail(ToolError, { error: "tour_input_invalid", field });
   return value.trim();
 }
@@ -233,9 +249,7 @@ function stringArray(value, field, ToolError) {
   const normalized = new Array(values.length);
   const seen = new Set();
   for (let index = 0; index < values.length; index++) {
-    if (typeof values[index] !== "string" || !values[index].trim())
-      fail(ToolError, { error: "tour_input_invalid", field });
-    normalized[index] = values[index].trim();
+    normalized[index] = text(values[index], field, ToolError);
     if (seen.has(normalized[index])) fail(ToolError, { error: "tour_input_invalid", field });
     seen.add(normalized[index]);
   }
