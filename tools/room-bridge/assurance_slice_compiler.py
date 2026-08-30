@@ -51,6 +51,29 @@ _DIGEST = execution_contract.SHA256
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _GLOB = re.compile(r"[*?\[\]{}!]")
 
+_CHECK_PROFILES: dict[str, dict[str, Any]] = {
+    "check:compiler": {
+        "check_profile_ref": "check-profile:assurance-compiler-v1",
+        "runner": "python_pytest",
+        "test_artifact_path": "tools/test-assurance-slice-compiler.py",
+        "environment_ref": "environment:repository-python-lock",
+        "runtime": "python3",
+        "version_source_path": ".python-version",
+        "dependency_lock_path": "requirements.lock",
+        "argv": ["python3", "-m", "pytest", "-q", "tools/test-assurance-slice-compiler.py"],
+        "cwd": ".",
+        "environment_gate": {
+            "argv": ["python3", "-c", "import pytest"],
+            "must_pass_before_test": True,
+            "causal_failure": {
+                "code": "TEST_ENVIRONMENT_NOT_MATERIALIZED",
+                "object": "environment:repository-python-lock",
+                "expected": "pytest importable from requirements.lock",
+            },
+        },
+    },
+}
+
 
 class _Refusal(Exception):
     def __init__(self, code: str, causal_object: str, expected: Any, actual: Any):
@@ -268,9 +291,10 @@ def _validate_contract(value: Any) -> dict[str, Any]:
     _unique(row["required_tests"], "assurance_slice.required_tests", key="check_ref")
     for index, test in enumerate(row["required_tests"]):
         label = f"assurance_slice.required_tests[{index}]"
-        item = _exact(test, {"check_ref", "planned_check_digest", "runner", "test_artifact", "environment", "argv", "cwd", "causal_failure", "evidence_fields"}, label)
+        item = _exact(test, {"check_ref", "planned_check_digest", "check_profile_ref", "runner", "test_artifact", "environment", "environment_gate", "argv", "cwd", "causal_failure", "evidence_fields"}, label)
         _string(item["check_ref"], label + ".check_ref", identifier=True)
         _digest(item["planned_check_digest"], label + ".planned_check_digest")
+        _string(item["check_profile_ref"], label + ".check_profile_ref", identifier=True)
         if item["runner"] not in {"python_pytest", "python_script", "node_test", "repository_gate"}:
             _refuse("FIELD_INVALID", label + ".runner", ["python_pytest", "python_script", "node_test", "repository_gate"], item["runner"])
         _read_binding(item["test_artifact"], label + ".test_artifact")
@@ -279,6 +303,14 @@ def _validate_contract(value: Any) -> dict[str, Any]:
         _string(environment["runtime"], label + ".environment.runtime")
         _read_binding(environment["version_source"], label + ".environment.version_source")
         _read_binding(environment["dependency_lock"], label + ".environment.dependency_lock")
+        gate = _exact(item["environment_gate"], {"argv", "must_pass_before_test", "causal_failure"}, label + ".environment_gate")
+        if not isinstance(gate["argv"], list) or not gate["argv"] or not all(isinstance(x, str) and x for x in gate["argv"]):
+            _refuse("FIELD_INVALID", label + ".environment_gate.argv", "non-empty argv string list", gate["argv"])
+        if gate["must_pass_before_test"] is not True:
+            _refuse("FIELD_INVALID", label + ".environment_gate.must_pass_before_test", True, gate["must_pass_before_test"])
+        gate_failure = _exact(gate["causal_failure"], {"code", "object", "expected"}, label + ".environment_gate.causal_failure")
+        for field in gate_failure:
+            _string(gate_failure[field], label + ".environment_gate.causal_failure." + field)
         if not isinstance(item["argv"], list) or not item["argv"] or not all(isinstance(x, str) and x for x in item["argv"]):
             _refuse("FIELD_INVALID", label + ".argv", "non-empty argv string list", item["argv"])
         _cwd(item["cwd"], label + ".cwd")
@@ -443,21 +475,23 @@ def _enforce_bindings(value: dict[str, Any], contract: dict[str, Any], plan: dic
         expected_failure = {"code": "REQUIRED_CHECK_FAILED", "object": required["check_ref"], "expected": planned["failure_condition"]}
         if required["causal_failure"] != expected_failure:
             _refuse("REQUIRED_TEST_BINDING_MISMATCH", required["check_ref"], expected_failure, required["causal_failure"])
-        artifact = required["test_artifact"]["path"]
-        artifact_arg = next((argument for argument in required["argv"] if _resolved_repo_path(required["cwd"], argument) == artifact), None)
-        runtime = required["environment"]["runtime"]
-        runner = required["runner"]
-        expected_argv: list[str] | None
-        if runner == "python_pytest":
-            expected_argv = [runtime, "-m", "pytest", "-q", artifact_arg] if artifact_arg is not None and (artifact.endswith(".py") and (artifact.rsplit("/", 1)[-1].startswith(("test-", "test_")))) else None
-        elif runner == "python_script":
-            expected_argv = [runtime, artifact_arg] if artifact_arg is not None and artifact.endswith(".py") and artifact.rsplit("/", 1)[-1].startswith(("test-", "test_")) else None
-        elif runner == "node_test":
-            expected_argv = [runtime, "--test", artifact_arg] if artifact_arg is not None and artifact.endswith(".test.mjs") else None
-        else:
-            expected_argv = required["argv"] if artifact_arg == required["argv"][0] else None
-        if expected_argv is None or required["argv"] != expected_argv:
-            _refuse("REQUIRED_TEST_BINDING_MISMATCH", required["check_ref"], {"runner": runner, "runtime": runtime, "executes_test_artifact": artifact}, required["argv"])
+        profile = _CHECK_PROFILES.get(required["check_ref"])
+        if profile is None:
+            _refuse("REQUIRED_TEST_BINDING_MISMATCH", required["check_ref"], "compiler-registered check profile", None)
+        actual_profile = {
+            "check_profile_ref": required["check_profile_ref"],
+            "runner": required["runner"],
+            "test_artifact_path": required["test_artifact"]["path"],
+            "environment_ref": required["environment"]["environment_ref"],
+            "runtime": required["environment"]["runtime"],
+            "version_source_path": required["environment"]["version_source"]["path"],
+            "dependency_lock_path": required["environment"]["dependency_lock"]["path"],
+            "argv": required["argv"],
+            "cwd": required["cwd"],
+            "environment_gate": required["environment_gate"],
+        }
+        if actual_profile != profile:
+            _refuse("REQUIRED_TEST_BINDING_MISMATCH", required["check_ref"], profile, actual_profile)
     identity = contract["executor_identity"]
     policy = contract["reviewer_policy"]
     if policy["executor_actor_ref"] != identity["actor_ref"] or policy["executor_session_ref"] != identity["session_ref"]:

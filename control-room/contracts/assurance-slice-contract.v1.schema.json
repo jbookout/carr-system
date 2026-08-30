@@ -432,9 +432,11 @@
       "required": [
         "check_ref",
         "planned_check_digest",
+        "check_profile_ref",
         "runner",
         "test_artifact",
         "environment",
+        "environment_gate",
         "argv",
         "cwd",
         "causal_failure",
@@ -442,50 +444,115 @@
       ],
       "properties": {
         "check_ref": {
-          "$ref": "#/$defs/Id"
+          "const": "check:compiler"
         },
         "planned_check_digest": {
-          "$ref": "#/$defs/Digest"
+          "const": "sha256:9c24ba42a8800e13dca584e204200d1680014b57e401ec0959245d6851268327"
+        },
+        "check_profile_ref": {
+          "const": "check-profile:assurance-compiler-v1"
         },
         "runner": {
-          "enum": [
-            "python_pytest",
-            "python_script",
-            "node_test",
-            "repository_gate"
-          ]
+          "const": "python_pytest"
         },
         "test_artifact": {
-          "$ref": "#/$defs/ReadBinding"
-        },
-        "environment": {
-          "$ref": "#/$defs/TestEnvironment"
-        },
-        "argv": {
-          "$ref": "#/$defs/Argv"
-        },
-        "cwd": {
-          "$ref": "#/$defs/Cwd"
-        },
-        "causal_failure": {
           "type": "object",
           "additionalProperties": false,
           "required": [
-            "code",
-            "object",
-            "expected"
+            "path",
+            "digest"
           ],
           "properties": {
-            "code": {
-              "const": "REQUIRED_CHECK_FAILED"
+            "path": {
+              "const": "tools/test-assurance-slice-compiler.py"
             },
-            "object": {
-              "$ref": "#/$defs/Id"
-            },
-            "expected": {
-              "type": "string",
-              "minLength": 1
+            "digest": {
+              "$ref": "#/$defs/Digest"
             }
+          }
+        },
+        "environment": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "environment_ref",
+            "runtime",
+            "version_source",
+            "dependency_lock"
+          ],
+          "properties": {
+            "environment_ref": {
+              "const": "environment:repository-python-lock"
+            },
+            "runtime": {
+              "const": "python3"
+            },
+            "version_source": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "path",
+                "digest"
+              ],
+              "properties": {
+                "path": {
+                  "const": ".python-version"
+                },
+                "digest": {
+                  "$ref": "#/$defs/Digest"
+                }
+              }
+            },
+            "dependency_lock": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "path",
+                "digest"
+              ],
+              "properties": {
+                "path": {
+                  "const": "requirements.lock"
+                },
+                "digest": {
+                  "$ref": "#/$defs/Digest"
+                }
+              }
+            }
+          }
+        },
+        "environment_gate": {
+          "const": {
+            "argv": [
+              "python3",
+              "-c",
+              "import pytest"
+            ],
+            "must_pass_before_test": true,
+            "causal_failure": {
+              "code": "TEST_ENVIRONMENT_NOT_MATERIALIZED",
+              "object": "environment:repository-python-lock",
+              "expected": "pytest importable from requirements.lock"
+            }
+          }
+        },
+        "argv": {
+          "const": [
+            "python3",
+            "-m",
+            "pytest",
+            "-q",
+            "tools/test-assurance-slice-compiler.py"
+          ]
+        },
+        "cwd": {
+          "const": "."
+        },
+        "causal_failure": {
+          "const": {
+            "code": "REQUIRED_CHECK_FAILED",
+            "object": "check:compiler",
+            "expected": "invalid input compiles or refusal loses its causal object"
           }
         },
         "evidence_fields": {

@@ -94,7 +94,7 @@
   },
   "assurance_slice": {
     "schema_version": "assurance-slice-contract.v1",
-    "contract_digest": "sha256:5a4d897e326905abff87a4acbe2d7d057ccb2387507b3156de1593cc549bf36b",
+    "contract_digest": "sha256:80bb481fd0337b8d914f53da0f649e3eacf325a05486279e200b81da836ecc6a",
     "work_request": {
       "id": "wr:assurance-kernel",
       "state_version": 3,
@@ -166,7 +166,7 @@
         "runner": "python_pytest",
         "test_artifact": {
           "path": "tools/test-assurance-slice-compiler.py",
-          "digest": "sha256:c5239e2051cb61e913531e238833e283397dac3d6c931315a1ad0ae733ccbaef"
+          "digest": "sha256:12f577fef90baf616994873ea40e731b0ca1c193c537a2e8b134d1d4993c2a0b"
         },
         "environment": {
           "environment_ref": "environment:repository-python-lock",
@@ -178,6 +178,20 @@
           "dependency_lock": {
             "path": "requirements.lock",
             "digest": "sha256:7ac085f76c2b003ba3b5325ad23b1318a0e2e50e820ae0482f585190445c7631"
+          }
+        },
+        "check_profile_ref": "check-profile:assurance-compiler-v1",
+        "environment_gate": {
+          "argv": [
+            "python3",
+            "-c",
+            "import pytest"
+          ],
+          "must_pass_before_test": true,
+          "causal_failure": {
+            "code": "TEST_ENVIRONMENT_NOT_MATERIALIZED",
+            "object": "environment:repository-python-lock",
+            "expected": "pytest importable from requirements.lock"
           }
         }
       }

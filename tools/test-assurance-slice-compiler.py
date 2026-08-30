@@ -108,10 +108,14 @@ def test_valid_compilation_is_deterministic_and_manifest_is_immutable_posture():
     assert manifest["currentness"]["recompile_against_resulting_commit_tree_before"] == ["commit", "push", "pr_update", "review", "merge", "runtime_action"]
     assert manifest["currentness"]["usable_only_as_preflight_for"] == []
     assert manifest["currentness"]["requires_live_currentness_check_before"][:2] == ["write", "test"]
+    assert manifest["slice"]["required_tests"][0]["check_profile_ref"] == "check-profile:assurance-compiler-v1"
     assert manifest["slice"]["required_tests"][0]["runner"] == "python_pytest"
     assert manifest["slice"]["required_tests"][0]["argv"] == ["python3", "-m", "pytest", "-q", "tools/test-assurance-slice-compiler.py"]
     assert manifest["slice"]["required_tests"][0]["cwd"] == "."
     required = manifest["slice"]["required_tests"][0]
+    assert required["environment_gate"] == compiler._CHECK_PROFILES["check:compiler"]["environment_gate"]
+    assert required["environment_gate"]["must_pass_before_test"] is True
+    assert required["environment_gate"]["argv"][0] == required["environment"]["runtime"] == required["argv"][0]
     for binding in (required["test_artifact"], required["environment"]["version_source"], required["environment"]["dependency_lock"]):
         actual = "sha256:" + hashlib.sha256((ROOT / binding["path"]).read_bytes()).hexdigest()
         assert binding["digest"] == actual
@@ -228,6 +232,14 @@ def test_required_commands_refine_exact_planned_checks_and_reviewer_names_execut
     refusal(value, "REQUIRED_TEST_BINDING_MISMATCH", "check:compiler")
     value = valid_input(); required = value["assurance_slice"]["required_tests"][0]; required["test_artifact"] = {"path":"tools/room-bridge/assurance_slice_compiler.py","digest":"sha256:" + "8" * 64}; required["argv"][-1] = required["test_artifact"]["path"]; seal_contract(value)
     refusal(value, "REQUIRED_TEST_BINDING_MISMATCH", "check:compiler")
+    value = valid_input(); required = value["assurance_slice"]["required_tests"][0]; required["environment"]["runtime"] = "true"; required["argv"][0] = "true"; required["environment_gate"]["argv"][0] = "true"; seal_contract(value)
+    refusal(value, "REQUIRED_TEST_BINDING_MISMATCH", "check:compiler")
+    value = valid_input(); required = value["assurance_slice"]["required_tests"][0]; required["test_artifact"] = {"path":"tools/room-bridge/test_engineering_passport_unit.py","digest":"sha256:" + "7" * 64}; required["argv"][-1] = required["test_artifact"]["path"]; seal_contract(value)
+    refusal(value, "REQUIRED_TEST_BINDING_MISMATCH", "check:compiler")
+    value = valid_input(); value["assurance_slice"]["required_tests"][0]["check_profile_ref"] = "check-profile:foreign"; seal_contract(value)
+    refusal(value, "REQUIRED_TEST_BINDING_MISMATCH", "check:compiler")
+    value = valid_input(); value["assurance_slice"]["required_tests"][0]["environment_gate"]["must_pass_before_test"] = False
+    refusal(value, "FIELD_INVALID", "assurance_slice.required_tests[0].environment_gate.must_pass_before_test")
     value = valid_input(); value["assurance_slice"]["required_tests"][0]["causal_failure"]["expected"] = "anything exits nonzero"; seal_contract(value)
     refusal(value, "REQUIRED_TEST_BINDING_MISMATCH", "check:compiler")
     value = valid_input(); value["assurance_slice"]["required_tests"][0]["causal_failure"]["code"] = "generic_nonzero"; seal_contract(value)
@@ -264,6 +276,10 @@ def test_output_cannot_claim_authorization_verification_or_self_certification():
         assert schema["$defs"][name]["additionalProperties"] is False
     slice_schema = json.loads((ROOT / "control-room/contracts/assurance-slice-contract.v1.schema.json").read_text())
     input_schema = json.loads((ROOT / "control-room/contracts/assurance-compiler-input.v1.schema.json").read_text())
+    required_schema_value = valid_input()["assurance_slice"]["required_tests"][0]
+    assert schema_valid(slice_schema, "RequiredTest", required_schema_value)
+    altered = copy.deepcopy(required_schema_value); altered["environment"]["runtime"] = "true"; altered["argv"][0] = "true"
+    assert not schema_valid(slice_schema, "RequiredTest", altered)
     assert schema_valid(slice_schema, "Risk", {"risk_class":"R1","summary":"bounded"})
     assert not schema_valid(slice_schema, "Risk", {"risk_class":1,"summary":"bounded"})
     for bad in ("tools//test.py", "tools/", "tools/space path.py"):
