@@ -12,8 +12,8 @@ import {
 const root = path.resolve(import.meta.dirname, "../..");
 const fixture = JSON.parse(fs.readFileSync(path.join(root, "mcp-server/test/fixtures/tour-operations-foundation.v1.json"), "utf8"));
 const { projection_fact: fact, field_assertion: assertion, membership, projection, source_evidence: evidence, rights_receipt: rights } = fixture;
-const addressAssertion = { ...assertion, id: "address-assertion", field_key: "display.address", value: "1 Synthetic Way" };
-const addressFact = { ...fact, id: "address-fact", field_assertion_id: addressAssertion.id, display_field_key: addressAssertion.field_key };
+const addressAssertion = { ...assertion, id: "44444444-4444-4444-8444-444444444445", field_key: "display.address", value: "1 Synthetic Way" };
+const addressFact = { ...fact, id: "55555555-5555-4555-8555-555555555556", field_assertion_id: addressAssertion.id, display_field_key: addressAssertion.field_key };
 const completeFacts = [fact, addressFact];
 const completeAssertions = [assertion, addressAssertion];
 const completeInput = {
@@ -107,6 +107,24 @@ test("canonical projection digest matches the database UTF-8 byte contract vecto
     "sha256:73c90187e235a2e7262bf8de28ea4b61f69721cb8e60e8876092d3337d134bb7");
 });
 
+test("canonical projection digest matches PostgreSQL lowercase UUID text", () => {
+  const lower = withProjectionBody("approved");
+  const upper = {
+    ...lower,
+    projection: {
+      ...lower.projection,
+      id: lower.projection.id.toUpperCase(),
+      tour_id: lower.projection.tour_id.toUpperCase(),
+    },
+    facts: lower.facts.map(item => ({
+      ...item,
+      property_id: item.property_id.toUpperCase(),
+      field_assertion_id: item.field_assertion_id.toUpperCase(),
+    })),
+  };
+  assert.equal(canonicalProjectionDigest(upper), canonicalProjectionDigest(lower));
+});
+
 test("canonical projection digest binds immutable public-map coordinate selection", () => {
   const base = { ...withProjectionBody("approved"), map_points: [{
     property_id: membership.property_id,
@@ -117,6 +135,49 @@ test("canonical projection digest binds immutable public-map coordinate selectio
   const digest = canonicalProjectionDigest(base);
   assert.notEqual(digest, canonicalProjectionDigest({ ...base, map_points: [] }));
   assert.throws(() => assertProjectionDigest({ ...base, map_points: [{ ...base.map_points[0], coordinate_candidate_id: "10000000-0000-4000-8000-000000000072" }] }, digest), /PROJECTION_DIGEST_MISMATCH/);
+});
+
+test("canonical projection digest refuses authority accessors instead of rereading them", () => {
+  const changingFact = { ...fact };
+  delete changingFact.field_assertion_id;
+  let reads = 0;
+  Object.defineProperty(changingFact, "field_assertion_id", {
+    enumerable: true,
+    get() { return reads++ === 0 ? fact.field_assertion_id : addressAssertion.id; },
+  });
+  assert.throws(() => canonicalProjectionDigest({
+    ...withProjectionBody("approved"), facts: [changingFact],
+  }), /PROJECTION_INCOMPLETE/);
+  assert.equal(reads, 0, "digest authority accessors must never execute");
+});
+
+test("canonical projection digest refuses coercible identifier objects", () => {
+  let reads = 0;
+  const coercibleId = {
+    toString() {
+      reads++;
+      return reads === 1 ? fact.property_id : membership.property_id;
+    },
+  };
+  assert.throws(() => canonicalProjectionDigest({
+    ...withProjectionBody("approved"),
+    facts: [{ ...fact, property_id: coercibleId }],
+  }), /PROJECTION_INCOMPLETE/);
+  assert.equal(reads, 0, "identifier objects must not be coerced");
+});
+
+test("canonical projection digest ignores inherited Array slice overrides", () => {
+  const input = withProjectionBody("approved");
+  const expected = canonicalProjectionDigest(input);
+  const originalSlice = Array.prototype.slice;
+  let actual;
+  try {
+    Array.prototype.slice = () => [];
+    actual = canonicalProjectionDigest(input);
+  } finally {
+    Array.prototype.slice = originalSlice;
+  }
+  assert.equal(actual, expected);
 });
 
 test("complete-projection validation includes sealed public-map points in digest parity", () => {
@@ -157,6 +218,48 @@ test("projection creation is draft-only and a complete seal requires the full se
     projection_digest: tamperedDigest,
     seal_receipt: { ...sealed.projection.seal_receipt, canonical_projection_digest: tamperedDigest },
   } }), /PROJECTION_DIGEST_MISMATCH|DIGEST/);
+
+  const extraAssertion = {
+    ...assertion,
+    id: "10000000-0000-4000-8000-000000000098",
+    property_id: "10000000-0000-4000-8000-000000000099",
+    field_key: "internal_note",
+    value: "broker-only secret",
+    data_classification: "internal",
+  };
+  const unboundInternalFact = {
+    ...fact,
+    property_id: extraAssertion.property_id,
+    field_assertion_id: extraAssertion.id,
+    display_field_key: extraAssertion.field_key,
+  };
+  assert.throws(() => validateProjectionComplete({
+    ...sealed.input,
+    projection: sealed.projection,
+    facts: [...sealed.input.facts, unboundInternalFact],
+    assertions: [...sealed.input.assertions, extraAssertion],
+  }), /PROJECTION_INCOMPLETE/);
+  assert.throws(() => validateProjectionComplete({
+    ...sealed.input,
+    projection: sealed.projection,
+    facts: [...sealed.input.facts, { ...fact, id: "duplicate-fact" }],
+  }), /PROJECTION_INCOMPLETE/);
+
+  let coercions = 0;
+  const coerciblePropertyId = {
+    toString() {
+      coercions++;
+      return membership.property_id;
+    },
+  };
+  assert.throws(() => validateProjectionComplete({
+    ...sealed.input,
+    projection: sealed.projection,
+    memberships: [{ ...membership, property_id: coerciblePropertyId }],
+    facts: sealed.input.facts.map(item => ({ ...item, property_id: coerciblePropertyId })),
+    assertions: sealed.input.assertions.map(item => ({ ...item, property_id: coerciblePropertyId })),
+  }), /PROJECTION_INCOMPLETE/);
+  assert.equal(coercions, 0, "complete-projection identity objects must not be coerced");
 });
 
 test("internal-only assertions neither enter nor perturb the public projection, but an internal fact is refused", () => {
@@ -176,4 +279,113 @@ test("internal-only assertions neither enter nor perturb the public projection, 
   assert.ok(validateProjectionComplete(withUnreferencedInternal), "unreferenced internal material must not interfere with the public read model");
   const internalFact = { ...fact, field_assertion_id: internalAssertion.id, display_field_key: "internal_note" };
   assert.throws(() => validateProjectionComplete({ ...sealed.input, projection: sealed.projection, facts: [internalFact], assertions: [internalAssertion] }), /PUBLIC_FIELD|PUBLIC_ASSERTION|INTERNAL|PROJECTION/);
+});
+
+test("unresolved evidence, confidence, and field conflicts are quarantined", () => {
+  const sealed = sealedProjectionInput();
+  const conflictId = "10000000-0000-4000-8000-000000000090";
+  const resolution = {
+    id: "10000000-0000-4000-8000-000000000091",
+    organization_tenant_id: fixture.tenant,
+    conflict_id: conflictId,
+    selected_field_assertion_id: fact.field_assertion_id,
+    rationale: "Verified source selected",
+    evidence: { source_evidence_id: evidence.id },
+    resolver_actor_id: "actor:proof",
+    resolved_at: "2026-08-24T12:00:00Z",
+    receipt_digest: "sha256:" + "d".repeat(64),
+    created_at: "2026-08-24T12:00:01Z",
+  };
+  const participant = {
+    organization_tenant_id: fixture.tenant,
+    conflict_id: conflictId,
+    field_assertion_id: fact.field_assertion_id,
+    participant_role: "candidate",
+  };
+  assert.throws(() => validateProjectionComplete({
+    ...sealed.input,
+    projection: sealed.projection,
+    evidence: [{ ...evidence, retrieval_status: "partial" }],
+  }), /EVIDENCE_UNRESOLVED/);
+  assert.throws(() => validateProjectionComplete({
+    ...sealed.input,
+    projection: sealed.projection,
+    assertions: completeAssertions.map(item => ({ ...item, confidence: "unknown" })),
+  }), /PUBLIC_ASSERTION_UNRESOLVED/);
+  assert.throws(() => validateProjectionComplete({
+    ...sealed.input,
+    projection: sealed.projection,
+    conflicts: [{
+      id: conflictId,
+      organization_tenant_id: fixture.tenant,
+      property_id: membership.property_id,
+      field_key: fact.display_field_key,
+      state: "open",
+      opened_at: "2026-08-24T00:00:00Z",
+    }],
+  }), /PUBLIC_ASSERTION_CONFLICTED/);
+  assert.equal(validateProjectionComplete({
+    ...sealed.input,
+    projection: sealed.projection,
+    conflicts: [{
+      id: conflictId, organization_tenant_id: fixture.tenant,
+      property_id: membership.property_id, field_key: fact.display_field_key,
+      state: "open", opened_at: "2026-08-24T00:00:00Z",
+    }],
+    conflict_resolutions: [resolution],
+    conflict_participants: [participant],
+  }), true);
+  const baseConflictInput = {
+    ...sealed.input,
+    projection: sealed.projection,
+    conflicts: [{
+      id: conflictId, organization_tenant_id: fixture.tenant,
+      property_id: membership.property_id, field_key: fact.display_field_key,
+      state: "open", opened_at: "2026-08-24T00:00:00Z",
+    }],
+    conflict_participants: [participant],
+  };
+  for (const incompleteResolution of [
+    (({ receipt_digest: _ignored, ...rest }) => rest)(resolution),
+    { ...resolution, rationale: "" },
+    { ...resolution, evidence: null },
+    { ...resolution, resolver_actor_id: "" },
+    { ...resolution, created_at: undefined },
+  ]) assert.throws(() => validateProjectionComplete({
+    ...baseConflictInput, conflict_resolutions: [incompleteResolution],
+  }), /PUBLIC_ASSERTION_CONFLICTED/);
+  const changingResolution = { ...resolution };
+  delete changingResolution.resolved_at;
+  let resolutionReads = 0;
+  Object.defineProperty(changingResolution, "resolved_at", {
+    enumerable: true,
+    get() { return resolutionReads++ === 0 ? "2026-08-26T12:00:00Z" : "2026-08-24T12:00:00Z"; },
+  });
+  assert.throws(() => validateProjectionComplete({
+    ...baseConflictInput, conflict_resolutions: [changingResolution],
+  }), /PUBLIC_ASSERTION_CONFLICTED|PROJECTION_INCOMPLETE/);
+  assert.equal(resolutionReads, 0, "resolution accessors must never execute");
+  assert.throws(() => validateProjectionComplete({
+    ...baseConflictInput,
+    conflict_resolutions: [resolution],
+    conflict_participants: [{ ...participant, field_assertion_id: addressAssertion.id }],
+  }), /PUBLIC_ASSERTION_CONFLICTED/);
+  const shadowedResolutions = [];
+  Object.defineProperty(shadowedResolutions, "some", { value: () => true });
+  assert.throws(() => validateProjectionComplete({
+    ...baseConflictInput,
+    conflict_resolutions: shadowedResolutions,
+  }), /PROJECTION_INCOMPLETE|PUBLIC_ASSERTION_CONFLICTED/);
+  const shadowedConflicts = [];
+  Object.defineProperty(shadowedConflicts, "some", { value: () => false });
+  assert.throws(() => validateProjectionComplete({
+    ...sealed.input, projection: sealed.projection, conflicts: shadowedConflicts,
+  }), /PROJECTION_INCOMPLETE/);
+  const shadowedParticipants = [];
+  Object.defineProperty(shadowedParticipants, "some", { value: () => true });
+  assert.throws(() => validateProjectionComplete({
+    ...baseConflictInput,
+    conflict_resolutions: [resolution],
+    conflict_participants: shadowedParticipants,
+  }), /PROJECTION_INCOMPLETE|PUBLIC_ASSERTION_CONFLICTED/);
 });
