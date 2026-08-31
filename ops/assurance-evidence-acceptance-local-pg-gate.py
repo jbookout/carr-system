@@ -649,7 +649,8 @@ def main() -> int:
               len(manifest_race) == 2
               and all(row.get("ok") is True for row in manifest_race)
               and len({row.get("manifest_id") for row in manifest_race}) == 1
-              and sorted(row.get("replayed") for row in manifest_race) == [False, True])
+              and sum(row.get("replayed") is False for row in manifest_race) == 1
+              and sum(row.get("replayed") is True for row in manifest_race) == 1)
         evidence_race = race_calls(dsn, [setup_codex, setup_codex],
             "ops.record_assurance_evidence_extension", (
                 receipt_id, post_id, lease["lease_token"], Jsonb(evidence),
