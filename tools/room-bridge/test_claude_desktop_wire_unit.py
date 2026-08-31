@@ -154,7 +154,14 @@ def test_done_pending_hands_off_then_finishes_queue() -> None:
     class Executor:
         def finish_pending(self, pending: dict, raw_result: str) -> dict:
             finished.append((pending, raw_result))
-            return {"outcome": "review", "task_id": "t_queue0001"}
+            return {
+                "outcome": "review", "task_id": "t_queue0001",
+                "completion": {"queue_completion": {
+                    "v": 1, "task_id": "t_queue0001", "target": "claude-desktop",
+                    "outcome": "success", "summary": "Reviewed",
+                    "source_seq": 1, "source_msg_id": "queue:t_queue0001",
+                }},
+            }
 
     def post(**row) -> None:
         posted.append(row)
@@ -178,6 +185,8 @@ def test_done_pending_hands_off_then_finishes_queue() -> None:
     assert outcome["outcome"] == "review"
     assert handed == [SID] and finished[0][1] == result
     assert json.loads(posted[0]["body"])["claude_desktop_handoff"]["status"] == "opened"
+    assert json.loads(posted[1]["body"])["queue_completion"]["task_id"] == "t_queue0001"
+    assert posted[1]["idempotency_key"] == "queue-completion:t_queue0001"
     assert state_mod.get_pending(state, "claude-desktop") is None
 
 

@@ -363,8 +363,22 @@ def handle_pending(name: str, seat: str, state: dict, *, add_room_turn,
             if queue_executor is None:
                 return {"desk": name, "outcome": "queue_executor_unavailable"}
             terminal = queue_executor.finish_pending(pending, result_text)
+            completion = terminal.get("completion")
+            if not isinstance(completion, dict):
+                raise queue_dispatch.QueueDispatchError("queue completion callback is absent")
+            task_id = terminal.get("task_id")
+            if not isinstance(task_id, str) or not task_id.startswith("t_"):
+                raise queue_dispatch.QueueDispatchError("queue completion callback identity is invalid")
+            add_room_turn(
+                body=json.dumps(completion, separators=(",", ":")),
+                seat=seat,
+                kind="turn",
+                msg_id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"carr:queue-completion:{task_id}")),
+                idempotency_key=f"queue-completion:{task_id}",
+            )
             state_mod.clear_pending(state, name)
-            return {"desk": name, **terminal}
+            return {"desk": name, **{key: value for key, value in terminal.items()
+                                     if key != "completion"}}
         add_room_turn(body=result_text.strip() or "(empty reply)", seat=seat, kind="turn",
                       msg_id=str(uuid.uuid4()))
         state_mod.clear_pending(state, name)
@@ -785,8 +799,9 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
                             dispatch_msg_id=str(pending.get("dispatch_msg_id") or ""),
                             log_offset=offset,
                             injected_at=str(pending.get("injected_at") or _now()),
-                            source_msg_id=f"queue:{pending['kanban_task_id']}",
-                            source_seq=None,
+                            source_msg_id=str(pending.get("source_msg_id") or
+                                              f"queue:{pending['kanban_task_id']}"),
+                            source_seq=pending.get("source_seq"),
                             origin_kind="queue",
                             kanban_task_id=pending["kanban_task_id"],
                             target=pending["target"],
