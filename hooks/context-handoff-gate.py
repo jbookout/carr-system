@@ -48,6 +48,13 @@ WORKER_STATES = {
     "RUNNING", "IDLE", "WAITING_ATTENTION", "CAPACITY_EXHAUSTED",
     "ERROR", "TERMINAL",
 }
+SURFACES = {"claude", "codex"}
+OWNER_STATES = {"ACTIVE", "DRAINING", "SUCCESSOR_DECLARED", "TERMINAL"}
+HANDOFF_STATES = {
+    "DRAINING", "SUCCESSOR_DECLARED", "TAKEOVER_VERIFIED",
+    "PREDECESSOR_TERMINAL",
+}
+RECOVERY_STATES = {"PENDING", "COMPLETED", "ABORTED"}
 MUTATING_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 WORKER_TOOLS = {"Agent", "Task", "spawn_agent", "create_thread", "fork_thread"}
 WINDOW_KEYS = {"model_context_window", "context_window", "contextWindow"}
@@ -152,6 +159,11 @@ def load_json_file(path: Path) -> dict[str, Any] | None:
     return value
 
 
+def is_digest(value: Any) -> bool:
+    return (isinstance(value, str) and len(value) == 64
+            and all(char in "0123456789abcdef" for char in value))
+
+
 def validate_task_state(value: dict[str, Any], task_key: str) -> None:
     """Reject structurally inconsistent persisted lifecycle state.
 
@@ -159,10 +171,13 @@ def validate_task_state(value: dict[str, Any], task_key: str) -> None:
     Every reader must establish the small ownership/shape invariants it relies
     on before a Stop decision or state-machine transition can use them.
     """
+    if value.get("schema_version") != 1:
+        raise LifecycleError("LIFECYCLE_INVALID", "state schema version is invalid")
     if value.get("task_key") != task_key:
         raise LifecycleError("LIFECYCLE_INVALID", "state task_key mismatch")
     version = value.get("version")
-    if isinstance(version, bool) or not isinstance(version, int):
+    if (isinstance(version, bool) or not isinstance(version, int)
+            or version < -1):
         raise LifecycleError("LIFECYCLE_INVALID", "state version is not an integer")
     generation = value.get("generation")
     if (isinstance(generation, bool) or not isinstance(generation, int)
@@ -175,9 +190,22 @@ def validate_task_state(value: dict[str, Any], task_key: str) -> None:
     if not isinstance(owners, dict):
         raise LifecycleError("LIFECYCLE_INVALID", "owners is not an object")
     for owner_id, owner in owners.items():
-        if (not isinstance(owner_id, str) or not isinstance(owner, dict)
+        if (not isinstance(owner_id, str) or not owner_id
+                or not isinstance(owner, dict)
                 or owner.get("id") != owner_id):
             raise LifecycleError("LIFECYCLE_INVALID", "owner record is invalid")
+        owner_generation = owner.get("generation")
+        if (owner.get("surface") not in SURFACES
+                or owner.get("state") not in OWNER_STATES
+                or isinstance(owner_generation, bool)
+                or not isinstance(owner_generation, int)
+                or owner_generation < 0
+                or owner_generation > generation + 1
+                or (owner.get("evidence_digest") is not None
+                    and not is_digest(owner.get("evidence_digest")))
+                or owner.get("ownership_digest") != owner_digest(owner)):
+            raise LifecycleError("LIFECYCLE_INVALID",
+                                 "owner record semantics are invalid")
     active_owner = value.get("active_owner")
     if status == "ACTIVE":
         if not isinstance(active_owner, str) or active_owner not in owners:
@@ -191,6 +219,107 @@ def validate_task_state(value: dict[str, Any], task_key: str) -> None:
             raise LifecycleError("LIFECYCLE_INVALID", f"{field} is not an object")
     if not isinstance(value.get("signal"), dict):
         raise LifecycleError("LIFECYCLE_INVALID", "signal is not an object")
+
+    handoff = value.get("handoff") or {}
+    handoff_state = handoff.get("state")
+    if handoff and handoff_state not in HANDOFF_STATES:
+        raise LifecycleError("LIFECYCLE_INVALID", "handoff state is invalid")
+    if handoff:
+        predecessor = handoff.get("predecessor")
+        successor = handoff.get("successor")
+        handoff_generation = handoff.get("generation")
+        if (not isinstance(predecessor, str) or not predecessor
+                or not isinstance(successor, str) or not successor
+                or predecessor == successor
+                or predecessor not in owners
+                or isinstance(handoff_generation, bool)
+                or not isinstance(handoff_generation, int)
+                or not is_digest(handoff.get("offer_digest"))):
+            raise LifecycleError("LIFECYCLE_INVALID",
+                                 "handoff identity is invalid")
+        if handoff_state in {
+                "SUCCESSOR_DECLARED", "TAKEOVER_VERIFIED",
+                "PREDECESSOR_TERMINAL"}:
+            if (successor not in owners
+                    or not is_digest(handoff.get("declaration_digest"))):
+                raise LifecycleError("LIFECYCLE_INVALID",
+                                     "handoff declaration is invalid")
+        if handoff_state in {"TAKEOVER_VERIFIED", "PREDECESSOR_TERMINAL"}:
+            if (not is_digest(handoff.get("receipt_digest"))
+                    or not is_digest(handoff.get("final_digest"))):
+                raise LifecycleError("LIFECYCLE_INVALID",
+                                     "verified handoff receipts are invalid")
+
+        predecessor_state = owners[predecessor].get("state")
+        successor_state = (owners.get(successor) or {}).get("state")
+        if handoff_state == "DRAINING":
+            valid = (handoff_generation == generation + 1
+                     and active_owner == predecessor
+                     and predecessor_state == "DRAINING")
+        elif handoff_state == "SUCCESSOR_DECLARED":
+            valid = (handoff_generation == generation + 1
+                     and active_owner == predecessor
+                     and predecessor_state == "DRAINING"
+                     and successor_state == "SUCCESSOR_DECLARED"
+                     and owners[successor].get("generation") == handoff_generation)
+        elif handoff_state == "TAKEOVER_VERIFIED":
+            valid = (handoff_generation == generation
+                     and active_owner == successor
+                     and predecessor_state == "DRAINING"
+                     and successor_state == "ACTIVE"
+                     and owners[successor].get("generation") == generation)
+        else:
+            valid = (handoff_generation == generation
+                     and predecessor_state == "TERMINAL"
+                     and ((status == "ACTIVE" and active_owner == successor
+                           and successor_state == "ACTIVE")
+                          or (status == "TERMINAL" and active_owner is None
+                              and successor_state == "TERMINAL")))
+        if not valid:
+            raise LifecycleError("LIFECYCLE_INVALID",
+                                 "handoff ownership relationship is invalid")
+
+    recovery = value.get("recovery_intent") or {}
+    recovery_state = recovery.get("state")
+    if recovery and recovery_state not in RECOVERY_STATES:
+        raise LifecycleError("LIFECYCLE_INVALID", "recovery state is invalid")
+    if recovery:
+        failed_owner = recovery.get("failed_owner")
+        recovery_generation = recovery.get("generation")
+        if (recovery.get("task_key") != task_key
+                or failed_owner not in owners
+                or isinstance(recovery_generation, bool)
+                or not isinstance(recovery_generation, int)
+                or recovery_generation < 0
+                or not is_digest(recovery.get("nonce"))
+                or not is_digest(recovery.get("snapshot_digest"))
+                or not isinstance(recovery.get("source_event_id"), str)
+                or not recovery.get("source_event_id")):
+            raise LifecycleError("LIFECYCLE_INVALID",
+                                 "recovery identity is invalid")
+        failed_state = owners[failed_owner].get("state")
+        if recovery_state == "PENDING" and failed_state != "DRAINING":
+            raise LifecycleError("LIFECYCLE_INVALID",
+                                 "pending recovery owner is not draining")
+        if (recovery_state == "ABORTED" and status == "ACTIVE"
+                and failed_state != "ACTIVE"):
+            raise LifecycleError("LIFECYCLE_INVALID",
+                                 "aborted recovery owner is not active")
+
+    active_ids = [owner_id for owner_id, owner in owners.items()
+                  if owner.get("state") == "ACTIVE"]
+    transitional = (handoff_state in {"DRAINING", "SUCCESSOR_DECLARED"}
+                    or recovery_state == "PENDING")
+    if status == "ACTIVE":
+        expected_state = "DRAINING" if transitional else "ACTIVE"
+        if (owners[active_owner].get("state") != expected_state
+                or active_ids != ([] if transitional else [active_owner])):
+            raise LifecycleError("LIFECYCLE_INVALID",
+                                 "active ownership cardinality is invalid")
+    elif active_ids or any(owner.get("state") != "TERMINAL"
+                           for owner in owners.values()):
+        raise LifecycleError("LIFECYCLE_INVALID",
+                             "terminal task retains nonterminal owners")
 
 
 def atomic_write(path: Path, value: Any) -> None:
@@ -581,9 +710,12 @@ def context_decision(rows: list[dict[str, Any]], state: dict[str, Any],
                 "crossed": crossed, "fallback_level": fallback,
                 "reason": "CONTEXT_HANDOFF_REQUIRED" if crossed else None}
     reason = window.get("reason") or "CONTEXT_SIGNAL_UNAVAILABLE"
+    control_error = reason == "WINDOW_CONFIG_INVALID"
     return {"available": False, "used": used or None, "dense": is_dense,
-            "crossed": bool(fallback), "fallback_level": fallback,
-            "reason": "CONTEXT_HANDOFF_REQUIRED" if fallback else reason,
+            "crossed": bool(fallback) or control_error,
+            "fallback_level": fallback,
+            "reason": (reason if control_error else
+                       "CONTEXT_HANDOFF_REQUIRED" if fallback else reason),
             "signal_reason": reason, "window_tier": window.get("tier")}
 
 
@@ -671,21 +803,19 @@ def hook_main() -> int:
     if state.get("task_status") == "TERMINAL":
         return 0
     pending = state.get("handoff") or {}
-    caller = (state.get("owners") or {}).get(owner_id) or {}
-    if (pending.get("state") in {"TAKEOVER_VERIFIED", "PREDECESSOR_TERMINAL"}
-            and pending.get("predecessor") == owner_id
-            and caller.get("state") in {"DRAINING", "TERMINAL"}):
+    if pending.get("state") in {"TAKEOVER_VERIFIED", "PREDECESSOR_TERMINAL"}:
         try:
             verify_handoff_state(task_key, state, manifest)
-            return 0
         except LifecycleError as exc:
-            # Receipt integrity is a control-plane invariant, not a context
-            # threshold.  A low-signal draining predecessor must fail closed
-            # when the supposedly verified handoff packet no longer verifies.
             if event == "Stop":
                 print(canonical(block_payload(
                     task_key, state["version"], signal, exc.reason)).decode("utf-8"))
             return 0
+    caller = (state.get("owners") or {}).get(owner_id) or {}
+    if (pending.get("state") in {"TAKEOVER_VERIFIED", "PREDECESSOR_TERMINAL"}
+            and pending.get("predecessor") == owner_id
+            and caller.get("state") in {"DRAINING", "TERMINAL"}):
+        return 0
     if state.get("active_owner") != owner_id:
         if event == "Stop":
             print(canonical(block_payload(
@@ -693,7 +823,11 @@ def hook_main() -> int:
                 "OWNERSHIP_MISMATCH")).decode("utf-8"))
         return 0
     if event == "Stop" and signal.get("crossed"):
-        print(canonical(block_payload(task_key, state["version"], signal)).decode("utf-8"))
+        reason_code = ("WINDOW_CONFIG_INVALID"
+                       if signal.get("reason") == "WINDOW_CONFIG_INVALID"
+                       else "CONTEXT_HANDOFF_REQUIRED")
+        print(canonical(block_payload(
+            task_key, state["version"], signal, reason_code)).decode("utf-8"))
         return 0
     if event == "PostToolUse" and (signal.get("crossed") or not signal.get("available")):
         notice_key = str(signal.get("reason") or signal.get("signal_reason")
@@ -766,6 +900,14 @@ def validate_successor_evidence(offer: dict[str, Any], successor: str,
     surface = offer["successor_surface"]
     evidence_digest = validate_native_evidence(
         surface, evidence, expected_identity=successor, accept=accept)
+    if surface == "codex":
+        try:
+            Path(str(evidence.get("cwd"))).expanduser().resolve().relative_to(
+                REPO.resolve())
+        except (OSError, RuntimeError, ValueError):
+            raise LifecycleError(
+                "OWNERSHIP_MISMATCH",
+                "Codex successor is outside the CARR checkout")
     # A same-surface Codex handoff must stay in the project and checkout that
     # the predecessor offered. The thread id changes by design; changing the
     # project or cwd would be a different slice wearing this task_key.
@@ -955,21 +1097,38 @@ def verify_handoff_state(task_key: str, state: dict[str, Any],
         task_key, "declaration", pending["declaration_digest"], manifest)
     receipt = read_object(task_key, "receipt", pending["receipt_digest"], manifest)
     final = read_object(task_key, "final", pending["final_digest"], manifest)
-    if (declaration.get("offer_digest") != pending["offer_digest"]
+    acceptance = receipt.get("ownership_acceptance") or {}
+    if (offer.get("schema_version") != 1
+            or offer.get("task_key") != task_key
+            or offer.get("generation") != pending.get("generation")
+            or offer.get("predecessor") != pending.get("predecessor")
+            or offer.get("successor") != pending.get("successor")
+            or offer.get("predecessor_surface")
+            != (state.get("owners", {}).get(pending.get("predecessor")) or {}).get("surface")
+            or offer.get("successor_surface")
+            != (state.get("owners", {}).get(pending.get("successor")) or {}).get("surface")
+            or declaration.get("schema_version") != 1
+            or declaration.get("task_key") != task_key
+            or declaration.get("offer_digest") != pending["offer_digest"]
             or declaration.get("successor") != offer.get("successor")
+            or receipt.get("schema_version") != 1
+            or receipt.get("task_key") != task_key
             or receipt.get("offer_digest") != pending["offer_digest"]
             or receipt.get("declaration_digest") != pending["declaration_digest"]
+            or acceptance.get("successor") != offer.get("successor")
+            or acceptance.get("surface") != offer.get("successor_surface")
+            or final.get("schema_version") != 1
             or final.get("offer_digest") != pending["offer_digest"]
             or final.get("declaration_digest") != pending["declaration_digest"]
             or final.get("receipt_digest") != pending["receipt_digest"]
             or final.get("offer") != offer
             or final.get("declaration") != declaration
             or final.get("ownership_acceptance")
-            != receipt.get("ownership_acceptance")
+            != acceptance
             or declaration.get("native_evidence_digest")
-            != receipt.get("ownership_acceptance", {}).get("native_evidence_digest")
+            != acceptance.get("native_evidence_digest")
             or declaration.get("native_evidence")
-            != receipt.get("ownership_acceptance", {}).get("native_evidence")):
+            != acceptance.get("native_evidence")):
         raise LifecycleError("HANDOFF_RECEIPT_INVALID",
                              "offer/receipt/final linkage is invalid")
     return {"offer_digest": pending["offer_digest"],
@@ -1122,9 +1281,18 @@ def validate_snapshot(snapshot: Any, task_key: str,
                              "dispatcher snapshot keys are not exact")
     if snapshot.get("task_key") != task_key:
         raise LifecycleError("OWNERSHIP_MISMATCH", "snapshot task_key mismatch")
+    for field in ("source_event_id", "observer_id", "source_surface",
+                  "evidence_ref"):
+        if not isinstance(snapshot.get(field), str) or not snapshot[field].strip():
+            raise LifecycleError("RECOVERY_SNAPSHOT_INVALID",
+                                 f"{field} must be a non-empty string")
+    if snapshot.get("source_surface") not in SURFACES:
+        raise LifecycleError("RECOVERY_SNAPSHOT_INVALID",
+                             "source_surface is invalid")
     evidence = {key: snapshot.get(key) for key in SNAPSHOT_KEYS
                 if key != "evidence_digest"}
-    if digest(evidence) != snapshot.get("evidence_digest"):
+    if (not is_digest(snapshot.get("evidence_digest"))
+            or digest(evidence) != snapshot.get("evidence_digest")):
         raise LifecycleError("RECOVERY_SNAPSHOT_INVALID",
                              "snapshot evidence digest mismatch")
     now = dt.datetime.now(dt.timezone.utc)
@@ -1144,8 +1312,35 @@ def validate_snapshot(snapshot: Any, task_key: str,
     for worker in workers:
         if not isinstance(worker, dict) or set(worker) != WORKER_KEYS:
             raise LifecycleError("RECOVERY_SNAPSHOT_INVALID", "worker keys are not exact")
+        worker_generation = worker.get("generation")
+        if (not isinstance(worker.get("id"), str) or not worker["id"].strip()
+                or worker.get("surface") not in SURFACES
+                or isinstance(worker_generation, bool)
+                or not isinstance(worker_generation, int)
+                or worker_generation < 0
+                or not isinstance(worker.get("task_terminal"), bool)
+                or not isinstance(worker.get("recoverable"), bool)
+                or not is_digest(worker.get("ownership_digest"))):
+            raise LifecycleError("RECOVERY_SNAPSHOT_INVALID",
+                                 "worker identity fields are invalid")
         if worker.get("normalized_state") not in WORKER_STATES:
             raise LifecycleError("RECOVERY_SNAPSHOT_INVALID", "worker state invalid")
+        attention = worker.get("attention_kind")
+        if (not isinstance(attention, str) or not attention
+                or attention not in ({"NONE"} | set(
+                    manifest["dispatcher"]["waiting_attention_kinds"]))):
+            raise LifecycleError("RECOVERY_SNAPSHOT_INVALID",
+                                 "worker attention kind is invalid")
+        for field in ("error_code", "capacity_code"):
+            if (worker.get(field) is not None
+                    and (not isinstance(worker.get(field), str)
+                         or not worker[field])):
+                raise LifecycleError("RECOVERY_SNAPSHOT_INVALID",
+                                     f"worker {field} is invalid")
+        if ((worker.get("normalized_state") == "TERMINAL")
+                != worker.get("task_terminal")):
+            raise LifecycleError("RECOVERY_SNAPSHOT_INVALID",
+                                 "worker terminal evidence is inconsistent")
         try:
             last_progress = parse_time(worker.get("last_progress_at"))
         except Exception as exc:

@@ -173,10 +173,16 @@ def threshold_and_window_cases():
         check("positive override is highest tier",
               why and why["signal"]["window"] == 500_000
               and why["signal"]["window_tier"] == "override", out)
-        proc, out = run_hook(root, "Stop", t, session="bad-override",
+        high = write_jsonl(root / "bad-override-high.jsonl",
+                           [usage_row(900_000, model="claude-opus-4-1")])
+        proc, out = run_hook(root, "Stop", high, session="bad-override",
                              env_extra={"CARR_CONTEXT_WINDOW": "not-positive"})
-        check("invalid override is fail-open before fallback cap",
-              proc.returncode == 0 and out is None, out)
+        why = reason(out)
+        check("invalid override fails closed at high usage",
+              proc.returncode == 0 and why
+              and why["reason"] == "WINDOW_CONFIG_INVALID"
+              and why["signal"]["signal_reason"] == "WINDOW_CONFIG_INVALID",
+              (proc.returncode, out, proc.stderr))
 
         proc, out = run_hook(
             root, "Stop", t, session="missing-manifest",
@@ -382,6 +388,25 @@ def fallback_and_hook_sequence():
                    accepted["receipt_digest"], accepted["final_digest"]}) == 4,
               accepted)
 
+        sequence_path = root / "state" / f"{task_hash}.json"
+        tampered_state = json.loads(sequence_path.read_text())
+        successor_owner = tampered_state["owners"]["successor"]
+        successor_owner["state"] = "TERMINAL"
+        successor_owner["ownership_digest"] = digest({
+            key: successor_owner.get(key) for key in
+            ("id", "surface", "generation", "state", "evidence_digest")
+        })
+        tampered_state["handoff"]["predecessor"] = "successor"
+        sequence_path.write_text(json.dumps(tampered_state))
+        proc, tampered_semantics = run_hook(
+            root, "Stop", transcript, session="successor",
+            payload_extra={"task_key": "claude:sequence"})
+        why = reason(tampered_semantics)
+        check("owner and verified-handoff semantic tamper refuses Stop",
+              proc.returncode == 0 and why
+              and why["reason"] == "LIFECYCLE_INVALID",
+              (proc.returncode, tampered_semantics, proc.stderr))
+
         malformed_transcript = write_jsonl(
             root / "malformed-state.jsonl",
             [usage_row(1_000, model="claude-opus-4-1")],
@@ -421,6 +446,31 @@ def fallback_and_hook_sequence():
               and why["reason"] == "LIFECYCLE_INVALID"
               and why["signal"]["window_tier"] == "control_error",
               (proc.returncode, missing_owner_stop, proc.stderr))
+
+        terminal_owner_transcript = write_jsonl(
+            root / "terminal-owner-state.jsonl",
+            [usage_row(1_000, model="claude-opus-4-1")],
+        )
+        run_hook(root, "PostToolUse", terminal_owner_transcript,
+                 session="terminal-owner", wrapped=True)
+        terminal_owner_key = hashlib.sha256(b"claude:terminal-owner").hexdigest()
+        terminal_owner_path = root / "state" / f"{terminal_owner_key}.json"
+        terminal_owner_state = json.loads(terminal_owner_path.read_text())
+        terminal_owner = terminal_owner_state["owners"]["terminal-owner"]
+        terminal_owner["state"] = "TERMINAL"
+        terminal_owner["ownership_digest"] = digest({
+            key: terminal_owner.get(key) for key in
+            ("id", "surface", "generation", "state", "evidence_digest")
+        })
+        terminal_owner_path.write_text(json.dumps(terminal_owner_state))
+        proc, terminal_owner_stop = run_hook(
+            root, "Stop", terminal_owner_transcript,
+            session="terminal-owner", wrapped=True)
+        why = reason(terminal_owner_stop)
+        check("ACTIVE task with TERMINAL active owner refuses Stop",
+              proc.returncode == 0 and why
+              and why["reason"] == "LIFECYCLE_INVALID",
+              (proc.returncode, terminal_owner_stop, proc.stderr))
 
         bad_handoff_transcript = write_jsonl(
             root / "bad-handoff-state.jsonl",
@@ -552,6 +602,31 @@ def lifecycle_cas_and_tamper():
             "--expected-version", str(offer["state"]["version"]),
         )
         check("Codex successor must stay in the offered cwd",
+              proc.returncode == 2
+              and rejected["reason"] == "OWNERSHIP_MISMATCH", rejected)
+
+        cross_evidence = json.dumps({
+            "session_id": "cross-old", "transcript_path": str(claude_transcript),
+            "controller_callback_id": "cross-callback", "status": "active",
+        })
+        _, cross = run_cli(
+            root, "task-init", "--task-key", "task:cross-binding",
+            "--owner", "cross-old", "--surface", "claude",
+            "--evidence-json", cross_evidence, "--expected-version", "-1")
+        _, cross_offer = run_cli(
+            root, "handoff-offer-create", "--task-key", "task:cross-binding",
+            "--predecessor", "cross-old", "--predecessor-surface", "claude",
+            "--successor", "cross-new", "--successor-surface", "codex",
+            "--evidence-json", cross_evidence, "--generation", "1",
+            "--expected-version", str(cross["version"]))
+        proc, rejected = run_cli(
+            root, "successor-declare", "--task-key", "task:cross-binding",
+            "--offer-digest", cross_offer["offer_digest"],
+            "--successor", "cross-new",
+            "--evidence-json", codex_evidence(
+                "cross-new", project="foreign-project", cwd=root),
+            "--expected-version", str(cross_offer["state"]["version"]))
+        check("cross-surface successor must stay in the CARR checkout",
               proc.returncode == 2
               and rejected["reason"] == "OWNERSHIP_MISMATCH", rejected)
         proc, declared = run_cli(
@@ -700,6 +775,31 @@ def dispatcher_cases():
                            "--evidence-json", codex_evidence("owner"),
                            "--expected-version", "-1")
         own = state["owners"]["owner"]["ownership_digest"]
+
+        _, provenance_state = run_cli(
+            root, "task-init", "--task-key", "task:null-provenance",
+            "--owner", "provenance-owner", "--surface", "codex",
+            "--evidence-json", codex_evidence("provenance-owner"),
+            "--expected-version", "-1")
+        invalid_provenance = snapshot(
+            "task:null-provenance",
+            provenance_state["owners"]["provenance-owner"]["ownership_digest"],
+            "IDLE", source="event-null-provenance",
+            worker_id="provenance-owner")
+        for field in ("source_event_id", "observer_id", "source_surface",
+                      "evidence_ref"):
+            invalid_provenance[field] = None
+        invalid_provenance["evidence_digest"] = digest({
+            key: value for key, value in invalid_provenance.items()
+            if key != "evidence_digest"
+        })
+        proc, rejected = run_cli(
+            root, "dispatcher-evaluate", "--task-key", "task:null-provenance",
+            "--snapshot-json", json.dumps(invalid_provenance), "--apply",
+            "--expected-version", "0")
+        check("null recovery provenance is refused before mutation",
+              proc.returncode == 2
+              and rejected["reason"] == "RECOVERY_SNAPSHOT_INVALID", rejected)
 
         for label, worker_state, attention, recoverable, capacity, action, why in (
             ("running", "RUNNING", "NONE", False, None, "NOOP", "RECOVERY_ACTIVE"),
