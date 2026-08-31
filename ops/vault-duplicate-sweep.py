@@ -49,7 +49,22 @@ from lib.drive_recovery import require_legacy_vault  # noqa: E402
 _RECOVERY = require_legacy_vault("record-native duplicate detection (this sweeps the vault's own file tree)")
 sys.argv = [sys.argv[0], *_RECOVERY.args]
 VAULT = str(_RECOVERY.vault)
-MIRROR = os.path.join(VAULT, "Backups/portability-mirror/md")
+# THE MIRROR MOVED HOMES AND THIS POINTER DID NOT FOLLOW. Joe retired the Drive
+# vault as the portability mirror's destination on 2026-08-22 and gave it CARR
+# OneDrive plus the repo-local copy; this constant kept reading the vault path,
+# which stopped being written and then sat there aging. On 2026-08-31 it was 364
+# HOURS old and the classifier was still comparing live vault files against it —
+# which is how DIVERGENT went from 4 to 86 without the store actually moving.
+#
+# The REPO-LOCAL copy is the right source for a repo tool: bin/nightly.sh writes
+# it every night as the mirror's second destination, it needs no cloud mount, and
+# it cannot be silently unmounted the way the previous two homes both were. The
+# retired vault path stays as a fallback so an older checkout still finds
+# something rather than reporting every file unclassifiable.
+_REPO_MIRROR = os.path.join(
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..")), "out/mirror/md")
+MIRROR = (_REPO_MIRROR if os.path.isdir(_REPO_MIRROR)
+          else os.path.join(VAULT, "Backups/portability-mirror/md"))
 CLAUDE_DIR = os.path.expanduser("~/.claude")
 # Script-relative, NOT expanduser("~/carr-system"). VAULT and CLAUDE_DIR above
 # stay expanduser on purpose — those really are $HOME-relative. REPO is not: on
