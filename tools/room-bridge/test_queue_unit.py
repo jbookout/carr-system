@@ -163,6 +163,19 @@ def test_adapter_constructs_fixed_canonical_create_and_idempotency():
     assert body.startswith("[CARR_QUEUE_META ") and '"cap":"read"' in body
 
 
+def test_adapter_normalizes_worker_bigint_sequence_to_integer_metadata():
+    seen = []
+    command = queue_grammar.parse(
+        turn("@queue enqueue target=sol cap=read :: Verify queue"), CATALOG).value
+    adapter = kanban_adapter.KanbanAdapter(
+        runner=lambda argv: seen.append(argv) or {"id": "t_queue0002", "created": True})
+    adapter.create(command, turn("ignored", seq="8522"), CATALOG["targets"]["sol"])
+    body = seen[0][seen[0].index("--body") + 1]
+    meta = json.loads(body.split("]", 1)[0][len("[CARR_QUEUE_META "):])
+    assert meta["source_seq"] == 8522
+    assert isinstance(meta["source_seq"], int)
+
+
 def test_catalog_exactly_allowlists_yellow_and_human_capabilities():
     catalog = kanban_adapter.load_catalog()
     assert catalog["targets"]["sol"]["capabilities"] == ["read"]
@@ -593,6 +606,7 @@ def main():
     check("server origin beats claimed human seat", test_server_origin_not_claimed_human_seat_governs_human_only_enqueue)
     check("browser humans use only the manual human lane", test_browser_human_can_create_only_manual_human_lane_work)
     check("adapter fixed canonical create", test_adapter_constructs_fixed_canonical_create_and_idempotency)
+    check("Worker bigint sequence normalizes to integer metadata", test_adapter_normalizes_worker_bigint_sequence_to_integer_metadata)
     check("catalog explicitly denies unreviewed capability grants", test_catalog_exactly_allowlists_yellow_and_human_capabilities)
     check("manual create is atomically blocked", test_manual_create_is_atomically_blocked_before_dispatch_can_see_it)
     check("retry reclaim uses only the canonical Hermes transition", test_adapter_reclaims_only_through_the_supported_hermes_transition)
