@@ -102,6 +102,8 @@
     "claude": {
       "events": ["PostToolUse", "PreCompact", "Stop"],
       "blocking_event": "Stop",
+      "evidence_trust_boundary": "controller_callback",
+      "evidence_binding": "the hook verifies logical session identity and a live transcript path; controller_callback_id is the native controller trust boundary",
       "native_evidence_fields": [
         "session_id",
         "transcript_path",
@@ -111,6 +113,8 @@
     "codex": {
       "adapter": "bare_cli",
       "native_stop_hook": false,
+      "evidence_trust_boundary": "controller_capture",
+      "evidence_binding": "the CLI verifies live cwd, logical thread identity, recorded owner surface, declaration-to-acceptance equality, and immutable digest linkage; the controller that invokes the bare CLI remains responsible for capturing status and pinnedIndex from the native Codex surface",
       "native_evidence_fields": [
         "thread_id",
         "project_id",

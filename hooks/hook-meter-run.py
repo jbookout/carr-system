@@ -262,12 +262,14 @@ def _register_from_output(text, event, code, crashed):
     WHY THIS IS ITS OWN FIELD rather than something a rollup derives from the
     exit code. Five Stop gates — map-architecture, context-handoff, stale-claim,
     loose-work and unread-artifact — were demoted on 2026-08-23 from blocking to
-    announcing. They fire exactly as often as before and now charge nothing. A
-    reader inferring from the exit code sees exit 0 and records "allow", which is
-    true about the DECISION and silent about the INTERVENTION, so five gates
-    doing real work would look like five gates that had gone quiet — and the
-    retire rule keys on denies, so each would drift toward being a candidate for
-    precisely the reason it is working.
+    announcing. A0c deliberately restores context-handoff as the fourth admitted
+    reopener at a measured lifecycle threshold; the other four still announce
+    and charge nothing. A reader inferring from the exit code sees exit 0 and
+    records "allow" for those announcements, which is true about the DECISION
+    and silent about the INTERVENTION, so four gates doing real work would look
+    like four gates that had gone quiet — and the retire rule keys on denies, so
+    each would drift toward being a candidate for precisely the reason it is
+    working.
 
     It also settles a misreading already in the record: the council brief counted
     "eight chat-lint reopens" when chat-lint has not blocked since 2026-08-16 —

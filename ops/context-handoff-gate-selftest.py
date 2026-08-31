@@ -178,6 +178,22 @@ def threshold_and_window_cases():
         check("invalid override is fail-open before fallback cap",
               proc.returncode == 0 and out is None, out)
 
+        proc, out = run_hook(
+            root, "Stop", t, session="missing-manifest",
+            env_extra={"CARR_SESSION_CONTEXT_MANIFEST": root / "missing.json"})
+        why = reason(out)
+        check("Stop fails closed when the manifest is unavailable",
+              why and why["reason"] == "WINDOW_CONFIG_INVALID", out)
+
+        corrupt_state = root / "corrupt-state.json"
+        corrupt_state.write_text("{broken", encoding="utf-8")
+        proc, out = run_hook(
+            root, "Stop", t, session="corrupt-state",
+            env_extra={"CARR_CONTEXT_STATE": corrupt_state})
+        why = reason(out)
+        check("Stop fails closed when lifecycle state is corrupt",
+              why and why["reason"] == "LIFECYCLE_INVALID", out)
+
         # Exact known model binding wins over lower explicit windows.
         t = write_jsonl(root / "model.jsonl",
                         [usage_row(600_000, model="claude-opus-4-1",
@@ -342,16 +358,23 @@ def fallback_and_hook_sequence():
         final_path.write_text(original_final)
         proc, after = run_hook(root, "Stop", transcript, session="sequence")
         check("verified takeover makes recursive Stop allow", after is None, after)
-        check("offer receipt and final use three distinct digests",
-              len({offer["offer_digest"], accepted["receipt_digest"],
-                   accepted["final_digest"]}) == 3, accepted)
+        proc, successor_stop = run_hook(
+            root, "Stop", transcript, session="successor",
+            payload_extra={"task_key": "claude:sequence"})
+        check("prior receipt cannot suppress the successor generation threshold",
+              reason(successor_stop) is not None, successor_stop)
+        check("offer declaration receipt and final use four distinct digests",
+              len({offer["offer_digest"], declared["declaration_digest"],
+                   accepted["receipt_digest"], accepted["final_digest"]}) == 4,
+              accepted)
     finally:
         shutil.rmtree(root)
 
 
-def codex_evidence(thread, *, status="active", pinned=1, event="e"):
+def codex_evidence(thread, *, status="active", pinned=1, event="e",
+                   project="project", cwd=REPO):
     return json.dumps({
-        "thread_id": thread, "project_id": "project", "cwd": str(REPO),
+        "thread_id": thread, "project_id": project, "cwd": str(cwd),
         "status": status, "pinnedIndex": pinned, "event_id": event,
     })
 
@@ -401,6 +424,77 @@ def lifecycle_cas_and_tamper():
               proc.returncode == 2
               and rejected["reason"] == "HANDOFF_RECEIPT_INVALID", rejected)
 
+        # Surface and native identity are relationships, not caller labels.
+        proc, bound = run_cli(root, "task-init", "--task-key", "task:binding",
+                              "--owner", "bound-old", "--surface", "codex",
+                              "--evidence-json", codex_evidence("bound-old"),
+                              "--expected-version", "-1")
+        claude_transcript = write_jsonl(root / "bound.jsonl", [usage_row(1)])
+        wrong_surface = json.dumps({
+            "session_id": "bound-old", "transcript_path": str(claude_transcript),
+            "controller_callback_id": "callback", "status": "active",
+        })
+        proc, rejected = run_cli(
+            root, "handoff-offer-create", "--task-key", "task:binding",
+            "--predecessor", "bound-old", "--predecessor-surface", "claude",
+            "--successor", "bound-new", "--successor-surface", "codex",
+            "--evidence-json", wrong_surface, "--generation", "1",
+            "--expected-version", str(bound["version"]),
+        )
+        check("offer surface must match the recorded owner",
+              proc.returncode == 2 and rejected["reason"] == "OWNERSHIP_MISMATCH",
+              rejected)
+
+        proc, offer = run_cli(
+            root, "handoff-offer-create", "--task-key", "task:binding",
+            "--predecessor", "bound-old", "--predecessor-surface", "codex",
+            "--successor", "bound-new", "--successor-surface", "codex",
+            "--evidence-json", codex_evidence("bound-old"), "--generation", "1",
+            "--expected-version", str(bound["version"]),
+        )
+        proc, rejected = run_cli(
+            root, "successor-declare", "--task-key", "task:binding",
+            "--offer-digest", offer["offer_digest"], "--successor", "bound-new",
+            "--evidence-json", codex_evidence("unrelated"),
+            "--expected-version", str(offer["state"]["version"]),
+        )
+        check("native successor id must match the lifecycle successor",
+              proc.returncode == 2
+              and rejected["reason"] == "SUCCESSOR_SURFACE_INVALID", rejected)
+        proc, rejected = run_cli(
+            root, "successor-declare", "--task-key", "task:binding",
+            "--offer-digest", offer["offer_digest"], "--successor", "bound-new",
+            "--evidence-json", codex_evidence("bound-new", project="other-project"),
+            "--expected-version", str(offer["state"]["version"]),
+        )
+        check("Codex successor must stay in the offered project and cwd",
+              proc.returncode == 2
+              and rejected["reason"] == "OWNERSHIP_MISMATCH", rejected)
+        proc, rejected = run_cli(
+            root, "successor-declare", "--task-key", "task:binding",
+            "--offer-digest", offer["offer_digest"], "--successor", "bound-new",
+            "--evidence-json", codex_evidence("bound-new", cwd=root),
+            "--expected-version", str(offer["state"]["version"]),
+        )
+        check("Codex successor must stay in the offered cwd",
+              proc.returncode == 2
+              and rejected["reason"] == "OWNERSHIP_MISMATCH", rejected)
+        proc, declared = run_cli(
+            root, "successor-declare", "--task-key", "task:binding",
+            "--offer-digest", offer["offer_digest"], "--successor", "bound-new",
+            "--evidence-json", codex_evidence("bound-new", event="declare"),
+            "--expected-version", str(offer["state"]["version"]),
+        )
+        proc, rejected = run_cli(
+            root, "successor-accept", "--task-key", "task:binding",
+            "--offer-digest", offer["offer_digest"], "--successor", "bound-new",
+            "--evidence-json", codex_evidence("bound-new", event="accept-different"),
+            "--expected-version", str(declared["state"]["version"]),
+        )
+        check("acceptance evidence must equal the declaration evidence",
+              proc.returncode == 2
+              and rejected["reason"] == "TAKEOVER_NOT_VERIFIED", rejected)
+
         # Independent task terminal is evidence-bound and irreversible.
         proc, state = run_cli(root, "task-init", "--task-key", "task:terminal",
                               "--owner", "only", "--surface", "codex",
@@ -416,6 +510,14 @@ def lifecycle_cas_and_tamper():
               proc.returncode == 0
               and terminal["task_status"] == "TERMINAL"
               and terminal["active_owner"] is None, terminal)
+        terminal_version = terminal["version"]
+        run_hook(root, "Stop", None, session="intruder",
+                 payload_extra={"task_key": "task:terminal"})
+        _, unchanged_terminal = run_cli(
+            root, "status", "--task-key", "task:terminal")
+        check("terminal observations are read-only",
+              unchanged_terminal["version"] == terminal_version,
+              unchanged_terminal)
         proc, resurrect = run_cli(
             root, "handoff-offer-create", "--task-key", "task:terminal",
             "--predecessor", "only", "--predecessor-surface", "codex",
@@ -491,12 +593,14 @@ def rollout_resolver_cases():
 
 def snapshot(task_key, ownership_digest, state, *, source="event-1",
              observed=None, attention="NONE", recoverable=False,
-             capacity=None, worker_id="owner"):
+             capacity=None, worker_id="owner", last_progress=None,
+             generation=0):
     observed = observed or dt.datetime.now(dt.timezone.utc).replace(
         microsecond=0).isoformat().replace("+00:00", "Z")
+    last_progress = last_progress or observed
     worker = {
-        "id": worker_id, "surface": "codex", "generation": 0,
-        "normalized_state": state, "last_progress_at": observed,
+        "id": worker_id, "surface": "codex", "generation": generation,
+        "normalized_state": state, "last_progress_at": last_progress,
         "task_terminal": state == "TERMINAL", "attention_kind": attention,
         "error_code": "ERR" if state == "ERROR" else None,
         "recoverable": recoverable, "capacity_code": capacity,
@@ -553,7 +657,7 @@ def dispatcher_cases():
               proc.returncode == 2
               and out["reason"] == "RECOVERY_SNAPSHOT_STALE", out)
 
-        future = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=1)
+        future = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=30)
                   ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         snap = snapshot("task:dispatch", own, "RUNNING", observed=future)
         proc, out = run_cli(root, "dispatcher-evaluate",
@@ -561,6 +665,17 @@ def dispatcher_cases():
                             "--snapshot-json", json.dumps(snap))
         check("future snapshot is invalid", proc.returncode == 2
               and out["reason"] == "RECOVERY_SNAPSHOT_INVALID", out)
+
+        stale_progress = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=61)
+                          ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        snap = snapshot("task:dispatch", own, "RUNNING",
+                        last_progress=stale_progress, source="event-stale-heartbeat")
+        proc, out = run_cli(root, "dispatcher-evaluate",
+                            "--task-key", "task:dispatch",
+                            "--snapshot-json", json.dumps(snap))
+        check("stale RUNNING heartbeat cannot claim recovery active",
+              proc.returncode == 0 and out["action"] == "RECOVER_SAME_TASK"
+              and out["reason"] == "RECOVERY_IDLE", out)
 
         snap = snapshot("task:dispatch", own, "CAPACITY_EXHAUSTED",
                         capacity="CONTEXT_EXHAUSTED", source="event-apply")
@@ -593,7 +708,24 @@ def dispatcher_cases():
                                "--apply", "--expected-version", "1")
         check("exact recovery replay returns same nonce",
               proc.returncode == 0 and replay["replay"] is True
-              and replay["nonce"] == preview["nonce"], replay)
+              and replay["nonce"] == preview["nonce"]
+              and replay["state"]["version"] == 1, replay)
+        proc, missing_replay_cas = run_cli(
+            root, "dispatcher-evaluate", "--task-key", "task:dispatch",
+            "--snapshot-json", json.dumps(snap), "--apply")
+        check("applied recovery replay still requires expected-version CAS",
+              proc.returncode == 2
+              and missing_replay_cas["reason"] == "LIFECYCLE_INVALID",
+              missing_replay_cas)
+        changed = snapshot("task:dispatch", own, "RUNNING", source="event-apply")
+        proc, changed_replay = run_cli(
+            root, "dispatcher-evaluate", "--task-key", "task:dispatch",
+            "--snapshot-json", json.dumps(changed), "--apply",
+            "--expected-version", "1")
+        check("recovery replay is bound to the exact snapshot digest",
+              proc.returncode == 2
+              and changed_replay["reason"] == "LIFECYCLE_INVALID",
+              changed_replay)
         malformed = {**snap, "unexpected": True}
         proc, refused = run_cli(root, "dispatcher-evaluate",
                                 "--task-key", "task:dispatch",
@@ -610,6 +742,63 @@ def dispatcher_cases():
         check("second recovery while one is pending is refused",
               proc.returncode == 2
               and refused["reason"] == "LIFECYCLE_INVALID", refused)
+
+        proc, aborted = run_cli(
+            root, "recovery-abort", "--task-key", "task:dispatch",
+            "--owner", "owner", "--nonce", preview["nonce"],
+            "--expected-version", "1")
+        check("recovery abort restores the sole owner",
+              proc.returncode == 0
+              and aborted["owners"]["owner"]["state"] == "ACTIVE"
+              and aborted["active_owner"] == "owner"
+              and aborted["recovery_intent"]["state"] == "ABORTED", aborted)
+
+        # A separate applied recovery completes through the ordinary, receipt-
+        # verified handoff path and leaves one active successor.
+        _, recovery = run_cli(
+            root, "task-init", "--task-key", "task:recovery-complete",
+            "--owner", "failed", "--surface", "codex",
+            "--evidence-json", codex_evidence("failed"),
+            "--expected-version", "-1")
+        recovery_snap = snapshot(
+            "task:recovery-complete",
+            recovery["owners"]["failed"]["ownership_digest"],
+            "CAPACITY_EXHAUSTED", source="event-recovery-complete",
+            capacity="CONTEXT_EXHAUSTED", worker_id="failed")
+        _, applied_recovery = run_cli(
+            root, "dispatcher-evaluate", "--task-key", "task:recovery-complete",
+            "--snapshot-json", json.dumps(recovery_snap), "--apply",
+            "--expected-version", "0")
+        _, recovery_offer = run_cli(
+            root, "handoff-offer-create", "--task-key", "task:recovery-complete",
+            "--predecessor", "failed", "--predecessor-surface", "codex",
+            "--successor", "replacement", "--successor-surface", "codex",
+            "--evidence-json", codex_evidence("failed"), "--generation", "1",
+            "--expected-version", str(applied_recovery["state"]["version"]))
+        _, recovery_declared = run_cli(
+            root, "successor-declare", "--task-key", "task:recovery-complete",
+            "--offer-digest", recovery_offer["offer_digest"],
+            "--successor", "replacement",
+            "--evidence-json", codex_evidence("replacement"),
+            "--expected-version", str(recovery_offer["state"]["version"]))
+        _, recovery_accepted = run_cli(
+            root, "successor-accept", "--task-key", "task:recovery-complete",
+            "--offer-digest", recovery_offer["offer_digest"],
+            "--successor", "replacement",
+            "--evidence-json", codex_evidence("replacement"),
+            "--expected-version", str(recovery_declared["state"]["version"]))
+        proc, recovery_terminal = run_cli(
+            root, "predecessor-terminal", "--task-key", "task:recovery-complete",
+            "--predecessor", "failed",
+            "--evidence-json", codex_evidence("failed", status="terminal"),
+            "--expected-version", str(recovery_accepted["state"]["version"]))
+        active = [owner for owner in recovery_terminal["owners"].values()
+                  if owner["state"] == "ACTIVE"]
+        check("applied recovery completes with one verified active successor",
+              proc.returncode == 0 and len(active) == 1
+              and active[0]["id"] == "replacement"
+              and recovery_terminal["recovery_intent"]["state"] == "COMPLETED",
+              recovery_terminal)
     finally:
         shutil.rmtree(root)
 
@@ -682,7 +871,9 @@ def static_contract_cases():
     manifest = json.loads(MANIFEST.read_text())
     check("manifest makes Codex bare-CLI limitation explicit",
           manifest["surface_contracts"]["codex"]["adapter"] == "bare_cli"
-          and manifest["surface_contracts"]["codex"]["native_stop_hook"] is False,
+          and manifest["surface_contracts"]["codex"]["native_stop_hook"] is False
+          and manifest["surface_contracts"]["codex"]["evidence_trust_boundary"]
+          == "controller_capture",
           manifest["surface_contracts"]["codex"])
     check("heartbeat cadence is at most 60 seconds",
           manifest["dispatcher"]["heartbeat_max_seconds"] <= 60,

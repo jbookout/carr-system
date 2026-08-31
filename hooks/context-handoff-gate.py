@@ -186,9 +186,15 @@ def mutate_state(task_key: str, expected_version: int | None,
         if expected_version is not None and actual != expected_version:
             raise LifecycleError("LIFECYCLE_INVALID",
                                  f"expected version {expected_version}, found {actual}")
+        before = canonical(current) if current is not None else None
         updated = change(current)
         if not isinstance(updated, dict) or updated.get("task_key") != task_key:
             raise LifecycleError("LIFECYCLE_INVALID", "mutation returned invalid task state")
+        # Observations of a terminal task, an already-drained predecessor, and
+        # exact idempotent replays are reads.  Do not manufacture a new version
+        # merely because they passed through the mutation lock.
+        if before is not None and canonical(updated) == before:
+            return updated
         updated["version"] = actual + 1
         updated["updated_at"] = utc_now()
         atomic_write(path, updated)
@@ -407,7 +413,15 @@ def payload_mutated_paths(payload: dict[str, Any]) -> set[str]:
 
 
 def owner_digest(owner: dict[str, Any]) -> str:
-    return digest({key: owner.get(key) for key in ("id", "surface", "generation", "state")})
+    return digest({key: owner.get(key) for key in
+                   ("id", "surface", "generation", "state", "evidence_digest")})
+
+
+def fresh_signal() -> dict[str, Any]:
+    return {"highwater": 0, "invocations": 0, "active_minutes": 0.0,
+            "cycles": 0, "generation_tool_calls": 0,
+            "mutated_paths": [], "worker_starts": 0,
+            "last_observed_at": None, "notices": []}
 
 
 def initial_state(task_key: str, owner_id: str, surface: str = "claude") -> dict[str, Any]:
@@ -418,10 +432,7 @@ def initial_state(task_key: str, owner_id: str, surface: str = "claude") -> dict
         "schema_version": 1, "task_key": task_key, "version": -1,
         "task_status": "ACTIVE", "generation": 0, "active_owner": owner_id,
         "owners": {owner_id: owner}, "handoff": None, "recovery_intent": None,
-        "signal": {"highwater": 0, "invocations": 0, "active_minutes": 0.0,
-                   "cycles": 0, "generation_tool_calls": 0,
-                   "mutated_paths": [], "worker_starts": 0,
-                   "last_observed_at": None, "notices": []},
+        "signal": fresh_signal(),
     }
 
 
@@ -444,6 +455,11 @@ def update_observation(current: dict[str, Any] | None, task_key: str, owner_id: 
                        manifest: dict[str, Any]) -> dict[str, Any]:
     state = current or initial_state(task_key, owner_id)
     if state.get("task_status") == "TERMINAL":
+        return state
+    # One task may still receive the draining predecessor's final Stop after a
+    # successor is active.  That terminal callback must neither contaminate the
+    # successor generation's counters nor advance task state.
+    if state.get("active_owner") != owner_id:
         return state
     signal = state.setdefault("signal", {})
     totals = [usage_total(row) for row in rows]
@@ -539,6 +555,15 @@ def _add_notice(state: dict[str, Any] | None, notice: str) -> dict[str, Any]:
     return state
 
 
+def refuse_stop_on_control_error(event: str, task_key: str, reason: str,
+                                 version: int = -1) -> None:
+    if event != "Stop":
+        return
+    signal = {"available": False, "crossed": True, "reason": reason,
+              "signal_reason": reason, "window_tier": "control_error"}
+    print(canonical(block_payload(task_key, version, signal, reason)).decode("utf-8"))
+
+
 def hook_main() -> int:
     try:
         payload = json.load(sys.stdin)
@@ -552,7 +577,10 @@ def hook_main() -> int:
     try:
         manifest = load_manifest()
     except LifecycleError as exc:
-        audit({"session": owner_id, "event": event, "action": "NOOP", "reason": exc.reason})
+        audit({"session": owner_id, "event": event,
+               "action": "REFUSE" if event == "Stop" else "NOOP",
+               "reason": exc.reason})
+        refuse_stop_on_control_error(event, task_key, exc.reason)
         return 0
     try:
         state = mutate_state(
@@ -562,7 +590,10 @@ def hook_main() -> int:
             manifest,
         )
     except LifecycleError as exc:
-        audit({"session": owner_id, "event": event, "action": "NOOP", "reason": exc.reason}, manifest)
+        audit({"session": owner_id, "event": event,
+               "action": "REFUSE" if event == "Stop" else "NOOP",
+               "reason": exc.reason}, manifest)
+        refuse_stop_on_control_error(event, task_key, exc.reason)
         return 0
     signal = context_decision(rows, state, manifest)
     audit({"session": owner_id, "event": event, "task_key": task_key,
@@ -572,8 +603,11 @@ def hook_main() -> int:
         return 0
     if state.get("task_status") == "TERMINAL":
         return 0
-    if (state.get("handoff") or {}).get("state") in {
-            "TAKEOVER_VERIFIED", "PREDECESSOR_TERMINAL"}:
+    pending = state.get("handoff") or {}
+    caller = (state.get("owners") or {}).get(owner_id) or {}
+    if (pending.get("state") in {"TAKEOVER_VERIFIED", "PREDECESSOR_TERMINAL"}
+            and pending.get("predecessor") == owner_id
+            and caller.get("state") in {"DRAINING", "TERMINAL"}):
         try:
             verify_handoff_state(task_key, state, manifest)
             return 0
@@ -582,6 +616,12 @@ def hook_main() -> int:
                 print(canonical(block_payload(
                     task_key, state["version"], signal, exc.reason)).decode("utf-8"))
             return 0
+    if state.get("active_owner") != owner_id:
+        if event == "Stop":
+            print(canonical(block_payload(
+                task_key, state["version"], signal,
+                "OWNERSHIP_MISMATCH")).decode("utf-8"))
+        return 0
     if event == "Stop" and signal.get("crossed"):
         print(canonical(block_payload(task_key, state["version"], signal)).decode("utf-8"))
         return 0
@@ -612,12 +652,19 @@ def parse_evidence(text: str) -> dict[str, Any]:
     return value
 
 
-def validate_native_evidence(surface: str, evidence: dict[str, Any], *, accept: bool = False,
+def validate_native_evidence(surface: str, evidence: dict[str, Any], *,
+                             expected_identity: str | None = None,
+                             accept: bool = False,
                              terminal: bool = False) -> str:
     if surface == "codex":
         required = {"thread_id", "project_id", "cwd", "status", "event_id"}
         if not required.issubset(evidence) or not all(evidence.get(key) for key in required):
             raise LifecycleError("SUCCESSOR_SURFACE_INVALID", "Codex evidence fields missing")
+        if expected_identity is not None and str(evidence.get("thread_id")) != expected_identity:
+            raise LifecycleError("SUCCESSOR_SURFACE_INVALID",
+                                 "Codex thread_id does not match lifecycle owner")
+        if not Path(str(evidence.get("cwd"))).expanduser().is_dir():
+            raise LifecycleError("SUCCESSOR_SURFACE_INVALID", "Codex cwd is not a live directory")
         if accept and str(evidence.get("status")).lower() not in {"active", "idle", "running"}:
             raise LifecycleError("SUCCESSOR_NOT_ACTIVE", "Codex successor is not active")
         if accept and positive(evidence.get("pinnedIndex")) is None:
@@ -628,6 +675,12 @@ def validate_native_evidence(surface: str, evidence: dict[str, Any], *, accept: 
         required = {"session_id", "transcript_path", "controller_callback_id"}
         if not required.issubset(evidence) or not all(evidence.get(key) for key in required):
             raise LifecycleError("SUCCESSOR_SURFACE_INVALID", "Claude evidence fields missing")
+        if expected_identity is not None and str(evidence.get("session_id")) != expected_identity:
+            raise LifecycleError("SUCCESSOR_SURFACE_INVALID",
+                                 "Claude session_id does not match lifecycle owner")
+        if not Path(str(evidence.get("transcript_path"))).expanduser().is_file():
+            raise LifecycleError("SUCCESSOR_SURFACE_INVALID",
+                                 "Claude transcript_path is not a live file")
         if accept and str(evidence.get("status", "active")).lower() not in {"active", "idle", "running"}:
             raise LifecycleError("SUCCESSOR_NOT_ACTIVE", "Claude successor is not active")
         if terminal and str(evidence.get("status")).lower() not in {"archived", "terminated", "terminal"}:
@@ -637,9 +690,34 @@ def validate_native_evidence(surface: str, evidence: dict[str, Any], *, accept: 
     return digest(evidence)
 
 
+def validate_successor_evidence(offer: dict[str, Any], successor: str,
+                                evidence: dict[str, Any], *,
+                                accept: bool = False) -> str:
+    surface = offer["successor_surface"]
+    evidence_digest = validate_native_evidence(
+        surface, evidence, expected_identity=successor, accept=accept)
+    # A same-surface Codex handoff must stay in the project and checkout that
+    # the predecessor offered. The thread id changes by design; changing the
+    # project or cwd would be a different slice wearing this task_key.
+    if offer.get("predecessor_surface") == surface == "codex":
+        predecessor = offer.get("native_evidence") or {}
+        same_project = evidence.get("project_id") == predecessor.get("project_id")
+        try:
+            same_cwd = (Path(str(evidence.get("cwd"))).expanduser().resolve()
+                        == Path(str(predecessor.get("cwd"))).expanduser().resolve())
+        except (OSError, RuntimeError):
+            same_cwd = False
+        if not same_project or not same_cwd:
+            raise LifecycleError(
+                "OWNERSHIP_MISMATCH",
+                "Codex successor is not in the offered project and cwd")
+    return evidence_digest
+
+
 def lifecycle_init(args, manifest):
     evidence = parse_evidence(args.evidence_json)
-    evidence_digest = validate_native_evidence(args.surface, evidence, accept=True)
+    evidence_digest = validate_native_evidence(
+        args.surface, evidence, expected_identity=args.owner, accept=True)
 
     def create(current):
         if current is not None:
@@ -654,7 +732,8 @@ def lifecycle_init(args, manifest):
 
 def offer_create(args, manifest):
     evidence = parse_evidence(args.evidence_json)
-    evidence_digest = validate_native_evidence(args.predecessor_surface, evidence)
+    evidence_digest = validate_native_evidence(
+        args.predecessor_surface, evidence, expected_identity=args.predecessor)
     offer = {"schema_version": 1, "task_key": args.task_key,
              "generation": args.generation, "predecessor": args.predecessor,
              "predecessor_surface": args.predecessor_surface,
@@ -674,7 +753,16 @@ def offer_create(args, manifest):
         if state.get("handoff") and state["handoff"].get("state") not in {None, "PREDECESSOR_TERMINAL"}:
             raise LifecycleError("LIFECYCLE_INVALID", "handoff already pending")
         owner = state["owners"].get(args.predecessor)
-        if not owner or owner.get("state") != "ACTIVE":
+        recovery = state.get("recovery_intent") or {}
+        recovering = (recovery.get("state") == "PENDING"
+                      and recovery.get("failed_owner") == args.predecessor
+                      and recovery.get("task_key") == args.task_key
+                      and recovery.get("generation") == state.get("generation"))
+        if not owner or owner.get("surface") != args.predecessor_surface:
+            raise LifecycleError("OWNERSHIP_MISMATCH",
+                                 "predecessor surface does not match recorded owner")
+        if owner.get("state") != "ACTIVE" and not (
+                recovering and owner.get("state") == "DRAINING"):
             raise LifecycleError("OWNERSHIP_MISMATCH", "predecessor owner state is not ACTIVE")
         owner["state"] = "DRAINING"
         owner["ownership_digest"] = owner_digest(owner)
@@ -690,7 +778,8 @@ def offer_create(args, manifest):
 def successor_declare(args, manifest):
     offer = read_object(args.task_key, "offer", args.offer_digest, manifest)
     evidence = parse_evidence(args.evidence_json)
-    evidence_digest = validate_native_evidence(offer["successor_surface"], evidence)
+    evidence_digest = validate_successor_evidence(
+        offer, args.successor, evidence)
     declaration = {"schema_version": 1, "task_key": args.task_key,
                    "offer_digest": args.offer_digest, "successor": args.successor,
                    "native_evidence": evidence, "native_evidence_digest": evidence_digest,
@@ -719,16 +808,33 @@ def successor_declare(args, manifest):
 def successor_accept(args, manifest):
     offer = read_object(args.task_key, "offer", args.offer_digest, manifest)
     evidence = parse_evidence(args.evidence_json)
-    evidence_digest = validate_native_evidence(offer["successor_surface"], evidence, accept=True)
+    evidence_digest = validate_successor_evidence(
+        offer, args.successor, evidence, accept=True)
+    current = read_state(args.task_key, manifest)
+    pending_now = (current or {}).get("handoff") or {}
+    declaration_digest = pending_now.get("declaration_digest")
+    if not declaration_digest:
+        raise LifecycleError("TAKEOVER_NOT_VERIFIED", "successor declaration is absent")
+    declaration = read_object(
+        args.task_key, "declaration", declaration_digest, manifest)
+    if (declaration.get("successor") != args.successor
+            or declaration.get("native_evidence_digest") != evidence_digest
+            or declaration.get("native_evidence") != evidence):
+        raise LifecycleError("TAKEOVER_NOT_VERIFIED",
+                             "acceptance evidence does not match declaration")
     acceptance = {"successor": args.successor, "surface": offer["successor_surface"],
                   "native_evidence": evidence, "native_evidence_digest": evidence_digest,
                   "accepted_at": utc_now()}
     receipt = {"schema_version": 1, "task_key": args.task_key,
-               "offer_digest": args.offer_digest, "ownership_acceptance": acceptance}
+               "offer_digest": args.offer_digest,
+               "declaration_digest": declaration_digest,
+               "ownership_acceptance": acceptance}
     receipt_digest = write_immutable(args.task_key, "receipt", receipt, manifest)
     final_packet = {"schema_version": 1, "offer": offer,
+                    "declaration": declaration,
                     "ownership_acceptance": acceptance,
                     "offer_digest": args.offer_digest,
+                    "declaration_digest": declaration_digest,
                     "receipt_digest": receipt_digest}
     final_digest = write_immutable(args.task_key, "final", final_packet, manifest)
 
@@ -736,6 +842,8 @@ def successor_accept(args, manifest):
         pending = (state or {}).get("handoff") or {}
         if pending.get("state") != "SUCCESSOR_DECLARED" or pending.get("offer_digest") != args.offer_digest:
             raise LifecycleError("TAKEOVER_NOT_VERIFIED", "successor was not declared for this offer")
+        if pending.get("declaration_digest") != declaration_digest:
+            raise LifecycleError("TAKEOVER_NOT_VERIFIED", "successor declaration changed")
         if offer.get("successor") != args.successor:
             raise LifecycleError("OWNERSHIP_MISMATCH", "successor does not match offer")
         predecessor = state["owners"].get(offer["predecessor"])
@@ -748,6 +856,14 @@ def successor_accept(args, manifest):
         successor["ownership_digest"] = owner_digest(successor)
         state["active_owner"] = args.successor
         state["generation"] = int(offer["generation"])
+        state["signal"] = fresh_signal()
+        recovery = state.get("recovery_intent") or {}
+        if (recovery.get("state") == "PENDING"
+                and recovery.get("failed_owner") == offer.get("predecessor")
+                and recovery.get("task_key") == args.task_key
+                and recovery.get("generation") == int(offer["generation"]) - 1):
+            recovery.update({"state": "COMPLETED", "successor": args.successor,
+                             "completed_at": utc_now()})
         pending.update({"state": "TAKEOVER_VERIFIED", "receipt_digest": receipt_digest,
                         "final_digest": final_digest})
         return state
@@ -761,21 +877,33 @@ def verify_handoff_state(task_key: str, state: dict[str, Any],
     pending = state.get("handoff") or {}
     if pending.get("state") not in {"TAKEOVER_VERIFIED", "PREDECESSOR_TERMINAL"}:
         raise LifecycleError("TAKEOVER_NOT_VERIFIED", "takeover is not verified")
-    for key in ("offer_digest", "receipt_digest", "final_digest"):
+    for key in ("offer_digest", "declaration_digest", "receipt_digest", "final_digest"):
         if not pending.get(key):
             raise LifecycleError("HANDOFF_RECEIPT_MISSING", f"{key} missing")
     offer = read_object(task_key, "offer", pending["offer_digest"], manifest)
+    declaration = read_object(
+        task_key, "declaration", pending["declaration_digest"], manifest)
     receipt = read_object(task_key, "receipt", pending["receipt_digest"], manifest)
     final = read_object(task_key, "final", pending["final_digest"], manifest)
-    if (receipt.get("offer_digest") != pending["offer_digest"]
+    if (declaration.get("offer_digest") != pending["offer_digest"]
+            or declaration.get("successor") != offer.get("successor")
+            or receipt.get("offer_digest") != pending["offer_digest"]
+            or receipt.get("declaration_digest") != pending["declaration_digest"]
             or final.get("offer_digest") != pending["offer_digest"]
+            or final.get("declaration_digest") != pending["declaration_digest"]
             or final.get("receipt_digest") != pending["receipt_digest"]
             or final.get("offer") != offer
+            or final.get("declaration") != declaration
             or final.get("ownership_acceptance")
-            != receipt.get("ownership_acceptance")):
+            != receipt.get("ownership_acceptance")
+            or declaration.get("native_evidence_digest")
+            != receipt.get("ownership_acceptance", {}).get("native_evidence_digest")
+            or declaration.get("native_evidence")
+            != receipt.get("ownership_acceptance", {}).get("native_evidence")):
         raise LifecycleError("HANDOFF_RECEIPT_INVALID",
                              "offer/receipt/final linkage is invalid")
     return {"offer_digest": pending["offer_digest"],
+            "declaration_digest": pending["declaration_digest"],
             "receipt_digest": pending["receipt_digest"],
             "final_digest": pending["final_digest"]}
 
@@ -791,7 +919,9 @@ def predecessor_terminal(args, manifest):
         if not owner or owner.get("state") != "DRAINING":
             raise LifecycleError("OWNERSHIP_MISMATCH", "predecessor is not draining")
         verify_handoff_state(args.task_key, state, manifest)
-        evidence_digest = validate_native_evidence(owner["surface"], evidence, terminal=True)
+        evidence_digest = validate_native_evidence(
+            owner["surface"], evidence,
+            expected_identity=args.predecessor, terminal=True)
         owner.update({"state": "TERMINAL", "terminal_evidence_digest": evidence_digest})
         owner["ownership_digest"] = owner_digest(owner)
         pending["state"] = "PREDECESSOR_TERMINAL"
@@ -815,7 +945,9 @@ def task_terminal(args, manifest):
         handoff = state.get("handoff") or {}
         if handoff.get("state") in {"DRAINING", "SUCCESSOR_DECLARED", "TAKEOVER_VERIFIED"}:
             raise LifecycleError("TAKEOVER_NOT_VERIFIED", "handoff is incomplete")
-        evidence_digest = validate_native_evidence(active[0]["surface"], evidence, terminal=True)
+        evidence_digest = validate_native_evidence(
+            active[0]["surface"], evidence,
+            expected_identity=args.owner, terminal=True)
         active[0].update({"state": "TERMINAL", "terminal_evidence_digest": evidence_digest})
         active[0]["ownership_digest"] = owner_digest(active[0])
         state["task_status"] = "TERMINAL"
@@ -945,10 +1077,14 @@ def validate_snapshot(snapshot: Any, task_key: str,
         if worker.get("normalized_state") not in WORKER_STATES:
             raise LifecycleError("RECOVERY_SNAPSHOT_INVALID", "worker state invalid")
         try:
-            parse_time(worker.get("last_progress_at"))
+            last_progress = parse_time(worker.get("last_progress_at"))
         except Exception as exc:
             raise LifecycleError("RECOVERY_SNAPSHOT_INVALID",
                                  f"last_progress_at invalid: {exc}") from exc
+        if (last_progress - now).total_seconds() > int(
+                manifest["dispatcher"]["future_skew_seconds"]):
+            raise LifecycleError("RECOVERY_SNAPSHOT_INVALID",
+                                 "worker last_progress_at is in the future")
     return workers
 
 
@@ -972,6 +1108,11 @@ def dispatcher_decision(task_key: str, snapshot: dict[str, Any],
     worker = matches[0]
     if worker.get("id") != active_id:
         raise LifecycleError("OWNERSHIP_MISMATCH", "snapshot owner id mismatch")
+    recorded = (state.get("owners") or {}).get(active_id) or {}
+    if (worker.get("surface") != recorded.get("surface")
+            or worker.get("generation") != recorded.get("generation")):
+        raise LifecycleError("OWNERSHIP_MISMATCH",
+                             "snapshot owner surface or generation mismatch")
     state_name = worker["normalized_state"]
     waiting = set(manifest["dispatcher"]["waiting_attention_kinds"])
     capacity = set(manifest["dispatcher"]["recoverable_capacity_codes"])
@@ -993,6 +1134,11 @@ def dispatcher_decision(task_key: str, snapshot: dict[str, Any],
         return {"action": "NOOP", "reason": "RECOVERY_WAITING",
                 "failed_owner": active_id}
     if state_name == "RUNNING":
+        heartbeat_age = (dt.datetime.now(dt.timezone.utc)
+                         - parse_time(worker["last_progress_at"])).total_seconds()
+        if heartbeat_age > int(manifest["dispatcher"]["heartbeat_max_seconds"]):
+            return {"action": "RECOVER_SAME_TASK", "reason": "RECOVERY_IDLE",
+                    "failed_owner": active_id}
         return {"action": "NOOP", "reason": "RECOVERY_ACTIVE",
                 "failed_owner": active_id}
     raise LifecycleError("RECOVERY_SNAPSHOT_INVALID",
@@ -1006,15 +1152,34 @@ def dispatcher_evaluate(args, manifest):
     snapshot = parse_evidence(args.snapshot_json)
     validate_snapshot(snapshot, args.task_key, manifest)
     pending = state.get("recovery_intent")
-    if pending:
+    if pending and pending.get("state") == "PENDING":
         same = (
             pending.get("task_key") == args.task_key
             and pending.get("generation") == state.get("generation")
             and pending.get("source_event_id") == snapshot.get("source_event_id")
+            and pending.get("snapshot_digest") == snapshot.get("evidence_digest")
         )
         if not same:
             raise LifecycleError("LIFECYCLE_INVALID",
-                                 "another recovery intent is pending")
+                                 "recovery replay evidence changed")
+        replay_state = state
+        if args.apply:
+            if args.expected_version is None:
+                raise LifecycleError("LIFECYCLE_INVALID",
+                                     "--apply requires --expected-version")
+
+            def verify_replay(current):
+                current_pending = (current or {}).get("recovery_intent") or {}
+                if (current_pending.get("state") != "PENDING"
+                        or current_pending.get("nonce") != pending.get("nonce")
+                        or current_pending.get("snapshot_digest")
+                        != snapshot.get("evidence_digest")):
+                    raise LifecycleError("LIFECYCLE_INVALID",
+                                         "recovery replay state changed")
+                return current
+
+            replay_state = mutate_state(
+                args.task_key, args.expected_version, verify_replay, manifest)
         return {
             "action": "RECOVER_SAME_TASK",
             "reason": pending["cause"],
@@ -1022,7 +1187,7 @@ def dispatcher_evaluate(args, manifest):
             "nonce": pending["nonce"],
             "applied": bool(args.apply),
             "replay": True,
-            **({"state": state} if args.apply else {}),
+            **({"state": replay_state} if args.apply else {}),
         }
     decision = dispatcher_decision(args.task_key, snapshot, state, manifest)
     if decision["action"] != "RECOVER_SAME_TASK":
@@ -1030,7 +1195,8 @@ def dispatcher_evaluate(args, manifest):
     nonce_input = {"task_key": args.task_key, "generation": state.get("generation"),
                    "failed_owner": decision["failed_owner"],
                    "cause": decision["reason"],
-                   "source_event_id": snapshot["source_event_id"]}
+                   "source_event_id": snapshot["source_event_id"],
+                   "snapshot_digest": snapshot["evidence_digest"]}
     nonce = digest(nonce_input)
     result = {**decision, "nonce": nonce, "applied": False, "replay": False}
     if not args.apply:
@@ -1046,8 +1212,8 @@ def dispatcher_evaluate(args, manifest):
         if not current or current.get("task_status") == "TERMINAL":
             raise LifecycleError("RECOVERY_TERMINAL",
                                  "terminal task cannot recover")
-        pending = current.get("recovery_intent")
-        if pending:
+        pending = current.get("recovery_intent") or {}
+        if pending.get("state") == "PENDING":
             if pending.get("nonce") == nonce:
                 replay = True
                 return current
@@ -1067,6 +1233,30 @@ def dispatcher_evaluate(args, manifest):
     updated = mutate_state(args.task_key, args.expected_version, change, manifest)
     result.update({"applied": True, "replay": replay, "state": updated})
     return result
+
+
+def recovery_abort(args, manifest):
+    def change(state):
+        if not state or state.get("task_status") == "TERMINAL":
+            raise LifecycleError("RECOVERY_TERMINAL", "terminal task cannot recover")
+        pending = state.get("recovery_intent") or {}
+        if (pending.get("state") != "PENDING"
+                or pending.get("nonce") != args.nonce
+                or pending.get("failed_owner") != args.owner):
+            raise LifecycleError("LIFECYCLE_INVALID", "pending recovery does not match abort")
+        handoff = state.get("handoff") or {}
+        if handoff.get("state") not in {None, "PREDECESSOR_TERMINAL"}:
+            raise LifecycleError("LIFECYCLE_INVALID", "recovery handoff already started")
+        owner = (state.get("owners") or {}).get(args.owner)
+        if not owner or owner.get("state") != "DRAINING":
+            raise LifecycleError("OWNERSHIP_MISMATCH", "recovering owner is not DRAINING")
+        owner["state"] = "ACTIVE"
+        owner["ownership_digest"] = owner_digest(owner)
+        state["active_owner"] = args.owner
+        pending.update({"state": "ABORTED", "aborted_at": utc_now()})
+        return state
+
+    return mutate_state(args.task_key, args.expected_version, change, manifest)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -1128,6 +1318,11 @@ def parser() -> argparse.ArgumentParser:
     dispatch.add_argument("--snapshot-json", required=True)
     dispatch.add_argument("--apply", action="store_true")
     dispatch.add_argument("--expected-version", type=int)
+    abort = sub.add_parser("recovery-abort")
+    abort.add_argument("--task-key", required=True)
+    abort.add_argument("--owner", required=True)
+    abort.add_argument("--nonce", required=True)
+    abort.add_argument("--expected-version", type=int, required=True)
     return p
 
 
@@ -1181,6 +1376,8 @@ def cli_main(argv: list[str]) -> int:
             result = task_terminal(args, manifest)
         elif args.command == "dispatcher-evaluate":
             result = dispatcher_evaluate(args, manifest)
+        elif args.command == "recovery-abort":
+            result = recovery_abort(args, manifest)
         else:
             parser().print_help(sys.stderr)
             return 2

@@ -18,9 +18,9 @@
       "landing_harm": "Without a verified successor receipt, a source task can compact or terminate while its unfinished repository ownership, decisions, and exact next action exist on no active surface.",
       "bind_moment": "The Stop boundary after the configured soft or hard threshold, while the source task can still complete a same-task ownership transfer.",
       "consumer": "The successor task and dispatcher that must continue the same CARR System OS slice without duplicate or missing ownership.",
-      "self_serve_remedy": "Create and pin a same-slice successor, write and read back the immutable offer/receipt/final evidence through this gate's CLI, then retry Stop after TAKEOVER_VERIFIED.",
+      "self_serve_remedy": "Create and pin a same-slice successor; bind controller-captured native identity evidence to the immutable offer, declaration, receipt, and final through this gate's CLI; read the records back; then retry Stop after TAKEOVER_VERIFIED. A dispatcher recovery can instead be completed by the same handoff flow or explicitly aborted to restore the predecessor.",
       "scarce_resource_cost": "One reopened model turn only after a measured threshold or conservative fallback cap; PostToolUse notices are one-shot and PreCompact never blocks.",
-      "unique_bind": "No other gate preserves precompact high-water, validates cross-surface ownership receipts, or refuses Stop until the successor takeover is verified.",
+      "unique_bind": "No other gate preserves precompact high-water, validates cross-surface ownership and evidence bindings, detects stale worker heartbeats, or refuses Stop until the exact predecessor-to-successor takeover is verified.",
       "matcher_test": "ops/context-handoff-gate-selftest.py"
     }
   }
