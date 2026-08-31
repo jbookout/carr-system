@@ -78,6 +78,8 @@ def main() -> int:
     launch_path = environment.get("PATH", "")
     check("template PATH includes the home-relative Hermes bin",
           "{{HOME}}/.local/bin:" in launch_path, failures)
+    check("template explicitly polls the visible Model Room",
+          environment.get("CARR_ROOM_BRIDGE_ROOM") == "model-room", failures)
     check("template explicitly enables the lease-bound Engineering controller",
           environment.get("CARR_ENGINEERING_DISPATCH_ENABLED") == "true", failures)
     check("template has no concrete user home", not CONCRETE_HOME.search(template), failures)
@@ -116,6 +118,8 @@ def main() -> int:
           concrete_path.startswith(f"{fixture_home}/.local/bin:"), failures)
     check("rendered controller enablement remains explicit",
           concrete.get("EnvironmentVariables", {}).get("CARR_ENGINEERING_DISPATCH_ENABLED") == "true", failures)
+    check("rendered room selection remains the visible Model Room",
+          concrete.get("EnvironmentVariables", {}).get("CARR_ROOM_BRIDGE_ROOM") == "model-room", failures)
     arguments = concrete.get("ProgramArguments", [])
     check("rendered program arguments point at the fixture checkout",
           any(fixture_repo in str(arg) for arg in arguments), failures)

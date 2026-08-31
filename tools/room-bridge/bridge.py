@@ -210,6 +210,23 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def bind_room_writer(writer, room: str):
+    """Bind every bridge-authored turn to the room being polled.
+
+    ``verb_io.add_room_turn`` retains the record layer's legacy partner-line
+    default for callers that genuinely use that wire.  A bridge cycle may poll
+    another named room, so relying on the writer's independent default would
+    read one conversation and post its replies and receipts into another.
+    Test doubles stay simple: run_once callers may still inject an already
+    room-aware writer directly.
+    """
+    def write(*args, **kwargs):
+        kwargs.setdefault("room", room)
+        return writer(*args, **kwargs)
+
+    return write
+
+
 def _elapsed_seconds(iso_ts: str | None, *, now: str | None = None) -> float:
     if iso_ts is None:
         return 0.0
@@ -831,7 +848,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.cmd == "run-once":
         try:
-            summary = run_once(registry=reg, state_path=state_path, room=a.room)
+            summary = run_once(
+                registry=reg, state_path=state_path, room=a.room,
+                add_room_turn=bind_room_writer(verb_io.add_room_turn, a.room),
+            )
         except RuntimeError as e:
             print(f"room-bridge: FAILED — {e}", file=sys.stderr)
             return 1
