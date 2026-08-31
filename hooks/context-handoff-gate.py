@@ -545,16 +545,21 @@ def audit(record: dict[str, Any], manifest: dict[str, Any] | None = None) -> Non
         pass
 
 
-def walk_scalars(value: Any):
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if isinstance(child, (dict, list)):
-                yield from walk_scalars(child)
-            else:
-                yield key, child
-    elif isinstance(value, list):
-        for child in value:
-            yield from walk_scalars(child)
+def context_envelopes(row: dict[str, Any]):
+    """Containers whose model/window fields describe the current session.
+
+    Claude publishes those fields on the row or its message envelope. Codex
+    publishes its model on a turn_context payload. Tool inputs and assistant
+    content may also contain fields named model or context_window, but those
+    describe a child invocation and must never select this session's threshold.
+    """
+    yield row
+    message = row.get("message")
+    if isinstance(message, dict):
+        yield message
+    payload = row.get("payload")
+    if row.get("type") == "turn_context" and isinstance(payload, dict):
+        yield payload
 
 
 def transcript_rows(path: str | None) -> list[dict[str, Any]]:
@@ -618,9 +623,11 @@ def usage_total(row: dict[str, Any]) -> int | None:
 def models_in(rows: list[dict[str, Any]]) -> set[str]:
     models: set[str] = set()
     for row in rows:
-        for key, value in walk_scalars(row):
-            if key in {"model", "model_name", "modelName"} and isinstance(value, str) and value.strip():
-                models.add(value.strip())
+        for envelope in context_envelopes(row):
+            for key in ("model", "model_name", "modelName"):
+                value = envelope.get(key)
+                if isinstance(value, str) and value.strip():
+                    models.add(value.strip())
     return models
 
 
@@ -628,10 +635,12 @@ def explicit_windows(rows: list[dict[str, Any]]) -> tuple[bool, set[int]]:
     seen = False
     values: set[int] = set()
     for row in rows:
-        for key, value in walk_scalars(row):
-            if key in WINDOW_KEYS:
+        for envelope in context_envelopes(row):
+            for key in WINDOW_KEYS:
+                if key not in envelope:
+                    continue
                 seen = True
-                number = positive(value)
+                number = positive(envelope.get(key))
                 if number:
                     values.add(number)
     return seen, values

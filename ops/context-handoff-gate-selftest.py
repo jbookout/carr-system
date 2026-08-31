@@ -18,7 +18,7 @@ REPO = Path(__file__).resolve().parent.parent
 HOOK = REPO / "hooks/context-handoff-gate.py"
 RUNNER = REPO / "hooks/hook-meter-run.py"
 MANIFEST = REPO / "ops/config/session-context-lifecycle.v1.json"
-INSTALLED_REPO = Path("/Users/booko/carr-system")
+APPROVED_BASE = "01c3977580e8d9d490380f6c2135d1c4d7d20fd7"
 PASS: list[str] = []
 FAIL: list[str] = []
 
@@ -217,6 +217,39 @@ def threshold_and_window_cases():
         check("exact model binding is the second tier",
               why and why["signal"]["window"] == 1_000_000
               and why["signal"]["window_tier"] == "model", out)
+
+        # A model requested inside an ordinary tool payload describes the child
+        # invocation, not the session whose context window this gate measures.
+        # Only authoritative transcript envelopes may select the window tier.
+        t = write_jsonl(root / "nested-tool-model.jsonl", [
+            usage_row(600_000, model="claude-opus-4-1"),
+            {"type": "assistant", "message": {"content": [{
+                "type": "tool_use", "name": "spawn_agent",
+                "input": {"model": "gpt-5.6-sol"},
+            }]}},
+        ])
+        proc, out = run_hook(root, "Stop", t, session="nested-tool-model")
+        why = reason(out)
+        check("nested tool model cannot make the session window ambiguous",
+              proc.returncode == 0 and why
+              and why["signal"]["window"] == 1_000_000
+              and why["signal"]["window_tier"] == "model",
+              (proc.returncode, out, proc.stderr))
+
+        t = write_jsonl(root / "nested-tool-window.jsonl", [
+            usage_row(110_000, window=200_000),
+            {"type": "assistant", "message": {"content": [{
+                "type": "tool_use", "name": "spawn_agent",
+                "input": {"context_window": 300_000},
+            }]}},
+        ])
+        proc, out = run_hook(root, "Stop", t, session="nested-tool-window")
+        why = reason(out)
+        check("nested tool window cannot make the session window ambiguous",
+              proc.returncode == 0 and why
+              and why["signal"]["window"] == 200_000
+              and why["signal"]["window_tier"] == "transcript",
+              (proc.returncode, out, proc.stderr))
 
         # Unknown model is not a default; a usable lower tier may still resolve.
         t = write_jsonl(root / "unknown-explicit.jsonl",
@@ -1429,17 +1462,22 @@ def wrapper_and_historical_defect():
         ])
         payload = json.dumps({"hook_event_name": "Stop", "session_id": "selftest",
                               "transcript_path": str(historical)})
-        installed_hook = INSTALLED_REPO / "hooks/context-handoff-gate.py"
-        installed_runner = INSTALLED_REPO / "hooks/hook-meter-run.py"
-        if installed_hook.exists() and installed_runner.exists():
-            env = base_env(root, CARR_CONTEXT_WINDOW="1000000",
-                           CARR_CONTEXT_STATE=str(root / "installed-state.json"))
-            proc = subprocess.run(
-                ["/usr/bin/env", "python3", str(installed_runner), str(installed_hook)],
-                input=payload, text=True, capture_output=True, env=env,
-                cwd=INSTALLED_REPO)
-            check("installed exact command shape reproduces silent postcompact allow",
-                  proc.returncode == 0 and proc.stdout.strip() == "", proc.stdout)
+        # Pin the historical side of the regression to the approved base.  The
+        # canonical checkout is mutable and becomes the candidate after merge;
+        # treating it as the old implementation would make this test expire at
+        # the moment the fix is installed.
+        historical_hook = root / "legacy-context-handoff-gate.py"
+        historical_hook.write_bytes(subprocess.check_output(
+            ["git", "show", f"{APPROVED_BASE}:hooks/context-handoff-gate.py"],
+            cwd=REPO))
+        env = base_env(root, CARR_CONTEXT_WINDOW="1000000",
+                       CARR_CONTEXT_STATE=str(root / "installed-state.json"))
+        proc = subprocess.run(
+            ["/usr/bin/env", "python3", str(RUNNER), str(historical_hook)],
+            input=payload, text=True, capture_output=True, env=env,
+            cwd=REPO)
+        check("approved-base command shape reproduces silent postcompact allow",
+              proc.returncode == 0 and proc.stdout.strip() == "", proc.stdout)
         candidate, out = run_hook(
             root, "Stop", historical, session="historical", wrapped=True,
             env_extra={"CARR_CONTEXT_WINDOW": "1000000"})
