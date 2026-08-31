@@ -41,6 +41,7 @@ def digest(value):
 def ownership_digest(owner):
     return digest({key: owner.get(key) for key in (
         "id", "surface", "generation", "state", "evidence_digest",
+        "activation_final_digest",
         "terminal_evidence_digest", "terminal_provenance_digest",
     )})
 
@@ -812,6 +813,88 @@ def lifecycle_cas_and_tamper():
               and laundered_terminal["reason"] == "HANDOFF_RECEIPT_INVALID",
               (proc.returncode, laundered_terminal, proc.stderr))
 
+        # Digest linkage alone cannot replace native evidence validation.  A
+        # fully recomputed packet with required Codex fields removed refuses.
+        _, packet_state = run_cli(
+            root, "task-init", "--task-key", "task:packet-completeness",
+            "--owner", "p0", "--surface", "codex",
+            "--evidence-json", codex_evidence("p0"),
+            "--expected-version", "-1")
+        _, packet_offer = run_cli(
+            root, "handoff-offer-create", "--task-key", "task:packet-completeness",
+            "--predecessor", "p0", "--predecessor-surface", "codex",
+            "--successor", "p1", "--successor-surface", "codex",
+            "--evidence-json", codex_evidence("p0"), "--generation", "1",
+            "--expected-version", str(packet_state["version"]))
+        _, packet_declared = run_cli(
+            root, "successor-declare", "--task-key", "task:packet-completeness",
+            "--offer-digest", packet_offer["offer_digest"],
+            "--successor", "p1", "--evidence-json", codex_evidence("p1"),
+            "--expected-version", str(packet_offer["state"]["version"]))
+        _, packet_accepted = run_cli(
+            root, "successor-accept", "--task-key", "task:packet-completeness",
+            "--offer-digest", packet_offer["offer_digest"],
+            "--successor", "p1", "--evidence-json", codex_evidence("p1"),
+            "--expected-version", str(packet_declared["state"]["version"]))
+        packet_hash = hashlib.sha256(b"task:packet-completeness").hexdigest()
+        packet_path = root / "state" / f"{packet_hash}.json"
+        packet_value = json.loads(packet_path.read_text())
+        object_root = root / "state/objects" / packet_hash
+
+        def read_packet(kind, object_digest):
+            return json.loads(
+                (object_root / kind / f"{object_digest}.json").read_text())
+
+        def write_packet(kind, value):
+            object_digest = digest(value)
+            path = object_root / kind / f"{object_digest}.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(canonical(value) + b"\n")
+            return object_digest
+
+        pending_packet = packet_value["handoff"]
+        declaration_packet = read_packet(
+            "declaration", pending_packet["declaration_digest"])
+        receipt_packet = read_packet("receipt", pending_packet["receipt_digest"])
+        final_packet = read_packet("final", pending_packet["final_digest"])
+        incomplete_evidence = {"project_id": "project"}
+        incomplete_digest = digest(incomplete_evidence)
+        declaration_packet.update({
+            "native_evidence": incomplete_evidence,
+            "native_evidence_digest": incomplete_digest,
+        })
+        declaration_digest = write_packet("declaration", declaration_packet)
+        acceptance_packet = receipt_packet["ownership_acceptance"]
+        acceptance_packet.update({
+            "native_evidence": incomplete_evidence,
+            "native_evidence_digest": incomplete_digest,
+        })
+        receipt_packet["declaration_digest"] = declaration_digest
+        receipt_digest = write_packet("receipt", receipt_packet)
+        final_packet.update({
+            "declaration": declaration_packet,
+            "ownership_acceptance": acceptance_packet,
+            "declaration_digest": declaration_digest,
+            "receipt_digest": receipt_digest,
+        })
+        final_digest = write_packet("final", final_packet)
+        pending_packet.update({
+            "declaration_digest": declaration_digest,
+            "receipt_digest": receipt_digest,
+            "final_digest": final_digest,
+        })
+        packet_owner = packet_value["owners"]["p1"]
+        packet_owner["evidence_digest"] = incomplete_digest
+        packet_owner["activation_final_digest"] = final_digest
+        packet_owner["ownership_digest"] = ownership_digest(packet_owner)
+        packet_path.write_text(json.dumps(packet_value))
+        proc, incomplete_packet = run_cli(
+            root, "status", "--task-key", "task:packet-completeness")
+        check("recomputed final packet still requires complete native evidence",
+              proc.returncode == 2
+              and incomplete_packet["reason"] == "HANDOFF_RECEIPT_INVALID",
+              (proc.returncode, incomplete_packet, proc.stderr, packet_accepted))
+
         # Once a predecessor has supplied terminal evidence, its completed
         # handoff cannot strand the successor when dispatcher recovery begins.
         _, recoverable = run_cli(
@@ -854,6 +937,41 @@ def lifecycle_cas_and_tamper():
               and recovered["state"]["owners"]["r1"]["state"] == "DRAINING"
               and recovered["state"]["recovery_intent"]["state"] == "PENDING",
               (proc.returncode, recovered, proc.stderr))
+        proc, aborted_recovery = run_cli(
+            root, "recovery-abort", "--task-key", "task:post-handoff-recovery",
+            "--owner", "r1", "--nonce", recovered["nonce"],
+            "--expected-version", str(recovered["state"]["version"]))
+        check("post-handoff recovery can abort to the verified owner",
+              proc.returncode == 0
+              and aborted_recovery["owners"]["r1"]["state"] == "ACTIVE",
+              (proc.returncode, aborted_recovery, proc.stderr))
+        recovery_hash = hashlib.sha256(b"task:post-handoff-recovery").hexdigest()
+        recovery_path = root / "state" / f"{recovery_hash}.json"
+        aborted_text = recovery_path.read_text()
+        tampered_aborted = json.loads(aborted_text)
+        aborted_owner = tampered_aborted["owners"]["r1"]
+        aborted_owner["evidence_digest"] = "0" * 64
+        aborted_owner["ownership_digest"] = ownership_digest(aborted_owner)
+        recovery_path.write_text(json.dumps(tampered_aborted))
+        proc, aborted_tamper = run_cli(
+            root, "status", "--task-key", "task:post-handoff-recovery")
+        check("aborted recovery retains immutable successor binding",
+              proc.returncode == 2
+              and aborted_tamper["reason"] == "HANDOFF_RECEIPT_INVALID",
+              (proc.returncode, aborted_tamper, proc.stderr))
+        recovery_path.write_text(aborted_text)
+        proc, post_abort_offer = run_cli(
+            root, "handoff-offer-create",
+            "--task-key", "task:post-handoff-recovery",
+            "--predecessor", "r1", "--predecessor-surface", "codex",
+            "--successor", "r2", "--successor-surface", "codex",
+            "--evidence-json", codex_evidence("r1"), "--generation", "2",
+            "--expected-version", str(aborted_recovery["version"]))
+        check("aborted recovery does not block the next ordinary handoff",
+              proc.returncode == 0
+              and post_abort_offer["state"]["handoff"]["generation"] == 2
+              and post_abort_offer["state"]["recovery_intent"] is None,
+              (proc.returncode, post_abort_offer, proc.stderr))
 
         # Native Claude callbacks cannot impersonate a same-ID Codex owner.
         _, isolated = run_cli(

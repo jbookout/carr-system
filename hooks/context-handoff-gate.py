@@ -196,6 +196,7 @@ def validate_task_state(value: dict[str, Any], task_key: str,
                 or owner.get("id") != owner_id):
             raise LifecycleError("LIFECYCLE_INVALID", "owner record is invalid")
         owner_generation = owner.get("generation")
+        activation_final = owner.get("activation_final_digest")
         if (owner.get("surface") not in SURFACES
                 or owner.get("state") not in OWNER_STATES
                 or isinstance(owner_generation, bool)
@@ -204,9 +205,19 @@ def validate_task_state(value: dict[str, Any], task_key: str,
                 or owner_generation > generation + 1
                 or (owner.get("evidence_digest") is not None
                     and not is_digest(owner.get("evidence_digest")))
+                or (activation_final is not None
+                    and not is_digest(activation_final))
                 or owner.get("ownership_digest") != owner_digest(owner)):
             raise LifecycleError("LIFECYCLE_INVALID",
                                  "owner record semantics are invalid")
+        if (owner_generation > 0
+                and owner.get("state") != "SUCCESSOR_DECLARED"
+                and not is_digest(activation_final)):
+            raise LifecycleError(
+                "LIFECYCLE_INVALID",
+                "verified owner lacks immutable activation provenance")
+        if activation_final is not None:
+            verify_owner_activation(task_key, owner, manifest)
         terminal_evidence = owner.get("terminal_evidence_digest")
         terminal_provenance = owner.get("terminal_provenance_digest")
         if owner.get("state") == "TERMINAL":
@@ -683,6 +694,7 @@ def payload_mutated_paths(payload: dict[str, Any]) -> set[str]:
 def owner_digest(owner: dict[str, Any]) -> str:
     return digest({key: owner.get(key) for key in
                    ("id", "surface", "generation", "state", "evidence_digest",
+                    "activation_final_digest",
                     "terminal_evidence_digest", "terminal_provenance_digest")})
 
 
@@ -1083,6 +1095,14 @@ def offer_create(args, manifest):
             raise LifecycleError("LIFECYCLE_INVALID", "handoff already pending")
         owner = state["owners"].get(args.predecessor)
         recovery = state.get("recovery_intent") or {}
+        if recovery.get("state") == "ABORTED":
+            if (recovery.get("failed_owner") != args.predecessor
+                    or recovery.get("generation") != state.get("generation")):
+                raise LifecycleError(
+                    "LIFECYCLE_INVALID",
+                    "aborted recovery does not belong to the predecessor")
+            state["recovery_intent"] = None
+            recovery = {}
         recovering = (recovery.get("state") == "PENDING"
                       and recovery.get("failed_owner") == args.predecessor
                       and recovery.get("task_key") == args.task_key
@@ -1181,7 +1201,8 @@ def successor_accept(args, manifest):
             raise LifecycleError("OWNERSHIP_MISMATCH", "predecessor is not draining")
         if not successor or successor.get("state") != "SUCCESSOR_DECLARED":
             raise LifecycleError("SUCCESSOR_NOT_ACTIVE", "successor declaration is absent")
-        successor.update({"state": "ACTIVE", "evidence_digest": evidence_digest})
+        successor.update({"state": "ACTIVE", "evidence_digest": evidence_digest,
+                          "activation_final_digest": final_digest})
         successor["ownership_digest"] = owner_digest(successor)
         state["active_owner"] = args.successor
         state["generation"] = int(offer["generation"])
@@ -1271,9 +1292,42 @@ def read_verified_final_packet(task_key: str, final_digest: Any,
                      != successor_project_id))):
         raise LifecycleError("HANDOFF_RECEIPT_INVALID",
                              "offer/receipt/final linkage is invalid")
+    try:
+        predecessor_evidence_digest = validate_native_evidence(
+            str(offer.get("predecessor_surface")), offer_evidence,
+            expected_identity=str(offer.get("predecessor")))
+        successor_evidence_digest = validate_successor_evidence(
+            offer, str(offer.get("successor")), acceptance_evidence,
+            accept=True)
+    except LifecycleError as exc:
+        raise LifecycleError(
+            "HANDOFF_RECEIPT_INVALID",
+            f"handoff native evidence is invalid: {exc.detail}") from exc
+    if (predecessor_evidence_digest != offer.get("native_evidence_digest")
+            or successor_evidence_digest
+            != acceptance.get("native_evidence_digest")):
+        raise LifecycleError(
+            "HANDOFF_RECEIPT_INVALID",
+            "handoff native evidence digest changed")
     return {"offer": offer, "declaration": declaration,
             "receipt": receipt, "final": final, "acceptance": acceptance,
             **digests, "final_digest": final_digest}
+
+
+def verify_owner_activation(task_key: str, owner: dict[str, Any],
+                            manifest: dict[str, Any] | None = None) -> None:
+    verified = read_verified_final_packet(
+        task_key, owner.get("activation_final_digest"), manifest)
+    offer = verified["offer"]
+    acceptance = verified["acceptance"]
+    if (offer.get("successor") != owner.get("id")
+            or offer.get("successor_surface") != owner.get("surface")
+            or offer.get("generation") != owner.get("generation")
+            or acceptance.get("native_evidence_digest")
+            != owner.get("evidence_digest")):
+        raise LifecycleError(
+            "HANDOFF_RECEIPT_INVALID",
+            "owner activation is not linked to immutable acceptance")
 
 
 def verify_handoff_state(task_key: str, state: dict[str, Any],
