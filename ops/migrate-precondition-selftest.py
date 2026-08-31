@@ -186,8 +186,17 @@ def test_reviewed_controller_transaction_artifact_is_exact() -> None:
         "0382_standing_guidance_reader_boundary.sql",
         "0383_control_plane_not_configured_state.sql",
         "0387_control_plane_record_queue_priority_tiers.sql",
+        "0425_disable_legacy_schedule_readback_grant.sql",
+        "0426_withdraw_a_work_request_captured_in_error.sql",
+        "0427_tour_rights_projection_hardening.sql",
+        "0428_tour_property_identity_jurisdiction.sql",
+        "0429_tour_domain_route_cheat_sheet.sql",
+        "0430_tour_delivery_data_plane.sql",
+        "0431_completion_register_schema.sql",
+        "0450_canonical_ownership_lease_kernel.sql",
+        "0451_assurance_evidence_acceptance_persistence.sql",
     }
-    check("the reviewed controller transaction allowlist is four exact artifacts",
+    check("the reviewed transaction allowlist is thirteen exact artifacts",
           set(artifacts) == expected_names
           and not set(artifacts) & set(migrate.HISTORICAL_TRANSACTION_CONTROL_ARTIFACTS))
     exact = True

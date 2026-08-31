@@ -125,12 +125,12 @@ HISTORICAL_TRANSACTION_CONTROL_ARTIFACTS = {
     "0351_legacy_rule_lifecycle_admission.sql":
         "59439e1a12c035e61578b85c765d7bbd131bf555b95bbecd49c6d675b5c4d808",
 }
-# Controller PRs #763, #766, #768, and #771 deliberately keep explicit
-# transactions around their atomic control-plane changes and receipt readbacks. Preserve the
-# independently reviewed source artifacts exactly rather than rewriting them
-# during SIEP integration. These are separate from the five Production-applied
-# historical artifacts above: an unreviewed filename or one-byte change still
-# refuses before any SQL executes.
+# Reviewed migrations merged after the original SIEP branch was cut deliberately
+# keep explicit transactions around atomic control-plane changes and receipt
+# readbacks. Preserve those independently reviewed source artifacts exactly
+# rather than rewriting them during SIEP integration. These are separate from
+# the five Production-applied historical artifacts above: an unreviewed filename
+# or one-byte change still refuses before any SQL executes.
 REVIEWED_TRANSACTION_CONTROL_ARTIFACTS = {
     "0363_rule_delivery_activation_digest_repin.sql":
         "03133d0627cf63d2a0a2a7dd8a392065bc19ba17d56d0b2cfabd3dbccafdcb65",
@@ -140,6 +140,24 @@ REVIEWED_TRANSACTION_CONTROL_ARTIFACTS = {
         "f0cb86f97fcd87db8412be1f4c36544fe40f1ba9e524182bb3cb3b9ad3148bfa",
     "0387_control_plane_record_queue_priority_tiers.sql":
         "ba2f9ce18e54f8ceca330a5478ad66d72b76bbc832aba9c20734ebe8a701310e",
+    "0425_disable_legacy_schedule_readback_grant.sql":
+        "f1b0f6677363c3a0463a30660b379544b9a7093867c8847c3453b149da17aaed",
+    "0426_withdraw_a_work_request_captured_in_error.sql":
+        "151eddaae36b60fd1a6f0ad43f9577c03381ebd11b17b9a9741269d93bd2d395",
+    "0427_tour_rights_projection_hardening.sql":
+        "00dd241ccf86bf379cc20aec22dfd0b852754bc30224bae39cb707d8e66729a2",
+    "0428_tour_property_identity_jurisdiction.sql":
+        "3c32933288ecf780ee3ea54bffeddb1df0a22bdf862c1487eea0f021bd682975",
+    "0429_tour_domain_route_cheat_sheet.sql":
+        "6b217caf48ce0742045a1d3093c5bd85727a4511dabe4e739d9d271a61bcc8e4",
+    "0430_tour_delivery_data_plane.sql":
+        "f04d685a6ae2ba124694ff11f6d88695bed25774290e6b2997c59ad9fd9049be",
+    "0431_completion_register_schema.sql":
+        "7886498e34f7874aa1f1ac2df931aefbe036eb73e013eb4e81fd02112f145f70",
+    "0450_canonical_ownership_lease_kernel.sql":
+        "2130de773f09f5dd8621cfe5add3f8939ddd1d48f06c5d9a6908e19375a57847",
+    "0451_assurance_evidence_acceptance_persistence.sql":
+        "f17f538bafd602c9d90b3b46fe3cc377b746b03b1d5fe070a5fb597af4d2013c",
 }
 TRANSACTION_CONTROL_RE = re.compile(
     r"(?is)^\s*(?:(?:begin|commit|end|rollback|abort)\b|"
