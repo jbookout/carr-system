@@ -172,6 +172,10 @@ check(
     "Engineering terminalization race runs after the scoped claim",
     events[8][-1].endswith("ops/engineering-envelope-race-local-pg-gate.py"),
 )
+check(
+    "canonical ownership lease runs after the Engineering race proof",
+    events[9][-1].endswith("ops/canonical-ownership-lease-local-pg-gate.py"),
+)
 completion_event = next(
     index for index, event in enumerate(events)
     if event[-1].endswith("ops/completion-register-schema-local-pg-gate.py")
@@ -229,6 +233,10 @@ check(
 check(
     "strict lane also proves the Engineering terminalization race",
     events[8][-1].endswith("ops/engineering-envelope-race-local-pg-gate.py"),
+)
+check(
+    "strict lane also proves canonical ownership leases",
+    events[9][-1].endswith("ops/canonical-ownership-lease-local-pg-gate.py"),
 )
 
 

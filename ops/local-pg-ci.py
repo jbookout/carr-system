@@ -375,6 +375,23 @@ def run_local_ci(
                     else:
                         print("local-db-ci: Engineering envelope race acceptance passed")
                 if exit_code == 0:
+                    ownership_script = repo / "ops/canonical-ownership-lease-local-pg-gate.py"
+                    ownership = command_runner.run(
+                        [acceptance_python, ownership_script],
+                        env=acceptance_env,
+                        cwd=repo,
+                        capture=True,
+                    )
+                    if ownership.returncode:
+                        print(
+                            f"local-db-ci: canonical ownership lease acceptance failed: "
+                            f"{_failure_detail(ownership)}",
+                            file=sys.stderr,
+                        )
+                        exit_code = ownership.returncode
+                    else:
+                        print("local-db-ci: canonical ownership lease acceptance passed")
+                if exit_code == 0:
                     canary_script = repo / "ops/calendar-canary-local-pg-acceptance.py"
                     canary = command_runner.run(
                         [acceptance_python, canary_script],
