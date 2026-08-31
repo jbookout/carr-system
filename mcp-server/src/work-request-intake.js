@@ -10,6 +10,8 @@ const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const CRITERION_ID = /^[A-Z][A-Z0-9-]{1,63}$/;
 const TRIAGE_FIELDS = new Set(["idempotency_key", "human_ref", "base_version", "classification"]);
 const TRIAGE_CLASSES = new Set(["operational", "needs_judgment", "safety_review"]);
+const DECLINE_FIELDS = new Set(["idempotency_key", "human_ref", "base_version", "exit_reason"]);
+const SUPERSEDE_FIELDS = new Set(["idempotency_key", "human_ref", "base_version", "exit_reason", "superseded_by"]);
 const PLAN_FIELDS = new Set(["idempotency_key","human_ref","base_version","scope_summary","runbook_ref","dependency_refs","recovery_ref","observability_ref","caps","heavy_build"]);
 const ACCEPT_PLAN_FIELDS = new Set(["idempotency_key","human_ref","base_version","plan_hash"]);
 const HEAVY_REVIEW_FIELDS = new Set(["idempotency_key","human_ref","plan_hash","admission_hash","verdict","reviewer_session_ref","review_summary","evidence_refs","gaps"]);
@@ -218,6 +220,37 @@ function validateTriage(args, ToolError) {
   if (!UUID.test(args.idempotency_key || "") || !/^WR-[0-9]{1,12}$/.test(args.human_ref || "") ||
       !Number.isInteger(args.base_version) || args.base_version < 1 || !TRIAGE_CLASSES.has(args.classification))
     throw new ToolError({ error: "invalid_triage" });
+}
+
+// WITHDRAWAL IS TWO VALIDATORS, not one with an optional successor. See the two
+// verbs below for why the split is contractual rather than cosmetic.
+//
+// 500 characters for the reason. The database requires only btrim(exit_reason)
+// <> '' — it will take an essay — so the bound is this layer's, chosen to match
+// result_summary, the other short human sentence this file accepts. The empty
+// case is refused here AND by the function; duplicating it costs nothing and
+// stops a blank reason before the idempotency lock turns it into I/O.
+function validateDecline(args, ToolError) {
+  if (Object.keys(args).some(key => !DECLINE_FIELDS.has(key))) throw new ToolError({ error: "invalid_decline_work_request_fields" });
+  if (!UUID.test(args.idempotency_key || "") || !/^WR-[0-9]{1,12}$/.test(args.human_ref || "") ||
+      !Number.isInteger(args.base_version) || args.base_version < 1 ||
+      !text(args.exit_reason) || text(args.exit_reason).length > 500)
+    throw new ToolError({ error: "invalid_decline_work_request" });
+}
+
+function validateSupersede(args, ToolError) {
+  if (Object.keys(args).some(key => !SUPERSEDE_FIELDS.has(key))) throw new ToolError({ error: "invalid_supersede_work_request_fields" });
+  if (!UUID.test(args.idempotency_key || "") || !/^WR-[0-9]{1,12}$/.test(args.human_ref || "") ||
+      !Number.isInteger(args.base_version) || args.base_version < 1 ||
+      !text(args.exit_reason) || text(args.exit_reason).length > 500 ||
+      !/^WR-[0-9]{1,12}$/.test(args.superseded_by || "") ||
+      // Self-supersession is refused by the function too, and that refusal is the
+      // one that counts. This copy exists only so the obvious typo never reaches
+      // a row lock. The three refusals that need a SECOND row — a withdrawn
+      // successor, a non-sourced successor, a two-row cycle — are deliberately
+      // NOT re-implemented here: they cannot be decided without the database.
+      args.superseded_by.trim() === args.human_ref.trim())
+    throw new ToolError({ error: "invalid_supersede_work_request" });
 }
 
 function validatePlan(args, ToolError) {
@@ -508,7 +541,7 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
         situation: { type: "string", minLength: 1, maxLength: 1000 }, title: { type: "string", minLength: 1, maxLength: 200 },
         desired_outcome: { type: "string", minLength: 1, maxLength: 2000 }, acceptance_criteria: { type: "array", minItems: 1, maxItems: 12,
           items: { type: "object", additionalProperties: false, required: ["id", "text"], properties: {
-            id: { type: "string", minLength: 1, maxLength: 64 }, text: { type: "string", minLength: 1, maxLength: 500 },
+            id: { type: "string", minLength: 2, maxLength: 64, pattern: "^[A-Z][A-Z0-9-]{1,63}$" }, text: { type: "string", minLength: 1, maxLength: 500 },
           } } },
       }, additionalProperties: false, required: ["idempotency_key", "situation", "title", "desired_outcome", "acceptance_criteria"] },
       handler: async (c, actor, args) => {
@@ -556,7 +589,7 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
     },
     "work-request-card": {
       write: false,
-      description: "Read one same-tenant safe captured Work Request card. The card names the current or stale source and one human review label; it offers no executable actions.",
+      description: "Read one same-tenant safe Work Request card, live or withdrawn. The card names the current or stale source, one human review label, and — for a request withdrawn in error — why it was withdrawn, when it closed, and the request that replaced it. It offers no executable actions.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
         work_request: { type: "string", pattern: "^WR-[0-9]{1,12}$", minLength: 4, maxLength: 15 },
       }, required: ["work_request"] },
@@ -566,8 +599,22 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
           `select * from ops.work_request_card($1::text, $2::text)
              /* work-request-intake:card */`, [args.work_request, tenant]);
         const row = result.rows[0];
-        if (!row || !["captured", "triaged", "ready"].includes(row.state)) throw new ToolError({ error: "work_request_not_found" });
+        // A WITHDRAWN REQUEST IS STILL A RECORD. Refusing it here as
+        // work_request_not_found would make the withdrawal capability erase the
+        // one thing it exists to write, and it would say "not found" about a row
+        // the database returned. ops.work_request_card admits the two terminal
+        // states as of 0426, so this list has to as well or the SQL widening is
+        // dead code.
+        if (!row || !["captured", "triaged", "ready", "declined", "superseded"].includes(row.state)) throw new ToolError({ error: "work_request_not_found" });
         const triaged = ["triaged", "ready"].includes(row.state);
+        // Withdrawal is CAPTURED-ONLY: branch 3 of work_request_sourced_capture_
+        // shape requires triage_classification, triaged_by_actor_id and
+        // triaged_at to all be null in these two states, and the immutability
+        // trigger admits the transition only from 'captured'. So a withdrawn row
+        // carries no triage, no plan and no shape, and every block below that is
+        // keyed on those columns correctly reads null. Nothing here has to
+        // special-case them; the constraint already did.
+        const withdrawn = ["declined", "superseded"].includes(row.state);
         let pendingOutcomeFeedback = null;
         if (row.state === "ready") {
           const pending = await c.query(
@@ -581,7 +628,14 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
         return { ok: true, human_ref: row.ref, title: row.title, desired_outcome: row.desired_outcome,
           acting_identity: acting,
           acceptance_criteria: row.acceptance_criteria, state: row.state, version: Number(row.version),
-          projection_state: "queued", source: sourceProjection(row),
+          // DERIVED FROM THE CROSSWALK, not hardcoded. work-request-projection
+          // .v1.json maps captured/triaged/ready to queued and BOTH terminals to
+          // declined — superseded-projects-as-declined is that contract's
+          // declared judgment call, made because doctrine grants the projection
+          // seven states and superseded is not one of them. A withdrawn card that
+          // still read "queued" would tell a requester their closed record is
+          // waiting in line.
+          projection_state: withdrawn ? "declined" : "queued", source: sourceProjection(row),
           triage: triaged ? { classification: row.triage_classification, human_actor_slug: row.triaged_by_actor_slug,
             triaged_at: row.triaged_at } : null,
           plan: row.plan_hash ? { plan_ref: row.plan_ref || null, plan_hash: row.plan_hash, runbook_ref: row.runbook_ref || null,
@@ -596,7 +650,20 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
           outcome_feedback_history: Array.isArray(row.outcome_feedback_history) ? row.outcome_feedback_history.map(outcomeFeedbackProjection) : [],
           accepted_feedback_count: Number(row.accepted_feedback_count || 0),
           shape: row.shape_disposition ? { disposition: row.shape_disposition, fixed_surface_ref: row.shape_fixed_surface_ref || null } : null,
-          next_human_action: row.state === "ready" ? (pendingOutcomeFeedback ? { label: "Review outcome feedback", effect: "none" } : row.outcome_feedback ? { label: "Outcome feedback accepted", effect: "none" } : { label: "Plan accepted", effect: "none" }) : triaged ? { label: "Prepare scope and acceptance", effect: "none" } : { label: "Review and triage", effect: "none" },
+          // REASON SURVIVES COLLAPSE. Both terminals project to one label, so the
+          // crosswalk's own invariant obliges the card to carry what actually
+          // happened alongside it. superseded_by_ref is the successor's durable
+          // human ref, resolved by the card function's self-join; it is null on a
+          // decline by the receipt's own check constraint.
+          withdrawal: withdrawn ? { exit_reason: row.exit_reason, closed_at: row.closed_at,
+            superseded_by_ref: row.superseded_by_ref || null } : null,
+          // A withdrawn request asks nothing of anybody. Falling through to
+          // "Review and triage" would put a record closed in error back in front
+          // of a human as work, which is the queue-pollution the withdrawal verbs
+          // exist to end. The two terminals keep separate labels because the
+          // canonical record keeps them separate even where the projection does
+          // not.
+          next_human_action: withdrawn ? { label: row.state === "superseded" ? "Superseded" : "Declined", effect: "none" } : row.state === "ready" ? (pendingOutcomeFeedback ? { label: "Review outcome feedback", effect: "none" } : row.outcome_feedback ? { label: "Outcome feedback accepted", effect: "none" } : { label: "Plan accepted", effect: "none" }) : triaged ? { label: "Prepare scope and acceptance", effect: "none" } : { label: "Review and triage", effect: "none" },
           actions: [] };
       },
     },
@@ -628,6 +695,115 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
           return { ok: true, human_ref: row.ref, state: row.state, version: Number(row.version),
             classification: row.classification, triaged_by_actor_slug: row.triaged_by_actor_slug,
             triaged_at: row.triaged_at };
+        });
+      },
+    },
+    // WITHDRAWING A REQUEST CAPTURED IN ERROR — TWO VERBS, NEVER ONE.
+    //
+    // state-machines.v1.json is phase0_frozen and declares "* -> declined" and
+    // "* -> superseded" as SEPARATE transitions with different guards
+    // ("authorized disposition recorded" and "replacement request linked"), and
+    // work-request-projection.v1.json rests its declared judgment call
+    // superseded-projects-as-declined on the canonical record keeping the two
+    // apart. A single verb inferring the state from whether a successor argument
+    // was passed collapses exactly the distinction the frozen contract says must
+    // survive, and it does so silently: a caller who forgets the successor gets a
+    // decline instead of an error. 0426 splits the database functions for the
+    // same reason; this is that split reaching the verb layer.
+    //
+    // CAPTURED ONLY, and the verbs do not enforce it — ops.decline_/supersede_
+    // sourced_work_request select "for update" on state='captured' and version=
+    // p_base_version, so a triaged request raises and surfaces here as a version
+    // conflict. Withdrawing a triaged row would strand its triage receipt and may
+    // strand a shape disposition; that is the migration's reasoning, not a
+    // restriction this layer invented.
+    //
+    // NOT authorityOnly, unlike review-and-triage and accept-ready-plan. 0426
+    // grants execute on both functions to carr_writer and nothing else, and the
+    // authority login roles are REFUSED if they hold carr_writer at all
+    // (ops/control-plane-authority-runtime-preflight-selftest.py, "writer
+    // membership refuses"), so routing these down authorityDsnForActor would be a
+    // guaranteed permission-denied on every call. That is also why the functions
+    // take p_actor_slug: on the writer connection ops.authority_actor_slug() has
+    // no session role to map, so who acted is PASSED rather than inferred — and
+    // passing actor.slug records the agent that actually acted rather than
+    // flattening every act to 'joe', which is the gap ACTING_IDENTITY above
+    // exists to report.
+    //
+    // humanOnly is not declared either: the label stopped being read by
+    // executeRegisteredTool on 2026-08-26 (decision dc57f62d) and WR-000019
+    // slice S1 is removing the stale declarations. A new one would be dead on
+    // arrival and would misreport this verb's protection in the derived
+    // action-risk registry. base_version is the live guard, as it is for
+    // propose-ready-plan and propose-outcome-feedback.
+    "decline-work-request": {
+      write: true,
+      description: "Withdraw one sourced Work Request captured in error by declining it, recording why. It is the only backward move a captured request has, it works from captured and no later state, and it never triages, assigns, dispatches, approves, executes, or names a successor.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {
+        idempotency_key: { type: "string", pattern: "^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$" },
+        human_ref: { type: "string", pattern: "^WR-[0-9]{1,12}$", minLength: 4, maxLength: 15 },
+        base_version: { type: "integer", minimum: 1 },
+        exit_reason: { type: "string", minLength: 1, maxLength: 500 },
+      }, required: ["idempotency_key", "human_ref", "base_version", "exit_reason"] },
+      handler: async (c, actor, args) => {
+        validateDecline(args, ToolError);
+        // Bind replays to the authenticated actor without admitting actor data
+        // into the closed client schema.
+        return withEnvelope(c, actor, "decline-work-request", { ...args, _server_actor_id: actor.id }, async () => {
+          const result = await c.query(
+            `select * from ops.decline_sourced_work_request($1::text, $2::integer, $3::text, $4::text, $5::uuid)
+               /* work-request-intake:decline */`,
+            [args.human_ref, args.base_version, text(args.exit_reason), actor.slug, args.idempotency_key]);
+          const row = result.rows[0];
+          if (!row) throw new ToolError({ error: "version_conflict", human_ref: args.human_ref,
+            resolution: "re-read the Work Request card; only its current captured version may be withdrawn" });
+          // The function returns the card fields, not the row id, and event
+          // .subject_id is NOT NULL — so the id is read back by ref rather than
+          // the audit link being dropped.
+          const subject = await c.query(
+            `select id from ops.work_request where ref = $1
+               /* work-request-intake:withdrawn-subject */`, [row.ref]);
+          await writeEvent(c, actor, "decline-work-request", "ops_work_request", subject.rows[0].id, {
+            field: "state", old: { state: "captured", version: args.base_version },
+            new: { state: "declined", version: Number(row.version), exit_reason: row.exit_reason },
+            idempotency_key: args.idempotency_key,
+          });
+          return { ok: true, human_ref: row.ref, state: row.state, version: Number(row.version),
+            exit_reason: row.exit_reason, closed_at: row.closed_at };
+        });
+      },
+    },
+    "supersede-work-request": {
+      write: true,
+      description: "Withdraw one sourced Work Request captured in error by superseding it into the request that replaces it, recording why. It works from captured and no later state; it never triages, assigns, dispatches, approves, executes, or changes the successor.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {
+        idempotency_key: { type: "string", pattern: "^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$" },
+        human_ref: { type: "string", pattern: "^WR-[0-9]{1,12}$", minLength: 4, maxLength: 15 },
+        base_version: { type: "integer", minimum: 1 },
+        exit_reason: { type: "string", minLength: 1, maxLength: 500 },
+        superseded_by: { type: "string", pattern: "^WR-[0-9]{1,12}$", minLength: 4, maxLength: 15 },
+      }, required: ["idempotency_key", "human_ref", "base_version", "exit_reason", "superseded_by"] },
+      handler: async (c, actor, args) => {
+        validateSupersede(args, ToolError);
+        return withEnvelope(c, actor, "supersede-work-request", { ...args, _server_actor_id: actor.id }, async () => {
+          const result = await c.query(
+            `select * from ops.supersede_sourced_work_request($1::text, $2::integer, $3::text, $4::text, $5::text, $6::uuid)
+               /* work-request-intake:supersede */`,
+            [args.human_ref, args.base_version, text(args.exit_reason), args.superseded_by, actor.slug, args.idempotency_key]);
+          const row = result.rows[0];
+          if (!row) throw new ToolError({ error: "version_conflict", human_ref: args.human_ref,
+            resolution: "re-read the Work Request card; only its current captured version may be withdrawn" });
+          const subject = await c.query(
+            `select id from ops.work_request where ref = $1
+               /* work-request-intake:withdrawn-subject */`, [row.ref]);
+          await writeEvent(c, actor, "supersede-work-request", "ops_work_request", subject.rows[0].id, {
+            field: "state", old: { state: "captured", version: args.base_version },
+            new: { state: "superseded", version: Number(row.version), exit_reason: row.exit_reason,
+              superseded_by_ref: row.superseded_by_ref },
+            idempotency_key: args.idempotency_key,
+          });
+          return { ok: true, human_ref: row.ref, state: row.state, version: Number(row.version),
+            exit_reason: row.exit_reason, closed_at: row.closed_at, superseded_by_ref: row.superseded_by_ref };
         });
       },
     },
@@ -747,7 +923,7 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
         idempotency_key: { type: "string", pattern: "^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$" },
         human_ref: { type: "string", pattern: "^WR-[0-9]{1,12}$" }, base_version: { type: "integer", minimum: 1 },
         plan_hash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
-        criterion_results: { type: "array", minItems: 1, maxItems: 12, items: { type: "object", additionalProperties: false, required: ["id", "result"], properties: { id: { type: "string", minLength: 1, maxLength: 64 }, result: { type: "string", enum: ["met", "not_met", "not_observed"] } } } },
+        criterion_results: { type: "array", minItems: 1, maxItems: 12, items: { type: "object", additionalProperties: false, required: ["id", "result"], properties: { id: { type: "string", minLength: 2, maxLength: 64, pattern: "^[A-Z][A-Z0-9-]{1,63}$" }, result: { type: "string", enum: ["met", "not_met", "not_observed"] } } } },
         evidence_refs: { type: "array", minItems: 1, maxItems: 12, items: { type: "string", minLength: 6, maxLength: 300 } },
         blocker_code: { type: "string", enum: ["none", "evidence_missing", "criterion_not_met", "external_dependency", "system_error"] },
         result_summary: { type: "string", minLength: 1, maxLength: 500 },

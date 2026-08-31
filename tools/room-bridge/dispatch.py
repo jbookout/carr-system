@@ -48,6 +48,7 @@ sys.path.insert(0, str(HERE))
 import desks  # noqa: E402
 from desks import DeskError, Registry  # noqa: E402
 import claude_wire as inject_mod  # noqa: E402  — the Idea 78 wire, see the module
+import claude_desktop_wire  # noqa: E402 — background supervisor + supported /desktop
 import codex_wire  # noqa: E402  — Codex worked out this protocol, see the module
 import execution_contract  # noqa: E402 — portable Job Passport v1 seam
 
@@ -96,6 +97,14 @@ def _to_claude(entry: dict, task: str, msg_id: str) -> dict:
         conn.close()
 
 
+def _to_claude_desktop(entry: dict, task: str) -> dict:
+    """Create one durable background session; later bridge cycles observe it."""
+    try:
+        return claude_desktop_wire.launch_background(entry, task)
+    except claude_desktop_wire.ClaudeDesktopError as exc:
+        return {"status": "failed", "detail": exc.code}
+
+
 def _codex_events(stdout: str) -> list[dict]:
     """Codex prints one JSON object per line with --json. Ignore the rest."""
     out = []
@@ -110,7 +119,13 @@ def _codex_events(stdout: str) -> list[dict]:
     return out
 
 
-def _to_codex(entry: dict, task: str, env: dict | None, fresh: bool = False) -> dict:
+def _to_codex(
+    entry: dict,
+    task: str,
+    env: dict | None,
+    fresh: bool = False,
+    config_overrides: tuple[str, ...] = (),
+) -> dict:
     """Send one task to a standing Codex thread, resuming it when there is one.
 
     The thread is what makes this an equal seat rather than a shot: Codex
@@ -141,6 +156,17 @@ def _to_codex(entry: dict, task: str, env: dict | None, fresh: bool = False) -> 
             "-c", f"model_reasoning_effort={entry['effort']}",
             "-o", str(last),
         ]
+        # Callers may carry a reviewed, desk-specific Codex posture without
+        # teaching the shared registry or CLI how to widen every desk. The
+        # Engineering adapter is the only production caller and supplies an
+        # exact constant tuple; ordinary dispatches keep this empty and stay
+        # offline. -c is valid on both fresh and resumed exec paths.
+        for override in config_overrides:
+            if not isinstance(override, str) or not override.strip():
+                raise DeskError(
+                    "bad_codex_config",
+                    "Codex config overrides must be non-empty strings")
+            argv += ["-c", override]
         # `codex exec resume` does not accept -C/-s/--add-dir at all — a
         # resumed session already carries the cwd, sandbox and extra dirs it
         # was FIRST started with, and passing them again is a hard CLI parse
@@ -221,13 +247,14 @@ def dispatch(
     results_path: Path | None = None,
     env: dict | None = None,
     fresh: bool = False,
+    config_overrides: tuple[str, ...] = (),
 ) -> dict:
     """Send one task to one desk. Raises DeskError when the desk is not usable."""
     registry = registry or Registry()
     results_path = Path(results_path or DEFAULT_RESULTS)
     entry = registry.resolve(name)          # every refusal happens here
     msg_id = str(uuid.uuid4())
-    if entry["kind"] in ("codex-session", "codex-live"):
+    if entry["kind"] in ("claude-desktop", "codex-session", "codex-live"):
         if not entry.get("model") or not str(entry.get("model")).strip():
             raise DeskError(
                 "unnamed_model_or_effort",
@@ -245,6 +272,8 @@ def dispatch(
 
     if entry["kind"] == "claude-session":
         outcome = _to_claude(entry, task, msg_id)
+    elif entry["kind"] == "claude-desktop":
+        outcome = _to_claude_desktop(entry, task)
     elif entry["kind"] == "codex-live":
         outcome = codex_wire.run_turn(
             entry["socket"], task,
@@ -254,7 +283,9 @@ def dispatch(
         if outcome.get("thread_id"):
             registry.remember_thread(name, outcome["thread_id"])
     else:
-        outcome = _to_codex(entry, task, env, fresh=fresh)
+        outcome = _to_codex(
+            entry, task, env, fresh=fresh, config_overrides=config_overrides,
+        )
         # pin the desk to its thread so the next task lands in the same one
         if outcome.get("thread_id"):
             registry.remember_thread(name, outcome["thread_id"])

@@ -75,6 +75,8 @@
 #   bin/schema-snapshot.sh --check    # non-zero if the checked-in file is stale
 #   bin/schema-snapshot.sh --from-disposable-local postgres://carr_ci@127.0.0.1:<port>/carr_ci
 #       # generate only from the loopback disposable PG17 full-build target
+#   bin/schema-snapshot.sh --from-disposable-local <dsn> --verify-only
+#       # validate the disposable candidate without changing db/schema.sql
 #
 # Needs production access, so it runs on Joe's Mac and never in CI — CI consumes
 # the committed file and cannot reach production by construction.
@@ -109,10 +111,12 @@ normalise_eof() {
   awk "$EOF_NORMALIZER"
 }
 CHECK=0
+VERIFY_ONLY=0
 URL=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --check) CHECK=1 ;;
+    --verify-only) VERIFY_ONLY=1 ;;
     --from-disposable-local)
       [ "$#" -ge 2 ] || { echo "schema-snapshot: --from-disposable-local needs a DSN" >&2; exit 64; }
       URL="$2"; shift ;;
@@ -445,7 +449,7 @@ select format('grant execute on function %s.%s(%s) to %s;',
   join pg_roles r on r.oid = a.grantee
  where r.rolname in (select rolname from app)
    and lower(a.privilege_type) = 'execute'
- order by n.nspname, p.proname, r.rolname;
+ order by n.nspname, p.proname, pg_get_function_identity_arguments(p.oid), r.rolname;
 
 with app(rolname) as (
   values ('carr_reader'), ('carr_writer'), ('carr_jobs'), ('carr_exporter'), ('carr_authority'), ('carr_device_evidence'),
@@ -1199,6 +1203,67 @@ then
   exit 1
 fi
 
+# THE COMPLETION DEFAULT POLICY is bounded internal configuration, not runtime
+# evidence. Migration 0431 seeds exactly one versioned row. Once its ledger
+# entry enters this snapshot, the migration no longer replays; omitting the row
+# leaves every completion subject without a policy and the projection empty.
+# Carry only that exact row. Subjects, observations, relations, dispositions,
+# and receipts remain runtime evidence and are never dumped here.
+COMPLETION_REGISTER_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0431_completion_register_schema.sql')" \
+  2>/dev/null)"
+case "$COMPLETION_REGISTER_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the completion-register ledger state" >&2; exit 1 ;;
+esac
+
+if [ "$COMPLETION_REGISTER_APPLIED" = t ]; then
+  COMPLETION_POLICY_EXACT="$("$PSQL" "$URL" -Atqc \
+    "select count(*) = 1 and bool_and(
+       organization_tenant_id = 'carr-internal'
+       and id = '00000000-0000-4000-8000-000000000431'::uuid
+       and policy_key = 'completion-default'
+       and policy_version = 1
+       and capability_class = 'default'
+       and required_dimensions = array[
+         'canonical_owner','intended_consumer','workflow_trigger',
+         'retrieval_admission','enforcement_closure','operator_surface',
+         'telemetry','canonical_implementation','activation','live_readback','rollback'
+       ]::text[]
+       and default_freshness = interval '24 hours'
+       and state_precedence = array[
+         'conflicting','canceled','superseded','unknown_stale','blocked','planned',
+         'built_unmerged','merged_unactivated','active_unproven',
+         'partially_built','operational'
+       ]::text[]
+       and effective_at = '2026-08-25T00:00:00Z'::timestamptz
+       and created_at = '2026-08-25T00:00:00Z'::timestamptz
+     ) from ops.completion_policy" 2>/dev/null)"
+  [ "$COMPLETION_POLICY_EXACT" = t ] || {
+    echo "schema-snapshot: completion default policy is missing or drifted — nothing written" >&2
+    exit 1
+  }
+
+  cat >> "$TMP" <<'COMPLETION_POLICY_HEADER'
+
+-- CARR COMPLETION DEFAULT POLICY (bin/schema-snapshot.sh) — one exact,
+-- source-verified configuration row. Runtime completion evidence is excluded.
+COMPLETION_POLICY_HEADER
+  if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" >> "$TMP" <<'COMPLETION_POLICY_ROW'
+select format(
+  'select set_config(''carr.organization_tenant_id'', %L, false);%sinsert into ops.completion_policy select * from jsonb_populate_record(null::ops.completion_policy, %L::jsonb) on conflict (organization_tenant_id, policy_key, policy_version) do nothing;%sreset carr.organization_tenant_id;',
+  organization_tenant_id, chr(10), to_jsonb(p), chr(10))
+  from ops.completion_policy p
+ where organization_tenant_id = 'carr-internal'
+   and policy_key = 'completion-default'
+   and policy_version = 1;
+COMPLETION_POLICY_ROW
+  then
+    echo "schema-snapshot: could not render the completion default policy — nothing written" >&2
+    exit 1
+  fi
+fi
+
 # THE SIXTH INSTANCE WAS CAUGHT BY HAND; THE SEVENTH IS CAUGHT HERE. Every block
 # above this line was written one at a time, each after a database rebuilt from
 # this file failed a db-gate days later: the role preamble, the control catalog,
@@ -1222,6 +1287,11 @@ fi
 # in silence.
 if ! "$CATALOG_PY" "$REPO/ops/snapshot-seed-coverage.py" "$REPO" "$TMP"; then
   exit 1
+fi
+
+if [ "$VERIFY_ONLY" = "1" ]; then
+  echo "schema snapshot: disposable candidate valid; tracked snapshot unchanged"
+  exit 0
 fi
 
 if [ "$CHECK" = "1" ]; then

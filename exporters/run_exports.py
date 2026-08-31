@@ -73,7 +73,29 @@ def main():
     # unbootstrapped decision-history target aborted the whole nightly export sweep and
     # five generated files went stale, while the chain reported only the first failure.
     # Run every target, then fail if any did.
-    results = [run_export(k, rel, fn, bootstrap=a.bootstrap) for k, (rel, fn) in targets.items()]
+    #
+    # AND NOT A BARE COMPREHENSION EITHER, which is how the SAME outcome came back
+    # through a different door on 2026-08-25 through 08-27 (loop #535). run_export
+    # returns False on a failure it HANDLES, but keep_generation() re-raises OSError
+    # once its EDEADLK retry budget is spent — by design, since silently skipping the
+    # dated copy would discard the rollback guarantee. That exception escaped the
+    # comprehension and killed every remaining target. `curriculum` is the first key
+    # in TARGETS and its OneDrive file locks intermittently around the 02:05 window,
+    # so one transiently unreadable file took down all six exports for three nights
+    # and left five receipts stale.
+    #
+    # Catching per target is what makes the comment above TRUE rather than merely
+    # intended: an unhandled error becomes this target's failure, and the sweep goes
+    # on to the next one. Bare `except Exception` is deliberate — the contract here is
+    # blast radius, not diagnosis, and narrowing it to OSError would let the next
+    # unexpected exception type re-open the exact hole this closes.
+    results = []
+    for k, (rel, fn) in targets.items():
+        try:
+            results.append(run_export(k, rel, fn, bootstrap=a.bootstrap))
+        except Exception as e:
+            print(f"[{k}] FAILED (unhandled {type(e).__name__}): {e}", file=sys.stderr)
+            results.append(False)
     failed = [k for k, r in zip(targets, results) if not r]
     if failed:
         print(f"\n{len(failed)} of {len(results)} target(s) FAILED: {', '.join(failed)}")

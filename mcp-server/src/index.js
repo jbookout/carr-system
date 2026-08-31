@@ -92,6 +92,9 @@ import { buildRelease } from "./release.js";
 import { readCommandCenterSummary } from "./workspace-command-center.js";
 import { wrapWithCorrelation } from "./correlation.js";
 import { withFailureRecording, scheduleFailureRecord, actorUnresolvedFailureClass } from "./trace.js";
+import { createTourInternalWebHandler } from "./tour-internal-web.js";
+import { createReportsWebHandler, isReportsHostRequest } from "./reports-web.js";
+import { createReportsRuntimeAdapters, createTourRuntimeAdapters } from "./tour-runtime.js";
 
 const JSON_HEADERS = { "content-type": "application/json" };
 const json = (body, status = 200) =>
@@ -565,11 +568,14 @@ const oauthProvider = new OAuthProvider({
 // authentication adapter differs. The cookie session already resolved to the
 // exact actor shape dispatch() and pipelineChanges() accept.
 const program6RoutineController = createProgram6RoutineController({ authorizeAction: authorizeProgram6Action });
+const tourInternalHandler = createTourInternalWebHandler(createTourRuntimeAdapters());
+const reportsHandler = createReportsWebHandler(createReportsRuntimeAdapters());
 const dealroomHandler = createDealroomHandler({
   mcpHandler: (request, env, ctx, actor) => dispatch(request, env, ctx, actor),
   pipelineHandler: (request, env, _ctx, actor) => pipelineApi(request, env, actor),
   program6Handler: (request, env, ctx, actor, session) =>
     program6RoutineController.fetch(request, env, ctx, actor, session),
+  tourHandler: tourInternalHandler,
   commandCenterReader: async (env, actor, correlationId) => {
     const sql = neon(env.DATABASE_URL_READER);
     const client = { query: async (text, params = []) => ({ rows: await sql.query(text, params) }) };
@@ -608,6 +614,9 @@ const dealroomHandler = createDealroomHandler({
 // owned by OAuthProvider/defaultHandler.
 async function routeRequest(request, env, ctx) {
   const url = new URL(request.url);
+  // The confidential reports host is an isolated leaf. Unknown paths close as
+  // report-surface 404s and can never alias MCP, OAuth, capture, or Deal Room.
+  if (isReportsHostRequest(request)) return reportsHandler.fetch(request, env, ctx);
   // The old Deal Room hostname is a browser bookmark bridge only. Keep it
   // ahead of machine-token doors so /mcp and other API paths fail closed on
   // that hostname instead of reaching an unrelated machine surface.

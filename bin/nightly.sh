@@ -1082,6 +1082,24 @@ step "portability mirror (md+csv, 2 locations)" \
 # when ~/.config/carr/calendar.env is absent, same contract as the other steps.
 step "calendar archive (both partners' feeds)"       ./bin/archive-calendar.sh
 
+# MAIL, loop #169. The calendar lane proves a meeting happened; most follow-up
+# never becomes one, so a calendar-only view of the relationship sees a fraction
+# of the real contact. That gap is why vendor touch coverage sat at 0.7%.
+#
+# WHY IT LIVES IN THIS CHAIN RATHER THAN A 25TH LAUNCHD AGENT. The row asked for
+# "launchd, weekly is enough", written before the scheduler cutover. Recurrence
+# is moving to ONE adapter (loop #532), and this file's own scheduled-task note
+# says anything the chain gains in future goes inside bin/nightly.sh. Apple Mail
+# is a LOCAL store the cloud tick cannot reach, so the local edge is right and a
+# new scheduler is not. Daily also beats the weekly the row settled for.
+#
+# NEITHER STEP WRITES TO THE RECORD. The extractor emits envelope metadata only,
+# never message bodies (decision 745ab4aa admits derived facts); the matcher
+# emits proposals to out/mail-matched.json. Exit 78 = SKIP when Mail is not
+# running, because launching Joe's mail client at 02:05 with nobody at the
+# machine is a side effect no capture is worth.
+step "mail capture (extract + match, writes nothing)" ./bin/mail-capture.sh
+
 # Added 2026-08-12 (Joe's go, "put settings in the repo"): mirror the Claude Code
 # permission surface — the three settings.json files carrying the allow list, the
 # hook wiring, and the autoMode clearances — into claude-tree/settings/. Those

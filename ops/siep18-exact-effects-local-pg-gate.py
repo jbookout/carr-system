@@ -52,9 +52,9 @@ def main() -> int:
     try:
         with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
             if cur.execute("select count(*) from ops.scac_exact_effect_contract").fetchone()[0] != 0:
-                raise RuntimeError("0392 unexpectedly seeded reviewed effect authority")
+                raise RuntimeError("0452 unexpectedly seeded reviewed effect authority")
             if cur.execute("select count(*) from ops.scac_trusted_principal_binding").fetchone()[0] != 0:
-                raise RuntimeError("0392 unexpectedly seeded trusted-principal authority")
+                raise RuntimeError("0452 unexpectedly seeded trusted-principal authority")
             for role in ("carr_writer", "carr_jobs", "carr_authority"):
                 for signature in (
                     "ops.scac_register_exact_effect_contract(text,text,text,jsonb,uuid)",
@@ -64,7 +64,7 @@ def main() -> int:
                     if cur.execute(
                         "select has_function_privilege(%s,%s,'execute')", (role, signature)
                     ).fetchone()[0]:
-                        raise RuntimeError(f"0392 leaked runtime EXECUTE: {role} {signature}")
+                        raise RuntimeError(f"0452 leaked runtime EXECUTE: {role} {signature}")
 
             for role in ("carr_authority_joe", "carr_writer"):
                 if cur.execute("select 1 from pg_roles where rolname=%s", (role,)).fetchone() is None:

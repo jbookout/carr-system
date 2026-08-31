@@ -21,6 +21,15 @@ import engineering_passport as passport  # noqa: E402
 import execution_contract as contract  # noqa: E402
 import bridge  # noqa: E402
 
+# The dedicated desk is intentionally installable only on Joe's exact machine
+# boundary. Hosted checks exercise contract behavior with those same literal
+# roots but must not pretend their runner path is an authorized installation.
+_resolve_live_writable_roots = adapter._dedicated_writable_roots
+try:
+    _resolve_live_writable_roots()
+except adapter.DispatchRefusal:
+    adapter._dedicated_writable_roots = lambda: list(adapter.AUTHORIZED_WRITABLE_ROOTS)
+
 GATE_SPEC = importlib.util.spec_from_file_location(
     "engineering_rule_pack_gate", ROOT / "hooks" / "rule-pack-drift-gate.py")
 assert GATE_SPEC and GATE_SPEC.loader
@@ -102,7 +111,27 @@ class ValidEngineeringDesk:
     def resolve(self, name):
         assert name == "engineering-codex"
         return {"name": name, "kind": "codex-session", "model": "gpt-5.6-sol", "effort": "high",
-                "cwd": str(ROOT), "sandbox": "workspace-write", "room_seat": None}
+                "cwd": str(ROOT), "sandbox": "workspace-write",
+                "add_dirs": adapter._dedicated_writable_roots(), "room_seat": None}
+
+
+def test_writable_roots_are_exactly_the_two_authorized_machine_paths():
+    assert adapter.AUTHORIZED_WRITABLE_ROOTS == (
+        "/Users/booko/carr-system/.git",
+        "/Users/booko/carr-system/out",
+    )
+    assert adapter._dedicated_writable_roots() == list(adapter.AUTHORIZED_WRITABLE_ROOTS)
+    if Path(adapter.AUTHORIZED_WRITABLE_ROOTS[0]).is_dir():
+        assert _resolve_live_writable_roots() == list(adapter.AUTHORIZED_WRITABLE_ROOTS)
+
+
+def test_network_access_is_exactly_the_two_github_delivery_hosts():
+    assert adapter.AUTHORIZED_CODEX_CONFIG_OVERRIDES == (
+        "sandbox_workspace_write.network_access=true",
+        'features.network_proxy={enabled=true,domains={"github.com"="allow","api.github.com"="allow"}}',
+    )
+    assert not any(
+        'domains."*"' in value for value in adapter.AUTHORIZED_CODEX_CONFIG_OVERRIDES)
 
 
 def test_bridge_auth_observations_are_allowed_but_malformed_metadata_refuses():
@@ -127,6 +156,9 @@ def test_bridge_auth_observations_are_allowed_but_malformed_metadata_refuses():
 
 
 def test_success_is_fresh_and_database_capability_is_not_forwarded():
+    assert adapter.EXECUTOR_TIMEOUT_SECONDS == 900
+    assert adapter.EXECUTOR_RECEIPT_RESERVE_SECONDS == 120
+    assert adapter.dispatch.CODEX_TIMEOUT_S == adapter.EXECUTOR_TIMEOUT_SECONDS
     seen = {}
 
     def fake_dispatch(desk, prompt, **kwargs):
@@ -144,12 +176,34 @@ def test_success_is_fresh_and_database_capability_is_not_forwarded():
             os.environ["CARR_DB_JOBS_URL"] = old
     assert result["ok"] is True
     assert seen["desk"] == "engineering-codex" and seen["fresh"] is True
+    assert seen["config_overrides"] == adapter.AUTHORIZED_CODEX_CONFIG_OVERRIDES
     assert "CARR_DB_JOBS_URL" not in seen["env"]
     assert "SERVER-ISSUED SLICE PACKET" in seen["prompt"]
     assert "RULE-DELIVERY WORKFLOW: engineering-slice" in seen["prompt"]
     assert ("RULE-DELIVERY PACKS: engineering-git,delegation-council,"
             "scheduled-automation,source-study") in seen["prompt"]
+    assert ('{"packs":["engineering-git","delegation-council",'
+            '"scheduled-automation","source-study"]}') in seen["prompt"]
+    assert "Do not pass `workflow`" in seen["prompt"]
+    assert "`engineering-slice` is a workflow label rather than a canonical rule pack" in seen["prompt"]
     assert "REFUSE before inspecting the envelope, source, or job" in seen["prompt"]
+    assert f"stops this native turn after {adapter.EXECUTOR_TIMEOUT_SECONDS} seconds" in seen["prompt"]
+    assert f"Reserve the final {adapter.EXECUTOR_RECEIPT_RESERVE_SECONDS} seconds" in seen["prompt"]
+    assert "Never begin a broad or unbounded check late in the turn" in seen["prompt"]
+    assert "Run the smallest declared-scope fixture/snapshot checks first" in seen["prompt"]
+    assert "broader repository gates belong after those bounded checks" in seen["prompt"]
+    assert "return a typed blocked receipt before the adapter deadline" in seen["prompt"]
+    assert "RECOVERY FIRST:" in seen["prompt"]
+    assert "inspect the current branch and Git status" in seen["prompt"]
+    assert "treat them as an untrusted checkpoint" in seen["prompt"]
+    assert "review them, continue them, and cite fresh checks" in seen["prompt"]
+    assert "inspect local Git branches named for this exact slice" in seen["prompt"]
+    assert "review the exact commit and declared-scope diff" in seen["prompt"]
+    assert "Never select work from another slice" in seen["prompt"]
+    assert "push an unreviewed checkpoint" in seen["prompt"]
+    assert "reuse a predecessor envelope" in seen["prompt"]
+    assert "never inherit the predecessor transcript" in seen["prompt"]
+    assert "or its unverified conclusions" in seen["prompt"]
     prompt_record = {"type": "response_item", "payload": {"type": "message",
                      "role": "user", "content": [
                          {"type": "input_text", "text": seen["prompt"]}]}}
@@ -289,7 +343,8 @@ def test_desk_is_fixed_and_refuses_claude_or_unmodeled_registry_entries_before_d
 
     class WidenedDesk(ValidEngineeringDesk):
         def resolve(self, name):
-            return {**super().resolve(name), "add_dirs": [str(Path.home() / ".config" / "carr")]}
+            return {**super().resolve(name), "add_dirs": [
+                *adapter._dedicated_writable_roots(), str(Path.home() / ".config" / "carr")]}
 
     try:
         adapter.run(request(), dispatch_fn=fake_dispatch, registry=WidenedDesk())
@@ -308,6 +363,7 @@ def test_tracked_bootstrap_registers_one_unseated_exact_desk_and_wrapper_has_no_
         assert entry["name"] == "engineering-codex"
         assert entry["kind"] == "codex-session" and entry["model"] == "gpt-5.6-sol"
         assert entry["effort"] == "high" and entry["sandbox"] == "workspace-write"
+        assert entry["add_dirs"] == adapter._dedicated_writable_roots()
         assert entry.get("room_seat") is None and entry["thread_id"] is None
         assert adapter._dedicated_codex_desk(registry)["cwd"] == str(ROOT)
     wrapper = (ROOT / "bin" / "run-engineering-dispatch.sh").read_text()

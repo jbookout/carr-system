@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="referrer" content="no-referrer">
+    <title>Tour report</title>
+    <link rel="stylesheet" href="/vendor/maplibre-gl-6.1.0/maplibre-gl.css">
+    <link rel="stylesheet" href="/share.css">
+    <script src="/share-bootstrap.js"></script>
+    <script type="module" src="/share.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#report-list">Skip to report items</a>
+    <main class="shell" aria-labelledby="report-title">
+      <header class="masthead">
+        <p class="eyebrow">CARR Healthcare Real Estate</p>
+        <h1 id="report-title">Tour report</h1>
+        <p id="report-summary" class="summary">Opening your shared report…</p>
+      </header>
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+      <button id="open-tour" type="button" disabled>Open tour</button>
+      <section id="map-section" aria-labelledby="map-title" hidden>
+        <h2 id="map-title">Tour map</h2>
+        <p id="map-note" class="status">Ordered markers show only verified entrance, driveway, or parking-access coordinates. No road-route geometry is implied.</p>
+        <div id="tour-map" role="application" aria-label="Interactive map of the ordered tour stops"></div>
+      </section>
+      <section aria-labelledby="items-title">
+        <h2 id="items-title">Properties</h2>
+        <ol id="report-list" class="report-list" aria-busy="true"></ol>
+      </section>
+      <p class="status">This foundation share is read-only. PDF download and client feedback require a future governed permission-scope amendment.</p>
+    </main>
+  </body>
+</html>

@@ -8,6 +8,13 @@ const dell = { id: "10000000-0000-0000-0000-000000000003", slug: "dell", display
 const codexForJoe = { id: "10000000-0000-0000-0000-000000000004", slug: "codex", display: "Codex", human: false, sponsoring_human_slug: "joe", native_agent_verified: true, via: "oauth-agent" };
 const claudeForDell = { id: "10000000-0000-0000-0000-000000000005", slug: "claude", display: "Claude", human: false, sponsoring_human_slug: "dell", native_agent_verified: true, via: "oauth-agent" };
 
+const FALLBACK_UUID = "11111111-2222-4333-8444-555555555555";
+const ACCEPTANCE_UUIDS = {
+  "joe-shadow": "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa",
+  "joe-canary": "bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb",
+  "dell-shadow": "cccccccc-3333-4333-8333-cccccccccccc",
+};
+
 class AcceptanceAuthorityFake {
   constructor(sessionSlug) {
     this.sessionSlug = sessionSlug;
@@ -15,6 +22,8 @@ class AcceptanceAuthorityFake {
     this.disableCalls = [];
     this.envelopeWrites = 0;
     this.eventWrites = 0;
+    this.receiptLookups = [];
+    this.acceptanceIds = [];
   }
 
   async query(text, params = []) {
@@ -23,7 +32,10 @@ class AcceptanceAuthorityFake {
       this.acceptanceCalls.push(params);
       if (params[1] === "canary" && this.sessionSlug !== "joe")
         throw new Error("canary workflow acceptance requires Joe authority session");
-      return { rows: [{ id: `acceptance-${this.sessionSlug}-${params[1]}` }] };
+      // A real acceptance returns a uuid; the fixture must too, or the event
+      // assertion below is testing a shape production never produces.
+      this.acceptanceIds.push(`${this.sessionSlug}-${params[1]}`);
+      return { rows: [{ id: ACCEPTANCE_UUIDS[`${this.sessionSlug}-${params[1]}`] || FALLBACK_UUID }] };
     }
     if (text.includes("ops.disable_legacy_schedule")) {
       this.disableCalls.push(params);
@@ -34,8 +46,19 @@ class AcceptanceAuthorityFake {
       this.envelopeWrites += 1;
       return { rows: [] };
     }
+    if (text.includes("from ops.legacy_schedule_disable_receipt where receipt_ref")) {
+      this.receiptLookups.push(params[0]);
+      return { rows: [{ id: "8f14e45f-ceea-467a-9a5f-6a1b2c3d4e5f" }] };
+    }
     if (text.includes("insert into event")) {
       this.eventWrites += 1;
+      // THE SUBJECT OF AN EVENT IS A UUID. This fake used to accept anything,
+      // which is why the suite stayed green for months while every real call
+      // died on `invalid input syntax for type uuid` and rolled its receipt
+      // back. Assert the shape the database actually enforces.
+      const subject = params[4];
+      if (subject != null && !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(String(subject)))
+        throw new Error(`invalid input syntax for type uuid: "${subject}"`);
       return { rows: [] };
     }
     throw new Error(`unexpected SQL: ${text}`);
@@ -141,6 +164,9 @@ test("legacy disable emits a distinct Joe-bound surface receipt", async () => {
     pre_observation_ref: "native:enabled", post_observation_ref: "native:disabled",
   });
   assert.equal(result.receipt_ref, "legacy-disable:disable-fixture");
+  // The audit event must name the receipt's uuid, never the workflow key.
+  assert.deepEqual(c.receiptLookups, ["legacy-disable:disable-fixture"]);
+  assert.equal(c.eventWrites, 1);
   assert.deepEqual(c.disableCalls, [["cc-update-audit", "cc-update-audit.claude-code.v1",
     "cc-update-audit", "accepted evidence", "native:enabled", "native:disabled",
     null, null, null, null, "disable-fixture"]]);

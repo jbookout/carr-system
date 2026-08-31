@@ -477,7 +477,7 @@ export function isCurrentRepositoryWriteEnvelope(row) {
     JSON.stringify(envelope.request?.allowed_actions) === JSON.stringify(ENGINEERING_REPOSITORY_ACTIONS));
 }
 
-function isDispatchableCurrentEnvelope(row) {
+function isDispatchableCurrentEnvelope(row, agentSessionLeaseExpiresAt) {
   const envelope = row?.envelope;
   const issued = Date.parse(envelope?.issued_at);
   const expiry = Date.parse(envelope?.expires_at);
@@ -490,7 +490,7 @@ function isDispatchableCurrentEnvelope(row) {
     Number.isFinite(issued) && Number.isFinite(expiry) && expiry > issued && expiry - issued <= 30 * 60 * 1000 &&
     hasDispatchRunway(envelope.expires_at, 930) &&
     envelope.agent_session.lease_expires_at === envelope.expires_at &&
-    envelope.agent_session.lease_expires_at === row?.agent_session_lease_expires_at &&
+    envelope.agent_session.lease_expires_at === agentSessionLeaseExpiresAt &&
     envelope.agent_session.id === `session:${row?.agent_session_id}`;
 }
 
@@ -658,6 +658,7 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
   let priorBinding = null;
   let session = null;
   let executor = null;
+  let priorSessionIsActive = false;
 
   // Locator reads above are intentionally unlocked. Existing mutable authority
   // is acquired in the global session -> exact actor -> lineage order before
@@ -689,9 +690,13 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
         where id=$1::uuid for update`,
       [priorSessionId],
     )).rows[0];
+    priorSessionIsActive = ["claimed", "in_progress"].includes(session?.state);
+    // Completed/cancelled sessions remain immutable, but are still valid
+    // provenance for a fresh envelope generation on the same slice lineage.
+    const priorSessionIsTerminal = ["completed", "cancelled"].includes(session?.state);
     if (!session || session.id !== priorSessionId ||
         session.work_request_id !== source.work.id.replace(/^wr:/, "") ||
-        !["claimed", "in_progress"].includes(session.state) ||
+        (!priorSessionIsActive && !priorSessionIsTerminal) ||
         session.scope_ref !== `slice:${sliceRef}` ||
         session.worktree_ref !== ENGINEERING_SESSION_WORKTREE ||
         session.source_commit_sha !== ENGINEERING_SESSION_SOURCE)
@@ -745,21 +750,31 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
   if (priorEnvelope) {
     const priorSlicePlanId = uuid(priorBinding.slice_plan_id, "prior_envelope.slice_plan_id", ToolError);
     await c.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`engineering-envelope:${priorSlicePlanId}:${sliceRef}`]);
-    const currentness = await c.query("select ops.engineering_envelope_currentness($1::uuid,$2::uuid) as currentness", [priorEnvelope.id, priorEnvelope.job_id]);
-    const priorJobReplayable = ["queued", "retry_wait", "running"].includes(priorBinding.job_state);
-    if (priorJobReplayable && currentness.rows[0]?.currentness?.eligible === true &&
-        currentness.rows[0]?.currentness?.dispatch_runway_sufficient === true)
-      return { ok: true, replayed: true, envelope: priorEnvelope.envelope, envelope_id: priorEnvelope.id, job_id: priorEnvelope.job_id };
-    if (priorJobReplayable && currentness.rows[0]?.currentness?.eligible === true)
-      error(ToolError, { error: "engineering_envelope_insufficient_runway", envelope_id: priorEnvelope.id });
+    // A terminal session is a predecessor, never a replay candidate. Active
+    // sessions retain the existing currentness and dispatch-runway boundary.
+    if (priorSessionIsActive) {
+      const currentness = await c.query("select ops.engineering_envelope_currentness($1::uuid,$2::uuid) as currentness", [priorEnvelope.id, priorEnvelope.job_id]);
+      const priorJobReplayable = ["queued", "retry_wait", "running"].includes(priorBinding.job_state);
+      if (priorJobReplayable && currentness.rows[0]?.currentness?.eligible === true &&
+          currentness.rows[0]?.currentness?.dispatch_runway_sufficient === true)
+        return { ok: true, replayed: true, envelope: priorEnvelope.envelope, envelope_id: priorEnvelope.id, job_id: priorEnvelope.job_id };
+      if (priorJobReplayable && currentness.rows[0]?.currentness?.eligible === true)
+        error(ToolError, { error: "engineering_envelope_insufficient_runway", envelope_id: priorEnvelope.id });
+    }
   }
 
-  const lockedPlan = await c.query(
+  // engineering_slice_plan is append-only: its trigger forbids UPDATE/DELETE,
+  // and carr_writer intentionally has SELECT but no UPDATE authority. A row
+  // lock therefore adds no currentness guarantee here and makes this governed
+  // admission impossible (PostgreSQL row locks require UPDATE privilege).
+  // The transaction-scoped advisory lock plus the repeated passport digest
+  // check above are the serialization boundary; keep this lookup read-only.
+  const registeredPlan = await c.query(
     `select id from ops.engineering_slice_plan
-      where accepted_plan_id=$1::uuid and plan_digest=$2::text for key share`,
+      where accepted_plan_id=$1::uuid and plan_digest=$2::text`,
     [source.plan.record_id, plan.plan_digest],
   );
-  if (!lockedPlan.rows.length) error(ToolError, { error: "engineering_slice_plan_not_registered" });
+  if (!registeredPlan.rows.length) error(ToolError, { error: "engineering_slice_plan_not_registered" });
   const lockedWork = await c.query("select id from ops.work_request where id=$1::uuid for share", [source.work.id.replace(/^wr:/, "")]);
   if (!lockedWork.rows.length) error(ToolError, { error: "engineering_work_request_not_found_or_not_ready" });
   refreshed = await c.query("select ops.engineering_passport_facts($1::text) as facts", [workRequest]);
@@ -772,10 +787,12 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
   dependenciesSatisfied(facts, source, plan, slice, ToolError);
 
   if (priorEnvelope) {
-    await c.query(
-      `update ops.capability_agent_session set state='cancelled', cancelled_at=now(), version=version+1
-        where id=$1::uuid and work_request_id=$2::uuid and state not in ('completed','cancelled')`,
-      [priorSessionId, source.work.id.replace(/^wr:/, "")]);
+    if (priorSessionIsActive) {
+      await c.query(
+        `update ops.capability_agent_session set state='cancelled', cancelled_at=now(), version=version+1
+          where id=$1::uuid and work_request_id=$2::uuid and state not in ('completed','cancelled')`,
+        [priorSessionId, source.work.id.replace(/^wr:/, "")]);
+    }
     session = null;
   }
   const sessionExpiry = new Date(Date.now() + 30 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -827,8 +844,11 @@ export async function claimEngineeringSlice(c, worker, limit = 1) {
     // on an unspecified row order (which could resend an expired/read-only
     // predecessor); the most recently issued envelope is the only candidate
     // that may receive this fresh lease.
+    // carr_jobs intentionally cannot read capability sessions directly.  The
+    // SECURITY DEFINER controller binding below supplies the revalidated
+    // session lease after enforcing the canonical lock/currentness boundary.
     const bound = await c.query(
-      "select e.*, to_char(s.lease_expires_at at time zone 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') as agent_session_lease_expires_at from ops.engineering_execution_envelope e join ops.capability_agent_session s on s.id=e.agent_session_id where e.job_id=$1 order by e.issued_at desc, e.id desc limit 1",
+      "select e.* from ops.engineering_execution_envelope e where e.job_id=$1 order by e.issued_at desc, e.id desc limit 1",
       [job.job_id],
     );
     if (!bound.rows.length || !bound.rows[0].envelope) {
@@ -836,19 +856,17 @@ export async function claimEngineeringSlice(c, worker, limit = 1) {
       continue;
     }
     const envelopeRow = bound.rows[0];
-    if (!isDispatchableCurrentEnvelope(envelopeRow)) {
-      rows.push({ ...job, envelope: envelopeRow.envelope, envelope_id: envelopeRow.id,
-        envelope_digest: envelopeRow.envelope_digest, controller_error: "engineering_envelope_currentness_invalid" });
-      continue;
-    }
     const bindingResult = await c.query(
       "select ops.engineering_controller_binding($1::uuid,$2::uuid,$3::uuid) as binding",
       [envelopeRow.id, job.job_id, job.lease_token],
     );
     const binding = bindingResult.rows[0]?.binding;
-    if (!binding || typeof binding !== "object") {
+    if (!binding || typeof binding !== "object" ||
+        !isDispatchableCurrentEnvelope(envelopeRow, binding.agent_session_lease_expires_at)) {
       rows.push({ ...job, envelope: envelopeRow.envelope, envelope_id: envelopeRow.id,
-        envelope_digest: envelopeRow.envelope_digest, controller_error: "engineering_controller_binding_missing" });
+        envelope_digest: envelopeRow.envelope_digest,
+        controller_error: binding && typeof binding === "object"
+          ? "engineering_envelope_currentness_invalid" : "engineering_controller_binding_missing" });
       continue;
     }
     rows.push({ ...job, envelope: envelopeRow.envelope, envelope_id: envelopeRow.id,

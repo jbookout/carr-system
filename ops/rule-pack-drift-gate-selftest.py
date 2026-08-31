@@ -858,6 +858,10 @@ check("engineering-slice declares its canonical rule-delivery workflow",
 check("engineering-slice declares the exact reviewed pack set",
       "RULE-DELIVERY PACKS: engineering-git,delegation-council,scheduled-automation,source-study"
       in engineering_task)
+check("engineering-slice calls standing-context with packs only",
+      '{"packs":["engineering-git","delegation-council","scheduled-automation","source-study"]}'
+      in engineering_task and "`workflow`" in engineering_task
+      and "also interprets that field as a pack" in engineering_task)
 check("engineering-slice refuses before work when scoped standing-context fails",
       "REFUSE" in engineering_task and "standing-context" in engineering_task)
 spoofed_engineering = codex_user(

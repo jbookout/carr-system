@@ -91,9 +91,9 @@ test("successor generation refuses absent or ambiguous predecessor markers", () 
 
 test("reviewed MCP inventory is an exact immutable projection of the assembled registry", () => {
   const rows = mcpInventory();
-  assert.equal(rows.length, 188);
-  assert.equal(rows.filter(row => row.write).length, 128);
-  assert.equal(rows.filter(row => !row.write).length, 60);
+  assert.equal(rows.length, 220);
+  assert.equal(rows.filter(row => row.write).length, 155);
+  assert.equal(rows.filter(row => !row.write).length, 65);
   assert.deepEqual(rows.map(row => row.operation), Object.keys(TOOLS).sort());
   assert.equal(Object.isFrozen(TOOLS), true);
   assert.equal(Object.isFrozen(TOOLS["add-loop"]), true);
@@ -101,6 +101,12 @@ test("reviewed MCP inventory is an exact immutable projection of the assembled r
   assert.throws(() => { TOOLS["add-loop"].handler = async () => ({ ok: true }); }, TypeError);
   assert.equal(new Set(rows.map(row => row.ingress_key)).size, rows.length);
   assert.equal(new Set(rows.map(row => row.schema_digest)).has(undefined), false);
+  assert.equal(rows.find(row => row.operation === "append-tour-rights-receipt").source_locator,
+    "mcp-server/src/tour-rights-projection.js");
+  assert.equal(rows.find(row => row.operation === "record-tour-map-promotion-receipt").source_locator,
+    "mcp-server/src/tour-map-promotion.js");
+  assert.equal(rows.find(row => row.operation === "request-tour-pdf-render").source_locator,
+    "mcp-server/src/tour-artifacts.js");
   const governanceQueue = rows.find(row => row.operation === "governance-queue");
   assert.ok(governanceQueue);
   assert.equal(governanceQueue.write, false);
@@ -190,8 +196,8 @@ test("v9 successor seals v8 and binds the measured SIEP-18 grant snapshot", () =
   const expectedEntryCount = rows.length + SIEP18_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count +
     SIEP18_FORWARD_DB_CATALOG_BASELINE.relation_dml.count +
     SIEP18_FORWARD_DB_CATALOG_BASELINE.column_dml.count;
-  assert.equal(rows.length, 757);
-  assert.equal(expectedEntryCount, 1328);
+  assert.equal(rows.length, 800);
+  assert.equal(expectedEntryCount, 1371);
   assert.equal(sha256(siep18MonitorMigration), SIEP18_MONITOR_ARTIFACT_SHA256);
   assert.equal(SIEP18_PRE_V9_DB_CATALOG_BASELINE.secdef_execute.count, 270);
   assert.equal(SIEP18_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count -
@@ -267,7 +273,7 @@ test("migration is read-only at runtime and preserves the SIEP-18 boundary", () 
 
 test("reviewed non-MCP source locators resolve and remain explicitly non-authorizing", () => {
   const rows = fullInventory().filter(row => !["mcp_tool", "job_definition", "workflow_entrypoint"].includes(row.ingress_kind));
-  assert.equal(rows.length, 514);
+  assert.equal(rows.length, 524);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -275,7 +281,7 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
     assert.equal(row.implementation_state, "inventoried_not_atomically_mediated");
   }
   const scripts = discoverScriptEntrypoints();
-  assert.equal(scripts.length, 505);
+  assert.equal(scripts.length, 515);
   assert.equal(scripts.some(path => path === "ops/rule-delivery-cutover.py"), true);
   assert.equal(scripts.some(path => path === "ops/control-plane-scheduler-cutover.py"), true);
   assert.equal(scripts.some(path => path === "run.sh"), true);
@@ -337,15 +343,17 @@ test("job definitions and live DB capabilities have exact reviewed baselines", (
 
 test("GitHub and launchd workflow entrances bind exact triggers, permissions, and delegates", () => {
   const workflows = workflowDefinitionInventory();
-  assert.equal(workflows.length, 29);
+  assert.equal(workflows.length, 30);
   const github = workflows.filter(row => row.source_locator.startsWith(".github/workflows/"));
-  assert.equal(github.length, 5);
+  assert.equal(github.length, 6);
   assert.equal(github.every(row => row.ingress_kind === "workflow_entrypoint" &&
     row.trigger_contract_digest && row.permissions_contract_digest && row.classification_authorizing === false), true);
   const automerge = workflows.find(row => row.source_locator === ".github/workflows/automerge-pilot.yml");
   assert.equal(automerge.delegates_to.includes("script:ops/automerge_pilot.py"), true);
   const backup = workflows.find(row => row.source_locator === ".github/workflows/backup-nightly.yml");
   assert.equal(backup.delegates_to.includes("shell:aws-s3api-put-object"), true);
+  const dbAcceptance = workflows.find(row => row.source_locator === ".github/workflows/db-acceptance.yml");
+  assert.equal(dbAcceptance.delegates_to.includes("script:ops/local-pg-ci.py"), true);
   const launchd = workflows.filter(row => row.source_locator.startsWith("ops/launchd/"));
   assert.equal(launchd.length, 24);
   assert.equal(launchd.every(row => row.launchd_label && row.trigger_contract_digest &&

@@ -179,7 +179,26 @@ def build_pointer_index():
              # exists to prevent, reintroduced by a directory the first pass missed.
              # Each worktree carries a full second copy of corpus/, so one stale
              # checkout could pin a file as "pointed at" forever.
-             "worktrees"}
+             "worktrees",
+             # Added 2026-08-31, loop #289, and it is the SAME finding the line
+             # above records rather than a new one — the 2026-08-09 pass named
+             # ".claude/worktrees" and stopped there, so three other trees full
+             # of second copies kept pinning files. On 2026-08-31 every one of
+             # the 98 DUPLICATE rows was held by mirror paths and the stageable
+             # set was ZERO, which is the 190/190 uselessness again wearing a
+             # different directory name.
+             #
+             #   .codex-worktrees      Codex's worktrees, one of them inside the
+             #                         VAULT itself, each a full second checkout
+             #   executor-repos        .claude/executor-repos/<id>/{repo,worktree}
+             #   corpus                THE RENDER'S OWN SOURCE. Since the corpus
+             #                         flip (2026-08-06) corpus/ under the repo is
+             #                         git-canonical and the nightly chain PUSHES
+             #                         it out to the vault copy. The corpus twin
+             #                         of a vault file is not a pointer to that
+             #                         file; it is the same document upstream.
+             #   claude-tree           the same relationship for the .claude tree
+             ".codex-worktrees", "executor-repos", "corpus", "claude-tree"}
     idx = {}
     for base in (VAULT, CLAUDE_DIR, REPO):
         if not os.path.isdir(base):

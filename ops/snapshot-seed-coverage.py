@@ -12,9 +12,13 @@ was then patched one table at a time, by hand, in bin/schema-snapshot.sh.
 
 WHAT THIS CHECKS, and it is deliberately narrow: every table that an ALREADY
 APPLIED migration writes rows into AT MIGRATION TIME must be CLASSIFIED in
-ops/config/snapshot-seed-coverage.json -- carried, carried_subset, or explicitly
-excluded with a reason. A table that is none of those is the next instance, and
-the snapshot refuses to be written until someone classifies it.
+ops/config/snapshot-seed-coverage.json -- carried, carried_after_apply,
+carried_subset, or explicitly excluded with a reason. carried_after_apply is
+the two-phase source state: absence is allowed only while a repository migration
+that seeds the table remains outside the artifact ledger; once it enters the
+ledger, the same row-presence requirement as carried applies. A table that is
+none of those is the next instance, and the snapshot refuses to be written until
+someone classifies it.
 
 WHAT "AT MIGRATION TIME" MEANS, and the first version of this file got it wrong.
 It is NOT "appears in an INSERT statement in the file". An independent review of
@@ -63,6 +67,20 @@ TABLE = r"(\"?[a-z_][a-z0-9_]*\"?(?:\s*\.\s*\"?[a-z_][a-z0-9_]*\"?)?)"
 LEDGER_COPY = re.compile(r"^COPY\s+public\.schema_migrations\s*\(", re.M)
 COPY_BLOCK = re.compile(r"^COPY\s+" + TABLE + r"\s*(?:\([^)]*\)\s*)?FROM\s+stdin\s*;", re.I | re.M)
 
+# EXECUTE MAKES A STRING LITERAL INTO STATEMENTS. Blanking literals is right for
+# every other case and wrong for exactly this one: `execute 'insert into t ...'`
+# lands rows, and so does `execute format('insert into t ...', ...)`. The scanner
+# blanked both and detected nothing, while scan_sql's own docstring justified the
+# blanking with "no row-landing statement hides inside a string" -- which is
+# precisely false here. Twelve applied migrations already use EXECUTE.
+#
+# format() is matched as an optional wrapper rather than a separate case because
+# the literal is still the FIRST argument; a table interpolated as %s cannot be
+# recovered by anyone and is not pretended to be, but a literal table name in the
+# format string is read exactly like any other.
+EXECUTE_ARGUMENT = re.compile(
+    r"(?:^|[^A-Za-z0-9_])execute\s*(?:format\s*\(\s*)?$", re.I)
+
 CREATE_ROUTINE = re.compile(
     r"create\s+(?:or\s+replace\s+)?(?:function|procedure)\s+"
     r"([a-z_][a-z0-9_]*(?:\s*\.\s*[a-z_][a-z0-9_]*)?)\s*\(", re.I)
@@ -104,6 +122,25 @@ WRITES_ANYWHERE = (
                + TABLE + r"[^;]{0,4000}?\bas\s+(?:with|select)", re.I | re.S),
 )
 
+# ROW EVIDENCE IS A NARROWER QUESTION THAN PRESENCE, AND THE TWO DIRECTIONS WANT
+# DIFFERENT ANSWERS. Reading both from one set left the carried direction a NAME
+# test for one statement shape.
+#
+# `copy public.deal_phase from '/tmp/x.csv';` is a real write when a migration
+# runs it, and an artifact carrying that line is still something to refuse if the
+# table is EXCLUDED -- business or runtime data entering a tracked file is the one
+# outcome this whole design prevents, so presence stays deliberately broad there.
+# But it is not evidence the artifact CARRIES rows: the data sits in a file the
+# snapshot does not contain and a rebuild would never see. A carried table must
+# not pass on the strength of its name.
+#
+# So the carried direction reads this narrower set. COPY FROM stdin is absent
+# from it on purpose: copy_blocks() already counts those blocks, and it counts
+# ROWS, which is the whole reason that direction is a row test.
+ARTIFACT_ROW_WRITES = tuple(
+    pattern for pattern in WRITES_ANYWHERE
+    if "copy" not in pattern.pattern[:8].lower())
+
 # SELECT ... INTO IS DELIBERATELY NOT DETECTED, and the reason is worth stating so
 # nobody adds it back. In plain SQL it creates a table; in PL/pgSQL the identical
 # syntax assigns a variable. Every occurrence across all 264 migrations is the
@@ -118,6 +155,27 @@ def normalise(table):
     """public.foo and foo are the same table; ops.foo is not."""
     table = table.replace('"', "").replace(" ", "").lower()
     return table[len("public."):] if table.startswith("public.") else table
+
+
+# HOW FAR BACK THE TWO BACKWARD-LOOKING TESTS MAY REACH. Both are anchored to
+# the END of the accumulated buffer, so the cut is always thousands of characters
+# away from what they inspect: the keyword test reads the word immediately before
+# the dollar-quote, and the `do language <lang>` form spans well under a hundred
+# characters. Neither can see the truncation.
+HEAD_TAIL = 4096
+
+# The routine-header scan is bounded far more generously because it looks for the
+# LAST `create function` header before this body, which sits behind the whole
+# parameter list rather than adjacent to the quote.
+#
+# ITS DEGRADATION DIRECTION IS THE SAFE ONE, which is why a bound is acceptable
+# here at all. If the header falls outside the window, `headers` comes back empty
+# and the body is appended to the top-level text instead of being filed under a
+# routine name. Top-level text is scanned unconditionally, so the body's tables
+# are still detected -- they simply stop being gated on the routine being CALLED.
+# That is a false alarm at worst, never a missed seed, and this file's whole
+# purpose is to refuse rather than to miss.
+ROUTINE_TAIL = 65536
 
 
 def _tail(parts, count):
@@ -181,9 +239,15 @@ def scan_sql(sql):
     You cannot find comments without knowing where strings are, and you cannot
     find strings without knowing where comments are. Alternating regular
     expressions will always lose that race; a single pass that handles both, plus
-    dollar quoting, cannot. Literals are blanked rather than kept because a
-    table name is an identifier -- no row-landing statement hides inside a
-    string, and an `insert into` quoted in prose is not one either.
+    dollar quoting, cannot.
+
+    Literals are blanked rather than kept, because a table name is an identifier
+    and an `insert into` quoted in prose is not a statement. THE ONE EXCEPTION IS
+    EXECUTE, and an earlier version of this docstring stated the rule without it:
+    "no row-landing statement hides inside a string" is false for
+    `execute 'insert into t ...'`, which is a string and does land rows. A
+    literal that is an argument to EXECUTE is scanned as SQL; every other literal
+    is still blanked.
 
     Bodies are scanned too, not stored raw. A DO block or a routine body has its
     own comments and its own string literals, and leaving them unscanned put the
@@ -218,6 +282,11 @@ def scan_sql(sql):
             # INSERT went unreported. That is the apostrophe class of R4 one escape
             # form over, and it swallowed real DML rather than only a call.
             escaped = bool(re.search(r"(?:^|[^A-Za-z0-9_])[Ee]$", _tail(top, 4)))
+            # IS THIS LITERAL AN ARGUMENT TO EXECUTE? If so its text is not inert
+            # -- it is SQL that runs. Decided BEFORE the literal is consumed,
+            # because `top` still ends at the character before the quote here.
+            dynamic = bool(EXECUTE_ARGUMENT.search(_tail(top, HEAD_TAIL)))
+            opened = i
             i += 1
             while i < n:
                 if escaped and sql[i] == "\\" and i + 1 < n:
@@ -230,7 +299,13 @@ def scan_sql(sql):
                     i += 1
                     break
                 i += 1
-            top.append(" ")
+            if dynamic:
+                # The literal's own doubled quotes are how a quote is spelled
+                # inside it; undo that before reading the text as SQL.
+                inner = sql[opened + 1:i - 1].replace("''", "'")
+                top.append(" " + _scanned(inner) + " ")
+            else:
+                top.append(" ")
         elif ch == "$":
             match = DOLLAR.match(sql, i)
             if not match:
@@ -243,7 +318,7 @@ def scan_sql(sql):
                 top.append(sql[i:])
                 break
             body = sql[match.end():end]
-            head = "".join(top)
+            head = _tail(top, HEAD_TAIL)
             previous = re.search(r"([A-Za-z_]+)\s*$", head)
             keyword = previous.group(1).lower() if previous else ""
             # `do language plpgsql $$ ... $$` is the same statement as `do $$ ... $$`.
@@ -251,8 +326,15 @@ def scan_sql(sql):
             # and the block invisible.
             if keyword != "do" and re.search(r"(?:^|;|\s)do\s+language\s+[a-z_]+\s*$", head, re.I):
                 keyword = "do"
+            # `execute $$ ... $$` is the same statement as `execute '...'`, with the
+            # other spelling of a string. Handled here rather than by widening the
+            # literal branch, because a dollar-quote is consumed by this branch.
+            if keyword == "execute" or EXECUTE_ARGUMENT.search(head):
+                top.append(" " + _scanned(body) + " ")
+                i = end + len(tag)
+                continue
             if keyword == "as":
-                headers = list(CREATE_ROUTINE.finditer("".join(top)))
+                headers = list(CREATE_ROUTINE.finditer(_tail(top, ROUTINE_TAIL)))
                 if headers:
                     routines.setdefault(normalise(headers[-1].group(1)), []).append(_scanned(body))
                 else:
@@ -383,13 +465,23 @@ def check_region_boundary(artifact):
     # real artifact is equally clean, so all it did was give a mutation somewhere to
     # hide. Literals and comments are already gone from prefix_top, so a table merely
     # NAMED in prose cannot reach here.
-    candidates = []
+    # ONE ORDERED LIST, NOT A MINIMUM OVER SEVERAL. An earlier version took
+    # min(...) by match.start() across every segment, and those offsets are
+    # positions in DIFFERENT strings: a DO body's offset 10 is not earlier than
+    # top-level text's offset 400, and comparing them named whichever table the
+    # arithmetic happened to favour. Segments are searched in order instead --
+    # top-level text, then each DO body -- which is a real order and a stable one.
+    #
+    # re.M is NOT passed. No WRITES_ANYWHERE pattern is anchored, so it changed
+    # nothing and only gave a mutation a place to hide.
+    first = None
     for segment in [prefix_top, *prefix_dos]:
-        for pattern in WRITES_ANYWHERE:
-            candidates.append(re.search(pattern.pattern, segment, pattern.flags | re.M))
-    first = min((c for c in candidates if c), key=lambda c: c.start(), default=None)
+        hits = [m for m in (pattern.search(segment) for pattern in WRITES_ANYWHERE) if m]
+        if hits:
+            first = min(hits, key=lambda m: m.start())
+            break
     if first:
-        return (f"DATA REGION BOUNDARY MOVED: the first data statement in the artifact is "
+        return (f"DATA REGION BOUNDARY MOVED: a data statement in the artifact is "
                 f"{normalise(first.group(1))}, above public.schema_migrations.\n"
                 f"    This check reads data statements from the ledger COPY to EOF. With data\n"
                 f"    above it, rows in that block are invisible here and an excluded table\n"
@@ -413,16 +505,32 @@ def copy_blocks(region):
     The span is returned so the caller can take the block OUT before scanning. COPY
     data is not SQL: an apostrophe in a data row would send a literal scanner
     inside-out over everything after it, which is finding 4 one region over.
+
+    ONLY `FROM stdin` BLOCKS ARE COUNTED, and the asymmetry is deliberate rather
+    than overlooked. A `COPY t FROM '/path'` has no inline block to count, so its
+    rows can only be confirmed by reading a file this check cannot see; presence of
+    the statement is all there is, and it stays a name test. bin/schema-snapshot.sh
+    emits no such form -- pg_dump uses stdin -- so nothing in this artifact takes
+    that path today, and a suite case pins that it would still register rather than
+    vanish if one ever appeared.
     """
-    blocks = []
+    blocks, unterminated = [], []
     for head in COPY_BLOCK.finditer(region):
         end = region.find("\n\\.", head.end())
-        stop = len(region) if end == -1 else end + 3
-        body = region[head.end():end] if end != -1 else region[head.end():]
+        if end == -1:
+            # NOT blanked to end of file, which is what this used to do. A COPY with
+            # no terminator swallowed everything after it, so a truncated artifact
+            # hid every later statement -- including an excluded table's rows, the
+            # one thing the presence direction exists to catch. Silence is the worst
+            # available answer to a malformed artifact, so it is reported instead and
+            # the block contributes nothing.
+            unterminated.append(normalise(head.group(1)))
+            continue
+        body = region[head.end():end]
         blocks.append((normalise(head.group(1)),
                        any(line.strip() for line in body.split("\n")),
-                       head.start(), stop))
-    return blocks
+                       head.start(), end + 3))
+    return blocks, unterminated
 
 
 def _blank(text, spans):
@@ -439,7 +547,18 @@ def _blank(text, spans):
 
 
 def tables_with_data(artifact):
-    """Tables the artifact actually carries ROWS for.
+    """Returns (present, carrying_rows) -- two answers, because the two directions
+    of the check are asking different questions.
+
+    PRESENT is deliberately broad: anything that would land rows counts, including
+    a file-sourced COPY whose data the artifact does not contain. That set drives
+    the excluded direction, where the failure being caught is business or runtime
+    data entering a tracked file and a name is reason enough to stop.
+
+    CARRYING_ROWS is the row test: COPY blocks are counted only when they hold
+    rows, and a file-sourced COPY does not count at all. That set drives the
+    carried direction, where the failure being caught is a snapshot that cannot
+    rebuild its own database, and a table's NAME appearing proves nothing.
 
     Two passes, and each one can change an answer. COPY blocks are counted, because
     a header above an empty block carries nothing. Everything else is read from
@@ -450,10 +569,12 @@ def tables_with_data(artifact):
     """
     region = data_region(artifact)
     found, spans = set(), []
-    for name, rows, start, stop in copy_blocks(region):
+    blocks, _unterminated = copy_blocks(region)
+    for name, rows, start, stop in blocks:
         if rows:
             found.add(name)
         spans.append((start, stop))
+    rows_only = set(found)
     top, do_bodies, routines = scan_sql(_blank(region, spans))
     segments = [top, *do_bodies]
     for bodies in routines.values():
@@ -461,7 +582,9 @@ def tables_with_data(artifact):
     for segment in segments:
         for pattern in WRITES_ANYWHERE:
             found.update(normalise(hit.group(1)) for hit in pattern.finditer(segment))
-    return found
+        for pattern in ARTIFACT_ROW_WRITES:
+            rows_only.update(normalise(hit.group(1)) for hit in pattern.finditer(segment))
+    return found, rows_only
 
 
 def load_classification(repo):
@@ -469,10 +592,16 @@ def load_classification(repo):
     with open(path, encoding="utf-8") as handle:
         doc = json.load(handle)
     carried = dict(doc.get("carried") or {})
+    after_apply = dict(doc.get("carried_after_apply") or {})
     subset = dict(doc.get("carried_subset") or {})
     excluded = dict(doc.get("excluded") or {})
     forbidden = dict(doc.get("carried_subset_must_not_contain") or {})
-    buckets = (("carried", carried), ("carried_subset", subset), ("excluded", excluded))
+    buckets = (
+        ("carried", carried),
+        ("carried_after_apply", after_apply),
+        ("carried_subset", subset),
+        ("excluded", excluded),
+    )
     for index, (name_a, bucket_a) in enumerate(buckets):
         for name_b, bucket_b in buckets[index + 1:]:
             both = sorted(set(bucket_a) & set(bucket_b))
@@ -482,21 +611,36 @@ def load_classification(repo):
     if stray:
         raise ValueError("carried_subset_must_not_contain names a table that is not "
                          "carried_subset: " + ", ".join(stray))
-    return carried, subset, excluded, forbidden, path
+    return carried, after_apply, subset, excluded, forbidden, path
 
 
 def check(repo, artifact_text):
     """Return a list of human-readable failures; empty means the snapshot is sound."""
-    carried, subset, excluded, forbidden, config_path = load_classification(repo)
+    carried, after_apply, subset, excluded, forbidden, config_path = load_classification(repo)
     rel_config = os.path.relpath(config_path, repo)
     applied = applied_migrations(artifact_text)
     seeds, missing = seeded_tables(repo, applied)
-    present = tables_with_data(artifact_text)
+    migration_dir = os.path.join(repo, "migrations")
+    pending = {
+        name for name in os.listdir(migration_dir)
+        if name.endswith(".sql") and name not in applied
+    }
+    pending_seeds, _pending_missing = seeded_tables(repo, pending)
+    present, carrying_rows = tables_with_data(artifact_text)
     failures = []
 
     boundary = check_region_boundary(artifact_text)
     if boundary:
         failures.append(boundary)
+
+    _blocks, unterminated = copy_blocks(data_region(artifact_text))
+    for table in unterminated:
+        failures.append(
+            f"COPY BLOCK NEVER ENDS: {table}\n"
+            f"    Its COPY ... FROM stdin has no terminating line, so the artifact is\n"
+            f"    truncated or malformed. Nothing after it can be read as a statement,\n"
+            f"    which would hide an excluded table's rows rather than report them.\n"
+            f"    Regenerate the snapshot; do not hand-edit around this.")
 
     for name in missing:
         failures.append(
@@ -504,7 +648,10 @@ def check(repo, artifact_text):
             f"    It is applied, so a rebuild will not replay it, and its file is gone — so\n"
             f"    whatever it seeded cannot be checked. Restore the file or record the rename.")
 
-    for table in sorted(t for t in seeds if t not in carried and t not in subset and t not in excluded):
+    for table in sorted(
+        t for t in seeds
+        if t not in carried and t not in after_apply and t not in subset and t not in excluded
+    ):
         failures.append(
             f"UNCLASSIFIED SEEDED TABLE: {table}\n"
             f"    written at migration time by: {', '.join(seeds[table])}\n"
@@ -524,7 +671,7 @@ def check(repo, artifact_text):
             f"    Remove it, or say why detection changed.")
 
     for table in sorted(set(carried) | set(subset)):
-        if table not in present:
+        if table not in carrying_rows:
             failures.append(
                 f"DECLARED CARRIED BUT ABSENT: {table}\n"
                 f"    {rel_config} says this snapshot carries it, and it is not in the artifact.\n"
@@ -533,6 +680,28 @@ def check(repo, artifact_text):
                 f"    rebuild from this file would come up short. This check reads the ARTIFACT\n"
                 f"    and never the database, so it cannot tell you whether production still\n"
                 f"    holds the rows — do not read it as saying they are gone.")
+
+    for table in sorted(after_apply):
+        if table in seeds:
+            if table not in carrying_rows:
+                failures.append(
+                    f"""DECLARED CARRIED AFTER APPLY BUT ABSENT: {table}
+    An applied migration now seeds this table, so its two-phase allowance
+    is over and the artifact must carry rows for it.
+    Reason on file: {after_apply[table]}
+    Fix the bounded emit block in bin/schema-snapshot.sh; do not weaken
+    the classification or hand-edit the artifact.""")
+        elif table in pending_seeds:
+            if table in present:
+                failures.append(
+                    f"""CARRIED-AFTER-APPLY TABLE PRESENT BEFORE ITS LEDGER ENTRY: {table}
+    The artifact carries data for a table whose seeding migration is still
+    pending. Remove the premature data; source order must stay ledger-first.""")
+        else:
+            failures.append(
+                f"""CARRIED-AFTER-APPLY ENTRY HAS NO SOURCE SEED: {table}
+    No applied or pending migration seeds this table at migration time.
+    Remove the stale classification or restore the migration that justifies it.""")
 
     for table in sorted(excluded):
         if table in present:

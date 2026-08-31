@@ -8,6 +8,8 @@ untraceable evidence is a refusal rather than a reason to make an input up.
 """
 from __future__ import annotations
 
+from lib.secret_redaction import redact_text
+
 from collections.abc import Iterable, Mapping
 from typing import Any, Protocol
 
@@ -210,7 +212,19 @@ def build_input(manifest: Mapping[str, Any], builder_key: str, collector: Eviden
     except (InputUnavailable, NoEligibleRecords):
         raise
     except Exception as exc:
-        raise InputUnavailable(builder_key, f"read-only collector failed: {type(exc).__name__}") from exc
+        # NAME THE REASON, NOT JUST THE EXCEPTION CLASS. Until 2026-08-28 this
+        # recorded only the type, so a dead-lettered social-batch run said
+        # "read-only collector failed: CollectorUnavailable" and a session had
+        # to re-derive the cause by reading the collector by hand. The
+        # collectors already raise messages that say exactly which query or
+        # policy was wrong; carrying that message costs nothing and is the same
+        # lesson the entrypoint failure receipts learned a day earlier. Bounded
+        # and redacted, because a collector message can quote a row it read.
+        detail = redact_text(str(exc))[:500]
+        raise InputUnavailable(
+            builder_key,
+            f"read-only collector failed: {type(exc).__name__}" + (f": {detail}" if detail else ""),
+        ) from exc
     if not raw_evidence:
         raise InputUnavailable(builder_key, "no canonical/read-only/device evidence is available")
 

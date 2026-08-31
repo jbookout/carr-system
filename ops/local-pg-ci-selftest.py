@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import os
 import sys
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
@@ -77,6 +79,47 @@ with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}, clear=True):
     else:
         check("hosted runner refuses", False)
 
+# The declared hosted lane (.github/workflows/db-acceptance.yml) is the one
+# caller allowed through, and every clause is load-bearing. Dropping any one of
+# them would re-open the blanket hole the refusal exists to keep shut, so each
+# is tested by removing exactly that clause and requiring a refusal.
+DECLARED_HOSTED = {
+    "CARR_LOCAL_PG_ALLOW_HOSTED": "1",
+    "GITHUB_ACTIONS": "true",
+    "GITHUB_REPOSITORY": "jbookout/carr-system",
+    "GITHUB_RUN_ID": "1234567890",
+}
+with patch.dict(os.environ, DECLARED_HOSTED, clear=True):
+    try:
+        mod.refuse_hosted_execution()
+    except mod.LocalPGRefusal:
+        check("the declared hosted lane is allowed", False)
+    else:
+        check("the declared hosted lane is allowed", True)
+
+for dropped in sorted(DECLARED_HOSTED):
+    if dropped == "GITHUB_ACTIONS":
+        # Without the hosted marker this is simply not a hosted runner, and the
+        # refusal is not meant to fire at all — a developer shell is the norm.
+        continue
+    partial = {k: v for k, v in DECLARED_HOSTED.items() if k != dropped}
+    with patch.dict(os.environ, partial, clear=True):
+        try:
+            mod.refuse_hosted_execution()
+        except mod.LocalPGRefusal:
+            check(f"hosted refuses without {dropped}", True)
+        else:
+            check(f"hosted refuses without {dropped}", False)
+
+# A fork running the same workflow must not inherit the opt-in.
+with patch.dict(os.environ, {**DECLARED_HOSTED, "GITHUB_REPOSITORY": "someone/fork"}, clear=True):
+    try:
+        mod.refuse_hosted_execution()
+    except mod.LocalPGRefusal:
+        check("a fork is refused", True)
+    else:
+        check("a fork is refused", False)
+
 # The remaining cases use a fully mocked local runner. Clear the ambient hosted
 # marker after testing the refusal so CI and a developer shell exercise the
 # exact same hermetic fixtures below.
@@ -91,6 +134,8 @@ class FakeRunner:
         del cwd, capture
         events.append(tuple(str(part) for part in command))
         child_envs.append(dict(env or {}))
+        if str(command[-1]) == "--fingerprint-only":
+            return mod.CommandResult(0, "{}", "")
         return mod.CommandResult(0, "", "")
 
 
@@ -114,34 +159,82 @@ check("server binds loopback", "-h 127.0.0.1 -p 55432" in events[1])
 check("server output is detached from runner pipes", "-l" in events[1] and "postgres.log" in events[1][events[1].index("-l") + 1])
 check("database is created locally", events[2][0] == "/fake/createdb")
 check("fixture owner role is created", events[3][0] == "/fake/psql" and "neondb_owner" in events[3][-1])
-check("migration class runs through canonical CI", events[4][-2:] == ("--only", "migration"))
+check("pre-0450 fingerprint database is isolated", events[4][0] == "/fake/createdb" and events[4][-1] == "carr_ci_a2_pre")
+check("pre-0450 schema is loaded canonically", events[5][0] == "/fake/psql" and events[5][-1].endswith("db/schema.sql"))
+check("pre-0450 migrations stop at the exact predecessor", events[6][-2:] == ("--through", "0431_completion_register_schema.sql"))
+check("true pre-0450 fingerprint is captured", events[7][-1] == "--fingerprint-only")
+check("migration class runs through canonical CI", events[8][-2:] == ("--only", "migration"))
 check(
     "atomic Joe lifecycle runs after canonical CI",
-    events[5][-1].endswith("ops/atomic-rule-approval-local-pg-acceptance.py"),
+    events[9][-1].endswith("ops/atomic-rule-approval-local-pg-acceptance.py"),
 )
 check(
     "atomic rule-delivery cutover runs after authority acceptance",
-    events[6][-1].endswith("ops/rule-delivery-local-pg-acceptance.py"),
+    events[10][-1].endswith("ops/rule-delivery-local-pg-acceptance.py"),
 )
 check(
     "scoped engineering claim runs after the authority acceptances",
-    events[7][-1].endswith("ops/engineering-claim-local-pg-gate.py"),
+    events[11][-1].endswith("ops/engineering-claim-local-pg-gate.py"),
 )
 check(
     "Engineering terminalization race runs after the scoped claim",
-    events[8][-1].endswith("ops/engineering-envelope-race-local-pg-gate.py"),
+    events[12][-1].endswith("ops/engineering-envelope-race-local-pg-gate.py"),
+)
+check(
+    "canonical ownership lease runs after the Engineering race proof",
+    events[13][-1].endswith("ops/canonical-ownership-lease-local-pg-gate.py"),
+)
+check(
+    "assurance persistence runs immediately after canonical ownership",
+    events[14][-1].endswith("ops/assurance-evidence-acceptance-local-pg-gate.py"),
+)
+completion_event = next(
+    index for index, event in enumerate(events)
+    if event[-1].endswith("ops/completion-register-schema-local-pg-gate.py")
+)
+snapshot_event = next(
+    index for index, event in enumerate(events)
+    if event[0].endswith("bin/schema-snapshot.sh")
+)
+check(
+    "completion register fixture runs before schema snapshot",
+    completion_event < snapshot_event,
+)
+check(
+    "disposable schema snapshot proof cannot rewrite the tracked artifact",
+    "--verify-only" in events[snapshot_event],
+)
+check(
+    "disposable snapshot uses clients from the server toolchain",
+    child_envs[snapshot_event].get("PATH", "").split(os.pathsep)[0] == "/fake",
 )
 check(
     "authority acceptance receives only the local disposable DSN",
-    child_envs[5].get("CARR_LOCAL_PG_DSN")
+    child_envs[9].get("CARR_LOCAL_PG_DSN")
     == "postgres://carr_ci@127.0.0.1:55432/carr_ci"
-    and "CARR_CI_DATABASE_URL" not in child_envs[5],
+    and "CARR_CI_DATABASE_URL" not in child_envs[9],
+)
+check(
+    "fingerprint reads only the isolated pre-0450 database",
+    child_envs[7].get("CARR_LOCAL_PG_DSN")
+    == "postgres://carr_ci@127.0.0.1:55432/carr_ci_a2_pre"
+    and "DATABASE_URL" not in child_envs[7],
+)
+check(
+    "post-CI gates receive the exact pre-0450 fingerprint",
+    child_envs[9].get("CARR_OWNERSHIP_PRE_0450_FINGERPRINT") == "{}"
+    and child_envs[13].get("CARR_OWNERSHIP_PRE_0450_FINGERPRINT") == "{}",
 )
 check("server always stops", events[-1][0] == "/fake/pg_ctl" and events[-1][-1] == "stop")
 check("temporary cluster is always removed", remove.call_count == 1)
 check("ordinary children receive no ambient secrets", all(
-    not ({"DATABASE_URL", "NEON_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GH_TOKEN"} & set(env))
-    for env in child_envs
+    not ({"NEON_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GH_TOKEN"} & set(env))
+    and (
+        "DATABASE_URL" not in env
+        or (any(part.endswith("tools/migrate.py") for part in event)
+            and env["DATABASE_URL"] == "postgres://carr_ci@127.0.0.1:55432/carr_ci_a2_pre")
+    )
+    for event, env in zip(events, child_envs)
 ))
 
 events.clear()
@@ -152,22 +245,75 @@ with (
     patch.object(mod.shutil, "rmtree"),
 ):
     result = mod.run_local_ci(repo=REPO, ci_class="strict", port=55432, runner=FakeRunner())
-check("strict lane uses canonical strict CI", result == 0 and events[4][-1] == "--strict")
+check("strict lane uses canonical strict CI", result == 0 and events[8][-1] == "--strict")
 check(
     "strict lane also proves atomic Joe lifecycle",
-    events[5][-1].endswith("ops/atomic-rule-approval-local-pg-acceptance.py"),
+    events[9][-1].endswith("ops/atomic-rule-approval-local-pg-acceptance.py"),
 )
 check(
     "strict lane also proves atomic rule-delivery cutover",
-    events[6][-1].endswith("ops/rule-delivery-local-pg-acceptance.py"),
+    events[10][-1].endswith("ops/rule-delivery-local-pg-acceptance.py"),
 )
 check(
     "strict lane also proves the scoped engineering claim",
-    events[7][-1].endswith("ops/engineering-claim-local-pg-gate.py"),
+    events[11][-1].endswith("ops/engineering-claim-local-pg-gate.py"),
 )
 check(
     "strict lane also proves the Engineering terminalization race",
-    events[8][-1].endswith("ops/engineering-envelope-race-local-pg-gate.py"),
+    events[12][-1].endswith("ops/engineering-envelope-race-local-pg-gate.py"),
+)
+check(
+    "strict lane also proves canonical ownership leases",
+    events[13][-1].endswith("ops/canonical-ownership-lease-local-pg-gate.py"),
+)
+check(
+    "strict lane also proves assurance persistence",
+    events[14][-1].endswith("ops/assurance-evidence-acceptance-local-pg-gate.py"),
+)
+
+missing_gate = mod.run_required_local_gate(
+    FakeRunner(),
+    Path("/fake/python"),
+    Path("/definitely/missing/assurance-gate.py"),
+    env={},
+    cwd=REPO,
+)
+check(
+    "a missing assurance gate is a causal refusal",
+    missing_gate.returncode == 78
+    and "assurance-gate.py" in missing_gate.stderr
+    and "unavailable" in missing_gate.stderr,
+)
+
+
+class FailingAssuranceRunner(FakeRunner):
+    def run(self, command, *, env=None, cwd=None, capture=False):
+        result = super().run(command, env=env, cwd=cwd, capture=capture)
+        if str(command[-1]).endswith("ops/assurance-evidence-acceptance-local-pg-gate.py"):
+            return mod.CommandResult(23, "", "ASSURANCE_STAGE_MISMATCH: exact causal fixture")
+        return result
+
+
+events.clear()
+with (
+    patch.object(mod, "find_postgres_binaries", return_value=fake_bins),
+    patch.object(mod, "port_is_available", return_value=True),
+    patch.object(mod.tempfile, "mkdtemp", return_value=str(fake_root)),
+    patch.object(mod.shutil, "rmtree"),
+):
+    assurance_stderr = io.StringIO()
+    with redirect_stderr(assurance_stderr):
+        assurance_failure = mod.run_local_ci(
+            repo=REPO, ci_class="migration", port=55432, runner=FailingAssuranceRunner()
+        )
+check("assurance gate failure code is preserved", assurance_failure == 23)
+check(
+    "assurance gate exact child stderr is surfaced",
+    "ASSURANCE_STAGE_MISMATCH: exact causal fixture" in assurance_stderr.getvalue(),
+)
+check(
+    "later local gates do not run after assurance failure",
+    not any(event[-1].endswith("ops/calendar-canary-local-pg-acceptance.py") for event in events),
 )
 
 

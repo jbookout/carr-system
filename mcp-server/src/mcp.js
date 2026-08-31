@@ -24,6 +24,22 @@ const JSON_HEADERS = { "content-type": "application/json" };
 const json = (body, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
 
+// Transaction-local actor context for SECURITY DEFINER functions that must
+// derive authorship from the authenticated server principal rather than accept
+// it in a caller payload.  The verified-human setting is deliberately empty
+// for sponsored and machine actors; Tour entrance verification checks it as a
+// second, narrower boundary.
+export async function setWriterActorContext(client, actor) {
+  const authorizationClass = actor?.authorization_class || authorizationClassForActor(actor);
+  const verifiedHumanSlug = actor?.human === true &&
+    authorizationClass === "verified_partner" ? actor.slug : "";
+  await client.query(
+    "select set_config('carr.acting_actor_slug',$1::text,true), " +
+    "set_config('carr.verified_human_actor_slug',$2::text,true) /* writer-actor-context */",
+    [actor.slug, verifiedHumanSlug],
+  );
+}
+
 const PROTOCOL = "2025-06-18";
 const RULE_DELIVERY_RAIL = ` RULE DELIVERY: use only exact canonical pack names from standing-context rule_delivery.pack_index. A name in packs_not_found is unknown and is NOT loaded. If observed work enters a pack absent from rule_delivery.declared_packs, call standing-context again with that canonical pack and read the result before acting. Shadow mode records drift without blocking, but does not waive this recall protocol.`;
 
@@ -591,6 +607,7 @@ export async function callTool(env, actor, name, args, profile = "full") {
       hint: "the token authenticates as this actor but no row exists in the actor table — " +
             "provision the actor before any write verb will run" });
     const actorWithId = { ...actor, id: a.rows[0].id };
+    await setWriterActorContext(client, actorWithId);
     const principalReadback = await client.query(SCAC_TRUSTED_PRINCIPAL_READBACK_SQL.text);
     if (principalReadback.rows.length !== 1)
       throw new ToolError({ error: "trusted_database_principal_unavailable" });

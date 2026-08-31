@@ -117,6 +117,13 @@ test("both room endpoints require a session, and answer a fetch with JSON rather
   }
 });
 
+test("expired Tour API sessions return JSON 401 instead of an OAuth redirect", async () => {
+  const { handler } = handlerWith();
+  const response = await handler.fetch(new Request(`${ORIGIN}/api/tours/library`), env(), {});
+  assert.equal(response.status, 401);
+  assert.deepEqual(await response.json(), { error: "unauthorized", state: "sign_in_required" });
+});
+
 test("the panel's own page is served behind the same sign-in as the rest of the host", async () => {
   const { handler } = handlerWith();
   const anonymous = await handler.fetch(new Request(`${ORIGIN}/room.html`), env(), {});

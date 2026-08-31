@@ -16,8 +16,9 @@ A desk is a session started on purpose:
 
 That flag is a statement of intent. A pid is not.
 
-TWO KINDS SO FAR:
+DESK KINDS:
   claude-session   a live labeled Claude Code session, addressed by socket
+  claude-desktop   a queue-only Claude background session, handed to Desktop
   codex-session    a standing Codex thread, resumed per task through the CLI
   codex-live       a live Codex app-server, addressed by its unix socket
 
@@ -50,7 +51,7 @@ NAME_OK = re.compile(r"^[a-z0-9][a-z0-9-]{1,40}$")
 # /tmp/cc-socks/79534.sock — a process, not a desk
 PID_SOCKET = re.compile(r"^\d+\.sock$")
 
-KINDS = ("claude-session", "codex-session", "codex-live")
+KINDS = ("claude-session", "claude-desktop", "codex-session", "codex-live")
 # the old name for the Codex kind, before it carried a thread
 KIND_ALIASES = {"codex-exec": "codex-session"}
 EFFORT_CHOICES = ("minimal", "low", "medium", "high", "xhigh")
@@ -141,6 +142,7 @@ class Registry:
         cwd: str | None = None,
         sandbox: str | None = None,
         add_dirs: list[str] | None = None,
+        permission_mode: str | None = None,
     ) -> dict:
         if not NAME_OK.match(name or ""):
             raise DeskError(
@@ -163,6 +165,21 @@ class Registry:
                 raise DeskError("missing_socket", "a claude-session desk needs --socket")
             refuse_pid_socket(socket)
             entry = {"kind": kind, "socket": str(socket)}
+        elif kind == "claude-desktop":
+            if not model:
+                raise DeskError("missing_model", "a claude-desktop desk needs --model")
+            if not effort:
+                raise DeskError("missing_effort", "a claude-desktop desk needs --effort")
+            entry = {
+                "kind": kind,
+                "model": model,
+                "effort": effort,
+                "cwd": str(cwd or Path.cwd()),
+                # Background work cannot stop on a terminal approval dialog.
+                # dontAsk denies unapproved actions instead of widening the
+                # session's authority or leaving a hidden prompt waiting.
+                "permission_mode": str(permission_mode or "dontAsk"),
+            }
         elif kind == "codex-live":
             if not socket:
                 raise DeskError("missing_socket", "a codex-live desk needs --socket")

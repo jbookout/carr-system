@@ -20,6 +20,13 @@ import { memoryTools } from "./memory.js";
 import { incidentTools } from "./incident.js";
 import { evidenceActivationTools } from "./evidence-activation.js";
 import { engineeringRuntimeTools } from "./engineering-runtime.js";
+import { tourRightsProjectionTools } from "./tour-rights-projection.js";
+import { tourPropertyJurisdictionTools } from "./tour-property-jurisdiction.js";
+import { tourDomainTools } from "./tour-domain.js";
+import { tourPropertySearchTools } from "./tour-property-search.js";
+import { tourSharingTools } from "./tour-sharing.js";
+import { tourMapPromotionTools } from "./tour-map-promotion.js";
+import { tourArtifactTools } from "./tour-artifacts.js";
 import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, permittedActionOwnerSlugs,
          personalScopeForActor } from "./identity.js";
@@ -142,6 +149,25 @@ async function requestHash(args) {
   return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
+const TOUR_DOMAIN_SERIALIZED_WRITES = new Set([
+  "create-tour-domain",
+  "append-tour-route-version",
+  "prepare-tour-route-version",
+  "append-tour-route-stop",
+  "append-tour-route-stop-transition",
+  "accept-tour-route-version",
+  "append-tour-cheat-sheet-revision",
+  "restore-tour-cheat-sheet-revision",
+  "append-tour-selection-cart-version",
+  "record-tour-map-promotion-receipt",
+  "issue-tour-share-grant",
+  "rotate-tour-share-grant",
+  "revoke-tour-share-grant",
+  "request-tour-pdf-render",
+  "record-tour-pdf-render-result",
+  "record-tour-pdf-human-review",
+]);
+
 export function auditIdentity(actor) {
   const scope = personalScopeForActor(actor);
   return {
@@ -190,7 +216,7 @@ async function withEnvelope(client, actor, verb, args, fn) {
   // reports a version conflict instead of the promised replay.
   // Keep this scoped until the shared envelope's existing fake-client suites
   // are migrated to model the extra query for every historical write verb.
-  if (verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice")
+  if (verb === "write-work-shape" || verb === "set-work-shape-disposition" || verb === "report-problem" || verb === "review-and-triage" || verb === "decline-work-request" || verb === "supersede-work-request" || verb === "propose-ready-plan" || verb === "review-heavy-build-plan" || verb === "accept-ready-plan" || verb === "propose-outcome-feedback" || verb === "accept-outcome-feedback" || verb === "record-executed-lease" || verb === "observe-memory" || verb === "promote-memory" || verb === "correct-memory" || verb === "forget-memory" || verb === "register-engineering-slice-plan" || verb === "admit-engineering-slice" || verb === "review-engineering-slice" || verb === "append-tour-rights-receipt" || verb === "revoke-tour-rights-receipt" || verb === "append-tour-source-evidence" || verb === "append-tour-field-assertion" || verb === "create-tour-public-projection-draft" || verb === "seal-tour-public-projection" || verb === "append-tour-property-identifier-assertion" || verb === "append-tour-coordinate-candidate" || verb === "append-tour-entrance-verification-receipt" || TOUR_DOMAIN_SERIALIZED_WRITES.has(verb))
     await client.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [key]);
   const prior = await client.query("select request_hash, response from tool_call where idempotency_key=$1", [key]);
   if (prior.rows.length) {
@@ -5606,7 +5632,19 @@ export const TOOLS = {
          args.idempotency_key]);
       if (!retired.rows[0].receipt_ref)
         throw new ToolError({ error: "legacy_schedule_not_disabled", workflow_key: args.workflow_key });
-      await writeEvent(c, actor, "disable-legacy-schedule", "system", args.workflow_key,
+      // THE EVENT SUBJECT IS A UUID, AND THIS VERB PASSED A NAME. Until 2026-08-28
+      // the audit write below received args.workflow_key, so every call — however
+      // good its evidence — died on `invalid input syntax for type uuid` AFTER the
+      // receipt row was written, and the rollback took the receipt with it. The
+      // verb had therefore never once succeeded, and no legacy schedule could be
+      // retired through the only sanctioned path. Its sibling accept-workflow got
+      // this right four lines earlier by passing the returned row's id.
+      const disabled = await c.query(
+        "select id from ops.legacy_schedule_disable_receipt where receipt_ref=$1",
+        [retired.rows[0].receipt_ref]);
+      if (!disabled.rows[0])
+        throw new ToolError({ error: "legacy_schedule_receipt_not_readable", workflow_key: args.workflow_key });
+      await writeEvent(c, actor, "disable-legacy-schedule", "system", disabled.rows[0].id,
         { new: { workflow_key: args.workflow_key, surface_id: args.surface_id, locator: args.locator,
                  reason: args.reason, pre_observation_ref: args.pre_observation_ref,
                  post_observation_ref: args.post_observation_ref,
@@ -7518,6 +7556,13 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "memory": "mcp-server/src/memory.js",
   "incident": "mcp-server/src/incident.js",
   "engineering-runtime": "mcp-server/src/engineering-runtime.js",
+  "tour-rights-projection": "mcp-server/src/tour-rights-projection.js",
+  "tour-property-jurisdiction": "mcp-server/src/tour-property-jurisdiction.js",
+  "tour-domain": "mcp-server/src/tour-domain.js",
+  "tour-property-search": "mcp-server/src/tour-property-search.js",
+  "tour-map-promotion": "mcp-server/src/tour-map-promotion.js",
+  "tour-sharing": "mcp-server/src/tour-sharing.js",
+  "tour-artifacts": "mcp-server/src/tour-artifacts.js",
 });
 
 function bindToolSource(tool, source) {
@@ -8534,5 +8579,25 @@ registerTools(incidentTools({ withEnvelope, writeEvent, ToolError, authorization
 // Engineering Passport runtime: typed plan registration, server-derived
 // admission, and read-only closure projection over the canonical job ledger.
 registerTools(engineeringRuntimeTools({ withEnvelope, writeEvent, ToolError }), "engineering-runtime");
+
+// Tour Operations Slice 2: bounded rights, evidence, assertion, and immutable
+// public-projection seams. Sealing is authority-only; publication is absent.
+registerTools(tourRightsProjectionTools({ withEnvelope, writeEvent, ToolError }), "tour-rights-projection");
+
+// Tour Operations Slice 3: narrow, rights-bound identity assertions,
+// coordinate candidates, and human entrance-verification receipts. No map,
+// route, publication, or promotion seam is exposed here.
+registerTools(tourPropertyJurisdictionTools({ withEnvelope, writeEvent, ToolError }), "tour-property-jurisdiction");
+
+// Tour Operations Slice 4: immutable Tour route versions and internal-only
+// cheat-sheet revisions. Route acceptance is authority-only; publication is absent.
+registerTools(tourDomainTools({ withEnvelope, writeEvent, ToolError }), "tour-domain");
+
+// Tour Operations delivery surfaces: governed property search and cart,
+// confidential sharing, and deterministic PDF request/review records.
+registerTools(tourPropertySearchTools({ withEnvelope, writeEvent, ToolError }), "tour-property-search");
+registerTools(tourMapPromotionTools({ withEnvelope, writeEvent, ToolError }), "tour-map-promotion");
+registerTools(tourSharingTools({ withEnvelope, writeEvent, ToolError }), "tour-sharing");
+registerTools(tourArtifactTools({ withEnvelope, writeEvent, ToolError }), "tour-artifacts");
 
 Object.freeze(TOOLS);

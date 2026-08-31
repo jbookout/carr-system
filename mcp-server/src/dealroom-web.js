@@ -18,6 +18,7 @@ import { redeemProgram6BrowserChallenge } from "./program6-browser-challenge.js"
 import { program6ActionsEnabled } from "./program6-feature-flag.js";
 import { workspaceCommandCenterEnabled } from "./workspace-feature-flag.js";
 import { COMMAND_CENTER_PATH } from "./workspace-command-center.js";
+import { isTourInternalRequest } from "./tour-internal-web.js";
 
 export const DEALROOM_ASSET_DIRECTORY = "../dealroom"; // mirrors wrangler.toml [assets]
 
@@ -64,14 +65,14 @@ const PUBLIC_SHELL = new Map([
 const DEALROOM_HOST_PATTERN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const DEALROOM_EXACT_PATHS = new Set([
   "/", "/index.html", "/deals", "/leads", "/leads.html", "/workspace", "/workspace.html", "/system-work.html", "/room.html", "/queue.html",
-  "/manifest.webmanifest", "/sw.js", "/offline.html",
+  "/manifest.webmanifest", "/sw.js", "/offline.html", "/tours",
 ]);
 const DEALROOM_ROUTE_ASSETS = new Map([
   ["/deals", "/index.html"],
   ["/leads", "/leads.html"],
   ["/workspace", "/workspace.html"],
 ]);
-const DEALROOM_PATH_PREFIXES = ["/auth/", "/api/system-work/", "/api/room/", COMMAND_CENTER_API_PREFIX, "/css/", "/js/", "/data/", "/icons/"];
+const DEALROOM_PATH_PREFIXES = ["/auth/", "/api/system-work/", "/api/room/", "/api/tours/", "/tours/", COMMAND_CENTER_API_PREFIX, "/css/", "/js/", "/data/", "/icons/"];
 const LEGACY_BROWSER_REDIRECT_PATHS = new Set([
   "/", "/index.html", "/deals", "/leads", "/leads.html", "/workspace", "/workspace.html",
   "/system-work.html", "/room.html", "/queue.html", "/auth/login", "/auth/reauth",
@@ -752,14 +753,17 @@ async function handleRequest(request, env, ctx, dependencies) {
           return json({ error: "AUTHENTICATION_REQUIRED" }, 401);
         }
         if (url.pathname === "/mcp" || url.pathname === "/pipeline/changes" ||
-            url.pathname.startsWith(SYSTEM_WORK_PREFIX) || url.pathname.startsWith(ROOM_PREFIX)) {
+            url.pathname.startsWith(SYSTEM_WORK_PREFIX) || url.pathname.startsWith(ROOM_PREFIX) ||
+            url.pathname.startsWith("/api/tours/")) {
           return json({ error: "unauthorized", state: "sign_in_required" }, 401);
         }
         return redirect(`${origin}/auth/login?return_to=${encodeURIComponent(url.pathname + url.search)}`);
       }
 
       let response;
-      if (url.pathname.startsWith(ROOM_PREFIX)) {
+      if (isTourInternalRequest(request) && dependencies.tourHandler?.fetch) {
+        response = await dependencies.tourHandler.fetch(request, env, ctx, session.actor, session);
+      } else if (url.pathname.startsWith(ROOM_PREFIX)) {
         response = await roomRequest(request, env, session, dependencies);
       } else if (url.pathname.startsWith(SYSTEM_WORK_PREFIX)) {
         if (!program6ActionsEnabled(env)) return json({ error: "program6_actions_disabled" }, 404);

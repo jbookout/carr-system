@@ -8,6 +8,7 @@ child environment, and always stops and removes the temporary cluster.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import socket
@@ -87,8 +88,38 @@ def port_is_available(port: int) -> bool:
     return True
 
 
+def hosted_execution_is_declared(source: Mapping[str, str] | None = None) -> bool:
+    """True only for the one workflow that deliberately drives this lane.
+
+    The blanket hosted refusal below kept this lane off runners from the day it
+    was written, and the cost of that was not visible until it was measured: the
+    acceptance programs this module runs after ci.sh had NO hosted coverage on
+    any commit, ever, and the rule-delivery cutover acceptance sat red on main
+    across four map re-pins while the required strict context stayed green.
+    Defect fa03017b.
+
+    The refusal is kept as the DEFAULT rather than deleted, because what it
+    prevents is real: a runner that quietly initdbs clusters is a surprise, and
+    nothing should reach this lane by merely happening to set GITHUB_ACTIONS.
+    Opting in takes an explicit variable AND this repository AND a real run id --
+    the same shape the acceptance gates already use for `hosted_disposable`
+    (see ops/zz-engineering-controller-concurrency-gate.py). A fork, a local
+    shell exporting GITHUB_ACTIONS by accident, and any workflow that has not
+    said so in as many words all still refuse.
+    """
+    env = os.environ if source is None else source
+    return (
+        env.get("CARR_LOCAL_PG_ALLOW_HOSTED") == "1"
+        and env.get("GITHUB_ACTIONS", "").lower() == "true"
+        and env.get("GITHUB_REPOSITORY") == "jbookout/carr-system"
+        and bool(env.get("GITHUB_RUN_ID"))
+    )
+
+
 def refuse_hosted_execution() -> None:
     if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+        if hosted_execution_is_declared():
+            return
         raise LocalPGRefusal("local-db-ci cannot run on a hosted GitHub runner")
 
 
@@ -137,9 +168,38 @@ def find_postgres_binaries() -> PostgresBinaries:
     )
 
 
-def _failure_detail(result: CommandResult) -> str:
-    detail = (result.stderr or result.stdout).strip().splitlines()
-    return detail[-1][:240] if detail else "command failed without output"
+def _failure_detail(result: CommandResult, lines: int = 12) -> str:
+    """The tail of a failed command's output, not just its last line.
+
+    This used to return `detail[-1]` alone, and that one line is routinely the
+    least informative one in the whole output. initdb's final line is the
+    literal string "Examine the log output." -- so a hosted failure printed
+    `local-db-ci setup failed: Examine the log output.` and named no cause,
+    while the cause sat two lines above in output this function had already
+    been handed. Keep the tail instead: the last line is still there, with
+    whatever actually failed above it.
+    """
+    stream = result.stderr.strip() or result.stdout.strip()
+    detail = [line for line in stream.splitlines() if line.strip()]
+    if not detail:
+        return "command failed without output"
+    tail = detail[-lines:]
+    prefix = "" if len(detail) <= lines else f"(last {lines} of {len(detail)} lines) "
+    return prefix + " | ".join(line.strip()[:240] for line in tail)
+
+
+def run_required_local_gate(
+    runner: CommandRunner,
+    python: Path,
+    script: Path,
+    *,
+    env: Mapping[str, str],
+    cwd: Path,
+) -> CommandResult:
+    """Run one required disposable-PG gate, refusing a missing artifact."""
+    if not script.is_file():
+        return CommandResult(78, "", f"required local PostgreSQL gate is unavailable: {script.name}")
+    return runner.run([python, script], env=env, cwd=cwd, capture=True)
 
 
 def run_local_ci(
@@ -236,6 +296,67 @@ def run_local_ci(
             ]
         ):
             return exit_code
+        repo_python = repo / ".venv/bin/python"
+        acceptance_python = (
+            repo_python
+            if repo_python.is_file() and os.access(repo_python, os.X_OK)
+            else Path(sys.executable)
+        )
+        ownership_script = repo / "ops/canonical-ownership-lease-local-pg-gate.py"
+        pre_database = "carr_ci_a2_pre"
+        pre_dsn = f"postgres://carr_ci@127.0.0.1:{port}/{pre_database}"
+        if not setup(
+            [binaries.createdb, "-h", "127.0.0.1", "-p", str(port),
+             "-U", "carr_ci", pre_database]
+        ):
+            return exit_code
+        if not setup(
+            [binaries.psql, "-h", "127.0.0.1", "-p", str(port),
+             "-U", "carr_ci", "-d", pre_database, "-v", "ON_ERROR_STOP=1",
+             "-q", "-f", repo / "db/schema.sql"]
+        ):
+            return exit_code
+        pre_env = dict(clean_env)
+        pre_env["DATABASE_URL"] = pre_dsn
+        pre_apply = command_runner.run(
+            [acceptance_python, repo / "tools/migrate.py", "--apply", "--yes",
+             "--through", "0431_completion_register_schema.sql"],
+            env=pre_env,
+            cwd=repo,
+            capture=True,
+        )
+        if pre_apply.returncode:
+            print(
+                "local-db-ci: pre-0450 baseline migration failed: "
+                f"{_failure_detail(pre_apply)}",
+                file=sys.stderr,
+            )
+            return pre_apply.returncode
+        fingerprint_env = dict(clean_env)
+        fingerprint_env["CARR_LOCAL_PG_DSN"] = pre_dsn
+        pre_fingerprint = command_runner.run(
+            [acceptance_python, ownership_script, "--fingerprint-only"],
+            env=fingerprint_env,
+            cwd=repo,
+            capture=True,
+        )
+        if pre_fingerprint.returncode:
+            print(
+                "local-db-ci: pre-0450 catalog fingerprint failed: "
+                f"{_failure_detail(pre_fingerprint)}",
+                file=sys.stderr,
+            )
+            return pre_fingerprint.returncode
+        try:
+            ownership_baseline = json.dumps(
+                json.loads(pre_fingerprint.stdout), sort_keys=True, separators=(",", ":")
+            )
+        except (TypeError, ValueError) as exc:
+            print(
+                "local-db-ci: pre-0450 catalog fingerprint was not exact JSON",
+                file=sys.stderr,
+            )
+            return 78
         ci_env = dict(clean_env)
         ci_env["CARR_CI_DATABASE_URL"] = dsn
         ci_command: list[str | Path] = [repo / "ops/ci.sh"]
@@ -248,8 +369,6 @@ def run_local_ci(
         if exit_code:
             print("local-db-ci: canonical CI failed", file=sys.stderr)
         else:
-            repo_python = repo / ".venv/bin/python"
-            acceptance_python = repo_python if repo_python.is_file() and os.access(repo_python, os.X_OK) else Path(sys.executable)
             acceptance_script = repo / "ops/atomic-rule-approval-local-pg-acceptance.py"
             if not acceptance_python.is_file() or not os.access(acceptance_python, os.X_OK):
                 print("local-db-ci: repository Python environment is unavailable", file=sys.stderr)
@@ -259,7 +378,13 @@ def run_local_ci(
                 exit_code = 78
             else:
                 acceptance_env = dict(clean_env)
+                # Keep every disposable-database client on the same PostgreSQL toolchain
+                # as the server. Hosted runners expose several client majors on PATH.
+                acceptance_env["PATH"] = (
+                    f"{binaries.psql.parent}{os.pathsep}{acceptance_env.get('PATH', '')}"
+                )
                 acceptance_env["CARR_LOCAL_PG_DSN"] = dsn
+                acceptance_env["CARR_OWNERSHIP_PRE_0450_FINGERPRINT"] = ownership_baseline
                 acceptance = command_runner.run(
                     [acceptance_python, acceptance_script],
                     env=acceptance_env,
@@ -324,6 +449,40 @@ def run_local_ci(
                         exit_code = engineering_race.returncode
                     else:
                         print("local-db-ci: Engineering envelope race acceptance passed")
+                if exit_code == 0:
+                    ownership = command_runner.run(
+                        [acceptance_python, ownership_script],
+                        env=acceptance_env,
+                        cwd=repo,
+                        capture=True,
+                    )
+                    if ownership.returncode:
+                        print(
+                            f"local-db-ci: canonical ownership lease acceptance failed: "
+                            f"{_failure_detail(ownership)}",
+                            file=sys.stderr,
+                        )
+                        exit_code = ownership.returncode
+                    else:
+                        print("local-db-ci: canonical ownership lease acceptance passed")
+                if exit_code == 0:
+                    assurance_script = repo / "ops/assurance-evidence-acceptance-local-pg-gate.py"
+                    assurance = run_required_local_gate(
+                        command_runner,
+                        acceptance_python,
+                        assurance_script,
+                        env=acceptance_env,
+                        cwd=repo,
+                    )
+                    if assurance.returncode:
+                        print(
+                            f"local-db-ci: assurance evidence/acceptance persistence failed: "
+                            f"{_failure_detail(assurance)}",
+                            file=sys.stderr,
+                        )
+                        exit_code = assurance.returncode
+                    else:
+                        print("local-db-ci: assurance evidence/acceptance persistence passed")
                 if exit_code == 0:
                     canary_script = repo / "ops/calendar-canary-local-pg-acceptance.py"
                     canary = command_runner.run(
@@ -409,6 +568,44 @@ def run_local_ci(
                         exit_code = incident_recovery.returncode
                     else:
                         print("local-db-ci: incident fingerprint and success-clears acceptance passed")
+                        completion_schema_script = (
+                            repo / "ops/completion-register-schema-local-pg-gate.py"
+                        )
+                        completion_schema = command_runner.run(
+                            [acceptance_python, completion_schema_script],
+                            env=acceptance_env,
+                            cwd=repo,
+                            capture=True,
+                        )
+                        if completion_schema.returncode:
+                            print(
+                                "local-db-ci: completion register schema fixture failed: "
+                                f"{_failure_detail(completion_schema)}",
+                                file=sys.stderr,
+                            )
+                            exit_code = completion_schema.returncode
+                        else:
+                            print(completion_schema.stdout, end="")
+                if exit_code == 0:
+                    snapshot = command_runner.run(
+                        [
+                            repo / "bin/schema-snapshot.sh",
+                            "--from-disposable-local",
+                            dsn,
+                            "--verify-only",
+                        ],
+                        env=acceptance_env,
+                        cwd=repo,
+                        capture=True,
+                    )
+                    if snapshot.returncode:
+                        print(
+                            f"local-db-ci: schema snapshot failed: {_failure_detail(snapshot)}",
+                            file=sys.stderr,
+                        )
+                        exit_code = snapshot.returncode
+                    else:
+                        print(snapshot.stdout, end="")
                 if exit_code == 0:
                     print(
                         f"local-db-ci: {ci_class} proof and atomic Joe authority lifecycle "

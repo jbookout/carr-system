@@ -1,4 +1,4 @@
--- 0392 / SIEP-18 bounded successor: exact reviewed effects and trusted principal binding.
+-- 0452 / SIEP-18 bounded successor: exact reviewed effects and trusted principal binding.
 --
 -- This successor is additive and source/test-only. It creates no reviewed
 -- operation rows, changes no runtime grants, and does not activate the monitor.

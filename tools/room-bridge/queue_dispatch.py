@@ -193,6 +193,10 @@ class QueueDeskExecutor:
     @staticmethod
     def _prompt(parsed: dict) -> str:
         task_id = parsed["task_id"]
+        source = (
+            f"[Model Room source seq {parsed['meta']['source_seq']} "
+            f"msg_id {parsed['meta']['source_msg_id']}]\n"
+        )
         evidence = ""
         if parsed["meta"]["cap"] == "record-write":
             evidence = (
@@ -200,7 +204,7 @@ class QueueDeskExecutor:
                 "and readback_record_id fields in that JSON; no evidence means Review or Blocked, never Done."
             )
         return (
-            f"[Hermes queue {task_id}] {parsed['title']}\n\n{parsed['instructions']}\n\n"
+            f"[Hermes queue {task_id}] {parsed['title']}\n{source}\n{parsed['instructions']}\n\n"
             "Your final non-empty line must be exactly one JSON object prefixed with "
             f"CARR_QUEUE_RESULT and must bind task_id={task_id}. Allowed outcomes: success, blocked. "
             "Keep summary to one redacted sentence of at most 500 characters. If broader authority is needed, "
@@ -330,6 +334,8 @@ class QueueDeskExecutor:
 
         status = row.get("status") if isinstance(row, dict) else None
         if status == "delivered":
+            session_id = row.get("session_id")
+            transport = row.get("transport")
             return {
                 "outcome": "pending", "task_id": task_id, "target": target_alias,
                 "pending": {
@@ -338,6 +344,8 @@ class QueueDeskExecutor:
                     "cap": parsed["meta"]["cap"],
                     "dispatch_msg_id": row.get("msg_id"),
                     "injected_at": row.get("dispatched_at"),
+                    **({"session_id": session_id} if isinstance(session_id, str) else {}),
+                    **({"transport": transport} if isinstance(transport, str) else {}),
                 },
             }
         if status != "completed":

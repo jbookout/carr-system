@@ -3419,6 +3419,54 @@ end $_$;
 
 
 --
+-- Name: decline_sourced_work_request(text, integer, text, text, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.decline_sourced_work_request(p_work_request text, p_base_version integer, p_exit_reason text, p_actor_slug text, p_idempotency_key uuid) RETURNS TABLE(ref text, state text, version integer, exit_reason text, closed_at timestamp with time zone)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+declare
+  v_id uuid;
+  v_actor uuid;
+  v_now timestamp with time zone := now();
+begin
+  if p_exit_reason is null or btrim(p_exit_reason) = '' then
+    raise exception 'a withdrawal must record why';
+  end if;
+  select a.id into v_actor from public.actor a where a.slug = p_actor_slug;
+  if v_actor is null then
+    raise exception 'unknown actor %', p_actor_slug;
+  end if;
+
+  select w.id into v_id from ops.work_request w
+   where w.ref = p_work_request and w.capture_idempotency_key is not null
+     and w.state = 'captured' and w.version = p_base_version
+   for update;
+  if v_id is null then
+    raise exception 'no captured sourced Work Request % at version %', p_work_request, p_base_version;
+  end if;
+
+  insert into ops.work_request_withdrawal_receipt
+    (work_request_id, idempotency_key, base_version, result_version, final_state,
+     exit_reason, superseded_by, withdrawn_by_actor_id, withdrawn_at)
+  values (v_id, p_idempotency_key, p_base_version, p_base_version + 1, 'declined',
+          p_exit_reason, null, v_actor, v_now)
+  on conflict (idempotency_key) do nothing;
+
+  update ops.work_request w
+     set state = 'declined', exit_reason = p_exit_reason, closed_at = v_now,
+         version = w.version + 1, updated_at = v_now
+   where w.id = v_id;
+
+  return query
+    select w.ref, w.state, w.version, w.exit_reason, w.closed_at
+      from ops.work_request w where w.id = v_id;
+end;
+$$;
+
+
+--
 -- Name: deployment_provider_identity_is_immutable(); Type: FUNCTION; Schema: ops; Owner: -
 --
 
@@ -13179,6 +13227,18 @@ CREATE FUNCTION ops.sourced_work_request_is_immutable() RETURNS trigger
     SET search_path TO 'pg_catalog', 'ops'
     AS $$
 begin
+  -- INSERT WAS NEVER COVERED. This trigger was BEFORE UPDATE only, so a sourced
+  -- row could be INSERTed already terminal: no receipt, no version history, no
+  -- pointer check, nothing. Every other INSERT trigger on this table returns
+  -- early for these states, so the constraint alone stood between a fabricated
+  -- withdrawal and the table. A sourced request is born captured or not at all.
+  if tg_op = 'INSERT' then
+    if new.capture_idempotency_key is not null and new.state <> 'captured' then
+      raise exception 'a sourced Work Request must be INSERTed in state captured, not %', new.state;
+    end if;
+    return new;
+  end if;
+
   if old.capture_idempotency_key is null then
     return new;
   end if;
@@ -13248,7 +13308,26 @@ begin
     return new;
   end if;
 
-  raise exception 'sourced Program 6 Work Requests permit only receipt-backed captured-to-triaged, triaged shape-disposition, or triaged-to-ready transitions';
+  -- CAPTURED -> DECLINED or SUPERSEDED, receipt-backed like every other arm.
+  -- Only from captured: a triaged row carries a triage receipt and may carry a
+  -- shape disposition, and withdrawing it would strand both.
+  if old.state = 'captured'
+     and new.state in ('declined','superseded')
+     and new.version = old.version + 1
+     and (to_jsonb(new) - array['state','exit_reason','closed_at','superseded_by','version','updated_at'])
+           is not distinct from
+         (to_jsonb(old) - array['state','exit_reason','closed_at','superseded_by','version','updated_at'])
+     and exists (
+       select 1 from ops.work_request_withdrawal_receipt r
+        where r.work_request_id = old.id and r.base_version = old.version
+          and r.result_version = new.version and r.final_state = new.state
+          and r.exit_reason = new.exit_reason
+          and r.superseded_by is not distinct from new.superseded_by
+     ) then
+    return new;
+  end if;
+
+  raise exception 'sourced Program 6 Work Requests permit only receipt-backed captured-to-triaged, triaged shape-disposition, triaged-to-ready, or captured-to-withdrawn transitions';
 end;
 $$;
 
@@ -13554,6 +13633,80 @@ $$;
 --
 
 COMMENT ON FUNCTION ops.standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text) IS 'Reader-facing active Guidance Registry projection. SECURITY DEFINER with a fixed search_path so carr_reader can consume the sanctioned projection without receiving direct public.rule or public.actor table access.';
+
+
+--
+-- Name: supersede_sourced_work_request(text, integer, text, text, text, uuid); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.supersede_sourced_work_request(p_work_request text, p_base_version integer, p_exit_reason text, p_superseded_by text, p_actor_slug text, p_idempotency_key uuid) RETURNS TABLE(ref text, state text, version integer, exit_reason text, closed_at timestamp with time zone, superseded_by_ref text)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+declare
+  v_id uuid;
+  v_succ uuid;
+  v_succ_state text;
+  v_succ_sourced boolean;
+  v_actor uuid;
+  v_now timestamp with time zone := now();
+begin
+  if p_exit_reason is null or btrim(p_exit_reason) = '' then
+    raise exception 'a withdrawal must record why';
+  end if;
+  select a.id into v_actor from public.actor a where a.slug = p_actor_slug;
+  if v_actor is null then
+    raise exception 'unknown actor %', p_actor_slug;
+  end if;
+
+  select w.id into v_id from ops.work_request w
+   where w.ref = p_work_request and w.capture_idempotency_key is not null
+     and w.state = 'captured' and w.version = p_base_version
+   for update;
+  if v_id is null then
+    raise exception 'no captured sourced Work Request % at version %', p_work_request, p_base_version;
+  end if;
+
+  select w.id, w.state, (w.capture_idempotency_key is not null)
+    into v_succ, v_succ_state, v_succ_sourced
+    from ops.work_request w where w.ref = p_superseded_by;
+  if v_succ is null then
+    raise exception 'no Work Request % to supersede it', p_superseded_by;
+  end if;
+  -- The four refusals the foreign key does not give.
+  if v_succ = v_id then
+    raise exception 'a Work Request cannot supersede itself';
+  end if;
+  if v_succ_state in ('declined','superseded') then
+    raise exception 'the successor % is itself withdrawn; superseding into a dead row loses the trail', p_superseded_by;
+  end if;
+  if not v_succ_sourced then
+    raise exception 'the successor % is not a sourced Work Request', p_superseded_by;
+  end if;
+  if exists (select 1 from ops.work_request w
+              where w.id = v_succ and w.superseded_by = v_id) then
+    raise exception 'that would make a two-row supersession cycle';
+  end if;
+
+  insert into ops.work_request_withdrawal_receipt
+    (work_request_id, idempotency_key, base_version, result_version, final_state,
+     exit_reason, superseded_by, withdrawn_by_actor_id, withdrawn_at)
+  values (v_id, p_idempotency_key, p_base_version, p_base_version + 1, 'superseded',
+          p_exit_reason, v_succ, v_actor, v_now)
+  on conflict (idempotency_key) do nothing;
+
+  update ops.work_request w
+     set state = 'superseded', exit_reason = p_exit_reason, closed_at = v_now,
+         superseded_by = v_succ, version = w.version + 1, updated_at = v_now
+   where w.id = v_id;
+
+  return query
+    select w.ref, w.state, w.version, w.exit_reason, w.closed_at, s.ref
+      from ops.work_request w
+      left join ops.work_request s on s.id = w.superseded_by
+     where w.id = v_id;
+end;
+$$;
 
 
 --
@@ -14583,7 +14736,7 @@ end $$;
 -- Name: work_request_card(text, text); Type: FUNCTION; Schema: ops; Owner: -
 --
 
-CREATE FUNCTION ops.work_request_card(p_work_request text, p_organization_tenant_id text) RETURNS TABLE(ref text, title text, state text, version integer, origin_ref text, desired_outcome text, acceptance_criteria jsonb, doctrine_section_id uuid, doctrine_revision_id uuid, doctrine_source_label text, source_current boolean, triage_classification text, triaged_by_actor_slug text, triaged_at timestamp with time zone, plan_ref text, plan_hash text, scope_summary text, runbook_ref text, runbook_revision_id uuid, runbook_content_hash text, plan_caps jsonb, dependency_refs jsonb, recovery_ref text, observability_ref text, accepted_by_actor_slug text, accepted_at timestamp with time zone, shape_disposition text, shape_fixed_surface_ref text, outcome_feedback jsonb, outcome_feedback_history jsonb, accepted_feedback_count bigint)
+CREATE FUNCTION ops.work_request_card(p_work_request text, p_organization_tenant_id text) RETURNS TABLE(ref text, title text, state text, version integer, origin_ref text, desired_outcome text, acceptance_criteria jsonb, doctrine_section_id uuid, doctrine_revision_id uuid, doctrine_source_label text, source_current boolean, triage_classification text, triaged_by_actor_slug text, triaged_at timestamp with time zone, plan_ref text, plan_hash text, scope_summary text, runbook_ref text, runbook_revision_id uuid, runbook_content_hash text, plan_caps jsonb, dependency_refs jsonb, recovery_ref text, observability_ref text, accepted_by_actor_slug text, accepted_at timestamp with time zone, shape_disposition text, shape_fixed_surface_ref text, outcome_feedback jsonb, outcome_feedback_history jsonb, accepted_feedback_count bigint, exit_reason text, closed_at timestamp with time zone, superseded_by_ref text)
     LANGUAGE sql STABLE SECURITY DEFINER
     SET search_path TO 'pg_catalog', 'ops'
     AS $$
@@ -14596,11 +14749,13 @@ CREATE FUNCTION ops.work_request_card(p_work_request text, p_organization_tenant
          case when p.runbook_content_hash is null then null else 'sha256:' || p.runbook_content_hash end,
          p.caps,p.dependency_refs,p.recovery_ref,p.observability_ref,aa.slug,ar.accepted_at,
          w.shape_disposition,w.shape_fixed_surface_ref,
-         latest.feedback,coalesce(history.feedback_history,'[]'::jsonb),coalesce(counted.accepted_count,0)
+         latest.feedback,coalesce(history.feedback_history,'[]'::jsonb),coalesce(counted.accepted_count,0),
+         w.exit_reason,w.closed_at,succ.ref
     from ops.work_request w
     join public.doctrine_section s on s.id=w.doctrine_section_id
     join public.doctrine_document d on d.id=s.document_id
     left join public.actor ta on ta.id=w.triaged_by_actor_id
+    left join ops.work_request succ on succ.id=w.superseded_by
     left join lateral (
       select x.* from ops.sourced_work_request_plan x
       left join ops.sourced_work_request_plan_acceptance_receipt accepted on accepted.plan_id=x.id
@@ -14648,7 +14803,8 @@ CREATE FUNCTION ops.work_request_card(p_work_request text, p_organization_tenant
     ) counted on true
    where p_organization_tenant_id='carr-internal'
      and w.organization_tenant_id='carr-internal' and w.ref=p_work_request
-     and w.state in ('captured','triaged','ready') and d.visibility='shared';
+     and w.state in ('captured','triaged','ready','declined','superseded')
+     and d.visibility='shared';
 $$;
 
 
@@ -14743,6 +14899,20 @@ begin
   end if;
 
   return new;
+end;
+$$;
+
+
+--
+-- Name: work_request_withdrawal_receipt_append_only(); Type: FUNCTION; Schema: ops; Owner: -
+--
+
+CREATE FUNCTION ops.work_request_withdrawal_receipt_append_only() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'pg_catalog', 'ops'
+    AS $$
+begin
+  raise exception 'ops.work_request_withdrawal_receipt is append-only';
 end;
 $$;
 
@@ -19536,7 +19706,7 @@ CREATE TABLE ops.work_request (
     CONSTRAINT work_request_program_ordinal_positive CHECK (((program_ordinal IS NULL) OR (program_ordinal > 0))),
     CONSTRAINT work_request_shape_disposition_complete CHECK ((((shape_disposition IS NULL) AND (shape_fixed_surface_ref IS NULL) AND (shape_rationale IS NULL) AND (shape_decided_by_actor_id IS NULL) AND (shape_decided_at IS NULL)) OR ((shape_disposition = 'required'::text) AND (shape_fixed_surface_ref IS NULL) AND (shape_rationale IS NOT NULL) AND (btrim(shape_rationale) <> ''::text) AND (shape_decided_by_actor_id IS NOT NULL) AND (shape_decided_at IS NOT NULL)) OR ((shape_disposition = 'not_required'::text) AND (shape_fixed_surface_ref IS NOT NULL) AND (btrim(shape_fixed_surface_ref) <> ''::text) AND (shape_rationale IS NOT NULL) AND (btrim(shape_rationale) <> ''::text) AND (shape_decided_by_actor_id IS NOT NULL) AND (shape_decided_at IS NOT NULL)))),
     CONSTRAINT work_request_shape_disposition_valid CHECK (((shape_disposition IS NULL) OR (shape_disposition = ANY (ARRAY['required'::text, 'not_required'::text])))),
-    CONSTRAINT work_request_sourced_capture_shape CHECK ((((capture_idempotency_key IS NULL) AND (organization_tenant_id IS NULL) AND (doctrine_section_id IS NULL) AND (doctrine_revision_id IS NULL) AND (sourced_capture_sequence IS NULL) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL) AND (program_key IS NULL) AND (program_ordinal IS NULL)) OR ((capture_idempotency_key IS NULL) AND (NOT (organization_tenant_id IS DISTINCT FROM 'carr-internal'::text)) AND (doctrine_section_id IS NULL) AND (doctrine_revision_id IS NULL) AND (sourced_capture_sequence IS NULL) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL) AND (program_key = ANY (ARRAY['carr-ai-engineering-suite-v1'::text, 'carr-system-integrity-elimination-v1'::text])) AND (program_ordinal IS NOT NULL) AND (program_ordinal > 0) AND (NOT (requester_actor IS DISTINCT FROM 'joe'::text)) AND (NOT (owner_actor IS DISTINCT FROM 'joe'::text))) OR ((capture_idempotency_key IS NOT NULL) AND (NOT (organization_tenant_id IS DISTINCT FROM 'carr-internal'::text)) AND (doctrine_section_id IS NOT NULL) AND (doctrine_revision_id IS NOT NULL) AND (sourced_capture_sequence IS NOT NULL) AND (program_key IS NULL) AND (program_ordinal IS NULL) AND (origin_ref IS NOT NULL) AND (origin_ref ~ '^doctrine:[a-z0-9][a-z0-9-]*#[a-z0-9][a-z0-9-]*$'::text) AND (((state = 'captured'::text) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL)) OR ((state = ANY (ARRAY['triaged'::text, 'ready'::text])) AND (triage_classification = ANY (ARRAY['operational'::text, 'needs_judgment'::text, 'safety_review'::text])) AND (triaged_by_actor_id IS NOT NULL) AND (triaged_at IS NOT NULL)))))),
+    CONSTRAINT work_request_sourced_capture_shape CHECK ((((capture_idempotency_key IS NULL) AND (organization_tenant_id IS NULL) AND (doctrine_section_id IS NULL) AND (doctrine_revision_id IS NULL) AND (sourced_capture_sequence IS NULL) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL) AND (program_key IS NULL) AND (program_ordinal IS NULL)) OR ((capture_idempotency_key IS NULL) AND (NOT (organization_tenant_id IS DISTINCT FROM 'carr-internal'::text)) AND (doctrine_section_id IS NULL) AND (doctrine_revision_id IS NULL) AND (sourced_capture_sequence IS NULL) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL) AND (program_key = ANY (ARRAY['carr-ai-engineering-suite-v1'::text, 'carr-system-integrity-elimination-v1'::text])) AND (program_ordinal IS NOT NULL) AND (program_ordinal > 0) AND (NOT (requester_actor IS DISTINCT FROM 'joe'::text)) AND (NOT (owner_actor IS DISTINCT FROM 'joe'::text))) OR ((capture_idempotency_key IS NOT NULL) AND (NOT (organization_tenant_id IS DISTINCT FROM 'carr-internal'::text)) AND (doctrine_section_id IS NOT NULL) AND (doctrine_revision_id IS NOT NULL) AND (sourced_capture_sequence IS NOT NULL) AND (program_key IS NULL) AND (program_ordinal IS NULL) AND (origin_ref IS NOT NULL) AND (origin_ref ~ '^doctrine:[a-z0-9][a-z0-9-]*#[a-z0-9][a-z0-9-]*$'::text) AND (((state = 'captured'::text) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL)) OR ((state = ANY (ARRAY['triaged'::text, 'ready'::text])) AND (triage_classification = ANY (ARRAY['operational'::text, 'needs_judgment'::text, 'safety_review'::text])) AND (triaged_by_actor_id IS NOT NULL) AND (triaged_at IS NOT NULL)) OR ((state = ANY (ARRAY['declined'::text, 'superseded'::text])) AND (triage_classification IS NULL) AND (triaged_by_actor_id IS NULL) AND (triaged_at IS NULL) AND (exit_reason IS NOT NULL) AND (btrim(exit_reason) <> ''::text) AND (closed_at IS NOT NULL) AND (((state = 'declined'::text) AND (superseded_by IS NULL)) OR ((state = 'superseded'::text) AND (superseded_by IS NOT NULL)))))))),
     CONSTRAINT work_request_state_check CHECK ((state = ANY (ARRAY['captured'::text, 'triaged'::text, 'ready'::text, 'claimed'::text, 'in_progress'::text, 'verification'::text, 'awaiting_release'::text, 'released'::text, 'confirmed_closed'::text, 'needs_joe'::text, 'blocked'::text, 'declined'::text, 'superseded'::text, 'failed'::text])))
 );
 
@@ -21370,6 +21540,36 @@ CREATE TABLE ops.work_request_triage_receipt (
 --
 
 COMMENT ON TABLE ops.work_request_triage_receipt IS 'Private, append-only receipt that authorizes the sole Program 6 captured-to-triaged transition. It is not a dispatch or execution record.';
+
+
+--
+-- Name: work_request_withdrawal_receipt; Type: TABLE; Schema: ops; Owner: -
+--
+
+CREATE TABLE ops.work_request_withdrawal_receipt (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    work_request_id uuid NOT NULL,
+    idempotency_key uuid NOT NULL,
+    base_version integer NOT NULL,
+    result_version integer NOT NULL,
+    final_state text NOT NULL,
+    exit_reason text NOT NULL,
+    superseded_by uuid,
+    withdrawn_by_actor_id uuid NOT NULL,
+    withdrawn_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT withdrawal_receipt_successor_matches_state CHECK (((final_state = 'superseded'::text) = (superseded_by IS NOT NULL))),
+    CONSTRAINT work_request_withdrawal_receipt_base_version_check CHECK ((base_version > 0)),
+    CONSTRAINT work_request_withdrawal_receipt_exit_reason_check CHECK ((btrim(exit_reason) <> ''::text)),
+    CONSTRAINT work_request_withdrawal_receipt_final_state_check CHECK ((final_state = ANY (ARRAY['declined'::text, 'superseded'::text]))),
+    CONSTRAINT work_request_withdrawal_receipt_result_version_check CHECK ((result_version > 0))
+);
+
+
+--
+-- Name: TABLE work_request_withdrawal_receipt; Type: COMMENT; Schema: ops; Owner: -
+--
+
+COMMENT ON TABLE ops.work_request_withdrawal_receipt IS 'Receipt for withdrawing a sourced Work Request captured in error. Append-only, enforced by trigger rather than by this comment. One row per request.';
 
 
 --
@@ -31976,6 +32176,22 @@ ALTER TABLE ONLY ops.work_request_triage_receipt
 
 
 --
+-- Name: work_request_withdrawal_receipt work_request_withdrawal_receipt_idempotency_key_key; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.work_request_withdrawal_receipt
+    ADD CONSTRAINT work_request_withdrawal_receipt_idempotency_key_key UNIQUE (idempotency_key);
+
+
+--
+-- Name: work_request_withdrawal_receipt work_request_withdrawal_receipt_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.work_request_withdrawal_receipt
+    ADD CONSTRAINT work_request_withdrawal_receipt_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: work_shape_revision work_shape_revision_pkey; Type: CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -33754,6 +33970,13 @@ COMMENT ON INDEX ops.work_request_state_idx IS 'Partial on purpose: the common q
 
 
 --
+-- Name: work_request_withdrawal_receipt_one_per_request; Type: INDEX; Schema: ops; Owner: -
+--
+
+CREATE UNIQUE INDEX work_request_withdrawal_receipt_one_per_request ON ops.work_request_withdrawal_receipt USING btree (work_request_id);
+
+
+--
 -- Name: work_shape_revision_current_idx; Type: INDEX; Schema: ops; Owner: -
 --
 
@@ -35369,7 +35592,7 @@ CREATE TRIGGER siep_program_transition_guard_before_update BEFORE UPDATE ON ops.
 -- Name: work_request sourced_work_request_is_immutable; Type: TRIGGER; Schema: ops; Owner: -
 --
 
-CREATE TRIGGER sourced_work_request_is_immutable BEFORE UPDATE ON ops.work_request FOR EACH ROW EXECUTE FUNCTION ops.sourced_work_request_is_immutable();
+CREATE TRIGGER sourced_work_request_is_immutable BEFORE INSERT OR UPDATE ON ops.work_request FOR EACH ROW EXECUTE FUNCTION ops.sourced_work_request_is_immutable();
 
 
 --
@@ -35720,6 +35943,13 @@ CREATE TRIGGER work_request_heavy_build_ready_plan_gate BEFORE UPDATE ON ops.wor
 --
 
 CREATE TRIGGER work_request_shape_gate BEFORE INSERT OR UPDATE ON ops.work_request FOR EACH ROW EXECUTE FUNCTION ops.work_request_shape_gate();
+
+
+--
+-- Name: work_request_withdrawal_receipt work_request_withdrawal_receipt_append_only; Type: TRIGGER; Schema: ops; Owner: -
+--
+
+CREATE TRIGGER work_request_withdrawal_receipt_append_only BEFORE DELETE OR UPDATE ON ops.work_request_withdrawal_receipt FOR EACH ROW EXECUTE FUNCTION ops.work_request_withdrawal_receipt_append_only();
 
 
 --
@@ -38238,6 +38468,30 @@ ALTER TABLE ONLY ops.work_request
 
 
 --
+-- Name: work_request_withdrawal_receipt work_request_withdrawal_receipt_superseded_by_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.work_request_withdrawal_receipt
+    ADD CONSTRAINT work_request_withdrawal_receipt_superseded_by_fkey FOREIGN KEY (superseded_by) REFERENCES ops.work_request(id);
+
+
+--
+-- Name: work_request_withdrawal_receipt work_request_withdrawal_receipt_withdrawn_by_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.work_request_withdrawal_receipt
+    ADD CONSTRAINT work_request_withdrawal_receipt_withdrawn_by_actor_id_fkey FOREIGN KEY (withdrawn_by_actor_id) REFERENCES public.actor(id);
+
+
+--
+-- Name: work_request_withdrawal_receipt work_request_withdrawal_receipt_work_request_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
+--
+
+ALTER TABLE ONLY ops.work_request_withdrawal_receipt
+    ADD CONSTRAINT work_request_withdrawal_receipt_work_request_id_fkey FOREIGN KEY (work_request_id) REFERENCES ops.work_request(id);
+
+
+--
 -- Name: work_shape_revision work_shape_revision_created_by_actor_id_fkey; Type: FK CONSTRAINT; Schema: ops; Owner: -
 --
 
@@ -40451,6 +40705,7 @@ revoke all on function ops.create_nightly_availability_canary_source_snapshot(p_
 revoke all on function ops.current_sourced_work_requests(p_organization_tenant_id text) from public;
 revoke all on function ops.deactivate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.decide_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_state text, p_idempotency_key text, p_reason text) from public;
+revoke all on function ops.decline_sourced_work_request(p_work_request text, p_base_version integer, p_exit_reason text, p_actor_slug text, p_idempotency_key uuid) from public;
 revoke all on function ops.disable_legacy_schedule(p_workflow_key text, p_surface_id text, p_locator text, p_reason text, p_pre_observation_ref text, p_post_observation_ref text, p_sibling_surface_id text, p_sibling_locator text, p_sibling_pre_observation_ref text, p_sibling_post_observation_ref text, p_idempotency_key text) from public;
 revoke all on function ops.engineering_claim_slice(p_worker text, p_limit integer, p_lease_seconds integer) from public;
 revoke all on function ops.engineering_controller_binding(p_envelope_id uuid, p_job_id uuid, p_lease_token uuid) from public;
@@ -40588,6 +40843,7 @@ revoke all on function ops.sourced_work_request_plan_digest(p_preimage jsonb) fr
 revoke all on function ops.sourced_work_request_plan_preimage(p_work_request_id uuid, p_scope_summary text, p_runbook_ref text, p_runbook_section_id uuid, p_runbook_revision_id uuid, p_runbook_content_hash text, p_dependency_refs jsonb, p_recovery_ref text, p_observability_ref text, p_caps jsonb) from public;
 revoke all on function ops.stage_guidance_import_batch(p_manifest_digest text, p_canonical_manifest_text text, p_classifier_actor_id uuid, p_idempotency_key text, p_reason text) from public;
 revoke all on function ops.standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text) from public;
+revoke all on function ops.supersede_sourced_work_request(p_work_request text, p_base_version integer, p_exit_reason text, p_superseded_by text, p_actor_slug text, p_idempotency_key uuid) from public;
 revoke all on function ops.sync_system_rule_control_bindings() from public;
 revoke all on function ops.timeout_job(p_job_id uuid, p_lease_token uuid, p_detail text) from public;
 revoke all on function ops.transition_execution_environment_provider(p_provider_ref text, p_expected_state text, p_target_state text, p_evidence_refs jsonb, p_idempotency_key uuid) from public;
@@ -40599,7 +40855,6 @@ revoke all on function ops.validate_guidance_lifecycle_event() from public;
 revoke all on function ops.validate_guidance_revision() from public;
 revoke all on function ops.validate_guidance_situation_mapping() from public;
 revoke all on function ops.validate_rule_load_layer_packs() from public;
-revoke all on function ops.work_request_card(p_work_request text, p_organization_tenant_id text) from public;
 revoke all on function public.assert_situation_retrieval_golden(p_suite_digest text) from public;
 revoke all on function public.capture_call_context(requested_deal_ids uuid[]) from public;
 revoke all on function public.log_retrieval_query(p_query text, p_result_count integer, p_section_ids uuid[], p_score_bands jsonb, p_policy_id text, p_policy_version bigint, p_explicit_hit boolean, p_scope_ref text) from public;
@@ -40733,6 +40988,7 @@ grant insert, select, update on table ops.job_definition to carr_writer;
 grant select on table ops.job_receipt to carr_jobs;
 grant select on table ops.job_receipt to carr_reader;
 grant select on table ops.job_receipt to carr_writer;
+grant select on table ops.legacy_schedule_disable_receipt to carr_authority;
 grant select on table ops.legacy_schedule_disable_receipt to carr_jobs;
 grant select on table ops.legacy_schedule_disable_receipt to carr_reader;
 grant select on table ops.legacy_schedule_launchd_contract to carr_jobs;
@@ -40809,6 +41065,8 @@ grant insert, select, update on table ops.service_environment to carr_writer;
 grant insert, select on table ops.settings_change to carr_jobs;
 grant select on table ops.settings_change to carr_reader;
 grant insert, select on table ops.settings_change to carr_writer;
+grant select on table ops.sourced_work_request_outcome_feedback_acceptance_receipt to carr_reader;
+grant select on table ops.sourced_work_request_plan_acceptance_receipt to carr_reader;
 grant select on table ops.staging_deployment_attempt to carr_authority;
 grant select on table ops.staging_deployment_attempt to carr_jobs;
 grant select on table ops.staging_deployment_attempt to carr_reader;
@@ -40920,6 +41178,8 @@ grant select on table ops.v_work_shape_current to carr_writer;
 grant select on table ops.work_request to carr_reader;
 grant select, update on table ops.work_request to carr_writer;
 grant select on table ops.work_request_execution_environment_binding to carr_authority;
+grant select on table ops.work_request_triage_receipt to carr_reader;
+grant select on table ops.work_request_withdrawal_receipt to carr_reader;
 grant select on table ops.work_shape_revision to carr_reader;
 grant insert, select on table ops.work_shape_revision to carr_writer;
 grant select on table ops.workflow_acceptance to carr_jobs;
@@ -41307,6 +41567,7 @@ grant select (id) on table public.placement to carr_jobs;
 grant select (id, status) on table public.rule to carr_jobs;
 grant select (id, building_id, suite, area_amount) on table public.space to carr_jobs;
 grant select (key, value) on table public.system_config to carr_jobs;
+grant select (idempotency_key, actor_id, via, authorization_class) on table public.tool_call to carr_reader;
 grant select (id, vendor_ref, party_id, owner_id) on table public.vendor to carr_jobs;
 grant execute on function ops.accept_sourced_work_request_outcome_feedback(p_work_request text, p_base_version integer, p_feedback_hash text, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.accept_sourced_work_request_plan(p_work_request text, p_base_version integer, p_plan_hash text, p_idempotency_key uuid) to carr_authority;
@@ -41322,8 +41583,8 @@ grant execute on function ops.applicable_rules(p_workflow text, p_surface text, 
 grant execute on function ops.applicable_rules(p_workflow text, p_surface text, p_tier text) to carr_writer;
 grant execute on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.apply_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_writer;
-grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer) to carr_authority;
+grant execute on function ops.approve_program5_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.approve_rule(p_rule_id uuid, p_policy_kind text, p_control_keys text[], p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.approve_staging_release(p_release_key text, p_plan_hash text, p_idempotency_key uuid, p_expires_hours integer, p_verifier_actor text, p_verifier_evidence_ref text) to carr_authority;
 grant execute on function ops.assign_execution_profile(p_work_request text, p_profile_key text, p_environment text, p_policy_ref text, p_policy_digest text, p_idempotency_key uuid) to carr_authority;
@@ -41352,6 +41613,7 @@ grant execute on function ops.current_sourced_work_requests(p_organization_tenan
 grant execute on function ops.current_sourced_work_requests(p_organization_tenant_id text) to carr_writer;
 grant execute on function ops.deactivate_guidance_registry(p_registry_id uuid, p_manifest_digest text, p_idempotency_key text, p_reason text) to carr_authority;
 grant execute on function ops.decide_guidance_import_batch(p_batch_id uuid, p_manifest_digest text, p_state text, p_idempotency_key text, p_reason text) to carr_authority;
+grant execute on function ops.decline_sourced_work_request(p_work_request text, p_base_version integer, p_exit_reason text, p_actor_slug text, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.disable_legacy_schedule(p_workflow_key text, p_surface_id text, p_locator text, p_reason text, p_pre_observation_ref text, p_post_observation_ref text, p_sibling_surface_id text, p_sibling_locator text, p_sibling_pre_observation_ref text, p_sibling_post_observation_ref text, p_idempotency_key text) to carr_authority;
 grant execute on function ops.engineering_admission_source(p_work_request text) to carr_jobs;
 grant execute on function ops.engineering_admission_source(p_work_request text) to carr_reader;
@@ -41434,8 +41696,8 @@ grant execute on function ops.record_npi_device_evidence(p_job_id uuid, p_observ
 grant execute on function ops.record_provider_observation(p_route_key text, p_status text, p_latency_ms integer, p_error_class text, p_ttl_seconds integer, p_source_ref text) to carr_jobs;
 grant execute on function ops.record_sourced_heavy_build_admission(p_plan_id uuid, p_work_request text, p_base_version integer, p_classifier_reasons jsonb, p_contract jsonb, p_proposed_by_actor_id uuid, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.record_staging_forward_fix_rehearsal(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_schema_ledger_sha256 text, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_program5_forward_fix_verifiers;
-grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_jobs;
 grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint) to carr_jobs;
+grant execute on function ops.record_staging_release_readback(p_idempotency_key uuid, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean) to carr_jobs;
 grant execute on function ops.record_staging_replacement_project(p_idempotency_key uuid, p_observation jsonb) to carr_program5_forward_fix_verifiers;
 grant execute on function ops.record_staging_restore_only_result(p_idempotency_key uuid, p_status text, p_provider_version_id uuid, p_provider_tag text, p_verb_count integer, p_schema_highest_migration text, p_schema_applied_count integer, p_doctrine_generation bigint, p_program6_actions_enabled boolean, p_reason text) to carr_jobs;
 grant execute on function ops.record_workflow_acceptance(p_workflow_key text, p_mode text, p_status text, p_receipt_ref text) to carr_authority;
@@ -41493,6 +41755,7 @@ grant execute on function ops.stage_guidance_import_batch(p_manifest_digest text
 grant execute on function ops.stage_guidance_import_batch(p_manifest_digest text, p_canonical_manifest_text text, p_classifier_actor_id uuid, p_idempotency_key text, p_reason text) to carr_writer;
 grant execute on function ops.standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text) to carr_reader;
 grant execute on function ops.standing_guidance(p_actor text, p_workflow text, p_surface text, p_tier text) to carr_writer;
+grant execute on function ops.supersede_sourced_work_request(p_work_request text, p_base_version integer, p_exit_reason text, p_superseded_by text, p_actor_slug text, p_idempotency_key uuid) to carr_writer;
 grant execute on function ops.timeout_job(p_job_id uuid, p_lease_token uuid, p_detail text) to carr_jobs;
 grant execute on function ops.transition_execution_environment_provider(p_provider_ref text, p_expected_state text, p_target_state text, p_evidence_refs jsonb, p_idempotency_key uuid) to carr_authority;
 grant execute on function ops.transition_proposed_eval_candidate(p_work_request text, p_candidate_ref text, p_next_state text, p_decision_basis jsonb, p_idempotency_key uuid) to carr_authority;
@@ -41832,6 +42095,13 @@ COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;
 0383_control_plane_not_configured_state.sql	f0cb86f97fcd87db8412be1f4c36544fe40f1ba9e524182bb3cb3b9ad3148bfa	2026-08-27 20:40:05.784788+00
 0387_control_plane_record_queue_priority_tiers.sql	ba2f9ce18e54f8ceca330a5478ad66d72b76bbc832aba9c20734ebe8a701310e	2026-08-28 00:10:44.481308+00
 0388_heaviness_is_a_property_of_the_request_repin.sql	c0e0d353ef0a5f8363b15f41a51ccae7cad4aabe3176929c46e2741e7f51f3f8	2026-08-28 00:10:44.565762+00
+0389_acting_identity_receipt_read_grants.sql	f1f9cd9f3b3a517d6658228fcd987749f0663e8cf66bcb98a03dd55f49fc144a	2026-08-28 04:10:58.095773+00
+0390_acting_identity_reader_ledger_grants.sql	dee8bbd22ff4c130e5ff166cdbe0b61bfbb5d6ea22a20d218a139c3e9c536f81	2026-08-28 04:13:08.703849+00
+0391_acting_identity_definer_projection.sql	a785566265e1e6198c2d231bef329c08a5b09735f9420aa899c41c3dde590283	2026-08-28 04:30:44.093845+00
+0392_acting_identity_grant_rollback.sql	144da15fa947384eb92abd9081957704eb84cad16dbd8fcc2ba862d7d72ee375	2026-08-28 04:35:05.900703+00
+0393_work_request_card_receipt_reads.sql	b9556d0589d78b95b6f46b707f82d8f747eb119f2e7b87b02c08f3c58480af2a	2026-08-28 04:35:06.161008+00
+0425_disable_legacy_schedule_readback_grant.sql	f1b0f6677363c3a0463a30660b379544b9a7093867c8847c3453b149da17aaed	2026-08-28 14:40:52.53601+00
+0426_withdraw_a_work_request_captured_in_error.sql	151eddaae36b60fd1a6f0ad43f9577c03381ebd11b17b9a9741269d93bd2d395	2026-08-28 23:45:58.225528+00
 \.
 
 
@@ -42702,7 +42972,7 @@ insert into ops.siep_component_alias select * from jsonb_populate_record(null::o
 insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-14", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "24A"}'::jsonb) on conflict do nothing;
 insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-15", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "25"}'::jsonb) on conflict do nothing;
 insert into ops.siep_component_alias select * from jsonb_populate_record(null::ops.siep_component_alias, '{"alias_key": "SCAC-16", "created_at": "2026-08-26T22:03:36.801503+00:00", "package_key": "26"}'::jsonb) on conflict do nothing;
-select pg_catalog.setval('ops.work_request_ref_seq', 35, true);
+select pg_catalog.setval('ops.work_request_ref_seq', 37, true);
 alter table ops.siep_component_alias enable trigger siep_component_alias_sealed_before_insert;
 alter table ops.siep_program_dependency enable trigger siep_program_dependency_sealed_before_insert;
 alter table ops.siep_package_contract enable trigger siep_package_contract_sealed_before_insert;
