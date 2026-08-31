@@ -30,6 +30,7 @@ create table ops.canonical_ownership_lease (
   slice_plan_id uuid not null references ops.engineering_slice_plan(id) on delete restrict,
   slice_plan_digest text not null check (slice_plan_digest ~ '^sha256:[0-9a-f]{64}$'),
   slice_ref text not null check (slice_ref ~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$'),
+  subject_envelope_id uuid not null references ops.engineering_execution_envelope(id) on delete restrict,
   contract_digest text not null check (contract_digest ~ '^sha256:[0-9a-f]{64}$'),
   state text not null default 'active'
     check (state in ('active','released','expired','replaced')),
@@ -139,7 +140,7 @@ as $$
      and length(p_path)=octet_length(p_path)
      and p_path ~ '^[!-~]+$'
      and left(p_path,1)<>'/' and right(p_path,1)<>'/'
-     and strpos(p_path,'\\')=0
+     and strpos(p_path,chr(92))=0
      and strpos(p_path,'*')=0 and strpos(p_path,'?')=0
      and strpos(p_path,'[')=0 and strpos(p_path,']')=0
      and strpos(p_path,'{')=0 and strpos(p_path,'}')=0 and strpos(p_path,'!')=0
@@ -173,8 +174,8 @@ create or replace function ops.canonical_ownership_paths_overlap(
 ) returns boolean language sql immutable strict set search_path=pg_catalog
 as $$
   select lower(p_left)=lower(p_right)
-      or (p_left_mode='tree' and lower(p_right) like lower(p_left)||'/%')
-      or (p_right_mode='tree' and lower(p_left) like lower(p_right)||'/%');
+      or (p_left_mode='tree' and left(lower(p_right),length(p_left)+1)=lower(p_left)||'/')
+      or (p_right_mode='tree' and left(lower(p_left),length(p_right)+1)=lower(p_right)||'/');
 $$;
 
 create or replace function ops.canonical_ownership_context()
@@ -200,7 +201,8 @@ begin
   select id into actor_id from public.actor where slug=actor_slug and active;
   if not found then
     return ops.canonical_ownership_refusal('IDENTITY_CONTEXT_INVALID','identity_context.actor',
-      '"active canonical actor"'::jsonb,to_jsonb(actor_slug));
+      '"active canonical actor"'::jsonb,
+      jsonb_build_object('reason','unknown_or_inactive','value_redacted',true));
   end if;
   return jsonb_build_object('ok',true,'tenant',tenant,'actor_id',actor_id,'actor_slug',actor_slug,
     'session_ref',session_ref,'host_ref',host_ref);
@@ -266,39 +268,76 @@ declare work_row ops.work_request%rowtype; plan_row ops.engineering_slice_plan%r
 begin
   select * into work_row from ops.work_request where id=p_work_request_id;
   if not found or (work_row.organization_tenant_id is not null
-     and work_row.organization_tenant_id<>tenant) then
+     and work_row.organization_tenant_id is distinct from tenant) then
     return ops.canonical_ownership_refusal('WORK_REQUEST_NOT_FOUND','work_request',
-      to_jsonb(p_work_request_id::text),'null'::jsonb);
+      '"tenant-visible canonical work request"'::jsonb,'"absent"'::jsonb);
   end if;
   source:=ops.engineering_admission_source(work_row.ref);
-  if source is null or work_row.version<>p_work_request_version
-     or source->'work_request'->>'id'<>'wr:'||p_work_request_id::text
-     or (source->'work_request'->>'version')::integer<>p_work_request_version
-     or source->'work_request'->>'canonical_record_digest'<>p_work_request_digest
-     or (source->'accepted_plan'->>'record_id')::uuid<>p_accepted_plan_id
-     or source->'accepted_plan'->>'digest'<>p_accepted_plan_digest then
-    return ops.canonical_ownership_refusal('WORK_REQUEST_BINDING_STALE','work_request:'||p_work_request_id::text,
-      jsonb_build_object('version',p_work_request_version,'digest',p_work_request_digest,
-        'accepted_plan_id',p_accepted_plan_id,'accepted_plan_digest',p_accepted_plan_digest),
-      coalesce(source,'null'::jsonb));
+  if source is null or work_row.version is distinct from p_work_request_version
+     or source->'work_request'->>'id' is distinct from 'wr:'||p_work_request_id::text
+     or (source->'work_request'->>'version')::integer is distinct from p_work_request_version
+     or source->'work_request'->>'canonical_record_digest' is distinct from p_work_request_digest
+     or (source->'accepted_plan'->>'record_id')::uuid is distinct from p_accepted_plan_id
+     or source->'accepted_plan'->>'digest' is distinct from p_accepted_plan_digest then
+    return ops.canonical_ownership_refusal('WORK_REQUEST_BINDING_STALE','work_request.binding',
+      '"submitted binding matches canonical source"'::jsonb,
+      jsonb_build_object('reason','binding_stale','value_redacted',true));
   end if;
   select * into plan_row from ops.engineering_slice_plan where id=p_slice_plan_id;
   if not found then
-    return ops.canonical_ownership_refusal('SLICE_PLAN_NOT_FOUND','slice_plan',to_jsonb(p_slice_plan_id::text),'null'::jsonb);
+    return ops.canonical_ownership_refusal('SLICE_PLAN_NOT_FOUND','slice_plan',
+      '"canonical slice plan"'::jsonb,'"absent"'::jsonb);
   end if;
-  if plan_row.work_request_id<>p_work_request_id or plan_row.accepted_plan_id<>p_accepted_plan_id
-     or plan_row.work_request_version<>p_work_request_version
-     or plan_row.accepted_plan_hash<>p_accepted_plan_digest
-     or plan_row.plan_digest<>p_slice_plan_digest
+  if plan_row.work_request_id is distinct from p_work_request_id
+     or plan_row.accepted_plan_id is distinct from p_accepted_plan_id
+     or plan_row.work_request_version is distinct from p_work_request_version
+     or plan_row.accepted_plan_hash is distinct from p_accepted_plan_digest
+     or plan_row.plan_digest is distinct from p_slice_plan_digest
      or not exists (select 1 from jsonb_array_elements(coalesce(plan_row.plan->'slices','[]'::jsonb)) s
                      where s->>'slice_ref'=p_slice_ref) then
-    return ops.canonical_ownership_refusal('SLICE_PLAN_BINDING_STALE','slice_plan:'||p_slice_plan_id::text,
-      jsonb_build_object('work_request_id',p_work_request_id,'accepted_plan_id',p_accepted_plan_id,
-        'work_request_version',p_work_request_version,'plan_digest',p_slice_plan_digest,'slice_ref',p_slice_ref),
-      jsonb_build_object('work_request_id',plan_row.work_request_id,'accepted_plan_id',plan_row.accepted_plan_id,
-        'work_request_version',plan_row.work_request_version,'plan_digest',plan_row.plan_digest));
+    return ops.canonical_ownership_refusal('SLICE_PLAN_BINDING_STALE','slice_plan.binding',
+      '"submitted binding matches canonical slice plan"'::jsonb,
+      jsonb_build_object('reason','binding_stale','value_redacted',true));
   end if;
   return jsonb_build_object('ok',true);
+end $$;
+
+create or replace function ops.canonical_ownership_plan_dependencies(
+  p_slice_plan_id uuid,p_slice_ref text
+) returns jsonb language plpgsql volatile security definer set search_path=pg_catalog,ops,public
+as $$
+declare plan_row ops.engineering_slice_plan%rowtype; slice jsonb; slice_count integer;
+        dependencies jsonb;
+begin
+  select * into plan_row from ops.engineering_slice_plan where id=p_slice_plan_id;
+  if not found then
+    return ops.canonical_ownership_refusal('SLICE_PLAN_NOT_FOUND','slice_plan',
+      '"canonical slice plan"'::jsonb,'"absent"'::jsonb);
+  end if;
+  if jsonb_typeof(plan_row.plan->'slices') is distinct from 'array' then
+    return ops.canonical_ownership_refusal('SLICE_PLAN_BINDING_STALE','slice_plan.dependencies',
+      '"one typed canonical dependency set"'::jsonb,
+      jsonb_build_object('reason','malformed_plan','value_redacted',true));
+  end if;
+  select count(*),min(value::text)::jsonb into slice_count,slice
+    from jsonb_array_elements(plan_row.plan->'slices')
+   where value->>'slice_ref'=p_slice_ref;
+  if slice_count<>1 or not coalesce(ops.engineering_receipt_exact_object(slice,array[
+       'baseline_evidence_refs','concurrency_posture','declared_component_refs','declared_plan_step_refs',
+       'declared_resource_refs','definition_of_done','dependency_refs','forbidden_change_refs','manual_qa_required',
+       'objective','ordinal','planned_checks','release_requirement','risk_class','scope_boundary','slice_ref'
+     ]),false)
+     or not coalesce(ops.engineering_receipt_identifier_array(slice->'dependency_refs'),false) then
+    return ops.canonical_ownership_refusal('SLICE_PLAN_BINDING_STALE','slice_plan.dependencies',
+      '"one typed canonical dependency set"'::jsonb,
+      jsonb_build_object('reason','malformed_dependencies','value_redacted',true));
+  end if;
+  select coalesce(jsonb_agg(jsonb_build_object(
+           'slice_ref',dependency_ref,'required_state','independently_verified')
+           order by dependency_ref),'[]'::jsonb)
+    into dependencies
+    from jsonb_array_elements_text(slice->'dependency_refs') dependency_ref;
+  return jsonb_build_object('ok',true,'dependencies',dependencies);
 end $$;
 
 create or replace function ops.canonical_ownership_dependency_state(
@@ -314,7 +353,7 @@ begin
      and not exists (select 1 from ops.engineering_execution_envelope successor
                       where successor.supersedes_envelope_id=e.id);
   if leaf_count<>1 then
-    return ops.canonical_ownership_refusal('DEPENDENCY_MISSING','dependency:'||p_slice_ref,
+    return ops.canonical_ownership_refusal('DEPENDENCY_MISSING','dependency',
       '"exactly one unsuperseded envelope leaf"'::jsonb,to_jsonb(leaf_count));
   end if;
   select e.* into leaf from ops.engineering_execution_envelope e
@@ -323,15 +362,16 @@ begin
                       where successor.supersedes_envelope_id=e.id);
   select r.* into receipt from ops.engineering_slice_receipt r where r.envelope_id=leaf.id
    order by r.created_at desc,r.id desc limit 1;
-  if not found or receipt.outcome<>'claimed_complete'
-     or receipt.receipt->>'schema_version'<>'engineering-slice-receipt.v1'
-     or receipt.receipt->>'outcome'<>'claimed_complete'
-     or receipt.receipt->>'slice_ref'<>p_slice_ref
-     or receipt.receipt->>'envelope_digest'<>leaf.envelope_digest
-     or receipt.receipt->>'plan_digest'<>(select plan_digest from ops.engineering_slice_plan where id=p_slice_plan_id)
-     or jsonb_typeof(receipt.receipt->'artifact_refs')<>'array'
-     or jsonb_array_length(receipt.receipt->'artifact_refs')=0 then
-    return ops.canonical_ownership_refusal('DEPENDENCY_UNSATISFIED','dependency:'||p_slice_ref,
+  if not found or receipt.outcome is distinct from 'claimed_complete'
+     or receipt.receipt->>'schema_version' is distinct from 'engineering-slice-receipt.v1'
+     or receipt.receipt->>'outcome' is distinct from 'claimed_complete'
+     or receipt.receipt->>'slice_ref' is distinct from p_slice_ref
+     or receipt.receipt->>'envelope_digest' is distinct from leaf.envelope_digest
+     or receipt.receipt->>'plan_digest' is distinct from (select plan_digest from ops.engineering_slice_plan where id=p_slice_plan_id)
+     or jsonb_typeof(receipt.receipt->'artifact_refs') is distinct from 'array'
+     or not coalesce(case when jsonb_typeof(receipt.receipt->'artifact_refs')='array'
+                          then jsonb_array_length(receipt.receipt->'artifact_refs')>0 else false end,false) then
+    return ops.canonical_ownership_refusal('DEPENDENCY_UNSATISFIED','dependency',
       to_jsonb(p_required_state),jsonb_build_object('receipt_id',receipt.id,'outcome',receipt.outcome));
   end if;
   if p_required_state='completed' then
@@ -342,16 +382,21 @@ begin
   select coalesce(a.active,false) into reviewer_active from public.actor a where a.id=review.reviewer_actor_id;
   executor_session:=receipt.receipt#>>'{attribution,session_ref}';
   select coalesce(array_agg(d->>'deviation_ref' order by d->>'deviation_ref'),'{}'::text[])
-    into deviation_refs from jsonb_array_elements(coalesce(receipt.receipt->'deviations','[]'::jsonb)) d;
-  if review.id is null or review.state<>'passed' or reviewer_active is not true
+    into deviation_refs from jsonb_array_elements(case when jsonb_typeof(receipt.receipt->'deviations')='array'
+      then receipt.receipt->'deviations' else '[]'::jsonb end) d;
+  if review.id is null or review.state is distinct from 'passed' or reviewer_active is not true
      or review.reviewer_actor_id=receipt.executor_actor_id
-     or review.fact->>'state'<>'passed' or review.fact->'is_independent'<>'true'::jsonb
-     or review.fact->>'attempt_id'<>receipt.attempt_id or review.fact->>'slice_ref'<>p_slice_ref
-     or review.reviewer_session_ref<>review.fact->>'session_ref'
+     or review.fact->>'state' is distinct from 'passed' or review.fact->'is_independent' is distinct from 'true'::jsonb
+     or review.fact->>'attempt_id' is distinct from receipt.attempt_id or review.fact->>'slice_ref' is distinct from p_slice_ref
+     or review.reviewer_session_ref is distinct from review.fact->>'session_ref'
      or review.reviewer_session_ref=executor_session
-     or coalesce((select array_agg(v#>>'{}' order by v#>>'{}') from jsonb_array_elements(review.fact->'reviewed_deviation_refs') v),'{}'::text[])<>deviation_refs
-     or coalesce((select array_agg(v#>>'{}' order by v#>>'{}') from jsonb_array_elements(review.fact->'resolved_deviation_refs') v),'{}'::text[])<>deviation_refs then
-    return ops.canonical_ownership_refusal('DEPENDENCY_UNSATISFIED','dependency:'||p_slice_ref,
+     or coalesce((select array_agg(v#>>'{}' order by v#>>'{}') from jsonb_array_elements(
+          case when jsonb_typeof(review.fact->'reviewed_deviation_refs')='array'
+               then review.fact->'reviewed_deviation_refs' else '[]'::jsonb end) v),'{}'::text[]) is distinct from deviation_refs
+     or coalesce((select array_agg(v#>>'{}' order by v#>>'{}') from jsonb_array_elements(
+          case when jsonb_typeof(review.fact->'resolved_deviation_refs')='array'
+               then review.fact->'resolved_deviation_refs' else '[]'::jsonb end) v),'{}'::text[]) is distinct from deviation_refs then
+    return ops.canonical_ownership_refusal('DEPENDENCY_UNSATISFIED','dependency',
       '"independently_verified"'::jsonb,jsonb_build_object('receipt_id',receipt.id,'reviewer_fact_id',review.id,'review_state',review.state));
   end if;
   return jsonb_build_object('ok',true,'envelope_id',leaf.id,'receipt_id',receipt.id,'reviewer_fact_id',review.id);
@@ -365,9 +410,10 @@ create or replace function ops.acquire_canonical_ownership_lease(
 ) returns jsonb language plpgsql volatile security definer set search_path=pg_catalog,ops,public
 as $$
 declare context jsonb:=ops.canonical_ownership_context(); claim jsonb; other jsonb;
-        dep jsonb; currentness jsonb; dep_state jsonb; collision record;
+        dep jsonb; currentness jsonb; dep_state jsonb; canonical_deps jsonb;
+        submitted_deps jsonb; collision record; replaced record;
         lease_row ops.canonical_ownership_lease%rowtype; now_at timestamptz;
-        refs text[]; replaced_id uuid;
+        refs text[]; subject_id uuid; subject_count integer;
 begin
   if not coalesce((context->>'ok')::boolean,false) then return context; end if;
   if p_work_request_id is null or p_work_request_version is null or p_work_request_version<1
@@ -378,30 +424,36 @@ begin
      or p_slice_plan_digest !~ '^sha256:[0-9a-f]{64}$'
      or p_slice_ref is null or p_slice_ref !~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$'
      or p_ttl_seconds is null or p_ttl_seconds<30 or p_ttl_seconds>1800
-     or jsonb_typeof(p_path_claims)<>'array'
-     or jsonb_typeof(p_resource_claims)<>'array' or jsonb_typeof(p_dependencies)<>'array'
+     or jsonb_typeof(p_path_claims) is distinct from 'array'
+     or jsonb_typeof(p_resource_claims) is distinct from 'array'
+     or jsonb_typeof(p_dependencies) is distinct from 'array'
      or p_contract_digest is null or p_contract_digest !~ '^sha256:[0-9a-f]{64}$' then
     return ops.canonical_ownership_refusal('INPUT_INVALID','lease.input','"bounded exact A2 input"'::jsonb,'"invalid"'::jsonb);
   end if;
   for claim in select value from jsonb_array_elements(p_path_claims) loop
-    if not (claim ?& array['path','mode','operation']) or (select count(*) from jsonb_object_keys(claim))<>3
+    if not coalesce(ops.engineering_receipt_exact_object(claim,array['path','mode','operation']),false)
        or claim->>'mode' not in ('file','tree') or claim->>'operation' not in ('write','rename_source','rename_destination')
        or not coalesce(ops.canonical_ownership_path_valid(claim->>'path'),false) then
       return ops.canonical_ownership_refusal('PATH_INVALID','path_claim',
-        '"exact A1a path claim"'::jsonb,claim);
+        '"exact A1a path claim"'::jsonb,
+        jsonb_build_object('field','path_claim','reason','invalid','value_redacted',true));
     end if;
   end loop;
   for claim in select value from jsonb_array_elements(p_path_claims) loop
     for other in select value from jsonb_array_elements(p_path_claims) loop
       if claim::text<other::text and ops.canonical_ownership_path_case_alias(claim->>'path',other->>'path') then
-        return ops.canonical_ownership_refusal('PATH_CASE_ALIAS','path_claims','"one canonical path case"'::jsonb,jsonb_build_array(claim,other));
+        return ops.canonical_ownership_refusal('PATH_CASE_ALIAS','path_claims',
+          '"one canonical path case"'::jsonb,
+          jsonb_build_object('reason','case_alias','value_redacted',true));
       end if;
     end loop;
   end loop;
   for claim in select value from jsonb_array_elements(p_resource_claims) loop
-    if not (claim ? 'resource') or (select count(*) from jsonb_object_keys(claim))<>1
+    if not coalesce(ops.engineering_receipt_exact_object(claim,array['resource']),false)
        or not coalesce(ops.canonical_ownership_resource_valid(claim->>'resource'),false) then
-      return ops.canonical_ownership_refusal('RESOURCE_INVALID','resource_claim','"exact ASCII resource identifier"'::jsonb,claim);
+      return ops.canonical_ownership_refusal('RESOURCE_INVALID','resource_claim',
+        '"exact ASCII resource identifier"'::jsonb,
+        jsonb_build_object('field','resource_claim','reason','invalid','value_redacted',true));
     end if;
   end loop;
   if (select count(*) from jsonb_array_elements(p_path_claims))<>(select count(distinct value) from jsonb_array_elements(p_path_claims))
@@ -409,10 +461,12 @@ begin
     return ops.canonical_ownership_refusal('DUPLICATE_CLAIM','claims','"unique claims"'::jsonb,'"duplicates present"'::jsonb);
   end if;
   for dep in select value from jsonb_array_elements(p_dependencies) loop
-    if not (dep ?& array['slice_ref','required_state']) or (select count(*) from jsonb_object_keys(dep))<>2
+    if not coalesce(ops.engineering_receipt_exact_object(dep,array['slice_ref','required_state']),false)
        or dep->>'required_state' not in ('completed','independently_verified')
        or (dep->>'slice_ref') !~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$' then
-      return ops.canonical_ownership_refusal('INPUT_INVALID','dependency','"exact dependency object"'::jsonb,dep);
+      return ops.canonical_ownership_refusal('INPUT_INVALID','dependency',
+        '"exact dependency object"'::jsonb,
+        jsonb_build_object('field','dependency','reason','invalid','value_redacted',true));
     end if;
   end loop;
   if (select count(*) from jsonb_array_elements(p_dependencies))<>(select count(distinct value->>'slice_ref') from jsonb_array_elements(p_dependencies)) then
@@ -421,15 +475,38 @@ begin
 
   perform pg_advisory_xact_lock(hashtextextended('canonical-ownership:'||(context->>'tenant'),0));
   perform 1 from ops.canonical_ownership_lease l where l.organization_tenant_id=context->>'tenant' order by l.id for update;
+  canonical_deps:=ops.canonical_ownership_plan_dependencies(p_slice_plan_id,p_slice_ref);
   select array_agg(ref order by ref) into refs from (
-    select p_slice_ref ref union select value->>'slice_ref' from jsonb_array_elements(p_dependencies)
+    select p_slice_ref ref union select value->>'slice_ref'
+      from jsonb_array_elements(case when coalesce((canonical_deps->>'ok')::boolean,false)
+        then canonical_deps->'dependencies' else '[]'::jsonb end)
   ) q;
   perform ops.canonical_ownership_lock_lineage(p_slice_plan_id,refs);
   now_at:=clock_timestamp();
   currentness:=ops.canonical_ownership_currentness(p_work_request_id,p_work_request_version,p_work_request_digest,
     p_accepted_plan_id,p_accepted_plan_digest,p_slice_plan_id,p_slice_plan_digest,p_slice_ref);
   if not coalesce((currentness->>'ok')::boolean,false) then return currentness; end if;
-  for dep in select value from jsonb_array_elements(p_dependencies) loop
+  canonical_deps:=ops.canonical_ownership_plan_dependencies(p_slice_plan_id,p_slice_ref);
+  if not coalesce((canonical_deps->>'ok')::boolean,false) then return canonical_deps; end if;
+  select coalesce(jsonb_agg(value order by value->>'slice_ref'),'[]'::jsonb)
+    into submitted_deps from jsonb_array_elements(p_dependencies);
+  if submitted_deps is distinct from canonical_deps->'dependencies' then
+    return ops.canonical_ownership_refusal('SLICE_PLAN_BINDING_STALE','slice_plan.dependencies',
+      '"exact canonical dependency snapshot"'::jsonb,
+      jsonb_build_object('reason','snapshot_mismatch','value_redacted',true));
+  end if;
+  select count(*),(array_agg(id order by id))[1] into subject_count,subject_id
+    from ops.engineering_execution_envelope e
+   where e.work_request_id=p_work_request_id and e.slice_plan_id=p_slice_plan_id
+     and e.slice_ref=p_slice_ref
+     and not exists (select 1 from ops.engineering_execution_envelope successor
+                      where successor.supersedes_envelope_id=e.id);
+  if subject_count<>1 then
+    return ops.canonical_ownership_refusal('SLICE_PLAN_BINDING_STALE','slice_plan.subject',
+      '"one current subject envelope"'::jsonb,
+      jsonb_build_object('reason','subject_lineage_stale','value_redacted',true));
+  end if;
+  for dep in select value from jsonb_array_elements(canonical_deps->'dependencies') loop
     dep_state:=ops.canonical_ownership_dependency_state(p_work_request_id,p_slice_plan_id,dep->>'slice_ref',dep->>'required_state');
     if not coalesce((dep_state->>'ok')::boolean,false) then return dep_state; end if;
   end loop;
@@ -442,18 +519,21 @@ begin
              where ops.canonical_ownership_paths_overlap(c.claim_value,c.claim_mode,p->>'path',p->>'mode'))))
    order by l.id,c.claim_kind,c.claim_value limit 1;
   if found then
-    return ops.canonical_ownership_refusal('FOREIGN_LEASE_COLLISION','lease:'||collision.lease_id::text,
-      '"unclaimed scope"'::jsonb,jsonb_build_object('claim_kind',collision.claim_kind,
-        'claim_value',collision.claim_value,'mode',collision.claim_mode,'operation',collision.operation));
+    return ops.canonical_ownership_refusal('FOREIGN_LEASE_COLLISION','lease.collision',
+      '"unclaimed scope"'::jsonb,
+      jsonb_build_object('claim_kind',collision.claim_kind,'reason','already_claimed',
+        'value_redacted',true));
   end if;
 
   insert into ops.canonical_ownership_lease(
     organization_tenant_id,holder_actor_id,holder_actor_slug,holder_session_ref,holder_host_ref,
     work_request_id,work_request_version,work_request_digest,accepted_plan_id,accepted_plan_digest,
-    slice_plan_id,slice_plan_digest,slice_ref,contract_digest,acquired_at,expires_at)
+    slice_plan_id,slice_plan_digest,slice_ref,subject_envelope_id,
+    contract_digest,acquired_at,expires_at)
   values(context->>'tenant',(context->>'actor_id')::uuid,context->>'actor_slug',context->>'session_ref',context->>'host_ref',
     p_work_request_id,p_work_request_version,p_work_request_digest,p_accepted_plan_id,p_accepted_plan_digest,
-    p_slice_plan_id,p_slice_plan_digest,p_slice_ref,p_contract_digest,now_at,now_at+make_interval(secs=>p_ttl_seconds))
+    p_slice_plan_id,p_slice_plan_digest,p_slice_ref,subject_id,
+    p_contract_digest,now_at,now_at+make_interval(secs=>p_ttl_seconds))
   returning * into lease_row;
 
   for claim in select value from jsonb_array_elements(p_path_claims) loop
@@ -462,7 +542,7 @@ begin
   for claim in select value from jsonb_array_elements(p_resource_claims) loop
     insert into ops.canonical_ownership_claim values(lease_row.id,context->>'tenant','resource',claim->>'resource','resource','claim',now_at);
   end loop;
-  for dep in select value from jsonb_array_elements(p_dependencies) loop
+  for dep in select value from jsonb_array_elements(canonical_deps->'dependencies') loop
     dep_state:=ops.canonical_ownership_dependency_state(p_work_request_id,p_slice_plan_id,dep->>'slice_ref',dep->>'required_state');
     insert into ops.canonical_ownership_dependency values(
       lease_row.id,context->>'tenant',dep->>'slice_ref',dep->>'required_state',
@@ -470,25 +550,33 @@ begin
       nullif(dep_state->>'reviewer_fact_id','')::uuid,now_at,now_at);
   end loop;
 
-  for replaced_id in
-    select distinct l.id from ops.canonical_ownership_lease l join ops.canonical_ownership_claim c on c.lease_id=l.id
+  for replaced in
+    select distinct l.organization_tenant_id,l.id,l.lease_token,l.fencing_generation,
+      l.expires_at,l.state
+      from ops.canonical_ownership_lease l join ops.canonical_ownership_claim c on c.lease_id=l.id
      where l.organization_tenant_id=context->>'tenant' and l.id<>lease_row.id and l.state in ('active','expired') and l.expires_at<=now_at
        and ((c.claim_kind='resource' and exists(select 1 from jsonb_array_elements(p_resource_claims) r where r->>'resource'=c.claim_value))
          or (c.claim_kind='path' and exists(select 1 from jsonb_array_elements(p_path_claims) p
                where ops.canonical_ownership_paths_overlap(c.claim_value,c.claim_mode,p->>'path',p->>'mode'))))
   loop
-    insert into ops.canonical_ownership_lease_event
-      (organization_tenant_id,lease_id,event_kind,fencing_generation,actor_id,session_ref,host_ref,cause,occurred_at)
-    select organization_tenant_id,id,'expired',fencing_generation,(context->>'actor_id')::uuid,
-      context->>'session_ref',context->>'host_ref','{"reason":"observed_expired_during_reacquire"}'::jsonb,now_at
-      from ops.canonical_ownership_lease where id=replaced_id and state='active';
     update ops.canonical_ownership_lease set state='replaced',replaced_at=now_at,
-      superseded_by_lease_id=lease_row.id,updated_at=now_at where id=replaced_id and state in ('active','expired');
+      superseded_by_lease_id=lease_row.id,updated_at=now_at
+     where organization_tenant_id=replaced.organization_tenant_id and id=replaced.id
+       and lease_token=replaced.lease_token and fencing_generation=replaced.fencing_generation
+       and expires_at=replaced.expires_at and state=replaced.state;
+    if not found then raise exception 'canonical ownership predecessor fence changed under tenant lock'; end if;
+    if replaced.state='active' then
+      insert into ops.canonical_ownership_lease_event
+        (organization_tenant_id,lease_id,event_kind,fencing_generation,actor_id,session_ref,host_ref,cause,occurred_at)
+      values(replaced.organization_tenant_id,replaced.id,'expired',replaced.fencing_generation,
+        (context->>'actor_id')::uuid,context->>'session_ref',context->>'host_ref',
+        '{"reason":"observed_expired_during_reacquire"}'::jsonb,now_at);
+    end if;
     insert into ops.canonical_ownership_lease_event
       (organization_tenant_id,lease_id,event_kind,fencing_generation,actor_id,session_ref,host_ref,cause,occurred_at)
-    select organization_tenant_id,id,'replaced',fencing_generation,(context->>'actor_id')::uuid,
-      context->>'session_ref',context->>'host_ref',jsonb_build_object('superseded_by_lease_id',lease_row.id,'reason','expired_scope_reacquired'),now_at
-      from ops.canonical_ownership_lease where id=replaced_id;
+    values(replaced.organization_tenant_id,replaced.id,'replaced',replaced.fencing_generation,
+      (context->>'actor_id')::uuid,context->>'session_ref',context->>'host_ref',
+      jsonb_build_object('superseded_by_lease_id',lease_row.id,'reason','expired_scope_reacquired'),now_at);
   end loop;
   insert into ops.canonical_ownership_lease_event
     (organization_tenant_id,lease_id,event_kind,fencing_generation,actor_id,session_ref,host_ref,cause,occurred_at)
@@ -503,7 +591,9 @@ create or replace function ops.canonical_ownership_validate_live(
 ) returns jsonb language plpgsql volatile security definer set search_path=pg_catalog,ops,public
 as $$
 declare context jsonb:=ops.canonical_ownership_context(); lease_row ops.canonical_ownership_lease%rowtype;
-        currentness jsonb; dep record; dep_state jsonb; refs text[]; now_at timestamptz;
+        currentness jsonb; canonical_deps jsonb; stored_deps jsonb;
+        dep record; dep_state jsonb; refs text[]; now_at timestamptz;
+        current_subject uuid; subject_count integer;
 begin
   if not coalesce((context->>'ok')::boolean,false) then return context; end if;
   if p_lease_id is null or p_lease_token is null or p_fencing_generation is null or p_fencing_generation<1 then
@@ -512,23 +602,29 @@ begin
   perform pg_advisory_xact_lock(hashtextextended('canonical-ownership:'||(context->>'tenant'),0));
   select * into lease_row from ops.canonical_ownership_lease
    where id=p_lease_id and organization_tenant_id=context->>'tenant' for update;
-  if not found then return ops.canonical_ownership_refusal('LEASE_NOT_FOUND','lease:'||p_lease_id::text,'"tenant lease"'::jsonb,'null'::jsonb); end if;
-  if lease_row.holder_actor_id<>(context->>'actor_id')::uuid or lease_row.holder_actor_slug<>context->>'actor_slug'
-     or lease_row.holder_session_ref<>context->>'session_ref' or lease_row.holder_host_ref<>context->>'host_ref' then
-    return ops.canonical_ownership_refusal('LEASE_HOLDER_MISMATCH','lease:'||p_lease_id::text,
-      jsonb_build_object('actor',lease_row.holder_actor_slug,'session',lease_row.holder_session_ref,'host',lease_row.holder_host_ref),
-      jsonb_build_object('actor',context->>'actor_slug','session',context->>'session_ref','host',context->>'host_ref'));
+  if not found then return ops.canonical_ownership_refusal('LEASE_NOT_FOUND','lease',
+    '"tenant lease"'::jsonb,'"absent"'::jsonb); end if;
+  if lease_row.holder_actor_id is distinct from (context->>'actor_id')::uuid
+     or lease_row.holder_actor_slug is distinct from context->>'actor_slug'
+     or lease_row.holder_session_ref is distinct from context->>'session_ref'
+     or lease_row.holder_host_ref is distinct from context->>'host_ref' then
+    return ops.canonical_ownership_refusal('LEASE_HOLDER_MISMATCH','lease.holder',
+      '"acquiring actor, session, and host"'::jsonb,
+      jsonb_build_object('actor_matches',lease_row.holder_actor_id=(context->>'actor_id')::uuid,
+        'session_matches',lease_row.holder_session_ref=context->>'session_ref',
+        'host_matches',lease_row.holder_host_ref=context->>'host_ref'));
   end if;
   if lease_row.lease_token<>p_lease_token then
-    return ops.canonical_ownership_refusal('LEASE_TOKEN_STALE','lease:'||p_lease_id::text,'"current lease token"'::jsonb,'"redacted"'::jsonb);
+    return ops.canonical_ownership_refusal('LEASE_TOKEN_STALE','lease.token',
+      '"current lease token"'::jsonb,'"redacted"'::jsonb);
   end if;
   if lease_row.fencing_generation<>p_fencing_generation then
-    return ops.canonical_ownership_refusal('FENCING_GENERATION_STALE','lease:'||p_lease_id::text,
+    return ops.canonical_ownership_refusal('FENCING_GENERATION_STALE','lease.fencing_generation',
       to_jsonb(lease_row.fencing_generation),to_jsonb(p_fencing_generation));
   end if;
-  if lease_row.state='released' then return ops.canonical_ownership_refusal('LEASE_RELEASED','lease:'||p_lease_id::text,'"active"'::jsonb,'"released"'::jsonb); end if;
-  if lease_row.state='replaced' then return ops.canonical_ownership_refusal('LEASE_REPLACED','lease:'||p_lease_id::text,'"active"'::jsonb,'"replaced"'::jsonb); end if;
-  if lease_row.state='expired' then return ops.canonical_ownership_refusal('LEASE_EXPIRED','lease:'||p_lease_id::text,'"active and unexpired"'::jsonb,'"expired"'::jsonb); end if;
+  if lease_row.state='released' then return ops.canonical_ownership_refusal('LEASE_RELEASED','lease.lifecycle','"active"'::jsonb,'"released"'::jsonb); end if;
+  if lease_row.state='replaced' then return ops.canonical_ownership_refusal('LEASE_REPLACED','lease.lifecycle','"active"'::jsonb,'"replaced"'::jsonb); end if;
+  if lease_row.state='expired' then return ops.canonical_ownership_refusal('LEASE_EXPIRED','lease.lifecycle','"active and unexpired"'::jsonb,'"expired"'::jsonb); end if;
   select array_agg(ref order by ref) into refs from (
     select lease_row.slice_ref ref union
     select dependency_slice_ref from ops.canonical_ownership_dependency where lease_id=p_lease_id
@@ -536,13 +632,35 @@ begin
   perform ops.canonical_ownership_lock_lineage(lease_row.slice_plan_id,refs);
   now_at:=clock_timestamp();
   if lease_row.expires_at<=now_at then
-    return ops.canonical_ownership_refusal('LEASE_EXPIRED','lease:'||p_lease_id::text,'"future expiry"'::jsonb,to_jsonb(lease_row.expires_at));
+    return ops.canonical_ownership_refusal('LEASE_EXPIRED','lease.expiry',
+      '"future expiry"'::jsonb,'"elapsed"'::jsonb);
   end if;
   if p_check_currentness then
     currentness:=ops.canonical_ownership_currentness(lease_row.work_request_id,lease_row.work_request_version,
       lease_row.work_request_digest,lease_row.accepted_plan_id,lease_row.accepted_plan_digest,
       lease_row.slice_plan_id,lease_row.slice_plan_digest,lease_row.slice_ref);
     if not coalesce((currentness->>'ok')::boolean,false) then return currentness; end if;
+    select count(*),(array_agg(id order by id))[1] into subject_count,current_subject
+      from ops.engineering_execution_envelope e
+     where e.work_request_id=lease_row.work_request_id
+       and e.slice_plan_id=lease_row.slice_plan_id and e.slice_ref=lease_row.slice_ref
+       and not exists (select 1 from ops.engineering_execution_envelope successor
+                        where successor.supersedes_envelope_id=e.id);
+    if subject_count<>1 or current_subject is distinct from lease_row.subject_envelope_id then
+      return ops.canonical_ownership_refusal('SLICE_PLAN_BINDING_STALE','slice_plan.subject',
+        '"acquired subject envelope remains current"'::jsonb,
+        jsonb_build_object('reason','subject_lineage_stale','value_redacted',true));
+    end if;
+    canonical_deps:=ops.canonical_ownership_plan_dependencies(lease_row.slice_plan_id,lease_row.slice_ref);
+    if not coalesce((canonical_deps->>'ok')::boolean,false) then return canonical_deps; end if;
+    select coalesce(jsonb_agg(jsonb_build_object('slice_ref',dependency_slice_ref,
+             'required_state',required_state) order by dependency_slice_ref),'[]'::jsonb)
+      into stored_deps from ops.canonical_ownership_dependency where lease_id=p_lease_id;
+    if stored_deps is distinct from canonical_deps->'dependencies' then
+      return ops.canonical_ownership_refusal('SLICE_PLAN_BINDING_STALE','slice_plan.dependencies',
+        '"persisted dependencies match canonical plan"'::jsonb,
+        jsonb_build_object('reason','canonical_drift','value_redacted',true));
+    end if;
     for dep in select * from ops.canonical_ownership_dependency where lease_id=p_lease_id order by dependency_slice_ref loop
       dep_state:=ops.canonical_ownership_dependency_state(lease_row.work_request_id,lease_row.slice_plan_id,
         dep.dependency_slice_ref,dep.required_state);
@@ -561,20 +679,25 @@ as $a2_check$
 declare context jsonb:=ops.canonical_ownership_context(); live jsonb; claim jsonb; mismatch jsonb;
 begin
   if not coalesce((context->>'ok')::boolean,false) then return context; end if;
-  if jsonb_typeof(p_path_claims)<>'array' or jsonb_typeof(p_resource_claims)<>'array' then
+  if jsonb_typeof(p_path_claims) is distinct from 'array'
+     or jsonb_typeof(p_resource_claims) is distinct from 'array' then
     return ops.canonical_ownership_refusal('INPUT_INVALID','required_claims','"arrays"'::jsonb,'"invalid"'::jsonb);
   end if;
   for claim in select value from jsonb_array_elements(p_path_claims) loop
-    if not (claim ?& array['path','mode','operation']) or (select count(*) from jsonb_object_keys(claim))<>3
+    if not coalesce(ops.engineering_receipt_exact_object(claim,array['path','mode','operation']),false)
        or claim->>'mode' not in ('file','tree') or claim->>'operation' not in ('write','rename_source','rename_destination')
        or not coalesce(ops.canonical_ownership_path_valid(claim->>'path'),false) then
-      return ops.canonical_ownership_refusal('INPUT_INVALID','required_claims.path','"exact path claim"'::jsonb,claim);
+      return ops.canonical_ownership_refusal('INPUT_INVALID','required_claims.path',
+        '"exact path claim"'::jsonb,
+        jsonb_build_object('field','path_claim','reason','invalid','value_redacted',true));
     end if;
   end loop;
   for claim in select value from jsonb_array_elements(p_resource_claims) loop
-    if not (claim ? 'resource') or (select count(*) from jsonb_object_keys(claim))<>1
+    if not coalesce(ops.engineering_receipt_exact_object(claim,array['resource']),false)
        or not coalesce(ops.canonical_ownership_resource_valid(claim->>'resource'),false) then
-      return ops.canonical_ownership_refusal('INPUT_INVALID','required_claims.resource','"exact resource claim"'::jsonb,claim);
+      return ops.canonical_ownership_refusal('INPUT_INVALID','required_claims.resource',
+        '"exact resource claim"'::jsonb,
+        jsonb_build_object('field','resource_claim','reason','invalid','value_redacted',true));
     end if;
   end loop;
   live:=ops.canonical_ownership_validate_live(p_lease_id,p_lease_token,p_fencing_generation,true);
@@ -589,7 +712,9 @@ begin
         and c.claim_value=claim->>'resource') then mismatch:=claim; exit; end if;
     end loop;
   end if;
-  if mismatch is not null then return ops.canonical_ownership_refusal('LEASE_CLAIMS_MISMATCH','lease:'||p_lease_id::text||'.claims','"claimed scope"'::jsonb,mismatch); end if;
+  if mismatch is not null then return ops.canonical_ownership_refusal(
+    'LEASE_CLAIMS_MISMATCH','lease.claims','"claimed scope"'::jsonb,
+    jsonb_build_object('reason','unowned_claim','value_redacted',true)); end if;
   return live;
 end $a2_check$;
 
@@ -603,10 +728,10 @@ begin
   if p_ttl_seconds is null or p_ttl_seconds<30 or p_ttl_seconds>1800 then return ops.canonical_ownership_refusal('INPUT_INVALID','lease.ttl','"30..1800 seconds"'::jsonb,to_jsonb(p_ttl_seconds)); end if;
   live:=ops.canonical_ownership_validate_live(p_lease_id,p_lease_token,p_fencing_generation,true);
   if not coalesce((live->>'ok')::boolean,false) then return live; end if;
-  now_at:=clock_timestamp(); new_expiry:=now_at+make_interval(secs=>p_ttl_seconds);
+  now_at:=(live->>'evaluated_at')::timestamptz; new_expiry:=now_at+make_interval(secs=>p_ttl_seconds);
   update ops.canonical_ownership_lease set renewed_at=now_at,expires_at=new_expiry,updated_at=now_at
    where id=p_lease_id and state='active' and lease_token=p_lease_token and fencing_generation=p_fencing_generation and expires_at>now_at;
-  if not found then return ops.canonical_ownership_refusal('LEASE_EXPIRED','lease:'||p_lease_id::text,'"renewable live lease"'::jsonb,'"changed while renewing"'::jsonb); end if;
+  if not found then return ops.canonical_ownership_refusal('LEASE_EXPIRED','lease.expiry','"renewable live lease"'::jsonb,'"changed while renewing"'::jsonb); end if;
   insert into ops.canonical_ownership_lease_event
     (organization_tenant_id,lease_id,event_kind,fencing_generation,actor_id,session_ref,host_ref,cause,occurred_at)
   values(context->>'tenant',p_lease_id,'renewed',p_fencing_generation,(context->>'actor_id')::uuid,
@@ -622,10 +747,10 @@ declare live jsonb; context jsonb; now_at timestamptz;
 begin
   live:=ops.canonical_ownership_validate_live(p_lease_id,p_lease_token,p_fencing_generation,true);
   if not coalesce((live->>'ok')::boolean,false) then return live; end if;
-  context:=ops.canonical_ownership_context(); now_at:=clock_timestamp();
+  context:=ops.canonical_ownership_context(); now_at:=(live->>'evaluated_at')::timestamptz;
   update ops.canonical_ownership_lease set state='released',released_at=now_at,updated_at=now_at
    where id=p_lease_id and state='active' and lease_token=p_lease_token and fencing_generation=p_fencing_generation and expires_at>now_at;
-  if not found then return ops.canonical_ownership_refusal('LEASE_EXPIRED','lease:'||p_lease_id::text,'"releasable live lease"'::jsonb,'"changed while releasing"'::jsonb); end if;
+  if not found then return ops.canonical_ownership_refusal('LEASE_EXPIRED','lease.expiry','"releasable live lease"'::jsonb,'"changed while releasing"'::jsonb); end if;
   insert into ops.canonical_ownership_lease_event
     (organization_tenant_id,lease_id,event_kind,fencing_generation,actor_id,session_ref,host_ref,cause,occurred_at)
   values(context->>'tenant',p_lease_id,'released',p_fencing_generation,(context->>'actor_id')::uuid,
@@ -680,6 +805,7 @@ revoke all on function
   ops.canonical_ownership_context(),
   ops.canonical_ownership_lock_lineage(uuid,text[]),
   ops.canonical_ownership_currentness(uuid,integer,text,uuid,text,uuid,text,text),
+  ops.canonical_ownership_plan_dependencies(uuid,text),
   ops.canonical_ownership_dependency_state(uuid,uuid,text,text),
   ops.acquire_canonical_ownership_lease(uuid,integer,text,uuid,text,uuid,text,text,text,jsonb,jsonb,jsonb,integer),
   ops.canonical_ownership_validate_live(uuid,uuid,bigint,boolean),
