@@ -132,6 +132,8 @@ class FakeRunner:
         del cwd, capture
         events.append(tuple(str(part) for part in command))
         child_envs.append(dict(env or {}))
+        if str(command[-1]) == "--fingerprint-only":
+            return mod.CommandResult(0, "{}", "")
         return mod.CommandResult(0, "", "")
 
 
@@ -155,22 +157,30 @@ check("server binds loopback", "-h 127.0.0.1 -p 55432" in events[1])
 check("server output is detached from runner pipes", "-l" in events[1] and "postgres.log" in events[1][events[1].index("-l") + 1])
 check("database is created locally", events[2][0] == "/fake/createdb")
 check("fixture owner role is created", events[3][0] == "/fake/psql" and "neondb_owner" in events[3][-1])
-check("migration class runs through canonical CI", events[4][-2:] == ("--only", "migration"))
+check("pre-0450 fingerprint database is isolated", events[4][0] == "/fake/createdb" and events[4][-1] == "carr_ci_a2_pre")
+check("pre-0450 schema is loaded canonically", events[5][0] == "/fake/psql" and events[5][-1].endswith("db/schema.sql"))
+check("pre-0450 migrations stop at the exact predecessor", events[6][-2:] == ("--through", "0431_completion_register_schema.sql"))
+check("true pre-0450 fingerprint is captured", events[7][-1] == "--fingerprint-only")
+check("migration class runs through canonical CI", events[8][-2:] == ("--only", "migration"))
 check(
     "atomic Joe lifecycle runs after canonical CI",
-    events[5][-1].endswith("ops/atomic-rule-approval-local-pg-acceptance.py"),
+    events[9][-1].endswith("ops/atomic-rule-approval-local-pg-acceptance.py"),
 )
 check(
     "atomic rule-delivery cutover runs after authority acceptance",
-    events[6][-1].endswith("ops/rule-delivery-local-pg-acceptance.py"),
+    events[10][-1].endswith("ops/rule-delivery-local-pg-acceptance.py"),
 )
 check(
     "scoped engineering claim runs after the authority acceptances",
-    events[7][-1].endswith("ops/engineering-claim-local-pg-gate.py"),
+    events[11][-1].endswith("ops/engineering-claim-local-pg-gate.py"),
 )
 check(
     "Engineering terminalization race runs after the scoped claim",
-    events[8][-1].endswith("ops/engineering-envelope-race-local-pg-gate.py"),
+    events[12][-1].endswith("ops/engineering-envelope-race-local-pg-gate.py"),
+)
+check(
+    "canonical ownership lease runs after the Engineering race proof",
+    events[13][-1].endswith("ops/canonical-ownership-lease-local-pg-gate.py"),
 )
 completion_event = next(
     index for index, event in enumerate(events)
@@ -194,15 +204,31 @@ check(
 )
 check(
     "authority acceptance receives only the local disposable DSN",
-    child_envs[5].get("CARR_LOCAL_PG_DSN")
+    child_envs[9].get("CARR_LOCAL_PG_DSN")
     == "postgres://carr_ci@127.0.0.1:55432/carr_ci"
-    and "CARR_CI_DATABASE_URL" not in child_envs[5],
+    and "CARR_CI_DATABASE_URL" not in child_envs[9],
+)
+check(
+    "fingerprint reads only the isolated pre-0450 database",
+    child_envs[7].get("CARR_LOCAL_PG_DSN")
+    == "postgres://carr_ci@127.0.0.1:55432/carr_ci_a2_pre"
+    and "DATABASE_URL" not in child_envs[7],
+)
+check(
+    "post-CI gates receive the exact pre-0450 fingerprint",
+    child_envs[9].get("CARR_OWNERSHIP_PRE_0450_FINGERPRINT") == "{}"
+    and child_envs[13].get("CARR_OWNERSHIP_PRE_0450_FINGERPRINT") == "{}",
 )
 check("server always stops", events[-1][0] == "/fake/pg_ctl" and events[-1][-1] == "stop")
 check("temporary cluster is always removed", remove.call_count == 1)
 check("ordinary children receive no ambient secrets", all(
-    not ({"DATABASE_URL", "NEON_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GH_TOKEN"} & set(env))
-    for env in child_envs
+    not ({"NEON_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GH_TOKEN"} & set(env))
+    and (
+        "DATABASE_URL" not in env
+        or (any(part.endswith("tools/migrate.py") for part in event)
+            and env["DATABASE_URL"] == "postgres://carr_ci@127.0.0.1:55432/carr_ci_a2_pre")
+    )
+    for event, env in zip(events, child_envs)
 ))
 
 events.clear()
@@ -213,22 +239,26 @@ with (
     patch.object(mod.shutil, "rmtree"),
 ):
     result = mod.run_local_ci(repo=REPO, ci_class="strict", port=55432, runner=FakeRunner())
-check("strict lane uses canonical strict CI", result == 0 and events[4][-1] == "--strict")
+check("strict lane uses canonical strict CI", result == 0 and events[8][-1] == "--strict")
 check(
     "strict lane also proves atomic Joe lifecycle",
-    events[5][-1].endswith("ops/atomic-rule-approval-local-pg-acceptance.py"),
+    events[9][-1].endswith("ops/atomic-rule-approval-local-pg-acceptance.py"),
 )
 check(
     "strict lane also proves atomic rule-delivery cutover",
-    events[6][-1].endswith("ops/rule-delivery-local-pg-acceptance.py"),
+    events[10][-1].endswith("ops/rule-delivery-local-pg-acceptance.py"),
 )
 check(
     "strict lane also proves the scoped engineering claim",
-    events[7][-1].endswith("ops/engineering-claim-local-pg-gate.py"),
+    events[11][-1].endswith("ops/engineering-claim-local-pg-gate.py"),
 )
 check(
     "strict lane also proves the Engineering terminalization race",
-    events[8][-1].endswith("ops/engineering-envelope-race-local-pg-gate.py"),
+    events[12][-1].endswith("ops/engineering-envelope-race-local-pg-gate.py"),
+)
+check(
+    "strict lane also proves canonical ownership leases",
+    events[13][-1].endswith("ops/canonical-ownership-lease-local-pg-gate.py"),
 )
 
 
