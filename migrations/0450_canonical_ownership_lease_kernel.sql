@@ -212,7 +212,7 @@ end $$;
 -- Engineering receipt/review/successor writers. Tenant/lease locks are A2-only
 -- and are taken by the caller before this helper.
 create or replace function ops.canonical_ownership_lock_lineage(
-  p_slice_plan_id uuid,p_slice_refs text[]
+  p_holder_actor_id uuid,p_slice_plan_id uuid,p_slice_refs text[]
 ) returns void language plpgsql volatile security definer set search_path=pg_catalog,ops,public
 as $$
 declare lock_key text;
@@ -231,6 +231,8 @@ begin
       join ops.engineering_slice_receipt receipt on receipt.id=r.receipt_id
       join ops.engineering_execution_envelope e on e.id=receipt.envelope_id
      where e.slice_plan_id=p_slice_plan_id and e.slice_ref=any(p_slice_refs)
+     union
+     select p_holder_actor_id
    ) order by a.id for share;
   for lock_key in
     select 'engineering-envelope:'||p_slice_plan_id::text||':'||slice_ref
@@ -349,7 +351,7 @@ create or replace function ops.canonical_ownership_dependency_state(
 as $$
 declare leaf_count integer; leaf ops.engineering_execution_envelope%rowtype;
         receipt ops.engineering_slice_receipt%rowtype; review ops.engineering_reviewer_fact%rowtype;
-        reviewer_active boolean; executor_session text; deviation_refs text[];
+        reviewer_slug text; executor_session text; deviation_refs text[];
 begin
   select count(*) into leaf_count from ops.engineering_execution_envelope e
    where e.work_request_id=p_work_request_id and e.slice_plan_id=p_slice_plan_id and e.slice_ref=p_slice_ref
@@ -367,11 +369,26 @@ begin
   select r.* into receipt from ops.engineering_slice_receipt r where r.envelope_id=leaf.id
    order by r.created_at desc,r.id desc limit 1;
   if not found or receipt.outcome is distinct from 'claimed_complete'
+     or receipt.work_request_id is distinct from p_work_request_id
+     or receipt.slice_ref is distinct from p_slice_ref
+     or not coalesce(ops.engineering_receipt_exact_object(receipt.receipt,array[
+          'actual_component_refs','actual_resource_refs','artifact_refs','attribution','attempt_id','checks',
+          'deviations','envelope_digest','evidence_refs','executor_claim','independent_verification_required',
+          'outcome','plan_digest','planned_component_refs','planned_resource_refs','reset_reconstruction',
+          'schema_version','slice_ref','source_evidence'
+        ]),false)
      or receipt.receipt->>'schema_version' is distinct from 'engineering-slice-receipt.v1'
+     or receipt.receipt_digest is distinct from
+        ('sha256:'||encode(public.digest(
+          ops.guidance_import_canonical_json(receipt.receipt),'sha256'),'hex'))
      or receipt.receipt->>'outcome' is distinct from 'claimed_complete'
      or receipt.receipt->>'slice_ref' is distinct from p_slice_ref
+     or receipt.receipt->>'attempt_id' is distinct from receipt.attempt_id
      or receipt.receipt->>'envelope_digest' is distinct from leaf.envelope_digest
      or receipt.receipt->>'plan_digest' is distinct from (select plan_digest from ops.engineering_slice_plan where id=p_slice_plan_id)
+     or receipt.receipt->'independent_verification_required' is distinct from 'true'::jsonb
+     or not coalesce(ops.engineering_receipt_exact_object(
+          receipt.receipt->'attribution',array['actor_ref','adapter_ref','session_ref']),false)
      or jsonb_typeof(receipt.receipt->'deviations') is distinct from 'array'
      or exists (
        select 1 from jsonb_array_elements(case
@@ -407,16 +424,30 @@ begin
   end if;
   select f.* into review from ops.engineering_reviewer_fact f where f.receipt_id=receipt.id
    order by f.created_at desc,f.id desc limit 1;
-  select coalesce(a.active,false) into reviewer_active from public.actor a where a.id=review.reviewer_actor_id;
+  select a.slug into reviewer_slug from public.actor a
+   where a.id=review.reviewer_actor_id and a.active;
   executor_session:=receipt.receipt#>>'{attribution,session_ref}';
   select coalesce(array_agg(d->>'deviation_ref' order by d->>'deviation_ref'),'{}'::text[])
     into deviation_refs from jsonb_array_elements(receipt.receipt->'deviations') d;
-  if review.id is null or review.state is distinct from 'passed' or reviewer_active is not true
+  if review.id is null or review.state is distinct from 'passed'
+     or review.contract_version is distinct from 'engineering-review.v1'
+     or review.work_request_id is distinct from receipt.work_request_id
+     or review.slice_ref is distinct from receipt.slice_ref
+     or reviewer_slug is null
+     or not coalesce(ops.engineering_receipt_exact_object(review.fact,array[
+          'attempt_id','evidence_refs','is_independent','resolved_deviation_refs',
+          'reviewed_deviation_refs','reviewer_ref','session_ref','slice_ref','state'
+        ]),false)
      or review.reviewer_actor_id=receipt.executor_actor_id
      or review.fact->>'state' is distinct from 'passed' or review.fact->'is_independent' is distinct from 'true'::jsonb
      or review.fact->>'attempt_id' is distinct from receipt.attempt_id or review.fact->>'slice_ref' is distinct from p_slice_ref
+     or not coalesce(review.fact->>'reviewer_ref'=any(array[
+          reviewer_slug,'actor:'||reviewer_slug,'reviewer:'||reviewer_slug
+        ]),false)
      or review.reviewer_session_ref is distinct from review.fact->>'session_ref'
      or review.reviewer_session_ref=executor_session
+     or not coalesce(ops.engineering_receipt_evidence_array(review.fact->'evidence_refs'),false)
+     or not coalesce(jsonb_array_length(review.fact->'evidence_refs')>0,false)
      or not coalesce(ops.engineering_receipt_identifier_array(
           review.fact->'reviewed_deviation_refs'),false)
      or not coalesce(ops.engineering_receipt_identifier_array(
@@ -549,7 +580,16 @@ begin
       from jsonb_array_elements(case when coalesce((canonical_deps->>'ok')::boolean,false)
         then canonical_deps->'dependencies' else '[]'::jsonb end)
   ) q;
-  perform ops.canonical_ownership_lock_lineage(p_slice_plan_id,refs);
+  perform ops.canonical_ownership_lock_lineage(
+    (context->>'actor_id')::uuid,p_slice_plan_id,refs);
+  perform 1 from public.actor a
+   where a.id=(context->>'actor_id')::uuid
+     and a.slug=context->>'actor_slug' and a.active;
+  if not found then
+    return ops.canonical_ownership_refusal('IDENTITY_CONTEXT_INVALID','identity_context.actor',
+      '"active canonical actor"'::jsonb,
+      jsonb_build_object('reason','unknown_or_inactive','value_redacted',true));
+  end if;
   now_at:=clock_timestamp();
   currentness:=ops.canonical_ownership_currentness(p_work_request_id,p_work_request_version,p_work_request_digest,
     p_accepted_plan_id,p_accepted_plan_digest,p_slice_plan_id,p_slice_plan_digest,p_slice_ref);
@@ -618,11 +658,11 @@ begin
     organization_tenant_id,holder_actor_id,holder_actor_slug,holder_session_ref,holder_host_ref,
     work_request_id,work_request_version,work_request_digest,accepted_plan_id,accepted_plan_digest,
     slice_plan_id,slice_plan_digest,slice_ref,subject_envelope_id,
-    contract_digest,acquired_at,expires_at)
+    contract_digest,acquired_at,expires_at,created_at,updated_at)
   values(context->>'tenant',(context->>'actor_id')::uuid,context->>'actor_slug',context->>'session_ref',context->>'host_ref',
     p_work_request_id,p_work_request_version,p_work_request_digest,p_accepted_plan_id,p_accepted_plan_digest,
     p_slice_plan_id,p_slice_plan_digest,p_slice_ref,subject_id,
-    p_contract_digest,now_at,now_at+make_interval(secs=>p_ttl_seconds))
+    p_contract_digest,now_at,now_at+make_interval(secs=>p_ttl_seconds),now_at,now_at)
   returning * into lease_row;
 
   for claim in select value from jsonb_array_elements(p_path_claims) loop
@@ -656,21 +696,26 @@ begin
     if not found then raise exception 'canonical ownership predecessor fence changed under tenant lock'; end if;
     if replaced.state='active' then
       insert into ops.canonical_ownership_lease_event
-        (organization_tenant_id,lease_id,event_kind,fencing_generation,actor_id,session_ref,host_ref,cause,occurred_at)
+        (organization_tenant_id,lease_id,event_kind,fencing_generation,actor_id,
+         session_ref,host_ref,cause,occurred_at,created_at)
       values(replaced.organization_tenant_id,replaced.id,'expired',replaced.fencing_generation,
         (context->>'actor_id')::uuid,context->>'session_ref',context->>'host_ref',
-        '{"reason":"observed_expired_during_reacquire"}'::jsonb,now_at);
+        '{"reason":"observed_expired_during_reacquire"}'::jsonb,now_at,now_at);
     end if;
     insert into ops.canonical_ownership_lease_event
-      (organization_tenant_id,lease_id,event_kind,fencing_generation,actor_id,session_ref,host_ref,cause,occurred_at)
+      (organization_tenant_id,lease_id,event_kind,fencing_generation,actor_id,
+       session_ref,host_ref,cause,occurred_at,created_at)
     values(replaced.organization_tenant_id,replaced.id,'replaced',replaced.fencing_generation,
       (context->>'actor_id')::uuid,context->>'session_ref',context->>'host_ref',
-      jsonb_build_object('superseded_by_lease_id',lease_row.id,'reason','expired_scope_reacquired'),now_at);
+      jsonb_build_object('superseded_by_lease_id',lease_row.id,
+        'reason','expired_scope_reacquired'),now_at,now_at);
   end loop;
   insert into ops.canonical_ownership_lease_event
-    (organization_tenant_id,lease_id,event_kind,fencing_generation,actor_id,session_ref,host_ref,cause,occurred_at)
+    (organization_tenant_id,lease_id,event_kind,fencing_generation,actor_id,
+     session_ref,host_ref,cause,occurred_at,created_at)
   values(context->>'tenant',lease_row.id,'acquired',lease_row.fencing_generation,(context->>'actor_id')::uuid,
-    context->>'session_ref',context->>'host_ref',jsonb_build_object('contract_digest',p_contract_digest),now_at);
+    context->>'session_ref',context->>'host_ref',
+    jsonb_build_object('contract_digest',p_contract_digest),now_at,now_at);
   return jsonb_build_object('ok',true,'lease_id',lease_row.id,'lease_token',lease_row.lease_token,
     'fencing_generation',lease_row.fencing_generation,'expires_at',lease_row.expires_at);
 end $$;
@@ -718,7 +763,16 @@ begin
     select lease_row.slice_ref ref union
     select dependency_slice_ref from ops.canonical_ownership_dependency where lease_id=p_lease_id
   ) q;
-  perform ops.canonical_ownership_lock_lineage(lease_row.slice_plan_id,refs);
+  perform ops.canonical_ownership_lock_lineage(
+    (context->>'actor_id')::uuid,lease_row.slice_plan_id,refs);
+  perform 1 from public.actor a
+   where a.id=(context->>'actor_id')::uuid
+     and a.slug=context->>'actor_slug' and a.active;
+  if not found then
+    return ops.canonical_ownership_refusal('IDENTITY_CONTEXT_INVALID','identity_context.actor',
+      '"active canonical actor"'::jsonb,
+      jsonb_build_object('reason','unknown_or_inactive','value_redacted',true));
+  end if;
   now_at:=clock_timestamp();
   if lease_row.expires_at<=now_at then
     return ops.canonical_ownership_refusal('LEASE_EXPIRED','lease.expiry',
@@ -838,9 +892,11 @@ begin
    where id=p_lease_id and state='active' and lease_token=p_lease_token and fencing_generation=p_fencing_generation and expires_at>now_at;
   if not found then return ops.canonical_ownership_refusal('LEASE_EXPIRED','lease.expiry','"renewable live lease"'::jsonb,'"changed while renewing"'::jsonb); end if;
   insert into ops.canonical_ownership_lease_event
-    (organization_tenant_id,lease_id,event_kind,fencing_generation,actor_id,session_ref,host_ref,cause,occurred_at)
+    (organization_tenant_id,lease_id,event_kind,fencing_generation,actor_id,
+     session_ref,host_ref,cause,occurred_at,created_at)
   values(context->>'tenant',p_lease_id,'renewed',p_fencing_generation,(context->>'actor_id')::uuid,
-    context->>'session_ref',context->>'host_ref',jsonb_build_object('expires_at',new_expiry),now_at);
+    context->>'session_ref',context->>'host_ref',
+    jsonb_build_object('expires_at',new_expiry),now_at,now_at);
   return jsonb_build_object('ok',true,'lease_id',p_lease_id,'fencing_generation',p_fencing_generation,'expires_at',new_expiry);
 end $a2_renew$;
 
@@ -857,9 +913,11 @@ begin
    where id=p_lease_id and state='active' and lease_token=p_lease_token and fencing_generation=p_fencing_generation and expires_at>now_at;
   if not found then return ops.canonical_ownership_refusal('LEASE_EXPIRED','lease.expiry','"releasable live lease"'::jsonb,'"changed while releasing"'::jsonb); end if;
   insert into ops.canonical_ownership_lease_event
-    (organization_tenant_id,lease_id,event_kind,fencing_generation,actor_id,session_ref,host_ref,cause,occurred_at)
+    (organization_tenant_id,lease_id,event_kind,fencing_generation,actor_id,
+     session_ref,host_ref,cause,occurred_at,created_at)
   values(context->>'tenant',p_lease_id,'released',p_fencing_generation,(context->>'actor_id')::uuid,
-    context->>'session_ref',context->>'host_ref','{"reason":"holder_release"}',now_at);
+    context->>'session_ref',context->>'host_ref',
+    '{"reason":"holder_release"}',now_at,now_at);
   return jsonb_build_object('ok',true,'lease_id',p_lease_id,'fencing_generation',p_fencing_generation,'state','released');
 end $$;
 
@@ -878,9 +936,11 @@ begin
      returning *
   ), events as (
     insert into ops.canonical_ownership_lease_event
-      (organization_tenant_id,lease_id,event_kind,fencing_generation,actor_id,session_ref,host_ref,cause,occurred_at)
+      (organization_tenant_id,lease_id,event_kind,fencing_generation,actor_id,
+       session_ref,host_ref,cause,occurred_at,created_at)
     select organization_tenant_id,id,'expired',fencing_generation,(context->>'actor_id')::uuid,
-      context->>'session_ref',context->>'host_ref','{"reason":"lease_expiry"}'::jsonb,now_at from expired
+      context->>'session_ref',context->>'host_ref',
+      '{"reason":"lease_expiry"}'::jsonb,now_at,now_at from expired
     returning 1
   ) select count(*) into changed from events;
   return jsonb_build_object('ok',true,'expired_count',changed,'evaluated_at',now_at);
@@ -908,7 +968,7 @@ revoke all on function
   ops.canonical_ownership_path_case_alias(text,text),
   ops.canonical_ownership_paths_overlap(text,text,text,text),
   ops.canonical_ownership_context(),
-  ops.canonical_ownership_lock_lineage(uuid,text[]),
+  ops.canonical_ownership_lock_lineage(uuid,uuid,text[]),
   ops.canonical_ownership_currentness(uuid,integer,text,uuid,text,uuid,text,text),
   ops.canonical_ownership_plan_dependencies(uuid,text),
   ops.canonical_ownership_dependency_state(uuid,uuid,text,text),

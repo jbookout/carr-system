@@ -13,7 +13,8 @@ import os
 from pathlib import Path
 import sys
 from contextlib import redirect_stderr, redirect_stdout
-from threading import Barrier, Thread
+from datetime import datetime
+from threading import Barrier, Event, Lock, Thread
 import uuid
 
 import psycopg
@@ -27,6 +28,7 @@ RESPONSES: list[object] = []
 SECRET_TOKENS: set[str] = set()
 MINTED_TOKENS: dict[str, int] = {}
 SUBMITTED_WRONG_TOKENS: set[str] = set()
+RESPONSE_LOCK = Lock()
 CATALOG_FINGERPRINT_SQL = r"""
 with table_targets(obj) as (values
   ('ops.work_request'),('ops.engineering_slice_plan'),('ops.job'),
@@ -100,6 +102,13 @@ def sha(seed: str) -> str:
     return "sha256:" + (seed * 64)[:64]
 
 
+def record_response(value: object) -> int:
+    with RESPONSE_LOCK:
+        response_index = len(RESPONSES)
+        RESPONSES.append(value)
+        return response_index
+
+
 def context(cur, tenant: str, actor: str = "joe", session: str | None = None,
             host: str = "host:a2-disposable-pg") -> None:
     cur.execute("set local lock_timeout='5s'")
@@ -154,21 +163,23 @@ def acquire(
             ttl,
         ),
     )[0]
-    response_index = len(RESPONSES)
-    RESPONSES.append(value)
-    if value.get("ok") is True:
-        token = str(value["lease_token"])
-        if token in MINTED_TOKENS:
-            raise RuntimeError("duplicate minted token")
-        MINTED_TOKENS[token] = response_index
-        SECRET_TOKENS.add(token)
+    with RESPONSE_LOCK:
+        response_index = len(RESPONSES)
+        RESPONSES.append(value)
+        if value.get("ok") is True:
+            token = str(value["lease_token"])
+            if token in MINTED_TOKENS:
+                raise RuntimeError("duplicate minted token")
+            MINTED_TOKENS[token] = response_index
+            SECRET_TOKENS.add(token)
     return value
 
 
 def register_submitted_wrong_token(value: uuid.UUID) -> uuid.UUID:
     token = str(value)
-    SUBMITTED_WRONG_TOKENS.add(token)
-    SECRET_TOKENS.add(token)
+    with RESPONSE_LOCK:
+        SUBMITTED_WRONG_TOKENS.add(token)
+        SECRET_TOKENS.add(token)
     return value
 
 
@@ -181,7 +192,7 @@ def refusal(
     expected,
     actual,
 ) -> None:
-    RESPONSES.append(value)
+    record_response(value)
     actual_code = value.get("refusal", {}).get("code")
     if value.get("ok") is not False or actual_code != code:
         raise RuntimeError(f"{label}: refusal code mismatch")
@@ -441,7 +452,7 @@ def main() -> int:
             )[0]
             if assigned.get("ok") is not True:
                 raise RuntimeError("assigned tenant currentness failed")
-            RESPONSES.append(assigned)
+            record_response(assigned)
             context(cur, f"foreign-{tenant}", "joe", "session:a2:primary:joe")
             refusal(
                 one(
@@ -498,6 +509,81 @@ def main() -> int:
                 cur, "select id from ops.engineering_reviewer_fact where receipt_id=%s",
                 (_receipt,),
             )[0]
+            canonical_corruptions: tuple[
+                tuple[str, str, str, tuple[object, ...]], ...
+            ] = (
+                (
+                    "receipt extra top-level field",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt "
+                    "set receipt=receipt||%s::jsonb where id=%s",
+                    (Jsonb({"unexpected": True}), _receipt),
+                ),
+                (
+                    "receipt digest mismatch",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt "
+                    "set receipt_digest=%s where id=%s",
+                    (sha("f"), _receipt),
+                ),
+                (
+                    "receipt exact binding mismatch",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt set "
+                    "receipt=jsonb_set(receipt,'{attempt_id}',%s::jsonb,true) "
+                    "where id=%s",
+                    (Jsonb("attempt:999999"), _receipt),
+                ),
+                (
+                    "review extra top-level field",
+                    "engineering_reviewer_fact",
+                    "update ops.engineering_reviewer_fact "
+                    "set fact=fact||%s::jsonb where id=%s",
+                    (Jsonb({"unexpected": True}), reviewer_id),
+                ),
+                (
+                    "review contract version missing",
+                    "engineering_reviewer_fact",
+                    "update ops.engineering_reviewer_fact "
+                    "set contract_version=null where id=%s",
+                    (reviewer_id,),
+                ),
+                (
+                    "review evidence empty",
+                    "engineering_reviewer_fact",
+                    "update ops.engineering_reviewer_fact set "
+                    "fact=jsonb_set(fact,'{evidence_refs}',%s::jsonb,true) "
+                    "where id=%s",
+                    (Jsonb([]), reviewer_id),
+                ),
+            )
+            for label, table, corrupt_sql, corrupt_args in canonical_corruptions:
+                cur.execute("savepoint exact_dependency_acquire")
+                cur.execute(f"alter table ops.{table} disable trigger user")
+                cur.execute(corrupt_sql, corrupt_args)
+                value = acquire(cur, bound, dependencies=deps)
+                actual = {
+                    "slice_ref": dependency[5],
+                    "receipt_id": str(_receipt),
+                    "outcome": "claimed_complete",
+                }
+                if table == "engineering_reviewer_fact":
+                    actual = {
+                        "slice_ref": dependency[5],
+                        "receipt_id": str(_receipt),
+                        "reviewer_fact_id": str(reviewer_id),
+                        "review_state": "passed",
+                    }
+                refusal(
+                    value,
+                    "DEPENDENCY_UNSATISFIED",
+                    f"acquire {label}",
+                    causal_object="dependency",
+                    expected="independently_verified",
+                    actual=actual,
+                )
+                cur.execute("rollback to savepoint exact_dependency_acquire")
+                cur.execute("release savepoint exact_dependency_acquire")
             for index, (shape_label, shape_value, shape_missing) in enumerate((
                 ("missing receipt deviations", None, True),
                 ("scalar receipt deviations", "invalid", False),
@@ -1012,6 +1098,50 @@ def main() -> int:
                         actual=actual)
                 cur.execute("rollback to savepoint malformed_deviation_boundary")
                 cur.execute("release savepoint malformed_deviation_boundary")
+            exact_boundary_calls: tuple[tuple[str, str, tuple[object, ...]], ...] = (
+                (
+                    "check",
+                    "select ops.check_canonical_ownership_lease(%s,%s,%s)",
+                    (lease_id, lease_token, generation),
+                ),
+                (
+                    "renew",
+                    "select ops.renew_canonical_ownership_lease(%s,%s,%s,600)",
+                    (lease_id, lease_token, generation),
+                ),
+                (
+                    "release",
+                    "select ops.release_canonical_ownership_lease(%s,%s,%s)",
+                    (lease_id, lease_token, generation),
+                ),
+            )
+            for label, table, corrupt_sql, corrupt_args in canonical_corruptions:
+                cur.execute("savepoint exact_dependency_boundary")
+                cur.execute(f"alter table ops.{table} disable trigger user")
+                cur.execute(corrupt_sql, corrupt_args)
+                actual = {
+                    "slice_ref": dependency[5],
+                    "receipt_id": str(_receipt),
+                    "outcome": "claimed_complete",
+                }
+                if table == "engineering_reviewer_fact":
+                    actual = {
+                        "slice_ref": dependency[5],
+                        "receipt_id": str(_receipt),
+                        "reviewer_fact_id": str(reviewer_id),
+                        "review_state": "passed",
+                    }
+                for operation, boundary_sql, boundary_args in exact_boundary_calls:
+                    refusal(
+                        one(cur, boundary_sql, boundary_args)[0],
+                        "DEPENDENCY_UNSATISFIED",
+                        f"{operation} {label}",
+                        causal_object="dependency",
+                        expected="independently_verified",
+                        actual=actual,
+                    )
+                cur.execute("rollback to savepoint exact_dependency_boundary")
+                cur.execute("release savepoint exact_dependency_boundary")
             cur.execute("savepoint post_acquire_dependency_drift")
             cur.execute("alter table ops.engineering_slice_plan disable trigger user")
             drift_ref = "slice:a2:post-acquire-drift"
@@ -1044,7 +1174,7 @@ def main() -> int:
             )[0]
             if renewed.get("ok") is not True:
                 raise RuntimeError(f"renewal failed: {safe_outcome(renewed)}")
-            RESPONSES.append(renewed)
+            record_response(renewed)
             released = one(
                 cur,
                 "select ops.release_canonical_ownership_lease(%s,%s,%s)",
@@ -1052,7 +1182,7 @@ def main() -> int:
             )[0]
             if released.get("state") != "released":
                 raise RuntimeError(f"release failed: {safe_outcome(released)}")
-            RESPONSES.append(released)
+            record_response(released)
             refusal(
                 one(cur, "select ops.check_canonical_ownership_lease(%s,%s,%s)",
                     (lease_id, lease_token, generation))[0],
@@ -1107,16 +1237,17 @@ def main() -> int:
                 paths=[{"path": "ops/expired.py", "mode": "file", "operation": "write"}],
                 dependencies=deps,
             )
-            expired_update = cur.execute(
+            fixture_acquired_at = one(
+                cur,
                 """update ops.canonical_ownership_lease
-                      set acquired_at=clock_timestamp()-interval '2 hours',
-                          expires_at=clock_timestamp()-interval '1 hour',
-                          updated_at=clock_timestamp()
-                    where id=%s""",
+                      set acquired_at=fixture.fixture_at,
+                          created_at=fixture.fixture_at,
+                          expires_at=fixture.fixture_at+interval '1 hour',
+                          updated_at=fixture.fixture_at
+                     from (select clock_timestamp()-interval '2 hours' fixture_at) fixture
+                    where id=%s returning acquired_at""",
                 (expiring["lease_id"],),
-            )
-            if expired_update.rowcount != 1:
-                raise RuntimeError("expiry fixture did not update exactly one lease")
+            )[0]
             cur.execute("savepoint wall_clock_expiry_precedence")
             cur.execute("alter table ops.engineering_slice_plan disable trigger user")
             set_plan_dependencies(cur, bound[5], bound[7],
@@ -1135,11 +1266,11 @@ def main() -> int:
             cleanup = one(cur, "select ops.expire_canonical_ownership_leases()")[0]
             if cleanup.get("ok") is not True or cleanup.get("expired_count") != 1:
                 raise RuntimeError("expiry cleanup did not transition exactly one lease")
-            RESPONSES.append(cleanup)
+            record_response(cleanup)
             cleanup_again = one(cur, "select ops.expire_canonical_ownership_leases()")[0]
             if cleanup_again.get("ok") is not True or cleanup_again.get("expired_count") != 0:
                 raise RuntimeError("expiry cleanup was not idempotent")
-            RESPONSES.append(cleanup_again)
+            record_response(cleanup_again)
             expired_check = one(
                 cur,
                 "select ops.check_canonical_ownership_lease(%s,%s,%s)",
@@ -1465,7 +1596,7 @@ def main() -> int:
             "successor race crossed a noncausal boundary: "
             + safe_outcome(lease_outcome)
         )
-    RESPONSES.append(lease_outcome)
+    record_response(lease_outcome)
     assertions += 1
 
     lifecycle_session = "session:a2:lifecycle:joe"
@@ -1496,8 +1627,178 @@ def main() -> int:
                 lease_value["fencing_generation"],
             ))[0]
             peer.commit()
-            RESPONSES.append(value)
+            record_response(value)
             return value
+
+    # Transaction start is deliberately earlier than the tenant lock release.
+    # Every persisted acquisition timestamp must still be the one sample taken
+    # after that lock, never transaction-start now().
+    timestamp_ready = Event()
+    timestamp_results: list[tuple[dict[str, object], datetime] | BaseException] = []
+    with psycopg.connect(dsn) as blocker, blocker.cursor() as blocker_cur:
+        context(blocker_cur, tenant, "joe", lifecycle_session)
+        blocker_cur.execute(
+            "select pg_advisory_xact_lock(hashtextextended(%s,0))",
+            (f"canonical-ownership:{tenant}",),
+        )
+
+        def acquire_after_lock_wait() -> None:
+            try:
+                with psycopg.connect(dsn) as peer, peer.cursor() as cur:
+                    context(
+                        cur,
+                        tenant,
+                        "dell",
+                        "session:a2:post-lock-time:dell",
+                    )
+                    transaction_started = one(
+                        cur, "select transaction_timestamp()"
+                    )[0]
+                    timestamp_ready.set()
+                    value = acquire(
+                        cur,
+                        bound,
+                        paths=[{
+                            "path": "ops/post-lock-time.py",
+                            "mode": "file",
+                            "operation": "write",
+                        }],
+                        dependencies=deps,
+                    )
+                    peer.commit()
+                    timestamp_results.append((value, transaction_started))
+            except BaseException as exc:
+                timestamp_results.append(exc)
+
+        timestamp_thread = Thread(target=acquire_after_lock_wait, daemon=True)
+        timestamp_thread.start()
+        if not timestamp_ready.wait(10):
+            raise RuntimeError("post-lock timestamp peer did not reach acquisition")
+        blocker_cur.execute("select pg_sleep(0.25)")
+        blocker.commit()
+        timestamp_thread.join(15)
+    if timestamp_thread.is_alive() or len(timestamp_results) != 1:
+        raise RuntimeError("post-lock timestamp peer did not finish")
+    timestamp_result = timestamp_results[0]
+    if isinstance(timestamp_result, BaseException):
+        raise RuntimeError(
+            "post-lock timestamp peer failed: "
+            + type(timestamp_result).__name__
+        )
+    waited_lease, transaction_started = timestamp_result
+    if not isinstance(waited_lease, dict) or waited_lease.get("ok") is not True:
+        raise RuntimeError("post-lock timestamp acquisition was refused")
+    with psycopg.connect(dsn) as proof, proof.cursor() as cur:
+        times = one(
+            cur,
+            """select l.acquired_at,l.created_at,l.updated_at,
+                      e.occurred_at,e.created_at,
+                      (select min(c.created_at)
+                         from ops.canonical_ownership_claim c
+                        where c.lease_id=l.id),
+                      (select max(c.created_at)
+                         from ops.canonical_ownership_claim c
+                        where c.lease_id=l.id),
+                      (select min(d.evaluated_at)
+                         from ops.canonical_ownership_dependency d
+                        where d.lease_id=l.id),
+                      (select max(d.created_at)
+                         from ops.canonical_ownership_dependency d
+                        where d.lease_id=l.id)
+                 from ops.canonical_ownership_lease l
+                 join ops.canonical_ownership_lease_event e on e.lease_id=l.id
+                where l.id=%s and e.event_kind='acquired'""",
+            (waited_lease["lease_id"],),
+        )
+    if len(set(times)) != 1 or times[0] <= transaction_started:
+        raise RuntimeError("acquisition did not persist one post-lock timestamp")
+    assertions += 1
+
+    def holder_deactivation_race(label: str, operation) -> None:
+        ready = Event()
+        outcomes: list[object] = []
+        with psycopg.connect(dsn) as deactivator, deactivator.cursor() as actor_cur:
+            actor_cur.execute(
+                "update public.actor set active=false where slug='joe'"
+            )
+
+            def invoke_with_stale_context() -> None:
+                try:
+                    with psycopg.connect(dsn) as peer, peer.cursor() as cur:
+                        context(cur, tenant, "joe", lifecycle_session)
+                        sampled = one(
+                            cur, "select ops.canonical_ownership_context()"
+                        )[0]
+                        if sampled.get("ok") is not True:
+                            raise RuntimeError(
+                                f"{label}: initial actor context was not active"
+                            )
+                        ready.set()
+                        value = operation(cur)
+                        peer.commit()
+                        outcomes.append(value)
+                except BaseException as exc:
+                    outcomes.append(exc)
+
+            thread = Thread(target=invoke_with_stale_context, daemon=True)
+            thread.start()
+            if not ready.wait(10):
+                raise RuntimeError(f"{label}: stale context was not sampled")
+            deactivator.commit()
+            thread.join(15)
+        with psycopg.connect(dsn) as restore, restore.cursor() as restore_cur:
+            restore_cur.execute(
+                "update public.actor set active=true where slug='joe'"
+            )
+            restore.commit()
+        if thread.is_alive() or len(outcomes) != 1:
+            raise RuntimeError(f"{label}: actor race did not finish")
+        if isinstance(outcomes[0], BaseException):
+            raise RuntimeError(
+                f"{label}: actor race failed: {type(outcomes[0]).__name__}"
+            )
+        refusal(
+            outcomes[0],
+            "IDENTITY_CONTEXT_INVALID",
+            label,
+            causal_object="identity_context.actor",
+            expected="active canonical actor",
+            actual={"reason": "unknown_or_inactive", "value_redacted": True},
+        )
+
+    holder_deactivation_race(
+        "acquire holder deactivated after context",
+        lambda cur: acquire(
+            cur,
+            bound,
+            paths=[{
+                "path": "ops/actor-race-acquire.py",
+                "mode": "file",
+                "operation": "write",
+            }],
+            dependencies=deps,
+        ),
+    )
+    for operation in ("check", "renew", "release"):
+        actor_lease = lifecycle_lease(f"actor-race-{operation}")
+        actor_sql = {
+            "check": "select ops.check_canonical_ownership_lease(%s,%s,%s)",
+            "renew": "select ops.renew_canonical_ownership_lease(%s,%s,%s,600)",
+            "release": "select ops.release_canonical_ownership_lease(%s,%s,%s)",
+        }[operation]
+        holder_deactivation_race(
+            f"{operation} holder deactivated after context",
+            lambda cur, sql=actor_sql, lease=actor_lease: one(
+                cur,
+                sql,
+                (
+                    lease["lease_id"],
+                    lease["lease_token"],
+                    lease["fencing_generation"],
+                ),
+            )[0],
+        )
+    assertions += 4
 
     renew_release_lease = lifecycle_lease("renew-release")
     renew_release = race(
@@ -1527,10 +1828,17 @@ def main() -> int:
     cleanup_lease = lifecycle_lease("renew-cleanup")
     with psycopg.connect(dsn) as fixture, fixture.cursor() as cur:
         context(cur, tenant, "joe", lifecycle_session)
-        cur.execute("update ops.canonical_ownership_lease set "
-                    "acquired_at=clock_timestamp()-interval '2 seconds',"
-                    "expires_at=clock_timestamp()-interval '1 second' where id=%s",
-                    (cleanup_lease["lease_id"],))
+        shifted = one(
+            cur,
+            "update ops.canonical_ownership_lease set "
+            "acquired_at=fixture.fixture_at,created_at=fixture.fixture_at,"
+            "updated_at=fixture.fixture_at,"
+            "expires_at=fixture.fixture_at+interval '1 second' "
+            "from (select clock_timestamp()-interval '2 seconds' fixture_at) fixture "
+            "where id=%s "
+            "returning acquired_at",
+            (cleanup_lease["lease_id"],),
+        )[0]
         fixture.commit()
 
     def cleanup_call():
@@ -1538,7 +1846,7 @@ def main() -> int:
             context(cur, tenant, "joe", lifecycle_session)
             value = one(cur, "select ops.expire_canonical_ownership_leases()")[0]
             peer.commit()
-            RESPONSES.append(value)
+            record_response(value)
             return value
 
     renew_cleanup = race(cleanup_call,
@@ -1571,10 +1879,17 @@ def main() -> int:
         predecessor = lifecycle_lease(label)
         with psycopg.connect(dsn) as fixture, fixture.cursor() as cur:
             context(cur, tenant, "joe", lifecycle_session)
-            cur.execute("update ops.canonical_ownership_lease set "
-                        "acquired_at=clock_timestamp()-interval '2 seconds',"
-                        "expires_at=clock_timestamp()-interval '1 second' where id=%s",
-                        (predecessor["lease_id"],))
+            shifted = one(
+                cur,
+                "update ops.canonical_ownership_lease set "
+                "acquired_at=fixture.fixture_at,created_at=fixture.fixture_at,"
+                "updated_at=fixture.fixture_at,"
+                "expires_at=fixture.fixture_at+interval '1 second' "
+                "from (select clock_timestamp()-interval '2 seconds' fixture_at) fixture "
+                "where id=%s "
+                "returning acquired_at",
+                (predecessor["lease_id"],),
+            )[0]
             fixture.commit()
 
         def replace_call():
@@ -1649,7 +1964,7 @@ def main() -> int:
             "ops.canonical_ownership_path_case_alias(text,text)",
             "ops.canonical_ownership_paths_overlap(text,text,text,text)",
             "ops.canonical_ownership_context()",
-            "ops.canonical_ownership_lock_lineage(uuid,text[])",
+            "ops.canonical_ownership_lock_lineage(uuid,uuid,text[])",
             "ops.canonical_ownership_currentness(uuid,integer,text,uuid,text,uuid,text,text)",
             "ops.canonical_ownership_plan_dependencies(uuid,text)",
             "ops.canonical_ownership_dependency_state(uuid,uuid,text,text)",
@@ -1746,6 +2061,27 @@ def main() -> int:
             else:
                 raise RuntimeError(f"{table} accepted destructive cleanup")
         assertions += 3
+
+        timestamp_drift = one(
+            cur,
+            """select
+                 (select count(*) from ops.canonical_ownership_lease l
+                   where l.created_at is distinct from l.acquired_at
+                      or l.updated_at is distinct from case l.state
+                           when 'released' then l.released_at
+                           when 'replaced' then l.replaced_at
+                           when 'expired' then (
+                             select max(e.occurred_at)
+                               from ops.canonical_ownership_lease_event e
+                              where e.lease_id=l.id and e.event_kind='expired')
+                           else coalesce(l.renewed_at,l.acquired_at)
+                         end)
+               + (select count(*) from ops.canonical_ownership_lease_event e
+                   where e.created_at is distinct from e.occurred_at)""",
+        )[0]
+        if timestamp_drift != 0:
+            raise RuntimeError("lifecycle writes did not retain one operation timestamp")
+        assertions += 1
 
         baseline_text = os.environ.get("CARR_OWNERSHIP_PRE_0450_FINGERPRINT", "")
         if not baseline_text:
