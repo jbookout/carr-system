@@ -269,6 +269,23 @@ def set_plan_slices(cur, plan_id, value, *, missing: bool = False) -> None:
         raise RuntimeError("canonical plan shape fixture missed its plan")
 
 
+def reseal_receipt(cur, receipt_id) -> None:
+    cur.execute(
+        """update ops.engineering_slice_receipt
+              set receipt_digest='sha256:'||encode(
+                    public.digest(
+                      ops.guidance_import_canonical_json(receipt),
+                      'sha256'
+                    ),
+                    'hex'
+                  )
+            where id=%s""",
+        (receipt_id,),
+    )
+    if cur.rowcount != 1:
+        raise RuntimeError("receipt reseal fixture missed its receipt")
+
+
 def insert_review(cur, fixture_row, receipt_id) -> None:
     work_request_id = one(
         cur,
@@ -509,8 +526,13 @@ def main() -> int:
                 cur, "select id from ops.engineering_reviewer_fact where receipt_id=%s",
                 (_receipt,),
             )[0]
+            foreign_work_request_id = one(
+                cur,
+                "select id from ops.work_request where id<>%s order by id limit 1",
+                (bound[0],),
+            )[0]
             canonical_corruptions: tuple[
-                tuple[str, str, str, tuple[object, ...]], ...
+                tuple[str, str, str, tuple[object, ...], bool], ...
             ] = (
                 (
                     "receipt extra top-level field",
@@ -518,6 +540,7 @@ def main() -> int:
                     "update ops.engineering_slice_receipt "
                     "set receipt=receipt||%s::jsonb where id=%s",
                     (Jsonb({"unexpected": True}), _receipt),
+                    True,
                 ),
                 (
                     "receipt digest mismatch",
@@ -525,14 +548,233 @@ def main() -> int:
                     "update ops.engineering_slice_receipt "
                     "set receipt_digest=%s where id=%s",
                     (sha("f"), _receipt),
+                    False,
                 ),
                 (
-                    "receipt exact binding mismatch",
+                    "receipt work request row mismatch",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt "
+                    "set work_request_id=%s where id=%s",
+                    (foreign_work_request_id, _receipt),
+                    True,
+                ),
+                (
+                    "receipt slice row mismatch",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt "
+                    "set slice_ref=%s where id=%s",
+                    (bound[7], _receipt),
+                    True,
+                ),
+                (
+                    "receipt attempt row and object mismatch",
                     "engineering_slice_receipt",
                     "update ops.engineering_slice_receipt set "
+                    "attempt_id='attempt:999999',"
                     "receipt=jsonb_set(receipt,'{attempt_id}',%s::jsonb,true) "
                     "where id=%s",
                     (Jsonb("attempt:999999"), _receipt),
+                    True,
+                ),
+                (
+                    "receipt plan binding mismatch",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt set "
+                    "receipt=jsonb_set(receipt,'{plan_digest}',%s::jsonb,true) "
+                    "where id=%s",
+                    (Jsonb(sha("1")), _receipt),
+                    True,
+                ),
+                (
+                    "receipt envelope binding mismatch",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt set "
+                    "receipt=jsonb_set(receipt,'{envelope_digest}',%s::jsonb,true) "
+                    "where id=%s",
+                    (Jsonb(sha("2")), _receipt),
+                    True,
+                ),
+                *tuple(
+                    (
+                        f"receipt attribution {field} mismatch",
+                        "engineering_slice_receipt",
+                        "update ops.engineering_slice_receipt set "
+                        f"receipt=jsonb_set(receipt,'{{attribution,{field}}}',"
+                        "%s::jsonb,true) where id=%s",
+                        (Jsonb(f"{field}:mismatch"), _receipt),
+                        True,
+                    )
+                    for field in ("actor_ref", "session_ref", "adapter_ref")
+                ),
+                (
+                    "receipt planned resource malformed",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt set "
+                    "receipt=jsonb_set(receipt,'{planned_resource_refs}',"
+                    "%s::jsonb,true) where id=%s",
+                    (Jsonb("invalid"), _receipt),
+                    True,
+                ),
+                (
+                    "receipt planned resource binding mismatch",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt set "
+                    "receipt=jsonb_set(receipt,'{planned_resource_refs}',"
+                    "%s::jsonb,true) where id=%s",
+                    (Jsonb(["resource:unexpected"]), _receipt),
+                    True,
+                ),
+                (
+                    "receipt actual resource outside authority",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt set "
+                    "receipt=jsonb_set(receipt,'{actual_resource_refs}',"
+                    "%s::jsonb,true) where id=%s",
+                    (Jsonb(["resource:unexpected"]), _receipt),
+                    True,
+                ),
+                (
+                    "receipt planned component malformed",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt set "
+                    "receipt=jsonb_set(receipt,'{planned_component_refs}',"
+                    "%s::jsonb,true) where id=%s",
+                    (Jsonb({"invalid": True}), _receipt),
+                    True,
+                ),
+                (
+                    "receipt planned component binding mismatch",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt set "
+                    "receipt=jsonb_set(receipt,'{planned_component_refs}',"
+                    "%s::jsonb,true) where id=%s",
+                    (Jsonb(["component:unexpected"]), _receipt),
+                    True,
+                ),
+                (
+                    "receipt actual component outside authority",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt set "
+                    "receipt=jsonb_set(receipt,'{actual_component_refs}',"
+                    "%s::jsonb,true) where id=%s",
+                    (Jsonb(["component:unexpected"]), _receipt),
+                    True,
+                ),
+                (
+                    "receipt artifact malformed",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt set "
+                    "receipt=jsonb_set(receipt,'{artifact_refs}',"
+                    "%s::jsonb,true) where id=%s",
+                    (Jsonb("invalid"), _receipt),
+                    True,
+                ),
+                (
+                    "receipt artifact empty",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt set "
+                    "receipt=jsonb_set(receipt,'{artifact_refs}',"
+                    "%s::jsonb,true) where id=%s",
+                    (Jsonb([]), _receipt),
+                    True,
+                ),
+                (
+                    "receipt evidence missing",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt "
+                    "set receipt=receipt-'evidence_refs' where id=%s",
+                    (_receipt,),
+                    True,
+                ),
+                *tuple(
+                    (
+                        f"receipt evidence {label}",
+                        "engineering_slice_receipt",
+                        "update ops.engineering_slice_receipt set "
+                        "receipt=jsonb_set(receipt,'{evidence_refs}',"
+                        "%s::jsonb,true) where id=%s",
+                        (Jsonb(value), _receipt),
+                        True,
+                    )
+                    for label, value in (
+                        ("null", None),
+                        ("scalar", "invalid"),
+                        ("object", {"invalid": True}),
+                        ("empty", []),
+                    )
+                ),
+                (
+                    "receipt checks malformed",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt set "
+                    "receipt=jsonb_set(receipt,'{checks}',"
+                    "%s::jsonb,true) where id=%s",
+                    (Jsonb("invalid"), _receipt),
+                    True,
+                ),
+                (
+                    "receipt check binding mismatch",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt set "
+                    "receipt=jsonb_set(receipt,'{checks,0,check_ref}',"
+                    "%s::jsonb,true) where id=%s",
+                    (Jsonb("check:unexpected"), _receipt),
+                    True,
+                ),
+                (
+                    "receipt check not passed",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt set "
+                    "receipt=jsonb_set(receipt,'{checks,0,state}',"
+                    "%s::jsonb,true) where id=%s",
+                    (Jsonb("failed"), _receipt),
+                    True,
+                ),
+                (
+                    "receipt source evidence malformed",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt set "
+                    "receipt=jsonb_set(receipt,'{source_evidence}',"
+                    "%s::jsonb,true) where id=%s",
+                    (Jsonb("invalid"), _receipt),
+                    True,
+                ),
+                (
+                    "receipt reset reconstruction malformed",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt set "
+                    "receipt=jsonb_set(receipt,'{reset_reconstruction}',"
+                    "%s::jsonb,true) where id=%s",
+                    (Jsonb("invalid"), _receipt),
+                    True,
+                ),
+                (
+                    "receipt executor claim malformed",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt set "
+                    "receipt=jsonb_set(receipt,'{executor_claim}',"
+                    "%s::jsonb,true) where id=%s",
+                    (Jsonb("invalid"), _receipt),
+                    True,
+                ),
+                (
+                    "receipt executor binding mismatch",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt set "
+                    "receipt=jsonb_set(receipt,'{executor_claim,claimed_by}',"
+                    "%s::jsonb,true) where id=%s",
+                    (Jsonb("actor:unexpected"), _receipt),
+                    True,
+                ),
+                (
+                    "receipt independent verification false",
+                    "engineering_slice_receipt",
+                    "update ops.engineering_slice_receipt set "
+                    "receipt=jsonb_set(receipt,"
+                    "'{independent_verification_required}',"
+                    "%s::jsonb,true) where id=%s",
+                    (Jsonb(False), _receipt),
+                    True,
                 ),
                 (
                     "review extra top-level field",
@@ -540,6 +782,7 @@ def main() -> int:
                     "update ops.engineering_reviewer_fact "
                     "set fact=fact||%s::jsonb where id=%s",
                     (Jsonb({"unexpected": True}), reviewer_id),
+                    False,
                 ),
                 (
                     "review contract version missing",
@@ -547,20 +790,40 @@ def main() -> int:
                     "update ops.engineering_reviewer_fact "
                     "set contract_version=null where id=%s",
                     (reviewer_id,),
+                    False,
                 ),
                 (
-                    "review evidence empty",
+                    "review evidence missing",
                     "engineering_reviewer_fact",
-                    "update ops.engineering_reviewer_fact set "
-                    "fact=jsonb_set(fact,'{evidence_refs}',%s::jsonb,true) "
-                    "where id=%s",
-                    (Jsonb([]), reviewer_id),
+                    "update ops.engineering_reviewer_fact "
+                    "set fact=fact-'evidence_refs' where id=%s",
+                    (reviewer_id,),
+                    False,
+                ),
+                *tuple(
+                    (
+                        f"review evidence {label}",
+                        "engineering_reviewer_fact",
+                        "update ops.engineering_reviewer_fact set "
+                        "fact=jsonb_set(fact,'{evidence_refs}',"
+                        "%s::jsonb,true) where id=%s",
+                        (Jsonb(value), reviewer_id),
+                        False,
+                    )
+                    for label, value in (
+                        ("null", None),
+                        ("scalar", "invalid"),
+                        ("object", {"invalid": True}),
+                        ("empty", []),
+                    )
                 ),
             )
-            for label, table, corrupt_sql, corrupt_args in canonical_corruptions:
+            for label, table, corrupt_sql, corrupt_args, reseal in canonical_corruptions:
                 cur.execute("savepoint exact_dependency_acquire")
                 cur.execute(f"alter table ops.{table} disable trigger user")
                 cur.execute(corrupt_sql, corrupt_args)
+                if reseal:
+                    reseal_receipt(cur, _receipt)
                 value = acquire(cur, bound, dependencies=deps)
                 actual = {
                     "slice_ref": dependency[5],
@@ -599,6 +862,7 @@ def main() -> int:
                     cur.execute("update ops.engineering_slice_receipt set "
                                 "receipt=jsonb_set(receipt,'{deviations}',%s::jsonb,true) "
                                 "where id=%s", (Jsonb(shape_value), _receipt))
+                reseal_receipt(cur, _receipt)
                 value = acquire(cur, bound, dependencies=deps) if index == 0 else one(
                     cur, "select ops.canonical_ownership_dependency_state(%s,%s,%s,%s)",
                     (bound[0], bound[5], dependency[5], "independently_verified"),
@@ -1076,6 +1340,7 @@ def main() -> int:
                     cur.execute("update ops.engineering_slice_receipt set "
                                 "receipt=jsonb_set(receipt,%s,%s::jsonb,true) where id=%s",
                                 ([field], Jsonb(value), _receipt))
+                    reseal_receipt(cur, _receipt)
                     actual = {"slice_ref": dependency[5],
                               "receipt_id": str(_receipt),
                               "outcome": "claimed_complete"}
@@ -1115,10 +1380,12 @@ def main() -> int:
                     (lease_id, lease_token, generation),
                 ),
             )
-            for label, table, corrupt_sql, corrupt_args in canonical_corruptions:
+            for label, table, corrupt_sql, corrupt_args, reseal in canonical_corruptions:
                 cur.execute("savepoint exact_dependency_boundary")
                 cur.execute(f"alter table ops.{table} disable trigger user")
                 cur.execute(corrupt_sql, corrupt_args)
+                if reseal:
+                    reseal_receipt(cur, _receipt)
                 actual = {
                     "slice_ref": dependency[5],
                     "receipt_id": str(_receipt),
@@ -1237,17 +1504,15 @@ def main() -> int:
                 paths=[{"path": "ops/expired.py", "mode": "file", "operation": "write"}],
                 dependencies=deps,
             )
-            fixture_acquired_at = one(
+            fixture_expiry = one(
                 cur,
                 """update ops.canonical_ownership_lease
-                      set acquired_at=fixture.fixture_at,
-                          created_at=fixture.fixture_at,
-                          expires_at=fixture.fixture_at+interval '1 hour',
-                          updated_at=fixture.fixture_at
-                     from (select clock_timestamp()-interval '2 hours' fixture_at) fixture
-                    where id=%s returning acquired_at""",
+                      set expires_at=acquired_at+interval '1 microsecond'
+                    where id=%s returning acquired_at,expires_at""",
                 (expiring["lease_id"],),
-            )[0]
+            )
+            if fixture_expiry[1] <= fixture_expiry[0]:
+                raise RuntimeError("expiry fixture violated acquisition ordering")
             cur.execute("savepoint wall_clock_expiry_precedence")
             cur.execute("alter table ops.engineering_slice_plan disable trigger user")
             set_plan_dependencies(cur, bound[5], bound[7],
@@ -1828,17 +2093,15 @@ def main() -> int:
     cleanup_lease = lifecycle_lease("renew-cleanup")
     with psycopg.connect(dsn) as fixture, fixture.cursor() as cur:
         context(cur, tenant, "joe", lifecycle_session)
-        shifted = one(
+        fixture_expiry = one(
             cur,
             "update ops.canonical_ownership_lease set "
-            "acquired_at=fixture.fixture_at,created_at=fixture.fixture_at,"
-            "updated_at=fixture.fixture_at,"
-            "expires_at=fixture.fixture_at+interval '1 second' "
-            "from (select clock_timestamp()-interval '2 seconds' fixture_at) fixture "
-            "where id=%s "
-            "returning acquired_at",
+            "expires_at=acquired_at+interval '1 microsecond' "
+            "where id=%s returning acquired_at,expires_at",
             (cleanup_lease["lease_id"],),
-        )[0]
+        )
+        if fixture_expiry[1] <= fixture_expiry[0]:
+            raise RuntimeError("cleanup expiry fixture violated acquisition ordering")
         fixture.commit()
 
     def cleanup_call():
@@ -1879,17 +2142,17 @@ def main() -> int:
         predecessor = lifecycle_lease(label)
         with psycopg.connect(dsn) as fixture, fixture.cursor() as cur:
             context(cur, tenant, "joe", lifecycle_session)
-            shifted = one(
+            fixture_expiry = one(
                 cur,
                 "update ops.canonical_ownership_lease set "
-                "acquired_at=fixture.fixture_at,created_at=fixture.fixture_at,"
-                "updated_at=fixture.fixture_at,"
-                "expires_at=fixture.fixture_at+interval '1 second' "
-                "from (select clock_timestamp()-interval '2 seconds' fixture_at) fixture "
-                "where id=%s "
-                "returning acquired_at",
+                "expires_at=acquired_at+interval '1 microsecond' "
+                "where id=%s returning acquired_at,expires_at",
                 (predecessor["lease_id"],),
-            )[0]
+            )
+            if fixture_expiry[1] <= fixture_expiry[0]:
+                raise RuntimeError(
+                    "replacement expiry fixture violated acquisition ordering"
+                )
             fixture.commit()
 
         def replace_call():
@@ -2064,23 +2327,75 @@ def main() -> int:
 
         timestamp_drift = one(
             cur,
-            """select
-                 (select count(*) from ops.canonical_ownership_lease l
-                   where l.created_at is distinct from l.acquired_at
-                      or l.updated_at is distinct from case l.state
-                           when 'released' then l.released_at
-                           when 'replaced' then l.replaced_at
-                           when 'expired' then (
-                             select max(e.occurred_at)
-                               from ops.canonical_ownership_lease_event e
-                              where e.lease_id=l.id and e.event_kind='expired')
-                           else coalesce(l.renewed_at,l.acquired_at)
-                         end)
-               + (select count(*) from ops.canonical_ownership_lease_event e
-                   where e.created_at is distinct from e.occurred_at)""",
+            """select count(*) from ops.canonical_ownership_lease l
+                where l.created_at is distinct from l.acquired_at
+                   or l.updated_at is distinct from case l.state
+                        when 'released' then l.released_at
+                        when 'replaced' then l.replaced_at
+                        when 'expired' then (
+                          select max(e.occurred_at)
+                            from ops.canonical_ownership_lease_event e
+                           where e.lease_id=l.id and e.event_kind='expired')
+                        else coalesce(l.renewed_at,l.acquired_at)
+                      end
+                   or (select count(*) from ops.canonical_ownership_lease_event e
+                        where e.lease_id=l.id and e.event_kind='acquired')<>1
+                   or not exists (
+                        select 1 from ops.canonical_ownership_lease_event e
+                         where e.lease_id=l.id and e.event_kind='acquired'
+                           and e.occurred_at=l.acquired_at
+                           and e.created_at=e.occurred_at)
+                   or ((l.renewed_at is null) is distinct from
+                       ((select count(*) from ops.canonical_ownership_lease_event e
+                          where e.lease_id=l.id and e.event_kind='renewed')=0))
+                   or (l.renewed_at is not null and l.renewed_at is distinct from
+                       (select max(e.occurred_at)
+                          from ops.canonical_ownership_lease_event e
+                         where e.lease_id=l.id and e.event_kind='renewed'))
+                   or (l.state='released' and (
+                        l.released_at is null
+                        or (select count(*) from ops.canonical_ownership_lease_event e
+                             where e.lease_id=l.id and e.event_kind='released')<>1
+                        or not exists (
+                             select 1 from ops.canonical_ownership_lease_event e
+                              where e.lease_id=l.id and e.event_kind='released'
+                                and e.occurred_at=l.released_at)))
+                   or (l.state<>'released' and (
+                        l.released_at is not null
+                        or exists (
+                             select 1 from ops.canonical_ownership_lease_event e
+                              where e.lease_id=l.id and e.event_kind='released')))
+                   or (l.state='replaced' and (
+                        l.replaced_at is null
+                        or (select count(*) from ops.canonical_ownership_lease_event e
+                             where e.lease_id=l.id and e.event_kind='replaced')<>1
+                        or not exists (
+                             select 1 from ops.canonical_ownership_lease_event e
+                              where e.lease_id=l.id and e.event_kind='replaced'
+                                and e.occurred_at=l.replaced_at)))
+                   or (l.state<>'replaced' and (
+                        l.replaced_at is not null
+                        or exists (
+                             select 1 from ops.canonical_ownership_lease_event e
+                              where e.lease_id=l.id and e.event_kind='replaced')))
+                   or (l.state='expired' and (
+                        (select count(*) from ops.canonical_ownership_lease_event e
+                          where e.lease_id=l.id and e.event_kind='expired')<>1
+                        or not exists (
+                             select 1 from ops.canonical_ownership_lease_event e
+                              where e.lease_id=l.id and e.event_kind='expired'
+                                and e.occurred_at=l.updated_at)))
+                   or exists (
+                        select 1 from ops.canonical_ownership_lease_event e
+                         where e.lease_id=l.id
+                           and (e.created_at is distinct from e.occurred_at
+                                or e.occurred_at<l.acquired_at
+                                or e.occurred_at>l.updated_at))""",
         )[0]
         if timestamp_drift != 0:
-            raise RuntimeError("lifecycle writes did not retain one operation timestamp")
+            raise RuntimeError(
+                "lease and lifecycle audit timestamps lost their exact linkage"
+            )
         assertions += 1
 
         baseline_text = os.environ.get("CARR_OWNERSHIP_PRE_0450_FINGERPRINT", "")

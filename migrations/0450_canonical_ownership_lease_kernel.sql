@@ -351,6 +351,9 @@ create or replace function ops.canonical_ownership_dependency_state(
 as $$
 declare leaf_count integer; leaf ops.engineering_execution_envelope%rowtype;
         receipt ops.engineering_slice_receipt%rowtype; review ops.engineering_reviewer_fact%rowtype;
+        plan_row ops.engineering_slice_plan%rowtype; receipt_slice jsonb;
+        receipt_slice_count integer; receipt_attempt integer;
+        session_executor uuid; session_slug text;
         reviewer_slug text; executor_session text; deviation_refs text[];
 begin
   select count(*) into leaf_count from ops.engineering_execution_envelope e
@@ -368,9 +371,32 @@ begin
                       where successor.supersedes_envelope_id=e.id);
   select r.* into receipt from ops.engineering_slice_receipt r where r.envelope_id=leaf.id
    order by r.created_at desc,r.id desc limit 1;
-  if not found or receipt.outcome is distinct from 'claimed_complete'
+  select sp.* into plan_row from ops.engineering_slice_plan sp
+   where sp.id=p_slice_plan_id;
+  select count(*),min(value::text)::jsonb
+    into receipt_slice_count,receipt_slice
+    from jsonb_array_elements(case
+      when jsonb_typeof(plan_row.plan->'slices')='array'
+      then plan_row.plan->'slices' else '[]'::jsonb end)
+   where value->>'slice_ref'=p_slice_ref;
+  select ja.attempt into receipt_attempt from ops.job_attempt ja
+   where ja.id=receipt.job_attempt_id and ja.job_id=leaf.job_id;
+  select s.executor_actor_id,a.slug into session_executor,session_slug
+    from ops.capability_agent_session s
+    join public.actor a on a.id=s.executor_actor_id and a.active
+   where s.id=leaf.agent_session_id and s.work_request_id=p_work_request_id;
+  if receipt.id is null or receipt.outcome is distinct from 'claimed_complete'
      or receipt.work_request_id is distinct from p_work_request_id
+     or receipt.envelope_id is distinct from leaf.id
      or receipt.slice_ref is distinct from p_slice_ref
+     or plan_row.id is null
+     or plan_row.work_request_id is distinct from p_work_request_id
+     or leaf.slice_plan_id is distinct from plan_row.id
+     or receipt.executor_actor_id is distinct from session_executor
+     or session_slug is null
+     or receipt_attempt is null
+     or receipt.attempt_id is distinct from ('attempt:'||receipt_attempt)
+     or receipt_slice_count<>1
      or not coalesce(ops.engineering_receipt_exact_object(receipt.receipt,array[
           'actual_component_refs','actual_resource_refs','artifact_refs','attribution','attempt_id','checks',
           'deviations','envelope_digest','evidence_refs','executor_claim','independent_verification_required',
@@ -385,10 +411,143 @@ begin
      or receipt.receipt->>'slice_ref' is distinct from p_slice_ref
      or receipt.receipt->>'attempt_id' is distinct from receipt.attempt_id
      or receipt.receipt->>'envelope_digest' is distinct from leaf.envelope_digest
-     or receipt.receipt->>'plan_digest' is distinct from (select plan_digest from ops.engineering_slice_plan where id=p_slice_plan_id)
+     or receipt.receipt->>'plan_digest' is distinct from plan_row.plan_digest
      or receipt.receipt->'independent_verification_required' is distinct from 'true'::jsonb
      or not coalesce(ops.engineering_receipt_exact_object(
           receipt.receipt->'attribution',array['actor_ref','adapter_ref','session_ref']),false)
+     or leaf.envelope#>>'{server_binding,identity,agent_principal_id}' is null
+     or leaf.envelope#>>'{agent_session,id}' is null
+     or leaf.envelope#>>'{server_binding,adapter,adapter_id}' is null
+     or receipt.receipt#>>'{attribution,actor_ref}' is distinct from
+        leaf.envelope#>>'{server_binding,identity,agent_principal_id}'
+     or receipt.receipt#>>'{attribution,session_ref}' is distinct from
+        leaf.envelope#>>'{agent_session,id}'
+     or receipt.receipt#>>'{attribution,adapter_ref}' is distinct from
+        leaf.envelope#>>'{server_binding,adapter,adapter_id}'
+     or not coalesce(ops.engineering_receipt_exact_object(receipt_slice,array[
+          'baseline_evidence_refs','concurrency_posture','declared_component_refs',
+          'declared_plan_step_refs','declared_resource_refs','definition_of_done',
+          'dependency_refs','forbidden_change_refs','manual_qa_required','objective',
+          'ordinal','planned_checks','release_requirement','risk_class',
+          'scope_boundary','slice_ref'
+        ]),false)
+     or receipt_slice->>'slice_ref' is distinct from p_slice_ref
+     or not coalesce(ops.engineering_receipt_identifier_array(
+          receipt_slice->'declared_resource_refs'),false)
+     or not coalesce(ops.engineering_receipt_identifier_array(
+          receipt_slice->'declared_component_refs'),false)
+     or jsonb_typeof(receipt_slice->'planned_checks') is distinct from 'array'
+     or not coalesce(case when jsonb_typeof(receipt_slice->'planned_checks')='array'
+                          then jsonb_array_length(receipt_slice->'planned_checks')>0
+                          else false end,false)
+     or exists (
+       select 1 from jsonb_array_elements(case
+         when jsonb_typeof(receipt_slice->'planned_checks')='array'
+         then receipt_slice->'planned_checks' else '[]'::jsonb end) planned_check
+        where not coalesce(ops.engineering_receipt_exact_object(
+                planned_check,array['check_ref','evidence_requirement',
+                                    'failure_condition']),false)
+           or not coalesce((planned_check->>'check_ref') ~
+                '^[A-Za-z][A-Za-z0-9._:-]{2,127}$',false)
+           or not coalesce(planned_check->>'evidence_requirement'=any(array[
+                'redacted_evidence_required','metadata_only_sufficient']),false)
+           or jsonb_typeof(planned_check->'failure_condition') is distinct from 'string'
+           or not coalesce(btrim(planned_check->>'failure_condition')<>'',false)
+     )
+     or exists (
+       select 1 from jsonb_array_elements(case
+         when jsonb_typeof(receipt_slice->'planned_checks')='array'
+         then receipt_slice->'planned_checks' else '[]'::jsonb end) planned_check
+       group by planned_check->>'check_ref' having count(*)>1
+     )
+     or not coalesce(ops.engineering_receipt_identifier_array(
+          receipt.receipt->'planned_resource_refs'),false)
+     or not coalesce(ops.engineering_receipt_identifier_array(
+          receipt.receipt->'actual_resource_refs'),false)
+     or not coalesce(ops.engineering_receipt_identifier_array(
+          receipt.receipt->'planned_component_refs'),false)
+     or not coalesce(ops.engineering_receipt_identifier_array(
+          receipt.receipt->'actual_component_refs'),false)
+     or not coalesce(ops.engineering_receipt_identifier_array(
+          receipt.receipt->'artifact_refs'),false)
+     or not coalesce(ops.engineering_receipt_evidence_array(
+          receipt.receipt->'evidence_refs'),false)
+     or not coalesce(case
+          when jsonb_typeof(receipt.receipt->'artifact_refs')='array'
+          then jsonb_array_length(receipt.receipt->'artifact_refs')>0
+          else false end,false)
+     or not coalesce(case
+          when jsonb_typeof(receipt.receipt->'evidence_refs')='array'
+          then jsonb_array_length(receipt.receipt->'evidence_refs')>0
+          else false end,false)
+     or not coalesce(ops.engineering_receipt_identifier_sets_equal(
+          receipt.receipt->'planned_resource_refs',
+          receipt_slice->'declared_resource_refs'),false)
+     or not coalesce(ops.engineering_receipt_identifier_sets_equal(
+          receipt.receipt->'planned_component_refs',
+          receipt_slice->'declared_component_refs'),false)
+     or jsonb_typeof(receipt.receipt->'checks') is distinct from 'array'
+     or not coalesce(case when jsonb_typeof(receipt.receipt->'checks')='array'
+                          then jsonb_array_length(receipt.receipt->'checks')>0
+                          else false end,false)
+     or exists (
+       select 1 from jsonb_array_elements(case
+         when jsonb_typeof(receipt.receipt->'checks')='array'
+         then receipt.receipt->'checks' else '[]'::jsonb end) receipt_check
+        where not coalesce(ops.engineering_receipt_exact_object(
+                receipt_check,array['check_ref','evidence_refs','state']),false)
+           or not coalesce((receipt_check->>'check_ref') ~
+                '^[A-Za-z][A-Za-z0-9._:-]{2,127}$',false)
+           or receipt_check->>'state' is distinct from 'passed'
+           or not coalesce(ops.engineering_receipt_evidence_array(
+                receipt_check->'evidence_refs'),false)
+           or not coalesce(case
+                when jsonb_typeof(receipt_check->'evidence_refs')='array'
+                then jsonb_array_length(receipt_check->'evidence_refs')>0
+                else false end,false)
+     )
+     or exists (
+       select 1 from jsonb_array_elements(case
+         when jsonb_typeof(receipt.receipt->'checks')='array'
+         then receipt.receipt->'checks' else '[]'::jsonb end) receipt_check
+       group by receipt_check->>'check_ref' having count(*)>1
+     )
+     or exists (
+       select 1 from jsonb_array_elements(case
+         when jsonb_typeof(receipt.receipt->'checks')='array'
+         then receipt.receipt->'checks' else '[]'::jsonb end) receipt_check
+        where not exists (
+          select 1 from jsonb_array_elements(case
+            when jsonb_typeof(receipt_slice->'planned_checks')='array'
+            then receipt_slice->'planned_checks' else '[]'::jsonb end) planned_check
+           where planned_check->>'check_ref'=receipt_check->>'check_ref')
+     )
+     or exists (
+       select 1 from jsonb_array_elements(case
+         when jsonb_typeof(receipt_slice->'planned_checks')='array'
+         then receipt_slice->'planned_checks' else '[]'::jsonb end) planned_check
+        where not exists (
+          select 1 from jsonb_array_elements(case
+            when jsonb_typeof(receipt.receipt->'checks')='array'
+            then receipt.receipt->'checks' else '[]'::jsonb end) receipt_check
+           where receipt_check->>'check_ref'=planned_check->>'check_ref')
+     )
+     or exists (
+       select 1 from jsonb_array_elements(case
+         when jsonb_typeof(receipt.receipt->'checks')='array'
+         then receipt.receipt->'checks' else '[]'::jsonb end) receipt_check
+       join jsonb_array_elements(case
+         when jsonb_typeof(receipt_slice->'planned_checks')='array'
+         then receipt_slice->'planned_checks' else '[]'::jsonb end) planned_check
+         on planned_check->>'check_ref'=receipt_check->>'check_ref'
+        where not exists (
+          select 1 from jsonb_array_elements(case
+            when jsonb_typeof(receipt_check->'evidence_refs')='array'
+            then receipt_check->'evidence_refs' else '[]'::jsonb end) evidence
+           where evidence->>'redaction_class'=case
+             when planned_check->>'evidence_requirement'='redacted_evidence_required'
+             then 'redacted_evidence' else 'metadata_only' end)
+     )
      or jsonb_typeof(receipt.receipt->'deviations') is distinct from 'array'
      or exists (
        select 1 from jsonb_array_elements(case
@@ -399,6 +558,9 @@ begin
                 'out_of_scope_resource_refs','plan_revision_required','reason','review_state'
               ]),false)
            or not coalesce((deviation->>'deviation_ref') ~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$',false)
+           or exists (select 1 from unnest(array['category','reason','impact']) field
+                       where jsonb_typeof(deviation->field) is distinct from 'string'
+                          or not coalesce(btrim(deviation->>field)<>'',false))
            or jsonb_typeof(deviation->'plan_revision_required') is distinct from 'boolean'
            or not coalesce(ops.engineering_receipt_evidence_array(deviation->'evidence_refs'),false)
            or not coalesce(ops.engineering_receipt_identifier_array(deviation->'out_of_scope_resource_refs'),false)
@@ -412,9 +574,90 @@ begin
          then receipt.receipt->'deviations' else '[]'::jsonb end) deviation
        group by deviation->>'deviation_ref' having count(*)>1
      )
-     or jsonb_typeof(receipt.receipt->'artifact_refs') is distinct from 'array'
-     or not coalesce(case when jsonb_typeof(receipt.receipt->'artifact_refs')='array'
-                          then jsonb_array_length(receipt.receipt->'artifact_refs')>0 else false end,false) then
+     or exists (
+       select 1 from jsonb_array_elements(case
+         when jsonb_typeof(receipt.receipt->'actual_resource_refs')='array'
+         then receipt.receipt->'actual_resource_refs' else '[]'::jsonb end) actual_ref
+        where not exists (
+          select 1 from jsonb_array_elements(case
+            when jsonb_typeof(receipt_slice->'declared_resource_refs')='array'
+            then receipt_slice->'declared_resource_refs' else '[]'::jsonb end) declared_ref
+           where declared_ref=actual_ref)
+          and not exists (
+            select 1 from jsonb_array_elements(case
+              when jsonb_typeof(receipt.receipt->'deviations')='array'
+              then receipt.receipt->'deviations' else '[]'::jsonb end) deviation,
+              jsonb_array_elements(case
+                when jsonb_typeof(deviation->'out_of_scope_resource_refs')='array'
+                then deviation->'out_of_scope_resource_refs' else '[]'::jsonb end) approved_ref
+             where deviation->>'review_state'='resolved' and approved_ref=actual_ref)
+     )
+     or exists (
+       select 1 from jsonb_array_elements(case
+         when jsonb_typeof(receipt.receipt->'actual_component_refs')='array'
+         then receipt.receipt->'actual_component_refs' else '[]'::jsonb end) actual_ref
+        where not exists (
+          select 1 from jsonb_array_elements(case
+            when jsonb_typeof(receipt_slice->'declared_component_refs')='array'
+            then receipt_slice->'declared_component_refs' else '[]'::jsonb end) declared_ref
+           where declared_ref=actual_ref)
+          and not exists (
+            select 1 from jsonb_array_elements(case
+              when jsonb_typeof(receipt.receipt->'deviations')='array'
+              then receipt.receipt->'deviations' else '[]'::jsonb end) deviation,
+              jsonb_array_elements(case
+                when jsonb_typeof(deviation->'out_of_scope_component_refs')='array'
+                then deviation->'out_of_scope_component_refs' else '[]'::jsonb end) approved_ref
+             where deviation->>'review_state'='resolved' and approved_ref=actual_ref)
+     )
+     or not coalesce(ops.engineering_receipt_exact_object(
+          receipt.receipt->'source_evidence',
+          array['branch_ref','evidence_refs','source_sha','worktree_ref']),false)
+     or exists (
+       select 1 from unnest(array['worktree_ref','branch_ref','source_sha']) field
+        where jsonb_typeof(receipt.receipt->'source_evidence'->field)
+                is distinct from 'string'
+           or not coalesce(btrim(
+                receipt.receipt->'source_evidence'->>field)<>'',false)
+           or (field<>'source_sha' and not coalesce(
+                (receipt.receipt->'source_evidence'->>field) ~
+                '^[A-Za-z][A-Za-z0-9._:-]{2,127}$',false))
+     )
+     or not coalesce(ops.engineering_receipt_evidence_array(
+          receipt.receipt->'source_evidence'->'evidence_refs'),false)
+     or not coalesce(ops.engineering_receipt_exact_object(
+          receipt.receipt->'reset_reconstruction',array[
+            'fresh_session','inherited_transcript_used',
+            'reconstruction_free','remediation_action']),false)
+     or receipt.receipt->'reset_reconstruction'->'fresh_session'
+          is distinct from 'true'::jsonb
+     or receipt.receipt->'reset_reconstruction'->'inherited_transcript_used'
+          is distinct from 'false'::jsonb
+     or jsonb_typeof(receipt.receipt->'reset_reconstruction'
+          ->'reconstruction_free') is distinct from 'boolean'
+     or (receipt.receipt->'reset_reconstruction'->'reconstruction_free'='false'::jsonb
+         and (jsonb_typeof(receipt.receipt->'reset_reconstruction'
+                ->'remediation_action') is distinct from 'string'
+              or not coalesce(btrim(receipt.receipt->'reset_reconstruction'
+                ->>'remediation_action')<>'',false)))
+     or (receipt.receipt->'reset_reconstruction'->'reconstruction_free'='true'::jsonb
+         and receipt.receipt->'reset_reconstruction'->'remediation_action'
+                is distinct from 'null'::jsonb
+         and (jsonb_typeof(receipt.receipt->'reset_reconstruction'
+                ->'remediation_action') is distinct from 'string'
+              or not coalesce(btrim(receipt.receipt->'reset_reconstruction'
+                ->>'remediation_action')<>'',false)))
+     or not coalesce(ops.engineering_receipt_exact_object(
+          receipt.receipt->'executor_claim',
+          array['claim_state','claimed_at','claimed_by']),false)
+     or receipt.receipt->'executor_claim'->>'claim_state'
+          is distinct from 'executor_claim'
+     or receipt.receipt->'executor_claim'->>'claimed_by'
+          is distinct from session_slug
+     or jsonb_typeof(receipt.receipt->'executor_claim'->'claimed_at')
+          is distinct from 'string'
+     or not coalesce(btrim(receipt.receipt->'executor_claim'
+          ->>'claimed_at')<>'',false) then
     return ops.canonical_ownership_refusal('DEPENDENCY_UNSATISFIED','dependency',
       to_jsonb(p_required_state),jsonb_build_object(
         'slice_ref',p_slice_ref,'receipt_id',receipt.id,'outcome',receipt.outcome));
@@ -447,7 +690,9 @@ begin
      or review.reviewer_session_ref is distinct from review.fact->>'session_ref'
      or review.reviewer_session_ref=executor_session
      or not coalesce(ops.engineering_receipt_evidence_array(review.fact->'evidence_refs'),false)
-     or not coalesce(jsonb_array_length(review.fact->'evidence_refs')>0,false)
+     or not coalesce(case when jsonb_typeof(review.fact->'evidence_refs')='array'
+                          then jsonb_array_length(review.fact->'evidence_refs')>0
+                          else false end,false)
      or not coalesce(ops.engineering_receipt_identifier_array(
           review.fact->'reviewed_deviation_refs'),false)
      or not coalesce(ops.engineering_receipt_identifier_array(
