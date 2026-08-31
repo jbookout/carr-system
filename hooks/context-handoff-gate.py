@@ -336,6 +336,8 @@ def validate_task_state(value: dict[str, Any], task_key: str,
     for owner in owners.values():
         if owner.get("state") == "TERMINAL":
             verify_terminal_provenance(task_key, value, owner, manifest)
+    if handoff_state in {"TAKEOVER_VERIFIED", "PREDECESSOR_TERMINAL"}:
+        verify_handoff_state(task_key, value, manifest)
 
 
 def atomic_write(path: Path, value: Any) -> None:
@@ -449,7 +451,6 @@ def verify_terminal_provenance(task_key: str, state: dict[str, Any],
         task_key, "terminal", str(provenance_digest), manifest)
     evidence = packet.get("native_evidence")
     evidence_digest = packet.get("native_evidence_digest")
-    handoff = state.get("handoff") or {}
     kind = packet.get("terminal_kind")
     if (packet.get("schema_version") != 1
             or packet.get("task_key") != task_key
@@ -466,16 +467,36 @@ def verify_terminal_provenance(task_key: str, state: dict[str, Any],
             "HANDOFF_RECEIPT_INVALID",
             "terminal provenance linkage is invalid")
     if kind == "predecessor_terminal":
-        linked = (handoff.get("state") == "PREDECESSOR_TERMINAL"
-                  and handoff.get("predecessor") == owner.get("id")
-                  and packet.get("handoff_final_digest")
-                  == handoff.get("final_digest"))
+        final_digest = packet.get("handoff_final_digest")
+        try:
+            verified = read_verified_final_packet(
+                task_key, final_digest, manifest)
+        except LifecycleError as exc:
+            raise LifecycleError(
+                "HANDOFF_RECEIPT_INVALID",
+                f"terminal handoff packet is invalid: {exc.detail}") from exc
+        offer = verified["offer"]
+        owner_generation = owner.get("generation")
+        linked = (offer.get("predecessor") == owner.get("id")
+                  and offer.get("predecessor_surface") == owner.get("surface")
+                  and isinstance(owner_generation, int)
+                  and not isinstance(owner_generation, bool)
+                  and offer.get("generation") == owner_generation + 1)
     elif kind == "task_terminal":
-        expected_final = (handoff.get("final_digest")
-                          if handoff.get("state") == "PREDECESSOR_TERMINAL"
-                          else None)
-        linked = (state.get("task_status") == "TERMINAL"
-                  and packet.get("handoff_final_digest") == expected_final)
+        final_digest = packet.get("handoff_final_digest")
+        linked = state.get("task_status") == "TERMINAL"
+        if linked and final_digest is not None:
+            try:
+                verified = read_verified_final_packet(
+                    task_key, final_digest, manifest)
+            except LifecycleError as exc:
+                raise LifecycleError(
+                    "HANDOFF_RECEIPT_INVALID",
+                    f"terminal handoff packet is invalid: {exc.detail}") from exc
+            offer = verified["offer"]
+            linked = (offer.get("successor") == owner.get("id")
+                      and offer.get("successor_surface") == owner.get("surface")
+                      and offer.get("generation") == owner.get("generation"))
     else:
         linked = False
     if not linked:
@@ -702,6 +723,11 @@ def update_observation(current: dict[str, Any] | None, task_key: str, owner_id: 
                        event: str, now: dt.datetime,
                        manifest: dict[str, Any]) -> dict[str, Any]:
     state = current or initial_state(task_key, owner_id)
+    recorded = (state.get("owners") or {}).get(owner_id)
+    if recorded and recorded.get("surface") != "claude":
+        raise LifecycleError(
+            "OWNERSHIP_MISMATCH",
+            "Claude callback cannot observe a non-Claude owner")
     if state.get("task_status") == "TERMINAL":
         return state
     # One task may still receive the draining predecessor's final Stop after a
@@ -1175,73 +1201,115 @@ def successor_accept(args, manifest):
     return {"receipt_digest": receipt_digest, "final_digest": final_digest, "state": state}
 
 
+def read_verified_final_packet(task_key: str, final_digest: Any,
+                               manifest: dict[str, Any] | None = None
+                               ) -> dict[str, Any]:
+    """Validate a self-contained immutable handoff independently of live state."""
+    if not is_digest(final_digest):
+        raise LifecycleError("HANDOFF_RECEIPT_MISSING", "final_digest missing")
+    final = read_object(task_key, "final", str(final_digest), manifest)
+    digests = {
+        key: final.get(key)
+        for key in ("offer_digest", "declaration_digest", "receipt_digest")
+    }
+    for key, value in digests.items():
+        if not is_digest(value):
+            raise LifecycleError("HANDOFF_RECEIPT_MISSING", f"{key} missing")
+    offer_digest = str(digests["offer_digest"])
+    declaration_digest = str(digests["declaration_digest"])
+    receipt_digest = str(digests["receipt_digest"])
+    offer = read_object(task_key, "offer", offer_digest, manifest)
+    declaration = read_object(
+        task_key, "declaration", declaration_digest, manifest)
+    receipt = read_object(
+        task_key, "receipt", receipt_digest, manifest)
+    acceptance = receipt.get("ownership_acceptance") or {}
+    acceptance_evidence = acceptance.get("native_evidence") or {}
+    offer_evidence = offer.get("native_evidence") or {}
+    successor_project_id = offer.get("successor_project_id")
+    offer_generation = offer.get("generation")
+    if (final.get("schema_version") != 1
+            or offer.get("schema_version") != 1
+            or offer.get("task_key") != task_key
+            or offer.get("predecessor_surface") not in SURFACES
+            or offer.get("successor_surface") not in SURFACES
+            or not isinstance(offer.get("predecessor"), str)
+            or not offer.get("predecessor")
+            or not isinstance(offer.get("successor"), str)
+            or not offer.get("successor")
+            or offer.get("predecessor") == offer.get("successor")
+            or isinstance(offer_generation, bool)
+            or not isinstance(offer_generation, int)
+            or offer_generation < 1
+            or not isinstance(offer_evidence, dict)
+            or digest(offer_evidence) != offer.get("native_evidence_digest")
+            or declaration.get("schema_version") != 1
+            or declaration.get("task_key") != task_key
+            or declaration.get("offer_digest") != digests["offer_digest"]
+            or declaration.get("successor") != offer.get("successor")
+            or receipt.get("schema_version") != 1
+            or receipt.get("task_key") != task_key
+            or receipt.get("offer_digest") != digests["offer_digest"]
+            or receipt.get("declaration_digest")
+            != digests["declaration_digest"]
+            or acceptance.get("successor") != offer.get("successor")
+            or acceptance.get("surface") != offer.get("successor_surface")
+            or final.get("offer") != offer
+            or final.get("declaration") != declaration
+            or final.get("ownership_acceptance") != acceptance
+            or declaration.get("native_evidence_digest")
+            != acceptance.get("native_evidence_digest")
+            or declaration.get("native_evidence")
+            != acceptance.get("native_evidence")
+            or not isinstance(acceptance_evidence, dict)
+            or digest(acceptance_evidence)
+            != acceptance.get("native_evidence_digest")
+            or (offer.get("successor_surface") == "codex"
+                and (not isinstance(successor_project_id, str)
+                     or not successor_project_id.strip()
+                     or str(acceptance_evidence.get("project_id", "")).strip()
+                     != successor_project_id))):
+        raise LifecycleError("HANDOFF_RECEIPT_INVALID",
+                             "offer/receipt/final linkage is invalid")
+    return {"offer": offer, "declaration": declaration,
+            "receipt": receipt, "final": final, "acceptance": acceptance,
+            **digests, "final_digest": final_digest}
+
+
 def verify_handoff_state(task_key: str, state: dict[str, Any],
-                         manifest: dict[str, Any]) -> dict[str, Any]:
+                         manifest: dict[str, Any] | None = None
+                         ) -> dict[str, Any]:
     pending = state.get("handoff") or {}
     if pending.get("state") not in {"TAKEOVER_VERIFIED", "PREDECESSOR_TERMINAL"}:
         raise LifecycleError("TAKEOVER_NOT_VERIFIED", "takeover is not verified")
     for key in ("offer_digest", "declaration_digest", "receipt_digest", "final_digest"):
         if not pending.get(key):
             raise LifecycleError("HANDOFF_RECEIPT_MISSING", f"{key} missing")
-    offer = read_object(task_key, "offer", pending["offer_digest"], manifest)
-    declaration = read_object(
-        task_key, "declaration", pending["declaration_digest"], manifest)
-    receipt = read_object(task_key, "receipt", pending["receipt_digest"], manifest)
-    final = read_object(task_key, "final", pending["final_digest"], manifest)
-    acceptance = receipt.get("ownership_acceptance") or {}
-    successor_owner = ((state.get("owners") or {}).get(offer.get("successor"))
-                       or {})
-    acceptance_evidence = acceptance.get("native_evidence") or {}
-    successor_project_id = offer.get("successor_project_id")
-    if (offer.get("schema_version") != 1
-            or offer.get("task_key") != task_key
+    verified = read_verified_final_packet(
+        task_key, pending["final_digest"], manifest)
+    offer = verified["offer"]
+    acceptance = verified["acceptance"]
+    owners = state.get("owners") or {}
+    predecessor_owner = owners.get(pending.get("predecessor")) or {}
+    successor_owner = owners.get(pending.get("successor")) or {}
+    if (verified["offer_digest"] != pending.get("offer_digest")
+            or verified["declaration_digest"]
+            != pending.get("declaration_digest")
+            or verified["receipt_digest"] != pending.get("receipt_digest")
             or offer.get("generation") != pending.get("generation")
             or offer.get("predecessor") != pending.get("predecessor")
             or offer.get("successor") != pending.get("successor")
             or offer.get("predecessor_surface")
-            != (state.get("owners", {}).get(pending.get("predecessor")) or {}).get("surface")
-            or offer.get("successor_surface")
-            != (state.get("owners", {}).get(pending.get("successor")) or {}).get("surface")
-            or declaration.get("schema_version") != 1
-            or declaration.get("task_key") != task_key
-            or declaration.get("offer_digest") != pending["offer_digest"]
-            or declaration.get("successor") != offer.get("successor")
-            or receipt.get("schema_version") != 1
-            or receipt.get("task_key") != task_key
-            or receipt.get("offer_digest") != pending["offer_digest"]
-            or receipt.get("declaration_digest") != pending["declaration_digest"]
-            or acceptance.get("successor") != offer.get("successor")
-            or acceptance.get("surface") != offer.get("successor_surface")
+            != predecessor_owner.get("surface")
+            or offer.get("successor_surface") != successor_owner.get("surface")
             or successor_owner.get("id") != offer.get("successor")
-            or successor_owner.get("surface") != offer.get("successor_surface")
             or successor_owner.get("generation") != offer.get("generation")
             or successor_owner.get("evidence_digest")
-            != acceptance.get("native_evidence_digest")
-            or (offer.get("successor_surface") == "codex"
-                and (not isinstance(successor_project_id, str)
-                     or not successor_project_id.strip()
-                     or str(acceptance_evidence.get("project_id", "")).strip()
-                     != successor_project_id))
-            or final.get("schema_version") != 1
-            or final.get("offer_digest") != pending["offer_digest"]
-            or final.get("declaration_digest") != pending["declaration_digest"]
-            or final.get("receipt_digest") != pending["receipt_digest"]
-            or final.get("offer") != offer
-            or final.get("declaration") != declaration
-            or final.get("ownership_acceptance")
-            != acceptance
-            or declaration.get("native_evidence_digest")
-            != acceptance.get("native_evidence_digest")
-            or declaration.get("native_evidence")
-            != acceptance.get("native_evidence")
-            or digest(acceptance_evidence)
             != acceptance.get("native_evidence_digest")):
         raise LifecycleError("HANDOFF_RECEIPT_INVALID",
                              "offer/receipt/final linkage is invalid")
-    return {"offer_digest": pending["offer_digest"],
-            "declaration_digest": pending["declaration_digest"],
-            "receipt_digest": pending["receipt_digest"],
-            "final_digest": pending["final_digest"]}
+    return {key: verified[key] for key in
+            ("offer_digest", "declaration_digest", "receipt_digest", "final_digest")}
 
 
 def predecessor_terminal(args, manifest):
@@ -1630,6 +1698,13 @@ def dispatcher_evaluate(args, manifest):
         if not owner or owner.get("state") != "ACTIVE":
             raise LifecycleError("OWNERSHIP_MISMATCH",
                                  "old owner is not ACTIVE")
+        prior_handoff = current.get("handoff") or {}
+        if prior_handoff.get("state") == "PREDECESSOR_TERMINAL":
+            if prior_handoff.get("successor") != decision["failed_owner"]:
+                raise LifecycleError(
+                    "LIFECYCLE_INVALID",
+                    "completed handoff successor does not match recovery owner")
+            current["handoff"] = None
         owner["state"] = "DRAINING"
         owner["ownership_digest"] = owner_digest(owner)
         current["recovery_intent"] = {**nonce_input, "nonce": nonce,

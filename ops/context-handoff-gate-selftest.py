@@ -389,8 +389,10 @@ def fallback_and_hook_sequence():
         proc, successor_stop = run_hook(
             root, "Stop", transcript, session="successor",
             payload_extra={"task_key": "claude:sequence"})
-        check("prior receipt cannot suppress the successor generation threshold",
-              reason(successor_stop) is not None, successor_stop)
+        check("Claude callback cannot stand in for the Codex successor",
+              reason(successor_stop)
+              and reason(successor_stop)["reason"] == "OWNERSHIP_MISMATCH",
+              successor_stop)
         check("offer declaration receipt and final use four distinct digests",
               len({offer["offer_digest"], declared["declaration_digest"],
                    accepted["receipt_digest"], accepted["final_digest"]}) == 4,
@@ -697,6 +699,180 @@ def lifecycle_cas_and_tamper():
         check("acceptance evidence must equal the declaration evidence",
               proc.returncode == 2
               and rejected["reason"] == "TAKEOVER_NOT_VERIFIED", rejected)
+
+        # A completed handoff is historical evidence, not a one-generation
+        # ceiling.  The new active owner can complete generation two while the
+        # first predecessor's immutable terminal packet remains verifiable.
+        _, multi = run_cli(
+            root, "task-init", "--task-key", "task:multi-generation",
+            "--owner", "g0", "--surface", "codex",
+            "--evidence-json", codex_evidence("g0"),
+            "--expected-version", "-1")
+        _, multi_offer_1 = run_cli(
+            root, "handoff-offer-create", "--task-key", "task:multi-generation",
+            "--predecessor", "g0", "--predecessor-surface", "codex",
+            "--successor", "g1", "--successor-surface", "codex",
+            "--evidence-json", codex_evidence("g0"), "--generation", "1",
+            "--expected-version", str(multi["version"]))
+        _, multi_declared_1 = run_cli(
+            root, "successor-declare", "--task-key", "task:multi-generation",
+            "--offer-digest", multi_offer_1["offer_digest"],
+            "--successor", "g1", "--evidence-json", codex_evidence("g1"),
+            "--expected-version", str(multi_offer_1["state"]["version"]))
+        _, multi_accepted_1 = run_cli(
+            root, "successor-accept", "--task-key", "task:multi-generation",
+            "--offer-digest", multi_offer_1["offer_digest"],
+            "--successor", "g1", "--evidence-json", codex_evidence("g1"),
+            "--expected-version", str(multi_declared_1["state"]["version"]))
+        _, multi_terminal_1 = run_cli(
+            root, "predecessor-terminal", "--task-key", "task:multi-generation",
+            "--predecessor", "g0",
+            "--evidence-json", codex_evidence("g0", status="terminal"),
+            "--expected-version", str(multi_accepted_1["state"]["version"]))
+        proc, multi_offer_2 = run_cli(
+            root, "handoff-offer-create", "--task-key", "task:multi-generation",
+            "--predecessor", "g1", "--predecessor-surface", "codex",
+            "--successor", "g2", "--successor-surface", "codex",
+            "--evidence-json", codex_evidence("g1"), "--generation", "2",
+            "--expected-version", str(multi_terminal_1["version"]))
+        check("completed handoff permits generation-two offer",
+              proc.returncode == 0
+              and multi_offer_2["state"]["handoff"]["generation"] == 2,
+              (proc.returncode, multi_offer_2, proc.stderr))
+        if proc.returncode == 0:
+            _, multi_declared_2 = run_cli(
+                root, "successor-declare", "--task-key", "task:multi-generation",
+                "--offer-digest", multi_offer_2["offer_digest"],
+                "--successor", "g2", "--evidence-json", codex_evidence("g2"),
+                "--expected-version", str(multi_offer_2["state"]["version"]))
+            _, multi_accepted_2 = run_cli(
+                root, "successor-accept", "--task-key", "task:multi-generation",
+                "--offer-digest", multi_offer_2["offer_digest"],
+                "--successor", "g2", "--evidence-json", codex_evidence("g2"),
+                "--expected-version", str(multi_declared_2["state"]["version"]))
+            terminal_proc, multi_terminal_2 = run_cli(
+                root, "predecessor-terminal", "--task-key", "task:multi-generation",
+                "--predecessor", "g1",
+                "--evidence-json", codex_evidence("g1", status="terminal"),
+                "--expected-version", str(multi_accepted_2["state"]["version"]))
+            completed_two = (terminal_proc.returncode == 0
+                             and multi_terminal_2["generation"] == 2
+                             and multi_terminal_2["active_owner"] == "g2"
+                             and multi_terminal_2["owners"]["g2"]["state"] == "ACTIVE")
+            completed_two_detail = (
+                terminal_proc.returncode, multi_terminal_2, terminal_proc.stderr)
+        else:
+            completed_two = False
+            completed_two_detail = (proc.returncode, multi_offer_2, proc.stderr)
+        check("generation-two handoff completes with one active owner",
+              completed_two, completed_two_detail)
+
+        # A consumer transition may not mint valid terminal provenance from a
+        # verified owner whose mutable evidence was rewritten after takeover.
+        _, laundering = run_cli(
+            root, "task-init", "--task-key", "task:evidence-laundering",
+            "--owner", "l0", "--surface", "codex",
+            "--evidence-json", codex_evidence("l0"),
+            "--expected-version", "-1")
+        _, laundering_offer = run_cli(
+            root, "handoff-offer-create", "--task-key", "task:evidence-laundering",
+            "--predecessor", "l0", "--predecessor-surface", "codex",
+            "--successor", "l1", "--successor-surface", "codex",
+            "--evidence-json", codex_evidence("l0"), "--generation", "1",
+            "--expected-version", str(laundering["version"]))
+        _, laundering_declared = run_cli(
+            root, "successor-declare", "--task-key", "task:evidence-laundering",
+            "--offer-digest", laundering_offer["offer_digest"],
+            "--successor", "l1", "--evidence-json", codex_evidence("l1"),
+            "--expected-version", str(laundering_offer["state"]["version"]))
+        _, laundering_accepted = run_cli(
+            root, "successor-accept", "--task-key", "task:evidence-laundering",
+            "--offer-digest", laundering_offer["offer_digest"],
+            "--successor", "l1", "--evidence-json", codex_evidence("l1"),
+            "--expected-version", str(laundering_declared["state"]["version"]))
+        _, laundering_terminal = run_cli(
+            root, "predecessor-terminal", "--task-key", "task:evidence-laundering",
+            "--predecessor", "l0",
+            "--evidence-json", codex_evidence("l0", status="terminal"),
+            "--expected-version", str(laundering_accepted["state"]["version"]))
+        laundering_hash = hashlib.sha256(b"task:evidence-laundering").hexdigest()
+        laundering_path = root / "state" / f"{laundering_hash}.json"
+        corrupted_multi = json.loads(laundering_path.read_text())
+        corrupted_owner = corrupted_multi["owners"]["l1"]
+        corrupted_owner["evidence_digest"] = "0" * 64
+        corrupted_owner["ownership_digest"] = ownership_digest(corrupted_owner)
+        laundering_path.write_text(json.dumps(corrupted_multi))
+        proc, laundered_terminal = run_cli(
+            root, "task-terminal", "--task-key", "task:evidence-laundering",
+            "--owner", "l1",
+            "--evidence-json", codex_evidence("l1", status="terminal"),
+            "--expected-version", str(laundering_terminal["version"]))
+        check("corrupted verified owner cannot launder terminal provenance",
+              proc.returncode == 2
+              and laundered_terminal["reason"] == "HANDOFF_RECEIPT_INVALID",
+              (proc.returncode, laundered_terminal, proc.stderr))
+
+        # Once a predecessor has supplied terminal evidence, its completed
+        # handoff cannot strand the successor when dispatcher recovery begins.
+        _, recoverable = run_cli(
+            root, "task-init", "--task-key", "task:post-handoff-recovery",
+            "--owner", "r0", "--surface", "codex",
+            "--evidence-json", codex_evidence("r0"),
+            "--expected-version", "-1")
+        _, recover_offer = run_cli(
+            root, "handoff-offer-create", "--task-key", "task:post-handoff-recovery",
+            "--predecessor", "r0", "--predecessor-surface", "codex",
+            "--successor", "r1", "--successor-surface", "codex",
+            "--evidence-json", codex_evidence("r0"), "--generation", "1",
+            "--expected-version", str(recoverable["version"]))
+        _, recover_declared = run_cli(
+            root, "successor-declare", "--task-key", "task:post-handoff-recovery",
+            "--offer-digest", recover_offer["offer_digest"],
+            "--successor", "r1", "--evidence-json", codex_evidence("r1"),
+            "--expected-version", str(recover_offer["state"]["version"]))
+        _, recover_accepted = run_cli(
+            root, "successor-accept", "--task-key", "task:post-handoff-recovery",
+            "--offer-digest", recover_offer["offer_digest"],
+            "--successor", "r1", "--evidence-json", codex_evidence("r1"),
+            "--expected-version", str(recover_declared["state"]["version"]))
+        _, recover_terminal = run_cli(
+            root, "predecessor-terminal", "--task-key", "task:post-handoff-recovery",
+            "--predecessor", "r0",
+            "--evidence-json", codex_evidence("r0", status="terminal"),
+            "--expected-version", str(recover_accepted["state"]["version"]))
+        recover_snapshot = snapshot(
+            "task:post-handoff-recovery",
+            recover_terminal["owners"]["r1"]["ownership_digest"],
+            "CAPACITY_EXHAUSTED", source="event-post-handoff-recovery",
+            capacity="CONTEXT_EXHAUSTED", worker_id="r1", generation=1)
+        proc, recovered = run_cli(
+            root, "dispatcher-evaluate", "--task-key", "task:post-handoff-recovery",
+            "--snapshot-json", json.dumps(recover_snapshot), "--apply",
+            "--expected-version", str(recover_terminal["version"]))
+        check("completed handoff permits successor recovery",
+              proc.returncode == 0
+              and recovered["state"]["owners"]["r1"]["state"] == "DRAINING"
+              and recovered["state"]["recovery_intent"]["state"] == "PENDING",
+              (proc.returncode, recovered, proc.stderr))
+
+        # Native Claude callbacks cannot impersonate a same-ID Codex owner.
+        _, isolated = run_cli(
+            root, "task-init", "--task-key", "task:surface-isolation",
+            "--owner", "same-id", "--surface", "codex",
+            "--evidence-json", codex_evidence("same-id"),
+            "--expected-version", "-1")
+        proc, crossed_surface = run_hook(
+            root, "Stop", None, session="same-id",
+            payload_extra={"task_key": "task:surface-isolation"})
+        _, isolated_after = run_cli(
+            root, "status", "--task-key", "task:surface-isolation")
+        check("Claude callback cannot mutate a same-ID Codex owner",
+              proc.returncode == 0
+              and reason(crossed_surface)
+              and reason(crossed_surface)["reason"] == "OWNERSHIP_MISMATCH"
+              and isolated_after["version"] == isolated["version"]
+              and isolated_after["signal"]["cycles"] == 0,
+              (proc.returncode, crossed_surface, isolated_after, proc.stderr))
 
         # Independent task terminal is evidence-bound and irreversible.
         proc, state = run_cli(root, "task-init", "--task-key", "task:terminal",
