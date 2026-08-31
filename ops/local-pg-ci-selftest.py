@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import os
 import sys
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
@@ -299,10 +301,16 @@ with (
     patch.object(mod.tempfile, "mkdtemp", return_value=str(fake_root)),
     patch.object(mod.shutil, "rmtree"),
 ):
-    assurance_failure = mod.run_local_ci(
-        repo=REPO, ci_class="migration", port=55432, runner=FailingAssuranceRunner()
-    )
+    assurance_stderr = io.StringIO()
+    with redirect_stderr(assurance_stderr):
+        assurance_failure = mod.run_local_ci(
+            repo=REPO, ci_class="migration", port=55432, runner=FailingAssuranceRunner()
+        )
 check("assurance gate failure code is preserved", assurance_failure == 23)
+check(
+    "assurance gate exact child stderr is surfaced",
+    "ASSURANCE_STAGE_MISMATCH: exact causal fixture" in assurance_stderr.getvalue(),
+)
 check(
     "later local gates do not run after assurance failure",
     not any(event[-1].endswith("ops/calendar-canary-local-pg-acceptance.py") for event in events),
