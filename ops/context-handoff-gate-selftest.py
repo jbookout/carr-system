@@ -38,6 +38,13 @@ def digest(value):
     return hashlib.sha256(canonical(value)).hexdigest()
 
 
+def ownership_digest(owner):
+    return digest({key: owner.get(key) for key in (
+        "id", "surface", "generation", "state", "evidence_digest",
+        "terminal_evidence_digest", "terminal_provenance_digest",
+    )})
+
+
 def write_jsonl(path: Path, rows):
     path.write_text("".join(json.dumps(row) + "\n" for row in rows),
                     encoding="utf-8")
@@ -309,6 +316,7 @@ def fallback_and_hook_sequence():
         pred_evidence = json.dumps({
             "session_id": "sequence", "transcript_path": str(transcript),
             "controller_callback_id": "callback-1", "status": "active",
+            "successor_project_id": "p",
         })
         succ_evidence = json.dumps({
             "thread_id": "successor", "project_id": "p", "cwd": str(REPO),
@@ -389,13 +397,24 @@ def fallback_and_hook_sequence():
               accepted)
 
         sequence_path = root / "state" / f"{task_hash}.json"
+        original_state = sequence_path.read_text()
+        evidence_tamper = json.loads(original_state)
+        evidence_owner = evidence_tamper["owners"]["successor"]
+        evidence_owner["evidence_digest"] = "0" * 64
+        evidence_owner["ownership_digest"] = ownership_digest(evidence_owner)
+        sequence_path.write_text(json.dumps(evidence_tamper))
+        proc, evidence_mismatch = run_cli(
+            root, "verify-handoff", "--task-key", "claude:sequence")
+        check("verified owner evidence must match immutable acceptance",
+              proc.returncode == 2
+              and evidence_mismatch["reason"] == "HANDOFF_RECEIPT_INVALID",
+              (proc.returncode, evidence_mismatch, proc.stderr))
+        sequence_path.write_text(original_state)
+
         tampered_state = json.loads(sequence_path.read_text())
         successor_owner = tampered_state["owners"]["successor"]
         successor_owner["state"] = "TERMINAL"
-        successor_owner["ownership_digest"] = digest({
-            key: successor_owner.get(key) for key in
-            ("id", "surface", "generation", "state", "evidence_digest")
-        })
+        successor_owner["ownership_digest"] = ownership_digest(successor_owner)
         tampered_state["handoff"]["predecessor"] = "successor"
         sequence_path.write_text(json.dumps(tampered_state))
         proc, tampered_semantics = run_hook(
@@ -458,10 +477,7 @@ def fallback_and_hook_sequence():
         terminal_owner_state = json.loads(terminal_owner_path.read_text())
         terminal_owner = terminal_owner_state["owners"]["terminal-owner"]
         terminal_owner["state"] = "TERMINAL"
-        terminal_owner["ownership_digest"] = digest({
-            key: terminal_owner.get(key) for key in
-            ("id", "surface", "generation", "state", "evidence_digest")
-        })
+        terminal_owner["ownership_digest"] = ownership_digest(terminal_owner)
         terminal_owner_path.write_text(json.dumps(terminal_owner_state))
         proc, terminal_owner_stop = run_hook(
             root, "Stop", terminal_owner_transcript,
@@ -608,6 +624,7 @@ def lifecycle_cas_and_tamper():
         cross_evidence = json.dumps({
             "session_id": "cross-old", "transcript_path": str(claude_transcript),
             "controller_callback_id": "cross-callback", "status": "active",
+            "successor_project_id": "project",
         })
         _, cross = run_cli(
             root, "task-init", "--task-key", "task:cross-binding",
@@ -627,6 +644,42 @@ def lifecycle_cas_and_tamper():
                 "cross-new", project="foreign-project", cwd=root),
             "--expected-version", str(cross_offer["state"]["version"]))
         check("cross-surface successor must stay in the CARR checkout",
+              proc.returncode == 2
+              and rejected["reason"] == "OWNERSHIP_MISMATCH", rejected)
+        proc, rejected = run_cli(
+            root, "successor-declare", "--task-key", "task:cross-binding",
+            "--offer-digest", cross_offer["offer_digest"],
+            "--successor", "cross-new",
+            "--evidence-json", codex_evidence(
+                "cross-new", project="foreign-project", cwd=REPO),
+            "--expected-version", str(cross_offer["state"]["version"]))
+        check("cross-surface successor must match predecessor-authorized project",
+              proc.returncode == 2
+              and rejected["reason"] == "OWNERSHIP_MISMATCH", rejected)
+        _, missing_project_state = run_cli(
+            root, "task-init", "--task-key", "task:cross-missing-project",
+            "--owner", "missing-old", "--surface", "claude",
+            "--evidence-json", json.dumps({
+                "session_id": "missing-old",
+                "transcript_path": str(claude_transcript),
+                "controller_callback_id": "missing-callback",
+                "status": "active",
+            }), "--expected-version", "-1")
+        proc, rejected = run_cli(
+            root, "handoff-offer-create",
+            "--task-key", "task:cross-missing-project",
+            "--predecessor", "missing-old",
+            "--predecessor-surface", "claude",
+            "--successor", "missing-new",
+            "--successor-surface", "codex",
+            "--evidence-json", json.dumps({
+                "session_id": "missing-old",
+                "transcript_path": str(claude_transcript),
+                "controller_callback_id": "missing-callback",
+                "status": "active",
+            }), "--generation", "1",
+            "--expected-version", str(missing_project_state["version"]))
+        check("cross-surface offer requires predecessor-authorized project",
               proc.returncode == 2
               and rejected["reason"] == "OWNERSHIP_MISMATCH", rejected)
         proc, declared = run_cli(
@@ -678,6 +731,30 @@ def lifecycle_cas_and_tamper():
         check("terminal task cannot recover or resurrect",
               proc.returncode == 2
               and resurrect["reason"] == "LIFECYCLE_INVALID", resurrect)
+
+        _, tamper_terminal = run_cli(
+            root, "task-init", "--task-key", "task:terminal-tamper",
+            "--owner", "tamper-owner", "--surface", "codex",
+            "--evidence-json", codex_evidence("tamper-owner"),
+            "--expected-version", "-1")
+        terminal_hash = hashlib.sha256(b"task:terminal-tamper").hexdigest()
+        terminal_path = root / "state" / f"{terminal_hash}.json"
+        terminal_state = json.loads(terminal_path.read_text())
+        terminal_owner = terminal_state["owners"]["tamper-owner"]
+        terminal_state["task_status"] = "TERMINAL"
+        terminal_state["active_owner"] = None
+        terminal_owner["state"] = "TERMINAL"
+        terminal_owner.pop("terminal_evidence_digest", None)
+        terminal_owner["ownership_digest"] = ownership_digest(terminal_owner)
+        terminal_path.write_text(json.dumps(terminal_state))
+        proc, terminal_stop = run_hook(
+            root, "Stop", None, session="intruder",
+            payload_extra={"task_key": "task:terminal-tamper"})
+        why = reason(terminal_stop)
+        check("terminal task without immutable provenance refuses Stop",
+              proc.returncode == 0 and why
+              and why["reason"] == "LIFECYCLE_INVALID",
+              (proc.returncode, terminal_stop, proc.stderr, tamper_terminal))
     finally:
         shutil.rmtree(root)
 

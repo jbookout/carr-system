@@ -12,7 +12,7 @@
     "completion-evidence-gate.py": "cc212b5f06b5c3e9fc56696651583edc12d09dfc15e55e9a34eab2318c73b7a0",
     "conduct-stop-gate.py": "773f242567b877d1fac77658c244a7b8b6f39557106eda6cec2ee97f06e49603",
     "conduct_patterns.py": "c101be9bd78fec4449f28a792a79b505c49c5dc676e7065eafdcfd3d4e45efcb",
-    "context-handoff-gate.py": "f217719e96595ad54e23d7f6718c951cf96cdd2a604d334c06d85e2cf82c032c",
+    "context-handoff-gate.py": "89c4c400ceb00bb39d431561f94076cdbdec047ce3e0b36761731000cda411f9",
     "corpus_renders.py": "a5e9766e9ad7cbc15412a09e24a67530b9cbee4c256f6ace80cf4a075006272f",
     "costar-lane-gate.py": "87ef4e5fc2c9c3f6923d86d168444534ab5873120b392c182c2c37dcb1d5ab6f",
     "delegation-gate.py": "a2f1420e6d6ce41cfd6c745381a1a1a6b5c6ed5c20f1672292ab4466f3511bc2",

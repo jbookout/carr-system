@@ -164,7 +164,8 @@ def is_digest(value: Any) -> bool:
             and all(char in "0123456789abcdef" for char in value))
 
 
-def validate_task_state(value: dict[str, Any], task_key: str) -> None:
+def validate_task_state(value: dict[str, Any], task_key: str,
+                        manifest: dict[str, Any] | None = None) -> None:
     """Reject structurally inconsistent persisted lifecycle state.
 
     State files are mutable input outside the hook process's trust boundary.
@@ -206,6 +207,18 @@ def validate_task_state(value: dict[str, Any], task_key: str) -> None:
                 or owner.get("ownership_digest") != owner_digest(owner)):
             raise LifecycleError("LIFECYCLE_INVALID",
                                  "owner record semantics are invalid")
+        terminal_evidence = owner.get("terminal_evidence_digest")
+        terminal_provenance = owner.get("terminal_provenance_digest")
+        if owner.get("state") == "TERMINAL":
+            if (not is_digest(terminal_evidence)
+                    or not is_digest(terminal_provenance)):
+                raise LifecycleError(
+                    "LIFECYCLE_INVALID",
+                    "terminal owner lacks immutable terminal provenance")
+        elif terminal_evidence is not None or terminal_provenance is not None:
+            raise LifecycleError(
+                "LIFECYCLE_INVALID",
+                "nonterminal owner retains terminal provenance")
     active_owner = value.get("active_owner")
     if status == "ACTIVE":
         if not isinstance(active_owner, str) or active_owner not in owners:
@@ -320,6 +333,9 @@ def validate_task_state(value: dict[str, Any], task_key: str) -> None:
                            for owner in owners.values()):
         raise LifecycleError("LIFECYCLE_INVALID",
                              "terminal task retains nonterminal owners")
+    for owner in owners.values():
+        if owner.get("state") == "TERMINAL":
+            verify_terminal_provenance(task_key, value, owner, manifest)
 
 
 def atomic_write(path: Path, value: Any) -> None:
@@ -353,7 +369,7 @@ def mutate_state(task_key: str, expected_version: int | None,
         fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
         current = load_json_file(path)
         if current is not None:
-            validate_task_state(current, task_key)
+            validate_task_state(current, task_key, manifest)
         actual = int(current.get("version", -1)) if current else -1
         if expected_version is not None and actual != expected_version:
             raise LifecycleError("LIFECYCLE_INVALID",
@@ -362,7 +378,7 @@ def mutate_state(task_key: str, expected_version: int | None,
         updated = change(current)
         if not isinstance(updated, dict) or updated.get("task_key") != task_key:
             raise LifecycleError("LIFECYCLE_INVALID", "mutation returned invalid task state")
-        validate_task_state(updated, task_key)
+        validate_task_state(updated, task_key, manifest)
         # Observations of a terminal task, an already-drained predecessor, and
         # exact idempotent replays are reads.  Do not manufacture a new version
         # merely because they passed through the mutation lock.
@@ -377,7 +393,7 @@ def mutate_state(task_key: str, expected_version: int | None,
 def read_state(task_key: str, manifest: dict[str, Any] | None = None) -> dict[str, Any] | None:
     state = load_json_file(state_file(task_key, manifest))
     if state is not None:
-        validate_task_state(state, task_key)
+        validate_task_state(state, task_key, manifest)
     return state
 
 
@@ -423,6 +439,61 @@ def read_object(task_key: str, kind: str, object_digest: str,
     if not isinstance(value, dict) or digest(value) != object_digest:
         raise LifecycleError("HANDOFF_RECEIPT_INVALID", f"tampered {kind} {object_digest}")
     return value
+
+
+def verify_terminal_provenance(task_key: str, state: dict[str, Any],
+                               owner: dict[str, Any],
+                               manifest: dict[str, Any] | None = None) -> None:
+    provenance_digest = owner.get("terminal_provenance_digest")
+    packet = read_object(
+        task_key, "terminal", str(provenance_digest), manifest)
+    evidence = packet.get("native_evidence")
+    evidence_digest = packet.get("native_evidence_digest")
+    handoff = state.get("handoff") or {}
+    kind = packet.get("terminal_kind")
+    if (packet.get("schema_version") != 1
+            or packet.get("task_key") != task_key
+            or packet.get("owner") != owner.get("id")
+            or packet.get("surface") != owner.get("surface")
+            or packet.get("generation") != owner.get("generation")
+            or not isinstance(packet.get("created_at"), str)
+            or not packet.get("created_at")
+            or not isinstance(evidence, dict)
+            or not is_digest(evidence_digest)
+            or evidence_digest != owner.get("terminal_evidence_digest")
+            or digest(evidence) != evidence_digest):
+        raise LifecycleError(
+            "HANDOFF_RECEIPT_INVALID",
+            "terminal provenance linkage is invalid")
+    if kind == "predecessor_terminal":
+        linked = (handoff.get("state") == "PREDECESSOR_TERMINAL"
+                  and handoff.get("predecessor") == owner.get("id")
+                  and packet.get("handoff_final_digest")
+                  == handoff.get("final_digest"))
+    elif kind == "task_terminal":
+        expected_final = (handoff.get("final_digest")
+                          if handoff.get("state") == "PREDECESSOR_TERMINAL"
+                          else None)
+        linked = (state.get("task_status") == "TERMINAL"
+                  and packet.get("handoff_final_digest") == expected_final)
+    else:
+        linked = False
+    if not linked:
+        raise LifecycleError(
+            "HANDOFF_RECEIPT_INVALID",
+            "terminal provenance is not linked to lifecycle state")
+    try:
+        validated = validate_native_evidence(
+            str(owner.get("surface")), evidence,
+            expected_identity=str(owner.get("id")), terminal=True)
+    except LifecycleError as exc:
+        raise LifecycleError(
+            "HANDOFF_RECEIPT_INVALID",
+            f"terminal native evidence is invalid: {exc.detail}") from exc
+    if validated != evidence_digest:
+        raise LifecycleError(
+            "HANDOFF_RECEIPT_INVALID",
+            "terminal native evidence digest changed")
 
 
 def audit(record: dict[str, Any], manifest: dict[str, Any] | None = None) -> None:
@@ -590,7 +661,8 @@ def payload_mutated_paths(payload: dict[str, Any]) -> set[str]:
 
 def owner_digest(owner: dict[str, Any]) -> str:
     return digest({key: owner.get(key) for key in
-                   ("id", "surface", "generation", "state", "evidence_digest")})
+                   ("id", "surface", "generation", "state", "evidence_digest",
+                    "terminal_evidence_digest", "terminal_provenance_digest")})
 
 
 def fresh_signal() -> dict[str, Any]:
@@ -908,18 +980,25 @@ def validate_successor_evidence(offer: dict[str, Any], successor: str,
             raise LifecycleError(
                 "OWNERSHIP_MISMATCH",
                 "Codex successor is outside the CARR checkout")
+        trusted_project = offer.get("successor_project_id")
+        if (not isinstance(trusted_project, str)
+                or not trusted_project.strip()
+                or str(evidence.get("project_id", "")).strip()
+                != trusted_project):
+            raise LifecycleError(
+                "OWNERSHIP_MISMATCH",
+                "Codex successor project is not predecessor-authorized")
     # A same-surface Codex handoff must stay in the project and checkout that
     # the predecessor offered. The thread id changes by design; changing the
     # project or cwd would be a different slice wearing this task_key.
     if offer.get("predecessor_surface") == surface == "codex":
         predecessor = offer.get("native_evidence") or {}
-        same_project = evidence.get("project_id") == predecessor.get("project_id")
         try:
             same_cwd = (Path(str(evidence.get("cwd"))).expanduser().resolve()
                         == Path(str(predecessor.get("cwd"))).expanduser().resolve())
         except (OSError, RuntimeError):
             same_cwd = False
-        if not same_project or not same_cwd:
+        if not same_cwd:
             raise LifecycleError(
                 "OWNERSHIP_MISMATCH",
                 "Codex successor is not in the offered project and cwd")
@@ -946,12 +1025,24 @@ def offer_create(args, manifest):
     evidence = parse_evidence(args.evidence_json)
     evidence_digest = validate_native_evidence(
         args.predecessor_surface, evidence, expected_identity=args.predecessor)
+    successor_project_id = None
+    if args.successor_surface == "codex":
+        project_field = ("project_id" if args.predecessor_surface == "codex"
+                         else "successor_project_id")
+        project_value = evidence.get(project_field)
+        if not isinstance(project_value, str) or not project_value.strip():
+            raise LifecycleError(
+                "OWNERSHIP_MISMATCH",
+                "Codex successor lacks predecessor-authorized project binding")
+        successor_project_id = project_value.strip()
     offer = {"schema_version": 1, "task_key": args.task_key,
              "generation": args.generation, "predecessor": args.predecessor,
              "predecessor_surface": args.predecessor_surface,
              "successor": args.successor, "successor_surface": args.successor_surface,
              "native_evidence": evidence, "native_evidence_digest": evidence_digest,
              "created_at": utc_now()}
+    if successor_project_id is not None:
+        offer["successor_project_id"] = successor_project_id
     offer_digest = write_immutable(args.task_key, "offer", offer, manifest)
 
     def change(state):
@@ -1098,6 +1189,10 @@ def verify_handoff_state(task_key: str, state: dict[str, Any],
     receipt = read_object(task_key, "receipt", pending["receipt_digest"], manifest)
     final = read_object(task_key, "final", pending["final_digest"], manifest)
     acceptance = receipt.get("ownership_acceptance") or {}
+    successor_owner = ((state.get("owners") or {}).get(offer.get("successor"))
+                       or {})
+    acceptance_evidence = acceptance.get("native_evidence") or {}
+    successor_project_id = offer.get("successor_project_id")
     if (offer.get("schema_version") != 1
             or offer.get("task_key") != task_key
             or offer.get("generation") != pending.get("generation")
@@ -1117,6 +1212,16 @@ def verify_handoff_state(task_key: str, state: dict[str, Any],
             or receipt.get("declaration_digest") != pending["declaration_digest"]
             or acceptance.get("successor") != offer.get("successor")
             or acceptance.get("surface") != offer.get("successor_surface")
+            or successor_owner.get("id") != offer.get("successor")
+            or successor_owner.get("surface") != offer.get("successor_surface")
+            or successor_owner.get("generation") != offer.get("generation")
+            or successor_owner.get("evidence_digest")
+            != acceptance.get("native_evidence_digest")
+            or (offer.get("successor_surface") == "codex"
+                and (not isinstance(successor_project_id, str)
+                     or not successor_project_id.strip()
+                     or str(acceptance_evidence.get("project_id", "")).strip()
+                     != successor_project_id))
             or final.get("schema_version") != 1
             or final.get("offer_digest") != pending["offer_digest"]
             or final.get("declaration_digest") != pending["declaration_digest"]
@@ -1128,7 +1233,9 @@ def verify_handoff_state(task_key: str, state: dict[str, Any],
             or declaration.get("native_evidence_digest")
             != acceptance.get("native_evidence_digest")
             or declaration.get("native_evidence")
-            != acceptance.get("native_evidence")):
+            != acceptance.get("native_evidence")
+            or digest(acceptance_evidence)
+            != acceptance.get("native_evidence_digest")):
         raise LifecycleError("HANDOFF_RECEIPT_INVALID",
                              "offer/receipt/final linkage is invalid")
     return {"offer_digest": pending["offer_digest"],
@@ -1151,7 +1258,21 @@ def predecessor_terminal(args, manifest):
         evidence_digest = validate_native_evidence(
             owner["surface"], evidence,
             expected_identity=args.predecessor, terminal=True)
-        owner.update({"state": "TERMINAL", "terminal_evidence_digest": evidence_digest})
+        terminal_packet = {
+            "schema_version": 1, "task_key": args.task_key,
+            "terminal_kind": "predecessor_terminal",
+            "owner": args.predecessor, "surface": owner["surface"],
+            "generation": owner["generation"],
+            "native_evidence": evidence,
+            "native_evidence_digest": evidence_digest,
+            "handoff_final_digest": pending.get("final_digest"),
+            "created_at": utc_now(),
+        }
+        provenance_digest = write_immutable(
+            args.task_key, "terminal", terminal_packet, manifest)
+        owner.update({"state": "TERMINAL",
+                      "terminal_evidence_digest": evidence_digest,
+                      "terminal_provenance_digest": provenance_digest})
         owner["ownership_digest"] = owner_digest(owner)
         pending["state"] = "PREDECESSOR_TERMINAL"
         return state
@@ -1177,7 +1298,23 @@ def task_terminal(args, manifest):
         evidence_digest = validate_native_evidence(
             active[0]["surface"], evidence,
             expected_identity=args.owner, terminal=True)
-        active[0].update({"state": "TERMINAL", "terminal_evidence_digest": evidence_digest})
+        terminal_packet = {
+            "schema_version": 1, "task_key": args.task_key,
+            "terminal_kind": "task_terminal",
+            "owner": args.owner, "surface": active[0]["surface"],
+            "generation": active[0]["generation"],
+            "native_evidence": evidence,
+            "native_evidence_digest": evidence_digest,
+            "handoff_final_digest": (handoff.get("final_digest")
+                                     if handoff.get("state")
+                                     == "PREDECESSOR_TERMINAL" else None),
+            "created_at": utc_now(),
+        }
+        provenance_digest = write_immutable(
+            args.task_key, "terminal", terminal_packet, manifest)
+        active[0].update({"state": "TERMINAL",
+                          "terminal_evidence_digest": evidence_digest,
+                          "terminal_provenance_digest": provenance_digest})
         active[0]["ownership_digest"] = owner_digest(active[0])
         state["task_status"] = "TERMINAL"
         state["active_owner"] = None
