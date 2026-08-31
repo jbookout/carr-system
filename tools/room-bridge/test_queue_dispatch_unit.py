@@ -3,7 +3,8 @@
 
 No Hermes task is claimed and no model or named desk is contacted.  Fakes pin
 the controller boundary: canonical claim first, one desk at a time, exact
-terminal protocol, one terminal transition, and no conversational echo.
+terminal protocol, one terminal transition, and a bounded typed completion
+callback rather than raw model prose.
 """
 
 from __future__ import annotations
@@ -215,6 +216,7 @@ class QueueDispatchTests(unittest.TestCase):
             "sol", dispatch_call=dispatch_call)
         self.assertEqual(outcome["task_id"], "t_queue0001")
         self.assertIn("CARR_QUEUE_RESULT", seen[0])
+        self.assertIn('"v":1', seen[0])
         self.assertNotIn("Human-readable text stays at the desk", json.dumps(adapter.calls))
 
     def test_lost_claim_never_dispatches(self):
@@ -244,6 +246,9 @@ class QueueDispatchTests(unittest.TestCase):
         second = controller.finish_pending(pending, result())
         self.assertEqual(first["outcome"], "done")
         self.assertEqual(second["outcome"], "already_terminal")
+        self.assertEqual(first["completion"], second["completion"])
+        self.assertEqual(first["completion"]["queue_completion"]["summary"], "Local attestation complete.")
+        self.assertIn("do not merely acknowledge", first["completion"]["queue_completion"]["dispatcher_instruction"])
         self.assertEqual(sum(call[0] == "complete" for call in adapter.calls), 1)
         self.assertEqual(sum(call[0] == "comment" for call in adapter.calls), 0)
 
@@ -393,7 +398,7 @@ class QueueDispatchTests(unittest.TestCase):
             "claude", dispatch_call=lambda _prompt: {"status": "completed", "result": result(record_evidence=mismatched)})
         self.assertEqual(out["outcome"], "record_write_evidence_missing")
 
-    def test_queue_pending_result_never_reenters_room_as_a_turn(self):
+    def test_queue_pending_result_returns_typed_callback_to_dispatcher_room(self):
         state = state_mod.default_state()
         state_mod.set_pending(
             state, "joe-desk", dispatch_msg_id="dispatch-1", log_offset=0,
@@ -404,7 +409,12 @@ class QueueDispatchTests(unittest.TestCase):
         finished: list[tuple] = []
         executor = type("Executor", (), {
             "finish_pending": lambda self, pending, raw: finished.append((pending, raw)) or {
-                "outcome": "done", "task_id": "t_queue0001"
+                "outcome": "done", "task_id": "t_queue0001",
+                "completion": {"queue_completion": {
+                    "v": 1, "task_id": "t_queue0001", "target": "claude",
+                    "outcome": "success", "summary": "bounded result",
+                    "source_seq": 81, "source_msg_id": "source-message",
+                }},
             },
         })()
         posted: list[dict] = []
@@ -416,7 +426,14 @@ class QueueDispatchTests(unittest.TestCase):
             )
         self.assertEqual(outcome["outcome"], "done")
         self.assertEqual(len(finished), 1)
-        self.assertEqual(posted, [])
+        self.assertEqual(len(posted), 1)
+        callback = json.loads(posted[0]["body"])["queue_completion"]
+        self.assertEqual(callback["task_id"], "t_queue0001")
+        self.assertEqual(callback["summary"], "bounded result")
+        self.assertNotIn("Human-readable text", posted[0]["body"])
+        self.assertEqual(posted[0]["seat"], "claude")
+        self.assertEqual(posted[0]["kind"], "turn")
+        self.assertEqual(posted[0]["idempotency_key"], "queue-completion:t_queue0001")
         self.assertIsNone(state_mod.get_pending(state, "joe-desk"))
 
     def test_queue_timeout_blocks_canonically_without_echo(self):
