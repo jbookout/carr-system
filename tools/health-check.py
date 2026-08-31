@@ -323,7 +323,8 @@ print(json.dumps({"registered": sorted(TARGETS), "rows": rows, "retired": retire
         # v_job_control is the durable provider-independent job ledger.  The
         # SQL is intentionally here (rather than a projection parser) so a test
         # can prove exactly which authority surface health reads.
-        sql = """select 'DEF',d.key,d.version,d.recurrence::text,d.registered_at
+        sql = """select 'DEF',d.key,d.version,d.recurrence::text,d.registered_at,
+                        coalesce(d.legacy_disabled_at::text,'')
                    from ops.job_definition d where d.enabled order by d.key;
                  select 'JOB',v.id,v.definition_key,v.definition_version,v.state,v.mode,
                         v.attempt,v.max_attempts,v.scheduled_for,v.created_at,
@@ -350,14 +351,22 @@ print(json.dumps({"registered": sorted(TARGETS), "rows": rows, "retired": retire
             rows = []
             for line in p.stdout.splitlines():
                 cols = [c.strip() for c in line.split("|")]
-                if len(cols) == 5 and cols[0] == "DEF":
+                if len(cols) == 6 and cols[0] == "DEF":
                     try:
                         recurrence = json.loads(cols[3])
                     except ValueError:
                         recurrence = None
                     definitions.append({"key": cols[1], "version": int(cols[2]),
                                         "recurrence": recurrence,
-                                        "registered_at": cols[4]})
+                                        "registered_at": cols[4],
+                                        # The control plane is the executor of
+                                        # record only once the legacy schedule
+                                        # is disabled; until then its ledger is
+                                        # SILENT for this key by design, and
+                                        # afterwards it is the authority only
+                                        # from that instant forward.
+                                        "legacy_disabled_at": cols[5] or None,
+                                        "legacy_live": not cols[5]})
                 elif len(cols) == 16 and cols[0] == "JOB" and cols[4] in {
                     "queued", "running", "retry_wait", "waiting_approval", "succeeded",
                     "failed", "timed_out", "dead_lettered", "cancelled", "skipped",
@@ -445,6 +454,19 @@ def _live_jobs(snap):
             if isinstance(j, dict) and j.get("mode") == "live"]
 
 
+def _legacy_scheduled_definitions(snap):
+    """Enabled definitions whose LEGACY scheduler is still the executor.
+
+    Until ``disable-legacy-schedule`` fires for a key, launchd or the Claude
+    scheduler runs it and the Control Plane ledger holds nothing — so a due
+    window with no ledger row is the cutover working, not a missed run.  The
+    default is fail-closed: a definition that does not declare itself legacy
+    is still held to every due window.
+    """
+    return sorted(str(d.get("key")) for d in (snap.get("job_definitions") or [])
+                  if isinstance(d, dict) and d.get("legacy_live") is True)
+
+
 def _missing_due_executions(snap):
     """Due cron windows without a successful, exact ledger completion.
 
@@ -460,6 +482,11 @@ def _missing_due_executions(snap):
     for definition in snap.get("job_definitions") or []:
         if not isinstance(definition, dict):
             continue
+        if definition.get("legacy_live") is True:
+            # Loop #536: asserting a ledger row for a key the control plane does
+            # not dispatch produced a MISSING DUE line every day for eleven
+            # definitions, which is how a genuine miss became unreadable.
+            continue
         recurrence = definition.get("recurrence")
         if not isinstance(recurrence, dict) or not recurrence.get("cron"):
             continue
@@ -473,6 +500,15 @@ def _missing_due_executions(snap):
         registered = _iso(definition.get("registered_at"))
         registered_local = (registered.astimezone(zone).replace(tzinfo=None)
                             if registered else now_local - timedelta(days=40))
+        # A CUT-OVER DEFINITION IS THE CONTROL PLANE'S ONLY FROM THE INSTANT ITS
+        # LEGACY SCHEDULE WAS DISABLED. Windows before that stamp were the
+        # launchd or Claude scheduler's to run, so the ledger is rightly silent
+        # for them; counting them made calendar-fetch-daily read as three missed
+        # weekdays it never owned (loop #536).
+        cutover = _iso(definition.get("legacy_disabled_at"))
+        if cutover:
+            registered_local = max(registered_local,
+                                   cutover.astimezone(zone).replace(tzinfo=None))
         collapsed = "collapses window" in str(recurrence.get("source") or "").lower()
         start = max(registered_local,
                     now_local - timedelta(days=40 if collapsed else 8))
@@ -660,6 +696,7 @@ def _canonical_health():
                            int(j.get("completion_receipt_count", 0)) < 1]
             missing = _missing_due_executions(snap)
             stuck = _stuck_live_jobs(snap)
+            legacy = _legacy_scheduled_definitions(snap)
             for job in bad:
                 print(f"  ⚠︎ {job.get('definition_key')} {job.get('state')} "
                       f"attempt {job.get('attempt')}/{job.get('max_attempts')}")
@@ -683,6 +720,13 @@ def _canonical_health():
                 detail = f"{job.get('definition_key')} job={job.get('id')} {why}"
                 print(f"  ⚠︎ {detail}")
                 _canonical_finding("job_stuck", detail)
+            # THE CARRIED COUNT RIDES ON THE LINE EITHER WAY, same contract the
+            # exports section uses for retired targets: a chosen state stays
+            # visible rather than becoming silence (rule bd4a6d22).
+            if legacy:
+                print(f"  -- CARRIED {len(legacy)} definition(s) still on a legacy "
+                      f"scheduler, no Control Plane ledger row expected: "
+                      f"{', '.join(legacy)}")
             if bad or unreceipted or missing or stuck:
                 rc = 1
             else:
