@@ -594,6 +594,27 @@ def compact_pre_tokens(row: dict[str, Any]) -> int | None:
 
 
 def usage_total(row: dict[str, Any]) -> int | None:
+    # Codex token_count events carry two different domains: last_token_usage
+    # is the live turn/context occupancy, while total_token_usage is cumulative
+    # billing usage across the session.  Combining them turns a modest current
+    # context into millions of apparent tokens and forces spurious handoffs.
+    raw_payload = row.get("payload")
+    payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
+    if row.get("type") == "event_msg" and payload.get("type") == "token_count":
+        info = payload.get("info")
+        current = info.get("last_token_usage") if isinstance(info, dict) else None
+        if not isinstance(current, dict):
+            return None
+        direct: list[int] = []
+        for key in TOTAL_KEYS:
+            number = positive(current.get(key)) if key in current else None
+            if number:
+                direct.append(number)
+        if direct:
+            return max(direct)
+        parts = [positive(current.get(key)) for key in USAGE_PARTS if key in current]
+        return sum(number or 0 for number in parts) if any(parts) else None
+
     candidates: list[int] = []
     containers = [row]
     for key in ("message", "payload"):
@@ -726,12 +747,56 @@ def initial_state(task_key: str, owner_id: str, surface: str = "claude") -> dict
     }
 
 
-def hook_task_key(payload: dict[str, Any]) -> tuple[str, str]:
+def claude_owner_task_key(owner_id: str, manifest: dict[str, Any]) -> str | None:
+    """Resolve a native Claude session back to its accepted lifecycle task.
+
+    The controller callback does not carry an application-defined task key.
+    Lifecycle state is therefore the single authoritative binding: a verified
+    cross-surface successor already exists there with this native session id.
+    """
+    matches: set[str] = set()
+    root = state_root(manifest)
+    try:
+        paths = list(root.glob("*.json"))
+    except OSError:
+        paths = []
+    for path in paths:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(value, dict) or value.get("task_status") == "TERMINAL":
+            continue
+        owner = (value.get("owners") or {}).get(owner_id)
+        if (not isinstance(owner, dict) or owner.get("surface") != "claude"
+                or owner.get("state") == "TERMINAL"):
+            continue
+        task_key = value.get("task_key")
+        if not isinstance(task_key, str) or not task_key:
+            raise LifecycleError("LIFECYCLE_INVALID",
+                                 "Claude owner binding lacks a task key")
+        if path.resolve() != state_file(task_key, manifest).resolve():
+            raise LifecycleError("LIFECYCLE_INVALID",
+                                 "Claude owner binding path is inconsistent")
+        validate_task_state(value, task_key, manifest)
+        matches.add(task_key)
+    if len(matches) > 1:
+        raise LifecycleError("OWNERSHIP_DUPLICATE",
+                             "Claude session is bound to multiple live tasks")
+    return next(iter(matches)) if matches else None
+
+
+def hook_task_key(payload: dict[str, Any],
+                  manifest: dict[str, Any] | None = None) -> tuple[str, str]:
     explicit = payload.get("task_key") or os.environ.get("CARR_CONTEXT_TASK_KEY")
     session = payload.get("session_id") or payload.get("sessionId")
     if explicit:
         return str(explicit), str(session or explicit)
     if session:
+        if manifest is not None:
+            bound = claude_owner_task_key(str(session), manifest)
+            if bound:
+                return bound, str(session)
         return f"claude:{session}", str(session)
     transcript = payload.get("transcript_path") or payload.get("transcriptPath")
     if transcript:
@@ -878,6 +943,14 @@ def hook_main() -> int:
         audit({"session": owner_id, "event": event,
                "action": "REFUSE" if event == "Stop" else "NOOP",
                "reason": exc.reason})
+        refuse_stop_on_control_error(event, task_key, exc.reason)
+        return 0
+    try:
+        task_key, owner_id = hook_task_key(payload, manifest)
+    except LifecycleError as exc:
+        audit({"session": owner_id, "event": event,
+               "action": "REFUSE" if event == "Stop" else "NOOP",
+               "reason": exc.reason}, manifest)
         refuse_stop_on_control_error(event, task_key, exc.reason)
         return 0
     try:
@@ -1069,6 +1142,12 @@ def lifecycle_init(args, manifest):
 
 
 def offer_create(args, manifest):
+    if args.predecessor_surface not in SURFACES:
+        raise LifecycleError("SUCCESSOR_SURFACE_INVALID",
+                             f"unsupported predecessor surface {args.predecessor_surface}")
+    if args.successor_surface not in SURFACES:
+        raise LifecycleError("SUCCESSOR_SURFACE_INVALID",
+                             f"unsupported successor surface {args.successor_surface}")
     evidence = parse_evidence(args.evidence_json)
     evidence_digest = validate_native_evidence(
         args.predecessor_surface, evidence, expected_identity=args.predecessor)

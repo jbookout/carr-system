@@ -566,6 +566,27 @@ def lifecycle_cas_and_tamper():
                               "--expected-version", "-1")
         check("task init creates version zero", proc.returncode == 0 and state["version"] == 0,
               (proc.returncode, state))
+
+        # Reject an unsupported target before creating an immutable offer or
+        # changing the sole active owner to DRAINING.  Otherwise there is no
+        # valid declaration or cancellation path out of the persisted state.
+        proc, rejected = run_cli(
+            root, "handoff-offer-create", "--task-key", "task:cas",
+            "--predecessor", "old", "--predecessor-surface", "codex",
+            "--successor", "bad", "--successor-surface", "unsupported",
+            "--evidence-json", codex_evidence("old"), "--generation", "1",
+            "--expected-version", "0",
+        )
+        _, after_reject = run_cli(root, "status", "--task-key", "task:cas")
+        check("unsupported successor surface is rejected before DRAINING",
+              proc.returncode == 2
+              and rejected["reason"] == "SUCCESSOR_SURFACE_INVALID"
+              and after_reject["version"] == 0
+              and after_reject["active_owner"] == "old"
+              and after_reject["owners"]["old"]["state"] == "ACTIVE"
+              and after_reject["handoff"] is None,
+              (proc.returncode, rejected, after_reject, proc.stderr))
+
         proc, first = run_cli(
             root, "handoff-offer-create", "--task-key", "task:cas",
             "--predecessor", "old", "--predecessor-surface", "codex",
@@ -718,6 +739,60 @@ def lifecycle_cas_and_tamper():
         check("cross-surface offer requires predecessor-authorized project",
               proc.returncode == 2
               and rejected["reason"] == "OWNERSHIP_MISMATCH", rejected)
+
+        # The native Claude callback has only the new session id.  After a
+        # verified Codex-to-Claude takeover it must discover the existing
+        # same-task lifecycle rather than silently create claude:<session>.
+        claude_successor_transcript = write_jsonl(
+            root / "claude-successor.jsonl",
+            [usage_row(1_000, model="claude-opus-4-1")])
+        claude_successor_evidence = json.dumps({
+            "session_id": "claude-new",
+            "transcript_path": str(claude_successor_transcript),
+            "controller_callback_id": "claude-successor-callback",
+            "status": "active",
+        })
+        _, claude_binding = run_cli(
+            root, "task-init", "--task-key", "task:claude-successor-binding",
+            "--owner", "codex-old", "--surface", "codex",
+            "--evidence-json", codex_evidence("codex-old"),
+            "--expected-version", "-1")
+        _, claude_offer = run_cli(
+            root, "handoff-offer-create",
+            "--task-key", "task:claude-successor-binding",
+            "--predecessor", "codex-old", "--predecessor-surface", "codex",
+            "--successor", "claude-new", "--successor-surface", "claude",
+            "--evidence-json", codex_evidence("codex-old"), "--generation", "1",
+            "--expected-version", str(claude_binding["version"]))
+        _, claude_declared = run_cli(
+            root, "successor-declare",
+            "--task-key", "task:claude-successor-binding",
+            "--offer-digest", claude_offer["offer_digest"],
+            "--successor", "claude-new",
+            "--evidence-json", claude_successor_evidence,
+            "--expected-version", str(claude_offer["state"]["version"]))
+        _, claude_accepted = run_cli(
+            root, "successor-accept",
+            "--task-key", "task:claude-successor-binding",
+            "--offer-digest", claude_offer["offer_digest"],
+            "--successor", "claude-new",
+            "--evidence-json", claude_successor_evidence,
+            "--expected-version", str(claude_declared["state"]["version"]))
+        proc, callback = run_hook(
+            root, "PostToolUse", claude_successor_transcript,
+            session="claude-new")
+        _, bound_after = run_cli(
+            root, "status", "--task-key", "task:claude-successor-binding")
+        derived_path = root / "state" / (
+            hashlib.sha256(b"claude:claude-new").hexdigest() + ".json")
+        check("Claude successor callback inherits the handed-off task key",
+              proc.returncode == 0
+              and bound_after["version"] == claude_accepted["state"]["version"] + 1
+              and bound_after["active_owner"] == "claude-new"
+              and bound_after["signal"]["invocations"] == 1
+              and not derived_path.exists(),
+              (proc.returncode, callback, bound_after, proc.stderr))
+
         proc, declared = run_cli(
             root, "successor-declare", "--task-key", "task:binding",
             "--offer-digest", offer["offer_digest"], "--successor", "bound-new",
@@ -1141,6 +1216,38 @@ def rollout_resolver_cases():
         check("generic task-key resolver is read-only and stable",
               out.get("task_key") == "claude:claude-root"
               and out.get("resolver") == "session_id", out)
+
+        # Codex exposes both current-turn usage and an account/session-wide
+        # cumulative billing total.  Only the former measures the live context
+        # that can be exhausted by this task.
+        native = write_jsonl(root / "native-usage.jsonl", [
+            {"type": "session_meta", "payload": {"id": "native-usage"}},
+            {"type": "turn_context", "payload": {"model": "gpt-5.6-sol"}},
+            {"type": "event_msg", "payload": {
+                "type": "token_count",
+                "info": {
+                    "model_context_window": 258_400,
+                    "last_token_usage": {
+                        "input_tokens": 29_000,
+                        "cached_input_tokens": 900,
+                        "output_tokens": 121,
+                        "total_tokens": 30_021,
+                    },
+                    "total_token_usage": {
+                        "input_tokens": 49_000_000,
+                        "cached_input_tokens": 1_000_000,
+                        "output_tokens": 107_705,
+                        "total_tokens": 50_107_705,
+                    },
+                },
+            }},
+        ])
+        proc, out = run_cli(root, "codex-observe", "--rollout", str(native))
+        check("Codex occupancy ignores cumulative billing usage",
+              proc.returncode == 0
+              and out["context"]["signal"]["highwater"] == 30_021
+              and out["context"]["ratio"] == 11.618,
+              (proc.returncode, out, proc.stderr))
     finally:
         shutil.rmtree(root)
 
