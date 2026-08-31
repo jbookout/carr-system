@@ -80,9 +80,10 @@ def read_profiles(*, call_verb_path: Path = CALL_VERB) -> list:
 
 
 def add_room_turn(body: str, seat: str, *, kind: str = "turn", room: str = DEFAULT_ROOM,
-                   msg_id: str | None = None, call_verb_path: Path = CALL_VERB) -> dict:
+                   msg_id: str | None = None, idempotency_key: str | None = None,
+                   call_verb_path: Path = CALL_VERB) -> dict:
     args = {
-        "idempotency_key": str(uuid.uuid4()),
+        "idempotency_key": idempotency_key or str(uuid.uuid4()),
         "body": body,
         "seat": seat,
         "room": room,

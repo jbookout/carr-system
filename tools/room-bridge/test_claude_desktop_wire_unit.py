@@ -94,8 +94,10 @@ def test_desktop_handoff_uses_attached_pty_slash_command() -> None:
     with tempfile.TemporaryDirectory() as root:
         fake = Path(root) / "claude"
         capture = Path(root) / "input.txt"
+        args_capture = Path(root) / "args.txt"
         fake.write_text(
             "#!/bin/sh\n"
+            f"printf '%s' \"$*\" > {args_capture}\n"
             "printf 'ready\\n'\n"
             "IFS= read -r line\n"
             f"printf '%s' \"$line\" > {capture}\n"
@@ -105,6 +107,7 @@ def test_desktop_handoff_uses_attached_pty_slash_command() -> None:
         assert wire.handoff_to_desktop(SID, claude_bin=str(fake), timeout_s=5) == {
             "status": "opened", "session_id": SID
         }
+        assert args_capture.read_text() == "attach 12345678"
         assert capture.read_text() == "/desktop"
 
 
@@ -135,7 +138,7 @@ def test_registry_dispatch_and_queue_only_fanout() -> None:
         assert row["session_id"] == SID and row["status"] == "delivered"
 
 
-def test_completed_pending_hands_off_then_finishes_queue() -> None:
+def test_done_pending_hands_off_then_finishes_queue() -> None:
     state = state_mod.default_state()
     state_mod.set_pending(
         state, "claude-desktop", dispatch_msg_id="dispatch-1", log_offset=0,
@@ -151,7 +154,14 @@ def test_completed_pending_hands_off_then_finishes_queue() -> None:
     class Executor:
         def finish_pending(self, pending: dict, raw_result: str) -> dict:
             finished.append((pending, raw_result))
-            return {"outcome": "review", "task_id": "t_queue0001"}
+            return {
+                "outcome": "review", "task_id": "t_queue0001",
+                "completion": {"queue_completion": {
+                    "v": 1, "task_id": "t_queue0001", "target": "claude-desktop",
+                    "outcome": "success", "summary": "Reviewed",
+                    "source_seq": 1, "source_msg_id": "queue:t_queue0001",
+                }},
+            }
 
     def post(**row) -> None:
         posted.append(row)
@@ -166,7 +176,8 @@ def test_completed_pending_hands_off_then_finishes_queue() -> None:
         "claude-desktop", "claude", state,
         add_room_turn=post, log_path=Path("unused"),
         pending_timeout_s=1800, queue_executor=cast(Any, executor),
-        inspect_background=lambda _sid: {"state": "completed", "found": True},
+        # Live Claude Code uses ``done`` for a completed --bg session.
+        inspect_background=lambda _sid: {"state": "done", "found": True},
         read_background_result=lambda _sid: result,
         handoff_background=handoff,
     )
@@ -174,6 +185,8 @@ def test_completed_pending_hands_off_then_finishes_queue() -> None:
     assert outcome["outcome"] == "review"
     assert handed == [SID] and finished[0][1] == result
     assert json.loads(posted[0]["body"])["claude_desktop_handoff"]["status"] == "opened"
+    assert json.loads(posted[1]["body"])["queue_completion"]["task_id"] == "t_queue0001"
+    assert posted[1]["idempotency_key"] == "queue-completion:t_queue0001"
     assert state_mod.get_pending(state, "claude-desktop") is None
 
 
@@ -183,7 +196,7 @@ def main() -> int:
     check("typed result is read from persisted transcript", test_final_typed_result_comes_from_persisted_transcript)
     check("Desktop handoff uses attached PTY slash command", test_desktop_handoff_uses_attached_pty_slash_command)
     check("desktop desk is queue-only and dispatchable", test_registry_dispatch_and_queue_only_fanout)
-    check("completed background hands off before queue completion", test_completed_pending_hands_off_then_finishes_queue)
+    check("done background hands off before queue completion", test_done_pending_hands_off_then_finishes_queue)
     print(f"claude-desktop-wire unit: {6 - len(FAILURES)}/6 passed")
     return 1 if FAILURES else 0
 

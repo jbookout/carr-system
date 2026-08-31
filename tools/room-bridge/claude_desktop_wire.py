@@ -32,8 +32,13 @@ UUID = re.compile(
     re.IGNORECASE,
 )
 SHORT_ID = re.compile(r"\bbackgrounded\s*[·:]?\s*([0-9a-f]{8})\b", re.IGNORECASE)
+ANSI_ESCAPE = re.compile(
+    rb"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[@-_])"
+)
 ACTIVE_STATES = {"starting", "running", "working", "idle"}
-COMPLETED_STATES = {"completed"}
+# Current Claude Code reports a finished ``--bg`` agent as ``state: done``.
+# Keep ``completed`` for compatibility with older supervisor payloads.
+COMPLETED_STATES = {"completed", "done"}
 FAILED_STATES = {"failed", "stopped", "killed"}
 NEEDS_INPUT_STATES = {"needs_input", "needs-input", "blocked"}
 
@@ -266,11 +271,14 @@ def handoff_to_desktop(
 ) -> dict:
     """Attach to a completed background session and invoke supported /desktop."""
     sid = _session_id(session_id)
+    # ``claude agents --json`` exposes both the durable UUID and the eight-char
+    # agent id, but ``claude attach`` accepts only the latter.
+    attach_id = sid[:8]
     master, slave = pty.openpty()
     try:
         try:
             proc = subprocess.Popen(
-                [claude_bin, "attach", sid],
+                [claude_bin, "attach", attach_id],
                 stdin=slave,
                 stdout=slave,
                 stderr=slave,
@@ -281,30 +289,66 @@ def handoff_to_desktop(
         finally:
             os.close(slave)
 
-        # Wait for the attached client to paint at least once.  This is a PTY
-        # readiness boundary, not a visual/UI heuristic; a quiet client gets a
-        # bounded fallback so an output-theme change cannot wedge the bridge.
+        # A completed agent is briefly woken before the attached prompt accepts
+        # input. Wait for the initial transcript repaint to settle; sending the
+        # slash command on the first byte loses it during that wake-up.
         ready_deadline = time.monotonic() + ready_timeout_s
+        painted = False
+        last_paint_at = 0.0
         while proc.poll() is None and time.monotonic() < ready_deadline:
             readable, _, _ = select.select([master], [], [], 0.25)
             if readable:
                 try:
-                    os.read(master, 65536)
+                    chunk = os.read(master, 65536)
                 except OSError:
-                    pass
+                    chunk = b""
+                if chunk:
+                    painted = True
+                    last_paint_at = time.monotonic()
+            elif painted and time.monotonic() - last_paint_at >= 0.75:
                 break
         if proc.poll() is not None:
             raise ClaudeDesktopError("desktop_attach_failed", "Claude attach exited before handoff")
         os.write(master, b"/desktop\r")
 
         deadline = time.monotonic() + timeout_s
+        output = bytearray()
+        opened = False
         while proc.poll() is None and time.monotonic() < deadline:
             readable, _, _ = select.select([master], [], [], 0.25)
             if readable:
                 try:
-                    os.read(master, 65536)
+                    chunk = os.read(master, 65536)
                 except OSError:
-                    pass
+                    chunk = b""
+                if chunk:
+                    output.extend(chunk)
+                    if len(output) > 262144:
+                        del output[:-262144]
+                    rendered = ANSI_ESCAPE.sub(b"", bytes(output))
+                    if (b"Checking for Claude Desktop" in rendered
+                            or b"Opening Claude Desktop" in rendered):
+                        opened = True
+                        break
+        if opened:
+            # /desktop transitions the attached client into agent view instead
+            # of exiting. Give the app launch a moment, then close only this
+            # attached client; the durable conversation remains intact.
+            time.sleep(5)
+            try:
+                os.write(master, b"\x03")
+            except OSError:
+                pass
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=3)
+            return {"status": "opened", "session_id": sid}
         if proc.poll() is None:
             proc.terminate()
             try:
