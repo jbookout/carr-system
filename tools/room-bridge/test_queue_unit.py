@@ -63,6 +63,20 @@ def turn(body, *, msg_id="11111111-1111-4111-8111-111111111111", seat="codex", s
             "origin_channel": origin_channel, "origin_actor": origin_actor}
 
 
+def test_room_writer_binds_nondefault_room_without_overriding_explicit_calls():
+    calls = []
+
+    def writer(**kwargs):
+        calls.append(kwargs)
+        return {"ok": True}
+
+    bound = bridge.bind_room_writer(writer, "model-room")
+    bound(body="nonce", seat="claude")
+    bound(body="legacy", seat="claude", room="partner-line")
+    assert calls[0]["room"] == "model-room"
+    assert calls[1]["room"] == "partner-line"
+
+
 def test_strict_enqueue_and_bounds():
     parsed = queue_grammar.parse(turn(
         "@queue enqueue target=sol cap=read priority=P1 runtime=45m key=attest finish=review :: Attest PR 514\n"
@@ -572,6 +586,7 @@ def test_disabled_target_reconciliation_is_idempotent_and_mutation_narrow():
 
 
 def main():
+    check("bridge writers stay on the room being polled", test_room_writer_binds_nondefault_room_without_overriding_explicit_calls)
     check("strict enqueue grammar and bounds", test_strict_enqueue_and_bounds)
     check("shared key and delivery idempotency", test_shared_key_converges_and_source_id_deduplicates)
     check("targets and status are model-free reads", test_targets_and_status_parse_without_model)

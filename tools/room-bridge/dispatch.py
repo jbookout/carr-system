@@ -48,6 +48,7 @@ sys.path.insert(0, str(HERE))
 import desks  # noqa: E402
 from desks import DeskError, Registry  # noqa: E402
 import claude_wire as inject_mod  # noqa: E402  — the Idea 78 wire, see the module
+import claude_desktop_wire  # noqa: E402 — background supervisor + supported /desktop
 import codex_wire  # noqa: E402  — Codex worked out this protocol, see the module
 import execution_contract  # noqa: E402 — portable Job Passport v1 seam
 
@@ -94,6 +95,14 @@ def _to_claude(entry: dict, task: str, msg_id: str) -> dict:
                           "its own window, and this file does not carry that back"}
     finally:
         conn.close()
+
+
+def _to_claude_desktop(entry: dict, task: str) -> dict:
+    """Create one durable background session; later bridge cycles observe it."""
+    try:
+        return claude_desktop_wire.launch_background(entry, task)
+    except claude_desktop_wire.ClaudeDesktopError as exc:
+        return {"status": "failed", "detail": exc.code}
 
 
 def _codex_events(stdout: str) -> list[dict]:
@@ -245,7 +254,7 @@ def dispatch(
     results_path = Path(results_path or DEFAULT_RESULTS)
     entry = registry.resolve(name)          # every refusal happens here
     msg_id = str(uuid.uuid4())
-    if entry["kind"] in ("codex-session", "codex-live"):
+    if entry["kind"] in ("claude-desktop", "codex-session", "codex-live"):
         if not entry.get("model") or not str(entry.get("model")).strip():
             raise DeskError(
                 "unnamed_model_or_effort",
@@ -263,6 +272,8 @@ def dispatch(
 
     if entry["kind"] == "claude-session":
         outcome = _to_claude(entry, task, msg_id)
+    elif entry["kind"] == "claude-desktop":
+        outcome = _to_claude_desktop(entry, task)
     elif entry["kind"] == "codex-live":
         outcome = codex_wire.run_turn(
             entry["socket"], task,
