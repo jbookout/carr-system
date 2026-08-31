@@ -595,7 +595,27 @@ def hook_main() -> int:
                "reason": exc.reason}, manifest)
         refuse_stop_on_control_error(event, task_key, exc.reason)
         return 0
-    signal = context_decision(rows, state, manifest)
+    except Exception as exc:
+        audit({"session": owner_id, "event": event,
+               "action": "REFUSE" if event == "Stop" else "NOOP",
+               "reason": "LIFECYCLE_INVALID", "detail": str(exc)[:500]}, manifest)
+        refuse_stop_on_control_error(event, task_key, "LIFECYCLE_INVALID")
+        return 0
+    try:
+        signal = context_decision(rows, state, manifest)
+    except Exception as exc:
+        # Persisted state is outside the hook process's trust boundary.  A
+        # semantically malformed scalar must refuse Stop just like unreadable
+        # JSON does; letting ValueError escape disables the only blocking seam.
+        audit({"session": owner_id, "event": event,
+               "action": "REFUSE" if event == "Stop" else "NOOP",
+               "reason": "LIFECYCLE_INVALID", "detail": str(exc)[:500]}, manifest)
+        version = state.get("version", -1)
+        if isinstance(version, bool) or not isinstance(version, int):
+            version = -1
+        refuse_stop_on_control_error(event, task_key, "LIFECYCLE_INVALID",
+                                     version)
+        return 0
     audit({"session": owner_id, "event": event, "task_key": task_key,
            "version": state["version"], "caught": bool(signal.get("crossed")),
            "signal": signal}, manifest)
@@ -612,7 +632,10 @@ def hook_main() -> int:
             verify_handoff_state(task_key, state, manifest)
             return 0
         except LifecycleError as exc:
-            if event == "Stop" and signal.get("crossed"):
+            # Receipt integrity is a control-plane invariant, not a context
+            # threshold.  A low-signal draining predecessor must fail closed
+            # when the supposedly verified handoff packet no longer verifies.
+            if event == "Stop":
                 print(canonical(block_payload(
                     task_key, state["version"], signal, exc.reason)).decode("utf-8"))
             return 0
@@ -1098,8 +1121,7 @@ def dispatcher_decision(task_key: str, snapshot: dict[str, Any],
         raise LifecycleError("OWNERSHIP_MISSING", "task has no active owner")
     expected = (state.get("owners") or {}).get(active_id, {}).get("ownership_digest")
     matches = [worker for worker in workers
-               if worker.get("ownership_digest") == expected
-               and not worker.get("task_terminal")]
+               if worker.get("ownership_digest") == expected]
     if not matches:
         raise LifecycleError("OWNERSHIP_MISSING", "snapshot has no current owner")
     if len(matches) > 1:

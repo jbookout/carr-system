@@ -356,6 +356,20 @@ def fallback_and_hook_sequence():
               proc.returncode == 2
               and tampered["reason"] == "HANDOFF_RECEIPT_INVALID", tampered)
         final_path.write_text(original_final)
+        low_transcript = write_jsonl(
+            root / "sequence-low.jsonl",
+            [usage_row(1_000, model="claude-opus-4-1")],
+        )
+        receipt_path.write_text(original_receipt.replace(
+            '"successor":"successor"', '"successor":"tampered"', 1))
+        proc, tampered_stop = run_hook(
+            root, "Stop", low_transcript, session="sequence")
+        why = reason(tampered_stop)
+        check("tampered verified handoff refuses low-signal predecessor Stop",
+              proc.returncode == 0
+              and why and why["reason"] == "HANDOFF_RECEIPT_INVALID",
+              (proc.returncode, tampered_stop, proc.stderr))
+        receipt_path.write_text(original_receipt)
         proc, after = run_hook(root, "Stop", transcript, session="sequence")
         check("verified takeover makes recursive Stop allow", after is None, after)
         proc, successor_stop = run_hook(
@@ -367,6 +381,25 @@ def fallback_and_hook_sequence():
               len({offer["offer_digest"], declared["declaration_digest"],
                    accepted["receipt_digest"], accepted["final_digest"]}) == 4,
               accepted)
+
+        malformed_transcript = write_jsonl(
+            root / "malformed-state.jsonl",
+            [usage_row(1_000, model="claude-opus-4-1")],
+        )
+        run_hook(root, "PostToolUse", malformed_transcript, session="malformed")
+        malformed_key = hashlib.sha256(b"claude:malformed").hexdigest()
+        malformed_path = root / "state" / f"{malformed_key}.json"
+        malformed_state = json.loads(malformed_path.read_text())
+        malformed_state["signal"]["generation_tool_calls"] = "not-an-int"
+        malformed_path.write_text(json.dumps(malformed_state))
+        proc, malformed_stop = run_hook(
+            root, "Stop", malformed_transcript, session="malformed")
+        why = reason(malformed_stop)
+        check("semantically malformed lifecycle state refuses Stop",
+              proc.returncode == 0 and why
+              and why["reason"] == "LIFECYCLE_INVALID"
+              and why["signal"]["window_tier"] == "control_error",
+              (proc.returncode, malformed_stop, proc.stderr))
     finally:
         shutil.rmtree(root)
 
@@ -636,6 +669,8 @@ def dispatcher_cases():
              "RECOVER_SAME_TASK", "RECOVERY_ERROR"),
             ("idle", "IDLE", "NONE", False, None,
              "RECOVER_SAME_TASK", "RECOVERY_IDLE"),
+            ("terminal", "TERMINAL", "NONE", False, None,
+             "NOOP", "RECOVERY_TERMINAL"),
         ):
             snap = snapshot("task:dispatch", own, worker_state,
                             attention=attention, recoverable=recoverable,
