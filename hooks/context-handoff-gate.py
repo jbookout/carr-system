@@ -152,6 +152,47 @@ def load_json_file(path: Path) -> dict[str, Any] | None:
     return value
 
 
+def validate_task_state(value: dict[str, Any], task_key: str) -> None:
+    """Reject structurally inconsistent persisted lifecycle state.
+
+    State files are mutable input outside the hook process's trust boundary.
+    Every reader must establish the small ownership/shape invariants it relies
+    on before a Stop decision or state-machine transition can use them.
+    """
+    if value.get("task_key") != task_key:
+        raise LifecycleError("LIFECYCLE_INVALID", "state task_key mismatch")
+    version = value.get("version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise LifecycleError("LIFECYCLE_INVALID", "state version is not an integer")
+    generation = value.get("generation")
+    if (isinstance(generation, bool) or not isinstance(generation, int)
+            or generation < 0):
+        raise LifecycleError("LIFECYCLE_INVALID", "state generation is invalid")
+    status = value.get("task_status")
+    if status not in {"ACTIVE", "TERMINAL"}:
+        raise LifecycleError("LIFECYCLE_INVALID", "task status is invalid")
+    owners = value.get("owners")
+    if not isinstance(owners, dict):
+        raise LifecycleError("LIFECYCLE_INVALID", "owners is not an object")
+    for owner_id, owner in owners.items():
+        if (not isinstance(owner_id, str) or not isinstance(owner, dict)
+                or owner.get("id") != owner_id):
+            raise LifecycleError("LIFECYCLE_INVALID", "owner record is invalid")
+    active_owner = value.get("active_owner")
+    if status == "ACTIVE":
+        if not isinstance(active_owner, str) or active_owner not in owners:
+            raise LifecycleError("LIFECYCLE_INVALID",
+                                 "active_owner has no owner record")
+    elif active_owner is not None:
+        raise LifecycleError("LIFECYCLE_INVALID",
+                             "terminal task retains an active owner")
+    for field in ("handoff", "recovery_intent"):
+        if value.get(field) is not None and not isinstance(value.get(field), dict):
+            raise LifecycleError("LIFECYCLE_INVALID", f"{field} is not an object")
+    if not isinstance(value.get("signal"), dict):
+        raise LifecycleError("LIFECYCLE_INVALID", "signal is not an object")
+
+
 def atomic_write(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -182,6 +223,8 @@ def mutate_state(task_key: str, expected_version: int | None,
     with open(lock, "a+b") as guard:
         fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
         current = load_json_file(path)
+        if current is not None:
+            validate_task_state(current, task_key)
         actual = int(current.get("version", -1)) if current else -1
         if expected_version is not None and actual != expected_version:
             raise LifecycleError("LIFECYCLE_INVALID",
@@ -190,6 +233,7 @@ def mutate_state(task_key: str, expected_version: int | None,
         updated = change(current)
         if not isinstance(updated, dict) or updated.get("task_key") != task_key:
             raise LifecycleError("LIFECYCLE_INVALID", "mutation returned invalid task state")
+        validate_task_state(updated, task_key)
         # Observations of a terminal task, an already-drained predecessor, and
         # exact idempotent replays are reads.  Do not manufacture a new version
         # merely because they passed through the mutation lock.
@@ -202,7 +246,10 @@ def mutate_state(task_key: str, expected_version: int | None,
 
 
 def read_state(task_key: str, manifest: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    return load_json_file(state_file(task_key, manifest))
+    state = load_json_file(state_file(task_key, manifest))
+    if state is not None:
+        validate_task_state(state, task_key)
+    return state
 
 
 def object_path(task_key: str, kind: str, object_digest: str,
@@ -1214,6 +1261,12 @@ def dispatcher_evaluate(args, manifest):
     decision = dispatcher_decision(args.task_key, snapshot, state, manifest)
     if decision["action"] != "RECOVER_SAME_TASK":
         return {**decision, "applied": False}
+    handoff = state.get("handoff") or {}
+    if handoff.get("state") in {
+            "DRAINING", "SUCCESSOR_DECLARED", "TAKEOVER_VERIFIED"}:
+        raise LifecycleError(
+            "LIFECYCLE_INVALID",
+            "recovery cannot start while a prior handoff is nonterminal")
     nonce_input = {"task_key": args.task_key, "generation": state.get("generation"),
                    "failed_owner": decision["failed_owner"],
                    "cause": decision["reason"],

@@ -400,6 +400,48 @@ def fallback_and_hook_sequence():
               and why["reason"] == "LIFECYCLE_INVALID"
               and why["signal"]["window_tier"] == "control_error",
               (proc.returncode, malformed_stop, proc.stderr))
+
+        missing_owner_transcript = write_jsonl(
+            root / "missing-owner-state.jsonl",
+            [usage_row(1_000, model="claude-opus-4-1")],
+        )
+        run_hook(root, "PostToolUse", missing_owner_transcript,
+                 session="missing-owner", wrapped=True)
+        missing_owner_key = hashlib.sha256(b"claude:missing-owner").hexdigest()
+        missing_owner_path = root / "state" / f"{missing_owner_key}.json"
+        missing_owner_state = json.loads(missing_owner_path.read_text())
+        missing_owner_state["owners"] = {}
+        missing_owner_path.write_text(json.dumps(missing_owner_state))
+        proc, missing_owner_stop = run_hook(
+            root, "Stop", missing_owner_transcript,
+            session="missing-owner", wrapped=True)
+        why = reason(missing_owner_stop)
+        check("missing active-owner record refuses wrapped low-signal Stop",
+              proc.returncode == 0 and why
+              and why["reason"] == "LIFECYCLE_INVALID"
+              and why["signal"]["window_tier"] == "control_error",
+              (proc.returncode, missing_owner_stop, proc.stderr))
+
+        bad_handoff_transcript = write_jsonl(
+            root / "bad-handoff-state.jsonl",
+            [usage_row(1_000, model="claude-opus-4-1")],
+        )
+        run_hook(root, "PostToolUse", bad_handoff_transcript,
+                 session="bad-handoff", wrapped=True)
+        bad_handoff_key = hashlib.sha256(b"claude:bad-handoff").hexdigest()
+        bad_handoff_path = root / "state" / f"{bad_handoff_key}.json"
+        bad_handoff_state = json.loads(bad_handoff_path.read_text())
+        bad_handoff_state["handoff"] = [{"state": "TAKEOVER_VERIFIED"}]
+        bad_handoff_path.write_text(json.dumps(bad_handoff_state))
+        proc, bad_handoff_stop = run_hook(
+            root, "Stop", bad_handoff_transcript,
+            session="bad-handoff", wrapped=True)
+        why = reason(bad_handoff_stop)
+        check("non-object handoff refuses wrapped low-signal Stop",
+              proc.returncode == 0 and why
+              and why["reason"] == "LIFECYCLE_INVALID"
+              and why["signal"]["window_tier"] == "control_error",
+              (proc.returncode, bad_handoff_stop, proc.stderr))
     finally:
         shutil.rmtree(root)
 
@@ -834,6 +876,52 @@ def dispatcher_cases():
               and active[0]["id"] == "replacement"
               and recovery_terminal["recovery_intent"]["state"] == "COMPLETED",
               recovery_terminal)
+
+        # A verified successor can be active while the predecessor still owes
+        # terminal evidence.  Dispatcher recovery must not turn that owner into
+        # DRAINING/PENDING when the prior handoff would reject both advertised
+        # recovery exits (a next offer and an abort).
+        _, adjacent = run_cli(
+            root, "task-init", "--task-key", "task:adjacent",
+            "--owner", "old", "--surface", "codex",
+            "--evidence-json", codex_evidence("old"),
+            "--expected-version", "-1")
+        _, adjacent_offer = run_cli(
+            root, "handoff-offer-create", "--task-key", "task:adjacent",
+            "--predecessor", "old", "--predecessor-surface", "codex",
+            "--successor", "new", "--successor-surface", "codex",
+            "--evidence-json", codex_evidence("old"), "--generation", "1",
+            "--expected-version", str(adjacent["version"]))
+        _, adjacent_declared = run_cli(
+            root, "successor-declare", "--task-key", "task:adjacent",
+            "--offer-digest", adjacent_offer["offer_digest"],
+            "--successor", "new", "--evidence-json", codex_evidence("new"),
+            "--expected-version", str(adjacent_offer["state"]["version"]))
+        _, adjacent_accepted = run_cli(
+            root, "successor-accept", "--task-key", "task:adjacent",
+            "--offer-digest", adjacent_offer["offer_digest"],
+            "--successor", "new", "--evidence-json", codex_evidence("new"),
+            "--expected-version", str(adjacent_declared["state"]["version"]))
+        adjacent_snap = snapshot(
+            "task:adjacent",
+            adjacent_accepted["state"]["owners"]["new"]["ownership_digest"],
+            "CAPACITY_EXHAUSTED", source="event-adjacent-capacity",
+            capacity="CONTEXT_EXHAUSTED", worker_id="new", generation=1)
+        proc, adjacent_recovery = run_cli(
+            root, "dispatcher-evaluate", "--task-key", "task:adjacent",
+            "--snapshot-json", json.dumps(adjacent_snap), "--apply",
+            "--expected-version", str(adjacent_accepted["state"]["version"]))
+        _, adjacent_after = run_cli(
+            root, "status", "--task-key", "task:adjacent")
+        check("verified current owner is not stranded by adjacent recovery",
+              proc.returncode == 2
+              and adjacent_recovery["reason"] == "LIFECYCLE_INVALID"
+              and adjacent_after["version"] == adjacent_accepted["state"]["version"]
+              and adjacent_after["active_owner"] == "new"
+              and adjacent_after["owners"]["new"]["state"] == "ACTIVE"
+              and adjacent_after["recovery_intent"] is None
+              and adjacent_after["handoff"]["state"] == "TAKEOVER_VERIFIED",
+              (adjacent_recovery, adjacent_after))
     finally:
         shutil.rmtree(root)
 
