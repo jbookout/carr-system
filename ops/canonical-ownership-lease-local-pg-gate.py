@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import io
 import json
 import os
@@ -24,9 +25,12 @@ ACQUIRE_SQL = """select ops.acquire_canonical_ownership_lease(
   %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"""
 RESPONSES: list[object] = []
 SECRET_TOKENS: set[str] = set()
+MINTED_TOKENS: dict[str, int] = {}
+SUBMITTED_WRONG_TOKENS: set[str] = set()
 CATALOG_FINGERPRINT_SQL = r"""
 with table_targets(obj) as (values
   ('ops.work_request'),('ops.engineering_slice_plan'),('ops.job'),
+  ('ops.siep_lane_lock'),
   ('ops.capability_agent_session'),('ops.engineering_execution_envelope'),
   ('ops.engineering_slice_receipt'),('ops.engineering_reviewer_fact'),
   ('public.actor'),('public.lease'),('public.deal_presence_lease')
@@ -96,14 +100,15 @@ def sha(seed: str) -> str:
     return "sha256:" + (seed * 64)[:64]
 
 
-def context(cur, tenant: str, actor: str = "joe", session: str | None = None) -> None:
+def context(cur, tenant: str, actor: str = "joe", session: str | None = None,
+            host: str = "host:a2-disposable-pg") -> None:
     cur.execute("set local lock_timeout='5s'")
     cur.execute("set local deadlock_timeout='100ms'")
     values = {
         "carr.organization_tenant_id": tenant,
         "carr.acting_actor_slug": actor,
         "carr.ownership_session_id": session or f"session:a2:{actor}:{uuid.uuid4().hex}",
-        "carr.execution_host_id": "host:a2-disposable-pg",
+        "carr.execution_host_id": host,
     }
     for key, value in values.items():
         one(cur, "select set_config(%s,%s,false)", (key, value))
@@ -149,7 +154,21 @@ def acquire(
             ttl,
         ),
     )[0]
+    response_index = len(RESPONSES)
     RESPONSES.append(value)
+    if value.get("ok") is True:
+        token = str(value["lease_token"])
+        if token in MINTED_TOKENS:
+            raise RuntimeError("duplicate minted token")
+        MINTED_TOKENS[token] = response_index
+        SECRET_TOKENS.add(token)
+    return value
+
+
+def register_submitted_wrong_token(value: uuid.UUID) -> uuid.UUID:
+    token = str(value)
+    SUBMITTED_WRONG_TOKENS.add(token)
+    SECRET_TOKENS.add(token)
     return value
 
 
@@ -202,7 +221,10 @@ def catalog_fingerprint(cur):
     return one(cur, CATALOG_FINGERPRINT_SQL)[0]
 
 
-def set_plan_dependencies(cur, plan_id, slice_ref: str, dependency_refs: list[str]) -> None:
+def set_plan_dependencies(
+    cur, plan_id, slice_ref: str,
+    dependency_refs: list[str] | dict[str, bool],
+) -> None:
     cur.execute(
         """update ops.engineering_slice_plan p
               set plan=jsonb_set(
@@ -218,6 +240,22 @@ def set_plan_dependencies(cur, plan_id, slice_ref: str, dependency_refs: list[st
     )
     if cur.rowcount != 1:
         raise RuntimeError("canonical dependency drift fixture missed its plan")
+
+
+def set_plan_slices(cur, plan_id, value, *, missing: bool = False) -> None:
+    if missing:
+        cur.execute(
+            "update ops.engineering_slice_plan set plan=plan-'slices' where id=%s",
+            (plan_id,),
+        )
+    else:
+        cur.execute(
+            "update ops.engineering_slice_plan set "
+            "plan=jsonb_set(plan,'{slices}',%s::jsonb,true) where id=%s",
+            (Jsonb(value), plan_id),
+        )
+    if cur.rowcount != 1:
+        raise RuntimeError("canonical plan shape fixture missed its plan")
 
 
 def insert_review(cur, fixture_row, receipt_id) -> None:
@@ -348,8 +386,10 @@ def main() -> int:
         else:
             raise RuntimeError("unregistered refusal code was accepted")
         invalid_paths = (
-            "/absolute", "ops/./file", "ops/../file", "ops//file",
-            "ops\\file", "ops/résumé", "ops/file/",
+            "", "/absolute", " ops/file", "ops/file ", "ops/\x1fcontrol",
+            "ops/./file", "ops/../file", "ops//file", "ops\\file",
+            "ops/résumé", "ops/file/", "ops/*.py", "ops/file?",
+            "ops/[file]",
         )
         for path in invalid_paths:
             if one(cur, "select ops.canonical_ownership_path_valid(%s)", (path,))[0]:
@@ -427,6 +467,87 @@ def main() -> int:
             ]
             resources = [{"resource": "migration:0450"}]
             deps = [{"slice_ref": dependency[5], "required_state": "independently_verified"}]
+            for shape_label, shape_value, shape_missing in (
+                ("scalar plan slices", "invalid", False),
+                ("object plan slices", {"invalid": True}, False),
+                ("null plan slices", None, False),
+                ("missing plan slices", None, True),
+            ):
+                cur.execute("savepoint malformed_plan_acquire")
+                cur.execute("alter table ops.engineering_slice_plan disable trigger user")
+                set_plan_slices(cur, bound[5], shape_value, missing=shape_missing)
+                refusal(acquire(cur, bound, dependencies=deps),
+                        "SLICE_PLAN_BINDING_STALE", shape_label,
+                        causal_object="slice_plan.dependencies",
+                        expected="one typed canonical dependency set",
+                        actual={"reason": "malformed_plan", "value_redacted": True})
+                cur.execute("rollback to savepoint malformed_plan_acquire")
+                cur.execute("release savepoint malformed_plan_acquire")
+            cur.execute("savepoint malformed_dependency_shape_acquire")
+            cur.execute("alter table ops.engineering_slice_plan disable trigger user")
+            set_plan_dependencies(cur, bound[5], bound[7], {"invalid": True})
+            refusal(acquire(cur, bound, dependencies=deps),
+                    "SLICE_PLAN_BINDING_STALE", "non-array dependency refs",
+                    causal_object="slice_plan.dependencies",
+                    expected="one typed canonical dependency set",
+                    actual={"reason": "malformed_dependencies",
+                            "value_redacted": True})
+            cur.execute("rollback to savepoint malformed_dependency_shape_acquire")
+            cur.execute("release savepoint malformed_dependency_shape_acquire")
+            reviewer_id = one(
+                cur, "select id from ops.engineering_reviewer_fact where receipt_id=%s",
+                (_receipt,),
+            )[0]
+            for index, (shape_label, shape_value, shape_missing) in enumerate((
+                ("missing receipt deviations", None, True),
+                ("scalar receipt deviations", "invalid", False),
+                ("object receipt deviations", {"invalid": True}, False),
+                ("null receipt deviations", None, False),
+            )):
+                cur.execute("savepoint malformed_receipt_deviations")
+                cur.execute("alter table ops.engineering_slice_receipt disable trigger user")
+                if shape_missing:
+                    cur.execute("update ops.engineering_slice_receipt "
+                                "set receipt=receipt-'deviations' where id=%s", (_receipt,))
+                else:
+                    cur.execute("update ops.engineering_slice_receipt set "
+                                "receipt=jsonb_set(receipt,'{deviations}',%s::jsonb,true) "
+                                "where id=%s", (Jsonb(shape_value), _receipt))
+                value = acquire(cur, bound, dependencies=deps) if index == 0 else one(
+                    cur, "select ops.canonical_ownership_dependency_state(%s,%s,%s,%s)",
+                    (bound[0], bound[5], dependency[5], "independently_verified"),
+                )[0]
+                refusal(value, "DEPENDENCY_UNSATISFIED", shape_label,
+                        causal_object="dependency", expected="independently_verified",
+                        actual={"slice_ref": dependency[5], "receipt_id": str(_receipt),
+                                "outcome": "claimed_complete"})
+                cur.execute("rollback to savepoint malformed_receipt_deviations")
+                cur.execute("release savepoint malformed_receipt_deviations")
+            for field in ("reviewed_deviation_refs", "resolved_deviation_refs"):
+                for shape_label, shape_value, shape_missing in (
+                    ("missing", None, True), ("scalar", "invalid", False),
+                    ("object", {"invalid": True}, False), ("null", None, False),
+                ):
+                    cur.execute("savepoint malformed_review_deviations")
+                    cur.execute("alter table ops.engineering_reviewer_fact disable trigger user")
+                    if shape_missing:
+                        cur.execute("update ops.engineering_reviewer_fact "
+                                    f"set fact=fact-%s where id=%s", (field, reviewer_id))
+                    else:
+                        cur.execute("update ops.engineering_reviewer_fact set "
+                                    "fact=jsonb_set(fact,%s,%s::jsonb,true) where id=%s",
+                                    ([field], Jsonb(shape_value), reviewer_id))
+                    refusal(one(
+                        cur, "select ops.canonical_ownership_dependency_state(%s,%s,%s,%s)",
+                        (bound[0], bound[5], dependency[5], "independently_verified"),
+                    )[0], "DEPENDENCY_UNSATISFIED", f"{shape_label} {field}",
+                            causal_object="dependency", expected="independently_verified",
+                            actual={"slice_ref": dependency[5],
+                                    "receipt_id": str(_receipt),
+                                    "reviewer_fact_id": str(reviewer_id),
+                                    "review_state": "passed"})
+                    cur.execute("rollback to savepoint malformed_review_deviations")
+                    cur.execute("release savepoint malformed_review_deviations")
             stale_lookup = list(bound)
             stale_lookup[1] += 1
             refusal(acquire(cur, tuple(stale_lookup), ttl=1), "INPUT_INVALID",
@@ -446,20 +567,21 @@ def main() -> int:
                         *alias_paths], resources=invalid_resource, dependencies=deps),
                     "PATH_INVALID", "path precedes case/resource/duplicate",
                     causal_object="path_claim", expected="exact A1a path claim",
-                    actual={"field": "path_claim", "reason": "invalid",
+                    actual={"ordinal": 1, "field": "path_claim", "reason": "invalid",
                             "value_redacted": True})
             refusal(acquire(cur, bound, paths=alias_paths, resources=invalid_resource,
                             dependencies=deps),
                     "PATH_CASE_ALIAS", "case precedes resource/duplicate",
                     causal_object="path_claims", expected="one canonical path case",
-                    actual={"reason": "case_alias", "value_redacted": True})
+                    actual={"left_ordinal": 1, "right_ordinal": 2,
+                            "reason": "case_alias", "value_redacted": True})
             refusal(acquire(cur, bound, paths=[precedence_duplicate,
                                               precedence_duplicate],
                             resources=invalid_resource, dependencies=deps),
                     "RESOURCE_INVALID", "resource precedes duplicate",
                     causal_object="resource_claim",
                     expected="exact ASCII resource identifier",
-                    actual={"field": "resource_claim", "reason": "invalid",
+                    actual={"ordinal": 1, "field": "resource_claim", "reason": "invalid",
                             "value_redacted": True})
             refusal(one(
                 cur,
@@ -467,14 +589,15 @@ def main() -> int:
                 (bound[0], bound[5], "slice:a2:missing", "independently_verified"),
             )[0], "DEPENDENCY_MISSING", "missing canonical dependency evidence",
                 causal_object="dependency",
-                expected="exactly one unsuperseded envelope leaf", actual=0)
+                expected="exactly one unsuperseded envelope leaf",
+                actual={"slice_ref": "slice:a2:missing", "leaf_count": 0})
             refusal(one(
                 cur,
                 "select ops.canonical_ownership_dependency_state(%s,%s,%s,%s)",
                 (bound[0], bound[5], subject[5], "independently_verified"),
             )[0], "DEPENDENCY_UNSATISFIED", "unsatisfied canonical dependency evidence",
                 causal_object="dependency", expected="independently_verified",
-                actual={"receipt_id": None, "outcome": None})
+                actual={"slice_ref": subject[5], "receipt_id": None, "outcome": None})
 
             stale_work = list(bound)
             stale_work[1] += 1
@@ -510,29 +633,35 @@ def main() -> int:
                     "omitted canonical dependency",
                     causal_object="slice_plan.dependencies",
                     expected="exact canonical dependency snapshot",
-                    actual={"reason": "snapshot_mismatch", "value_redacted": True})
+                    actual={"reason": "snapshot_mismatch", "submitted_count": 0,
+                            "canonical_count": 1, "first_mismatch_ordinal": 1,
+                            "value_redacted": True})
             refusal(acquire(cur, bound, dependencies=[*deps, {
                 "slice_ref": "slice:a2:extra", "required_state": "independently_verified"
             }]), "SLICE_PLAN_BINDING_STALE", "extra canonical dependency",
                     causal_object="slice_plan.dependencies",
                     expected="exact canonical dependency snapshot",
-                    actual={"reason": "snapshot_mismatch", "value_redacted": True})
+                    actual={"reason": "snapshot_mismatch", "submitted_count": 2,
+                            "canonical_count": 1, "first_mismatch_ordinal": 1,
+                            "value_redacted": True})
             refusal(acquire(cur, bound, dependencies=[{
                 "slice_ref": dependency[5], "required_state": "completed"
             }]), "SLICE_PLAN_BINDING_STALE", "downgraded canonical dependency",
                     causal_object="slice_plan.dependencies",
                     expected="exact canonical dependency snapshot",
-                    actual={"reason": "snapshot_mismatch", "value_redacted": True})
+                    actual={"reason": "snapshot_mismatch", "submitted_count": 1,
+                            "canonical_count": 1, "first_mismatch_ordinal": 1,
+                            "value_redacted": True})
             refusal(acquire(cur, bound, dependencies=[{
                 "slice_ref": dependency[5]
             }]), "INPUT_INVALID", "malformed canonical dependency",
                     causal_object="dependency", expected="exact dependency object",
-                    actual={"field": "dependency", "reason": "invalid",
+                    actual={"ordinal": 1, "field": "dependency", "reason": "invalid",
                             "value_redacted": True})
             refusal(acquire(cur, bound, dependencies=[deps[0], deps[0]]),
                     "INPUT_INVALID", "duplicate canonical dependency",
                     causal_object="dependencies", expected="unique slice_ref values",
-                    actual="duplicates present")
+                    actual={"duplicate_ordinal": 2})
 
             refusal(acquire(cur, bound, ttl=1), "INPUT_INVALID", "ttl precedence",
                     causal_object="lease.input", expected="bounded exact A2 input",
@@ -543,7 +672,7 @@ def main() -> int:
                 "PATH_INVALID",
                 "repo-relative path",
                 causal_object="path_claim", expected="exact A1a path claim",
-                actual={"field": "path_claim", "reason": "invalid",
+                actual={"ordinal": 1, "field": "path_claim", "reason": "invalid",
                         "value_redacted": True},
             )
             refusal(
@@ -554,7 +683,8 @@ def main() -> int:
                 "PATH_CASE_ALIAS",
                 "case-fold alias",
                 causal_object="path_claims", expected="one canonical path case",
-                actual={"reason": "case_alias", "value_redacted": True},
+                actual={"left_ordinal": 1, "right_ordinal": 2,
+                        "reason": "case_alias", "value_redacted": True},
             )
             refusal(
                 acquire(cur, bound, resources=[{"resource": "résource:bad"}]),
@@ -562,13 +692,14 @@ def main() -> int:
                 "ASCII resource",
                 causal_object="resource_claim",
                 expected="exact ASCII resource identifier",
-                actual={"field": "resource_claim", "reason": "invalid",
+                actual={"ordinal": 1, "field": "resource_claim", "reason": "invalid",
                         "value_redacted": True},
             )
             duplicate = {"path": "ops/duplicate.py", "mode": "file", "operation": "write"}
             refusal(acquire(cur, bound, paths=[duplicate, duplicate]),
                     "DUPLICATE_CLAIM", "duplicate path", causal_object="claims",
-                    expected="unique claims", actual="duplicates present")
+                    expected="unique claims",
+                    actual={"claim_kind": "path", "duplicate_ordinal": 2})
             lease = acquire(
                 cur, bound, paths=path_claims, resources=resources, dependencies=deps
             )
@@ -579,8 +710,7 @@ def main() -> int:
             lease_id = lease["lease_id"]
             lease_token = lease["lease_token"]
             generation = lease["fencing_generation"]
-            wrong_token = uuid.uuid4()
-            SECRET_TOKENS.update({str(lease_token), str(wrong_token)})
+            wrong_token = register_submitted_wrong_token(uuid.uuid4())
             for label, value in (
                 ("malformed path token", acquire(cur, bound, paths=[{
                     "path": f"ops/{lease_token}", "mode": "file", "operation": "write",
@@ -604,7 +734,8 @@ def main() -> int:
                         expected="exact A1a path claim" if "path" in label else
                                  "exact ASCII resource identifier" if "resource" in label else
                                  "exact dependency object",
-                        actual={"field": "path_claim" if "path" in label else
+                        actual={"ordinal": 1,
+                                "field": "path_claim" if "path" in label else
                                           "resource_claim" if "resource" in label else
                                           "dependency",
                                 "reason": "invalid", "value_redacted": True})
@@ -644,7 +775,8 @@ def main() -> int:
                                   "required_state": "independently_verified"}]),
                     "DEPENDENCY_MISSING", "dependency missing precedes collision",
                     causal_object="dependency",
-                    expected="exactly one unsuperseded envelope leaf", actual=0)
+                    expected="exactly one unsuperseded envelope leaf",
+                    actual={"slice_ref": missing_dependency_ref, "leaf_count": 0})
             cur.execute("rollback to savepoint dependency_missing_precedence")
             cur.execute("release savepoint dependency_missing_precedence")
 
@@ -656,7 +788,7 @@ def main() -> int:
                     "DEPENDENCY_UNSATISFIED",
                     "dependency unsatisfied precedes collision",
                     causal_object="dependency", expected="independently_verified",
-                    actual={"receipt_id": str(_receipt),
+                    actual={"slice_ref": dependency[5], "receipt_id": str(_receipt),
                             "reviewer_fact_id": str(one(cur,
                                 "select id from ops.engineering_reviewer_fact where receipt_id=%s",
                                 (_receipt,))[0]),
@@ -673,17 +805,39 @@ def main() -> int:
                 "FOREIGN_LEASE_COLLISION",
                 "tree ancestry collision",
                 causal_object="lease.collision", expected="unclaimed scope",
-                actual={"claim_kind": "path", "reason": "already_claimed",
-                        "value_redacted": True},
+                actual={"conflicting_lease_id": str(lease_id), "claim_kind": "path",
+                        "submitted_ordinal": 1,
+                        "claim_digest": hashlib.sha256(b"ops/ownership").hexdigest(),
+                        "reason": "already_claimed", "value_redacted": True},
             )
             refusal(
                 acquire(cur, bound, resources=resources, dependencies=deps),
                 "FOREIGN_LEASE_COLLISION",
                 "resource collision",
                 causal_object="lease.collision", expected="unclaimed scope",
-                actual={"claim_kind": "resource", "reason": "already_claimed",
-                        "value_redacted": True},
+                actual={"conflicting_lease_id": str(lease_id), "claim_kind": "resource",
+                        "submitted_ordinal": 1,
+                        "claim_digest": hashlib.sha256(b"migration:0450").hexdigest(),
+                        "reason": "already_claimed", "value_redacted": True},
             )
+            refusal(
+                acquire(cur, bound, paths=[{
+                    "path": "ops/ownership-renamed/child.py", "mode": "file",
+                    "operation": "write"}], dependencies=deps),
+                "FOREIGN_LEASE_COLLISION", "rename destination collision",
+                causal_object="lease.collision", expected="unclaimed scope",
+                actual={"conflicting_lease_id": str(lease_id), "claim_kind": "path",
+                        "submitted_ordinal": 1,
+                        "claim_digest": hashlib.sha256(
+                            b"ops/ownership-renamed").hexdigest(),
+                        "reason": "already_claimed", "value_redacted": True},
+            )
+            resource_prefix = acquire(
+                cur, bound, resources=[{"resource": "migration:0450:child"}],
+                dependencies=deps,
+            )
+            if resource_prefix.get("ok") is not True:
+                raise RuntimeError("resource prefix was treated as a wildcard collision")
             holder = one(
                 cur,
                 "select ops.check_canonical_ownership_lease(%s,%s,%s)",
@@ -708,6 +862,17 @@ def main() -> int:
                 actual={"actor_matches": True, "session_matches": False,
                         "host_matches": True},
             )
+            context(cur, tenant, "joe", "session:a2:primary:joe",
+                    "host:a2:changed")
+            refusal(
+                one(cur, "select ops.check_canonical_ownership_lease(%s,%s,%s)",
+                    (lease_id, lease_token, generation))[0],
+                "LEASE_HOLDER_MISMATCH", "changed execution host",
+                causal_object="lease.holder",
+                expected="acquiring actor, session, and host",
+                actual={"actor_matches": True, "session_matches": True,
+                        "host_matches": False},
+            )
             assertions += 4
 
             context(cur, tenant, "joe", "session:a2:primary:joe")
@@ -719,7 +884,7 @@ def main() -> int:
             )
             refusal(
                 one(cur, "select ops.check_canonical_ownership_lease(%s,%s,%s)",
-                    (lease_id, uuid.uuid4(), generation))[0],
+                    (lease_id, register_submitted_wrong_token(uuid.uuid4()), generation))[0],
                 "LEASE_TOKEN_STALE",
                 "stale token",
                 causal_object="lease.token", expected="current lease token",
@@ -749,7 +914,8 @@ def main() -> int:
                 "LEASE_CLAIMS_MISMATCH",
                 "claim subset",
                 causal_object="lease.claims", expected="claimed scope",
-                actual={"reason": "unowned_claim", "value_redacted": True},
+                actual={"claim_kind": "path", "submitted_ordinal": 1,
+                        "reason": "unowned_claim", "value_redacted": True},
             )
             for label, paths, resource_claims in (
                 ("valid path submitted token", [{
@@ -766,7 +932,9 @@ def main() -> int:
                 )[0]
                 refusal(token_claim, "LEASE_CLAIMS_MISMATCH", label,
                         causal_object="lease.claims", expected="claimed scope",
-                        actual={"reason": "unowned_claim", "value_redacted": True})
+                        actual={"claim_kind": "path" if paths else "resource",
+                                "submitted_ordinal": 1, "reason": "unowned_claim",
+                                "value_redacted": True})
                 assert_secret_absent(token_claim, str(wrong_token), label)
             malformed_required = one(
                 cur,
@@ -778,15 +946,77 @@ def main() -> int:
             )[0]
             refusal(malformed_required, "INPUT_INVALID", "required claim token",
                     causal_object="required_claims.path", expected="exact path claim",
-                    actual={"field": "path_claim", "reason": "invalid",
+                    actual={"ordinal": 1, "field": "path_claim", "reason": "invalid",
                             "value_redacted": True})
             assert_secret_absent(malformed_required, str(lease_token),
                                  "required claim token")
+            for label, shape_value, shape_missing, sql, params in (
+                ("check scalar plan", "invalid", False,
+                 "select ops.check_canonical_ownership_lease(%s,%s,%s)",
+                 (lease_id, lease_token, generation)),
+                ("renew object plan", {"invalid": True}, False,
+                 "select ops.renew_canonical_ownership_lease(%s,%s,%s,600)",
+                 (lease_id, lease_token, generation)),
+                ("release null plan", None, False,
+                 "select ops.release_canonical_ownership_lease(%s,%s,%s)",
+                 (lease_id, lease_token, generation)),
+                ("check missing plan", None, True,
+                 "select ops.check_canonical_ownership_lease(%s,%s,%s)",
+                 (lease_id, lease_token, generation)),
+            ):
+                cur.execute("savepoint malformed_plan_boundary")
+                cur.execute("alter table ops.engineering_slice_plan disable trigger user")
+                set_plan_slices(cur, bound[5], shape_value, missing=shape_missing)
+                refusal(one(cur, sql, params)[0], "SLICE_PLAN_BINDING_STALE", label,
+                        causal_object="slice_plan.dependencies",
+                        expected="one typed canonical dependency set",
+                        actual={"reason": "malformed_plan", "value_redacted": True})
+                cur.execute("rollback to savepoint malformed_plan_boundary")
+                cur.execute("release savepoint malformed_plan_boundary")
+            for label, table, field, value, missing, sql in (
+                ("check malformed receipt deviations", "receipt", "deviations",
+                 "invalid", False,
+                 "select ops.check_canonical_ownership_lease(%s,%s,%s)"),
+                ("renew missing reviewed deviations", "review",
+                 "reviewed_deviation_refs", None, True,
+                 "select ops.renew_canonical_ownership_lease(%s,%s,%s,600)"),
+                ("release malformed resolved deviations", "review",
+                 "resolved_deviation_refs", {"invalid": True}, False,
+                 "select ops.release_canonical_ownership_lease(%s,%s,%s)"),
+            ):
+                cur.execute("savepoint malformed_deviation_boundary")
+                if table == "receipt":
+                    cur.execute("alter table ops.engineering_slice_receipt disable trigger user")
+                    cur.execute("update ops.engineering_slice_receipt set "
+                                "receipt=jsonb_set(receipt,%s,%s::jsonb,true) where id=%s",
+                                ([field], Jsonb(value), _receipt))
+                    actual = {"slice_ref": dependency[5],
+                              "receipt_id": str(_receipt),
+                              "outcome": "claimed_complete"}
+                else:
+                    cur.execute("alter table ops.engineering_reviewer_fact disable trigger user")
+                    if missing:
+                        cur.execute("update ops.engineering_reviewer_fact "
+                                    "set fact=fact-%s where id=%s", (field, reviewer_id))
+                    else:
+                        cur.execute("update ops.engineering_reviewer_fact set "
+                                    "fact=jsonb_set(fact,%s,%s::jsonb,true) where id=%s",
+                                    ([field], Jsonb(value), reviewer_id))
+                    actual = {"slice_ref": dependency[5],
+                              "receipt_id": str(_receipt),
+                              "reviewer_fact_id": str(reviewer_id),
+                              "review_state": "passed"}
+                refusal(one(cur, sql, (lease_id, lease_token, generation))[0],
+                        "DEPENDENCY_UNSATISFIED", label,
+                        causal_object="dependency", expected="independently_verified",
+                        actual=actual)
+                cur.execute("rollback to savepoint malformed_deviation_boundary")
+                cur.execute("release savepoint malformed_deviation_boundary")
             cur.execute("savepoint post_acquire_dependency_drift")
             cur.execute("alter table ops.engineering_slice_plan disable trigger user")
             drift_ref = "slice:a2:post-acquire-drift"
             set_plan_dependencies(cur, bound[5], bound[7], [dependency[5], drift_ref])
-            for label, sql, params in (
+            drift_cases: tuple[tuple[str, str, tuple[object, ...]], ...] = (
                 ("check canonical drift precedes claims",
                  "select ops.check_canonical_ownership_lease(%s,%s,%s,%s,%s)",
                  (lease_id, lease_token, generation,
@@ -798,8 +1028,10 @@ def main() -> int:
                 ("release canonical drift",
                  "select ops.release_canonical_ownership_lease(%s,%s,%s)",
                  (lease_id, lease_token, generation)),
-            ):
-                refusal(one(cur, sql, params)[0], "SLICE_PLAN_BINDING_STALE", label,
+            )
+            for label, sql, drift_params in drift_cases:
+                refusal(one(cur, sql, drift_params)[0],
+                        "SLICE_PLAN_BINDING_STALE", label,
                         causal_object="slice_plan.dependencies",
                         expected="persisted dependencies match canonical plan",
                         actual={"reason": "canonical_drift", "value_redacted": True})
@@ -1023,7 +1255,11 @@ def main() -> int:
         race_dep, race_subject, *_ = seed_lineage(setup, concurrency_tenant, "atomic")
         assert race_subject is not None
         race_bound = binding(setup.cursor(), race_subject[1])
-    race_claim = [{"path": "ops/atomic-owner.py", "mode": "file", "operation": "write"}]
+    race_claim = [
+        {"path": "ops/atomic-owner-a.py", "mode": "file", "operation": "write"},
+        {"path": "ops/atomic-owner-b.py", "mode": "file", "operation": "rename_destination"},
+    ]
+    race_resources = [{"resource": "ownership:atomic"}]
 
     def acquire_peer(actor):
         with psycopg.connect(dsn) as peer, peer.cursor() as cur:
@@ -1032,6 +1268,7 @@ def main() -> int:
                 cur,
                 race_bound,
                 paths=race_claim,
+                resources=race_resources,
                 dependencies=[{"slice_ref": race_dep[5],
                                "required_state": "independently_verified"}],
             )
@@ -1049,6 +1286,30 @@ def main() -> int:
             "atomic acquisition had wrong outcomes: "
             + ",".join(sorted(safe_outcome(value) for value in atomic.values()))
         )
+    winner = next(value for value in atomic.values() if value.get("ok") is True)
+    loser = next(value for value in atomic.values() if value.get("ok") is False)
+    refusal(
+        loser, "FOREIGN_LEASE_COLLISION", "atomic multi-claim loser",
+        causal_object="lease.collision", expected="unclaimed scope",
+        actual={"conflicting_lease_id": str(winner["lease_id"]),
+                "claim_kind": "path", "submitted_ordinal": 1,
+                "claim_digest": hashlib.sha256(b"ops/atomic-owner-a.py").hexdigest(),
+                "reason": "already_claimed", "value_redacted": True},
+    )
+    with psycopg.connect(dsn) as proof, proof.cursor() as cur:
+        atomic_counts = one(cur,
+            """select count(*),
+                      (select count(*) from ops.canonical_ownership_claim c
+                        join ops.canonical_ownership_lease l on l.id=c.lease_id
+                       where l.organization_tenant_id=%s),
+                      (select count(*) from ops.canonical_ownership_dependency d
+                        join ops.canonical_ownership_lease l on l.id=d.lease_id
+                       where l.organization_tenant_id=%s)
+                 from ops.canonical_ownership_lease
+                where organization_tenant_id=%s""",
+            (concurrency_tenant, concurrency_tenant, concurrency_tenant))
+        if atomic_counts != (1, 3, 1):
+            raise RuntimeError("atomic multi-claim loser left partial rows")
     assertions += 1
 
     # Real writers and A2 take the same session -> actor -> lineage ordering.
@@ -1457,6 +1718,8 @@ def main() -> int:
                                          host_ref,E'\n'),'')
                  from ops.canonical_ownership_lease_event""",
         )[0]
+        if set(tokens) != set(MINTED_TOKENS):
+            raise RuntimeError("minted token registry diverged from private lease rows")
         if any(token in evidence for token in tokens):
             raise RuntimeError("raw lease token leaked into lifecycle evidence")
         if one(
@@ -1493,10 +1756,17 @@ def main() -> int:
         assertions += 1
 
     response_evidence = json.dumps(RESPONSES, default=str, sort_keys=True)
-    if response_evidence.count(str(lease_token)) != 1:
-        raise RuntimeError("live token did not occur exactly once in allowed acquire output")
-    if str(wrong_token) in response_evidence:
-        raise RuntimeError("wrong submitted token escaped into a response")
+    for token, response_index in MINTED_TOKENS.items():
+        own_response = json.dumps(RESPONSES[response_index], default=str, sort_keys=True)
+        other_responses = json.dumps(
+            [value for index, value in enumerate(RESPONSES) if index != response_index],
+            default=str, sort_keys=True,
+        )
+        if own_response.count(token) != 1 or token in other_responses \
+           or response_evidence.count(token) != 1:
+            raise RuntimeError("minted token escaped its one acquire success response")
+    if any(token in response_evidence for token in SUBMITTED_WRONG_TOKENS):
+        raise RuntimeError("submitted wrong token escaped into a response")
     print(f"canonical ownership lease local PG gate — {assertions} assertion groups passed")
     return 0
 

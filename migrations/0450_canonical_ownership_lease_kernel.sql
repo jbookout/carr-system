@@ -264,7 +264,8 @@ create or replace function ops.canonical_ownership_currentness(
 ) returns jsonb language plpgsql volatile security definer set search_path=pg_catalog,ops,public
 as $$
 declare work_row ops.work_request%rowtype; plan_row ops.engineering_slice_plan%rowtype;
-        source jsonb; tenant text:=current_setting('carr.organization_tenant_id',true);
+        source jsonb; canonical_deps jsonb;
+        tenant text:=current_setting('carr.organization_tenant_id',true);
 begin
   select * into work_row from ops.work_request where id=p_work_request_id;
   if not found or (work_row.organization_tenant_id is not null
@@ -292,12 +293,14 @@ begin
      or plan_row.accepted_plan_id is distinct from p_accepted_plan_id
      or plan_row.work_request_version is distinct from p_work_request_version
      or plan_row.accepted_plan_hash is distinct from p_accepted_plan_digest
-     or plan_row.plan_digest is distinct from p_slice_plan_digest
-     or not exists (select 1 from jsonb_array_elements(coalesce(plan_row.plan->'slices','[]'::jsonb)) s
-                     where s->>'slice_ref'=p_slice_ref) then
+     or plan_row.plan_digest is distinct from p_slice_plan_digest then
     return ops.canonical_ownership_refusal('SLICE_PLAN_BINDING_STALE','slice_plan.binding',
       '"submitted binding matches canonical slice plan"'::jsonb,
       jsonb_build_object('reason','binding_stale','value_redacted',true));
+  end if;
+  canonical_deps:=ops.canonical_ownership_plan_dependencies(p_slice_plan_id,p_slice_ref);
+  if not coalesce((canonical_deps->>'ok')::boolean,false) then
+    return canonical_deps;
   end if;
   return jsonb_build_object('ok',true);
 end $$;
@@ -354,7 +357,8 @@ begin
                       where successor.supersedes_envelope_id=e.id);
   if leaf_count<>1 then
     return ops.canonical_ownership_refusal('DEPENDENCY_MISSING','dependency',
-      '"exactly one unsuperseded envelope leaf"'::jsonb,to_jsonb(leaf_count));
+      '"exactly one unsuperseded envelope leaf"'::jsonb,
+      jsonb_build_object('slice_ref',p_slice_ref,'leaf_count',leaf_count));
   end if;
   select e.* into leaf from ops.engineering_execution_envelope e
    where e.work_request_id=p_work_request_id and e.slice_plan_id=p_slice_plan_id and e.slice_ref=p_slice_ref
@@ -368,11 +372,35 @@ begin
      or receipt.receipt->>'slice_ref' is distinct from p_slice_ref
      or receipt.receipt->>'envelope_digest' is distinct from leaf.envelope_digest
      or receipt.receipt->>'plan_digest' is distinct from (select plan_digest from ops.engineering_slice_plan where id=p_slice_plan_id)
+     or jsonb_typeof(receipt.receipt->'deviations') is distinct from 'array'
+     or exists (
+       select 1 from jsonb_array_elements(case
+         when jsonb_typeof(receipt.receipt->'deviations')='array'
+         then receipt.receipt->'deviations' else '[]'::jsonb end) deviation
+        where not coalesce(ops.engineering_receipt_exact_object(deviation,array[
+                'category','deviation_ref','evidence_refs','impact','out_of_scope_component_refs',
+                'out_of_scope_resource_refs','plan_revision_required','reason','review_state'
+              ]),false)
+           or not coalesce((deviation->>'deviation_ref') ~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$',false)
+           or jsonb_typeof(deviation->'plan_revision_required') is distinct from 'boolean'
+           or not coalesce(ops.engineering_receipt_evidence_array(deviation->'evidence_refs'),false)
+           or not coalesce(ops.engineering_receipt_identifier_array(deviation->'out_of_scope_resource_refs'),false)
+           or not coalesce(ops.engineering_receipt_identifier_array(deviation->'out_of_scope_component_refs'),false)
+           or deviation->>'review_state' is distinct from 'resolved'
+           or deviation->'plan_revision_required' is distinct from 'false'::jsonb
+     )
+     or exists (
+       select 1 from jsonb_array_elements(case
+         when jsonb_typeof(receipt.receipt->'deviations')='array'
+         then receipt.receipt->'deviations' else '[]'::jsonb end) deviation
+       group by deviation->>'deviation_ref' having count(*)>1
+     )
      or jsonb_typeof(receipt.receipt->'artifact_refs') is distinct from 'array'
      or not coalesce(case when jsonb_typeof(receipt.receipt->'artifact_refs')='array'
                           then jsonb_array_length(receipt.receipt->'artifact_refs')>0 else false end,false) then
     return ops.canonical_ownership_refusal('DEPENDENCY_UNSATISFIED','dependency',
-      to_jsonb(p_required_state),jsonb_build_object('receipt_id',receipt.id,'outcome',receipt.outcome));
+      to_jsonb(p_required_state),jsonb_build_object(
+        'slice_ref',p_slice_ref,'receipt_id',receipt.id,'outcome',receipt.outcome));
   end if;
   if p_required_state='completed' then
     return jsonb_build_object('ok',true,'envelope_id',leaf.id,'receipt_id',receipt.id,'reviewer_fact_id',null);
@@ -382,22 +410,25 @@ begin
   select coalesce(a.active,false) into reviewer_active from public.actor a where a.id=review.reviewer_actor_id;
   executor_session:=receipt.receipt#>>'{attribution,session_ref}';
   select coalesce(array_agg(d->>'deviation_ref' order by d->>'deviation_ref'),'{}'::text[])
-    into deviation_refs from jsonb_array_elements(case when jsonb_typeof(receipt.receipt->'deviations')='array'
-      then receipt.receipt->'deviations' else '[]'::jsonb end) d;
+    into deviation_refs from jsonb_array_elements(receipt.receipt->'deviations') d;
   if review.id is null or review.state is distinct from 'passed' or reviewer_active is not true
      or review.reviewer_actor_id=receipt.executor_actor_id
      or review.fact->>'state' is distinct from 'passed' or review.fact->'is_independent' is distinct from 'true'::jsonb
      or review.fact->>'attempt_id' is distinct from receipt.attempt_id or review.fact->>'slice_ref' is distinct from p_slice_ref
      or review.reviewer_session_ref is distinct from review.fact->>'session_ref'
      or review.reviewer_session_ref=executor_session
-     or coalesce((select array_agg(v#>>'{}' order by v#>>'{}') from jsonb_array_elements(
-          case when jsonb_typeof(review.fact->'reviewed_deviation_refs')='array'
-               then review.fact->'reviewed_deviation_refs' else '[]'::jsonb end) v),'{}'::text[]) is distinct from deviation_refs
-     or coalesce((select array_agg(v#>>'{}' order by v#>>'{}') from jsonb_array_elements(
-          case when jsonb_typeof(review.fact->'resolved_deviation_refs')='array'
-               then review.fact->'resolved_deviation_refs' else '[]'::jsonb end) v),'{}'::text[]) is distinct from deviation_refs then
+     or not coalesce(ops.engineering_receipt_identifier_array(
+          review.fact->'reviewed_deviation_refs'),false)
+     or not coalesce(ops.engineering_receipt_identifier_array(
+          review.fact->'resolved_deviation_refs'),false)
+     or not coalesce(ops.engineering_receipt_identifier_sets_equal(
+          review.fact->'reviewed_deviation_refs',to_jsonb(deviation_refs)),false)
+     or not coalesce(ops.engineering_receipt_identifier_sets_equal(
+          review.fact->'resolved_deviation_refs',to_jsonb(deviation_refs)),false) then
     return ops.canonical_ownership_refusal('DEPENDENCY_UNSATISFIED','dependency',
-      '"independently_verified"'::jsonb,jsonb_build_object('receipt_id',receipt.id,'reviewer_fact_id',review.id,'review_state',review.state));
+      '"independently_verified"'::jsonb,jsonb_build_object(
+        'slice_ref',p_slice_ref,'receipt_id',receipt.id,
+        'reviewer_fact_id',review.id,'review_state',review.state));
   end if;
   return jsonb_build_object('ok',true,'envelope_id',leaf.id,'receipt_id',receipt.id,'reviewer_fact_id',review.id);
 end $$;
@@ -414,6 +445,8 @@ declare context jsonb:=ops.canonical_ownership_context(); claim jsonb; other jso
         submitted_deps jsonb; collision record; replaced record;
         lease_row ops.canonical_ownership_lease%rowtype; now_at timestamptz;
         refs text[]; subject_id uuid; subject_count integer;
+        claim_ordinal bigint; other_ordinal bigint; dep_ordinal bigint;
+        duplicate_kind text; mismatch_ordinal integer;
 begin
   if not coalesce((context->>'ok')::boolean,false) then return context; end if;
   if p_work_request_id is null or p_work_request_version is null or p_work_request_version<1
@@ -430,47 +463,82 @@ begin
      or p_contract_digest is null or p_contract_digest !~ '^sha256:[0-9a-f]{64}$' then
     return ops.canonical_ownership_refusal('INPUT_INVALID','lease.input','"bounded exact A2 input"'::jsonb,'"invalid"'::jsonb);
   end if;
-  for claim in select value from jsonb_array_elements(p_path_claims) loop
+  for claim,claim_ordinal in
+    select value,ordinality from jsonb_array_elements(p_path_claims) with ordinality
+  loop
     if not coalesce(ops.engineering_receipt_exact_object(claim,array['path','mode','operation']),false)
        or claim->>'mode' not in ('file','tree') or claim->>'operation' not in ('write','rename_source','rename_destination')
        or not coalesce(ops.canonical_ownership_path_valid(claim->>'path'),false) then
       return ops.canonical_ownership_refusal('PATH_INVALID','path_claim',
         '"exact A1a path claim"'::jsonb,
-        jsonb_build_object('field','path_claim','reason','invalid','value_redacted',true));
+        jsonb_build_object('ordinal',claim_ordinal,'field','path_claim',
+          'reason','invalid','value_redacted',true));
     end if;
   end loop;
-  for claim in select value from jsonb_array_elements(p_path_claims) loop
-    for other in select value from jsonb_array_elements(p_path_claims) loop
-      if claim::text<other::text and ops.canonical_ownership_path_case_alias(claim->>'path',other->>'path') then
+  for claim,claim_ordinal in
+    select value,ordinality from jsonb_array_elements(p_path_claims) with ordinality
+  loop
+    for other,other_ordinal in
+      select value,ordinality from jsonb_array_elements(p_path_claims) with ordinality
+    loop
+      if claim_ordinal<other_ordinal
+         and ops.canonical_ownership_path_case_alias(claim->>'path',other->>'path') then
         return ops.canonical_ownership_refusal('PATH_CASE_ALIAS','path_claims',
           '"one canonical path case"'::jsonb,
-          jsonb_build_object('reason','case_alias','value_redacted',true));
+          jsonb_build_object('left_ordinal',claim_ordinal,
+            'right_ordinal',other_ordinal,'reason','case_alias','value_redacted',true));
       end if;
     end loop;
   end loop;
-  for claim in select value from jsonb_array_elements(p_resource_claims) loop
+  for claim,claim_ordinal in
+    select value,ordinality from jsonb_array_elements(p_resource_claims) with ordinality
+  loop
     if not coalesce(ops.engineering_receipt_exact_object(claim,array['resource']),false)
        or not coalesce(ops.canonical_ownership_resource_valid(claim->>'resource'),false) then
       return ops.canonical_ownership_refusal('RESOURCE_INVALID','resource_claim',
         '"exact ASCII resource identifier"'::jsonb,
-        jsonb_build_object('field','resource_claim','reason','invalid','value_redacted',true));
+        jsonb_build_object('ordinal',claim_ordinal,'field','resource_claim',
+          'reason','invalid','value_redacted',true));
     end if;
   end loop;
-  if (select count(*) from jsonb_array_elements(p_path_claims))<>(select count(distinct value) from jsonb_array_elements(p_path_claims))
-     or (select count(*) from jsonb_array_elements(p_resource_claims))<>(select count(distinct value) from jsonb_array_elements(p_resource_claims)) then
-    return ops.canonical_ownership_refusal('DUPLICATE_CLAIM','claims','"unique claims"'::jsonb,'"duplicates present"'::jsonb);
+  select min(second.ordinality) into claim_ordinal
+    from jsonb_array_elements(p_path_claims) with ordinality first(value,ordinality)
+    join jsonb_array_elements(p_path_claims) with ordinality second(value,ordinality)
+      on first.value=second.value and first.ordinality<second.ordinality;
+  duplicate_kind:='path';
+  if claim_ordinal is null then
+    select min(second.ordinality) into claim_ordinal
+      from jsonb_array_elements(p_resource_claims) with ordinality first(value,ordinality)
+      join jsonb_array_elements(p_resource_claims) with ordinality second(value,ordinality)
+        on first.value=second.value and first.ordinality<second.ordinality;
+    duplicate_kind:='resource';
   end if;
-  for dep in select value from jsonb_array_elements(p_dependencies) loop
+  if claim_ordinal is not null then
+    return ops.canonical_ownership_refusal('DUPLICATE_CLAIM','claims',
+      '"unique claims"'::jsonb,jsonb_build_object(
+        'claim_kind',duplicate_kind,'duplicate_ordinal',claim_ordinal));
+  end if;
+  for dep,dep_ordinal in
+    select value,ordinality from jsonb_array_elements(p_dependencies) with ordinality
+  loop
     if not coalesce(ops.engineering_receipt_exact_object(dep,array['slice_ref','required_state']),false)
        or dep->>'required_state' not in ('completed','independently_verified')
        or (dep->>'slice_ref') !~ '^[A-Za-z][A-Za-z0-9._:-]{2,127}$' then
       return ops.canonical_ownership_refusal('INPUT_INVALID','dependency',
         '"exact dependency object"'::jsonb,
-        jsonb_build_object('field','dependency','reason','invalid','value_redacted',true));
+        jsonb_build_object('ordinal',dep_ordinal,'field','dependency',
+          'reason','invalid','value_redacted',true));
     end if;
   end loop;
-  if (select count(*) from jsonb_array_elements(p_dependencies))<>(select count(distinct value->>'slice_ref') from jsonb_array_elements(p_dependencies)) then
-    return ops.canonical_ownership_refusal('INPUT_INVALID','dependencies','"unique slice_ref values"'::jsonb,'"duplicates present"'::jsonb);
+  select min(second.ordinality) into dep_ordinal
+    from jsonb_array_elements(p_dependencies) with ordinality first(value,ordinality)
+    join jsonb_array_elements(p_dependencies) with ordinality second(value,ordinality)
+      on first.value->>'slice_ref'=second.value->>'slice_ref'
+     and first.ordinality<second.ordinality;
+  if dep_ordinal is not null then
+    return ops.canonical_ownership_refusal('INPUT_INVALID','dependencies',
+      '"unique slice_ref values"'::jsonb,
+      jsonb_build_object('duplicate_ordinal',dep_ordinal));
   end if;
 
   perform pg_advisory_xact_lock(hashtextextended('canonical-ownership:'||(context->>'tenant'),0));
@@ -491,9 +559,17 @@ begin
   select coalesce(jsonb_agg(value order by value->>'slice_ref'),'[]'::jsonb)
     into submitted_deps from jsonb_array_elements(p_dependencies);
   if submitted_deps is distinct from canonical_deps->'dependencies' then
+    select min(ordinal) into mismatch_ordinal
+      from generate_series(1,greatest(jsonb_array_length(submitted_deps),
+           jsonb_array_length(canonical_deps->'dependencies'))) ordinal
+     where submitted_deps->(ordinal-1)
+           is distinct from canonical_deps->'dependencies'->(ordinal-1);
     return ops.canonical_ownership_refusal('SLICE_PLAN_BINDING_STALE','slice_plan.dependencies',
       '"exact canonical dependency snapshot"'::jsonb,
-      jsonb_build_object('reason','snapshot_mismatch','value_redacted',true));
+      jsonb_build_object('reason','snapshot_mismatch',
+        'submitted_count',jsonb_array_length(submitted_deps),
+        'canonical_count',jsonb_array_length(canonical_deps->'dependencies'),
+        'first_mismatch_ordinal',mismatch_ordinal,'value_redacted',true));
   end if;
   select count(*),(array_agg(id order by id))[1] into subject_count,subject_id
     from ops.engineering_execution_envelope e
@@ -511,18 +587,31 @@ begin
     if not coalesce((dep_state->>'ok')::boolean,false) then return dep_state; end if;
   end loop;
 
-  select l.id lease_id,c.claim_kind,c.claim_value,c.claim_mode,c.operation into collision
-    from ops.canonical_ownership_lease l join ops.canonical_ownership_claim c on c.lease_id=l.id
+  select l.id lease_id,c.claim_kind,c.claim_value,c.claim_mode,c.operation,
+         submitted.submitted_ordinal,
+         encode(digest(c.claim_value,'sha256'),'hex') claim_digest into collision
+    from ops.canonical_ownership_lease l
+    join ops.canonical_ownership_claim c on c.lease_id=l.id
+    join lateral (
+      select r.ordinality submitted_ordinal
+        from jsonb_array_elements(p_resource_claims) with ordinality r(value,ordinality)
+       where c.claim_kind='resource' and r.value->>'resource'=c.claim_value
+      union all
+      select p.ordinality submitted_ordinal
+        from jsonb_array_elements(p_path_claims) with ordinality p(value,ordinality)
+       where c.claim_kind='path' and ops.canonical_ownership_paths_overlap(
+         c.claim_value,c.claim_mode,p.value->>'path',p.value->>'mode')
+    ) submitted on true
    where l.organization_tenant_id=context->>'tenant' and l.state='active' and l.expires_at>now_at
-     and ((c.claim_kind='resource' and exists(select 1 from jsonb_array_elements(p_resource_claims) r where r->>'resource'=c.claim_value))
-       or (c.claim_kind='path' and exists(select 1 from jsonb_array_elements(p_path_claims) p
-             where ops.canonical_ownership_paths_overlap(c.claim_value,c.claim_mode,p->>'path',p->>'mode'))))
-   order by l.id,c.claim_kind,c.claim_value limit 1;
+   order by l.id,c.claim_kind,c.claim_value,submitted.submitted_ordinal limit 1;
   if found then
     return ops.canonical_ownership_refusal('FOREIGN_LEASE_COLLISION','lease.collision',
       '"unclaimed scope"'::jsonb,
-      jsonb_build_object('claim_kind',collision.claim_kind,'reason','already_claimed',
-        'value_redacted',true));
+      jsonb_build_object('conflicting_lease_id',collision.lease_id,
+        'claim_kind',collision.claim_kind,
+        'submitted_ordinal',collision.submitted_ordinal,
+        'claim_digest',collision.claim_digest,
+        'reason','already_claimed','value_redacted',true));
   end if;
 
   insert into ops.canonical_ownership_lease(
@@ -676,45 +765,61 @@ create or replace function ops.check_canonical_ownership_lease(
   p_path_claims jsonb default '[]'::jsonb,p_resource_claims jsonb default '[]'::jsonb
 ) returns jsonb language plpgsql volatile security definer set search_path=pg_catalog,ops,public
 as $a2_check$
-declare context jsonb:=ops.canonical_ownership_context(); live jsonb; claim jsonb; mismatch jsonb;
+declare context jsonb:=ops.canonical_ownership_context(); live jsonb; claim jsonb;
+        claim_ordinal bigint; mismatch_kind text; mismatch_ordinal bigint;
 begin
   if not coalesce((context->>'ok')::boolean,false) then return context; end if;
   if jsonb_typeof(p_path_claims) is distinct from 'array'
      or jsonb_typeof(p_resource_claims) is distinct from 'array' then
     return ops.canonical_ownership_refusal('INPUT_INVALID','required_claims','"arrays"'::jsonb,'"invalid"'::jsonb);
   end if;
-  for claim in select value from jsonb_array_elements(p_path_claims) loop
+  for claim,claim_ordinal in
+    select value,ordinality from jsonb_array_elements(p_path_claims) with ordinality
+  loop
     if not coalesce(ops.engineering_receipt_exact_object(claim,array['path','mode','operation']),false)
        or claim->>'mode' not in ('file','tree') or claim->>'operation' not in ('write','rename_source','rename_destination')
        or not coalesce(ops.canonical_ownership_path_valid(claim->>'path'),false) then
       return ops.canonical_ownership_refusal('INPUT_INVALID','required_claims.path',
         '"exact path claim"'::jsonb,
-        jsonb_build_object('field','path_claim','reason','invalid','value_redacted',true));
+        jsonb_build_object('ordinal',claim_ordinal,'field','path_claim',
+          'reason','invalid','value_redacted',true));
     end if;
   end loop;
-  for claim in select value from jsonb_array_elements(p_resource_claims) loop
+  for claim,claim_ordinal in
+    select value,ordinality from jsonb_array_elements(p_resource_claims) with ordinality
+  loop
     if not coalesce(ops.engineering_receipt_exact_object(claim,array['resource']),false)
        or not coalesce(ops.canonical_ownership_resource_valid(claim->>'resource'),false) then
       return ops.canonical_ownership_refusal('INPUT_INVALID','required_claims.resource',
         '"exact resource claim"'::jsonb,
-        jsonb_build_object('field','resource_claim','reason','invalid','value_redacted',true));
+        jsonb_build_object('ordinal',claim_ordinal,'field','resource_claim',
+          'reason','invalid','value_redacted',true));
     end if;
   end loop;
   live:=ops.canonical_ownership_validate_live(p_lease_id,p_lease_token,p_fencing_generation,true);
   if not coalesce((live->>'ok')::boolean,false) then return live; end if;
-  for claim in select value from jsonb_array_elements(p_path_claims) loop
+  for claim,claim_ordinal in
+    select value,ordinality from jsonb_array_elements(p_path_claims) with ordinality
+  loop
     if not exists(select 1 from ops.canonical_ownership_claim c where c.lease_id=p_lease_id and c.claim_kind='path'
-      and c.claim_value=claim->>'path' and c.claim_mode=claim->>'mode' and c.operation=claim->>'operation') then mismatch:=claim; exit; end if;
+      and c.claim_value=claim->>'path' and c.claim_mode=claim->>'mode' and c.operation=claim->>'operation') then
+      mismatch_kind:='path'; mismatch_ordinal:=claim_ordinal; exit;
+    end if;
   end loop;
-  if mismatch is null then
-    for claim in select value from jsonb_array_elements(p_resource_claims) loop
+  if mismatch_ordinal is null then
+    for claim,claim_ordinal in
+      select value,ordinality from jsonb_array_elements(p_resource_claims) with ordinality
+    loop
       if not exists(select 1 from ops.canonical_ownership_claim c where c.lease_id=p_lease_id and c.claim_kind='resource'
-        and c.claim_value=claim->>'resource') then mismatch:=claim; exit; end if;
+        and c.claim_value=claim->>'resource') then
+        mismatch_kind:='resource'; mismatch_ordinal:=claim_ordinal; exit;
+      end if;
     end loop;
   end if;
-  if mismatch is not null then return ops.canonical_ownership_refusal(
+  if mismatch_ordinal is not null then return ops.canonical_ownership_refusal(
     'LEASE_CLAIMS_MISMATCH','lease.claims','"claimed scope"'::jsonb,
-    jsonb_build_object('reason','unowned_claim','value_redacted',true)); end if;
+    jsonb_build_object('claim_kind',mismatch_kind,'submitted_ordinal',mismatch_ordinal,
+      'reason','unowned_claim','value_redacted',true)); end if;
   return live;
 end $a2_check$;
 
