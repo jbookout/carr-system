@@ -1590,7 +1590,8 @@ export function renderSIEP18ForwardRegistrySql(rows = fullInventory(),
     "  grant_state:=case when registry.registry_version is not null and\n    (grant_snapshot->>'grant_digest')=ops.scac_reference_monitor_sha256(jsonb_build_array(\n      jsonb_build_object('relation_digest',relation_digest),\n      jsonb_build_object('column_digest',column_digest)))\n    then 'current' else 'measured_pending_v9_binding' end;\n  -- The v9 successor replaces the temporary combined-digest comparison above\n  -- with its exact catalog grant digest after 0384 is installed.\n",
     `  grant_state:=case when registry.registry_version='${REGISTRY_V9_VERSION}' and\n    (grant_snapshot->>'entry_count')::integer=${dbCatalogBaseline.runtime_dml_grants.count} and\n    grant_snapshot->>'grant_digest'='${dbCatalogBaseline.runtime_dml_grants.digest}'\n    then 'current' else 'drifted_or_unbound' end;\n`,
     "SIEP-18 exact runtime grant binding");
-  return `${predecessorCatalogPreflight}${sql}\n-- Exact post-0384 grant binding; generated from disposable-DB readback.\n${monitorState}`;
+  return `${predecessorCatalogPreflight}${sql}\n-- Exact post-0384 grant binding; generated from disposable-DB readback.\n${monitorState}`
+    .replace(/\n+$/, "\n");
 }
 
 function renderMigration(rows = fullInventory()) {
