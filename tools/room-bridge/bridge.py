@@ -68,6 +68,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import auth_control  # noqa: E402
+import claude_desktop_wire  # noqa: E402
 import desks  # noqa: E402
 import dispatch  # noqa: E402
 import execution_contract  # noqa: E402
@@ -227,6 +228,14 @@ def bind_room_writer(writer, room: str):
     return write
 
 
+def conversational_desk_seats(entries: dict[str, dict]) -> dict[str, str]:
+    """Room fan-out seats, excluding explicit queue-only transports."""
+    return {
+        name: entry["room_seat"] for name, entry in entries.items()
+        if entry.get("room_seat") and entry.get("kind") != "claude-desktop"
+    }
+
+
 def _elapsed_seconds(iso_ts: str | None, *, now: str | None = None) -> float:
     if iso_ts is None:
         return 0.0
@@ -282,7 +291,8 @@ def probe_live(entry: dict) -> bool:
     kind = entry.get("kind")
     if kind in ("claude-session", "codex-live"):
         return desks.is_live(entry.get("socket", ""))
-    # codex-session is durable rather than live (dispatch.py's own framing) —
+    # claude-desktop and codex-session are durable rather than live
+    # (dispatch.py's own framing) —
     # there is no process to probe between dispatches, so "live" here means
     # "usable", which delivery itself is what actually proves each cycle.
     return True
@@ -291,11 +301,63 @@ def probe_live(entry: dict) -> bool:
 def handle_pending(name: str, seat: str, state: dict, *, add_room_turn,
                     log_path: Path, pending_timeout_s: float,
                     scan=scan_for_result, now: str | None = None,
-                    queue_executor: queue_dispatch.QueueDeskExecutor | None = None) -> dict | None:
+                    queue_executor: queue_dispatch.QueueDeskExecutor | None = None,
+                    inspect_background=claude_desktop_wire.inspect_session,
+                    read_background_result=claude_desktop_wire.read_final_text,
+                    handoff_background=claude_desktop_wire.handoff_to_desktop) -> dict | None:
     pending = state_mod.get_pending(state, name)
     if pending is None:
         return None
-    result_text = scan(log_path, pending["log_offset"])
+    result_text = None
+    if pending.get("transport") == "claude-desktop":
+        session_id = pending.get("session_id")
+        if not isinstance(session_id, str):
+            observed = {"state": "failed", "found": False}
+        else:
+            try:
+                observed = inspect_background(session_id)
+            except claude_desktop_wire.ClaudeDesktopError:
+                observed = {"state": "unknown", "found": False}
+        observed_state = str(observed.get("state") or "unknown").lower()
+        if observed_state in claude_desktop_wire.COMPLETED_STATES:
+            result_text = read_background_result(session_id)
+            if result_text is None:
+                return {"desk": name, "outcome": "desktop_result_not_ready",
+                        "session_id": session_id}
+            try:
+                handoff_background(session_id)
+            except claude_desktop_wire.ClaudeDesktopError as exc:
+                add_room_turn(
+                    body=json.dumps({"claude_desktop_handoff": {
+                        "session_id": session_id, "status": "failed", "code": exc.code,
+                    }}, separators=(",", ":")),
+                    seat="hermes", kind="receipt", msg_id=str(uuid.uuid4()),
+                )
+                if pending.get("origin_kind") == "queue" and queue_executor is not None:
+                    terminal = queue_executor.fail_pending(
+                        pending, "provider_unavailable", now=now)
+                    state_mod.clear_pending(state, name)
+                    return {"desk": name, "session_id": session_id, **terminal}
+                state_mod.clear_pending(state, name)
+                return {"desk": name, "outcome": "desktop_handoff_failed",
+                        "session_id": session_id}
+            add_room_turn(
+                body=json.dumps({"claude_desktop_handoff": {
+                    "session_id": session_id, "status": "opened",
+                }}, separators=(",", ":")),
+                seat="hermes", kind="receipt", msg_id=str(uuid.uuid4()),
+            )
+        elif observed_state in (claude_desktop_wire.FAILED_STATES
+                                | claude_desktop_wire.NEEDS_INPUT_STATES):
+            if pending.get("origin_kind") == "queue" and queue_executor is not None:
+                terminal = queue_executor.fail_pending(pending, "provider_unavailable", now=now)
+                state_mod.clear_pending(state, name)
+                return {"desk": name, "session_id": session_id, **terminal}
+            state_mod.clear_pending(state, name)
+            return {"desk": name, "outcome": f"desktop_{observed_state}",
+                    "session_id": session_id}
+    else:
+        result_text = scan(log_path, pending["log_offset"])
     if result_text is not None:
         if pending.get("origin_kind") == "queue":
             if queue_executor is None:
@@ -526,7 +588,11 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
     state = state_mod.load_state(state_path)
 
     desk_entries = registry.entries()
-    desk_seats = {n: e["room_seat"] for n, e in desk_entries.items() if e.get("room_seat")}
+    # A claude-desktop desk is explicit-queue-only. Keeping its seat in the
+    # registry makes heartbeat and result attribution visible, while excluding
+    # it from conversational fan-out prevents ordinary room chatter from
+    # creating model sessions or spending tokens.
+    desk_seats = conversational_desk_seats(desk_entries)
 
     # The target catalog is configuration for command ingress, not a reason to
     # stop the conversational bridge.  When it cannot be loaded, only an
@@ -726,7 +792,19 @@ def run_once(*, registry: desks.Registry | None = None, state_path: Path = DEFAU
                             target=pending["target"],
                             finish=pending["finish"],
                             cap=pending.get("cap"),
+                            transport=pending.get("transport"),
+                            session_id=pending.get("session_id"),
                         )
+                        if pending.get("transport") == "claude-desktop":
+                            add_room_turn(
+                                body=json.dumps({"claude_desktop_session": {
+                                    "session_id": pending.get("session_id"),
+                                    "status": "backgrounded",
+                                    "task_id": pending.get("kanban_task_id"),
+                                    "desktop_visibility": "after_completion",
+                                }}, separators=(",", ":")),
+                                seat="hermes", kind="receipt", msg_id=str(uuid.uuid4()),
+                            )
                     if queue_outcome.get("outcome") != "idle":
                         delivered.append({"desk": name, **queue_outcome})
             registry_ext.stamp_heartbeat(name, live=live_by_desk.get(name, True), path=registry.path)
