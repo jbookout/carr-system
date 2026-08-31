@@ -194,23 +194,24 @@
       "mode": "enforcing"
     },
     "context-handoff-gate.py": {
-      "failure_class": "context ending with no handoff written",
+      "failure_class": "context threshold crossed without a verified same-task successor takeover",
       "catch_metric": {
         "log_path": "out/context-handoff.jsonl",
         "log_format": "jsonl",
-        "ts_field": null,
+        "ts_field": "ts",
         "hook_filter": {
           "field": "hook",
           "equals": "context-handoff-gate"
         },
         "true_positive": {
-          "kind": "row_exists"
+          "kind": "field_truthy",
+          "field": "caught"
         },
-        "rule_description": "every row is a band crossing (70 or 88 pct of context window used); presence would be the catch, but the log carries no timestamp field at all, so a windowed count cannot be computed from it today -- reported as data_unavailable rather than guessed at zero.",
-        "note": "out/context-handoff.jsonl has no 'ts' field (checked 2026-08-26/27); this gate is excluded from downgrade proposals until that gap is closed."
+        "rule_description": "a timestamped context-handoff-gate row whose signal crossed the configured threshold or fallback cap; Stop alone refuses until the immutable takeover receipt is verified.",
+        "note": "PostToolUse observes and can announce once; PreCompact always allows; Stop is the sole refusal seam."
       },
       "review_date": "2026-11-24",
-      "mode": "announce"
+      "mode": "enforcing"
     },
     "costar-lane-gate.py": {
       "failure_class": "browser lane discipline",

@@ -345,6 +345,23 @@ def _deny_class(text):
         return None
 
 
+def _structured_reason(text):
+    """Stable reason code carried by a canonical structured Stop refusal."""
+    try:
+        import json
+        outer = json.loads((text or "").strip())
+        reason = outer.get("reason") if isinstance(outer, dict) else None
+        if isinstance(reason, str) and reason.lstrip().startswith("{"):
+            inner = json.loads(reason)
+            reason = inner.get("reason") if isinstance(inner, dict) else None
+        if (isinstance(reason, str) and reason
+                and all(c.isalnum() or c in "._-" for c in reason)):
+            return reason[:64]
+    except Exception:
+        pass
+    return None
+
+
 def _headline(text):
     """First non-empty line of a refusal — the de-facto class gates already have."""
     try:
@@ -470,7 +487,8 @@ def main():
             "exit": code,
             "register": _register_from_output(captured_out, event, code, crashed),
             "reopen": bool(event in STOP_EVENTS and outcome == "deny"),
-            "deny_class": _deny_class(captured_err) or _deny_class(captured_out),
+            "deny_class": (_deny_class(captured_err) or _deny_class(captured_out)
+                           or _structured_reason(captured_out)),
             "deny_headline": (_clip(_headline(captured_err))
                               if outcome in ("deny", "ask", "error") else None),
             "pid": os.getpid(),

@@ -166,6 +166,15 @@
   ],
   "PostToolUse": [
     {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/context-handoff-gate.py",
+          "timeout": 20
+        }
+      ]
+    },
+    {
       "matcher": "Write|Edit|MultiEdit",
       "hooks": [
         {
@@ -191,6 +200,17 @@
           "type": "command",
           "command": "/usr/bin/env python3 {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/write-effect-check.py",
           "timeout": 15
+        }
+      ]
+    }
+  ],
+  "PreCompact": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "/usr/bin/env python3 {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/context-handoff-gate.py",
+          "timeout": 20
         }
       ]
     }

@@ -1,273 +1,722 @@
 #!/usr/bin/env python3
-"""context-handoff-gate-selftest.py — spawn the REAL hook and read its exit.
+"""Executable acceptance for session_context_lifecycle_gate_v1."""
 
-Rule a9ecd5b4: a success signal must be derived from evidence, not asserted. So
-this does not import the hook and call its functions — it runs the hook as the
-harness runs it (fresh process, JSON on stdin, JSON on stdout) and asserts on
-what came back. Every case states the failure it is guarding against.
-"""
+from __future__ import annotations
 
+import datetime as dt
+import hashlib
+import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-HOOK = os.path.join(os.path.dirname(HERE), "hooks", "context-handoff-gate.py")
-
+REPO = Path(__file__).resolve().parent.parent
+HOOK = REPO / "hooks/context-handoff-gate.py"
+RUNNER = REPO / "hooks/hook-meter-run.py"
+MANIFEST = REPO / "ops/config/session-context-lifecycle.v1.json"
+INSTALLED_REPO = Path("/Users/booko/carr-system")
 PASS: list[str] = []
 FAIL: list[str] = []
 
 
-def transcript(rows, tmpdir, name="t.jsonl"):
-    path = os.path.join(tmpdir, name)
-    with open(path, "w") as fh:
-        for r in rows:
-            fh.write((r if isinstance(r, str) else json.dumps(r)) + "\n")
+def check(name, condition, detail=""):
+    (PASS if condition else FAIL).append(name)
+    if not condition:
+        print(f"  FAIL {name}: {detail}")
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False).encode()
+
+
+def digest(value):
+    return hashlib.sha256(canonical(value)).hexdigest()
+
+
+def write_jsonl(path: Path, rows):
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows),
+                    encoding="utf-8")
     return path
 
 
-def usage_row(total):
-    """An assistant row whose three usage fields sum to `total`."""
-    return {"type": "assistant", "message": {"usage": {
+def usage_row(total, *, model=None, window=None):
+    usage = {
         "input_tokens": 2,
         "cache_creation_input_tokens": 98,
-        "cache_read_input_tokens": total - 100,
-    }}}
+        "cache_read_input_tokens": max(0, total - 200),
+        "output_tokens": 100,
+    }
+    row = {"type": "assistant", "message": {"usage": usage}}
+    if model:
+        row["message"]["model"] = model
+    if window is not None:
+        row["model_context_window"] = window
+    return row
 
 
-def run(payload, env=None, statefile=None):
-    e = dict(os.environ)
-    e["CARR_CONTEXT_WINDOW"] = "1000000"
-    if statefile:
-        e["CARR_CONTEXT_STATE"] = statefile
-    if env:
-        e.update(env)
-    p = subprocess.run([sys.executable, HOOK], input=json.dumps(payload),
-                       capture_output=True, text=True, env=e)
-    out = p.stdout.strip()
+def base_env(root: Path, **extra):
+    env = dict(os.environ)
+    env.update({
+        "CARR_SESSION_CONTEXT_STATE_DIR": str(root / "state"),
+        "CARR_SESSION_CONTEXT_MANIFEST": str(root / "manifest.json"),
+        "CARR_CONTEXT_AUDIT": "off",
+        "CARR_HOOK_TELEMETRY": str(root / "telemetry.jsonl"),
+        "CARR_HOOK_FIXTURE": "1",
+    })
+    env.pop("CARR_CONTEXT_WINDOW", None)
+    env.update({key: str(value) for key, value in extra.items()})
+    return env
+
+
+def run_hook(root: Path, event: str, transcript: Path | None, *,
+             session="selftest", payload_extra=None, env_extra=None, wrapped=False):
+    payload = {
+        "hook_event_name": event,
+        "session_id": session,
+        "prompt_id": f"prompt-{session}",
+        "tool_use_id": f"tool-{session}",
+    }
+    if transcript:
+        payload["transcript_path"] = str(transcript)
+    if payload_extra:
+        payload.update(payload_extra)
+    env = base_env(root, **(env_extra or {}))
+    command = [sys.executable, str(HOOK)]
+    if wrapped:
+        command = [sys.executable, str(RUNNER), str(HOOK)]
+    proc = subprocess.run(command, input=json.dumps(payload), text=True,
+                          capture_output=True, env=env, cwd=REPO)
     parsed = None
-    if out:
+    if proc.stdout.strip():
         try:
-            parsed = json.loads(out)
+            parsed = json.loads(proc.stdout)
         except Exception:
-            parsed = {"_unparseable": out}
-    return p.returncode, parsed
+            parsed = {"unparseable": proc.stdout}
+    return proc, parsed
 
 
-def said(out):
-    """The gate's announcement text, or "" for silence.
-
-    DEMOTED 2026-08-23 (the gates-audit council's Stop-gate rationing, Joe's
-    order). This gate emitted {"decision": "block"}, which reopens the turn; it
-    now announces the same text into context without forcing another message.
-    So every "fires" assertion below reads the announcement, and a payload still
-    carrying `decision` reads as SILENCE on purpose — a block wearing an
-    announce's clothes must fail these, not pass them.
-    """
-    if not isinstance(out, dict):
-        return ""
-    if "decision" in out:
-        return ""
-    return (out.get("hookSpecificOutput") or {}).get("additionalContext") or ""
+def run_cli(root: Path, *args):
+    proc = subprocess.run([sys.executable, str(HOOK), *map(str, args)],
+                          text=True, capture_output=True, env=base_env(root), cwd=REPO)
+    parsed = None
+    if proc.stdout.strip():
+        try:
+            parsed = json.loads(proc.stdout)
+        except Exception:
+            parsed = {"unparseable": proc.stdout}
+    return proc, parsed
 
 
-def check(name, cond, detail=""):
-    (PASS if cond else FAIL).append(name)
-    print(f"  {'ok  ' if cond else 'FAIL'} {name}{(' :: ' + detail) if detail and not cond else ''}")
+def reason(parsed):
+    if not isinstance(parsed, dict) or parsed.get("decision") != "block":
+        return None
+    try:
+        return json.loads(parsed["reason"])
+    except Exception:
+        return None
+
+
+def fresh_root(prefix="context-lifecycle-"):
+    root = Path(tempfile.mkdtemp(prefix=prefix))
+    shutil.copy2(MANIFEST, root / "manifest.json")
+    return root
+
+
+def threshold_and_window_cases():
+    print("thresholds, density, window tiers")
+    root = fresh_root()
+    try:
+        t = write_jsonl(root / "normal-low.jsonl",
+                        [usage_row(549_999, model="claude-opus-4-1")])
+        proc, out = run_hook(root, "Stop", t, session="normal-low")
+        check("normal 54.9999 percent allows", proc.returncode == 0 and out is None,
+              (proc.returncode, out))
+
+        t = write_jsonl(root / "normal-edge.jsonl",
+                        [usage_row(550_000, model="claude-opus-4-1")])
+        proc, out = run_hook(root, "Stop", t, session="normal-edge")
+        why = reason(out)
+        check("normal 55 percent refuses", why and why["signal"]["threshold"] == 55, out)
+
+        t = write_jsonl(root / "dense-low.jsonl",
+                        [usage_row(499_999, model="claude-opus-4-1")])
+        proc, out = run_hook(root, "Stop", t, session="dense-low",
+                             payload_extra={"risk": "R3"})
+        check("dense below 50 percent allows", out is None, out)
+        t = write_jsonl(root / "dense-edge.jsonl",
+                        [usage_row(500_000, model="claude-opus-4-1")])
+        proc, out = run_hook(root, "Stop", t, session="dense-edge",
+                             payload_extra={"risk": "R3"})
+        why = reason(out)
+        check("R3 makes 50 percent the soft threshold",
+              why and why["signal"]["dense"] is True
+              and why["signal"]["threshold"] == 50, out)
+
+        t = write_jsonl(root / "hard.jsonl",
+                        [usage_row(700_000, model="claude-opus-4-1")])
+        proc, out = run_hook(root, "Stop", t, session="hard")
+        check("70 percent hard line refuses",
+              reason(out) and reason(out)["signal"]["threshold"] == 70, out)
+
+        # Operator/test override wins; a lower conflicting transcript tier is
+        # deliberately not compared to the chosen higher tier.
+        t = write_jsonl(root / "override.jsonl",
+                        [usage_row(300_000, model="claude-opus-4-1", window=200_000)])
+        proc, out = run_hook(root, "Stop", t, session="override",
+                             env_extra={"CARR_CONTEXT_WINDOW": "500000"})
+        why = reason(out)
+        check("positive override is highest tier",
+              why and why["signal"]["window"] == 500_000
+              and why["signal"]["window_tier"] == "override", out)
+        proc, out = run_hook(root, "Stop", t, session="bad-override",
+                             env_extra={"CARR_CONTEXT_WINDOW": "not-positive"})
+        check("invalid override is fail-open before fallback cap",
+              proc.returncode == 0 and out is None, out)
+
+        # Exact known model binding wins over lower explicit windows.
+        t = write_jsonl(root / "model.jsonl",
+                        [usage_row(600_000, model="claude-opus-4-1",
+                                   window=2_000_000)])
+        proc, out = run_hook(root, "Stop", t, session="model")
+        why = reason(out)
+        check("exact model binding is the second tier",
+              why and why["signal"]["window"] == 1_000_000
+              and why["signal"]["window_tier"] == "model", out)
+
+        # Unknown model is not a default; a usable lower tier may still resolve.
+        t = write_jsonl(root / "unknown-explicit.jsonl",
+                        [usage_row(110_000, model="claude-unknown", window=200_000)])
+        proc, out = run_hook(root, "Stop", t, session="unknown-explicit")
+        why = reason(out)
+        check("unknown model falls through to explicit window",
+              why and why["signal"]["window_tier"] == "transcript", out)
+
+        t = write_jsonl(root / "equal.jsonl",
+                        [usage_row(110_000, window=200_000),
+                         {"model_context_window": 200_000}])
+        proc, out = run_hook(root, "Stop", t, session="equal")
+        check("equal positive explicit repeats are accepted",
+              reason(out) and reason(out)["signal"]["window"] == 200_000, out)
+
+        t = write_jsonl(root / "unequal.jsonl",
+                        [usage_row(150_000, window=200_000),
+                         {"context_window": 300_000}])
+        proc, out = run_hook(root, "Stop", t, session="unequal")
+        check("unequal explicit windows are ambiguous and initially allow",
+              proc.returncode == 0 and out is None, out)
+
+        t = write_jsonl(root / "invalid.jsonl",
+                        [usage_row(150_000), {"context_window": 0}])
+        proc, out = run_hook(root, "Stop", t, session="invalid")
+        check("all-invalid explicit windows initially allow", out is None, out)
+
+        # compact_boundary.preTokens is both conservative window fallback and
+        # usage high-water; minimum positive boundary wins.
+        t = write_jsonl(root / "compact.jsonl", [
+            usage_row(38_496),
+            {"payload": {"type": "compact_boundary", "preTokens": 1_013_084}},
+            {"payload": {"type": "compact_boundary", "preTokens": 1_100_000}},
+        ])
+        proc, out = run_hook(root, "Stop", t, session="compact")
+        why = reason(out)
+        check("minimum compact preTokens is final window tier",
+              why and why["signal"]["window"] == 1_013_084
+              and why["signal"]["used"] == 1_100_000, out)
+
+        # Density from the other three independent predicates.
+        for label, payloads in (
+            ("tool-call density", [{}] * 20),
+            ("mutated-path density",
+             [{"tool_name": "Write", "tool_input": {"file_path": f"/tmp/p{i}"}} for i in range(8)]),
+            ("worker-start density", [{"tool_name": "Agent"} for _ in range(3)]),
+        ):
+            session = label.replace(" ", "-")
+            transcript = write_jsonl(root / f"{session}.jsonl",
+                                     [usage_row(500_000, model="claude-opus-4-1")])
+            for extra in payloads:
+                run_hook(root, "PostToolUse", transcript, session=session,
+                         payload_extra=extra)
+            proc, out = run_hook(root, "Stop", transcript, session=session)
+            check(label + " selects dense threshold",
+                  reason(out) and reason(out)["signal"]["dense"] is True, out)
+    finally:
+        shutil.rmtree(root)
+
+
+def fallback_and_hook_sequence():
+    print("fallback and Claude event sequence")
+    root = fresh_root()
+    try:
+        # Fresh unavailable signal announces once but does not block.
+        proc, first = run_hook(root, "PostToolUse", None, session="fallback")
+        proc, second = run_hook(root, "PostToolUse", None, session="fallback")
+        check("fresh unavailable signal notices once",
+              first is not None and second is None, (first, second))
+        proc, out = run_hook(root, "Stop", None, session="fallback")
+        check("unavailable below fallback cap allows first Stop", out is None, out)
+        for _ in range(22):
+            run_hook(root, "PostToolUse", None, session="fallback")
+        proc, out = run_hook(root, "Stop", None, session="fallback")
+        why = reason(out)
+        check("fallback ANY invocation cap refuses",
+              why and why["signal"]["fallback_level"] in {
+                  "dense_soft", "normal_soft", "hard"}, out)
+        check("fallback refusal preserves signal reason",
+              why and why["signal"]["signal_reason"] == "CONTEXT_SIGNAL_UNAVAILABLE", why)
+
+        transcript = write_jsonl(root / "sequence.jsonl",
+                                 [usage_row(600_000, model="claude-opus-4-1")])
+        proc, post = run_hook(root, "PostToolUse", transcript, session="sequence")
+        proc, pre = run_hook(root, "PreCompact", transcript, session="sequence")
+        proc, stop = run_hook(root, "Stop", transcript, session="sequence")
+        check("PostToolUse emits one additionalContext notice",
+              isinstance(post, dict)
+              and "additionalContext" in post.get("hookSpecificOutput", {}), post)
+        check("PreCompact always allows silently", pre is None, pre)
+        check("Stop is the sole refusal seam", reason(stop) is not None, stop)
+
+        # Complete the same task's handoff through immutable offer/declaration/
+        # receipt/final objects, then prove recursive Stop allows.
+        _, status = run_cli(root, "status", "--task-key", "claude:sequence")
+        version = status["version"]
+        pred_evidence = json.dumps({
+            "session_id": "sequence", "transcript_path": str(transcript),
+            "controller_callback_id": "callback-1", "status": "active",
+        })
+        succ_evidence = json.dumps({
+            "thread_id": "successor", "project_id": "p", "cwd": str(REPO),
+            "status": "active", "pinnedIndex": 1, "event_id": "event-2",
+        })
+        proc, offer = run_cli(
+            root, "handoff-offer-create", "--task-key", "claude:sequence",
+            "--predecessor", "sequence", "--predecessor-surface", "claude",
+            "--successor", "successor", "--successor-surface", "codex",
+            "--evidence-json", pred_evidence, "--generation", "1",
+            "--expected-version", str(version),
+        )
+        proc, declared = run_cli(
+            root, "successor-declare", "--task-key", "claude:sequence",
+            "--offer-digest", offer["offer_digest"], "--successor", "successor",
+            "--evidence-json", succ_evidence,
+            "--expected-version", str(offer["state"]["version"]),
+        )
+        proc, accepted = run_cli(
+            root, "successor-accept", "--task-key", "claude:sequence",
+            "--offer-digest", offer["offer_digest"], "--successor", "successor",
+            "--evidence-json", succ_evidence,
+            "--expected-version", str(declared["state"]["version"]),
+        )
+        task_hash = hashlib.sha256(b"claude:sequence").hexdigest()
+        receipt_path = (root / "state/objects" / task_hash / "receipt"
+                        / f"{accepted['receipt_digest']}.json")
+        final_path = (root / "state/objects" / task_hash / "final"
+                      / f"{accepted['final_digest']}.json")
+        proc, verified = run_cli(root, "verify-handoff",
+                                 "--task-key", "claude:sequence")
+        check("offer receipt and final verify as one linked packet",
+              proc.returncode == 0
+              and verified["receipt_digest"] == accepted["receipt_digest"],
+              verified)
+        original_receipt = receipt_path.read_text()
+        receipt_path.write_text(original_receipt.replace(
+            '"successor":"successor"', '"successor":"tampered"', 1))
+        proc, tampered = run_cli(root, "verify-handoff",
+                                 "--task-key", "claude:sequence")
+        check("receipt tamper is refused",
+              proc.returncode == 2
+              and tampered["reason"] == "HANDOFF_RECEIPT_INVALID", tampered)
+        receipt_path.write_text(original_receipt)
+        original_final = final_path.read_text()
+        final_path.write_text(original_final.replace(
+            '"successor":"successor"', '"successor":"tampered"', 1))
+        proc, tampered = run_cli(root, "verify-handoff",
+                                 "--task-key", "claude:sequence")
+        check("final packet tamper is refused",
+              proc.returncode == 2
+              and tampered["reason"] == "HANDOFF_RECEIPT_INVALID", tampered)
+        final_path.write_text(original_final)
+        proc, after = run_hook(root, "Stop", transcript, session="sequence")
+        check("verified takeover makes recursive Stop allow", after is None, after)
+        check("offer receipt and final use three distinct digests",
+              len({offer["offer_digest"], accepted["receipt_digest"],
+                   accepted["final_digest"]}) == 3, accepted)
+    finally:
+        shutil.rmtree(root)
+
+
+def codex_evidence(thread, *, status="active", pinned=1, event="e"):
+    return json.dumps({
+        "thread_id": thread, "project_id": "project", "cwd": str(REPO),
+        "status": status, "pinnedIndex": pinned, "event_id": event,
+    })
+
+
+def lifecycle_cas_and_tamper():
+    print("immutable lifecycle, CAS, terminal irreversibility")
+    root = fresh_root()
+    try:
+        proc, state = run_cli(root, "task-init", "--task-key", "task:cas",
+                              "--owner", "old", "--surface", "codex",
+                              "--evidence-json", codex_evidence("old"),
+                              "--expected-version", "-1")
+        check("task init creates version zero", proc.returncode == 0 and state["version"] == 0,
+              (proc.returncode, state))
+        proc, first = run_cli(
+            root, "handoff-offer-create", "--task-key", "task:cas",
+            "--predecessor", "old", "--predecessor-surface", "codex",
+            "--successor", "new", "--successor-surface", "codex",
+            "--evidence-json", codex_evidence("old"), "--generation", "1",
+            "--expected-version", "0",
+        )
+        proc2, lost = run_cli(
+            root, "handoff-offer-create", "--task-key", "task:cas",
+            "--predecessor", "old", "--predecessor-surface", "codex",
+            "--successor", "other", "--successor-surface", "codex",
+            "--evidence-json", codex_evidence("old"), "--generation", "1",
+            "--expected-version", "0",
+        )
+        check("expected-version CAS has one winner",
+              proc.returncode == 0 and proc2.returncode == 2
+              and lost["reason"] == "LIFECYCLE_INVALID", lost)
+
+        # Tamper an offer object and prove the declaration validates bytes,
+        # never merely the filename/digest reference.
+        task_hash = hashlib.sha256(b"task:cas").hexdigest()
+        offer_path = (root / "state/objects" / task_hash / "offer"
+                      / f"{first['offer_digest']}.json")
+        original = offer_path.read_text()
+        offer_path.write_text(original.replace('"successor":"new"',
+                                               '"successor":"tampered"'))
+        proc, rejected = run_cli(
+            root, "successor-declare", "--task-key", "task:cas",
+            "--offer-digest", first["offer_digest"], "--successor", "new",
+            "--evidence-json", codex_evidence("new"), "--expected-version", "1",
+        )
+        check("tampered immutable offer is refused",
+              proc.returncode == 2
+              and rejected["reason"] == "HANDOFF_RECEIPT_INVALID", rejected)
+
+        # Independent task terminal is evidence-bound and irreversible.
+        proc, state = run_cli(root, "task-init", "--task-key", "task:terminal",
+                              "--owner", "only", "--surface", "codex",
+                              "--evidence-json", codex_evidence("only"),
+                              "--expected-version", "-1")
+        proc, terminal = run_cli(
+            root, "task-terminal", "--task-key", "task:terminal",
+            "--owner", "only",
+            "--evidence-json", codex_evidence("only", status="terminal"),
+            "--expected-version", "0",
+        )
+        check("task terminal requires native terminal evidence",
+              proc.returncode == 0
+              and terminal["task_status"] == "TERMINAL"
+              and terminal["active_owner"] is None, terminal)
+        proc, resurrect = run_cli(
+            root, "handoff-offer-create", "--task-key", "task:terminal",
+            "--predecessor", "only", "--predecessor-surface", "codex",
+            "--successor", "again", "--successor-surface", "codex",
+            "--evidence-json", codex_evidence("only"), "--generation", "1",
+            "--expected-version", "1",
+        )
+        check("terminal task cannot recover or resurrect",
+              proc.returncode == 2
+              and resurrect["reason"] == "LIFECYCLE_INVALID", resurrect)
+    finally:
+        shutil.rmtree(root)
+
+
+def rollout_resolver_cases():
+    print("Codex rollout task resolver")
+    root = fresh_root()
+    try:
+        fixtures = {
+            "root": [
+                {"type": "session_meta",
+                 "payload": {"id": "root", "session_id": "root"}},
+            ],
+            "subagent": [
+                {"type": "session_meta",
+                 "payload": {"id": "child", "session_id": "root"}},
+            ],
+            "legacy": [
+                {"type": "session_meta", "payload": {"session_id": "legacy"}},
+            ],
+            "turn": [
+                {"type": "event_msg",
+                 "payload": {"type": "task_started", "turn_id": "turn-1"}},
+            ],
+            "ambiguous": [
+                {"type": "session_meta", "payload": {"id": "one"}},
+                {"type": "session_meta", "payload": {"id": "two"}},
+            ],
+            "archived": [
+                {"type": "session_meta",
+                 "payload": {"id": "archived", "status": "archived"}},
+            ],
+        }
+        expected = {
+            "root": ("codex:root", "payload.id"),
+            "subagent": ("codex:child", "payload.id"),
+            "legacy": ("codex:legacy", "session_id"),
+            "turn": ("codex-turn:turn-1", "task_started.turn_id"),
+            "archived": ("codex:archived", "payload.id"),
+        }
+        for name, rows in fixtures.items():
+            path = write_jsonl(root / f"{name}.jsonl", rows)
+            proc, out = run_cli(root, "codex-task-key", "--rollout", str(path))
+            if name == "ambiguous":
+                check("multiple authoritative IDs are ambiguous",
+                      out.get("ok") is False
+                      and out["reason"] == "CONTEXT_SIGNAL_AMBIGUOUS", out)
+            else:
+                check(f"{name} fixture resolves through authoritative tier",
+                      (out.get("task_key"), out.get("resolver")) == expected[name], out)
+        path = root / "subagent.jsonl"
+        _, out = run_cli(root, "codex-task-key", "--rollout", str(path))
+        check("unequal session_id lineage is ignored",
+              out.get("ignored_lineage") == ["root"], out)
+        _, out = run_cli(root, "task-key", "--surface", "claude",
+                         "--session-id", "claude-root")
+        check("generic task-key resolver is read-only and stable",
+              out.get("task_key") == "claude:claude-root"
+              and out.get("resolver") == "session_id", out)
+    finally:
+        shutil.rmtree(root)
+
+
+def snapshot(task_key, ownership_digest, state, *, source="event-1",
+             observed=None, attention="NONE", recoverable=False,
+             capacity=None, worker_id="owner"):
+    observed = observed or dt.datetime.now(dt.timezone.utc).replace(
+        microsecond=0).isoformat().replace("+00:00", "Z")
+    worker = {
+        "id": worker_id, "surface": "codex", "generation": 0,
+        "normalized_state": state, "last_progress_at": observed,
+        "task_terminal": state == "TERMINAL", "attention_kind": attention,
+        "error_code": "ERR" if state == "ERROR" else None,
+        "recoverable": recoverable, "capacity_code": capacity,
+        "ownership_digest": ownership_digest,
+    }
+    value = {
+        "task_key": task_key, "observed_at": observed,
+        "source_event_id": source, "observer_id": "dispatcher",
+        "source_surface": "codex", "evidence_ref": "native:event-1",
+        "workers": [worker],
+    }
+    value["evidence_digest"] = digest(value)
+    return value
+
+
+def dispatcher_cases():
+    print("dispatcher schema, predicates, nonce, replay")
+    root = fresh_root()
+    try:
+        _, state = run_cli(root, "task-init", "--task-key", "task:dispatch",
+                           "--owner", "owner", "--surface", "codex",
+                           "--evidence-json", codex_evidence("owner"),
+                           "--expected-version", "-1")
+        own = state["owners"]["owner"]["ownership_digest"]
+
+        for label, worker_state, attention, recoverable, capacity, action, why in (
+            ("running", "RUNNING", "NONE", False, None, "NOOP", "RECOVERY_ACTIVE"),
+            ("waiting authority", "WAITING_ATTENTION", "AUTHORITY", False, None,
+             "NOOP", "RECOVERY_WAITING"),
+            ("capacity", "CAPACITY_EXHAUSTED", "NONE", False,
+             "CONTEXT_EXHAUSTED", "RECOVER_SAME_TASK", "RECOVERY_CAPACITY"),
+            ("recoverable error", "ERROR", "NONE", True, None,
+             "RECOVER_SAME_TASK", "RECOVERY_ERROR"),
+            ("idle", "IDLE", "NONE", False, None,
+             "RECOVER_SAME_TASK", "RECOVERY_IDLE"),
+        ):
+            snap = snapshot("task:dispatch", own, worker_state,
+                            attention=attention, recoverable=recoverable,
+                            capacity=capacity, source=f"event-{label}")
+            proc, out = run_cli(root, "dispatcher-evaluate",
+                                "--task-key", "task:dispatch",
+                                "--snapshot-json", json.dumps(snap))
+            check(label + " predicate is exact",
+                  proc.returncode == 0 and out["action"] == action
+                  and out["reason"] == why, out)
+
+        stale = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=121)
+                 ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        snap = snapshot("task:dispatch", own, "RUNNING", observed=stale)
+        proc, out = run_cli(root, "dispatcher-evaluate",
+                            "--task-key", "task:dispatch",
+                            "--snapshot-json", json.dumps(snap))
+        check("snapshot older than 120 seconds is refused",
+              proc.returncode == 2
+              and out["reason"] == "RECOVERY_SNAPSHOT_STALE", out)
+
+        future = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=1)
+                  ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        snap = snapshot("task:dispatch", own, "RUNNING", observed=future)
+        proc, out = run_cli(root, "dispatcher-evaluate",
+                            "--task-key", "task:dispatch",
+                            "--snapshot-json", json.dumps(snap))
+        check("future snapshot is invalid", proc.returncode == 2
+              and out["reason"] == "RECOVERY_SNAPSHOT_INVALID", out)
+
+        snap = snapshot("task:dispatch", own, "CAPACITY_EXHAUSTED",
+                        capacity="CONTEXT_EXHAUSTED", source="event-apply")
+        proc, preview = run_cli(root, "dispatcher-evaluate",
+                                "--task-key", "task:dispatch",
+                                "--snapshot-json", json.dumps(snap))
+        check("dispatcher evaluation is read-only without apply",
+              proc.returncode == 0 and preview["applied"] is False
+              and preview["nonce"], preview)
+        _, unchanged = run_cli(root, "status", "--task-key", "task:dispatch")
+        check("read-only dispatcher leaves version unchanged",
+              unchanged["version"] == 0, unchanged["version"])
+        proc, missing_cas = run_cli(root, "dispatcher-evaluate",
+                                    "--task-key", "task:dispatch",
+                                    "--snapshot-json", json.dumps(snap),
+                                    "--apply")
+        check("new dispatcher apply requires expected-version CAS",
+              proc.returncode == 2
+              and missing_cas["reason"] == "LIFECYCLE_INVALID", missing_cas)
+        proc, applied = run_cli(root, "dispatcher-evaluate",
+                                "--task-key", "task:dispatch",
+                                "--snapshot-json", json.dumps(snap),
+                                "--apply", "--expected-version", "0")
+        check("apply fences old owner and records one intent",
+              proc.returncode == 0 and applied["state"]["owners"]["owner"]["state"] == "DRAINING"
+              and applied["state"]["recovery_intent"]["nonce"] == preview["nonce"], applied)
+        proc, replay = run_cli(root, "dispatcher-evaluate",
+                               "--task-key", "task:dispatch",
+                               "--snapshot-json", json.dumps(snap),
+                               "--apply", "--expected-version", "1")
+        check("exact recovery replay returns same nonce",
+              proc.returncode == 0 and replay["replay"] is True
+              and replay["nonce"] == preview["nonce"], replay)
+        malformed = {**snap, "unexpected": True}
+        proc, refused = run_cli(root, "dispatcher-evaluate",
+                                "--task-key", "task:dispatch",
+                                "--snapshot-json", json.dumps(malformed),
+                                "--apply", "--expected-version", "1")
+        check("recovery replay still validates exact snapshot schema",
+              proc.returncode == 2
+              and refused["reason"] == "RECOVERY_SNAPSHOT_INVALID", refused)
+        other = snapshot("task:dispatch", own, "IDLE", source="event-other")
+        proc, refused = run_cli(root, "dispatcher-evaluate",
+                                "--task-key", "task:dispatch",
+                                "--snapshot-json", json.dumps(other),
+                                "--apply", "--expected-version", "1")
+        check("second recovery while one is pending is refused",
+              proc.returncode == 2
+              and refused["reason"] == "LIFECYCLE_INVALID", refused)
+    finally:
+        shutil.rmtree(root)
+
+
+def wrapper_and_historical_defect():
+    print("wrapper equivalence and historical compaction defect")
+    root = fresh_root()
+    try:
+        transcript = write_jsonl(root / "wrapped.jsonl",
+                                 [usage_row(600_000, model="claude-opus-4-1")])
+        bare_root = root / "bare"; bare_root.mkdir()
+        wrapped_root = root / "wrapped"; wrapped_root.mkdir()
+        shutil.copy2(MANIFEST, bare_root / "manifest.json")
+        shutil.copy2(MANIFEST, wrapped_root / "manifest.json")
+        bare, bare_out = run_hook(bare_root, "Stop", transcript,
+                                  session="equivalent", wrapped=False)
+        wrapped, wrapped_out = run_hook(wrapped_root, "Stop", transcript,
+                                        session="equivalent", wrapped=True)
+        check("bare and wrapped candidate return identical exit",
+              bare.returncode == wrapped.returncode, (bare.returncode, wrapped.returncode))
+        check("bare and wrapped stdout/stderr are byte-identical",
+              bare.stdout == wrapped.stdout and bare.stderr == wrapped.stderr,
+              (bare.stdout, wrapped.stdout, bare.stderr, wrapped.stderr))
+
+        # Historical ordering: usage reached 1,013,084, compacted to 38,496,
+        # then Stop ran. The installed gate reads only the last assistant usage
+        # and silently allows; the candidate preserves compact preTokens.
+        historical = write_jsonl(root / "historical.jsonl", [
+            usage_row(990_267),
+            {"payload": {"type": "compact_boundary", "preTokens": 1_013_084,
+                         "postTokens": 38_496,
+                         "timestamp": "2026-08-30T13:15:30.668Z"}},
+            usage_row(38_496),
+        ])
+        payload = json.dumps({"hook_event_name": "Stop", "session_id": "selftest",
+                              "transcript_path": str(historical)})
+        installed_hook = INSTALLED_REPO / "hooks/context-handoff-gate.py"
+        installed_runner = INSTALLED_REPO / "hooks/hook-meter-run.py"
+        if installed_hook.exists() and installed_runner.exists():
+            env = base_env(root, CARR_CONTEXT_WINDOW="1000000",
+                           CARR_CONTEXT_STATE=str(root / "installed-state.json"))
+            proc = subprocess.run(
+                ["/usr/bin/env", "python3", str(installed_runner), str(installed_hook)],
+                input=payload, text=True, capture_output=True, env=env,
+                cwd=INSTALLED_REPO)
+            check("installed exact command shape reproduces silent postcompact allow",
+                  proc.returncode == 0 and proc.stdout.strip() == "", proc.stdout)
+        candidate, out = run_hook(
+            root, "Stop", historical, session="historical", wrapped=True,
+            env_extra={"CARR_CONTEXT_WINDOW": "1000000"})
+        why = reason(out)
+        check("candidate exact wrapped shape catches historical preTokens",
+              why and why["signal"]["used"] == 1_013_084, out)
+    finally:
+        shutil.rmtree(root)
+
+
+def static_contract_cases():
+    print("protected contract and explicit exclusions")
+    hooks = json.loads((REPO / "ops/config/hooks.json").read_text())
+    stop = json.dumps(hooks.get("Stop", []))
+    post = json.dumps(hooks.get("PostToolUse", []))
+    compact = json.dumps(hooks.get("PreCompact", []))
+    check("Claude wiring has context gate on PostToolUse",
+          "context-handoff-gate.py" in post, post)
+    check("Claude wiring has context gate on PreCompact",
+          "context-handoff-gate.py" in compact, compact)
+    check("Claude wiring keeps context gate on Stop",
+          "context-handoff-gate.py" in stop, stop)
+    manifest = json.loads(MANIFEST.read_text())
+    check("manifest makes Codex bare-CLI limitation explicit",
+          manifest["surface_contracts"]["codex"]["adapter"] == "bare_cli"
+          and manifest["surface_contracts"]["codex"]["native_stop_hook"] is False,
+          manifest["surface_contracts"]["codex"])
+    check("heartbeat cadence is at most 60 seconds",
+          manifest["dispatcher"]["heartbeat_max_seconds"] <= 60,
+          manifest["dispatcher"]["heartbeat_max_seconds"])
+
+    # These contracts were frozen unchanged by the reviewed plan.
+    base = subprocess.check_output(
+        ["git", "show", "01c3977580e8d9d490380f6c2135d1c4d7d20fd7:"
+         "hooks/stop_latch.py"], cwd=REPO)
+    check("stop_latch.py is byte-identical to approved base",
+          base == (REPO / "hooks/stop_latch.py").read_bytes())
+    for path in ("ops/stop_latch-selftest.py", "ops/config/codex-hooks.json",
+                 "ops/config/rule-enforcement-map.json"):
+        base = subprocess.check_output(
+            ["git", "show",
+             f"01c3977580e8d9d490380f6c2135d1c4d7d20fd7:{path}"], cwd=REPO)
+        check(path + " is explicitly unchanged", base == (REPO / path).read_bytes())
 
 
 def main():
-    with tempfile.TemporaryDirectory() as tmp:
-        state = os.path.join(tmp, "state.json")
-
-        # --- the threshold itself -------------------------------------------
-        # Guards: an off-by-one that fires a band early, or never.
-        t69 = transcript([usage_row(699_000)], tmp, "t69.jsonl")
-        rc, out = run({"session_id": "s-under", "transcript_path": t69}, statefile=state)
-        check("69.9% does not fire", rc == 0 and out is None, f"rc={rc} out={out}")
-
-        t70 = transcript([usage_row(700_000)], tmp, "t70.jsonl")
-        rc, out = run({"session_id": "s-at70", "transcript_path": t70}, statefile=state)
-        check("exactly 70% fires", rc == 0 and bool(said(out)),
-              f"rc={rc} out={out}")
-        check("70% reason names the band and the real numbers",
-              "70%" in said(out) and "700,000" in said(out))
-        check("70% reason orders the packet + the chip",
-              "handoff" in said(out)
-              and "spawn_task" in said(out))
-        check("70% reason is NOT the hard-line text",
-              "HARD LINE" not in said(out))
-        # THE LAST MILE (2026-08-10, decision aa6c00fa). The chip renders on the
-        # desktop app only, so a handoff delivered by chip alone is invisible to
-        # Joe in the field. Every band must order the push; without this
-        # assertion the delivery half is exactly as untested as it was the night
-        # Joe found the defect by looking at his phone.
-        check("70% reason orders the phone push",
-              "PushNotification" in said(out))
-        check("70% reason says why the push is needed (desktop-only chip)",
-              "desktop app only" in said(out))
-        # The 70% band must NOT queue a scheduled continuation: the session
-        # usually keeps working past 70, so a queued run would duplicate it.
-        check("70% band does NOT queue a scheduled continuation",
-              "create_scheduled_task" not in said(out))
-        check("70% reason leads the push with the disposition",
-              "LEAD WITH THE DISPOSITION" in said(out)
-              and "truncates the TAIL" in said(out))
-
-        # --- fires once per band, then escalates ----------------------------
-        # Guards the loop risk (a Stop hook that blocks forever strands Joe)
-        # AND the opposite failure: a one-shot nudge that never escalates.
-        s = "s-bands"
-        t75 = transcript([usage_row(750_000)], tmp, "t75.jsonl")
-        rc, out = run({"session_id": s, "transcript_path": t75}, statefile=state)
-        check("first crossing of band 70 speaks", bool(said(out)))
-        # The top-level key, not a substring search: the packet instructions
-        # themselves say "decisions already settled", which made the first
-        # version of this assertion fail on its own fixture text.
-        check("...and it does not reopen the turn to speak",
-              rc == 0 and "decision" not in (out or {}), f"rc={rc} keys={list((out or {}))}")
-        rc, out = run({"session_id": s, "transcript_path": t75}, statefile=state)
-        check("band 70 does not fire twice (no nag)", out is None, f"out={out}")
-
-        t90 = transcript([usage_row(900_000)], tmp, "t90.jsonl")
-        rc, out = run({"session_id": s, "transcript_path": t90}, statefile=state)
-        check("same session escalates to band 88", bool(said(out)))
-        check("band 88 uses the hard-line text",
-              "HARD LINE" in said(out))
-        # At the hard line the session IS stopping, so both delivery routes are
-        # required: the push so Joe learns of it wherever he is, and the
-        # one-time scheduled task so the continuation resumes with no click.
-        check("band 88 orders the phone push",
-              "PushNotification" in said(out))
-        check("band 88 queues a scheduled continuation (removes the click)",
-              "create_scheduled_task" in said(out)
-              and "fireAt" in said(out))
-        check("band 88 names a collision-proof taskId for it",
-              "handoff-continuation-" in said(out))
-        # The overclaim guard. A scheduled task does not run on a closed
-        # machine, so the text must promise that the work RESUMES, never that
-        # it runs at a particular time. This is the same class of honesty the
-        # file already keeps about the chip not being a new session.
-        # Joe, on the first live push, phone closed: "i dont know if it did
-        # anything." Tapping the push opens the EXHAUSTED session, not the
-        # continuation, so a message naming only the subject strands him. Both
-        # bands must order the disposition in the same line.
-        # The ORDER is the rule. A lock screen truncates the TAIL at roughly
-        # 100 chars, so a disposition written last is the part the phone eats —
-        # which is exactly what the first corrected push got wrong (163 chars,
-        # "Nothing needed from you" at the end).
-        check("band 88 orders disposition FIRST, not merely present",
-              "DISPOSITION FIRST" in said(out))
-        check("band 88 gives both permitted opening stems",
-              "Nothing needed from you" in said(out)
-              and "Need your call on" in said(out))
-        check("band 88 names the truncation limit that forces the order",
-              "100 characters" in said(out))
-        check("band 88 does not promise the continuation runs unattended",
-              "unattended" not in said(out).lower()
-              and "only while the app is open" in said(out))
-        rc, out = run({"session_id": s, "transcript_path": t90}, statefile=state)
-        check("band 88 does not fire twice", out is None, f"out={out}")
-
-        # A DIFFERENT session at the same size must still fire — guards a state
-        # key collision that would silently disable the gate for everyone after
-        # the first session crossed.
-        rc, out = run({"session_id": "s-other", "transcript_path": t90}, statefile=state)
-        check("state is per-session, not global", bool(said(out)))
-
-        # --- reads the LAST usage row, not the largest ----------------------
-        # Guards a max() implementation: after a compaction the context DROPS,
-        # and a max() would keep reporting the pre-compaction peak forever.
-        drop = transcript([usage_row(900_000), usage_row(120_000)], tmp, "drop.jsonl")
-        rc, out = run({"session_id": "s-drop", "transcript_path": drop}, statefile=state)
-        check("post-drop context is read from the last row (allows)", out is None, f"out={out}")
-
-        # --- fail-open paths -------------------------------------------------
-        # Every one of these must let the turn END. A gate that blocks on its
-        # own bug is worse than no gate.
-        rc, out = run({"session_id": "s-x", "transcript_path": "/nope/missing.jsonl"},
-                      statefile=state)
-        check("missing transcript fails open", rc == 0 and out is None)
-
-        empty = transcript([], tmp, "empty.jsonl")
-        rc, out = run({"session_id": "s-e", "transcript_path": empty}, statefile=state)
-        check("empty transcript fails open", rc == 0 and out is None)
-
-        nousage = transcript([{"type": "user", "message": {"content": "hi"}}], tmp, "nu.jsonl")
-        rc, out = run({"session_id": "s-n", "transcript_path": nousage}, statefile=state)
-        check("transcript with no usage rows fails open", rc == 0 and out is None)
-
-        rc, out = run({}, statefile=state)
-        check("payload with no transcript_path fails open", rc == 0 and out is None)
-
-        p = subprocess.run([sys.executable, HOOK], input="not json at all",
-                           capture_output=True, text=True)
-        check("garbage stdin fails open", p.returncode == 0 and not p.stdout.strip())
-
-        # Malformed lines interleaved with good ones — a real transcript can be
-        # torn mid-write while the session is live.
-        torn = transcript(["{not json", usage_row(800_000), "]]broken"], tmp, "torn.jsonl")
-        rc, out = run({"session_id": "s-torn", "transcript_path": torn}, statefile=state)
-        check("torn lines are skipped, good rows still counted",
-              bool(said(out)), f"out={out}")
-
-        # --- window override is honoured -------------------------------------
-        # Guards the 200K-window case: if the harness ever changes, the gate
-        # must fire EARLIER, not silently never.
-        rc, out = run({"session_id": "s-200k", "transcript_path": transcript(
-            [usage_row(150_000)], tmp, "small.jsonl")},
-            env={"CARR_CONTEXT_WINDOW": "200000"}, statefile=state)
-        check("200K window: 150K fires at 75%", bool(said(out)))
-
-        # --- against a REAL transcript ---------------------------------------
-        # The synthetic rows above are my own shape assumption; this is the only
-        # case that proves the parser matches what the product actually writes.
-        # Was pinned to "-Users-booko-My-Drive-CARR-AI", which is one machine's
-        # project folder and contains a username. On any other Mac that path
-        # cannot exist, so this fell to the else branch and FAILED the whole
-        # selftest — which in turn aborted the migration script that runs it
-        # (2026-08-10 fresh-machine audit). Search every project instead.
-        root = os.path.expanduser("~/.claude/projects")
-        files = []
-        if os.path.isdir(root):
-            for d in os.listdir(root):
-                sub = os.path.join(root, d)
-                if not os.path.isdir(sub):
-                    continue
-                files += [os.path.join(sub, f) for f in os.listdir(sub)
-                          if f.endswith(".jsonl")
-                          and os.path.getsize(os.path.join(sub, f)) > 50_000]
-        real = max(files, key=os.path.getsize) if files else None
-        if real:
-            sys.path.insert(0, HERE)
-            import importlib.util
-            spec = importlib.util.spec_from_file_location("chg", HOOK)
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            n = mod.context_tokens(real)
-            check("real transcript parses to a plausible context size",
-                  isinstance(n, int) and 1_000 < n < 1_100_000,
-                  f"got {n} from {os.path.basename(real)}")
-            print(f"       (real session {os.path.basename(real)[:12]}… "
-                  f"= {n:,} tokens = {100*n/1_000_000:.1f}% of 1M)")
-        else:
-            # A machine with no Claude history yet has nothing to parse. That is
-            # a fresh install, not a defect — failing here made a correct
-            # migration report MIGRATION INCOMPLETE. Say it was skipped, out
-            # loud, so a green run never hides which half was exercised.
-            print("       SKIP  real-transcript case — no session ≥50KB on this "
-                  "machine yet (fresh install); synthetic cases above still ran")
-
+    threshold_and_window_cases()
+    fallback_and_hook_sequence()
+    lifecycle_cas_and_tamper()
+    rollout_resolver_cases()
+    dispatcher_cases()
+    wrapper_and_historical_defect()
+    static_contract_cases()
     print()
-    print(f"{len(PASS)} passed, {len(FAIL)} failed")
     if FAIL:
-        for f in FAIL:
-            print(f"  FAILED: {f}")
+        print(f"FAIL {len(FAIL)} check(s): {', '.join(FAIL)}")
         return 1
+    print(f"OK {len(PASS)} checks passed")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

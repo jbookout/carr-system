@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "control": "session_context_lifecycle_gate_v1",
+  "state_directory": "out/session-context-lifecycle",
+  "audit_log": "out/context-handoff.jsonl",
+  "thresholds_percent": {
+    "dense_soft": 50,
+    "normal_soft": 55,
+    "hard": 70
+  },
+  "density": {
+    "risk_levels": ["R3", "R4", "R5", "R6"],
+    "generation_tool_calls": 20,
+    "distinct_mutated_paths": 8,
+    "worker_starts": 3
+  },
+  "model_windows": {
+    "claude-opus-4-1": 1000000,
+    "claude-opus-4-1-20250805": 1000000,
+    "claude-opus-5": 1000000,
+    "claude-sonnet-5": 1000000,
+    "claude-haiku-4-5-20251001": 200000,
+    "claude-fable-5": 1000000,
+    "gpt-5.6-sol": 258400,
+    "gpt-5.6-terra": 258400,
+    "gpt-5.6-luna": 258400
+  },
+  "fallback_caps": {
+    "dense_soft": {
+      "invocations": 20,
+      "active_minutes": 75,
+      "cycles": 6
+    },
+    "normal_soft": {
+      "invocations": 24,
+      "active_minutes": 90,
+      "cycles": 8
+    },
+    "hard": {
+      "invocations": 40,
+      "active_minutes": 120,
+      "cycles": 12
+    },
+    "adjacent_activity_cap_seconds": 300
+  },
+  "dispatcher": {
+    "snapshot_schema": "session_context_dispatcher_snapshot_v1",
+    "freshness_seconds": 120,
+    "future_skew_seconds": 0,
+    "heartbeat_max_seconds": 60,
+    "normalized_states": [
+      "RUNNING",
+      "IDLE",
+      "WAITING_ATTENTION",
+      "CAPACITY_EXHAUSTED",
+      "ERROR",
+      "TERMINAL"
+    ],
+    "waiting_attention_kinds": [
+      "AUTHORITY",
+      "APPROVAL",
+      "CREDENTIAL",
+      "EXTERNAL"
+    ],
+    "recoverable_capacity_codes": [
+      "CONTEXT_EXHAUSTED",
+      "TOKEN_BUDGET_EXHAUSTED",
+      "MODEL_CAPACITY_EXHAUSTED"
+    ]
+  },
+  "actions": [
+    "NOOP",
+    "RECOVER_SAME_TASK",
+    "REFUSE"
+  ],
+  "reasons": [
+    "CONTEXT_HANDOFF_REQUIRED",
+    "CONTEXT_SIGNAL_UNAVAILABLE",
+    "CONTEXT_SIGNAL_AMBIGUOUS",
+    "CONTEXT_SIGNAL_INVALID",
+    "WINDOW_CONFIG_INVALID",
+    "HANDOFF_RECEIPT_MISSING",
+    "HANDOFF_RECEIPT_INVALID",
+    "SUCCESSOR_SURFACE_INVALID",
+    "SUCCESSOR_NOT_ACTIVE",
+    "SUCCESSOR_NOT_PINNED",
+    "TAKEOVER_NOT_VERIFIED",
+    "OWNERSHIP_MISMATCH",
+    "OWNERSHIP_MISSING",
+    "OWNERSHIP_DUPLICATE",
+    "LIFECYCLE_INVALID",
+    "RECOVERY_CAPACITY",
+    "RECOVERY_ERROR",
+    "RECOVERY_IDLE",
+    "RECOVERY_ACTIVE",
+    "RECOVERY_TERMINAL",
+    "RECOVERY_SNAPSHOT_STALE",
+    "RECOVERY_SNAPSHOT_INVALID",
+    "RECOVERY_WAITING"
+  ],
+  "surface_contracts": {
+    "claude": {
+      "events": ["PostToolUse", "PreCompact", "Stop"],
+      "blocking_event": "Stop",
+      "native_evidence_fields": [
+        "session_id",
+        "transcript_path",
+        "controller_callback_id"
+      ]
+    },
+    "codex": {
+      "adapter": "bare_cli",
+      "native_stop_hook": false,
+      "native_evidence_fields": [
+        "thread_id",
+        "project_id",
+        "cwd",
+        "status",
+        "pinnedIndex",
+        "event_id"
+      ]
+    }
+  }
+}

@@ -326,11 +326,14 @@ def replay_demotions(tmp):
         fh.write(json.dumps({"type": "assistant", "message": {"usage": {
             "input_tokens": 100, "cache_read_input_tokens": 699_900}}}) + "\n")
     verdict, text = fire("context-handoff-gate.py",
-                         {"session_id": "replay-ctx", "transcript_path": usage},
+                         {"hook_event_name": "Stop",
+                          "session_id": "replay-ctx", "transcript_path": usage},
                          env={"CARR_CONTEXT_WINDOW": "1000000",
-                              "CARR_CONTEXT_STATE": os.path.join(tmp, "ctx-state.json")})
-    check("context-handoff announces the band and does not reopen",
-          verdict == "ANNOUNCE" and "70%" in text, f"{verdict}: {text[:100]}")
+                              "CARR_CONTEXT_STATE": os.path.join(tmp, "ctx-state.json"),
+                              "CARR_CONTEXT_AUDIT": "off"})
+    check("context-handoff deliberately reopens at the hard line",
+          verdict == "REOPEN" and "CONTEXT_HANDOFF_REQUIRED" in text,
+          f"{verdict}: {text[:160]}")
 
     # unread-artifact: a behavioural claim about a file only ever grepped.
     verdict, text = fire("unread-artifact-gate.py", {
