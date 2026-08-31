@@ -3,6 +3,7 @@
   "$id": "carr-assurance-compiler-input-v1",
   "contract": "carr-assurance-compiler-input",
   "version": "1.0.0",
+  "x-carr-foundation-revision": "1.1.0",
   "status": "phase1_contract_foundation_not_deployed",
   "description": "Read-only input for compiling exactly one canonical Work Request and Engineering Slice. The declared evaluation time proves only internal window consistency; live currentness remains an external gate. Lease, dependency, and rule arrays are set-like and canonicalized by content.",
   "type": "object",

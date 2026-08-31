@@ -3,6 +3,7 @@
   "$id": "carr-assurance-slice-contract-v1",
   "contract": "carr-assurance-slice-contract",
   "version": "1.0.0",
+  "x-carr-foundation-revision": "1.1.0",
   "status": "phase1_contract_foundation_not_deployed",
   "description": "Exact path, test, evidence, review, rollback, rule, repository, and lease extension for one canonical Engineering Slice. Arrays marked x-carr-set are canonicalized as unordered sets.",
   "type": "object",
@@ -10,6 +11,7 @@
   "required": [
     "schema_version",
     "contract_digest",
+    "ownership_contract_digest",
     "work_request",
     "accepted_plan_revision",
     "engineering_slice_plan_digest",
@@ -36,6 +38,9 @@
       "const": "assurance-slice-contract.v1"
     },
     "contract_digest": {
+      "$ref": "#/$defs/Digest"
+    },
+    "ownership_contract_digest": {
       "$ref": "#/$defs/Digest"
     },
     "work_request": {
@@ -295,6 +300,55 @@
     }
   },
   "$defs": {
+    "OwnershipContractPreimage": {
+      "description": "Closed normalized prelease ownership contract. It contains every assurance contract field except contract_digest, ownership_contract_digest, and the entire lease_binding.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "work_request",
+        "accepted_plan_revision",
+        "engineering_slice_plan_digest",
+        "slice_ref",
+        "outcome",
+        "risk",
+        "path_claims",
+        "forbidden_paths",
+        "dependencies",
+        "required_tests",
+        "evidence_requirements",
+        "reviewer_policy",
+        "observable_output",
+        "rollback",
+        "release_class",
+        "unfinished_work",
+        "repository_binding",
+        "rule_snapshot_binding",
+        "executor_identity"
+      ],
+      "properties": {
+        "schema_version": { "$ref": "#/properties/schema_version" },
+        "work_request": { "$ref": "#/properties/work_request" },
+        "accepted_plan_revision": { "$ref": "#/properties/accepted_plan_revision" },
+        "engineering_slice_plan_digest": { "$ref": "#/properties/engineering_slice_plan_digest" },
+        "slice_ref": { "$ref": "#/properties/slice_ref" },
+        "outcome": { "$ref": "#/properties/outcome" },
+        "risk": { "$ref": "#/properties/risk" },
+        "path_claims": { "$ref": "#/properties/path_claims" },
+        "forbidden_paths": { "$ref": "#/properties/forbidden_paths" },
+        "dependencies": { "$ref": "#/properties/dependencies" },
+        "required_tests": { "$ref": "#/properties/required_tests" },
+        "evidence_requirements": { "$ref": "#/properties/evidence_requirements" },
+        "reviewer_policy": { "$ref": "#/properties/reviewer_policy" },
+        "observable_output": { "$ref": "#/properties/observable_output" },
+        "rollback": { "$ref": "#/properties/rollback" },
+        "release_class": { "$ref": "#/properties/release_class" },
+        "unfinished_work": { "$ref": "#/properties/unfinished_work" },
+        "repository_binding": { "$ref": "#/properties/repository_binding" },
+        "rule_snapshot_binding": { "$ref": "#/properties/rule_snapshot_binding" },
+        "executor_identity": { "$ref": "#/properties/executor_identity" }
+      }
+    },
     "Id": {
       "type": "string",
       "pattern": "^[A-Za-z][A-Za-z0-9._:-]{2,127}$"
