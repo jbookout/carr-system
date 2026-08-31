@@ -3,6 +3,7 @@
   "$id": "carr-assurance-execution-manifest-v1",
   "contract": "carr-assurance-execution-manifest",
   "version": "1.0.0",
+  "x-carr-foundation-revision": "1.1.0",
   "status": "phase1_contract_foundation_not_deployed",
   "description": "Immutable compiler output. It proves deterministic binding and declared-window consistency only; it is never action authority, live-currentness proof, or verification.",
   "type": "object",
@@ -152,6 +153,7 @@
         "work_request",
         "accepted_plan_revision",
         "engineering_slice_plan_digest",
+        "assurance_slice_ownership_contract_digest",
         "assurance_slice_contract_digest",
         "repository",
         "applicable_rule_snapshot_digest",
@@ -165,6 +167,9 @@
           "$ref": "assurance-slice-contract.v1.schema.json#/$defs/PlanBinding"
         },
         "engineering_slice_plan_digest": {
+          "$ref": "#/$defs/Digest"
+        },
+        "assurance_slice_ownership_contract_digest": {
           "$ref": "#/$defs/Digest"
         },
         "assurance_slice_contract_digest": {

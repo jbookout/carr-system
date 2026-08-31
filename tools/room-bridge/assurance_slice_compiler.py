@@ -17,7 +17,7 @@ import execution_contract
 
 
 COMPILER_ID = "carr-assurance-slice-compiler"
-COMPILER_VERSION = "1.0.0"
+COMPILER_VERSION = "1.1.0"
 INPUT_SCHEMA = "assurance-compiler-input.v1"
 CONTRACT_SCHEMA = "assurance-slice-contract.v1"
 MANIFEST_SCHEMA = "assurance-execution-manifest.v1"
@@ -25,7 +25,8 @@ MANIFEST_SCHEMA = "assurance-execution-manifest.v1"
 REFUSAL_CODES = (
     "INPUT_NOT_OBJECT", "INPUT_UNKNOWN_FIELD", "INPUT_MISSING_FIELD", "INPUT_SCHEMA_UNSUPPORTED",
     "FIELD_INVALID", "ENGINEERING_SLICE_PLAN_INVALID", "ASSURANCE_SLICE_ABSENT",
-    "ASSURANCE_CONTRACT_DIGEST_MISMATCH", "WORK_REQUEST_BINDING_MISMATCH",
+    "OWNERSHIP_CONTRACT_DIGEST_MISMATCH", "ASSURANCE_CONTRACT_DIGEST_MISMATCH",
+    "WORK_REQUEST_BINDING_MISMATCH",
     "ACCEPTED_PLAN_BINDING_MISMATCH", "ENGINEERING_SLICE_PLAN_BINDING_MISMATCH",
     "SLICE_BINDING_MISMATCH", "REPOSITORY_IDENTITY_MISMATCH", "RULE_SNAPSHOT_DIGEST_MISMATCH",
     "RULE_SNAPSHOT_STALE", "COORDINATION_SNAPSHOT_DIGEST_MISMATCH", "COORDINATION_SNAPSHOT_STALE",
@@ -40,11 +41,14 @@ _INPUT_FIELDS = {
     "assurance_slice", "repository", "applicable_rules", "coordination_snapshot", "declared_evaluation_time",
 }
 _CONTRACT_FIELDS = {
-    "schema_version", "contract_digest", "work_request", "accepted_plan_revision",
+    "schema_version", "contract_digest", "ownership_contract_digest", "work_request", "accepted_plan_revision",
     "engineering_slice_plan_digest", "slice_ref", "outcome", "risk", "path_claims",
     "forbidden_paths", "dependencies", "required_tests", "evidence_requirements",
     "reviewer_policy", "observable_output", "rollback", "release_class", "unfinished_work",
     "repository_binding", "rule_snapshot_binding", "lease_binding", "executor_identity",
+}
+_OWNERSHIP_CONTRACT_FIELDS = _CONTRACT_FIELDS - {
+    "contract_digest", "ownership_contract_digest", "lease_binding",
 }
 _ID = execution_contract.ID
 _DIGEST = execution_contract.SHA256
@@ -255,13 +259,17 @@ def _validate_paths(allowed: list[dict[str, Any]], forbidden: list[dict[str, Any
                 _refuse("PATH_SCOPE_COLLISION", allow["path"], "no allowed/forbidden component ancestry overlap", deny["path"])
 
 
-def _validate_contract(value: Any) -> dict[str, Any]:
-    if value is None:
+def _validate_contract(value: Any, *, prelease: bool = False) -> dict[str, Any]:
+    if value is None and not prelease:
         _refuse("ASSURANCE_SLICE_ABSENT", "assurance_slice", CONTRACT_SCHEMA, None)
-    row = _exact(value, _CONTRACT_FIELDS, "assurance_slice")
+    fields = _OWNERSHIP_CONTRACT_FIELDS if prelease else _CONTRACT_FIELDS
+    label = "ownership_contract_preimage" if prelease else "assurance_slice"
+    row = _exact(value, fields, label)
     if row["schema_version"] != CONTRACT_SCHEMA:
-        _refuse("INPUT_SCHEMA_UNSUPPORTED", "assurance_slice.schema_version", CONTRACT_SCHEMA, row["schema_version"])
-    _digest(row["contract_digest"], "assurance_slice.contract_digest")
+        _refuse("INPUT_SCHEMA_UNSUPPORTED", label + ".schema_version", CONTRACT_SCHEMA, row["schema_version"])
+    if not prelease:
+        _digest(row["contract_digest"], "assurance_slice.contract_digest")
+        _digest(row["ownership_contract_digest"], "assurance_slice.ownership_contract_digest")
     _binding(row["work_request"], "assurance_slice.work_request")
     _plan_binding(row["accepted_plan_revision"], "assurance_slice.accepted_plan_revision")
     _digest(row["engineering_slice_plan_digest"], "assurance_slice.engineering_slice_plan_digest")
@@ -355,14 +363,26 @@ def _validate_contract(value: Any) -> dict[str, Any]:
     rules = _exact(row["rule_snapshot_binding"], {"snapshot_ref", "snapshot_digest"}, "assurance_slice.rule_snapshot_binding")
     _string(rules["snapshot_ref"], "assurance_slice.rule_snapshot_binding.snapshot_ref", identifier=True)
     _digest(rules["snapshot_digest"], "assurance_slice.rule_snapshot_binding.snapshot_digest")
-    lease = _exact(row["lease_binding"], {"lease_id", "fencing_generation", "holder_session_id", "holder_host_id"}, "assurance_slice.lease_binding")
-    for field in ("lease_id", "holder_session_id", "holder_host_id"):
-        _string(lease[field], f"assurance_slice.lease_binding.{field}", identifier=True)
-    _positive_int(lease["fencing_generation"], "assurance_slice.lease_binding.fencing_generation")
+    if not prelease:
+        lease = _exact(row["lease_binding"], {"lease_id", "fencing_generation", "holder_session_id", "holder_host_id"}, "assurance_slice.lease_binding")
+        for field in ("lease_id", "holder_session_id", "holder_host_id"):
+            _string(lease[field], f"assurance_slice.lease_binding.{field}", identifier=True)
+        _positive_int(lease["fencing_generation"], "assurance_slice.lease_binding.fencing_generation")
     identity = _exact(row["executor_identity"], {"actor_ref", "session_ref", "host_ref"}, "assurance_slice.executor_identity")
     for field in identity:
         _string(identity[field], f"assurance_slice.executor_identity.{field}", identifier=True)
     normalized = _normalized_contract(row)
+    if prelease:
+        return normalized
+    ownership_preimage = {key: normalized[key] for key in _OWNERSHIP_CONTRACT_FIELDS}
+    ownership_actual = execution_contract.canonical_digest(ownership_preimage)
+    if row["ownership_contract_digest"] != ownership_actual:
+        _refuse(
+            "OWNERSHIP_CONTRACT_DIGEST_MISMATCH",
+            "assurance_slice.ownership_contract_digest",
+            ownership_actual,
+            row["ownership_contract_digest"],
+        )
     without_digest = {key: item for key, item in normalized.items() if key != "contract_digest"}
     actual = execution_contract.canonical_digest(without_digest)
     if row["contract_digest"] != actual:
@@ -578,6 +598,7 @@ def _compile(value: Any, *, compiler_version: str) -> dict[str, Any]:
             "work_request": copy.deepcopy(row["work_request"]),
             "accepted_plan_revision": copy.deepcopy(row["accepted_plan_revision"]),
             "engineering_slice_plan_digest": plan["plan_digest"],
+            "assurance_slice_ownership_contract_digest": contract["ownership_contract_digest"],
             "assurance_slice_contract_digest": contract["contract_digest"],
             "repository": copy.deepcopy(row["repository"]),
             "applicable_rule_snapshot_digest": rules["snapshot_digest"],
@@ -626,3 +647,12 @@ def compile_assurance_slice(value: Any, *, compiler_version: str = COMPILER_VERS
         return {"ok": False, "refusal": exc.fact}
     except Exception as exc:  # fail closed without exposing an exception to callers
         return {"ok": False, "refusal": {"code": "COMPILER_INTERNAL_ERROR", "causal_object": "compiler", "expected": "deterministic validated input", "actual": type(exc).__name__}}
+
+
+def compile_ownership_contract_digest(preimage: Any) -> str:
+    """Return the deterministic digest for one closed, schema-valid prelease contract."""
+    try:
+        normalized = _validate_contract(copy.deepcopy(preimage), prelease=True)
+    except _Refusal as exc:
+        raise ValueError(exc.fact) from None
+    return execution_contract.canonical_digest(normalized)

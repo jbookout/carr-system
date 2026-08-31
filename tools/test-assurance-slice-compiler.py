@@ -61,8 +61,19 @@ def seal_coordination(value: dict) -> None:
     coord["snapshot_digest"] = _digest_without(coord, "snapshot_digest")
 
 
+def ownership_preimage(contract: dict) -> dict:
+    return {
+        key: copy.deepcopy(item)
+        for key, item in contract.items()
+        if key not in {"contract_digest", "ownership_contract_digest", "lease_binding"}
+    }
+
+
 def seal_contract(value: dict) -> None:
     contract = compiler._normalized_contract(value["assurance_slice"])
+    contract["ownership_contract_digest"] = execution_contract.canonical_digest(
+        ownership_preimage(contract)
+    )
     contract["contract_digest"] = _digest_without(contract, "contract_digest")
     value["assurance_slice"] = contract
 
@@ -112,6 +123,7 @@ def test_valid_compilation_is_deterministic_and_manifest_is_immutable_posture():
     assert manifest["slice"]["required_tests"][0]["runner"] == "python_pytest"
     assert manifest["slice"]["required_tests"][0]["argv"] == ["python3", "-m", "pytest", "-q", "tools/test-assurance-slice-compiler.py"]
     assert manifest["slice"]["required_tests"][0]["cwd"] == "."
+    assert manifest["input_bindings"]["assurance_slice_ownership_contract_digest"] == value["assurance_slice"]["ownership_contract_digest"]
     required = manifest["slice"]["required_tests"][0]
     assert required["environment_gate"] == compiler._CHECK_PROFILES["check:compiler"]["environment_gate"]
     assert required["environment_gate"]["must_pass_before_test"] is True
@@ -129,6 +141,143 @@ def test_declared_set_reordering_preserves_manifest_hash():
     right["applicable_rules"]["rules"].reverse()
     right["coordination_snapshot"]["leases"][0]["claims"].reverse()
     assert compiler.compile_assurance_slice(left)["manifest"]["manifest_hash"] == compiler.compile_assurance_slice(right)["manifest"]["manifest_hash"]
+
+
+def test_ownership_digest_is_prelease_stable_but_executor_identity_is_owned():
+    baseline = valid_input()
+    expected = baseline["assurance_slice"]["ownership_contract_digest"]
+    for field, replacement in (("lease_id", "lease:replacement"), ("fencing_generation", 99)):
+        changed = copy.deepcopy(baseline)
+        changed["assurance_slice"]["lease_binding"][field] = replacement
+        assert compiler.compile_ownership_contract_digest(ownership_preimage(changed["assurance_slice"])) == expected
+
+    for field, replacement in (("holder_session_id", "session:other"), ("holder_host_id", "host:other")):
+        changed = copy.deepcopy(baseline)
+        changed["assurance_slice"]["lease_binding"][field] = replacement
+        seal_contract(changed)
+        assert changed["assurance_slice"]["ownership_contract_digest"] == expected
+        refusal(changed, "LEASE_BINDING_MISMATCH", "assurance_slice.lease_binding")
+
+    coherent = copy.deepcopy(baseline)
+    identity = coherent["assurance_slice"]["executor_identity"]
+    identity.update({"actor_ref": "actor:other", "session_ref": "session:other", "host_ref": "host:other"})
+    policy = coherent["assurance_slice"]["reviewer_policy"]
+    policy.update({"executor_actor_ref": "actor:other", "executor_session_ref": "session:other"})
+    assert compiler.compile_ownership_contract_digest(ownership_preimage(coherent["assurance_slice"])) != expected
+
+
+def test_every_mutable_ownership_category_changes_prelease_digest():
+    baseline = ownership_preimage(valid_input()["assurance_slice"])
+    expected = compiler.compile_ownership_contract_digest(baseline)
+    variants = []
+
+    def variant(edit):
+        changed = copy.deepcopy(baseline); edit(changed); variants.append(changed)
+
+    variant(lambda row: row["work_request"].update(state_version=2))
+    variant(lambda row: row["accepted_plan_revision"].update(revision=3))
+    variant(lambda row: row.update(engineering_slice_plan_digest="sha256:" + "1" * 64))
+    variant(lambda row: row.update(slice_ref="slice:other"))
+    variant(lambda row: row.update(outcome="Changed owned outcome"))
+    variant(lambda row: row["risk"].update(summary="Changed owned risk"))
+    variant(lambda row: row["path_claims"][0].update(operation="rename_source"))
+    variant(lambda row: row["forbidden_paths"][0].update(path="migrations/other.sql"))
+    variant(lambda row: row["dependencies"][0].update(required_state="completed"))
+    variant(lambda row: row["required_tests"][0]["evidence_fields"].append("new_owned_field"))
+    variant(lambda row: row["evidence_requirements"][0]["required_fields"].append("new_owned_field"))
+    variant(lambda row: row["reviewer_policy"].update(minimum_independent_reviewers=3))
+    variant(lambda row: row["observable_output"].update(description="Changed owned output"))
+    variant(lambda row: row["rollback"].update(strategy="Changed owned rollback"))
+    variant(lambda row: row.update(release_class="none"))
+    variant(lambda row: row["unfinished_work"].append("Changed owned unfinished work"))
+    variant(lambda row: row["repository_binding"].update(commit_sha="1" * 40))
+    variant(lambda row: row["rule_snapshot_binding"].update(snapshot_digest="sha256:" + "1" * 64))
+    variant(lambda row: row["executor_identity"].update(actor_ref="actor:other"))
+    for changed in variants:
+        assert compiler.compile_ownership_contract_digest(changed) != expected
+
+
+def test_final_digest_covers_all_lease_fields_and_the_ownership_digest():
+    contract = compiler._normalized_contract(valid_input()["assurance_slice"])
+    expected = _digest_without(contract, "contract_digest")
+    replacements = {
+        "lease_id": "lease:replacement", "fencing_generation": 99,
+        "holder_session_id": "session:other", "holder_host_id": "host:other",
+    }
+    for field, replacement in replacements.items():
+        changed = copy.deepcopy(contract); changed["lease_binding"][field] = replacement
+        assert _digest_without(changed, "contract_digest") != expected
+    changed = copy.deepcopy(contract)
+    changed["ownership_contract_digest"] = "sha256:" + "1" * 64
+    assert _digest_without(changed, "contract_digest") != expected
+
+
+def test_ownership_preimage_schema_is_exactly_closed_and_matches_compiler_fields():
+    schema = json.loads((ROOT / "control-room/contracts/assurance-slice-contract.v1.schema.json").read_text())
+    definition = schema["$defs"]["OwnershipContractPreimage"]
+    expected_fields = set(valid_input()["assurance_slice"]) - {"contract_digest", "ownership_contract_digest", "lease_binding"}
+    assert definition["additionalProperties"] is False
+    assert set(definition["required"]) == set(definition["properties"]) == expected_fields == compiler._OWNERSHIP_CONTRACT_FIELDS
+    preimage = ownership_preimage(valid_input()["assurance_slice"])
+    assert schema_valid(schema, "OwnershipContractPreimage", preimage)
+    for forbidden in ("contract_digest", "ownership_contract_digest", "lease_binding"):
+        altered = copy.deepcopy(preimage); altered[forbidden] = valid_input()["assurance_slice"][forbidden]
+        assert not schema_valid(schema, "OwnershipContractPreimage", altered)
+
+
+def test_ownership_digest_normalization_and_refusal_precedence_are_deterministic():
+    left = ownership_preimage(valid_input()["assurance_slice"])
+    right = copy.deepcopy(left)
+    right["path_claims"].reverse()
+    right["required_tests"][0]["evidence_fields"].reverse()
+    assert compiler.compile_ownership_contract_digest(left) == compiler.compile_ownership_contract_digest(right)
+
+    value = valid_input()
+    value["assurance_slice"]["ownership_contract_digest"] = "sha256:" + "8" * 64
+    value["assurance_slice"]["contract_digest"] = "sha256:" + "9" * 64
+    refusal(value, "OWNERSHIP_CONTRACT_DIGEST_MISMATCH", "assurance_slice.ownership_contract_digest")
+    value["assurance_slice"]["ownership_contract_digest"] = compiler.compile_ownership_contract_digest(
+        ownership_preimage(value["assurance_slice"])
+    )
+    refusal(value, "ASSURANCE_CONTRACT_DIGEST_MISMATCH", "assurance_slice.contract_digest")
+
+
+def test_foundation_metadata_and_compiler_versions_advance_together():
+    paths = [
+        "control-room/contracts/assurance-slice-contract.v1.schema.json",
+        "control-room/contracts/assurance-compiler-input.v1.schema.json",
+        "control-room/contracts/assurance-execution-manifest.v1.schema.json",
+    ]
+    schemas = [json.loads((ROOT / path).read_text()) for path in paths]
+    assert {schema["version"] for schema in schemas} == {"1.0.0"}
+    assert {schema["x-carr-foundation-revision"] for schema in schemas} == {compiler.COMPILER_VERSION} == {"1.1.0"}
+    assert {schema["status"] for schema in schemas} == {"phase1_contract_foundation_not_deployed"}
+
+
+def test_a1a_foundation_hashes_are_superseded_and_a1b_is_resealed():
+    old = {
+        "fixture": "sha256:f7d21cde58fba958187d2c8e075160c79dccc7a57366693cbc39b263abc0f488",
+        "input": "sha256:3405984739709066fc4240cba271bc6c4a47708073375156777f8bf5555ef527",
+        "ownership": "sha256:e3a7a26ee6d25c41314d9aefb1a1bf591c742d54b2364406c6fe71d824e93f64",
+        "final": "sha256:7bab89fe9bfd96c56cd47fed548f3027399e1a1bc7ad934397a596babf0438ea",
+        "manifest": "sha256:cb13135536704318b7e1905d5c28bde1565f8fc3fc75d7c2b70a92b668726ec1",
+    }
+    value = valid_input()
+    result = compiler.compile_assurance_slice(value)
+    assert result["ok"] is True, result
+    manifest = result["manifest"]
+    current = {
+        "fixture": "sha256:" + hashlib.sha256(FIXTURE.read_bytes()).hexdigest(),
+        "input": manifest["input_digest"],
+        "ownership": value["assurance_slice"]["ownership_contract_digest"],
+        "final": value["assurance_slice"]["contract_digest"],
+        "manifest": manifest["manifest_hash"],
+    }
+    assert all(current[name] != old[name] for name in old)
+    assert current["ownership"] == compiler.compile_ownership_contract_digest(ownership_preimage(value["assurance_slice"]))
+    assert current["final"] == _digest_without(compiler._normalized_contract(value["assurance_slice"]), "contract_digest")
+    assert current["input"] == execution_contract.canonical_digest(compiler._normalized_input(value))
+    assert current["manifest"] == execution_contract.canonical_digest({key: item for key, item in manifest.items() if key != "manifest_hash"})
 
 
 def test_unknown_missing_and_absent_extension_refuse_exactly():
@@ -328,6 +477,8 @@ def test_module_has_no_provider_network_git_database_model_or_write_imports():
     source = (BRIDGE / "assurance_slice_compiler.py").read_text()
     for forbidden in ("requests", "urllib", "subprocess", "psycopg", "openai", "anthropic", ".write_text(", "open("):
         assert forbidden not in source
+    preimage = ownership_preimage(valid_input()["assurance_slice"])
+    assert compiler.compile_ownership_contract_digest(preimage) == valid_input()["assurance_slice"]["ownership_contract_digest"]
 
 
 if __name__ == "__main__":
