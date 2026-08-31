@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from typing import Any
 
 from canonical_ownership_siep18_normalization import (
     SIEP18NormalizationError,
@@ -30,7 +31,7 @@ TRUNCATE = {
         "FOR EACH STATEMENT EXECUTE FUNCTION ops.scac_reference_monitor_guard()"
     ),
 }
-BASELINE = {
+BASELINE: dict[str, Any] = {
     "tables": {
         TARGET: {"acl": "baseline", "triggers": [{"name": "existing", "enabled": "O", "definition": "stable"}]},
         "public.actor": {"acl": "baseline", "triggers": []},
@@ -39,7 +40,7 @@ BASELINE = {
 }
 
 
-def candidate() -> dict:
+def candidate() -> dict[str, Any]:
     value = deepcopy(BASELINE)
     value["tables"][TARGET]["triggers"].extend([deepcopy(ROW), deepcopy(TRUNCATE)])
     return value
