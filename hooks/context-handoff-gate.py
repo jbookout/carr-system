@@ -196,6 +196,7 @@ def validate_task_state(value: dict[str, Any], task_key: str,
                 or owner.get("id") != owner_id):
             raise LifecycleError("LIFECYCLE_INVALID", "owner record is invalid")
         owner_generation = owner.get("generation")
+        activation_init = owner.get("activation_init_digest")
         activation_final = owner.get("activation_final_digest")
         if (owner.get("surface") not in SURFACES
                 or owner.get("state") not in OWNER_STATES
@@ -207,9 +208,22 @@ def validate_task_state(value: dict[str, Any], task_key: str,
                     and not is_digest(owner.get("evidence_digest")))
                 or (activation_final is not None
                     and not is_digest(activation_final))
+                or (activation_init is not None
+                    and not is_digest(activation_init))
                 or owner.get("ownership_digest") != owner_digest(owner)):
             raise LifecycleError("LIFECYCLE_INVALID",
                                  "owner record semantics are invalid")
+        if owner_generation == 0:
+            if (not is_digest(activation_init)
+                    or activation_final is not None):
+                raise LifecycleError(
+                    "LIFECYCLE_INVALID",
+                    "initial owner lacks immutable activation provenance")
+            verify_owner_initialization(task_key, owner, manifest)
+        elif activation_init is not None:
+            raise LifecycleError(
+                "LIFECYCLE_INVALID",
+                "successor owner carries initialization provenance")
         if (owner_generation > 0
                 and owner.get("state") != "SUCCESSOR_DECLARED"
                 and not is_digest(activation_final)):
@@ -454,6 +468,54 @@ def read_object(task_key: str, kind: str, object_digest: str,
     return value
 
 
+def verify_owner_initialization(task_key: str, owner: dict[str, Any],
+                                manifest: dict[str, Any] | None = None) -> None:
+    """Bind generation-zero ownership to an immutable admission packet."""
+    packet = read_object(
+        task_key, "initialization", str(owner.get("activation_init_digest")),
+        manifest)
+    evidence = packet.get("native_evidence")
+    evidence_digest = packet.get("native_evidence_digest")
+    source = packet.get("source")
+    if (packet.get("schema_version") != 1
+            or packet.get("task_key") != task_key
+            or packet.get("owner") != owner.get("id")
+            or packet.get("surface") != owner.get("surface")
+            or packet.get("generation") != 0
+            or source not in {"task_init", "claude_hook"}
+            or not isinstance(packet.get("created_at"), str)
+            or not packet.get("created_at")
+            or evidence_digest != owner.get("evidence_digest")):
+        raise LifecycleError(
+            "HANDOFF_RECEIPT_INVALID",
+            "initialization provenance linkage is invalid")
+    if source == "claude_hook":
+        if evidence is not None or evidence_digest is not None:
+            raise LifecycleError(
+                "HANDOFF_RECEIPT_INVALID",
+                "hook initialization carries unverified native evidence")
+        return
+    if (not isinstance(evidence, dict)
+            or not is_digest(evidence_digest)
+            or digest(evidence) != evidence_digest):
+        raise LifecycleError(
+            "HANDOFF_RECEIPT_INVALID",
+            "initialization native evidence linkage is invalid")
+    try:
+        validated = validate_native_evidence(
+            str(owner.get("surface")), evidence,
+            expected_identity=str(owner.get("id")), accept=True,
+            require_live=False)
+    except LifecycleError as exc:
+        raise LifecycleError(
+            "HANDOFF_RECEIPT_INVALID",
+            f"initialization native evidence is invalid: {exc.detail}") from exc
+    if validated != evidence_digest:
+        raise LifecycleError(
+            "HANDOFF_RECEIPT_INVALID",
+            "initialization native evidence digest changed")
+
+
 def verify_terminal_provenance(task_key: str, state: dict[str, Any],
                                owner: dict[str, Any],
                                manifest: dict[str, Any] | None = None) -> None:
@@ -517,7 +579,8 @@ def verify_terminal_provenance(task_key: str, state: dict[str, Any],
     try:
         validated = validate_native_evidence(
             str(owner.get("surface")), evidence,
-            expected_identity=str(owner.get("id")), terminal=True)
+            expected_identity=str(owner.get("id")), terminal=True,
+            require_live=False)
     except LifecycleError as exc:
         raise LifecycleError(
             "HANDOFF_RECEIPT_INVALID",
@@ -724,7 +787,7 @@ def payload_mutated_paths(payload: dict[str, Any]) -> set[str]:
 def owner_digest(owner: dict[str, Any]) -> str:
     return digest({key: owner.get(key) for key in
                    ("id", "surface", "generation", "state", "evidence_digest",
-                    "activation_final_digest",
+                    "activation_init_digest", "activation_final_digest",
                     "terminal_evidence_digest", "terminal_provenance_digest")})
 
 
@@ -735,9 +798,12 @@ def fresh_signal() -> dict[str, Any]:
             "last_observed_at": None, "notices": []}
 
 
-def initial_state(task_key: str, owner_id: str, surface: str = "claude") -> dict[str, Any]:
+def initial_state(task_key: str, owner_id: str, surface: str,
+                  evidence_digest: str | None,
+                  activation_init_digest: str) -> dict[str, Any]:
     owner = {"id": owner_id, "surface": surface, "generation": 0,
-             "state": "ACTIVE", "evidence_digest": None}
+             "state": "ACTIVE", "evidence_digest": evidence_digest,
+             "activation_init_digest": activation_init_digest}
     owner["ownership_digest"] = owner_digest(owner)
     return {
         "schema_version": 1, "task_key": task_key, "version": -1,
@@ -765,11 +831,10 @@ def claude_owner_task_key(owner_id: str, manifest: dict[str, Any]) -> str | None
             value = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if not isinstance(value, dict) or value.get("task_status") == "TERMINAL":
+        if not isinstance(value, dict):
             continue
         owner = (value.get("owners") or {}).get(owner_id)
-        if (not isinstance(owner, dict) or owner.get("surface") != "claude"
-                or owner.get("state") == "TERMINAL"):
+        if not isinstance(owner, dict) or owner.get("surface") != "claude":
             continue
         task_key = value.get("task_key")
         if not isinstance(task_key, str) or not task_key:
@@ -790,14 +855,20 @@ def hook_task_key(payload: dict[str, Any],
                   manifest: dict[str, Any] | None = None) -> tuple[str, str]:
     explicit = payload.get("task_key") or os.environ.get("CARR_CONTEXT_TASK_KEY")
     session = payload.get("session_id") or payload.get("sessionId")
-    if explicit:
-        return str(explicit), str(session or explicit)
     if session:
         if manifest is not None:
             bound = claude_owner_task_key(str(session), manifest)
             if bound:
+                if explicit and str(explicit) != bound:
+                    raise LifecycleError(
+                        "OWNERSHIP_MISMATCH",
+                        "callback task key conflicts with authoritative Claude binding")
                 return bound, str(session)
+        if explicit:
+            return str(explicit), str(session)
         return f"claude:{session}", str(session)
+    if explicit:
+        return str(explicit), str(explicit)
     transcript = payload.get("transcript_path") or payload.get("transcriptPath")
     if transcript:
         return f"claude-transcript:{digest(os.path.abspath(str(transcript)))}", "unknown"
@@ -808,7 +879,19 @@ def update_observation(current: dict[str, Any] | None, task_key: str, owner_id: 
                        payload: dict[str, Any], rows: list[dict[str, Any]],
                        event: str, now: dt.datetime,
                        manifest: dict[str, Any]) -> dict[str, Any]:
-    state = current or initial_state(task_key, owner_id)
+    if current is None:
+        packet = {
+            "schema_version": 1, "task_key": task_key,
+            "owner": owner_id, "surface": "claude", "generation": 0,
+            "source": "claude_hook", "native_evidence": None,
+            "native_evidence_digest": None, "created_at": utc_now(),
+        }
+        init_digest = write_immutable(
+            task_key, "initialization", packet, manifest)
+        state = initial_state(
+            task_key, owner_id, "claude", None, init_digest)
+    else:
+        state = current
     recorded = (state.get("owners") or {}).get(owner_id)
     if recorded and recorded.get("surface") != "claude":
         raise LifecycleError(
@@ -931,8 +1014,19 @@ def hook_main() -> int:
     try:
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
-            return 0
+            raise ValueError("hook payload is not an object")
     except Exception:
+        # The same executable is wired to non-blocking observation events and
+        # to Stop.  The wiring supplies the event independently so malformed
+        # JSON cannot erase the sole blocking seam.  A direct invocation has no
+        # such assurance and therefore conservatively assumes Stop.
+        event = os.environ.get("CARR_CONTEXT_HOOK_EVENT", "Stop")
+        task_key = os.environ.get("CARR_CONTEXT_TASK_KEY", "claude:unknown")
+        audit({"session": "unknown", "event": event,
+               "action": "REFUSE" if event == "Stop" else "NOOP",
+               "reason": "LIFECYCLE_INVALID",
+               "detail": "hook payload is malformed"})
+        refuse_stop_on_control_error(event, task_key, "LIFECYCLE_INVALID")
         return 0
     event = payload.get("hook_event_name") or payload.get("hookEventName") or "Stop"
     task_key, owner_id = hook_task_key(payload)
@@ -1051,7 +1145,8 @@ def parse_evidence(text: str) -> dict[str, Any]:
 def validate_native_evidence(surface: str, evidence: dict[str, Any], *,
                              expected_identity: str | None = None,
                              accept: bool = False,
-                             terminal: bool = False) -> str:
+                             terminal: bool = False,
+                             require_live: bool = True) -> str:
     if surface == "codex":
         required = {"thread_id", "project_id", "cwd", "status", "event_id"}
         if not required.issubset(evidence) or not all(evidence.get(key) for key in required):
@@ -1059,7 +1154,8 @@ def validate_native_evidence(surface: str, evidence: dict[str, Any], *,
         if expected_identity is not None and str(evidence.get("thread_id")) != expected_identity:
             raise LifecycleError("SUCCESSOR_SURFACE_INVALID",
                                  "Codex thread_id does not match lifecycle owner")
-        if not Path(str(evidence.get("cwd"))).expanduser().is_dir():
+        if (require_live
+                and not Path(str(evidence.get("cwd"))).expanduser().is_dir()):
             raise LifecycleError("SUCCESSOR_SURFACE_INVALID", "Codex cwd is not a live directory")
         if accept and str(evidence.get("status")).lower() not in {"active", "idle", "running"}:
             raise LifecycleError("SUCCESSOR_NOT_ACTIVE", "Codex successor is not active")
@@ -1074,7 +1170,8 @@ def validate_native_evidence(surface: str, evidence: dict[str, Any], *,
         if expected_identity is not None and str(evidence.get("session_id")) != expected_identity:
             raise LifecycleError("SUCCESSOR_SURFACE_INVALID",
                                  "Claude session_id does not match lifecycle owner")
-        if not Path(str(evidence.get("transcript_path"))).expanduser().is_file():
+        if (require_live
+                and not Path(str(evidence.get("transcript_path"))).expanduser().is_file()):
             raise LifecycleError("SUCCESSOR_SURFACE_INVALID",
                                  "Claude transcript_path is not a live file")
         if accept and str(evidence.get("status", "active")).lower() not in {"active", "idle", "running"}:
@@ -1088,10 +1185,12 @@ def validate_native_evidence(surface: str, evidence: dict[str, Any], *,
 
 def validate_successor_evidence(offer: dict[str, Any], successor: str,
                                 evidence: dict[str, Any], *,
-                                accept: bool = False) -> str:
+                                accept: bool = False,
+                                require_live: bool = True) -> str:
     surface = offer["successor_surface"]
     evidence_digest = validate_native_evidence(
-        surface, evidence, expected_identity=successor, accept=accept)
+        surface, evidence, expected_identity=successor, accept=accept,
+        require_live=require_live)
     if surface == "codex":
         try:
             Path(str(evidence.get("cwd"))).expanduser().resolve().relative_to(
@@ -1129,14 +1228,21 @@ def lifecycle_init(args, manifest):
     evidence = parse_evidence(args.evidence_json)
     evidence_digest = validate_native_evidence(
         args.surface, evidence, expected_identity=args.owner, accept=True)
+    packet = {
+        "schema_version": 1, "task_key": args.task_key,
+        "owner": args.owner, "surface": args.surface, "generation": 0,
+        "source": "task_init", "native_evidence": evidence,
+        "native_evidence_digest": evidence_digest, "created_at": utc_now(),
+    }
+    init_digest = write_immutable(
+        args.task_key, "initialization", packet, manifest)
 
     def create(current):
         if current is not None:
             raise LifecycleError("LIFECYCLE_INVALID", "task already exists")
-        state = initial_state(args.task_key, args.owner, args.surface)
-        state["owners"][args.owner]["evidence_digest"] = evidence_digest
-        state["owners"][args.owner]["ownership_digest"] = owner_digest(state["owners"][args.owner])
-        return state
+        return initial_state(
+            args.task_key, args.owner, args.surface,
+            evidence_digest, init_digest)
 
     return mutate_state(args.task_key, args.expected_version, create, manifest)
 
@@ -1383,10 +1489,11 @@ def read_verified_final_packet(task_key: str, final_digest: Any,
     try:
         predecessor_evidence_digest = validate_native_evidence(
             str(offer.get("predecessor_surface")), offer_evidence,
-            expected_identity=str(offer.get("predecessor")))
+            expected_identity=str(offer.get("predecessor")),
+            require_live=False)
         successor_evidence_digest = validate_successor_evidence(
             offer, str(offer.get("successor")), acceptance_evidence,
-            accept=True)
+            accept=True, require_live=False)
     except LifecycleError as exc:
         raise LifecycleError(
             "HANDOFF_RECEIPT_INVALID",

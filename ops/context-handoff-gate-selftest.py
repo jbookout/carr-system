@@ -41,7 +41,7 @@ def digest(value):
 def ownership_digest(owner):
     return digest({key: owner.get(key) for key in (
         "id", "surface", "generation", "state", "evidence_digest",
-        "activation_final_digest",
+        "activation_init_digest", "activation_final_digest",
         "terminal_evidence_digest", "terminal_provenance_digest",
     )})
 
@@ -343,6 +343,31 @@ def fallback_and_hook_sequence():
         check("PreCompact always allows silently", pre is None, pre)
         check("Stop is the sole refusal seam", reason(stop) is not None, stop)
 
+        malformed = subprocess.run(
+            [sys.executable, str(HOOK)], input="{bad", text=True,
+            capture_output=True, env=base_env(root), cwd=REPO)
+        malformed_out = None
+        if malformed.stdout.strip():
+            try:
+                malformed_out = json.loads(malformed.stdout)
+            except Exception:
+                malformed_out = {"unparseable": malformed.stdout}
+        malformed_reason = reason(malformed_out)
+        check("malformed hook input conservatively refuses the Stop seam",
+              malformed.returncode == 0 and malformed_reason
+              and malformed_reason["reason"] == "LIFECYCLE_INVALID",
+              (malformed.returncode, malformed_out, malformed.stderr))
+        malformed_post = subprocess.run(
+            [sys.executable, str(HOOK)], input="{bad", text=True,
+            capture_output=True,
+            env=base_env(root, CARR_CONTEXT_HOOK_EVENT="PostToolUse"),
+            cwd=REPO)
+        check("out-of-band event keeps malformed observation non-blocking",
+              malformed_post.returncode == 0
+              and not malformed_post.stdout.strip(),
+              (malformed_post.returncode, malformed_post.stdout,
+               malformed_post.stderr))
+
         # Complete the same task's handoff through immutable offer/declaration/
         # receipt/final objects, then prove recursive Stop allows.
         _, status = run_cli(root, "status", "--task-key", "claude:sequence")
@@ -566,6 +591,21 @@ def lifecycle_cas_and_tamper():
                               "--expected-version", "-1")
         check("task init creates version zero", proc.returncode == 0 and state["version"] == 0,
               (proc.returncode, state))
+
+        cas_hash = hashlib.sha256(b"task:cas").hexdigest()
+        cas_path = root / "state" / f"{cas_hash}.json"
+        original_cas = cas_path.read_text()
+        forged_cas = json.loads(original_cas)
+        forged_owner = forged_cas["owners"]["old"]
+        forged_owner["evidence_digest"] = "0" * 64
+        forged_owner["ownership_digest"] = ownership_digest(forged_owner)
+        cas_path.write_text(json.dumps(forged_cas))
+        proc, forged_init = run_cli(root, "status", "--task-key", "task:cas")
+        check("generation-zero evidence is bound to immutable initialization",
+              proc.returncode == 2
+              and forged_init["reason"] == "HANDOFF_RECEIPT_INVALID",
+              (proc.returncode, forged_init, proc.stderr))
+        cas_path.write_text(original_cas)
 
         # Reject an unsupported target before creating an immutable offer or
         # changing the sole active owner to DRAINING.  Otherwise there is no
@@ -792,6 +832,31 @@ def lifecycle_cas_and_tamper():
               and bound_after["signal"]["invocations"] == 1
               and not derived_path.exists(),
               (proc.returncode, callback, bound_after, proc.stderr))
+
+        bound_version = bound_after["version"]
+        wrong_key = "task:wrong-claude-callback"
+        wrong_path = root / "state" / (
+            hashlib.sha256(wrong_key.encode()).hexdigest() + ".json")
+        proc, wrong_callback = run_hook(
+            root, "Stop", claude_successor_transcript,
+            session="claude-new", payload_extra={"task_key": wrong_key})
+        _, bound_after_wrong = run_cli(
+            root, "status", "--task-key", "task:claude-successor-binding")
+        check("accepted Claude binding overrides and rejects a conflicting callback key",
+              proc.returncode == 0
+              and reason(wrong_callback)
+              and reason(wrong_callback)["reason"] == "OWNERSHIP_MISMATCH"
+              and bound_after_wrong["version"] == bound_version
+              and not wrong_path.exists(),
+              (proc.returncode, wrong_callback, bound_after_wrong, proc.stderr))
+
+        claude_successor_transcript.unlink()
+        proc, historical_status = run_cli(
+            root, "status", "--task-key", "task:claude-successor-binding")
+        check("immutable accepted history survives transcript cleanup",
+              proc.returncode == 0
+              and historical_status["active_owner"] == "claude-new",
+              (proc.returncode, historical_status, proc.stderr))
 
         proc, declared = run_cli(
             root, "successor-declare", "--task-key", "task:binding",
@@ -1133,6 +1198,37 @@ def lifecycle_cas_and_tamper():
         check("terminal task cannot recover or resurrect",
               proc.returncode == 2
               and resurrect["reason"] == "LIFECYCLE_INVALID", resurrect)
+
+        late_transcript = write_jsonl(
+            root / "late-terminal.jsonl",
+            [usage_row(1_000, model="claude-opus-4-1")])
+        late_active_evidence = json.dumps({
+            "session_id": "late-terminal", "transcript_path": str(late_transcript),
+            "controller_callback_id": "late-terminal-callback", "status": "active",
+        })
+        _, late_state = run_cli(
+            root, "task-init", "--task-key", "task:late-terminal",
+            "--owner", "late-terminal", "--surface", "claude",
+            "--evidence-json", late_active_evidence, "--expected-version", "-1")
+        late_terminal_evidence = json.dumps({
+            "session_id": "late-terminal", "transcript_path": str(late_transcript),
+            "controller_callback_id": "late-terminal-callback", "status": "terminal",
+        })
+        _, late_terminal_state = run_cli(
+            root, "task-terminal", "--task-key", "task:late-terminal",
+            "--owner", "late-terminal", "--evidence-json", late_terminal_evidence,
+            "--expected-version", str(late_state["version"]))
+        proc, late_callback = run_hook(
+            root, "Stop", late_transcript, session="late-terminal")
+        _, late_after = run_cli(
+            root, "status", "--task-key", "task:late-terminal")
+        late_derived_path = root / "state" / (
+            hashlib.sha256(b"claude:late-terminal").hexdigest() + ".json")
+        check("late terminal Claude callback resolves existing task and no-ops",
+              proc.returncode == 0 and late_callback is None
+              and late_after["version"] == late_terminal_state["version"]
+              and not late_derived_path.exists(),
+              (proc.returncode, late_callback, late_after, proc.stderr))
 
         _, tamper_terminal = run_cli(
             root, "task-init", "--task-key", "task:terminal-tamper",
@@ -1602,11 +1698,14 @@ def static_contract_cases():
     post = json.dumps(hooks.get("PostToolUse", []))
     compact = json.dumps(hooks.get("PreCompact", []))
     check("Claude wiring has context gate on PostToolUse",
-          "context-handoff-gate.py" in post, post)
+          "context-handoff-gate.py" in post
+          and "CARR_CONTEXT_HOOK_EVENT=PostToolUse" in post, post)
     check("Claude wiring has context gate on PreCompact",
-          "context-handoff-gate.py" in compact, compact)
+          "context-handoff-gate.py" in compact
+          and "CARR_CONTEXT_HOOK_EVENT=PreCompact" in compact, compact)
     check("Claude wiring keeps context gate on Stop",
-          "context-handoff-gate.py" in stop, stop)
+          "context-handoff-gate.py" in stop
+          and "CARR_CONTEXT_HOOK_EVENT=Stop" in stop, stop)
     manifest = json.loads(MANIFEST.read_text())
     check("manifest makes Codex bare-CLI limitation explicit",
           manifest["surface_contracts"]["codex"]["adapter"] == "bare_cli"

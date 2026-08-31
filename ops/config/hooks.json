@@ -169,7 +169,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "/usr/bin/env python3 {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/context-handoff-gate.py",
+          "command": "CARR_CONTEXT_HOOK_EVENT=PostToolUse /usr/bin/env python3 {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/context-handoff-gate.py",
           "timeout": 20
         }
       ]
@@ -209,7 +209,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "/usr/bin/env python3 {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/context-handoff-gate.py",
+          "command": "CARR_CONTEXT_HOOK_EVENT=PreCompact /usr/bin/env python3 {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/context-handoff-gate.py",
           "timeout": 20
         }
       ]
@@ -240,7 +240,7 @@
         },
         {
           "type": "command",
-          "command": "/usr/bin/env python3 {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/context-handoff-gate.py",
+          "command": "CARR_CONTEXT_HOOK_EVENT=Stop /usr/bin/env python3 {{REPO}}/hooks/hook-meter-run.py {{REPO}}/hooks/context-handoff-gate.py",
           "timeout": 20
         },
         {
