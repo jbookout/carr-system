@@ -392,6 +392,12 @@ begin
      or plan_row.id is null
      or plan_row.work_request_id is distinct from p_work_request_id
      or leaf.slice_plan_id is distinct from plan_row.id
+     or leaf.envelope->>'envelope_id'
+          is distinct from 'env:'||leaf.id::text
+     or leaf.envelope#>>'{request,job_ref}'
+          is distinct from 'job:'||leaf.job_id::text
+     or leaf.envelope#>>'{agent_session,id}'
+          is distinct from 'session:'||leaf.agent_session_id::text
      or receipt.executor_actor_id is distinct from session_executor
      or session_slug is null
      or receipt_attempt is null

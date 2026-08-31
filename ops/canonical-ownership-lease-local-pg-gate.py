@@ -286,6 +286,77 @@ def reseal_receipt(cur, receipt_id) -> None:
         raise RuntimeError("receipt reseal fixture missed its receipt")
 
 
+def corrupt_envelope_identity(
+    cur,
+    envelope_id,
+    receipt_id,
+    path: list[str],
+    value: str,
+    *,
+    sync_receipt_session: bool = False,
+) -> None:
+    cur.execute(
+        "alter table ops.engineering_execution_envelope disable trigger user"
+    )
+    cur.execute(
+        "alter table ops.engineering_slice_receipt disable trigger user"
+    )
+    cur.execute(
+        """update ops.engineering_execution_envelope
+              set envelope=jsonb_set(envelope,%s,to_jsonb(%s::text),false)
+            where id=%s""",
+        (path, value, envelope_id),
+    )
+    if cur.rowcount != 1:
+        raise RuntimeError("envelope identity fixture missed its envelope")
+    cur.execute(
+        """update ops.engineering_execution_envelope
+              set envelope_digest='sha256:'||encode(
+                    public.digest(
+                      ops.guidance_import_canonical_json(envelope),
+                      'sha256'
+                    ),
+                    'hex'
+                  )
+            where id=%s""",
+        (envelope_id,),
+    )
+    if cur.rowcount != 1:
+        raise RuntimeError("envelope identity fixture did not reseal its digest")
+    cur.execute(
+        """update ops.engineering_slice_receipt r
+              set receipt=jsonb_set(
+                    r.receipt,
+                    '{envelope_digest}',
+                    to_jsonb(e.envelope_digest),
+                    true
+                  )
+             from ops.engineering_execution_envelope e
+            where r.id=%s and e.id=%s""",
+        (receipt_id, envelope_id),
+    )
+    if cur.rowcount != 1:
+        raise RuntimeError("envelope identity fixture missed its receipt binding")
+    if sync_receipt_session:
+        cur.execute(
+            """update ops.engineering_slice_receipt r
+                  set receipt=jsonb_set(
+                        r.receipt,
+                        '{attribution,session_ref}',
+                        to_jsonb(e.envelope#>>'{agent_session,id}'),
+                        true
+                      )
+                 from ops.engineering_execution_envelope e
+                where r.id=%s and e.id=%s""",
+            (receipt_id, envelope_id),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError(
+                "envelope identity fixture missed receipt session attribution"
+            )
+    reseal_receipt(cur, receipt_id)
+
+
 def insert_review(cur, fixture_row, receipt_id) -> None:
     work_request_id = one(
         cur,
@@ -531,6 +602,28 @@ def main() -> int:
                 "select id from ops.work_request where id<>%s order by id limit 1",
                 (bound[0],),
             )[0]
+            envelope_identity_corruptions: tuple[
+                tuple[str, list[str], str, bool], ...
+            ] = (
+                (
+                    "envelope JSON envelope_id relational mismatch",
+                    ["envelope_id"],
+                    f"env:{uuid.uuid4()}",
+                    False,
+                ),
+                (
+                    "envelope JSON job_ref relational mismatch",
+                    ["request", "job_ref"],
+                    f"job:{uuid.uuid4()}",
+                    False,
+                ),
+                (
+                    "envelope JSON agent_session relational mismatch",
+                    ["agent_session", "id"],
+                    f"session:{uuid.uuid4()}",
+                    True,
+                ),
+            )
             canonical_corruptions: tuple[
                 tuple[str, str, str, tuple[object, ...], bool], ...
             ] = (
@@ -818,6 +911,35 @@ def main() -> int:
                     )
                 ),
             )
+            for (
+                identity_label,
+                identity_path,
+                identity_value,
+                sync_receipt_session,
+            ) in envelope_identity_corruptions:
+                cur.execute("savepoint envelope_identity_acquire")
+                corrupt_envelope_identity(
+                    cur,
+                    dependency[1],
+                    _receipt,
+                    identity_path,
+                    identity_value,
+                    sync_receipt_session=sync_receipt_session,
+                )
+                refusal(
+                    acquire(cur, bound, dependencies=deps),
+                    "DEPENDENCY_UNSATISFIED",
+                    f"acquire {identity_label}",
+                    causal_object="dependency",
+                    expected="independently_verified",
+                    actual={
+                        "slice_ref": dependency[5],
+                        "receipt_id": str(_receipt),
+                        "outcome": "claimed_complete",
+                    },
+                )
+                cur.execute("rollback to savepoint envelope_identity_acquire")
+                cur.execute("release savepoint envelope_identity_acquire")
             for label, table, corrupt_sql, corrupt_args, reseal in canonical_corruptions:
                 cur.execute("savepoint exact_dependency_acquire")
                 cur.execute(f"alter table ops.{table} disable trigger user")
@@ -1380,6 +1502,36 @@ def main() -> int:
                     (lease_id, lease_token, generation),
                 ),
             )
+            for (
+                identity_label,
+                identity_path,
+                identity_value,
+                sync_receipt_session,
+            ) in envelope_identity_corruptions:
+                cur.execute("savepoint envelope_identity_boundary")
+                corrupt_envelope_identity(
+                    cur,
+                    dependency[1],
+                    _receipt,
+                    identity_path,
+                    identity_value,
+                    sync_receipt_session=sync_receipt_session,
+                )
+                for operation, boundary_sql, boundary_args in exact_boundary_calls:
+                    refusal(
+                        one(cur, boundary_sql, boundary_args)[0],
+                        "DEPENDENCY_UNSATISFIED",
+                        f"{operation} {identity_label}",
+                        causal_object="dependency",
+                        expected="independently_verified",
+                        actual={
+                            "slice_ref": dependency[5],
+                            "receipt_id": str(_receipt),
+                            "outcome": "claimed_complete",
+                        },
+                    )
+                cur.execute("rollback to savepoint envelope_identity_boundary")
+                cur.execute("release savepoint envelope_identity_boundary")
             for label, table, corrupt_sql, corrupt_args, reseal in canonical_corruptions:
                 cur.execute("savepoint exact_dependency_boundary")
                 cur.execute(f"alter table ops.{table} disable trigger user")
