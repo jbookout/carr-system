@@ -1,4 +1,4 @@
--- 0364_siep02_rule_delivery_authority.sql
+-- 0452_siep02_rule_delivery_authority.sql
 -- SIEP-02 successor to 0317: selecting scoped rules is source-only until later
 -- enforcement nodes, and the shadow/enforced switch remains Joe's alone.  The
 -- legacy four-argument implementation is retained as a private implementation

@@ -14,7 +14,7 @@ import {
 import { executeWithTrustedPrincipal } from "../src/mcp.js";
 import { ToolError } from "../src/tools.js";
 const migration = fs.readFileSync(new URL(
-  "../../migrations/0452_siep18_exact_effects_trusted_principal.sql", import.meta.url), "utf8");
+  "../../migrations/0469_siep18_exact_effects_trusted_principal.sql", import.meta.url), "utf8");
 
 const contract = (ingress_key, direct_effects = [], delegates_to = [], extra = {}) => ({
   schema_version: "scac-exact-effect-contract.v1", ingress_key, direct_effects, delegates_to,
@@ -159,7 +159,7 @@ test("dispatch translates principal mismatch before handler entry", async () => 
   assert.equal(handlerCalls, 0);
 });
 
-test("0452 persists exact effects and trusted principals without activating enforcement", () => {
+test("0469 persists exact effects and trusted principals without activating enforcement", () => {
   for (const fragment of [
     /create table ops\.scac_exact_effect_contract/i,
     /create table ops\.scac_trusted_principal_binding/i,
@@ -190,7 +190,7 @@ test("0452 persists exact effects and trusted principals without activating enfo
   assert.doesNotMatch(migration, /^\s*(?:begin|commit)\s*;/im);
 });
 
-test("0452 refuses inference, wildcard delegation, dynamic SQL, and caller identity", () => {
+test("0469 refuses inference, wildcard delegation, dynamic SQL, and caller identity", () => {
   assert.match(migration, /write labels, prose, grants, opaque functions, and dynamic SQL are never effect authority/i);
   assert.match(migration, /p_contract->>'sql_state'<>'static_reviewed'/i);
   assert.match(migration, /p_contract->>'integration_state'<>'reviewed_source_test'/i);

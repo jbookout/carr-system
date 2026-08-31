@@ -25,7 +25,9 @@
     "row-required automatically when the migration enters the ledger."
   ],
   "carried_after_apply": {
-    "ops.completion_policy": "the single versioned completion-default policy seeded by migration 0431; it contains only tenant metadata, the closed required-dimension list, freshness, precedence, effective time, and its digest. Without it the completion projection has no policy and emits no subjects. Carried by an exact source-verified block in bin/schema-snapshot.sh; no subjects, observations, relations, dispositions, or receipts are carried"
+    "ops.completion_policy": "the single versioned completion-default policy seeded by migration 0431; it contains only tenant metadata, the closed required-dimension list, freshness, precedence, effective time, and its digest. Without it the completion projection has no policy and emits no subjects. Carried by an exact source-verified block in bin/schema-snapshot.sh; no subjects, observations, relations, dispositions, or receipts are carried",
+    "ops.scac_mutation_registry_entry": "the immutable v1-v9 SCAC mutation inventory entries seeded by migrations 0454 through 0468. They are bounded internal security configuration, contain source contracts and catalog ACL projections rather than business or runtime data, and are required for every exact registry lookup. Carried with their sealed version headers by a source-verified block in bin/schema-snapshot.sh once 0468 enters the snapshot ledger",
+    "ops.scac_mutation_registry_version": "the nine immutable v1-v9 SCAC registry seal headers seeded by migrations 0454 through 0468. They are bounded internal security configuration and the foreign-key parents and cryptographic seals for ops.scac_mutation_registry_entry. Carried with the exact entry rows by a source-verified block in bin/schema-snapshot.sh once 0468 enters the snapshot ledger"
   },
   "carried": {
     "activity_kind": "closed vocabulary, foreign-key target; bounded vocabulary pg_dump",
@@ -97,6 +99,7 @@
     "ops.rule_control_binding": "per-rule history, not bounded internal control configuration; bin/schema-snapshot.sh names this table by name as one never to add",
     "ops.rule_enforcement_point": "per-rule enforcement records",
     "ops.rule_pack": "0291's only migration-time insert is a probe that asserts its own row does NOT survive; the table holds no migration-seeded rows. Runtime pack rows are outside this check's scope, which is migration-seeded rows only",
+    "ops.scac_policy_epoch": "the policy epoch is derived runtime assurance evidence, not seed configuration. A fresh reconstructed database intentionally starts with no blessed epoch; SIEP-12 and SIEP-18 acceptance assert that state and require the real deferred refresh trigger to create the first cryptographically valid epoch only after nonempty reviewed doctrine and rule projections arrive",
     "ops.run": "job run history — runtime records",
     "ops.service": "observability service inventory — runtime state, rebuilt by the environment it describes",
     "ops.service_environment": "observability environment rows — runtime state",

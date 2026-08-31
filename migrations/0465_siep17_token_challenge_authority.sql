@@ -1,4 +1,4 @@
--- 0379 / SIEP-17 / SCAC-07: single-use PoP challenges, signed capability-token
+-- 0465 / SIEP-17 / SCAC-07: single-use PoP challenges, signed capability-token
 -- receipts, permanent revocation, and Joe-only global kill-switch events.
 --
 -- Source/test implementation only. These facts are necessary evidence but

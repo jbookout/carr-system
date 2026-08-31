@@ -52,9 +52,9 @@ def main() -> int:
     try:
         with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
             if cur.execute("select count(*) from ops.scac_exact_effect_contract").fetchone()[0] != 0:
-                raise RuntimeError("0452 unexpectedly seeded reviewed effect authority")
+                raise RuntimeError("0469 unexpectedly seeded reviewed effect authority")
             if cur.execute("select count(*) from ops.scac_trusted_principal_binding").fetchone()[0] != 0:
-                raise RuntimeError("0452 unexpectedly seeded trusted-principal authority")
+                raise RuntimeError("0469 unexpectedly seeded trusted-principal authority")
             for role in ("carr_writer", "carr_jobs", "carr_authority"):
                 for signature in (
                     "ops.scac_register_exact_effect_contract(text,text,text,jsonb,uuid)",
@@ -64,11 +64,20 @@ def main() -> int:
                     if cur.execute(
                         "select has_function_privilege(%s,%s,'execute')", (role, signature)
                     ).fetchone()[0]:
-                        raise RuntimeError(f"0452 leaked runtime EXECUTE: {role} {signature}")
+                        raise RuntimeError(f"0469 leaked runtime EXECUTE: {role} {signature}")
 
-            for role in ("carr_authority_joe", "carr_writer"):
+            # Provider-managed authority login roles are intentionally absent
+            # from reconstructed CI databases (0273 documents that boundary).
+            # Create rollback-only fixture principals and attach only the
+            # existing NOLOGIN authority bundle so the behavioral proof can
+            # exercise the real session_user checks without changing the
+            # committed or post-gate catalog.
+            for role in ("carr_authority_joe", "carr_authority_dell"):
                 if cur.execute("select 1 from pg_roles where rolname=%s", (role,)).fetchone() is None:
-                    raise RuntimeError(f"disposable runtime role absent: {role}")
+                    cur.execute(f"create role {role} noinherit")
+                    cur.execute(f"grant carr_authority to {role}")
+            if cur.execute("select 1 from pg_roles where rolname='carr_writer'").fetchone() is None:
+                raise RuntimeError("disposable runtime role absent: carr_writer")
             leaf_version, leaf_digest, leaf_delegates = registry_entry(cur, "mcp-tool:log-activity")
             if leaf_delegates != []:
                 raise RuntimeError(f"leaf fixture unexpectedly delegates: {leaf_delegates!r}")

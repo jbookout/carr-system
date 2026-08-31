@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
-const migration = await readFile(new URL("../../migrations/0364_siep02_rule_delivery_authority.sql", import.meta.url), "utf8");
+const migration = await readFile(new URL("../../migrations/0452_siep02_rule_delivery_authority.sql", import.meta.url), "utf8");
 const runtime = await readFile(new URL("../../ops/rule-delivery-cutover.py", import.meta.url), "utf8");
 const wrapper = await readFile(new URL("../../bin/rule-delivery-cutover-prod.sh", import.meta.url), "utf8");
 const controllerSuccessor = await readFile(new URL("../../migrations/0363_rule_delivery_activation_digest_repin.sql", import.meta.url), "utf8");

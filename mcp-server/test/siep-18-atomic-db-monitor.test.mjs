@@ -10,7 +10,7 @@ import {
 } from "../src/scac-reference-monitor.js";
 
 const migration = fs.readFileSync(
-  new URL("../../migrations/0384_siep18_atomic_db_monitor_grants.sql", import.meta.url), "utf8");
+  new URL("../../migrations/0467_siep18_atomic_db_monitor_grants.sql", import.meta.url), "utf8");
 
 function fixture() {
   const base = {
@@ -100,7 +100,7 @@ test("typed admission query carries only token, closed manifest, and one idempot
   assert.equal(JSON.stringify(query).includes("signature"), false);
 });
 
-test("0384 owns same-transaction DB enforcement and never activates Production", () => {
+test("0467 owns same-transaction DB enforcement and never activates Production", () => {
   for (const fragment of [
     /create table ops\.scac_token_issuer_binding/i,
     /create table ops\.scac_token_verification_binding/i,

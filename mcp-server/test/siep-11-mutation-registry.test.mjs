@@ -42,43 +42,43 @@ import {
 import { TOOLS } from "../src/tools.js";
 
 const migration = fs.readFileSync(
-  new URL("../../migrations/0366_siep11_mutation_registry.sql", import.meta.url), "utf8");
+  new URL("../../migrations/0454_siep11_mutation_registry.sql", import.meta.url), "utf8");
 const generated = fs.readFileSync(
   new URL("../src/scac-mutation-registry.generated.js", import.meta.url), "utf8");
 const generatedV2 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v2.generated.js", import.meta.url), "utf8");
 const successorMigration = fs.readFileSync(
-  new URL("../../migrations/0367_siep12_policy_epoch.sql", import.meta.url), "utf8");
+  new URL("../../migrations/0455_siep12_policy_epoch.sql", import.meta.url), "utf8");
 const generatedV3 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v3.generated.js", import.meta.url), "utf8");
 const v3Migration = fs.readFileSync(
-  new URL("../../migrations/0369_siep13_forward_mutation_registry.sql", import.meta.url), "utf8");
+  new URL("../../migrations/0457_siep13_forward_mutation_registry.sql", import.meta.url), "utf8");
 const generatedV4 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v4.generated.js", import.meta.url), "utf8");
 const v4Migration = fs.readFileSync(
-  new URL("../../migrations/0371_siep14_forward_mutation_registry.sql", import.meta.url), "utf8");
+  new URL("../../migrations/0459_siep14_forward_mutation_registry.sql", import.meta.url), "utf8");
 const generatedV5 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v5.generated.js", import.meta.url), "utf8");
 const v5Migration = fs.readFileSync(
-  new URL("../../migrations/0373_siep15_forward_mutation_registry.sql", import.meta.url), "utf8");
+  new URL("../../migrations/0461_siep15_forward_mutation_registry.sql", import.meta.url), "utf8");
 const generatedV6 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v6.generated.js", import.meta.url), "utf8");
 const v6Migration = fs.readFileSync(
-  new URL("../../migrations/0375_siep16_forward_mutation_registry.sql", import.meta.url), "utf8");
+  new URL("../../migrations/0462_siep16_forward_mutation_registry.sql", import.meta.url), "utf8");
 const generatedV7 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v7.generated.js", import.meta.url), "utf8");
 const v7Migration = fs.readFileSync(
-  new URL("../../migrations/0377_siep16_integrated_mutation_registry.sql", import.meta.url), "utf8");
+  new URL("../../migrations/0464_siep16_integrated_mutation_registry.sql", import.meta.url), "utf8");
 const generatedV8 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v8.generated.js", import.meta.url), "utf8");
 const v8Migration = fs.readFileSync(
-  new URL("../../migrations/0380_siep17_forward_mutation_registry.sql", import.meta.url), "utf8");
+  new URL("../../migrations/0466_siep17_forward_mutation_registry.sql", import.meta.url), "utf8");
 const generatedV9 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v9.generated.js", import.meta.url), "utf8");
 const v9Migration = fs.readFileSync(
-  new URL("../../migrations/0385_siep18_forward_mutation_registry.sql", import.meta.url), "utf8");
+  new URL("../../migrations/0468_siep18_forward_mutation_registry.sql", import.meta.url), "utf8");
 const siep18MonitorMigration = fs.readFileSync(
-  new URL("../../migrations/0384_siep18_atomic_db_monitor_grants.sql", import.meta.url), "utf8");
+  new URL("../../migrations/0467_siep18_atomic_db_monitor_grants.sql", import.meta.url), "utf8");
 
 test("successor generation refuses absent or ambiguous predecessor markers", () => {
   assert.equal(replaceExactlyOnce("before marker after", "marker", "successor", "unit"),
@@ -120,21 +120,21 @@ test("sealed v1-v8 stay immutable historical evidence after the v9 successor", (
   const { v1: v1Seal, v2: v2Seal, v3: v3Seal, v4: v4Seal, v5: v5Seal,
     v6: v6Seal } = HISTORICAL_REGISTRY_SEALS;
   const historicalArtifacts = new Map([
-    ["migrations/0366_siep11_mutation_registry.sql", migration],
-    ["migrations/0367_siep12_policy_epoch.sql", successorMigration],
-    ["migrations/0369_siep13_forward_mutation_registry.sql", v3Migration],
-    ["migrations/0371_siep14_forward_mutation_registry.sql", v4Migration],
+    ["migrations/0454_siep11_mutation_registry.sql", migration],
+    ["migrations/0455_siep12_policy_epoch.sql", successorMigration],
+    ["migrations/0457_siep13_forward_mutation_registry.sql", v3Migration],
+    ["migrations/0459_siep14_forward_mutation_registry.sql", v4Migration],
     ["mcp-server/src/scac-mutation-registry.generated.js", generated],
     ["mcp-server/src/scac-mutation-registry.v2.generated.js", generatedV2],
     ["mcp-server/src/scac-mutation-registry.v3.generated.js", generatedV3],
     ["mcp-server/src/scac-mutation-registry.v4.generated.js", generatedV4],
-    ["migrations/0373_siep15_forward_mutation_registry.sql", v5Migration],
+    ["migrations/0461_siep15_forward_mutation_registry.sql", v5Migration],
     ["mcp-server/src/scac-mutation-registry.v5.generated.js", generatedV5],
-    ["migrations/0375_siep16_forward_mutation_registry.sql", v6Migration],
+    ["migrations/0462_siep16_forward_mutation_registry.sql", v6Migration],
     ["mcp-server/src/scac-mutation-registry.v6.generated.js", generatedV6],
-    ["migrations/0377_siep16_integrated_mutation_registry.sql", v7Migration],
+    ["migrations/0464_siep16_integrated_mutation_registry.sql", v7Migration],
     ["mcp-server/src/scac-mutation-registry.v7.generated.js", generatedV7],
-    ["migrations/0380_siep17_forward_mutation_registry.sql", v8Migration],
+    ["migrations/0466_siep17_forward_mutation_registry.sql", v8Migration],
     ["mcp-server/src/scac-mutation-registry.v8.generated.js", generatedV8],
   ]);
   for (const [path, contents] of historicalArtifacts)
@@ -167,7 +167,7 @@ test("sealed v8 predecessor remains exact after source inventory advances", () =
   const { v1: v1Seal, v2: v2Seal, v3: v3Seal, v4: v4Seal, v5: v5Seal,
     v6: v6Seal, v7: v7Seal, v8: v8Seal } = HISTORICAL_REGISTRY_SEALS;
   assert.equal(sha256(v8Migration),
-    HISTORICAL_REGISTRY_ARTIFACT_SHA256["migrations/0380_siep17_forward_mutation_registry.sql"]);
+    HISTORICAL_REGISTRY_ARTIFACT_SHA256["migrations/0466_siep17_forward_mutation_registry.sql"]);
   assert.equal(sha256(generatedV8),
     HISTORICAL_REGISTRY_ARTIFACT_SHA256["mcp-server/src/scac-mutation-registry.v8.generated.js"]);
   assert.equal(JSON.parse(generatedV8.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]),
@@ -196,14 +196,14 @@ test("v9 successor seals v8 and binds the measured SIEP-18 grant snapshot", () =
   const expectedEntryCount = rows.length + SIEP18_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count +
     SIEP18_FORWARD_DB_CATALOG_BASELINE.relation_dml.count +
     SIEP18_FORWARD_DB_CATALOG_BASELINE.column_dml.count;
-  assert.equal(rows.length, 800);
-  assert.equal(expectedEntryCount, 1371);
+  assert.equal(rows.length, 905);
+  assert.equal(expectedEntryCount, 1544);
   assert.equal(sha256(siep18MonitorMigration), SIEP18_MONITOR_ARTIFACT_SHA256);
-  assert.equal(SIEP18_PRE_V9_DB_CATALOG_BASELINE.secdef_execute.count, 270);
+  assert.equal(SIEP18_PRE_V9_DB_CATALOG_BASELINE.secdef_execute.count, 338);
   assert.equal(SIEP18_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count -
     SIEP18_PRE_V9_DB_CATALOG_BASELINE.secdef_execute.count, 4);
   assert.match(v9Migration,
-    /observed_count<>270 or observed_digest<>'sha256:e8cd8701015f49fcfd254a618803f3559892cdc77dc28b5acac85ed8795ed307'/);
+    /observed_count<>338 or observed_digest<>'sha256:ccf023867a696884b2b9e50ae6eccc7b4e2afd9d7d6dbd1a93c01d8b1ec38555'/);
   assert.match(v9Migration, /Refuse before creating any v9 function/);
   for (const selfEffect of [
     /scac_mutation_registry_v8_seal_available\(\)/,
@@ -273,7 +273,7 @@ test("migration is read-only at runtime and preserves the SIEP-18 boundary", () 
 
 test("reviewed non-MCP source locators resolve and remain explicitly non-authorizing", () => {
   const rows = fullInventory().filter(row => !["mcp_tool", "job_definition", "workflow_entrypoint"].includes(row.ingress_kind));
-  assert.equal(rows.length, 524);
+  assert.equal(rows.length, 629);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -281,7 +281,7 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
     assert.equal(row.implementation_state, "inventoried_not_atomically_mediated");
   }
   const scripts = discoverScriptEntrypoints();
-  assert.equal(scripts.length, 515);
+  assert.equal(scripts.length, 620);
   assert.equal(scripts.some(path => path === "ops/rule-delivery-cutover.py"), true);
   assert.equal(scripts.some(path => path === "ops/control-plane-scheduler-cutover.py"), true);
   assert.equal(scripts.some(path => path === "run.sh"), true);
@@ -323,7 +323,7 @@ test("job definitions and live DB capabilities have exact reviewed baselines", (
   assert.equal(jobs.every(row => row.ingress_kind === "job_definition" && row.entrypoint), true);
   assert.deepEqual(DB_CATALOG_BASELINE, {
     projection_version: "scac-db-catalog-projection.v1",
-    secdef_execute: { count: 219, digest: "sha256:069f4cad859e283a2f8d73aa1334bcf54fd3f97ae95b727925720f39706e0545" },
+    secdef_execute: { count: 290, digest: "sha256:92d1347b45ee669c97a8b21712684651ee67aa3a2af363fca7c3f3a25436a0b6" },
     relation_dml: { count: 285, digest: "sha256:53d12ebf83db4661b0e55eb81f91ab510c34828424a2b945b66c0286134b0b0b" },
     column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
   });

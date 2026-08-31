@@ -135,13 +135,13 @@ def main() -> int:
     try:
         expected_v1 = generated_registry_digest(1)
         expected_v2 = generated_registry_digest(2)
-        migration = REPO / "migrations/0367_siep12_policy_epoch.sql"
+        migration = REPO / "migrations/0455_siep12_policy_epoch.sql"
         migration_sha = hashlib.sha256(migration.read_bytes()).hexdigest()
         with rollback_only_connection(dsn) as conn, conn.cursor() as cur:
             v1 = cur.execute(
                 "select registry_digest,entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v1'"
             ).fetchone()
-            if v1 != (expected_v1, 1264):
+            if v1 != (expected_v1, 1492):
                 raise RuntimeError(f"sealed v1 changed: {v1!r}")
             v2 = cur.execute(
                 """select registry_digest,entry_count,source_entry_count,catalog_projection,
@@ -198,10 +198,10 @@ def main() -> int:
                 raise RuntimeError("owner-only historical v1 audit lookup is unavailable")
 
             ledger = cur.execute(
-                "select sha256 from public.schema_migrations where filename='0367_siep12_policy_epoch.sql'"
+                "select sha256 from public.schema_migrations where filename='0455_siep12_policy_epoch.sql'"
             ).fetchone()
             if ledger != (migration_sha,):
-                raise RuntimeError(f"0367 ledger SHA is not exact: {ledger!r}")
+                raise RuntimeError(f"0455 ledger SHA is not exact: {ledger!r}")
             current = cur.execute("select epoch,epoch_digest,schema_highest_migration from ops.scac_policy_epoch").fetchone()
             if current is not None:
                 raise RuntimeError(f"empty reconstructed policy was incorrectly blessed: {current!r}")

@@ -7,7 +7,7 @@ import { digest } from "../src/artifact-trust.js";
 import * as scacToken from "../src/scac-token.js";
 
 const migration = fs.readFileSync(
-  new URL("../../migrations/0379_siep17_token_challenge_authority.sql", import.meta.url), "utf8");
+  new URL("../../migrations/0465_siep17_token_challenge_authority.sql", import.meta.url), "utf8");
 const clone = value => structuredClone(value);
 
 function fixture() {

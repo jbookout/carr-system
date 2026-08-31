@@ -8,7 +8,7 @@ import {
   PolicyEpochRefusal,
 } from "../src/policy-epoch.js";
 
-const migrationUrl = new URL("../../migrations/0367_siep12_policy_epoch.sql", import.meta.url);
+const migrationUrl = new URL("../../migrations/0455_siep12_policy_epoch.sql", import.meta.url);
 
 function status(overrides = {}) {
   return {

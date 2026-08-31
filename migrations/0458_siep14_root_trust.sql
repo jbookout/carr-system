@@ -1,4 +1,4 @@
--- 0370 / SIEP-14 / SCAC-04: public root descriptors, quorum ceremony facts, rotation,
+-- 0458 / SIEP-14 / SCAC-04: public root descriptors, quorum ceremony facts, rotation,
 -- revocation, and offline-recovery receipts. Source/test implementation only.
 -- This migration stores no private material and activates no Production trust.
 

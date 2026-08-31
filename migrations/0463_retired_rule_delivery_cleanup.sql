@@ -1,4 +1,4 @@
--- 0376 / SIEP finding elimination: a retired rule must not leave a live delivery row.
+-- 0463 / SIEP finding elimination: a retired rule must not leave a live delivery row.
 -- Source/test implementation only. Production application remains Joe-gated.
 
 create or replace function ops.retired_rule_delivery_cleanup()

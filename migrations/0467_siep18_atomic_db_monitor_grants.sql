@@ -1,4 +1,4 @@
--- 0384 / SIEP-18 / SCAC-08: atomic database reference monitor and guarded DML.
+-- 0467 / SIEP-18 / SCAC-08: atomic database reference monitor and guarded DML.
 --
 -- Source/test implementation only.  The monitor binds one closed operation
 -- manifest, the externally verified token payload, current epoch/registry,
@@ -253,7 +253,7 @@ begin
       jsonb_build_object('column_digest',column_digest)))
     then 'current' else 'measured_pending_v9_binding' end;
   -- The v9 successor replaces the temporary combined-digest comparison above
-  -- with its exact catalog grant digest after 0384 is installed.
+  -- with its exact catalog grant digest after 0467 is installed.
   with recursive connected(oid) as (
     select oid from pg_roles where rolname in ('carr_writer','carr_jobs','carr_authority')
   ), writable as (

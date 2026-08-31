@@ -151,16 +151,16 @@ def main() -> int:
                 raise RuntimeError("owner-only historical v1 audit lookup is unavailable")
             if not isinstance(digest, str) or not digest.startswith("sha256:") or len(digest) != 71:
                 raise RuntimeError(f"malformed sealed registry digest {digest!r}")
-            if version[1:] != (1264, True, True, False, False, False, False, False):
+            if version[1:] != (1492, True, True, False, False, False, False, False):
                 raise RuntimeError(f"unexpected sealed registry version {version!r}")
 
             counts = dict(cur.execute(
                 "select ingress_kind,count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v1' group by ingress_kind"
             ))
-            if counts != {"mcp_tool": 186, "script_entrypoint": 470,
+            if counts != {"mcp_tool": 220, "script_entrypoint": 590,
                           "worker_route": 6, "worker_sidewrite": 3,
-                          "external_admin": 27, "break_glass": 2,
-                          "job_definition": 26, "workflow_entrypoint": 28, "db_function_acl": 219,
+                          "external_admin": 28, "break_glass": 2,
+                          "job_definition": 26, "workflow_entrypoint": 30, "db_function_acl": 290,
                           "db_relation_acl": 285, "db_column_acl": 12}:
                 raise RuntimeError(f"unexpected ingress census {counts!r}")
             if cur.execute(

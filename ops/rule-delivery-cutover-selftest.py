@@ -14,7 +14,7 @@ cutover=importlib.util.module_from_spec(spec); spec.loader.exec_module(cutover)
 py=(REPO/"ops/rule-delivery-cutover.py").read_text()
 sh=(REPO/"bin/rule-delivery-cutover-prod.sh").read_text()
 sql=(REPO/"migrations/0317_atomic_rule_delivery_cutover.sql").read_text()
-successor=(REPO/"migrations/0364_siep02_rule_delivery_authority.sql").read_text()
+successor=(REPO/"migrations/0452_siep02_rule_delivery_authority.sql").read_text()
 current_sql=(REPO/"migrations/0363_rule_delivery_activation_digest_repin.sql").read_text()
 checks={
  "current activation contract is authoritative":len(cutover.EXPECTED_IDS)==8 and "EXPECTED_IDS, load_validated" in py,

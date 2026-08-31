@@ -27,7 +27,7 @@ if (( APPLY )); then
     ops/rule-delivery-shadow-ledger.py ops/rule-delivery-shadow-watch.py \
     bin/rule-delivery-cutover-prod.sh bin/rule-delivery-shadow-ledger-prod.sh \
     migrations/0317_atomic_rule_delivery_cutover.sql \
-    migrations/0364_siep02_rule_delivery_authority.sql)
+    migrations/0452_siep02_rule_delivery_authority.sql)
   [[ -z "$dirty" ]] || { print -u2 "REFUSED: cutover source is uncommitted"; exit 1; }
 fi
 

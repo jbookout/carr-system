@@ -79,7 +79,7 @@ def main() -> int:
                     source_session_user,source_relation)
                    values (1,%s,null,null,'carr-system-integrity-elimination-v1','carr-internal',
                     'scac-core','scac-mutation-registry.v2',%s,0,%s,%s,1,
-                    '0379_siep17_token_challenge_authority.sql',%s,%s,current_user,
+                    '0465_siep17_token_challenge_authority.sql',%s,%s,current_user,
                     'public.schema_migrations')""",
                 (epoch_digest, registry_digest, zero, zero, zero, zero),
             )

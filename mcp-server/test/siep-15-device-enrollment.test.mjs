@@ -8,7 +8,7 @@ import { benchmarkReceiptPayload, deviceFactPayload, deviceProfileDigest,
   evaluateStudioBenchmarks, STUDIO_EXECUTOR_PROFILE,
   verifyDeviceFactEnvelope } from "../src/device-enrollment.js";
 
-const migration = fs.readFileSync(new URL("../../migrations/0372_siep15_device_enrollment.sql", import.meta.url), "utf8");
+const migration = fs.readFileSync(new URL("../../migrations/0460_siep15_device_enrollment.sql", import.meta.url), "utf8");
 
 function fixture() {
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");

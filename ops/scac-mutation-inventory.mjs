@@ -24,50 +24,50 @@ const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 // --write-rebased-* commands below; ordinary historical write modes stay
 // refused so an accidental invocation cannot rewrite a reviewed seal.
 export const HISTORICAL_REGISTRY_SEALS = Object.freeze({
-  v1: Object.freeze({ version: REGISTRY_VERSION, digest: "sha256:0f0c82893dcce0156c5ae073bbb5673da8a6408cea2f54baeb8b20c712e7adce", entryCount: 1264, sourceEntryCount: 748 }),
-  v2: Object.freeze({ version: REGISTRY_V2_VERSION, digest: "sha256:b0091fef639419d02513d153fac1da5721622c2d42926bf69bb5380df7280804", entryCount: 1268, sourceEntryCount: 748 }),
-  v3: Object.freeze({ version: REGISTRY_V3_VERSION, digest: "sha256:d72f0702395979678c3ea5ccf8a14c0747c2f69cf0b2d331375ba9b12010d262", entryCount: 1272, sourceEntryCount: 748 }),
-  v4: Object.freeze({ version: REGISTRY_V4_VERSION, digest: "sha256:1cda0177668f6b7baa092a463d832046073c197aa0a4860871223934268baeac", entryCount: 1276, sourceEntryCount: 748 }),
-  v5: Object.freeze({ version: REGISTRY_V5_VERSION, digest: "sha256:7cc3398a42d549eb37ec9df855a2b727101534a8bfc5f0868d5c4af9f4d3231b", entryCount: 1281, sourceEntryCount: 748 }),
-  v6: Object.freeze({ version: REGISTRY_V6_VERSION, digest: "sha256:95c09d69ad27eaf8103bc30a02c6c3e85fe8c139d7587b49080439a271e1663a", entryCount: 1285, sourceEntryCount: 748 }),
-  v7: Object.freeze({ version: REGISTRY_V7_VERSION, digest: "sha256:01021a534ad534b41e7b62efc35a5a32758c6bc35b0b88f94e63763c69de0cda", entryCount: 1289, sourceEntryCount: 748 }),
-  v8: Object.freeze({ version: REGISTRY_V8_VERSION, digest: "sha256:975e286a51e95a2a4befc4404449d95637553bb87fbb0be870279b47a523d6e9", entryCount: 1305, sourceEntryCount: 751 }),
+  v1: Object.freeze({ version: REGISTRY_VERSION, digest: "sha256:71a909c105dfe4267adc5075533c844abb378aead75ddf46d284bdf528babdcb", entryCount: 1492, sourceEntryCount: 905 }),
+  v2: Object.freeze({ version: REGISTRY_V2_VERSION, digest: "sha256:31c89f7f2280beebc9cbd1c0b138bd23e05ae58f1c6bf80fd6f53736117d8208", entryCount: 1496, sourceEntryCount: 905 }),
+  v3: Object.freeze({ version: REGISTRY_V3_VERSION, digest: "sha256:fcb82ebe89f0c515df60008783528b98aa70db78536c86306cb243ca947dd065", entryCount: 1500, sourceEntryCount: 905 }),
+  v4: Object.freeze({ version: REGISTRY_V4_VERSION, digest: "sha256:4422234b95359c3dfb3fb78c02430411f5668b9c30888e6677181c98e10fb104", entryCount: 1504, sourceEntryCount: 905 }),
+  v5: Object.freeze({ version: REGISTRY_V5_VERSION, digest: "sha256:c7ad3c4f7b172129aaba6dd00d61b16790b1fafbf7cc7f4bd5ee5b47cd447321", entryCount: 1509, sourceEntryCount: 905 }),
+  v6: Object.freeze({ version: REGISTRY_V6_VERSION, digest: "sha256:78642a905b243ed0eaa14ca36f5185159353fb85fd102ede9a30b647e9c76ad4", entryCount: 1513, sourceEntryCount: 905 }),
+  v7: Object.freeze({ version: REGISTRY_V7_VERSION, digest: "sha256:41db4b93c40d5c6660a5b6febbe14ea84642fc96742a95349a7bab32cb806779", entryCount: 1517, sourceEntryCount: 905 }),
+  v8: Object.freeze({ version: REGISTRY_V8_VERSION, digest: "sha256:8797f9d7661445d18190f481f485376231d787b61b6b3de10dea8669bc9692d9", entryCount: 1530, sourceEntryCount: 905 }),
 });
 export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
-  "migrations/0366_siep11_mutation_registry.sql": "b88797294961d60028009d0048e1e9b5c4eca613c7ebe784842c89ff966b2766",
-  "migrations/0367_siep12_policy_epoch.sql": "08b875e3b561c3c41c535050c4d0325dd872a70d36fe602354f31f4bdca7426e",
-  "migrations/0369_siep13_forward_mutation_registry.sql": "bae1c68dfe1a8b8874008d46e0d5051dd4974d27bba0590de4b5034c1f4aff3d",
-  "migrations/0371_siep14_forward_mutation_registry.sql": "16ddfd37b2b0869a6512d0814fba7c319ee7629fbd2d4dcc99c48ebea22252b2",
-  "mcp-server/src/scac-mutation-registry.generated.js": "6099badbf8095c9cf92cf2e86593acf42292dde824b7f0882e1d04fb90e02bb8",
-  "mcp-server/src/scac-mutation-registry.v2.generated.js": "537056147677a8c83e4ade6faa01af3f6a7649316072cfeca4fb5eca4b222426",
-  "mcp-server/src/scac-mutation-registry.v3.generated.js": "3b9aefd026e8a576d623354bdfbb39c003c551c8023c4fe4e81255b7b62f268b",
-  "mcp-server/src/scac-mutation-registry.v4.generated.js": "afb9458505872728c7446692a6e9071c105e602db7096ec613c46c1e8e98e629",
-  "migrations/0373_siep15_forward_mutation_registry.sql": "57f3f4c23f10b43eba93de9d8b5f55601091447f8e8b899ab031c2b4e0e29703",
-  "mcp-server/src/scac-mutation-registry.v5.generated.js": "675d9fd4b1db7bdd26fccd32cef04b995603670299ef6a188e43a1a57341d37b",
-  "migrations/0375_siep16_forward_mutation_registry.sql": "4b5880da6156288c48d30cea9d7556716fe44f972382cccb58b4ca10913584e9",
-  "mcp-server/src/scac-mutation-registry.v6.generated.js": "c21a8974f5014562d2281ff48ab86974145b64712fe5596b48122f9f061ae4a2",
-  "migrations/0377_siep16_integrated_mutation_registry.sql": "f1d19b8e3823962af99d412e0909fa543a616e42c57cc3becc904e6d20c4f3d8",
-  "mcp-server/src/scac-mutation-registry.v7.generated.js": "b58283016e0e738713ed787edcd7f0abd895fa3cfa1d383c60d853e7151f452c",
-  "migrations/0380_siep17_forward_mutation_registry.sql": "37dfe28390d2986719add2bd2cdc08e883f96ee951b1af97f816239bc1da0b7d",
-  "mcp-server/src/scac-mutation-registry.v8.generated.js": "cda1d66aa52d5540e6b067f9284fa2023a749fe2e48dc3e65e7060f1599d5243",
+  "migrations/0454_siep11_mutation_registry.sql": "802b7ff1bb683f30c64e3209c77fe5a695fec32aec1ce5fb4b18630dc4881f26",
+  "migrations/0455_siep12_policy_epoch.sql": "2d8cc557aec6bff7e2e6e016ba5519c43c40d99e64c59cbb75267788a0305c85",
+  "migrations/0457_siep13_forward_mutation_registry.sql": "b3b1d2542b5ad492c9d5a5b47c5b266e973384a93afc73aabebe9353e72d3069",
+  "migrations/0459_siep14_forward_mutation_registry.sql": "fcb50009e17e907288d89cb90fe1823a221e4fb6cfb521d9b5956049009ac98c",
+  "mcp-server/src/scac-mutation-registry.generated.js": "782dcd96c9812d57d3e05453906d3ab9e0f3f289cf6ce41a518ad7c7704363b1",
+  "mcp-server/src/scac-mutation-registry.v2.generated.js": "4c62baa6859ee58d01fec75f0b9106f72f86896d8553bd0aba7119c8263b4da3",
+  "mcp-server/src/scac-mutation-registry.v3.generated.js": "44815f87826e619f8cd8642a7ab71fd298af3fe27b5b2e3f196444b27731ac27",
+  "mcp-server/src/scac-mutation-registry.v4.generated.js": "120d9306f200a5c5ca854c109a845b6b4b0a0604a4623824754beb4afd606558",
+  "migrations/0461_siep15_forward_mutation_registry.sql": "9a1c2eb6d176cad504daea19f4c3c3cd6bf317ca0db4094432e560d7749ebe0a",
+  "mcp-server/src/scac-mutation-registry.v5.generated.js": "9890164f902940a764d65da96d50d970fa34a35ab79a405f83798cd0a29bdf68",
+  "migrations/0462_siep16_forward_mutation_registry.sql": "702b739cadffb68c6b4d92475305468a49840d8c19dcd66a6e5afbd15ad0db11",
+  "mcp-server/src/scac-mutation-registry.v6.generated.js": "f98647116ba948c1f74466b5f8cae47ba86bfb89f9f1e69d5db543e364c2b500",
+  "migrations/0464_siep16_integrated_mutation_registry.sql": "88bd6aaca088f64db6f638d957d7792a54f3cf2bf4bcaadff074076a3d5de0a6",
+  "mcp-server/src/scac-mutation-registry.v7.generated.js": "b6cc65c35644639a0feb16c143018b9acb7c2ca007c6875dbc8977409ffc3c98",
+  "migrations/0466_siep17_forward_mutation_registry.sql": "b790767dd7371bdd1ef7363ed992965d79144ce495d67f972c2aa0a8ae9da9ff",
+  "mcp-server/src/scac-mutation-registry.v8.generated.js": "9a1bfbc7da9883a5d4bc1f7b5a2fa0dde44b500fb3fad5d6cd9ef202a58c508a",
 });
-// 0384 is the reviewed SIEP-18 monitor source consumed by the v9 generator.
+// 0467 is the reviewed SIEP-18 monitor source consumed by the v9 generator.
 // It is not historical yet, but its bytes must still be exact: otherwise a
-// mutable monitor function could silently change the generated 0385 artifact.
+// mutable monitor function could silently change the generated 0468 artifact.
 export const SIEP18_MONITOR_ARTIFACT_SHA256 =
-  "2e725a756c282c396a0d7521208c4f9b9eeca50bb28ec609db6a8aafe00b1bcd";
+  "ae94885190bb97ada59684be6637417e12277f3ddaa2e1b1251221200b601cca";
 export const DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v1",
-  secdef_execute: { count: 219, digest: "sha256:069f4cad859e283a2f8d73aa1334bcf54fd3f97ae95b727925720f39706e0545" },
+  secdef_execute: { count: 290, digest: "sha256:92d1347b45ee669c97a8b21712684651ee67aa3a2af363fca7c3f3a25436a0b6" },
   relation_dml: { count: 285, digest: "sha256:53d12ebf83db4661b0e55eb81f91ab510c34828424a2b945b66c0286134b0b0b" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
 });
 // SIEP-12's forward-only registry successor. These values are recomputed from
-// a disposable database after every 0367 authority-surface change, never from
+// a disposable database after every 0455 authority-surface change, never from
 // a caller or a running Production catalog.
 export const SIEP12_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v2",
-  secdef_execute: { count: 223, digest: "sha256:6c088fd59f60f2ccf57ec51beb3215c4e1540e389efaf7a2795f05ab3756515e" },
+  secdef_execute: { count: 294, digest: "sha256:8e1f8ed8984bc1f1a627020d1b5b0384124c5e5adba79ac17df0b21702bf6cc5" },
   relation_dml: { count: 285, digest: "sha256:53d12ebf83db4661b0e55eb81f91ab510c34828424a2b945b66c0286134b0b0b" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
   role_authority: { count: 52, digest: "sha256:345871802aa8f5b57aa87f3edfeac5187d06be0cb1ab5695371bcdfba4a49433" },
@@ -76,7 +76,7 @@ export const SIEP12_DB_CATALOG_BASELINE = Object.freeze({
 // The digest is replaced only from disposable-DB readback when 0341 changes.
 export const SIEP13_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v3",
-  secdef_execute: { count: 227, digest: "sha256:949a6f77f9b5b13c31b7fd2b378965b9487ed7719935280d01055cb08c605271" },
+  secdef_execute: { count: 298, digest: "sha256:d8306fc5bb4bd3348fe5197f0946c251c4f0486ecdf98914ba11a7af6e4682c5" },
   relation_dml: { count: 285, digest: "sha256:53d12ebf83db4661b0e55eb81f91ab510c34828424a2b945b66c0286134b0b0b" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
   role_authority: { count: 52, digest: "sha256:345871802aa8f5b57aa87f3edfeac5187d06be0cb1ab5695371bcdfba4a49433" },
@@ -85,7 +85,7 @@ export const SIEP13_DB_CATALOG_BASELINE = Object.freeze({
 // category digest is replaced only from disposable-DB readback.
 export const SIEP14_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v4",
-  secdef_execute: { count: 231, digest: "sha256:7616f8b22d86b0279225d49290288fd5f6b0be6cce38ccf13ea91975c8b51f73" },
+  secdef_execute: { count: 302, digest: "sha256:abe2fb9009736fa4ae47270fcf5d2153bbf3e7a8ed01de861cced9a1bb2fee82" },
   relation_dml: { count: 285, digest: "sha256:53d12ebf83db4661b0e55eb81f91ab510c34828424a2b945b66c0286134b0b0b" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
   role_authority: { count: 52, digest: "sha256:345871802aa8f5b57aa87f3edfeac5187d06be0cb1ab5695371bcdfba4a49433" },
@@ -94,7 +94,7 @@ export const SIEP14_DB_CATALOG_BASELINE = Object.freeze({
 // The secdef digest starts fail-closed and is replaced only by disposable-DB readback.
 export const SIEP15_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v5",
-  secdef_execute: { count: 236, digest: "sha256:7c3b51d9cb7d21f24ab10fa57fd5b2bd2e9c98fafc017162e8e9c6bd6dd365a4" },
+  secdef_execute: { count: 307, digest: "sha256:d4671fbc10a54406acece348dbeaef08b044b8231037bf4ecce8e1d85cd2d24d" },
   relation_dml: { count: 285, digest: "sha256:53d12ebf83db4661b0e55eb81f91ab510c34828424a2b945b66c0286134b0b0b" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
   role_authority: { count: 52, digest: "sha256:345871802aa8f5b57aa87f3edfeac5187d06be0cb1ab5695371bcdfba4a49433" },
@@ -104,7 +104,7 @@ export const SIEP15_DB_CATALOG_BASELINE = Object.freeze({
 // rewriting the now-historical v5 artifacts.
 export const SIEP16_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v6",
-  secdef_execute: { count: 240, digest: "sha256:22abf2ef4e0e62caddba8564483a7b9a54f82f6172995e350f7fe2b7ed01b587" },
+  secdef_execute: { count: 311, digest: "sha256:78771a23004af05b61ea9491ed70248ee8cbbe77aa6ace8c6f0437983624470b" },
   relation_dml: { count: 285, digest: "sha256:53d12ebf83db4661b0e55eb81f91ab510c34828424a2b945b66c0286134b0b0b" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
   role_authority: { count: 52, digest: "sha256:345871802aa8f5b57aa87f3edfeac5187d06be0cb1ab5695371bcdfba4a49433" },
@@ -114,7 +114,7 @@ export const SIEP16_DB_CATALOG_BASELINE = Object.freeze({
 // database digest is replaced only from disposable-DB readback.
 export const SIEP16_INTEGRATED_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v7",
-  secdef_execute: { count: 244, digest: "sha256:8d241a8547a5c16fcaf58e1b863a4919856162b66c8944cd42a0762a2268fcb6" },
+  secdef_execute: { count: 315, digest: "sha256:d47181d79ffb352fdf2c707a6fa265f093a8c7edde76df4358a6805c89651022" },
   relation_dml: { count: 285, digest: "sha256:53d12ebf83db4661b0e55eb81f91ab510c34828424a2b945b66c0286134b0b0b" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
   role_authority: { count: 52, digest: "sha256:345871802aa8f5b57aa87f3edfeac5187d06be0cb1ab5695371bcdfba4a49433" },
@@ -123,27 +123,27 @@ export const SIEP16_INTEGRATED_DB_CATALOG_BASELINE = Object.freeze({
 // surface. Values are measured from disposable-DB readback only.
 export const SIEP17_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v8",
-  secdef_execute: { count: 257, digest: "sha256:d8bc7437188a7ebb40b7989f83cbb09b4185eaf19363aa16261718d6556dc919" },
+  secdef_execute: { count: 328, digest: "sha256:7c6a54dda8f8c4c6f4fcb6004f2544ba8231f212e1b2d8e5c9cc39651a2a216c" },
   relation_dml: { count: 285, digest: "sha256:53d12ebf83db4661b0e55eb81f91ab510c34828424a2b945b66c0286134b0b0b" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
   role_authority: { count: 52, digest: "sha256:345871802aa8f5b57aa87f3edfeac5187d06be0cb1ab5695371bcdfba4a49433" },
 });
-// The disposable-DB receipt before 0385 is applied. 0385 must first seal this
+// The disposable-DB receipt before 0468 is applied. 0468 must first seal this
 // exact predecessor catalog, then its four security-definer self-effects yield
 // the v9 baseline below. Keeping both measurements makes the delta reviewable.
 export const SIEP18_PRE_V9_DB_CATALOG_BASELINE = Object.freeze({
-  projection_version: "scac-db-catalog-projection.v8-post-0384",
-  secdef_execute: { count: 270, digest: "sha256:e8cd8701015f49fcfd254a618803f3559892cdc77dc28b5acac85ed8795ed307" },
+  projection_version: "scac-db-catalog-projection.v8-post-0467",
+  secdef_execute: { count: 338, digest: "sha256:ccf023867a696884b2b9e50ae6eccc7b4e2afd9d7d6dbd1a93c01d8b1ec38555" },
   relation_dml: { count: 285, digest: "sha256:53d12ebf83db4661b0e55eb81f91ab510c34828424a2b945b66c0286134b0b0b" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
   role_authority: { count: 52, digest: "sha256:345871802aa8f5b57aa87f3edfeac5187d06be0cb1ab5695371bcdfba4a49433" },
 });
-// SIEP-18's forward successor binds the exact post-0385 catalog and the
+// SIEP-18's forward successor binds the exact post-0468 catalog and the
 // separately measured runtime DML grant snapshot. The grant snapshot is a
 // derived monitor input and therefore does not add registry entry rows.
 export const SIEP18_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v9",
-  secdef_execute: { count: 274, digest: "sha256:866fbf7b90f060406ae220d894837fae53188412e07bb42ceb196d85d83a7183" },
+  secdef_execute: { count: 342, digest: "sha256:57444b408258e9ec0a0dd8d2b8062cc6f6575e0b97cd0e9faebbb7ca322e17af" },
   relation_dml: { count: 285, digest: "sha256:53d12ebf83db4661b0e55eb81f91ab510c34828424a2b945b66c0286134b0b0b" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
   role_authority: { count: 52, digest: "sha256:345871802aa8f5b57aa87f3edfeac5187d06be0cb1ab5695371bcdfba4a49433" },
@@ -985,7 +985,7 @@ export function renderSIEP15RegistrySql(rows = fullInventory(),
   const v5CatalogCount = dbCatalogBaseline.secdef_execute.count +
     dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
   const v5EntryCount = rows.length + v5CatalogCount;
-  const v4Path = "migrations/0371_siep14_forward_mutation_registry.sql";
+  const v4Path = "migrations/0459_siep14_forward_mutation_registry.sql";
   const v4Sql = readFileSync(resolve(REPO_ROOT, v4Path), "utf8");
   const observedV4Sha = sha256(v4Sql);
   if (observedV4Sha !== HISTORICAL_REGISTRY_ARTIFACT_SHA256[v4Path])
@@ -1115,7 +1115,7 @@ export function renderSIEP16RegistrySql(rows = fullInventory(),
   const v6CatalogCount = dbCatalogBaseline.secdef_execute.count +
     dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
   const v6EntryCount = rows.length + v6CatalogCount;
-  const v5Path = "migrations/0373_siep15_forward_mutation_registry.sql";
+  const v5Path = "migrations/0461_siep15_forward_mutation_registry.sql";
   const v5Sql = readFileSync(resolve(REPO_ROOT, v5Path), "utf8");
   const observedV5Sha = sha256(v5Sql);
   if (observedV5Sha !== HISTORICAL_REGISTRY_ARTIFACT_SHA256[v5Path])
@@ -1205,7 +1205,7 @@ export function renderSIEP16IntegratedRegistrySql(rows = fullInventory(),
   const v7CatalogCount = dbCatalogBaseline.secdef_execute.count +
     dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
   const v7EntryCount = rows.length + v7CatalogCount;
-  const v6Path = "migrations/0375_siep16_forward_mutation_registry.sql";
+  const v6Path = "migrations/0462_siep16_forward_mutation_registry.sql";
   const v6Sql = readFileSync(resolve(REPO_ROOT, v6Path), "utf8");
   const observedV6Sha = sha256(v6Sql);
   if (observedV6Sha !== HISTORICAL_REGISTRY_ARTIFACT_SHA256[v6Path])
@@ -1294,7 +1294,7 @@ export function renderSIEP17ForwardRegistrySql(rows = fullInventory(),
   const catalogCount = dbCatalogBaseline.secdef_execute.count +
     dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
   const entryCount = rows.length + catalogCount;
-  const v7MigrationPath = "migrations/0377_siep16_integrated_mutation_registry.sql";
+  const v7MigrationPath = "migrations/0464_siep16_integrated_mutation_registry.sql";
   const v7RuntimePath = "mcp-server/src/scac-mutation-registry.v7.generated.js";
   const v7Migration = readFileSync(resolve(REPO_ROOT, v7MigrationPath), "utf8");
   for (const path of [v7MigrationPath, v7RuntimePath]) {
@@ -1397,7 +1397,7 @@ export function renderSIEP18ForwardRegistrySql(rows = fullInventory(),
   const catalogCount = dbCatalogBaseline.secdef_execute.count +
     dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
   const entryCount = rows.length + catalogCount;
-  const v8MigrationPath = "migrations/0380_siep17_forward_mutation_registry.sql";
+  const v8MigrationPath = "migrations/0466_siep17_forward_mutation_registry.sql";
   const v8RuntimePath = "mcp-server/src/scac-mutation-registry.v8.generated.js";
   const v8Migration = readFileSync(resolve(REPO_ROOT, v8MigrationPath), "utf8");
   for (const path of [v8MigrationPath, v8RuntimePath]) {
@@ -1565,7 +1565,7 @@ export function renderSIEP18ForwardRegistrySql(rows = fullInventory(),
   sql = `${sql.slice(0, seedStart + seedStartMarker.length)}${sqlLiteral(seed)}${sql.slice(seedEnd)}`;
 
   const monitorMigration = readFileSync(
-    resolve(REPO_ROOT, "migrations/0384_siep18_atomic_db_monitor_grants.sql"), "utf8");
+    resolve(REPO_ROOT, "migrations/0467_siep18_atomic_db_monitor_grants.sql"), "utf8");
   const monitorDigest = sha256(monitorMigration);
   if (monitorDigest !== SIEP18_MONITOR_ARTIFACT_SHA256)
     throw new Error(`reviewed SIEP-18 monitor artifact changed: ${monitorDigest}`);
@@ -1587,10 +1587,10 @@ export function renderSIEP18ForwardRegistrySql(rows = fullInventory(),
     "  relation_digest:=registry.catalog_projection#>>'{relation_dml,digest}';\n  column_digest:=registry.catalog_projection#>>'{column_dml,digest}';\n",
     "", "SIEP-18 monitor temporary category digests");
   monitorState = replaceExactlyOnce(monitorState,
-    "  grant_state:=case when registry.registry_version is not null and\n    (grant_snapshot->>'grant_digest')=ops.scac_reference_monitor_sha256(jsonb_build_array(\n      jsonb_build_object('relation_digest',relation_digest),\n      jsonb_build_object('column_digest',column_digest)))\n    then 'current' else 'measured_pending_v9_binding' end;\n  -- The v9 successor replaces the temporary combined-digest comparison above\n  -- with its exact catalog grant digest after 0384 is installed.\n",
+    "  grant_state:=case when registry.registry_version is not null and\n    (grant_snapshot->>'grant_digest')=ops.scac_reference_monitor_sha256(jsonb_build_array(\n      jsonb_build_object('relation_digest',relation_digest),\n      jsonb_build_object('column_digest',column_digest)))\n    then 'current' else 'measured_pending_v9_binding' end;\n  -- The v9 successor replaces the temporary combined-digest comparison above\n  -- with its exact catalog grant digest after 0467 is installed.\n",
     `  grant_state:=case when registry.registry_version='${REGISTRY_V9_VERSION}' and\n    (grant_snapshot->>'entry_count')::integer=${dbCatalogBaseline.runtime_dml_grants.count} and\n    grant_snapshot->>'grant_digest'='${dbCatalogBaseline.runtime_dml_grants.digest}'\n    then 'current' else 'drifted_or_unbound' end;\n`,
     "SIEP-18 exact runtime grant binding");
-  return `${predecessorCatalogPreflight}${sql}\n-- Exact post-0384 grant binding; generated from disposable-DB readback.\n${monitorState}`
+  return `${predecessorCatalogPreflight}${sql}\n-- Exact post-0467 grant binding; generated from disposable-DB readback.\n${monitorState}`
     .replace(/\n+$/, "\n");
 }
 
@@ -1739,13 +1739,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     "--write-rebased-runtime-v4": [REGISTRY_V4_VERSION, SIEP14_DB_CATALOG_BASELINE, "mcp-server/src/scac-mutation-registry.v4.generated.js"],
     "--write-rebased-runtime-v5": [REGISTRY_V5_VERSION, SIEP15_DB_CATALOG_BASELINE, "mcp-server/src/scac-mutation-registry.v5.generated.js"],
     "--write-rebased-runtime-v6": [REGISTRY_V6_VERSION, SIEP16_DB_CATALOG_BASELINE, "mcp-server/src/scac-mutation-registry.v6.generated.js"],
+    "--write-rebased-runtime-v8": [REGISTRY_V8_VERSION, SIEP17_FORWARD_DB_CATALOG_BASELINE, "mcp-server/src/scac-mutation-registry.v8.generated.js"],
   };
   const rebasedMigrationModes = {
-    "--write-rebased-migration-v1": [renderMigration, "migrations/0366_siep11_mutation_registry.sql"],
-    "--write-rebased-migration-v3": [renderSIEP13RegistrySql, "migrations/0369_siep13_forward_mutation_registry.sql"],
-    "--write-rebased-migration-v4": [renderSIEP14RegistrySql, "migrations/0371_siep14_forward_mutation_registry.sql"],
-    "--write-rebased-migration-v5": [renderSIEP15RegistrySql, "migrations/0373_siep15_forward_mutation_registry.sql"],
-    "--write-rebased-migration-v6": [renderSIEP16RegistrySql, "migrations/0375_siep16_forward_mutation_registry.sql"],
+    "--write-rebased-migration-v1": [renderMigration, "migrations/0454_siep11_mutation_registry.sql"],
+    "--write-rebased-migration-v3": [renderSIEP13RegistrySql, "migrations/0457_siep13_forward_mutation_registry.sql"],
+    "--write-rebased-migration-v4": [renderSIEP14RegistrySql, "migrations/0459_siep14_forward_mutation_registry.sql"],
+    "--write-rebased-migration-v5": [renderSIEP15RegistrySql, "migrations/0461_siep15_forward_mutation_registry.sql"],
+    "--write-rebased-migration-v6": [renderSIEP16RegistrySql, "migrations/0462_siep16_forward_mutation_registry.sql"],
+    "--write-rebased-migration-v8": [renderSIEP17ForwardRegistrySql, "migrations/0466_siep17_forward_mutation_registry.sql"],
   };
   if (rebasedRuntimeModes[process.argv[2]]) {
     const [version, dbCatalogBaseline, defaultTarget] = rebasedRuntimeModes[process.argv[2]];
@@ -1758,7 +1760,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     await writeFile(target, render(rows));
     process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--write-rebased-migration-v2") {
-    const target = resolve(process.argv[3] || "migrations/0367_siep12_policy_epoch.sql");
+    const target = resolve(process.argv[3] || "migrations/0455_siep12_policy_epoch.sql");
     const v1Seal = registrySeal(REGISTRY_VERSION, rows, DB_CATALOG_BASELINE);
     await writeFile(target, renderPolicyEpochMigration(renderSuccessorRegistrySql(rows), {
       v1Seal,
@@ -1778,7 +1780,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     }));
     process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--write-siep16-integrated-registry-migration") {
-    const target = resolve(process.argv[3] || "migrations/0377_siep16_integrated_mutation_registry.sql");
+    const target = resolve(process.argv[3] || "migrations/0464_siep16_integrated_mutation_registry.sql");
     await writeFile(target, renderSIEP16IntegratedRegistrySql(rows));
     process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--write-runtime-v9") {
@@ -1789,7 +1791,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     }));
     process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--write-siep18-forward-registry-migration") {
-    const target = resolve(process.argv[3] || "migrations/0385_siep18_forward_mutation_registry.sql");
+    const target = resolve(process.argv[3] || "migrations/0468_siep18_forward_mutation_registry.sql");
     await writeFile(target, renderSIEP18ForwardRegistrySql(rows));
     process.stdout.write(`${target}\n`);
   } else {
