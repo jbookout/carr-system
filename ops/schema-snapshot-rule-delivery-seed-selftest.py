@@ -29,6 +29,9 @@ SOURCE_MERGE_MIGRATION = "0471_source_merge_catalog_registry_successor.sql"
 SOURCE_MERGE_MIGRATION_SOURCE = (
     ROOT / "migrations" / SOURCE_MERGE_MIGRATION
 ).read_text(encoding="utf-8")
+ACCEPTANCE_SOURCE = (
+    ROOT / "ops" / "rule-delivery-local-pg-acceptance.py"
+).read_text(encoding="utf-8")
 POLICY_MARKER = "-- CARR RULE DELIVERY POLICY (bin/schema-snapshot.sh)"
 TARGET_POST_MARKER = (
     "-- CARR RULE DELIVERY ACTIVATION TARGETS POST-0332 (bin/schema-snapshot.sh)"
@@ -213,6 +216,13 @@ assert "requires shadow mode" in CURRENT_MIGRATION_SOURCE
 assert CURRENT_DIGEST in SOURCE_MERGE_MIGRATION_SOURCE
 assert POST_0363_DIGEST in SOURCE_MERGE_MIGRATION_SOURCE
 assert "expected eight exact rule-delivery target repins" in SOURCE_MERGE_MIGRATION_SOURCE
+assert f'MIGRATION_0363_ACTIVATION_DIGEST = "{POST_0363_DIGEST}"' in ACCEPTANCE_SOURCE
+assert f'CURRENT_ACTIVATION_DIGEST = "{CURRENT_DIGEST}"' in ACCEPTANCE_SOURCE
+historical_acceptance = ACCEPTANCE_SOURCE.split(
+    'check("0363 accepts the exact receipted retirement"', 1
+)[0].rsplit("receipt_cur.execute", 1)[1]
+assert "MIGRATION_0363_ACTIVATION_DIGEST" in historical_acceptance
+assert "CURRENT_ACTIVATION_DIGEST" not in historical_acceptance
 policy_lock = CURRENT_MIGRATION_SOURCE.index("select p.mode into v_policy_mode")
 rule_lock = CURRENT_MIGRATION_SOURCE.index("perform r.id")
 target_delete = CURRENT_MIGRATION_SOURCE.index(
