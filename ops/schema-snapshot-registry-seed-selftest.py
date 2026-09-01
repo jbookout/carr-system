@@ -70,14 +70,17 @@ loaded_sql = subprocess.run(
 assert loaded_sql.count("scac-mutation-registry.v") == 9
 assert loaded_sql.count("sha256:") == 9
 
-runtime_seals = {
-    name: re.search(rf'^export const {name} = "([0-9a-f]{{64}})";$', RUNTIME_V9, re.MULTILINE).group(1)
-    for name in (
-        "SCAC_MUTATION_REGISTRY_DIGEST",
-        "SCAC_MUTATION_SOURCE_CONTRACT_SET_DIGEST",
-        "SCAC_MUTATION_DB_CATALOG_BASELINE_DIGEST",
-    )
-}
+def runtime_seal(name: str) -> str:
+    match = re.search(rf'^export const {name} = "([0-9a-f]{{64}})";$', RUNTIME_V9, re.MULTILINE)
+    assert match is not None, f"missing generated runtime seal {name}"
+    return match.group(1)
+
+
+runtime_seals = {name: runtime_seal(name) for name in (
+    "SCAC_MUTATION_REGISTRY_DIGEST",
+    "SCAC_MUTATION_SOURCE_CONTRACT_SET_DIGEST",
+    "SCAC_MUTATION_DB_CATALOG_BASELINE_DIGEST",
+)}
 validation_start = GENERATOR.index('  case "$SCAC_EXPECTED_V9_DIGEST$SCAC_EXPECTED_V9_SOURCE_SET')
 validation_end = GENERATOR.index('  SCAC_EXPECTED_V9_DIGEST="sha256:', validation_start)
 validation = GENERATOR[validation_start:validation_end]
