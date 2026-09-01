@@ -640,6 +640,10 @@ export function registryDigest(rows = fullInventory()) {
   return registryDigestFor(REGISTRY_VERSION, rows, DB_CATALOG_BASELINE);
 }
 
+export function sourceContractSetDigest(rows = fullInventory()) {
+  return sha256(rows.map(row => `sha256:${sha256(row)}`).sort().join(","));
+}
+
 export function registrySeal(version, rows, dbCatalogBaseline) {
   const catalogEntryCount = dbCatalogBaseline.secdef_execute.count +
     dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
@@ -656,6 +660,8 @@ export function renderRuntimeProjection(rows = fullInventory(), {
   dbCatalogBaseline = DB_CATALOG_BASELINE,
 } = {}) {
   const digest = registryDigestFor(version, rows, dbCatalogBaseline);
+  const sourceSetDigest = sourceContractSetDigest(rows);
+  const catalogBaselineDigest = sha256(dbCatalogBaseline);
   const projection = Object.fromEntries(rows.filter(row => row.ingress_kind === "mcp_tool").map(row => [row.operation, {
     ingress_key: row.ingress_key,
     source_locator: row.source_locator,
@@ -670,6 +676,8 @@ export function renderRuntimeProjection(rows = fullInventory(), {
     `// This is a non-authorizing source/build guard. The sealed DB registry is SIEP-11's sole metadata authority; SIEP-18 owns atomic admission.\n` +
     `export const SCAC_MUTATION_REGISTRY_VERSION = ${JSON.stringify(version)};\n` +
     `export const SCAC_MUTATION_REGISTRY_DIGEST = ${JSON.stringify(digest)};\n` +
+    `export const SCAC_MUTATION_SOURCE_CONTRACT_SET_DIGEST = ${JSON.stringify(sourceSetDigest)};\n` +
+    `export const SCAC_MUTATION_DB_CATALOG_BASELINE_DIGEST = ${JSON.stringify(catalogBaselineDigest)};\n` +
     `export const SCAC_MUTATION_DB_METADATA_AUTHORITY = true;\n` +
     `export const SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING = false;\n` +
     `export const SCAC_MUTATION_OPERATIONS = Object.freeze(${JSON.stringify(projection, null, 2)});\n`;

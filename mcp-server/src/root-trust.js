@@ -86,9 +86,13 @@ function verifyCustodianQuorum(event, expectedCustodianSetDigest, reviewedKeys) 
     throw new Error("root_trust_custodian_set_unreviewed");
 }
 
-export function verifyRootTrustChainAgainstDigest(events, expectedCustodianSetDigest, reviewedCustodianKeyDigests) {
+export function verifyRootTrustChainAgainstDigest(
+  events, expectedCustodianSetDigest, reviewedCustodianKeyDigests, reviewedThreshold) {
   if (!Array.isArray(events) || events.length === 0) throw new TypeError("root_trust_events_unavailable");
   const reviewedKeys = reviewedCustodianSet(expectedCustodianSetDigest, reviewedCustodianKeyDigests);
+  if (!Number.isSafeInteger(reviewedThreshold) || reviewedThreshold < 2 ||
+      reviewedThreshold > Math.min(8, reviewedKeys.size))
+    throw new TypeError("reviewed_custodian_threshold_required");
   let previous = null;
   let activeKey = null;
   let lastRecoveryReceipt = null;
@@ -102,7 +106,7 @@ export function verifyRootTrustChainAgainstDigest(events, expectedCustodianSetDi
         !SHA256.test(event.event_digest || "") || !SHA256.test(event.subject_key_digest || "") ||
         (event.replacement_key_digest !== null && !SHA256.test(event.replacement_key_digest || "")) ||
         (event.recovery_receipt_digest !== null && !SHA256.test(event.recovery_receipt_digest || "")) ||
-        !Number.isSafeInteger(event.threshold) || event.threshold < 2 || event.threshold > 8 ||
+        event.threshold !== reviewedThreshold ||
         !SHA256.test(event.custodian_set_digest || "") ||
         !Number.isSafeInteger(event.policy_epoch) || event.policy_epoch <= 0 ||
         !SHA256.test(event.policy_epoch_digest || "") || event.production_trust_active !== false)
@@ -146,17 +150,19 @@ export function verifyRootTrustChainAgainstDigest(events, expectedCustodianSetDi
 export function evaluateRootTrust(events) {
   const expected = SCAC_ROOT_TRUST_CONFIG.reviewed_custodian_set_digest;
   const reviewedKeys = SCAC_ROOT_TRUST_CONFIG.reviewed_custodian_key_digests;
-  if (SCAC_ROOT_TRUST_CONFIG.review_state !== "reviewed" || !SHA256.test(expected || ""))
+  const reviewedThreshold = SCAC_ROOT_TRUST_CONFIG.reviewed_threshold;
+  if (SCAC_ROOT_TRUST_CONFIG.review_state !== "reviewed" || !SHA256.test(expected || "") ||
+      !Number.isSafeInteger(reviewedThreshold))
     throw new Error("reviewed_custodian_set_unprovisioned");
-  const state = verifyRootTrustChainAgainstDigest(events, expected, reviewedKeys);
+  const state = verifyRootTrustChainAgainstDigest(events, expected, reviewedKeys, reviewedThreshold);
   return Object.freeze({ ...state, review_binding_state: "immutable_source_config_matched" });
 }
 
 export function verifyArtifactRootBindingAgainstDigest(
-  artifactBundle, rootTrustEvents, expectedCustodianSetDigest, reviewedCustodianKeyDigests) {
+  artifactBundle, rootTrustEvents, expectedCustodianSetDigest, reviewedCustodianKeyDigests, reviewedThreshold) {
   const artifact = verifyArtifactBundle(artifactBundle);
   const root = verifyRootTrustChainAgainstDigest(
-    rootTrustEvents, expectedCustodianSetDigest, reviewedCustodianKeyDigests);
+    rootTrustEvents, expectedCustodianSetDigest, reviewedCustodianKeyDigests, reviewedThreshold);
   const signerKey = artifactBundle.signature.signer_key_digest;
   const bound = root.active_key_digest !== null && root.active_key_digest === signerKey;
   return Object.freeze({

@@ -67,7 +67,7 @@ test("quorum-bound root can bind a valid artifact only for nonproduction", () =>
   const { artifact, keyDigest } = signedFixture();
   const rootEvent = event({ subject_key_digest: keyDigest });
   const state = verifyArtifactRootBindingAgainstDigest(
-    artifact, [rootEvent], rootEvent.custodian_set_digest, REVIEWED_KEYS);
+    artifact, [rootEvent], rootEvent.custodian_set_digest, REVIEWED_KEYS, 2);
   assert.equal(state.root_binding_state, "current_nonproduction_root");
   assert.equal(state.artifact_trust_state, "eligible_nonproduction_only");
   assert.equal(state.root_trust_operational, false);
@@ -83,7 +83,7 @@ test("rotation, recovery proof, and revocation replay monotonically", () => {
   const revoke = event({ event_no: 4, previous_event_digest: recovery.event_digest, action: "revoke",
     subject_key_digest: rotate.replacement_key_digest });
   const state = verifyRootTrustChainAgainstDigest(
-    [establish, rotate, recovery, revoke], establish.custodian_set_digest, REVIEWED_KEYS);
+    [establish, rotate, recovery, revoke], establish.custodian_set_digest, REVIEWED_KEYS, 2);
   assert.equal(state.active_key_digest, null);
   assert.equal(state.recovery_state, "offline_receipt_recorded");
 });
@@ -91,33 +91,42 @@ test("rotation, recovery proof, and revocation replay monotonically", () => {
 test("weak quorum, forks, illegal transitions, operational claims, and secret-shaped material fail closed", () => {
   const weak = event({ threshold: 3 });
   assert.throws(() => verifyRootTrustChainAgainstDigest(
-    [weak], weak.custodian_set_digest, REVIEWED_KEYS), /quorum_invalid/);
+    [weak], weak.custodian_set_digest, REVIEWED_KEYS, 3), /quorum_invalid/);
   const fork = event({ previous_event_digest: sha("fork") });
   assert.throws(() => verifyRootTrustChainAgainstDigest(
-    [fork], fork.custodian_set_digest, REVIEWED_KEYS), /malformed_or_operational/);
+    [fork], fork.custodian_set_digest, REVIEWED_KEYS, 2), /malformed_or_operational/);
   const operational = event({ production_trust_active: true });
   assert.throws(() => verifyRootTrustChainAgainstDigest(
-    [operational], operational.custodian_set_digest, REVIEWED_KEYS), /malformed_or_operational/);
+    [operational], operational.custodian_set_digest, REVIEWED_KEYS, 2), /malformed_or_operational/);
   const establish = event();
   const badRotate = event({ event_no: 2, previous_event_digest: establish.event_digest, action: "rotate",
     subject_key_digest: sha("not-current"), replacement_key_digest: sha("root-b") });
   assert.throws(() => verifyRootTrustChainAgainstDigest(
-    [establish, badRotate], establish.custodian_set_digest, REVIEWED_KEYS), /custodian_set_unreviewed|transition_invalid/);
+    [establish, badRotate], establish.custodian_set_digest, REVIEWED_KEYS, 2), /custodian_set_unreviewed|transition_invalid/);
   const tampered = event();
   tampered.custodian_attestations[0].signature = Buffer.alloc(64).toString("base64");
   assert.throws(() => verifyRootTrustChainAgainstDigest(
-    [tampered], tampered.custodian_set_digest, REVIEWED_KEYS), /quorum_invalid|attestation_invalid/);
+    [tampered], tampered.custodian_set_digest, REVIEWED_KEYS, 2), /quorum_invalid|attestation_invalid/);
   const unreviewed = event();
   assert.throws(() => verifyRootTrustChainAgainstDigest(
-    [unreviewed], sha("different-custodian-set"), REVIEWED_KEYS), /reviewed_custodian_set_mismatch/);
+    [unreviewed], sha("different-custodian-set"), REVIEWED_KEYS, 2), /reviewed_custodian_set_mismatch/);
   assert.throws(() => evaluateRootTrust([unreviewed]), /reviewed_custodian_set_unprovisioned/);
   assert.equal(containsForbiddenRootMaterial({ private_key: "do-not-store" }), true);
   assert.equal(containsForbiddenRootMaterial({ public_key_digest: sha("safe") }), false);
 });
 
 test("a reviewed three-member custodian set accepts an actual two-of-three quorum", () => {
-  const state = verifyRootTrustChainAgainstDigest([event()], REVIEWED_SET_DIGEST, REVIEWED_KEYS);
+  const state = verifyRootTrustChainAgainstDigest([event()], REVIEWED_SET_DIGEST, REVIEWED_KEYS, 2);
   assert.equal(state.chain_state, "valid");
+});
+
+test("a signer minority cannot lower the reviewed threshold in a successor event", () => {
+  const establish = event({ threshold: 3 }, [0, 1, 2]);
+  const lowered = event({ event_no: 2, previous_event_digest: establish.event_digest,
+    action: "rotate", subject_key_digest: establish.subject_key_digest,
+    replacement_key_digest: sha("root-b"), threshold: 2 });
+  assert.throws(() => verifyRootTrustChainAgainstDigest(
+    [establish, lowered], REVIEWED_SET_DIGEST, REVIEWED_KEYS, 3), /malformed_or_operational/);
 });
 
 test("migration stores public facts only and remains source-only", () => {

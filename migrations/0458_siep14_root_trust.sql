@@ -115,6 +115,7 @@ returns jsonb language plpgsql stable security definer set search_path=pg_catalo
 declare r ops.scac_root_trust_event%rowtype; expected bigint:=1; prior text:=null; active_key text:=null;
         expected_digest text; sorted_digests text[]; recorded_digests text[]; recorded_keys text[];
         reviewed_keys text[]; expected_custodian_set text:=null; reviewed_custodian_set text;
+        expected_threshold integer:=null;
 begin
   for r in select * from ops.scac_root_trust_event order by event_no loop
     select array_agg(v order by v) into sorted_digests from unnest(r.custodian_approval_digests) v;
@@ -135,11 +136,13 @@ begin
        cardinality(recorded_keys)<r.threshold or reviewed_custodian_set is distinct from r.custodian_set_digest or
        exists(select 1 from unnest(recorded_keys) k where not (k=any(reviewed_keys))) or
        (expected_custodian_set is not null and r.custodian_set_digest is distinct from expected_custodian_set) or
+       (expected_threshold is not null and r.threshold is distinct from expected_threshold) or
        r.production_trust_active then
       return jsonb_build_object('valid',false,'structurally_valid',false,'reason','root_chain_gap_fork_digest_or_quorum',
         'cryptographic_quorum_state','external_verification_required');
     end if;
     expected_custodian_set:=r.custodian_set_digest;
+    expected_threshold:=r.threshold;
     if r.action='establish' then
       if expected<>1 or active_key is not null then return jsonb_build_object('valid',false,'structurally_valid',false,'reason','root_transition_invalid'); end if;
       active_key:=r.subject_key_digest;
@@ -196,6 +199,8 @@ begin
   if new.action='establish' and tip.event_no is not null then raise exception 'SIEP-14 duplicate root establishment'; end if;
   if tip.event_no is not null and new.custodian_set_digest is distinct from tip.custodian_set_digest
      then raise exception 'SIEP-14 custodian set is not the reviewed chain set'; end if;
+  if tip.event_no is not null and new.threshold is distinct from tip.threshold
+     then raise exception 'SIEP-14 custodian threshold is not the established chain threshold'; end if;
   if new.action<>'establish' and (state->>'active_key_digest') is distinct from new.subject_key_digest
      then raise exception 'SIEP-14 ceremony subject is not the current root'; end if;
   return new;

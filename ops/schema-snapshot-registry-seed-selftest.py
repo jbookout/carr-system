@@ -36,9 +36,15 @@ canonical_entry_seal = (
     "           convert_to(ops.scac_canonical_json(e.contract),'UTF8'),'sha256'),'hex')"
 )
 assert GENERATOR.count("e.entry_digest is distinct from 'sha256:'||encode(public.digest(") >= 2
-assert GENERATOR.count("ops.scac_mutation_registry_v8_seal_available()") >= 2
+assert GENERATOR.count("ops.scac_mutation_registry_seal_valid(historical.registry_version)") >= 2
+for version in range(1, 9):
+    assert GENERATOR.count(f"'scac-mutation-registry.v{version}'") >= 2
 assert "SCAC_EXPECTED_V9_DIGEST" in GENERATOR
 assert "registry_digest='${SCAC_EXPECTED_V9_DIGEST}'" in GENERATOR
+assert "SCAC_EXPECTED_V9_SOURCE_SET" in GENERATOR
+assert "SCAC_EXPECTED_V9_CATALOG" in GENERATOR
+assert GENERATOR.count("order by e.entry_digest collate") >= 2
+assert "not ops.scac_mutation_catalog_v9_current()" in GENERATOR
 
 # Model the exact attack the SQL predicate closes: changing the canonical
 # contract necessarily invalidates the retained digest.
