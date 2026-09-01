@@ -1594,6 +1594,33 @@ def rollout_resolver_cases():
               out.get("task_key") == "claude:claude-root"
               and out.get("resolver") == "session_id", out)
 
+        # Controller identity fields are typed protocol values. JSON numbers
+        # and booleans must never be stringified into durable task keys.
+        invalid_identity_rows = (
+            [{"type": "session_meta", "payload": {"id": 7}}],
+            [{"type": "session_meta", "payload": {"id": True}}],
+            [{"type": "session_meta", "payload": {"session_id": 7}}],
+            [{"type": "session_meta", "payload": {"session_id": False}}],
+            [{"type": "event_msg", "payload": {
+                "type": "task_started", "turn_id": 7}}],
+            [{"type": "event_msg", "payload": {
+                "type": "task_started", "turn_id": True}}],
+            [{"type": "session_meta", "payload": {
+                "id": "valid-authority", "session_id": 7}}],
+        )
+        invalid_identity_results = []
+        for index, rows in enumerate(invalid_identity_rows):
+            path = write_jsonl(root / f"invalid-identity-{index}.jsonl", rows)
+            invalid_identity_results.append(
+                run_cli(root, "codex-task-key", "--rollout", str(path)))
+        check("Codex rollout resolver rejects scalar identity coercion",
+              all(proc.returncode == 0 and out.get("ok") is False
+                  and out.get("reason") == "CONTEXT_SIGNAL_INVALID"
+                  and "task_key" not in out
+                  for proc, out in invalid_identity_results),
+              [(proc.returncode, out, proc.stderr)
+               for proc, out in invalid_identity_results])
+
         # Codex exposes both current-turn usage and an account/session-wide
         # cumulative billing total.  Only the former measures the live context
         # that can be exhausted by this task.
@@ -1984,9 +2011,9 @@ def immutable_publication_concurrency():
         results = []
         errors = []
 
-        def delayed_final_open(path, flags, mode=0o777):
-            fd = real_open(path, flags, mode)
-            if (Path(path).resolve() == target
+        def delayed_final_open(path, flags, mode=0o777, *, dir_fd=None):
+            fd = real_open(path, flags, mode, dir_fd=dir_fd)
+            if (dir_fd is None and Path(path).resolve() == target
                     and flags & os.O_CREAT and flags & os.O_EXCL):
                 created.set()
                 release.wait(timeout=5)
@@ -2190,6 +2217,35 @@ def independent_review_regressions():
               [(item.returncode, item.stdout, item.stderr)
                for item in (init, offer, declare, accept, portable)])
 
+        terminal_evidence = {
+            "thread_id": "review-terminal", "project_id": "review-project",
+            "cwd": str(repo_a / "work"), "status": "active",
+            "event_id": "review-terminal-start", "pinnedIndex": 1,
+        }
+        terminal_init = copied_cli(
+            hook_a, "task-init", "--task-key", "review-terminal-portable",
+            "--owner", "review-terminal", "--surface", "codex",
+            "--evidence-json", json.dumps(terminal_evidence),
+            "--expected-version", "-1")
+        terminal_native = dict(
+            terminal_evidence, status="terminal",
+            event_id="review-terminal-finish")
+        terminal_done = copied_cli(
+            hook_a, "task-terminal", "--task-key", "review-terminal-portable",
+            "--owner", "review-terminal", "--evidence-json",
+            json.dumps(terminal_native), "--expected-version", "0")
+        terminal_portable = copied_cli(
+            hook_b, "status", "--task-key", "review-terminal-portable")
+        terminal_portable_out = (
+            json.loads(terminal_portable.stdout)
+            if terminal_portable.stdout.strip() else {})
+        check("terminal Codex history is readable from another worktree",
+              all(item.returncode == 0 for item in (
+                  terminal_init, terminal_done, terminal_portable))
+              and terminal_portable_out.get("task_status") == "TERMINAL",
+              [(item.returncode, item.stdout, item.stderr)
+               for item in (terminal_init, terminal_done, terminal_portable)])
+
         # An invalid controller-wired event is itself a Stop control error and
         # must fail closed instead of using the invalid spelling as a NOOP.
         high = write_jsonl(
@@ -2299,6 +2355,48 @@ def exact_head_review_regressions():
                   for proc, out in strict_results),
               [(proc.returncode, out, proc.stderr)
                for proc, out in strict_results])
+
+        # Declaration is the durable admission point for a successor identity.
+        # It must require the same controller pin that acceptance requires, or
+        # it can publish a declaration that no later acceptance can reproduce.
+        _, pin_init = run_cli(
+            root, "task-init", "--task-key", "declare-requires-pin",
+            "--owner", "declare-old", "--surface", "codex",
+            "--evidence-json", codex_evidence("declare-old"),
+            "--expected-version", "-1")
+        _, pin_offer = run_cli(
+            root, "handoff-offer-create", "--task-key", "declare-requires-pin",
+            "--predecessor", "declare-old", "--predecessor-surface", "codex",
+            "--successor", "declare-new", "--successor-surface", "codex",
+            "--generation", "1", "--evidence-json",
+            codex_evidence("declare-old"), "--expected-version",
+            str(pin_init["version"]))
+        unpinned = json.loads(codex_evidence("declare-new"))
+        unpinned.pop("pinnedIndex")
+        identities_before = set(
+            (root / "state/identity-bindings").glob("*.json"))
+        pin_declare, pin_declare_out = run_cli(
+            root, "successor-declare", "--task-key", "declare-requires-pin",
+            "--offer-digest", pin_offer["offer_digest"],
+            "--successor", "declare-new", "--evidence-json",
+            json.dumps(unpinned), "--expected-version",
+            str(pin_offer["state"]["version"]))
+        _, pin_after = run_cli(
+            root, "status", "--task-key", "declare-requires-pin")
+        declaration_dir = (
+            root / "state/objects"
+            / hashlib.sha256(b"declare-requires-pin").hexdigest()
+            / "declaration")
+        check("successor declaration requires acceptance-grade pinning",
+              pin_declare.returncode == 2 and pin_declare_out
+              and pin_declare_out.get("reason") == "SUCCESSOR_NOT_PINNED"
+              and pin_after["version"] == pin_offer["state"]["version"]
+              and "declare-new" not in pin_after["owners"]
+              and set((root / "state/identity-bindings").glob("*.json"))
+              == identities_before
+              and not list(declaration_dir.glob("*.json")),
+              (pin_declare.returncode, pin_declare_out, pin_after,
+               list(declaration_dir.glob("*.json"))))
 
         # Both terminal transitions retain the project and checkout admitted
         # for that owner generation. Status alone cannot terminate another
@@ -2559,6 +2657,140 @@ def exact_head_review_regressions():
                [repr(exc) for exc in mutation_errors],
                [repr(exc) for exc in reader_errors], reader_results,
                list(recovery_dir.glob("*.json"))))
+
+        # The transaction directory entry must be durable before state can
+        # publish, and the artifact directory/link must be durable before the
+        # recovery journal is removed. Instrument the controller's directory
+        # sync boundary rather than relying on filesystem timing.
+        durable_events = []
+        durable_error = None
+        durable_state = gate.read_state(task_key, manifest)
+        if hasattr(gate, "_fsync_directory"):
+            real_directory_sync = gate._fsync_directory
+            real_atomic_for_order = gate.atomic_write
+            real_cleanup_for_order = gate._cleanup_transaction
+
+            def record_directory_sync(path):
+                durable_events.append(
+                    ("fsync", gate._absolute(Path(path))))
+                return real_directory_sync(path)
+
+            def record_atomic_for_order(path, value):
+                if gate._absolute(Path(path)) == gate._absolute(state_path):
+                    durable_events.append(("state", gate._absolute(Path(path))))
+                return real_atomic_for_order(path, value)
+
+            def record_cleanup_for_order(directory):
+                durable_events.append(
+                    ("cleanup", gate._absolute(Path(directory))))
+                return real_cleanup_for_order(directory)
+
+            gate._fsync_directory = record_directory_sync
+            gate.atomic_write = record_atomic_for_order
+            gate._cleanup_transaction = record_cleanup_for_order
+            try:
+                gate.mutate_state(
+                    task_key, durable_state["version"],
+                    recovery_change("durability-event"), manifest)
+            except Exception as exc:
+                durable_error = exc
+            finally:
+                gate._fsync_directory = real_directory_sync
+                gate.atomic_write = real_atomic_for_order
+                gate._cleanup_transaction = real_cleanup_for_order
+        else:
+            durable_error = AttributeError("_fsync_directory is absent")
+        transactions_root = gate.state_root(manifest) / "transactions"
+        transaction_syncs = [
+            index for index, event in enumerate(durable_events)
+            if event == ("fsync", gate._absolute(transactions_root))]
+        artifact_syncs = [
+            index for index, event in enumerate(durable_events)
+            if event == ("fsync", gate._absolute(recovery_dir))]
+        state_events = [
+            index for index, event in enumerate(durable_events)
+            if event[0] == "state"]
+        cleanup_events = [
+            index for index, event in enumerate(durable_events)
+            if event[0] == "cleanup"]
+        check("transaction durability syncs bracket state and cleanup",
+              durable_error is None and transaction_syncs and state_events
+              and artifact_syncs and cleanup_events
+              and transaction_syncs[0] < state_events[0]
+              and artifact_syncs[-1] < cleanup_events[-1],
+              (repr(durable_error), durable_events))
+
+        # Recovery must tolerate the exact cleanup crash left by the old order:
+        # the public artifact is already correct, the staged link is gone, and
+        # the committed journal still exists.
+        recovery_state = gate.read_state(task_key, manifest)
+        lifecycle_root = gate.state_root(manifest)
+        wedge_directory = lifecycle_root / "transactions" / "cleanup-wedge"
+        wedge_directory.mkdir(parents=True)
+        public_value = {"schema_version": 1, "value": "already-published"}
+        public_final = lifecycle_root / "manual" / "already-published.json"
+        gate.atomic_write(public_final, public_value)
+        gate.atomic_write(wedge_directory / "journal.json", {
+            "schema_version": 1,
+            "task_key": task_key,
+            "state_path": str(gate._absolute(state_path)),
+            "target_state_digest": gate.digest(recovery_state),
+            "artifacts": [{
+                "final": "manual/already-published.json",
+                "staged": "staged/missing.json",
+                "value_digest": gate.digest(public_value),
+            }],
+        })
+        wedge_error = None
+        wedge_recovered = None
+        try:
+            wedge_recovered = gate.read_state(task_key, manifest)
+        except Exception as exc:
+            wedge_error = exc
+        check("recovery accepts correct public artifact after cleanup crash",
+              wedge_error is None and wedge_recovered == recovery_state
+              and not wedge_directory.exists(),
+              (repr(wedge_error), wedge_recovered,
+               wedge_directory.exists()))
+        if wedge_directory.exists():
+            shutil.rmtree(wedge_directory)
+
+        # A committed journal is untrusted input after a crash. A symlinked
+        # descendant must not redirect publication outside the pinned lifecycle
+        # root, even when the staged bytes and digest are otherwise valid.
+        symlink_directory = lifecycle_root / "transactions" / "symlink-escape"
+        staged_path = symlink_directory / "staged/value.json"
+        escape_value = {"schema_version": 1, "value": "must-not-escape"}
+        gate.atomic_write(staged_path, escape_value)
+        outside = root / "outside-publication"
+        outside.mkdir()
+        redirect = lifecycle_root / "artifact-link"
+        os.symlink(outside, redirect, target_is_directory=True)
+        gate.atomic_write(symlink_directory / "journal.json", {
+            "schema_version": 1,
+            "task_key": task_key,
+            "state_path": str(gate._absolute(state_path)),
+            "target_state_digest": gate.digest(recovery_state),
+            "artifacts": [{
+                "final": "artifact-link/escaped.json",
+                "staged": "staged/value.json",
+                "value_digest": gate.digest(escape_value),
+            }],
+        })
+        symlink_error = None
+        try:
+            gate.read_state(task_key, manifest)
+        except Exception as exc:
+            symlink_error = exc
+        escaped = outside / "escaped.json"
+        check("transaction recovery rejects symlink redirection",
+              isinstance(symlink_error, gate.LifecycleError)
+              and not escaped.exists(),
+              (repr(symlink_error), escaped.exists()))
+        if symlink_directory.exists():
+            shutil.rmtree(symlink_directory)
+        redirect.unlink()
+        shutil.rmtree(outside)
     finally:
         if checkout_path is not None:
             if checkout_path.is_symlink():

@@ -23,6 +23,7 @@ import json
 import math
 import os
 import secrets
+import stat
 import sys
 import tempfile
 import threading
@@ -497,22 +498,112 @@ def _absolute(path: Path) -> Path:
     return Path(os.path.abspath(os.fspath(path)))
 
 
+def _fsync_directory(path: Path) -> None:
+    """Durably publish directory-entry changes for a trusted directory path."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _relative_parts(value: str, label: str) -> tuple[str, ...]:
+    path = Path(value)
+    parts = path.parts
+    if (path.is_absolute() or not parts
+            or any(part in {"", ".", ".."} for part in parts)):
+        raise LifecycleError(
+            "LIFECYCLE_INVALID", f"lifecycle transaction {label} is invalid")
+    return parts
+
+
+def _open_directory_at(root_fd: int, parts: tuple[str, ...], *,
+                       create: bool = False) -> int:
+    """Open descendants beneath a pinned fd without following symlinks."""
+    current = os.dup(root_fd)
+    flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+             | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        for part in parts:
+            try:
+                child = os.open(part, flags, dir_fd=current)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(part, 0o700, dir_fd=current)
+                os.fsync(current)
+                child = os.open(part, flags, dir_fd=current)
+            os.close(current)
+            current = child
+        return current
+    except Exception:
+        os.close(current)
+        raise
+
+
+def _load_json_at(parent_fd: int, name: str) -> tuple[bool, Any | None]:
+    """Read one regular file relative to a pinned directory, without links."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(name, flags, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return False, None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return True, None
+        with os.fdopen(fd, "rb", closefd=False) as fh:
+            raw = fh.read()
+        try:
+            return True, json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return True, None
+    finally:
+        os.close(fd)
+
+
 def _cleanup_transaction(directory: Path) -> None:
     """Remove only one controller-created transaction directory."""
-    if not directory.is_dir():
-        return
-    for item in sorted(directory.rglob("*"), key=lambda p: len(p.parts), reverse=True):
-        try:
-            if item.is_dir() and not item.is_symlink():
-                item.rmdir()
-            else:
-                item.unlink()
-        except FileNotFoundError:
-            pass
+    flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+             | getattr(os, "O_NOFOLLOW", 0))
+    parent_fd = os.open(directory.parent, flags)
     try:
-        directory.rmdir()
-    except FileNotFoundError:
-        pass
+        try:
+            directory_fd = os.open(directory.name, flags, dir_fd=parent_fd)
+        except (FileNotFoundError, NotADirectoryError, OSError):
+            return
+
+        def remove_contents(fd: int) -> None:
+            for name in os.listdir(fd):
+                mode = os.stat(
+                    name, dir_fd=fd, follow_symlinks=False).st_mode
+                if stat.S_ISDIR(mode):
+                    child_fd = os.open(name, flags, dir_fd=fd)
+                    try:
+                        remove_contents(child_fd)
+                    finally:
+                        os.close(child_fd)
+                    os.rmdir(name, dir_fd=fd)
+                else:
+                    os.unlink(name, dir_fd=fd)
+
+        try:
+            try:
+                os.unlink("journal.json", dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+            else:
+                # Once this entry removal is durable, any cleanup interruption
+                # leaves a journal-less directory recovery may discard safely.
+                os.fsync(directory_fd)
+            remove_contents(directory_fd)
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        os.rmdir(directory.name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
 
 
 def _publish_transaction_artifact(root: Path, directory: Path,
@@ -525,6 +616,8 @@ def _publish_transaction_artifact(root: Path, directory: Path,
             or not is_digest(expected_digest)):
         raise LifecycleError("LIFECYCLE_INVALID",
                              "lifecycle transaction artifact is invalid")
+    final_parts = _relative_parts(final_rel, "final path")
+    staged_parts = _relative_parts(staged_rel, "staged path")
     final = _absolute(root / final_rel)
     staged = _absolute(directory / staged_rel)
     try:
@@ -533,41 +626,115 @@ def _publish_transaction_artifact(root: Path, directory: Path,
     except ValueError as exc:
         raise LifecycleError("LIFECYCLE_INVALID",
                              "lifecycle transaction path escapes its root") from exc
+    root_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    root_fd = os.open(root, root_flags)
+    transaction_fd = final_parent_fd = staged_parent_fd = None
     try:
-        value = json.loads(staged.read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise LifecycleError("LIFECYCLE_INVALID",
-                             f"lifecycle transaction artifact is unreadable: {exc}") from exc
-    if digest(value) != expected_digest:
-        raise LifecycleError("LIFECYCLE_INVALID",
-                             "lifecycle transaction artifact digest changed")
-    final.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.link(staged, final)
-    except FileExistsError:
-        existing = load_json_file(final)
-        if existing is None or digest(existing) != expected_digest:
+        directory_parts = tuple(directory.relative_to(root).parts)
+        transaction_fd = _open_directory_at(root_fd, directory_parts)
+        final_parent_fd = _open_directory_at(
+            root_fd, final_parts[:-1], create=True)
+
+        exists, existing = _load_json_at(final_parent_fd, final_parts[-1])
+        if exists:
+            if existing is None or digest(existing) != expected_digest:
+                raise LifecycleError("LIFECYCLE_INVALID",
+                                     "lifecycle transaction artifact collided")
+            return
+
+        staged_parent_fd = _open_directory_at(
+            transaction_fd, staged_parts[:-1])
+        staged_exists, value = _load_json_at(
+            staged_parent_fd, staged_parts[-1])
+        if not staged_exists or value is None:
             raise LifecycleError("LIFECYCLE_INVALID",
-                                 "lifecycle transaction artifact collided")
-    dfd = os.open(final.parent, os.O_RDONLY)
-    try:
-        os.fsync(dfd)
+                                 "lifecycle transaction artifact is unreadable")
+        if digest(value) != expected_digest:
+            raise LifecycleError("LIFECYCLE_INVALID",
+                                 "lifecycle transaction artifact digest changed")
+        try:
+            os.link(
+                staged_parts[-1], final_parts[-1],
+                src_dir_fd=staged_parent_fd, dst_dir_fd=final_parent_fd,
+                follow_symlinks=False)
+        except FileExistsError:
+            exists, existing = _load_json_at(
+                final_parent_fd, final_parts[-1])
+            if (not exists or existing is None
+                    or digest(existing) != expected_digest):
+                raise LifecycleError(
+                    "LIFECYCLE_INVALID",
+                    "lifecycle transaction artifact collided")
+        os.fsync(final_parent_fd)
+        # Keep a named sync boundary for durability instrumentation while the
+        # descriptor above remains the race-safe authority.
+        _fsync_directory(final.parent)
+    except LifecycleError:
+        raise
+    except (FileNotFoundError, NotADirectoryError, OSError) as exc:
+        raise LifecycleError(
+            "LIFECYCLE_INVALID",
+            f"lifecycle transaction path is unsafe: {exc}") from exc
     finally:
-        os.close(dfd)
+        for fd in (staged_parent_fd, final_parent_fd, transaction_fd, root_fd):
+            if fd is not None:
+                os.close(fd)
 
 
 def _recover_transactions_unlocked(
         root: Path, manifest: dict[str, Any] | None = None) -> None:
     transactions = root / "transactions"
-    if not transactions.is_dir():
-        return
-    for directory in sorted(path for path in transactions.iterdir()
-                            if path.is_dir() and not path.is_symlink()):
-        journal_path = directory / "journal.json"
-        if not journal_path.is_file():
+    flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+             | getattr(os, "O_NOFOLLOW", 0))
+    root_fd = os.open(root, flags)
+    try:
+        try:
+            transactions_fd = _open_directory_at(root_fd, ("transactions",))
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise LifecycleError(
+                "LIFECYCLE_INVALID",
+                f"lifecycle transaction root is unsafe: {exc}") from exc
+        try:
+            transaction_names = sorted(os.listdir(transactions_fd))
+        finally:
+            os.close(transactions_fd)
+    finally:
+        os.close(root_fd)
+    for name in transaction_names:
+        directory = transactions / name
+        try:
+            parent_fd = os.open(transactions, flags)
+            try:
+                mode = os.stat(
+                    name, dir_fd=parent_fd, follow_symlinks=False).st_mode
+                if stat.S_ISLNK(mode):
+                    raise LifecycleError(
+                        "LIFECYCLE_INVALID",
+                        "lifecycle transaction directory is a symlink")
+                if not stat.S_ISDIR(mode):
+                    continue
+                directory_fd = os.open(name, flags, dir_fd=parent_fd)
+                try:
+                    journal_exists, journal = _load_json_at(
+                        directory_fd, "journal.json")
+                finally:
+                    os.close(directory_fd)
+            finally:
+                os.close(parent_fd)
+        except LifecycleError:
+            raise
+        except OSError as exc:
+            raise LifecycleError(
+                "LIFECYCLE_INVALID",
+                f"lifecycle transaction directory is unsafe: {exc}") from exc
+        if not journal_exists:
             _cleanup_transaction(directory)
             continue
-        journal = load_json_file(journal_path)
+        if journal is None:
+            raise LifecycleError("LIFECYCLE_INVALID",
+                                 "lifecycle transaction journal is invalid")
         if (not isinstance(journal, dict)
                 or set(journal) != {
                     "schema_version", "task_key", "state_path",
@@ -734,8 +901,15 @@ def mutate_state(task_key: str, expected_version: int | None,
                 raise LifecycleError("LIFECYCLE_INVALID",
                                      f"expected version {expected_version}, found {actual}")
             before = canonical(current) if current is not None else None
-            directory = root / "transactions" / secrets.token_hex(16)
-            directory.mkdir(parents=True, exist_ok=False)
+            transactions = root / "transactions"
+            if not transactions.exists():
+                transactions.mkdir()
+                _fsync_directory(root)
+            directory = transactions / secrets.token_hex(16)
+            directory.mkdir(exist_ok=False)
+            # A journal cannot protect published state if its own transaction
+            # directory entry disappears after power loss.
+            _fsync_directory(transactions)
             transaction = {
                 "root": root, "directory": directory, "task_key": task_key,
                 "artifacts": {}, "state_published": False,
@@ -1182,7 +1356,8 @@ def verify_terminal_provenance(task_key: str, state: dict[str, Any],
             "terminal native evidence digest changed")
     validate_owner_native_binding(
         task_key, owner, evidence, manifest,
-        error_reason="HANDOFF_RECEIPT_INVALID")
+        error_reason="HANDOFF_RECEIPT_INVALID",
+        require_live_checkout=False)
 
 
 def audit(record: dict[str, Any], manifest: dict[str, Any] | None = None) -> None:
@@ -1876,12 +2051,14 @@ def owner_activation_evidence(task_key: str, owner: dict[str, Any],
 def validate_owner_native_binding(task_key: str, owner: dict[str, Any],
                                   evidence: dict[str, Any],
                                   manifest: dict[str, Any] | None,
-                                  *, error_reason: str = "OWNERSHIP_MISMATCH") -> None:
+                                  *, error_reason: str = "OWNERSHIP_MISMATCH",
+                                  require_live_checkout: bool = True) -> None:
     """Compare current/terminal Codex evidence to immutable admission bytes."""
     if owner.get("surface") != "codex":
         return
     try:
-        validate_codex_checkout(evidence)
+        if require_live_checkout:
+            validate_codex_checkout(evidence)
         admitted = owner_activation_evidence(task_key, owner, manifest)
         if (evidence.get("project_id") != admitted.get("project_id")
                 or evidence.get("cwd") != admitted.get("cwd")):
@@ -2062,7 +2239,7 @@ def successor_declare(args, manifest):
     offer = read_object(args.task_key, "offer", args.offer_digest, manifest)
     evidence = parse_evidence(args.evidence_json)
     evidence_digest = validate_successor_evidence(
-        offer, args.successor, evidence)
+        offer, args.successor, evidence, accept=True)
     declaration = {"schema_version": 1, "task_key": args.task_key,
                    "offer_digest": args.offer_digest, "successor": args.successor,
                    "native_evidence": evidence, "native_evidence_digest": evidence_digest,
@@ -2403,17 +2580,34 @@ def resolve_codex_rollout(path: str) -> dict[str, Any]:
     authoritative: set[str] = set()
     legacy: set[str] = set()
     turns: set[str] = set()
+    invalid = {"payload.id": False, "session_id": False,
+               "task_started.turn_id": False}
+
+    def capture(payload: dict[str, Any], field: str, target: set[str],
+                tier: str) -> None:
+        if field not in payload:
+            return
+        value = payload[field]
+        if not isinstance(value, str) or not value.strip():
+            invalid[tier] = True
+            return
+        target.add(value)
+
     for row in rows:
         raw_payload = row.get("payload")
         payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
         if row.get("type") == "session_meta":
-            if payload.get("id"):
-                authoritative.add(str(payload["id"]))
-            if payload.get("session_id"):
-                legacy.add(str(payload["session_id"]))
-        if (row.get("type") == "event_msg" and payload.get("type") == "task_started"
-                and payload.get("turn_id")):
-            turns.add(str(payload["turn_id"]))
+            capture(payload, "id", authoritative, "payload.id")
+            capture(payload, "session_id", legacy, "session_id")
+        if (row.get("type") == "event_msg"
+                and payload.get("type") == "task_started"):
+            capture(payload, "turn_id", turns, "task_started.turn_id")
+    invalid_tier = next((tier for tier in (
+        "payload.id", "session_id", "task_started.turn_id")
+        if invalid[tier]), None)
+    if invalid_tier is not None:
+        return {"ok": False, "reason": "CONTEXT_SIGNAL_INVALID",
+                "resolver": invalid_tier}
     if len(authoritative) == 1:
         value = next(iter(authoritative))
         return {"ok": True, "task_key": f"codex:{value}", "resolver": "payload.id",
