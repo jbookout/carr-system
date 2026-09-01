@@ -31,6 +31,7 @@ wrong version).
 Run: .venv/bin/python ops/worktree-venv-lock-selftest.py   # exit 0 = all pass
 """
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -140,6 +141,16 @@ with tempfile.TemporaryDirectory() as td:
                    check=True, capture_output=True)
     assert (venv / "bin" / "python").exists(), "fixture venv has no bin/python"
 
+    # venv_guard_record writes here; without it the durable record is a no-op.
+    (canonical / "out").mkdir()
+    guard_log = canonical / "out" / "worktree-venv-guard.jsonl"
+
+    def guard_rows():
+        if not guard_log.exists():
+            return []
+        return [json.loads(line) for line in
+                guard_log.read_text().splitlines() if line.strip()]
+
     worktree = Path(td) / "worktree"
     run("git", "worktree", "add", "-q", "-b", "fixture-worktree", str(worktree),
         cwd=canonical)
@@ -186,22 +197,64 @@ with tempfile.TemporaryDirectory() as td:
     assert not link_path.exists() and not link_path.is_symlink(), \
         "a venv holding an unlocked distribution must not be linked"
 
-    # CASE 5 — the escape hatch links, and ANNOUNCES that it did. A machine
-    # whose canonical venv has drifted must not lose every worktree's tooling
-    # with no way forward; what it must not do is go quiet about it.
-    drift_ok = dict(FIXTURE_ENV, CARR_WORKTREE_VENV_DRIFT_OK="1")
-    fifth = plumb(env=drift_ok)
+    # CASE 5 — THE OVERRIDE NEEDS BOTH KEYS, and the argv half is the one an
+    # exported variable cannot supply. An ambient CARR_WORKTREE_VENV_DRIFT_OK
+    # used to arm every automatic bootstrap on the machine, because the boot
+    # hook runs this script as a child and children inherit the environment.
+    def plumb_flag(env=None):
+        return run(ZSH, str(canonical / "bin" / "worktree.sh"), "--plumb",
+                   "--allow-venv-drift", str(worktree), cwd=worktree, env=env,
+                   check=False)
+
+    # 5a — environment alone, no flag: this is exactly the automatic-bootstrap
+    # shape, and it must NOT take the override.
+    env_only = plumb(env=dict(FIXTURE_ENV, CARR_WORKTREE_VENV_DRIFT_OK="1"))
+    assert "LINKED ANYWAY" not in env_only.stdout, \
+        "an exported variable alone must never arm the override (automatic bootstrap)"
+    assert not link_path.exists() and not link_path.is_symlink(), env_only.stdout
+
+    # 5b — flag alone, and flag with a value that is merely NONEMPTY. The old
+    # test was `-n`, so "0" and "false" both armed it.
+    for value in ("", "0", "false", "no", "yes"):
+        env = dict(FIXTURE_ENV)
+        env.pop("CARR_WORKTREE_VENV_DRIFT_OK", None)
+        if value:
+            env["CARR_WORKTREE_VENV_DRIFT_OK"] = value
+        got = plumb_flag(env=env)
+        assert "LINKED ANYWAY" not in got.stdout, \
+            f"CARR_WORKTREE_VENV_DRIFT_OK={value!r} must not arm the override"
+        assert not link_path.exists() and not link_path.is_symlink(), got.stdout
+
+    # 5c — both keys: links, announces, and leaves a DURABLE record.
+    before = len(guard_rows())
+    fifth = plumb_flag(env=dict(FIXTURE_ENV, CARR_WORKTREE_VENV_DRIFT_OK="1"))
     assert "LINKED ANYWAY" in fifth.stdout, fifth.stdout
-    assert REFUSAL in fifth.stdout, "the escape hatch must still state the drift"
+    assert REFUSAL in fifth.stdout, "the override must still state the drift"
     assert link_path.is_symlink(), fifth.stdout
+
+    rows = guard_rows()
+    assert len(rows) > before, "the override left no durable record"
+    used = [r for r in rows if r["verdict"] == "override_used"]
+    assert used, f"no override_used row: {rows}"
+    row = used[-1]
+    for field in ("at", "worktree", "venv", "venv_identity",
+                  "requirements_lock_sha256"):
+        assert row.get(field), f"durable record is missing {field}: {row}"
+    assert row["requirements_lock_sha256"] == \
+        hashlib.sha256((worktree / "requirements.lock").read_bytes()).hexdigest()
+    assert os.path.realpath(str(venv)) == row["venv"]
+    # Earlier refusals are recorded too, so the ledger shows what was refused as
+    # well as what was waved through.
+    assert any(r["verdict"] == "refused" for r in rows), rows
 
     # CASE 6 — the frozen door. --install offers exactly two spellings and
     # neither of them re-resolves: `npm ci`, and pip against requirements.lock.
-    # Asserted on --dry-run because the real install needs the network.
     dry = run(ZSH, str(canonical / "bin" / "worktree.sh"), "--install", "--dry-run",
               str(worktree), cwd=worktree)
     assert "npm --prefix" in dry.stdout and " ci" in dry.stdout, dry.stdout
     assert "requirements.lock" in dry.stdout, dry.stdout
+    assert "-m venv --clear" in dry.stdout, \
+        "the frozen door must build a FRESH venv, or it inherits unlocked packages"
     assert "npm install" not in dry.stdout, "the frozen door must never say npm install"
     assert "npm i " not in dry.stdout, "the frozen door must never say npm i"
     assert "requirements.txt" not in dry.stdout, \
@@ -217,4 +270,116 @@ with tempfile.TemporaryDirectory() as td:
     assert "refusing to install into the canonical tree" in canon_install.stdout, \
         canon_install.stdout
 
-print("worktree-venv-lock-selftest: drifted shared .venv refused, frozen door is frozen")
+    # CASE 8 — FAIL CLOSED WITH NO LOCK. A runtime that cannot be proven against
+    # a lockfile is not exposed. This used to `return 0` and trust anything.
+    set_installed(venv, {"alpha": "1.0.0", "beta": "2.0.0"})
+    (worktree / "requirements.lock").unlink()
+    nolock = plumb()
+    assert "no readable requirements.lock" in nolock.stdout, nolock.stdout
+    assert not link_path.exists() and not link_path.is_symlink(), \
+        "with no lock to prove it against, the venv must not be linked"
+    run("git", "checkout", "--", "requirements.lock", cwd=worktree)
+
+    # CASE 9 — THE RUNTIME ACTUALLY USED IS THE ONE VALIDATED. A worktree
+    # carrying its own real .venv never gets replaced by link(), so validating
+    # the canonical venv proved nothing about what the worktree would run.
+    local_venv = worktree / ".venv"
+    if local_venv.is_symlink():
+        local_venv.unlink()
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(local_venv)],
+                   check=True, capture_output=True)
+    set_installed(venv, {"alpha": "1.0.0", "beta": "2.0.0"})       # canonical: GOOD
+    set_installed(local_venv, {"alpha": "1.0.0", "beta": "6.6.6"})  # local: DRIFTED
+    local = plumb()
+    assert "worktree-local" in local.stdout, \
+        f"the local venv must be the one judged, not the canonical one:\n{local.stdout}"
+    assert REFUSAL in local.stdout, local.stdout
+    assert local_venv.is_dir() and not local_venv.is_symlink(), \
+        "a worktree-local venv is somebody's work — refuse it, never delete it"
+    assert any(r["verdict"] == "refused" and r["kind"] == "worktree-local"
+               for r in guard_rows()), guard_rows()
+
+    # And a MATCHING local venv is accepted on its own merit.
+    set_installed(local_venv, {"alpha": "1.0.0", "beta": "2.0.0", "pip": "1.0"})
+    good_local = plumb()
+    assert "worktree-local) matches" in good_local.stdout, good_local.stdout
+
+
+# ---- CASE 10. THE REAL ARGV, NOT THE PRINTED ONE. -------------------------
+# --dry-run output is a claim about what would run. Until the print and the
+# execution shared one array, a selftest asserting on that output would stay
+# green while the executed command installed requirements.txt. This runs the
+# INSTALLER for real against fake `python3`/`npm` that record their argv, so the
+# assertion is about the command that actually executed.
+FAKE = """#!/bin/sh
+printf '%s\\n' "$*" >> "$ARGV_LOG"
+# The guard probes a venv by piping a script to `python -`; refuse that, so the
+# post-install verification is exercised rather than spuriously satisfied.
+[ "$1" = "-" ] && exit 1
+if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
+  for a in "$@"; do t="$a"; done
+  mkdir -p "$t/bin"
+  cp "$0" "$t/bin/python"
+  chmod +x "$t/bin/python"
+fi
+exit 0
+"""
+
+with tempfile.TemporaryDirectory() as td:
+    canonical = Path(td) / "canonical"
+    canonical.mkdir()
+    run("git", "init", "-q", "-b", "main", cwd=canonical)
+    run("git", "config", "user.email", "fixture@example.com", cwd=canonical)
+    run("git", "config", "user.name", "fixture", cwd=canonical)
+    (canonical / "bin").mkdir()
+    shutil.copy2(ROOT / "bin" / "worktree.sh", canonical / "bin" / "worktree.sh")
+    (canonical / "requirements.lock").write_text(LOCK_TEXT)
+    (canonical / "mcp-server").mkdir()
+    (canonical / "mcp-server" / "package.json").write_text('{"name":"fixture"}')
+    (canonical / "mcp-server" / "package-lock.json").write_text('{"name":"fixture"}')
+    (canonical / ".gitignore").write_text(".venv/\nout/\nmcp-server/node_modules/\n")
+    run("git", "add", "bin/worktree.sh", "requirements.lock", ".gitignore",
+        "mcp-server/package.json", "mcp-server/package-lock.json", cwd=canonical)
+    run("git", "commit", "-qm", "fixture", cwd=canonical)
+    # No canonical .venv on purpose: base_py then falls back to `python3`, which
+    # PATH resolves to the recorder below.
+    worktree = Path(td) / "worktree"
+    run("git", "worktree", "add", "-q", "-b", "argv-worktree", str(worktree),
+        cwd=canonical)
+
+    fakebin = Path(td) / "fakebin"
+    fakebin.mkdir()
+    argv_log = Path(td) / "argv.log"
+    for name in ("python3", "npm"):
+        target = fakebin / name
+        target.write_text(FAKE)
+        target.chmod(0o755)
+
+    env = dict(FIXTURE_ENV,
+               PATH=f"{fakebin}{os.pathsep}{FIXTURE_ENV.get('PATH', '')}",
+               ARGV_LOG=str(argv_log))
+    got = run(ZSH, str(canonical / "bin" / "worktree.sh"), "--install",
+              str(worktree), cwd=worktree, env=env, check=False)
+    recorded = argv_log.read_text() if argv_log.exists() else ""
+    # worktree.sh resolves paths with ${wt:A}, and on macOS /var is a symlink to
+    # /private/var — compare against the resolved path the script actually used.
+    wt_real = os.path.realpath(worktree)
+
+    assert f"-m venv --clear {wt_real}/.venv" in recorded, \
+        f"the EXECUTED venv command is not the fresh-venv one:\n{recorded}"
+    assert f"-r {wt_real}/requirements.lock" in recorded, \
+        f"the EXECUTED pip command does not install the lock:\n{recorded}"
+    assert "requirements.txt" not in recorded, \
+        f"the EXECUTED pip command installed the loose declaration:\n{recorded}"
+    assert f"--prefix {wt_real}/mcp-server ci" in recorded, \
+        f"the EXECUTED npm command is not `npm ci`:\n{recorded}"
+    for forbidden in ("npm install", f"--prefix {wt_real}/mcp-server install"):
+        assert forbidden not in recorded, f"{forbidden!r} was executed:\n{recorded}"
+    # The post-install verification is load-bearing: the fake venv cannot satisfy
+    # the lock, so --install must refuse to call it good.
+    assert got.returncode != 0, got.stdout
+    assert "does NOT match requirements.lock" in got.stdout, got.stdout
+
+print("worktree-venv-lock-selftest: drifted shared .venv refused, fail-closed without a "
+      "lock, worktree-local runtime judged, override needs both keys and is recorded, "
+      "executed installer argv proven frozen")

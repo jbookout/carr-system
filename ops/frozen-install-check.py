@@ -308,14 +308,30 @@ def pip_verdict(rest):
         return ("installs " + ", ".join(loose)
                 + " — the loose declaration, not requirements.lock")
 
+    # A LOCAL PROJECT INSTALL IS NOT FROZEN BY DEFAULT. `pip install .` (or
+    # `-e .`, or a path) reads the project's own pyproject/setup metadata and
+    # RESOLVES its dependencies from the index, so it can pull a different
+    # dependency graph on any two days — the same reproducibility hole a `>=`
+    # range leaves. The first cut listed `.` and `-e` as always-frozen, which
+    # forgave exactly that. Cross-family review, advisory 1. Resolution has to be
+    # switched off (`--no-deps`) or pinned by hashes for a local install to
+    # count as frozen.
+    resolution_disabled = any(t.startswith("--no-deps") for t in tokens)
+    local_targets = [p for p in packages
+                     if p in (".", "./", "..")
+                     or p.split("[")[0] in (".", "./", "..")
+                     or p.startswith(("./", "../", "/"))
+                     or "-e" in tokens and p == "."]
+    if local_targets and not resolution_disabled:
+        return ("local project install " + ", ".join(local_targets)
+                + " resolves its own dependencies — add --no-deps or install a lock")
+
     unpinned = [p for p in packages
                 if "==" not in p
                 and re.sub(r"[-_.]+", "-", p.split("[")[0]).lower() not in BOOTSTRAP
-                and p not in (".", "-e", "./")]
+                and p not in local_targets]
     if unpinned:
         return "unpinned package(s): " + ", ".join(unpinned)
-    if not reqs and not packages:
-        return None
     return None
 
 

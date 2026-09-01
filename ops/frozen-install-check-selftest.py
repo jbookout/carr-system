@@ -84,6 +84,13 @@ SEEDS = {
     # The continuation case: read line-by-line this looks like a bare
     # `pip install -q`, with no requirement file to judge at all.
     "continued line": "bin/seed.sh|#!/bin/sh\npip install -q \\\n  -r requirements.txt\n",
+    # A local project install RESOLVES the project's own dependencies from the
+    # index unless resolution is switched off, so it is not frozen. The first
+    # cut listed `.` and `-e` as always-frozen and forgave exactly this.
+    "local project": "bin/seed.sh|#!/bin/sh\npip install .\n",
+    "local project editable": "bin/seed.sh|#!/bin/sh\npip install -e .\n",
+    "local project path": "bin/seed.sh|#!/bin/sh\npip install ./vendor-patches\n",
+    "local project extra": "bin/seed.sh|#!/bin/sh\npip install .[dev]\n",
 }
 for label, spec in SEEDS.items():
     name, text = spec.split("|", 1)
@@ -110,6 +117,9 @@ FROZEN = {
     "global cli": "bin/ok.sh|#!/bin/sh\nnpm i -g @openai/codex\n",
     "installer bootstrap": "bin/ok.sh|#!/bin/sh\npython3 -m pip install --upgrade pip\n",
     "redirections only": "bin/ok.sh|#!/bin/sh\npip install -r requirements.lock >/tmp/a.log 2>&1\n",
+    # Resolution switched off makes a local install reproducible again.
+    "local project no-deps": "bin/ok.sh|#!/bin/sh\npip install --no-deps .\n",
+    "local editable no-deps": "bin/ok.sh|#!/bin/sh\npip install --no-deps -e .\n",
     # Prose is deliberately out of scope; flagging it trains people to ignore
     # the check.
     "prose outside scan roots": "corpus/notes.sh|#!/bin/sh\nnpm install\n",
