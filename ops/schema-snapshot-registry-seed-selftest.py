@@ -3,6 +3,8 @@
 
 import hashlib
 import json
+import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -12,6 +14,9 @@ GENERATOR = (ROOT / "bin" / "schema-snapshot.sh").read_text(encoding="utf-8")
 SNAPSHOT = (ROOT / "db" / "schema.sql").read_text(encoding="utf-8")
 FULL_SET_SEALS = json.loads(
     (ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json").read_text(encoding="utf-8")
+)
+RUNTIME_V9 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v9.generated.js").read_text(
+    encoding="utf-8"
 )
 
 for table, key in (
@@ -64,6 +69,25 @@ loaded_sql = subprocess.run(
 ).stdout
 assert loaded_sql.count("scac-mutation-registry.v") == 9
 assert loaded_sql.count("sha256:") == 9
+
+runtime_seals = {
+    name: re.search(rf'^export const {name} = "([0-9a-f]{{64}})";$', RUNTIME_V9, re.MULTILINE).group(1)
+    for name in (
+        "SCAC_MUTATION_REGISTRY_DIGEST",
+        "SCAC_MUTATION_SOURCE_CONTRACT_SET_DIGEST",
+        "SCAC_MUTATION_DB_CATALOG_BASELINE_DIGEST",
+    )
+}
+validation_start = GENERATOR.index('  case "$SCAC_EXPECTED_V9_DIGEST$SCAC_EXPECTED_V9_SOURCE_SET')
+validation_end = GENERATOR.index('  SCAC_EXPECTED_V9_DIGEST="sha256:', validation_start)
+validation = GENERATOR[validation_start:validation_end]
+validation_env = {
+    **os.environ,
+    "SCAC_EXPECTED_V9_DIGEST": runtime_seals["SCAC_MUTATION_REGISTRY_DIGEST"],
+    "SCAC_EXPECTED_V9_SOURCE_SET": runtime_seals["SCAC_MUTATION_SOURCE_CONTRACT_SET_DIGEST"],
+    "SCAC_EXPECTED_V9_CATALOG": runtime_seals["SCAC_MUTATION_DB_CATALOG_BASELINE_DIGEST"],
+}
+subprocess.run(["sh", "-c", validation], check=True, env=validation_env)
 
 # Model the exact attack the SQL predicate closes: changing the canonical
 # contract necessarily invalidates the retained digest.

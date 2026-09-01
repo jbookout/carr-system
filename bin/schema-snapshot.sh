@@ -1144,11 +1144,11 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
   SCAC_EXPECTED_V9_DIGEST="$(sed -n 's/^export const SCAC_MUTATION_REGISTRY_DIGEST = "\([0-9a-f]\{64\}\)";$/\1/p' "$SCAC_V9_RUNTIME")"
   SCAC_EXPECTED_V9_SOURCE_SET="$(sed -n 's/^export const SCAC_MUTATION_SOURCE_CONTRACT_SET_DIGEST = "\([0-9a-f]\{64\}\)";$/\1/p' "$SCAC_V9_RUNTIME")"
   SCAC_EXPECTED_V9_CATALOG="$(sed -n 's/^export const SCAC_MUTATION_DB_CATALOG_BASELINE_DIGEST = "\([0-9a-f]\{64\}\)";$/\1/p' "$SCAC_V9_RUNTIME")"
-  case "$SCAC_EXPECTED_V9_DIGEST" in
-    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
-    *) echo "schema-snapshot: could not read the reviewed SCAC v9 runtime digest" >&2; exit 1 ;;
+  case "$SCAC_EXPECTED_V9_DIGEST$SCAC_EXPECTED_V9_SOURCE_SET$SCAC_EXPECTED_V9_CATALOG" in
+    ''|*[!0-9a-f]*) echo "schema-snapshot: reviewed SCAC v9 runtime seals are malformed" >&2; exit 1 ;;
   esac
-  [ "${#SCAC_EXPECTED_V9_SOURCE_SET}" -eq 64 ] && [ "${#SCAC_EXPECTED_V9_CATALOG}" -eq 64 ] || {
+  [ "${#SCAC_EXPECTED_V9_DIGEST}" -eq 64 ] &&
+    [ "${#SCAC_EXPECTED_V9_SOURCE_SET}" -eq 64 ] && [ "${#SCAC_EXPECTED_V9_CATALOG}" -eq 64 ] || {
     echo "schema-snapshot: reviewed SCAC v9 source or catalog seal is malformed" >&2; exit 1
   }
   SCAC_EXPECTED_V9_DIGEST="sha256:$SCAC_EXPECTED_V9_DIGEST"
