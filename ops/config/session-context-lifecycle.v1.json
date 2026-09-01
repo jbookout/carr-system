@@ -72,6 +72,7 @@
   "ownership_registry": {
     "scope": "surface plus native identity",
     "binding": "an atomic immutable registry claim binds each Claude session or Codex thread to exactly one task and activation-evidence digest before admission",
+    "lookup": "callbacks resolve exactly one O(1) identity-binding entry and validate only its bound task; unrelated task files are never scanned on a hook path",
     "terminal_policy": "claims are permanent tombstones and are never released or reusable after terminal state"
   },
   "actions": [
@@ -120,7 +121,7 @@
       "adapter": "bare_cli",
       "native_stop_hook": false,
       "evidence_trust_boundary": "controller_capture",
-      "evidence_binding": "the CLI canonicalizes cwd to an absolute resolved path before immutable publication, verifies the live canonical cwd, logical thread identity, recorded owner surface, declaration-to-acceptance equality, and immutable digest linkage; the controller that invokes the bare CLI remains responsible for capturing status and pinnedIndex from the native Codex surface",
+      "evidence_binding": "the CLI canonicalizes cwd to an absolute resolved path before immutable publication and verifies it against the invoking checkout at live admission; historical reads compare the immutable admitted bytes without reinterpreting them against a different reader worktree; logical thread identity, recorded owner surface, declaration-to-acceptance equality, and immutable digest linkage remain mandatory; the controller that invokes the bare CLI remains responsible for capturing status and pinnedIndex from the native Codex surface",
       "native_evidence_fields": [
         "thread_id",
         "project_id",

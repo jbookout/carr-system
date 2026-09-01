@@ -2102,6 +2102,127 @@ def wrapper_and_historical_defect():
         shutil.rmtree(root)
 
 
+def independent_review_regressions():
+    print("independent review regressions")
+    root = fresh_root("context-lifecycle-review-")
+    try:
+        transcript = write_jsonl(
+            root / "review.jsonl",
+            [usage_row(1_000, model="claude-opus-4-1")])
+
+        # A callback may consult only its permanent native-identity binding.
+        # Corruption or volume in unrelated task files must never block the
+        # innocent task's Stop or turn each tool call into a whole-root scan.
+        run_hook(root, "PostToolUse", transcript, session="innocent")
+        run_hook(root, "PostToolUse", transcript, session="foreign")
+        foreign = (root / "state"
+                   / f"{hashlib.sha256(b'claude:foreign').hexdigest()}.json")
+        foreign.write_text('{"schema_version":1,"task_key":"claude:foreign"}\n',
+                           encoding="utf-8")
+        for index in range(500):
+            (root / "state" / f"foreign-{index:04d}.json").write_text(
+                "{broken\n", encoding="utf-8")
+        proc, out = run_hook(
+            root, "Stop", transcript, session="innocent")
+        check("foreign lifecycle corruption cannot block unrelated Claude Stop",
+              proc.returncode == 0 and out is None,
+              (proc.returncode, out, proc.stderr))
+
+        # Immutable Codex evidence is admitted relative to the checkout that
+        # captured it. Reading that task from another worktree must not
+        # reinterpret the historical cwd against the reader's own checkout.
+        repo_a = root / "repo-a"
+        repo_b = root / "repo-b"
+        for repo in (repo_a, repo_b):
+            (repo / "hooks").mkdir(parents=True)
+            shutil.copy2(HOOK, repo / "hooks/context-handoff-gate.py")
+            shutil.copy2(REPO / "hooks/stop_latch.py",
+                         repo / "hooks/stop_latch.py")
+            (repo / "work").mkdir()
+        hook_a = repo_a / "hooks/context-handoff-gate.py"
+        hook_b = repo_b / "hooks/context-handoff-gate.py"
+        env = base_env(root)
+
+        def copied_cli(hook, *args):
+            return subprocess.run(
+                [sys.executable, str(hook), *map(str, args)], text=True,
+                capture_output=True, env=env, cwd=hook.parent.parent)
+
+        first = {
+            "thread_id": "review-codex-a", "project_id": "review-project",
+            "cwd": str(repo_a / "work"), "status": "active",
+            "event_id": "review-event-a", "pinnedIndex": 1,
+        }
+        second = {
+            "thread_id": "review-codex-b", "project_id": "review-project",
+            "cwd": str(repo_a / "work"), "status": "active",
+            "event_id": "review-event-b", "pinnedIndex": 1,
+        }
+        init = copied_cli(
+            hook_a, "task-init", "--task-key", "review-portable",
+            "--owner", "review-codex-a", "--surface", "codex",
+            "--evidence-json", json.dumps(first), "--expected-version", "-1")
+        offer = copied_cli(
+            hook_a, "handoff-offer-create", "--task-key", "review-portable",
+            "--predecessor", "review-codex-a", "--predecessor-surface", "codex",
+            "--successor", "review-codex-b", "--successor-surface", "codex",
+            "--generation", "1", "--evidence-json", json.dumps(first),
+            "--expected-version", "0")
+        offer_out = json.loads(offer.stdout) if offer.returncode == 0 else {}
+        offer_digest = offer_out.get("offer_digest", "missing")
+        declare = copied_cli(
+            hook_a, "successor-declare", "--task-key", "review-portable",
+            "--offer-digest", offer_digest, "--successor", "review-codex-b",
+            "--evidence-json", json.dumps(second), "--expected-version", "1")
+        accept = copied_cli(
+            hook_a, "successor-accept", "--task-key", "review-portable",
+            "--offer-digest", offer_digest, "--successor", "review-codex-b",
+            "--evidence-json", json.dumps(second), "--expected-version", "2")
+        portable = copied_cli(
+            hook_b, "status", "--task-key", "review-portable")
+        portable_out = (json.loads(portable.stdout)
+                        if portable.stdout.strip() else {})
+        check("accepted Codex lifecycle is readable from another worktree",
+              all(item.returncode == 0
+                  for item in (init, offer, declare, accept, portable))
+              and portable_out.get("task_key") == "review-portable",
+              [(item.returncode, item.stdout, item.stderr)
+               for item in (init, offer, declare, accept, portable)])
+
+        # An invalid controller-wired event is itself a Stop control error and
+        # must fail closed instead of using the invalid spelling as a NOOP.
+        high = write_jsonl(
+            root / "review-high.jsonl",
+            [usage_row(900_000, model="claude-opus-4-1")])
+        proc, out = run_hook(
+            root, "Stop", high, session="invalid-wired-event",
+            env_extra={"CARR_CONTEXT_HOOK_EVENT": "stop"})
+        why = reason(out)
+        check("invalid wired hook event fails closed as Stop",
+              proc.returncode == 0 and why
+              and why["reason"] == "LIFECYCLE_INVALID",
+              (proc.returncode, out, proc.stderr))
+
+        # Python's decoder accepts bare Infinity. The bare Codex adapter must
+        # still return the canonical refusal envelope, never a traceback.
+        rollout = root / "nonfinite-rollout.jsonl"
+        rollout.write_text(
+            '{"type":"session_meta","payload":{"id":"review-inf"},'
+            '"timestamp":"2026-08-31T00:00:00Z"}\n'
+            '{"type":"response_item","payload":{"type":"function_call",'
+            '"name":"Write","arguments":{"path":"/tmp/review"}},'
+            '"total_tokens":Infinity,"timestamp":"2026-08-31T00:00:01Z"}\n',
+            encoding="utf-8")
+        proc, out = run_cli(root, "codex-observe", "--rollout", rollout)
+        check("Codex nonfinite token input returns canonical refusal",
+              proc.returncode == 2 and out
+              and out.get("action") == "REFUSE"
+              and out.get("reason") == "LIFECYCLE_INVALID",
+              (proc.returncode, out, proc.stderr))
+    finally:
+        shutil.rmtree(root)
+
+
 def static_contract_cases():
     print("protected contract and explicit exclusions")
     hooks = json.loads((REPO / "ops/config/hooks.json").read_text())
@@ -2150,6 +2271,7 @@ def main():
     dispatcher_cases()
     immutable_publication_concurrency()
     wrapper_and_historical_defect()
+    independent_review_regressions()
     static_contract_cases()
     print()
     if FAIL:

@@ -96,8 +96,14 @@ def parse_time(value: Any) -> dt.datetime:
 def positive(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
+    if isinstance(value, float) and not math.isfinite(value):
+        raise LifecycleError(
+            "LIFECYCLE_INVALID", "numeric signal is non-finite")
     try:
         number = int(value)
+    except OverflowError as exc:
+        raise LifecycleError(
+            "LIFECYCLE_INVALID", "numeric signal is outside integer range") from exc
     except (TypeError, ValueError):
         return None
     return number if number > 0 else None
@@ -648,6 +654,28 @@ def verify_identity_binding(task_key: str, owner: dict[str, Any],
             "native identity binding is missing or inconsistent")
 
 
+def read_identity_binding(surface: str, identity: str,
+                          manifest: dict[str, Any] | None = None
+                          ) -> dict[str, Any] | None:
+    """Read one authoritative native-identity index entry in O(1)."""
+    binding = load_json_file(
+        identity_binding_path(surface, identity, manifest))
+    if binding is None:
+        return None
+    if (set(binding) != {
+            "schema_version", "surface", "identity", "task_key",
+            "activation_provenance_digest"}
+            or binding.get("schema_version") != 1
+            or binding.get("surface") != surface
+            or binding.get("identity") != identity
+            or not isinstance(binding.get("task_key"), str)
+            or not binding.get("task_key")
+            or not is_digest(binding.get("activation_provenance_digest"))):
+        raise LifecycleError(
+            "OWNERSHIP_MISMATCH", "native identity binding is invalid")
+    return binding
+
+
 RECOVERY_CAUSES = {"RECOVERY_CAPACITY", "RECOVERY_ERROR", "RECOVERY_IDLE"}
 RECOVERY_EVENT_KEYS = {
     "schema_version", "task_key", "source_event_id", "snapshot_digest",
@@ -1082,45 +1110,24 @@ def claude_owner_task_key(owner_id: str, manifest: dict[str, Any]) -> str | None
     """Resolve a native Claude session back to its accepted lifecycle task.
 
     The controller callback does not carry an application-defined task key.
-    Lifecycle state is therefore the single authoritative binding: a verified
-    cross-surface successor already exists there with this native session id.
+    The permanent native-identity index is the authoritative binding. Only the
+    one bound task is validated; unrelated state can neither add latency nor
+    block this callback.
     """
-    matches: set[str] = set()
-    root = state_root(manifest)
-    try:
-        paths = list(root.glob("*.json"))
-    except OSError as exc:
+    binding = read_identity_binding("claude", owner_id, manifest)
+    if binding is None:
+        return None
+    task_key = str(binding["task_key"])
+    value = read_state(task_key, manifest)
+    owner = ((value or {}).get("owners") or {}).get(owner_id)
+    if (not isinstance(owner, dict)
+            or owner.get("surface") != "claude"
+            or owner.get("evidence_digest")
+            != binding.get("activation_provenance_digest")):
         raise LifecycleError(
-            "LIFECYCLE_INVALID", f"Claude binding state cannot be listed: {exc}") from exc
-    for path in paths:
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise LifecycleError(
-                "LIFECYCLE_INVALID", f"Claude binding state is unreadable: {exc}") from exc
-        if not isinstance(value, dict):
-            raise LifecycleError(
-                "LIFECYCLE_INVALID", "Claude binding state is not an object")
-        task_key = value.get("task_key")
-        if not isinstance(task_key, str) or not task_key:
-            raise LifecycleError("LIFECYCLE_INVALID",
-                                 "Claude binding state lacks a task key")
-        if path.resolve() != state_file(task_key, manifest).resolve():
-            raise LifecycleError("LIFECYCLE_INVALID",
-                                 "Claude owner binding path is inconsistent")
-        validate_task_state(value, task_key, manifest)
-        owners = value.get("owners")
-        if not isinstance(owners, dict):
-            raise LifecycleError(
-                "LIFECYCLE_INVALID", "Claude binding owners are not an object")
-        owner = owners.get(owner_id)
-        if not isinstance(owner, dict) or owner.get("surface") != "claude":
-            continue
-        matches.add(task_key)
-    if len(matches) > 1:
-        raise LifecycleError("OWNERSHIP_DUPLICATE",
-                             "Claude session is bound to multiple live tasks")
-    return next(iter(matches)) if matches else None
+            "OWNERSHIP_MISMATCH",
+            "Claude identity binding does not match its lifecycle owner")
+    return task_key
 
 
 def hook_task_key(payload: dict[str, Any],
@@ -1333,6 +1340,10 @@ def hook_main() -> int:
         payload_event = payload.get("hook_event_name") or payload.get("hookEventName")
         if wired_event is not None:
             if wired_event not in {"PostToolUse", "PreCompact", "Stop"}:
+                # The controller intended to select a trusted seam but supplied
+                # unusable wiring. Treat that control failure as Stop so it can
+                # never become the only event spelling that silently allows.
+                event = "Stop"
                 raise LifecycleError(
                     "LIFECYCLE_INVALID", "wired hook event is invalid")
             event = wired_event
@@ -1570,7 +1581,8 @@ def validate_successor_evidence(offer: dict[str, Any], successor: str,
         surface, evidence, expected_identity=successor, accept=accept,
         require_live=require_live)
     if surface == "codex":
-        validate_codex_checkout(evidence)
+        if require_live:
+            validate_codex_checkout(evidence)
         trusted_project = offer.get("successor_project_id")
         if (not isinstance(trusted_project, str)
                 or not trusted_project.strip()
