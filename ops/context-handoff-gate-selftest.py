@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 REPO = Path(__file__).resolve().parent.parent
 HOOK = REPO / "hooks/context-handoff-gate.py"
@@ -2223,6 +2224,350 @@ def independent_review_regressions():
         shutil.rmtree(root)
 
 
+def exact_head_review_regressions():
+    print("exact-head review regression classes")
+    root = fresh_root("context-lifecycle-exact-head-")
+    checkout_path = None
+    try:
+        transcript = write_jsonl(
+            root / "native-session.jsonl",
+            [usage_row(1_000, model="claude-opus-4-1")])
+
+        # A malformed fresh Stop must refuse before it can derive an "unknown"
+        # owner, create state, or claim a permanent native identity. Exercise
+        # the installed wrapper shape as well as the bare candidate.
+        missing_payload = {
+            "hook_event_name": "Stop", "prompt_id": "missing-session",
+            "transcript_path": str(transcript),
+        }
+        missing = subprocess.run(
+            [sys.executable, str(RUNNER), str(HOOK)],
+            input=json.dumps(missing_payload), text=True, capture_output=True,
+            env=base_env(root), cwd=REPO)
+        missing_out = json.loads(missing.stdout) if missing.stdout.strip() else None
+        scalar, scalar_out = run_hook(
+            root, "Stop", transcript, session=7)
+        public_json = list((root / "state").glob("*.json"))
+        bindings = list((root / "state/identity-bindings").glob("*.json"))
+        check("missing or scalar Claude session refuses before publication",
+              missing.returncode == 0 and reason(missing_out)
+              and reason(missing_out)["reason"] == "LIFECYCLE_INVALID"
+              and scalar.returncode == 0 and reason(scalar_out)
+              and reason(scalar_out)["reason"] == "LIFECYCLE_INVALID"
+              and not public_json and not bindings,
+              (missing.returncode, missing_out, missing.stderr,
+               scalar.returncode, scalar_out, scalar.stderr,
+               public_json, bindings))
+
+        # Every controller-native scalar used as identity or activation
+        # evidence must be a nonempty string. A bool is not an integer pin.
+        codex_base = {
+            "thread_id": "strict-codex", "project_id": "project",
+            "cwd": str(REPO), "status": "active", "event_id": "strict-event",
+            "pinnedIndex": 1,
+        }
+        strict_results = []
+        for index, (field, bad_value) in enumerate((
+                ("thread_id", 8), ("project_id", 8), ("cwd", 8),
+                ("status", 8), ("event_id", 8), ("pinnedIndex", True))):
+            evidence = dict(codex_base)
+            evidence[field] = bad_value
+            strict_results.append(run_cli(
+                root, "task-init", "--task-key", f"strict-codex-{index}",
+                "--owner", "strict-codex", "--surface", "codex",
+                "--evidence-json", json.dumps(evidence),
+                "--expected-version", "-1"))
+        claude_base = {
+            "session_id": "strict-claude",
+            "transcript_path": str(transcript),
+            "controller_callback_id": "strict-callback", "status": "active",
+        }
+        for index, field in enumerate((
+                "session_id", "transcript_path",
+                "controller_callback_id", "status")):
+            evidence = dict(claude_base)
+            evidence[field] = 8
+            strict_results.append(run_cli(
+                root, "task-init", "--task-key", f"strict-claude-{index}",
+                "--owner", "strict-claude", "--surface", "claude",
+                "--evidence-json", json.dumps(evidence),
+                "--expected-version", "-1"))
+        check("native evidence rejects scalar coercion and boolean pins",
+              all(proc.returncode == 2 and out
+                  and out.get("reason") in {
+                      "SUCCESSOR_SURFACE_INVALID", "SUCCESSOR_NOT_PINNED"}
+                  for proc, out in strict_results),
+              [(proc.returncode, out, proc.stderr)
+               for proc, out in strict_results])
+
+        # Both terminal transitions retain the project and checkout admitted
+        # for that owner generation. Status alone cannot terminate another
+        # project or a different checkout under the same thread id.
+        _, initial = run_cli(
+            root, "task-init", "--task-key", "terminal-binding",
+            "--owner", "terminal-old", "--surface", "codex",
+            "--evidence-json", codex_evidence(
+                "terminal-old", project="terminal-project"),
+            "--expected-version", "-1")
+        _, offer = run_cli(
+            root, "handoff-offer-create", "--task-key", "terminal-binding",
+            "--predecessor", "terminal-old", "--predecessor-surface", "codex",
+            "--successor", "terminal-new", "--successor-surface", "codex",
+            "--evidence-json", codex_evidence(
+                "terminal-old", project="terminal-project"),
+            "--generation", "1", "--expected-version", str(initial["version"]))
+        _, declared = run_cli(
+            root, "successor-declare", "--task-key", "terminal-binding",
+            "--offer-digest", offer["offer_digest"],
+            "--successor", "terminal-new",
+            "--evidence-json", codex_evidence(
+                "terminal-new", project="terminal-project"),
+            "--expected-version", str(offer["state"]["version"]))
+        _, accepted = run_cli(
+            root, "successor-accept", "--task-key", "terminal-binding",
+            "--offer-digest", offer["offer_digest"],
+            "--successor", "terminal-new",
+            "--evidence-json", codex_evidence(
+                "terminal-new", project="terminal-project"),
+            "--expected-version", str(declared["state"]["version"]))
+        pred_bad, pred_bad_out = run_cli(
+            root, "predecessor-terminal", "--task-key", "terminal-binding",
+            "--predecessor", "terminal-old",
+            "--evidence-json", codex_evidence(
+                "terminal-old", status="terminal", project="other-project"),
+            "--expected-version", str(accepted["state"]["version"]))
+        _, after_pred_bad = run_cli(
+            root, "status", "--task-key", "terminal-binding")
+        terminal_dir = (root / "state/objects"
+                        / hashlib.sha256(b"terminal-binding").hexdigest()
+                        / "terminal")
+        check("predecessor terminal refuses project drift without publication",
+              pred_bad.returncode == 2
+              and pred_bad_out.get("reason") == "OWNERSHIP_MISMATCH"
+              and after_pred_bad["version"] == accepted["state"]["version"]
+              and not list(terminal_dir.glob("*.json")),
+              (pred_bad.returncode, pred_bad_out, after_pred_bad,
+               list(terminal_dir.glob("*.json"))))
+        _, pred_done = run_cli(
+            root, "predecessor-terminal", "--task-key", "terminal-binding",
+            "--predecessor", "terminal-old",
+            "--evidence-json", codex_evidence(
+                "terminal-old", status="terminal", project="terminal-project"),
+            "--expected-version", str(accepted["state"]["version"]))
+        terminal_count = len(list(terminal_dir.glob("*.json")))
+        task_bad, task_bad_out = run_cli(
+            root, "task-terminal", "--task-key", "terminal-binding",
+            "--owner", "terminal-new",
+            "--evidence-json", codex_evidence(
+                "terminal-new", status="terminal", project="terminal-project",
+                cwd=REPO / "hooks"),
+            "--expected-version", str(pred_done["version"]))
+        _, after_task_bad = run_cli(
+            root, "status", "--task-key", "terminal-binding")
+        check("task terminal refuses checkout drift without publication",
+              task_bad.returncode == 2
+              and task_bad_out.get("reason") == "OWNERSHIP_MISMATCH"
+              and after_task_bad["version"] == pred_done["version"]
+              and len(list(terminal_dir.glob("*.json"))) == terminal_count,
+              (task_bad.returncode, task_bad_out, after_task_bad,
+               list(terminal_dir.glob("*.json"))))
+
+        # Historical evidence is canonicalized once at admission. Changing the
+        # filesystem node at that stored path must not rewrite signed bytes.
+        checkout_path = Path(tempfile.mkdtemp(
+            prefix=".context-historical-", dir=REPO))
+        _, historical_init = run_cli(
+            root, "task-init", "--task-key", "historical-cwd-bytes",
+            "--owner", "historical-owner", "--surface", "codex",
+            "--evidence-json", codex_evidence(
+                "historical-owner", cwd=checkout_path),
+            "--expected-version", "-1")
+        shutil.rmtree(checkout_path)
+        os.symlink(REPO / "hooks", checkout_path, target_is_directory=True)
+        historical_proc, historical_state = run_cli(
+            root, "status", "--task-key", "historical-cwd-bytes")
+        check("historical Codex cwd bytes survive later symlink retargeting",
+              historical_proc.returncode == 0
+              and historical_init["version"] == 0
+              and historical_state["active_owner"] == "historical-owner",
+              (historical_proc.returncode, historical_state,
+               historical_proc.stderr))
+        checkout_path.unlink()
+        checkout_path = None
+
+        # Exercise the failure-atomic protocol directly so faults can be placed
+        # at exact filesystem boundaries that a subprocess cannot name.
+        spec = importlib.util.spec_from_file_location(
+            "context_handoff_transaction_test", HOOK)
+        gate = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(gate)
+        manifest = json.loads((root / "manifest.json").read_text())
+        manifest["state_directory"] = str(root / "transaction-state")
+        task_key = "transaction-atomicity"
+        init_args = SimpleNamespace(
+            task_key=task_key, owner="transaction-owner", surface="codex",
+            evidence_json=codex_evidence("transaction-owner"),
+            expected_version=-1)
+        state_path = gate.state_file(task_key, manifest)
+        binding_path = gate.identity_binding_path(
+            "codex", "transaction-owner", manifest)
+        real_atomic = gate.atomic_write
+
+        def fail_state_write(path, value):
+            if gate._absolute(Path(path)) == gate._absolute(state_path):
+                raise OSError("injected state publication failure")
+            return real_atomic(path, value)
+
+        gate.atomic_write = fail_state_write
+        init_error = None
+        try:
+            gate.lifecycle_init(init_args, manifest)
+        except Exception as exc:
+            init_error = exc
+        finally:
+            gate.atomic_write = real_atomic
+        object_root = gate.state_root(manifest) / "objects"
+        check("failed state publication exposes no identity or immutable object",
+              isinstance(init_error, OSError)
+              and not state_path.exists() and not binding_path.exists()
+              and not list(object_root.rglob("*.json")),
+              (repr(init_error), state_path.exists(), binding_path.exists(),
+               list(object_root.rglob("*.json"))))
+        atomic_state = gate.lifecycle_init(init_args, manifest)
+
+        def recovery_change(source_event_id):
+            def change(current):
+                event = {
+                    "schema_version": 1, "task_key": task_key,
+                    "source_event_id": source_event_id,
+                    "snapshot_digest": gate.digest({"snapshot": source_event_id}),
+                    "nonce": gate.digest({"nonce": source_event_id}),
+                    "generation": current["generation"],
+                    "failed_owner": current["active_owner"],
+                    "cause": "RECOVERY_ERROR",
+                    "previous_digest": (current["recovery_history"][-1]
+                                        if current["recovery_history"] else None),
+                }
+                event_digest = gate.write_immutable(
+                    task_key, "recovery-event", event, manifest)
+                current["recovery_history"].append(event_digest)
+                return current
+            return change
+
+        gate.atomic_write = fail_state_write
+        recovery_error = None
+        try:
+            gate.mutate_state(
+                task_key, atomic_state["version"],
+                recovery_change("failed-state-event"), manifest)
+        except Exception as exc:
+            recovery_error = exc
+        finally:
+            gate.atomic_write = real_atomic
+        recovery_dir = gate.object_path(
+            task_key, "recovery-event", "unused", manifest).parent
+        check("failed recovery CAS exposes no orphan recovery event",
+              isinstance(recovery_error, OSError)
+              and not list(recovery_dir.glob("*.json")),
+              (repr(recovery_error), list(recovery_dir.glob("*.json"))))
+        stable_state = gate.read_state(task_key, manifest)
+        before_cas_objects = set(object_root.rglob("*.json"))
+        cas_error = None
+        try:
+            gate.mutate_state(
+                task_key, stable_state["version"] - 1,
+                recovery_change("failed-cas-event"), manifest)
+        except Exception as exc:
+            cas_error = exc
+        check("failed expected-version CAS stages no side artifacts",
+              isinstance(cas_error, gate.LifecycleError)
+              and set(object_root.rglob("*.json")) == before_cas_objects,
+              (repr(cas_error), before_cas_objects,
+               set(object_root.rglob("*.json"))))
+
+        real_publish = gate._publish_transaction_artifact
+        publish_error = None
+
+        def interrupt_publish(*_args, **_kwargs):
+            raise OSError("injected interruption after state commit")
+
+        gate._publish_transaction_artifact = interrupt_publish
+        try:
+            gate.mutate_state(
+                task_key, stable_state["version"],
+                recovery_change("interrupted-event"), manifest)
+        except Exception as exc:
+            publish_error = exc
+        finally:
+            gate._publish_transaction_artifact = real_publish
+        absent_before_recovery = not list(recovery_dir.glob("*.json"))
+        recovered_state = gate.read_state(task_key, manifest)
+        check("reader completes interrupted side publication from journal",
+              isinstance(publish_error, OSError) and absent_before_recovery
+              and len(recovered_state["recovery_history"]) == 1
+              and len(list(recovery_dir.glob("*.json"))) == 1
+              and not list((gate.state_root(manifest)
+                            / "transactions").glob("*")),
+              (repr(publish_error), absent_before_recovery,
+               recovered_state, list(recovery_dir.glob("*.json"))))
+
+        entered_publish = threading.Event()
+        release_publish = threading.Event()
+        mutation_errors = []
+        reader_errors = []
+        reader_results = []
+
+        def delayed_publish(*args, **kwargs):
+            entered_publish.set()
+            release_publish.wait(timeout=5)
+            return real_publish(*args, **kwargs)
+
+        def mutate_with_delay():
+            try:
+                gate.mutate_state(
+                    task_key, recovered_state["version"],
+                    recovery_change("concurrent-event"), manifest)
+            except Exception as exc:
+                mutation_errors.append(exc)
+
+        def read_during_commit():
+            try:
+                reader_results.append(gate.read_state(task_key, manifest))
+            except Exception as exc:
+                reader_errors.append(exc)
+
+        gate._publish_transaction_artifact = delayed_publish
+        writer = threading.Thread(target=mutate_with_delay)
+        writer.start()
+        reached_commit_window = entered_publish.wait(timeout=2)
+        reader = threading.Thread(target=read_during_commit)
+        reader.start()
+        reader.join(timeout=0.2)
+        reader_blocked = reader.is_alive()
+        release_publish.set()
+        writer.join(timeout=5)
+        reader.join(timeout=5)
+        gate._publish_transaction_artifact = real_publish
+        check("concurrent reader never observes state without recovery object",
+              reached_commit_window and reader_blocked
+              and not mutation_errors and not reader_errors
+              and len(reader_results) == 1
+              and len(reader_results[0]["recovery_history"]) == 2
+              and len(list(recovery_dir.glob("*.json"))) == 2,
+              (reached_commit_window, reader_blocked,
+               [repr(exc) for exc in mutation_errors],
+               [repr(exc) for exc in reader_errors], reader_results,
+               list(recovery_dir.glob("*.json"))))
+    finally:
+        if checkout_path is not None:
+            if checkout_path.is_symlink():
+                checkout_path.unlink()
+            elif checkout_path.exists():
+                shutil.rmtree(checkout_path)
+        shutil.rmtree(root)
+
+
 def static_contract_cases():
     print("protected contract and explicit exclusions")
     hooks = json.loads((REPO / "ops/config/hooks.json").read_text())
@@ -2272,6 +2617,7 @@ def main():
     immutable_publication_concurrency()
     wrapper_and_historical_defect()
     independent_review_regressions()
+    exact_head_review_regressions()
     static_contract_cases()
     print()
     if FAIL:

@@ -8,8 +8,9 @@ native Stop hook: its rollout and dispatcher adapters are explicit bare CLI
 commands exposed by this same file.
 
 Lifecycle mutations are expected-version CAS operations over one task file.
-Immutable offer, receipt, and final packet objects are written before the CAS;
-if a concurrent writer wins, those unreferenced objects are harmless orphans.
+State, immutable side objects, and native-identity bindings commit through one
+recoverable filesystem transaction. Readers take the same root lock and finish
+or discard an interrupted transaction before trusting any public bytes.
 """
 
 from __future__ import annotations
@@ -21,8 +22,11 @@ import hashlib
 import json
 import math
 import os
+import secrets
 import sys
 import tempfile
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
 
@@ -484,42 +488,293 @@ def atomic_write(path: Path, value: Any) -> None:
             pass
 
 
+_GUARD_LOCAL = threading.local()
+_TRANSACTION_LOCAL = threading.local()
+
+
+def _absolute(path: Path) -> Path:
+    """Return stable absolute bytes without following a mutable symlink."""
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _cleanup_transaction(directory: Path) -> None:
+    """Remove only one controller-created transaction directory."""
+    if not directory.is_dir():
+        return
+    for item in sorted(directory.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        try:
+            if item.is_dir() and not item.is_symlink():
+                item.rmdir()
+            else:
+                item.unlink()
+        except FileNotFoundError:
+            pass
+    try:
+        directory.rmdir()
+    except FileNotFoundError:
+        pass
+
+
+def _publish_transaction_artifact(root: Path, directory: Path,
+                                  artifact: dict[str, Any]) -> None:
+    final_rel = artifact.get("final")
+    staged_rel = artifact.get("staged")
+    expected_digest = artifact.get("value_digest")
+    if (not isinstance(final_rel, str) or not final_rel
+            or not isinstance(staged_rel, str) or not staged_rel
+            or not is_digest(expected_digest)):
+        raise LifecycleError("LIFECYCLE_INVALID",
+                             "lifecycle transaction artifact is invalid")
+    final = _absolute(root / final_rel)
+    staged = _absolute(directory / staged_rel)
+    try:
+        final.relative_to(root)
+        staged.relative_to(directory)
+    except ValueError as exc:
+        raise LifecycleError("LIFECYCLE_INVALID",
+                             "lifecycle transaction path escapes its root") from exc
+    try:
+        value = json.loads(staged.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise LifecycleError("LIFECYCLE_INVALID",
+                             f"lifecycle transaction artifact is unreadable: {exc}") from exc
+    if digest(value) != expected_digest:
+        raise LifecycleError("LIFECYCLE_INVALID",
+                             "lifecycle transaction artifact digest changed")
+    final.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(staged, final)
+    except FileExistsError:
+        existing = load_json_file(final)
+        if existing is None or digest(existing) != expected_digest:
+            raise LifecycleError("LIFECYCLE_INVALID",
+                                 "lifecycle transaction artifact collided")
+    dfd = os.open(final.parent, os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
+def _recover_transactions_unlocked(
+        root: Path, manifest: dict[str, Any] | None = None) -> None:
+    transactions = root / "transactions"
+    if not transactions.is_dir():
+        return
+    for directory in sorted(path for path in transactions.iterdir()
+                            if path.is_dir() and not path.is_symlink()):
+        journal_path = directory / "journal.json"
+        if not journal_path.is_file():
+            _cleanup_transaction(directory)
+            continue
+        journal = load_json_file(journal_path)
+        if (not isinstance(journal, dict)
+                or set(journal) != {
+                    "schema_version", "task_key", "state_path",
+                    "target_state_digest", "artifacts"}
+                or journal.get("schema_version") != 1
+                or not isinstance(journal.get("task_key"), str)
+                or not journal.get("task_key")
+                or not isinstance(journal.get("state_path"), str)
+                or not journal.get("state_path")
+                or not is_digest(journal.get("target_state_digest"))
+                or not isinstance(journal.get("artifacts"), list)):
+            raise LifecycleError("LIFECYCLE_INVALID",
+                                 "lifecycle transaction journal is invalid")
+        state_path = _absolute(Path(journal["state_path"]))
+        expected_state_path = _absolute(
+            state_file(journal["task_key"], manifest))
+        if state_path != expected_state_path:
+            raise LifecycleError(
+                "LIFECYCLE_INVALID",
+                "lifecycle transaction state path is not the configured task state")
+        current = load_json_file(state_path)
+        committed = (isinstance(current, dict)
+                     and current.get("task_key") == journal["task_key"]
+                     and digest(current) == journal["target_state_digest"])
+        if committed:
+            for artifact in journal["artifacts"]:
+                if not isinstance(artifact, dict):
+                    raise LifecycleError("LIFECYCLE_INVALID",
+                                         "lifecycle transaction artifact list is invalid")
+                _publish_transaction_artifact(root, directory, artifact)
+        _cleanup_transaction(directory)
+
+
+@contextmanager
+def lifecycle_guard(manifest: dict[str, Any] | None = None):
+    """Serialize lifecycle visibility and recover any interrupted commit."""
+    root = _absolute(state_root(manifest))
+    root.mkdir(parents=True, exist_ok=True)
+    held = getattr(_GUARD_LOCAL, "held", None)
+    if held is None:
+        held = {}
+        _GUARD_LOCAL.held = held
+    key = os.fspath(root)
+    if key in held:
+        held[key][1] += 1
+        try:
+            yield root
+        finally:
+            held[key][1] -= 1
+        return
+    lock = open(root / ".lifecycle.lock", "a+b")
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    held[key] = [lock, 1]
+    try:
+        _recover_transactions_unlocked(root, manifest)
+        yield root
+    finally:
+        held.pop(key, None)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        lock.close()
+
+
+def _active_transaction(task_key: str | None = None) -> dict[str, Any] | None:
+    transaction = getattr(_TRANSACTION_LOCAL, "current", None)
+    if (transaction is not None and task_key is not None
+            and transaction.get("task_key") != task_key):
+        raise LifecycleError("LIFECYCLE_INVALID",
+                             "cross-task lifecycle transaction is invalid")
+    return transaction
+
+
+def _stage_transaction_value(final: Path, value: Any) -> None:
+    transaction = _active_transaction()
+    if transaction is None:
+        raise LifecycleError("LIFECYCLE_INVALID",
+                             "no lifecycle transaction is active")
+    root = transaction["root"]
+    directory = transaction["directory"]
+    final = _absolute(final)
+    try:
+        final_rel = os.fspath(final.relative_to(root))
+    except ValueError as exc:
+        raise LifecycleError("LIFECYCLE_INVALID",
+                             "transaction artifact escapes lifecycle root") from exc
+    value_digest = digest(value)
+    prior = transaction["artifacts"].get(final_rel)
+    if prior is not None:
+        staged = directory / prior["staged"]
+        existing = load_json_file(staged)
+        if existing is None or digest(existing) != value_digest:
+            raise LifecycleError("LIFECYCLE_INVALID",
+                                 "transaction staged conflicting artifact bytes")
+        return
+    staged_rel = f"staged/{digest({'final': final_rel})}.json"
+    staged = directory / staged_rel
+    atomic_write(staged, value)
+    transaction["artifacts"][final_rel] = {
+        "final": final_rel, "staged": staged_rel,
+        "value_digest": value_digest,
+    }
+
+
+def _transaction_value(final: Path) -> Any | None:
+    transaction = _active_transaction()
+    if transaction is None:
+        return None
+    final = _absolute(final)
+    try:
+        final_rel = os.fspath(final.relative_to(transaction["root"]))
+    except ValueError:
+        return None
+    artifact = transaction["artifacts"].get(final_rel)
+    if artifact is None:
+        return None
+    return load_json_file(transaction["directory"] / artifact["staged"])
+
+
+def _transaction_paths_under(parent: Path) -> set[Path]:
+    transaction = _active_transaction()
+    if transaction is None:
+        return set()
+    parent = _absolute(parent)
+    paths: set[Path] = set()
+    for artifact in transaction["artifacts"].values():
+        final = _absolute(transaction["root"] / artifact["final"])
+        if final.parent == parent:
+            paths.add(final)
+    return paths
+
+
+def _commit_transaction(transaction: dict[str, Any], state_path: Path,
+                        updated: dict[str, Any]) -> None:
+    root = transaction["root"]
+    directory = transaction["directory"]
+    journal = {
+        "schema_version": 1,
+        "task_key": transaction["task_key"],
+        "state_path": os.fspath(_absolute(state_path)),
+        "target_state_digest": digest(updated),
+        "artifacts": list(transaction["artifacts"].values()),
+    }
+    atomic_write(directory / "journal.json", journal)
+    transaction["state_published"] = True
+    atomic_write(state_path, updated)
+    for artifact in journal["artifacts"]:
+        _publish_transaction_artifact(root, directory, artifact)
+    _cleanup_transaction(directory)
+
+
 def mutate_state(task_key: str, expected_version: int | None,
                  change: Callable[[dict[str, Any] | None], dict[str, Any]],
                  manifest: dict[str, Any] | None = None) -> dict[str, Any]:
-    path = state_file(task_key, manifest)
-    lock = lock_file(task_key, manifest)
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock, "a+b") as guard:
-        fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
-        current = load_json_file(path)
-        if current is not None:
-            validate_task_state(current, task_key, manifest)
-        actual = int(current.get("version", -1)) if current else -1
-        if expected_version is not None and actual != expected_version:
-            raise LifecycleError("LIFECYCLE_INVALID",
-                                 f"expected version {expected_version}, found {actual}")
-        before = canonical(current) if current is not None else None
-        updated = change(current)
-        if not isinstance(updated, dict) or updated.get("task_key") != task_key:
-            raise LifecycleError("LIFECYCLE_INVALID", "mutation returned invalid task state")
-        validate_task_state(updated, task_key, manifest)
-        # Observations of a terminal task, an already-drained predecessor, and
-        # exact idempotent replays are reads.  Do not manufacture a new version
-        # merely because they passed through the mutation lock.
-        if before is not None and canonical(updated) == before:
-            return updated
-        updated["version"] = actual + 1
-        updated["updated_at"] = utc_now()
-        atomic_write(path, updated)
-        return updated
+    with lifecycle_guard(manifest) as root:
+        path = state_file(task_key, manifest)
+        lock = lock_file(task_key, manifest)
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock, "a+b") as guard:
+            fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
+            current = load_json_file(path)
+            if current is not None:
+                validate_task_state(current, task_key, manifest)
+            actual = int(current.get("version", -1)) if current else -1
+            if expected_version is not None and actual != expected_version:
+                raise LifecycleError("LIFECYCLE_INVALID",
+                                     f"expected version {expected_version}, found {actual}")
+            before = canonical(current) if current is not None else None
+            directory = root / "transactions" / secrets.token_hex(16)
+            directory.mkdir(parents=True, exist_ok=False)
+            transaction = {
+                "root": root, "directory": directory, "task_key": task_key,
+                "artifacts": {}, "state_published": False,
+            }
+            _TRANSACTION_LOCAL.current = transaction
+            try:
+                updated = change(current)
+                if (not isinstance(updated, dict)
+                        or updated.get("task_key") != task_key):
+                    raise LifecycleError(
+                        "LIFECYCLE_INVALID", "mutation returned invalid task state")
+                validate_task_state(updated, task_key, manifest)
+                # Observations of a terminal task, an already-drained predecessor,
+                # and exact idempotent replays are reads. Do not manufacture a new
+                # version merely because they passed through the mutation lock.
+                if before is not None and canonical(updated) == before:
+                    _cleanup_transaction(directory)
+                    return updated
+                updated["version"] = actual + 1
+                updated["updated_at"] = utc_now()
+                validate_task_state(updated, task_key, manifest)
+                _commit_transaction(transaction, path, updated)
+                return updated
+            finally:
+                _TRANSACTION_LOCAL.current = None
+                if not transaction["state_published"]:
+                    _cleanup_transaction(directory)
 
 
 def read_state(task_key: str, manifest: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    state = load_json_file(state_file(task_key, manifest))
-    if state is not None:
-        validate_task_state(state, task_key, manifest)
-    return state
+    with lifecycle_guard(manifest):
+        lock = lock_file(task_key, manifest)
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock, "a+b") as guard:
+            fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
+            state = load_json_file(state_file(task_key, manifest))
+            if state is not None:
+                validate_task_state(state, task_key, manifest)
+            return state
 
 
 def object_path(task_key: str, kind: str, object_digest: str,
@@ -532,6 +787,22 @@ def write_immutable(task_key: str, kind: str, value: Any,
                     manifest: dict[str, Any] | None = None) -> str:
     object_digest = digest(value)
     path = object_path(task_key, kind, object_digest, manifest)
+    transaction = _active_transaction(task_key)
+    if transaction is not None:
+        existing = load_json_file(path)
+        if existing is not None:
+            if digest(existing) != object_digest:
+                raise LifecycleError(
+                    "HANDOFF_RECEIPT_INVALID", "immutable object collision")
+            return object_digest
+        _stage_transaction_value(path, value)
+        return object_digest
+    with lifecycle_guard(manifest):
+        return _write_immutable_public(path, kind, value, object_digest)
+
+
+def _write_immutable_public(path: Path, kind: str, value: Any,
+                            object_digest: str) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     publication_lock = path.with_suffix(".lock")
 
@@ -600,6 +871,22 @@ def claim_identity(surface: str, identity: str, task_key: str,
         "activation_provenance_digest": activation_provenance_digest,
     }
     path = identity_binding_path(surface, identity, manifest)
+    transaction = _active_transaction(task_key)
+    if transaction is not None:
+        existing = load_json_file(path)
+        if existing is not None:
+            if existing != value:
+                raise LifecycleError(
+                    "OWNERSHIP_MISMATCH",
+                    "native identity is permanently bound to another lifecycle")
+            return
+        _stage_transaction_value(path, value)
+        return
+    with lifecycle_guard(manifest):
+        _claim_identity_public(path, value)
+
+
+def _claim_identity_public(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lock = path.with_suffix(".lock")
     with open(lock, "a+b") as guard:
@@ -640,40 +927,46 @@ def claim_identity(surface: str, identity: str, task_key: str,
 
 def verify_identity_binding(task_key: str, owner: dict[str, Any],
                             manifest: dict[str, Any] | None = None) -> None:
-    path = identity_binding_path(
-        str(owner.get("surface")), str(owner.get("id")), manifest)
-    binding = load_json_file(path)
-    expected = {
-        "schema_version": 1, "surface": owner.get("surface"),
-        "identity": owner.get("id"), "task_key": task_key,
-        "activation_provenance_digest": owner.get("evidence_digest"),
-    }
-    if binding != expected:
-        raise LifecycleError(
-            "OWNERSHIP_MISMATCH",
-            "native identity binding is missing or inconsistent")
+    with lifecycle_guard(manifest):
+        path = identity_binding_path(
+            str(owner.get("surface")), str(owner.get("id")), manifest)
+        binding = _transaction_value(path)
+        if binding is None:
+            binding = load_json_file(path)
+        expected = {
+            "schema_version": 1, "surface": owner.get("surface"),
+            "identity": owner.get("id"), "task_key": task_key,
+            "activation_provenance_digest": owner.get("evidence_digest"),
+        }
+        if binding != expected:
+            raise LifecycleError(
+                "OWNERSHIP_MISMATCH",
+                "native identity binding is missing or inconsistent")
 
 
 def read_identity_binding(surface: str, identity: str,
                           manifest: dict[str, Any] | None = None
                           ) -> dict[str, Any] | None:
     """Read one authoritative native-identity index entry in O(1)."""
-    binding = load_json_file(
-        identity_binding_path(surface, identity, manifest))
-    if binding is None:
-        return None
-    if (set(binding) != {
-            "schema_version", "surface", "identity", "task_key",
-            "activation_provenance_digest"}
-            or binding.get("schema_version") != 1
-            or binding.get("surface") != surface
-            or binding.get("identity") != identity
-            or not isinstance(binding.get("task_key"), str)
-            or not binding.get("task_key")
-            or not is_digest(binding.get("activation_provenance_digest"))):
-        raise LifecycleError(
-            "OWNERSHIP_MISMATCH", "native identity binding is invalid")
-    return binding
+    with lifecycle_guard(manifest):
+        path = identity_binding_path(surface, identity, manifest)
+        binding = _transaction_value(path)
+        if binding is None:
+            binding = load_json_file(path)
+        if binding is None:
+            return None
+        if (set(binding) != {
+                "schema_version", "surface", "identity", "task_key",
+                "activation_provenance_digest"}
+                or binding.get("schema_version") != 1
+                or binding.get("surface") != surface
+                or binding.get("identity") != identity
+                or not isinstance(binding.get("task_key"), str)
+                or not binding.get("task_key")
+                or not is_digest(binding.get("activation_provenance_digest"))):
+            raise LifecycleError(
+                "OWNERSHIP_MISMATCH", "native identity binding is invalid")
+        return binding
 
 
 RECOVERY_CAUSES = {"RECOVERY_CAPACITY", "RECOVERY_ERROR", "RECOVERY_IDLE"}
@@ -712,10 +1005,12 @@ def validate_recovery_history(task_key: str, history: list[str],
     directory = object_path(
         task_key, "recovery-event", "unused", manifest).parent
     try:
+        public_paths = (set(directory.glob("*.json"))
+                        if directory.is_dir() else set())
         published = {
-            path.stem for path in directory.glob("*.json")
+            path.stem for path in public_paths | _transaction_paths_under(directory)
             if is_digest(path.stem)
-        } if directory.is_dir() else set()
+        }
     except OSError as exc:
         raise LifecycleError(
             "LIFECYCLE_INVALID", "recovery history cannot be listed") from exc
@@ -736,16 +1031,23 @@ def recovery_history_event_ids(task_key: str, state: dict[str, Any],
 
 def read_object(task_key: str, kind: str, object_digest: str,
                 manifest: dict[str, Any] | None = None) -> dict[str, Any]:
-    path = object_path(task_key, kind, object_digest, manifest)
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise LifecycleError("HANDOFF_RECEIPT_MISSING", f"missing {kind} {object_digest}") from exc
-    except Exception as exc:
-        raise LifecycleError("HANDOFF_RECEIPT_INVALID", f"invalid {kind}: {exc}") from exc
-    if not isinstance(value, dict) or digest(value) != object_digest:
-        raise LifecycleError("HANDOFF_RECEIPT_INVALID", f"tampered {kind} {object_digest}")
-    return value
+    with lifecycle_guard(manifest):
+        path = object_path(task_key, kind, object_digest, manifest)
+        value = _transaction_value(path)
+        if value is None:
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except FileNotFoundError as exc:
+                raise LifecycleError(
+                    "HANDOFF_RECEIPT_MISSING",
+                    f"missing {kind} {object_digest}") from exc
+            except Exception as exc:
+                raise LifecycleError(
+                    "HANDOFF_RECEIPT_INVALID", f"invalid {kind}: {exc}") from exc
+        if not isinstance(value, dict) or digest(value) != object_digest:
+            raise LifecycleError(
+                "HANDOFF_RECEIPT_INVALID", f"tampered {kind} {object_digest}")
+        return value
 
 
 def verify_owner_initialization(task_key: str, owner: dict[str, Any],
@@ -878,6 +1180,9 @@ def verify_terminal_provenance(task_key: str, state: dict[str, Any],
         raise LifecycleError(
             "HANDOFF_RECEIPT_INVALID",
             "terminal native evidence digest changed")
+    validate_owner_native_binding(
+        task_key, owner, evidence, manifest,
+        error_reason="HANDOFF_RECEIPT_INVALID")
 
 
 def audit(record: dict[str, Any], manifest: dict[str, Any] | None = None) -> None:
@@ -1132,26 +1437,34 @@ def claude_owner_task_key(owner_id: str, manifest: dict[str, Any]) -> str | None
 
 def hook_task_key(payload: dict[str, Any],
                   manifest: dict[str, Any] | None = None) -> tuple[str, str]:
-    explicit = payload.get("task_key") or os.environ.get("CARR_CONTEXT_TASK_KEY")
-    session = payload.get("session_id") or payload.get("sessionId")
-    if session:
-        if manifest is not None:
-            bound = claude_owner_task_key(str(session), manifest)
-            if bound:
-                if explicit and str(explicit) != bound:
-                    raise LifecycleError(
-                        "OWNERSHIP_MISMATCH",
-                        "callback task key conflicts with authoritative Claude binding")
-                return bound, str(session)
-        if explicit:
-            return str(explicit), str(session)
-        return f"claude:{session}", str(session)
+    explicit = (payload.get("task_key")
+                if "task_key" in payload
+                else os.environ.get("CARR_CONTEXT_TASK_KEY"))
+    sessions = [payload[key] for key in ("session_id", "sessionId")
+                if key in payload]
+    if (not sessions
+            or any(not isinstance(value, str) or not value.strip()
+                   for value in sessions)
+            or len(set(sessions)) != 1):
+        raise LifecycleError(
+            "LIFECYCLE_INVALID",
+            "live Claude callback requires one nonempty native session identity")
+    session = sessions[0]
+    if explicit is not None and (
+            not isinstance(explicit, str) or not explicit.strip()):
+        raise LifecycleError(
+            "LIFECYCLE_INVALID", "callback task key is invalid")
+    if manifest is not None:
+        bound = claude_owner_task_key(session, manifest)
+        if bound:
+            if explicit and explicit != bound:
+                raise LifecycleError(
+                    "OWNERSHIP_MISMATCH",
+                    "callback task key conflicts with authoritative Claude binding")
+            return bound, session
     if explicit:
-        return str(explicit), str(explicit)
-    transcript = payload.get("transcript_path") or payload.get("transcriptPath")
-    if transcript:
-        return f"claude-transcript:{digest(os.path.abspath(str(transcript)))}", "unknown"
-    return "claude:unknown", "unknown"
+        return explicit, session
+    return f"claude:{session}", session
 
 
 def update_observation(current: dict[str, Any] | None, task_key: str, owner_id: str,
@@ -1474,43 +1787,57 @@ def validate_native_evidence(surface: str, evidence: dict[str, Any], *,
                              require_live: bool = True) -> str:
     if surface == "codex":
         required = {"thread_id", "project_id", "cwd", "status", "event_id"}
-        if not required.issubset(evidence) or not all(evidence.get(key) for key in required):
+        if (not required.issubset(evidence)
+                or any(not isinstance(evidence.get(key), str)
+                       or not evidence[key].strip() for key in required)):
             raise LifecycleError("SUCCESSOR_SURFACE_INVALID", "Codex evidence fields missing")
-        if not isinstance(evidence.get("cwd"), str):
+        pinned = evidence.get("pinnedIndex")
+        if ((accept and "pinnedIndex" not in evidence)
+                or ("pinnedIndex" in evidence
+                    and (isinstance(pinned, bool)
+                         or not isinstance(pinned, int) or pinned <= 0))):
             raise LifecycleError(
-                "SUCCESSOR_SURFACE_INVALID", "Codex cwd must be a string")
-        try:
-            evidence["cwd"] = str(
-                Path(evidence["cwd"]).expanduser().resolve())
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise LifecycleError(
-                "SUCCESSOR_SURFACE_INVALID", "Codex cwd is invalid") from exc
-        if expected_identity is not None and str(evidence.get("thread_id")) != expected_identity:
+                "SUCCESSOR_NOT_PINNED", "Codex pinnedIndex must be a positive integer")
+        if require_live:
+            try:
+                evidence["cwd"] = str(
+                    Path(evidence["cwd"]).expanduser().resolve())
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise LifecycleError(
+                    "SUCCESSOR_SURFACE_INVALID", "Codex cwd is invalid") from exc
+        else:
+            cwd = evidence["cwd"]
+            if (not Path(cwd).is_absolute()
+                    or os.path.normpath(cwd) != cwd):
+                raise LifecycleError(
+                    "SUCCESSOR_SURFACE_INVALID",
+                    "historical Codex cwd is not stored canonical absolute bytes")
+        if expected_identity is not None and evidence.get("thread_id") != expected_identity:
             raise LifecycleError("SUCCESSOR_SURFACE_INVALID",
                                  "Codex thread_id does not match lifecycle owner")
         if (require_live
-                and not Path(str(evidence.get("cwd"))).expanduser().is_dir()):
+                and not Path(evidence["cwd"]).is_dir()):
             raise LifecycleError("SUCCESSOR_SURFACE_INVALID", "Codex cwd is not a live directory")
-        if accept and str(evidence.get("status")).lower() not in {"active", "idle", "running"}:
+        if accept and evidence["status"].lower() not in {"active", "idle", "running"}:
             raise LifecycleError("SUCCESSOR_NOT_ACTIVE", "Codex successor is not active")
-        if accept and positive(evidence.get("pinnedIndex")) is None:
-            raise LifecycleError("SUCCESSOR_NOT_PINNED", "Codex successor is not pinned")
-        if terminal and str(evidence.get("status")).lower() not in {"archived", "terminated", "terminal"}:
+        if terminal and evidence["status"].lower() not in {"archived", "terminated", "terminal"}:
             raise LifecycleError("LIFECYCLE_INVALID", "Codex predecessor lacks terminal evidence")
     elif surface == "claude":
-        required = {"session_id", "transcript_path", "controller_callback_id"}
-        if not required.issubset(evidence) or not all(evidence.get(key) for key in required):
+        required = {"session_id", "transcript_path", "controller_callback_id", "status"}
+        if (not required.issubset(evidence)
+                or any(not isinstance(evidence.get(key), str)
+                       or not evidence[key].strip() for key in required)):
             raise LifecycleError("SUCCESSOR_SURFACE_INVALID", "Claude evidence fields missing")
-        if expected_identity is not None and str(evidence.get("session_id")) != expected_identity:
+        if expected_identity is not None and evidence.get("session_id") != expected_identity:
             raise LifecycleError("SUCCESSOR_SURFACE_INVALID",
                                  "Claude session_id does not match lifecycle owner")
         if (require_live
-                and not Path(str(evidence.get("transcript_path"))).expanduser().is_file()):
+                and not Path(evidence["transcript_path"]).expanduser().is_file()):
             raise LifecycleError("SUCCESSOR_SURFACE_INVALID",
                                  "Claude transcript_path is not a live file")
-        if accept and str(evidence.get("status", "active")).lower() not in {"active", "idle", "running"}:
+        if accept and evidence["status"].lower() not in {"active", "idle", "running"}:
             raise LifecycleError("SUCCESSOR_NOT_ACTIVE", "Claude successor is not active")
-        if terminal and str(evidence.get("status")).lower() not in {"archived", "terminated", "terminal"}:
+        if terminal and evidence["status"].lower() not in {"archived", "terminated", "terminal"}:
             raise LifecycleError("LIFECYCLE_INVALID", "Claude predecessor lacks terminal evidence")
     else:
         raise LifecycleError("SUCCESSOR_SURFACE_INVALID", f"unsupported surface {surface}")
@@ -1520,16 +1847,15 @@ def validate_native_evidence(surface: str, evidence: dict[str, Any], *,
 def validate_codex_checkout(evidence: dict[str, Any]) -> None:
     """Require a Codex owner to belong to this repository checkout."""
     try:
-        Path(str(evidence.get("cwd"))).expanduser().resolve().relative_to(
-            REPO.resolve())
-    except (OSError, RuntimeError, ValueError) as exc:
+        Path(evidence["cwd"]).relative_to(REPO.resolve())
+    except (KeyError, TypeError, OSError, RuntimeError, ValueError) as exc:
         raise LifecycleError(
             "OWNERSHIP_MISMATCH",
             "Codex owner is outside the CARR checkout") from exc
 
 
 def owner_activation_evidence(task_key: str, owner: dict[str, Any],
-                              manifest: dict[str, Any]) -> dict[str, Any]:
+                              manifest: dict[str, Any] | None) -> dict[str, Any]:
     """Return the immutable evidence that admitted an owner generation."""
     if owner.get("generation") == 0:
         packet = read_object(
@@ -1547,6 +1873,25 @@ def owner_activation_evidence(task_key: str, owner: dict[str, Any],
     return evidence
 
 
+def validate_owner_native_binding(task_key: str, owner: dict[str, Any],
+                                  evidence: dict[str, Any],
+                                  manifest: dict[str, Any] | None,
+                                  *, error_reason: str = "OWNERSHIP_MISMATCH") -> None:
+    """Compare current/terminal Codex evidence to immutable admission bytes."""
+    if owner.get("surface") != "codex":
+        return
+    try:
+        validate_codex_checkout(evidence)
+        admitted = owner_activation_evidence(task_key, owner, manifest)
+        if (evidence.get("project_id") != admitted.get("project_id")
+                or evidence.get("cwd") != admitted.get("cwd")):
+            raise LifecycleError(
+                "OWNERSHIP_MISMATCH",
+                "Codex project or cwd changed after activation")
+    except LifecycleError as exc:
+        raise LifecycleError(error_reason, exc.detail) from exc
+
+
 def validate_predecessor_binding(task_key: str, state: dict[str, Any],
                                  owner_id: str, surface: str,
                                  evidence: dict[str, Any],
@@ -1559,17 +1904,7 @@ def validate_predecessor_binding(task_key: str, state: dict[str, Any],
             "predecessor surface does not match recorded owner")
     if surface != "codex":
         return
-    validate_codex_checkout(evidence)
-    admitted = owner_activation_evidence(task_key, owner, manifest)
-    if (str(evidence.get("project_id", "")).strip()
-            != str(admitted.get("project_id", "")).strip()):
-        raise LifecycleError(
-            "OWNERSHIP_MISMATCH",
-            "Codex predecessor project changed after activation")
-    if evidence.get("cwd") != admitted.get("cwd"):
-        raise LifecycleError(
-            "OWNERSHIP_MISMATCH",
-            "Codex predecessor cwd changed after activation")
+    validate_owner_native_binding(task_key, owner, evidence, manifest)
 
 
 def validate_successor_evidence(offer: dict[str, Any], successor: str,
@@ -1615,18 +1950,19 @@ def lifecycle_init(args, manifest):
         "source": "task_init", "native_evidence": evidence,
         "native_evidence_digest": evidence_digest, "created_at": utc_now(),
     }
-    init_digest = write_immutable(
-        args.task_key, "initialization", packet, manifest)
+    result: dict[str, str] = {}
 
     def create(current):
         if current is not None:
             raise LifecycleError("LIFECYCLE_INVALID", "task already exists")
+        result["init_digest"] = write_immutable(
+            args.task_key, "initialization", packet, manifest)
         claim_identity(
             args.surface, args.owner, args.task_key,
             evidence_digest, manifest)
         return initial_state(
             args.task_key, args.owner, args.surface,
-            evidence_digest, init_digest)
+            evidence_digest, result["init_digest"])
 
     return mutate_state(args.task_key, args.expected_version, create, manifest)
 
@@ -1669,7 +2005,7 @@ def offer_create(args, manifest):
              "created_at": utc_now()}
     if successor_project_id is not None:
         offer["successor_project_id"] = successor_project_id
-    offer_digest = write_immutable(args.task_key, "offer", offer, manifest)
+    result: dict[str, str] = {}
 
     def change(state):
         if not state or state.get("task_status") != "ACTIVE":
@@ -1708,15 +2044,18 @@ def offer_create(args, manifest):
         if owner.get("state") != "ACTIVE" and not (
                 recovering and owner.get("state") == "DRAINING"):
             raise LifecycleError("OWNERSHIP_MISMATCH", "predecessor owner state is not ACTIVE")
+        result["offer_digest"] = write_immutable(
+            args.task_key, "offer", offer, manifest)
         owner["state"] = "DRAINING"
         owner["ownership_digest"] = owner_digest(owner)
-        state["handoff"] = {"state": "DRAINING", "offer_digest": offer_digest,
+        state["handoff"] = {"state": "DRAINING",
+                            "offer_digest": result["offer_digest"],
                             "predecessor": args.predecessor, "successor": args.successor,
                             "generation": args.generation}
         return state
 
     state = mutate_state(args.task_key, args.expected_version, change, manifest)
-    return {"offer_digest": offer_digest, "state": state}
+    return {"offer_digest": result["offer_digest"], "state": state}
 
 
 def successor_declare(args, manifest):
@@ -1728,7 +2067,7 @@ def successor_declare(args, manifest):
                    "offer_digest": args.offer_digest, "successor": args.successor,
                    "native_evidence": evidence, "native_evidence_digest": evidence_digest,
                    "declared_at": utc_now()}
-    declaration_digest = write_immutable(args.task_key, "declaration", declaration, manifest)
+    result: dict[str, str] = {}
 
     def change(state):
         pending = (state or {}).get("handoff") or {}
@@ -1740,6 +2079,8 @@ def successor_declare(args, manifest):
             raise LifecycleError(
                 "OWNERSHIP_MISMATCH",
                 "successor identity was already used by this task")
+        result["declaration_digest"] = write_immutable(
+            args.task_key, "declaration", declaration, manifest)
         claim_identity(
             offer["successor_surface"], args.successor, args.task_key,
             evidence_digest, manifest)
@@ -1749,11 +2090,11 @@ def successor_declare(args, manifest):
         successor["ownership_digest"] = owner_digest(successor)
         state["owners"][args.successor] = successor
         pending.update({"state": "SUCCESSOR_DECLARED",
-                        "declaration_digest": declaration_digest})
+                        "declaration_digest": result["declaration_digest"]})
         return state
 
     state = mutate_state(args.task_key, args.expected_version, change, manifest)
-    return {"declaration_digest": declaration_digest, "state": state}
+    return {"declaration_digest": result["declaration_digest"], "state": state}
 
 
 def successor_accept(args, manifest):
@@ -1780,14 +2121,7 @@ def successor_accept(args, manifest):
                "offer_digest": args.offer_digest,
                "declaration_digest": declaration_digest,
                "ownership_acceptance": acceptance}
-    receipt_digest = write_immutable(args.task_key, "receipt", receipt, manifest)
-    final_packet = {"schema_version": 1, "offer": offer,
-                    "declaration": declaration,
-                    "ownership_acceptance": acceptance,
-                    "offer_digest": args.offer_digest,
-                    "declaration_digest": declaration_digest,
-                    "receipt_digest": receipt_digest}
-    final_digest = write_immutable(args.task_key, "final", final_packet, manifest)
+    result: dict[str, str] = {}
 
     def change(state):
         pending = (state or {}).get("handoff") or {}
@@ -1803,8 +2137,18 @@ def successor_accept(args, manifest):
             raise LifecycleError("OWNERSHIP_MISMATCH", "predecessor is not draining")
         if not successor or successor.get("state") != "SUCCESSOR_DECLARED":
             raise LifecycleError("SUCCESSOR_NOT_ACTIVE", "successor declaration is absent")
+        result["receipt_digest"] = write_immutable(
+            args.task_key, "receipt", receipt, manifest)
+        final_packet = {"schema_version": 1, "offer": offer,
+                        "declaration": declaration,
+                        "ownership_acceptance": acceptance,
+                        "offer_digest": args.offer_digest,
+                        "declaration_digest": declaration_digest,
+                        "receipt_digest": result["receipt_digest"]}
+        result["final_digest"] = write_immutable(
+            args.task_key, "final", final_packet, manifest)
         successor.update({"state": "ACTIVE", "evidence_digest": evidence_digest,
-                          "activation_final_digest": final_digest})
+                          "activation_final_digest": result["final_digest"]})
         successor["ownership_digest"] = owner_digest(successor)
         state["active_owner"] = args.successor
         state["generation"] = int(offer["generation"])
@@ -1816,12 +2160,14 @@ def successor_accept(args, manifest):
                 and recovery.get("generation") == int(offer["generation"]) - 1):
             recovery.update({"state": "COMPLETED", "successor": args.successor,
                              "completed_at": utc_now()})
-        pending.update({"state": "TAKEOVER_VERIFIED", "receipt_digest": receipt_digest,
-                        "final_digest": final_digest})
+        pending.update({"state": "TAKEOVER_VERIFIED",
+                        "receipt_digest": result["receipt_digest"],
+                        "final_digest": result["final_digest"]})
         return state
 
     state = mutate_state(args.task_key, args.expected_version, change, manifest)
-    return {"receipt_digest": receipt_digest, "final_digest": final_digest, "state": state}
+    return {"receipt_digest": result["receipt_digest"],
+            "final_digest": result["final_digest"], "state": state}
 
 
 def read_verified_final_packet(task_key: str, final_digest: Any,
@@ -1983,6 +2329,8 @@ def predecessor_terminal(args, manifest):
         evidence_digest = validate_native_evidence(
             owner["surface"], evidence,
             expected_identity=args.predecessor, terminal=True)
+        validate_owner_native_binding(
+            args.task_key, owner, evidence, manifest)
         terminal_packet = {
             "schema_version": 1, "task_key": args.task_key,
             "terminal_kind": "predecessor_terminal",
@@ -2023,6 +2371,8 @@ def task_terminal(args, manifest):
         evidence_digest = validate_native_evidence(
             active[0]["surface"], evidence,
             expected_identity=args.owner, terminal=True)
+        validate_owner_native_binding(
+            args.task_key, active[0], evidence, manifest)
         terminal_packet = {
             "schema_version": 1, "task_key": args.task_key,
             "terminal_kind": "task_terminal",
