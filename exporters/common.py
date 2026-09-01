@@ -316,6 +316,47 @@ def keep_generation(final_path: Path):
         old.unlink()
 
 
+def publish_export(tmp_path: Path, final_path: Path, live: bool | None = None):
+    """Publish one built export atomically. Returns (published, file_sha, error).
+
+    `error` carries the publication failure when published is False, and the
+    tamper-hash failure (a landed file whose hash could not be read) when it is
+    True. It is None on a clean publication.
+
+    SEPARATED FROM run_export SO IT CAN FAIL AS ONE TARGET AND BE PROVED WITHOUT A
+    DATABASE. On 2026-09-01 the nightly's first target raised EDEADLK out of
+    keep_generation while reading the previous OneDrive copy; the OSError went
+    through run_export, through run_exports.main, and killed the process. The
+    caller now catches per target, but two things were still missing when a
+    publication fails: an `export_run` row saying so (the receipt `run.sh health`
+    reads), and removal of the staged .tmp left sitting in the vault.
+
+    THE ORDER IS THE SAFETY PROPERTY. keep_generation runs BEFORE os.replace, so
+    a failure to keep the dated copy means the previous good file was never
+    overwritten — the rollback guarantee is preserved by refusing to publish, not
+    by publishing and hoping.
+
+    The tamper hash is deliberately NOT allowed to fail the target: it is a second
+    cloud read of a file that has ALREADY landed, so losing a good export over the
+    detector would be the wrong trade. It comes back as sha_error instead.
+    """
+    if live is None:
+        live = LIVE
+    try:
+        keep_generation(final_path)
+        os.replace(tmp_path, final_path)
+    except Exception as error:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        return False, None, error
+    if not live:
+        return True, None, None
+    try:
+        return True, hashlib.sha256(final_path.read_bytes()).hexdigest(), None
+    except OSError as error:
+        return True, None, error
+
+
 def run_export(target_key, live_rel_path, build_fn, bootstrap=False):
     """build_fn(tmp_path, cur) -> (row_count, canonical_rows). Returns True on ok."""
     dest_dir = (EXPORT_HOME / live_rel_path).parent if LIVE else DRAFT
@@ -378,13 +419,21 @@ def run_export(target_key, live_rel_path, build_fn, bootstrap=False):
                   file=sys.stderr)
             return False
 
-        keep_generation(final_path)
-        os.replace(tmp_path, final_path)
         # file_sha is a LIVE-file tamper detector; a draft run's hash describes
         # out/exports/, not the vault, and recording it poisoned renders-verify
         # with false "tampered" flags (caught by the doctrine health pass,
         # 2026-08-08: three draft 03:43Z rows outranked the live 02:51Z ones).
-        file_sha = hashlib.sha256(final_path.read_bytes()).hexdigest() if LIVE else None
+        published, file_sha, publish_error = publish_export(tmp_path, final_path)
+        if not published:
+            record_run(cur, target_key, row_count, checksum, "failed")
+            conn.commit()
+            print(f"[{target_key}] PUBLISH FAILED: "
+                  f"{type(publish_error).__name__}: {publish_error}. "
+                  f"Previous good file untouched, staged copy removed.", file=sys.stderr)
+            return False
+        if publish_error is not None:
+            print(f"[{target_key}] file landed; tamper hash not recorded "
+                  f"({type(publish_error).__name__}: {publish_error})", file=sys.stderr)
         record_run(cur, target_key, row_count, checksum, "ok", file_sha)
         conn.commit()
         mode = "LIVE" if LIVE else "draft"
