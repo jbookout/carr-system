@@ -1002,19 +1002,45 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
           [...(Array.isArray(args.packs) ? args.packs : []),
            ...(args.workflow ? [args.workflow] : [])]
             .map(s => String(s || "").trim().toLowerCase()).filter(Boolean))];
-        const deliveryMode = (await c.query(
-          `select mode from ops.rule_delivery_policy limit 1`)
-          .catch(() => ({ rows: [] }))).rows[0]?.mode || null;
-        const plan = deliveryMode ? (await c.query(
-          `select short_id, load_layer, packs, scope, selected
-             from ops.rule_delivery_plan($1,$2)`,
+        // One statement means policy, map digest, selector rows, and pack index
+        // describe the same database snapshot. Four independent reads under
+        // READ COMMITTED could otherwise advertise one map while delivering a
+        // plan compiled from another during a registry sync.
+        const deliverySnapshot = (await c.query(
+          `with registry as (
+             select count(distinct map_digest)::integer as map_versions,
+                    min(map_digest) as map_digest,
+                    count(*)::integer as tagged_rules
+               from ops.rule_load_layer
+           ), plan as (
+             select coalesce(jsonb_agg(to_jsonb(p) order by p.load_layer,p.short_id),'[]'::jsonb) as rows
+               from ops.rule_delivery_plan($1,$2) p
+           ), packs as (
+             select coalesce(jsonb_agg(to_jsonb(i) order by i.pack),'[]'::jsonb) as rows
+               from ops.rule_pack_index() i
+           )
+           select (select mode from ops.rule_delivery_policy limit 1) as mode,
+                  registry.map_versions,registry.map_digest,registry.tagged_rules,
+                  plan.rows as delivery_plan,packs.rows as pack_index
+             from registry cross join plan cross join packs`,
           [scope.status === "personal" ? who : null, requestedPacks])
-          .catch(() => ({ rows: [] }))).rows : [];
-        const packIndex = deliveryMode ? (await c.query(
-          `select pack, title, triggers, rule_count from ops.rule_pack_index()`)
-          .catch(() => ({ rows: [] }))).rows : [];
+          .catch(() => ({ rows: [] }))).rows[0] || {};
+        const deliveryMode = deliverySnapshot.mode || null;
+        const deliveryMapVersions = Number(deliverySnapshot.map_versions || 0);
+        const deliveryMapDigest = deliveryMapVersions === 1
+          && /^[0-9a-f]{64}$/i.test(String(deliverySnapshot.map_digest || ""))
+          ? `sha256:${String(deliverySnapshot.map_digest).toLowerCase()}` : null;
+        const deliveryTaggedRules = Number(deliverySnapshot.tagged_rules || 0);
+        const plan = deliveryMode && Array.isArray(deliverySnapshot.delivery_plan)
+          ? deliverySnapshot.delivery_plan : [];
+        const packIndex = deliveryMode && Array.isArray(deliverySnapshot.pack_index)
+          ? deliverySnapshot.pack_index : [];
         const knownPacks = new Set(packIndex.map(p => p.pack));
         const packsNotFound = requestedPacks.filter(p => !knownPacks.has(p));
+        const emptyPacks = requestedPacks.filter(pack => {
+          const row = packIndex.find(item => item.pack === pack);
+          return row && Number(row.rule_count) < 1;
+        });
         const selectedShortIds = new Set(
           plan.filter(r => r.selected).map(r => String(r.short_id).toLowerCase()));
         // "Null workflow returns Layer 0, never all 204 and never nothing" — the
@@ -1022,7 +1048,9 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
         // are not installed here, and an empty selection means the compiler found
         // nothing to hand over; either way the honest fallback is the full set,
         // said out loud, rather than a session that boots with no rules at all.
-        const deliveryUsable = plan.length > 0 && selectedShortIds.size > 0;
+        const deliveryUsable = plan.length > 0 && selectedShortIds.size > 0
+          && deliveryMapVersions === 1 && deliveryTaggedRules > 0 && deliveryMapDigest !== null
+          && packsNotFound.length === 0 && emptyPacks.length === 0;
         const enforcing = deliveryMode === "enforced" && deliveryUsable;
         // Intro-politics rules deliberately do not belong to the full boot
         // corpus above, but they DO make up the vendor-intros pack.  Building
@@ -1273,15 +1301,19 @@ export function doctrineTools({ withEnvelope, writeEvent, ToolError }) {
                 + "have handed you — if you needed one of those rules this turn, "
                 + "that is the miss the shadow week exists to find.",
             declared_packs: requestedPacks,
+            map_digest: deliveryMapDigest,
+            map_versions: deliveryMapVersions,
+            tagged_rules: deliveryTaggedRules,
             ...(packsNotFound.length ? { packs_not_found: packsNotFound,
               hint: "an unknown pack loads nothing; check pack_index for the name" } : {}),
+            ...(emptyPacks.length ? { empty_packs: emptyPacks } : {}),
             layer0: plan.filter(r => r.load_layer === "layer0").length,
             selected: selectedShortIds.size,
             in_scope: plan.length,
             would_omit_count: omitted.length,
             would_omit: omitted,
             ...(deliveryMode && !deliveryUsable ? { fallback:
-              "no usable delivery plan (the tags are not installed here), so the "
+              "no usable coherent delivery plan (the map, tags, or requested packs are absent), so the "
               + "FULL set was recited — a scoped boot never returns nothing" } : {}),
             pack_index: packIndex.map(p => ({ pack: p.pack, title: p.title,
               triggers: p.triggers, rules: Number(p.rule_count) })),

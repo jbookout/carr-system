@@ -663,6 +663,12 @@ def check(repo, artifact_text):
 
     classified = set(carried) | set(subset) | set(excluded)
     for table in sorted(classified - set(seeds)):
+        # An exclusion is safe to decide before its source-only migration is
+        # absorbed: the pending migration still replays, and the artifact must
+        # remain empty for that runtime/business table. Keep refusing truly
+        # stale exclusions that have neither an applied nor pending seed.
+        if table in excluded and table in pending_seeds:
+            continue
         failures.append(
             f"CLASSIFICATION ENTRY NO LONGER APPLIES: {table}\n"
             f"    {rel_config} classifies this table, and no applied migration writes rows\n"

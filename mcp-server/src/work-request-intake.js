@@ -3,6 +3,7 @@
 // does not own a lifecycle transition, an executor, or an approval.
 import { searchDoctrineSituations } from "./situation-retrieval.js";
 import { organizationTenantForActor } from "./identity.js";
+import { deriveRuleDeliverySource, normalizeRuleMapDigest } from "./rule-delivery-source.js";
 
 const FIELDS = new Set(["idempotency_key", "situation", "title", "desired_outcome", "acceptance_criteria"]);
 const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
@@ -28,6 +29,77 @@ const EVIDENCE_CLASS = Object.freeze({ primary_sources: "primary_source", mainta
   practitioner_evidence: "practitioner_evidence", current_baseline: "current_baseline", failure_modes: "failure_mode" });
 
 function text(value) { return typeof value === "string" ? value.trim() : ""; }
+
+async function deliverySourceForPlan(c, actor, row, args, classified, admission) {
+  await c.query("savepoint siep02_rule_delivery_source");
+  let registry;
+  try {
+    registry = await c.query(
+      `with registry as (
+         select count(distinct map_digest)::integer as map_versions,
+                min(map_digest) as map_digest,
+                count(*)::integer as tagged_rules
+           from ops.rule_load_layer
+       ), packs as (
+         select coalesce(jsonb_agg(to_jsonb(p) order by p.pack),'[]'::jsonb) as pack_index
+           from ops.rule_pack_index() p
+       )
+       select registry.*,packs.pack_index,w.title as work_request_title,
+              w.desired_outcome,w.acceptance_criteria
+         from registry cross join packs
+         join ops.work_request w on w.id=$1::uuid and w.ref=$2::text
+          and w.version=$3::integer and w.organization_tenant_id=$4::text
+         /* work-request-intake:rule-delivery-source-snapshot */`,
+      [row.work_request_id, row.ref, Number(row.version), organizationTenantForActor(actor)]);
+    await c.query("release savepoint siep02_rule_delivery_source");
+  } catch (error) {
+    await c.query("rollback to savepoint siep02_rule_delivery_source");
+    await c.query("release savepoint siep02_rule_delivery_source");
+    return { schema_version: "rule-delivery-source.v1", status: "unavailable",
+      reason: "rule_delivery_registry_unavailable", detail: String(error?.message || error).slice(0, 160) };
+  }
+  try {
+    const state = registry.rows[0] || {};
+    const digest = normalizeRuleMapDigest(state.map_digest);
+    if (Number(state.map_versions) !== 1 || Number(state.tagged_rules) < 1 || !digest) {
+      return { schema_version: "rule-delivery-source.v1", status: "unavailable",
+        reason: "installed_rule_map_is_not_one_coherent_nonempty_version",
+        map_versions: Number(state.map_versions || 0), tagged_rules: Number(state.tagged_rules || 0) };
+    }
+    return await deriveRuleDeliverySource({
+      plan: {
+        work_request_ref: row.ref,
+        work_request_title: state.work_request_title,
+        desired_outcome: state.desired_outcome,
+        acceptance_criteria: state.acceptance_criteria,
+        base_version: Number(row.version),
+        plan_ref: row.plan_ref,
+        plan_hash: row.plan_hash,
+        scope_summary: row.scope_summary,
+        runbook_ref: row.runbook_ref,
+        dependency_refs: args.dependency_refs,
+        recovery_ref: args.recovery_ref,
+        observability_ref: args.observability_ref,
+        caps: args.caps,
+      },
+      heavyClassification: {
+        tier: admission ? "heavy" : classified.tier,
+        reasons: admission?.classifier_reasons || classified.reasons || [],
+      },
+      admittedHeavyContract: admission ? {
+        admission_ref: admission.admission_ref,
+        admission_hash: admission.admission_hash,
+        builder_session_ref: admission.builder_session_ref,
+        master_plan: args.heavy_build.master_plan,
+      } : null,
+      packIndex: state.pack_index,
+      mapDigest: digest,
+    });
+  } catch (error) {
+    return { schema_version: "rule-delivery-source.v1", status: "unavailable",
+      reason: "rule_delivery_source_invalid", detail: String(error?.message || error).slice(0, 160) };
+  }
+}
 function exactKeys(value, keys) {
   return value && typeof value === "object" && !Array.isArray(value) &&
     Object.keys(value).sort().join(",") === [...keys].sort().join(",");
@@ -808,16 +880,19 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
               [row.plan_id, args.human_ref, args.base_version, JSON.stringify(effectiveReasons), JSON.stringify(args.heavy_build), actor.id, args.idempotency_key])).rows[0];
             if (!admission) throw new ToolError({ error: "heavy_build_admission_not_recorded" });
           }
+          const ruleDeliverySource = await deliverySourceForPlan(c, actor, row, args, classified, admission);
           await writeEvent(c, actor, "propose-ready-plan", "ops_work_request", row.work_request_id, {
             field: "ready_plan", new: { plan_ref: row.plan_ref, plan_hash: row.plan_hash, runbook_ref: row.runbook_ref,
-              build_tier: heavy ? "heavy" : "standard", admission_hash: admission?.admission_hash || null }, idempotency_key: args.idempotency_key,
+              build_tier: heavy ? "heavy" : "standard", admission_hash: admission?.admission_hash || null,
+              rule_delivery_contract_digest: ruleDeliverySource.contract_digest || null }, idempotency_key: args.idempotency_key,
           });
           return { ok: true, human_ref: row.ref, state: row.state, version: Number(row.version), plan_ref: row.plan_ref,
             plan_hash: row.plan_hash, scope_summary: row.scope_summary, runbook_ref: row.runbook_ref,
             runbook_revision_id: row.runbook_revision_id, runbook_content_hash: row.runbook_content_hash,
             build_admission: heavy ? { tier: "heavy", reasons: admission.classifier_reasons || reasons, required: true,
               admission_ref: admission.admission_ref, admission_hash: admission.admission_hash,
-              next_required_action: "fresh independent plan review" } : { tier: "standard", reasons, required: false } };
+              next_required_action: "fresh independent plan review" } : { tier: "standard", reasons, required: false },
+            rule_delivery_source: ruleDeliverySource };
         });
       },
     },

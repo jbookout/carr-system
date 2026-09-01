@@ -32,6 +32,7 @@ const PARTNER_SLUGS = new Set(["joe", "dell"]);
 export function partnerAuthoritySlugForActor(actor) {
   if (actor?.human === true && PARTNER_SLUGS.has(actor.slug)) return actor.slug;
   if (actor?.human === false && PARTNER_AUTHORITY_AGENTS.has(actor.slug) &&
+      actor.native_agent_verified === true &&
       PARTNER_SLUGS.has(actor.sponsoring_human_slug) &&
       authorizationClassForActor(actor) === "sponsored_agent")
     return actor.sponsoring_human_slug;

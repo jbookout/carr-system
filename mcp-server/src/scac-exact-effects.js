@@ -1,0 +1,221 @@
+import { authorizationClassForActor, organizationTenantForActor,
+  personalScopeForActor } from "./identity.js";
+import { partnerAuthoritySlugForActor } from "./partner-authority.js";
+
+const INGRESS = /^[a-z][a-z0-9_-]+:[^\n\r\t]{1,980}$/;
+const RELATION = /^[a-z_][a-z0-9_$]*\.[a-z_][a-z0-9_$]*$/;
+const COLUMN = /^[a-z_][a-z0-9_$]*$/;
+const FUNCTION_SIGNATURE = /^[a-z_][a-z0-9_$]*\.[a-z_][a-z0-9_$]*\([^;\n\r]*\)$/;
+const SESSION_PRINCIPALS = new Map([
+  ["carr_writer", "carr_writer"],
+  ["carr_jobs", "carr_jobs"],
+  ["carr_authority_joe", "carr_authority"],
+  ["carr_authority_dell", "carr_authority"],
+]);
+
+export const SCAC_TRUSTED_PRINCIPAL_READBACK_SQL = Object.freeze({
+  text: `select session_user::text as session_principal,
+                current_user::text as current_principal,
+                case session_user
+                  when 'carr_writer' then 'carr_writer'
+                  when 'carr_jobs' then 'carr_jobs'
+                  when 'carr_authority_joe' then 'carr_authority'
+                  when 'carr_authority_dell' then 'carr_authority'
+                  else null end as privilege_bundle,
+                pg_backend_pid()::integer as backend_pid`,
+  values: Object.freeze([]),
+});
+
+export class ExactEffectRefusal extends Error {
+  constructor(error, ingressKey, detail = null) {
+    super(error);
+    this.name = "ExactEffectRefusal";
+    this.error = error;
+    this.ingress_key = ingressKey;
+    this.detail = detail;
+  }
+}
+
+const UTF8_ENCODER = new TextEncoder();
+function compareUtf8(left, right) {
+  const a = UTF8_ENCODER.encode(left);
+  const b = UTF8_ENCODER.encode(right);
+  const length = Math.min(a.length, b.length);
+  for (let index = 0; index < length; index += 1) {
+    if (a[index] !== b[index]) return a[index] < b[index] ? -1 : 1;
+  }
+  return a.length < b.length ? -1 : a.length > b.length ? 1 : 0;
+}
+
+function exactObject(value, keys, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new TypeError(`${label}_malformed`);
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index]))
+    throw new TypeError(`${label}_open_or_incomplete`);
+}
+
+function canonicalize(value) {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === "object")
+    return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalize(value[key])]));
+  return value;
+}
+
+async function sha256(value) {
+  const bytes = new TextEncoder().encode(JSON.stringify(canonicalize(value)));
+  const result = await crypto.subtle.digest("SHA-256", bytes);
+  return `sha256:${[...new Uint8Array(result)].map(byte => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function sortedUniqueStrings(values, pattern, label, { allowEmpty = false } = {}) {
+  if (!Array.isArray(values) || (!allowEmpty && values.length === 0) ||
+      values.some(value => typeof value !== "string" || !pattern.test(value)))
+    throw new TypeError(`${label}_malformed`);
+  const sorted = [...values].sort(compareUtf8);
+  if (new Set(sorted).size !== sorted.length || sorted.some((value, index) => value !== values[index]))
+    throw new TypeError(`${label}_not_canonical`);
+  return sorted;
+}
+
+export function canonicalExactEffect(effect) {
+  if (!effect || typeof effect !== "object" || Array.isArray(effect))
+    throw new TypeError("scac_exact_effect_malformed");
+  if (effect.kind === "execute") {
+    exactObject(effect, ["kind", "function_signature"], "scac_execute_effect");
+    if (!FUNCTION_SIGNATURE.test(effect.function_signature || ""))
+      throw new TypeError("scac_execute_effect_target_malformed");
+    return Object.freeze({ kind: "execute", function_signature: effect.function_signature });
+  }
+  exactObject(effect, ["kind", "relation", "columns"], "scac_dml_effect");
+  if (!["insert", "update", "delete"].includes(effect.kind) || !RELATION.test(effect.relation || ""))
+    throw new TypeError("scac_dml_effect_target_malformed");
+  const columns = sortedUniqueStrings(effect.columns, COLUMN, "scac_dml_effect_columns");
+  return Object.freeze({ kind: effect.kind, relation: effect.relation,
+    columns: Object.freeze(columns) });
+}
+
+function effectKey(effect) {
+  return effect.kind === "execute"
+    ? `execute:${effect.function_signature}`
+    : `${effect.kind}:${effect.relation}:${effect.columns.join(",")}`;
+}
+
+export function canonicalExactEffectContract(contract) {
+  exactObject(contract, ["schema_version", "ingress_key", "direct_effects", "delegates_to",
+    "sql_state", "integration_state"], "scac_exact_effect_contract");
+  if (contract.schema_version !== "scac-exact-effect-contract.v1" ||
+      !INGRESS.test(contract.ingress_key || "") ||
+      !["static_reviewed", "dynamic_refused", "opaque_refused"].includes(contract.sql_state) ||
+      !["reviewed_source_test", "unintegrated_default_deny"].includes(contract.integration_state))
+    throw new TypeError("scac_exact_effect_contract_value_malformed");
+  const effects = contract.direct_effects.map(canonicalExactEffect);
+  const keys = effects.map(effectKey);
+  if (new Set(keys).size !== keys.length ||
+      keys.some((key, index) => index > 0 && compareUtf8(key, keys[index - 1]) < 0))
+    throw new TypeError("scac_exact_effects_not_canonical");
+  const delegates = sortedUniqueStrings(contract.delegates_to, INGRESS,
+    "scac_exact_effect_delegates", { allowEmpty: true });
+  if (delegates.some(value => value.includes("*")))
+    throw new TypeError("scac_exact_effect_wildcard_delegate_refused");
+  if (contract.sql_state === "static_reviewed" && contract.integration_state === "reviewed_source_test" &&
+      effects.length === 0 && delegates.length === 0)
+    throw new TypeError("scac_exact_effect_contract_empty");
+  return Object.freeze({
+    schema_version: contract.schema_version,
+    ingress_key: contract.ingress_key,
+    direct_effects: Object.freeze(effects),
+    delegates_to: Object.freeze(delegates),
+    sql_state: contract.sql_state,
+    integration_state: contract.integration_state,
+  });
+}
+
+export function immutableExactEffectContracts(contracts) {
+  if (!Array.isArray(contracts)) throw new TypeError("scac_exact_effect_contracts_malformed");
+  const entries = contracts.map(canonicalExactEffectContract);
+  const out = {};
+  for (const contract of entries) {
+    if (out[contract.ingress_key]) throw new TypeError("scac_exact_effect_contract_duplicate");
+    out[contract.ingress_key] = contract;
+  }
+  return Object.freeze(out);
+}
+
+// Intentionally empty at this bounded checkpoint. An operation becomes
+// admissible only when a reviewer adds a complete static contract here. The
+// registry's write flag, handler prose, SQL text, and current grants are never
+// treated as effect authority.
+export const SCAC_EXACT_EFFECT_CONTRACTS = immutableExactEffectContracts([]);
+
+export function resolveExactEffects(ingressKey, contracts = SCAC_EXACT_EFFECT_CONTRACTS) {
+  const visiting = new Set();
+  const visited = new Set();
+  const effects = new Map();
+  function visit(key) {
+    if (visiting.has(key)) throw new ExactEffectRefusal("effect_delegate_cycle", ingressKey, key);
+    if (visited.has(key)) return;
+    const contract = contracts[key];
+    if (!contract) throw new ExactEffectRefusal("effect_contract_missing", ingressKey, key);
+    if (contract.sql_state !== "static_reviewed")
+      throw new ExactEffectRefusal("effect_sql_not_static", ingressKey, key);
+    if (contract.integration_state !== "reviewed_source_test")
+      throw new ExactEffectRefusal("effect_path_unintegrated", ingressKey, key);
+    visiting.add(key);
+    for (const effect of contract.direct_effects) effects.set(effectKey(effect), effect);
+    for (const delegate of contract.delegates_to) visit(delegate);
+    visiting.delete(key);
+    visited.add(key);
+  }
+  if (!INGRESS.test(ingressKey || ""))
+    throw new ExactEffectRefusal("effect_ingress_malformed", ingressKey);
+  visit(ingressKey);
+  if (effects.size === 0) throw new ExactEffectRefusal("effect_contract_empty", ingressKey);
+  return Object.freeze([...effects.entries()].sort(([a], [b]) => compareUtf8(a, b))
+    .map(([, effect]) => effect));
+}
+
+export async function deriveTrustedPrincipalBinding(actor, readback, requiredBundle) {
+  exactObject(readback, ["session_principal", "current_principal", "privilege_bundle", "backend_pid"],
+    "scac_trusted_principal_readback");
+  if (!actor || typeof actor !== "object" || typeof actor.id !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(actor.id) ||
+      typeof actor.slug !== "string" || !/^[a-z][a-z0-9_-]{0,63}$/.test(actor.slug))
+    throw new ExactEffectRefusal("trusted_actor_unavailable", null);
+  const actorKind = actor.human === true ? "human" : "automation";
+  const scope = personalScopeForActor(actor);
+  if (scope.status === "error") throw new ExactEffectRefusal("trusted_actor_scope_unavailable", null);
+  const authoritySponsor = requiredBundle === "carr_authority"
+    ? partnerAuthoritySlugForActor(actor) : null;
+  const observedBundle = SESSION_PRINCIPALS.get(readback.session_principal);
+  const expectedAuthoritySession = scope.status === "personal"
+    ? `carr_authority_${scope.sponsor}` : null;
+  if (!observedBundle || observedBundle !== readback.privilege_bundle ||
+      !["carr_writer", "carr_jobs", "carr_authority"].includes(requiredBundle) ||
+      observedBundle !== requiredBundle || readback.current_principal !== readback.session_principal ||
+      (requiredBundle === "carr_authority" && readback.session_principal !== expectedAuthoritySession) ||
+      (requiredBundle === "carr_authority" && authoritySponsor !== scope.sponsor) ||
+      !Number.isSafeInteger(readback.backend_pid) || readback.backend_pid <= 0)
+    throw new ExactEffectRefusal("trusted_database_principal_mismatch", null);
+  const manifest = {
+    schema_version: "scac-trusted-principal.v1",
+    organization_tenant_id: organizationTenantForActor(actor),
+    actor_id: actor.id,
+    actor_slug: actor.slug,
+    actor_kind: actorKind,
+    human: actor.human === true,
+    via: actor.via || null,
+    client_id: actor.client_id || null,
+    sponsoring_human_slug: scope.status === "personal" ? scope.sponsor : null,
+    native_agent_verified: actor.native_agent_verified === true,
+    authority_sponsor_slug: authoritySponsor,
+    authorization_class: authorizationClassForActor(actor),
+    session_principal: readback.session_principal,
+    privilege_bundle: observedBundle,
+    backend_pid: readback.backend_pid,
+  };
+  return Object.freeze({ ...manifest, principal_digest: await sha256(manifest),
+    source: "server_authenticated_actor_plus_database_readback",
+    production_enforcement_active: false });
+}

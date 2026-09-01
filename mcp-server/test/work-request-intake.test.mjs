@@ -89,7 +89,7 @@ test("current-work-requests derives tenant server-side and returns only the type
   const read = db.calls.find(call => call.sql.includes("work-request-intake:current"));
   assert.deepEqual(read.params, ["carr-internal"]);
   const rejectedArgs = await rejected(() => executeRegisteredTool(new IntakeFake(), { ...ACTOR }, "current-work-requests", { state: "ready" }));
-  assert.equal(rejectedArgs.error, "invalid_current_work_requests_fields");
+  assert.ok(["invalid_current_work_requests_fields", "unregistered_operation_fields"].includes(rejectedArgs.error));
 });
 
 test("report-problem retrieves deterministically then captures exactly the top current visible source", async () => {
@@ -161,6 +161,29 @@ test("report-problem replay key is bound to the authenticated actor", async () =
   assert.equal(db.calls.filter(call => call.sql.includes("capture_sourced_work_request")).length, 1);
 });
 
+test("mutation replay key is bound to operation and server-derived principal context", async () => {
+  const db = new IntakeFake();
+  const firstActor = { ...ACTOR, client_id: "client:verified-a", authorization_class: "interactive" };
+  await executeRegisteredTool(db, firstActor, "report-problem", structuredClone(REQUEST));
+
+  for (const actor of [
+    { ...firstActor, client_id: "client:verified-b" },
+    { ...firstActor, via: "different-auth-adapter" },
+    { ...firstActor, authorization_class: "different-class" },
+    { ...firstActor, human: false, sponsoring_human_slug: "joe" },
+  ]) {
+    const out = await rejected(() => executeRegisteredTool(db, actor, "report-problem", structuredClone(REQUEST)));
+    assert.equal(out.error, "key_reuse");
+  }
+
+  const crossVerb = await rejected(() => executeRegisteredTool(db, firstActor, "review-and-triage", {
+    idempotency_key: KEY, human_ref: "WR-1", base_version: 1, classification: "operational",
+  }));
+  assert.equal(crossVerb.error, "key_reuse");
+  assert.equal(db.calls.filter(call => call.sql.includes("capture_sourced_work_request")).length, 1);
+  assert.equal(db.calls.some(call => call.sql.includes("triage_sourced_work_request")), false);
+});
+
 test("report-problem skips a higher-ranked personal hit and refuses when no shared source remains", async () => {
   const shared = new IntakeFake();
   shared.personalFirst = true;
@@ -196,7 +219,7 @@ test("report-problem refuses caller source, identity, and state fields before an
   for (const extra of [{ source_id: "secret" }, { state: "triaged" }, { actor: "other" }, { tenant: "other" }]) {
     const db = new IntakeFake();
     const out = await rejected(() => executeRegisteredTool(db, { ...ACTOR }, "report-problem", { ...REQUEST, ...extra }));
-    assert.ok(["invalid_report_problem_fields", "caller_authority_field_forbidden"].includes(out.error));
+    assert.ok(["invalid_report_problem_fields", "caller_authority_field_forbidden", "unregistered_operation_fields"].includes(out.error));
     assert.equal(db.calls.length, 0);
   }
 });

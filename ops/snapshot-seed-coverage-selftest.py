@@ -141,6 +141,16 @@ def main():
         case("negative control: a PENDING seeding migration is not a finding "
              "(it still replays, so a rebuild loses nothing)", found == [])
 
+        pending_excluded = build_repo(
+            tmp + "/pending-excluded",
+            {"0100_seed.sql": seeding},
+            {"carried": {}, "excluded": {"ops.widget": "future runtime evidence"}},
+        )
+        case(
+            "excluded permits a decision before its seeding migration is applied",
+            module.check(pending_excluded, artifact([])) == [],
+        )
+
         repo = build_repo(
             tmp + "/pending-carried",
             {"0100_seed.sql": seeding},

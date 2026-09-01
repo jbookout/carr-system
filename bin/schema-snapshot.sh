@@ -1126,6 +1126,154 @@ end
 SIEP_FOOTER
 fi
 
+# THE SCAC MUTATION REGISTRY is bounded, immutable security configuration.
+# Once 0468 enters this snapshot's ledger, none of the nine seed migrations
+# replay; omitting these rows would leave every exact registry lookup empty.
+# Carry only the sealed version headers and their exact entry sets. Policy
+# epochs, monitor receipts, token evidence, and other runtime state stay out.
+SCAC_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0468_siep18_forward_mutation_registry.sql')" \
+  2>/dev/null)"
+case "$SCAC_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the SCAC registry ledger state" >&2; exit 1 ;;
+esac
+
+if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
+  SCAC_V9_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v9.generated.js"
+  SCAC_EXPECTED_V9_DIGEST="$(sed -n 's/^export const SCAC_MUTATION_REGISTRY_DIGEST = "\([0-9a-f]\{64\}\)";$/\1/p' "$SCAC_V9_RUNTIME")"
+  SCAC_EXPECTED_V9_SOURCE_SET="$(sed -n 's/^export const SCAC_MUTATION_SOURCE_CONTRACT_SET_DIGEST = "\([0-9a-f]\{64\}\)";$/\1/p' "$SCAC_V9_RUNTIME")"
+  SCAC_EXPECTED_V9_CATALOG="$(sed -n 's/^export const SCAC_MUTATION_DB_CATALOG_BASELINE_DIGEST = "\([0-9a-f]\{64\}\)";$/\1/p' "$SCAC_V9_RUNTIME")"
+  case "$SCAC_EXPECTED_V9_DIGEST$SCAC_EXPECTED_V9_SOURCE_SET$SCAC_EXPECTED_V9_CATALOG" in
+    ''|*[!0-9a-f]*) echo "schema-snapshot: reviewed SCAC v9 runtime seals are malformed" >&2; exit 1 ;;
+  esac
+  [ "${#SCAC_EXPECTED_V9_DIGEST}" -eq 64 ] &&
+    [ "${#SCAC_EXPECTED_V9_SOURCE_SET}" -eq 64 ] && [ "${#SCAC_EXPECTED_V9_CATALOG}" -eq 64 ] || {
+    echo "schema-snapshot: reviewed SCAC v9 source or catalog seal is malformed" >&2; exit 1
+  }
+  SCAC_EXPECTED_V9_DIGEST="sha256:$SCAC_EXPECTED_V9_DIGEST"
+  SCAC_EXPECTED_V9_SOURCE_SET="sha256:$SCAC_EXPECTED_V9_SOURCE_SET"
+  SCAC_EXPECTED_V9_CATALOG="sha256:$SCAC_EXPECTED_V9_CATALOG"
+  SCAC_FULL_SET_SEALS="$REPO/ops/config/scac-registry-full-entry-set-seals.json"
+  SCAC_FULL_SET_SQL="$(node -e '
+    const fs=require("fs"); const seals=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+    const keys=Array.from({length:9},(_,i)=>`scac-mutation-registry.v${i+1}`);
+    if (Object.keys(seals).sort().join("|")!==keys.sort().join("|") ||
+        keys.some(key=>!/^sha256:[0-9a-f]{64}$/.test(seals[key]))) process.exit(2);
+    const quote=String.fromCharCode(39);
+    const literal=value=>quote+String(value).replaceAll(quote,quote+quote)+quote;
+    process.stdout.write(keys.map(key=>`(${literal(key)},${literal(seals[key])})`).join(","));
+  ' "$SCAC_FULL_SET_SEALS")" || {
+    echo "schema-snapshot: immutable SCAC full-entry-set seals are unavailable or malformed" >&2; exit 1
+  }
+  SCAC_REGISTRY_EXACT="$("$PSQL" "$URL" -Atqc \
+    "select count(*)=9
+       and array_agg(registry_version order by registry_version collate \"C\")=array[
+         'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3',
+         'scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6',
+         'scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9']::text[]
+       and sum(entry_count)=12660
+       and bool_and(entry_count=(select count(*) from ops.scac_mutation_registry_entry e
+                                  where e.registry_version=v.registry_version))
+       and bool_and(entry_set_digest=(select 'sha256:'||encode(public.digest(
+             convert_to(coalesce(string_agg(e.entry_digest,',' order by e.ingress_key collate \"C\"),''),'UTF8'),
+             'sha256'),'hex') from ops.scac_mutation_registry_entry e
+             where e.registry_version=v.registry_version))
+       and not exists(select 1 from (values $SCAC_FULL_SET_SQL) expected(registry_version,entry_set_digest)
+         left join ops.scac_mutation_registry_version sealed using(registry_version)
+         where sealed.entry_set_digest is distinct from expected.entry_set_digest)
+       and not exists(select 1 from ops.scac_mutation_registry_entry e
+         where e.entry_digest is distinct from 'sha256:'||encode(public.digest(
+           convert_to(ops.scac_canonical_json(e.contract),'UTF8'),'sha256'),'hex'))
+       and not exists(select 1 from unnest(array[
+         'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3',
+         'scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6',
+         'scac-mutation-registry.v7','scac-mutation-registry.v8']) historical(registry_version)
+         where not ops.scac_mutation_registry_seal_valid(historical.registry_version))
+       and (select registry_digest='$SCAC_EXPECTED_V9_DIGEST' and entry_count=1439 and source_entry_count=800
+              from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v9')
+       and (select 'sha256:'||encode(public.digest(convert_to(string_agg(e.entry_digest,',' order by e.entry_digest collate \"C\"),'UTF8'),'sha256'),'hex')='$SCAC_EXPECTED_V9_SOURCE_SET'
+              from ops.scac_mutation_registry_entry e where e.registry_version='scac-mutation-registry.v9'
+                and e.ingress_kind not in ('db_function_acl','db_relation_acl','db_column_acl'))
+       and (select 'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(v.catalog_projection),'UTF8'),'sha256'),'hex')='$SCAC_EXPECTED_V9_CATALOG'
+              from ops.scac_mutation_registry_version v where v.registry_version='scac-mutation-registry.v9')
+       and ops.scac_mutation_catalog_v9_current()
+     from ops.scac_mutation_registry_version v" 2>/dev/null)"
+  [ "$SCAC_REGISTRY_EXACT" = t ] || {
+    echo "schema-snapshot: SCAC v1-v9 registry is missing or internally drifted — nothing written" >&2
+    exit 1
+  }
+
+  cat >> "$TMP" <<'SCAC_REGISTRY_HEADER'
+
+-- CARR SCAC MUTATION REGISTRY V1-V9 (bin/schema-snapshot.sh) — immutable,
+-- internally digest-verified security configuration. The append-only triggers
+-- are disabled only while restoring the exact sealed rows and re-enabled
+-- before the closing verification block.
+alter table ops.scac_mutation_registry_version disable trigger scac_mutation_registry_version_sealed;
+alter table ops.scac_mutation_registry_entry disable trigger scac_mutation_registry_entry_sealed;
+SCAC_REGISTRY_HEADER
+
+  if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" >> "$TMP" <<'SCAC_REGISTRY_ROWS'
+select format(
+  'insert into ops.scac_mutation_registry_version select * from jsonb_populate_recordset(null::ops.scac_mutation_registry_version, %L::jsonb) on conflict (registry_version) do nothing;',
+  jsonb_agg(to_jsonb(v) order by v.registry_version collate "C"))
+from ops.scac_mutation_registry_version v;
+select format(
+  'insert into ops.scac_mutation_registry_entry select * from jsonb_populate_recordset(null::ops.scac_mutation_registry_entry, %L::jsonb) on conflict (registry_version,ingress_key) do nothing;',
+  jsonb_agg(to_jsonb(e) order by e.ingress_key collate "C"))
+from ops.scac_mutation_registry_entry e
+group by e.registry_version order by e.registry_version;
+SCAC_REGISTRY_ROWS
+  then
+    echo "schema-snapshot: could not render the exact SCAC registry — nothing written" >&2
+    exit 1
+  fi
+
+  cat >> "$TMP" <<SCAC_REGISTRY_FOOTER
+alter table ops.scac_mutation_registry_entry enable trigger scac_mutation_registry_entry_sealed;
+alter table ops.scac_mutation_registry_version enable trigger scac_mutation_registry_version_sealed;
+do \$carr_scac_registry\$
+begin
+  if not (select count(*)=9 and sum(entry_count)=12660 and
+      bool_and(entry_count=(select count(*) from ops.scac_mutation_registry_entry e
+                            where e.registry_version=v.registry_version)) and
+      bool_and(entry_set_digest=(select 'sha256:'||encode(public.digest(
+        convert_to(coalesce(string_agg(e.entry_digest,',' order by e.ingress_key collate "C"),''),'UTF8'),
+        'sha256'),'hex') from ops.scac_mutation_registry_entry e
+        where e.registry_version=v.registry_version))
+    from ops.scac_mutation_registry_version v) then
+    raise exception 'restored SCAC v1-v9 registry is incomplete or digest-drifted';
+  end if;
+  if exists(select 1 from (values ${SCAC_FULL_SET_SQL}) expected(registry_version,entry_set_digest)
+       left join ops.scac_mutation_registry_version sealed using(registry_version)
+       where sealed.entry_set_digest is distinct from expected.entry_set_digest) then
+    raise exception 'restored SCAC registry does not match immutable full-entry-set seals';
+  end if;
+  if exists(select 1 from unnest(array[
+       'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3',
+       'scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6',
+       'scac-mutation-registry.v7','scac-mutation-registry.v8']) historical(registry_version)
+       where not ops.scac_mutation_registry_seal_valid(historical.registry_version)) or
+     not (select registry_digest='${SCAC_EXPECTED_V9_DIGEST}' and entry_count=1439 and source_entry_count=800
+            from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v9') or
+     not (select 'sha256:'||encode(public.digest(convert_to(string_agg(e.entry_digest,',' order by e.entry_digest collate "C"),'UTF8'),'sha256'),'hex')='${SCAC_EXPECTED_V9_SOURCE_SET}'
+            from ops.scac_mutation_registry_entry e where e.registry_version='scac-mutation-registry.v9'
+              and e.ingress_kind not in ('db_function_acl','db_relation_acl','db_column_acl')) or
+     not (select 'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(v.catalog_projection),'UTF8'),'sha256'),'hex')='${SCAC_EXPECTED_V9_CATALOG}'
+            from ops.scac_mutation_registry_version v where v.registry_version='scac-mutation-registry.v9') or
+     not ops.scac_mutation_catalog_v9_current() or
+     exists(select 1 from ops.scac_mutation_registry_entry e
+       where e.entry_digest is distinct from 'sha256:'||encode(public.digest(
+         convert_to(ops.scac_canonical_json(e.contract),'UTF8'),'sha256'),'hex')) then
+    raise exception 'restored SCAC registry failed exact historical, v9, or per-entry contract seals';
+  end if;
+end
+\$carr_scac_registry\$;
+
+SCAC_REGISTRY_FOOTER
+fi
+
 # A truncated dump is the failure mode that matters: pg_dump has lost a Neon
 # connection mid-stream before (2026-08-07, on the nightly backup). A short file
 # that parses is worse than no file, because it would silently define a smaller
