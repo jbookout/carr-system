@@ -42,7 +42,8 @@ const PACK_INDEX = [
     triggers: ["x.com", "mail"], rule_count: 1 },
 ];
 
-function client({ mode = "shadow", plan = PLAN, packIndex = PACK_INDEX } = {}) {
+function client({ mode = "shadow", plan = PLAN, packIndex = PACK_INDEX,
+                  mapState = null } = {}) {
   const calls = [];
   return {
     calls,
@@ -51,8 +52,21 @@ function client({ mode = "shadow", plan = PLAN, packIndex = PACK_INDEX } = {}) {
       if (/from v_compiled_rules/i.test(sql))
         return { rows: [...rows(SHARED, false), ...rows(PERSONAL, true)] };
       if (/v_guidance_registry_state/i.test(sql)) return { rows: [] };
+      if (/with registry as/i.test(sql)) {
+        const state = mapState || { map_versions: 1, map_digest: "d".repeat(64),
+                                    tagged_rules: plan.length };
+        const declared = params[1] || [];
+        return { rows: [{ mode, ...state, pack_index: packIndex,
+          delivery_plan: plan
+            .filter(r => r.scope === "shared" || (params[0] && r.scope === params[0]))
+            .map(r => ({ ...r, selected: r.load_layer === "layer0"
+                         || r.packs.some(p => declared.includes(p)) })) }] };
+      }
       if (/from ops\.rule_delivery_policy/i.test(sql))
         return { rows: mode ? [{ mode }] : [] };
+      if (/count\(distinct map_digest\)/i.test(sql))
+        return { rows: [mapState || { map_versions: 1, map_digest: "d".repeat(64),
+                                      tagged_rules: plan.length }] };
       if (/ops\.rule_delivery_plan/i.test(sql)) {
         const declared = params[1] || [];
         return { rows: plan
@@ -142,7 +156,38 @@ test("workflow= is read as a pack, so the council's compile path works as writte
 test("an unknown pack is reported, never silently empty", async () => {
   const out = await call(client({ mode: "enforced" }), { packs: ["enginering-git"] });
   assert.deepEqual(out.rule_delivery.packs_not_found, ["enginering-git"]);
+  assert.equal(out.rule_delivery.enforcing, false);
+  assert.match(out.rule_delivery.fallback, /FULL set/);
   assert.ok(out.shared_rules.length >= 2, "Layer 0 still arrives after a typo");
+});
+
+test("an empty requested pack and an incoherent registry both fall back to full delivery", async () => {
+  const emptyIndex = [...PACK_INDEX, { pack: "empty-pack", title: "Empty",
+    triggers: ["empty"], rule_count: 0 }];
+  const empty = await call(client({ mode: "enforced", packIndex: emptyIndex }),
+    { packs: ["empty-pack"] });
+  assert.deepEqual(empty.rule_delivery.empty_packs, ["empty-pack"]);
+  assert.equal(empty.rule_delivery.enforcing, false);
+  assert.equal(empty.shared_rules.length, 4);
+
+  const split = await call(client({ mode: "enforced",
+    mapState: { map_versions: 2, map_digest: "d".repeat(64), tagged_rules: PLAN.length } }),
+    { packs: ["engineering-git"] });
+  assert.equal(split.rule_delivery.map_versions, 2);
+  assert.equal(split.rule_delivery.enforcing, false);
+  assert.equal(split.shared_rules.length, 4);
+});
+
+test("delivery reports the one installed map digest used for scoped selection", async () => {
+  const c = client({ mode: "enforced" });
+  const out = await call(c, { packs: ["engineering-git"] });
+  assert.equal(out.rule_delivery.map_digest, `sha256:${"d".repeat(64)}`);
+  assert.equal(out.rule_delivery.map_versions, 1);
+  assert.equal(out.rule_delivery.tagged_rules, PLAN.length);
+  const snapshots = c.calls.filter(call => /rule_delivery_policy|rule_load_layer|rule_delivery_plan|rule_pack_index/i.test(call.sql));
+  assert.equal(snapshots.length, 1);
+  for (const name of ["rule_delivery_policy", "rule_load_layer", "rule_delivery_plan", "rule_pack_index"])
+    assert.match(snapshots[0].sql, new RegExp(name));
 });
 
 test("the pack index ships instead of the packs, with what fires each one", async () => {

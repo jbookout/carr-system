@@ -58,6 +58,16 @@ function client({ mode = "shadow", plan = PLAN, packIndex = PACK_INDEX } = {}) {
       if (/from v_compiled_rules/i.test(sql))
         return { rows: [...rows(SHARED, false), ...rows(PERSONAL, true)] };
       if (/v_guidance_registry_state/i.test(sql)) return { rows: [] };
+      if (/with registry as/i.test(sql) && /plan\.rows as delivery_plan/i.test(sql)) {
+        const declared = params[1] || [];
+        const deliveryPlan = plan
+          .filter(r => r.scope === "shared" || (params[0] && r.scope === params[0]))
+          .map(r => ({ ...r, selected: r.load_layer === "layer0"
+                       || r.packs.some(p => declared.includes(p)) }));
+        return { rows: [{ mode, map_versions: 1,
+          map_digest: "b513180786cf7212877870ab3bc14c03bb78b17b3397eb6ee474187a152b13f2",
+          tagged_rules: plan.length, delivery_plan: deliveryPlan, pack_index: packIndex }] };
+      }
       if (/from ops\.rule_delivery_policy/i.test(sql))
         return { rows: mode ? [{ mode }] : [] };
       if (/ops\.rule_delivery_plan/i.test(sql)) {

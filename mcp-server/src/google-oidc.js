@@ -12,7 +12,7 @@
 // There is no consent screen. Identity IS the gate (A10). A non-allow-listed
 // Google account gets a plain refusal and nothing is issued.
 
-import { slugForEmail, propsForSlug, agentSlugForClient } from "./identity.js";
+import { slugForEmail, propsForSlug, agentSlugForClient, verifiedAgentSlugForClient } from "./identity.js";
 
 const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -340,6 +340,11 @@ export async function handleCallback(request, env) {
     ? await env.OAUTH_PROVIDER.lookupClient(pending.req.clientId).catch(() => null)
     : null;
   const agentSlug = agentSlugForClient(clientInfo?.clientName);
+  const verifiedAgentSlug = verifiedAgentSlugForClient(
+    pending.req?.clientId,
+    agentSlug,
+    env.CARR_NATIVE_AGENT_OAUTH_CLIENTS,
+  );
   const slug = agentSlug || humanSlug;
 
   const props = {
@@ -361,6 +366,9 @@ export async function handleCallback(request, env) {
     // neither the OAuth client, model, nor an MCP tool argument can choose it.
     props.sponsoring_human_slug = humanSlug;
     props.sponsor_required = true;
+    // client_name remains attribution only. Partner authority is available
+    // only when a server-held exact client-id binding corroborates it.
+    if (verifiedAgentSlug === agentSlug) props.native_agent_verified = true;
   }
 
   const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({

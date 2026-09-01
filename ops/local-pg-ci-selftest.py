@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import os
 import sys
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
@@ -182,6 +184,10 @@ check(
     "canonical ownership lease runs after the Engineering race proof",
     events[13][-1].endswith("ops/canonical-ownership-lease-local-pg-gate.py"),
 )
+check(
+    "assurance persistence runs immediately after canonical ownership",
+    events[14][-1].endswith("ops/assurance-evidence-acceptance-local-pg-gate.py"),
+)
 completion_event = next(
     index for index, event in enumerate(events)
     if event[-1].endswith("ops/completion-register-schema-local-pg-gate.py")
@@ -259,6 +265,55 @@ check(
 check(
     "strict lane also proves canonical ownership leases",
     events[13][-1].endswith("ops/canonical-ownership-lease-local-pg-gate.py"),
+)
+check(
+    "strict lane also proves assurance persistence",
+    events[14][-1].endswith("ops/assurance-evidence-acceptance-local-pg-gate.py"),
+)
+
+missing_gate = mod.run_required_local_gate(
+    FakeRunner(),
+    Path("/fake/python"),
+    Path("/definitely/missing/assurance-gate.py"),
+    env={},
+    cwd=REPO,
+)
+check(
+    "a missing assurance gate is a causal refusal",
+    missing_gate.returncode == 78
+    and "assurance-gate.py" in missing_gate.stderr
+    and "unavailable" in missing_gate.stderr,
+)
+
+
+class FailingAssuranceRunner(FakeRunner):
+    def run(self, command, *, env=None, cwd=None, capture=False):
+        result = super().run(command, env=env, cwd=cwd, capture=capture)
+        if str(command[-1]).endswith("ops/assurance-evidence-acceptance-local-pg-gate.py"):
+            return mod.CommandResult(23, "", "ASSURANCE_STAGE_MISMATCH: exact causal fixture")
+        return result
+
+
+events.clear()
+with (
+    patch.object(mod, "find_postgres_binaries", return_value=fake_bins),
+    patch.object(mod, "port_is_available", return_value=True),
+    patch.object(mod.tempfile, "mkdtemp", return_value=str(fake_root)),
+    patch.object(mod.shutil, "rmtree"),
+):
+    assurance_stderr = io.StringIO()
+    with redirect_stderr(assurance_stderr):
+        assurance_failure = mod.run_local_ci(
+            repo=REPO, ci_class="migration", port=55432, runner=FailingAssuranceRunner()
+        )
+check("assurance gate failure code is preserved", assurance_failure == 23)
+check(
+    "assurance gate exact child stderr is surfaced",
+    "ASSURANCE_STAGE_MISMATCH: exact causal fixture" in assurance_stderr.getvalue(),
+)
+check(
+    "later local gates do not run after assurance failure",
+    not any(event[-1].endswith("ops/calendar-canary-local-pg-acceptance.py") for event in events),
 )
 
 

@@ -34,6 +34,7 @@ from __future__ import annotations
 import pathlib
 import re
 import sys
+import hashlib
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "tools"))
@@ -136,6 +137,79 @@ def test_source_enforces_the_contract() -> None:
           "a broad handler here would turn this table into skip-on-failure")
     check("the two documented timeout handlers still fail the run",
           "LockNotAvailable" in loop and "QueryCanceled" in loop and loop.count("fail(") >= 2)
+    check("0339 and later migrations reject their own transaction control",
+          migrate.OUTER_TRANSACTION_MIGRATION == "0339_"
+          and all(migrate.contains_transaction_control(statement) for statement in (
+              "begin;", "begin transaction;", " COMMIT;", "commit work;",
+              "start transaction;", "rollback;", "rollback work;", "end;",
+              "select 1; commit; select 2;", "commit; select 1;",
+              "begin; select 1;", "rollback transaction;", "/*x*/ commit;",
+              "commit and chain;", "commit work and no chain;",
+              "rollback and chain;", "abort;", "abort work;",
+              "prepare transaction 'x';", "commit prepared 'x';"))
+          and not any(migrate.contains_transaction_control(statement) for statement in (
+              "-- begin;\nselect 1;", "select 'commit;';", 'select "rollback";',
+              "do $$ begin perform 1; end $$;", "/* commit; */ select 1;")),
+          "an internal commit would expose schema before its ledger-bound epoch")
+
+
+def test_historical_transaction_artifact_is_exact() -> None:
+    artifacts = migrate.HISTORICAL_TRANSACTION_CONTROL_ARTIFACTS
+    expected_names = {
+        "0344_demote_evidence_activation_bookkeeping.sql",
+        "0345_governance_queue_projection.sql",
+        "0348_pr_only_main_ruleset_control.sql",
+        "0349_versioned_rule_amendment.sql",
+        "0351_legacy_rule_lifecycle_admission.sql",
+    }
+    check("the historical transaction-control grandfather is five exact files",
+          set(artifacts) == expected_names,
+          "the exception must never widen to another migration")
+    exact = True
+    drift_refused = True
+    for name in expected_names:
+        sql = (REPO / "migrations" / name).read_text(encoding="utf-8")
+        digest = hashlib.sha256(sql.encode()).hexdigest()
+        exact = exact and artifacts.get(name) == digest \
+            and migrate.contains_transaction_control(sql)
+        changed_digest = hashlib.sha256((sql + "\n-- drift probe").encode()).hexdigest()
+        drift_refused = drift_refused and artifacts.get(name) != changed_digest
+    check("every grandfather digest equals its immutable applied artifact", exact,
+          "an edited or transaction-free file must not match a historical exception")
+    check("one-byte drift cannot reuse any historical grandfather", drift_refused)
+
+
+def test_reviewed_controller_transaction_artifact_is_exact() -> None:
+    artifacts = migrate.REVIEWED_TRANSACTION_CONTROL_ARTIFACTS
+    expected_names = {
+        "0363_rule_delivery_activation_digest_repin.sql",
+        "0382_standing_guidance_reader_boundary.sql",
+        "0383_control_plane_not_configured_state.sql",
+        "0387_control_plane_record_queue_priority_tiers.sql",
+        "0425_disable_legacy_schedule_readback_grant.sql",
+        "0426_withdraw_a_work_request_captured_in_error.sql",
+        "0427_tour_rights_projection_hardening.sql",
+        "0428_tour_property_identity_jurisdiction.sql",
+        "0429_tour_domain_route_cheat_sheet.sql",
+        "0430_tour_delivery_data_plane.sql",
+        "0431_completion_register_schema.sql",
+        "0450_canonical_ownership_lease_kernel.sql",
+        "0451_assurance_evidence_acceptance_persistence.sql",
+    }
+    check("the reviewed transaction allowlist is thirteen exact artifacts",
+          set(artifacts) == expected_names
+          and not set(artifacts) & set(migrate.HISTORICAL_TRANSACTION_CONTROL_ARTIFACTS))
+    exact = True
+    drift_refused = True
+    for name in expected_names:
+        sql = (REPO / "migrations" / name).read_text(encoding="utf-8")
+        digest = hashlib.sha256(sql.encode()).hexdigest()
+        changed_digest = hashlib.sha256((sql + "\n-- drift probe").encode()).hexdigest()
+        exact = exact and artifacts.get(name) == digest \
+            and migrate.contains_transaction_control(sql)
+        drift_refused = drift_refused and artifacts.get(name) != changed_digest
+    check("each controller digest equals its reviewed source artifact", exact)
+    check("one-byte drift cannot reuse any controller transaction review", drift_refused)
 
 
 def main() -> int:
@@ -143,6 +217,8 @@ def main() -> int:
     test_table_shape()
     test_probe_is_checked_before_the_file_runs()
     test_source_enforces_the_contract()
+    test_historical_transaction_artifact_is_exact()
+    test_reviewed_controller_transaction_artifact_is_exact()
     print()
     print(f"migrate-precondition-selftest: {len(PASS)}/{len(PASS) + len(FAIL)} passed")
     if FAIL:

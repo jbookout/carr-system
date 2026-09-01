@@ -163,8 +163,8 @@ def load_packs():
     (see `pack_keyword_pattern()` there), so the two are recognizably the same
     keyword source even though neither reads the other's file.
     """
-    with open(MAP, encoding="utf-8") as handle:
-        data = json.load(handle)
+    raw = Path(MAP).read_bytes()
+    data = json.loads(raw)
     triggers, members = {}, {}
     for name, pack in data.get("rule_packs", {}).items():
         words = [re.escape(t) for t in pack.get("triggers", []) if str(t).strip()]
@@ -181,7 +181,7 @@ def load_packs():
     for short, entry in data.get("rule_load_layers", {}).items():
         for name in entry.get("packs", []):
             members.setdefault(name, []).append(short)
-    return triggers, members
+    return triggers, members, hashlib.sha256(raw).hexdigest()
 
 
 def _content_text(content, kinds=("text", "input_text", "output_text")):
@@ -884,13 +884,13 @@ def main():
             return 0
         with open(path, errors="replace") as handle:
             records = [json.loads(line) for line in handle if line.strip()]
-        triggers, members = load_packs()
+        triggers, members, local_map_digest = load_packs()
         result = evaluate(records, triggers, members)
         raw_session = payload.get("session_id") or payload.get("sessionId")
         session = raw_session if isinstance(raw_session, str) and raw_session.strip() \
             else "unavailable"
         row = make_observation(
-            session=session, map_digest=file_sha256(Path(MAP)),
+            session=session, map_digest=local_map_digest,
             source_digest=source_sha256(Path(REPO)), result=result)
         # A turn that implied no pack and loaded none is the ordinary case and
         # writing a row per turn for it would bury the rows that matter.

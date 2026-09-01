@@ -319,7 +319,7 @@ mode, loaded, _ = drift.delivery_state([
 check("Codex Bash alias receives and proves the same receipt",
       mode == "shadow" and loaded == ["scheduled-automation"], (mode, loaded))
 
-TRIGGERS, MEMBERS = drift.load_packs()
+TRIGGERS, MEMBERS, _ = drift.load_packs()
 for label, records in [
     ("Claude success", claude_records),
     ("Codex function success", codex_records),

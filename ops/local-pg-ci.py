@@ -188,6 +188,20 @@ def _failure_detail(result: CommandResult, lines: int = 12) -> str:
     return prefix + " | ".join(line.strip()[:240] for line in tail)
 
 
+def run_required_local_gate(
+    runner: CommandRunner,
+    python: Path,
+    script: Path,
+    *,
+    env: Mapping[str, str],
+    cwd: Path,
+) -> CommandResult:
+    """Run one required disposable-PG gate, refusing a missing artifact."""
+    if not script.is_file():
+        return CommandResult(78, "", f"required local PostgreSQL gate is unavailable: {script.name}")
+    return runner.run([python, script], env=env, cwd=cwd, capture=True)
+
+
 def run_local_ci(
     *,
     repo: Path,
@@ -451,6 +465,24 @@ def run_local_ci(
                         exit_code = ownership.returncode
                     else:
                         print("local-db-ci: canonical ownership lease acceptance passed")
+                if exit_code == 0:
+                    assurance_script = repo / "ops/assurance-evidence-acceptance-local-pg-gate.py"
+                    assurance = run_required_local_gate(
+                        command_runner,
+                        acceptance_python,
+                        assurance_script,
+                        env=acceptance_env,
+                        cwd=repo,
+                    )
+                    if assurance.returncode:
+                        print(
+                            f"local-db-ci: assurance evidence/acceptance persistence failed: "
+                            f"{_failure_detail(assurance)}",
+                            file=sys.stderr,
+                        )
+                        exit_code = assurance.returncode
+                    else:
+                        print("local-db-ci: assurance evidence/acceptance persistence passed")
                 if exit_code == 0:
                     canary_script = repo / "ops/calendar-canary-local-pg-acceptance.py"
                     canary = command_runner.run(
