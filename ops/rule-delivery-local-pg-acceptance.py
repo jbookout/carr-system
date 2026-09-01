@@ -36,6 +36,15 @@ PY = REPO / ".venv" / "bin" / "python"
 MIGRATION_0363 = REPO / "migrations" / "0363_rule_delivery_activation_digest_repin.sql"
 PRIOR_ACTIVATION_DIGEST = "4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218"
 CURRENT_ACTIVATION_DIGEST = "f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904"
+# The chain has a fourth link as of 2026-09-01. Reinstating canonical_edit into
+# control_catalog (Joe's ruling 7f48abf6, Repo Hygiene Program R02) moved the
+# rule-enforcement-map digest, so the REGENERATED 0471 carries the generator's
+# designed, guarded rule-map repin and the eight targets end on this value.
+# NAMED FOR 0471, NOT 0474: 0474 reinstates the catalog control, but it is
+# 0471's repin block that actually moves ops.rule_delivery_activation_target.
+# PRIOR (pre-0363) and CURRENT (post-0363) are deliberately untouched -- 0363
+# still produces CURRENT, and its assertions below must keep expecting it.
+POST_0471_ACTIVATION_DIGEST = "6d21c37d533a5d98debfe4991c902164cf3c1fee88e7f42a3112468268e3335c"
 ACTIVATION_TO_TEST_REF = (
     "ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; "
     "ops/rule-pack-preuse-reselection-selftest.py"
@@ -334,6 +343,27 @@ def main() -> int:
             (CURRENT_ACTIVATION_DIGEST,),
         )
         check("the restored post-0363 fixture is the exact current eight",
+              one(cur)[0] == len(EXPECTED_IDS))
+
+        # FOURTH LINK: 0471's repin. The fixture above reconstructs the state as
+        # of 0363; the cutover below is handed the digest read from the live
+        # overlay, which is now the post-0471 value. Without this step the two
+        # disagree and the database refuses with "activation map digest preimage
+        # differs" -- which is exactly how this gap was found.
+        cur.execute(
+            """update ops.rule_delivery_activation_target
+                  set map_digest=%s
+                where map_digest=%s""",
+            (POST_0471_ACTIVATION_DIGEST, CURRENT_ACTIVATION_DIGEST),
+        )
+        check("0471 repins exactly the eight current targets",
+              cur.rowcount == len(EXPECTED_IDS))
+        cur.execute(
+            """select count(*) from ops.rule_delivery_activation_target
+                where map_digest=%s""",
+            (POST_0471_ACTIVATION_DIGEST,),
+        )
+        check("the post-0471 fixture is the exact eight on the current map",
               one(cur)[0] == len(EXPECTED_IDS))
         cur.execute("""insert into actor (slug,kind,display_name) values ('joe','human','Joe')
                        on conflict (slug) do nothing returning id""")

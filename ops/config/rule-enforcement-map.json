@@ -427,6 +427,16 @@
         "ops/candidate-match-threshold-selftest.py"
       ]
     },
+    "canonical_edit": {
+      "failure_mode": "an Edit/Write/MultiEdit landing on a file git already tracks inside the shared canonical checkout ~/carr-system, before any commit, push or merge exists to refuse it",
+      "implementation": [
+        "hooks/canonical-edit-gate.py"
+      ],
+      "note": "REINSTATED 2026-09-01 by Joe's ruling 7f48abf6 (Repo Hygiene Program R02, WR-000040), reversing the retirement in WR-000019 slice S3 (2026-08-27) and migration 0348. It returns with three dispositions applied: the registered-worktree exemption widened to every worktree git registers for this repo, the untracked-file allowance KEPT (receipts and out/ are load-bearing, with ops/untracked-anomaly-report.py as the non-paging visibility control), and the CARR_ALLOW_CANONICAL_EDIT scoped-edit escape hatch REMOVED. HONESTLY SCOPED, and the gate's own docstring is the authority: it sees Write, Edit and MultiEdit only. NotebookEdit is in its tool tuple but no matcher delivers it, so it is not covered. Bash and Codex sessions are not covered at all -- the R04 canonical-dirt alarm is the planned compensating control and is NOT BUILT YET, so those paths are uncompensated today. This control does not replace pr_only_main_ruleset; it binds EARLIER, at the edit, and that control still binds at merge.",
+      "test": [
+        "ops/canonical-edit-gate-selftest.py"
+      ]
+    },
     "chat_lint": {
       "failure_mode": "deferred surfacing \u2014 the finding is parked and injected as context before the NEXT reply (UserPromptSubmit); it does not block the Stop, because the offending text has already reached the partner and a block would only buy a paid-for restatement (rule 1d50a3bb)",
       "implementation": [
@@ -1355,12 +1365,12 @@
       "why_unenforceable": "Research-discipline judgment."
     },
     "4a53ff82": {
-      "binding_moment": "before a change reaches main",
+      "binding_moment": "the first edit to a tracked canonical file",
       "category": "hard_pre_action",
-      "control": "pr_only_main_ruleset",
+      "control": "canonical_edit",
       "enforcement_class": "deny_gate",
       "exceptions": "registered worktrees; integration-lane work (nightly chain, merges/landings, pulls)",
-      "note": "Corrected 2026-08-15 (see history below), then reassigned 2026-08-27 (WR-000019 slice S3): hooks/canonical-edit-gate.py retired, and control moved from the retired edit-time gate to the server-side backstop that already carries the same property -- a canonical-tree edit cannot reach main without a reviewed PR under the PR-only ruleset with required CI. That binds later (at merge) than the retired gate's edit-time catch, which is a real reduction in how early a stray canonical edit is caught, stated plainly rather than hidden. HISTORY: this read unbuilt on 2026-08-15, with a planned_control describing a hook that had already been built the day before as hooks/canonical-edit-gate.py, blessed in the gate baseline and live in the PreToolUse set. A session working the unbuilt list came one step from building a second gate for an already-enforced rule. ops/enforcement-coverage-check.py now fails on any blessed gate no control names."
+      "note": "Reassigned 2026-08-27 (WR-000019 slice S3) to pr_only_main_ruleset when hooks/canonical-edit-gate.py retired, then RETURNED to canonical_edit on 2026-09-01 by Joe's ruling 7f48abf6 (Repo Hygiene Program R02) when that gate was reinstated. The 2026-08-27 reassignment reasoned that the server-side backstop carried the same property later; that reasoning is now void because the earlier control exists again. BOTH controls really do bind this rule now, at different moments -- canonical_edit at the edit, pr_only_main_ruleset at merge -- and this field holds ONE control key, so it names the EARLIEST binding moment, which is the one this rule is about. pr_only_main_ruleset is unchanged and still carries 308ef1de. HISTORY: this read unbuilt on 2026-08-15, with a planned_control describing a hook that had already been built the day before as hooks/canonical-edit-gate.py, blessed in the gate baseline and live in the PreToolUse set. A session working the unbuilt list came one step from building a second gate for an already-enforced rule. ops/enforcement-coverage-check.py now fails on any blessed gate no control names."
     },
     "4a9188f3": {
       "binding_moment": "partner correction",
@@ -2677,7 +2687,7 @@
       "packs": [
         "engineering-git"
       ],
-      "why": "An installed deny gate delivered this at its binding moment; WR-000019 S3 (2026-08-27) reassigned the control from the retired hooks/canonical-edit-gate.py to the server-side PR-only main ruleset (control pr_only_main_ruleset), which is still an installed control that delivers this rule at ITS binding moment (merge, not the edit itself)."
+      "why": "An installed deny gate delivers this at its binding moment. WR-000019 S3 (2026-08-27) reassigned the control to the server-side PR-only main ruleset when hooks/canonical-edit-gate.py retired; Joe's ruling 7f48abf6 (2026-09-01) reinstated that gate, so the control returns to canonical_edit and the rule is delivered at the edit again, with the merge-time ruleset still behind it."
     },
     "4a9188f3": {
       "load_layer": "pack",

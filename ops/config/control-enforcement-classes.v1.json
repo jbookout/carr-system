@@ -4,6 +4,7 @@
     "blocker_decider": "deny_gate",
     "calendar_intake": "deny_gate",
     "candidate_match": "judgment_ambient",
+    "canonical_edit": "deny_gate",
     "chat_lint": "surfacing",
     "client_asset_packet": "deny_gate",
     "close_before_open": "deny_gate",

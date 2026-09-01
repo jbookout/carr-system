@@ -2,7 +2,7 @@
   "_doc": [
     "Gate lifecycle metadata -- WR-000019 slice S5.",
     "",
-    "One entry per gate script actually wired in ops/config/hooks.json (35 gates as of 2026-08-27, down from 38 -- WR-000019 slice S3 retired canonical-edit-gate.py, git-writer-gate.py and staging-attribution-gate.py the same day; the count is re-derivable any time by walking that file the same way ops/hook-telemetry-rollup.py's wiring() does). A gate wired ONLY through .claude/settings.json (worktree-self-plumb.py, machine-converge.py) is a different wiring surface and out of this slice's DoD wording -- it is not listed here.",
+    "One entry per gate script actually wired in ops/config/hooks.json (35 gates as of 2026-09-01, re-derived from hooks.json at that date -- WR-000019 slice S3 retired canonical-edit-gate.py, git-writer-gate.py and staging-attribution-gate.py on 2026-08-27, and canonical-edit-gate.py was REINSTATED on 2026-09-01 by Joe's ruling 7f48abf6 while the other two stay retired; the count is re-derivable any time by walking that file the same way ops/hook-telemetry-rollup.py's wiring() does). A gate wired ONLY through .claude/settings.json (worktree-self-plumb.py, machine-converge.py) is a different wiring surface and out of this slice's DoD wording -- it is not listed here.",
     "",
     "delegation-gate.py IS listed, as of WR-000019 slice S4 (2026-08-27), despite being wired only through .claude/settings.json (PreToolUse and, as of this slice, Stop) rather than ops/config/hooks.json -- an intentional, named exception to the line above. This slice's own DoD asked for the gate's mode recorded here, and ops/gate-lifecycle-report.py's coverage check treats a metadata entry for a gate absent from ops/config/hooks.json's wired set as a non-fatal 'stale_metadata' WARNING rather than a failure (see that script's own docstring), so recording it costs nothing. Its catch_metric points at its own dedicated out/delegation-gate-ledger.jsonl rather than the shared out/hook-telemetry.jsonl register convention every ops/config/hooks.json-wired gate uses, for the same reason completion-evidence-gate.py and map-architecture-gate.py keep dedicated logs: it was never part of that shared wiring surface to begin with.",
     "",
@@ -84,6 +84,29 @@
         "note": ""
       },
       "review_date": "2026-11-24",
+      "mode": "enforcing"
+    },
+    "canonical-edit-gate.py": {
+      "failure_class": "an edit to a tracked file in the shared canonical checkout",
+      "catch_metric": {
+        "log_path": "out/conduct-gate.jsonl",
+        "log_format": "jsonl",
+        "ts_field": "ts",
+        "hook_filter": {
+          "field": "hook",
+          "equals": "canonical-edit-gate"
+        },
+        "true_positive": {
+          "kind": "field_in",
+          "field": "decision",
+          "values": [
+            "deny"
+          ]
+        },
+        "rule_description": "a row for canonical-edit-gate in out/conduct-gate.jsonl whose decision is 'deny' -- an edit to a tracked canonical file that was actually refused. NOT the row_exists convention the rest of this log's family uses, and deliberately so: this gate has rollout modes, and under 'shadow' or 'announce' it writes a row with decision 'allow-observed' or 'allow-announced' for an edit it did NOT refuse. Counting those as catches would report a staged rollout as enforcement. Reinstated 2026-09-01 (Joe's ruling 7f48abf6) after WR-000019 slice S3 retired it on 2026-08-27; the mode flag below is read directly by the gate, the same exception conduct-stop-gate.py already holds.",
+        "note": "shared conduct log; see hooks/canonical-edit-gate.py's COVERAGE section for what this gate does NOT see (Bash, Codex, NotebookEdit)."
+      },
+      "review_date": "2026-12-01",
       "mode": "enforcing"
     },
     "chat-lint-carryover.py": {
