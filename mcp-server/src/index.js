@@ -240,7 +240,7 @@ const protectedApiHandler = {
     const pathname = new URL(request.url).pathname;
     if (pathname === "/mcp") return mcpApiHandler.fetch(request, env, ctx);
     if (pathname !== "/pipeline/changes") return json({ error: "not_found" }, 404);
-    const actor = actorFromProps(ctx.props);
+    const actor = actorFromProps(ctx.props, env.CARR_NATIVE_AGENT_OAUTH_CLIENTS);
     if (!actor) {
       // Same reasoning as mcpApiHandler's identical check (mcp.js) — a
       // provider-validated grant with no resolvable actor, not a routine

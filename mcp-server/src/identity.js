@@ -112,6 +112,26 @@ export function agentSlugForClient(clientName) {
   return AGENT_CLIENT_NAMES[clientName.trim().toLowerCase()] || null;
 }
 
+/**
+ * A self-declared OAuth client_name is attribution only. Native-agent
+ * authority requires an exact client-id -> actor binding held in server
+ * configuration. Unknown, malformed, or mismatched bindings refuse.
+ *
+ * SIEP-21 will replace this bootstrap binding with enrolled workload identity;
+ * until then absence is deliberately non-authorizing.
+ */
+export function verifiedAgentSlugForClient(clientId, attributedSlug, rawBindings) {
+  if (typeof clientId !== "string" || !clientId ||
+      typeof attributedSlug !== "string" || !attributedSlug ||
+      typeof rawBindings !== "string" || !rawBindings) return null;
+  let bindings;
+  try { bindings = JSON.parse(rawBindings); }
+  catch { return null; }
+  if (!bindings || typeof bindings !== "object" || Array.isArray(bindings)) return null;
+  const bound = bindings[clientId];
+  return (bound === attributedSlug && (bound === "codex" || bound === "claude")) ? bound : null;
+}
+
 export function isKnownActor(slug) {
   return typeof slug === "string" && Object.prototype.hasOwnProperty.call(DISPLAY, slug);
 }
@@ -134,7 +154,7 @@ export function propsForSlug(slug, extra = {}) {
 }
 
 /** ctx.props → the actor object the verbs expect. Fails closed. */
-export function actorFromProps(props) {
+export function actorFromProps(props, currentNativeAgentBindings = null) {
   if (!props || !isKnownActor(props.slug)) return null;
   // via/client_id ride through to the write path (0037). They were already on the
   // grant props and this function was dropping them, so no row ever recorded which
@@ -153,9 +173,18 @@ export function actorFromProps(props) {
   const candidateSponsor = props.sponsoring_human_slug || props.human_slug || null;
   const sponsoring_human_slug = !human && isKnownPartner(candidateSponsor)
     ? candidateSponsor : null;
+  // Recompute native-agent authority from the CURRENT server-held client-id
+  // map on every request.  The encrypted grant's historical boolean is not a
+  // revocation mechanism: removing a compromised client id from configuration
+  // must immediately make every already-issued grant non-authorizing.  This
+  // also admits a pre-flag grant once its stored client_id is explicitly bound,
+  // avoiding a forced reauthorization rollout window.
+  const native_agent_verified = !human &&
+    verifiedAgentSlugForClient(props.client_id, props.slug, currentNativeAgentBindings) === props.slug;
   return { slug: props.slug, display: DISPLAY[props.slug], human,
            via: props.via || null, client_id: props.client_id || null,
            sponsoring_human_slug,
+           ...(native_agent_verified ? { native_agent_verified: true } : {}),
            // Compatibility alias for existing internal readers. New code must
            // use sponsoring_human_slug so runtime and sponsor never blur.
            human_slug: sponsoring_human_slug,
@@ -307,9 +336,11 @@ export function agentActorForToken(authorizationHeader, agentTokensRaw, viaLabel
   // above, which is how 'joe-local' resolves to Joe's personal scope while
   // codex/grok (absent from that map) stay unsponsored exactly as before.
   const sponsoring_human_slug = LOCAL_SPONSOR[slug] || null;
+  const native_agent_verified = viaLabel === "local-token" && sponsoring_human_slug !== null;
   return { slug, display: `Agent (${slug})`, human: false, agent: true,
            via: viaLabel, client_id: null,
-           sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false };
+           sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false,
+           ...(native_agent_verified ? { native_agent_verified: true } : {}) };
 }
 
 /**

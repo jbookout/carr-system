@@ -184,7 +184,7 @@ test("a server-verified sponsored Codex session crosses the direct memory transi
   const client = { query: async () => { queries++; return { rows: [] }; } };
   await assert.rejects(() => STRICT_TOOLS["promote-memory"].handler(client, {
     id: "runtime", slug: "codex", human: false, via: "oauth-google",
-    sponsoring_human_slug: "joe", sponsor_required: true,
+    sponsoring_human_slug: "joe", sponsor_required: true, native_agent_verified: true,
   }, {
     idempotency_key: KEY, memory_id: MEMORY_ID, base_version: 1, reason: "verified",
   }), error => error.payload?.error === "memory_version_conflict_or_not_candidate");

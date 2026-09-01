@@ -81,7 +81,6 @@ def shadow_eligible(module, rows: list[dict], identity: dict) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", required=True, choices=("shadow","enforced"))
-    parser.add_argument("--changed-by", required=True)
     parser.add_argument("--reason", required=True)
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
@@ -97,19 +96,22 @@ def main() -> int:
             psycopg.connect(dsn) as conn, conn.cursor() as cur:
         if not args.apply:
             cur.execute("set transaction read only")
+        cur.execute("select session_user,current_user")
+        if cur.fetchone() != ("carr_authority_joe", "carr_authority_joe"):
+            raise RuntimeError("cutover requires the exact carr_authority_joe login")
         cur.execute("""select mode,changed_by,reason,changed_at
                          from ops.rule_delivery_policy where singleton""")
         row = cur.fetchone()
         current = row[0] if row else None
         identity = current_identity(REPO, row)
-        cur.execute("""select count(*),count(*) filter(where p.status='approved'),
-                              count(*) filter(where p.status='approved' and a.kind='human')
-                         from retrieval_proposal p left join actor a on a.id=p.reviewer_id
-                        where p.id=any(%s::uuid[])""",
+        cur.execute("select * from ops.rule_delivery_cutover_preflight(%s::uuid[])",
                     (sorted(curation_ids()),))
-        curation = cur.fetchone()
-        if curation is None:
-            raise RuntimeError("curation approval query returned no aggregate row")
+        preflight_row = cur.fetchone()
+        if preflight_row is None:
+            raise RuntimeError("typed cutover preflight returned no row")
+        typed_mode, target_count, receipt_count, *curation = preflight_row
+        if typed_mode != current:
+            raise RuntimeError("typed preflight and policy row disagree")
         expected_target_ids = sorted(EXPECTED_IDS)
         expected_target_count = len(expected_target_ids)
         cur.execute("""select coalesce(array_agg(short_id order by short_id),
@@ -119,12 +121,8 @@ def main() -> int:
         if target_row is None:
             raise RuntimeError("activation target query returned no row")
         target_ids = list(target_row[0])
-        target_count = len(target_ids)
-        cur.execute("select count(*) from ops.rule_delivery_activation_receipt")
-        receipt_row = cur.fetchone()
-        if receipt_row is None:
-            raise RuntimeError("activation receipt query returned no row")
-        receipt_count = receipt_row[0]
+        if target_count != expected_target_count:
+            raise RuntimeError("typed preflight target count and current contract disagree")
         eligibility = shadow_eligible(eligibility_module, ledger_rows, identity) \
             if args.mode == "enforced" else {"eligible": True}
         preflight = {"current_mode": current,"requested_mode": args.mode,
@@ -164,8 +162,8 @@ def main() -> int:
             print("rule-delivery-cutover: Claude/Codex hook config parity failed",
                   file=sys.stderr)
             return 1
-        cur.execute("select * from ops.set_rule_delivery_mode(%s,%s,%s,%s)",
-                    (args.mode,args.changed_by,args.reason,digest))
+        cur.execute("select * from ops.set_rule_delivery_mode(%s,%s,%s)",
+                    (args.mode,args.reason,digest))
         result = cur.fetchone()
         if not result or result[0] != args.mode or result[1] != expected_target_count:
             raise RuntimeError(f"atomic cutover returned an invalid receipt: {result}")

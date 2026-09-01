@@ -121,7 +121,9 @@ test("an empty reason, an unknown field and a self-supersession refuse before an
   const cases = [
     ["decline-work-request", { ...DECLINE, exit_reason: "   " }, "invalid_decline_work_request"],
     ["decline-work-request", { ...DECLINE, idempotency_key: "not-a-uuid" }, "invalid_decline_work_request"],
-    ["decline-work-request", { ...DECLINE, superseded_by: "WR-000034" }, "invalid_decline_work_request_fields"],
+    // SIEP's reviewed operation contract rejects undeclared top-level fields at
+    // the shared dispatch choke point, before the verb-specific validator.
+    ["decline-work-request", { ...DECLINE, superseded_by: "WR-000034" }, "unregistered_operation_fields"],
     // A literally empty reason never reaches the validator: assertRequiredArgs
     // counts "" as missing at the shared choke point. Whitespace does reach it,
     // and is where "a withdrawal must record why" is actually enforced twice —

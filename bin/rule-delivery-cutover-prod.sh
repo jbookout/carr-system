@@ -6,21 +6,18 @@ set -eu
 REPO="${0:A:h:h}"
 APPLY=0
 MODE=""
-CHANGED_BY=""
 REASON=""
 while (( $# )); do
   case "$1" in
     --apply) APPLY=1; shift ;;
     --mode) MODE="$2"; shift 2 ;;
-    --changed-by) CHANGED_BY="$2"; shift 2 ;;
     --reason) REASON="$2"; shift 2 ;;
     *) print -u2 "unknown argument: $1"; exit 2 ;;
   esac
 done
 [[ "$MODE" == "shadow" || "$MODE" == "enforced" ]] || {
   print -u2 "--mode must be shadow or enforced"; exit 2; }
-[[ -n "$CHANGED_BY" && -n "$REASON" ]] || {
-  print -u2 "--changed-by and --reason are required"; exit 2; }
+[[ -n "$REASON" ]] || { print -u2 "--reason is required"; exit 2; }
 
 if (( APPLY )); then
   dirty=$(cd "$REPO" && git status --porcelain -- \
@@ -29,25 +26,19 @@ if (( APPLY )); then
     ops/rule-delivery-cutover.py ops/rule-delivery-shadow-eligibility.py \
     ops/rule-delivery-shadow-ledger.py ops/rule-delivery-shadow-watch.py \
     bin/rule-delivery-cutover-prod.sh bin/rule-delivery-shadow-ledger-prod.sh \
-    migrations/0317_atomic_rule_delivery_cutover.sql)
+    migrations/0317_atomic_rule_delivery_cutover.sql \
+    migrations/0452_siep02_rule_delivery_authority.sql)
   [[ -z "$dirty" ]] || { print -u2 "REFUSED: cutover source is uncommitted"; exit 1; }
 fi
 
-if [[ -z "${NEON_API_KEY:-}" && -f "$HOME/.config/carr/db.env" ]]; then
+if [[ -z "${CARR_DB_AUTHORITY_JOE_URL:-}" && -f "$HOME/.config/carr/db.env" ]]; then
   . "$REPO"/bin/routine-credential-env.sh
   carr_require_sourceable_db_env "rule-delivery-cutover-prod" || exit $?
   set -a; . "$HOME/.config/carr/db.env"; set +a
 fi
-NEONCTL="$REPO/mcp-server/node_modules/.bin/neonctl"
-[[ -x "$NEONCTL" ]] || NEONCTL="neonctl"
-DSN="$("$NEONCTL" connection-string production --project-id steep-field-48688294 \
-       --role-name neondb_owner 2>/tmp/rule-delivery-cutover-neonctl.err)"
-if [[ -z "$DSN" ]]; then
-  print -u2 "could not derive the pinned Production owner credential"
-  rm -f /tmp/rule-delivery-cutover-neonctl.err
-  exit 1
-fi
-rm -f /tmp/rule-delivery-cutover-neonctl.err
-args=(--mode "$MODE" --changed-by "$CHANGED_BY" --reason "$REASON")
+[[ -n "${CARR_DB_AUTHORITY_JOE_URL:-}" ]] || {
+  print -u2 "REFUSED: CARR_DB_AUTHORITY_JOE_URL is required"; exit 78; }
+args=(--mode "$MODE" --reason "$REASON")
 (( APPLY )) && args+=(--apply)
-DATABASE_URL="$DSN" "$REPO/.venv/bin/python" "$REPO/ops/rule-delivery-cutover.py" "${args[@]}"
+DATABASE_URL="$CARR_DB_AUTHORITY_JOE_URL" \
+  "$REPO/.venv/bin/python" "$REPO/ops/rule-delivery-cutover.py" "${args[@]}"

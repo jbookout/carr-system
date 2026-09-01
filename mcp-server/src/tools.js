@@ -31,6 +31,7 @@ import { stripDealPlaceholders } from "./dealroom.js";
 import { authorizationClassForActor, organizationTenantForActor, permittedActionOwnerSlugs,
          personalScopeForActor } from "./identity.js";
 import { canExercisePartnerAuthority, partnerAuthoritySlugForActor } from "./partner-authority.js";
+import { assertRegisteredOperation, mutationManifestIdentity, MutationRegistryRefusal } from "./mutation-registry.js";
 export { canExercisePartnerAuthority, partnerAuthoritySlugForActor };
 
 // ---------- envelope helpers ----------
@@ -187,7 +188,29 @@ async function withEnvelope(client, actor, verb, args, fn) {
   const key = args.idempotency_key;
   if (!key) throw new ToolError({ error: "missing_idempotency_key",
     hint: "generate a UUID per intended action; retries reuse the SAME key" });
-  const hash = await requestHash({ ...args, idempotency_key: undefined });
+  const identity = auditIdentity(actor);
+  // SIEP-11: replay authority is the exact operation manifest, never the bare
+  // caller key. Binding the canonical operation and server-derived principal
+  // makes cross-verb, cross-actor, cross-client, cross-sponsor, and cross-tenant
+  // reuse fail as key_reuse before a stored response can be returned. The
+  // session/token/epoch fields are added by SIEP-12/17/21; their absence here
+  // cannot widen authority because this manifest is monotonic and deny-only.
+  const hash = await requestHash({
+    manifest_version: "scac-application-mutation.v1",
+    ...mutationManifestIdentity(),
+    operation: verb,
+    principal: {
+      actor_id: actor.id,
+      actor_slug: actor.slug,
+      human: actor.human === true,
+      via: actor.via || null,
+      client_id: actor.client_id || null,
+      sponsoring_human_slug: identity.sponsoring_human_slug,
+      authorization_class: identity.authorization_class,
+      organization_tenant_id: identity.organization_tenant_id,
+    },
+    args: { ...args, idempotency_key: undefined },
+  });
   // Shape writes need same-key serialization before their replay read:
   // otherwise two first calls can both see no tool_call row, and the loser
   // reports a version conflict instead of the promised replay.
@@ -201,7 +224,6 @@ async function withEnvelope(client, actor, verb, args, fn) {
     return { replayed: true, ...prior.rows[0].response };          // A1: replay, no second write
   }
   const result = await fn();                                        // inside the open transaction
-  const identity = auditIdentity(actor);
   await client.query(
     `insert into tool_call (idempotency_key, verb, actor_id, request_hash, response, via, client_id,
        organization_tenant_id, sponsoring_human_slug, personal_scope, authorization_class, correlation_id)
@@ -2598,7 +2620,7 @@ export const TOOLS = {
       // This is not a generic composite dispatcher: the two names are fixed in
       // code, no callback/tool name/provider is accepted, and the second handler
       // is unreachable until the first yields exactly one live target.
-      const found = await TOOLS["find"].handler(c, actor, { query });
+      const found = await executeRegisteredTool(c, actor, "find", { query });
       const candidates = findCatchUpCandidates(found);
       if (candidates.length === 0) {
         const retiredMatches = found.parties.filter((row) => row?.merged === true).length +
@@ -2618,7 +2640,7 @@ export const TOOLS = {
       }
 
       const match = candidates[0];
-      const catchUp = await TOOLS["catch-me-up"].handler(c, actor, { ref: match.target, limit });
+      const catchUp = await executeRegisteredTool(c, actor, "catch-me-up", { ref: match.target, limit });
       return { state: "completed", query, match: { ...match }, catch_up: catchUp };
     },
   },
@@ -2659,7 +2681,7 @@ export const TOOLS = {
       // Three fixed read stages, no caller-selected route: find, catch-up, then
       // (only for a live non-deal target) the introduction graph. The first two
       // already live behind find-and-catch-up's exact one-candidate gate.
-      const located = await TOOLS["find-and-catch-up"].handler(c, actor, {
+      const located = await executeRegisteredTool(c, actor, "find-and-catch-up", {
         query: args.query.trim(),
         limit: timelineLimit,
       });
@@ -2674,7 +2696,7 @@ export const TOOLS = {
           } };
       }
 
-      const graph = await TOOLS["who-do-we-know"].handler(c, actor, {
+      const graph = await executeRegisteredTool(c, actor, "who-do-we-know", {
         target: located.match.target,
         max_depth: maxDepth,
         limit: pathLimit,
@@ -2721,16 +2743,16 @@ export const TOOLS = {
       const ownOrShared = (row) => !row?.owner || String(row.owner).toLowerCase() === scope.sponsor;
 
       const today = await section(async () => {
-        const value = await TOOLS["today-triage"].handler(c, actor, {});
+        const value = await executeRegisteredTool(c, actor, "today-triage", {});
         return { items: value.items.filter(ownOrShared) };
       });
       const claimCard = await section(async () => {
-        const value = await TOOLS["claim-card"].handler(c, actor, { limit: 5, include_needs_contact: false });
+        const value = await executeRegisteredTool(c, actor, "claim-card", { limit: 5, include_needs_contact: false });
         return { items: value.candidates, claimable: value.claimable,
           needs_contact_count: value.needs_contact_count };
       });
       const deals = await section(async () => {
-        const value = await TOOLS["deal-room-board"].handler(c, actor, { workspace: "all" });
+        const value = await executeRegisteredTool(c, actor, "deal-room-board", { workspace: "all" });
         // deal-room-board is shared by design; the personal morning composite is
         // not.  Account ownership is therefore filtered from authenticated
         // sponsor scope exactly as deal ownership is, never from caller input.
@@ -2738,7 +2760,7 @@ export const TOOLS = {
           accounts: value.accounts.filter((row) => String(row?.account_owner || "").toLowerCase() === scope.sponsor) };
       });
       const loops = await section(async () => {
-        const value = await TOOLS["loop-board"].handler(c, actor,
+        const value = await executeRegisteredTool(c, actor, "loop-board",
           { kind: "open_loop", status: "open", owner: scope.sponsor, limit: 60 });
         return { items: value.loops };
       });
@@ -3172,7 +3194,7 @@ export const TOOLS = {
       kind: { type: "string", enum: ["call","text"], default: "call" },
       summary: { type: "string" } }, required: ["idempotency_key","ref","summary"] },
     handler: async (c, actor, args) =>
-      TOOLS["log-activity"].handler(c, actor, { ...args, kind: args.kind || "call" }),
+      executeRegisteredTool(c, actor, "log-activity", { ...args, kind: args.kind || "call" }),
   },
 
   // Added 2026-08-06 (loop #216): the missing half of the capture pipeline.
@@ -7425,12 +7447,11 @@ const RESERVED_AUTHORITY_ARGUMENT_FIELDS = new Set([
   "write", "writes_records", "calls_models", "call_models",
 ]);
 
-// Partner-authority operations are performed through agent sessions in normal
-// use.  The server already resolves and audits the sponsor separately from the
-// runtime actor; do not force a second interactive OAuth seat after that exact
-// identity binding exists.  Keep the delegation deliberately closed to the two
-// native implementation agents.  Local tokens, reviewers, probes, Hermes, Grok,
-// and unsponsored runtimes remain outside this boundary.
+// Authority and registry checks remain distinct. The server resolves and audits
+// the sponsor separately from the runtime actor; caller fields can select
+// neither. Joe's 2026-08-26 ruling retired the humanOnly refusal and admitted
+// the two server-bound local partner doors, but reviewers, probes, Hermes, Grok,
+// and unsponsored runtimes remain outside partner authority.
 export function assertNoCallerAuthorityFields(args) {
   if (args && typeof args === "object" && !Array.isArray(args) &&
       Object.keys(args).some((key) => RESERVED_AUTHORITY_ARGUMENT_FIELDS.has(key)))
@@ -7443,10 +7464,22 @@ export function assertNoCallerAuthorityFields(args) {
 // registry lookup, human-only, coercion, and handler/envelope gates. Keeping
 // the first gate here makes direct MCP, call-verb recursion, and composites
 // fail closed before a handler or database client can be used.
+export async function assertRegisteredToolInput(name, tool, args = {}) {
+  try {
+    await assertRegisteredOperation(name, tool, args);
+  } catch (error) {
+    if (error instanceof MutationRegistryRefusal)
+      throw new ToolError({ error: error.error, operation: error.operation,
+        ...(error.fields ? { fields: error.fields } : {}) });
+    throw error;
+  }
+}
+
 export async function executeRegisteredTool(client, actor, name, args = {}) {
   const tool = TOOLS[name];
   if (!tool) throw new ToolError({ error: "unknown_tool", name });
   assertNoCallerAuthorityFields(args);
+  await assertRegisteredToolInput(name, tool, args);
   // RETIRED 2026-08-26 BY JOE'S RULING, and the flag is kept only as a label.
   // His words: "Nothing is human only from now on. I don't want anything to be
   // human only in this entire system. I'm so sick of the roadblocks. I'm
@@ -7505,9 +7538,62 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
 }
 
 
+const TOOL_REGISTRATION_SOURCE = Object.freeze({
+  "inline": "mcp-server/src/tools.js",
+  "deal-room-inline": "mcp-server/src/tools.js",
+  "deploy-gap-inline": "mcp-server/src/tools.js",
+  "doctrine": "mcp-server/src/doctrine.js",
+  "situation-retrieval": "mcp-server/src/situation-retrieval.js",
+  "investigation": "mcp-server/src/investigation.js",
+  "capability-program": "mcp-server/src/capability-program.js",
+  "work-shape": "mcp-server/src/work-shape.js",
+  "work-request-intake": "mcp-server/src/work-request-intake.js",
+  "lease-term-comparison": "mcp-server/src/lease-term-comparison.js",
+  "partner-room": "mcp-server/src/partner-room.js",
+  "agent-profile": "mcp-server/src/agent-profiles.js",
+  "bot-brief": "mcp-server/src/bot-brief.js",
+  "evidence-activation": "mcp-server/src/evidence-activation.js",
+  "memory": "mcp-server/src/memory.js",
+  "incident": "mcp-server/src/incident.js",
+  "engineering-runtime": "mcp-server/src/engineering-runtime.js",
+  "tour-rights-projection": "mcp-server/src/tour-rights-projection.js",
+  "tour-property-jurisdiction": "mcp-server/src/tour-property-jurisdiction.js",
+  "tour-domain": "mcp-server/src/tour-domain.js",
+  "tour-property-search": "mcp-server/src/tour-property-search.js",
+  "tour-map-promotion": "mcp-server/src/tour-map-promotion.js",
+  "tour-sharing": "mcp-server/src/tour-sharing.js",
+  "tour-artifacts": "mcp-server/src/tour-artifacts.js",
+});
+
+function bindToolSource(tool, source) {
+  if (!tool || typeof tool !== "object" || !TOOL_REGISTRATION_SOURCE[source])
+    throw new Error(`missing reviewed tool source for ${source}`);
+  Object.defineProperty(tool, "registrySource", {
+    value: TOOL_REGISTRATION_SOURCE[source], enumerable: false, writable: false, configurable: false,
+  });
+  deepFreezeToolContract(tool);
+}
+
+function deepFreezeToolContract(value, seen = new Set()) {
+  if ((!value || (typeof value !== "object" && typeof value !== "function")) || seen.has(value)) return value;
+  seen.add(value);
+  for (const key of Reflect.ownKeys(value)) deepFreezeToolContract(value[key], seen);
+  return Object.freeze(value);
+}
+
+for (const tool of Object.values(TOOLS)) bindToolSource(tool, "inline");
+
+function registerTools(additions, source) {
+  const duplicates = Object.keys(additions).filter(name => Object.hasOwn(TOOLS, name)).sort();
+  if (duplicates.length)
+    throw new Error(`duplicate tool registration from ${source}: ${duplicates.join(",")}`);
+  for (const tool of Object.values(additions)) bindToolSource(tool, source);
+  Object.assign(TOOLS, additions);
+}
+
 // Deal Room contract. Durable writes use the same envelope and event helper as
 // the rest of this registry; the one explicit exception is the ephemeral lease.
-Object.assign(TOOLS, {
+registerTools({
   "get-deal-room": {
     description: "Read one complete open Deal Room work record: board/workspace and active/parked fields, next actions, notes, critical dates, activity, parties, premises, current economics, documents, and attributed history. Includes salesforce_id and base_version only so a reconciler can make one guarded follow-on write. Placeholder Salesforce fields are structurally excluded.",
     inputSchema: { type: "object", properties: { deal: { type: "string" } }, required: ["deal"] },
@@ -8153,14 +8239,14 @@ Object.assign(TOOLS, {
         ref: String(action.rows[0].id), assignee: candidate.assignee_slug };
     }),
   },
-});
+}, "deal-room-inline");
 
 // The deploy-gap pair (2026-08-08, Joe's reconnect complaint). call-verb's
 // dispatch lives in mcp.js callTool (interception, so profile checks apply to
 // the INNER verb by recursion); these registry entries exist so both tools are
 // listed with schemas. list-verbs is the discovery half: a session whose
 // cached tool list predates a deploy asks the live registry what exists now.
-Object.assign(TOOLS, {
+registerTools({
   "list-verbs": {
     description: "The LIVE verb registry — names, descriptions, write flags, input schemas — straight from the deployed Worker, bypassing the connector's cached tool list. Use when a verb you expect is missing from your tool list (a deploy since this session connected): find it here, then invoke it through call-verb without any reconnect.",
     inputSchema: { type: "object", properties: {
@@ -8444,41 +8530,41 @@ Object.assign(TOOLS, {
         hint: "call-verb is intercepted in mcp.js callTool; invoke the inner verb directly here" });
     },
   },
-});
+}, "deploy-gap-inline");
 
 // Doctrine store verbs (P2, decision 82a2fb62) — same envelope, same contracts.
-Object.assign(TOOLS, doctrineTools({ withEnvelope, writeEvent, ToolError }));
+registerTools(doctrineTools({ withEnvelope, writeEvent, ToolError }), "doctrine");
 
 // WR-AI-006: curation proposals are machine-callable; approval and retirement
 // remain human-only inside their handlers and the dispatcher boundary.
-Object.assign(TOOLS, situationRetrievalTools({ withEnvelope, writeEvent, ToolError }));
+registerTools(situationRetrievalTools({ withEnvelope, writeEvent, ToolError }), "situation-retrieval");
 
 // Bounded investigation control plane (0098): deterministic signals, one
 // reasoning owner, evidence-only worker packets, explicit branch termination.
-Object.assign(TOOLS, investigationTools({ withEnvelope, writeEvent, ToolError }));
+registerTools(investigationTools({ withEnvelope, writeEvent, ToolError }), "investigation");
 
 // One fixed ordered AI-capability portfolio over canonical Work Requests.
-Object.assign(TOOLS, capabilityProgramTools({ withEnvelope, writeEvent, ToolError }));
+registerTools(capabilityProgramTools({ withEnvelope, writeEvent, ToolError }), "capability-program");
 
 // Evidence-backed implementation form, linked to canonical Work Requests.
-Object.assign(TOOLS, workShapeTools({ withEnvelope, writeEvent, ToolError }));
+registerTools(workShapeTools({ withEnvelope, writeEvent, ToolError }), "work-shape");
 
 // Program 6: sourced additive capture and a safe card only. No lifecycle verbs.
-Object.assign(TOOLS, workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }));
+registerTools(workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }), "work-request-intake");
 
 // Pure workbook-derived lease economics. No database, model, or write path.
-Object.assign(TOOLS, leaseTermComparisonTools({ ToolError }));
+registerTools(leaseTermComparisonTools({ ToolError }), "lease-term-comparison");
 
 // The partner room (Idea 78): shared AI-to-AI transcript both Macs poll; raw
 // turns, server-derived attribution, human-watchable. See src/partner-room.js.
-Object.assign(TOOLS, partnerRoomTools({ withEnvelope, ToolError }));
-Object.assign(TOOLS, agentProfileTools({ withEnvelope, writeEvent, ToolError }));
-Object.assign(TOOLS, botBriefTools({ ToolError, assertNoCallerAuthorityFields }));
-Object.assign(TOOLS, evidenceActivationTools({ withEnvelope, ToolError }));
+registerTools(partnerRoomTools({ withEnvelope, ToolError }), "partner-room");
+registerTools(agentProfileTools({ withEnvelope, writeEvent, ToolError }), "agent-profile");
+registerTools(botBriefTools({ ToolError, assertNoCallerAuthorityFields }), "bot-brief");
+registerTools(evidenceActivationTools({ withEnvelope, ToolError }), "evidence-activation");
 // Phase 1 CARR-native learning memory: evidence-backed context with explicit
 // candidate/promotion/correction/forgetting lifecycle. Memory never grants
 // authority; actor and sponsor scope are resolved by the server.
-Object.assign(TOOLS, memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCallerAuthorityFields }));
+registerTools(memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCallerAuthorityFields }), "memory");
 
 // The operational incident ledger gets a front door (2026-08-23 rules-and-verbs
 // council, item 1 from both chairs). ops.incident has been written by two
@@ -8488,28 +8574,30 @@ Object.assign(TOOLS, memoryTools({ withEnvelope, writeEvent, ToolError, assertNo
 // adjudication carrying partner authority, because 0117 already wrote that
 // boundary into the grants and the verb surface should not be laxer than the
 // grants are. See migrations/0286 for the permission half.
-Object.assign(TOOLS, incidentTools({ withEnvelope, writeEvent, ToolError, authorizationClassForActor }));
+registerTools(incidentTools({ withEnvelope, writeEvent, ToolError, authorizationClassForActor }), "incident");
 
 // Engineering Passport runtime: typed plan registration, server-derived
 // admission, and read-only closure projection over the canonical job ledger.
-Object.assign(TOOLS, engineeringRuntimeTools({ withEnvelope, writeEvent, ToolError }));
+registerTools(engineeringRuntimeTools({ withEnvelope, writeEvent, ToolError }), "engineering-runtime");
 
 // Tour Operations Slice 2: bounded rights, evidence, assertion, and immutable
 // public-projection seams. Sealing is authority-only; publication is absent.
-Object.assign(TOOLS, tourRightsProjectionTools({ withEnvelope, writeEvent, ToolError }));
+registerTools(tourRightsProjectionTools({ withEnvelope, writeEvent, ToolError }), "tour-rights-projection");
 
 // Tour Operations Slice 3: narrow, rights-bound identity assertions,
 // coordinate candidates, and human entrance-verification receipts. No map,
 // route, publication, or promotion seam is exposed here.
-Object.assign(TOOLS, tourPropertyJurisdictionTools({ withEnvelope, writeEvent, ToolError }));
+registerTools(tourPropertyJurisdictionTools({ withEnvelope, writeEvent, ToolError }), "tour-property-jurisdiction");
 
 // Tour Operations Slice 4: immutable Tour route versions and internal-only
 // cheat-sheet revisions. Route acceptance is authority-only; publication is absent.
-Object.assign(TOOLS, tourDomainTools({ withEnvelope, writeEvent, ToolError }));
+registerTools(tourDomainTools({ withEnvelope, writeEvent, ToolError }), "tour-domain");
 
 // Tour Operations delivery surfaces: governed property search and cart,
 // confidential sharing, and deterministic PDF request/review records.
-Object.assign(TOOLS, tourPropertySearchTools({ withEnvelope, writeEvent, ToolError }));
-Object.assign(TOOLS, tourMapPromotionTools({ withEnvelope, writeEvent, ToolError }));
-Object.assign(TOOLS, tourSharingTools({ withEnvelope, writeEvent, ToolError }));
-Object.assign(TOOLS, tourArtifactTools({ withEnvelope, writeEvent, ToolError }));
+registerTools(tourPropertySearchTools({ withEnvelope, writeEvent, ToolError }), "tour-property-search");
+registerTools(tourMapPromotionTools({ withEnvelope, writeEvent, ToolError }), "tour-map-promotion");
+registerTools(tourSharingTools({ withEnvelope, writeEvent, ToolError }), "tour-sharing");
+registerTools(tourArtifactTools({ withEnvelope, writeEvent, ToolError }), "tour-artifacts");
+
+Object.freeze(TOOLS);
