@@ -296,13 +296,14 @@ def test_plumb_leaves_tracked_real_dir_alone():
         git(["commit", "-q", "-m", "tracked real .venv"], wt)
 
         p = s.worktree_sh("--plumb", wt)
-        check("--plumb exits 0 even though one target is a real tracked dir",
-              p.returncode == 0, p.stdout + p.stderr)
-        # A worktree-local .venv is now the runtime --plumb JUDGES, rather than
-        # something it merely declines to overwrite: this one has no interpreter,
-        # so it cannot be proven against the lock and is reported untrusted. What
-        # matters for THIS case is unchanged and is asserted below — the real
-        # tracked directory and its file survive untouched.
+        # A worktree-local .venv is the runtime --plumb JUDGES, rather than
+        # something it merely declines to overwrite. This one has no interpreter,
+        # so it cannot be proven against the lock — and --plumb must REPORT that
+        # by exiting nonzero. Expecting success here was itself a hole: a caller
+        # reading the exit status was told the plumbing had succeeded while the
+        # runtime in the tree was untrusted.
+        check("--plumb exits NONZERO when the worktree-local .venv is untrusted",
+              p.returncode != 0, f"rc={p.returncode}\n{p.stdout}{p.stderr}")
         check("--plumb reports the worktree-local .venv left in place",
               "left in place" in p.stdout, p.stdout)
         check(".venv is still a real directory, not a symlink",

@@ -156,9 +156,12 @@ with tempfile.TemporaryDirectory() as td:
         cwd=canonical)
     link_path = worktree / ".venv"
 
+    # check=False throughout: a refused runtime is now a NONZERO exit from
+    # --plumb (callers must not swallow the guard's verdict), so the cases below
+    # assert on returncode explicitly rather than relying on subprocess to raise.
     def plumb(env=None):
         return run(ZSH, str(canonical / "bin" / "worktree.sh"), "--plumb",
-                   str(worktree), cwd=worktree, env=env)
+                   str(worktree), cwd=worktree, env=env, check=False)
 
     REFUSAL = "does not match this worktree's requirements.lock"
 
@@ -168,6 +171,7 @@ with tempfile.TemporaryDirectory() as td:
     assert REFUSAL in first.stdout, first.stdout
     assert not link_path.exists() and not link_path.is_symlink(), \
         "a venv missing a locked package must not be linked"
+    assert first.returncode != 0, "--plumb must propagate the refusal"
 
     # CASE 2 — exact match links. `pip` is present and is NOT in the lock: the
     # installer bootstrap is never a project dependency and never appears in a
@@ -178,6 +182,7 @@ with tempfile.TemporaryDirectory() as td:
     assert link_path.is_symlink(), second.stdout
     assert os.path.realpath(link_path) == os.path.realpath(venv)
     assert "ok  .venv" in second.stdout, second.stdout
+    assert second.returncode == 0, second.stdout
 
     # CASE 3 — the cache drifts AFTER the worktree was plumbed. Re-running the
     # same path must remove the now-unsafe untracked symlink, not leave it
@@ -187,6 +192,7 @@ with tempfile.TemporaryDirectory() as td:
     assert REFUSAL in third.stdout, third.stdout
     assert not link_path.exists() and not link_path.is_symlink(), \
         "a wrong-version venv must be unlinked, not left trusted"
+    assert third.returncode != 0, "--plumb must propagate the refusal"
 
     # CASE 4 — the phantom dependency: everything the lock pins is installed AND
     # something it does not pin is installed too. That is the direction that
@@ -196,6 +202,7 @@ with tempfile.TemporaryDirectory() as td:
     assert REFUSAL in fourth.stdout, fourth.stdout
     assert not link_path.exists() and not link_path.is_symlink(), \
         "a venv holding an unlocked distribution must not be linked"
+    assert fourth.returncode != 0, "--plumb must propagate the refusal"
 
     # CASE 5 — THE OVERRIDE NEEDS BOTH KEYS, and the argv half is the one an
     # exported variable cannot supply. An ambient CARR_WORKTREE_VENV_DRIFT_OK
@@ -231,6 +238,7 @@ with tempfile.TemporaryDirectory() as td:
     assert "LINKED ANYWAY" in fifth.stdout, fifth.stdout
     assert REFUSAL in fifth.stdout, "the override must still state the drift"
     assert link_path.is_symlink(), fifth.stdout
+    assert fifth.returncode == 0, "a granted override is a success"
 
     rows = guard_rows()
     assert len(rows) > before, "the override left no durable record"
@@ -276,6 +284,7 @@ with tempfile.TemporaryDirectory() as td:
     (worktree / "requirements.lock").unlink()
     nolock = plumb()
     assert "no readable requirements.lock" in nolock.stdout, nolock.stdout
+    assert nolock.returncode != 0, "fail-closed must reach the caller"
     assert not link_path.exists() and not link_path.is_symlink(), \
         "with no lock to prove it against, the venv must not be linked"
     run("git", "checkout", "--", "requirements.lock", cwd=worktree)
@@ -303,6 +312,112 @@ with tempfile.TemporaryDirectory() as td:
     set_installed(local_venv, {"alpha": "1.0.0", "beta": "2.0.0", "pip": "1.0"})
     good_local = plumb()
     assert "worktree-local) matches" in good_local.stdout, good_local.stdout
+    assert good_local.returncode == 0, good_local.stdout
+
+    # CASE 11 — NO CALLER SWALLOWS THE REFUSAL. The guard failing closed
+    # internally is worth nothing if --plumb, --install and the create path all
+    # report success anyway; a caller reading the exit status was being told the
+    # runtime had been accepted. Each door is checked separately.
+    set_installed(local_venv, {"alpha": "1.0.0", "beta": "6.6.6"})   # drifted
+    refused = run(ZSH, str(canonical / "bin" / "worktree.sh"), "--plumb",
+                  str(worktree), cwd=worktree, check=False)
+    assert refused.returncode != 0, \
+        f"--plumb swallowed the refusal and exited 0:\n{refused.stdout}"
+    assert REFUSAL in refused.stdout, refused.stdout
+    # The other two links are still plumbed — they are independent of Python.
+    assert (worktree / "out").is_symlink() or not (canonical / "out").is_dir()
+
+    # 11b — a MISSING lock during --install is a refusal, not "nothing to do".
+    # Reporting nothing-to-install and exiting 0 left the existing local .venv
+    # in place, unvalidated, and blessed by a successful exit.
+    (worktree / "requirements.lock").unlink()
+    no_lock_install = run(ZSH, str(canonical / "bin" / "worktree.sh"), "--install",
+                          str(worktree), cwd=worktree, check=False)
+    assert no_lock_install.returncode != 0, \
+        f"--install treated a missing lock as a no-op and exited 0:\n{no_lock_install.stdout}"
+    assert "no readable requirements.lock" in no_lock_install.stdout, no_lock_install.stdout
+    run("git", "checkout", "--", "requirements.lock", cwd=worktree)
+
+    # 11c — the CREATE path carries the verdict too.
+    set_installed(venv, {"alpha": "1.0.0", "beta": "9.9.9"})          # canonical drifted
+    created = run(ZSH, str(canonical / "bin" / "worktree.sh"), "fresh-tree",
+                  cwd=canonical, check=False)
+    assert created.returncode != 0, \
+        f"the create path reported a ready worktree despite a refused runtime:\n{created.stdout}"
+    assert "worktree ready" in created.stdout, "the tree is still created and still said so"
+    assert "Python runtime was REFUSED" in created.stdout, created.stdout
+
+    # CASE 12 — AN OVERRIDE WITHOUT A DURABLE RECORD IS DENIED. Recording used
+    # to be best-effort: an absent or unwritable ledger returned success, the
+    # announcement was printed anyway, and the drifted runtime got linked. The
+    # record is the override's precondition, so an unwritable ledger must refuse.
+    both_keys = dict(FIXTURE_ENV, CARR_WORKTREE_VENV_DRIFT_OK="1")
+    # The override only applies to the SHARED venv, so clear the worktree-local
+    # one case 9 built — otherwise this exercises the local-venv refusal instead.
+    if link_path.is_symlink():
+        link_path.unlink()
+    elif link_path.is_dir():
+        shutil.rmtree(link_path)
+    set_installed(venv, {"alpha": "1.0.0", "beta": "9.9.9"})   # shared: drifted
+    guard_log.chmod(0o444)
+    readonly_dir = os.stat(canonical / "out").st_mode
+    (canonical / "out").chmod(0o555)          # cannot create or append here
+    try:
+        denied = run(ZSH, str(canonical / "bin" / "worktree.sh"), "--plumb",
+                     "--allow-venv-drift", str(worktree), cwd=worktree,
+                     env=both_keys, check=False)
+    finally:
+        (canonical / "out").chmod(readonly_dir)
+        guard_log.chmod(0o644)
+    assert "override DENIED" in denied.stdout, \
+        f"an unwritable ledger still granted the override:\n{denied.stdout}"
+    assert "LINKED ANYWAY" not in denied.stdout, denied.stdout
+    assert not link_path.exists() and not link_path.is_symlink(), \
+        "the drifted runtime was linked despite the record failing"
+    assert denied.returncode != 0, denied.stdout
+
+    # 12b — an ABSENT ledger directory is the same denial as an unwritable one.
+    # The recorder used to `return 0` when out/ did not exist, which meant the
+    # override was granted on a machine where nothing could ever be recorded.
+    moved_aside = canonical / "out-moved-aside"
+    (canonical / "out").rename(moved_aside)
+    try:
+        no_ledger = run(ZSH, str(canonical / "bin" / "worktree.sh"), "--plumb",
+                        "--allow-venv-drift", str(worktree), cwd=worktree,
+                        env=both_keys, check=False)
+    finally:
+        moved_aside.rename(canonical / "out")
+    assert "override DENIED" in no_ledger.stdout, \
+        f"an absent ledger directory still granted the override:\n{no_ledger.stdout}"
+    assert "LINKED ANYWAY" not in no_ledger.stdout, no_ledger.stdout
+    assert not link_path.exists() and not link_path.is_symlink(), no_ledger.stdout
+
+    # 12c — THE WRITE SUCCEEDS AND LANDS NOTHING. This is the case the read-back
+    # exists for and the only one that isolates it: /dev/null accepts the append,
+    # flush and fsync all report success, and the row is simply not there
+    # afterwards. Without reading the row back, "recorded" would be a lie told by
+    # a successful syscall.
+    real_rows = guard_log.read_text()
+    guard_log.unlink()
+    guard_log.symlink_to("/dev/null")
+    try:
+        black_hole = run(ZSH, str(canonical / "bin" / "worktree.sh"), "--plumb",
+                         "--allow-venv-drift", str(worktree), cwd=worktree,
+                         env=both_keys, check=False)
+    finally:
+        guard_log.unlink()
+        guard_log.write_text(real_rows)
+    assert "override DENIED" in black_hole.stdout, \
+        f"a write that landed nothing still granted the override:\n{black_hole.stdout}"
+    assert "LINKED ANYWAY" not in black_hole.stdout, black_hole.stdout
+    assert not link_path.exists() and not link_path.is_symlink(), black_hole.stdout
+
+    # And with the ledger writable again, the same invocation is granted.
+    granted = run(ZSH, str(canonical / "bin" / "worktree.sh"), "--plumb",
+                  "--allow-venv-drift", str(worktree), cwd=worktree,
+                  env=both_keys, check=False)
+    assert "LINKED ANYWAY" in granted.stdout, granted.stdout
+    assert link_path.is_symlink(), granted.stdout
 
 
 # ---- CASE 10. THE REAL ARGV, NOT THE PRINTED ONE. -------------------------
@@ -382,4 +497,5 @@ with tempfile.TemporaryDirectory() as td:
 
 print("worktree-venv-lock-selftest: drifted shared .venv refused, fail-closed without a "
       "lock, worktree-local runtime judged, override needs both keys and is recorded, "
-      "executed installer argv proven frozen")
+      "executed installer argv proven frozen, no caller swallows the refusal, "
+      "an unrecordable override is denied")

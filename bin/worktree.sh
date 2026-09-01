@@ -277,10 +277,17 @@ PYEOF
 # against which lock. Cross-family review, blocker 2. Only the outcomes that
 # matter are written — an override taken, or a runtime refused — so this stays a
 # ledger of exceptions rather than a log of every SessionStart on 40 worktrees.
+#
+# IT RETURNS FAILURE WHEN IT DID NOT RECORD, and the caller is expected to care.
+# The first cut returned success when out/ was absent, hid the recorder behind
+# `|| true`, and swallowed write errors — so an unwritable ledger produced a
+# silent "recorded" claim and the override proceeded anyway. An audit control
+# that fails open is not an audit control. Cross-family review round 2, blocker
+# 2. The row is written AND READ BACK before this reports success.
 venv_guard_record() {
   local log="$CANON/out/worktree-venv-guard.jsonl"
-  [ -d "$CANON/out" ] || return 0
-  "$PY" - "$log" "$1" "$2" "$3" "$4" <<'PYEOF' 2>/dev/null || true
+  [ -d "$CANON/out" ] || return 1
+  "$PY" - "$log" "$1" "$2" "$3" "$4" <<'PYEOF'
 import hashlib, json, os, subprocess, sys, time
 
 log, verdict, wt, venv, kind = sys.argv[1:6]
@@ -320,11 +327,28 @@ row = {
     "venv_identity": identity,
     "requirements_lock_sha256": sha256_file(os.path.join(wt, "requirements.lock")),
 }
+line = json.dumps(row, sort_keys=True)
 try:
     with open(log, "a") as fh:
-        fh.write(json.dumps(row, sort_keys=True) + "\n")
-except OSError:
-    pass
+        fh.write(line + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+except OSError as exc:
+    print(f"venv_guard_record: could not write {log}: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+# READ IT BACK. A write that reported success and left nothing on disk is the
+# failure this whole record exists to make impossible, so the claim "recorded"
+# is only made after the row is found again.
+try:
+    with open(log) as fh:
+        written = [ln.rstrip("\n") for ln in fh]
+except OSError as exc:
+    print(f"venv_guard_record: could not read back {log}: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+if not written or written[-1] != line:
+    print(f"venv_guard_record: row not found after write in {log}", file=sys.stderr)
+    raise SystemExit(1)
 PYEOF
 }
 
@@ -390,20 +414,32 @@ link_python_runtime() {
   # A worktree-local venv is somebody's work: it is never deleted here, only
   # refused and recorded. A shared symlink this script made is dropped, as
   # before — a wrong runtime is worse than an absent one.
+  # RECORD FIRST, VERIFY, THEN ACT. The override is not "announce and proceed";
+  # the durable record is its PRECONDITION. If the ledger cannot be written and
+  # read back, the override is DENIED and this falls through to the ordinary
+  # refusal — an exception nobody can audit is not an exception this grants.
   if [ "$kind" = "shared" ] && drift_override_allowed; then
-    print -r -- "  !! shared .venv does not match this worktree's requirements.lock"
-    print -r -- "     LINKED ANYWAY — CARR_WORKTREE_VENV_DRIFT_OK=1 and --allow-venv-drift were both given"
-    print -r -- "     recorded in out/worktree-venv-guard.jsonl; local results may not match CI"
-    venv_guard_record "override_used" "$wt" "$target" "$kind"
-    link "$CANON/.venv" "$name"
-    return 0
+    if venv_guard_record "override_used" "$wt" "$target" "$kind"; then
+      print -r -- "  !! shared .venv does not match this worktree's requirements.lock"
+      print -r -- "     LINKED ANYWAY — CARR_WORKTREE_VENV_DRIFT_OK=1 and --allow-venv-drift were both given"
+      print -r -- "     recorded in out/worktree-venv-guard.jsonl; local results may not match CI"
+      link "$CANON/.venv" "$name"
+      return 0
+    fi
+    print -r -- "  !! override DENIED — the durable record could not be written to"
+    print -r -- "     $CANON/out/worktree-venv-guard.jsonl"
+    print -r -- "     An override that cannot be audited is not granted; refusing the runtime instead."
   fi
 
   if [ "$kind" = "shared" ] && [ -L "$name" ] \
      && ! git -C "$wt" ls-files --error-unmatch ".venv" >/dev/null 2>&1; then
     rm "$name"
   fi
-  venv_guard_record "refused" "$wt" "$target" "$kind"
+  # DELIBERATELY NOT GATED on the recorder, and this is the opposite case from
+  # the override above: refusing is the SAFE direction, so a ledger that cannot
+  # be written must not turn a refusal into an acceptance. The override needs
+  # the record because it grants an exception; a refusal grants nothing.
+  venv_guard_record "refused" "$wt" "$target" "$kind" || true
   if [ -r "$wt/requirements.lock" ]; then
     print -r -- "  !! $kind .venv does not match this worktree's requirements.lock — not trusted"
   else
@@ -652,10 +688,15 @@ case "$1" in
       print -r -- "  ./run.sh worktree --list   shows the ones that are"
       exit 2
     fi
-    link_python_runtime "$wt"
+    # PROPAGATE THE REFUSAL. link_python_runtime returning nonzero means the
+    # Python runtime was NOT trusted; exiting 0 anyway told every caller the
+    # plumbing had succeeded, which is the refusal-swallowing this boundary
+    # cannot afford. out/ and node_modules are still plumbed — they are
+    # independent and useful — but the exit status is the guard's.
+    link_python_runtime "$wt"; plumb_rc=$?
     link "$CANON/out"   "$wt/out"
     link_node_runtime "$wt"
-    exit 0
+    exit $plumb_rc
     ;;
   --install)
     shift
@@ -768,7 +809,15 @@ case "$1" in
         fi
       fi
     else
-      print -r -- "  python: no requirements.lock in this worktree — nothing to install"
+      # A MISSING LOCK IS A REFUSAL, NOT A NO-OP. Reporting "nothing to install"
+      # and exiting 0 left any existing local .venv in place, unvalidated, and
+      # blessed by a successful exit — the same fail-open the guard itself was
+      # fixed to close. Cross-family review round 2, blocker 1.
+      print -r -- "  !! python: this worktree has no readable requirements.lock"
+      print -r -- "     There is no frozen runtime to install and nothing to validate an existing"
+      print -r -- "     .venv against, so this is a refusal rather than a no-op."
+      venv_guard_record "install_refused_no_lock" "$wt" "$wt/.venv" "worktree-local" || true
+      rc=1
     fi
 
     if [ -r "$wt/mcp-server/package-lock.json" ]; then
@@ -1008,7 +1057,7 @@ else
   print -r -- "branched $name from $base"
 fi
 
-link_python_runtime "$wt"
+link_python_runtime "$wt"; create_py_rc=$?
 link "$CANON/out"   "$wt/out"
 # The THIRD gitignored dependency, and it hides the same way the first two did.
 # `npm test` in a fresh worktree dies on ERR_MODULE_NOT_FOUND for
@@ -1031,3 +1080,15 @@ print -r -- "  ./run.sh worktree --remove $name"
 print -r -- ""
 print -r -- "Keep the nightly chain in $CANON — it publishes to the vault, so running"
 print -r -- "it here would ship this branch's output as if it were live."
+
+# THE CREATE PATH CARRIES THE GUARD'S VERDICT TOO. A worktree whose Python
+# runtime was refused is a worktree that cannot run this repo's tooling, and
+# saying "worktree ready" with exit 0 hid exactly that. The tree is still
+# created and still useful — the message above stands — but the exit status
+# tells the truth about the runtime. Cross-family review round 2, blocker 1.
+if [ "$create_py_rc" -ne 0 ]; then
+  print -r -- ""
+  print -r -- "  !! but its Python runtime was REFUSED (see above) — build one with:"
+  print -r -- "     ./run.sh worktree --install $name"
+fi
+exit $create_py_rc
