@@ -20,6 +20,11 @@ const BASE = "b".repeat(40);
 const TREE = "c".repeat(40);
 const SCOPE_ID = "99999999-9999-4999-8999-999999999999";
 const CURRENTNESS = new Date(Date.now() - 1_000).toISOString();
+const VALID_UNTIL = new Date(Date.now() + 10 * 60_000).toISOString();
+
+function pathClaim(path) {
+  return { lease_ref: `canonical-ownership-lease:${SCOPE_ID}`, path, mode: "file", operation: "write", claim_path: path, claim_mode: "file", claim_operation: "write" };
+}
 
 function passport() {
   const value = {
@@ -85,12 +90,23 @@ function authorization() {
     pr_number: 42,
     source_merge_only: true,
     allowed_actions: [...SOURCE_MERGE_ACTIONS],
+    assurance_bindings: [{
+      slice_ref: "slice:source", attempt_id: "attempt:source",
+      evidence_manifest_ref: "assurance-manifest:11111111-1111-4111-8111-111111111111",
+      review_manifest_ref: "assurance-manifest:22222222-2222-4222-8222-222222222222",
+      evidence_ref: "assurance-evidence:33333333-3333-4333-8333-333333333333",
+      reviewer_fact_ref: "engineering-review:44444444-4444-4444-8444-444444444444",
+      review_extension_ref: "assurance-review:55555555-5555-4555-8555-555555555555",
+      reviewer_state: "passed", evidence_digest: `sha256:${"4".repeat(64)}`,
+      review_digest: `sha256:${"5".repeat(64)}`, repository_commit_sha: HEAD,
+      repository_tree_sha: TREE, snapshot_valid_until: VALID_UNTIL,
+    }],
     scope_ref: `source-merge-scope:${SCOPE_ID}`,
     scope_digest: `sha256:${"6".repeat(64)}`,
     currentness_evaluated_at: CURRENTNESS,
     authorized_path_claims: [
-      { path: "mcp-server/src/routine-feature.js", mode: "file", operation: "write" },
-      { path: "mcp-server/test/routine-feature.test.mjs", mode: "file", operation: "write" },
+      pathClaim("mcp-server/src/routine-feature.js"),
+      pathClaim("mcp-server/test/routine-feature.test.mjs"),
     ],
   };
 }
@@ -175,9 +191,7 @@ test("scope is exact files only and protected authority surfaces never auto-merg
   assert.ok(evaluation({ authorization: tree }).reason_codes.includes("canonical_path_authority_invalid"));
 
   const protectedAuth = authorization();
-  protectedAuth.authorized_path_claims.push({
-    path: "migrations/0471_example.sql", mode: "file", operation: "write",
-  });
+  protectedAuth.authorized_path_claims.push(pathClaim("migrations/0471_example.sql"));
   protectedAuth.authorized_path_claims.sort((left, right) => left.path.localeCompare(right.path));
   const pr = pullRequest();
   pr.files.push({ filename: "migrations/0471_example.sql", status: "added" });
@@ -185,9 +199,7 @@ test("scope is exact files only and protected authority surfaces never auto-merg
   assert.ok(result.reason_codes.includes("protected_source_authority_boundary"));
 
   const trustedPathAuth = authorization();
-  trustedPathAuth.authorized_path_claims.push({
-    path: "mcp-server/src/tools.js", mode: "file", operation: "write",
-  });
+  trustedPathAuth.authorized_path_claims.push(pathClaim("mcp-server/src/tools.js"));
   trustedPathAuth.authorized_path_claims.sort((left, right) => left.path.localeCompare(right.path));
   const trustedPathPr = pullRequest();
   trustedPathPr.files.push({ filename: "mcp-server/src/tools.js", status: "modified" });
@@ -195,9 +207,7 @@ test("scope is exact files only and protected authority surfaces never auto-merg
     .reason_codes.includes("protected_source_authority_boundary"));
 
   const digestAuth = authorization();
-  digestAuth.authorized_path_claims.push({
-    path: "mcp-server/src/sha256.js", mode: "file", operation: "write",
-  });
+  digestAuth.authorized_path_claims.push(pathClaim("mcp-server/src/sha256.js"));
   digestAuth.authorized_path_claims.sort((left, right) => left.path.localeCompare(right.path));
   const digestPr = pullRequest();
   digestPr.files.push({ filename: "mcp-server/src/sha256.js", status: "modified" });
@@ -227,6 +237,32 @@ test("stale controller currentness stops merge", () => {
   const stale = authorization();
   stale.currentness_evaluated_at = new Date(Date.now() - 6 * 60_000).toISOString();
   assert.ok(evaluation({ authorization: stale }).reason_codes.includes("controller_currentness_stale"));
+});
+
+test("assurance bindings must cover the exact current receipt generation", () => {
+  const wrongAttempt = authorization();
+  wrongAttempt.assurance_bindings[0].attempt_id = "attempt:other";
+  assert.ok(evaluation({ authorization: wrongAttempt }).reason_codes.includes("canonical_assurance_binding_missing"));
+
+  const wrongTree = authorization();
+  wrongTree.assurance_bindings[0].repository_tree_sha = "d".repeat(40);
+  assert.ok(evaluation({ authorization: wrongTree }).reason_codes.includes("canonical_assurance_binding_missing"));
+
+  const expired = authorization();
+  expired.assurance_bindings[0].snapshot_valid_until = new Date(Date.now() - 1_000).toISOString();
+  assert.ok(evaluation({ authorization: expired }).reason_codes.includes("canonical_assurance_binding_missing"));
+});
+
+test("lease claims corroborate but cannot broaden accepted file scope", () => {
+  const treeClaim = authorization();
+  treeClaim.authorized_path_claims[0].claim_path = "mcp-server";
+  treeClaim.authorized_path_claims[0].claim_mode = "tree";
+  assert.equal(evaluation({ authorization: treeClaim }).eligible, true);
+
+  const uncovered = authorization();
+  uncovered.authorized_path_claims[0].claim_path = "other";
+  uncovered.authorized_path_claims[0].claim_mode = "tree";
+  assert.ok(evaluation({ authorization: uncovered }).reason_codes.includes("canonical_path_authority_invalid"));
 });
 
 test("manual QA cannot be hidden by an otherwise complete Passport", () => {

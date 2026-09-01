@@ -237,6 +237,8 @@ declare tenant constant text:='carr-internal';
         decision record;
         acceptor record;
         facts jsonb;
+        assurance_bindings jsonb;
+        lease_path_claims jsonb;
         evaluated_at timestamptz:=statement_timestamp();
 begin
   if p_decision_id is null
@@ -322,6 +324,106 @@ begin
     return jsonb_build_object('ok',false,'error','source_merge_passport_unavailable');
   end if;
 
+  -- These raw assurance and ownership relations deliberately grant no runtime
+  -- SELECT. This SECURITY DEFINER projection exposes only exact, current
+  -- closure bindings; it never returns evidence bodies, lease tokens, or a
+  -- path outside the accepted plan-hash scope.
+  select coalesce(jsonb_agg(jsonb_build_object(
+      'slice_ref',receipt.slice_ref,
+      'attempt_id',receipt.attempt_id,
+      'evidence_manifest_ref','assurance-manifest:'||evidence_manifest.id::text,
+      'review_manifest_ref','assurance-manifest:'||review_manifest.id::text,
+      'evidence_ref','assurance-evidence:'||evidence.id::text,
+      'reviewer_fact_ref','engineering-review:'||reviewer.id::text,
+      'review_extension_ref','assurance-review:'||review.id::text,
+      'reviewer_state',reviewer.state,
+      'evidence_digest',evidence.evidence_digest,
+      'review_digest',review.review_digest,
+      'repository_commit_sha',evidence_manifest.repository_commit_sha,
+      'repository_tree_sha',evidence_manifest.repository_tree_sha,
+      'snapshot_valid_until',least(evidence_manifest.snapshot_valid_until,review_manifest.snapshot_valid_until)
+    ) order by receipt.slice_ref collate "C",receipt.attempt_id collate "C"),'[]'::jsonb)
+    into assurance_bindings
+    from ops.assurance_evidence_extension evidence
+    join ops.assurance_execution_manifest evidence_manifest on evidence_manifest.id=evidence.manifest_id
+    join ops.assurance_review_extension review on review.evidence_id=evidence.id
+    join ops.assurance_execution_manifest review_manifest on review_manifest.id=review.review_manifest_id
+    join ops.engineering_slice_receipt receipt on receipt.id=evidence.receipt_id
+    join ops.engineering_execution_envelope envelope on envelope.id=receipt.envelope_id
+    join ops.engineering_reviewer_fact reviewer on reviewer.id=review.reviewer_fact_id
+    join ops.canonical_ownership_lease lease on lease.id=evidence_manifest.lease_id
+   where evidence_manifest.organization_tenant_id=tenant
+     and evidence_manifest.work_request_id=w.id
+     and evidence_manifest.accepted_plan_id=p.id
+     and evidence_manifest.slice_plan_id=sp.id
+     and evidence_manifest.repository_stage='post_commit'
+     and review_manifest.organization_tenant_id=tenant
+     and review_manifest.work_request_id=w.id
+     and review_manifest.accepted_plan_id=p.id
+     and review_manifest.slice_plan_id=sp.id
+     and review_manifest.repository_stage='review'
+     and review_manifest.repository_commit_sha=evidence_manifest.repository_commit_sha
+     and review_manifest.repository_tree_sha=evidence_manifest.repository_tree_sha
+     and evidence_manifest.repository_commit_sha=p_head_sha
+     and envelope.slice_plan_id=sp.id and envelope.work_request_id=w.id
+     and reviewer.receipt_id=receipt.id and reviewer.state='passed'
+     and receipt.work_request_id=w.id and receipt.outcome='claimed_complete'
+     and receipt.receipt#>>'{source_evidence,source_sha}'=p_head_sha
+     and evidence_manifest.snapshot_valid_until>evaluated_at
+     and review_manifest.snapshot_valid_until>evaluated_at
+     and lease.organization_tenant_id=tenant
+     and lease.work_request_id=w.id and lease.accepted_plan_id=p.id and lease.slice_plan_id=sp.id
+     and lease.state='active' and lease.expires_at>evaluated_at
+     and lease.id=review_manifest.lease_id
+     and lease.fencing_generation=evidence_manifest.fencing_generation
+     and lease.fencing_generation=review_manifest.fencing_generation
+     and coalesce((select owner.decision from ops.assurance_owner_acceptance_fact owner
+                    where owner.organization_tenant_id=tenant and owner.evidence_id=evidence.id
+                    order by owner.created_at desc,owner.id desc limit 1),'accept')
+         not in ('hold','reject');
+
+  select coalesce(jsonb_agg(jsonb_build_object(
+      'lease_ref','canonical-ownership-lease:'||covered.lease_id::text,
+      'path',accepted.path,
+      'mode','file',
+      'operation','write',
+      'claim_path',covered.claim_value,
+      'claim_mode',covered.claim_mode,
+      'claim_operation',covered.operation
+    ) order by lower(accepted.path) collate "C",accepted.path collate "C"),'[]'::jsonb)
+    into lease_path_claims
+    from jsonb_array_elements_text(scope.authorized_paths) accepted(path)
+    cross join lateral (
+      select lease.id lease_id,claim.claim_value,claim.claim_mode,claim.operation
+        from ops.canonical_ownership_lease lease
+        join ops.canonical_ownership_claim claim on claim.lease_id=lease.id
+       where lease.organization_tenant_id=tenant and lease.work_request_id=w.id
+         and lease.accepted_plan_id=p.id and lease.slice_plan_id=sp.id
+         and lease.state='active' and lease.expires_at>evaluated_at
+         and claim.organization_tenant_id=tenant and claim.claim_kind='path'
+         and claim.operation='write' and claim.claim_mode in ('file','tree')
+         and (claim.claim_mode='file' and claim.claim_value=accepted.path
+           or claim.claim_mode='tree' and
+              (accepted.path=claim.claim_value or accepted.path like claim.claim_value||'/%'))
+         and exists (select 1 from ops.assurance_execution_manifest bound_manifest
+                      join ops.assurance_evidence_extension bound_evidence
+                        on bound_evidence.manifest_id=bound_manifest.id
+                     where bound_manifest.lease_id=lease.id
+                       and bound_manifest.repository_commit_sha=p_head_sha
+                       and bound_evidence.receipt_id in (
+                         select bound_receipt.id from ops.engineering_slice_receipt bound_receipt
+                          where bound_receipt.work_request_id=w.id
+                            and bound_receipt.outcome='claimed_complete'))
+       order by (claim.claim_mode='file') desc,length(claim.claim_value) desc,
+                lease.fencing_generation desc,lease.id,claim.claim_value collate "C"
+       limit 1
+    ) covered;
+
+  if jsonb_array_length(assurance_bindings)=0
+     or jsonb_array_length(lease_path_claims)<>jsonb_array_length(scope.authorized_paths) then
+    return jsonb_build_object('ok',false,'error','source_merge_assurance_or_ownership_incomplete');
+  end if;
+
   return jsonb_build_object(
     'ok',true,
     'passport_facts',facts,
@@ -339,9 +441,8 @@ begin
       'allowed_actions',jsonb_build_array('repository:merge-pr'),
       'scope_ref','source-merge-scope:'||scope.id::text,
       'scope_digest',scope.scope_digest,
-      'authorized_path_claims',(select jsonb_agg(jsonb_build_object(
-          'path',path,'mode','file','operation','write') order by lower(path) collate "C",path collate "C")
-        from jsonb_array_elements_text(scope.authorized_paths) path),
+      'authorized_path_claims',lease_path_claims,
+      'assurance_bindings',assurance_bindings,
       'currentness_evaluated_at',evaluated_at));
 exception when others then
   return jsonb_build_object('ok',false,'error','source_merge_projection_refused','sqlstate',sqlstate);

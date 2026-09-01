@@ -460,7 +460,7 @@ test("closure projection is generation-aware: exact review completes, unreviewed
   assert.equal(noReceiptSuccessor.closure_state, "blocked");
 });
 
-test("source merge authority comes from one reader-safe controller projection, never lease claims", async () => {
+test("source merge authority comes from one reader-safe projection, never direct runtime table reads", async () => {
   const head = "a".repeat(40);
   const plan = typedEngineeringPlan([engineeringSlice("slice:one", 1)]);
   const envelope = envelopeRow("11111111-1111-4111-8111-111111111111", "slice:one", "2026-08-26T00:00:01Z");
@@ -489,7 +489,18 @@ test("source merge authority comes from one reader-safe controller projection, n
       allowed_actions: ["repository:merge-pr"],
       scope_ref: "source-merge-scope:99999999-9999-4999-8999-999999999999",
       scope_digest: `sha256:${"6".repeat(64)}`,
-      authorized_path_claims: [{ path: "mcp-server/src/source-merge-policy.js", mode: "file", operation: "write" }],
+      authorized_path_claims: [{ lease_ref: "canonical-ownership-lease:99999999-9999-4999-8999-999999999999", path: "mcp-server/src/source-merge-policy.js", mode: "file", operation: "write", claim_path: "mcp-server/src/source-merge-policy.js", claim_mode: "file", claim_operation: "write" }],
+      assurance_bindings: [{
+        slice_ref: "slice:one", attempt_id: receipt.attempt_id,
+        evidence_manifest_ref: "assurance-manifest:55555555-5555-4555-8555-555555555555",
+        review_manifest_ref: "assurance-manifest:66666666-6666-4666-8666-666666666666",
+        evidence_ref: "assurance-evidence:77777777-7777-4777-8777-777777777777",
+        reviewer_fact_ref: "engineering-review:33333333-3333-4333-8333-333333333333",
+        review_extension_ref: "assurance-review:88888888-8888-4888-8888-888888888888",
+        reviewer_state: "passed", evidence_digest: `sha256:${"4".repeat(64)}`,
+        review_digest: `sha256:${"5".repeat(64)}`, repository_commit_sha: head,
+        repository_tree_sha: "b".repeat(40), snapshot_valid_until: new Date(Date.now() + 60_000).toISOString(),
+      }],
       exact_head_sha: head, pr_number: 42,
       currentness_evaluated_at: new Date().toISOString(),
     } } }] };

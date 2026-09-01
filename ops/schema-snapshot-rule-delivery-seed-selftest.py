@@ -25,6 +25,10 @@ SECOND_REFRESH_MIGRATION_SOURCE = (
     ROOT / "migrations" / "0348_pr_only_main_ruleset_control.sql"
 ).read_text(encoding="utf-8")
 CURRENT_MIGRATION = "0363_rule_delivery_activation_digest_repin.sql"
+SOURCE_MERGE_MIGRATION = "0471_source_merge_catalog_registry_successor.sql"
+SOURCE_MERGE_MIGRATION_SOURCE = (
+    ROOT / "migrations" / SOURCE_MERGE_MIGRATION
+).read_text(encoding="utf-8")
 POLICY_MARKER = "-- CARR RULE DELIVERY POLICY (bin/schema-snapshot.sh)"
 TARGET_POST_MARKER = (
     "-- CARR RULE DELIVERY ACTIVATION TARGETS POST-0332 (bin/schema-snapshot.sh)"
@@ -36,12 +40,13 @@ TARGET_POST_0348_MARKER = (
     "-- CARR RULE DELIVERY ACTIVATION TARGETS POST-0348 (bin/schema-snapshot.sh)"
 )
 TARGET_POST_0363_MARKER = (
-    "-- CARR RULE DELIVERY ACTIVATION TARGETS POST-0363 (bin/schema-snapshot.sh)"
+    "-- CARR RULE DELIVERY ACTIVATION TARGETS POST-0363/0471 (bin/schema-snapshot.sh)"
 )
 OLD_DIGEST = "266ebb98076361b74cc2e22e5ea96380b2d3d1946b2d5d06b23ff349a5c98d9a"
 DIGEST = "c0f3a9cc4fd407b346f44f09d7f05885051cfcc6c14c3f6c077e54a2a5448997"
 THIRD_DIGEST = "4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218"
-CURRENT_DIGEST = "f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904"
+POST_0363_DIGEST = "f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904"
+CURRENT_DIGEST = "5b0f93d82dc2127bc721d8a091a5c637b9d2eaf4e492f660306527bc5ae80c98"
 EXPECTED_TARGETS = [
     "25fcddee", "3fa17fa0", "72e06bdf", "581cb3fe", "113b3833",
     "57d13061", "c66dc739", "49533583", "557838a5",
@@ -121,6 +126,9 @@ second_refresh_ledger_applied = bool(
 current_ledger_applied = bool(
     re.search(rf"^{re.escape(CURRENT_MIGRATION)}\t", SNAPSHOT, re.M)
 )
+source_merge_ledger_applied = bool(
+    re.search(rf"^{re.escape(SOURCE_MERGE_MIGRATION)}\t", SNAPSHOT, re.M)
+)
 snapshot_targets = snapshot_target_rows(SNAPSHOT)
 
 assert "RULE_DELIVERY_APPLIED" in GENERATOR
@@ -136,6 +144,9 @@ assert 'if [ "$RULE_DELIVERY_REFRESH_APPLIED" = t ]; then' in GENERATOR
 assert "RULE_DELIVERY_DIGEST_REPIN_APPLIED" in GENERATOR
 assert f"filename='{CURRENT_MIGRATION}'" in GENERATOR
 assert 'if [ "$RULE_DELIVERY_DIGEST_REPIN_APPLIED" = t ]; then' in GENERATOR
+assert "SOURCE_MERGE_REGISTRY_APPLIED" in GENERATOR
+assert f"filename='{SOURCE_MERGE_MIGRATION}'" in GENERATOR
+assert 'if [ "$SOURCE_MERGE_REGISTRY_APPLIED" = t ]; then' in GENERATOR
 assert 'elif [ "$RULE_DELIVERY_REFRESH_APPLIED" = t ]; then' in GENERATOR
 assert "insert into ops.rule_delivery_policy (singleton,mode,changed_by,reason)" in GENERATOR
 assert "values (true,'shadow','schema-snapshot'," in GENERATOR
@@ -147,10 +158,12 @@ assert target_digests(GENERATOR, TARGET_PRE_MARKER) == [OLD_DIGEST] * 9
 assert target_ids(GENERATOR, TARGET_POST_0348_MARKER) == EXPECTED_TARGETS
 assert target_digests(GENERATOR, TARGET_POST_0348_MARKER) == [THIRD_DIGEST] * 9
 assert target_ids(GENERATOR, TARGET_POST_0363_MARKER) == CURRENT_EXPECTED_TARGETS
-assert target_digests(GENERATOR, TARGET_POST_0363_MARKER) == [CURRENT_DIGEST] * 8
 current_block = GENERATOR.split(TARGET_POST_0363_MARKER, 1)[1].split(
     "on conflict (short_id) do nothing;", 1
 )[0]
+assert current_block.count("${RULE_DELIVERY_CURRENT_MAP_DIGEST}") == 8
+assert f'RULE_DELIVERY_CURRENT_MAP_DIGEST="{POST_0363_DIGEST}"' in GENERATOR
+assert f'RULE_DELIVERY_CURRENT_MAP_DIGEST="{CURRENT_DIGEST}"' in GENERATOR
 assert "581cb3fe" not in current_block
 post_block = GENERATOR.split(TARGET_POST_MARKER, 1)[1].split(
     "on conflict (short_id) do nothing;", 1
@@ -167,7 +180,8 @@ expected_snapshot_targets = (
 )
 assert [row[0] for row in snapshot_targets] == expected_snapshot_targets
 expected_snapshot_digest = (
-    CURRENT_DIGEST if current_ledger_applied
+    CURRENT_DIGEST if source_merge_ledger_applied
+    else POST_0363_DIGEST if current_ledger_applied
     else THIRD_DIGEST if second_refresh_ledger_applied
     else DIGEST if refresh_ledger_applied
     else OLD_DIGEST
@@ -181,7 +195,7 @@ assert THIRD_DIGEST in SECOND_REFRESH_MIGRATION_SOURCE
 assert all(short_id in SECOND_REFRESH_MIGRATION_SOURCE for short_id in EXPECTED_TARGETS)
 assert all(short_id in REFRESH_MIGRATION_SOURCE for short_id in EXPECTED_TARGETS)
 assert "requires shadow mode" in REFRESH_MIGRATION_SOURCE
-assert CURRENT_DIGEST in CURRENT_MIGRATION_SOURCE
+assert POST_0363_DIGEST in CURRENT_MIGRATION_SOURCE
 assert THIRD_DIGEST in CURRENT_MIGRATION_SOURCE
 assert all(short_id in CURRENT_MIGRATION_SOURCE for short_id in EXPECTED_TARGETS)
 assert "delete from ops.rule_delivery_activation_target" in CURRENT_MIGRATION_SOURCE
@@ -196,6 +210,9 @@ assert "historical activation receipt cardinality constraint differs" in CURRENT
 assert "drop constraint rule_delivery_activation_receipt_target_short_ids_check" in CURRENT_MIGRATION_SOURCE
 assert "check (cardinality(target_short_ids) in (8,9))" in CURRENT_MIGRATION_SOURCE
 assert "requires shadow mode" in CURRENT_MIGRATION_SOURCE
+assert CURRENT_DIGEST in SOURCE_MERGE_MIGRATION_SOURCE
+assert POST_0363_DIGEST in SOURCE_MERGE_MIGRATION_SOURCE
+assert "expected eight exact rule-delivery target repins" in SOURCE_MERGE_MIGRATION_SOURCE
 policy_lock = CURRENT_MIGRATION_SOURCE.index("select p.mode into v_policy_mode")
 rule_lock = CURRENT_MIGRATION_SOURCE.index("perform r.id")
 target_delete = CURRENT_MIGRATION_SOURCE.index(

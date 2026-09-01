@@ -23,7 +23,7 @@ test("accepted plan hash owns exact source-merge paths", () => {
   assert.match(migration, /authorized_paths jsonb not null/i);
   assert.doesNotMatch(migration.slice(0, migration.indexOf("create or replace function ops.source_merge_authority_projection")),
     /canonical_ownership_(claim|path_valid)/i);
-  assert.match(migration, /'mode','file','operation','write'/i);
+  assert.match(migration, /'mode','file',[\s\S]{0,80}'operation','write'/i);
   assert.match(migration, /caps is already part of the canonical[\s\S]+plan preimage/i);
 });
 
@@ -50,10 +50,13 @@ test("projection fails closed on current work, current generation, and manual QA
   assert.match(migration, /candidate_successor\.id is null/i);
 });
 
-test("dark ownership claims are never promoted into source authority", () => {
+test("dark assurance and ownership rows are projected without expanding accepted scope", () => {
   const projection = migration.slice(migration.indexOf("create or replace function ops.source_merge_authority_projection"));
-  assert.doesNotMatch(projection, /canonical_ownership_claim/i);
-  assert.doesNotMatch(projection, /assurance_(execution_manifest|evidence_extension|review_extension|owner_acceptance_fact)/i);
+  assert.match(projection, /from ops\.assurance_evidence_extension evidence/i);
+  assert.match(projection, /join ops\.canonical_ownership_claim claim/i);
+  assert.match(projection, /from jsonb_array_elements_text\(scope\.authorized_paths\) accepted\(path\)/i);
+  assert.match(projection, /jsonb_array_length\(lease_path_claims\)<>jsonb_array_length\(scope\.authorized_paths\)/i);
+  assert.doesNotMatch(migration, /grant\s+select\s+on\s+ops\.(assurance|canonical_ownership)/i);
   assert.match(projection, /source_merge_plan_scope/);
 });
 

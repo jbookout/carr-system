@@ -220,6 +220,13 @@ function pathCovered(filename, claim) {
   return filename === claim.path;
 }
 
+function claimCoversAcceptedPath(claim) {
+  if (claim?.claim_operation !== "write" || !["file", "tree"].includes(claim?.claim_mode) ||
+      typeof claim?.claim_path !== "string" || !claim.claim_path) return false;
+  return claim.claim_mode === "file" ? claim.claim_path === claim.path
+    : claim.claim_path === claim.path || claim.path.startsWith(`${claim.claim_path}/`);
+}
+
 function protectedSourcePath(filename) {
   return PROTECTED_SOURCE_PATHS.has(filename) ||
     PROTECTED_SOURCE_PREFIXES.some(prefix => filename.startsWith(prefix));
@@ -227,7 +234,7 @@ function protectedSourcePath(filename) {
 
 function authorizationReasons(authorization, passport, pullRequest, reasons) {
   const fields = [
-    "accepted_plan_revision", "allowed_actions",
+    "accepted_plan_revision", "allowed_actions", "assurance_bindings",
     "authorized_path_claims", "currentness_evaluated_at", "decision", "derived_by",
     "exact_head_sha", "pr_number", "schema_version", "scope_digest", "scope_ref",
     "source_merge_only", "work_request",
@@ -262,18 +269,51 @@ function authorizationReasons(authorization, passport, pullRequest, reasons) {
   const now = Date.now();
   if (!Number.isFinite(evaluatedAt) || evaluatedAt > now + 30_000 || now - evaluatedAt > 5 * 60_000)
     reasons.push("controller_currentness_stale");
+  const receipts = Array.isArray(passport?.current_receipts) ? passport.current_receipts : [];
+  const receiptKeys = receipts.map(receipt => `${receipt?.slice_ref}\0${receipt?.attempt_id}`);
+  const bindings = Array.isArray(authorization.assurance_bindings) ? authorization.assurance_bindings : [];
+  const bindingKeys = bindings.map(binding => `${binding?.slice_ref}\0${binding?.attempt_id}`);
+  if (bindings.length !== receipts.length || !unique(receiptKeys) || !unique(bindingKeys) ||
+      JSON.stringify([...bindingKeys].sort()) !== JSON.stringify([...receiptKeys].sort()) ||
+      !unique(bindings.map(binding => binding?.evidence_ref)) ||
+      !unique(bindings.map(binding => binding?.review_extension_ref)) ||
+      bindings.some(binding => {
+        const validUntil = Date.parse(String(binding?.snapshot_valid_until || ""));
+        return !exactKeys(binding, [
+          "attempt_id", "evidence_digest", "evidence_manifest_ref", "evidence_ref",
+          "repository_commit_sha", "repository_tree_sha", "review_digest",
+          "review_extension_ref", "review_manifest_ref", "reviewer_fact_ref",
+          "reviewer_state", "slice_ref", "snapshot_valid_until",
+        ]) || binding?.reviewer_state !== "passed" ||
+          binding?.repository_commit_sha !== authorization.exact_head_sha ||
+          binding?.repository_tree_sha !== pullRequest?.head?.tree_sha ||
+          !Number.isFinite(validUntil) || validUntil <= now ||
+          !/^sha256:[0-9a-f]{64}$/.test(binding?.evidence_digest || "") ||
+          !/^sha256:[0-9a-f]{64}$/.test(binding?.review_digest || "") ||
+          !/^assurance-manifest:[0-9a-f-]{36}$/.test(binding?.evidence_manifest_ref || "") ||
+          !/^assurance-manifest:[0-9a-f-]{36}$/.test(binding?.review_manifest_ref || "") ||
+          !/^assurance-evidence:[0-9a-f-]{36}$/.test(binding?.evidence_ref || "") ||
+          !/^engineering-review:[0-9a-f-]{36}$/.test(binding?.reviewer_fact_ref || "") ||
+          !/^assurance-review:[0-9a-f-]{36}$/.test(binding?.review_extension_ref || "");
+      })) reasons.push("canonical_assurance_binding_missing");
   if (!Array.isArray(authorization.authorized_path_claims) ||
       authorization.authorized_path_claims.length === 0) {
     reasons.push("canonical_path_authority_missing");
   } else {
     const claimPaths = authorization.authorized_path_claims.map(claim => claim?.path);
     if (authorization.authorized_path_claims.some(claim =>
-      !exactKeys(claim, ["mode", "operation", "path"]) ||
+      !exactKeys(claim, ["claim_mode", "claim_operation", "claim_path", "lease_ref", "mode", "operation", "path"]) ||
       claim?.mode !== "file" || claim?.operation !== "write" ||
+      !/^canonical-ownership-lease:[0-9a-f-]{36}$/.test(claim?.lease_ref || "") ||
+      !claimCoversAcceptedPath(claim) ||
       typeof claim?.path !== "string" || claim.path.length === 0 || claim.path.length > 500 ||
+      typeof claim?.claim_path !== "string" || claim.claim_path.length === 0 || claim.claim_path.length > 500 ||
       !/^[!-~]+$/.test(claim.path) || claim.path.startsWith("/") || claim.path.endsWith("/") ||
+      !/^[!-~]+$/.test(claim.claim_path) || claim.claim_path.startsWith("/") || claim.claim_path.endsWith("/") ||
       claim.path.includes("\\") || /[*?\[\]{}!]/.test(claim.path) ||
-      claim.path.split("/").some(part => !part || part === "." || part === "..")) ||
+      claim.claim_path.includes("\\") || /[*?\[\]{}!]/.test(claim.claim_path) ||
+      claim.path.split("/").some(part => !part || part === "." || part === "..") ||
+      claim.claim_path.split("/").some(part => !part || part === "." || part === "..")) ||
       !unique(claimPaths) || new Set(claimPaths.map(path => path.toLowerCase())).size !== claimPaths.length ||
       JSON.stringify(claimPaths) !== JSON.stringify([...claimPaths].sort(comparePaths)))
       reasons.push("canonical_path_authority_invalid");
