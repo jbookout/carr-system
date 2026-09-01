@@ -157,7 +157,11 @@ REVIEWED_TRANSACTION_CONTROL_ARTIFACTS = {
     "0450_canonical_ownership_lease_kernel.sql":
         "2130de773f09f5dd8621cfe5add3f8939ddd1d48f06c5d9a6908e19375a57847",
     "0451_assurance_evidence_acceptance_persistence.sql":
-        "f17f538bafd602c9d90b3b46fe3cc377b746b03b1d5fe070a5fb597af4d2013c",
+        # Re-pinned 2026-09-01 (the 0363 repin precedent): the reviewed change is
+        # a one-clause exemption of the carr_backup default-privilege SELECT grant
+        # in the file's own ACL self-check, which blocked every production apply.
+        # The reviewed transaction wrapper is unchanged.
+        "8aa6784fae5b55ba53fbf96e5e0ad7847ec54a8fb85a9f8bbcd468e1941ff2d5",
 }
 TRANSACTION_CONTROL_RE = re.compile(
     r"(?is)^\s*(?:(?:begin|commit|end|rollback|abort)\b|"
