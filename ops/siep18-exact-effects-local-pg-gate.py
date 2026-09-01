@@ -37,11 +37,11 @@ def registry_entry(cur, ingress_key: str) -> tuple[str, str, list[str]]:
     row = cur.execute(
         """select registry_version,entry_digest,contract->'delegates_to'
              from ops.scac_mutation_registry_entry
-            where registry_version='scac-mutation-registry.v9' and ingress_key=%s""",
+            where registry_version='scac-mutation-registry.v10' and ingress_key=%s""",
         (ingress_key,),
     ).fetchone()
     if row is None:
-        raise RuntimeError(f"v9 fixture ingress absent: {ingress_key}")
+        raise RuntimeError(f"v10 fixture ingress absent: {ingress_key}")
     return row[0], row[1], row[2]
 
 

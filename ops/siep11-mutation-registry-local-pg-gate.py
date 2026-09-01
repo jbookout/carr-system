@@ -114,7 +114,7 @@ def main() -> int:
             successor = cur.execute(
                 """select registry_version,catalog_projection from ops.scac_mutation_registry_version
                     where registry_version>'scac-mutation-registry.v1'
-                    order by registry_version desc limit 1"""
+                    order by regexp_replace(registry_version,'^.*[.]v','','')::integer desc limit 1"""
             ).fetchone()
             sealed_projection = successor[1] if successor is not None else cur.execute(
                 "select catalog_projection from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v1'"
@@ -137,7 +137,7 @@ def main() -> int:
             ).fetchone()
             digest = version[0]
             runtime_version = successor[0] if successor is not None else "scac-mutation-registry.v1"
-            if runtime_version not in {"scac-mutation-registry.v2", "scac-mutation-registry.v3", "scac-mutation-registry.v4", "scac-mutation-registry.v5", "scac-mutation-registry.v6", "scac-mutation-registry.v7", "scac-mutation-registry.v8", "scac-mutation-registry.v9"}:
+            if runtime_version not in {"scac-mutation-registry.v2", "scac-mutation-registry.v3", "scac-mutation-registry.v4", "scac-mutation-registry.v5", "scac-mutation-registry.v6", "scac-mutation-registry.v7", "scac-mutation-registry.v8", "scac-mutation-registry.v9", "scac-mutation-registry.v10"}:
                 raise RuntimeError(f"unsupported live successor {runtime_version!r}")
             lookup_function = f"ops.scac_mutation_registration_{runtime_version.rsplit('.', 1)[1]}"
             runtime_digest = cur.execute(

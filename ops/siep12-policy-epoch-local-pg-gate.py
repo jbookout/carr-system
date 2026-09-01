@@ -152,7 +152,7 @@ def main() -> int:
             if v2 is None or v2[0] != expected_v2 or any(v2[4:]):
                 raise RuntimeError(f"v2 registry is missing, drifted, or authority-expanding: {v2!r}")
             current_projection = cur.execute(
-                "select catalog_projection from ops.scac_mutation_registry_version order by registry_version desc limit 1"
+                "select catalog_projection from ops.scac_mutation_registry_version order by regexp_replace(registry_version,'^.*[.]v','','')::integer desc limit 1"
             ).fetchone()[0]
             catalog = summarize(project(cur))
             role_authority = project_role_authority(cur)

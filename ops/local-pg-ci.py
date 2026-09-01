@@ -484,6 +484,24 @@ def run_local_ci(
                     else:
                         print("local-db-ci: assurance evidence/acceptance persistence passed")
                 if exit_code == 0:
+                    source_merge_script = repo / "ops/source-merge-authority-local-pg-gate.py"
+                    source_merge = run_required_local_gate(
+                        command_runner,
+                        acceptance_python,
+                        source_merge_script,
+                        env=acceptance_env,
+                        cwd=repo,
+                    )
+                    if source_merge.returncode:
+                        print(
+                            f"local-db-ci: source-merge authority projection failed: "
+                            f"{_failure_detail(source_merge)}",
+                            file=sys.stderr,
+                        )
+                        exit_code = source_merge.returncode
+                    else:
+                        print("local-db-ci: source-merge authority projection passed")
+                if exit_code == 0:
                     canary_script = repo / "ops/calendar-canary-local-pg-acceptance.py"
                     canary = command_runner.run(
                         [acceptance_python, canary_script],
