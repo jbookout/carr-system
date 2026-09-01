@@ -19,17 +19,21 @@ import {
   REGISTRY_V7_VERSION,
   REGISTRY_V8_VERSION,
   REGISTRY_V9_VERSION,
+  REGISTRY_V10_VERSION,
   replaceExactlyOnce,
   renderRuntimeProjection,
   renderSIEP16IntegratedRegistrySql,
   renderSIEP17ForwardRegistrySql,
   renderSIEP18ForwardRegistrySql,
+  renderSourceMergeForwardRegistrySql,
   sha256,
   SIEP16_INTEGRATED_DB_CATALOG_BASELINE,
   SIEP17_FORWARD_DB_CATALOG_BASELINE,
   SIEP18_FORWARD_DB_CATALOG_BASELINE,
   SIEP18_MONITOR_ARTIFACT_SHA256,
   SIEP18_PRE_V9_DB_CATALOG_BASELINE,
+  SOURCE_MERGE_FORWARD_DB_CATALOG_BASELINE,
+  SOURCE_MERGE_PRE_V10_DB_CATALOG_BASELINE,
   SIEP12_DB_CATALOG_BASELINE,
   validateLaunchdAuthorityCatalogs,
   workflowDefinitionInventory,
@@ -79,6 +83,10 @@ const generatedV9 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v9.generated.js", import.meta.url), "utf8");
 const v9Migration = fs.readFileSync(
   new URL("../../migrations/0468_siep18_forward_mutation_registry.sql", import.meta.url), "utf8");
+const generatedV10 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v10.generated.js", import.meta.url), "utf8");
+const v10Migration = fs.readFileSync(
+  new URL("../../migrations/0471_source_merge_catalog_registry_successor.sql", import.meta.url), "utf8");
 const siep18MonitorMigration = fs.readFileSync(
   new URL("../../migrations/0467_siep18_atomic_db_monitor_grants.sql", import.meta.url), "utf8");
 
@@ -93,9 +101,9 @@ test("successor generation refuses absent or ambiguous predecessor markers", () 
 
 test("reviewed MCP inventory is an exact immutable projection of the assembled registry", () => {
   const rows = mcpInventory();
-  assert.equal(rows.length, 220);
+  assert.equal(rows.length, 221);
   assert.equal(rows.filter(row => row.write).length, 155);
-  assert.equal(rows.filter(row => !row.write).length, 65);
+  assert.equal(rows.filter(row => !row.write).length, 66);
   assert.deepEqual(rows.map(row => row.operation), Object.keys(TOOLS).sort());
   assert.equal(Object.isFrozen(TOOLS), true);
   assert.equal(Object.isFrozen(TOOLS["add-loop"]), true);
@@ -187,18 +195,13 @@ test("sealed v8 predecessor remains exact after source inventory advances", () =
 });
 
 test("v9 successor seals v8 and binds the measured SIEP-18 grant snapshot", () => {
-  const rows = fullInventory();
-  const seals = Object.values(HISTORICAL_REGISTRY_SEALS);
-  assert.equal(generatedV9, renderRuntimeProjection(rows, {
-    version: REGISTRY_V9_VERSION, dbCatalogBaseline: SIEP18_FORWARD_DB_CATALOG_BASELINE,
-  }));
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
-    JSON.parse(generatedV9.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]));
-  assert.equal(v9Migration, renderSIEP18ForwardRegistrySql(rows));
-  const expectedEntryCount = rows.length + SIEP18_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count +
-    SIEP18_FORWARD_DB_CATALOG_BASELINE.relation_dml.count +
-    SIEP18_FORWARD_DB_CATALOG_BASELINE.column_dml.count;
-  assert.equal(rows.length, 800);
+  const seals = Object.values(HISTORICAL_REGISTRY_SEALS).filter(seal => seal.version !== REGISTRY_V9_VERSION);
+  const expectedEntryCount = HISTORICAL_REGISTRY_SEALS.v9.entryCount;
+  assert.equal(sha256(generatedV9),
+    HISTORICAL_REGISTRY_ARTIFACT_SHA256["mcp-server/src/scac-mutation-registry.v9.generated.js"]);
+  assert.equal(sha256(v9Migration),
+    HISTORICAL_REGISTRY_ARTIFACT_SHA256["migrations/0468_siep18_forward_mutation_registry.sql"]);
+  assert.equal(HISTORICAL_REGISTRY_SEALS.v9.sourceEntryCount, 800);
   assert.equal(expectedEntryCount, 1439);
   assert.equal(sha256(siep18MonitorMigration), SIEP18_MONITOR_ARTIFACT_SHA256);
   assert.equal(SIEP18_PRE_V9_DB_CATALOG_BASELINE.secdef_execute.count, 338);
@@ -214,7 +217,7 @@ test("v9 successor seals v8 and binds the measured SIEP-18 grant snapshot", () =
     /scac_policy_epoch_snapshot_v8\(\)/,
   ])
     assert.match(v9Migration, selfEffect);
-  assert.match(v9Migration, new RegExp(`'sha256:[0-9a-f]{64}',${expectedEntryCount},${rows.length},`));
+  assert.match(v9Migration, new RegExp(`'${HISTORICAL_REGISTRY_SEALS.v9.digest}',${expectedEntryCount},800,`));
   assert.match(v9Migration, /scac_mutation_catalog_v8_live_at_seal\(\)/);
   assert.match(v9Migration, /scac_mutation_registry_v8_seal_available\(\)/);
   assert.match(v9Migration, /scac_mutation_catalog_v9_current\(\)/);
@@ -225,6 +228,33 @@ test("v9 successor seals v8 and binds the measured SIEP-18 grant snapshot", () =
   assert.doesNotMatch(v9Migration, /measured_pending_v9_binding/);
   for (const seal of seals)
     assert.match(v9Migration, new RegExp(`\\('${seal.version.replaceAll(".", "\\.")}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount}\\)`));
+});
+
+test("v10 successor seals v9 and carries the generated source-merge control", () => {
+  const rows = fullInventory();
+  assert.equal(rows.length, 804);
+  assert.equal(generatedV10, renderRuntimeProjection(rows, {
+    version: REGISTRY_V10_VERSION, dbCatalogBaseline: SOURCE_MERGE_FORWARD_DB_CATALOG_BASELINE,
+  }));
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
+    JSON.parse(generatedV10.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]));
+  assert.equal(v10Migration, renderSourceMergeForwardRegistrySql(rows));
+  assert.equal(SOURCE_MERGE_PRE_V10_DB_CATALOG_BASELINE.secdef_execute.count, 343);
+  assert.equal(SOURCE_MERGE_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count, 347);
+  assert.match(v10Migration, /Refuse before creating any v10 function/);
+  assert.match(v10Migration, /source_merge_eligibility/);
+  assert.match(v10Migration, /GENERATED by ops\/sync_control_catalog\.py/);
+  assert.doesNotMatch(v10Migration, /rule_map_repin|rule-delivery target repins/);
+  assert.match(v10Migration, /scac_mutation_registry_v9_seal_available\(\)/);
+  assert.match(v10Migration, /scac_mutation_registration_v10\(text,text\)/);
+  assert.match(v10Migration, /scac_mutation_catalog_v10_current\(\)/);
+  assert.doesNotMatch(v10Migration,
+    /alter function ops\.scac_mutation_catalog_v8_current\(\) rename to scac_mutation_catalog_v8_live_at_seal/);
+  assert.match(v10Migration,
+    /alter function ops\.scac_mutation_catalog_v9_current\(\) rename to scac_mutation_catalog_v9_live_at_seal/);
+  assert.match(v10Migration, /registry\.registry_version='scac-mutation-registry\.v10'/);
+  assert.match(v10Migration, /direct_database_grant_cutover',false/);
+  assert.match(v10Migration, /production_enforcement_active',false/);
 });
 
 test("unknown, changed, and open operation contracts refuse deterministically", async () => {
@@ -275,7 +305,7 @@ test("migration is read-only at runtime and preserves the SIEP-18 boundary", () 
 
 test("reviewed non-MCP source locators resolve and remain explicitly non-authorizing", () => {
   const rows = fullInventory().filter(row => !["mcp_tool", "job_definition", "workflow_entrypoint"].includes(row.ingress_kind));
-  assert.equal(rows.length, 524);
+  assert.equal(rows.length, 526);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -283,7 +313,7 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
     assert.equal(row.implementation_state, "inventoried_not_atomically_mediated");
   }
   const scripts = discoverScriptEntrypoints();
-  assert.equal(scripts.length, 515);
+  assert.equal(scripts.length, 517);
   assert.equal(scripts.some(path => path === "ops/rule-delivery-cutover.py"), true);
   assert.equal(scripts.some(path => path === "ops/control-plane-scheduler-cutover.py"), true);
   assert.equal(scripts.some(path => path === "run.sh"), true);
@@ -364,9 +394,9 @@ test("job definitions and live DB capabilities have exact reviewed baselines", (
 
 test("GitHub and launchd workflow entrances bind exact triggers, permissions, and delegates", () => {
   const workflows = workflowDefinitionInventory();
-  assert.equal(workflows.length, 30);
+  assert.equal(workflows.length, 31);
   const github = workflows.filter(row => row.source_locator.startsWith(".github/workflows/"));
-  assert.equal(github.length, 6);
+  assert.equal(github.length, 7);
   assert.equal(github.every(row => row.ingress_kind === "workflow_entrypoint" &&
     row.trigger_contract_digest && row.permissions_contract_digest && row.classification_authorizing === false), true);
   const automerge = workflows.find(row => row.source_locator === ".github/workflows/automerge-pilot.yml");

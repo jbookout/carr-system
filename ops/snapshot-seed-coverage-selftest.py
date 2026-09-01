@@ -1174,6 +1174,11 @@ def main():
     case("every live classification entry states a reason",
          all(str(v).strip() for v in
              list(carried.values()) + list(subset.values()) + list(excluded.values())))
+    case("source-merge plan scope is operational authority history, never snapshot seed",
+         "ops.source_merge_plan_scope" in excluded
+         and "accepted-plan" in excluded["ops.source_merge_plan_scope"]
+         and "ops.source_merge_plan_scope" not in carried
+         and "ops.source_merge_plan_scope" not in subset)
 
     if FAILURES:
         print(f"\nFAILED {len(FAILURES)}: {'; '.join(FAILURES)}")

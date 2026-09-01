@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # ci: db-gate
 # doctrine: runbook
-"""Rollback-only acceptance for the SIEP-18 v9 grant and guard binding."""
+"""Rollback-only acceptance for the current SIEP-18 grant and guard binding."""
 
 from __future__ import annotations
 
@@ -123,19 +123,19 @@ def main() -> int:
                           atomic_database_mediation_operational,direct_database_grant_cutover,
                           production_enforcement_active
                      from ops.scac_mutation_registry_version
-                    where registry_version='scac-mutation-registry.v9'"""
+                    where registry_version='scac-mutation-registry.v10'"""
             ).fetchone()
             if registry is None or registry[4:] != (False, False, False):
-                raise RuntimeError(f"v9 registry is absent or authority-expanding: {registry!r}")
+                raise RuntimeError(f"v10 registry is absent or authority-expanding: {registry!r}")
             if registry[3].get("runtime_dml_grants") != {
                 "count": EXPECTED_GRANT_COUNT, "digest": EXPECTED_GRANT_DIGEST,
             }:
-                raise RuntimeError(f"v9 grant projection is not exact: {registry[3]!r}")
+                raise RuntimeError(f"v10 grant projection is not exact: {registry[3]!r}")
 
             # A fresh reconstructed database intentionally has no policy epoch
             # until nonempty reviewed doctrine/rule data arrives. Seed that
             # reviewed projection and require the real deferred refresh trigger
-            # to build a cryptographically valid v9 chain; never fabricate an
+            # to build a cryptographically valid current chain; never fabricate an
             # epoch pointer merely to make the monitor look current.
             if cur.execute("select count(*) from ops.scac_policy_epoch").fetchone()[0] != 0:
                 raise RuntimeError("empty reconstructed policy was unexpectedly blessed")
@@ -145,10 +145,10 @@ def main() -> int:
             ).fetchone()[0]
             if epoch_chain.get("valid") is not True or \
                epoch_chain.get("reason") != "valid" or \
-               epoch_chain.get("registry_version") != "scac-mutation-registry.v9" or \
+               epoch_chain.get("registry_version") != "scac-mutation-registry.v10" or \
                epoch_chain.get("registry_digest") != registry[0] or \
                epoch_chain.get("current_source_digest") != epoch_chain.get("live_source_digest"):
-                raise RuntimeError(f"real v9 policy epoch chain is not current: {epoch_chain!r}")
+                raise RuntimeError(f"real v10 policy epoch chain is not current: {epoch_chain!r}")
 
             grant_snapshot = cur.execute(
                 "select ops.scac_runtime_dml_grant_snapshot()"
@@ -167,22 +167,22 @@ def main() -> int:
                state.get("missing_guard_count") != 0 or \
                state.get("unsupported_writable_relation_count") != 0 or \
                state.get("policy_epoch_state") != "current" or \
-               state.get("registry_version") != "scac-mutation-registry.v9" or \
+               state.get("registry_version") != "scac-mutation-registry.v10" or \
                state.get("direct_database_grant_cutover") is not False or \
                state.get("production_enforcement_active") is not False:
                 raise RuntimeError(f"reference monitor did not become exactly current: {state!r}")
 
             lookup = cur.execute(
-                "select ops.scac_mutation_registration_v9(%s,'mcp-tool:standing-context')",
+                "select ops.scac_mutation_registration_v10(%s,'mcp-tool:standing-context')",
                 (registry[0],),
             ).fetchone()[0]
             if lookup.get("registered") is not True or \
-               lookup.get("registry_version") != "scac-mutation-registry.v9":
-                raise RuntimeError(f"v9 exact registry lookup refused: {lookup!r}")
+               lookup.get("registry_version") != "scac-mutation-registry.v10":
+                raise RuntimeError(f"v10 exact registry lookup refused: {lookup!r}")
             if cur.execute(
-                "select ops.scac_mutation_registry_v8_seal_available()"
+                "select ops.scac_mutation_registry_v9_seal_available()"
             ).fetchone()[0] is not True:
-                raise RuntimeError("sealed v8 predecessor is unavailable")
+                raise RuntimeError("sealed v9 predecessor is unavailable")
 
             cur.execute("savepoint grant_drift")
             cur.execute("grant insert on public.lead to carr_reader")
@@ -210,7 +210,7 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001 - gate reports the exact refusal
         return fail(str(exc))
     print(
-        "siep18-reference-monitor-local-pg-gate passed: exact v9 grant seal, "
+        "siep18-reference-monitor-local-pg-gate passed: exact v10 grant seal, "
         "complete guards, drift refusal, and unsupported-view refusal"
     )
     return 0
