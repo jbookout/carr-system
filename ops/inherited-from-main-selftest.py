@@ -229,6 +229,45 @@ def test_exit_78_at_the_base_is_not_a_break():
               "exit 78" in out, out)
 
 
+def test_an_unmaterialised_runtime_prerequisite_is_not_a_break():
+    """A detached merge-base tree does not inherit ignored installed tools.
+
+    The caller's checkout has the runtime, so the check is reproducible there.
+    The helper's fresh worktree does not. Treating that environment difference
+    as a failing base would falsely exonerate an unrelated branch.
+    """
+    runtime_check = """\
+import pathlib
+import subprocess
+
+root = pathlib.Path(__file__).resolve().parent
+subprocess.run([str(root / "runtime" / "tool")], check=True)
+"""
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = make_repo(tmp, base_subject="good")
+        write(repo, "runtime-check.py", runtime_check)
+        git(repo, "add", "runtime-check.py", must=True)
+        git(repo, "commit", "-q", "-m", "add runtime-dependent check", must=True)
+        branch(repo, "innocent", {"unrelated.txt": "x\n"})
+        write(repo, "runtime/tool", "#!/bin/sh\nexit 0\n", executable=True)
+
+        live = subprocess.run([sys.executable, "runtime-check.py"], cwd=repo,
+                              capture_output=True, text=True, env=fixture_env())
+        check("the runtime-dependent check is configured in the caller checkout",
+              live.returncode == 0, live.stderr)
+
+        e = fixture_env()
+        p = subprocess.run(
+            [sys.executable, HELPER, "--check", "runtime-check.py", "--",
+             sys.executable, "runtime-check.py"],
+            cwd=repo, capture_output=True, text=True, env=e, timeout=300)
+        out = (p.stdout or "") + (p.stderr or "")
+        check("a runtime absent only from the detached replay resolves to cannot-tell",
+              p.returncode == CANNOT_TELL, f"exit {p.returncode}\n{out}")
+        check("the refusal names the unmaterialised runtime prerequisite",
+              "runtime prerequisite is absent from the merge-base worktree" in out, out)
+
+
 def test_a_slow_base_run_times_out_into_cannot_tell():
     with tempfile.TemporaryDirectory() as tmp:
         repo = make_repo(tmp, base_subject="slow")
@@ -290,6 +329,7 @@ def main():
                test_a_check_absent_from_the_merge_base_is_not_inherited,
                test_committing_a_new_check_is_answered_by_the_pre_filter_first,
                test_exit_78_at_the_base_is_not_a_break,
+               test_an_unmaterialised_runtime_prerequisite_is_not_a_break,
                test_a_slow_base_run_times_out_into_cannot_tell,
                test_on_main_itself_there_is_nothing_to_attribute,
                test_no_base_ref_refuses,
