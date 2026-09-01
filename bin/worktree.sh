@@ -111,6 +111,9 @@ usage() {
   print -r -- "       run.sh worktree --plumb [path]           link .venv/out/node_modules into a"
   print -r -- "                                                worktree THIS script did not create"
   print -r -- "                                                (default: the worktree at \$PWD)"
+  print -r -- "       run.sh worktree --install [--dry-run] [path]"
+  print -r -- "                                                build this worktree its OWN runtime,"
+  print -r -- "                                                frozen: npm ci + requirements.lock"
   exit 2
 }
 
@@ -172,6 +175,123 @@ link_node_runtime() {
   fi
   print -r -- "  !! shared node_modules does not match this worktree's package-lock.json — left unlinked"
   print -r -- "     run npm --prefix mcp-server ci in the worktree when local Node tooling is needed"
+}
+
+# venv_matches_lock <worktree> <venv>
+#
+# THE SAME TRUST BOUNDARY AS runtime_matches_lock, ON THE OTHER RUNTIME. PR #834
+# closed it for npm and stopped there, which left the larger of the two surfaces
+# open: every worktree links the canonical .venv, and NOTHING compared what is
+# installed in that venv with the requirements.lock the consuming worktree
+# actually tracks. Both drift directions are recorded costs.
+#
+#   MISSING or WRONG VERSION — the shared venv is behind the worktree's lock, so
+#   the worktree's code imports a package that is not there (or is there at the
+#   wrong version). That is the stale-shared-cache failure #834 named, and it
+#   reads as a code bug rather than a checkout artifact.
+#
+#   EXTRA — the venv holds a distribution the lock does not pin, so code can
+#   import something no lockfile declares. It passes here and fails in CI, on
+#   Dell's machine, and in the Worker. That is the phantom dependency, and
+#   requirements.txt's own comments record it happening twice (2026-08-13's four
+#   undeclared packages, and pymupdf found later by importing it).
+#
+# Symmetric with the npm rule on purpose: every required entry present at the
+# exact pinned version, and no installed distribution outside the lock. Lock
+# entries whose environment marker does not apply here are legitimately absent,
+# exactly as npm omits a platform-inapplicable optional package. The installer
+# bootstrap (pip/setuptools/wheel) is not a project dependency and is never in a
+# `pip freeze` lock, so it is not judged as an extra.
+venv_matches_lock() {
+  local lockfile="$1/requirements.lock"
+  [ -f "$lockfile" ] || return 0            # nothing to compare against
+  [ -x "$2/bin/python" ] || return 1        # a venv with no interpreter is not usable
+  "$2/bin/python" - "$lockfile" <<'PYEOF'
+import re, sys
+from importlib import metadata
+
+# Never a project dependency, never emitted by `pip freeze`.
+BOOTSTRAP = {"pip", "setuptools", "wheel", "distribute", "pkg-resources"}
+
+
+def norm(name):
+    return re.sub(r"[-_.]+", "-", name.split("[")[0]).strip().lower()
+
+
+required = {}
+try:
+    lines = open(sys.argv[1]).read().splitlines()
+except OSError:
+    raise SystemExit(1)
+for raw in lines:
+    line = raw.split("#", 1)[0].strip()
+    if not line or "==" not in line:
+        continue
+    spec, _, marker = line.partition(";")
+    if "==" not in spec:
+        continue
+    name, version = spec.split("==", 1)
+    marker = marker.strip()
+    if marker:
+        # Cannot evaluate the marker -> treat the entry as inapplicable rather
+        # than as a mismatch. Same failure direction as npm's optional packages:
+        # what this cannot prove, it does not use to refuse.
+        try:
+            from packaging.markers import Marker
+            if not Marker(marker).evaluate():
+                continue
+        except Exception:
+            continue
+    required[norm(name)] = version.strip()
+
+installed = {}
+for dist in metadata.distributions():
+    name = dist.metadata["Name"] or ""
+    if name:
+        installed[norm(name)] = dist.version
+
+if any(installed.get(key) != version for key, version in required.items()):
+    raise SystemExit(1)
+if any(key not in required and key not in BOOTSTRAP for key in installed):
+    raise SystemExit(1)
+PYEOF
+}
+
+# link_python_runtime <worktree> — the .venv half of the plumbing decision, and
+# the exact shape link_node_runtime already has, so the two runtimes are judged
+# by one rule rather than two (rule a8c55a47).
+#
+# THE FAILURE DIRECTION IS DIFFERENT FROM npm's, AND IT IS STATED RATHER THAN
+# ASSUMED. A worktree with no node_modules still boots: ordinary STORE calls run
+# zero-install. A worktree with no .venv runs almost nothing in this repo — ten
+# plus scripts hard-code ./.venv/bin, ops/ci.sh included. So refusing the link
+# is the right call (a venv that does not match the lock makes every local test
+# result a lie about what CI will do) but it must never be a silent brick:
+# the refusal names the exact frozen install that fixes it, and
+# CARR_WORKTREE_VENV_DRIFT_OK=1 links anyway while SAYING SO on every single
+# invocation. An announced exception, never a quiet one — the discipline
+# ops/config/ci-check-scope.json already applies to the gates class.
+link_python_runtime() {
+  local wt="$1"
+  local venv="$CANON/.venv"
+  local name="$wt/.venv"
+  [ -d "$venv" ] || return 0
+  if venv_matches_lock "$wt" "$venv"; then
+    link "$venv" "$name"
+    return 0
+  fi
+  if [ -n "${CARR_WORKTREE_VENV_DRIFT_OK:-}" ]; then
+    print -r -- "  !! shared .venv does not match this worktree's requirements.lock"
+    print -r -- "     LINKED ANYWAY because CARR_WORKTREE_VENV_DRIFT_OK is set — local results may not match CI"
+    link "$venv" "$name"
+    return 0
+  fi
+  if [ -L "$name" ] && ! git -C "$wt" ls-files --error-unmatch ".venv" >/dev/null 2>&1; then
+    rm "$name"
+  fi
+  print -r -- "  !! shared .venv does not match this worktree's requirements.lock — left unlinked"
+  print -r -- "     build this worktree's own frozen runtime:  ./run.sh worktree --install ${wt:t}"
+  print -r -- "     or set CARR_WORKTREE_VENV_DRIFT_OK=1 to link the drifted venv anyway (announced every run)"
 }
 
 # ---------------------------------------------------------------------------
@@ -395,10 +515,121 @@ case "$1" in
       print -r -- "  ./run.sh worktree --list   shows the ones that are"
       exit 2
     fi
-    link "$CANON/.venv" "$wt/.venv"
+    link_python_runtime "$wt"
     link "$CANON/out"   "$wt/out"
     link_node_runtime "$wt"
     exit 0
+    ;;
+  --install)
+    shift
+    # THE ONE FROZEN DOOR. link_python_runtime and link_node_runtime both refuse a
+    # shared runtime that does not match this worktree's lock, and a refusal that
+    # names no command is just a broken worktree with a nicer message. This is
+    # that command, and it is deliberately the ONLY install path this script
+    # offers: it runs `npm ci` and `pip install -r requirements.lock` and has no
+    # spelling that resolves dependencies freshly. `npm install` re-resolves and
+    # rewrites the lock; `pip install -r requirements.txt` installs the loose
+    # human-facing declaration (`>=` ranges) instead of the pinned output. Both
+    # produce a worktree whose local results are not the results CI will get,
+    # which is the whole failure this slice exists to close.
+    #
+    # --dry-run prints the exact commands without running them. That is not a
+    # convenience: the install itself needs the network, so the dry run is what
+    # a selftest can assert on offline, and what it asserts is precisely the
+    # property that matters — that the commands are the frozen spellings.
+    dry=0
+    case "${1:-}" in
+      --dry-run) dry=1; shift ;;
+    esac
+    if [ $# -ge 1 ]; then
+      target="$1"
+      case "$target" in
+        */*|'~'*) wt="${target:A}" ;;
+        *)        wt="$HOME_DIR/$target" ;;
+      esac
+    else
+      wt="$(git rev-parse --show-toplevel 2>/dev/null)"
+      if [ -z "$wt" ]; then
+        print -r -- "not inside a git worktree — pass a path: run.sh worktree --install <path>"
+        exit 2
+      fi
+      wt="${wt:A}"
+    fi
+    [ -d "$wt" ] || { print -r -- "no worktree at $wt"; exit 1; }
+    # Same two guards --plumb and --remove use, same reasons. The canonical tree
+    # holds the REAL .venv and node_modules that every worktree links; installing
+    # into it from here would rewrite the shared runtime out from under every
+    # other session on this machine.
+    if [ "${wt:A}" = "${CANON:A}" ]; then
+      print -r -- "refusing to install into the canonical tree: $CANON (every worktree links its runtime)"
+      exit 2
+    fi
+    if ! git -C "$CANON" worktree list --porcelain | awk '/^worktree /{print $2}' \
+         | grep -qx -e "${wt:A}" -e "$wt"; then
+      print -r -- "not a registered worktree of this repo: $wt"
+      print -r -- "  ./run.sh worktree --list   shows the ones that are"
+      exit 2
+    fi
+
+    # A LINKED RUNTIME IS NOT THIS WORKTREE'S TO OVERWRITE. .venv and
+    # mcp-server/node_modules arrive here as symlinks into $CANON; installing
+    # over one writes into the shared tree. Drop this script's own untracked
+    # symlink first — the same untracked-is-the-test rule drop_plumbing uses, so
+    # a TRACKED .venv (somebody's work) is never touched.
+    unlink_plumbing() {   # unlink_plumbing <rel>
+      if [ -L "$wt/$1" ] && ! git -C "$wt" ls-files --error-unmatch "$1" >/dev/null 2>&1; then
+        if [ "$dry" = "1" ]; then
+          print -r -- "  would drop shared symlink $1"
+        else
+          rm "$wt/$1"
+          print -r -- "  dropped shared symlink $1"
+        fi
+      fi
+    }
+
+    base_py="$CANON/.venv/bin/python"
+    [ -x "$base_py" ] || base_py="python3"
+    rc=0
+
+    if [ -r "$wt/requirements.lock" ]; then
+      print -r -- "  python: $base_py -m venv $wt/.venv"
+      print -r -- "  python: $wt/.venv/bin/python -m pip install -r $wt/requirements.lock"
+      if [ "$dry" = "0" ]; then
+        unlink_plumbing .venv
+        if "$base_py" -m venv "$wt/.venv" \
+           && "$wt/.venv/bin/python" -m pip install --disable-pip-version-check \
+                -r "$wt/requirements.lock"; then
+          print -r -- "  ok  .venv installed frozen from requirements.lock"
+        else
+          print -r -- "  !! frozen python install FAILED"
+          rc=1
+        fi
+      else
+        unlink_plumbing .venv
+      fi
+    else
+      print -r -- "  python: no requirements.lock in this worktree — nothing to install"
+    fi
+
+    if [ -r "$wt/mcp-server/package-lock.json" ]; then
+      print -r -- "  npm: npm --prefix $wt/mcp-server ci"
+      if [ "$dry" = "0" ]; then
+        unlink_plumbing mcp-server/node_modules
+        if npm --prefix "$wt/mcp-server" ci; then
+          print -r -- "  ok  node_modules installed frozen from package-lock.json"
+        else
+          print -r -- "  !! frozen npm install FAILED"
+          rc=1
+        fi
+      else
+        unlink_plumbing mcp-server/node_modules
+      fi
+    else
+      print -r -- "  npm: no mcp-server/package-lock.json in this worktree — nothing to install"
+    fi
+
+    [ "$dry" = "1" ] && print -r -- "dry run — nothing was installed"
+    exit $rc
     ;;
   --sweep)
     shift
@@ -619,7 +850,7 @@ else
   print -r -- "branched $name from $base"
 fi
 
-link "$CANON/.venv" "$wt/.venv"
+link_python_runtime "$wt"
 link "$CANON/out"   "$wt/out"
 # The THIRD gitignored dependency, and it hides the same way the first two did.
 # `npm test` in a fresh worktree dies on ERR_MODULE_NOT_FOUND for
