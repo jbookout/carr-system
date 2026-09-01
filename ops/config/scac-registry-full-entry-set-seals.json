@@ -1,0 +1,11 @@
+{
+  "scac-mutation-registry.v1": "sha256:9ac6c128ffa04b7f88cdc68fae1739e88d0e5d367799b3b2a37f9f4931c36757",
+  "scac-mutation-registry.v2": "sha256:09847d91bbf2e77ca810651d5fcb7ad1a1d94deec5219486a9ccaafa3553613c",
+  "scac-mutation-registry.v3": "sha256:811f2db1346132550935bf8ed6981b7e4b91df921dc955bd3dba6d22cd80dcd4",
+  "scac-mutation-registry.v4": "sha256:822fdecb166e4eab7d2c42ff5fb6d89aebe97a362ca58b00713a13953e20e867",
+  "scac-mutation-registry.v5": "sha256:f9c7564830d5e57d760d1a043a650dfb729cec79cdcdab2b3862c3f1b630ec0d",
+  "scac-mutation-registry.v6": "sha256:3a909bf4f9826a3abca2bb27fbed8f99c8a67233a6d796f3248028cfdd4a31ef",
+  "scac-mutation-registry.v7": "sha256:ecb1de3f712ce26eadbefc584a4ff9cd8b515d2e8e7a908a0cd6af6daf07f26a",
+  "scac-mutation-registry.v8": "sha256:00a09739dc8bfa869e82886ebbec2f2a48b3e7c0ec4801eeedde0a7c5c9664fd",
+  "scac-mutation-registry.v9": "sha256:41e2568a9799abd5d20ecada9bdfb646173876c09b01069f347b258022c15d13"
+}

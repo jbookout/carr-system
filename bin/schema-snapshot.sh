@@ -1154,6 +1154,17 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
   SCAC_EXPECTED_V9_DIGEST="sha256:$SCAC_EXPECTED_V9_DIGEST"
   SCAC_EXPECTED_V9_SOURCE_SET="sha256:$SCAC_EXPECTED_V9_SOURCE_SET"
   SCAC_EXPECTED_V9_CATALOG="sha256:$SCAC_EXPECTED_V9_CATALOG"
+  SCAC_FULL_SET_SEALS="$REPO/ops/config/scac-registry-full-entry-set-seals.json"
+  SCAC_FULL_SET_SQL="$(node -e '
+    const fs=require("fs"); const seals=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+    const keys=Array.from({length:9},(_,i)=>`scac-mutation-registry.v${i+1}`);
+    if (Object.keys(seals).sort().join("|")!==keys.sort().join("|") ||
+        keys.some(key=>!/^sha256:[0-9a-f]{64}$/.test(seals[key]))) process.exit(2);
+    const literal=value=>`'${String(value).replaceAll("'","''")}'`;
+    process.stdout.write(keys.map(key=>`(${literal(key)},${literal(seals[key])})`).join(","));
+  ' "$SCAC_FULL_SET_SEALS")" || {
+    echo "schema-snapshot: immutable SCAC full-entry-set seals are unavailable or malformed" >&2; exit 1
+  }
   SCAC_REGISTRY_EXACT="$("$PSQL" "$URL" -Atqc \
     "select count(*)=9
        and array_agg(registry_version order by registry_version collate \"C\")=array[
@@ -1167,6 +1178,9 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
              convert_to(coalesce(string_agg(e.entry_digest,',' order by e.ingress_key collate \"C\"),''),'UTF8'),
              'sha256'),'hex') from ops.scac_mutation_registry_entry e
              where e.registry_version=v.registry_version))
+       and not exists(select 1 from (values $SCAC_FULL_SET_SQL) expected(registry_version,entry_set_digest)
+         left join ops.scac_mutation_registry_version sealed using(registry_version)
+         where sealed.entry_set_digest is distinct from expected.entry_set_digest)
        and not exists(select 1 from ops.scac_mutation_registry_entry e
          where e.entry_digest is distinct from 'sha256:'||encode(public.digest(
            convert_to(ops.scac_canonical_json(e.contract),'UTF8'),'sha256'),'hex'))
@@ -1229,6 +1243,11 @@ begin
         where e.registry_version=v.registry_version))
     from ops.scac_mutation_registry_version v) then
     raise exception 'restored SCAC v1-v9 registry is incomplete or digest-drifted';
+  end if;
+  if exists(select 1 from (values ${SCAC_FULL_SET_SQL}) expected(registry_version,entry_set_digest)
+       left join ops.scac_mutation_registry_version sealed using(registry_version)
+       where sealed.entry_set_digest is distinct from expected.entry_set_digest) then
+    raise exception 'restored SCAC registry does not match immutable full-entry-set seals';
   end if;
   if exists(select 1 from unnest(array[
        'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3',
