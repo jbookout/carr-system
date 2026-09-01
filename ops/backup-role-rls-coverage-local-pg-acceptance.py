@@ -10,9 +10,13 @@ Proves, against a disposable cluster whose migrations are already applied:
   2. The fix works: migration 0475's permissive policy + row_security=on lets
      carr_backup read EVERY row of work_request (parity with the true count,
      SIEP-program rows included).
-  3. The fix touches no sealed digest: the SCAC v10 role+membership census
-     sub-digest (migration 0471) is byte-IDENTICAL before and after the policy
-     — a policy is a schema object, not a role attribute, so it is not hashed.
+  3. The fix touches no sealed digest: the COMPLETE SCAC v10 census 4th block
+     (roles + memberships + ownership, migration 0471's count=52 / sha256:345871
+     block) is byte-IDENTICAL before and after the policy — a policy is a schema
+     object, hashed by none of the three sets. Positive control on the same
+     cluster: flipping carr_backup to BYPASSRLS MOVES that same block digest,
+     then restoring NOBYPASSRLS returns it — proving the census is bypass-
+     sensitive but policy-insensitive (the two halves are the airtight proof).
   4. Completeness invariant: for EVERY RLS-enabled table in public+ops,
      carr_backup under row_security=on sees the true row count (no silent
      short dump under --enable-row-security).
@@ -43,35 +47,39 @@ PASS = 0
 FAIL = 0
 FAILED: list[str] = []
 
-# The exact 4th SCAC v10 census block from migration 0471: role rows + membership
-# rows over the '^carr_' connected closure. Role attributes (incl. bypass_rls)
-# live here; a policy does not. Reused verbatim so the assertion tracks the real
-# pinned census, not a paraphrase.
-CENSUS_ROLE_BLOCK = """
-with recursive connected(oid) as (
-  select oid from pg_roles where rolname~'^carr_' and rolname<>'carr_ci' union
-  select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid
-    join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end
-   where other.rolname<>'carr_ci'
-), role_rows as (
-  select 'db-role:'||r.rolname ingress_key, jsonb_build_object(
-    'ingress_key','db-role:'||r.rolname,'row_kind','role','role',r.rolname,
-    'login',r.rolcanlogin,'inherit',r.rolinherit,'superuser',r.rolsuper,
-    'create_role',r.rolcreaterole,'create_db',r.rolcreatedb,
-    'replication',r.rolreplication,'bypass_rls',r.rolbypassrls) row
-    from pg_roles r where r.oid in(select oid from connected)
-), membership_rows as (
-  select 'db-role-membership:'||role.rolname||':'||member.rolname ingress_key, jsonb_build_object(
-    'ingress_key','db-role-membership:'||role.rolname||':'||member.rolname,'row_kind','membership',
-    'role',role.rolname,'member',member.rolname,'admin_option',m.admin_option,
-    'inherit_option',m.inherit_option,'set_option',m.set_option) row
-    from pg_auth_members m join pg_roles role on role.oid=m.roleid join pg_roles member on member.oid=m.member
-   where m.roleid in(select oid from connected) and m.member in(select oid from connected)
-), observed as (select * from role_rows union all select * from membership_rows)
-select 'sha256:'||encode(public.digest(
-  convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key collate "C"),'[]'::jsonb)),'UTF8'),
-  'sha256'),'hex') from observed
+# The COMPLETE 4th SCAC v10 census block from migration 0471 (its
+# scac_mutation_catalog_v10_current(), the block that returns count=52 and
+# sha256:345871...): role_rows UNION ALL membership_rows UNION ALL
+# ownership_rows, aggregated and hashed as ONE set. This is the sealed digest
+# whose invariance under the policy is the load-bearing safety claim, so the CTE
+# is copied VERBATIM from 0471 lines 270-281 (only the final projection is
+# widened to also return count, matching 0471's `select count(*),'sha256:'...`).
+# Role ATTRIBUTES (incl. bypass_rls) live in role_rows; a table policy appears in
+# none of the three sets. Absolute count/digest are environment-specific (a
+# disposable cluster holds fewer objects than production's 52); the proof is the
+# INVARIANCE (identical across the policy) and the CONTRAST (moves under
+# BYPASSRLS), both of which are deterministic.
+CENSUS_V10_BLOCK4 = """
+  with recursive connected(oid) as (
+    select oid from pg_roles where rolname~'^carr_' and rolname<>'carr_ci' union
+    select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end where other.rolname<>'carr_ci'
+  ), role_rows as (
+    select 'db-role:'||r.rolname ingress_key,jsonb_build_object('ingress_key','db-role:'||r.rolname,'row_kind','role','role',r.rolname,'login',r.rolcanlogin,'inherit',r.rolinherit,'superuser',r.rolsuper,'create_role',r.rolcreaterole,'create_db',r.rolcreatedb,'replication',r.rolreplication,'bypass_rls',r.rolbypassrls) row from pg_roles r where r.oid in(select oid from connected)
+  ), membership_rows as (
+    select 'db-role-membership:'||role.rolname||':'||member.rolname ingress_key,jsonb_build_object('ingress_key','db-role-membership:'||role.rolname||':'||member.rolname,'row_kind','membership','role',role.rolname,'member',member.rolname,'admin_option',m.admin_option,'inherit_option',m.inherit_option,'set_option',m.set_option) row from pg_auth_members m join pg_roles role on role.oid=m.roleid join pg_roles member on member.oid=m.member where m.roleid in(select oid from connected) and m.member in(select oid from connected)
+  ), ownership_rows as (
+    select 'db-function-owner:'||n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||'):'||owner.rolname ingress_key,jsonb_build_object('ingress_key','db-function-owner:'||n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||'):'||owner.rolname,'row_kind','function_owner','signature',n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')','owner',owner.rolname) row from pg_proc p join pg_namespace n on n.oid=p.pronamespace join pg_roles owner on owner.oid=p.proowner where n.nspname not in ('pg_catalog','information_schema') and p.prokind in ('f','p') and owner.oid in(select oid from connected) and not owner.rolsuper and owner.rolname<>'neondb_owner' union all
+    select 'db-relation-owner:'||n.nspname||'.'||c.relname||':'||owner.rolname,jsonb_build_object('ingress_key','db-relation-owner:'||n.nspname||'.'||c.relname||':'||owner.rolname,'row_kind','relation_owner','relation',n.nspname||'.'||c.relname,'relation_kind',c.relkind,'owner',owner.rolname) row from pg_class c join pg_namespace n on n.oid=c.relnamespace join pg_roles owner on owner.oid=c.relowner where n.nspname not in ('pg_catalog','information_schema') and c.relkind in ('r','p','v','m','f') and owner.oid in(select oid from connected) and not owner.rolsuper and owner.rolname<>'neondb_owner'
+  ), observed as (select * from role_rows union all select * from membership_rows union all select * from ownership_rows)
+  select count(*)::int, 'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex') from observed
 """
+
+
+def census_block(cur) -> tuple[int, str]:
+    """Return (count, digest) of the full SCAC v10 census 4th block."""
+    row = cur.execute(CENSUS_V10_BLOCK4).fetchone()
+    assert row is not None
+    return int(row[0]), str(row[1])
 
 WRITE_PRIVS = ("INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER")
 BUNDLE_ROLES = ("carr_writer", "carr_reader", "carr_jobs", "carr_exporter", "carr_authority")
@@ -150,28 +158,58 @@ def main() -> int:
         create_backup_role(conn)
 
         with conn.cursor() as cur:
-            census_before = one(cur, CENSUS_ROLE_BLOCK)
+            count_before, digest_before = census_block(cur)
             bypass_before = one(cur, "select rolbypassrls from pg_roles where rolname='carr_backup'")
+        print(f"  ..    full v10 census block BEFORE policy: count={count_before} digest={digest_before}")
 
         # Apply the fix.
         apply_0475(conn)
 
         with conn.cursor() as cur:
-            census_after = one(cur, CENSUS_ROLE_BLOCK)
+            count_after, digest_after = census_block(cur)
             policy_present = one(cur, """
                 select exists(select 1 from pg_policy
                   where polname='carr_backup_full_read' and polrelid='ops.work_request'::regclass)
             """)
+        print(f"  ..    full v10 census block AFTER  policy: count={count_after} digest={digest_after}")
 
         check("migration 0475 creates carr_backup_full_read on ops.work_request", bool(policy_present))
-        check("SCAC v10 role+membership census sub-digest is UNCHANGED by the policy",
-              census_before == census_after,
-              f"before={census_before} after={census_after}")
+        check("FULL SCAC v10 census block (roles+memberships+ownership) is byte-IDENTICAL across the policy",
+              (count_before, digest_before) == (count_after, digest_after),
+              f"before=({count_before},{digest_before}) after=({count_after},{digest_after})")
         check("carr_backup did NOT gain BYPASSRLS (fix is a policy, not a role attribute)",
               bypass_before is False and one_bypass(conn) is False)
 
+        # POSITIVE CONTROL: the census IS bypass-sensitive. Flip carr_backup to
+        # BYPASSRLS on the same cluster, prove the SAME full census block digest
+        # MOVES, then restore. Together with the invariance above this is the
+        # airtight proof: the policy path is safe BECAUSE the sealed census
+        # reacts to the role attribute the naive fix would have changed, and does
+        # NOT react to the schema object this fix adds.
+        with conn.cursor() as cur:
+            cur.execute("alter role carr_backup bypassrls")
+        conn.commit()
+        with conn.cursor() as cur:
+            count_bypass, digest_bypass = census_block(cur)
+        print(f"  ..    full v10 census block WITH BYPASSRLS: count={count_bypass} digest={digest_bypass}")
+        check("CONTRAST: flipping carr_backup to BYPASSRLS MOVES the same census block digest",
+              digest_bypass != digest_after,
+              f"policy_digest={digest_after} bypass_digest={digest_bypass} (must differ)")
+        check("CONTRAST: the count is unchanged by BYPASSRLS (only the attribute bit moves the hash)",
+              count_bypass == count_after,
+              f"count_after={count_after} count_bypass={count_bypass}")
+        with conn.cursor() as cur:
+            cur.execute("alter role carr_backup nobypassrls")
+        conn.commit()
+        with conn.cursor() as cur:
+            count_restored, digest_restored = census_block(cur)
+        check("CONTRAST: restoring NOBYPASSRLS returns the census block to the identical digest",
+              (count_restored, digest_restored) == (count_after, digest_after),
+              f"restored=({count_restored},{digest_restored}) expected=({count_after},{digest_after})")
+
         # (1) Reproduce the failure, (2) prove the fix, on the real table.
         off_ok, off_val = count_as_backup(dsn, "ops.work_request", "off")
+        print(f"  ..    row_security=off as carr_backup -> {'REFUSED: ' + str(off_val).strip() if not off_ok else 'read ' + str(off_val) + ' rows'}")
         check("row_security=off: carr_backup read of ops.work_request is REFUSED (the nightly failure)",
               (not off_ok) and "row-level security" in str(off_val).lower(),
               f"ok={off_ok} val={off_val}")
@@ -181,6 +219,8 @@ def main() -> int:
             true_wr = one(cur, "select count(*) from ops.work_request")
             true_siep = one(cur, "select count(*) from ops.work_request "
                                  "where program_key='carr-system-integrity-elimination-v1'")
+        print(f"  ..    row_security=on  as carr_backup -> read {on_val} rows; true count={true_wr}; "
+              f"SIEP-keyed rows={true_siep}")
         check("row_security=on: carr_backup reads ops.work_request without error", on_ok, str(on_val))
         check("row_security=on: carr_backup sees EVERY work_request row (parity, no silent omission)",
               on_ok and on_val == true_wr, f"backup={on_val} true={true_wr}")
