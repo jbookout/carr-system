@@ -124,6 +124,56 @@ link() {                                # link <target> <linkname>
   print -r -- "  ok  $(basename "$name") -> $target"
 }
 
+# runtime_matches_lock <worker-dir> <node_modules-dir>
+#
+# A canonical checkout can be cleanly *present* yet many commits behind the
+# worktree consuming its shared npm cache. Directory existence therefore proves
+# nothing. npm writes node_modules/.package-lock.json from the exact resolution
+# it installed; compare that installed resolution with the consuming
+# worktree's lock before linking. Platform-inapplicable optional packages are
+# legitimately absent, but every required package must be present and every
+# installed entry must be byte-for-byte the lock entry the worktree expects.
+runtime_matches_lock() {
+  "$PY" - "$1/package-lock.json" "$2/.package-lock.json" <<'PYEOF'
+import json, sys
+try:
+    expected = json.load(open(sys.argv[1]))["packages"]
+    installed = json.load(open(sys.argv[2]))["packages"]
+except Exception:
+    raise SystemExit(1)
+expected.pop("", None)
+if any(key not in expected or installed[key] != expected[key] for key in installed):
+    raise SystemExit(1)
+if any(key not in installed and not row.get("optional")
+       for key, row in expected.items()):
+    raise SystemExit(1)
+PYEOF
+}
+
+# link_node_runtime <worktree> — one shared decision for create-time plumbing
+# and SessionStart --plumb. A stale shared cache is worse than no cache: the
+# latter prints a missing-dependency error, while the former runs an arbitrary
+# older dependency graph and can make unrelated current tests fail. On a
+# mismatch, remove only this script's untracked symlink and leave the worktree
+# dependency-empty; ordinary STORE calls still boot zero-install, and code work
+# can run `npm --prefix mcp-server ci` locally from its own lock.
+link_node_runtime() {
+  local wt="$1"
+  local runtime="$CANON/mcp-server/node_modules"
+  local name="$wt/mcp-server/node_modules"
+  [ -d "$runtime" ] || return 0
+  if runtime_matches_lock "$wt/mcp-server" "$runtime"; then
+    link "$runtime" "$name"
+    return 0
+  fi
+  if [ -L "$name" ] && ! git -C "$wt" ls-files --error-unmatch \
+       "mcp-server/node_modules" >/dev/null 2>&1; then
+    rm "$name"
+  fi
+  print -r -- "  !! shared node_modules does not match this worktree's package-lock.json — left unlinked"
+  print -r -- "     run npm --prefix mcp-server ci in the worktree when local Node tooling is needed"
+}
+
 # ---------------------------------------------------------------------------
 # REMOVAL PLUMBING — shared by --remove and --sweep, so a worktree reaped
 # automatically goes through the EXACT code path a worktree removed by hand
@@ -347,7 +397,7 @@ case "$1" in
     fi
     link "$CANON/.venv" "$wt/.venv"
     link "$CANON/out"   "$wt/out"
-    [ -d "$CANON/mcp-server/node_modules" ] && link "$CANON/mcp-server/node_modules" "$wt/mcp-server/node_modules"
+    link_node_runtime "$wt"
     exit 0
     ;;
   --sweep)
@@ -579,7 +629,7 @@ link "$CANON/out"   "$wt/out"
 # 1 fail on a test that had nothing to do with the change. Linked, not
 # installed, because a per-worktree npm install would drift from the canonical
 # lockfile — the same reasoning as .venv.
-[ -d "$CANON/mcp-server/node_modules" ] && link "$CANON/mcp-server/node_modules" "$wt/mcp-server/node_modules"
+link_node_runtime "$wt"
 
 print -r -- ""
 print -r -- "worktree ready — your own tree, nobody else's files in it:"
