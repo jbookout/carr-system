@@ -163,18 +163,6 @@ def lock_file(task_key: str, manifest: dict[str, Any] | None = None) -> Path:
     return state_file(task_key, manifest).with_suffix(".lock")
 
 
-def load_json_file(path: Path) -> dict[str, Any] | None:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except Exception as exc:
-        raise LifecycleError("LIFECYCLE_INVALID", f"state unreadable: {exc}") from exc
-    if not isinstance(value, dict):
-        raise LifecycleError("LIFECYCLE_INVALID", "state is not an object")
-    return value
-
-
 SIGNAL_KEYS = {
     "highwater", "invocations", "active_minutes", "cycles",
     "generation_tool_calls", "mutated_paths", "worker_starts",
@@ -562,6 +550,17 @@ def _load_json_at(parent_fd: int, name: str) -> tuple[bool, Any | None]:
         os.close(fd)
 
 
+def _load_json_fd(fd: int) -> Any | None:
+    """Decode one already-open regular file without releasing its identity."""
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        return None
+    try:
+        raw = os.pread(fd, os.fstat(fd).st_size + 1, 0)
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, OSError):
+        return None
+
+
 def _atomic_write_at(parent_fd: int, name: str, value: Any) -> None:
     """Durably replace one regular file beneath a pinned directory."""
     if name in {"", ".", ".."} or "/" in name:
@@ -588,6 +587,98 @@ def _atomic_write_at(parent_fd: int, name: str, value: Any) -> None:
             os.unlink(temp_name, dir_fd=parent_fd)
         except FileNotFoundError:
             pass
+
+
+def _publish_immutable_at(
+        parent_fd: int, name: str, value: Any, *, reason: str,
+        invalid_detail: str, collision_detail: str,
+        matches: Callable[[Any], bool]) -> None:
+    """Publish one immutable value beneath a pinned parent descriptor."""
+    lock_name = f"{Path(name).stem}.lock"
+    lock_fd = os.open(
+        lock_name,
+        os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+        0o600, dir_fd=parent_fd)
+    if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
+        os.close(lock_fd)
+        raise LifecycleError(reason, invalid_detail)
+    with os.fdopen(lock_fd, "a+b") as guard:
+        fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
+        exists, existing = _load_json_at(parent_fd, name)
+        if exists:
+            if existing is None or not matches(existing):
+                raise LifecycleError(reason, collision_detail)
+            return
+
+        temp_name = f".{name}.{secrets.token_hex(16)}"
+        temp_fd = final_fd = None
+        created = False
+        try:
+            temp_fd = os.open(
+                temp_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600, dir_fd=parent_fd)
+            remaining = memoryview(canonical(value) + b"\n")
+            while remaining:
+                written = os.write(temp_fd, remaining)
+                if written <= 0:
+                    raise OSError("immutable publication write made no progress")
+                remaining = remaining[written:]
+            os.fsync(temp_fd)
+            temp_identity = os.fstat(temp_fd)
+            try:
+                os.link(
+                    temp_name, name,
+                    src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
+                    follow_symlinks=False)
+                created = True
+            except FileExistsError:
+                exists, existing = _load_json_at(parent_fd, name)
+                if not exists or existing is None or not matches(existing):
+                    raise LifecycleError(reason, collision_detail)
+            if created:
+                linked_identity = None
+                try:
+                    linked_identity = os.stat(
+                        name, dir_fd=parent_fd, follow_symlinks=False)
+                    final_fd = os.open(
+                        name,
+                        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=parent_fd)
+                    final_identity = os.fstat(final_fd)
+                    final_value = _load_json_fd(final_fd)
+                    if (not stat.S_ISREG(final_identity.st_mode)
+                            or (final_identity.st_dev, final_identity.st_ino)
+                            != (temp_identity.st_dev, temp_identity.st_ino)
+                            or (linked_identity.st_dev, linked_identity.st_ino)
+                            != (temp_identity.st_dev, temp_identity.st_ino)
+                            or final_value is None
+                            or not matches(final_value)):
+                        raise LifecycleError(reason, invalid_detail)
+                except Exception:
+                    try:
+                        current = os.stat(
+                            name, dir_fd=parent_fd, follow_symlinks=False)
+                        if (linked_identity is not None
+                                and (current.st_dev, current.st_ino)
+                                == (linked_identity.st_dev,
+                                    linked_identity.st_ino)):
+                            os.unlink(name, dir_fd=parent_fd)
+                    except FileNotFoundError:
+                        pass
+                    os.fsync(parent_fd)
+                    raise
+            os.fsync(parent_fd)
+        finally:
+            if final_fd is not None:
+                os.close(final_fd)
+            if temp_fd is not None:
+                os.close(temp_fd)
+            try:
+                os.unlink(temp_name, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
 
 
 def _parts_beneath(root: Path, path: Path, label: str) -> tuple[str, ...]:
@@ -687,7 +778,7 @@ def _publish_transaction_artifact(
                   | getattr(os, "O_NOFOLLOW", 0))
     root_fd = (os.open(root, root_flags) if pinned_root_fd is None
                else os.dup(pinned_root_fd))
-    transaction_fd = final_parent_fd = staged_parent_fd = None
+    transaction_fd = final_parent_fd = staged_parent_fd = staged_fd = None
     try:
         if pinned_transaction_fd is None:
             directory_parts = tuple(directory.relative_to(root).parts)
@@ -710,19 +801,25 @@ def _publish_transaction_artifact(
 
         staged_parent_fd = _open_directory_at(
             transaction_fd, staged_parts[:-1])
-        staged_exists, value = _load_json_at(
-            staged_parent_fd, staged_parts[-1])
-        if not staged_exists or value is None:
+        staged_fd = os.open(
+            staged_parts[-1],
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=staged_parent_fd)
+        staged_identity = os.fstat(staged_fd)
+        value = _load_json_fd(staged_fd)
+        if value is None:
             raise LifecycleError("LIFECYCLE_INVALID",
                                  "lifecycle transaction artifact is unreadable")
         if digest(value) != expected_digest:
             raise LifecycleError("LIFECYCLE_INVALID",
                                  "lifecycle transaction artifact digest changed")
+        created = False
         try:
             os.link(
                 staged_parts[-1], final_parts[-1],
                 src_dir_fd=staged_parent_fd, dst_dir_fd=final_parent_fd,
                 follow_symlinks=False)
+            created = True
         except FileExistsError:
             exists, existing = _load_json_at(
                 final_parent_fd, final_parts[-1])
@@ -731,6 +828,48 @@ def _publish_transaction_artifact(
                 raise LifecycleError(
                     "LIFECYCLE_INVALID",
                     "lifecycle transaction artifact collided")
+        if created:
+            final_fd = None
+            linked_identity = None
+            try:
+                linked_identity = os.stat(
+                    final_parts[-1], dir_fd=final_parent_fd,
+                    follow_symlinks=False)
+                final_fd = os.open(
+                    final_parts[-1],
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                    dir_fd=final_parent_fd)
+                final_identity = os.fstat(final_fd)
+                final_value = _load_json_fd(final_fd)
+                if (not stat.S_ISREG(final_identity.st_mode)
+                        or (final_identity.st_dev, final_identity.st_ino)
+                        != (staged_identity.st_dev, staged_identity.st_ino)
+                        or (linked_identity.st_dev, linked_identity.st_ino)
+                        != (staged_identity.st_dev, staged_identity.st_ino)
+                        or final_value is None
+                        or digest(final_value) != expected_digest):
+                    raise LifecycleError(
+                        "LIFECYCLE_INVALID",
+                        "lifecycle transaction artifact identity changed")
+            except Exception:
+                # This process created the entry, so a failed identity proof
+                # must retract it durably before leaving the journal for retry.
+                try:
+                    current = os.stat(
+                        final_parts[-1], dir_fd=final_parent_fd,
+                        follow_symlinks=False)
+                    if (linked_identity is not None
+                            and (current.st_dev, current.st_ino)
+                            == (linked_identity.st_dev,
+                                linked_identity.st_ino)):
+                        os.unlink(final_parts[-1], dir_fd=final_parent_fd)
+                except FileNotFoundError:
+                    pass
+                os.fsync(final_parent_fd)
+                raise
+            finally:
+                if final_fd is not None:
+                    os.close(final_fd)
         os.fsync(final_parent_fd)
         # Keep a named sync boundary for durability instrumentation while the
         # descriptor above remains the race-safe authority. Recovery passes a
@@ -744,7 +883,8 @@ def _publish_transaction_artifact(
             "LIFECYCLE_INVALID",
             f"lifecycle transaction path is unsafe: {exc}") from exc
     finally:
-        for fd in (staged_parent_fd, final_parent_fd, transaction_fd, root_fd):
+        for fd in (staged_fd, staged_parent_fd, final_parent_fd,
+                   transaction_fd, root_fd):
             if fd is not None:
                 os.close(fd)
 
@@ -925,6 +1065,55 @@ def _guard_root_fd(root: Path) -> int:
     return int(entry[2])
 
 
+def _guarded_parent_fd(
+        root: Path, path: Path, label: str, *, create: bool = False
+        ) -> tuple[int, str]:
+    """Open one path's parent beneath the active guard's pinned root."""
+    parts = _parts_beneath(root, path, label)
+    parent_fd = _open_directory_at(
+        _guard_root_fd(root), parts[:-1], create=create)
+    return parent_fd, parts[-1]
+
+
+def _guarded_load_json(root: Path, path: Path, label: str
+                       ) -> tuple[bool, Any | None]:
+    """Read one guarded public value without reopening the root pathname."""
+    try:
+        parent_fd, name = _guarded_parent_fd(root, path, label)
+    except FileNotFoundError:
+        return False, None
+    try:
+        return _load_json_at(parent_fd, name)
+    finally:
+        os.close(parent_fd)
+
+
+def _state_parent_fd(
+        root: Path, path: Path, lock: Path) -> tuple[int, str, str]:
+    """Pin the configured state and lock parent for one guarded operation."""
+    root_fd = _guard_root_fd(root)
+    try:
+        state_parts = _parts_beneath(root, path, "lifecycle state path")
+        lock_parts = _parts_beneath(root, lock, "lifecycle task lock")
+        if state_parts[:-1] != lock_parts[:-1]:
+            raise LifecycleError(
+                "LIFECYCLE_INVALID", "lifecycle task lock parent is invalid")
+        return (_open_directory_at(root_fd, state_parts[:-1], create=True),
+                state_parts[-1], lock_parts[-1])
+    except LifecycleError:
+        # Preserve the explicit legacy single-state-file interface while still
+        # pinning its external parent for the duration of this operation.
+        legacy = os.environ.get("CARR_CONTEXT_STATE")
+        if not legacy or _absolute(Path(legacy)) != _absolute(path):
+            raise
+        path.parent.mkdir(parents=True, exist_ok=True)
+        parent_fd = os.open(
+            path.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0))
+        return parent_fd, path.name, lock.name
+
+
 def _create_transaction_directory(root_fd: int) -> tuple[int, str, int]:
     """Create and pin one durable transaction directory."""
     transactions_fd = _open_directory_at(
@@ -1083,29 +1272,8 @@ def mutate_state(task_key: str, expected_version: int | None,
         path = state_file(task_key, manifest)
         lock = lock_file(task_key, manifest)
         root_fd = _guard_root_fd(root)
-        try:
-            state_parts = _parts_beneath(root, path, "lifecycle state path")
-            lock_parts = _parts_beneath(root, lock, "lifecycle task lock")
-            if state_parts[:-1] != lock_parts[:-1]:
-                raise LifecycleError(
-                    "LIFECYCLE_INVALID", "lifecycle task lock parent is invalid")
-            state_parent_fd = _open_directory_at(
-                root_fd, state_parts[:-1], create=True)
-            state_name = state_parts[-1]
-            lock_name = lock_parts[-1]
-        except LifecycleError:
-            # Preserve the explicit legacy single-state-file interface while
-            # still pinning its parent for the duration of this mutation.
-            legacy = os.environ.get("CARR_CONTEXT_STATE")
-            if not legacy or _absolute(Path(legacy)) != _absolute(path):
-                raise
-            path.parent.mkdir(parents=True, exist_ok=True)
-            state_parent_fd = os.open(
-                path.parent,
-                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-                | getattr(os, "O_NOFOLLOW", 0))
-            state_name = path.name
-            lock_name = lock.name
+        state_parent_fd, state_name, lock_name = _state_parent_fd(
+            root, path, lock)
         try:
             lock_fd = os.open(
                 lock_name,
@@ -1178,15 +1346,30 @@ def mutate_state(task_key: str, expected_version: int | None,
 
 
 def read_state(task_key: str, manifest: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    with lifecycle_guard(manifest):
-        lock = lock_file(task_key, manifest)
-        lock.parent.mkdir(parents=True, exist_ok=True)
-        with open(lock, "a+b") as guard:
-            fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
-            state = load_json_file(state_file(task_key, manifest))
-            if state is not None:
-                validate_task_state(state, task_key, manifest)
-            return state
+    with lifecycle_guard(manifest) as root:
+        path = state_file(task_key, manifest)
+        parent_fd, state_name, lock_name = _state_parent_fd(
+            root, path, lock_file(task_key, manifest))
+        try:
+            lock_fd = os.open(
+                lock_name,
+                os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                0o600, dir_fd=parent_fd)
+            if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
+                os.close(lock_fd)
+                raise LifecycleError(
+                    "LIFECYCLE_INVALID", "lifecycle task lock is not a regular file")
+            with os.fdopen(lock_fd, "a+b") as guard:
+                fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
+                exists, state = _load_json_at(parent_fd, state_name)
+                if exists and not isinstance(state, dict):
+                    raise LifecycleError(
+                        "LIFECYCLE_INVALID", "state is not an object")
+                if state is not None:
+                    validate_task_state(state, task_key, manifest)
+                return state
+        finally:
+            os.close(parent_fd)
 
 
 def object_path(task_key: str, kind: str, object_digest: str,
@@ -1212,52 +1395,24 @@ def write_immutable(task_key: str, kind: str, value: Any,
             return object_digest
         _stage_transaction_value(path, value)
         return object_digest
-    with lifecycle_guard(manifest):
-        return _write_immutable_public(path, kind, value, object_digest)
+    with lifecycle_guard(manifest) as root:
+        return _write_immutable_public(
+            root, path, kind, value, object_digest)
 
 
-def _write_immutable_public(path: Path, kind: str, value: Any,
+def _write_immutable_public(root: Path, path: Path, kind: str, value: Any,
                             object_digest: str) -> str:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    publication_lock = path.with_suffix(".lock")
-
-    def verify_existing() -> None:
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise LifecycleError(
-                "HANDOFF_RECEIPT_INVALID",
-                f"invalid published {kind}: {exc}") from exc
-        if digest(existing) != object_digest:
-            raise LifecycleError(
-                "HANDOFF_RECEIPT_INVALID", "immutable object collision")
-
-    with open(publication_lock, "a+b") as guard:
-        fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
-        if path.exists():
-            verify_existing()
-            return object_digest
-        fd, temp_name = tempfile.mkstemp(
-            prefix=f".{path.name}.", dir=path.parent)
-        try:
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(canonical(value) + b"\n")
-                fh.flush()
-                os.fsync(fh.fileno())
-            try:
-                os.link(temp_name, path)
-            except FileExistsError:
-                verify_existing()
-            dfd = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(dfd)
-            finally:
-                os.close(dfd)
-        finally:
-            try:
-                os.unlink(temp_name)
-            except FileNotFoundError:
-                pass
+    parent_fd, name = _guarded_parent_fd(
+        root, path, f"{kind} object path", create=True)
+    try:
+        _publish_immutable_at(
+            parent_fd, name, value,
+            reason="HANDOFF_RECEIPT_INVALID",
+            invalid_detail=f"invalid published {kind}",
+            collision_detail="immutable object collision",
+            matches=lambda existing: digest(existing) == object_digest)
+    finally:
+        os.close(parent_fd)
     return object_digest
 
 
@@ -1297,52 +1452,29 @@ def claim_identity(surface: str, identity: str, task_key: str,
             return
         _stage_transaction_value(path, value)
         return
-    with lifecycle_guard(manifest):
-        _claim_identity_public(path, value)
+    with lifecycle_guard(manifest) as root:
+        _claim_identity_public(root, path, value)
 
 
-def _claim_identity_public(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lock = path.with_suffix(".lock")
-    with open(lock, "a+b") as guard:
-        fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
-        existing = load_json_file(path)
-        if existing is not None:
-            if existing != value:
-                raise LifecycleError(
-                    "OWNERSHIP_MISMATCH",
-                    "native identity is permanently bound to another lifecycle")
-            return
-        fd, temp_name = tempfile.mkstemp(
-            prefix=f".{path.name}.", dir=path.parent)
-        try:
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(canonical(value) + b"\n")
-                fh.flush()
-                os.fsync(fh.fileno())
-            try:
-                os.link(temp_name, path)
-            except FileExistsError:
-                existing = load_json_file(path)
-                if existing != value:
-                    raise LifecycleError(
-                        "OWNERSHIP_MISMATCH",
-                        "native identity was concurrently claimed")
-            dfd = os.open(path.parent, os.O_RDONLY)
-            try:
-                os.fsync(dfd)
-            finally:
-                os.close(dfd)
-        finally:
-            try:
-                os.unlink(temp_name)
-            except FileNotFoundError:
-                pass
+def _claim_identity_public(
+        root: Path, path: Path, value: dict[str, Any]) -> None:
+    parent_fd, name = _guarded_parent_fd(
+        root, path, "identity binding path", create=True)
+    try:
+        _publish_immutable_at(
+            parent_fd, name, value,
+            reason="OWNERSHIP_MISMATCH",
+            invalid_detail="native identity binding is invalid",
+            collision_detail=(
+                "native identity is permanently bound to another lifecycle"),
+            matches=lambda existing: existing == value)
+    finally:
+        os.close(parent_fd)
 
 
 def verify_identity_binding(task_key: str, owner: dict[str, Any],
                             manifest: dict[str, Any] | None = None) -> None:
-    with lifecycle_guard(manifest):
+    with lifecycle_guard(manifest) as root:
         path = identity_binding_path(
             str(owner.get("surface")), str(owner.get("id")), manifest)
         binding = _transaction_value(path)
@@ -1351,7 +1483,8 @@ def verify_identity_binding(task_key: str, owner: dict[str, Any],
             if transaction is not None:
                 _exists, binding = _transaction_public_value(path)
             else:
-                binding = load_json_file(path)
+                _exists, binding = _guarded_load_json(
+                    root, path, "identity binding path")
         expected = {
             "schema_version": 1, "surface": owner.get("surface"),
             "identity": owner.get("id"), "task_key": task_key,
@@ -1367,7 +1500,7 @@ def read_identity_binding(surface: str, identity: str,
                           manifest: dict[str, Any] | None = None
                           ) -> dict[str, Any] | None:
     """Read one authoritative native-identity index entry in O(1)."""
-    with lifecycle_guard(manifest):
+    with lifecycle_guard(manifest) as root:
         path = identity_binding_path(surface, identity, manifest)
         binding = _transaction_value(path)
         if binding is None:
@@ -1375,7 +1508,8 @@ def read_identity_binding(surface: str, identity: str,
             if transaction is not None:
                 _exists, binding = _transaction_public_value(path)
             else:
-                binding = load_json_file(path)
+                _exists, binding = _guarded_load_json(
+                    root, path, "identity binding path")
         if binding is None:
             return None
         if (set(binding) != {
@@ -1428,12 +1562,30 @@ def validate_recovery_history(task_key: str, history: list[str],
     directory = object_path(
         task_key, "recovery-event", "unused", manifest).parent
     try:
-        public_paths = (set(directory.glob("*.json"))
-                        if directory.is_dir() else set())
-        published = {
-            path.stem for path in public_paths | _transaction_paths_under(directory)
-            if is_digest(path.stem)
-        }
+        with lifecycle_guard(manifest) as root:
+            parts = _parts_beneath(
+                root, directory, "recovery history directory")
+            public_names: set[str] = set()
+            try:
+                directory_fd = _open_directory_at(
+                    _guard_root_fd(root), parts)
+            except FileNotFoundError:
+                directory_fd = None
+            if directory_fd is not None:
+                try:
+                    for name in os.listdir(directory_fd):
+                        path = Path(name)
+                        if (path.suffix == ".json" and is_digest(path.stem)
+                                and stat.S_ISREG(os.stat(
+                                    name, dir_fd=directory_fd,
+                                    follow_symlinks=False).st_mode)):
+                            public_names.add(path.stem)
+                finally:
+                    os.close(directory_fd)
+            published = public_names | {
+                path.stem for path in _transaction_paths_under(directory)
+                if is_digest(path.stem)
+            }
     except OSError as exc:
         raise LifecycleError(
             "LIFECYCLE_INVALID", "recovery history cannot be listed") from exc
@@ -1454,7 +1606,7 @@ def recovery_history_event_ids(task_key: str, state: dict[str, Any],
 
 def read_object(task_key: str, kind: str, object_digest: str,
                 manifest: dict[str, Any] | None = None) -> dict[str, Any]:
-    with lifecycle_guard(manifest):
+    with lifecycle_guard(manifest) as root:
         path = object_path(task_key, kind, object_digest, manifest)
         value = _transaction_value(path)
         if value is None:
@@ -1467,14 +1619,15 @@ def read_object(task_key: str, kind: str, object_digest: str,
                         f"missing {kind} {object_digest}")
             else:
                 try:
-                    value = json.loads(path.read_text(encoding="utf-8"))
-                except FileNotFoundError as exc:
-                    raise LifecycleError(
-                        "HANDOFF_RECEIPT_MISSING",
-                        f"missing {kind} {object_digest}") from exc
-                except Exception as exc:
+                    exists, value = _guarded_load_json(
+                        root, path, f"{kind} object path")
+                except OSError as exc:
                     raise LifecycleError(
                         "HANDOFF_RECEIPT_INVALID", f"invalid {kind}: {exc}") from exc
+                if not exists:
+                    raise LifecycleError(
+                        "HANDOFF_RECEIPT_MISSING",
+                        f"missing {kind} {object_digest}")
         if not isinstance(value, dict) or digest(value) != object_digest:
             raise LifecycleError(
                 "HANDOFF_RECEIPT_INVALID", f"tampered {kind} {object_digest}")

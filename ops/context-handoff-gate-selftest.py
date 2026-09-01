@@ -2857,6 +2857,62 @@ def exact_head_review_regressions():
         if ordinary_pinned_root.exists():
             ordinary_pinned_root.rename(lifecycle_root)
 
+        # Keep the exact staged inode verified across publication. Swapping the
+        # staged directory entry after its digest check but before link(2) must
+        # neither publish the substituted symlink nor permit journal cleanup.
+        staged_swap_directory = transactions_root / "staged-entry-swap"
+        staged_swap_path = staged_swap_directory / "staged/value.json"
+        staged_swap_value = {"schema_version": 1, "value": "verified-inode"}
+        staged_swap_external = root / "staged-swap-external.json"
+        staged_swap_final = lifecycle_root / "manual/staged-swap.json"
+        gate.atomic_write(staged_swap_path, staged_swap_value)
+        gate.atomic_write(
+            staged_swap_directory / "journal.json",
+            {"schema_version": 1, "value": "keeps-cleanup-honest"})
+        gate.atomic_write(
+            staged_swap_external,
+            {"schema_version": 1, "value": "unverified-substitute"})
+        staged_swap_artifact = {
+            "final": "manual/staged-swap.json",
+            "staged": "staged/value.json",
+            "value_digest": gate.digest(staged_swap_value),
+        }
+        real_link_for_staged_swap = gate.os.link
+        staged_entry_swapped = False
+        staged_swap_error = None
+
+        def swap_staged_entry_before_link(*args, **kwargs):
+            nonlocal staged_entry_swapped
+            if not staged_entry_swapped and args[:2] == (
+                    "value.json", "staged-swap.json"):
+                staged_swap_path.unlink()
+                os.symlink(staged_swap_external, staged_swap_path)
+                staged_entry_swapped = True
+            return real_link_for_staged_swap(*args, **kwargs)
+
+        gate.os.link = swap_staged_entry_before_link
+        try:
+            gate._publish_transaction_artifact(
+                lifecycle_root, staged_swap_directory, staged_swap_artifact)
+        except Exception as exc:
+            staged_swap_error = exc
+        finally:
+            gate.os.link = real_link_for_staged_swap
+        check("staged artifact identity is continuous across hard-link publish",
+              staged_entry_swapped
+              and isinstance(staged_swap_error, gate.LifecycleError)
+              and not staged_swap_final.exists()
+              and not staged_swap_final.is_symlink()
+              and (staged_swap_directory / "journal.json").exists(),
+              (staged_entry_swapped, repr(staged_swap_error),
+               staged_swap_final.exists(), staged_swap_final.is_symlink(),
+               (staged_swap_directory / "journal.json").exists()))
+        if staged_swap_final.exists() or staged_swap_final.is_symlink():
+            staged_swap_final.unlink()
+        if staged_swap_directory.exists():
+            shutil.rmtree(staged_swap_directory)
+        staged_swap_external.unlink()
+
         # A crash can leave the final hard link present while its parent entry
         # is not yet durable. Recovery must sync that matching destination
         # before it removes the only journal capable of replaying the link.
@@ -3024,6 +3080,54 @@ def exact_head_review_regressions():
             pinned_root.rename(lifecycle_root)
         if replacement_root.exists():
             shutil.rmtree(replacement_root)
+
+        # Guarded reads must use the root descriptor already holding the
+        # lifecycle lock. A replacement pathname may contain a self-consistent
+        # forged state, or omit the original identity/object bytes entirely;
+        # neither may redirect a nested reader away from the pinned tree.
+        guarded_state = gate.read_state(task_key, manifest)
+        guarded_binding = gate.read_identity_binding(
+            "codex", "transaction-owner", manifest)
+        guarded_object_digest = guarded_state["recovery_history"][0]
+        guarded_object = gate.read_object(
+            task_key, "recovery-event", guarded_object_digest, manifest)
+        forged_state = json.loads(json.dumps(guarded_state))
+        forged_state["signal"]["highwater"] = 199_999
+        read_replacement_root = root / "read-replacement-lifecycle-root"
+        read_pinned_root = root / "read-pinned-lifecycle-root"
+        read_replacement_root.mkdir()
+        gate.atomic_write(
+            read_replacement_root / state_path.name, forged_state)
+        guarded_read_error = None
+        observed_state = observed_binding = observed_object = None
+        try:
+            with gate.lifecycle_guard(manifest):
+                lifecycle_root.rename(read_pinned_root)
+                os.symlink(
+                    read_replacement_root, lifecycle_root,
+                    target_is_directory=True)
+                observed_state = gate.read_state(task_key, manifest)
+                observed_binding = gate.read_identity_binding(
+                    "codex", "transaction-owner", manifest)
+                observed_object = gate.read_object(
+                    task_key, "recovery-event", guarded_object_digest, manifest)
+        except Exception as exc:
+            guarded_read_error = exc
+        finally:
+            if lifecycle_root.is_symlink():
+                lifecycle_root.unlink()
+            if read_pinned_root.exists():
+                read_pinned_root.rename(lifecycle_root)
+            if read_replacement_root.exists():
+                shutil.rmtree(read_replacement_root)
+        check("state object and identity reads stay under pinned guard root",
+              guarded_read_error is None
+              and observed_state == guarded_state
+              and observed_binding == guarded_binding
+              and observed_object == guarded_object,
+              (repr(guarded_read_error), observed_state, guarded_state,
+               observed_binding, guarded_binding,
+               observed_object, guarded_object))
     finally:
         if checkout_path is not None:
             if checkout_path.is_symlink():
