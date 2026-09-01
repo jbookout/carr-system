@@ -37,6 +37,7 @@ Five cases:
 
 Run: .venv/bin/python tools/test-worktree-plumb.py   # exit 0 = all pass
 """
+import json
 import os
 import shutil
 import subprocess
@@ -100,7 +101,34 @@ class Scratch:
         os.makedirs(os.path.join(self.repo, "mcp-server"))
         with open(os.path.join(self.repo, "mcp-server", "index.js"), "w") as f:
             f.write("// scratch stand-in for tracked mcp-server source\n")
-        git(["add", "README.md", "mcp-server/index.js"], self.repo)
+        lock = {
+            "name": "fixture",
+            "version": "1.0.0",
+            "lockfileVersion": 3,
+            "requires": True,
+            "packages": {
+                "": {
+                    "name": "fixture",
+                    "version": "1.0.0",
+                    "dependencies": {"fixture-pkg": "1.0.0"},
+                },
+                "node_modules/fixture-pkg": {
+                    "version": "1.0.0",
+                    "resolved": "https://registry.example/fixture-pkg-1.0.0.tgz",
+                    "integrity": "sha512-fixture-1.0.0",
+                },
+            },
+        }
+        with open(os.path.join(self.repo, "mcp-server", "package.json"), "w") as f:
+            json.dump({
+                "name": "fixture",
+                "version": "1.0.0",
+                "dependencies": {"fixture-pkg": "1.0.0"},
+            }, f)
+        with open(os.path.join(self.repo, "mcp-server", "package-lock.json"), "w") as f:
+            json.dump(lock, f)
+        git(["add", "README.md", "mcp-server/index.js", "mcp-server/package.json",
+             "mcp-server/package-lock.json"], self.repo)
         git(["commit", "-q", "-m", "init"], self.repo)
         git(["remote", "add", "origin", self.origin], self.repo)
         git(["push", "-q", "-u", "origin", "main"], self.repo)
@@ -113,6 +141,11 @@ class Scratch:
             os.makedirs(d, exist_ok=True)
             with open(os.path.join(d, "marker.txt"), "w") as f:
                 f.write(rel + "\n")
+        installed_lock = dict(lock)
+        installed_lock["packages"] = dict(lock["packages"])
+        installed_lock["packages"].pop("")
+        with open(os.path.join(self.repo, "mcp-server", "node_modules", ".package-lock.json"), "w") as f:
+            json.dump(installed_lock, f)
 
     def worktree_sh(self, *args):
         return run(["zsh", os.path.join(self.repo, "bin", "worktree.sh"), *args], self.repo)
