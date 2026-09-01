@@ -89,8 +89,6 @@
 // ordinary, unintentional case impossible on the default path, and makes the
 // deliberate direct-database case receipted and visible rather than silent.
 
-import { Pool, neonConfig } from "@neondatabase/serverless";
-import ws from "ws";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -99,15 +97,33 @@ import { humanOnlyGuidance, isHumanOnlyError } from "./human-only-hint.mjs";
 import {
   LOCAL_CLIENT_PROFILE_NAMES, selectLocalClientCredential, tokenFileSecurityIssue,
 } from "./local-client-auth.mjs";
-import { TOOLS, ToolError, executeRegisteredTool } from "./src/tools.js";
 
-// The `ws` package, NOT Node's built-in WebSocket: under Node 26 the native
-// constructor makes the driver die with an unhandled ErrorEvent before any
-// query runs (measured 2026-08-06, first real use of this harness). `ws` is
-// already in node_modules and works. Only touched on the break-glass path,
-// but wired at module scope same as before — importing it costs nothing on
-// the default path and keeps this one file simple.
-neonConfig.webSocketConstructor = ws;
+// ZERO-INSTALL DEFAULT PATH. The ordinary `run.sh call` route is only an HTTPS
+// client of the deployed Worker. It must therefore boot from a clean checkout
+// with no mcp-server/node_modules at all. Loading the database driver, ws, and
+// the full local tool registry at module scope made that path die before its
+// first fetch whenever the canonical runtime cache was absent or mid-refresh.
+// Those packages and the registry are direct-database break-glass machinery,
+// so load them only after DATABASE_URL has selected that explicitly receipted
+// path. This also keeps a broken optional recovery runtime from taking the
+// normal STORE front door down with it.
+async function loadBreakGlassRuntime() {
+  const [{ Pool, neonConfig }, { default: ws }, tools] = await Promise.all([
+    import("@neondatabase/serverless"),
+    import("ws"),
+    import("./src/tools.js"),
+  ]);
+  // The `ws` package, NOT Node's built-in WebSocket: under Node 26 the native
+  // constructor makes the driver die with an unhandled ErrorEvent before any
+  // query runs (measured 2026-08-06, first real use of this harness).
+  neonConfig.webSocketConstructor = ws;
+  return {
+    Pool,
+    TOOLS: tools.TOOLS,
+    ToolError: tools.ToolError,
+    executeRegisteredTool: tools.executeRegisteredTool,
+  };
+}
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -288,6 +304,8 @@ function appendReceipt(actor, mode, target, host, reason) {
 }
 
 async function runBreakGlass(verbName, verbArgs, url) {
+  const { Pool, TOOLS, ToolError, executeRegisteredTool } =
+    await loadBreakGlassRuntime();
   const engaged = process.env.CARR_BREAK_GLASS === "1" &&
     Boolean(process.env.CARR_BREAK_GLASS_REASON && process.env.CARR_BREAK_GLASS_REASON.trim());
   const host = (url.match(/@([^/?]+)/) || [])[1] || "(unparsed)";
