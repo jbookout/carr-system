@@ -68,7 +68,7 @@
     "conduct-stop-gate.py": {"catch_class": "conduct violation in the turn being ended", "also_caught_by": "unverified"},
     "completion-evidence-gate.py": {"catch_class": "completion claimed without evidence", "also_caught_by": "unverified"},
     "ledger-sweep.py": {"catch_class": "ruling in the turn that belongs in the decision ledger", "also_caught_by": "unverified"},
-    "context-handoff-gate.py": {"catch_class": "context ending with no handoff written", "also_caught_by": "unverified"},
+    "context-handoff-gate.py": {"catch_class": "context threshold crossed without a verified same-task successor takeover", "also_caught_by": "none-known", "verified": "2026-08-31 — no other hook preserves precompact high-water and binds Stop to immutable cross-surface takeover evidence."},
     "scheduled-run-record.py": {"catch_class": "scheduled run finishing with no run row", "also_caught_by": "unverified"},
     "chat-lint-gate.py": {"catch_class": "writing lint on the turn's prose", "also_caught_by": "unverified"},
     "chat-lint-carryover.py": {"catch_class": "carryover of the previous turn's lint", "also_caught_by": "unverified"},
