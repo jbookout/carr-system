@@ -2913,6 +2913,105 @@ def exact_head_review_regressions():
             shutil.rmtree(staged_swap_directory)
         staged_swap_external.unlink()
 
+        # Matching immutable content is not enough: the directory entry must
+        # still name the inode whose bytes were verified when publication
+        # returns. A replacement after the matching read must be rejected.
+        existing_value = {"schema_version": 1, "value": "matching-existing"}
+        replacement_value = {
+            "schema_version": 1, "value": "substituted-after-check"}
+        existing_digest = gate.digest(existing_value)
+        existing_final = gate.object_path(
+            task_key, "matching-existing", existing_digest, manifest)
+        gate.atomic_write(existing_final, existing_value)
+        real_load_for_existing_swap = gate._load_json_at
+        existing_swapped = False
+        existing_error = None
+
+        def swap_matching_existing_after_load(parent_fd, name):
+            nonlocal existing_swapped
+            exists, value = real_load_for_existing_swap(parent_fd, name)
+            if (not existing_swapped and name == existing_final.name
+                    and value == existing_value):
+                gate.atomic_write(existing_final, replacement_value)
+                existing_swapped = True
+            return exists, value
+
+        gate._load_json_at = swap_matching_existing_after_load
+        try:
+            gate.write_immutable(
+                task_key, "matching-existing", existing_value, manifest)
+        except Exception as exc:
+            existing_error = exc
+        finally:
+            gate._load_json_at = real_load_for_existing_swap
+        check("matching immutable publication retains verified entry identity",
+              existing_swapped
+              and isinstance(existing_error, gate.LifecycleError)
+              and json.loads(existing_final.read_text(encoding="utf-8"))
+              == replacement_value,
+              (existing_swapped, repr(existing_error),
+               json.loads(existing_final.read_text(encoding="utf-8"))))
+
+        # Recovery must not clear its journal or staged authority after the
+        # same matching-destination substitution. The committed state makes
+        # this a real replay path rather than a direct helper-only probe.
+        collision_state = gate.read_state(task_key, manifest)
+        collision_directory = transactions_root / "matching-entry-swap"
+        collision_staged = collision_directory / "staged/value.json"
+        collision_final = lifecycle_root / "manual/matching-entry-swap.json"
+        collision_value = {
+            "schema_version": 1, "value": "recoverable-authority"}
+        collision_replacement = {
+            "schema_version": 1, "value": "substituted-before-cleanup"}
+        gate.atomic_write(collision_staged, collision_value)
+        gate.atomic_write(collision_final, collision_value)
+        gate.atomic_write(collision_directory / "journal.json", {
+            "schema_version": 1,
+            "task_key": task_key,
+            "state_path": str(gate._absolute(state_path)),
+            "target_state_digest": gate.digest(collision_state),
+            "artifacts": [{
+                "final": "manual/matching-entry-swap.json",
+                "staged": "staged/value.json",
+                "value_digest": gate.digest(collision_value),
+            }],
+        })
+        real_load_for_recovery_swap = gate._load_json_at
+        recovery_entry_swapped = False
+        recovery_collision_error = None
+
+        def swap_recovery_match_after_load(parent_fd, name):
+            nonlocal recovery_entry_swapped
+            exists, value = real_load_for_recovery_swap(parent_fd, name)
+            if (not recovery_entry_swapped and name == collision_final.name
+                    and value == collision_value):
+                gate.atomic_write(collision_final, collision_replacement)
+                recovery_entry_swapped = True
+            return exists, value
+
+        gate._load_json_at = swap_recovery_match_after_load
+        try:
+            gate.read_state(task_key, manifest)
+        except Exception as exc:
+            recovery_collision_error = exc
+        finally:
+            gate._load_json_at = real_load_for_recovery_swap
+        check("recovery retains journal after matching entry substitution",
+              recovery_entry_swapped
+              and isinstance(recovery_collision_error, gate.LifecycleError)
+              and (collision_directory / "journal.json").exists()
+              and collision_staged.exists()
+              and json.loads(collision_final.read_text(encoding="utf-8"))
+              == collision_replacement,
+              (recovery_entry_swapped, repr(recovery_collision_error),
+               (collision_directory / "journal.json").exists(),
+               collision_staged.exists(),
+               json.loads(collision_final.read_text(encoding="utf-8"))))
+        if collision_directory.exists():
+            shutil.rmtree(collision_directory)
+        if collision_final.exists():
+            collision_final.unlink()
+
         # A crash can leave the final hard link present while its parent entry
         # is not yet durable. Recovery must sync that matching destination
         # before it removes the only journal capable of replaying the link.

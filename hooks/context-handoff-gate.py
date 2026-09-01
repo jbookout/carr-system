@@ -561,6 +561,35 @@ def _load_json_fd(fd: int) -> Any | None:
         return None
 
 
+def _entry_matches_fd(parent_fd: int, name: str, fd: int) -> bool:
+    """Prove a pinned directory entry still names one open regular file."""
+    try:
+        opened = os.fstat(fd)
+        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except (FileNotFoundError, OSError):
+        return False
+    return (stat.S_ISREG(opened.st_mode)
+            and (opened.st_dev, opened.st_ino) == (named.st_dev, named.st_ino))
+
+
+def _open_matching_json_at(
+        parent_fd: int, name: str, matches: Callable[[Any], bool]
+        ) -> int | None:
+    """Open and retain the exact named inode when its JSON matches."""
+    try:
+        fd = os.open(
+            name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=parent_fd)
+    except (FileNotFoundError, OSError):
+        return None
+    value = _load_json_fd(fd)
+    if (value is None or not matches(value)
+            or not _entry_matches_fd(parent_fd, name, fd)):
+        os.close(fd)
+        return None
+    return fd
+
+
 def _atomic_write_at(parent_fd: int, name: str, value: Any) -> None:
     """Durably replace one regular file beneath a pinned directory."""
     if name in {"", ".", ".."} or "/" in name:
@@ -604,16 +633,24 @@ def _publish_immutable_at(
         raise LifecycleError(reason, invalid_detail)
     with os.fdopen(lock_fd, "a+b") as guard:
         fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
-        exists, existing = _load_json_at(parent_fd, name)
-        if exists:
-            if existing is None or not matches(existing):
-                raise LifecycleError(reason, collision_detail)
-            return
-
-        temp_name = f".{name}.{secrets.token_hex(16)}"
-        temp_fd = final_fd = None
+        temp_name = None
+        temp_fd = final_fd = matching_fd = None
         created = False
         try:
+            exists, existing = _load_json_at(parent_fd, name)
+            if exists:
+                if existing is None or not matches(existing):
+                    raise LifecycleError(reason, collision_detail)
+                matching_fd = _open_matching_json_at(
+                    parent_fd, name, matches)
+                if matching_fd is None:
+                    raise LifecycleError(reason, collision_detail)
+                os.fsync(parent_fd)
+                if not _entry_matches_fd(parent_fd, name, matching_fd):
+                    raise LifecycleError(reason, collision_detail)
+                return
+
+            temp_name = f".{name}.{secrets.token_hex(16)}"
             temp_fd = os.open(
                 temp_name,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -636,6 +673,10 @@ def _publish_immutable_at(
             except FileExistsError:
                 exists, existing = _load_json_at(parent_fd, name)
                 if not exists or existing is None or not matches(existing):
+                    raise LifecycleError(reason, collision_detail)
+                matching_fd = _open_matching_json_at(
+                    parent_fd, name, matches)
+                if matching_fd is None:
                     raise LifecycleError(reason, collision_detail)
             if created:
                 linked_identity = None
@@ -670,15 +711,22 @@ def _publish_immutable_at(
                     os.fsync(parent_fd)
                     raise
             os.fsync(parent_fd)
+            held_fd = final_fd if created else matching_fd
+            if (held_fd is None
+                    or not _entry_matches_fd(parent_fd, name, held_fd)):
+                raise LifecycleError(reason, collision_detail)
         finally:
+            if matching_fd is not None:
+                os.close(matching_fd)
             if final_fd is not None:
                 os.close(final_fd)
             if temp_fd is not None:
                 os.close(temp_fd)
-            try:
-                os.unlink(temp_name, dir_fd=parent_fd)
-            except FileNotFoundError:
-                pass
+            if temp_name is not None:
+                try:
+                    os.unlink(temp_name, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
 
 
 def _parts_beneath(root: Path, path: Path, label: str) -> tuple[str, ...]:
@@ -779,6 +827,7 @@ def _publish_transaction_artifact(
     root_fd = (os.open(root, root_flags) if pinned_root_fd is None
                else os.dup(pinned_root_fd))
     transaction_fd = final_parent_fd = staged_parent_fd = staged_fd = None
+    final_fd = matching_fd = None
     try:
         if pinned_transaction_fd is None:
             directory_parts = tuple(directory.relative_to(root).parts)
@@ -793,10 +842,22 @@ def _publish_transaction_artifact(
             if existing is None or digest(existing) != expected_digest:
                 raise LifecycleError("LIFECYCLE_INVALID",
                                      "lifecycle transaction artifact collided")
+            matching_fd = _open_matching_json_at(
+                final_parent_fd, final_parts[-1],
+                lambda value: digest(value) == expected_digest)
+            if matching_fd is None:
+                raise LifecycleError(
+                    "LIFECYCLE_INVALID",
+                    "lifecycle transaction artifact identity changed")
             # Recovery may find the exact link created immediately before a
             # crash.  It is not safe to delete the journal until the containing
             # directory has crossed a durable sync boundary in this process.
             os.fsync(final_parent_fd)
+            if not _entry_matches_fd(
+                    final_parent_fd, final_parts[-1], matching_fd):
+                raise LifecycleError(
+                    "LIFECYCLE_INVALID",
+                    "lifecycle transaction artifact identity changed")
             return
 
         staged_parent_fd = _open_directory_at(
@@ -828,8 +889,14 @@ def _publish_transaction_artifact(
                 raise LifecycleError(
                     "LIFECYCLE_INVALID",
                     "lifecycle transaction artifact collided")
+            matching_fd = _open_matching_json_at(
+                final_parent_fd, final_parts[-1],
+                lambda existing: digest(existing) == expected_digest)
+            if matching_fd is None:
+                raise LifecycleError(
+                    "LIFECYCLE_INVALID",
+                    "lifecycle transaction artifact identity changed")
         if created:
-            final_fd = None
             linked_identity = None
             try:
                 linked_identity = os.stat(
@@ -867,10 +934,13 @@ def _publish_transaction_artifact(
                     pass
                 os.fsync(final_parent_fd)
                 raise
-            finally:
-                if final_fd is not None:
-                    os.close(final_fd)
         os.fsync(final_parent_fd)
+        held_fd = final_fd if created else matching_fd
+        if (held_fd is None or not _entry_matches_fd(
+                final_parent_fd, final_parts[-1], held_fd)):
+            raise LifecycleError(
+                "LIFECYCLE_INVALID",
+                "lifecycle transaction artifact identity changed")
         # Keep a named sync boundary for durability instrumentation while the
         # descriptor above remains the race-safe authority. Recovery passes a
         # pinned root and must not reopen a replaceable ancestor by pathname.
@@ -883,7 +953,8 @@ def _publish_transaction_artifact(
             "LIFECYCLE_INVALID",
             f"lifecycle transaction path is unsafe: {exc}") from exc
     finally:
-        for fd in (staged_fd, staged_parent_fd, final_parent_fd,
+        for fd in (matching_fd, final_fd, staged_fd,
+                   staged_parent_fd, final_parent_fd,
                    transaction_fd, root_fd):
             if fd is not None:
                 os.close(fd)
