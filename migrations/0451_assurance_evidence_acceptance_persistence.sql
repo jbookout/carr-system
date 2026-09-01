@@ -1596,7 +1596,12 @@ begin
     if to_regclass(rel) is null then raise exception '0451 FAILED: missing table %',rel; end if;
     if exists (select 1 from pg_class c cross join lateral
          aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) acl
-       where c.oid=rel::regclass and acl.grantee<>c.relowner) then
+       where c.oid=rel::regclass and acl.grantee<>c.relowner
+         -- production's ops-schema default privileges grant carr_backup SELECT on
+         -- every new table (pg_default_acl, neondb_owner->carr_backup); that grant
+         -- is machine policy, not a widening this migration performed, and the
+         -- disposable CI database has no such default - exempt exactly it.
+         and not (acl.grantee::regrole::text = 'carr_backup' and acl.privilege_type = 'SELECT')) then
       raise exception '0451 FAILED: assurance table ACL widened for %',rel;
     end if;
   end loop;
