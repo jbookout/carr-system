@@ -266,7 +266,7 @@ test("local token resolves to joe-local, human:false, sponsored to joe", () => {
   assert.deepEqual(actor, {
     slug: "joe-local", display: "Agent (joe-local)", human: false, agent: true,
     via: "local-token", client_id: null, sponsoring_human_slug: "joe",
-    human_slug: "joe", sponsor_required: false,
+    human_slug: "joe", sponsor_required: false, native_agent_verified: true,
   });
   // A local token remains non-human and is not one of the approved native
   // Codex/Claude authority-bearing runtime identities.
@@ -301,7 +301,7 @@ test("dell-local resolves to Dell's personal scope, human:false", () => {
   assert.deepEqual(actor, {
     slug: "dell-local", display: "Agent (dell-local)", human: false, agent: true,
     via: "local-token", client_id: null, sponsoring_human_slug: "dell",
-    human_slug: "dell", sponsor_required: false,
+    human_slug: "dell", sponsor_required: false, native_agent_verified: true,
   });
   assert.equal(actor.human, false);
 });

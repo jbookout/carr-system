@@ -9,10 +9,12 @@ import {
   fullInventory,
   HISTORICAL_REGISTRY_ARTIFACT_SHA256,
   HISTORICAL_REGISTRY_SEALS,
+  isScriptEntrypoint,
   jobDefinitionInventory,
   JOB_DEFINITION_BASELINE,
   mcpInventory,
   parsePlistXml,
+  parseGitIndexEntries,
   registryDigest,
   REGISTRY_V7_VERSION,
   REGISTRY_V8_VERSION,
@@ -315,6 +317,25 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
     ["*registered_script_entrypoint"]);
   assert.deepEqual(rows.find(row => row.source_locator === "mcp-server/local-verb.mjs").delegates_to,
     ["*registered_mcp_tool"]);
+});
+
+test("script discovery is bound to tracked index paths and index executable modes", () => {
+  const parsed = parseGitIndexEntries(Buffer.from(
+    "100755 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 0\tbin/tracked-entry\0" +
+    "100644 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 0\tops/tracked.py\0" +
+    "100755 cccccccccccccccccccccccccccccccccccccccc 1\tbin/unmerged\0",
+  ));
+  assert.deepEqual(parsed, [
+    { path: "bin/tracked-entry", executable: true },
+    { path: "ops/tracked.py", executable: false },
+  ]);
+  assert.equal(parsed.some(({ path }) => path === "tmp/untracked.py"), false,
+    "ambient untracked files cannot enter an index-derived census");
+  assert.equal(isScriptEntrypoint("bin/tracked-entry", true, "#!/bin/sh\nexit 0\n"), true);
+  assert.equal(isScriptEntrypoint("bin/tracked-entry", false, "#!/bin/sh\nexit 0\n"), false,
+    "extensionless entrypoints use the Git index mode, never host stat bits");
+  assert.equal(isScriptEntrypoint("ops/tracked.py", false,
+    "if __name__ == '__main__':\n    main()\n"), true);
 });
 
 test("job definitions and live DB capabilities have exact reviewed baselines", () => {

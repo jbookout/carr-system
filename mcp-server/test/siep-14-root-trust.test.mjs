@@ -10,7 +10,14 @@ import { containsForbiddenRootMaterial, custodianSetDigest, evaluateRootTrust,
 
 const migration = fs.readFileSync(new URL("../../migrations/0458_siep14_root_trust.sql", import.meta.url), "utf8");
 const sha = value => `sha256:${createHash("sha256").update(value).digest("hex")}`;
-const CUSTODIANS = [generateKeyPairSync("ed25519"), generateKeyPairSync("ed25519")];
+const CUSTODIANS = [generateKeyPairSync("ed25519"), generateKeyPairSync("ed25519"),
+  generateKeyPairSync("ed25519")];
+const CUSTODIAN_DESCRIPTORS = CUSTODIANS.map(({ privateKey, publicKey }) => {
+  const publicRaw = publicKey.export({ format: "der", type: "spki" }).subarray(-32);
+  return { privateKey, publicRaw, custodian_key_digest: digest(publicRaw) };
+});
+const REVIEWED_KEYS = CUSTODIAN_DESCRIPTORS.map(item => item.custodian_key_digest);
+const REVIEWED_SET_DIGEST = custodianSetDigest(CUSTODIAN_DESCRIPTORS);
 
 function signedFixture() {
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
@@ -32,30 +39,26 @@ function signedFixture() {
   return { artifact: { manifest, signature, transparency: [entry] }, keyDigest: signature.signer_key_digest };
 }
 
-function event(overrides = {}) {
-  const custodians = CUSTODIANS;
+function event(overrides = {}, signerIndexes = [0, 1]) {
   const value = { event_no: 1, event_digest: null, previous_event_digest: null, action: "establish",
     subject_key_digest: sha("root-a"), replacement_key_digest: null, threshold: 2,
     custodian_set_digest: null, custodian_attestations: [],
     recovery_receipt_digest: null, policy_epoch: 1, policy_epoch_digest: sha("epoch"),
     production_trust_active: false, ...overrides };
-  const unsigned = custodians.map(({ privateKey, publicKey }) => {
-    const publicRaw = publicKey.export({ format: "der", type: "spki" }).subarray(-32);
-    return { privateKey, publicRaw, custodian_key_digest: digest(publicRaw) };
-  });
-  value.custodian_set_digest = custodianSetDigest(unsigned);
+  value.custodian_set_digest = REVIEWED_SET_DIGEST;
   const statement = digest({ schema_version: "scac-root-trust-event.v1", event_no: value.event_no,
     previous_event_digest: value.previous_event_digest, action: value.action,
     subject_key_digest: value.subject_key_digest, replacement_key_digest: value.replacement_key_digest,
     threshold: value.threshold, custodian_set_digest: value.custodian_set_digest,
     recovery_receipt_digest: value.recovery_receipt_digest,
     policy_epoch: value.policy_epoch, policy_epoch_digest: value.policy_epoch_digest });
-  value.custodian_attestations = unsigned.map(({ privateKey, publicRaw, custodian_key_digest }) => {
+  value.custodian_attestations = signerIndexes.map(index => CUSTODIAN_DESCRIPTORS[index]).map(
+    ({ privateKey, publicRaw, custodian_key_digest }) => {
     const signature = sign(null, Buffer.from(statement), privateKey);
     return { algorithm: "ed25519", custodian_key_digest,
       public_key: publicRaw.toString("base64"), signature: signature.toString("base64"),
       signature_digest: digest(signature), signed_payload_digest: statement };
-  });
+    });
   value.event_digest = rootTrustEventDigest(value);
   return value;
 }
@@ -63,7 +66,8 @@ function event(overrides = {}) {
 test("quorum-bound root can bind a valid artifact only for nonproduction", () => {
   const { artifact, keyDigest } = signedFixture();
   const rootEvent = event({ subject_key_digest: keyDigest });
-  const state = verifyArtifactRootBindingAgainstDigest(artifact, [rootEvent], rootEvent.custodian_set_digest);
+  const state = verifyArtifactRootBindingAgainstDigest(
+    artifact, [rootEvent], rootEvent.custodian_set_digest, REVIEWED_KEYS);
   assert.equal(state.root_binding_state, "current_nonproduction_root");
   assert.equal(state.artifact_trust_state, "eligible_nonproduction_only");
   assert.equal(state.root_trust_operational, false);
@@ -78,30 +82,42 @@ test("rotation, recovery proof, and revocation replay monotonically", () => {
     subject_key_digest: rotate.replacement_key_digest, recovery_receipt_digest: sha("offline-drill") });
   const revoke = event({ event_no: 4, previous_event_digest: recovery.event_digest, action: "revoke",
     subject_key_digest: rotate.replacement_key_digest });
-  const state = verifyRootTrustChainAgainstDigest([establish, rotate, recovery, revoke], establish.custodian_set_digest);
+  const state = verifyRootTrustChainAgainstDigest(
+    [establish, rotate, recovery, revoke], establish.custodian_set_digest, REVIEWED_KEYS);
   assert.equal(state.active_key_digest, null);
   assert.equal(state.recovery_state, "offline_receipt_recorded");
 });
 
 test("weak quorum, forks, illegal transitions, operational claims, and secret-shaped material fail closed", () => {
   const weak = event({ threshold: 3 });
-  assert.throws(() => verifyRootTrustChainAgainstDigest([weak], weak.custodian_set_digest), /quorum_invalid/);
+  assert.throws(() => verifyRootTrustChainAgainstDigest(
+    [weak], weak.custodian_set_digest, REVIEWED_KEYS), /quorum_invalid/);
   const fork = event({ previous_event_digest: sha("fork") });
-  assert.throws(() => verifyRootTrustChainAgainstDigest([fork], fork.custodian_set_digest), /malformed_or_operational/);
+  assert.throws(() => verifyRootTrustChainAgainstDigest(
+    [fork], fork.custodian_set_digest, REVIEWED_KEYS), /malformed_or_operational/);
   const operational = event({ production_trust_active: true });
-  assert.throws(() => verifyRootTrustChainAgainstDigest([operational], operational.custodian_set_digest), /malformed_or_operational/);
+  assert.throws(() => verifyRootTrustChainAgainstDigest(
+    [operational], operational.custodian_set_digest, REVIEWED_KEYS), /malformed_or_operational/);
   const establish = event();
   const badRotate = event({ event_no: 2, previous_event_digest: establish.event_digest, action: "rotate",
     subject_key_digest: sha("not-current"), replacement_key_digest: sha("root-b") });
-  assert.throws(() => verifyRootTrustChainAgainstDigest([establish, badRotate], establish.custodian_set_digest), /custodian_set_unreviewed|transition_invalid/);
+  assert.throws(() => verifyRootTrustChainAgainstDigest(
+    [establish, badRotate], establish.custodian_set_digest, REVIEWED_KEYS), /custodian_set_unreviewed|transition_invalid/);
   const tampered = event();
   tampered.custodian_attestations[0].signature = Buffer.alloc(64).toString("base64");
-  assert.throws(() => verifyRootTrustChainAgainstDigest([tampered], tampered.custodian_set_digest), /quorum_invalid|attestation_invalid/);
+  assert.throws(() => verifyRootTrustChainAgainstDigest(
+    [tampered], tampered.custodian_set_digest, REVIEWED_KEYS), /quorum_invalid|attestation_invalid/);
   const unreviewed = event();
-  assert.throws(() => verifyRootTrustChainAgainstDigest([unreviewed], sha("different-custodian-set")), /custodian_set_unreviewed/);
+  assert.throws(() => verifyRootTrustChainAgainstDigest(
+    [unreviewed], sha("different-custodian-set"), REVIEWED_KEYS), /reviewed_custodian_set_mismatch/);
   assert.throws(() => evaluateRootTrust([unreviewed]), /reviewed_custodian_set_unprovisioned/);
   assert.equal(containsForbiddenRootMaterial({ private_key: "do-not-store" }), true);
   assert.equal(containsForbiddenRootMaterial({ public_key_digest: sha("safe") }), false);
+});
+
+test("a reviewed three-member custodian set accepts an actual two-of-three quorum", () => {
+  const state = verifyRootTrustChainAgainstDigest([event()], REVIEWED_SET_DIGEST, REVIEWED_KEYS);
+  assert.equal(state.chain_state, "valid");
 });
 
 test("migration stores public facts only and remains source-only", () => {
@@ -109,8 +125,9 @@ test("migration stores public facts only and remains source-only", () => {
   assert.match(migration, /create table ops\.scac_root_trust_event\b/i);
   assert.match(migration, /octet_length\(public_key_bytes\)\s*=\s*32/i);
   assert.match(migration, /create table ops\.scac_root_custodian_attestation\b/i);
+  assert.match(migration, /create table ops\.scac_root_custodian_set_member\b/i);
   assert.match(migration, /before update or delete on ops\.scac_root_trust_/ig);
-  assert.equal((migration.match(/before truncate on ops\.scac_root_(?:trust_|custodian_)/ig) || []).length, 3);
+  assert.equal((migration.match(/before truncate on ops\.scac_root_(?:trust_|custodian_)/ig) || []).length, 4);
   assert.doesNotMatch(migration, /private_key|secret_key|recovery_secret/i);
   assert.match(migration, /production_trust_active boolean not null default false check \(not production_trust_active\)/i);
   assert.doesNotMatch(migration, /^\s*(?:begin|commit)\s*;/im);

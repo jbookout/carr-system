@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -234,37 +235,42 @@ function sourceDigest(path) {
   return createHash("sha256").update(readFileSync(resolve(REPO_ROOT, path))).digest("hex");
 }
 
-const SCRIPT_SCAN_EXCLUDED_DIRS = new Set([
-  ".git", ".claude", ".mypy_cache", ".pytest_cache", ".venv", "__pycache__", "node_modules",
-]);
-
-function walkFiles(relativeDir = "") {
-  return readdirSync(resolve(REPO_ROOT, relativeDir || "."), { withFileTypes: true }).flatMap(entry => {
-    if (entry.isDirectory() && SCRIPT_SCAN_EXCLUDED_DIRS.has(entry.name)) return [];
-    const relative = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
-    return entry.isDirectory() ? walkFiles(relative) : [relative];
+export function parseGitIndexEntries(raw) {
+  const records = Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw || "");
+  return records.split("\0").filter(Boolean).flatMap(record => {
+    const tab = record.indexOf("\t");
+    if (tab < 0) throw new Error("git index entry missing path separator");
+    const [mode, _objectId, stage] = record.slice(0, tab).split(" ");
+    if (!/^(?:100644|100755)$/.test(mode) || stage !== "0") return [];
+    return [{ path: record.slice(tab + 1), executable: mode === "100755" }];
   });
 }
 
-export function discoverScriptEntrypoints() {
-  return walkFiles().filter(path => {
-    const base = path.split("/").at(-1);
-    if (base.startsWith("test-") || base.startsWith("test_") || path.includes("/tests/")) return false;
-    if (/(?:^|[-_])selftest(?:[-_.]|$)/.test(base) || path.includes("/test/")) return false;
-    const knownExtension = /\.(?:py|sh|applescript|mjs|js)$/.test(path);
-    const details = statSync(resolve(REPO_ROOT, path));
-    if (!details.isFile()) return false;
-    const executable = (details.mode & 0o111) !== 0;
-    if (!knownExtension && !executable) return false;
-    const source = readFileSync(resolve(REPO_ROOT, path), "utf8");
-    if (source.startsWith("#!")) return true;
-    if (path.endsWith(".applescript")) return true;
-    if (!/\.(?:py|mjs|js)$/.test(path)) return false;
-    if (path.endsWith(".py"))
-      return /if\s+__name__\s*==\s*["']__main__["']\s*:/.test(source);
-    return /\.(?:mjs|js)$/.test(path) &&
-      (source.includes("process.argv") || source.includes("import.meta.url ===") || source.includes("require.main === module"));
-  }).sort();
+function trackedIndexEntries() {
+  return parseGitIndexEntries(execFileSync("git", ["ls-files", "--stage", "-z"], {
+    cwd: REPO_ROOT, encoding: "buffer",
+  }));
+}
+
+export function isScriptEntrypoint(path, executable, source) {
+  const base = path.split("/").at(-1);
+  if (base.startsWith("test-") || base.startsWith("test_") || path.includes("/tests/")) return false;
+  if (/(?:^|[-_])selftest(?:[-_.]|$)/.test(base) || path.includes("/test/")) return false;
+  const knownExtension = /\.(?:py|sh|applescript|mjs|js)$/.test(path);
+  if (!knownExtension && !executable) return false;
+  if (source.startsWith("#!")) return true;
+  if (path.endsWith(".applescript")) return true;
+  if (!/\.(?:py|mjs|js)$/.test(path)) return false;
+  if (path.endsWith(".py"))
+    return /if\s+__name__\s*==\s*["']__main__["']\s*:/.test(source);
+  return /\.(?:mjs|js)$/.test(path) &&
+    (source.includes("process.argv") || source.includes("import.meta.url ===") || source.includes("require.main === module"));
+}
+
+export function discoverScriptEntrypoints(indexEntries = trackedIndexEntries(),
+  sourceReader = path => readFileSync(resolve(REPO_ROOT, path), "utf8")) {
+  return indexEntries.filter(({ path, executable }) =>
+    isScriptEntrypoint(path, executable, sourceReader(path))).map(({ path }) => path).sort();
 }
 
 export function nonMcpInventory() {
@@ -518,7 +524,9 @@ function launchdAuthorityMaps(launchdPaths) {
 }
 
 export function workflowDefinitionInventory() {
-  const github = walkFiles(".github/workflows").filter(path => /\.ya?ml$/.test(path)).sort().map(source_locator => {
+  const trackedPaths = trackedIndexEntries().map(entry => entry.path);
+  const github = trackedPaths.filter(path => path.startsWith(".github/workflows/") && /\.ya?ml$/.test(path))
+    .sort().map(source_locator => {
     const source = readFileSync(resolve(REPO_ROOT, source_locator), "utf8");
     const runSource = yamlSections(source, "run").join("\n");
     const actionDelegates = [...source.matchAll(/^\s*-?\s*uses:\s*([^\s#]+)/gm)]
@@ -556,7 +564,7 @@ export function workflowDefinitionInventory() {
     };
   });
   const scriptEntrypoints = new Set(discoverScriptEntrypoints());
-  const launchdPaths = walkFiles("ops/launchd").filter(path => path.endsWith(".plist")).sort();
+  const launchdPaths = trackedPaths.filter(path => path.startsWith("ops/launchd/") && path.endsWith(".plist")).sort();
   const { servicesByPlist, legacyByPlist, catalogDigests } = launchdAuthorityMaps(launchdPaths);
   const launchd = launchdPaths.map(source_locator => {
     const source = readFileSync(resolve(REPO_ROOT, source_locator), "utf8");

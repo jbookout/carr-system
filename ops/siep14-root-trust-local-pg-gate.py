@@ -67,11 +67,19 @@ def main() -> int:
             )
             signatures = [bytes.fromhex("41" * 64), bytes.fromhex("42" * 64)]
             approval_digests = sorted(sha(value) for value in signatures)
-            custodian_keys = [bytes([81 + index]) * 32 for index in range(2)]
+            # The reviewed membership is three custodians, while this ceremony
+            # deliberately carries only the threshold subset: a real 2-of-3.
+            custodian_keys = [bytes([81 + index]) * 32 for index in range(3)]
             custodian_set_digest = cur.execute(
                 "select ops.scac_root_custodian_set_digest(%s)",
                 (sorted(sha(value) for value in custodian_keys),),
             ).fetchone()[0]
+            for custodian_key in custodian_keys:
+                cur.execute(
+                    """insert into ops.scac_root_custodian_set_member
+                       (custodian_set_digest,custodian_key_digest) values (%s,%s)""",
+                    (custodian_set_digest, sha(custodian_key)),
+                )
             event_digest = cur.execute(
                 """select ops.scac_root_trust_event_digest(
                      1,null,'establish',%s,null,2,%s,%s,null,1,%s)""",
@@ -113,6 +121,8 @@ def main() -> int:
 
             refusal(cur, "update ops.scac_root_trust_key set key_purpose='changed'", "append-only")
             refusal(cur, "delete from ops.scac_root_trust_event", "append-only")
+            refusal(cur, "delete from ops.scac_root_custodian_set_member", "append-only")
+            refusal(cur, "truncate ops.scac_root_custodian_set_member", "cannot be truncated")
             refusal(cur, "truncate ops.scac_root_custodian_attestation cascade", "cannot be truncated")
             refusal(cur, f"insert into ops.scac_root_trust_event(event_no,event_digest,previous_event_digest,action,subject_key_digest,threshold,custodian_set_digest,custodian_approval_digests,policy_epoch,policy_epoch_digest) values (3,'{zero}','{event_digest}','revoke','{root_digest}',2,'{custodian_set_digest}',array['{approval_digests[0]}','{approval_digests[1]}'],1,'{epoch_digest}')", "gap or fork")
 

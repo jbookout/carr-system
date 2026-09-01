@@ -40,6 +40,14 @@ create table ops.scac_root_trust_event (
          (action in ('establish','revoke') and replacement_key_digest is null and recovery_receipt_digest is null))
 );
 
+create table ops.scac_root_custodian_set_member (
+  custodian_set_digest text not null check (custodian_set_digest ~ '^sha256:[0-9a-f]{64}$'),
+  custodian_key_digest text not null check (custodian_key_digest ~ '^sha256:[0-9a-f]{64}$'),
+  recorded_at timestamptz not null default clock_timestamp(),
+  production_trust_active boolean not null default false check (not production_trust_active),
+  primary key (custodian_set_digest,custodian_key_digest)
+);
+
 create table ops.scac_root_custodian_attestation (
   event_digest text not null references ops.scac_root_trust_event(event_digest) on delete restrict,
   custodian_key_digest text not null check (custodian_key_digest ~ '^sha256:[0-9a-f]{64}$'),
@@ -61,6 +69,8 @@ comment on table ops.scac_root_trust_key is
   'SIEP-14 public Ed25519 root descriptors only. Private or offline signing material is forbidden.';
 comment on table ops.scac_root_trust_event is
   'SIEP-14 immutable quorum ceremony chain. Source-only facts never activate Production trust.';
+comment on table ops.scac_root_custodian_set_member is
+  'SIEP-14 immutable reviewed custodian-set membership; event attestations may be a threshold subset.';
 comment on table ops.scac_root_custodian_attestation is
   'SIEP-14 public-key-only custodian signatures, externally verified before recording; no custodian identity or secret material.';
 
@@ -104,7 +114,7 @@ create or replace function ops.scac_root_trust_chain_state()
 returns jsonb language plpgsql stable security definer set search_path=pg_catalog,public,ops as $fn$
 declare r ops.scac_root_trust_event%rowtype; expected bigint:=1; prior text:=null; active_key text:=null;
         expected_digest text; sorted_digests text[]; recorded_digests text[]; recorded_keys text[];
-        expected_custodian_set text:=null; actual_custodian_set text;
+        reviewed_keys text[]; expected_custodian_set text:=null; reviewed_custodian_set text;
 begin
   for r in select * from ops.scac_root_trust_event order by event_no loop
     select array_agg(v order by v) into sorted_digests from unnest(r.custodian_approval_digests) v;
@@ -112,7 +122,9 @@ begin
       from ops.scac_root_custodian_attestation where event_digest=r.event_digest;
     select array_agg(custodian_key_digest order by custodian_key_digest) into recorded_keys
       from ops.scac_root_custodian_attestation where event_digest=r.event_digest;
-    actual_custodian_set:=case when recorded_keys is null then null else ops.scac_root_custodian_set_digest(recorded_keys) end;
+    select array_agg(custodian_key_digest order by custodian_key_digest) into reviewed_keys
+      from ops.scac_root_custodian_set_member where custodian_set_digest=r.custodian_set_digest;
+    reviewed_custodian_set:=case when reviewed_keys is null then null else ops.scac_root_custodian_set_digest(reviewed_keys) end;
     expected_digest:=ops.scac_root_trust_event_digest(r.event_no,r.previous_event_digest,r.action,
       r.subject_key_digest,r.replacement_key_digest,r.threshold,r.custodian_set_digest,sorted_digests,
       r.recovery_receipt_digest,r.policy_epoch,r.policy_epoch_digest);
@@ -120,7 +132,8 @@ begin
        r.event_digest is distinct from expected_digest or sorted_digests is distinct from r.custodian_approval_digests or
        cardinality(sorted_digests)<>(select count(distinct v) from unnest(sorted_digests) v) or
        cardinality(sorted_digests)<r.threshold or recorded_digests is distinct from sorted_digests or
-       actual_custodian_set is distinct from r.custodian_set_digest or
+       cardinality(recorded_keys)<r.threshold or reviewed_custodian_set is distinct from r.custodian_set_digest or
+       exists(select 1 from unnest(recorded_keys) k where not (k=any(reviewed_keys))) or
        (expected_custodian_set is not null and r.custodian_set_digest is distinct from expected_custodian_set) or
        r.production_trust_active then
       return jsonb_build_object('valid',false,'structurally_valid',false,'reason','root_chain_gap_fork_digest_or_quorum',
@@ -152,6 +165,7 @@ end $fn$;
 create or replace function ops.scac_root_trust_event_insert_guard()
 returns trigger language plpgsql security definer set search_path=pg_catalog,public,ops as $fn$
 declare tip ops.scac_root_trust_event%rowtype; state jsonb; sorted_digests text[]; expected_digest text;
+        reviewed_keys text[]; reviewed_custodian_set text;
 begin
   lock table ops.scac_root_trust_event in share row exclusive mode;
   select * into tip from ops.scac_root_trust_event order by event_no desc limit 1;
@@ -163,6 +177,12 @@ begin
   if sorted_digests is distinct from new.custodian_approval_digests or
      cardinality(sorted_digests)<>(select count(distinct v) from unnest(sorted_digests) v) then
     raise exception 'SIEP-14 custodian approvals must be distinct and sorted';
+  end if;
+  select array_agg(custodian_key_digest order by custodian_key_digest) into reviewed_keys
+    from ops.scac_root_custodian_set_member where custodian_set_digest=new.custodian_set_digest;
+  reviewed_custodian_set:=case when reviewed_keys is null then null else ops.scac_root_custodian_set_digest(reviewed_keys) end;
+  if reviewed_custodian_set is distinct from new.custodian_set_digest or cardinality(reviewed_keys)<new.threshold then
+    raise exception 'SIEP-14 reviewed custodian set is unavailable, drifted, or below threshold';
   end if;
   expected_digest:=ops.scac_root_trust_event_digest(new.event_no,new.previous_event_digest,new.action,
     new.subject_key_digest,new.replacement_key_digest,new.threshold,new.custodian_set_digest,sorted_digests,
@@ -190,7 +210,10 @@ begin
     e.subject_key_digest,e.replacement_key_digest,e.threshold,e.custodian_set_digest,
     e.recovery_receipt_digest,e.policy_epoch,e.policy_epoch_digest);
   if e.event_digest is null or new.signed_payload_digest is distinct from expected_payload or
-     not (new.signature_digest=any(e.custodian_approval_digests)) then
+     not (new.signature_digest=any(e.custodian_approval_digests)) or
+     not exists(select 1 from ops.scac_root_custodian_set_member m
+                where m.custodian_set_digest=e.custodian_set_digest
+                  and m.custodian_key_digest=new.custodian_key_digest) then
     raise exception 'SIEP-14 custodian attestation does not bind the ceremony';
   end if;
   return new;
@@ -211,11 +234,15 @@ create trigger scac_root_trust_key_append_only before update or delete on ops.sc
 for each row execute function ops.scac_root_trust_append_only_guard();
 create trigger scac_root_trust_event_append_only before update or delete on ops.scac_root_trust_event
 for each row execute function ops.scac_root_trust_append_only_guard();
+create trigger scac_root_custodian_set_member_append_only before update or delete on ops.scac_root_custodian_set_member
+for each row execute function ops.scac_root_trust_append_only_guard();
 create trigger scac_root_custodian_attestation_append_only before update or delete on ops.scac_root_custodian_attestation
 for each row execute function ops.scac_root_trust_append_only_guard();
 create trigger scac_root_trust_key_no_truncate before truncate on ops.scac_root_trust_key
 for each statement execute function ops.scac_root_trust_truncate_guard();
 create trigger scac_root_trust_event_no_truncate before truncate on ops.scac_root_trust_event
+for each statement execute function ops.scac_root_trust_truncate_guard();
+create trigger scac_root_custodian_set_member_no_truncate before truncate on ops.scac_root_custodian_set_member
 for each statement execute function ops.scac_root_trust_truncate_guard();
 create trigger scac_root_custodian_attestation_no_truncate before truncate on ops.scac_root_custodian_attestation
 for each statement execute function ops.scac_root_trust_truncate_guard();
@@ -236,7 +263,8 @@ begin
 end $fn$;
 
 revoke all on ops.scac_root_trust_key,ops.scac_root_trust_event,
-  ops.scac_root_custodian_attestation from public,carr_reader,carr_writer,carr_jobs,carr_authority;
+  ops.scac_root_custodian_set_member,ops.scac_root_custodian_attestation
+  from public,carr_reader,carr_writer,carr_jobs,carr_authority;
 revoke all on function ops.scac_root_trust_event_statement_digest(bigint,text,text,text,text,integer,text,text,bigint,text),
   ops.scac_root_trust_event_digest(bigint,text,text,text,text,integer,text,text[],text,bigint,text),
   ops.scac_root_custodian_set_digest(text[]),
@@ -248,7 +276,7 @@ revoke all on function ops.scac_root_trust_event_statement_digest(bigint,text,te
 do $assert$
 begin
   if exists(select 1 from information_schema.role_table_grants where table_schema='ops'
-    and table_name in ('scac_root_trust_key','scac_root_trust_event','scac_root_custodian_attestation')
+    and table_name in ('scac_root_trust_key','scac_root_trust_event','scac_root_custodian_set_member','scac_root_custodian_attestation')
     and grantee in ('PUBLIC','carr_reader','carr_writer','carr_jobs','carr_authority')) then
     raise exception 'SIEP-14 runtime roles unexpectedly received raw root trust authority';
   end if;

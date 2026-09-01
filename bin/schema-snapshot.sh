@@ -1140,6 +1140,13 @@ case "$SCAC_REGISTRY_APPLIED" in
 esac
 
 if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
+  SCAC_V9_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v9.generated.js"
+  SCAC_EXPECTED_V9_DIGEST="$(sed -n 's/^export const SCAC_MUTATION_REGISTRY_DIGEST = "\([0-9a-f]\{64\}\)";$/\1/p' "$SCAC_V9_RUNTIME")"
+  case "$SCAC_EXPECTED_V9_DIGEST" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+    *) echo "schema-snapshot: could not read the reviewed SCAC v9 runtime digest" >&2; exit 1 ;;
+  esac
+  SCAC_EXPECTED_V9_DIGEST="sha256:$SCAC_EXPECTED_V9_DIGEST"
   SCAC_REGISTRY_EXACT="$("$PSQL" "$URL" -Atqc \
     "select count(*)=9
        and array_agg(registry_version order by registry_version collate \"C\")=array[
@@ -1153,6 +1160,12 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
              convert_to(coalesce(string_agg(e.entry_digest,',' order by e.ingress_key collate \"C\"),''),'UTF8'),
              'sha256'),'hex') from ops.scac_mutation_registry_entry e
              where e.registry_version=v.registry_version))
+       and not exists(select 1 from ops.scac_mutation_registry_entry e
+         where e.entry_digest is distinct from 'sha256:'||encode(public.digest(
+           convert_to(ops.scac_canonical_json(e.contract),'UTF8'),'sha256'),'hex'))
+       and ops.scac_mutation_registry_v8_seal_available()
+       and (select registry_digest='$SCAC_EXPECTED_V9_DIGEST' and entry_count=1439 and source_entry_count=800
+              from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v9')
        and ops.scac_mutation_catalog_v9_current()
      from ops.scac_mutation_registry_version v" 2>/dev/null)"
   [ "$SCAC_REGISTRY_EXACT" = t ] || {
@@ -1186,10 +1199,10 @@ SCAC_REGISTRY_ROWS
     exit 1
   fi
 
-  cat >> "$TMP" <<'SCAC_REGISTRY_FOOTER'
+  cat >> "$TMP" <<SCAC_REGISTRY_FOOTER
 alter table ops.scac_mutation_registry_entry enable trigger scac_mutation_registry_entry_sealed;
 alter table ops.scac_mutation_registry_version enable trigger scac_mutation_registry_version_sealed;
-do $carr_scac_registry$
+do \$carr_scac_registry\$
 begin
   if not (select count(*)=9 and sum(entry_count)=12660 and
       bool_and(entry_count=(select count(*) from ops.scac_mutation_registry_entry e
@@ -1201,8 +1214,16 @@ begin
     from ops.scac_mutation_registry_version v) then
     raise exception 'restored SCAC v1-v9 registry is incomplete or digest-drifted';
   end if;
+  if not ops.scac_mutation_registry_v8_seal_available() or
+     not (select registry_digest='${SCAC_EXPECTED_V9_DIGEST}' and entry_count=1439 and source_entry_count=800
+            from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v9') or
+     exists(select 1 from ops.scac_mutation_registry_entry e
+       where e.entry_digest is distinct from 'sha256:'||encode(public.digest(
+         convert_to(ops.scac_canonical_json(e.contract),'UTF8'),'sha256'),'hex')) then
+    raise exception 'restored SCAC registry failed exact historical, v9, or per-entry contract seals';
+  end if;
 end
-$carr_scac_registry$;
+\$carr_scac_registry\$;
 
 SCAC_REGISTRY_FOOTER
 fi

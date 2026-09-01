@@ -15,7 +15,8 @@ import { neon, Pool } from "@neondatabase/serverless";
 import { TOOLS, ToolError, executeRegisteredTool, assertRegisteredToolInput,
   auditIdentity, assertNoCallerAuthorityFields } from "./tools.js";
 import { partnerAuthoritySlugForActor } from "./partner-authority.js";
-import { actorFromProps, authorizationClassForActor, organizationTenantForActor, personalScopeForActor } from "./identity.js";
+import { actorFromProps, authorizationClassForActor, organizationTenantForActor, personalScopeForActor,
+  verifiedAgentSlugForClient } from "./identity.js";
 import { deriveTrustedPrincipalBinding,
   ExactEffectRefusal, SCAC_TRUSTED_PRINCIPAL_READBACK_SQL } from "./scac-exact-effects.js";
 import { scheduleFailureRecord, rpcInternalErrorFailureClass, actorUnresolvedFailureClass, RPC_INTERNAL_ERROR_CODE } from "./trace.js";
@@ -425,6 +426,9 @@ export async function recordReadCall(insertFn, actor, verb, ok, errorKind) {
 // Dell-attributed call fall back to a Joe login would make the application actor
 // and database principal disagree, bypassing DB-enforced Joe-only operations.
 export function authorityDsnForActor(env, runtimeActor) {
+  if (runtimeActor?.human === false && (runtimeActor.slug === "codex" || runtimeActor.slug === "claude") &&
+      verifiedAgentSlugForClient(runtimeActor.client_id, runtimeActor.slug,
+        env?.CARR_NATIVE_AGENT_OAUTH_CLIENTS) !== runtimeActor.slug) return null;
   const partner = partnerAuthoritySlugForActor(runtimeActor);
   if (!partner) return null;
   // Preserve the provisioning contract's actor-shaped binding while selecting
@@ -789,7 +793,7 @@ export async function dispatch(request, env, ctx, actor) {
 /** Mounted as OAuthProvider `apiHandler` for /mcp. ctx.props is already authenticated. */
 export const mcpApiHandler = {
   async fetch(request, env, ctx) {
-    const actor = actorFromProps(ctx.props);
+    const actor = actorFromProps(ctx.props, env.CARR_NATIVE_AGENT_OAUTH_CLIENTS);
     // Fails closed: a token whose grant does not name one of the two actors is
     // no better than no token at all.
     if (!actor) {

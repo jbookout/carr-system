@@ -49,7 +49,18 @@ export function custodianSetDigest(attestations) {
     custodian_key_digests: attestations.map(item => item.custodian_key_digest).sort() });
 }
 
-function verifyCustodianQuorum(event, expectedCustodianSetDigest) {
+function reviewedCustodianSet(expectedCustodianSetDigest, reviewedCustodianKeyDigests) {
+  if (!SHA256.test(expectedCustodianSetDigest || "") || !Array.isArray(reviewedCustodianKeyDigests) ||
+      reviewedCustodianKeyDigests.length < 2 || reviewedCustodianKeyDigests.length > 12)
+    throw new TypeError("reviewed_custodian_set_required");
+  const keys = [...reviewedCustodianKeyDigests].sort();
+  if (keys.some(key => !SHA256.test(key || "")) || new Set(keys).size !== keys.length ||
+      custodianSetDigest(keys.map(custodian_key_digest => ({ custodian_key_digest }))) !== expectedCustodianSetDigest)
+    throw new TypeError("reviewed_custodian_set_mismatch");
+  return new Set(keys);
+}
+
+function verifyCustodianQuorum(event, expectedCustodianSetDigest, reviewedKeys) {
   const statementDigest = digest(rootTrustEventPayload(event));
   const attestations = event.custodian_attestations;
   if (!Array.isArray(attestations) || attestations.length < event.threshold || attestations.length > 12)
@@ -64,20 +75,20 @@ function verifyCustodianQuorum(event, expectedCustodianSetDigest) {
     const publicKey = rawBytes(attestation.public_key, 32, "custodian_public_key");
     const signature = rawBytes(attestation.signature, 64, "custodian_signature");
     if (digest(publicKey) !== attestation.custodian_key_digest || digest(signature) !== attestation.signature_digest ||
-        keys.has(attestation.custodian_key_digest)) throw new Error("root_trust_quorum_invalid");
+        keys.has(attestation.custodian_key_digest) || !reviewedKeys.has(attestation.custodian_key_digest))
+      throw new Error("root_trust_quorum_invalid");
     const key = createPublicKey({ key: Buffer.concat([ED25519_SPKI_PREFIX, publicKey]), format: "der", type: "spki" });
     if (!verify(null, Buffer.from(statementDigest), key, signature))
       throw new Error("root_trust_attestation_invalid");
     keys.add(attestation.custodian_key_digest);
   }
-  const actualSetDigest = custodianSetDigest(attestations);
-  if (event.custodian_set_digest !== actualSetDigest || actualSetDigest !== expectedCustodianSetDigest)
+  if (event.custodian_set_digest !== expectedCustodianSetDigest)
     throw new Error("root_trust_custodian_set_unreviewed");
 }
 
-export function verifyRootTrustChainAgainstDigest(events, expectedCustodianSetDigest) {
+export function verifyRootTrustChainAgainstDigest(events, expectedCustodianSetDigest, reviewedCustodianKeyDigests) {
   if (!Array.isArray(events) || events.length === 0) throw new TypeError("root_trust_events_unavailable");
-  if (!SHA256.test(expectedCustodianSetDigest || "")) throw new TypeError("reviewed_custodian_set_required");
+  const reviewedKeys = reviewedCustodianSet(expectedCustodianSetDigest, reviewedCustodianKeyDigests);
   let previous = null;
   let activeKey = null;
   let lastRecoveryReceipt = null;
@@ -96,7 +107,7 @@ export function verifyRootTrustChainAgainstDigest(events, expectedCustodianSetDi
         !Number.isSafeInteger(event.policy_epoch) || event.policy_epoch <= 0 ||
         !SHA256.test(event.policy_epoch_digest || "") || event.production_trust_active !== false)
       throw new Error("root_trust_event_malformed_or_operational");
-    verifyCustodianQuorum(event, expectedCustodianSetDigest);
+    verifyCustodianQuorum(event, expectedCustodianSetDigest, reviewedKeys);
     if (rootTrustEventDigest(event) !== event.event_digest)
       throw new Error("root_trust_event_digest_mismatch");
     if (event.action === "establish") {
@@ -134,15 +145,18 @@ export function verifyRootTrustChainAgainstDigest(events, expectedCustodianSetDi
 
 export function evaluateRootTrust(events) {
   const expected = SCAC_ROOT_TRUST_CONFIG.reviewed_custodian_set_digest;
+  const reviewedKeys = SCAC_ROOT_TRUST_CONFIG.reviewed_custodian_key_digests;
   if (SCAC_ROOT_TRUST_CONFIG.review_state !== "reviewed" || !SHA256.test(expected || ""))
     throw new Error("reviewed_custodian_set_unprovisioned");
-  const state = verifyRootTrustChainAgainstDigest(events, expected);
+  const state = verifyRootTrustChainAgainstDigest(events, expected, reviewedKeys);
   return Object.freeze({ ...state, review_binding_state: "immutable_source_config_matched" });
 }
 
-export function verifyArtifactRootBindingAgainstDigest(artifactBundle, rootTrustEvents, expectedCustodianSetDigest) {
+export function verifyArtifactRootBindingAgainstDigest(
+  artifactBundle, rootTrustEvents, expectedCustodianSetDigest, reviewedCustodianKeyDigests) {
   const artifact = verifyArtifactBundle(artifactBundle);
-  const root = verifyRootTrustChainAgainstDigest(rootTrustEvents, expectedCustodianSetDigest);
+  const root = verifyRootTrustChainAgainstDigest(
+    rootTrustEvents, expectedCustodianSetDigest, reviewedCustodianKeyDigests);
   const signerKey = artifactBundle.signature.signer_key_digest;
   const bound = root.active_key_digest !== null && root.active_key_digest === signerKey;
   return Object.freeze({
