@@ -953,11 +953,41 @@ check_dependency() {
   # value, so "0" would have passed --strict too. Caught while testing the skip path.
   local strictflag=""
   [ "$STRICT" = "1" ] && strictflag="--strict"
+  # THE SECOND HALF OF THE SAME DOCTRINE CLASS, IN SHADOW. ci-dep-check.py below
+  # reads the LOCKFILES; it never reads an install COMMAND, so a tree with a
+  # perfect lock can still install around it (`npm install` re-resolves the lock
+  # it was handed; `pip install -r requirements.txt` takes the loose declaration
+  # instead of the pinned output beside it). ops/frozen-install-check.py closes
+  # that half and belongs in this class rather than a new one.
+  #
+  # IT RUNS AND REPORTS; IT DOES NOT BLOCK, AND THAT IS DELIBERATE. `ops/ci.sh
+  # --strict` is the required status check on main, so failing the class here
+  # would make this a REQUIRED hosted gate the moment it merged. Slice R05's
+  # authority is explicitly build-only: hosted and required activation belongs to
+  # the master plan's CI/CD hardening owner, and the contract change asking for
+  # it is out/repo-hygiene-program/r05-contract-change-draft.md. Flipping it is
+  # one line — move the `frozen_rc` test into the verdict below — and that line
+  # is that owner's to write, not this slice's.
+  #
+  # SHADOW IS NOT SILENCE. It runs on every local and hosted run and prints what
+  # it found, because the failure shape this repo keeps rediscovering is a
+  # control that exists, is correct, and is connected to nothing.
+  local frozen_rc=0
+  run_quiet "$LOGDIR/dep-frozen.log" "$PY" ops/frozen-install-check.py || frozen_rc=$?
+  local frozen_note
+  if [ "$frozen_rc" -eq 0 ]; then
+    frozen_note="$(tail -1 "$LOGDIR/dep-frozen.log")"
+  else
+    cat "$LOGDIR/dep-frozen.log" >&2
+    printf '        \033[33mSHADOW\033[0m  frozen-install-check reports unfrozen install(s) — NOT blocking; activation is the CI/CD hardening owner (see out/repo-hygiene-program/r05-contract-change-draft.md)\n' >&2
+    frozen_note="frozen installs: SHADOW FAIL (not blocking) — see above"
+  fi
+
   if run_quiet "$LOGDIR/dep.log" "$PY" ops/ci-dep-check.py $strictflag; then
-    ok dependency "$(tail -1 "$LOGDIR/dep.log")"
+    ok dependency "$(tail -1 "$LOGDIR/dep.log"); $frozen_note"
   else
     cat "$LOGDIR/dep.log" >&2
-    bad dependency "see above"
+    bad dependency "see above; $frozen_note"
   fi
 }
 
