@@ -232,7 +232,7 @@ test("v9 successor seals v8 and binds the measured SIEP-18 grant snapshot", () =
 
 test("v10 successor seals v9 and carries the generated source-merge control", () => {
   const rows = fullInventory();
-  assert.equal(rows.length, 807);
+  assert.equal(rows.length, 808);
   assert.equal(generatedV10, renderRuntimeProjection(rows, {
     version: REGISTRY_V10_VERSION, dbCatalogBaseline: SOURCE_MERGE_FORWARD_DB_CATALOG_BASELINE,
   }));
@@ -315,7 +315,7 @@ test("migration is read-only at runtime and preserves the SIEP-18 boundary", () 
 
 test("reviewed non-MCP source locators resolve and remain explicitly non-authorizing", () => {
   const rows = fullInventory().filter(row => !["mcp_tool", "job_definition", "workflow_entrypoint"].includes(row.ingress_kind));
-  assert.equal(rows.length, 529);
+  assert.equal(rows.length, 530);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -323,7 +323,7 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
     assert.equal(row.implementation_state, "inventoried_not_atomically_mediated");
   }
   const scripts = discoverScriptEntrypoints();
-  assert.equal(scripts.length, 520);
+  assert.equal(scripts.length, 521);
   assert.equal(scripts.some(path => path === "ops/rule-delivery-cutover.py"), true);
   assert.equal(scripts.some(path => path === "ops/control-plane-scheduler-cutover.py"), true);
   assert.equal(scripts.some(path => path === "run.sh"), true);
