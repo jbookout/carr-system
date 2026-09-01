@@ -104,6 +104,7 @@
     "ops.service": "observability service inventory — runtime state, rebuilt by the environment it describes",
     "ops.service_environment": "observability environment rows — runtime state",
     "ops.settings_change": "settings change receipts — runtime history",
+    "ops.source_merge_plan_scope": "append-only per-accepted-plan source-merge authority history, not bounded configuration. Every row is transactionally captured from one human-accepted sourced plan and is foreign-key-bound to that operational work request, plan, acceptance receipt, and actor; the snapshot carries none of those sourced-plan parent rows. A fresh rebuild therefore correctly starts with no prior merge authority and captures new scope rows only when a future plan is accepted",
     "ops.tour": "tour operations records (0318) — business data",
     "ops.tour_conflict_resolution_receipt": "per-tour conflict resolution receipts — business data",
     "ops.tour_fact_conflict": "per-tour fact conflicts — business data",
