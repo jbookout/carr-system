@@ -474,7 +474,10 @@ def main():
         else:
             outcome = "allow"
 
-        event = facts["event"] or ""
+        # For a malformed payload, JSON cannot name the hook event. The tracked
+        # wiring supplies it independently; it is also authoritative when a
+        # semantically corrupt payload claims a different event.
+        event = os.environ.get("CARR_CONTEXT_HOOK_EVENT") or facts["event"] or ""
         record = {
             "ts": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
             "event": event or None,

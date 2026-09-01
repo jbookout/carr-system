@@ -329,9 +329,12 @@ def replay_demotions(tmp):
             "input_tokens": 100, "cache_read_input_tokens": 699_900}}}) + "\n")
     verdict, text = fire("context-handoff-gate.py",
                          {"hook_event_name": "Stop",
-                          "session_id": "replay-ctx", "transcript_path": usage},
+                          "session_id": "replay-ctx",
+                          "prompt_id": "prompt-replay-ctx",
+                          "transcript_path": usage},
                          env={"CARR_CONTEXT_WINDOW": "1000000",
                               "CARR_CONTEXT_STATE": os.path.join(tmp, "ctx-state.json"),
+                              "CARR_CONTEXT_HOOK_EVENT": "Stop",
                               "CARR_CONTEXT_AUDIT": "off"})
     check("context-handoff deliberately reopens at the hard line",
           verdict == "REOPEN" and "CONTEXT_HANDOFF_REQUIRED" in text,

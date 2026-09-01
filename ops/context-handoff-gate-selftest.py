@@ -368,6 +368,54 @@ def fallback_and_hook_sequence():
               (malformed_post.returncode, malformed_post.stdout,
                malformed_post.stderr))
 
+        typed_bad = json.dumps({
+            "hook_event_name": "Stop", "session_id": "semantic-bad",
+            "transcript_path": {"not": "a path"},
+        })
+        typed_bad_proc = subprocess.run(
+            [sys.executable, str(HOOK)], input=typed_bad, text=True,
+            capture_output=True,
+            env=base_env(root, CARR_CONTEXT_HOOK_EVENT="Stop"), cwd=REPO)
+        typed_bad_out = (json.loads(typed_bad_proc.stdout)
+                         if typed_bad_proc.stdout.strip() else None)
+        check("semantically malformed Stop preprocessing fails closed",
+              typed_bad_proc.returncode == 0 and reason(typed_bad_out)
+              and reason(typed_bad_out)["reason"] == "LIFECYCLE_INVALID"
+              and not typed_bad_proc.stderr.strip(),
+              (typed_bad_proc.returncode, typed_bad_out,
+               typed_bad_proc.stderr))
+
+        spoofed_stop = json.dumps({
+            "hook_event_name": "PostToolUse", "session_id": "sequence",
+            "prompt_id": "spoofed-stop", "tool_use_id": "spoofed-tool",
+            "transcript_path": str(transcript),
+        })
+        spoofed_proc = subprocess.run(
+            [sys.executable, str(HOOK)], input=spoofed_stop, text=True,
+            capture_output=True,
+            env=base_env(root, CARR_CONTEXT_HOOK_EVENT="Stop"), cwd=REPO)
+        spoofed_out = (json.loads(spoofed_proc.stdout)
+                       if spoofed_proc.stdout.strip() else None)
+        check("wired Stop event is authoritative over payload event",
+              spoofed_proc.returncode == 0 and reason(spoofed_out),
+              (spoofed_proc.returncode, spoofed_out, spoofed_proc.stderr))
+
+        fallback_hash = hashlib.sha256(b"claude:fallback").hexdigest()
+        fallback_state = json.loads(
+            (root / "state" / f"{fallback_hash}.json").read_text())
+        fallback_owner = fallback_state["owners"]["fallback"]
+        fallback_init = json.loads((
+            root / "state/objects" / fallback_hash / "initialization"
+            / f"{fallback_owner['activation_init_digest']}.json").read_text())
+        hook_evidence = fallback_init.get("native_evidence")
+        check("hook-created generation zero binds native callback evidence",
+              isinstance(hook_evidence, dict)
+              and hook_evidence.get("session_id") == "fallback"
+              and hook_evidence.get("controller_callback_id") == "prompt-fallback"
+              and fallback_init.get("native_evidence_digest") == digest(hook_evidence)
+              and fallback_owner.get("evidence_digest") == digest(hook_evidence),
+              (fallback_owner, fallback_init))
+
         # Complete the same task's handoff through immutable offer/declaration/
         # receipt/final objects, then prove recursive Stop allows.
         _, status = run_cli(root, "status", "--task-key", "claude:sequence")
@@ -486,6 +534,7 @@ def fallback_and_hook_sequence():
               proc.returncode == 0 and why
               and why["reason"] == "LIFECYCLE_INVALID",
               (proc.returncode, tampered_semantics, proc.stderr))
+        sequence_path.write_text(original_state)
 
         malformed_transcript = write_jsonl(
             root / "malformed-state.jsonl",
@@ -494,6 +543,7 @@ def fallback_and_hook_sequence():
         run_hook(root, "PostToolUse", malformed_transcript, session="malformed")
         malformed_key = hashlib.sha256(b"claude:malformed").hexdigest()
         malformed_path = root / "state" / f"{malformed_key}.json"
+        original_malformed = malformed_path.read_text()
         malformed_state = json.loads(malformed_path.read_text())
         malformed_state["signal"]["generation_tool_calls"] = "not-an-int"
         malformed_path.write_text(json.dumps(malformed_state))
@@ -505,6 +555,7 @@ def fallback_and_hook_sequence():
               and why["reason"] == "LIFECYCLE_INVALID"
               and why["signal"]["window_tier"] == "control_error",
               (proc.returncode, malformed_stop, proc.stderr))
+        malformed_path.write_text(original_malformed)
 
         missing_owner_transcript = write_jsonl(
             root / "missing-owner-state.jsonl",
@@ -514,6 +565,7 @@ def fallback_and_hook_sequence():
                  session="missing-owner", wrapped=True)
         missing_owner_key = hashlib.sha256(b"claude:missing-owner").hexdigest()
         missing_owner_path = root / "state" / f"{missing_owner_key}.json"
+        original_missing_owner = missing_owner_path.read_text()
         missing_owner_state = json.loads(missing_owner_path.read_text())
         missing_owner_state["owners"] = {}
         missing_owner_path.write_text(json.dumps(missing_owner_state))
@@ -526,6 +578,7 @@ def fallback_and_hook_sequence():
               and why["reason"] == "LIFECYCLE_INVALID"
               and why["signal"]["window_tier"] == "control_error",
               (proc.returncode, missing_owner_stop, proc.stderr))
+        missing_owner_path.write_text(original_missing_owner)
 
         terminal_owner_transcript = write_jsonl(
             root / "terminal-owner-state.jsonl",
@@ -535,6 +588,7 @@ def fallback_and_hook_sequence():
                  session="terminal-owner", wrapped=True)
         terminal_owner_key = hashlib.sha256(b"claude:terminal-owner").hexdigest()
         terminal_owner_path = root / "state" / f"{terminal_owner_key}.json"
+        original_terminal_owner = terminal_owner_path.read_text()
         terminal_owner_state = json.loads(terminal_owner_path.read_text())
         terminal_owner = terminal_owner_state["owners"]["terminal-owner"]
         terminal_owner["state"] = "TERMINAL"
@@ -548,6 +602,7 @@ def fallback_and_hook_sequence():
               proc.returncode == 0 and why
               and why["reason"] == "LIFECYCLE_INVALID",
               (proc.returncode, terminal_owner_stop, proc.stderr))
+        terminal_owner_path.write_text(original_terminal_owner)
 
         bad_handoff_transcript = write_jsonl(
             root / "bad-handoff-state.jsonl",
@@ -591,6 +646,38 @@ def lifecycle_cas_and_tamper():
                               "--expected-version", "-1")
         check("task init creates version zero", proc.returncode == 0 and state["version"] == 0,
               (proc.returncode, state))
+
+        proc, outside = run_cli(
+            root, "task-init", "--task-key", "task:outside-checkout",
+            "--owner", "outside", "--surface", "codex",
+            "--evidence-json", codex_evidence("outside", cwd=root),
+            "--expected-version", "-1")
+        outside_hash = hashlib.sha256(b"task:outside-checkout").hexdigest()
+        check("Codex task init refuses an owner outside the CARR checkout",
+              proc.returncode == 2
+              and outside["reason"] == "OWNERSHIP_MISMATCH"
+              and not (root / "state" / f"{outside_hash}.json").exists(),
+              (proc.returncode, outside, proc.stderr))
+
+        _, stable = run_cli(
+            root, "task-init", "--task-key", "task:stable-predecessor",
+            "--owner", "stable", "--surface", "codex",
+            "--evidence-json", codex_evidence("stable", project="project-a"),
+            "--expected-version", "-1")
+        proc, drifted_offer = run_cli(
+            root, "handoff-offer-create", "--task-key", "task:stable-predecessor",
+            "--predecessor", "stable", "--predecessor-surface", "codex",
+            "--successor", "stable-next", "--successor-surface", "codex",
+            "--evidence-json", codex_evidence("stable", project="project-b"),
+            "--generation", "1", "--expected-version", str(stable["version"]))
+        _, stable_after = run_cli(
+            root, "status", "--task-key", "task:stable-predecessor")
+        check("offer rebinds predecessor project and cwd to immutable activation",
+              proc.returncode == 2
+              and drifted_offer["reason"] == "OWNERSHIP_MISMATCH"
+              and stable_after["version"] == stable["version"]
+              and stable_after["handoff"] is None,
+              (proc.returncode, drifted_offer, stable_after, proc.stderr))
 
         cas_hash = hashlib.sha256(b"task:cas").hexdigest()
         cas_path = root / "state" / f"{cas_hash}.json"
@@ -661,6 +748,7 @@ def lifecycle_cas_and_tamper():
         check("tampered immutable offer is refused",
               proc.returncode == 2
               and rejected["reason"] == "HANDOFF_RECEIPT_INVALID", rejected)
+        offer_path.write_text(original)
 
         # Surface and native identity are relationships, not caller labels.
         proc, bound = run_cli(root, "task-init", "--task-key", "task:binding",
@@ -940,6 +1028,23 @@ def lifecycle_cas_and_tamper():
             completed_two_detail = (proc.returncode, multi_offer_2, proc.stderr)
         check("generation-two handoff completes with one active owner",
               completed_two, completed_two_detail)
+        if completed_two:
+            proc, reused_terminal = run_cli(
+                root, "handoff-offer-create", "--task-key", "task:multi-generation",
+                "--predecessor", "g2", "--predecessor-surface", "codex",
+                "--successor", "g0", "--successor-surface", "codex",
+                "--evidence-json", codex_evidence("g2"), "--generation", "3",
+                "--expected-version", str(multi_terminal_2["version"]))
+            _, multi_after_reuse = run_cli(
+                root, "status", "--task-key", "task:multi-generation")
+            check("terminal owner identity cannot be reused as a successor",
+                  proc.returncode == 2
+                  and reused_terminal["reason"] == "OWNERSHIP_MISMATCH"
+                  and multi_after_reuse["version"] == multi_terminal_2["version"]
+                  and multi_after_reuse["owners"]["g0"]["state"] == "TERMINAL"
+                  and multi_after_reuse["active_owner"] == "g2",
+                  (proc.returncode, reused_terminal, multi_after_reuse,
+                   proc.stderr))
 
         # A consumer transition may not mint valid terminal provenance from a
         # verified owner whose mutable evidence was rewritten after takeover.
@@ -971,6 +1076,7 @@ def lifecycle_cas_and_tamper():
             "--expected-version", str(laundering_accepted["state"]["version"]))
         laundering_hash = hashlib.sha256(b"task:evidence-laundering").hexdigest()
         laundering_path = root / "state" / f"{laundering_hash}.json"
+        original_laundering = laundering_path.read_text()
         corrupted_multi = json.loads(laundering_path.read_text())
         corrupted_owner = corrupted_multi["owners"]["l1"]
         corrupted_owner["evidence_digest"] = "0" * 64
@@ -985,6 +1091,7 @@ def lifecycle_cas_and_tamper():
               proc.returncode == 2
               and laundered_terminal["reason"] == "HANDOFF_RECEIPT_INVALID",
               (proc.returncode, laundered_terminal, proc.stderr))
+        laundering_path.write_text(original_laundering)
 
         # Digest linkage alone cannot replace native evidence validation.  A
         # fully recomputed packet with required Codex fields removed refuses.
@@ -1011,6 +1118,7 @@ def lifecycle_cas_and_tamper():
             "--expected-version", str(packet_declared["state"]["version"]))
         packet_hash = hashlib.sha256(b"task:packet-completeness").hexdigest()
         packet_path = root / "state" / f"{packet_hash}.json"
+        original_packet_state = packet_path.read_text()
         packet_value = json.loads(packet_path.read_text())
         object_root = root / "state/objects" / packet_hash
 
@@ -1067,6 +1175,7 @@ def lifecycle_cas_and_tamper():
               proc.returncode == 2
               and incomplete_packet["reason"] == "HANDOFF_RECEIPT_INVALID",
               (proc.returncode, incomplete_packet, proc.stderr, packet_accepted))
+        packet_path.write_text(original_packet_state)
 
         # Once a predecessor has supplied terminal evidence, its completed
         # handoff cannot strand the successor when dispatcher recovery begins.
@@ -1237,6 +1346,7 @@ def lifecycle_cas_and_tamper():
             "--expected-version", "-1")
         terminal_hash = hashlib.sha256(b"task:terminal-tamper").hexdigest()
         terminal_path = root / "state" / f"{terminal_hash}.json"
+        original_terminal = terminal_path.read_text()
         terminal_state = json.loads(terminal_path.read_text())
         terminal_owner = terminal_state["owners"]["tamper-owner"]
         terminal_state["task_status"] = "TERMINAL"
@@ -1253,6 +1363,17 @@ def lifecycle_cas_and_tamper():
               proc.returncode == 0 and why
               and why["reason"] == "LIFECYCLE_INVALID",
               (proc.returncode, terminal_stop, proc.stderr, tamper_terminal))
+        terminal_path.write_text(original_terminal)
+
+        corrupt_path = root / "state" / ("f" * 64 + ".json")
+        corrupt_path.write_text(json.dumps({"owners": []}))
+        proc, corrupt_callback = run_hook(
+            root, "Stop", None, session="corrupt-scan")
+        check("malformed lifecycle file fails Claude binding scan closed",
+              proc.returncode == 0 and reason(corrupt_callback)
+              and reason(corrupt_callback)["reason"] == "LIFECYCLE_INVALID"
+              and not proc.stderr.strip(),
+              (proc.returncode, corrupt_callback, proc.stderr))
     finally:
         shutil.rmtree(root)
 

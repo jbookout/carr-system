@@ -490,10 +490,19 @@ def verify_owner_initialization(task_key: str, owner: dict[str, Any],
             "HANDOFF_RECEIPT_INVALID",
             "initialization provenance linkage is invalid")
     if source == "claude_hook":
-        if evidence is not None or evidence_digest is not None:
+        if (not isinstance(evidence, dict)
+                or not is_digest(evidence_digest)
+                or digest(evidence) != evidence_digest
+                or evidence.get("session_id") != owner.get("id")
+                or not isinstance(evidence.get("controller_callback_id"), str)
+                or not evidence.get("controller_callback_id")
+                or (evidence.get("transcript_path") is not None
+                    and (not isinstance(evidence.get("transcript_path"), str)
+                         or not evidence.get("transcript_path")))
+                or evidence.get("status") != "active"):
             raise LifecycleError(
                 "HANDOFF_RECEIPT_INVALID",
-                "hook initialization carries unverified native evidence")
+                "hook initialization native evidence is invalid")
         return
     if (not isinstance(evidence, dict)
             or not is_digest(evidence_digest)
@@ -628,6 +637,9 @@ def context_envelopes(row: dict[str, Any]):
 def transcript_rows(path: str | None) -> list[dict[str, Any]]:
     if not path:
         return []
+    if not isinstance(path, str):
+        raise LifecycleError(
+            "LIFECYCLE_INVALID", "transcript_path must be a string")
     rows: list[dict[str, Any]] = []
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
@@ -824,26 +836,33 @@ def claude_owner_task_key(owner_id: str, manifest: dict[str, Any]) -> str | None
     root = state_root(manifest)
     try:
         paths = list(root.glob("*.json"))
-    except OSError:
-        paths = []
+    except OSError as exc:
+        raise LifecycleError(
+            "LIFECYCLE_INVALID", f"Claude binding state cannot be listed: {exc}") from exc
     for path in paths:
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
+        except Exception as exc:
+            raise LifecycleError(
+                "LIFECYCLE_INVALID", f"Claude binding state is unreadable: {exc}") from exc
         if not isinstance(value, dict):
-            continue
-        owner = (value.get("owners") or {}).get(owner_id)
-        if not isinstance(owner, dict) or owner.get("surface") != "claude":
-            continue
+            raise LifecycleError(
+                "LIFECYCLE_INVALID", "Claude binding state is not an object")
         task_key = value.get("task_key")
         if not isinstance(task_key, str) or not task_key:
             raise LifecycleError("LIFECYCLE_INVALID",
-                                 "Claude owner binding lacks a task key")
+                                 "Claude binding state lacks a task key")
         if path.resolve() != state_file(task_key, manifest).resolve():
             raise LifecycleError("LIFECYCLE_INVALID",
                                  "Claude owner binding path is inconsistent")
         validate_task_state(value, task_key, manifest)
+        owners = value.get("owners")
+        if not isinstance(owners, dict):
+            raise LifecycleError(
+                "LIFECYCLE_INVALID", "Claude binding owners are not an object")
+        owner = owners.get(owner_id)
+        if not isinstance(owner, dict) or owner.get("surface") != "claude":
+            continue
         matches.add(task_key)
     if len(matches) > 1:
         raise LifecycleError("OWNERSHIP_DUPLICATE",
@@ -880,16 +899,32 @@ def update_observation(current: dict[str, Any] | None, task_key: str, owner_id: 
                        event: str, now: dt.datetime,
                        manifest: dict[str, Any]) -> dict[str, Any]:
     if current is None:
+        transcript = payload.get("transcript_path") or payload.get("transcriptPath")
+        callback_id = (payload.get("prompt_id") or payload.get("promptId")
+                       or payload.get("tool_use_id") or payload.get("toolUseId"))
+        if (transcript is not None and not isinstance(transcript, str)):
+            raise LifecycleError(
+                "LIFECYCLE_INVALID", "hook transcript_path must be a string")
+        if not isinstance(callback_id, str) or not callback_id:
+            raise LifecycleError(
+                "LIFECYCLE_INVALID", "hook callback identity is missing")
+        native_evidence = {
+            "session_id": owner_id,
+            "transcript_path": transcript,
+            "controller_callback_id": callback_id,
+            "status": "active",
+        }
+        evidence_digest = digest(native_evidence)
         packet = {
             "schema_version": 1, "task_key": task_key,
             "owner": owner_id, "surface": "claude", "generation": 0,
-            "source": "claude_hook", "native_evidence": None,
-            "native_evidence_digest": None, "created_at": utc_now(),
+            "source": "claude_hook", "native_evidence": native_evidence,
+            "native_evidence_digest": evidence_digest, "created_at": utc_now(),
         }
         init_digest = write_immutable(
             task_key, "initialization", packet, manifest)
         state = initial_state(
-            task_key, owner_id, "claude", None, init_digest)
+            task_key, owner_id, "claude", evidence_digest, init_digest)
     else:
         state = current
     recorded = (state.get("owners") or {}).get(owner_id)
@@ -1011,41 +1046,43 @@ def refuse_stop_on_control_error(event: str, task_key: str, reason: str,
 
 
 def hook_main() -> int:
+    wired_event = os.environ.get("CARR_CONTEXT_HOOK_EVENT")
+    event = wired_event or "Stop"
+    task_key = os.environ.get("CARR_CONTEXT_TASK_KEY", "claude:unknown")
+    owner_id = "unknown"
+    manifest: dict[str, Any] | None = None
     try:
         payload = json.load(sys.stdin)
         if not isinstance(payload, dict):
-            raise ValueError("hook payload is not an object")
-    except Exception:
-        # The same executable is wired to non-blocking observation events and
-        # to Stop.  The wiring supplies the event independently so malformed
-        # JSON cannot erase the sole blocking seam.  A direct invocation has no
-        # such assurance and therefore conservatively assumes Stop.
-        event = os.environ.get("CARR_CONTEXT_HOOK_EVENT", "Stop")
-        task_key = os.environ.get("CARR_CONTEXT_TASK_KEY", "claude:unknown")
-        audit({"session": "unknown", "event": event,
-               "action": "REFUSE" if event == "Stop" else "NOOP",
-               "reason": "LIFECYCLE_INVALID",
-               "detail": "hook payload is malformed"})
-        refuse_stop_on_control_error(event, task_key, "LIFECYCLE_INVALID")
-        return 0
-    event = payload.get("hook_event_name") or payload.get("hookEventName") or "Stop"
-    task_key, owner_id = hook_task_key(payload)
-    rows = transcript_rows(payload.get("transcript_path") or payload.get("transcriptPath"))
-    try:
+            raise LifecycleError(
+                "LIFECYCLE_INVALID", "hook payload is not an object")
+        payload_event = payload.get("hook_event_name") or payload.get("hookEventName")
+        if wired_event is not None:
+            if wired_event not in {"PostToolUse", "PreCompact", "Stop"}:
+                raise LifecycleError(
+                    "LIFECYCLE_INVALID", "wired hook event is invalid")
+            event = wired_event
+        else:
+            event = payload_event or "Stop"
+            if event not in {"PostToolUse", "PreCompact", "Stop"}:
+                raise LifecycleError(
+                    "LIFECYCLE_INVALID", "payload hook event is invalid")
+        task_key, owner_id = hook_task_key(payload)
+        rows = transcript_rows(
+            payload.get("transcript_path") or payload.get("transcriptPath"))
         manifest = load_manifest()
-    except LifecycleError as exc:
-        audit({"session": owner_id, "event": event,
-               "action": "REFUSE" if event == "Stop" else "NOOP",
-               "reason": exc.reason})
-        refuse_stop_on_control_error(event, task_key, exc.reason)
-        return 0
-    try:
         task_key, owner_id = hook_task_key(payload, manifest)
     except LifecycleError as exc:
         audit({"session": owner_id, "event": event,
                "action": "REFUSE" if event == "Stop" else "NOOP",
-               "reason": exc.reason}, manifest)
+               "reason": exc.reason, "detail": exc.detail[:500]}, manifest)
         refuse_stop_on_control_error(event, task_key, exc.reason)
+        return 0
+    except Exception as exc:
+        audit({"session": owner_id, "event": event,
+               "action": "REFUSE" if event == "Stop" else "NOOP",
+               "reason": "LIFECYCLE_INVALID", "detail": str(exc)[:500]}, manifest)
+        refuse_stop_on_control_error(event, task_key, "LIFECYCLE_INVALID")
         return 0
     try:
         state = mutate_state(
@@ -1183,6 +1220,66 @@ def validate_native_evidence(surface: str, evidence: dict[str, Any], *,
     return digest(evidence)
 
 
+def validate_codex_checkout(evidence: dict[str, Any]) -> None:
+    """Require a Codex owner to belong to this repository checkout."""
+    try:
+        Path(str(evidence.get("cwd"))).expanduser().resolve().relative_to(
+            REPO.resolve())
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise LifecycleError(
+            "OWNERSHIP_MISMATCH",
+            "Codex owner is outside the CARR checkout") from exc
+
+
+def owner_activation_evidence(task_key: str, owner: dict[str, Any],
+                              manifest: dict[str, Any]) -> dict[str, Any]:
+    """Return the immutable evidence that admitted an owner generation."""
+    if owner.get("generation") == 0:
+        packet = read_object(
+            task_key, "initialization",
+            str(owner.get("activation_init_digest")), manifest)
+        evidence = packet.get("native_evidence")
+    else:
+        verified = read_verified_final_packet(
+            task_key, owner.get("activation_final_digest"), manifest)
+        evidence = verified["acceptance"].get("native_evidence")
+    if not isinstance(evidence, dict):
+        raise LifecycleError(
+            "HANDOFF_RECEIPT_INVALID",
+            "owner activation evidence is missing")
+    return evidence
+
+
+def validate_predecessor_binding(task_key: str, state: dict[str, Any],
+                                 owner_id: str, surface: str,
+                                 evidence: dict[str, Any],
+                                 manifest: dict[str, Any]) -> None:
+    """Bind a new offer to the predecessor's immutable admission identity."""
+    owner = (state.get("owners") or {}).get(owner_id)
+    if not isinstance(owner, dict) or owner.get("surface") != surface:
+        raise LifecycleError(
+            "OWNERSHIP_MISMATCH",
+            "predecessor surface does not match recorded owner")
+    if surface != "codex":
+        return
+    validate_codex_checkout(evidence)
+    admitted = owner_activation_evidence(task_key, owner, manifest)
+    if (str(evidence.get("project_id", "")).strip()
+            != str(admitted.get("project_id", "")).strip()):
+        raise LifecycleError(
+            "OWNERSHIP_MISMATCH",
+            "Codex predecessor project changed after activation")
+    try:
+        same_cwd = (Path(str(evidence.get("cwd"))).expanduser().resolve()
+                    == Path(str(admitted.get("cwd"))).expanduser().resolve())
+    except (OSError, RuntimeError, ValueError):
+        same_cwd = False
+    if not same_cwd:
+        raise LifecycleError(
+            "OWNERSHIP_MISMATCH",
+            "Codex predecessor cwd changed after activation")
+
+
 def validate_successor_evidence(offer: dict[str, Any], successor: str,
                                 evidence: dict[str, Any], *,
                                 accept: bool = False,
@@ -1192,13 +1289,7 @@ def validate_successor_evidence(offer: dict[str, Any], successor: str,
         surface, evidence, expected_identity=successor, accept=accept,
         require_live=require_live)
     if surface == "codex":
-        try:
-            Path(str(evidence.get("cwd"))).expanduser().resolve().relative_to(
-                REPO.resolve())
-        except (OSError, RuntimeError, ValueError):
-            raise LifecycleError(
-                "OWNERSHIP_MISMATCH",
-                "Codex successor is outside the CARR checkout")
+        validate_codex_checkout(evidence)
         trusted_project = offer.get("successor_project_id")
         if (not isinstance(trusted_project, str)
                 or not trusted_project.strip()
@@ -1228,6 +1319,8 @@ def lifecycle_init(args, manifest):
     evidence = parse_evidence(args.evidence_json)
     evidence_digest = validate_native_evidence(
         args.surface, evidence, expected_identity=args.owner, accept=True)
+    if args.surface == "codex":
+        validate_codex_checkout(evidence)
     packet = {
         "schema_version": 1, "task_key": args.task_key,
         "owner": args.owner, "surface": args.surface, "generation": 0,
@@ -1257,6 +1350,16 @@ def offer_create(args, manifest):
     evidence = parse_evidence(args.evidence_json)
     evidence_digest = validate_native_evidence(
         args.predecessor_surface, evidence, expected_identity=args.predecessor)
+    current = read_state(args.task_key, manifest)
+    if not current or current.get("task_status") != "ACTIVE":
+        raise LifecycleError("LIFECYCLE_INVALID", "task is not active")
+    if args.predecessor == args.successor or args.successor in current["owners"]:
+        raise LifecycleError(
+            "OWNERSHIP_MISMATCH",
+            "successor identity was already used by this task")
+    validate_predecessor_binding(
+        args.task_key, current, args.predecessor,
+        args.predecessor_surface, evidence, manifest)
     successor_project_id = None
     if args.successor_surface == "codex":
         project_field = ("project_id" if args.predecessor_surface == "codex"
@@ -1282,6 +1385,13 @@ def offer_create(args, manifest):
             raise LifecycleError("LIFECYCLE_INVALID", "task is not active")
         if state.get("active_owner") != args.predecessor:
             raise LifecycleError("OWNERSHIP_MISMATCH", "predecessor is not sole active owner")
+        if args.predecessor == args.successor or args.successor in state["owners"]:
+            raise LifecycleError(
+                "OWNERSHIP_MISMATCH",
+                "successor identity was already used by this task")
+        validate_predecessor_binding(
+            args.task_key, state, args.predecessor,
+            args.predecessor_surface, evidence, manifest)
         if args.generation != int(state.get("generation", 0)) + 1:
             raise LifecycleError("LIFECYCLE_INVALID",
                                  "offer generation must be current generation plus one")
@@ -1335,6 +1445,10 @@ def successor_declare(args, manifest):
             raise LifecycleError("TAKEOVER_NOT_VERIFIED", "offer is not the pending handoff")
         if offer.get("successor") != args.successor:
             raise LifecycleError("OWNERSHIP_MISMATCH", "successor does not match offer")
+        if args.successor in state["owners"]:
+            raise LifecycleError(
+                "OWNERSHIP_MISMATCH",
+                "successor identity was already used by this task")
         successor = {"id": args.successor, "surface": offer["successor_surface"],
                      "generation": offer["generation"], "state": "SUCCESSOR_DECLARED",
                      "evidence_digest": evidence_digest}

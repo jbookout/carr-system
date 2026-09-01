@@ -202,6 +202,27 @@ def equivalence_cases(tmp):
           and lifecycle_rows[-1].get("deny_class") == "CONTEXT_HANDOFF_REQUIRED",
           lifecycle_rows[-1] if lifecycle_rows else "no row")
 
+    malformed_env = env_for(
+        tmp,
+        CARR_SESSION_CONTEXT_STATE_DIR=os.path.join(tmp, "context-malformed"),
+        CARR_CONTEXT_AUDIT="off",
+        CARR_CONTEXT_HOOK_EVENT="Stop",
+    )
+    malformed_rc, malformed_out, malformed_err = fire(
+        [RUNNER, target], "{bad", malformed_env)
+    malformed_rows = [row for row in records(tmp)
+                      if row.get("hook") == "context-handoff-gate.py"]
+    malformed_row = malformed_rows[-1] if malformed_rows else {}
+    check("malformed Stop telemetry uses trusted wired event",
+          malformed_rc == 0 and malformed_out.strip()
+          and not malformed_err.strip()
+          and malformed_row.get("event") == "Stop"
+          and malformed_row.get("outcome") == "deny"
+          and malformed_row.get("register") == "reopen"
+          and malformed_row.get("reopen") is True
+          and malformed_row.get("deny_class") == "LIFECYCLE_INVALID",
+          (malformed_rc, malformed_out, malformed_err, malformed_row))
+
 
 # ── 2. synthetic gates: every outcome shape the classifier must name ────────
 GATES = {
