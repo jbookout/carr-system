@@ -33,7 +33,10 @@ def main() -> int:
               has_table_privilege('carr_reader','ops.assurance_review_extension','select'),
               has_table_privilege('carr_reader','ops.assurance_owner_acceptance_fact','select'),
               has_table_privilege('carr_reader','ops.canonical_ownership_lease','select'),
-              p.prosecdef,p.provolatile,p.proconfig
+              p.prosecdef,p.provolatile,p.proconfig,
+              has_table_privilege(p.proowner,'ops.assurance_evidence_extension','select'),
+              has_table_privilege(p.proowner,'ops.canonical_ownership_claim','select'),
+              pg_get_functiondef(p.oid)
               from pg_proc p
               where p.oid='ops.source_merge_authority_projection(uuid,text,text,integer)'::regprocedure""").fetchone()
             if (row is None or row[0] is not True or any(value is not False for value in row[1:7])
@@ -41,6 +44,11 @@ def main() -> int:
                 raise RuntimeError(f"source-merge projection privilege posture invalid: {row!r}")
             if row[9] != ["search_path=pg_catalog, ops, public"]:
                 raise RuntimeError(f"source-merge projection search_path invalid: {row[9]!r}")
+            if row[10] is not True or row[11] is not True:
+                raise RuntimeError(f"source-merge projection owner cannot read protected evidence: {row!r}")
+            if ("ops.assurance_evidence_extension" not in row[12]
+                    or "ops.canonical_ownership_claim" not in row[12]):
+                raise RuntimeError("source-merge projection omitted protected evidence projection")
             grant_settable_runtime_roles(cur, "carr_reader")
             set_local_role(cur, "carr_reader")
             result = cur.execute(
@@ -53,6 +61,7 @@ def main() -> int:
         "contract": "source-merge-authority-local-pg.v1",
         "reader_execute": True,
         "raw_table_select": False,
+        "security_definer_protected_read": True,
         "server_side_candidate_discovery": True,
         "typed_refusal": True,
     }, sort_keys=True))

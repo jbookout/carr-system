@@ -673,6 +673,8 @@ export async function resolveSourceMergeAuthority(c, args, ToolError) {
   if (!Array.isArray(authority.authorized_path_claims) || !authority.authorized_path_claims.length ||
       typeof authority.scope_digest !== "string" || typeof authority.scope_ref !== "string")
     error(ToolError, { error: "source_merge_path_authority_missing" });
+  if (!Array.isArray(authority.assurance_bindings) || !authority.assurance_bindings.length)
+    error(ToolError, { error: "source_merge_assurance_lineage_incomplete" });
   return {
     ...authority,
     work_request: passport.work_request,

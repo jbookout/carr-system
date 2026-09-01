@@ -35,7 +35,7 @@ MAP = REPO / "ops" / "config" / "rule-enforcement-map.json"
 PY = REPO / ".venv" / "bin" / "python"
 MIGRATION_0363 = REPO / "migrations" / "0363_rule_delivery_activation_digest_repin.sql"
 PRIOR_ACTIVATION_DIGEST = "4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218"
-CURRENT_ACTIVATION_DIGEST = "f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904"
+CURRENT_ACTIVATION_DIGEST = "5b0f93d82dc2127bc721d8a091a5c637b9d2eaf4e492f660306527bc5ae80c98"
 ACTIVATION_TO_TEST_REF = (
     "ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; "
     "ops/rule-pack-preuse-reselection-selftest.py"
