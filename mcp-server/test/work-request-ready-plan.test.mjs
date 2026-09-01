@@ -93,6 +93,30 @@ test("proposal returns explicit plan readback and audits the Work Request entity
   assert.equal(JSON.parse(event.params[7]).plan_ref, "PLAN-000001");
 });
 
+test("source merge scope is an exact sorted file set inside the human-accepted plan hash", async () => {
+  const scoped = structuredClone(PROPOSE);
+  scoped.idempotency_key = "10000000-0000-0000-0000-000000000098";
+  scoped.caps.source_merge = {
+    schema_version: "source-merge-scope.v1",
+    repository: "jbookout/carr-system",
+    base_branch: "main",
+    authorized_paths: [
+      "mcp-server/src/source-merge-policy.js",
+      "mcp-server/test/source-merge-policy.test.mjs",
+    ],
+  };
+  const db = new PlanFake();
+  await executeRegisteredTool(db, JOE, "propose-ready-plan", scoped);
+  const proposal = db.calls.find(call => call.sql.includes("propose_sourced_work_request_plan"));
+  assert.deepEqual(JSON.parse(proposal.params[7]).source_merge, scoped.caps.source_merge);
+
+  const invalid = structuredClone(scoped);
+  invalid.idempotency_key = "10000000-0000-0000-0000-000000000097";
+  invalid.caps.source_merge.authorized_paths.reverse();
+  const error = await refused(() => executeRegisteredTool(new PlanFake(), JOE, "propose-ready-plan", invalid));
+  assert.equal(error.error, "invalid_source_merge_scope");
+});
+
 test("heavy classification refuses before plan creation when shape or the typed contract is missing", async () => {
   const unshaped = new PlanFake({ tier: "heavy", shapeReady: false });
   const shapeError = await refused(() => executeRegisteredTool(unshaped, JOE, "propose-ready-plan", structuredClone(PROPOSE)));

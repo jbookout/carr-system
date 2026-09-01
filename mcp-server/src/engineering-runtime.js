@@ -7,6 +7,10 @@
 // Claude is refused explicitly until a fresh-native-session launcher exists.
 
 import { sha256 } from "./sha256.js";
+import {
+  NO_CEREMONIAL_MERGE_DECISION,
+  NO_CEREMONIAL_MERGE_DECISION_TITLE,
+} from "./source-merge-policy.js";
 
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -595,6 +599,10 @@ export function closureProjection(facts, ToolError) {
       manual_qa_required: slice.manual_qa_required, release_requirement: slice.release_requirement };
   });
   const complete = planCurrent && states.every(row => row.state === "verified_complete");
+  const currentReceiptRows = [...latest.values()].map(row =>
+    receiptRows.find(receipt => receipt.id === row?.id)).filter(Boolean);
+  const currentReceiptIds = new Set(currentReceiptRows.map(row => row.id));
+  const currentReviewerRows = reviewerRows.filter(row => currentReceiptIds.has(row.receipt_id));
   const evidence = receiptRows.flatMap(row => row.receipt?.evidence_refs || []).filter(item => item && typeof item === "object");
   const unresolved = states.filter(row => row.state !== "verified_complete").map(row => row.slice_ref);
   const disposition = (state, note) => ({ state, evidence_refs: evidence, note });
@@ -606,6 +614,8 @@ export function closureProjection(facts, ToolError) {
     slice_plan: plan,
     execution_envelopes: envelopes.map(row => row.envelope || row),
     slices: states,
+    current_receipts: currentReceiptRows.map(row => row.receipt),
+    current_reviewer_facts: currentReviewerRows.map(row => row.fact),
     receipts: receiptRows.map(row => row.receipt),
     reviewer_facts: reviewerRows.map(row => row.fact),
     qa_facts: [],
@@ -630,6 +640,45 @@ export async function runCodexSlice({ dispatchEnvelope, desk, envelope, task }) 
     throw new Error("engineering adapter unsupported: only codex_desktop is enabled in v1");
   if (typeof dispatchEnvelope !== "function") throw new Error("engineering Codex adapter requires dispatchEnvelope");
   return dispatchEnvelope(desk, envelope, task, { fresh: true });
+}
+
+export async function resolveSourceMergeAuthority(c, args, ToolError) {
+  const decisionId = String(args.decision_id || "").replace(/^decision:/, "");
+  if (`decision:${decisionId}` !== NO_CEREMONIAL_MERGE_DECISION || !UUID.test(decisionId))
+    error(ToolError, { error: "source_merge_decision_not_allowed" });
+  const work = args.work_request === undefined || args.work_request === null
+    ? null : text(args.work_request, "work_request", ToolError);
+  const headSha = text(args.head_sha, "head_sha", ToolError);
+  if (!/^[0-9a-f]{40}$/.test(headSha) || !Number.isInteger(args.pr_number) || args.pr_number < 1)
+    error(ToolError, { error: "source_merge_pr_identity_invalid" });
+  const projection = (await c.query(
+    `select ops.source_merge_authority_projection($1::uuid,$2::text,$3::text,$4::integer) authority
+       /* engineering-runtime:source-merge-authority */`,
+    [decisionId, work, headSha, args.pr_number])).rows[0]?.authority;
+  if (!projection?.ok || !projection.authority || !projection.passport_facts?.source)
+    error(ToolError, { error: projection?.error || "source_merge_authority_projection_refused" });
+  const authority = projection.authority;
+  if (authority.schema_version !== "source-merge-authority.v1" ||
+      authority.derived_by !== "source-merge-authority-projection" ||
+      authority.decision?.title !== NO_CEREMONIAL_MERGE_DECISION_TITLE ||
+      authority.decision?.decision_ref !== NO_CEREMONIAL_MERGE_DECISION ||
+      authority.decision?.sponsoring_human_slug !== "joe" || authority.exact_head_sha !== headSha ||
+      authority.pr_number !== args.pr_number)
+    error(ToolError, { error: "source_merge_authority_projection_mismatch" });
+  const passport = closureProjection(projection.passport_facts, ToolError);
+  if (passport.closure_state !== "complete" || passport.stale_conflict?.state !== "none")
+    error(ToolError, { error: "source_merge_passport_not_closed" });
+  if (passport.slices.some(slice => slice.manual_qa_required === true))
+    error(ToolError, { error: "source_merge_manual_qa_requires_human" });
+  if (!Array.isArray(authority.authorized_path_claims) || !authority.authorized_path_claims.length ||
+      typeof authority.scope_digest !== "string" || typeof authority.scope_ref !== "string")
+    error(ToolError, { error: "source_merge_path_authority_missing" });
+  return {
+    ...authority,
+    work_request: passport.work_request,
+    accepted_plan_revision: passport.accepted_plan_revision,
+    passport,
+  };
 }
 
 // These functions are intentionally usable by both an MCP adapter (writer
@@ -1095,6 +1144,11 @@ export function engineeringRuntimeTools({ withEnvelope, writeEvent, ToolError })
       description: "Read the canonical typed Engineering Passport projection. Closure is derived from persisted envelopes, receipts, and independent reviewer facts; it is not a task store or authority source.",
       inputSchema: { type: "object", additionalProperties: false, properties: { work_request: { type: "string" } }, required: ["work_request"] },
       handler: async (c, _actor, args) => { const work = text(args.work_request, "work_request", ToolError); const r = await c.query("select ops.engineering_passport_facts($1::text) as facts", [work]); if (!r.rows.length || !r.rows[0].facts?.source) error(ToolError, { error: "engineering_work_request_not_found" }); return closureProjection(r.rows[0].facts, ToolError); },
+    },
+    "source-merge-authority": {
+      description: "Resolve one merge-only authority packet from the settled decision, Joe-accepted plan-hash file scope, and current unsuperseded Engineering receipt/reviewer generations through a reader-safe security-definer projection. Lease and assurance claims remain non-authorizing evidence and cannot add scope. The caller supplies only immutable locators plus exact PR identity.",
+      inputSchema: { type: "object", additionalProperties: false, properties: { decision_id: { type: "string" }, work_request: { type: "string" }, pr_number: { type: "integer", minimum: 1 }, head_sha: { type: "string", pattern: "^[0-9a-f]{40}$" } }, required: ["decision_id", "pr_number", "head_sha"] },
+      handler: async (c, _actor, args) => resolveSourceMergeAuthority(c, args, ToolError),
     },
     "engineering-writer-runtime-preflight": {
       fullOnly: true,

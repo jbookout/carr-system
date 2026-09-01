@@ -12,6 +12,7 @@ import {
   runEngineeringWorker,
   admitEngineeringSlice,
   recordEngineeringReview,
+  resolveSourceMergeAuthority,
   engineeringRuntimeTools,
 } from "../src/engineering-runtime.js";
 
@@ -221,7 +222,7 @@ test("the committed plan shape is validated and Passport closure is schema-shape
   assert.throws(() => requirePlan({ ...typedPlan, slices: [{ ...item, risk_class: "R9" }] }, Error));
   const facts = { source: { work_request: source.work, accepted_plan: source.plan }, slice_plans: [{ accepted_plan_id: source.plan.record_id, accepted_plan_hash: source.plan.digest, plan: typedPlan }], envelopes: [], receipts: [], reviewer_facts: [] };
   const projection = closureProjection(facts, Error);
-  assert.deepEqual(Object.keys(projection).sort(), ["accepted_plan_revision", "closure", "closure_state", "execution_envelopes", "operator_receipt", "plan_digest", "projection_digest", "qa_facts", "receipts", "reviewer_facts", "schema_version", "slice_plan", "slices", "stale_conflict", "work_request"].sort());
+  assert.deepEqual(Object.keys(projection).sort(), ["accepted_plan_revision", "closure", "closure_state", "current_receipts", "current_reviewer_facts", "execution_envelopes", "operator_receipt", "plan_digest", "projection_digest", "qa_facts", "receipts", "reviewer_facts", "schema_version", "slice_plan", "slices", "stale_conflict", "work_request"].sort());
   for (const key of ["slice_plan", "execution_envelopes", "receipts", "reviewer_facts", "qa_facts", "operator_receipt", "projection_digest"]) assert.ok(projection[key]);
   for (const key of ["work", "proof", "explanation", "release"]) assert.deepEqual(Object.keys(projection.closure[key]).sort(), ["evidence_refs", "note", "state"]);
   assert.deepEqual(Object.keys(projection.closure.learning).sort(), ["evidence_refs", "note", "route", "state"]);
@@ -440,6 +441,8 @@ test("closure projection is generation-aware: exact review completes, unreviewed
   assert.equal(exact.closure_state, "complete");
   assert.deepEqual(exact.receipts, [failed.receipt, success.receipt]);
   assert.deepEqual(exact.reviewer_facts, [oldPass.fact, exactPass.fact]);
+  assert.deepEqual(exact.current_receipts, [success.receipt]);
+  assert.deepEqual(exact.current_reviewer_facts, [exactPass.fact]);
 
   const staleFacts = structuredClone({ ...throughSuccess, reviewer_facts: [oldPass, exactPass] });
   staleFacts.source.work_request.version += 1;
@@ -455,6 +458,55 @@ test("closure projection is generation-aware: exact review completes, unreviewed
   const noReceiptSuccessor = closureProjection({ ...base, receipts: [failed, success], reviewer_facts: [oldPass, exactPass] }, Error);
   assert.equal(noReceiptSuccessor.slices[0].state, "eligible", "an unsuperseded leaf without a receipt must fence an older reviewed pass");
   assert.equal(noReceiptSuccessor.closure_state, "blocked");
+});
+
+test("source merge authority comes from one reader-safe controller projection, never lease claims", async () => {
+  const head = "a".repeat(40);
+  const plan = typedEngineeringPlan([engineeringSlice("slice:one", 1)]);
+  const envelope = envelopeRow("11111111-1111-4111-8111-111111111111", "slice:one", "2026-08-26T00:00:01Z");
+  const receipt = receiptRow("22222222-2222-4222-8222-222222222222", envelope.id, "slice:one", "claimed_complete", "2026-08-26T00:00:02Z");
+  receipt.receipt.source_evidence.source_sha = head;
+  bindReceiptLineage(receipt, plan, envelope);
+  const review = reviewerRow("33333333-3333-4333-8333-333333333333", receipt.id, "slice:one", "passed", "2026-08-26T00:00:03Z");
+  const facts = passportFacts(plan, { envelopes: [envelope], receipts: [receipt], reviewer_facts: [review] });
+  facts.source.accepted_plan.accepted_by_actor_id = actor.id;
+  const calls = [];
+  const c = { query: async (sql, params) => {
+    calls.push({ sql, params });
+    if (sql.includes("source_merge_authority_projection")) return { rows: [{ authority: {
+      ok: true,
+      passport_facts: facts,
+      authority: {
+      schema_version: "source-merge-authority.v1",
+      derived_by: "source-merge-authority-projection",
+      decision: {
+        decision_ref: "decision:4eaae0e1-f3b0-4e5d-af93-c44f39adc687",
+        event_ref: "event:44444444-4444-4444-8444-444444444444",
+        title: "Routine authorized green PRs merge without asking Joe for ceremonial approval",
+        sponsoring_human_slug: "joe",
+      },
+      source_merge_only: true,
+      allowed_actions: ["repository:merge-pr"],
+      scope_ref: "source-merge-scope:99999999-9999-4999-8999-999999999999",
+      scope_digest: `sha256:${"6".repeat(64)}`,
+      authorized_path_claims: [{ path: "mcp-server/src/source-merge-policy.js", mode: "file", operation: "write" }],
+      exact_head_sha: head, pr_number: 42,
+      currentness_evaluated_at: new Date().toISOString(),
+    } } }] };
+    return { rows: [] };
+  } };
+  const authority = await resolveSourceMergeAuthority(c, {
+    decision_id: "4eaae0e1-f3b0-4e5d-af93-c44f39adc687",
+    work_request: source.work.ref, pr_number: 42, head_sha: head,
+  }, EngineeringToolError);
+  assert.equal(authority.derived_by, "source-merge-authority-projection");
+  assert.equal(authority.decision.sponsoring_human_slug, "joe");
+  assert.equal(authority.passport.closure_state, "complete");
+  assert.equal(authority.authorized_path_claims[0].path, "mcp-server/src/source-merge-policy.js");
+  assert.match(authority.scope_ref, /^source-merge-scope:[0-9a-f-]{36}$/);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].sql, /source_merge_authority_projection/);
+  assert.doesNotMatch(calls[0].sql, /canonical_ownership_claim|assurance_evidence_extension|from event/i);
 });
 
 test("dependency preflight and closure fail closed on malformed latest receipt or reviewer lineage", async () => {

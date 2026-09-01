@@ -867,6 +867,25 @@
         "ops/gate-baseline-cochange-selftest.py"
       ]
     },
+    "source_merge_eligibility": {
+      "failure_mode": "controller refuses merge and exposes no merge action",
+      "implementation": [
+        ".github/workflows/source-merge-controller.yml",
+        "mcp-server/src/engineering-runtime.js",
+        "mcp-server/src/work-request-intake.js",
+        "mcp-server/src/source-merge-policy.js",
+        "mcp-server/bin/run-source-merge.mjs",
+        "migrations/0470_source_merge_authority_projection.sql",
+        "ops/source-merge-authority-local-pg-gate.py"
+      ],
+      "test": [
+        "mcp-server/test/engineering-runtime.test.mjs",
+        "mcp-server/test/source-merge-policy.test.mjs",
+        "mcp-server/test/source-merge-migration.test.mjs",
+        "mcp-server/test/work-request-ready-plan.test.mjs",
+        "ops/local-pg-ci-selftest.py"
+      ]
+    },
     "stale_claim": {
       "failure_mode": "Stop block; names the recent commit that already fixed what the reply calls broken",
       "implementation": [
