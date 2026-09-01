@@ -1064,8 +1064,24 @@ BACKUP_RC=$LAST_STEP_RC
 # later, which is a long way from the cause.
 portability_root="${CARR_EXPORT_HOME:-}"
 [ -n "$portability_root" ] || portability_root="/Users/booko/Library/CloudStorage/OneDrive-CARR,Inc/Joe's Folder/CARR AI"
+# THE MIRROR WAS WIRED TO A CREDENTIAL THAT DOES NOT EXIST ON THIS MAC, and it
+# had been skipping on that every night since 2026-08-16 — fifteen nights, all
+# of them reading green, because an absent credential exits 78 and 78 is the
+# house SKIP contract. Found 2026-08-31 from the far end: the mirror is what
+# ops/vault-duplicate-sweep.py classifies against, so a frozen mirror was
+# quietly corrupting a different decision downstream.
+#
+# CARR_DB_BACKUP_URL is not a key in ~/.config/carr/db.env at all. The BACKUP
+# still needs it and that is Joe's to provision. The MIRROR never did: it is a
+# read that renders md + csv, which is exactly the exporter credential's scope,
+# and CARR_DB_EXPORTER_URL is already loaded and already crosses the routine
+# boundary in bin/routine-credential-env.sh. Pointing a read at the backup
+# credential was over-scoped as well as broken.
+#
+# Proven before the change, on the real database with the exporter credential:
+# "mirror OK (verified on disk): 240 md docs, 40 tables, 75365 rows".
 step "portability mirror (md+csv, 2 locations)" \
-  env DATABASE_URL="$CARR_DB_BACKUP_URL" .venv/bin/python pipelines/doctrine_mirror.py \
+  env DATABASE_URL="$CARR_DB_EXPORTER_URL" .venv/bin/python pipelines/doctrine_mirror.py \
     --out "$portability_root/Backups/portability-mirror" \
     --also "$HOME/carr-system/out/mirror"
 # NO BACKUP_RC HERE ANY MORE — it is captured beside the encrypted backup above,
