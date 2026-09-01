@@ -326,6 +326,11 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .stage-node-disc { fill: var(--node-seat); fill-opacity: 0.30; stroke: var(--node-halo); stroke-width: 2; }
 .stage-node.is-outer .stage-node-disc { fill-opacity: 0.18; stroke-opacity: 0.65; }
 .stage-node.is-outer { opacity: 0.55; }
+/* Moons: staff Doc summons. Visibly smaller satellites, full presence (the
+   outer-ring fade was the lie that made them look like a second peer ring). */
+.stage-node.is-moon { opacity: 0.85; }
+.stage-node.is-moon .stage-node-disc { stroke-width: 1.2; }
+.stage-node-name-moon { font-size: 4.5px; letter-spacing: 0.04em; }
 .stage-node.is-dim { opacity: 0.35; }
 .stage-node-glyph {
   fill: var(--text); font-family: var(--display); font-size: 13px;
