@@ -29,11 +29,12 @@ begin
     raise notice '0473: carr_backup absent (non-production database); nothing to restore';
     return;
   end if;
-  grant select on ops.assurance_execution_manifest,
-                  ops.assurance_evidence_extension,
-                  ops.assurance_review_extension,
-                  ops.assurance_owner_acceptance_fact
-    to carr_backup;
+  -- Sweep the whole schema, not only 0451's four tables: every table created
+  -- by the pending migrations that apply inside the revoke window (0452-0472)
+  -- was also born without the backup grant. SELECT grants are not part of any
+  -- sealed census, and re-granting an existing grant is a no-op.
+  grant select on all tables in schema ops to carr_backup;
+  grant select on all sequences in schema ops to carr_backup;
   execute 'alter default privileges for role neondb_owner in schema ops '
           'grant select on tables to carr_backup';
   execute 'alter default privileges for role neondb_owner in schema ops '
