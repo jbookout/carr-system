@@ -1142,15 +1142,15 @@ esac
 if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
   SCAC_REGISTRY_EXACT="$("$PSQL" "$URL" -Atqc \
     "select count(*)=9
-       and array_agg(registry_version order by registry_version)=array[
+       and array_agg(registry_version order by registry_version collate \"C\")=array[
          'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3',
          'scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6',
          'scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9']::text[]
-       and sum(entry_count)=13605
+       and sum(entry_count)=12660
        and bool_and(entry_count=(select count(*) from ops.scac_mutation_registry_entry e
                                   where e.registry_version=v.registry_version))
        and bool_and(entry_set_digest=(select 'sha256:'||encode(public.digest(
-             convert_to(coalesce(string_agg(e.entry_digest,',' order by e.ingress_key),''),'UTF8'),
+             convert_to(coalesce(string_agg(e.entry_digest,',' order by e.ingress_key collate \"C\"),''),'UTF8'),
              'sha256'),'hex') from ops.scac_mutation_registry_entry e
              where e.registry_version=v.registry_version))
        and ops.scac_mutation_catalog_v9_current()
@@ -1173,11 +1173,11 @@ SCAC_REGISTRY_HEADER
   if ! "$PSQL" -X -Atq -v ON_ERROR_STOP=1 "$URL" >> "$TMP" <<'SCAC_REGISTRY_ROWS'
 select format(
   'insert into ops.scac_mutation_registry_version select * from jsonb_populate_recordset(null::ops.scac_mutation_registry_version, %L::jsonb) on conflict (registry_version) do nothing;',
-  jsonb_agg(to_jsonb(v) order by v.registry_version))
+  jsonb_agg(to_jsonb(v) order by v.registry_version collate "C"))
 from ops.scac_mutation_registry_version v;
 select format(
   'insert into ops.scac_mutation_registry_entry select * from jsonb_populate_recordset(null::ops.scac_mutation_registry_entry, %L::jsonb) on conflict (registry_version,ingress_key) do nothing;',
-  jsonb_agg(to_jsonb(e) order by e.ingress_key))
+  jsonb_agg(to_jsonb(e) order by e.ingress_key collate "C"))
 from ops.scac_mutation_registry_entry e
 group by e.registry_version order by e.registry_version;
 SCAC_REGISTRY_ROWS
@@ -1191,11 +1191,11 @@ alter table ops.scac_mutation_registry_entry enable trigger scac_mutation_regist
 alter table ops.scac_mutation_registry_version enable trigger scac_mutation_registry_version_sealed;
 do $carr_scac_registry$
 begin
-  if not (select count(*)=9 and sum(entry_count)=13605 and
+  if not (select count(*)=9 and sum(entry_count)=12660 and
       bool_and(entry_count=(select count(*) from ops.scac_mutation_registry_entry e
                             where e.registry_version=v.registry_version)) and
       bool_and(entry_set_digest=(select 'sha256:'||encode(public.digest(
-        convert_to(coalesce(string_agg(e.entry_digest,',' order by e.ingress_key),''),'UTF8'),
+        convert_to(coalesce(string_agg(e.entry_digest,',' order by e.ingress_key collate "C"),''),'UTF8'),
         'sha256'),'hex') from ops.scac_mutation_registry_entry e
         where e.registry_version=v.registry_version))
     from ops.scac_mutation_registry_version v) then

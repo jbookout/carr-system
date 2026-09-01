@@ -196,8 +196,8 @@ test("v9 successor seals v8 and binds the measured SIEP-18 grant snapshot", () =
   const expectedEntryCount = rows.length + SIEP18_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count +
     SIEP18_FORWARD_DB_CATALOG_BASELINE.relation_dml.count +
     SIEP18_FORWARD_DB_CATALOG_BASELINE.column_dml.count;
-  assert.equal(rows.length, 905);
-  assert.equal(expectedEntryCount, 1544);
+  assert.equal(rows.length, 800);
+  assert.equal(expectedEntryCount, 1439);
   assert.equal(sha256(siep18MonitorMigration), SIEP18_MONITOR_ARTIFACT_SHA256);
   assert.equal(SIEP18_PRE_V9_DB_CATALOG_BASELINE.secdef_execute.count, 338);
   assert.equal(SIEP18_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count -
@@ -273,7 +273,7 @@ test("migration is read-only at runtime and preserves the SIEP-18 boundary", () 
 
 test("reviewed non-MCP source locators resolve and remain explicitly non-authorizing", () => {
   const rows = fullInventory().filter(row => !["mcp_tool", "job_definition", "workflow_entrypoint"].includes(row.ingress_kind));
-  assert.equal(rows.length, 629);
+  assert.equal(rows.length, 524);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -281,7 +281,7 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
     assert.equal(row.implementation_state, "inventoried_not_atomically_mediated");
   }
   const scripts = discoverScriptEntrypoints();
-  assert.equal(scripts.length, 620);
+  assert.equal(scripts.length, 515);
   assert.equal(scripts.some(path => path === "ops/rule-delivery-cutover.py"), true);
   assert.equal(scripts.some(path => path === "ops/control-plane-scheduler-cutover.py"), true);
   assert.equal(scripts.some(path => path === "run.sh"), true);

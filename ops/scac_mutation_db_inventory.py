@@ -35,7 +35,8 @@ select jsonb_build_object(
 from capabilities c left join pg_roles r on r.oid=c.grantee
 where prosecdef and privilege_type='EXECUTE'
   and (grantee=0 or r.oid in (select oid from runtime_roles))
-order by nspname,proname,args,coalesce(r.rolname,'public')
+order by nspname collate "C",proname collate "C",args collate "C",
+         coalesce(r.rolname,'public') collate "C"
 """
 
 RELATION_DML_SQL = r"""
@@ -60,7 +61,8 @@ select jsonb_build_object(
 from capabilities c left join pg_roles r on r.oid=c.grantee
 where privilege_type in ('INSERT','UPDATE','DELETE','TRUNCATE')
   and (grantee=0 or r.oid in (select oid from runtime_roles))
-order by nspname,relname,coalesce(r.rolname,'public'),lower(privilege_type)
+order by nspname collate "C",relname collate "C",
+         coalesce(r.rolname,'public') collate "C",lower(privilege_type) collate "C"
 """
 
 COLUMN_DML_SQL = r"""
@@ -87,7 +89,8 @@ select jsonb_build_object(
 from capabilities c left join pg_roles r on r.oid=c.grantee
 where privilege_type in ('INSERT','UPDATE')
   and (grantee=0 or r.oid in (select oid from runtime_roles))
-order by nspname,relname,attname,coalesce(r.rolname,'public'),lower(privilege_type)
+order by nspname collate "C",relname collate "C",attname collate "C",
+         coalesce(r.rolname,'public') collate "C",lower(privilege_type) collate "C"
 """
 
 JOB_DEFINITIONS_SQL = r"""
@@ -99,7 +102,7 @@ select jsonb_build_object(
   'state_contract',state_contract,'routing_contract',routing_contract,'filtering_contract',filtering_contract,
   'validation_contract',validation_contract,'retry_policy',retry_policy,'deduplication',deduplication,
   'completion_contract',completion_contract,'legacy_schedule',legacy_schedule)
-from ops.job_definition order by key,version
+from ops.job_definition order by key collate "C",version
 """
 
 # Role membership changes effective DB authority without changing relation or
@@ -144,7 +147,7 @@ with recursive connected(oid) as (
      and owner.oid in(select oid from connected) and not owner.rolsuper and owner.rolname<>'neondb_owner'
 )
 select row from (select * from role_rows union all select * from membership_rows union all select * from ownership_rows) facts
-order by ingress_key
+order by ingress_key collate "C"
 """
 
 QUERIES = {

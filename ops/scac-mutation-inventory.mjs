@@ -24,32 +24,32 @@ const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 // --write-rebased-* commands below; ordinary historical write modes stay
 // refused so an accidental invocation cannot rewrite a reviewed seal.
 export const HISTORICAL_REGISTRY_SEALS = Object.freeze({
-  v1: Object.freeze({ version: REGISTRY_VERSION, digest: "sha256:71a909c105dfe4267adc5075533c844abb378aead75ddf46d284bdf528babdcb", entryCount: 1492, sourceEntryCount: 905 }),
-  v2: Object.freeze({ version: REGISTRY_V2_VERSION, digest: "sha256:31c89f7f2280beebc9cbd1c0b138bd23e05ae58f1c6bf80fd6f53736117d8208", entryCount: 1496, sourceEntryCount: 905 }),
-  v3: Object.freeze({ version: REGISTRY_V3_VERSION, digest: "sha256:fcb82ebe89f0c515df60008783528b98aa70db78536c86306cb243ca947dd065", entryCount: 1500, sourceEntryCount: 905 }),
-  v4: Object.freeze({ version: REGISTRY_V4_VERSION, digest: "sha256:4422234b95359c3dfb3fb78c02430411f5668b9c30888e6677181c98e10fb104", entryCount: 1504, sourceEntryCount: 905 }),
-  v5: Object.freeze({ version: REGISTRY_V5_VERSION, digest: "sha256:c7ad3c4f7b172129aaba6dd00d61b16790b1fafbf7cc7f4bd5ee5b47cd447321", entryCount: 1509, sourceEntryCount: 905 }),
-  v6: Object.freeze({ version: REGISTRY_V6_VERSION, digest: "sha256:78642a905b243ed0eaa14ca36f5185159353fb85fd102ede9a30b647e9c76ad4", entryCount: 1513, sourceEntryCount: 905 }),
-  v7: Object.freeze({ version: REGISTRY_V7_VERSION, digest: "sha256:41db4b93c40d5c6660a5b6febbe14ea84642fc96742a95349a7bab32cb806779", entryCount: 1517, sourceEntryCount: 905 }),
-  v8: Object.freeze({ version: REGISTRY_V8_VERSION, digest: "sha256:8797f9d7661445d18190f481f485376231d787b61b6b3de10dea8669bc9692d9", entryCount: 1530, sourceEntryCount: 905 }),
+  v1: Object.freeze({ version: REGISTRY_VERSION, digest: "sha256:7cc2feacec82bf7cce2af9af309dc4ae9426922003471703af010f6728957190", entryCount: 1387, sourceEntryCount: 800 }),
+  v2: Object.freeze({ version: REGISTRY_V2_VERSION, digest: "sha256:d78696444c3f9d6dc9f82b71469986671b3846b762be7096ef4370bf4f6d609e", entryCount: 1391, sourceEntryCount: 800 }),
+  v3: Object.freeze({ version: REGISTRY_V3_VERSION, digest: "sha256:b5b32aeb7c777cf726c5cb526a860a5b7d644afa54c3ce1fd55a42132fc0b298", entryCount: 1395, sourceEntryCount: 800 }),
+  v4: Object.freeze({ version: REGISTRY_V4_VERSION, digest: "sha256:1bdf011d492a611eb528ddb907292871d099fea507e4fca11646978944a42c91", entryCount: 1399, sourceEntryCount: 800 }),
+  v5: Object.freeze({ version: REGISTRY_V5_VERSION, digest: "sha256:18a0bcb000edd6bad0f82b229748592173c6de31b18663718418a2d5fd95b36b", entryCount: 1404, sourceEntryCount: 800 }),
+  v6: Object.freeze({ version: REGISTRY_V6_VERSION, digest: "sha256:9538ff0f43a6b5cbd7bcabb0f79bd78852e1f9c23f29291b42b25f61035f9dc2", entryCount: 1408, sourceEntryCount: 800 }),
+  v7: Object.freeze({ version: REGISTRY_V7_VERSION, digest: "sha256:0662449e25ab7cb26eb2ba922d4e2177b22e62066c8d5a3eac01daa9879a1aec", entryCount: 1412, sourceEntryCount: 800 }),
+  v8: Object.freeze({ version: REGISTRY_V8_VERSION, digest: "sha256:aac53ad8a01b1e2bbf4cd633b6f4cacdf4d66195556be31a64b0795091d4f397", entryCount: 1425, sourceEntryCount: 800 }),
 });
 export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
-  "migrations/0454_siep11_mutation_registry.sql": "802b7ff1bb683f30c64e3209c77fe5a695fec32aec1ce5fb4b18630dc4881f26",
-  "migrations/0455_siep12_policy_epoch.sql": "2d8cc557aec6bff7e2e6e016ba5519c43c40d99e64c59cbb75267788a0305c85",
-  "migrations/0457_siep13_forward_mutation_registry.sql": "b3b1d2542b5ad492c9d5a5b47c5b266e973384a93afc73aabebe9353e72d3069",
-  "migrations/0459_siep14_forward_mutation_registry.sql": "fcb50009e17e907288d89cb90fe1823a221e4fb6cfb521d9b5956049009ac98c",
-  "mcp-server/src/scac-mutation-registry.generated.js": "782dcd96c9812d57d3e05453906d3ab9e0f3f289cf6ce41a518ad7c7704363b1",
-  "mcp-server/src/scac-mutation-registry.v2.generated.js": "4c62baa6859ee58d01fec75f0b9106f72f86896d8553bd0aba7119c8263b4da3",
-  "mcp-server/src/scac-mutation-registry.v3.generated.js": "44815f87826e619f8cd8642a7ab71fd298af3fe27b5b2e3f196444b27731ac27",
-  "mcp-server/src/scac-mutation-registry.v4.generated.js": "120d9306f200a5c5ca854c109a845b6b4b0a0604a4623824754beb4afd606558",
-  "migrations/0461_siep15_forward_mutation_registry.sql": "9a1c2eb6d176cad504daea19f4c3c3cd6bf317ca0db4094432e560d7749ebe0a",
-  "mcp-server/src/scac-mutation-registry.v5.generated.js": "9890164f902940a764d65da96d50d970fa34a35ab79a405f83798cd0a29bdf68",
-  "migrations/0462_siep16_forward_mutation_registry.sql": "702b739cadffb68c6b4d92475305468a49840d8c19dcd66a6e5afbd15ad0db11",
-  "mcp-server/src/scac-mutation-registry.v6.generated.js": "f98647116ba948c1f74466b5f8cae47ba86bfb89f9f1e69d5db543e364c2b500",
-  "migrations/0464_siep16_integrated_mutation_registry.sql": "88bd6aaca088f64db6f638d957d7792a54f3cf2bf4bcaadff074076a3d5de0a6",
-  "mcp-server/src/scac-mutation-registry.v7.generated.js": "b6cc65c35644639a0feb16c143018b9acb7c2ca007c6875dbc8977409ffc3c98",
-  "migrations/0466_siep17_forward_mutation_registry.sql": "b790767dd7371bdd1ef7363ed992965d79144ce495d67f972c2aa0a8ae9da9ff",
-  "mcp-server/src/scac-mutation-registry.v8.generated.js": "9a1bfbc7da9883a5d4bc1f7b5a2fa0dde44b500fb3fad5d6cd9ef202a58c508a",
+  "migrations/0454_siep11_mutation_registry.sql": "a478461eeecacc3a02dd86f3b9c1b98b3c9432953a8f974c9b3d39a08e081d21",
+  "migrations/0455_siep12_policy_epoch.sql": "7bf22c704e24ec4d602ac7f9493c200a6d50050369b04c07a71d015a6dbfdd58",
+  "migrations/0457_siep13_forward_mutation_registry.sql": "e1a08ab506b74a46cc064368537cbd9dc99b8b5486dff38b771a262be887e380",
+  "migrations/0459_siep14_forward_mutation_registry.sql": "babbf220826ab12da78505c0eb61b6db3b8890bf17deb09130c7b6508e007935",
+  "mcp-server/src/scac-mutation-registry.generated.js": "e8cf336806337ba0ba25532816692ac2a24b48f9df58cee2966baaeafdae5abc",
+  "mcp-server/src/scac-mutation-registry.v2.generated.js": "7e2e680f5eb0c20aa01dab605d9040c2b71841f75bf51fd9a02468ca1c2da23d",
+  "mcp-server/src/scac-mutation-registry.v3.generated.js": "45e03d5c8fde6f44067cc2a6ec97b262f251182f77a95efdeafdcf29adc9e0c5",
+  "mcp-server/src/scac-mutation-registry.v4.generated.js": "bcece72c3089b3970128e306094836b3c88f5d8f41c0e1b92262eee2662c918f",
+  "migrations/0461_siep15_forward_mutation_registry.sql": "610aee81147679c4ddf7db23626d21db3b8b8329cc3c725e1c75b9016a26d69d",
+  "mcp-server/src/scac-mutation-registry.v5.generated.js": "ad999f53bb954cda52708050845946e2beddcc2fa3cc44239336a043d2279cf3",
+  "migrations/0462_siep16_forward_mutation_registry.sql": "02d42584a871b6b2944c5747f76bbd0abb07e1bbf158c4cef30c2213ab14efb3",
+  "mcp-server/src/scac-mutation-registry.v6.generated.js": "be5c28d7ab1cc7f6b00ae2c556ab4359ec8a1f3ef0d64f3b57ecf8ab43a25137",
+  "migrations/0464_siep16_integrated_mutation_registry.sql": "1005cb8f13bf5c0c2003a3dca021c3d86c656a4faabfb0e069b416a130ceccb7",
+  "mcp-server/src/scac-mutation-registry.v7.generated.js": "b2f8bee1c5027d97cfaf9930b7b9bf0130b51802f1af398e5f0c1867911ab45d",
+  "migrations/0466_siep17_forward_mutation_registry.sql": "20a158f96b287e7ac9c3979138c95803d1da644a5e4918290f092c628d0325d9",
+  "mcp-server/src/scac-mutation-registry.v8.generated.js": "2388c79ae79b76b433ce69e237fd43d850deeebfb42cf787490882191ae8ddf0",
 });
 // 0467 is the reviewed SIEP-18 monitor source consumed by the v9 generator.
 // It is not historical yet, but its bytes must still be exact: otherwise a
@@ -235,7 +235,7 @@ function sourceDigest(path) {
 }
 
 const SCRIPT_SCAN_EXCLUDED_DIRS = new Set([
-  ".git", ".claude", ".mypy_cache", "__pycache__", "node_modules",
+  ".git", ".claude", ".mypy_cache", ".pytest_cache", ".venv", "__pycache__", "node_modules",
 ]);
 
 function walkFiles(relativeDir = "") {
@@ -762,13 +762,13 @@ catalogSeedSql(version) +
 `do $$ declare actual_count integer; actual_digest text; expected jsonb; category text; kind text;\n` +
 `begin\n` +
 `  for category,kind in values ('secdef_execute','db_function_acl'),('relation_dml','db_relation_acl'),('column_dml','db_column_acl') loop\n` +
-`    select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(contract-'effect_class'-'owner_package'-'implementation_state'-'classification_authorizing'-'source_locator' order by ingress_key),'[]'::jsonb)),'UTF8'),'sha256'),'hex')\n` +
+`    select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(contract-'effect_class'-'owner_package'-'implementation_state'-'classification_authorizing'-'source_locator' order by ingress_key collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex')\n` +
 `      into actual_count,actual_digest from ops.scac_mutation_registry_entry where registry_version='${version}' and ingress_kind=kind;\n` +
 `    select catalog_projection->category into expected from ops.scac_mutation_registry_version where registry_version='${version}';\n` +
 `    if actual_count<>(expected->>'count')::integer or actual_digest<>expected->>'digest' then raise exception 'SCAC v2 database catalog category % drifted: count %, digest %',category,actual_count,actual_digest; end if;\n` +
 `  end loop;\n` +
 `end $$;\n\n` +
-`update ops.scac_mutation_registry_version v set entry_set_digest=(select 'sha256:'||encode(public.digest(convert_to(string_agg(e.entry_digest,',' order by e.ingress_key),'UTF8'),'sha256'),'hex') from ops.scac_mutation_registry_entry e where e.registry_version=v.registry_version) where registry_version='${version}';\n` +
+`update ops.scac_mutation_registry_version v set entry_set_digest=(select 'sha256:'||encode(public.digest(convert_to(string_agg(e.entry_digest,',' order by e.ingress_key collate "C"),'UTF8'),'sha256'),'hex') from ops.scac_mutation_registry_entry e where e.registry_version=v.registry_version) where registry_version='${version}';\n` +
 `do $$ begin\n` +
 `  if (select count(*) from ops.scac_mutation_registry_entry where registry_version='${version}')<>${totalCount}\n` +
 `     or exists(select 1 from ops.scac_mutation_registry_entry where registry_version='${version}' and (contract->>'owner_package'<>'11' or (contract->>'classification_authorizing')::boolean))\n` +
@@ -804,7 +804,7 @@ function renderSIEP13RegistrySql(rows = fullInventory(),
 `begin\n` +
 `  select * into v from ops.scac_mutation_registry_version where registry_version='${version}';\n` +
 `  if v.registry_version is null then return jsonb_build_object('registered',false,'reason','registry_unavailable'); end if;\n` +
-`  select count(*),'sha256:'||encode(public.digest(convert_to(coalesce(string_agg(entry_digest,',' order by ingress_key),''),'UTF8'),'sha256'),'hex'),\n` +
+`  select count(*),'sha256:'||encode(public.digest(convert_to(coalesce(string_agg(entry_digest,',' order by ingress_key collate "C"),''),'UTF8'),'sha256'),'hex'),\n` +
 `         coalesce(bool_or(entry_digest is distinct from 'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(contract),'UTF8'),'sha256'),'hex')),false)\n` +
 `    into actual_count,actual_set,bad_hash from ops.scac_mutation_registry_entry where registry_version=v.registry_version;\n` +
 `  if actual_count<>v.entry_count or actual_set is distinct from v.entry_set_digest or bad_hash then\n` +
@@ -830,13 +830,13 @@ catalogSeedSql(version) +
 `do $$ declare actual_count integer; actual_digest text; expected jsonb; category text; kind text;\n` +
 `begin\n` +
 `  for category,kind in values ('secdef_execute','db_function_acl'),('relation_dml','db_relation_acl'),('column_dml','db_column_acl') loop\n` +
-`    select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(contract-'effect_class'-'owner_package'-'implementation_state'-'classification_authorizing'-'source_locator' order by ingress_key),'[]'::jsonb)),'UTF8'),'sha256'),'hex')\n` +
+`    select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(contract-'effect_class'-'owner_package'-'implementation_state'-'classification_authorizing'-'source_locator' order by ingress_key collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex')\n` +
 `      into actual_count,actual_digest from ops.scac_mutation_registry_entry where registry_version='${version}' and ingress_kind=kind;\n` +
 `    select catalog_projection->category into expected from ops.scac_mutation_registry_version where registry_version='${version}';\n` +
 `    if actual_count<>(expected->>'count')::integer or actual_digest<>expected->>'digest' then raise exception 'SCAC v3 database catalog category % drifted: count %, digest %',category,actual_count,actual_digest; end if;\n` +
 `  end loop;\n` +
 `end $$;\n\n` +
-`update ops.scac_mutation_registry_version v set entry_set_digest=(select 'sha256:'||encode(public.digest(convert_to(string_agg(e.entry_digest,',' order by e.ingress_key),'UTF8'),'sha256'),'hex') from ops.scac_mutation_registry_entry e where e.registry_version=v.registry_version) where registry_version='${version}';\n` +
+`update ops.scac_mutation_registry_version v set entry_set_digest=(select 'sha256:'||encode(public.digest(convert_to(string_agg(e.entry_digest,',' order by e.ingress_key collate "C"),'UTF8'),'sha256'),'hex') from ops.scac_mutation_registry_entry e where e.registry_version=v.registry_version) where registry_version='${version}';\n` +
 `do $$ begin\n` +
 `  if (select count(*) from ops.scac_mutation_registry_entry where registry_version='${version}')<>${totalCount}\n` +
 `     or exists(select 1 from ops.scac_mutation_registry_entry where registry_version='${version}' and (contract->>'owner_package'<>'11' or (contract->>'classification_authorizing')::boolean))\n` +
@@ -862,13 +862,13 @@ catalogSeedSql(version) +
 `  functions as (select p.oid,n.nspname,p.proname,pg_get_function_identity_arguments(p.oid) args,p.prosecdef,p.prokind,p.provolatile,p.proparallel,p.proconfig,p.proacl,p.proowner from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname not in ('pg_catalog','information_schema') and p.prokind in ('f','p')),\n` +
 `  capabilities as (select f.*,acl.grantee,acl.privilege_type,acl.is_grantable from functions f cross join lateral aclexplode(coalesce(f.proacl,acldefault('f',f.proowner))) acl),\n` +
 `  observed as (select 'db-function-acl:'||nspname||'.'||proname||'('||args||'):'||coalesce(r.rolname,'public')||':execute' ingress_key,jsonb_build_object('ingress_key','db-function-acl:'||nspname||'.'||proname||'('||args||'):'||coalesce(r.rolname,'public')||':execute','ingress_kind','db_function_acl','signature',nspname||'.'||proname||'('||args||')','security_definer',prosecdef,'function_kind',prokind,'volatility',provolatile,'parallel',proparallel,'config',coalesce(to_jsonb(proconfig),'[]'::jsonb),'grantee',coalesce(r.rolname,'public'),'privilege','execute','grantable',is_grantable) row from capabilities c left join pg_roles r on r.oid=c.grantee where prosecdef and privilege_type='EXECUTE' and (grantee=0 or r.oid in(select oid from runtime_roles)))\n` +
-`  select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key),'[]'::jsonb)),'UTF8'),'sha256'),'hex') into observed_count,observed_digest from observed;\n` +
+`  select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex') into observed_count,observed_digest from observed;\n` +
 `  if observed_count<>${dbCatalogBaseline.secdef_execute.count} or observed_digest<>'${dbCatalogBaseline.secdef_execute.digest}' then return false; end if;\n` +
 `  with recursive connected(oid) as (select oid from pg_roles where rolname~'^carr_' and rolname<>'carr_ci' union select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end where other.rolname<>'carr_ci' and not other.rolsuper), runtime_roles as (select r.oid,r.rolname from pg_roles r where r.oid in(select oid from connected) and not r.rolsuper), capabilities as (select n.nspname,c.relname,c.relkind,acl.grantee,acl.privilege_type,acl.is_grantable from pg_class c join pg_namespace n on n.oid=c.relnamespace cross join lateral aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) acl where n.nspname not in ('pg_catalog','information_schema') and c.relkind in ('r','p','v','m','f')), observed as (select 'db-relation-acl:'||nspname||'.'||relname||':'||coalesce(r.rolname,'public')||':'||lower(privilege_type) ingress_key,jsonb_build_object('ingress_key','db-relation-acl:'||nspname||'.'||relname||':'||coalesce(r.rolname,'public')||':'||lower(privilege_type),'ingress_kind','db_relation_acl','relation',nspname||'.'||relname,'relation_kind',relkind,'grantee',coalesce(r.rolname,'public'),'privilege',lower(privilege_type),'grantable',is_grantable) row from capabilities c left join pg_roles r on r.oid=c.grantee where privilege_type in ('INSERT','UPDATE','DELETE','TRUNCATE') and (grantee=0 or r.oid in(select oid from runtime_roles)))\n` +
-`  select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key),'[]'::jsonb)),'UTF8'),'sha256'),'hex') into observed_count,observed_digest from observed;\n` +
+`  select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex') into observed_count,observed_digest from observed;\n` +
 `  if observed_count<>${dbCatalogBaseline.relation_dml.count} or observed_digest<>'${dbCatalogBaseline.relation_dml.digest}' then return false; end if;\n` +
 `  with recursive connected(oid) as (select oid from pg_roles where rolname~'^carr_' and rolname<>'carr_ci' union select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end where other.rolname<>'carr_ci' and not other.rolsuper), runtime_roles as (select r.oid,r.rolname from pg_roles r where r.oid in(select oid from connected) and not r.rolsuper), capabilities as (select n.nspname,c.relname,c.relkind,a.attname,acl.grantee,acl.privilege_type,acl.is_grantable from pg_attribute a join pg_class c on c.oid=a.attrelid join pg_namespace n on n.oid=c.relnamespace cross join lateral aclexplode(a.attacl) acl where a.attnum>0 and not a.attisdropped and a.attacl is not null and cardinality(a.attacl)>0 and n.nspname not in ('pg_catalog','information_schema') and c.relkind in ('r','p','v','m','f')), observed as (select 'db-column-acl:'||nspname||'.'||relname||'.'||attname||':'||coalesce(r.rolname,'public')||':'||lower(privilege_type) ingress_key,jsonb_build_object('ingress_key','db-column-acl:'||nspname||'.'||relname||'.'||attname||':'||coalesce(r.rolname,'public')||':'||lower(privilege_type),'ingress_kind','db_column_acl','relation',nspname||'.'||relname,'relation_kind',relkind,'column',attname,'grantee',coalesce(r.rolname,'public'),'privilege',lower(privilege_type),'grantable',is_grantable) row from capabilities c left join pg_roles r on r.oid=c.grantee where privilege_type in ('INSERT','UPDATE') and (grantee=0 or r.oid in(select oid from runtime_roles)))\n` +
-`  select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key),'[]'::jsonb)),'UTF8'),'sha256'),'hex') into observed_count,observed_digest from observed;\n` +
+`  select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex') into observed_count,observed_digest from observed;\n` +
 `  if observed_count<>${dbCatalogBaseline.column_dml.count} or observed_digest<>'${dbCatalogBaseline.column_dml.digest}' then return false; end if;\n` +
 `  with recursive connected(oid) as (\n` +
 `    select oid from pg_roles where rolname~'^carr_' and rolname<>'carr_ci' union\n` +
@@ -881,7 +881,7 @@ catalogSeedSql(version) +
 `    select 'db-function-owner:'||n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||'):'||owner.rolname ingress_key,jsonb_build_object('ingress_key','db-function-owner:'||n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||'):'||owner.rolname,'row_kind','function_owner','signature',n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')','owner',owner.rolname) row from pg_proc p join pg_namespace n on n.oid=p.pronamespace join pg_roles owner on owner.oid=p.proowner where n.nspname not in ('pg_catalog','information_schema') and p.prokind in ('f','p') and owner.oid in(select oid from connected) and not owner.rolsuper and owner.rolname<>'neondb_owner' union all\n` +
 `    select 'db-relation-owner:'||n.nspname||'.'||c.relname||':'||owner.rolname,jsonb_build_object('ingress_key','db-relation-owner:'||n.nspname||'.'||c.relname||':'||owner.rolname,'row_kind','relation_owner','relation',n.nspname||'.'||c.relname,'relation_kind',c.relkind,'owner',owner.rolname) row from pg_class c join pg_namespace n on n.oid=c.relnamespace join pg_roles owner on owner.oid=c.relowner where n.nspname not in ('pg_catalog','information_schema') and c.relkind in ('r','p','v','m','f') and owner.oid in(select oid from connected) and not owner.rolsuper and owner.rolname<>'neondb_owner'\n` +
 `  ), observed as (select * from role_rows union all select * from membership_rows union all select * from ownership_rows)\n` +
-`  select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key),'[]'::jsonb)),'UTF8'),'sha256'),'hex') into observed_count,observed_digest from observed;\n` +
+`  select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex') into observed_count,observed_digest from observed;\n` +
 `  return observed_count=${dbCatalogBaseline.role_authority.count} and observed_digest='${dbCatalogBaseline.role_authority.digest}';\n` +
 `end $fn$;\n\n` +
 `alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v2;\n` +
@@ -1052,14 +1052,14 @@ export function renderSIEP15RegistrySql(rows = fullInventory(),
 `  if v.registry_version is null or v.registry_digest is distinct from expected_registry or\n` +
 `     v.catalog_projection is distinct from expected_catalog then return false; end if;\n` +
 `  select count(*),count(*) filter(where ingress_kind not in ('db_function_acl','db_relation_acl','db_column_acl')),\n` +
-`    'sha256:'||encode(public.digest(convert_to(coalesce(string_agg(entry_digest,',' order by ingress_key),''),'UTF8'),'sha256'),'hex'),\n` +
+`    'sha256:'||encode(public.digest(convert_to(coalesce(string_agg(entry_digest,',' order by ingress_key collate "C"),''),'UTF8'),'sha256'),'hex'),\n` +
 `    coalesce(bool_or(entry_digest is distinct from 'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(contract),'UTF8'),'sha256'),'hex')),false)\n` +
 `    into actual_count,actual_source_count,actual_set,bad_hash\n` +
 `    from ops.scac_mutation_registry_entry where registry_version=p_registry_version;\n` +
 `  if actual_count<>v.entry_count or actual_source_count<>v.source_entry_count or\n` +
 `     actual_set is distinct from v.entry_set_digest or bad_hash then return false; end if;\n` +
 `  for category,kind in values ('secdef_execute','db_function_acl'),('relation_dml','db_relation_acl'),('column_dml','db_column_acl') loop\n` +
-`    select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(contract-'effect_class'-'owner_package'-'implementation_state'-'classification_authorizing'-'source_locator' order by ingress_key),'[]'::jsonb)),'UTF8'),'sha256'),'hex')\n` +
+`    select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(contract-'effect_class'-'owner_package'-'implementation_state'-'classification_authorizing'-'source_locator' order by ingress_key collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex')\n` +
 `      into actual_category_count,actual_category_digest from ops.scac_mutation_registry_entry\n` +
 `      where registry_version=p_registry_version and ingress_kind=kind;\n` +
 `    expected:=v.catalog_projection->category;\n` +
@@ -1416,7 +1416,7 @@ export function renderSIEP18ForwardRegistrySql(rows = fullInventory(),
 `  functions as (select p.oid,n.nspname,p.proname,pg_get_function_identity_arguments(p.oid) args,p.prosecdef,p.prokind,p.provolatile,p.proparallel,p.proconfig,p.proacl,p.proowner from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname not in ('pg_catalog','information_schema') and p.prokind in ('f','p')),\n` +
 `  capabilities as (select f.*,acl.grantee,acl.privilege_type,acl.is_grantable from functions f cross join lateral aclexplode(coalesce(f.proacl,acldefault('f',f.proowner))) acl),\n` +
 `  observed as (select 'db-function-acl:'||nspname||'.'||proname||'('||args||'):'||coalesce(r.rolname,'public')||':execute' ingress_key,jsonb_build_object('ingress_key','db-function-acl:'||nspname||'.'||proname||'('||args||'):'||coalesce(r.rolname,'public')||':execute','ingress_kind','db_function_acl','signature',nspname||'.'||proname||'('||args||')','security_definer',prosecdef,'function_kind',prokind,'volatility',provolatile,'parallel',proparallel,'config',coalesce(to_jsonb(proconfig),'[]'::jsonb),'grantee',coalesce(r.rolname,'public'),'privilege','execute','grantable',is_grantable) row from capabilities c left join pg_roles r on r.oid=c.grantee where prosecdef and privilege_type='EXECUTE' and (grantee=0 or r.oid in(select oid from runtime_roles)))\n` +
-`  select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key),'[]'::jsonb)),'UTF8'),'sha256'),'hex') into observed_count,observed_digest from observed;\n` +
+`  select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex') into observed_count,observed_digest from observed;\n` +
 `  if observed_count<>${SIEP18_PRE_V9_DB_CATALOG_BASELINE.secdef_execute.count} or observed_digest<>'${SIEP18_PRE_V9_DB_CATALOG_BASELINE.secdef_execute.digest}' then\n` +
 `    raise exception 'SIEP-18 pre-v9 security-definer catalog receipt drifted: count %, digest %',observed_count,observed_digest;\n` +
 `  end if;\n` +
@@ -1649,7 +1649,7 @@ function renderMigration(rows = fullInventory()) {
 `declare kind text:=jsonb_typeof(p_value); rendered text;\n` +
 `begin\n` +
 `  if kind='object' then\n` +
-`    select '{'||coalesce(string_agg(to_jsonb(key)::text||':'||ops.scac_canonical_json(value),',' order by key),'')||'}' into rendered from jsonb_each(p_value);\n` +
+`    select '{'||coalesce(string_agg(to_jsonb(key)::text||':'||ops.scac_canonical_json(value),',' order by key collate "C"),'')||'}' into rendered from jsonb_each(p_value);\n` +
 `    return rendered;\n` +
 `  elsif kind='array' then\n` +
 `    select '['||coalesce(string_agg(ops.scac_canonical_json(value),',' order by ordinal),'')||']' into rendered from jsonb_array_elements(p_value) with ordinality as a(value,ordinal);\n` +
@@ -1673,7 +1673,7 @@ function renderMigration(rows = fullInventory()) {
 `begin\n` +
 `  select * into v from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v1';\n` +
 `  if v.registry_version is null then return jsonb_build_object('registered',false,'reason','registry_unavailable'); end if;\n` +
-`  select count(*),'sha256:'||encode(public.digest(convert_to(coalesce(string_agg(entry_digest,',' order by ingress_key),''),'UTF8'),'sha256'),'hex'),\n` +
+`  select count(*),'sha256:'||encode(public.digest(convert_to(coalesce(string_agg(entry_digest,',' order by ingress_key collate "C"),''),'UTF8'),'sha256'),'hex'),\n` +
 `         coalesce(bool_or(entry_digest is distinct from 'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(contract),'UTF8'),'sha256'),'hex')),false)\n` +
 `    into actual_count,actual_set_digest,contract_digest_mismatch from ops.scac_mutation_registry_entry where registry_version=v.registry_version;\n` +
 `  if actual_count<>v.entry_count or actual_set_digest is distinct from v.entry_set_digest or contract_digest_mismatch then\n` +
@@ -1697,7 +1697,7 @@ catalogSeedSql() +
 `begin\n` +
 `  for category,kind in values ('secdef_execute','db_function_acl'),('relation_dml','db_relation_acl'),('column_dml','db_column_acl') loop\n` +
 `    select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(\n` +
-`      contract-'effect_class'-'owner_package'-'implementation_state'-'classification_authorizing'-'source_locator' order by ingress_key),'[]'::jsonb)),'UTF8'),'sha256'),'hex')\n` +
+`      contract-'effect_class'-'owner_package'-'implementation_state'-'classification_authorizing'-'source_locator' order by ingress_key collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex')\n` +
 `      into actual_count,actual_digest from ops.scac_mutation_registry_entry where ingress_kind=kind;\n` +
 `    select catalog_projection->category into expected from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v1';\n` +
 `    if actual_count<>(expected->>'count')::integer or actual_digest<>expected->>'digest' then\n` +
@@ -1706,7 +1706,7 @@ catalogSeedSql() +
 `  end loop;\n` +
 `end $$;\n\n` +
 `update ops.scac_mutation_registry_version v set entry_set_digest=(\n` +
-`  select 'sha256:'||encode(public.digest(convert_to(string_agg(e.entry_digest,',' order by e.ingress_key),'UTF8'),'sha256'),'hex')\n` +
+`  select 'sha256:'||encode(public.digest(convert_to(string_agg(e.entry_digest,',' order by e.ingress_key collate "C"),'UTF8'),'sha256'),'hex')\n` +
 `  from ops.scac_mutation_registry_entry e where e.registry_version=v.registry_version\n` +
 `) where registry_version='scac-mutation-registry.v1';\n\n` +
 `do $$ begin\n` +

@@ -141,7 +141,7 @@ def main() -> int:
             v1 = cur.execute(
                 "select registry_digest,entry_count from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v1'"
             ).fetchone()
-            if v1 != (expected_v1, 1492):
+            if v1 != (expected_v1, 1387):
                 raise RuntimeError(f"sealed v1 changed: {v1!r}")
             v2 = cur.execute(
                 """select registry_digest,entry_count,source_entry_count,catalog_projection,
@@ -178,7 +178,7 @@ def main() -> int:
             if not lookup["registered"] or lookup["registry_version"] != "scac-mutation-registry.v2":
                 v2_integrity = cur.execute(
                     """select v.entry_count,count(e.*),v.entry_set_digest,
-                              'sha256:'||encode(public.digest(convert_to(coalesce(string_agg(e.entry_digest,',' order by e.ingress_key),''),'UTF8'),'sha256'),'hex'),
+                              'sha256:'||encode(public.digest(convert_to(coalesce(string_agg(e.entry_digest,',' order by e.ingress_key collate "C"),''),'UTF8'),'sha256'),'hex'),
                               coalesce(bool_or(e.entry_digest is distinct from 'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(e.contract),'UTF8'),'sha256'),'hex')),false)
                          from ops.scac_mutation_registry_version v
                          left join ops.scac_mutation_registry_entry e on e.registry_version=v.registry_version

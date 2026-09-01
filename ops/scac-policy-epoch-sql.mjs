@@ -20,7 +20,7 @@ do $guard$
 declare v ops.scac_mutation_registry_version%rowtype; actual_count integer; actual_set text; bad_hash boolean;
 begin
   select * into v from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v1';
-  select count(*),'sha256:'||encode(public.digest(convert_to(coalesce(string_agg(entry_digest,',' order by ingress_key),''),'UTF8'),'sha256'),'hex'),
+  select count(*),'sha256:'||encode(public.digest(convert_to(coalesce(string_agg(entry_digest,',' order by ingress_key collate "C"),''),'UTF8'),'sha256'),'hex'),
          coalesce(bool_or(entry_digest is distinct from 'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(contract),'UTF8'),'sha256'),'hex')),false)
     into actual_count,actual_set,bad_hash from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v1';
   if v.registry_digest<>'${v1Seal.digest}'
@@ -100,7 +100,7 @@ begin
   observed as (select 'db-function-acl:'||nspname||'.'||proname||'('||args||'):'||coalesce(r.rolname,'public')||':execute' ingress_key,
     jsonb_build_object('ingress_key','db-function-acl:'||nspname||'.'||proname||'('||args||'):'||coalesce(r.rolname,'public')||':execute','ingress_kind','db_function_acl','signature',nspname||'.'||proname||'('||args||')','security_definer',prosecdef,'function_kind',prokind,'volatility',provolatile,'parallel',proparallel,'config',coalesce(to_jsonb(proconfig),'[]'::jsonb),'grantee',coalesce(r.rolname,'public'),'privilege','execute','grantable',is_grantable) row
     from capabilities c left join pg_roles r on r.oid=c.grantee where prosecdef and privilege_type='EXECUTE' and (grantee=0 or r.oid in(select oid from runtime_roles)))
-  select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key),'[]'::jsonb)),'UTF8'),'sha256'),'hex') into observed_count,observed_digest from observed;
+  select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex') into observed_count,observed_digest from observed;
   if observed_count<>${dbCatalogBaseline.secdef_execute.count} or observed_digest<>'${dbCatalogBaseline.secdef_execute.digest}' then return false; end if;
 
   with recursive connected(oid) as (select oid from pg_roles where rolname~'^carr_' and rolname<>'carr_ci' union select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end where other.rolname<>'carr_ci' and not other.rolsuper),
@@ -109,7 +109,7 @@ begin
   observed as (select 'db-relation-acl:'||nspname||'.'||relname||':'||coalesce(r.rolname,'public')||':'||lower(privilege_type) ingress_key,
     jsonb_build_object('ingress_key','db-relation-acl:'||nspname||'.'||relname||':'||coalesce(r.rolname,'public')||':'||lower(privilege_type),'ingress_kind','db_relation_acl','relation',nspname||'.'||relname,'relation_kind',relkind,'grantee',coalesce(r.rolname,'public'),'privilege',lower(privilege_type),'grantable',is_grantable) row
     from capabilities c left join pg_roles r on r.oid=c.grantee where privilege_type in ('INSERT','UPDATE','DELETE','TRUNCATE') and (grantee=0 or r.oid in(select oid from runtime_roles)))
-  select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key),'[]'::jsonb)),'UTF8'),'sha256'),'hex') into observed_count,observed_digest from observed;
+  select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex') into observed_count,observed_digest from observed;
   if observed_count<>${dbCatalogBaseline.relation_dml.count} or observed_digest<>'${dbCatalogBaseline.relation_dml.digest}' then return false; end if;
 
   with recursive connected(oid) as (select oid from pg_roles where rolname~'^carr_' and rolname<>'carr_ci' union select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end where other.rolname<>'carr_ci' and not other.rolsuper),
@@ -118,7 +118,7 @@ begin
   observed as (select 'db-column-acl:'||nspname||'.'||relname||'.'||attname||':'||coalesce(r.rolname,'public')||':'||lower(privilege_type) ingress_key,
     jsonb_build_object('ingress_key','db-column-acl:'||nspname||'.'||relname||'.'||attname||':'||coalesce(r.rolname,'public')||':'||lower(privilege_type),'ingress_kind','db_column_acl','relation',nspname||'.'||relname,'relation_kind',relkind,'column',attname,'grantee',coalesce(r.rolname,'public'),'privilege',lower(privilege_type),'grantable',is_grantable) row
     from capabilities c left join pg_roles r on r.oid=c.grantee where privilege_type in ('INSERT','UPDATE') and (grantee=0 or r.oid in(select oid from runtime_roles)))
-  select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key),'[]'::jsonb)),'UTF8'),'sha256'),'hex') into observed_count,observed_digest from observed;
+  select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex') into observed_count,observed_digest from observed;
   if observed_count<>${dbCatalogBaseline.column_dml.count} or observed_digest<>'${dbCatalogBaseline.column_dml.digest}' then return false; end if;
 
   with recursive connected(oid) as (
@@ -158,7 +158,7 @@ begin
        and owner.oid in(select oid from connected) and not owner.rolsuper and owner.rolname<>'neondb_owner'
   ), observed as (select * from role_rows union all select * from membership_rows union all select * from ownership_rows)
   select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(
-    coalesce(jsonb_agg(row order by ingress_key),'[]'::jsonb)),'UTF8'),'sha256'),'hex')
+    coalesce(jsonb_agg(row order by ingress_key collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex')
     into observed_count,observed_digest from observed;
   return observed_count=52 and observed_digest='sha256:345871802aa8f5b57aa87f3edfeac5187d06be0cb1ab5695371bcdfba4a49433';
 end $fn$;
@@ -194,12 +194,12 @@ begin
       'id',r.id,'statement_digest','sha256:'||encode(public.digest(convert_to(r.statement,'UTF8'),'sha256'),'hex'),
       'rule_scope',r.scope,'personal_to',r.personal_to,'short_id',l.short_id,
       'load_layer',l.load_layer,'packs',l.packs,'scope',l.scope,
-      'map_digest',l.map_digest) order by r.id::text)
+      'map_digest',l.map_digest) order by r.id::text collate "C")
       from public.rule r join ops.rule_load_layer l on l.rule_id=r.id where r.status='active'),'[]'::jsonb),
     'packs',coalesce((select jsonb_agg(jsonb_build_object('pack',pack,
       'title_digest','sha256:'||encode(public.digest(convert_to(title,'UTF8'),'sha256'),'hex'),
       'description_digest','sha256:'||encode(public.digest(convert_to(description,'UTF8'),'sha256'),'hex'),
-      'triggers',triggers,'source_digest','sha256:'||encode(public.digest(convert_to(source,'UTF8'),'sha256'),'hex')) order by pack)
+      'triggers',triggers,'source_digest','sha256:'||encode(public.digest(convert_to(source,'UTF8'),'sha256'),'hex')) order by pack collate "C")
       from ops.rule_pack),'[]'::jsonb),
     'delivery_mode',(select mode from ops.rule_delivery_policy where singleton=true)
   )),'UTF8'),'sha256'),'hex') into rule_digest;
@@ -335,7 +335,7 @@ declare v ops.scac_mutation_registry_version%rowtype; e ops.scac_mutation_regist
 begin
   select * into v from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v2';
   if v.registry_version is null then return jsonb_build_object('registered',false,'reason','registry_unavailable'); end if;
-  select count(*),'sha256:'||encode(public.digest(convert_to(coalesce(string_agg(entry_digest,',' order by ingress_key),''),'UTF8'),'sha256'),'hex'),
+  select count(*),'sha256:'||encode(public.digest(convert_to(coalesce(string_agg(entry_digest,',' order by ingress_key collate "C"),''),'UTF8'),'sha256'),'hex'),
     coalesce(bool_or(entry_digest is distinct from 'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(contract),'UTF8'),'sha256'),'hex')),false)
     into actual_count,actual_set,bad_hash from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v2';
   if actual_count<>v.entry_count or actual_set is distinct from v.entry_set_digest or bad_hash or not ops.scac_mutation_catalog_v2_current() then return jsonb_build_object('registered',false,'reason','registry_corrupt','registry_version',v.registry_version,'registry_digest',v.registry_digest); end if;
