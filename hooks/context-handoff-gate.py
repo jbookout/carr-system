@@ -134,6 +134,10 @@ def state_root(manifest: dict[str, Any] | None = None) -> Path:
     explicit = os.environ.get("CARR_SESSION_CONTEXT_STATE_DIR")
     if explicit:
         return Path(explicit)
+    legacy = os.environ.get("CARR_CONTEXT_STATE")
+    if legacy:
+        path = Path(legacy).expanduser().resolve()
+        return path.parent / f".{path.name}.lifecycle"
     return REPO / (manifest or {}).get("state_directory", "out/session-context-lifecycle")
 
 
@@ -292,6 +296,7 @@ def validate_task_state(value: dict[str, Any], task_key: str,
             raise LifecycleError(
                 "LIFECYCLE_INVALID",
                 "nonterminal owner retains terminal provenance")
+        verify_identity_binding(task_key, owner, manifest)
     active_owner = value.get("active_owner")
     if status == "ACTIVE":
         if not isinstance(active_owner, str) or active_owner not in owners:
@@ -303,6 +308,13 @@ def validate_task_state(value: dict[str, Any], task_key: str,
     for field in ("handoff", "recovery_intent"):
         if value.get(field) is not None and not isinstance(value.get(field), dict):
             raise LifecycleError("LIFECYCLE_INVALID", f"{field} is not an object")
+    recovery_history = value.get("recovery_history")
+    if (not isinstance(recovery_history, list)
+            or any(not is_digest(item) for item in recovery_history)
+            or len(recovery_history) != len(set(recovery_history))):
+        raise LifecycleError(
+            "LIFECYCLE_INVALID", "recovery history is invalid")
+    validate_recovery_history(task_key, recovery_history, manifest)
     validate_signal_state(value.get("signal"))
 
     handoff = value.get("handoff") or {}
@@ -406,10 +418,15 @@ def validate_task_state(value: dict[str, Any], task_key: str,
                 or recovery_generation < 0
                 or not is_digest(recovery.get("nonce"))
                 or not is_digest(recovery.get("snapshot_digest"))
+                or not is_digest(recovery.get("history_digest"))
                 or not isinstance(recovery.get("source_event_id"), str)
                 or not recovery.get("source_event_id")):
             raise LifecycleError("LIFECYCLE_INVALID",
                                  "recovery identity is invalid")
+        if (not recovery_history
+                or recovery.get("history_digest") != recovery_history[-1]):
+            raise LifecycleError(
+                "LIFECYCLE_INVALID", "recovery intent is not history-linked")
         failed_state = owners[failed_owner].get("state")
         if recovery_state == "PENDING" and failed_state != "DRAINING":
             raise LifecycleError("LIFECYCLE_INVALID",
@@ -550,6 +567,143 @@ def write_immutable(task_key: str, kind: str, value: Any,
             except FileNotFoundError:
                 pass
     return object_digest
+
+
+def identity_binding_path(surface: str, identity: str,
+                          manifest: dict[str, Any] | None = None) -> Path:
+    key = digest({"surface": surface, "identity": identity})
+    return state_root(manifest) / "identity-bindings" / f"{key}.json"
+
+
+def claim_identity(surface: str, identity: str, task_key: str,
+                   activation_provenance_digest: str,
+                   manifest: dict[str, Any] | None = None) -> None:
+    """Permanently bind one native identity to one lifecycle task.
+
+    The binding is never removed at terminal state. Publication is atomic, so
+    simultaneous task admissions cannot both claim the same controller-native
+    identity. An exact retry for the same task and provenance is idempotent.
+    """
+    if (surface not in SURFACES or not isinstance(identity, str) or not identity
+            or not is_digest(activation_provenance_digest)):
+        raise LifecycleError(
+            "OWNERSHIP_MISMATCH", "native identity claim is invalid")
+    value = {
+        "schema_version": 1, "surface": surface, "identity": identity,
+        "task_key": task_key,
+        "activation_provenance_digest": activation_provenance_digest,
+    }
+    path = identity_binding_path(surface, identity, manifest)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = path.with_suffix(".lock")
+    with open(lock, "a+b") as guard:
+        fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
+        existing = load_json_file(path)
+        if existing is not None:
+            if existing != value:
+                raise LifecycleError(
+                    "OWNERSHIP_MISMATCH",
+                    "native identity is permanently bound to another lifecycle")
+            return
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(canonical(value) + b"\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            try:
+                os.link(temp_name, path)
+            except FileExistsError:
+                existing = load_json_file(path)
+                if existing != value:
+                    raise LifecycleError(
+                        "OWNERSHIP_MISMATCH",
+                        "native identity was concurrently claimed")
+            dfd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        finally:
+            try:
+                os.unlink(temp_name)
+            except FileNotFoundError:
+                pass
+
+
+def verify_identity_binding(task_key: str, owner: dict[str, Any],
+                            manifest: dict[str, Any] | None = None) -> None:
+    path = identity_binding_path(
+        str(owner.get("surface")), str(owner.get("id")), manifest)
+    binding = load_json_file(path)
+    expected = {
+        "schema_version": 1, "surface": owner.get("surface"),
+        "identity": owner.get("id"), "task_key": task_key,
+        "activation_provenance_digest": owner.get("evidence_digest"),
+    }
+    if binding != expected:
+        raise LifecycleError(
+            "OWNERSHIP_MISMATCH",
+            "native identity binding is missing or inconsistent")
+
+
+RECOVERY_CAUSES = {"RECOVERY_CAPACITY", "RECOVERY_ERROR", "RECOVERY_IDLE"}
+RECOVERY_EVENT_KEYS = {
+    "schema_version", "task_key", "source_event_id", "snapshot_digest",
+    "nonce", "generation", "failed_owner", "cause", "previous_digest",
+}
+
+
+def validate_recovery_history(task_key: str, history: list[str],
+                              manifest: dict[str, Any] | None = None) -> None:
+    previous: str | None = None
+    event_ids: set[str] = set()
+    for event_digest in history:
+        event = read_object(
+            task_key, "recovery-event", event_digest, manifest)
+        generation = event.get("generation")
+        source = event.get("source_event_id")
+        if (set(event) != RECOVERY_EVENT_KEYS
+                or event.get("schema_version") != 1
+                or event.get("task_key") != task_key
+                or not isinstance(source, str) or not source
+                or source in event_ids
+                or not is_digest(event.get("snapshot_digest"))
+                or not is_digest(event.get("nonce"))
+                or isinstance(generation, bool)
+                or not isinstance(generation, int) or generation < 0
+                or not isinstance(event.get("failed_owner"), str)
+                or not event.get("failed_owner")
+                or event.get("cause") not in RECOVERY_CAUSES
+                or event.get("previous_digest") != previous):
+            raise LifecycleError(
+                "LIFECYCLE_INVALID", "recovery history linkage is invalid")
+        event_ids.add(source)
+        previous = event_digest
+    directory = object_path(
+        task_key, "recovery-event", "unused", manifest).parent
+    try:
+        published = {
+            path.stem for path in directory.glob("*.json")
+            if is_digest(path.stem)
+        } if directory.is_dir() else set()
+    except OSError as exc:
+        raise LifecycleError(
+            "LIFECYCLE_INVALID", "recovery history cannot be listed") from exc
+    if published != set(history):
+        raise LifecycleError(
+            "LIFECYCLE_INVALID",
+            "recovery history omits or invents an immutable event")
+
+
+def recovery_history_event_ids(task_key: str, state: dict[str, Any],
+                               manifest: dict[str, Any]) -> set[str]:
+    return {
+        str(read_object(task_key, "recovery-event", item, manifest)
+            .get("source_event_id"))
+        for item in state.get("recovery_history", [])
+    }
 
 
 def read_object(task_key: str, kind: str, object_digest: str,
@@ -919,6 +1073,7 @@ def initial_state(task_key: str, owner_id: str, surface: str,
         "schema_version": 1, "task_key": task_key, "version": -1,
         "task_status": "ACTIVE", "generation": 0, "active_owner": owner_id,
         "owners": {owner_id: owner}, "handoff": None, "recovery_intent": None,
+        "recovery_history": [],
         "signal": fresh_signal(),
     }
 
@@ -996,16 +1151,40 @@ def update_observation(current: dict[str, Any] | None, task_key: str, owner_id: 
                        payload: dict[str, Any], rows: list[dict[str, Any]],
                        event: str, now: dt.datetime,
                        manifest: dict[str, Any]) -> dict[str, Any]:
+    transcript = payload.get("transcript_path") or payload.get("transcriptPath")
+    callback_id = (payload.get("prompt_id") or payload.get("promptId")
+                   or payload.get("tool_use_id") or payload.get("toolUseId"))
+    recorded = ((current or {}).get("owners") or {}).get(owner_id)
+    if recorded and recorded.get("surface") != "claude":
+        raise LifecycleError(
+            "OWNERSHIP_MISMATCH",
+            "Claude callback cannot observe a non-Claude owner")
+    # A provenance-verified historical terminal callback is intentionally a
+    # no-op even after its native transcript has been archived. Every live or
+    # new callback must instead prove the controller identity and a readable
+    # transcript before it can observe or initialize lifecycle state.
+    if recorded and recorded.get("state") == "TERMINAL":
+        if current is None:  # narrowed by recorded; explicit for type checking
+            raise LifecycleError(
+                "LIFECYCLE_INVALID", "terminal owner lacks task state")
+        return current
+    if (not isinstance(owner_id, str) or not owner_id
+            or not isinstance(callback_id, str) or not callback_id
+            or not isinstance(transcript, str) or not transcript):
+        raise LifecycleError(
+            "LIFECYCLE_INVALID", "live Claude callback evidence is incomplete")
+    transcript_path = Path(transcript).expanduser()
+    try:
+        with open(transcript_path, "rb") as live_transcript:
+            live_transcript.read(1)
+    except (OSError, ValueError) as exc:
+        raise LifecycleError(
+            "LIFECYCLE_INVALID", "hook transcript_path is not a readable file") from exc
+    if not transcript_path.is_file():
+        raise LifecycleError(
+            "LIFECYCLE_INVALID", "hook transcript_path is not a live file")
+    transcript = str(transcript_path.resolve())
     if current is None:
-        transcript = payload.get("transcript_path") or payload.get("transcriptPath")
-        callback_id = (payload.get("prompt_id") or payload.get("promptId")
-                       or payload.get("tool_use_id") or payload.get("toolUseId"))
-        if (transcript is not None and not isinstance(transcript, str)):
-            raise LifecycleError(
-                "LIFECYCLE_INVALID", "hook transcript_path must be a string")
-        if not isinstance(callback_id, str) or not callback_id:
-            raise LifecycleError(
-                "LIFECYCLE_INVALID", "hook callback identity is missing")
         native_evidence = {
             "session_id": owner_id,
             "transcript_path": transcript,
@@ -1021,15 +1200,12 @@ def update_observation(current: dict[str, Any] | None, task_key: str, owner_id: 
         }
         init_digest = write_immutable(
             task_key, "initialization", packet, manifest)
+        claim_identity(
+            "claude", owner_id, task_key, evidence_digest, manifest)
         state = initial_state(
             task_key, owner_id, "claude", evidence_digest, init_digest)
     else:
         state = current
-    recorded = (state.get("owners") or {}).get(owner_id)
-    if recorded and recorded.get("surface") != "claude":
-        raise LifecycleError(
-            "OWNERSHIP_MISMATCH",
-            "Claude callback cannot observe a non-Claude owner")
     if state.get("task_status") == "TERMINAL":
         return state
     # One task may still receive the draining predecessor's final Stop after a
@@ -1289,6 +1465,15 @@ def validate_native_evidence(surface: str, evidence: dict[str, Any], *,
         required = {"thread_id", "project_id", "cwd", "status", "event_id"}
         if not required.issubset(evidence) or not all(evidence.get(key) for key in required):
             raise LifecycleError("SUCCESSOR_SURFACE_INVALID", "Codex evidence fields missing")
+        if not isinstance(evidence.get("cwd"), str):
+            raise LifecycleError(
+                "SUCCESSOR_SURFACE_INVALID", "Codex cwd must be a string")
+        try:
+            evidence["cwd"] = str(
+                Path(evidence["cwd"]).expanduser().resolve())
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise LifecycleError(
+                "SUCCESSOR_SURFACE_INVALID", "Codex cwd is invalid") from exc
         if expected_identity is not None and str(evidence.get("thread_id")) != expected_identity:
             raise LifecycleError("SUCCESSOR_SURFACE_INVALID",
                                  "Codex thread_id does not match lifecycle owner")
@@ -1370,12 +1555,7 @@ def validate_predecessor_binding(task_key: str, state: dict[str, Any],
         raise LifecycleError(
             "OWNERSHIP_MISMATCH",
             "Codex predecessor project changed after activation")
-    try:
-        same_cwd = (Path(str(evidence.get("cwd"))).expanduser().resolve()
-                    == Path(str(admitted.get("cwd"))).expanduser().resolve())
-    except (OSError, RuntimeError, ValueError):
-        same_cwd = False
-    if not same_cwd:
+    if evidence.get("cwd") != admitted.get("cwd"):
         raise LifecycleError(
             "OWNERSHIP_MISMATCH",
             "Codex predecessor cwd changed after activation")
@@ -1404,12 +1584,7 @@ def validate_successor_evidence(offer: dict[str, Any], successor: str,
     # project or cwd would be a different slice wearing this task_key.
     if offer.get("predecessor_surface") == surface == "codex":
         predecessor = offer.get("native_evidence") or {}
-        try:
-            same_cwd = (Path(str(evidence.get("cwd"))).expanduser().resolve()
-                        == Path(str(predecessor.get("cwd"))).expanduser().resolve())
-        except (OSError, RuntimeError):
-            same_cwd = False
-        if not same_cwd:
+        if evidence.get("cwd") != predecessor.get("cwd"):
             raise LifecycleError(
                 "OWNERSHIP_MISMATCH",
                 "Codex successor is not in the offered project and cwd")
@@ -1434,6 +1609,9 @@ def lifecycle_init(args, manifest):
     def create(current):
         if current is not None:
             raise LifecycleError("LIFECYCLE_INVALID", "task already exists")
+        claim_identity(
+            args.surface, args.owner, args.task_key,
+            evidence_digest, manifest)
         return initial_state(
             args.task_key, args.owner, args.surface,
             evidence_digest, init_digest)
@@ -1550,6 +1728,9 @@ def successor_declare(args, manifest):
             raise LifecycleError(
                 "OWNERSHIP_MISMATCH",
                 "successor identity was already used by this task")
+        claim_identity(
+            offer["successor_surface"], args.successor, args.task_key,
+            evidence_digest, manifest)
         successor = {"id": args.successor, "surface": offer["successor_surface"],
                      "generation": offer["generation"], "state": "SUCCESSOR_DECLARED",
                      "evidence_digest": evidence_digest}
@@ -2085,8 +2266,11 @@ def dispatcher_evaluate(args, manifest):
     snapshot = parse_evidence(args.snapshot_json)
     validate_snapshot(snapshot, args.task_key, manifest)
     pending = state.get("recovery_intent")
-    if (pending and pending.get("state") in {"ABORTED", "COMPLETED"}
-            and pending.get("source_event_id") == snapshot.get("source_event_id")):
+    consumed = recovery_history_event_ids(args.task_key, state, manifest)
+    pending_replay = (pending and pending.get("state") == "PENDING"
+                      and pending.get("source_event_id")
+                      == snapshot.get("source_event_id"))
+    if snapshot.get("source_event_id") in consumed and not pending_replay:
         raise LifecycleError(
             "LIFECYCLE_INVALID", "recovery source event was already consumed")
     if pending and pending.get("state") == "PENDING":
@@ -2173,9 +2357,21 @@ def dispatcher_evaluate(args, manifest):
                     "LIFECYCLE_INVALID",
                     "completed handoff successor does not match recovery owner")
             current["handoff"] = None
+        history = current.get("recovery_history")
+        if not isinstance(history, list):
+            raise LifecycleError(
+                "LIFECYCLE_INVALID", "recovery history is missing")
+        event_record = {
+            "schema_version": 1, **nonce_input, "nonce": nonce,
+            "previous_digest": history[-1] if history else None,
+        }
+        history_digest = write_immutable(
+            args.task_key, "recovery-event", event_record, manifest)
+        history.append(history_digest)
         owner["state"] = "DRAINING"
         owner["ownership_digest"] = owner_digest(owner)
         current["recovery_intent"] = {**nonce_input, "nonce": nonce,
+                                      "history_digest": history_digest,
                                       "state": "PENDING",
                                       "created_at": utc_now()}
         return current

@@ -209,6 +209,49 @@ def threshold_and_window_cases():
         check("Stop fails closed when lifecycle state is corrupt",
               why and why["reason"] == "LIFECYCLE_INVALID", out)
 
+        proc, out = run_hook(root, "Stop", None, session="missing-transcript")
+        check("fresh Stop without a live transcript fails closed",
+              proc.returncode == 0 and reason(out)
+              and reason(out)["reason"] == "LIFECYCLE_INVALID",
+              (proc.returncode, out, proc.stderr))
+        proc, out = run_hook(
+            root, "Stop", root / "does-not-exist.jsonl",
+            session="unreadable-transcript")
+        check("fresh Stop with an unreadable transcript fails closed",
+              proc.returncode == 0 and reason(out)
+              and reason(out)["reason"] == "LIFECYCLE_INVALID",
+              (proc.returncode, out, proc.stderr))
+        active_transcript = write_jsonl(
+            root / "active-transcript.jsonl", [usage_row(1_000)])
+        run_hook(root, "PostToolUse", active_transcript,
+                 session="active-transcript")
+        proc, out = run_hook(root, "Stop", None,
+                             session="active-transcript")
+        check("nonterminal callback cannot drop its live transcript",
+              proc.returncode == 0 and reason(out)
+              and reason(out)["reason"] == "LIFECYCLE_INVALID",
+              (proc.returncode, out, proc.stderr))
+
+        legacy_payload = json.dumps({
+            "hook_event_name": "PostToolUse", "session_id": "legacy-repeat",
+            "prompt_id": "legacy-repeat-callback",
+            "transcript_path": str(active_transcript),
+        })
+        legacy_results = []
+        for name in ("legacy-a.json", "legacy-b.json"):
+            env = base_env(root, CARR_CONTEXT_HOOK_EVENT="PostToolUse",
+                           CARR_CONTEXT_STATE=root / name)
+            env.pop("CARR_SESSION_CONTEXT_STATE_DIR", None)
+            legacy_results.append(subprocess.run(
+                [sys.executable, str(HOOK)], input=legacy_payload, text=True,
+                capture_output=True, env=env, cwd=REPO))
+        check("legacy state overrides isolate immutable identity registries",
+              all(proc.returncode == 0 for proc in legacy_results)
+              and all((root / name).exists()
+                      for name in ("legacy-a.json", "legacy-b.json")),
+              [(proc.returncode, proc.stdout, proc.stderr)
+               for proc in legacy_results])
+
         # Exact known model binding wins over lower explicit windows.
         t = write_jsonl(root / "model.jsonl",
                         [usage_row(600_000, model="claude-opus-4-1",
@@ -317,15 +360,16 @@ def fallback_and_hook_sequence():
     root = fresh_root()
     try:
         # Fresh unavailable signal announces once but does not block.
-        proc, first = run_hook(root, "PostToolUse", None, session="fallback")
-        proc, second = run_hook(root, "PostToolUse", None, session="fallback")
+        unavailable = write_jsonl(root / "fallback-empty.jsonl", [])
+        proc, first = run_hook(root, "PostToolUse", unavailable, session="fallback")
+        proc, second = run_hook(root, "PostToolUse", unavailable, session="fallback")
         check("fresh unavailable signal notices once",
               first is not None and second is None, (first, second))
-        proc, out = run_hook(root, "Stop", None, session="fallback")
+        proc, out = run_hook(root, "Stop", unavailable, session="fallback")
         check("unavailable below fallback cap allows first Stop", out is None, out)
         for _ in range(22):
-            run_hook(root, "PostToolUse", None, session="fallback")
-        proc, out = run_hook(root, "Stop", None, session="fallback")
+            run_hook(root, "PostToolUse", unavailable, session="fallback")
+        proc, out = run_hook(root, "Stop", unavailable, session="fallback")
         why = reason(out)
         check("fallback ANY invocation cap refuses",
               why and why["signal"]["fallback_level"] in {
@@ -1322,6 +1366,17 @@ def lifecycle_cas_and_tamper():
               proc.returncode == 0
               and terminal["task_status"] == "TERMINAL"
               and terminal["active_owner"] is None, terminal)
+        proc, reused_global = run_cli(
+            root, "task-init", "--task-key", "task:terminal-reuse",
+            "--owner", "only", "--surface", "codex",
+            "--evidence-json", codex_evidence("only"),
+            "--expected-version", "-1")
+        reused_global_hash = hashlib.sha256(b"task:terminal-reuse").hexdigest()
+        check("terminal native identity cannot be reused by another task",
+              proc.returncode == 2
+              and reused_global["reason"] == "OWNERSHIP_MISMATCH"
+              and not (root / "state" / f"{reused_global_hash}.json").exists(),
+              (proc.returncode, reused_global, proc.stderr))
         terminal_version = terminal["version"]
         run_hook(root, "Stop", None, session="intruder",
                  payload_extra={"task_key": "task:terminal"})
@@ -1340,6 +1395,23 @@ def lifecycle_cas_and_tamper():
         check("terminal task cannot recover or resurrect",
               proc.returncode == 2
               and resurrect["reason"] == "LIFECYCLE_INVALID", resurrect)
+
+        proc, relative = run_cli(
+            root, "task-init", "--task-key", "task:canonical-cwd",
+            "--owner", "relative-cwd", "--surface", "codex",
+            "--evidence-json", codex_evidence("relative-cwd", cwd="."),
+            "--expected-version", "-1")
+        relative_hash = hashlib.sha256(b"task:canonical-cwd").hexdigest()
+        relative_packet = None
+        if proc.returncode == 0:
+            init_digest = relative["owners"]["relative-cwd"]["activation_init_digest"]
+            relative_packet = json.loads((
+                root / "state/objects" / relative_hash / "initialization"
+                / f"{init_digest}.json").read_text())
+        check("Codex cwd is canonicalized before immutable publication",
+              proc.returncode == 0 and relative_packet
+              and relative_packet["native_evidence"]["cwd"] == str(REPO.resolve()),
+              (proc.returncode, relative_packet, proc.stderr))
 
         late_transcript = write_jsonl(
             root / "late-terminal.jsonl",
@@ -1361,12 +1433,12 @@ def lifecycle_cas_and_tamper():
             "--owner", "late-terminal", "--evidence-json", late_terminal_evidence,
             "--expected-version", str(late_state["version"]))
         proc, late_callback = run_hook(
-            root, "Stop", late_transcript, session="late-terminal")
+            root, "Stop", None, session="late-terminal")
         _, late_after = run_cli(
             root, "status", "--task-key", "task:late-terminal")
         late_derived_path = root / "state" / (
             hashlib.sha256(b"claude:late-terminal").hexdigest() + ".json")
-        check("late terminal Claude callback resolves existing task and no-ops",
+        check("late terminal Claude callback no-ops without a live transcript",
               proc.returncode == 0 and late_callback is None
               and late_after["version"] == late_terminal_state["version"]
               and not late_derived_path.exists(),
@@ -1758,6 +1830,41 @@ def dispatcher_cases():
               and after_resurrection["recovery_intent"]["state"] == "ABORTED",
               (proc.returncode, resurrected, after_resurrection, proc.stderr))
 
+        second_snap = snapshot(
+            "task:dispatch", own, "IDLE", source="event-after-first-abort")
+        proc, second_applied = run_cli(
+            root, "dispatcher-evaluate", "--task-key", "task:dispatch",
+            "--snapshot-json", json.dumps(second_snap), "--apply",
+            "--expected-version", str(aborted["version"]))
+        proc2, second_aborted = run_cli(
+            root, "recovery-abort", "--task-key", "task:dispatch",
+            "--owner", "owner", "--nonce", second_applied.get("nonce", "missing"),
+            "--expected-version", str(
+                (second_applied.get("state") or {}).get("version", -999)))
+        proc3, replayed_first = run_cli(
+            root, "dispatcher-evaluate", "--task-key", "task:dispatch",
+            "--snapshot-json", json.dumps(snap), "--apply",
+            "--expected-version", str(second_aborted.get("version", -999)))
+        check("older aborted event stays consumed after a later abort",
+              proc.returncode == 0 and proc2.returncode == 0
+              and proc3.returncode == 2
+              and replayed_first["reason"] == "LIFECYCLE_INVALID",
+              (second_applied, second_aborted, replayed_first))
+        dispatch_hash = hashlib.sha256(b"task:dispatch").hexdigest()
+        dispatch_path = root / "state" / f"{dispatch_hash}.json"
+        original_dispatch = dispatch_path.read_text()
+        truncated_history = json.loads(original_dispatch)
+        truncated_history["recovery_history"] = (
+            truncated_history["recovery_history"][1:])
+        dispatch_path.write_text(json.dumps(truncated_history))
+        proc, truncated = run_cli(
+            root, "status", "--task-key", "task:dispatch")
+        check("immutable recovery history cannot be truncated",
+              proc.returncode == 2
+              and truncated["reason"] == "LIFECYCLE_INVALID",
+              (proc.returncode, truncated, proc.stderr))
+        dispatch_path.write_text(original_dispatch)
+
         # A separate applied recovery completes through the ordinary, receipt-
         # verified handoff path and leaves one active successor.
         _, recovery = run_cli(
@@ -1908,6 +2015,31 @@ def immutable_publication_concurrency():
               and json.loads(target.read_text()) == value,
               (exposed_partial, results,
                [f"{type(exc).__name__}: {exc}" for exc in errors]))
+
+        claim_results = []
+        start = threading.Barrier(3)
+
+        def claim(task_key):
+            start.wait()
+            claim_results.append(run_cli(
+                root, "task-init", "--task-key", task_key,
+                "--owner", "one-native-owner", "--surface", "codex",
+                "--evidence-json", codex_evidence("one-native-owner"),
+                "--expected-version", "-1"))
+
+        claim_a = threading.Thread(target=claim, args=("task:claim-a",))
+        claim_b = threading.Thread(target=claim, args=("task:claim-b",))
+        claim_a.start()
+        claim_b.start()
+        start.wait()
+        claim_a.join(timeout=10)
+        claim_b.join(timeout=10)
+        returncodes = sorted(proc.returncode for proc, _ in claim_results)
+        failures = [value for proc, value in claim_results if proc.returncode == 2]
+        check("concurrent task admissions have one native-identity winner",
+              returncodes == [0, 2] and len(failures) == 1
+              and failures[0]["reason"] == "OWNERSHIP_MISMATCH",
+              [(proc.returncode, value) for proc, value in claim_results])
     finally:
         shutil.rmtree(root)
 

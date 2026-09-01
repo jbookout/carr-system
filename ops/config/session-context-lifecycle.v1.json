@@ -48,6 +48,7 @@
     "freshness_seconds": 120,
     "future_skew_seconds": 0,
     "heartbeat_max_seconds": 60,
+    "recovery_history": "each applied source event is published as an immutable digest-linked record; the mutable task state must name the complete chain, and an event identity is permanently consumed after first apply",
     "normalized_states": [
       "RUNNING",
       "IDLE",
@@ -67,6 +68,11 @@
       "TOKEN_BUDGET_EXHAUSTED",
       "MODEL_CAPACITY_EXHAUSTED"
     ]
+  },
+  "ownership_registry": {
+    "scope": "surface plus native identity",
+    "binding": "an atomic immutable registry claim binds each Claude session or Codex thread to exactly one task and activation-evidence digest before admission",
+    "terminal_policy": "claims are permanent tombstones and are never released or reusable after terminal state"
   },
   "actions": [
     "NOOP",
@@ -103,7 +109,7 @@
       "events": ["PostToolUse", "PreCompact", "Stop"],
       "blocking_event": "Stop",
       "evidence_trust_boundary": "controller_callback",
-      "evidence_binding": "the hook verifies logical session identity and a live transcript path; controller_callback_id is the native controller trust boundary",
+      "evidence_binding": "every nonterminal hook callback verifies logical session identity and a live readable transcript path; controller_callback_id is the native controller trust boundary; a provenance-verified historical terminal callback may no-op after its transcript is archived",
       "native_evidence_fields": [
         "session_id",
         "transcript_path",
@@ -114,7 +120,7 @@
       "adapter": "bare_cli",
       "native_stop_hook": false,
       "evidence_trust_boundary": "controller_capture",
-      "evidence_binding": "the CLI verifies live cwd, logical thread identity, recorded owner surface, declaration-to-acceptance equality, and immutable digest linkage; the controller that invokes the bare CLI remains responsible for capturing status and pinnedIndex from the native Codex surface",
+      "evidence_binding": "the CLI canonicalizes cwd to an absolute resolved path before immutable publication, verifies the live canonical cwd, logical thread identity, recorded owner surface, declaration-to-acceptance equality, and immutable digest linkage; the controller that invokes the bare CLI remains responsible for capturing status and pinnedIndex from the native Codex surface",
       "native_evidence_fields": [
         "thread_id",
         "project_id",
