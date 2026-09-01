@@ -562,16 +562,19 @@ def _load_json_at(parent_fd: int, name: str) -> tuple[bool, Any | None]:
         os.close(fd)
 
 
-def _cleanup_transaction(directory: Path) -> None:
-    """Remove only one controller-created transaction directory."""
+def _cleanup_transaction_at(
+        parent_fd: int, name: str, directory_fd: int | None = None) -> None:
+    """Remove one transaction beneath a pinned parent descriptor."""
     flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
              | getattr(os, "O_NOFOLLOW", 0))
-    parent_fd = os.open(directory.parent, flags)
+    owns_directory_fd = directory_fd is None
     try:
-        try:
-            directory_fd = os.open(directory.name, flags, dir_fd=parent_fd)
-        except (FileNotFoundError, NotADirectoryError, OSError):
-            return
+        if directory_fd is None:
+            try:
+                directory_fd = os.open(name, flags, dir_fd=parent_fd)
+            except (FileNotFoundError, NotADirectoryError, OSError):
+                return
+        assert directory_fd is not None
 
         def remove_contents(fd: int) -> None:
             for name in os.listdir(fd):
@@ -599,15 +602,29 @@ def _cleanup_transaction(directory: Path) -> None:
             remove_contents(directory_fd)
             os.fsync(directory_fd)
         finally:
-            os.close(directory_fd)
-        os.rmdir(directory.name, dir_fd=parent_fd)
+            if owns_directory_fd:
+                os.close(directory_fd)
+        os.rmdir(name, dir_fd=parent_fd)
         os.fsync(parent_fd)
+    except FileNotFoundError:
+        return
+
+
+def _cleanup_transaction(directory: Path) -> None:
+    """Remove only one controller-created transaction directory."""
+    flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+             | getattr(os, "O_NOFOLLOW", 0))
+    parent_fd = os.open(directory.parent, flags)
+    try:
+        _cleanup_transaction_at(parent_fd, directory.name)
     finally:
         os.close(parent_fd)
 
 
-def _publish_transaction_artifact(root: Path, directory: Path,
-                                  artifact: dict[str, Any]) -> None:
+def _publish_transaction_artifact(
+        root: Path, directory: Path, artifact: dict[str, Any], *,
+        pinned_root_fd: int | None = None,
+        pinned_transaction_fd: int | None = None) -> None:
     final_rel = artifact.get("final")
     staged_rel = artifact.get("staged")
     expected_digest = artifact.get("value_digest")
@@ -626,12 +643,17 @@ def _publish_transaction_artifact(root: Path, directory: Path,
     except ValueError as exc:
         raise LifecycleError("LIFECYCLE_INVALID",
                              "lifecycle transaction path escapes its root") from exc
-    root_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    root_fd = os.open(root, root_flags)
+    root_flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                  | getattr(os, "O_NOFOLLOW", 0))
+    root_fd = (os.open(root, root_flags) if pinned_root_fd is None
+               else os.dup(pinned_root_fd))
     transaction_fd = final_parent_fd = staged_parent_fd = None
     try:
-        directory_parts = tuple(directory.relative_to(root).parts)
-        transaction_fd = _open_directory_at(root_fd, directory_parts)
+        if pinned_transaction_fd is None:
+            directory_parts = tuple(directory.relative_to(root).parts)
+            transaction_fd = _open_directory_at(root_fd, directory_parts)
+        else:
+            transaction_fd = os.dup(pinned_transaction_fd)
         final_parent_fd = _open_directory_at(
             root_fd, final_parts[:-1], create=True)
 
@@ -640,6 +662,10 @@ def _publish_transaction_artifact(root: Path, directory: Path,
             if existing is None or digest(existing) != expected_digest:
                 raise LifecycleError("LIFECYCLE_INVALID",
                                      "lifecycle transaction artifact collided")
+            # Recovery may find the exact link created immediately before a
+            # crash.  It is not safe to delete the journal until the containing
+            # directory has crossed a durable sync boundary in this process.
+            os.fsync(final_parent_fd)
             return
 
         staged_parent_fd = _open_directory_at(
@@ -667,8 +693,10 @@ def _publish_transaction_artifact(root: Path, directory: Path,
                     "lifecycle transaction artifact collided")
         os.fsync(final_parent_fd)
         # Keep a named sync boundary for durability instrumentation while the
-        # descriptor above remains the race-safe authority.
-        _fsync_directory(final.parent)
+        # descriptor above remains the race-safe authority. Recovery passes a
+        # pinned root and must not reopen a replaceable ancestor by pathname.
+        if pinned_root_fd is None:
+            _fsync_directory(final.parent)
     except LifecycleError:
         raise
     except (FileNotFoundError, NotADirectoryError, OSError) as exc:
@@ -687,6 +715,7 @@ def _recover_transactions_unlocked(
     flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
              | getattr(os, "O_NOFOLLOW", 0))
     root_fd = os.open(root, flags)
+    transactions_fd = None
     try:
         try:
             transactions_fd = _open_directory_at(root_fd, ("transactions",))
@@ -696,76 +725,98 @@ def _recover_transactions_unlocked(
             raise LifecycleError(
                 "LIFECYCLE_INVALID",
                 f"lifecycle transaction root is unsafe: {exc}") from exc
-        try:
-            transaction_names = sorted(os.listdir(transactions_fd))
-        finally:
-            os.close(transactions_fd)
-    finally:
-        os.close(root_fd)
-    for name in transaction_names:
-        directory = transactions / name
-        try:
-            parent_fd = os.open(transactions, flags)
+        transaction_names = sorted(os.listdir(transactions_fd))
+        for name in transaction_names:
+            directory = transactions / name
+            directory_fd = None
             try:
                 mode = os.stat(
-                    name, dir_fd=parent_fd, follow_symlinks=False).st_mode
+                    name, dir_fd=transactions_fd,
+                    follow_symlinks=False).st_mode
                 if stat.S_ISLNK(mode):
                     raise LifecycleError(
                         "LIFECYCLE_INVALID",
                         "lifecycle transaction directory is a symlink")
                 if not stat.S_ISDIR(mode):
                     continue
-                directory_fd = os.open(name, flags, dir_fd=parent_fd)
-                try:
-                    journal_exists, journal = _load_json_at(
-                        directory_fd, "journal.json")
-                finally:
-                    os.close(directory_fd)
-            finally:
-                os.close(parent_fd)
-        except LifecycleError:
-            raise
-        except OSError as exc:
-            raise LifecycleError(
-                "LIFECYCLE_INVALID",
-                f"lifecycle transaction directory is unsafe: {exc}") from exc
-        if not journal_exists:
-            _cleanup_transaction(directory)
-            continue
-        if journal is None:
-            raise LifecycleError("LIFECYCLE_INVALID",
-                                 "lifecycle transaction journal is invalid")
-        if (not isinstance(journal, dict)
-                or set(journal) != {
-                    "schema_version", "task_key", "state_path",
-                    "target_state_digest", "artifacts"}
-                or journal.get("schema_version") != 1
-                or not isinstance(journal.get("task_key"), str)
-                or not journal.get("task_key")
-                or not isinstance(journal.get("state_path"), str)
-                or not journal.get("state_path")
-                or not is_digest(journal.get("target_state_digest"))
-                or not isinstance(journal.get("artifacts"), list)):
-            raise LifecycleError("LIFECYCLE_INVALID",
-                                 "lifecycle transaction journal is invalid")
-        state_path = _absolute(Path(journal["state_path"]))
-        expected_state_path = _absolute(
-            state_file(journal["task_key"], manifest))
-        if state_path != expected_state_path:
-            raise LifecycleError(
-                "LIFECYCLE_INVALID",
-                "lifecycle transaction state path is not the configured task state")
-        current = load_json_file(state_path)
-        committed = (isinstance(current, dict)
-                     and current.get("task_key") == journal["task_key"]
-                     and digest(current) == journal["target_state_digest"])
-        if committed:
-            for artifact in journal["artifacts"]:
-                if not isinstance(artifact, dict):
+                directory_fd = os.open(
+                    name, flags, dir_fd=transactions_fd)
+                journal_exists, journal = _load_json_at(
+                    directory_fd, "journal.json")
+                if not journal_exists:
+                    _cleanup_transaction_at(
+                        transactions_fd, name, directory_fd)
+                    continue
+                if journal is None:
                     raise LifecycleError("LIFECYCLE_INVALID",
-                                         "lifecycle transaction artifact list is invalid")
-                _publish_transaction_artifact(root, directory, artifact)
-        _cleanup_transaction(directory)
+                                         "lifecycle transaction journal is invalid")
+                if (not isinstance(journal, dict)
+                        or set(journal) != {
+                            "schema_version", "task_key", "state_path",
+                            "target_state_digest", "artifacts"}
+                        or journal.get("schema_version") != 1
+                        or not isinstance(journal.get("task_key"), str)
+                        or not journal.get("task_key")
+                        or not isinstance(journal.get("state_path"), str)
+                        or not journal.get("state_path")
+                        or not is_digest(journal.get("target_state_digest"))
+                        or not isinstance(journal.get("artifacts"), list)):
+                    raise LifecycleError(
+                        "LIFECYCLE_INVALID",
+                        "lifecycle transaction journal is invalid")
+                state_path = _absolute(Path(journal["state_path"]))
+                expected_state_path = _absolute(
+                    state_file(journal["task_key"], manifest))
+                if state_path != expected_state_path:
+                    raise LifecycleError(
+                        "LIFECYCLE_INVALID",
+                        "lifecycle transaction state path is not the configured task state")
+                try:
+                    state_parts = tuple(state_path.relative_to(root).parts)
+                except ValueError as exc:
+                    raise LifecycleError(
+                        "LIFECYCLE_INVALID",
+                        "lifecycle transaction state path escapes its root") from exc
+                if not state_parts:
+                    raise LifecycleError(
+                        "LIFECYCLE_INVALID",
+                        "lifecycle transaction state path is invalid")
+                state_parent_fd = _open_directory_at(
+                    root_fd, state_parts[:-1])
+                try:
+                    state_exists, current = _load_json_at(
+                        state_parent_fd, state_parts[-1])
+                finally:
+                    os.close(state_parent_fd)
+                committed = (
+                    state_exists and isinstance(current, dict)
+                    and current.get("task_key") == journal["task_key"]
+                    and digest(current) == journal["target_state_digest"])
+                if committed:
+                    for artifact in journal["artifacts"]:
+                        if not isinstance(artifact, dict):
+                            raise LifecycleError(
+                                "LIFECYCLE_INVALID",
+                                "lifecycle transaction artifact list is invalid")
+                        _publish_transaction_artifact(
+                            root, directory, artifact,
+                            pinned_root_fd=root_fd,
+                            pinned_transaction_fd=directory_fd)
+                _cleanup_transaction_at(
+                    transactions_fd, name, directory_fd)
+            except LifecycleError:
+                raise
+            except OSError as exc:
+                raise LifecycleError(
+                    "LIFECYCLE_INVALID",
+                    f"lifecycle transaction directory is unsafe: {exc}") from exc
+            finally:
+                if directory_fd is not None:
+                    os.close(directory_fd)
+    finally:
+        if transactions_fd is not None:
+            os.close(transactions_fd)
+        os.close(root_fd)
 
 
 @contextmanager
@@ -1476,21 +1527,33 @@ def usage_total(row: dict[str, Any]) -> int | None:
     return max(candidates) if candidates else None
 
 
-def models_in(rows: list[dict[str, Any]]) -> set[str]:
-    models: set[str] = set()
-    for row in rows:
+def latest_models(rows: list[dict[str, Any]]) -> set[str]:
+    """Return only the newest authoritative model declaration.
+
+    A transcript is session history, not one simultaneous context.  Model
+    switches therefore leave older, legitimately different windows behind.
+    Combining every historical model makes the live window ambiguous and can
+    suppress a hard-threshold Stop.  Preserve ambiguity within the newest row,
+    but never let an older row override or conflict with the current one.
+    """
+    for row in reversed(rows):
+        models: set[str] = set()
         for envelope in context_envelopes(row):
             for key in ("model", "model_name", "modelName"):
                 value = envelope.get(key)
                 if isinstance(value, str) and value.strip():
                     models.add(value.strip())
-    return models
+        if models:
+            return models
+    return set()
 
 
-def explicit_windows(rows: list[dict[str, Any]]) -> tuple[bool, set[int]]:
-    seen = False
-    values: set[int] = set()
-    for row in rows:
+def latest_explicit_windows(
+        rows: list[dict[str, Any]]) -> tuple[bool, set[int]]:
+    """Return the newest authoritative explicit-window declaration only."""
+    for row in reversed(rows):
+        seen = False
+        values: set[int] = set()
         for envelope in context_envelopes(row):
             for key in WINDOW_KEYS:
                 if key not in envelope:
@@ -1499,7 +1562,9 @@ def explicit_windows(rows: list[dict[str, Any]]) -> tuple[bool, set[int]]:
                 number = positive(envelope.get(key))
                 if number:
                     values.add(number)
-    return seen, values
+        if seen:
+            return True, values
+    return False, set()
 
 
 def resolve_window(rows: list[dict[str, Any]], manifest: dict[str, Any]) -> dict[str, Any]:
@@ -1510,7 +1575,7 @@ def resolve_window(rows: list[dict[str, Any]], manifest: dict[str, Any]) -> dict
         return {"ok": True, "window": number, "tier": "override"}
 
     bindings = manifest.get("model_windows", {})
-    models = models_in(rows)
+    models = latest_models(rows)
     bound: set[int] = set()
     malformed = False
     for model in models:
@@ -1528,7 +1593,7 @@ def resolve_window(rows: list[dict[str, Any]], manifest: dict[str, Any]) -> dict
     if len(bound) > 1:
         return {"ok": False, "reason": "CONTEXT_SIGNAL_AMBIGUOUS", "tier": "model"}
 
-    present, windows = explicit_windows(rows)
+    present, windows = latest_explicit_windows(rows)
     if len(windows) == 1:
         return {"ok": True, "window": next(iter(windows)), "tier": "transcript"}
     if len(windows) > 1:

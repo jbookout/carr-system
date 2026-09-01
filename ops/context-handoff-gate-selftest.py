@@ -263,6 +263,24 @@ def threshold_and_window_cases():
               why and why["signal"]["window"] == 1_000_000
               and why["signal"]["window_tier"] == "model", out)
 
+        # A transcript retains older model declarations after a legitimate
+        # switch. Only the newest authoritative row describes the live context
+        # window; treating all history as simultaneous makes a 75% current
+        # context ambiguous and allows it past the hard line.
+        t = write_jsonl(root / "mixed-model-history.jsonl", [
+            usage_row(40_000, model="claude-opus-4-1"),
+            usage_row(150_000, model="claude-haiku-4-5-20251001"),
+        ])
+        proc, out = run_hook(root, "Stop", t, session="mixed-model-history")
+        why = reason(out)
+        check("latest model switch remains subject to the hard threshold",
+              proc.returncode == 0 and why
+              and why["signal"]["window"] == 200_000
+              and why["signal"]["window_tier"] == "model"
+              and why["signal"]["ratio"] == 75.0
+              and why["signal"]["threshold"] == 70,
+              (proc.returncode, out, proc.stderr))
+
         # A model requested inside an ordinary tool payload describes the child
         # invocation, not the session whose context window this gate measures.
         # Only authoritative transcript envelopes may select the window tier.
@@ -311,12 +329,25 @@ def threshold_and_window_cases():
         check("equal positive explicit repeats are accepted",
               reason(out) and reason(out)["signal"]["window"] == 200_000, out)
 
-        t = write_jsonl(root / "unequal.jsonl",
-                        [usage_row(150_000, window=200_000),
-                         {"context_window": 300_000}])
+        unequal_row = usage_row(150_000, window=200_000)
+        unequal_row["message"]["context_window"] = 300_000
+        t = write_jsonl(root / "unequal.jsonl", [unequal_row])
         proc, out = run_hook(root, "Stop", t, session="unequal")
-        check("unequal explicit windows are ambiguous and initially allow",
+        check("unequal current-row windows are ambiguous and initially allow",
               proc.returncode == 0 and out is None, out)
+
+        t = write_jsonl(root / "mixed-window-history.jsonl", [
+            usage_row(40_000, window=1_000_000),
+            usage_row(150_000, window=200_000),
+        ])
+        proc, out = run_hook(root, "Stop", t, session="mixed-window-history")
+        why = reason(out)
+        check("latest explicit window supersedes historical window",
+              proc.returncode == 0 and why
+              and why["signal"]["window"] == 200_000
+              and why["signal"]["window_tier"] == "transcript"
+              and why["signal"]["ratio"] == 75.0,
+              (proc.returncode, out, proc.stderr))
 
         t = write_jsonl(root / "invalid.jsonl",
                         [usage_row(150_000), {"context_window": 0}])
@@ -2700,7 +2731,8 @@ def exact_head_review_regressions():
                 gate._cleanup_transaction = real_cleanup_for_order
         else:
             durable_error = AttributeError("_fsync_directory is absent")
-        transactions_root = gate.state_root(manifest) / "transactions"
+        lifecycle_root = gate.state_root(manifest)
+        transactions_root = lifecycle_root / "transactions"
         transaction_syncs = [
             index for index, event in enumerate(durable_events)
             if event == ("fsync", gate._absolute(transactions_root))]
@@ -2719,6 +2751,44 @@ def exact_head_review_regressions():
               and transaction_syncs[0] < state_events[0]
               and artifact_syncs[-1] < cleanup_events[-1],
               (repr(durable_error), durable_events))
+
+        # A crash can leave the final hard link present while its parent entry
+        # is not yet durable. Recovery must sync that matching destination
+        # before it removes the only journal capable of replaying the link.
+        matching_directory = transactions_root / "matching-destination-sync"
+        matching_directory.mkdir(parents=True)
+        matching_value = {"schema_version": 1, "value": "matching-link"}
+        matching_final = lifecycle_root / "manual" / "matching-link.json"
+        gate.atomic_write(matching_final, matching_value)
+        matching_artifact = {
+            "final": "manual/matching-link.json",
+            "staged": "staged/already-consumed.json",
+            "value_digest": gate.digest(matching_value),
+        }
+        matching_parent = os.stat(matching_final.parent)
+        matching_syncs = []
+        matching_error = None
+        real_fsync = gate.os.fsync
+
+        def record_matching_fsync(fd):
+            observed = os.fstat(fd)
+            if ((observed.st_dev, observed.st_ino)
+                    == (matching_parent.st_dev, matching_parent.st_ino)):
+                matching_syncs.append(fd)
+            return real_fsync(fd)
+
+        gate.os.fsync = record_matching_fsync
+        try:
+            gate._publish_transaction_artifact(
+                lifecycle_root, matching_directory, matching_artifact)
+        except Exception as exc:
+            matching_error = exc
+        finally:
+            gate.os.fsync = real_fsync
+        check("matching recovery destination is synced before journal cleanup",
+              matching_error is None and matching_syncs,
+              (repr(matching_error), matching_syncs))
+        shutil.rmtree(matching_directory)
 
         # Recovery must tolerate the exact cleanup crash left by the old order:
         # the public artifact is already correct, the staged link is gone, and
@@ -2791,6 +2861,64 @@ def exact_head_review_regressions():
             shutil.rmtree(symlink_directory)
         redirect.unlink()
         shutil.rmtree(outside)
+
+        # Pinning only the initial list operation is insufficient. If the root
+        # path is replaced after listing, every journal read, state read,
+        # publication, and cleanup operation must continue through the original
+        # descriptors rather than reopening the substituted ancestor.
+        swap_directory = lifecycle_root / "transactions" / "root-swap"
+        swap_staged = swap_directory / "staged/value.json"
+        swap_value = {"schema_version": 1, "value": "pinned-root-only"}
+        gate.atomic_write(swap_staged, swap_value)
+        gate.atomic_write(swap_directory / "journal.json", {
+            "schema_version": 1,
+            "task_key": task_key,
+            "state_path": str(gate._absolute(state_path)),
+            "target_state_digest": gate.digest(recovery_state),
+            "artifacts": [{
+                "final": "swap-target/pinned.json",
+                "staged": "staged/value.json",
+                "value_digest": gate.digest(swap_value),
+            }],
+        })
+        replacement_root = root / "replacement-lifecycle-root"
+        pinned_root = root / "pinned-lifecycle-root"
+        shutil.copytree(lifecycle_root, replacement_root, symlinks=True)
+        real_listdir = gate.os.listdir
+        swapped_root = False
+        swap_error = None
+
+        def swap_root_after_list(path):
+            nonlocal swapped_root
+            names = real_listdir(path)
+            if not swapped_root and isinstance(path, int):
+                lifecycle_root.rename(pinned_root)
+                os.symlink(
+                    replacement_root, lifecycle_root,
+                    target_is_directory=True)
+                swapped_root = True
+            return names
+
+        gate.os.listdir = swap_root_after_list
+        try:
+            gate._recover_transactions_unlocked(lifecycle_root, manifest)
+        except Exception as exc:
+            swap_error = exc
+        finally:
+            gate.os.listdir = real_listdir
+        pinned_created = pinned_root / "swap-target/pinned.json"
+        escaped_created = replacement_root / "swap-target/pinned.json"
+        check("recovery keeps lifecycle root descriptors pinned end to end",
+              swapped_root and swap_error is None
+              and pinned_created.exists() and not escaped_created.exists(),
+              (swapped_root, repr(swap_error), pinned_created.exists(),
+               escaped_created.exists()))
+        if lifecycle_root.is_symlink():
+            lifecycle_root.unlink()
+        if pinned_root.exists():
+            pinned_root.rename(lifecycle_root)
+        if replacement_root.exists():
+            shutil.rmtree(replacement_root)
     finally:
         if checkout_path is not None:
             if checkout_path.is_symlink():
