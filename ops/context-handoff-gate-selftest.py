@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -557,6 +558,18 @@ def fallback_and_hook_sequence():
               (proc.returncode, malformed_stop, proc.stderr))
         malformed_path.write_text(original_malformed)
 
+        parseable_signal = json.loads(original_malformed)
+        parseable_signal["signal"] = {}
+        malformed_path.write_text(json.dumps(parseable_signal))
+        proc, parseable_stop = run_hook(
+            root, "Stop", malformed_transcript, session="malformed")
+        why = reason(parseable_stop)
+        check("parseable signal corruption cannot suppress Stop enforcement",
+              proc.returncode == 0 and why
+              and why["reason"] == "LIFECYCLE_INVALID",
+              (proc.returncode, parseable_stop, proc.stderr))
+        malformed_path.write_text(original_malformed)
+
         missing_owner_transcript = write_jsonl(
             root / "missing-owner-state.jsonl",
             [usage_row(1_000, model="claude-opus-4-1")],
@@ -1046,6 +1059,26 @@ def lifecycle_cas_and_tamper():
                   (proc.returncode, reused_terminal, multi_after_reuse,
                    proc.stderr))
 
+            multi_hash = hashlib.sha256(b"task:multi-generation").hexdigest()
+            multi_path = root / "state" / f"{multi_hash}.json"
+            intact_multi = multi_path.read_text()
+            deleted_history = json.loads(intact_multi)
+            del deleted_history["owners"]["g0"]
+            multi_path.write_text(json.dumps(deleted_history))
+            proc, deleted_reuse = run_cli(
+                root, "handoff-offer-create", "--task-key", "task:multi-generation",
+                "--predecessor", "g2", "--predecessor-surface", "codex",
+                "--successor", "g0", "--successor-surface", "codex",
+                "--evidence-json", codex_evidence("g2"), "--generation", "3",
+                "--expected-version", str(multi_terminal_2["version"]))
+            check("immutable lineage prevents deleted terminal identity reuse",
+                  proc.returncode == 2
+                  and deleted_reuse["reason"] in {
+                      "LIFECYCLE_INVALID", "HANDOFF_RECEIPT_INVALID",
+                      "OWNERSHIP_MISMATCH"},
+                  (proc.returncode, deleted_reuse, proc.stderr))
+            multi_path.write_text(intact_multi)
+
         # A consumer transition may not mint valid terminal provenance from a
         # verified owner whose mutable evidence was rewritten after takeover.
         _, laundering = run_cli(
@@ -1338,6 +1371,60 @@ def lifecycle_cas_and_tamper():
               and late_after["version"] == late_terminal_state["version"]
               and not late_derived_path.exists(),
               (proc.returncode, late_callback, late_after, proc.stderr))
+
+        chain_transcript = write_jsonl(
+            root / "claude-history.jsonl",
+            [usage_row(1_000, model="claude-opus-4-1")])
+
+        def claude_evidence(owner, status="active"):
+            return json.dumps({
+                "session_id": owner,
+                "transcript_path": str(chain_transcript),
+                "controller_callback_id": f"callback-{owner}",
+                "status": status,
+            })
+
+        _, chain = run_cli(
+            root, "task-init", "--task-key", "task:claude-history",
+            "--owner", "cg0", "--surface", "claude",
+            "--evidence-json", claude_evidence("cg0"),
+            "--expected-version", "-1")
+        current_chain = chain
+        for generation, predecessor, successor in (
+            (1, "cg0", "cg1"), (2, "cg1", "cg2"),
+        ):
+            _, chain_offer = run_cli(
+                root, "handoff-offer-create", "--task-key", "task:claude-history",
+                "--predecessor", predecessor, "--predecessor-surface", "claude",
+                "--successor", successor, "--successor-surface", "claude",
+                "--evidence-json", claude_evidence(predecessor),
+                "--generation", str(generation), "--expected-version",
+                str(current_chain["version"]))
+            _, chain_declared = run_cli(
+                root, "successor-declare", "--task-key", "task:claude-history",
+                "--offer-digest", chain_offer["offer_digest"],
+                "--successor", successor,
+                "--evidence-json", claude_evidence(successor),
+                "--expected-version", str(chain_offer["state"]["version"]))
+            _, chain_accepted = run_cli(
+                root, "successor-accept", "--task-key", "task:claude-history",
+                "--offer-digest", chain_offer["offer_digest"],
+                "--successor", successor,
+                "--evidence-json", claude_evidence(successor),
+                "--expected-version", str(chain_declared["state"]["version"]))
+            _, current_chain = run_cli(
+                root, "predecessor-terminal", "--task-key", "task:claude-history",
+                "--predecessor", predecessor,
+                "--evidence-json", claude_evidence(predecessor, "terminal"),
+                "--expected-version", str(chain_accepted["state"]["version"]))
+        proc, old_callback = run_hook(
+            root, "Stop", chain_transcript, session="cg0")
+        _, chain_after = run_cli(
+            root, "status", "--task-key", "task:claude-history")
+        check("older terminal Claude callback is a verified no-op",
+              proc.returncode == 0 and old_callback is None
+              and chain_after["version"] == current_chain["version"],
+              (proc.returncode, old_callback, chain_after, proc.stderr))
 
         _, tamper_terminal = run_cli(
             root, "task-init", "--task-key", "task:terminal-tamper",
@@ -1658,6 +1745,19 @@ def dispatcher_cases():
               and aborted["active_owner"] == "owner"
               and aborted["recovery_intent"]["state"] == "ABORTED", aborted)
 
+        proc, resurrected = run_cli(
+            root, "dispatcher-evaluate", "--task-key", "task:dispatch",
+            "--snapshot-json", json.dumps(snap), "--apply",
+            "--expected-version", str(aborted["version"]))
+        _, after_resurrection = run_cli(
+            root, "status", "--task-key", "task:dispatch")
+        check("aborted recovery snapshot is consumed and cannot resurrect",
+              proc.returncode == 2
+              and resurrected["reason"] == "LIFECYCLE_INVALID"
+              and after_resurrection["version"] == aborted["version"]
+              and after_resurrection["recovery_intent"]["state"] == "ABORTED",
+              (proc.returncode, resurrected, after_resurrection, proc.stderr))
+
         # A separate applied recovery completes through the ordinary, receipt-
         # verified handoff path and leaves one active successor.
         _, recovery = run_cli(
@@ -1750,6 +1850,64 @@ def dispatcher_cases():
               and adjacent_after["recovery_intent"] is None
               and adjacent_after["handoff"]["state"] == "TAKEOVER_VERIFIED",
               (adjacent_recovery, adjacent_after))
+    finally:
+        shutil.rmtree(root)
+
+
+def immutable_publication_concurrency():
+    print("immutable object publication concurrency")
+    root = fresh_root()
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "context_handoff_publication_test", HOOK)
+        gate = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(gate)
+        manifest = {"state_directory": str(root / "state")}
+        task_key = "task:publication-race"
+        value = {"schema_version": 1, "task_key": task_key,
+                 "kind": "same-object", "payload": "x" * 4096}
+        object_digest = gate.digest(value)
+        target = gate.object_path(
+            task_key, "race", object_digest, manifest).resolve()
+        created = threading.Event()
+        release = threading.Event()
+        real_open = gate.os.open
+        results = []
+        errors = []
+
+        def delayed_final_open(path, flags, mode=0o777):
+            fd = real_open(path, flags, mode)
+            if (Path(path).resolve() == target
+                    and flags & os.O_CREAT and flags & os.O_EXCL):
+                created.set()
+                release.wait(timeout=5)
+            return fd
+
+        def publish():
+            try:
+                results.append(gate.write_immutable(
+                    task_key, "race", value, manifest))
+            except Exception as exc:  # the regression is an escaping JSON error
+                errors.append(exc)
+
+        gate.os.open = delayed_final_open
+        first = threading.Thread(target=publish)
+        first.start()
+        exposed_partial = created.wait(timeout=1)
+        second = threading.Thread(target=publish)
+        second.start()
+        second.join(timeout=2)
+        release.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+        gate.os.open = real_open
+        check("concurrent identical immutable writes publish complete bytes",
+              not errors and len(results) == 2
+              and set(results) == {object_digest}
+              and json.loads(target.read_text()) == value,
+              (exposed_partial, results,
+               [f"{type(exc).__name__}: {exc}" for exc in errors]))
     finally:
         shutil.rmtree(root)
 
@@ -1858,6 +2016,7 @@ def main():
     lifecycle_cas_and_tamper()
     rollout_resolver_cases()
     dispatcher_cases()
+    immutable_publication_concurrency()
     wrapper_and_historical_defect()
     static_contract_cases()
     print()

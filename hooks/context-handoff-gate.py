@@ -19,6 +19,7 @@ import datetime as dt
 import fcntl
 import hashlib
 import json
+import math
 import os
 import sys
 import tempfile
@@ -159,6 +160,53 @@ def load_json_file(path: Path) -> dict[str, Any] | None:
     return value
 
 
+SIGNAL_KEYS = {
+    "highwater", "invocations", "active_minutes", "cycles",
+    "generation_tool_calls", "mutated_paths", "worker_starts",
+    "last_observed_at", "notices",
+}
+
+
+def validate_signal_state(signal: Any) -> None:
+    if not isinstance(signal, dict):
+        raise LifecycleError("LIFECYCLE_INVALID", "signal is not an object")
+    if frozenset(signal) not in {frozenset(SIGNAL_KEYS),
+                                 frozenset(SIGNAL_KEYS | {"risk"})}:
+        raise LifecycleError(
+            "LIFECYCLE_INVALID", "signal fields are not exact")
+    for field in ("highwater", "invocations", "cycles",
+                  "generation_tool_calls", "worker_starts"):
+        value = signal.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise LifecycleError(
+                "LIFECYCLE_INVALID", f"signal {field} is invalid")
+    active_minutes = signal.get("active_minutes")
+    if (isinstance(active_minutes, bool)
+            or not isinstance(active_minutes, (int, float))
+            or not math.isfinite(float(active_minutes))
+            or float(active_minutes) < 0):
+        raise LifecycleError(
+            "LIFECYCLE_INVALID", "signal active_minutes is invalid")
+    for field in ("mutated_paths", "notices"):
+        values = signal.get(field)
+        if (not isinstance(values, list)
+                or any(not isinstance(item, str) or not item for item in values)
+                or values != sorted(set(values))):
+            raise LifecycleError(
+                "LIFECYCLE_INVALID", f"signal {field} is invalid")
+    observed = signal.get("last_observed_at")
+    if observed is not None:
+        try:
+            parse_time(observed)
+        except Exception as exc:
+            raise LifecycleError(
+                "LIFECYCLE_INVALID",
+                f"signal last_observed_at is invalid: {exc}") from exc
+    if "risk" in signal and signal.get("risk") not in {
+            "R0", "R1", "R2", "R3", "R4", "R5", "R6"}:
+        raise LifecycleError("LIFECYCLE_INVALID", "signal risk is invalid")
+
+
 def is_digest(value: Any) -> bool:
     return (isinstance(value, str) and len(value) == 64
             and all(char in "0123456789abcdef" for char in value))
@@ -255,13 +303,40 @@ def validate_task_state(value: dict[str, Any], task_key: str,
     for field in ("handoff", "recovery_intent"):
         if value.get(field) is not None and not isinstance(value.get(field), dict):
             raise LifecycleError("LIFECYCLE_INVALID", f"{field} is not an object")
-    if not isinstance(value.get("signal"), dict):
-        raise LifecycleError("LIFECYCLE_INVALID", "signal is not an object")
+    validate_signal_state(value.get("signal"))
 
     handoff = value.get("handoff") or {}
     handoff_state = handoff.get("state")
     if handoff and handoff_state not in HANDOFF_STATES:
         raise LifecycleError("LIFECYCLE_INVALID", "handoff state is invalid")
+    by_generation: dict[int, dict[str, Any]] = {}
+    for owner in owners.values():
+        owner_generation = int(owner["generation"])
+        if owner_generation in by_generation:
+            raise LifecycleError(
+                "LIFECYCLE_INVALID", "multiple owners share one generation")
+        by_generation[owner_generation] = owner
+    expected_generations = set(range(generation + 1))
+    if handoff_state == "SUCCESSOR_DECLARED":
+        expected_generations.add(generation + 1)
+    if set(by_generation) != expected_generations:
+        raise LifecycleError(
+            "LIFECYCLE_INVALID", "immutable owner lineage is incomplete")
+    for owner_generation in range(1, generation + 1):
+        owner = by_generation[owner_generation]
+        lineage_predecessor = by_generation[owner_generation - 1]
+        verified = read_verified_final_packet(
+            task_key, owner.get("activation_final_digest"), manifest)
+        offer = verified["offer"]
+        if (offer.get("generation") != owner_generation
+                or offer.get("predecessor") != lineage_predecessor.get("id")
+                or offer.get("predecessor_surface")
+                != lineage_predecessor.get("surface")
+                or offer.get("successor") != owner.get("id")
+                or offer.get("successor_surface") != owner.get("surface")):
+            raise LifecycleError(
+                "HANDOFF_RECEIPT_INVALID",
+                "owner lineage is not linked to immutable handoff history")
     if handoff:
         predecessor = handoff.get("predecessor")
         successor = handoff.get("successor")
@@ -435,22 +510,45 @@ def write_immutable(task_key: str, kind: str, value: Any,
     object_digest = digest(value)
     path = object_path(task_key, kind, object_digest, manifest)
     path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        existing = json.loads(path.read_text(encoding="utf-8"))
+    publication_lock = path.with_suffix(".lock")
+
+    def verify_existing() -> None:
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise LifecycleError(
+                "HANDOFF_RECEIPT_INVALID",
+                f"invalid published {kind}: {exc}") from exc
         if digest(existing) != object_digest:
-            raise LifecycleError("HANDOFF_RECEIPT_INVALID", "immutable object collision")
-        return object_digest
-    with os.fdopen(fd, "wb") as fh:
-        fh.write(canonical(value) + b"\n")
-        fh.flush()
-        os.fsync(fh.fileno())
-    dfd = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(dfd)
-    finally:
-        os.close(dfd)
+            raise LifecycleError(
+                "HANDOFF_RECEIPT_INVALID", "immutable object collision")
+
+    with open(publication_lock, "a+b") as guard:
+        fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
+        if path.exists():
+            verify_existing()
+            return object_digest
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", dir=path.parent)
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(canonical(value) + b"\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            try:
+                os.link(temp_name, path)
+            except FileExistsError:
+                verify_existing()
+            dfd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+        finally:
+            try:
+                os.unlink(temp_name)
+            except FileNotFoundError:
+                pass
     return object_digest
 
 
@@ -1135,6 +1233,9 @@ def hook_main() -> int:
                     task_key, state["version"], signal, exc.reason)).decode("utf-8"))
             return 0
     caller = (state.get("owners") or {}).get(owner_id) or {}
+    if (caller.get("surface") == "claude"
+            and caller.get("state") == "TERMINAL"):
+        return 0
     if (pending.get("state") in {"TAKEOVER_VERIFIED", "PREDECESSOR_TERMINAL"}
             and pending.get("predecessor") == owner_id
             and caller.get("state") in {"DRAINING", "TERMINAL"}):
@@ -1984,6 +2085,10 @@ def dispatcher_evaluate(args, manifest):
     snapshot = parse_evidence(args.snapshot_json)
     validate_snapshot(snapshot, args.task_key, manifest)
     pending = state.get("recovery_intent")
+    if (pending and pending.get("state") in {"ABORTED", "COMPLETED"}
+            and pending.get("source_event_id") == snapshot.get("source_event_id")):
+        raise LifecycleError(
+            "LIFECYCLE_INVALID", "recovery source event was already consumed")
     if pending and pending.get("state") == "PENDING":
         same = (
             pending.get("task_key") == args.task_key
