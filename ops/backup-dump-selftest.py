@@ -32,12 +32,13 @@ def executable(path: Path, body: str) -> None:
 def main() -> int:
     source = SCRIPT.read_text(encoding="utf-8")
     required = (
-        '"$PG_DUMP_BIN" --no-owner --no-acl '
+        '"$PG_DUMP_BIN" --no-owner --no-acl --enable-row-security '
         '--schema=public --schema=ops "$URL"'
     )
     assert required in source, (
         "backup-dump.sh must scope pg_dump to the two schemas carr_backup is "
-        "authorized to read"
+        "authorized to read, and read under row_security=on (--enable-row-security) "
+        "so ops.work_request's RLS does not fail the dump (WR-000044)"
     )
 
     with tempfile.TemporaryDirectory(prefix="carr-backup-selftest-") as raw:
@@ -79,9 +80,10 @@ def main() -> int:
         assert run.returncode == 0, run.stdout + run.stderr
 
         args = shlex.split(args_file.read_text(encoding="utf-8"))
-        assert args[:4] == [
+        assert args[:5] == [
             "--no-owner",
             "--no-acl",
+            "--enable-row-security",
             "--schema=public",
             "--schema=ops",
         ], args
