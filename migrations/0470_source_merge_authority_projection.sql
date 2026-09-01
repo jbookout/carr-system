@@ -6,8 +6,6 @@
 -- coordination/evidence only; this migration never promotes either into
 -- authority.
 
-begin;
-
 create table ops.source_merge_plan_scope (
   id uuid primary key default gen_random_uuid(),
   organization_tenant_id text not null check (btrim(organization_tenant_id)<>''),
@@ -363,5 +361,3 @@ begin
     raise exception '0470 FAILED: source merge projection privilege boundary is not narrow';
   end if;
 end $$;
-
-commit;

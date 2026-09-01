@@ -10,6 +10,10 @@ const migration = fs.readFileSync(path.join(ROOT,
 const workflow = fs.readFileSync(path.join(ROOT,
   ".github/workflows/source-merge-controller.yml"), "utf8");
 
+test("canonical migration runner owns the transaction boundary", () => {
+  assert.doesNotMatch(migration, /^(?:begin|commit|rollback)(?:\s+transaction)?;\s*$/im);
+});
+
 test("accepted plan hash owns exact source-merge paths", () => {
   assert.match(migration, /create table ops\.source_merge_plan_scope/i);
   assert.match(migration, /after insert on ops\.sourced_work_request_plan_acceptance_receipt/i);
