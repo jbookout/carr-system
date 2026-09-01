@@ -1064,21 +1064,8 @@ BACKUP_RC=$LAST_STEP_RC
 # later, which is a long way from the cause.
 portability_root="${CARR_EXPORT_HOME:-}"
 [ -n "$portability_root" ] || portability_root="/Users/booko/Library/CloudStorage/OneDrive-CARR,Inc/Joe's Folder/CARR AI"
-# THE CREDENTIAL WAS ONE THIS MACHINE HAS NEVER HELD. This step ran as
-# CARR_DB_BACKUP_URL, a key that is not in ~/.config/carr/db.env at all (loop
-# #427 is the row that provisions it, still open), so doctrine_mirror.py exited
-# 78 every night — and 78 is the house SKIP contract, which reads as a benign
-# "nothing to do" rather than as a step that has not run since 2026-08-16.
-# INC-20260817-01 has been open the whole time.
-#
-# The mirror never needed that credential. It is a READ that renders the
-# doctrine database as markdown and csv, which is exactly the exporter
-# credential's scope, and CARR_DB_EXPORTER_URL is already loaded and already
-# crossed the routine boundary for the six business exports a few steps above.
-# Measured 2026-09-01 under the exporter role: 243 md docs, 40 tables, 77479
-# rows, verified on disk.
 step "portability mirror (md+csv, 2 locations)" \
-  env DATABASE_URL="$CARR_DB_EXPORTER_URL" .venv/bin/python pipelines/doctrine_mirror.py \
+  env DATABASE_URL="$CARR_DB_BACKUP_URL" .venv/bin/python pipelines/doctrine_mirror.py \
     --out "$portability_root/Backups/portability-mirror" \
     --also "$HOME/carr-system/out/mirror"
 # NO BACKUP_RC HERE ANY MORE — it is captured beside the encrypted backup above,
