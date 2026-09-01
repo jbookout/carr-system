@@ -333,8 +333,42 @@ def threshold_and_window_cases():
         unequal_row["message"]["context_window"] = 300_000
         t = write_jsonl(root / "unequal.jsonl", [unequal_row])
         proc, out = run_hook(root, "Stop", t, session="unequal")
-        check("unequal current-row windows are ambiguous and initially allow",
-              proc.returncode == 0 and out is None, out)
+        why = reason(out)
+        check("unequal current-row windows fail closed on the first Stop",
+              proc.returncode == 0 and why
+              and why["reason"] == "CONTEXT_SIGNAL_AMBIGUOUS"
+              and why["signal"]["crossed"] is True
+              and why["signal"]["signal_reason"]
+              == "CONTEXT_SIGNAL_AMBIGUOUS",
+              (proc.returncode, out, proc.stderr))
+
+        same_window_row = usage_row(
+            150_000, model="claude-opus-4-1")
+        same_window_row["model"] = "claude-sonnet-5"
+        t = write_jsonl(
+            root / "same-window-model-conflict.jsonl", [same_window_row])
+        proc, out = run_hook(
+            root, "Stop", t, session="same-window-model-conflict")
+        why = reason(out)
+        check("distinct current models sharing a window remain ambiguous",
+              proc.returncode == 0 and why
+              and why["reason"] == "CONTEXT_SIGNAL_AMBIGUOUS"
+              and why["signal"]["crossed"] is True,
+              (proc.returncode, out, proc.stderr))
+
+        known_unknown_row = usage_row(
+            150_000, model="claude-haiku-4-5-20251001")
+        known_unknown_row["model"] = "claude-unknown"
+        t = write_jsonl(
+            root / "known-unknown-model-conflict.jsonl", [known_unknown_row])
+        proc, out = run_hook(
+            root, "Stop", t, session="known-unknown-model-conflict")
+        why = reason(out)
+        check("known and unknown current models remain ambiguous",
+              proc.returncode == 0 and why
+              and why["reason"] == "CONTEXT_SIGNAL_AMBIGUOUS"
+              and why["signal"]["crossed"] is True,
+              (proc.returncode, out, proc.stderr))
 
         t = write_jsonl(root / "mixed-window-history.jsonl", [
             usage_row(40_000, window=1_000_000),
@@ -2542,20 +2576,21 @@ def exact_head_review_regressions():
         binding_path = gate.identity_binding_path(
             "codex", "transaction-owner", manifest)
         real_atomic = gate.atomic_write
+        real_atomic_at = gate._atomic_write_at
 
-        def fail_state_write(path, value):
-            if gate._absolute(Path(path)) == gate._absolute(state_path):
+        def fail_state_write_at(parent_fd, name, value):
+            if name == state_path.name:
                 raise OSError("injected state publication failure")
-            return real_atomic(path, value)
+            return real_atomic_at(parent_fd, name, value)
 
-        gate.atomic_write = fail_state_write
+        gate._atomic_write_at = fail_state_write_at
         init_error = None
         try:
             gate.lifecycle_init(init_args, manifest)
         except Exception as exc:
             init_error = exc
         finally:
-            gate.atomic_write = real_atomic
+            gate._atomic_write_at = real_atomic_at
         object_root = gate.state_root(manifest) / "objects"
         check("failed state publication exposes no identity or immutable object",
               isinstance(init_error, OSError)
@@ -2584,7 +2619,7 @@ def exact_head_review_regressions():
                 return current
             return change
 
-        gate.atomic_write = fail_state_write
+        gate._atomic_write_at = fail_state_write_at
         recovery_error = None
         try:
             gate.mutate_state(
@@ -2593,7 +2628,7 @@ def exact_head_review_regressions():
         except Exception as exc:
             recovery_error = exc
         finally:
-            gate.atomic_write = real_atomic
+            gate._atomic_write_at = real_atomic_at
         recovery_dir = gate.object_path(
             task_key, "recovery-event", "unused", manifest).parent
         check("failed recovery CAS exposes no orphan recovery event",
@@ -2696,29 +2731,43 @@ def exact_head_review_regressions():
         durable_events = []
         durable_error = None
         durable_state = gate.read_state(task_key, manifest)
-        if hasattr(gate, "_fsync_directory"):
-            real_directory_sync = gate._fsync_directory
-            real_atomic_for_order = gate.atomic_write
-            real_cleanup_for_order = gate._cleanup_transaction
+        if hasattr(gate, "_atomic_write_at"):
+            real_fsync_for_order = gate.os.fsync
+            real_atomic_at_for_order = gate._atomic_write_at
+            real_cleanup_at_for_order = gate._cleanup_transaction_at
+            transactions_root = gate.state_root(manifest) / "transactions"
+            transaction_identity = os.stat(transactions_root)
+            recovery_identity = os.stat(recovery_dir)
 
-            def record_directory_sync(path):
+            def record_fsync_for_order(fd):
+                observed = os.fstat(fd)
+                identity = (observed.st_dev, observed.st_ino)
+                if identity == (transaction_identity.st_dev,
+                                transaction_identity.st_ino):
+                    durable_events.append(
+                        ("fsync", gate._absolute(transactions_root)))
+                if identity == (recovery_identity.st_dev,
+                                recovery_identity.st_ino):
+                    durable_events.append(
+                        ("fsync", gate._absolute(recovery_dir)))
+                return real_fsync_for_order(fd)
+
+            def record_atomic_at_for_order(parent_fd, name, value):
+                if name == state_path.name:
+                    durable_events.append(
+                        ("state", gate._absolute(state_path)))
+                return real_atomic_at_for_order(parent_fd, name, value)
+
+            def record_cleanup_at_for_order(parent_fd, name,
+                                            directory_fd=None):
                 durable_events.append(
-                    ("fsync", gate._absolute(Path(path))))
-                return real_directory_sync(path)
+                    ("cleanup", gate._absolute(transactions_root / name)))
+                return real_cleanup_at_for_order(
+                    parent_fd, name, directory_fd)
 
-            def record_atomic_for_order(path, value):
-                if gate._absolute(Path(path)) == gate._absolute(state_path):
-                    durable_events.append(("state", gate._absolute(Path(path))))
-                return real_atomic_for_order(path, value)
-
-            def record_cleanup_for_order(directory):
-                durable_events.append(
-                    ("cleanup", gate._absolute(Path(directory))))
-                return real_cleanup_for_order(directory)
-
-            gate._fsync_directory = record_directory_sync
-            gate.atomic_write = record_atomic_for_order
-            gate._cleanup_transaction = record_cleanup_for_order
+            gate.os.fsync = record_fsync_for_order
+            gate._atomic_write_at = record_atomic_at_for_order
+            gate._cleanup_transaction_at = record_cleanup_at_for_order
             try:
                 gate.mutate_state(
                     task_key, durable_state["version"],
@@ -2726,11 +2775,11 @@ def exact_head_review_regressions():
             except Exception as exc:
                 durable_error = exc
             finally:
-                gate._fsync_directory = real_directory_sync
-                gate.atomic_write = real_atomic_for_order
-                gate._cleanup_transaction = real_cleanup_for_order
+                gate.os.fsync = real_fsync_for_order
+                gate._atomic_write_at = real_atomic_at_for_order
+                gate._cleanup_transaction_at = real_cleanup_at_for_order
         else:
-            durable_error = AttributeError("_fsync_directory is absent")
+            durable_error = AttributeError("_atomic_write_at is absent")
         lifecycle_root = gate.state_root(manifest)
         transactions_root = lifecycle_root / "transactions"
         transaction_syncs = [
@@ -2751,6 +2800,62 @@ def exact_head_review_regressions():
               and transaction_syncs[0] < state_events[0]
               and artifact_syncs[-1] < cleanup_events[-1],
               (repr(durable_error), durable_events))
+
+        # Ordinary commits need the same descriptor confinement as crash
+        # recovery. Rename the locked root immediately after journal durability
+        # and install a replacement at the configured pathname. Publication and
+        # cleanup must remain entirely under the originally pinned root.
+        ordinary_state = gate.read_state(task_key, manifest)
+        lifecycle_root = gate.state_root(manifest)
+        ordinary_pinned_root = root / "ordinary-pinned-lifecycle-root"
+        ordinary_replacement_root = root / "ordinary-replacement-lifecycle-root"
+        real_atomic_at_for_swap = gate._atomic_write_at
+        ordinary_swapped = False
+        ordinary_error = None
+        ordinary_result = None
+
+        def swap_root_after_journal(parent_fd, name, value):
+            nonlocal ordinary_swapped
+            result = real_atomic_at_for_swap(parent_fd, name, value)
+            if name == "journal.json" and not ordinary_swapped:
+                lifecycle_root.rename(ordinary_pinned_root)
+                ordinary_replacement_root.mkdir()
+                os.symlink(
+                    ordinary_replacement_root, lifecycle_root,
+                    target_is_directory=True)
+                ordinary_swapped = True
+            return result
+
+        gate._atomic_write_at = swap_root_after_journal
+        try:
+            ordinary_result = gate.mutate_state(
+                task_key, ordinary_state["version"],
+                recovery_change("ordinary-root-swap-event"), manifest)
+        except Exception as exc:
+            ordinary_error = exc
+        finally:
+            gate._atomic_write_at = real_atomic_at_for_swap
+        pinned_state = ordinary_pinned_root / state_path.name
+        replacement_state = ordinary_replacement_root / state_path.name
+        pinned_objects = list(
+            (ordinary_pinned_root / "objects").rglob("*.json"))
+        pinned_journals = list(
+            (ordinary_pinned_root / "transactions").glob("*/journal.json"))
+        check("ordinary mutation stays under pinned root after journal publish",
+              ordinary_swapped and ordinary_error is None
+              and isinstance(ordinary_result, dict)
+              and ordinary_result["version"] == ordinary_state["version"] + 1
+              and pinned_state.exists() and not replacement_state.exists()
+              and pinned_objects and not pinned_journals,
+              (ordinary_swapped, repr(ordinary_error), ordinary_result,
+               pinned_state.exists(), replacement_state.exists(),
+               pinned_objects, pinned_journals))
+        if lifecycle_root.is_symlink():
+            lifecycle_root.unlink()
+        if ordinary_replacement_root.exists():
+            shutil.rmtree(ordinary_replacement_root)
+        if ordinary_pinned_root.exists():
+            ordinary_pinned_root.rename(lifecycle_root)
 
         # A crash can leave the final hard link present while its parent entry
         # is not yet durable. Recovery must sync that matching destination

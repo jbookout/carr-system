@@ -562,6 +562,46 @@ def _load_json_at(parent_fd: int, name: str) -> tuple[bool, Any | None]:
         os.close(fd)
 
 
+def _atomic_write_at(parent_fd: int, name: str, value: Any) -> None:
+    """Durably replace one regular file beneath a pinned directory."""
+    if name in {"", ".", ".."} or "/" in name:
+        raise LifecycleError("LIFECYCLE_INVALID",
+                             "lifecycle publication name is invalid")
+    flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
+             | getattr(os, "O_NOFOLLOW", 0))
+    temp_name = f".{name}.{secrets.token_hex(16)}"
+    fd = None
+    try:
+        fd = os.open(temp_name, flags, 0o600, dir_fd=parent_fd)
+        with os.fdopen(fd, "wb") as fh:
+            fd = None
+            fh.write(canonical(value) + b"\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(
+            temp_name, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        try:
+            os.unlink(temp_name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+
+
+def _parts_beneath(root: Path, path: Path, label: str) -> tuple[str, ...]:
+    """Return a validated relative path beneath the configured root."""
+    try:
+        parts = tuple(_absolute(path).relative_to(root).parts)
+    except ValueError as exc:
+        raise LifecycleError(
+            "LIFECYCLE_INVALID", f"{label} escapes lifecycle root") from exc
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise LifecycleError("LIFECYCLE_INVALID", f"{label} is invalid")
+    return parts
+
+
 def _cleanup_transaction_at(
         parent_fd: int, name: str, directory_fd: int | None = None) -> None:
     """Remove one transaction beneath a pinned parent descriptor."""
@@ -710,11 +750,13 @@ def _publish_transaction_artifact(
 
 
 def _recover_transactions_unlocked(
-        root: Path, manifest: dict[str, Any] | None = None) -> None:
+        root: Path, manifest: dict[str, Any] | None = None, *,
+        pinned_root_fd: int | None = None) -> None:
     transactions = root / "transactions"
     flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
              | getattr(os, "O_NOFOLLOW", 0))
-    root_fd = os.open(root, flags)
+    root_fd = (os.open(root, flags) if pinned_root_fd is None
+               else os.dup(pinned_root_fd))
     transactions_fd = None
     try:
         try:
@@ -836,16 +878,75 @@ def lifecycle_guard(manifest: dict[str, Any] | None = None):
         finally:
             held[key][1] -= 1
         return
-    lock = open(root / ".lifecycle.lock", "a+b")
-    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-    held[key] = [lock, 1]
+    flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+             | getattr(os, "O_NOFOLLOW", 0))
+    root_fd = os.open(root, flags)
+    lock_fd = None
     try:
-        _recover_transactions_unlocked(root, manifest)
+        lock_fd = os.open(
+            ".lifecycle.lock",
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            0o600, dir_fd=root_fd)
+        if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
+            raise LifecycleError(
+                "LIFECYCLE_INVALID", "lifecycle lock is not a regular file")
+        lock = os.fdopen(lock_fd, "a+b")
+        lock_fd = None
+    except Exception:
+        if lock_fd is not None:
+            os.close(lock_fd)
+        os.close(root_fd)
+        raise
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        lock.close()
+        os.close(root_fd)
+        raise
+    held[key] = [lock, 1, root_fd]
+    try:
+        _recover_transactions_unlocked(
+            root, manifest, pinned_root_fd=root_fd)
         yield root
     finally:
         held.pop(key, None)
         fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
         lock.close()
+        os.close(root_fd)
+
+
+def _guard_root_fd(root: Path) -> int:
+    """Borrow the descriptor pinned by the active lifecycle guard."""
+    held = getattr(_GUARD_LOCAL, "held", None) or {}
+    entry = held.get(os.fspath(_absolute(root)))
+    if entry is None or len(entry) < 3:
+        raise LifecycleError(
+            "LIFECYCLE_INVALID", "lifecycle root descriptor is unavailable")
+    return int(entry[2])
+
+
+def _create_transaction_directory(root_fd: int) -> tuple[int, str, int]:
+    """Create and pin one durable transaction directory."""
+    transactions_fd = _open_directory_at(
+        root_fd, ("transactions",), create=True)
+    directory_name = secrets.token_hex(16)
+    directory_fd = None
+    try:
+        os.mkdir(directory_name, 0o700, dir_fd=transactions_fd)
+        # A journal cannot protect published state if its own transaction
+        # directory entry disappears after power loss.
+        os.fsync(transactions_fd)
+        directory_fd = os.open(
+            directory_name,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            dir_fd=transactions_fd)
+        return transactions_fd, directory_name, directory_fd
+    except Exception:
+        if directory_fd is not None:
+            os.close(directory_fd)
+        os.close(transactions_fd)
+        raise
 
 
 def _active_transaction(task_key: str | None = None) -> dict[str, Any] | None:
@@ -873,15 +974,19 @@ def _stage_transaction_value(final: Path, value: Any) -> None:
     value_digest = digest(value)
     prior = transaction["artifacts"].get(final_rel)
     if prior is not None:
-        staged = directory / prior["staged"]
-        existing = load_json_file(staged)
+        existing = _transaction_value(final)
         if existing is None or digest(existing) != value_digest:
             raise LifecycleError("LIFECYCLE_INVALID",
                                  "transaction staged conflicting artifact bytes")
         return
     staged_rel = f"staged/{digest({'final': final_rel})}.json"
-    staged = directory / staged_rel
-    atomic_write(staged, value)
+    staged_parts = _relative_parts(staged_rel, "staged path")
+    staged_parent_fd = _open_directory_at(
+        transaction["directory_fd"], staged_parts[:-1], create=True)
+    try:
+        _atomic_write_at(staged_parent_fd, staged_parts[-1], value)
+    finally:
+        os.close(staged_parent_fd)
     transaction["artifacts"][final_rel] = {
         "final": final_rel, "staged": staged_rel,
         "value_digest": value_digest,
@@ -900,7 +1005,36 @@ def _transaction_value(final: Path) -> Any | None:
     artifact = transaction["artifacts"].get(final_rel)
     if artifact is None:
         return None
-    return load_json_file(transaction["directory"] / artifact["staged"])
+    staged_parts = _relative_parts(artifact["staged"], "staged path")
+    try:
+        staged_parent_fd = _open_directory_at(
+            transaction["directory_fd"], staged_parts[:-1])
+    except FileNotFoundError:
+        return None
+    try:
+        exists, value = _load_json_at(staged_parent_fd, staged_parts[-1])
+        return value if exists else None
+    finally:
+        os.close(staged_parent_fd)
+
+
+def _transaction_public_value(final: Path) -> tuple[bool, Any | None]:
+    """Read public bytes beneath the active transaction's pinned root."""
+    transaction = _active_transaction()
+    if transaction is None:
+        raise LifecycleError(
+            "LIFECYCLE_INVALID", "no lifecycle transaction is active")
+    parts = _parts_beneath(
+        transaction["root"], final, "transaction public path")
+    try:
+        parent_fd = _open_directory_at(
+            transaction["root_fd"], parts[:-1])
+    except FileNotFoundError:
+        return False, None
+    try:
+        return _load_json_at(parent_fd, parts[-1])
+    finally:
+        os.close(parent_fd)
 
 
 def _transaction_paths_under(parent: Path) -> set[Path]:
@@ -927,12 +1061,19 @@ def _commit_transaction(transaction: dict[str, Any], state_path: Path,
         "target_state_digest": digest(updated),
         "artifacts": list(transaction["artifacts"].values()),
     }
-    atomic_write(directory / "journal.json", journal)
+    _atomic_write_at(transaction["directory_fd"], "journal.json", journal)
     transaction["state_published"] = True
-    atomic_write(state_path, updated)
+    _atomic_write_at(
+        transaction["state_parent_fd"], transaction["state_name"], updated)
     for artifact in journal["artifacts"]:
-        _publish_transaction_artifact(root, directory, artifact)
-    _cleanup_transaction(directory)
+        _publish_transaction_artifact(
+            root, directory, artifact,
+            pinned_root_fd=transaction["root_fd"],
+            pinned_transaction_fd=transaction["directory_fd"])
+    _cleanup_transaction_at(
+        transaction["transactions_fd"], transaction["directory_name"],
+        transaction["directory_fd"])
+    transaction["cleaned"] = True
 
 
 def mutate_state(task_key: str, expected_version: int | None,
@@ -941,53 +1082,99 @@ def mutate_state(task_key: str, expected_version: int | None,
     with lifecycle_guard(manifest) as root:
         path = state_file(task_key, manifest)
         lock = lock_file(task_key, manifest)
-        lock.parent.mkdir(parents=True, exist_ok=True)
-        with open(lock, "a+b") as guard:
-            fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
-            current = load_json_file(path)
-            if current is not None:
-                validate_task_state(current, task_key, manifest)
-            actual = int(current.get("version", -1)) if current else -1
-            if expected_version is not None and actual != expected_version:
-                raise LifecycleError("LIFECYCLE_INVALID",
-                                     f"expected version {expected_version}, found {actual}")
-            before = canonical(current) if current is not None else None
-            transactions = root / "transactions"
-            if not transactions.exists():
-                transactions.mkdir()
-                _fsync_directory(root)
-            directory = transactions / secrets.token_hex(16)
-            directory.mkdir(exist_ok=False)
-            # A journal cannot protect published state if its own transaction
-            # directory entry disappears after power loss.
-            _fsync_directory(transactions)
-            transaction = {
-                "root": root, "directory": directory, "task_key": task_key,
-                "artifacts": {}, "state_published": False,
-            }
-            _TRANSACTION_LOCAL.current = transaction
-            try:
-                updated = change(current)
-                if (not isinstance(updated, dict)
-                        or updated.get("task_key") != task_key):
+        root_fd = _guard_root_fd(root)
+        try:
+            state_parts = _parts_beneath(root, path, "lifecycle state path")
+            lock_parts = _parts_beneath(root, lock, "lifecycle task lock")
+            if state_parts[:-1] != lock_parts[:-1]:
+                raise LifecycleError(
+                    "LIFECYCLE_INVALID", "lifecycle task lock parent is invalid")
+            state_parent_fd = _open_directory_at(
+                root_fd, state_parts[:-1], create=True)
+            state_name = state_parts[-1]
+            lock_name = lock_parts[-1]
+        except LifecycleError:
+            # Preserve the explicit legacy single-state-file interface while
+            # still pinning its parent for the duration of this mutation.
+            legacy = os.environ.get("CARR_CONTEXT_STATE")
+            if not legacy or _absolute(Path(legacy)) != _absolute(path):
+                raise
+            path.parent.mkdir(parents=True, exist_ok=True)
+            state_parent_fd = os.open(
+                path.parent,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0))
+            state_name = path.name
+            lock_name = lock.name
+        try:
+            lock_fd = os.open(
+                lock_name,
+                os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                0o600, dir_fd=state_parent_fd)
+            if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
+                os.close(lock_fd)
+                raise LifecycleError(
+                    "LIFECYCLE_INVALID", "lifecycle task lock is not a regular file")
+            with os.fdopen(lock_fd, "a+b") as guard:
+                fcntl.flock(guard.fileno(), fcntl.LOCK_EX)
+                exists, current = _load_json_at(state_parent_fd, state_name)
+                if exists and not isinstance(current, dict):
                     raise LifecycleError(
-                        "LIFECYCLE_INVALID", "mutation returned invalid task state")
-                validate_task_state(updated, task_key, manifest)
-                # Observations of a terminal task, an already-drained predecessor,
-                # and exact idempotent replays are reads. Do not manufacture a new
-                # version merely because they passed through the mutation lock.
-                if before is not None and canonical(updated) == before:
-                    _cleanup_transaction(directory)
+                        "LIFECYCLE_INVALID", "state is not an object")
+                if current is not None:
+                    validate_task_state(current, task_key, manifest)
+                actual = int(current.get("version", -1)) if current else -1
+                if expected_version is not None and actual != expected_version:
+                    raise LifecycleError(
+                        "LIFECYCLE_INVALID",
+                        f"expected version {expected_version}, found {actual}")
+                before = canonical(current) if current is not None else None
+                transactions = root / "transactions"
+                transactions_fd, directory_name, directory_fd = (
+                    _create_transaction_directory(root_fd))
+                directory = transactions / directory_name
+                transaction = {
+                    "root": root, "directory": directory,
+                    "task_key": task_key, "root_fd": root_fd,
+                    "transactions_fd": transactions_fd,
+                    "directory_fd": directory_fd,
+                    "directory_name": directory_name,
+                    "state_parent_fd": state_parent_fd,
+                    "state_name": state_name,
+                    "artifacts": {}, "state_published": False,
+                    "cleaned": False,
+                }
+                _TRANSACTION_LOCAL.current = transaction
+                try:
+                    updated = change(current)
+                    if (not isinstance(updated, dict)
+                            or updated.get("task_key") != task_key):
+                        raise LifecycleError(
+                            "LIFECYCLE_INVALID",
+                            "mutation returned invalid task state")
+                    validate_task_state(updated, task_key, manifest)
+                    # Terminal observations, already-drained predecessors, and
+                    # exact idempotent replays are reads, not new versions.
+                    if before is not None and canonical(updated) == before:
+                        _cleanup_transaction_at(
+                            transactions_fd, directory_name, directory_fd)
+                        transaction["cleaned"] = True
+                        return updated
+                    updated["version"] = actual + 1
+                    updated["updated_at"] = utc_now()
+                    validate_task_state(updated, task_key, manifest)
+                    _commit_transaction(transaction, path, updated)
                     return updated
-                updated["version"] = actual + 1
-                updated["updated_at"] = utc_now()
-                validate_task_state(updated, task_key, manifest)
-                _commit_transaction(transaction, path, updated)
-                return updated
-            finally:
-                _TRANSACTION_LOCAL.current = None
-                if not transaction["state_published"]:
-                    _cleanup_transaction(directory)
+                finally:
+                    _TRANSACTION_LOCAL.current = None
+                    if (not transaction["state_published"]
+                            and not transaction["cleaned"]):
+                        _cleanup_transaction_at(
+                            transactions_fd, directory_name, directory_fd)
+                    os.close(directory_fd)
+                    os.close(transactions_fd)
+        finally:
+            os.close(state_parent_fd)
 
 
 def read_state(task_key: str, manifest: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -1014,8 +1201,11 @@ def write_immutable(task_key: str, kind: str, value: Any,
     path = object_path(task_key, kind, object_digest, manifest)
     transaction = _active_transaction(task_key)
     if transaction is not None:
-        existing = load_json_file(path)
-        if existing is not None:
+        exists, existing = _transaction_public_value(path)
+        if exists:
+            if existing is None:
+                raise LifecycleError(
+                    "HANDOFF_RECEIPT_INVALID", f"invalid published {kind}")
             if digest(existing) != object_digest:
                 raise LifecycleError(
                     "HANDOFF_RECEIPT_INVALID", "immutable object collision")
@@ -1098,8 +1288,8 @@ def claim_identity(surface: str, identity: str, task_key: str,
     path = identity_binding_path(surface, identity, manifest)
     transaction = _active_transaction(task_key)
     if transaction is not None:
-        existing = load_json_file(path)
-        if existing is not None:
+        exists, existing = _transaction_public_value(path)
+        if exists:
             if existing != value:
                 raise LifecycleError(
                     "OWNERSHIP_MISMATCH",
@@ -1157,7 +1347,11 @@ def verify_identity_binding(task_key: str, owner: dict[str, Any],
             str(owner.get("surface")), str(owner.get("id")), manifest)
         binding = _transaction_value(path)
         if binding is None:
-            binding = load_json_file(path)
+            transaction = _active_transaction(task_key)
+            if transaction is not None:
+                _exists, binding = _transaction_public_value(path)
+            else:
+                binding = load_json_file(path)
         expected = {
             "schema_version": 1, "surface": owner.get("surface"),
             "identity": owner.get("id"), "task_key": task_key,
@@ -1177,7 +1371,11 @@ def read_identity_binding(surface: str, identity: str,
         path = identity_binding_path(surface, identity, manifest)
         binding = _transaction_value(path)
         if binding is None:
-            binding = load_json_file(path)
+            transaction = _active_transaction()
+            if transaction is not None:
+                _exists, binding = _transaction_public_value(path)
+            else:
+                binding = load_json_file(path)
         if binding is None:
             return None
         if (set(binding) != {
@@ -1260,15 +1458,23 @@ def read_object(task_key: str, kind: str, object_digest: str,
         path = object_path(task_key, kind, object_digest, manifest)
         value = _transaction_value(path)
         if value is None:
-            try:
-                value = json.loads(path.read_text(encoding="utf-8"))
-            except FileNotFoundError as exc:
-                raise LifecycleError(
-                    "HANDOFF_RECEIPT_MISSING",
-                    f"missing {kind} {object_digest}") from exc
-            except Exception as exc:
-                raise LifecycleError(
-                    "HANDOFF_RECEIPT_INVALID", f"invalid {kind}: {exc}") from exc
+            transaction = _active_transaction(task_key)
+            if transaction is not None:
+                exists, value = _transaction_public_value(path)
+                if not exists:
+                    raise LifecycleError(
+                        "HANDOFF_RECEIPT_MISSING",
+                        f"missing {kind} {object_digest}")
+            else:
+                try:
+                    value = json.loads(path.read_text(encoding="utf-8"))
+                except FileNotFoundError as exc:
+                    raise LifecycleError(
+                        "HANDOFF_RECEIPT_MISSING",
+                        f"missing {kind} {object_digest}") from exc
+                except Exception as exc:
+                    raise LifecycleError(
+                        "HANDOFF_RECEIPT_INVALID", f"invalid {kind}: {exc}") from exc
         if not isinstance(value, dict) or digest(value) != object_digest:
             raise LifecycleError(
                 "HANDOFF_RECEIPT_INVALID", f"tampered {kind} {object_digest}")
@@ -1576,6 +1782,11 @@ def resolve_window(rows: list[dict[str, Any]], manifest: dict[str, Any]) -> dict
 
     bindings = manifest.get("model_windows", {})
     models = latest_models(rows)
+    # Distinct declarations in the newest authoritative row are contradictory
+    # even when they map to the same numeric window, or one is unknown. Never
+    # reduce identity ambiguity into apparent numeric agreement.
+    if len(models) > 1:
+        return {"ok": False, "reason": "CONTEXT_SIGNAL_AMBIGUOUS", "tier": "model"}
     bound: set[int] = set()
     malformed = False
     for model in models:
@@ -1846,7 +2057,8 @@ def context_decision(rows: list[dict[str, Any]], state: dict[str, Any],
                 "crossed": crossed, "fallback_level": fallback,
                 "reason": "CONTEXT_HANDOFF_REQUIRED" if crossed else None}
     reason = window.get("reason") or "CONTEXT_SIGNAL_UNAVAILABLE"
-    control_error = reason == "WINDOW_CONFIG_INVALID"
+    control_error = reason in {
+        "WINDOW_CONFIG_INVALID", "CONTEXT_SIGNAL_AMBIGUOUS"}
     return {"available": False, "used": used or None, "dense": is_dense,
             "crossed": bool(fallback) or control_error,
             "fallback_level": fallback,
@@ -1987,8 +2199,10 @@ def hook_main() -> int:
                 "OWNERSHIP_MISMATCH")).decode("utf-8"))
         return 0
     if event == "Stop" and signal.get("crossed"):
-        reason_code = ("WINDOW_CONFIG_INVALID"
-                       if signal.get("reason") == "WINDOW_CONFIG_INVALID"
+        signal_reason = signal.get("reason")
+        reason_code = (signal_reason
+                       if signal_reason in {
+                           "WINDOW_CONFIG_INVALID", "CONTEXT_SIGNAL_AMBIGUOUS"}
                        else "CONTEXT_HANDOFF_REQUIRED")
         print(canonical(block_payload(
             task_key, state["version"], signal, reason_code)).decode("utf-8"))
