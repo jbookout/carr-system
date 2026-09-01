@@ -187,6 +187,14 @@ case "$RULE_DELIVERY_DIGEST_REPIN_APPLIED" in
   *) echo "schema-snapshot: could not read the rule-delivery digest-repin ledger state" >&2; exit 1 ;;
 esac
 
+SOURCE_MERGE_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0471_source_merge_catalog_registry_successor.sql')" \
+  2>/dev/null)"
+case "$SOURCE_MERGE_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the source-merge registry ledger state" >&2; exit 1 ;;
+esac
+
 # pg_dump renders timestamptz in the server session timezone; pin it so the
 # Production and disposable-local paths serialize identical instants alike.
 export PGOPTIONS='-c timezone=UTC'
@@ -824,24 +832,30 @@ fi
 
 if [ "$RULE_DELIVERY_CUTOVER_APPLIED" = t ]; then
   # Preserve the exact ledger-visible postimage. A source with 0363 already
-  # applied gets the current eight-row set; earlier ledgers keep the historical
-  # nine-row preimages needed by their pending guarded transitions.
+  # applied gets its eight-row set; 0471 alone advances that set to the new
+  # rule-map digest. Earlier ledgers keep the historical nine-row preimages
+  # needed by their pending guarded transitions.
   if [ "$RULE_DELIVERY_DIGEST_REPIN_APPLIED" = t ]; then
-cat >> "$TMP" <<'RULE_DELIVERY_ACTIVATION_TARGETS_POST_0363'
--- CARR RULE DELIVERY ACTIVATION TARGETS POST-0363 (bin/schema-snapshot.sh) — exact reviewed cutover config.
+    if [ "$SOURCE_MERGE_REGISTRY_APPLIED" = t ]; then
+      RULE_DELIVERY_CURRENT_MAP_DIGEST="5b0f93d82dc2127bc721d8a091a5c637b9d2eaf4e492f660306527bc5ae80c98"
+    else
+      RULE_DELIVERY_CURRENT_MAP_DIGEST="f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904"
+    fi
+cat >> "$TMP" <<RULE_DELIVERY_ACTIVATION_TARGETS_POST_0363
+-- CARR RULE DELIVERY ACTIVATION TARGETS POST-0363/0471 (bin/schema-snapshot.sh) — exact reviewed cutover config.
 insert into ops.rule_delivery_activation_target
   (short_id,expected_scope,expected_pack,
    from_control,from_enforcement_class,from_implementation_ref,from_test_ref,
    to_control,to_enforcement_class,to_implementation_ref,to_test_ref,map_digest)
 values
- ('25fcddee','shared','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
- ('3fa17fa0','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
- ('72e06bdf','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
- ('113b3833','joe','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
- ('57d13061','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
- ('c66dc739','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
- ('49533583','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904'),
- ('557838a5','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904')
+ ('25fcddee','shared','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','${RULE_DELIVERY_CURRENT_MAP_DIGEST}'),
+ ('3fa17fa0','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','${RULE_DELIVERY_CURRENT_MAP_DIGEST}'),
+ ('72e06bdf','shared','client-deal','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','${RULE_DELIVERY_CURRENT_MAP_DIGEST}'),
+ ('113b3833','joe','governance-rules','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','${RULE_DELIVERY_CURRENT_MAP_DIGEST}'),
+ ('57d13061','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','${RULE_DELIVERY_CURRENT_MAP_DIGEST}'),
+ ('c66dc739','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','${RULE_DELIVERY_CURRENT_MAP_DIGEST}'),
+ ('49533583','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','${RULE_DELIVERY_CURRENT_MAP_DIGEST}'),
+ ('557838a5','joe','joe-comms','session_boot','surfacing','hooks/session-brief.py; hooks/machine-converge.py; mcp-server/src/mcp.js','command:python3 hooks/gate-integrity.py --selftest','pack_delivery','stop_gate','hooks/rule-pack-drift-gate.py; hooks/rule-pack-preuse-reselection.py','ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; ops/rule-pack-preuse-reselection-selftest.py','${RULE_DELIVERY_CURRENT_MAP_DIGEST}')
 on conflict (short_id) do nothing;
 
 RULE_DELIVERY_ACTIVATION_TARGETS_POST_0363
@@ -1127,8 +1141,8 @@ SIEP_FOOTER
 fi
 
 # THE SCAC MUTATION REGISTRY is bounded, immutable security configuration.
-# Once 0468 enters this snapshot's ledger, none of the nine seed migrations
-# replay; omitting these rows would leave every exact registry lookup empty.
+# Once 0468 enters this snapshot's ledger, the seed chain no longer replays;
+# omitting a ledger-visible successor would leave its exact lookups empty.
 # Carry only the sealed version headers and their exact entry sets. Policy
 # epochs, monitor receipts, token evidence, and other runtime state stay out.
 SCAC_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
@@ -1140,39 +1154,58 @@ case "$SCAC_REGISTRY_APPLIED" in
 esac
 
 if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
-  SCAC_V9_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v9.generated.js"
-  SCAC_EXPECTED_V9_DIGEST="$(sed -n 's/^export const SCAC_MUTATION_REGISTRY_DIGEST = "\([0-9a-f]\{64\}\)";$/\1/p' "$SCAC_V9_RUNTIME")"
-  SCAC_EXPECTED_V9_SOURCE_SET="$(sed -n 's/^export const SCAC_MUTATION_SOURCE_CONTRACT_SET_DIGEST = "\([0-9a-f]\{64\}\)";$/\1/p' "$SCAC_V9_RUNTIME")"
-  SCAC_EXPECTED_V9_CATALOG="$(sed -n 's/^export const SCAC_MUTATION_DB_CATALOG_BASELINE_DIGEST = "\([0-9a-f]\{64\}\)";$/\1/p' "$SCAC_V9_RUNTIME")"
-  case "$SCAC_EXPECTED_V9_DIGEST$SCAC_EXPECTED_V9_SOURCE_SET$SCAC_EXPECTED_V9_CATALOG" in
-    ''|*[!0-9a-f]*) echo "schema-snapshot: reviewed SCAC v9 runtime seals are malformed" >&2; exit 1 ;;
+  if [ "$SOURCE_MERGE_REGISTRY_APPLIED" = t ]; then
+    SCAC_CURRENT_NUMBER=10
+    SCAC_VERSION_COUNT=10
+    SCAC_TOTAL_ENTRY_COUNT=14108
+    SCAC_CURRENT_ENTRY_COUNT=1448
+    SCAC_CURRENT_SOURCE_COUNT=804
+    SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v10.generated.js"
+    SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10'"
+    SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9'"
+    SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v10_current()"
+  else
+    SCAC_CURRENT_NUMBER=9
+    SCAC_VERSION_COUNT=9
+    SCAC_TOTAL_ENTRY_COUNT=12660
+    SCAC_CURRENT_ENTRY_COUNT=1439
+    SCAC_CURRENT_SOURCE_COUNT=800
+    SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v9.generated.js"
+    SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9'"
+    SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8'"
+    SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v9_current()"
+  fi
+  SCAC_EXPECTED_CURRENT_DIGEST="$(sed -n 's/^export const SCAC_MUTATION_REGISTRY_DIGEST = "\([0-9a-f]\{64\}\)";$/\1/p' "$SCAC_CURRENT_RUNTIME")"
+  SCAC_EXPECTED_CURRENT_SOURCE_SET="$(sed -n 's/^export const SCAC_MUTATION_SOURCE_CONTRACT_SET_DIGEST = "\([0-9a-f]\{64\}\)";$/\1/p' "$SCAC_CURRENT_RUNTIME")"
+  SCAC_EXPECTED_CURRENT_CATALOG="$(sed -n 's/^export const SCAC_MUTATION_DB_CATALOG_BASELINE_DIGEST = "\([0-9a-f]\{64\}\)";$/\1/p' "$SCAC_CURRENT_RUNTIME")"
+  case "$SCAC_EXPECTED_CURRENT_DIGEST$SCAC_EXPECTED_CURRENT_SOURCE_SET$SCAC_EXPECTED_CURRENT_CATALOG" in
+    ''|*[!0-9a-f]*) echo "schema-snapshot: reviewed SCAC v${SCAC_CURRENT_NUMBER} runtime seals are malformed" >&2; exit 1 ;;
   esac
-  [ "${#SCAC_EXPECTED_V9_DIGEST}" -eq 64 ] &&
-    [ "${#SCAC_EXPECTED_V9_SOURCE_SET}" -eq 64 ] && [ "${#SCAC_EXPECTED_V9_CATALOG}" -eq 64 ] || {
-    echo "schema-snapshot: reviewed SCAC v9 source or catalog seal is malformed" >&2; exit 1
+  [ "${#SCAC_EXPECTED_CURRENT_DIGEST}" -eq 64 ] &&
+    [ "${#SCAC_EXPECTED_CURRENT_SOURCE_SET}" -eq 64 ] && [ "${#SCAC_EXPECTED_CURRENT_CATALOG}" -eq 64 ] || {
+    echo "schema-snapshot: reviewed SCAC v${SCAC_CURRENT_NUMBER} source or catalog seal is malformed" >&2; exit 1
   }
-  SCAC_EXPECTED_V9_DIGEST="sha256:$SCAC_EXPECTED_V9_DIGEST"
-  SCAC_EXPECTED_V9_SOURCE_SET="sha256:$SCAC_EXPECTED_V9_SOURCE_SET"
-  SCAC_EXPECTED_V9_CATALOG="sha256:$SCAC_EXPECTED_V9_CATALOG"
+  SCAC_EXPECTED_CURRENT_DIGEST="sha256:$SCAC_EXPECTED_CURRENT_DIGEST"
+  SCAC_EXPECTED_CURRENT_SOURCE_SET="sha256:$SCAC_EXPECTED_CURRENT_SOURCE_SET"
+  SCAC_EXPECTED_CURRENT_CATALOG="sha256:$SCAC_EXPECTED_CURRENT_CATALOG"
   SCAC_FULL_SET_SEALS="$REPO/ops/config/scac-registry-full-entry-set-seals.json"
   SCAC_FULL_SET_SQL="$(node -e '
     const fs=require("fs"); const seals=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
-    const keys=Array.from({length:9},(_,i)=>`scac-mutation-registry.v${i+1}`);
-    if (Object.keys(seals).sort().join("|")!==keys.sort().join("|") ||
-        keys.some(key=>!/^sha256:[0-9a-f]{64}$/.test(seals[key]))) process.exit(2);
+    const allKeys=Array.from({length:10},(_,i)=>`scac-mutation-registry.v${i+1}`);
+    const count=Number(process.argv[2]); const keys=allKeys.slice(0,count);
+    if (Object.keys(seals).sort().join("|")!==allKeys.sort().join("|") ||
+        !Number.isInteger(count) || count<9 || count>10 ||
+        allKeys.some(key=>!/^sha256:[0-9a-f]{64}$/.test(seals[key]))) process.exit(2);
     const quote=String.fromCharCode(39);
     const literal=value=>quote+String(value).replaceAll(quote,quote+quote)+quote;
     process.stdout.write(keys.map(key=>`(${literal(key)},${literal(seals[key])})`).join(","));
-  ' "$SCAC_FULL_SET_SEALS")" || {
+  ' "$SCAC_FULL_SET_SEALS" "$SCAC_VERSION_COUNT")" || {
     echo "schema-snapshot: immutable SCAC full-entry-set seals are unavailable or malformed" >&2; exit 1
   }
   SCAC_REGISTRY_EXACT="$("$PSQL" "$URL" -Atqc \
-    "select count(*)=9
-       and array_agg(registry_version order by registry_version collate \"C\")=array[
-         'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3',
-         'scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6',
-         'scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9']::text[]
-       and sum(entry_count)=12660
+    "select count(*)=$SCAC_VERSION_COUNT
+       and array_agg(registry_version order by split_part(registry_version,'.v',2)::integer)=array[$SCAC_VERSION_ARRAY]::text[]
+       and sum(entry_count)=$SCAC_TOTAL_ENTRY_COUNT
        and bool_and(entry_count=(select count(*) from ops.scac_mutation_registry_entry e
                                   where e.registry_version=v.registry_version))
        and bool_and(entry_set_digest=(select 'sha256:'||encode(public.digest(
@@ -1185,28 +1218,25 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
        and not exists(select 1 from ops.scac_mutation_registry_entry e
          where e.entry_digest is distinct from 'sha256:'||encode(public.digest(
            convert_to(ops.scac_canonical_json(e.contract),'UTF8'),'sha256'),'hex'))
-       and not exists(select 1 from unnest(array[
-         'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3',
-         'scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6',
-         'scac-mutation-registry.v7','scac-mutation-registry.v8']) historical(registry_version)
+       and not exists(select 1 from unnest(array[$SCAC_HISTORICAL_ARRAY]) historical(registry_version)
          where not ops.scac_mutation_registry_seal_valid(historical.registry_version))
-       and (select registry_digest='$SCAC_EXPECTED_V9_DIGEST' and entry_count=1439 and source_entry_count=800
-              from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v9')
-       and (select 'sha256:'||encode(public.digest(convert_to(string_agg(e.entry_digest,',' order by e.entry_digest collate \"C\"),'UTF8'),'sha256'),'hex')='$SCAC_EXPECTED_V9_SOURCE_SET'
-              from ops.scac_mutation_registry_entry e where e.registry_version='scac-mutation-registry.v9'
+       and (select registry_digest='$SCAC_EXPECTED_CURRENT_DIGEST' and entry_count=$SCAC_CURRENT_ENTRY_COUNT and source_entry_count=$SCAC_CURRENT_SOURCE_COUNT
+              from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v$SCAC_CURRENT_NUMBER')
+       and (select 'sha256:'||encode(public.digest(convert_to(string_agg(e.entry_digest,',' order by e.entry_digest collate \"C\"),'UTF8'),'sha256'),'hex')='$SCAC_EXPECTED_CURRENT_SOURCE_SET'
+              from ops.scac_mutation_registry_entry e where e.registry_version='scac-mutation-registry.v$SCAC_CURRENT_NUMBER'
                 and e.ingress_kind not in ('db_function_acl','db_relation_acl','db_column_acl'))
-       and (select 'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(v.catalog_projection),'UTF8'),'sha256'),'hex')='$SCAC_EXPECTED_V9_CATALOG'
-              from ops.scac_mutation_registry_version v where v.registry_version='scac-mutation-registry.v9')
-       and ops.scac_mutation_catalog_v9_current()
+       and (select 'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(v.catalog_projection),'UTF8'),'sha256'),'hex')='$SCAC_EXPECTED_CURRENT_CATALOG'
+              from ops.scac_mutation_registry_version v where v.registry_version='scac-mutation-registry.v$SCAC_CURRENT_NUMBER')
+       and $SCAC_CURRENT_CATALOG_FUNCTION
      from ops.scac_mutation_registry_version v" 2>/dev/null)"
   [ "$SCAC_REGISTRY_EXACT" = t ] || {
-    echo "schema-snapshot: SCAC v1-v9 registry is missing or internally drifted — nothing written" >&2
+    echo "schema-snapshot: SCAC v1-v${SCAC_CURRENT_NUMBER} registry is missing or internally drifted — nothing written" >&2
     exit 1
   }
 
-  cat >> "$TMP" <<'SCAC_REGISTRY_HEADER'
+  cat >> "$TMP" <<SCAC_REGISTRY_HEADER
 
--- CARR SCAC MUTATION REGISTRY V1-V9 (bin/schema-snapshot.sh) — immutable,
+-- CARR SCAC MUTATION REGISTRY V1-V${SCAC_CURRENT_NUMBER} (bin/schema-snapshot.sh) — immutable,
 -- internally digest-verified security configuration. The append-only triggers
 -- are disabled only while restoring the exact sealed rows and re-enabled
 -- before the closing verification block.
@@ -1235,7 +1265,7 @@ alter table ops.scac_mutation_registry_entry enable trigger scac_mutation_regist
 alter table ops.scac_mutation_registry_version enable trigger scac_mutation_registry_version_sealed;
 do \$carr_scac_registry\$
 begin
-  if not (select count(*)=9 and sum(entry_count)=12660 and
+  if not (select count(*)=${SCAC_VERSION_COUNT} and sum(entry_count)=${SCAC_TOTAL_ENTRY_COUNT} and
       bool_and(entry_count=(select count(*) from ops.scac_mutation_registry_entry e
                             where e.registry_version=v.registry_version)) and
       bool_and(entry_set_digest=(select 'sha256:'||encode(public.digest(
@@ -1243,30 +1273,27 @@ begin
         'sha256'),'hex') from ops.scac_mutation_registry_entry e
         where e.registry_version=v.registry_version))
     from ops.scac_mutation_registry_version v) then
-    raise exception 'restored SCAC v1-v9 registry is incomplete or digest-drifted';
+    raise exception 'restored SCAC v1-v${SCAC_CURRENT_NUMBER} registry is incomplete or digest-drifted';
   end if;
   if exists(select 1 from (values ${SCAC_FULL_SET_SQL}) expected(registry_version,entry_set_digest)
        left join ops.scac_mutation_registry_version sealed using(registry_version)
        where sealed.entry_set_digest is distinct from expected.entry_set_digest) then
     raise exception 'restored SCAC registry does not match immutable full-entry-set seals';
   end if;
-  if exists(select 1 from unnest(array[
-       'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3',
-       'scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6',
-       'scac-mutation-registry.v7','scac-mutation-registry.v8']) historical(registry_version)
+  if exists(select 1 from unnest(array[${SCAC_HISTORICAL_ARRAY}]) historical(registry_version)
        where not ops.scac_mutation_registry_seal_valid(historical.registry_version)) or
-     not (select registry_digest='${SCAC_EXPECTED_V9_DIGEST}' and entry_count=1439 and source_entry_count=800
-            from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v9') or
-     not (select 'sha256:'||encode(public.digest(convert_to(string_agg(e.entry_digest,',' order by e.entry_digest collate "C"),'UTF8'),'sha256'),'hex')='${SCAC_EXPECTED_V9_SOURCE_SET}'
-            from ops.scac_mutation_registry_entry e where e.registry_version='scac-mutation-registry.v9'
+     not (select registry_digest='${SCAC_EXPECTED_CURRENT_DIGEST}' and entry_count=${SCAC_CURRENT_ENTRY_COUNT} and source_entry_count=${SCAC_CURRENT_SOURCE_COUNT}
+            from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v${SCAC_CURRENT_NUMBER}') or
+     not (select 'sha256:'||encode(public.digest(convert_to(string_agg(e.entry_digest,',' order by e.entry_digest collate "C"),'UTF8'),'sha256'),'hex')='${SCAC_EXPECTED_CURRENT_SOURCE_SET}'
+            from ops.scac_mutation_registry_entry e where e.registry_version='scac-mutation-registry.v${SCAC_CURRENT_NUMBER}'
               and e.ingress_kind not in ('db_function_acl','db_relation_acl','db_column_acl')) or
-     not (select 'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(v.catalog_projection),'UTF8'),'sha256'),'hex')='${SCAC_EXPECTED_V9_CATALOG}'
-            from ops.scac_mutation_registry_version v where v.registry_version='scac-mutation-registry.v9') or
-     not ops.scac_mutation_catalog_v9_current() or
+     not (select 'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(v.catalog_projection),'UTF8'),'sha256'),'hex')='${SCAC_EXPECTED_CURRENT_CATALOG}'
+            from ops.scac_mutation_registry_version v where v.registry_version='scac-mutation-registry.v${SCAC_CURRENT_NUMBER}') or
+     not ${SCAC_CURRENT_CATALOG_FUNCTION} or
      exists(select 1 from ops.scac_mutation_registry_entry e
        where e.entry_digest is distinct from 'sha256:'||encode(public.digest(
          convert_to(ops.scac_canonical_json(e.contract),'UTF8'),'sha256'),'hex')) then
-    raise exception 'restored SCAC registry failed exact historical, v9, or per-entry contract seals';
+    raise exception 'restored SCAC registry failed exact historical, current, or per-entry contract seals';
   end if;
 end
 \$carr_scac_registry\$;
