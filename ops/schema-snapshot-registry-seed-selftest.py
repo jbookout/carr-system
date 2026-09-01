@@ -3,6 +3,7 @@
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 
@@ -49,6 +50,20 @@ assert "SCAC_EXPECTED_V9_SOURCE_SET" in GENERATOR
 assert "SCAC_EXPECTED_V9_CATALOG" in GENERATOR
 assert GENERATOR.count("order by e.entry_digest collate") >= 2
 assert "not ops.scac_mutation_catalog_v9_current()" in GENERATOR
+
+loader_start = GENERATOR.index("SCAC_FULL_SET_SQL=\"$(node -e '\n") + len(
+    "SCAC_FULL_SET_SQL=\"$(node -e '\n"
+)
+loader_end = GENERATOR.index("\n  ' \"$SCAC_FULL_SET_SEALS\")\"", loader_start)
+loader = GENERATOR[loader_start:loader_end]
+loaded_sql = subprocess.run(
+    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json")],
+    check=True,
+    capture_output=True,
+    text=True,
+).stdout
+assert loaded_sql.count("scac-mutation-registry.v") == 9
+assert loaded_sql.count("sha256:") == 9
 
 # Model the exact attack the SQL predicate closes: changing the canonical
 # contract necessarily invalidates the retained digest.

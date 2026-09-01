@@ -1160,7 +1160,8 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
     const keys=Array.from({length:9},(_,i)=>`scac-mutation-registry.v${i+1}`);
     if (Object.keys(seals).sort().join("|")!==keys.sort().join("|") ||
         keys.some(key=>!/^sha256:[0-9a-f]{64}$/.test(seals[key]))) process.exit(2);
-    const literal=value=>`'${String(value).replaceAll("'","''")}'`;
+    const quote=String.fromCharCode(39);
+    const literal=value=>quote+String(value).replaceAll(quote,quote+quote)+quote;
     process.stdout.write(keys.map(key=>`(${literal(key)},${literal(seals[key])})`).join(","));
   ' "$SCAC_FULL_SET_SEALS")" || {
     echo "schema-snapshot: immutable SCAC full-entry-set seals are unavailable or malformed" >&2; exit 1
