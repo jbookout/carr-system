@@ -88,7 +88,10 @@ jobs:
   checks:
     name: ops/ci.sh --strict
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Full strict now includes 330+ gate fixtures and 52 DB programs. The
+    # 2026-09-01 merge-ref run finished every class green in 19m46s of test
+    # time, then GitHub cancelled it at the old 20-minute job ceiling.
+    timeout-minutes: 30
 
     services:
       # The migration class needs a database to apply 130 forward migrations to.
