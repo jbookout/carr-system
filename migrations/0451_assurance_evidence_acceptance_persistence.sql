@@ -6,8 +6,7 @@
 -- does not grant execution, install a runtime, or make the A1a compiler's
 -- deliberately non-authorizing manifest authoritative.
 
--- (transaction wrapper removed 2026-09-01: the migration runner supplies the
--- single transaction, and the post-0339 lint forbids explicit control here)
+begin;
 
 create table ops.assurance_execution_manifest (
   id uuid primary key default gen_random_uuid(),
@@ -1614,3 +1613,5 @@ begin
     end if;
   end loop;
 end $$;
+
+commit;
