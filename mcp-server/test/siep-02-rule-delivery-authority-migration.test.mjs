@@ -7,7 +7,6 @@ const migration = await readFile(new URL("../../migrations/0452_siep02_rule_deli
 const runtime = await readFile(new URL("../../ops/rule-delivery-cutover.py", import.meta.url), "utf8");
 const wrapper = await readFile(new URL("../../bin/rule-delivery-cutover-prod.sh", import.meta.url), "utf8");
 const controllerSuccessor = await readFile(new URL("../../migrations/0363_rule_delivery_activation_digest_repin.sql", import.meta.url), "utf8");
-const sourceMergeSuccessor = await readFile(new URL("../../migrations/0471_source_merge_catalog_registry_successor.sql", import.meta.url), "utf8");
 const mapBytes = await readFile(new URL("../../ops/config/rule-enforcement-map.json", import.meta.url));
 const overlay = JSON.parse(await readFile(new URL("../../ops/config/rule-delivery-activation-overlay.v1.json", import.meta.url), "utf8"));
 const currentMapDigest = createHash("sha256").update(mapBytes).digest("hex");
@@ -51,7 +50,7 @@ test("SIEP-02 does not activate or deploy rule delivery", () => {
 
 test("the controller successor owns the exact nine-to-eight shadow transition", () => {
   assert.equal(overlay.base_map_sha256, currentMapDigest);
-  assert.match(sourceMergeSuccessor, new RegExp(currentMapDigest));
+  assert.match(controllerSuccessor, new RegExp(currentMapDigest));
   assert.match(controllerSuccessor, /v_prior constant text := '4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'/);
   assert.match(controllerSuccessor, /cardinality\(v_prior_ids\)/);
   assert.match(controllerSuccessor, /cardinality\(v_ids\)/);

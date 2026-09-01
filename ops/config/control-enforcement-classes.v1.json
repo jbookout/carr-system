@@ -47,7 +47,6 @@
     "session_boot": "stop_gate",
     "settings_change": "deny_gate",
     "shared_rename_absence": "schema",
-    "source_merge_eligibility": "deny_gate",
     "staged_gate_bless": "deny_gate",
     "stale_claim": "stop_gate",
     "stale_count": "schema",
@@ -98,6 +97,26 @@
         "ops/platform-metering-gate-selftest.py",
         "ops/platform-metering-policy-selftest.py",
         "ops/guard-selftest.py"
+      ]
+    },
+    "source_merge_eligibility": {
+      "enforcement_class": "deny_gate",
+      "failure_mode": "controller refuses merge and exposes no merge action",
+      "implementation": [
+        ".github/workflows/source-merge-controller.yml",
+        "mcp-server/src/engineering-runtime.js",
+        "mcp-server/src/work-request-intake.js",
+        "mcp-server/src/source-merge-policy.js",
+        "mcp-server/bin/run-source-merge.mjs",
+        "migrations/0470_source_merge_authority_projection.sql",
+        "ops/source-merge-authority-local-pg-gate.py"
+      ],
+      "test": [
+        "mcp-server/test/engineering-runtime.test.mjs",
+        "mcp-server/test/source-merge-policy.test.mjs",
+        "mcp-server/test/source-merge-migration.test.mjs",
+        "mcp-server/test/work-request-ready-plan.test.mjs",
+        "ops/local-pg-ci-selftest.py"
       ]
     }
   },

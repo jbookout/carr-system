@@ -1823,8 +1823,8 @@ export function renderSourceMergeForwardRegistrySql(rows = fullInventory(),
   const targetTuples = overlay.targets.map(target =>
     `('${target.short_id}','${target.scope}','${target.pack}')`).join(",\n        ");
   const priorMapDigest = "f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904";
-  const ruleMapRepinSql =
-`-- The map change adds one control only; repin the unchanged exact eight delivery targets.\n` +
+  const ruleMapRepinSql = mapDigest === priorMapDigest ? "" :
+`-- The rule map changed; repin the unchanged exact eight delivery targets.\n` +
 `do $rule_map_repin$\n` +
 `declare updated bigint;\n` +
 `begin\n` +
@@ -1844,7 +1844,7 @@ export function renderSourceMergeForwardRegistrySql(rows = fullInventory(),
 `  get diagnostics updated=row_count;\n` +
 `  if updated<>8 then raise exception '0471 REFUSED: expected eight exact rule-delivery target repins, changed %',updated; end if;\n` +
 `end $rule_map_repin$;\n`;
-  return `${predecessorCatalogPreflight}${controlSql}\n${ruleMapRepinSql}\n${sql}`.replace(/\n+$/, "\n");
+  return `${predecessorCatalogPreflight}${controlSql}\n${ruleMapRepinSql}${sql}`.replace(/\n+$/, "\n");
 }
 
 function renderMigration(rows = fullInventory()) {
