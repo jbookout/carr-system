@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Derive the R03 settlement's RESTORE set, fail-closed.
 
 WHY THIS IS ITS OWN MODULE AND NOT A LOOP INSIDE THE AUTHORING SCRIPT.
