@@ -418,7 +418,18 @@ def _archive_and_verify(repository: Path, manifest: Mapping[str, Any], parsed: M
     if stat.S_IMODE(archive_path.stat().st_mode) != 0o600:
         raise SweepError("encrypted archive is not mode 600")
     digest_path = archive_dir / f"repo-hygiene-park-{parsed['run_id']}.tar.gz.age.sha256"
-    _write_private(digest_path, (hashlib.sha256(archive_path.read_bytes()).hexdigest() + "\n").encode("ascii"))
+    # Hash the archive in chunks rather than reading it whole. The archive is
+    # written by a streaming tar|age pipe and can run to hundreds of megabytes
+    # -- the parked set here is 1.3GB before compression -- so read_bytes() put
+    # the entire file in memory for no reason. On 2026-09-02 a settlement run on
+    # this host was killed outright with swap at 500MB free, and a single
+    # allocation that size is exactly the shape that dies. Chunked hashing gives
+    # the identical digest at constant memory.
+    archive_hash = hashlib.sha256()
+    with archive_path.open("rb") as archive_reader:
+        for block in iter(lambda: archive_reader.read(1024 * 1024), b""):
+            archive_hash.update(block)
+    _write_private(digest_path, (archive_hash.hexdigest() + "\n").encode("ascii"))
 
     with tempfile.TemporaryDirectory(prefix="r03-park-restore-") as temporary:
         restore_root = Path(temporary)
