@@ -266,7 +266,7 @@ def list_user_tables(cur) -> list[tuple[str, str]]:
 
 def table_digest(cur, schema: str, table: str, exclude_keys: list[dict] | None = None) -> str:
     ident = psql.Identifier(schema, table)
-    where = psql.SQL("")
+    where: psql.SQL | psql.Composed = psql.SQL("")
     params: list = []
     if exclude_keys:
         clauses = []

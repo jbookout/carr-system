@@ -466,7 +466,7 @@ def canonicalize_type(t):
 # rather than just name, so a hypothetical arg-count collision would fall
 # back to the raw text instead of guessing (verified: zero collisions occur
 # across the 109 real functions in this corpus).
-FUNCTION_SIGNATURE_INDEX = {}
+FUNCTION_SIGNATURE_INDEX: dict[tuple[str, int], str] = {}
 
 
 def parse_name_and_type_from_param(param_text):
@@ -740,7 +740,7 @@ def object_identity_and_kind(obj_text, explicit_kind):
 # already-granted (object, grantee, privilege) triple occur anywhere in this
 # corpus (verified empirically -- filtering GRANT the same way changes
 # nothing), so filtering it would add risk without changing any output.
-ACL_GRANTED_STATE = {}
+ACL_GRANTED_STATE: dict[tuple[str, str, str, str], bool] = {}
 
 
 def handle_grant_revoke(stmt, filename, is_grant):

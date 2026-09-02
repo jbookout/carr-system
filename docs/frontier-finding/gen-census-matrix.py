@@ -41,6 +41,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from typing import Any
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # docs/frontier-finding/gen-census-matrix.py -> REPO is two dirs up.
@@ -143,7 +144,7 @@ def build_expected(frontier_file_digests: dict) -> dict:
         if result is None:
             continue
         version, projection = result
-        categories = {}
+        categories: dict[str, Any] = {}
         for cat in CENSUS_CATEGORIES:
             entry = projection.get(cat)
             if entry is None:
@@ -441,7 +442,7 @@ def run_tap(sql_text: str, receipts: list) -> dict:
 def build_observed(census_sql_path: str, do_tap: bool) -> tuple[dict, list]:
     blocks = split_census_queries(census_sql_path)
     observed = {}
-    receipts = []
+    receipts: list[dict[str, Any]] = []
     for cat in CENSUS_CATEGORIES:
         if not do_tap:
             observed[cat] = {
@@ -460,9 +461,9 @@ def build_observed(census_sql_path: str, do_tap: bool) -> tuple[dict, list]:
 # ---------------------------------------------------------------------------
 
 def build_deltas(expected: dict, observed: dict) -> dict:
-    deltas = {}
+    deltas: dict[str, Any] = {}
     for cat in CENSUS_CATEGORIES:
-        by_version = {}
+        by_version: dict[str, Any] = {}
         for v in VERSION_ORDER:
             pin = expected[v]["categories"][cat]
             if pin == "not_applicable":

@@ -37,6 +37,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -51,6 +52,8 @@ TEST_RECEIPTS_PATH = RECEIPTS_DIR / "test-receipts.jsonl"
 sys.path.insert(0, str(HERE))
 import importlib.util
 _spec = importlib.util.spec_from_file_location("breakglass_run", HERE / "breakglass-run.py")
+if _spec is None or _spec.loader is None:
+    sys.exit("breakglass-tests: breakglass-run.py is unavailable")
 breakglass_run = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(breakglass_run)
 
@@ -219,7 +222,7 @@ def fetch_family_row(dsn: str, family: str, identity_key: str) -> dict | None:
     with psycopg.connect(dsn) as conn:
         with conn.cursor() as cur:
             cur.execute(blocks[family])
-            rows = dict(cur.fetchall())
+            rows: dict[str, Any] = dict(cur.fetchall())
     return rows.get(identity_key)
 
 
@@ -309,7 +312,9 @@ def test_wrapper_mediated_control_row_mutation_aborts(dsn: str) -> None:
     )
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("select val from bgtest.control_row where id = 2")
-        (val,) = cur.fetchone()
+        row = cur.fetchone()
+        assert row is not None, "bgtest.control_row id=2 is seeded by FIXTURE_SQL and must exist"
+        (val,) = row
     ok = ok and val == "untouched"
     check("wrapper_mediated_control_row_mutation_aborts",
           "verdict=rolled_back, row 2 unchanged in the database", ok,
@@ -342,7 +347,9 @@ def test_rls_enable_on_undeclared_table_aborts(dsn: str) -> None:
     )
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("select relrowsecurity from pg_class where oid = 'bgtest.rls_table'::regclass")
-        (rls,) = cur.fetchone()
+        row = cur.fetchone()
+        assert row is not None, "bgtest.rls_table is seeded by FIXTURE_SQL and must exist"
+        (rls,) = row
     ok = ok and rls is False
     check("rls_enable_on_undeclared_table_aborts", "verdict=rolled_back, RLS not actually enabled", ok,
           f"rc={result.returncode} verdict={receipt.get('verdict') if receipt else None} live_relrowsecurity={rls}")
@@ -453,6 +460,7 @@ def test_declared_view_target_wrong_body_fails_side3(dsn: str) -> None:
 
 def test_expected_pre_mismatch_refused_before_execution(dsn: str) -> None:
     pre_image = fetch_row_image(dsn, "bgtest.control_row", {"id": 1})
+    assert pre_image is not None, "bgtest.control_row id=1 is seeded by FIXTURE_SQL and must exist"
     wrong_pre = {**pre_image, "val": "not-the-real-value"}
     target = row_target("bgtest.control_row", {"id": 1}, expected_pre=wrong_pre, expected_post=pre_image)
     result, receipt, *_ = gen_and_run(
@@ -462,7 +470,9 @@ def test_expected_pre_mismatch_refused_before_execution(dsn: str) -> None:
     )
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("select val from bgtest.control_row where id = 1")
-        (val,) = cur.fetchone()
+        row = cur.fetchone()
+        assert row is not None, "bgtest.control_row id=1 is seeded by FIXTURE_SQL and must exist"
+        (val,) = row
     ok = (receipt is not None and receipt.get("verdict") == "refused_precheck"
           and "post_snapshot" not in receipt and val == pre_image["val"])
     check("expected_pre_mismatch_refused_before_execution",
@@ -483,6 +493,7 @@ def test_end_refused_by_lexer(dsn: str) -> None:
 
 def test_do_block_passes_lexer(dsn: str) -> None:
     pre_image = fetch_row_image(dsn, "bgtest.control_row", {"id": 1})
+    assert pre_image is not None, "bgtest.control_row id=1 is seeded by FIXTURE_SQL and must exist"
     expected_post = {**pre_image, "note": "touched-by-do-block"}
     target = row_target("bgtest.control_row", {"id": 1}, expected_pre=pre_image, expected_post=expected_post)
     do_block = (
@@ -526,6 +537,7 @@ def test_categorical_floor_refuses_scac_target(dsn: str) -> None:
 
 def test_durability_fault_prephase_receipt_survives_kill(dsn: str) -> None:
     pre_image = fetch_row_image(dsn, "bgtest.control_row", {"id": 1})
+    assert pre_image is not None, "bgtest.control_row id=1 is seeded by FIXTURE_SQL and must exist"
     target = row_target("bgtest.control_row", {"id": 1}, expected_pre=pre_image,
                          expected_post={**pre_image, "val": "durability-test"})
     candidate_path = write_text(WORK_DIR / "durability-candidate.sql",
@@ -552,7 +564,9 @@ def test_durability_fault_prephase_receipt_survives_kill(dsn: str) -> None:
     )
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("select val from bgtest.control_row where id = 1")
-        (val,) = cur.fetchone()
+        row = cur.fetchone()
+        assert row is not None, "bgtest.control_row id=1 is seeded by FIXTURE_SQL and must exist"
+        (val,) = row
     db_untouched = val == pre_image["val"]
     ok = killed_as_expected and receipt_present and prephase_shape_ok and db_untouched
     check("durability_fault_prephase_receipt_survives_kill",
@@ -566,6 +580,7 @@ def test_durability_fault_prephase_receipt_survives_kill(dsn: str) -> None:
 
 def test_double_apply(dsn: str) -> None:
     pre_alpha = fetch_row_image(dsn, "bgtest.plain_table", {"id": 1})
+    assert pre_alpha is not None, "bgtest.plain_table id=1 is seeded by FIXTURE_SQL and must exist"
     post_beta = {**pre_alpha, "name": "beta"}
     target_pass_one = row_target("bgtest.plain_table", {"id": 1}, expected_pre=pre_alpha, expected_post=post_beta)
     candidate = "UPDATE bgtest.plain_table SET name = 'beta' WHERE id = 1;"
@@ -614,6 +629,7 @@ def test_double_apply(dsn: str) -> None:
 
 def commit_declared_update(dsn: str, tag: str, table: str, key: dict, new_val: dict) -> tuple[dict, Path]:
     pre_image = fetch_row_image(dsn, table, key)
+    assert pre_image is not None, f"commit_declared_update contract: {table} {key} must identify an existing row"
     post_image = {**pre_image, **new_val}
     set_clause = ", ".join(f"{col} = '{val}'" for col, val in new_val.items())
     where = " AND ".join(f"{col} = {val!r}" if isinstance(val, str) else f"{col} = {val}" for col, val in key.items())
@@ -627,6 +643,7 @@ def commit_declared_update(dsn: str, tag: str, table: str, key: dict, new_val: d
 
 def test_restore_success_commits(dsn: str) -> tuple[dict, Path] | None:
     pre_before = fetch_row_image(dsn, "bgtest.control_row", {"id": 1})
+    assert pre_before is not None, "bgtest.control_row id=1 is seeded by FIXTURE_SQL and must exist"
     receipt, receipt_path = commit_declared_update(
         dsn, "restore-setup-a", "bgtest.control_row", {"id": 1}, {"val": "restore-target-value"}
     )
@@ -637,7 +654,9 @@ def test_restore_success_commits(dsn: str) -> tuple[dict, Path] | None:
     restore_receipt = load_receipt(restore_receipt_path) if restore_receipt_path.is_file() else None
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("select val from bgtest.control_row where id = 1")
-        (val,) = cur.fetchone()
+        row = cur.fetchone()
+        assert row is not None, "bgtest.control_row id=1 is seeded by FIXTURE_SQL and must exist"
+        (val,) = row
     ok = (gen_result.returncode == 0 and restore_receipt is not None
           and restore_receipt.get("verdict") == "committed" and val == pre_before["val"])
     check("restore_success_commits",
@@ -724,7 +743,9 @@ def test_restore_collateral_undeclared_effect_aborts(dsn: str) -> None:
           and any(v["table"] == "bgtest.plain_table" for v in restore_receipt.get("undeclared_table_digest_changes", [])))
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute("select val from bgtest.control_row where id = 1")
-        (val,) = cur.fetchone()
+        row = cur.fetchone()
+        assert row is not None, "bgtest.control_row id=1 is seeded by FIXTURE_SQL and must exist"
+        (val,) = row
     ok = ok and val == "restore-collateral-value"  # the declared restore itself must ALSO have rolled back
     check("restore_collateral_undeclared_effect_aborts",
           "a restore candidate with a tampered-in collateral edit aborts entirely (atomic rollback)", ok,

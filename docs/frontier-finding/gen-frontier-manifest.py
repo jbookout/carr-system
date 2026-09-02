@@ -73,7 +73,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GENERATOR_PATH = Path(__file__).resolve()
@@ -210,7 +210,7 @@ def strip_spaces_after_commas(s: str) -> str:
     return re.sub(r",\s+", ",", s)
 
 
-def fail(msg: str) -> None:
+def fail(msg: str) -> NoReturn:
     print(f"gen-frontier-manifest: ERROR: {msg}", file=sys.stderr)
     raise SystemExit(1)
 
@@ -343,7 +343,7 @@ def materialize_pinned_tree(dest: Path) -> Path:
             stdout=fh, stderr=subprocess.PIPE, text=False,
         )
     if result.returncode != 0:
-        fail(f"git archive of pinned commit failed: {result.stderr}")
+        fail(f"git archive of pinned commit failed: {result.stderr.decode('utf-8', errors='replace')}")
     subprocess.run(["tar", "-xf", str(tar_path)], cwd=dest, check=True)
     tar_path.unlink()
     return dest
@@ -635,7 +635,8 @@ def family_target_identity(family: str, key: str, row: dict, relkind_map: dict[s
     if family == "pg_namespace":
         return f"schema:{key}"
     if family == "pg_class":
-        return relation_identity(*key.rsplit(".", 1), row.get("relkind"))  # type: ignore[misc]
+        schema, name = key.rsplit(".", 1)
+        return relation_identity(schema, name, row.get("relkind"))
     if family in ("pg_attribute", "pg_attrdef"):
         schema, table, _col = key.split(".", 2)
         return relation_identity(schema, table, relkind_map.get(f"{schema}.{table}"))
@@ -839,13 +840,15 @@ def diff_owners(pre: dict, post: dict, filename: str, detail: dict, targets: set
             post_owner = post_fam[key].get(field)
             if pre_owner == post_owner:
                 continue
+            ident: str | None
             if family == "pg_proc":
                 ident = function_identity_from_key(key)
             elif family == "pg_type":
                 typtype = post_fam[key].get("typtype")
                 ident = f"{'enum' if typtype == 'e' else 'type'}:{key}"
             else:
-                ident = relation_identity(*key.rsplit(".", 1), post_fam[key].get("relkind"))
+                schema, name = key.rsplit(".", 1)
+                ident = relation_identity(schema, name, post_fam[key].get("relkind"))
             if ident is None:
                 continue
             target = f"owner:{ident}"
