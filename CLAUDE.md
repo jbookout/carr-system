@@ -39,6 +39,23 @@ no credential (the receipted break-glass close stays a human's call) and it is
 not `call-verb` — never reach for that generic passthrough to get at a verb
 the classifier declined; that is working around a denial rather than filing it.
 
+## The production migration lane is parked — hosted-CI green is not production-applied
+
+Production's apply lane stops at the integrity frontier (migration 0454): the
+integrity-registry files refuse on their own census checks and stay Joe-gated
+until that program's activation (Joe ruled 2026-09-02 to activate; the
+activation runs as its own work request). Until the doctrine's dissolution
+predicate holds: a migration merged to main QUEUES behind the frontier and does
+NOT reach production; an urgent post-frontier row lands ONLY by Joe-approved
+receipted break-glass under the interim protocol — per-use digest approval
+recorded on the parked-lane work request (WR-000046), clone rehearsal, the
+receipt instrument in `docs/frontier-finding/`, production readback, and a
+forward-fix duty. The law, the finding it rests on, and the full dead-end
+catalog live in the doctrine store: the runbook section
+`frontier-finding-program` and the reference document `frontier-finding-plan`.
+Never build a workaround for the parked lane; new ideas are filed on the
+parked-lane work request and disposed there first.
+
 ## Map work has one mandatory front door
 
 For any request to recommend, design, build, revise, review, or publish a map,
