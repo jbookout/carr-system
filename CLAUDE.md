@@ -39,6 +39,9 @@ no credential (the receipted break-glass close stays a human's call) and it is
 not `call-verb` — never reach for that generic passthrough to get at a verb
 the classifier declined; that is working around a denial rather than filing it.
 
+## Parked migration lane
+Production stops at 0454; CI green is not applied. Urgent rows: WR-000046 break-glass law, doctrine frontier-finding-program. Activation: WR-000048.
+
 ## Map work has one mandatory front door
 
 For any request to recommend, design, build, revise, review, or publish a map,
