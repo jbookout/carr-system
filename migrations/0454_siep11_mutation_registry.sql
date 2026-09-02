@@ -110,7 +110,7 @@ with recursive connected(oid) as (
     'function_kind',prokind,'volatility',provolatile,'parallel',proparallel,'config',coalesce(to_jsonb(proconfig),'[]'::jsonb),
     'grantee',coalesce(r.rolname,'public'),'privilege','execute','grantable',is_grantable) row
   from capabilities c left join pg_roles r on r.oid=c.grantee
-  where prosecdef and privilege_type='EXECUTE' and (grantee=0 or r.oid in(select oid from runtime_roles))
+  where prosecdef and privilege_type='EXECUTE' and grantee<>proowner and (grantee=0 or r.oid in(select oid from runtime_roles))
 ), contracts as (
   select row||jsonb_build_object('effect_class','administrative_mutation','owner_package','11','implementation_state','inventoried_not_atomically_mediated','classification_authorizing',false,'source_locator',row->>'signature') contract from observed
 )
@@ -119,7 +119,7 @@ select 'scac-mutation-registry.v1',contract->>'ingress_key',contract->>'ingress_
   'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(contract),'UTF8'),'sha256'),'hex'),contract from contracts;
 
 with recursive connected(oid) as (select oid from pg_roles where rolname~'^carr_' and rolname<>'carr_ci' union select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end where other.rolname<>'carr_ci' and not other.rolsuper), runtime_roles as (select r.oid,r.rolname from pg_roles r where r.oid in(select oid from connected) and not r.rolsuper), capabilities as (
-  select n.nspname,c.relname,c.relkind,acl.grantee,acl.privilege_type,acl.is_grantable
+  select n.nspname,c.relname,c.relkind,c.relowner,acl.grantee,acl.privilege_type,acl.is_grantable
   from pg_class c join pg_namespace n on n.oid=c.relnamespace
   cross join lateral aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) acl
   where n.nspname not in ('pg_catalog','information_schema') and c.relkind in ('r','p','v','m','f')
@@ -128,7 +128,7 @@ with recursive connected(oid) as (select oid from pg_roles where rolname~'^carr_
     'ingress_kind','db_relation_acl','relation',nspname||'.'||relname,'relation_kind',relkind,'grantee',coalesce(r.rolname,'public'),
     'privilege',lower(privilege_type),'grantable',is_grantable) row
   from capabilities c left join pg_roles r on r.oid=c.grantee
-  where privilege_type in ('INSERT','UPDATE','DELETE','TRUNCATE') and (grantee=0 or r.oid in(select oid from runtime_roles))
+  where privilege_type in ('INSERT','UPDATE','DELETE','TRUNCATE') and grantee<>relowner and (grantee=0 or r.oid in(select oid from runtime_roles))
 ), contracts as (
   select row||jsonb_build_object('effect_class','administrative_mutation','owner_package','11','implementation_state','inventoried_not_atomically_mediated','classification_authorizing',false,'source_locator',row->>'relation') contract from observed
 )
@@ -137,7 +137,7 @@ select 'scac-mutation-registry.v1',contract->>'ingress_key',contract->>'ingress_
   'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(contract),'UTF8'),'sha256'),'hex'),contract from contracts;
 
 with recursive connected(oid) as (select oid from pg_roles where rolname~'^carr_' and rolname<>'carr_ci' union select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end where other.rolname<>'carr_ci' and not other.rolsuper), runtime_roles as (select r.oid,r.rolname from pg_roles r where r.oid in(select oid from connected) and not r.rolsuper), capabilities as (
-  select n.nspname,c.relname,c.relkind,a.attname,acl.grantee,acl.privilege_type,acl.is_grantable
+  select n.nspname,c.relname,c.relkind,c.relowner,a.attname,acl.grantee,acl.privilege_type,acl.is_grantable
   from pg_attribute a join pg_class c on c.oid=a.attrelid join pg_namespace n on n.oid=c.relnamespace
   cross join lateral aclexplode(a.attacl) acl
   where a.attnum>0 and not a.attisdropped and a.attacl is not null and cardinality(a.attacl)>0
@@ -147,7 +147,7 @@ with recursive connected(oid) as (select oid from pg_roles where rolname~'^carr_
     'ingress_kind','db_column_acl','relation',nspname||'.'||relname,'relation_kind',relkind,'column',attname,
     'grantee',coalesce(r.rolname,'public'),'privilege',lower(privilege_type),'grantable',is_grantable) row
   from capabilities c left join pg_roles r on r.oid=c.grantee
-  where privilege_type in ('INSERT','UPDATE') and (grantee=0 or r.oid in(select oid from runtime_roles))
+  where privilege_type in ('INSERT','UPDATE') and grantee<>relowner and (grantee=0 or r.oid in(select oid from runtime_roles))
 ), contracts as (
   select row||jsonb_build_object('effect_class','administrative_mutation','owner_package','11','implementation_state','inventoried_not_atomically_mediated','classification_authorizing',false,'source_locator',(row->>'relation')||'.'||(row->>'column')) contract from observed
 )
