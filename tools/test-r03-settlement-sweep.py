@@ -325,6 +325,29 @@ def test_closing_detects_collateral_branch_loss(root: Path) -> None:
     print("PASS closing_detects_collateral_branch_loss")
 
 
+def test_closing_detects_undeleted_branch(root: Path) -> None:
+    """A branch the runner believes it deleted must not still exist.
+
+    End-to-end this cannot be staged -- if the delete ran, the branch is gone --
+    so the closing assertion is exercised directly rather than shipped unproven.
+    """
+    fixture = Fixture(root / "undeleted-branch")
+    git(fixture.repository, "branch", "still-here")
+    manifest = fixture.manifest(clean_pathspecs=["scratch"], clean_expected=[], branch_count=2)
+    parsed = RUNNER.validate_manifest(manifest)
+    try:
+        RUNNER._stage6_readback(
+            fixture.repository, manifest, parsed,
+            starting_branches={"main", "still-here"}, deleted={"still-here"},
+        )
+    except RUNNER.SweepError as exc:
+        assert "deleted branches still present" in str(exc), str(exc)
+        assert "still-here" in str(exc), str(exc)
+    else:
+        raise AssertionError("closing readback accepted a branch that was never actually deleted")
+    print("PASS closing_detects_undeleted_branch")
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="r03-settlement-sweep-") as temporary:
         root = Path(temporary)
@@ -336,6 +359,7 @@ def main() -> int:
         test_freshness_refuses_rewound_origin_main(root)
         test_precondition_refuses_stale_head(root)
         test_closing_detects_collateral_branch_loss(root)
+        test_closing_detects_undeleted_branch(root)
     print("r03-settlement-sweep-selftest: PASS")
     return 0
 
