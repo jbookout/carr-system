@@ -1,7 +1,7 @@
 {
   "schema_version": "target-dispositions.v1",
   "wr": "WR-000046",
-  "purpose": "Disposition ruleset applied by compare-targets.py to the symmetric difference between the OBSERVED effect manifest and the PARSED extraction (both taken AFTER the documented rendering patches in this worktree -- see comparison-report.md section 'Patches applied before comparison'). Every rule below excludes a specific, individually-verified class of target from the symmetric difference, with a concrete justification and a matched count that compare-targets.py recomputes and cross-checks against the number recorded here on every run.",
+  "purpose": "Disposition ruleset applied by compare_targets.py to the symmetric difference between the OBSERVED effect manifest and the PARSED extraction (both taken AFTER the documented rendering patches in this worktree -- see comparison-report.md section 'Patches applied before comparison'). Every rule below excludes a specific, individually-verified class of target from the symmetric difference, with a concrete justification and a matched count that compare_targets.py recomputes and cross-checks against the number recorded here on every run.",
   "rules": [
     {
       "id": "unresolved_catalog_scan_rows",
@@ -42,7 +42,7 @@
       "id": "auto_named_constraint_scope_decision",
       "direction": "observed_only",
       "predicate": "target matches ^constraint:.* , is not matched by constraint_trigger_pg_constraint_dual_registration, and its trailing constraint-name segment matches PostgreSQL's own auto-naming suffixes ^[a-z0-9_]+_(pkey|key|check|fkey|excl)[0-9]*$",
-      "justification": "The PARSED extractor's own documented, deliberate scope decision (parse-extract-targets.py RESULT.md, 'Deliberate scope decisions'): unnamed/auto-generated constraints (inline CHECK/UNIQUE/FOREIGN KEY/PRIMARY KEY clauses inside CREATE TABLE, and unnamed ALTER TABLE ... ADD constraints) are out of scope because reproducing PostgreSQL's internal auto-naming algorithm, including its per-column collision-counter behavior, is not verifiable from text alone without a database connection -- which the parsing seat is forbidden from opening. Verified: every one of these 383 targets' trailing name segment matches the exact Postgres auto-naming suffix family, with zero unexplained residue after removing the 18 constraint-trigger names above.",
+      "justification": "The PARSED extractor's own documented, deliberate scope decision (parse_extract_targets.py RESULT.md, 'Deliberate scope decisions'): unnamed/auto-generated constraints (inline CHECK/UNIQUE/FOREIGN KEY/PRIMARY KEY clauses inside CREATE TABLE, and unnamed ALTER TABLE ... ADD constraints) are out of scope because reproducing PostgreSQL's internal auto-naming algorithm, including its per-column collision-counter behavior, is not verifiable from text alone without a database connection -- which the parsing seat is forbidden from opening. Verified: every one of these 383 targets' trailing name segment matches the exact Postgres auto-naming suffix family, with zero unexplained residue after removing the 18 constraint-trigger names above.",
       "expected_count": 383
     },
     {
