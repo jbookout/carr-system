@@ -311,6 +311,29 @@ def make_coord(cur, lease: dict, session: str, host: str, *, seconds: int = 300)
     earliest_expiry = min(datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
                           for row in leases)
     valid_until = min(now + timedelta(seconds=seconds), earliest_expiry - timedelta(seconds=1))
+    # THE CLAMP HAS NO NATURAL FLOOR, and that is a harness race rather than a
+    # policy. earliest_expiry is the soonest lease this snapshot covers, so once
+    # that lease is within a second of expiring the expiry clamp wins and lands
+    # at or before `now`. The manifest insert immediately after is then refused
+    # as ASSURANCE_SNAPSHOT_EXPIRED — for a window THIS FUNCTION just computed.
+    # It reads like a genuine assurance refusal and is really the gate racing
+    # its own fixture, so it surfaces only on a slow runner. Observed twice on
+    # 2026-09-02, the second time red on a branch that changed two digests in a
+    # generated file and could not have touched assurance at all.
+    #
+    # The deliberate short windows stay legal: callers pass seconds=1 and
+    # seconds=2 to build near-expiry snapshots for the negative tests, and
+    # `now + seconds` is always after `now`. Only the EXPIRY clamp can go
+    # non-positive, so only that case is refused here, and it names the lease
+    # rather than blaming the snapshot.
+    if valid_until <= now:
+        raise RuntimeError(
+            "coordination snapshot window collapsed before it was written: "
+            f"earliest covered lease expires {iso(earliest_expiry)}, which is "
+            f"at or before now ({iso(now)}). The fixture lease expired while "
+            "the gate was still building its snapshot — this is a harness "
+            "race, not an assurance refusal, and it is not evidence about the "
+            "branch under test.")
     value = {
         "schema_version": "assurance-coordination-snapshot.v1",
         "as_of": iso(now),
