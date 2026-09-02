@@ -232,7 +232,7 @@ test("v9 successor seals v8 and binds the measured SIEP-18 grant snapshot", () =
 
 test("v10 successor seals v9 and carries the generated source-merge control", () => {
   const rows = fullInventory();
-  assert.equal(rows.length, 808);
+  assert.equal(rows.length, 809);
   assert.equal(generatedV10, renderRuntimeProjection(rows, {
     version: REGISTRY_V10_VERSION, dbCatalogBaseline: SOURCE_MERGE_FORWARD_DB_CATALOG_BASELINE,
   }));
