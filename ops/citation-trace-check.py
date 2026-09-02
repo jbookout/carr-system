@@ -148,7 +148,20 @@ def main(argv):
     # which silently excused every citation of a sibling bundle's
     # findings.md, unknowns.md or self-audit.md because this bundle happens
     # to contain files by those names. That hole hid every real failure.
-    bundle_rel = os.path.relpath(bundle, ".").rstrip("/") + "/"
+    # Normalise the bundle to its evidence-root-relative form. An earlier
+    # version used relpath against the CURRENT DIRECTORY, so the same bundle
+    # reported 0 unopened when addressed by a relative path and 58 when
+    # addressed by an absolute one — its own outputs stopped being recognised
+    # as its own. Path form must not change a verdict.
+    norm = os.path.normpath(os.path.abspath(bundle))
+    bundle_rel = None
+    for r in EVIDENCE_ROOTS:
+        i = norm.find("/" + r)
+        if i != -1:
+            bundle_rel = norm[i + 1:].rstrip("/") + "/"
+            break
+    if bundle_rel is None:
+        bundle_rel = os.path.relpath(bundle, ".").rstrip("/") + "/"
 
     unopened = {p: srcs for p, srcs in cited.items()
                 if p not in opened and not p.startswith(bundle_rel)}
