@@ -526,12 +526,14 @@ PYEOF
     eligible="$eligible $t"
   done
   export CI_TIMEOUT_HELPER CI_SELFTEST_TIMEOUT_SECONDS LOGDIR PY
-  printf '%s\n' $eligible | xargs -P "${CARR_CI_GATE_JOBS:-4}" -I{} bash -c '
-    b="$(basename "{}")"
-    "$PY" "$CI_TIMEOUT_HELPER" "$CI_SELFTEST_TIMEOUT_SECONDS" "$PY" "{}" \
+  # -n1 with the path as $1, NOT -I{}: BSD xargs -I substitutes into the whole
+  # script and refuses with "command line cannot be assembled, too long".
+  printf '%s\n' $eligible | xargs -P "${CARR_CI_GATE_JOBS:-4}" -n1 bash -c '
+    b="$(basename "$1")"
+    "$PY" "$CI_TIMEOUT_HELPER" "$CI_SELFTEST_TIMEOUT_SECONDS" "$PY" "$1" \
       >"$LOGDIR/gate-$b.log" 2>&1
     echo $? >"$LOGDIR/gate-$b.rc"
-  '
+  ' _
   local grc
   for t in $eligible; do
     base="$(basename "$t")"
