@@ -2466,6 +2466,13 @@
         "vendor-intros"
       ]
     },
+    "1fcaa63a": {
+      "load_layer": "pack",
+      "packs": [
+        "governance-rules"
+      ],
+      "why": "The heavy-build protocol trigger rule (activated 2026-09-01 ahead of its binding migration 0472). It fires only when a partner invokes the heavy build protocol or admission derives work heavy - governance-workflow territory, not an every-boot law. Found untagged by WR-000048's clone rehearsal: the frontier's 0455 policy-epoch activation-safety check refuses over any untagged active rule."
+    },
     "1fddcffb": {
       "load_layer": "layer0",
       "packs": [],
