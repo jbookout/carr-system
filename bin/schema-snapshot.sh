@@ -1153,12 +1153,10 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
   if [ "$SOURCE_MERGE_REGISTRY_APPLIED" = t ]; then
     SCAC_CURRENT_NUMBER=10
     SCAC_VERSION_COUNT=10
-    # +2 on 2026-09-01: the Repo Hygiene Program's R02 landing (Joe's ruling
-    # 7f48abf6) adds two script entrypoints, hooks/canonical-edit-gate.py and
-    # ops/untracked-anomaly-report.py, so v10's source set grows by two beyond
-    # R05's base of 805. v1-v9 are sealed history and sum to 12660; 12660 + 1451
-    # = 14111. All three re-derived live from the generator, not hand-added.
-    SCAC_TOTAL_ENTRY_COUNT=14112
+    # The re-cut seals the current 808-source inventory: v1-v9 sum to 12732
+    # and v10 contributes 1452. These pins are derived from the disposable
+    # registry receipt, never hand-added.
+    SCAC_TOTAL_ENTRY_COUNT=14184
     SCAC_CURRENT_ENTRY_COUNT=1452
     SCAC_CURRENT_SOURCE_COUNT=808
     SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v10.generated.js"
@@ -1168,9 +1166,9 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
   else
     SCAC_CURRENT_NUMBER=9
     SCAC_VERSION_COUNT=9
-    SCAC_TOTAL_ENTRY_COUNT=12660
-    SCAC_CURRENT_ENTRY_COUNT=1439
-    SCAC_CURRENT_SOURCE_COUNT=800
+    SCAC_TOTAL_ENTRY_COUNT=12732
+    SCAC_CURRENT_ENTRY_COUNT=1447
+    SCAC_CURRENT_SOURCE_COUNT=808
     SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v9.generated.js"
     SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9'"
     SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8'"

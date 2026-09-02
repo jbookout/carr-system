@@ -26,35 +26,35 @@ const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 // --write-rebased-* commands below; ordinary historical write modes stay
 // refused so an accidental invocation cannot rewrite a reviewed seal.
 export const HISTORICAL_REGISTRY_SEALS = Object.freeze({
-  v1: Object.freeze({ version: REGISTRY_VERSION, digest: "sha256:7cc2feacec82bf7cce2af9af309dc4ae9426922003471703af010f6728957190", entryCount: 1387, sourceEntryCount: 800 }),
-  v2: Object.freeze({ version: REGISTRY_V2_VERSION, digest: "sha256:d78696444c3f9d6dc9f82b71469986671b3846b762be7096ef4370bf4f6d609e", entryCount: 1391, sourceEntryCount: 800 }),
-  v3: Object.freeze({ version: REGISTRY_V3_VERSION, digest: "sha256:b5b32aeb7c777cf726c5cb526a860a5b7d644afa54c3ce1fd55a42132fc0b298", entryCount: 1395, sourceEntryCount: 800 }),
-  v4: Object.freeze({ version: REGISTRY_V4_VERSION, digest: "sha256:1bdf011d492a611eb528ddb907292871d099fea507e4fca11646978944a42c91", entryCount: 1399, sourceEntryCount: 800 }),
-  v5: Object.freeze({ version: REGISTRY_V5_VERSION, digest: "sha256:18a0bcb000edd6bad0f82b229748592173c6de31b18663718418a2d5fd95b36b", entryCount: 1404, sourceEntryCount: 800 }),
-  v6: Object.freeze({ version: REGISTRY_V6_VERSION, digest: "sha256:9538ff0f43a6b5cbd7bcabb0f79bd78852e1f9c23f29291b42b25f61035f9dc2", entryCount: 1408, sourceEntryCount: 800 }),
-  v7: Object.freeze({ version: REGISTRY_V7_VERSION, digest: "sha256:0662449e25ab7cb26eb2ba922d4e2177b22e62066c8d5a3eac01daa9879a1aec", entryCount: 1412, sourceEntryCount: 800 }),
-  v8: Object.freeze({ version: REGISTRY_V8_VERSION, digest: "sha256:aac53ad8a01b1e2bbf4cd633b6f4cacdf4d66195556be31a64b0795091d4f397", entryCount: 1425, sourceEntryCount: 800 }),
-  v9: Object.freeze({ version: REGISTRY_V9_VERSION, digest: "sha256:af77a09256a23a31c616e89136eb2adb861fef99a2068f2950c223d6d1828dc6", entryCount: 1439, sourceEntryCount: 800 }),
+  v1: Object.freeze({ version: REGISTRY_VERSION, digest: "sha256:fd1f61e5cd2e91a9d8a16332b223ae8187f9f14dd004e58df2f8ecfc4bd4cc3f", entryCount: 1395, sourceEntryCount: 808 }),
+  v2: Object.freeze({ version: REGISTRY_V2_VERSION, digest: "sha256:90fa401a77c7711a5dac36a3a603ebc0d74a1a7b1afd0b3a2d36371566a7b687", entryCount: 1399, sourceEntryCount: 808 }),
+  v3: Object.freeze({ version: REGISTRY_V3_VERSION, digest: "sha256:50accf84abf2a413f91487b7e0344c6c6be51c4f817214973161a2d95cf3543b", entryCount: 1403, sourceEntryCount: 808 }),
+  v4: Object.freeze({ version: REGISTRY_V4_VERSION, digest: "sha256:f2f235305e8ac9531ac22d1045c46b7ae616a8ec8528c6d54bd8ad205449548a", entryCount: 1407, sourceEntryCount: 808 }),
+  v5: Object.freeze({ version: REGISTRY_V5_VERSION, digest: "sha256:eeb977fdf1f3188808e4ff396831427bbe323d43ecd8d177b8a40b0eb8181233", entryCount: 1412, sourceEntryCount: 808 }),
+  v6: Object.freeze({ version: REGISTRY_V6_VERSION, digest: "sha256:037d354a58b33e12a7b745035eea8dd89d705cb37eefb94f3a070f294f95b41a", entryCount: 1416, sourceEntryCount: 808 }),
+  v7: Object.freeze({ version: REGISTRY_V7_VERSION, digest: "sha256:30a91d680eda53cf70bea4a1c23ed9b668b20620f1f98a5bb54f103179e204cf", entryCount: 1420, sourceEntryCount: 808 }),
+  v8: Object.freeze({ version: REGISTRY_V8_VERSION, digest: "sha256:b44f4a93c5c6f5b5a4b1e52e2303b3b036d993c652a32f7d34e2c8dbba6b9f26", entryCount: 1433, sourceEntryCount: 808 }),
+  v9: Object.freeze({ version: REGISTRY_V9_VERSION, digest: "sha256:61cfab7d6e71ddcad48d9e0e60d64b5cbb0cff5bd5197b7dfbc3c6df8dbc388e", entryCount: 1447, sourceEntryCount: 808 }),
 });
 export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
-  "migrations/0454_siep11_mutation_registry.sql": "a478461eeecacc3a02dd86f3b9c1b98b3c9432953a8f974c9b3d39a08e081d21",
-  "migrations/0455_siep12_policy_epoch.sql": "7bf22c704e24ec4d602ac7f9493c200a6d50050369b04c07a71d015a6dbfdd58",
-  "migrations/0457_siep13_forward_mutation_registry.sql": "e1a08ab506b74a46cc064368537cbd9dc99b8b5486dff38b771a262be887e380",
-  "migrations/0459_siep14_forward_mutation_registry.sql": "babbf220826ab12da78505c0eb61b6db3b8890bf17deb09130c7b6508e007935",
-  "mcp-server/src/scac-mutation-registry.generated.js": "e8cf336806337ba0ba25532816692ac2a24b48f9df58cee2966baaeafdae5abc",
-  "mcp-server/src/scac-mutation-registry.v2.generated.js": "7e2e680f5eb0c20aa01dab605d9040c2b71841f75bf51fd9a02468ca1c2da23d",
-  "mcp-server/src/scac-mutation-registry.v3.generated.js": "45e03d5c8fde6f44067cc2a6ec97b262f251182f77a95efdeafdcf29adc9e0c5",
-  "mcp-server/src/scac-mutation-registry.v4.generated.js": "bcece72c3089b3970128e306094836b3c88f5d8f41c0e1b92262eee2662c918f",
-  "migrations/0461_siep15_forward_mutation_registry.sql": "610aee81147679c4ddf7db23626d21db3b8b8329cc3c725e1c75b9016a26d69d",
-  "mcp-server/src/scac-mutation-registry.v5.generated.js": "ad999f53bb954cda52708050845946e2beddcc2fa3cc44239336a043d2279cf3",
-  "migrations/0462_siep16_forward_mutation_registry.sql": "02d42584a871b6b2944c5747f76bbd0abb07e1bbf158c4cef30c2213ab14efb3",
-  "mcp-server/src/scac-mutation-registry.v6.generated.js": "be5c28d7ab1cc7f6b00ae2c556ab4359ec8a1f3ef0d64f3b57ecf8ab43a25137",
-  "migrations/0464_siep16_integrated_mutation_registry.sql": "1005cb8f13bf5c0c2003a3dca021c3d86c656a4faabfb0e069b416a130ceccb7",
-  "mcp-server/src/scac-mutation-registry.v7.generated.js": "b2f8bee1c5027d97cfaf9930b7b9bf0130b51802f1af398e5f0c1867911ab45d",
-  "migrations/0466_siep17_forward_mutation_registry.sql": "20a158f96b287e7ac9c3979138c95803d1da644a5e4918290f092c628d0325d9",
-  "mcp-server/src/scac-mutation-registry.v8.generated.js": "2388c79ae79b76b433ce69e237fd43d850deeebfb42cf787490882191ae8ddf0",
-  "migrations/0468_siep18_forward_mutation_registry.sql": "c3dbeabd699e7036e9bdab980f94515243f5ef061bc1992c4ded8acda4ccbfd5",
-  "mcp-server/src/scac-mutation-registry.v9.generated.js": "5d01afe2f0e035441f3f8ec406db8a53557eb536652624609d151ce12f09706e",
+  "migrations/0454_siep11_mutation_registry.sql": "5cfd6716724025f028979c53a8700fd8bb9829fdfea24b58a937f9af326d9419",
+  "migrations/0455_siep12_policy_epoch.sql": "ca60c32fc0e2b542a75523f11433e219db63b24f8602580988808bd0d2b08a79",
+  "migrations/0457_siep13_forward_mutation_registry.sql": "a84276d002e316b493e80f3a82e6fdb5327bde6e7abd23ab2e6e1933fd2974ff",
+  "migrations/0459_siep14_forward_mutation_registry.sql": "b01922f373d3f5f19c973ea946292f27689b54fe12c83685551dc95f1a5f3ed2",
+  "mcp-server/src/scac-mutation-registry.generated.js": "f1ef3225cff0cb38c4a33c5b2f3d82608a4fc5e6c4389273511df59f2de0fc88",
+  "mcp-server/src/scac-mutation-registry.v2.generated.js": "60647c749770821980b695cd8312db472c426e70c11c0a1bd3ae88768cebfca8",
+  "mcp-server/src/scac-mutation-registry.v3.generated.js": "9db8b4270e2d016133d3b107a3df8ff396ccf2167bb1fc7b0fd5b982bcfe64d0",
+  "mcp-server/src/scac-mutation-registry.v4.generated.js": "c3b9c22c3a7b666e9321ec4f79c5bf487ead2209e7e7a2c07d9f50791a02f679",
+  "migrations/0461_siep15_forward_mutation_registry.sql": "c8fdfc35cbe91923d63982edafa8fd90290a8eb20f7b036a1d514abccfc3bd3a",
+  "mcp-server/src/scac-mutation-registry.v5.generated.js": "df03a3990236721cfbe6669dc3c525ec7aaae15cbe7fb30680b83df799c08f3a",
+  "migrations/0462_siep16_forward_mutation_registry.sql": "10189e385147605695a44c0eb8f2a81d81c4384a616244291958cfa7599c62cd",
+  "mcp-server/src/scac-mutation-registry.v6.generated.js": "5f8972e5cd695d31c77da900c503d047a22c90b7c014a10a5021bc7b82bff20f",
+  "migrations/0464_siep16_integrated_mutation_registry.sql": "c69f9403284ec0bfca4b600bfdeef2889bb597007065577ab14c6fdc5332a304",
+  "mcp-server/src/scac-mutation-registry.v7.generated.js": "b3e92d2cccd92cee3665ceff01d5a7cdb889424503170541bc8d2b28c0844917",
+  "migrations/0466_siep17_forward_mutation_registry.sql": "6defae1b96a8344848e9ee70840db57672b7e4e44309e45fa1f40b7c8031ab25",
+  "mcp-server/src/scac-mutation-registry.v8.generated.js": "52134ee1edfdf52111e5e803a6610a2906b2f6aeb2a66c39bf9e6b12e615174e",
+  "migrations/0468_siep18_forward_mutation_registry.sql": "b5b35cc034b37dbd4a8e3bb3f092f5a867c983499a4ef0b51e23a491685ab815",
+  "mcp-server/src/scac-mutation-registry.v9.generated.js": "7a039123f2f121b713bb1d7766241eebfb59941637f0d0f70101f5288ca5051f",
 });
 // 0467 is the reviewed SIEP-18 monitor source consumed by the v9 generator.
 // It is not historical yet, but its bytes must still be exact: otherwise a
@@ -734,7 +734,7 @@ function catalogSeedSql(version = REGISTRY_VERSION) {
 `    'function_kind',prokind,'volatility',provolatile,'parallel',proparallel,'config',coalesce(to_jsonb(proconfig),'[]'::jsonb),\n` +
 `    'grantee',coalesce(r.rolname,'public'),'privilege','execute','grantable',is_grantable) row\n` +
 `  from capabilities c left join pg_roles r on r.oid=c.grantee\n` +
-`  where prosecdef and privilege_type='EXECUTE' and (grantee=0 or r.oid in(select oid from runtime_roles))\n` +
+`  where prosecdef and privilege_type='EXECUTE' and grantee<>proowner and (grantee=0 or r.oid in(select oid from runtime_roles))\n` +
 `), contracts as (\n` +
 `  select row||jsonb_build_object(${common},'source_locator',row->>'signature') contract from observed\n` +
 `)\n` +
@@ -742,7 +742,7 @@ function catalogSeedSql(version = REGISTRY_VERSION) {
 `select ${sqlLiteral(version)},contract->>'ingress_key',contract->>'ingress_kind',contract->>'effect_class',contract->>'source_locator',\n` +
 `  'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(contract),'UTF8'),'sha256'),'hex'),contract from contracts;\n\n` +
 `with recursive connected(oid) as (select oid from pg_roles where rolname~'^carr_' and rolname<>'carr_ci' union select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end where other.rolname<>'carr_ci' and not other.rolsuper), runtime_roles as (select r.oid,r.rolname from pg_roles r where r.oid in(select oid from connected) and not r.rolsuper), capabilities as (\n` +
-`  select n.nspname,c.relname,c.relkind,acl.grantee,acl.privilege_type,acl.is_grantable\n` +
+`  select n.nspname,c.relname,c.relkind,c.relowner,acl.grantee,acl.privilege_type,acl.is_grantable\n` +
 `  from pg_class c join pg_namespace n on n.oid=c.relnamespace\n` +
 `  cross join lateral aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) acl\n` +
 `  where n.nspname not in ('pg_catalog','information_schema') and c.relkind in ('r','p','v','m','f')\n` +
@@ -751,7 +751,7 @@ function catalogSeedSql(version = REGISTRY_VERSION) {
 `    'ingress_kind','db_relation_acl','relation',nspname||'.'||relname,'relation_kind',relkind,'grantee',coalesce(r.rolname,'public'),\n` +
 `    'privilege',lower(privilege_type),'grantable',is_grantable) row\n` +
 `  from capabilities c left join pg_roles r on r.oid=c.grantee\n` +
-`  where privilege_type in ('INSERT','UPDATE','DELETE','TRUNCATE') and (grantee=0 or r.oid in(select oid from runtime_roles))\n` +
+`  where privilege_type in ('INSERT','UPDATE','DELETE','TRUNCATE') and grantee<>relowner and (grantee=0 or r.oid in(select oid from runtime_roles))\n` +
 `), contracts as (\n` +
 `  select row||jsonb_build_object(${common},'source_locator',row->>'relation') contract from observed\n` +
 `)\n` +
@@ -759,7 +759,7 @@ function catalogSeedSql(version = REGISTRY_VERSION) {
 `select ${sqlLiteral(version)},contract->>'ingress_key',contract->>'ingress_kind',contract->>'effect_class',contract->>'source_locator',\n` +
 `  'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(contract),'UTF8'),'sha256'),'hex'),contract from contracts;\n\n` +
 `with recursive connected(oid) as (select oid from pg_roles where rolname~'^carr_' and rolname<>'carr_ci' union select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end where other.rolname<>'carr_ci' and not other.rolsuper), runtime_roles as (select r.oid,r.rolname from pg_roles r where r.oid in(select oid from connected) and not r.rolsuper), capabilities as (\n` +
-`  select n.nspname,c.relname,c.relkind,a.attname,acl.grantee,acl.privilege_type,acl.is_grantable\n` +
+`  select n.nspname,c.relname,c.relkind,c.relowner,a.attname,acl.grantee,acl.privilege_type,acl.is_grantable\n` +
 `  from pg_attribute a join pg_class c on c.oid=a.attrelid join pg_namespace n on n.oid=c.relnamespace\n` +
 `  cross join lateral aclexplode(a.attacl) acl\n` +
 `  where a.attnum>0 and not a.attisdropped and a.attacl is not null and cardinality(a.attacl)>0\n` +
@@ -769,7 +769,7 @@ function catalogSeedSql(version = REGISTRY_VERSION) {
 `    'ingress_kind','db_column_acl','relation',nspname||'.'||relname,'relation_kind',relkind,'column',attname,\n` +
 `    'grantee',coalesce(r.rolname,'public'),'privilege',lower(privilege_type),'grantable',is_grantable) row\n` +
 `  from capabilities c left join pg_roles r on r.oid=c.grantee\n` +
-`  where privilege_type in ('INSERT','UPDATE') and (grantee=0 or r.oid in(select oid from runtime_roles))\n` +
+`  where privilege_type in ('INSERT','UPDATE') and grantee<>relowner and (grantee=0 or r.oid in(select oid from runtime_roles))\n` +
 `), contracts as (\n` +
 `  select row||jsonb_build_object(${common},'source_locator',(row->>'relation')||'.'||(row->>'column')) contract from observed\n` +
 `)\n` +
@@ -902,13 +902,13 @@ catalogSeedSql(version) +
 `  runtime_roles as (select r.oid,r.rolname from pg_roles r where r.oid in(select oid from connected) and not r.rolsuper),\n` +
 `  functions as (select p.oid,n.nspname,p.proname,pg_get_function_identity_arguments(p.oid) args,p.prosecdef,p.prokind,p.provolatile,p.proparallel,p.proconfig,p.proacl,p.proowner from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname not in ('pg_catalog','information_schema') and p.prokind in ('f','p')),\n` +
 `  capabilities as (select f.*,acl.grantee,acl.privilege_type,acl.is_grantable from functions f cross join lateral aclexplode(coalesce(f.proacl,acldefault('f',f.proowner))) acl),\n` +
-`  observed as (select 'db-function-acl:'||nspname||'.'||proname||'('||args||'):'||coalesce(r.rolname,'public')||':execute' ingress_key,jsonb_build_object('ingress_key','db-function-acl:'||nspname||'.'||proname||'('||args||'):'||coalesce(r.rolname,'public')||':execute','ingress_kind','db_function_acl','signature',nspname||'.'||proname||'('||args||')','security_definer',prosecdef,'function_kind',prokind,'volatility',provolatile,'parallel',proparallel,'config',coalesce(to_jsonb(proconfig),'[]'::jsonb),'grantee',coalesce(r.rolname,'public'),'privilege','execute','grantable',is_grantable) row from capabilities c left join pg_roles r on r.oid=c.grantee where prosecdef and privilege_type='EXECUTE' and (grantee=0 or r.oid in(select oid from runtime_roles)))\n` +
+`  observed as (select 'db-function-acl:'||nspname||'.'||proname||'('||args||'):'||coalesce(r.rolname,'public')||':execute' ingress_key,jsonb_build_object('ingress_key','db-function-acl:'||nspname||'.'||proname||'('||args||'):'||coalesce(r.rolname,'public')||':execute','ingress_kind','db_function_acl','signature',nspname||'.'||proname||'('||args||')','security_definer',prosecdef,'function_kind',prokind,'volatility',provolatile,'parallel',proparallel,'config',coalesce(to_jsonb(proconfig),'[]'::jsonb),'grantee',coalesce(r.rolname,'public'),'privilege','execute','grantable',is_grantable) row from capabilities c left join pg_roles r on r.oid=c.grantee where prosecdef and privilege_type='EXECUTE' and grantee<>proowner and (grantee=0 or r.oid in(select oid from runtime_roles)))\n` +
 `  select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex') into observed_count,observed_digest from observed;\n` +
 `  if observed_count<>${dbCatalogBaseline.secdef_execute.count} or observed_digest<>'${dbCatalogBaseline.secdef_execute.digest}' then return false; end if;\n` +
-`  with recursive connected(oid) as (select oid from pg_roles where rolname~'^carr_' and rolname<>'carr_ci' union select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end where other.rolname<>'carr_ci' and not other.rolsuper), runtime_roles as (select r.oid,r.rolname from pg_roles r where r.oid in(select oid from connected) and not r.rolsuper), capabilities as (select n.nspname,c.relname,c.relkind,acl.grantee,acl.privilege_type,acl.is_grantable from pg_class c join pg_namespace n on n.oid=c.relnamespace cross join lateral aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) acl where n.nspname not in ('pg_catalog','information_schema') and c.relkind in ('r','p','v','m','f')), observed as (select 'db-relation-acl:'||nspname||'.'||relname||':'||coalesce(r.rolname,'public')||':'||lower(privilege_type) ingress_key,jsonb_build_object('ingress_key','db-relation-acl:'||nspname||'.'||relname||':'||coalesce(r.rolname,'public')||':'||lower(privilege_type),'ingress_kind','db_relation_acl','relation',nspname||'.'||relname,'relation_kind',relkind,'grantee',coalesce(r.rolname,'public'),'privilege',lower(privilege_type),'grantable',is_grantable) row from capabilities c left join pg_roles r on r.oid=c.grantee where privilege_type in ('INSERT','UPDATE','DELETE','TRUNCATE') and (grantee=0 or r.oid in(select oid from runtime_roles)))\n` +
+`  with recursive connected(oid) as (select oid from pg_roles where rolname~'^carr_' and rolname<>'carr_ci' union select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end where other.rolname<>'carr_ci' and not other.rolsuper), runtime_roles as (select r.oid,r.rolname from pg_roles r where r.oid in(select oid from connected) and not r.rolsuper), capabilities as (select n.nspname,c.relname,c.relkind,c.relowner,acl.grantee,acl.privilege_type,acl.is_grantable from pg_class c join pg_namespace n on n.oid=c.relnamespace cross join lateral aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) acl where n.nspname not in ('pg_catalog','information_schema') and c.relkind in ('r','p','v','m','f')), observed as (select 'db-relation-acl:'||nspname||'.'||relname||':'||coalesce(r.rolname,'public')||':'||lower(privilege_type) ingress_key,jsonb_build_object('ingress_key','db-relation-acl:'||nspname||'.'||relname||':'||coalesce(r.rolname,'public')||':'||lower(privilege_type),'ingress_kind','db_relation_acl','relation',nspname||'.'||relname,'relation_kind',relkind,'grantee',coalesce(r.rolname,'public'),'privilege',lower(privilege_type),'grantable',is_grantable) row from capabilities c left join pg_roles r on r.oid=c.grantee where privilege_type in ('INSERT','UPDATE','DELETE','TRUNCATE') and grantee<>relowner and (grantee=0 or r.oid in(select oid from runtime_roles)))\n` +
 `  select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex') into observed_count,observed_digest from observed;\n` +
 `  if observed_count<>${dbCatalogBaseline.relation_dml.count} or observed_digest<>'${dbCatalogBaseline.relation_dml.digest}' then return false; end if;\n` +
-`  with recursive connected(oid) as (select oid from pg_roles where rolname~'^carr_' and rolname<>'carr_ci' union select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end where other.rolname<>'carr_ci' and not other.rolsuper), runtime_roles as (select r.oid,r.rolname from pg_roles r where r.oid in(select oid from connected) and not r.rolsuper), capabilities as (select n.nspname,c.relname,c.relkind,a.attname,acl.grantee,acl.privilege_type,acl.is_grantable from pg_attribute a join pg_class c on c.oid=a.attrelid join pg_namespace n on n.oid=c.relnamespace cross join lateral aclexplode(a.attacl) acl where a.attnum>0 and not a.attisdropped and a.attacl is not null and cardinality(a.attacl)>0 and n.nspname not in ('pg_catalog','information_schema') and c.relkind in ('r','p','v','m','f')), observed as (select 'db-column-acl:'||nspname||'.'||relname||'.'||attname||':'||coalesce(r.rolname,'public')||':'||lower(privilege_type) ingress_key,jsonb_build_object('ingress_key','db-column-acl:'||nspname||'.'||relname||'.'||attname||':'||coalesce(r.rolname,'public')||':'||lower(privilege_type),'ingress_kind','db_column_acl','relation',nspname||'.'||relname,'relation_kind',relkind,'column',attname,'grantee',coalesce(r.rolname,'public'),'privilege',lower(privilege_type),'grantable',is_grantable) row from capabilities c left join pg_roles r on r.oid=c.grantee where privilege_type in ('INSERT','UPDATE') and (grantee=0 or r.oid in(select oid from runtime_roles)))\n` +
+`  with recursive connected(oid) as (select oid from pg_roles where rolname~'^carr_' and rolname<>'carr_ci' union select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end where other.rolname<>'carr_ci' and not other.rolsuper), runtime_roles as (select r.oid,r.rolname from pg_roles r where r.oid in(select oid from connected) and not r.rolsuper), capabilities as (select n.nspname,c.relname,c.relkind,c.relowner,a.attname,acl.grantee,acl.privilege_type,acl.is_grantable from pg_attribute a join pg_class c on c.oid=a.attrelid join pg_namespace n on n.oid=c.relnamespace cross join lateral aclexplode(a.attacl) acl where a.attnum>0 and not a.attisdropped and a.attacl is not null and cardinality(a.attacl)>0 and n.nspname not in ('pg_catalog','information_schema') and c.relkind in ('r','p','v','m','f')), observed as (select 'db-column-acl:'||nspname||'.'||relname||'.'||attname||':'||coalesce(r.rolname,'public')||':'||lower(privilege_type) ingress_key,jsonb_build_object('ingress_key','db-column-acl:'||nspname||'.'||relname||'.'||attname||':'||coalesce(r.rolname,'public')||':'||lower(privilege_type),'ingress_kind','db_column_acl','relation',nspname||'.'||relname,'relation_kind',relkind,'column',attname,'grantee',coalesce(r.rolname,'public'),'privilege',lower(privilege_type),'grantable',is_grantable) row from capabilities c left join pg_roles r on r.oid=c.grantee where privilege_type in ('INSERT','UPDATE') and grantee<>relowner and (grantee=0 or r.oid in(select oid from runtime_roles)))\n` +
 `  select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex') into observed_count,observed_digest from observed;\n` +
 `  if observed_count<>${dbCatalogBaseline.column_dml.count} or observed_digest<>'${dbCatalogBaseline.column_dml.digest}' then return false; end if;\n` +
 `  with recursive connected(oid) as (\n` +
@@ -1456,7 +1456,7 @@ export function renderSIEP18ForwardRegistrySql(rows = fullInventory(),
 `  runtime_roles as (select r.oid,r.rolname from pg_roles r where r.oid in(select oid from connected) and not r.rolsuper),\n` +
 `  functions as (select p.oid,n.nspname,p.proname,pg_get_function_identity_arguments(p.oid) args,p.prosecdef,p.prokind,p.provolatile,p.proparallel,p.proconfig,p.proacl,p.proowner from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname not in ('pg_catalog','information_schema') and p.prokind in ('f','p')),\n` +
 `  capabilities as (select f.*,acl.grantee,acl.privilege_type,acl.is_grantable from functions f cross join lateral aclexplode(coalesce(f.proacl,acldefault('f',f.proowner))) acl),\n` +
-`  observed as (select 'db-function-acl:'||nspname||'.'||proname||'('||args||'):'||coalesce(r.rolname,'public')||':execute' ingress_key,jsonb_build_object('ingress_key','db-function-acl:'||nspname||'.'||proname||'('||args||'):'||coalesce(r.rolname,'public')||':execute','ingress_kind','db_function_acl','signature',nspname||'.'||proname||'('||args||')','security_definer',prosecdef,'function_kind',prokind,'volatility',provolatile,'parallel',proparallel,'config',coalesce(to_jsonb(proconfig),'[]'::jsonb),'grantee',coalesce(r.rolname,'public'),'privilege','execute','grantable',is_grantable) row from capabilities c left join pg_roles r on r.oid=c.grantee where prosecdef and privilege_type='EXECUTE' and (grantee=0 or r.oid in(select oid from runtime_roles)))\n` +
+`  observed as (select 'db-function-acl:'||nspname||'.'||proname||'('||args||'):'||coalesce(r.rolname,'public')||':execute' ingress_key,jsonb_build_object('ingress_key','db-function-acl:'||nspname||'.'||proname||'('||args||'):'||coalesce(r.rolname,'public')||':execute','ingress_kind','db_function_acl','signature',nspname||'.'||proname||'('||args||')','security_definer',prosecdef,'function_kind',prokind,'volatility',provolatile,'parallel',proparallel,'config',coalesce(to_jsonb(proconfig),'[]'::jsonb),'grantee',coalesce(r.rolname,'public'),'privilege','execute','grantable',is_grantable) row from capabilities c left join pg_roles r on r.oid=c.grantee where prosecdef and privilege_type='EXECUTE' and grantee<>proowner and (grantee=0 or r.oid in(select oid from runtime_roles)))\n` +
 `  select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex') into observed_count,observed_digest from observed;\n` +
 `  if observed_count<>${SIEP18_PRE_V9_DB_CATALOG_BASELINE.secdef_execute.count} or observed_digest<>'${SIEP18_PRE_V9_DB_CATALOG_BASELINE.secdef_execute.digest}' then\n` +
 `    raise exception 'SIEP-18 pre-v9 security-definer catalog receipt drifted: count %, digest %',observed_count,observed_digest;\n` +
@@ -1660,7 +1660,7 @@ export function renderSourceMergeForwardRegistrySql(rows = fullInventory(),
 `  runtime_roles as (select r.oid,r.rolname from pg_roles r where r.oid in(select oid from connected) and not r.rolsuper),\n` +
 `  functions as (select p.oid,n.nspname,p.proname,pg_get_function_identity_arguments(p.oid) args,p.prosecdef,p.prokind,p.provolatile,p.proparallel,p.proconfig,p.proacl,p.proowner from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname not in ('pg_catalog','information_schema') and p.prokind in ('f','p')),\n` +
 `  capabilities as (select f.*,acl.grantee,acl.privilege_type,acl.is_grantable from functions f cross join lateral aclexplode(coalesce(f.proacl,acldefault('f',f.proowner))) acl),\n` +
-`  observed as (select 'db-function-acl:'||nspname||'.'||proname||'('||args||'):'||coalesce(r.rolname,'public')||':execute' ingress_key,jsonb_build_object('ingress_key','db-function-acl:'||nspname||'.'||proname||'('||args||'):'||coalesce(r.rolname,'public')||':execute','ingress_kind','db_function_acl','signature',nspname||'.'||proname||'('||args||')','security_definer',prosecdef,'function_kind',prokind,'volatility',provolatile,'parallel',proparallel,'config',coalesce(to_jsonb(proconfig),'[]'::jsonb),'grantee',coalesce(r.rolname,'public'),'privilege','execute','grantable',is_grantable) row from capabilities c left join pg_roles r on r.oid=c.grantee where prosecdef and privilege_type='EXECUTE' and (grantee=0 or r.oid in(select oid from runtime_roles)))\n` +
+`  observed as (select 'db-function-acl:'||nspname||'.'||proname||'('||args||'):'||coalesce(r.rolname,'public')||':execute' ingress_key,jsonb_build_object('ingress_key','db-function-acl:'||nspname||'.'||proname||'('||args||'):'||coalesce(r.rolname,'public')||':execute','ingress_kind','db_function_acl','signature',nspname||'.'||proname||'('||args||')','security_definer',prosecdef,'function_kind',prokind,'volatility',provolatile,'parallel',proparallel,'config',coalesce(to_jsonb(proconfig),'[]'::jsonb),'grantee',coalesce(r.rolname,'public'),'privilege','execute','grantable',is_grantable) row from capabilities c left join pg_roles r on r.oid=c.grantee where prosecdef and privilege_type='EXECUTE' and grantee<>proowner and (grantee=0 or r.oid in(select oid from runtime_roles)))\n` +
 `  select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex') into observed_count,observed_digest from observed;\n` +
 `  if observed_count<>${SOURCE_MERGE_PRE_V10_DB_CATALOG_BASELINE.secdef_execute.count} or observed_digest<>'${SOURCE_MERGE_PRE_V10_DB_CATALOG_BASELINE.secdef_execute.digest}' then\n` +
 `    raise exception 'source-merge pre-v10 security-definer catalog receipt drifted: count %, digest %',observed_count,observed_digest;\n` +
@@ -1992,6 +1992,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     "--write-rebased-runtime-v4": [REGISTRY_V4_VERSION, SIEP14_DB_CATALOG_BASELINE, "mcp-server/src/scac-mutation-registry.v4.generated.js"],
     "--write-rebased-runtime-v5": [REGISTRY_V5_VERSION, SIEP15_DB_CATALOG_BASELINE, "mcp-server/src/scac-mutation-registry.v5.generated.js"],
     "--write-rebased-runtime-v6": [REGISTRY_V6_VERSION, SIEP16_DB_CATALOG_BASELINE, "mcp-server/src/scac-mutation-registry.v6.generated.js"],
+    "--write-rebased-runtime-v7": [REGISTRY_V7_VERSION, SIEP16_INTEGRATED_DB_CATALOG_BASELINE, "mcp-server/src/scac-mutation-registry.v7.generated.js"],
     "--write-rebased-runtime-v8": [REGISTRY_V8_VERSION, SIEP17_FORWARD_DB_CATALOG_BASELINE, "mcp-server/src/scac-mutation-registry.v8.generated.js"],
   };
   const rebasedMigrationModes = {
@@ -2000,6 +2001,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     "--write-rebased-migration-v4": [renderSIEP14RegistrySql, "migrations/0459_siep14_forward_mutation_registry.sql"],
     "--write-rebased-migration-v5": [renderSIEP15RegistrySql, "migrations/0461_siep15_forward_mutation_registry.sql"],
     "--write-rebased-migration-v6": [renderSIEP16RegistrySql, "migrations/0462_siep16_forward_mutation_registry.sql"],
+    "--write-rebased-migration-v7": [renderSIEP16IntegratedRegistrySql, "migrations/0464_siep16_integrated_mutation_registry.sql"],
     "--write-rebased-migration-v8": [renderSIEP17ForwardRegistrySql, "migrations/0466_siep17_forward_mutation_registry.sql"],
   };
   if (rebasedRuntimeModes[process.argv[2]]) {
@@ -2020,22 +2022,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
       dbCatalogBaseline: SIEP12_DB_CATALOG_BASELINE,
     }));
     process.stdout.write(`${target}\n`);
-  } else if (["--write-runtime", "--write-runtime-v2", "--write-runtime-v3", "--write-runtime-v4", "--write-runtime-v5", "--write-runtime-v6", "--write-runtime-v8",
+  } else if (["--write-runtime", "--write-runtime-v2", "--write-runtime-v3", "--write-runtime-v4", "--write-runtime-v5", "--write-runtime-v6", "--write-runtime-v7", "--write-runtime-v8",
     "--write-migration", "--write-siep12-migration", "--write-siep13-registry-migration",
     "--write-siep14-registry-migration", "--write-siep15-registry-migration",
-    "--write-siep16-registry-migration", "--write-siep17-forward-registry-migration"].includes(process.argv[2])) {
+    "--write-siep16-registry-migration", "--write-siep16-integrated-registry-migration",
+    "--write-siep17-forward-registry-migration"].includes(process.argv[2])) {
     throw new Error(`${process.argv[2]} refused: SCAC registry v1-v8 artifacts are sealed historical evidence; create a forward successor instead`);
-  } else if (process.argv[2] === "--write-runtime-v7") {
-    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v7.generated.js");
-    await writeFile(target, renderRuntimeProjection(rows, {
-      version: REGISTRY_V7_VERSION,
-      dbCatalogBaseline: SIEP16_INTEGRATED_DB_CATALOG_BASELINE,
-    }));
-    process.stdout.write(`${target}\n`);
-  } else if (process.argv[2] === "--write-siep16-integrated-registry-migration") {
-    const target = resolve(process.argv[3] || "migrations/0464_siep16_integrated_mutation_registry.sql");
-    await writeFile(target, renderSIEP16IntegratedRegistrySql(rows));
-    process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--write-runtime-v9") {
     const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v9.generated.js");
     await writeFile(target, renderRuntimeProjection(rows, {
