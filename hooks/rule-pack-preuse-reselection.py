@@ -74,6 +74,57 @@ GENERALIZED_FAILURE_CONTEXT = (
 )
 PATH_INPUT_KEYS = ("file_path", "path", "notebook_path")
 
+# THE CLOSED SET OF CAUSES THIS MODULE IS WILLING TO NAME OUT LOUD.
+#
+# Every string here is a RuntimeError message written in THIS file, so it
+# carries no provider text, no credential, no URL and no local path — which is
+# exactly the property the redaction below exists to protect. Anything else
+# reaching the handler is reported by exception CLASS ONLY, never its message.
+#
+# Why this exists: before 2026-09-02 all ten of these causes, plus a subprocess
+# timeout, collapsed into the same three words with the reason discarded, so a
+# dead database was indistinguishable from a rule-map inconsistency and neither
+# could be diagnosed after the fact. A delivery failure on this rail is also
+# invisible to out/rule-delivery-shadow.jsonl — a failed delivery emits no
+# receipt, and the Stop-side reconstruction credits only receipts — so this
+# transcript line is the ONLY trace a failure leaves. It has to say which
+# failure it was.
+#
+# ops/rule-pack-preuse-reselection-selftest.py asserts this set equals the
+# RuntimeError literals actually raised in this file, so a new raise site
+# cannot silently degrade to its class name.
+SELECTOR_REASONS = frozenset({
+    "selector delivery plan is not exact",
+    "selector did not return every scheduled rule",
+    "selector did not return every triggered rule",
+    "selector identity is incomplete",
+    "selector response was not ok",
+    "selector returned a malformed rule",
+    "selector returned duplicate or nonbinding rule",
+    "selector returned malformed JSON",
+    "selector returned nonzero",
+    "selector rule pools are malformed",
+})
+
+
+def _failure_reason(exc: BaseException) -> str:
+    """Name the cause without ever echoing untrusted exception text.
+
+    An allowlist, not a denylist: redaction that tries to strip secrets out of
+    arbitrary text is a guess, and a guess that is wrong once puts a bearer in
+    the transcript permanently. `type(exc) is RuntimeError` rather than
+    isinstance, so a subclass carrying a coincidentally-matching message
+    cannot pass.
+    """
+    if type(exc) is RuntimeError and str(exc) in SELECTOR_REASONS:
+        return str(exc)
+    return f"unexpected {type(exc).__name__}"
+
+
+def _failed(base: str, exc: BaseException) -> dict:
+    """The fixed non-blocking failure line, plus the one safe word for why."""
+    return _context(f"{base} Cause: {_failure_reason(exc)}.")
+
 
 def scheduled_rule_ids() -> list[str]:
     """Expose the current reviewed-map membership for the hook and its gate."""
@@ -343,11 +394,13 @@ def process(payload: dict, *, runner: Callable = subprocess.run) -> dict | None:
             ids = scheduled_rule_ids()
             response = _run_selector(ids, runner)
             return _context(canonical(_receipt(payload, response, ids)).decode("utf-8"))
-        except Exception:
+        except Exception as exc:
             # Never surface provider/auth/network exception text: it may contain a
-            # bearer, URL, or local path.  The fixed category is enough for Stop to
-            # preserve the miss and for the operator to reproduce through the door.
-            return _context(FAILURE_CONTEXT)
+            # bearer, URL, or local path.  Only this module's OWN RuntimeError
+            # messages are named (SELECTOR_REASONS); everything else degrades to
+            # its exception class.  That keeps the redaction property intact while
+            # letting Stop and the operator tell the ten causes apart.
+            return _failed(FAILURE_CONTEXT, exc)
 
     # THE GENERALIZED RAIL (WR-000019 slice S9). Only reached when the
     # original exact shape did not match, so a background Bash/functions.exec
@@ -364,8 +417,8 @@ def process(payload: dict, *, runner: Callable = subprocess.run) -> dict | None:
         return _context(canonical(
             _generalized_receipt(payload, response, trigger_ids, packs, ids)
         ).decode("utf-8"))
-    except Exception:
-        return _context(GENERALIZED_FAILURE_CONTEXT)
+    except Exception as exc:
+        return _failed(GENERALIZED_FAILURE_CONTEXT, exc)
 
 
 def main() -> int:

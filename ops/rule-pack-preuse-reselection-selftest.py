@@ -2,10 +2,12 @@
 """Behavioral contract for the shadow-compatible pre-use reselection rail."""
 from __future__ import annotations
 
+import ast
 import copy
 import hashlib
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -227,6 +229,47 @@ check("Codex structured exec receives the same rail",
       receipt(rail.process(payload(tool="functions.exec", client="codex"), runner=Runner()))["client"]
       == "codex")
 
+# A failure line must name its cause, and the cause must come from the closed
+# set or be a bare exception class name. This is the invariant that lets the
+# line be diagnostic without becoming a channel for provider text: a leak would
+# have to appear as a cause that is neither in SELECTOR_REASONS nor of the form
+# "unexpected <ClassName>", which is exactly what this rejects.
+def safe_cause(rendered: str, base: str) -> bool:
+    if not rendered.startswith(base + " Cause: ") or not rendered.endswith("."):
+        return False
+    cause = rendered[len(base) + len(" Cause: "):-1]
+    if cause in rail.SELECTOR_REASONS:
+        return True
+    return (cause.startswith("unexpected ")
+            and cause.removeprefix("unexpected ").isidentifier())
+
+
+# The allowlist must track the raise sites, or a new one degrades to its class
+# name and quietly loses the very detail this whole change exists to keep.
+raised_literals = {
+    arg.value
+    for node in ast.walk(ast.parse(Path(rail.__file__).read_text(encoding="utf-8")))
+    if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
+    and getattr(node.exc.func, "id", None) == "RuntimeError"
+    for arg in node.exc.args
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+}
+check("SELECTOR_REASONS covers every RuntimeError raised in the rail",
+      raised_literals == set(rail.SELECTOR_REASONS),
+      {"only_raised": sorted(raised_literals - set(rail.SELECTOR_REASONS)),
+       "only_listed": sorted(set(rail.SELECTOR_REASONS) - raised_literals)})
+
+# The redaction itself, stated directly rather than only via the runners below.
+check("a secret-bearing exception is reported by class, never by message",
+      rail._failure_reason(RuntimeError("postgres://user:hunter2@host/db"))  # ci-secret-scan: allow — invented fixture, never a real DSN; it is the thing being proven unreadable
+      == "unexpected RuntimeError")
+check("a timeout is named as its class rather than collapsing to nothing",
+      rail._failure_reason(subprocess.TimeoutExpired(cmd="x", timeout=15))
+      == "unexpected TimeoutExpired")
+check("a RuntimeError subclass cannot smuggle an allowlisted message",
+      rail._failure_reason(type("Sneaky", (RuntimeError,), {})("selector returned nonzero"))
+      == "unexpected Sneaky")
+
 # Selector responses are strict; failures are fixed/redacted and never block.
 bad_cases = [
     ("nonzero", Runner(returncode=1, stderr="token=SUPER-SECRET")),
@@ -244,8 +287,8 @@ bad_cases = [
 for label, fake in bad_cases:
     failed = rail.process(payload(), runner=fake)
     rendered = context(failed)
-    check(f"{label} is fixed redacted nonblocking failure",
-          rendered == rail.FAILURE_CONTEXT
+    check(f"{label} is redacted nonblocking failure naming one safe cause",
+          safe_cause(rendered, rail.FAILURE_CONTEXT)
           and "SUPER-SECRET" not in json.dumps(failed)
           and "decision" not in failed and "updatedInput" not in failed, failed)
 
@@ -617,8 +660,8 @@ gen_bad_cases = [
 for label, fake in gen_bad_cases:
     failed = rail.process(agent_call, runner=fake)
     rendered = context(failed)
-    check(f"generalized rail: {label} is fixed redacted nonblocking failure",
-          rendered == rail.GENERALIZED_FAILURE_CONTEXT
+    check(f"generalized rail: {label} is redacted nonblocking failure naming one safe cause",
+          safe_cause(rendered, rail.GENERALIZED_FAILURE_CONTEXT)
           and "SUPER-SECRET" not in json.dumps(failed)
           and "decision" not in failed and "updatedInput" not in failed, failed)
 
