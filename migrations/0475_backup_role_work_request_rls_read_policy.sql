@@ -37,10 +37,10 @@
 -- on, pg_dump fails OPEN: a table whose RLS hides rows from carr_backup is
 -- dumped short, silently. Today ops.work_request is the only RLS-enabled table
 -- in public+ops. The invariant that every such table must carry a permissive
--- carr_backup read-all policy is enforced two ways, so a future RLS addition
--- fails loudly instead of shrinking the backup: the source contract in
--- ops/backup-role-rls-coverage-selftest.py (runs in ci.sh), and the live proof
--- in ops/backup-role-rls-coverage-local-pg-acceptance.py.
+-- carr_backup read-all policy is enforced by
+-- ops/backup-role-rls-coverage-selftest.py: its source contract runs in ci.sh
+-- (a future RLS addition without a carr_backup read-all policy fails loudly),
+-- and its live disposable-Postgres proof runs when CARR_LOCAL_PG_DSN is set.
 --
 -- CONDITIONAL ON THE ROLE, like 0473. carr_backup is a production login;
 -- db/schema.sql deliberately does not create it, so on a CI rebuild the role is

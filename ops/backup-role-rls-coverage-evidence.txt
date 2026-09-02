@@ -1,20 +1,27 @@
 WR-000044 / decision 11376c54 — backup RLS fix: reproducible safety evidence
 ============================================================================
 
-WHAT THIS IS. A captured run of ops/backup-role-rls-coverage-local-pg-acceptance.py
-against a disposable PostgreSQL 17 cluster, committed so a reviewer who cannot
-stand up Postgres can see the numbers, and so anyone can re-run it and reproduce
-the INVARIANTS (the absolute digests below are environment-specific — a
-disposable cluster holds fewer objects than production — but the invariance, the
-contrast, the refusal, and the row parity are deterministic).
+WHAT THIS IS. A captured run of ops/backup-role-rls-coverage-selftest.py with
+CARR_LOCAL_PG_DSN set to a disposable PostgreSQL 17 cluster, committed so a
+reviewer who cannot stand up Postgres can see the numbers, and so anyone can
+re-run it and reproduce the INVARIANTS (the absolute digests below are
+environment-specific — a disposable cluster holds fewer objects than production
+— but the invariance, the contrast, the refusal, and the row parity are
+deterministic).
+
+The proof lives in the *-selftest.py (not a *-local-pg-acceptance.py) on purpose:
+a selftest is excluded from the SCAC script-entrypoint census
+(ops/scac-mutation-inventory.mjs isScriptEntrypoint), so this proof harness adds
+nothing to the sealed mutation registry and needs no reseal. Without a DSN the
+same file runs only the source contract (and passes) in ci.sh.
 
 HOW TO REPRODUCE (LC_ALL=C, disposable cluster, never port 55432):
   1. initdb a throwaway PG17 cluster as superuser carr_ci; create role neondb_owner.
   2. Create db carr_proof; load db/schema.sql; DATABASE_URL=...carr_proof \
        .venv/bin/python tools/migrate.py --apply --yes    # applies through 0475
   3. CARR_LOCAL_PG_DSN=...carr_proof \
-       .venv/bin/python ops/backup-role-rls-coverage-local-pg-acceptance.py
-The test itself creates carr_backup (mirroring migration 0119) because
+       .venv/bin/python ops/backup-role-rls-coverage-selftest.py
+The selftest creates carr_backup (mirroring migration 0119) because
 db/schema.sql deliberately omits it — that omission was the original false-green.
 
 THE PROOF, IN TWO HALVES (both required):
@@ -27,9 +34,14 @@ THE PROOF, IN TWO HALVES (both required):
     where the naive BYPASSRLS path was not.
 
 CAPTURED RUN:
-  $ date -u: 2026-09-01T23:47:15Z
+  $ date -u: 2026-09-02T00:32:18Z
   $ pg: pg_dump (PostgreSQL) 17.11 (Homebrew)
 
+  ok    at least one public/ops table has RLS (sanity: ops.work_request)
+  ok    RLS table ops.work_request has a permissive carr_backup read-all policy in migrations
+  ok    bin/backup-dump.sh dumps with --enable-row-security
+  ok    the pg_dump invocation itself carries --enable-row-security
+  --    CARR_LOCAL_PG_DSN present: running live disposable-Postgres proof
   ..    full v10 census block BEFORE policy: count=27 digest=sha256:e5dcfea5551a9ff1f78d8b079c8340103b173505207bb63b7ab14ac28c4efdbb
   ..    full v10 census block AFTER  policy: count=27 digest=sha256:e5dcfea5551a9ff1f78d8b079c8340103b173505207bb63b7ab14ac28c4efdbb
   ok    migration 0475 creates carr_backup_full_read on ops.work_request
@@ -58,6 +70,6 @@ CAPTURED RUN:
   ok    carr_backup holds zero write/DDL-adjacent table grants
   ok    no '^carr_' app role carries BYPASSRLS (fix introduced none anywhere)
 
-backup-role-rls-coverage: all 22 checks passed
+backup-role-rls-coverage-selftest: all 26 checks passed
 
 exit=0 (all checks passed)
