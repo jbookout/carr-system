@@ -500,6 +500,19 @@ PYEOF
   # ops/ci-selftest.py's test_every_test_file_in_the_tree_is_collected reads
   # these globs back out of this file and fails if ANY test-shaped file in the
   # tree is matched by none of them.
+  # THE PYTHON SUITES RUN IN A BOUNDED PARALLEL POOL (2026-09-02). Measured
+  # sequentially this loop cost 495s on the canary's biggest class: ten suites
+  # carry ~235s of subprocess work and the other ~330 average 0.8s of
+  # interpreter start-up each. Three 4-way parallel sweeps of all 341 suites
+  # finished in 125s with zero new failures, no cross-suite collisions, and a
+  # byte-clean tree fingerprint (evidence in the PR that landed this).
+  # Execution is parallel; REPORTING stays sequential in stable name order
+  # below, so the output contract, the exit-78 skip handling, inherited_abort,
+  # and the timeout classing are unchanged. Suites must already be isolated —
+  # the git-isolation selftest and the class-level tree fingerprint enforce
+  # that — and each still runs under the same per-suite timeout helper.
+  # Pool width: hosted runners have 4 vCPUs; CARR_CI_GATE_JOBS overrides.
+  local eligible=""
   for t in ops/*-selftest.py tools/test-*.py tools/test_*.py; do
     [ -f "$t" ] || continue
     local base; base="$(basename "$t")"
@@ -510,10 +523,30 @@ PYEOF
       continue
     fi
     count=$((count+1))
-    local grc
-    run_quiet "$LOGDIR/gate-$base.log" "$PY" "$CI_TIMEOUT_HELPER" \
-      "$CI_SELFTEST_TIMEOUT_SECONDS" "$PY" "$t"
-    grc=$?
+    eligible="$eligible $t"
+  done
+  # THE POOLED CAP SCALES WITH THE POOL (2026-09-02). The 120s per-suite cap
+  # was calibrated for a suite running alone; four suites sharing four hosted
+  # vCPUs stretch wall time roughly by the pool width, and the first canary
+  # after the pool landed proved it: ci-selftest (27s alone) was starved past
+  # 120s, killed, and its nested runs leaked children that then collided with
+  # the migration class (run 33634323225). Scaling by width keeps the cap's
+  # meaning — "several times slower than the slowest honest run is a hang" —
+  # at every pool size, and width 1 restores today's exact 120s.
+  local pooled_timeout=$(( CI_SELFTEST_TIMEOUT_SECONDS * ${CARR_CI_GATE_JOBS:-4} ))
+  export CI_TIMEOUT_HELPER CI_SELFTEST_TIMEOUT_SECONDS LOGDIR PY pooled_timeout
+  # -n1 with the path as $1, NOT -I{}: BSD xargs -I substitutes into the whole
+  # script and refuses with "command line cannot be assembled, too long".
+  printf '%s\n' $eligible | xargs -P "${CARR_CI_GATE_JOBS:-4}" -n1 bash -c '
+    b="$(basename "$1")"
+    "$PY" "$CI_TIMEOUT_HELPER" "$pooled_timeout" "$PY" "$1" \
+      >"$LOGDIR/gate-$b.log" 2>&1
+    echo $? >"$LOGDIR/gate-$b.rc"
+  ' _
+  local grc
+  for t in $eligible; do
+    base="$(basename "$t")"
+    grc="$(cat "$LOGDIR/gate-$base.rc" 2>/dev/null || echo 1)"
     # EXIT 78 IS "NOT CONFIGURED HERE", NOT A FAILURE. It is EX_CONFIG, and it is
     # already the repo's convention: bin/type-check.sh's header states it and the
     # types class above honours it. This loop counted every nonzero the same, so
@@ -525,8 +558,8 @@ PYEOF
     if [ "$grc" -eq 124 ]; then
       failures="$failures TIMEOUT:$base"
       gates_timed_out=1
-      printf '        \033[31mTIMEOUT\033[0m  %s — exceeded %ss; aborting remaining gate selftests\n' \
-        "$base" "$CI_SELFTEST_TIMEOUT_SECONDS" >&2
+      printf '        \033[31mTIMEOUT\033[0m  %s — exceeded %ss (pool-scaled); aborting remaining gate selftests\n' \
+        "$base" "$pooled_timeout" >&2
       tail -12 "$LOGDIR/gate-$base.log" >&2
       break
     elif [ "$grc" -eq 78 ]; then

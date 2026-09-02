@@ -117,6 +117,41 @@ with tempfile.TemporaryDirectory() as td:
         "it survived the kill, which is exactly the 2026-08-23 failure",
     )
 
+# ── 5b. THE 2026-09-02 CASE: a re-sessioned descendant dies too ─────────────
+# The group kill cannot reach a descendant that called start_new_session —
+# which every NESTED with-timeout does. On canary run 33634323225 a timed-out
+# gate selftest's nested runs escaped exactly this way and kept writing to the
+# run's shared throwaway Postgres. The helper now also walks the ps ppid tree.
+print("re-sessioned descendant reaping (the 2026-09-02 canary shape)")
+with tempfile.TemporaryDirectory() as td:
+    marker = Path(td) / "escapee-still-running"
+    escapee = Path(td) / "escapee.py"
+    escapee.write_text(
+        "import time, pathlib\n"
+        f"p = pathlib.Path({str(marker)!r})\n"
+        "end = time.time() + 30\n"
+        "while time.time() < end:\n"
+        "    p.touch(); time.sleep(0.3)\n"
+    )
+    parent = Path(td) / "parent.py"
+    parent.write_text(
+        "import subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, {str(escapee)!r}], start_new_session=True,\n"
+        "    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)\n"
+        "time.sleep(30)\n"
+    )
+    rc, _, _, _ = run_helper(2, sys.executable, str(parent), timeout=90)
+    check("parent of the escapee times out", rc == 124, f"got rc={rc}")
+    time.sleep(1.0)
+    marker.unlink(missing_ok=True)
+    time.sleep(1.5)
+    check(
+        "re-sessioned descendant is dead, not merely escaped",
+        not marker.exists(),
+        "the start_new_session grandchild kept touching the marker after the "
+        "timeout — it escaped the group kill, the 2026-09-02 canary failure",
+    )
+
 # ── 6. a child that ignores SIGTERM is still stopped ────────────────────────
 # A process blocked in an uninterruptible-looking wait may not act on TERM.
 # The helper escalates to KILL rather than waiting forever for a polite exit.
