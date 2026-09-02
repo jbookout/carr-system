@@ -98,6 +98,16 @@ class Fixture:
                 "argv": ["git", "clean", "-fd", "--", *paths],
                 "pathspecs": paths,
             })
+        # Stage 3 pushes every backed-up branch tip to the remote in one atomic
+        # command, so the allowlist has to carry it whenever any branch declares
+        # a backup ref. Mirrors what the real manifest authoring emits.
+        refspecs = [f"refs/heads/{b['name']}:{b['tip_backup_ref']}"
+                    for b in manifest["branches"] if b["tip_backup_ref"]]
+        if refspecs:
+            commands.append({
+                "id": "stage3.branch-backup.push",
+                "argv": ["git", "push", "--atomic", "origin", *refspecs], "pathspecs": [],
+            })
         for branch in manifest["branches"]:
             if branch["classification"] == "ancestry_merged" and branch["tip_backup_ref"] is not None:
                 commands.append({
@@ -348,6 +358,55 @@ def test_closing_detects_undeleted_branch(root: Path) -> None:
     print("PASS closing_detects_undeleted_branch")
 
 
+def test_branch_only_settlement_ignores_working_tree(root: Path) -> None:
+    """A settlement that declares no file operation must not be gated by the tree.
+
+    The shared checkout is written continuously by other sessions, so a
+    branch-only run cannot be made hostage to a cleanliness it never touches.
+    Here the checkout is behind the pin AND carries untracked debris, and the
+    branch deletion still completes.
+    """
+    fixture = Fixture(root / "branch-only")
+    git(fixture.repository, "switch", "-c", "merged-branch")
+    git(fixture.repository, "switch", "main")
+    tip = git(fixture.repository, "rev-parse", "HEAD").strip()
+    backup_ref = "refs/backup/fixture-r03-stage5/branch/merged-branch"
+    git(fixture.repository, "update-ref", backup_ref, tip)
+    branches = [{"name": "merged-branch", "tip": tip, "classification": "ancestry_merged",
+                 "tip_backup_ref": backup_ref, "host_confirmation": None}]
+    manifest = fixture.manifest(clean_pathspecs=[], clean_expected=[], branches=branches, branch_count=1)
+    # debris the run must leave alone, and a checkout deliberately behind the pin
+    debris = fixture.repository / "untouched-debris.txt"
+    debris.write_text("not this run's business\n", encoding="utf-8")
+    _advance_origin_main(fixture)
+    manifest["pinned_origin_main"] = fixture.pin
+    manifest["closing"]["expected_head"] = fixture.pin
+    output = invoke(fixture, manifest, execute=True)
+    assert "branch-only settlement" in output, output
+    assert "clean skipped" in output, output
+    surviving = subprocess.run(["git", "for-each-ref", "--format=%(refname:short)", "refs/heads"],
+                               cwd=str(fixture.repository), env=ENV, text=True,
+                               stdout=subprocess.PIPE).stdout.split()
+    assert "merged-branch" not in surviving, f"branch was not deleted; refs={surviving}"
+    assert debris.exists(), "a branch-only settlement deleted an untracked file"
+    print("PASS branch_only_settlement_ignores_working_tree")
+
+
+def test_empty_clean_set_never_cleans_whole_tree(root: Path) -> None:
+    """An empty pathspec list means clean nothing; `git clean -fd --` means clean everything."""
+    fixture = Fixture(root / "empty-clean")
+    keep = fixture.repository / "keep-me.txt"
+    keep.write_text("untracked but not condemned\n", encoding="utf-8")
+    nested = fixture.repository / "nested" / "deep.txt"
+    nested.parent.mkdir()
+    nested.write_text("also not condemned\n", encoding="utf-8")
+    manifest = fixture.manifest(clean_pathspecs=[], clean_expected=[], branch_count=1)
+    invoke(fixture, manifest, execute=True)
+    assert keep.exists(), "empty clean set widened into deleting untracked files"
+    assert nested.exists(), "empty clean set widened into a recursive tree clean"
+    print("PASS empty_clean_set_never_cleans_whole_tree")
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="r03-settlement-sweep-") as temporary:
         root = Path(temporary)
@@ -360,6 +419,8 @@ def main() -> int:
         test_precondition_refuses_stale_head(root)
         test_closing_detects_collateral_branch_loss(root)
         test_closing_detects_undeleted_branch(root)
+        test_branch_only_settlement_ignores_working_tree(root)
+        test_empty_clean_set_never_cleans_whole_tree(root)
     print("r03-settlement-sweep-selftest: PASS")
     return 0
 

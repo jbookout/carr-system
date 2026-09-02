@@ -167,7 +167,11 @@ def validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
     clean = _require_mapping(manifest["clean"], "manifest.clean")
     if set(clean) != {"pathspecs", "expected"}:
         raise SweepError("manifest.clean fields are not exact")
-    clean_pathspecs = _relative_paths(clean["pathspecs"], "manifest.clean.pathspecs")
+    # allow_empty: a branch-only settlement declares no clean set at all. This is
+    # only safe because an empty list is now proven to SKIP the clean rather than
+    # widen into `git clean -fd --` over the whole tree; the two changes belong
+    # together and neither is correct without the other.
+    clean_pathspecs = _relative_paths(clean["pathspecs"], "manifest.clean.pathspecs", allow_empty=True)
     clean_expected = _relative_paths(clean["expected"], "manifest.clean.expected", allow_empty=True)
 
     restores = manifest["restore"]
@@ -602,14 +606,33 @@ def _safe_remove(repository: Path, pathspec: str) -> None:
         raise SweepError(f"unsupported park removal type: {pathspec}")
 
 
+def _touches_working_tree(parsed: Mapping[str, Any]) -> bool:
+    """True when this settlement declares any file-level operation.
+
+    A settlement that deletes only branches reads and writes no file, so
+    requiring the whole checkout to be pinned and spotless would make it hostage
+    to work it never touches. On a checkout several sessions write to
+    continuously that condition is not merely inconvenient, it is never durably
+    true: this tree was cleaned to zero twice on 2026-09-02 and fresh work from
+    another session appeared within minutes both times. Assert what this run
+    changed, and nothing else.
+    """
+    return bool(parsed["clean_pathspecs"] or parsed["restore_paths"] or parsed.get("park_paths"))
+
+
 def _stage6_readback(repository: Path, manifest: Mapping[str, Any], parsed: Mapping[str, Any],
                      starting_branches: set[str], deleted: set[str]) -> None:
-    head = _git(repository, "rev-parse", "HEAD").stdout.strip().lower()
-    if head != parsed["pinned"]:
-        raise SweepError(f"closing readback HEAD differs from pin: {head}")
-    status = _git(repository, "status", "--porcelain=v1").stdout
-    if status:
-        raise SweepError(f"closing readback has remaining tracked/untracked dirt: {status!r}")
+    if _touches_working_tree(parsed):
+        head = _git(repository, "rev-parse", "HEAD").stdout.strip().lower()
+        if head != parsed["pinned"]:
+            raise SweepError(f"closing readback HEAD differs from pin: {head}")
+        status = _git(repository, "status", "--porcelain=v1").stdout
+        if status:
+            raise SweepError(f"closing readback has remaining tracked/untracked dirt: {status!r}")
+    else:
+        head = _git(repository, "rev-parse", "HEAD").stdout.strip().lower()
+        print("STAGE 6 branch-only settlement: no file operation was declared, so the "
+              "closing readback asserts branch sets only and leaves the working tree unjudged")
 
     # Branch closing is asserted as SETS, not as a pinned integer.  A count fixed at
     # authoring time is invalidated by any concurrent session creating a branch -- which
@@ -656,9 +679,17 @@ def run_settlement(*, repository: Path, manifest_fd: int, allowlist_fd: int, cap
     validate_allowlist(allowlist)
     validate_receipt(receipt, manifest_bytes)
 
-    dry_argv = ["git", "clean", "-nd", "--", *parsed["clean_pathspecs"]]
-    _require_allowed(allowlist, "stage5.clean.dry", dry_argv, parsed["clean_pathspecs"])
-    candidates = _clean_candidates(repository, parsed["clean_pathspecs"])
+    # AN EMPTY PATHSPEC LIST MEANS CLEAN NOTHING, NEVER CLEAN EVERYTHING.
+    # `git clean -fd --` with no pathspec removes every untracked file in the
+    # repository. A manifest that declares no clean set is asking for no clean,
+    # so the command must not be built at all -- passing the empty list through
+    # would turn "nothing to tidy" into "delete all untracked work", which is
+    # the single most destructive thing this tool could do by accident.
+    candidates: list[str] = []
+    if parsed["clean_pathspecs"]:
+        dry_argv = ["git", "clean", "-nd", "--", *parsed["clean_pathspecs"]]
+        _require_allowed(allowlist, "stage5.clean.dry", dry_argv, parsed["clean_pathspecs"])
+        candidates = _clean_candidates(repository, parsed["clean_pathspecs"])
     _assert_clean_diff(manifest, parsed, candidates)
 
     # THE SETTLEMENT SETTLES A CURRENT TREE; IT NEVER MOVES HEAD.  Stage 6 requires HEAD to
@@ -668,7 +699,9 @@ def run_settlement(*, repository: Path, manifest_fd: int, allowlist_fd: int, cap
     # an unsatisfiable run into an honest refusal that names the remedy.  Bringing the
     # checkout current is a separate, adjudicated step and deliberately not this tool's job.
     head_now = _git(repository, "rev-parse", "HEAD").stdout.strip().lower()
-    head_is_pinned = head_now == parsed["pinned"]
+    # A branch-only settlement never reads or writes a file, so a checkout that
+    # is behind the pin cannot affect its outcome and does not gate it.
+    head_is_pinned = head_now == parsed["pinned"] or not _touches_working_tree(parsed)
     if not head_is_pinned:
         behind = _git(repository, "rev-list", "--count", f"{head_now}..{parsed['pinned']}",
                       check=False).stdout.strip() or "?"
@@ -734,9 +767,13 @@ def run_settlement(*, repository: Path, manifest_fd: int, allowlist_fd: int, cap
                 raise SweepError(f"manifest tries to park never-cleanable path: {pathspec}")
             _safe_remove(repository, pathspec)
 
-    execute_argv = ["git", "clean", "-fd", "--", *parsed["clean_pathspecs"]]
-    _require_allowed(allowlist, "stage5.clean.execute", execute_argv, parsed["clean_pathspecs"])
-    _git(repository, "clean", "-fd", "--", *parsed["clean_pathspecs"])
+    if parsed["clean_pathspecs"]:
+        execute_argv = ["git", "clean", "-fd", "--", *parsed["clean_pathspecs"]]
+        _require_allowed(allowlist, "stage5.clean.execute", execute_argv, parsed["clean_pathspecs"])
+        _git(repository, "clean", "-fd", "--", *parsed["clean_pathspecs"])
+    else:
+        print("STAGE 5 clean skipped: the manifest declares no clean set, and an empty "
+              "pathspec list must never widen into cleaning the whole tree")
     deleted, retained = _delete_branches(repository, manifest, parsed, allowlist)
     print(f"STAGE 5 branch law applied: deleted={len(deleted)} retained={len(retained)}")
     _stage6_readback(repository, manifest, parsed, starting_branches, deleted)
