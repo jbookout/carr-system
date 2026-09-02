@@ -24,7 +24,7 @@ and larger: a website column would be written by SESSIONS during research, and a
 list a session can append to is not a control — it is a session granting itself
 access and writing the permission slip afterwards.
 
-EMAIL DOMAINS avoid both. `kaydee@gulfcoastpelvichealth.com` names the practice's
+EMAIL DOMAINS avoid both. `frontdesk@<the-practice-domain>` names the practice's
 own domain; the field is partner-entered at intake; and the standing doctrine
 that identity fields are never edited on research alone already governs it. The
 list maintains itself as the book grows, with no migration and no new surface.
