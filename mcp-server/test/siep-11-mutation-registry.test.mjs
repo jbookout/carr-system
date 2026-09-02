@@ -232,7 +232,7 @@ test("v9 successor seals v8 and binds the measured SIEP-18 grant snapshot", () =
 
 test("v10 successor seals v9 and carries the generated source-merge control", () => {
   const rows = fullInventory();
-  assert.equal(rows.length, 809);
+  assert.equal(rows.length, 811);
   assert.equal(generatedV10, renderRuntimeProjection(rows, {
     version: REGISTRY_V10_VERSION, dbCatalogBaseline: SOURCE_MERGE_FORWARD_DB_CATALOG_BASELINE,
   }));
@@ -315,7 +315,7 @@ test("migration is read-only at runtime and preserves the SIEP-18 boundary", () 
 
 test("reviewed non-MCP source locators resolve and remain explicitly non-authorizing", () => {
   const rows = fullInventory().filter(row => !["mcp_tool", "job_definition", "workflow_entrypoint"].includes(row.ingress_kind));
-  assert.equal(rows.length, 531);
+  assert.equal(rows.length, 533);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -323,7 +323,7 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
     assert.equal(row.implementation_state, "inventoried_not_atomically_mediated");
   }
   const scripts = discoverScriptEntrypoints();
-  assert.equal(scripts.length, 522);
+  assert.equal(scripts.length, 524);
   assert.equal(scripts.some(path => path === "ops/rule-delivery-cutover.py"), true);
   assert.equal(scripts.some(path => path === "ops/control-plane-scheduler-cutover.py"), true);
   assert.equal(scripts.some(path => path === "run.sh"), true);
@@ -358,6 +358,8 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
     .map(row => row.source_locator).sort(), scripts);
   assert.equal(rows.find(row => row.source_locator === "tools/db-tap.py").ingress_kind, "break_glass");
   assert.equal(rows.find(row => row.source_locator === "tools/call-verb.py").ingress_kind, "break_glass");
+  assert.equal(rows.find(row => row.source_locator === "tools/run-breakglass.py").ingress_kind, "break_glass");
+  assert.equal(rows.find(row => row.source_locator === "tools/migrate-prod-support.py").ingress_kind, "external_admin");
   assert.deepEqual(rows.find(row => row.source_locator === "run.sh").delegates_to,
     ["*registered_script_entrypoint"]);
   assert.deepEqual(rows.find(row => row.source_locator === "mcp-server/local-verb.mjs").delegates_to,
@@ -401,8 +403,8 @@ test("job definitions and live DB capabilities have exact reviewed baselines", (
   assert.match(migration, /for category,kind in values \('secdef_execute','db_function_acl'\)/);
   assert.match(migration, /actual_digest<>expected->>'digest'/);
   assert.deepEqual(SIEP12_DB_CATALOG_BASELINE.role_authority, {
-    count: 52,
-    digest: "sha256:345871802aa8f5b57aa87f3edfeac5187d06be0cb1ab5695371bcdfba4a49433",
+    count: 95,
+    digest: "sha256:082b8570b428c33296c801871177f6bfb34e9c070513d4b1db23007f4edecafb",
   });
   assert.match(successorMigration, /pg_auth_members/);
 });

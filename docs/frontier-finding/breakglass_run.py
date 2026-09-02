@@ -12,8 +12,12 @@ forward-fix commitment. This driver only ADDS a three-sided assertion on top.
 INVOCATION (exactly as F01 condition (d) and the execution path describe it):
 
     CARR_BREAK_GLASS=1 .venv/bin/python tools/db-tap.py --reason "<WR note ref>" \\
-        run docs/frontier-finding/breakglass_run.py -- \\
+        run tools/run-breakglass.py -- \\
         --approved <run>.sql --receipt <receipt>.json
+
+(tools/run-breakglass.py is the tracked, reviewed launcher registered as a
+break-glass-class entrypoint by the WR-000048 registry re-pin; this module
+stays import-only and is reached through the launcher's main().)
 
 db-tap's `run` mode execs this file with DATABASE_URL already set in the
 child environment and no DSN ever on a command line. This script also runs
