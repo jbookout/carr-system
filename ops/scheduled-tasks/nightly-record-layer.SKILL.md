@@ -1,6 +1,6 @@
 ---
 name: nightly-record-layer
-description: Nightly record-layer chain (7 days, ~2am CT): exports all 7 generated files to the vault, rebuilds the Graph, then takes the encrypted backup. Verified by OUTPUT freshness, never by the schedule existing.
+description: Nightly record-layer VERIFIER (7 days, 2:30am CT, after the launchd chain at 2:05). launchd com.carr.nightly-record-layer is the executor; this task reads the chain's terminal line, verifies OUTPUT freshness via run.sh health, reports amber rows, and runs the chain itself only as failover when launchd did not fire.
 ---
 
 RULE-DELIVERY WORKFLOW: nightly-record-layer
@@ -16,7 +16,19 @@ declared pack is anything other than the exact canonical name
 
 STORE-FIRST (added 2026-08-09, loop #289): the doctrine STORE is the source of truth for every governing doc named below. Before reading any `.md` path in the vault, try `read-doctrine` with that file's stem as the document slug; if a store doc exists, IT WINS and the vault file may be a stale duplicate. Two such duplicates were found on 2026-08-09 and this routine's sibling had been reading a three-week-old SOP because its pointer named the file instead of the slug. Do not edit the vault copy either way: hand-authored vault markdown is closed by record-home-gate.py (rule 14181e60).
 
-Run the CARR record-layer nightly chain. Execute EXACTLY this via Bash, VERBATIM, character for character — do not paraphrase it, do not add flags, do not substitute paths, do not re-quote it. Permission approval matches the exact command string, and the string below is the one carrying a persisted approval (Joe, 2026-07-31); any rewording can hit a permission prompt at 2am with nobody awake to answer it, which is exactly how the first scheduled run produced nothing:
+FIRST, ESTABLISH WHETHER THE CHAIN ALREADY RAN TONIGHT (added 2026-08-31). This task is NOT the chain's executor. The launchd job `com.carr.nightly-record-layer` runs `bin/nightly.sh` at 02:05 and is the registered executor — it is the only nightly surface the control plane models (`ops/config/control-plane-scheduler-cutover.v1.json`). This task is the reporting half, which launchd cannot do.
+
+Why this gate exists, measured on 2026-08-31: this task used to invoke the chain unconditionally. `bin/nightly.sh` takes a lock, so the second invocation is a deliberate no-op THAT EXITS 0 — the task read `direct script exit=0`, concluded the chain had run, and then health-checked a tree the launchd chain was still writing. That night launchd began 07:05:01Z and signed off 07:12:51Z; this task fired at 07:06:10Z, sixty-nine seconds in, with the consumer rebuilds still seven minutes away. Every board row it read was BEHIND, and the file below calls a BEHIND board row a real finding. The alarm was manufactured by the ordering, not by the system.
+
+Read the terminal line for tonight's run and branch on it:
+
+cd ~/carr-system && tail -400 out/nightly.log | grep -E "===== nightly chain (begin|OK|FINISHED)" | tail -5
+
+  * A `nightly chain OK` or `nightly chain FINISHED WITH FAILURES` line dated tonight — the chain is COMPLETE. Do not invoke it. Skip straight to the verification section below, and report that line's verdict as the chain result.
+  * A `nightly chain begin` dated tonight with no terminal line after it — the chain is STILL RUNNING. Do not invoke it; a second invocation is a no-op that will mislead you exactly as described above. Wait and re-read the same command until a terminal line appears, then verify. The chain has been taking about eight minutes; if twenty-five minutes pass with no terminal line, stop waiting and report the chain as STALLED, naming the last `START` line in the log as where it hung.
+  * No `nightly chain begin` at all tonight — LAUNCHD DID NOT FIRE. This is the one case where this task runs the chain itself, as failover. Run the command below, then verify. Report the launchd miss prominently: a missed native run is a finding in its own right, separate from whatever the chain then reports, and `ops/launchd-plist-parity.py` plus the health check's launchd rows are where its cause will be.
+
+IF AND ONLY IF the third branch applies — launchd did not fire tonight — run the chain yourself. Execute EXACTLY this via Bash, VERBATIM, character for character — do not paraphrase it, do not add flags, do not substitute paths, do not re-quote it. Permission approval matches the exact command string, and the string below is the one carrying a persisted approval (Joe, 2026-07-31); any rewording can hit a permission prompt at 2am with nobody awake to answer it, which is exactly how the first scheduled run produced nothing:
 
 cd ~/carr-system && ./bin/nightly.sh >/dev/null 2>&1; echo "direct script exit=$?"
 
