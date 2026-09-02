@@ -1045,12 +1045,33 @@ def direct_metered_dispatch(cmd):
     return None
 
 
+def skipped_floor_push(cmd):
+    """Refuse a push that switches the local quality floor off.
+
+    CARR_SKIP_CI=1 exists for one human case: reconciling the canonical
+    checkout by hand. A session that sets it beside a `git push` is pushing
+    untested code and saying so in the environment (Engineering Workflow SOP,
+    section 2; Joe's 2026-09-02 ruling that hosted CI is the merge gate, not
+    the debugger). Prose describing the variable stays inert.
+    """
+    executable = strip_inert_text(cmd)
+    if not re.search(r"\bCARR_SKIP_CI=1\b", executable):
+        return None
+    if re.search(r"\bgit\s+push\b", executable):
+        return "CARR_SKIP_CI=1 beside a git push skips the local floor — blocked by the CARR guard; run ops/ci.sh and push green"
+    return None
+
+
 def check(cmd):
     """Return a reason string to block, or None to allow."""
     if cmd.strip() in ALLOW_EXACT:
         return None
 
     reason = delegation_control_plane_write(cmd)
+    if reason:
+        return reason
+
+    reason = skipped_floor_push(cmd)
     if reason:
         return reason
 
