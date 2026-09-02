@@ -228,16 +228,31 @@ EOF
     # and ci.sh's `for _want in $ONLY` splits it on whitespace; the new one runs
     # tr over a string with no commas and changes nothing. Verified against both
     # parsers before this was written. Do not "tidy" these back into commas.
-    FLOOR_CLASSES="pushfloor secret freshness"
-    if [ -n "$CARR_CI_RANGE" ] \
-        && git diff --name-only "$CARR_CI_RANGE" 2>/dev/null | grep -q '^migrations/'; then
-      FLOOR_CLASSES="$FLOOR_CLASSES migration"
-    fi
+    #
+    # THE FLOOR IS THE WHOLE SUITE AGAIN (Joe, 2026-09-02). From 2026-08-23 to
+    # 2026-09-02 this line read "pushfloor secret freshness" (+ migration when
+    # the diff touched migrations/): a 9-second floor, with the full suite left
+    # to hosted CI. Measured over 2026-09-01..02, that made GitHub the debugger:
+    # 12 of 25 branches were red on their FIRST push, branches averaged 4.1
+    # pushes to merge (one took 14), and hosted Actions billed 2,911 of the
+    # month's 3,000 included minutes by day two. Joe's ruling: a two-partner
+    # system in its build phase does not pay hundreds of dollars a month so the
+    # cloud can run tests a laptop runs in minutes. The identical suite runs
+    # here — ci.sh is the same file hosted runs — so a push that would fail
+    # hosted now fails on this machine first, at no cost.
+    #
+    # Every class is named explicitly rather than passing no --only at all, so
+    # the class list stays greppable and the space-separated compatibility
+    # argument above still holds. `migration` SKIPs without a throwaway
+    # Postgres; ci.sh reports the skip without failing the push, and
+    # `./run.sh local-db-ci --class migration` runs it properly. Hosted CI is
+    # still the REQUIRED merge gate; it is no longer where code is debugged.
+    FLOOR_CLASSES="pushfloor unit types contract gates secret dependency migration binding artifact freshness"
 
     if [ -n "$CARR_CI_RANGE" ]; then
-      echo "  pre-push: checking $CARR_CI_RANGE — $FLOOR_CLASSES (full strict suite runs hosted)…" >&2
+      echo "  pre-push: checking $CARR_CI_RANGE — the full suite ($FLOOR_CLASSES); hosted CI is the merge gate, not the debugger…" >&2
     else
-      echo "  pre-push: running $FLOOR_CLASSES (full strict suite runs hosted)…" >&2
+      echo "  pre-push: running the full suite ($FLOOR_CLASSES); hosted CI is the merge gate, not the debugger…" >&2
     fi
     # STRIP THE HOOK'S GIT ENVIRONMENT BEFORE RUNNING CI, and this is not hygiene —
     # it is the fix for a bug that destroyed local main on 2026-08-14.
