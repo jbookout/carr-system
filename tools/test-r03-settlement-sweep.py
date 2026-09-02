@@ -236,6 +236,95 @@ def test_branch_law_retains_unmerged_and_unbacked_squash(root: Path) -> None:
     print("PASS branch_law_retains_unmerged_and_unbacked_squash")
 
 
+def _advance_origin_main(fixture: Fixture) -> str:
+    """Land a new commit on origin/main while the checkout stays where it was.
+
+    This is the ordinary state of a repository other sessions merge into, and the
+    case a manifest must survive rather than expire on.
+    """
+    stay = git(fixture.repository, "rev-parse", "HEAD").strip()
+    (fixture.repository / "landed-elsewhere.txt").write_text("another session's merge\n", encoding="utf-8")
+    git(fixture.repository, "add", "landed-elsewhere.txt")
+    git(fixture.repository, "commit", "-m", "unrelated PR landing on main")
+    git(fixture.repository, "push", "origin", "main")
+    git(fixture.repository, "reset", "--hard", stay)
+    git(fixture.repository, "fetch", "origin", "main")
+    return stay
+
+
+def test_freshness_accepts_advanced_origin_main(root: Path) -> None:
+    """origin/main moving forward must NOT expire an otherwise-valid manifest."""
+    fixture = Fixture(root / "freshness-advance")
+    pin = fixture.pin
+    manifest = fixture.manifest(clean_pathspecs=["scratch"], clean_expected=[])
+    stayed = _advance_origin_main(fixture)
+    assert stayed == pin and fixture.pin != pin, "fixture did not advance origin/main past the pin"
+    output = invoke(fixture, manifest, execute=True)
+    assert "origin/main advanced" in output, output
+    assert "STAGE 6 closing readback passed" in output, output
+    print("PASS freshness_accepts_advanced_origin_main")
+
+
+def test_freshness_refuses_rewound_origin_main(root: Path) -> None:
+    """A pin that origin/main can no longer reach invalidates every ancestry claim."""
+    fixture = Fixture(root / "freshness-rewind")
+    manifest = fixture.manifest(clean_pathspecs=["scratch"], clean_expected=[])
+    git(fixture.repository, "checkout", "--orphan", "rewritten")
+    (fixture.repository / "rewritten.txt").write_text("rewritten history\n", encoding="utf-8")
+    git(fixture.repository, "add", "rewritten.txt")
+    git(fixture.repository, "commit", "-m", "rewritten history")
+    git(fixture.repository, "push", "--force", "origin", "rewritten:main")
+    git(fixture.repository, "checkout", "main")
+    git(fixture.repository, "fetch", "origin", "main")
+    try:
+        invoke(fixture, manifest, execute=True)
+    except RUNNER.SweepError as exc:
+        assert "does not descend from manifest pin" in str(exc), str(exc)
+    else:
+        raise AssertionError("a rewound origin/main did not abort the settlement")
+    print("PASS freshness_refuses_rewound_origin_main")
+
+
+def test_precondition_refuses_stale_head(root: Path) -> None:
+    """A checkout behind the pin can never satisfy stage 6, so it is refused up front."""
+    fixture = Fixture(root / "stale-head")
+    debris = fixture.repository / "scratch" / "remove-me.txt"
+    debris.parent.mkdir()
+    debris.write_text("fixture debris\n", encoding="utf-8")
+    _advance_origin_main(fixture)
+    # manifest pins the NEW origin/main while the checkout still sits on the old commit
+    manifest = fixture.manifest(clean_pathspecs=["scratch"], clean_expected=["scratch"])
+    assert manifest["pinned_origin_main"] != git(fixture.repository, "rev-parse", "HEAD").strip()
+    try:
+        invoke(fixture, manifest, execute=True)
+    except RUNNER.SweepHeld as exc:
+        assert "is not the settled pin" in str(exc), str(exc)
+    else:
+        raise AssertionError("a stale checkout was not refused before destructive work")
+    assert debris.exists(), "refused run still reached git clean"
+    # and the dry-run must SAY so rather than implying the run would succeed
+    output = invoke(fixture, manifest, execute=False)
+    assert "PRECONDITION NOT MET" in output, output
+    print("PASS precondition_refuses_stale_head")
+
+
+def test_closing_detects_collateral_branch_loss(root: Path) -> None:
+    """A branch this settlement never declared must not disappear during it."""
+    fixture = Fixture(root / "collateral-loss")
+    git(fixture.repository, "branch", "bystander")
+    manifest = fixture.manifest(clean_pathspecs=["scratch"], clean_expected=[], branch_count=2)
+    def drop_bystander() -> None:
+        git(fixture.repository, "branch", "-D", "bystander")
+    try:
+        invoke(fixture, manifest, execute=True, before_disposal=drop_bystander)
+    except RUNNER.SweepError as exc:
+        assert "vanished that this settlement never deleted" in str(exc), str(exc)
+        assert "bystander" in str(exc), str(exc)
+    else:
+        raise AssertionError("collateral branch loss was not detected by the closing readback")
+    print("PASS closing_detects_collateral_branch_loss")
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="r03-settlement-sweep-") as temporary:
         root = Path(temporary)
@@ -243,6 +332,10 @@ def main() -> int:
         test_never_cleanable_candidate_aborts(root)
         test_midrun_tree_change_aborts(root)
         test_branch_law_retains_unmerged_and_unbacked_squash(root)
+        test_freshness_accepts_advanced_origin_main(root)
+        test_freshness_refuses_rewound_origin_main(root)
+        test_precondition_refuses_stale_head(root)
+        test_closing_detects_collateral_branch_loss(root)
     print("r03-settlement-sweep-selftest: PASS")
     return 0
 
