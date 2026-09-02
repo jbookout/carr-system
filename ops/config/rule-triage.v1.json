@@ -489,6 +489,7 @@
       "title_gist": "Before claiming the record layer cannot do something, read the FULL verb list and match on BEHAVIOR, not on"
     },
     {
+      "carrying_control": "canonical_edit",
       "home": "core",
       "id": "4a53ff82",
       "reason": "Worktree-per-session is the default; the canonical tree is the integration lane only. The baseline discipline for where a session is even allowed to write code.",

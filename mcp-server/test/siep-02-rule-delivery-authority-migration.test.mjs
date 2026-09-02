@@ -10,6 +10,17 @@ const controllerSuccessor = await readFile(new URL("../../migrations/0363_rule_d
 const mapBytes = await readFile(new URL("../../ops/config/rule-enforcement-map.json", import.meta.url));
 const overlay = JSON.parse(await readFile(new URL("../../ops/config/rule-delivery-activation-overlay.v1.json", import.meta.url), "utf8"));
 const currentMapDigest = createHash("sha256").update(mapBytes).digest("hex");
+// 0363 permanently pins the map digest that was current WHEN IT WAS WRITTEN.
+// Until 2026-09-01 that equalled the live map digest, because the map had not
+// moved since 0363. Reinstating the canonical_edit control (Joe's ruling
+// 7f48abf6, Repo Hygiene Program R02) moved the live map to 6d21c37d..., and
+// that forward divergence is carried by 0471's guarded rule_map_repin block
+// (verified read-only: both durable DBs hold the prior digest, so the repin
+// moves exactly eight targets). 0363 itself is immutable history and keeps
+// f7bf5726..., so this test now pins that historical value directly rather
+// than conflating it with the live map digest.
+const controllerSuccessorMapDigest =
+  "f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904";
 
 test("cutover attribution is derived from the exact Joe authority login", () => {
   assert.match(migration, /session_user\s*<>\s*'carr_authority_joe'/i);
@@ -50,7 +61,7 @@ test("SIEP-02 does not activate or deploy rule delivery", () => {
 
 test("the controller successor owns the exact nine-to-eight shadow transition", () => {
   assert.equal(overlay.base_map_sha256, currentMapDigest);
-  assert.match(controllerSuccessor, new RegExp(currentMapDigest));
+  assert.match(controllerSuccessor, new RegExp(controllerSuccessorMapDigest));
   assert.match(controllerSuccessor, /v_prior constant text := '4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218'/);
   assert.match(controllerSuccessor, /cardinality\(v_prior_ids\)/);
   assert.match(controllerSuccessor, /cardinality\(v_ids\)/);

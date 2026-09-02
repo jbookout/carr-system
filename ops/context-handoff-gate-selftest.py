@@ -3268,8 +3268,18 @@ def static_contract_cases():
          "hooks/stop_latch.py"], cwd=REPO)
     check("stop_latch.py is byte-identical to approved base",
           base == (REPO / "hooks/stop_latch.py").read_bytes())
-    for path in ("ops/stop_latch-selftest.py", "ops/config/codex-hooks.json",
-                 "ops/config/rule-enforcement-map.json"):
+    # ops/config/rule-enforcement-map.json was in this frozen list to prove the
+    # context-handoff work did not disturb it. It legitimately CHANGED on
+    # 2026-09-01 under a SEPARATE authority — Joe's ruling 7f48abf6 reinstating
+    # the canonical_edit control (Repo Hygiene Program R02) — so it is no longer
+    # byte-identical to the context-handoff baseline, and asserting otherwise
+    # would be false. It is dropped from this list, not silently: the map is now
+    # covered by gate-integrity's contract hash (re-blessed in the same R02
+    # commit) and by control-catalog-parity-gate. stop_latch.py,
+    # ops/stop_latch-selftest.py and ops/config/codex-hooks.json stay frozen —
+    # R02 did not touch them, and the context-handoff scoping guard for those is
+    # unchanged.
+    for path in ("ops/stop_latch-selftest.py", "ops/config/codex-hooks.json"):
         base = subprocess.check_output(
             ["git", "show",
              f"01c3977580e8d9d490380f6c2135d1c4d7d20fd7:{path}"], cwd=REPO)
