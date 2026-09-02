@@ -27,6 +27,112 @@ REPO="${0:A:h:h}"
 LOG="$REPO/out/migrate-prod.log"
 mkdir -p "$REPO/out"
 
+# ── PREVENTION WIRING (WR-000048 activation, design at
+#    out/wr48-activation/design-rehearse/prevention-design.md) ─────────────
+# Master plan §6: "a parked lane becomes a loud, attributed, routed decision
+# within minutes of first refusal, never a discovery." Every refusal below
+# sets LAST_REASON_CLASS/LAST_DETAIL/LAST_MIGRATION and then exits exactly as
+# it always has; the EXIT trap turns an unhandled exit into a durable local
+# receipt plus an escalation attempt, and INT/TERM get the same treatment so
+# an operator's Ctrl-C or a supervisor's TERM is never a silent gap either.
+#
+# MP_PY / RUN_DOOR: the receipt writer and the escalation orchestrator live
+# in tools/migrate-prod-support.py (JSON handling and the fsync discipline
+# belong in Python, not inlined shell — design §2). RUN_DOOR is the ONE
+# sanctioned Bash door (`<door> call <verb> '<json>'`) both record-layer
+# calls go through; CARR_MIGRATE_PROD_RUN_DOOR is a TEST HOOK ONLY, mirroring
+# the CARR_KEY_RECOVERY_TEST_SELFTEST / CARR_RESTORE_REHEARSE_SELFTEST
+# precedent (bin/key-recovery-test.sh, bin/restore-rehearse.sh) — never set
+# by a real invocation, so the real door is always the default.
+MP_PY="$REPO/.venv/bin/python"
+[ -x "$MP_PY" ] || MP_PY=python3
+RUN_DOOR="${CARR_MIGRATE_PROD_RUN_DOOR:-$REPO/run.sh}"
+
+LAST_REASON_CLASS=""
+LAST_DETAIL=""
+LAST_MIGRATION=""
+COMPLETED=0
+SIGNAL_HANDLED=0
+
+write_refusal_receipt() {   # write_refusal_receipt <reason_class> <detail> [migration_name]
+  local reason_class="$1" detail="$2" migration="${3:-}"
+  local host=""
+  host="$(hostname 2>/dev/null || true)"
+  local path
+  if path="$("$MP_PY" "$REPO/tools/migrate-prod-support.py" write-receipt \
+      --reason-class "$reason_class" --detail "$detail" \
+      --migration "$migration" --host "$host" --out-dir "$REPO/out")"; then
+    print -r -- "$path"
+  else
+    # NEVER SWALLOWED — the helper already printed why to stderr; this line
+    # is the wrapper's own loud line, matching restore-rehearse.sh's
+    # "RECORDING NEVER FAILS THE REHEARSAL... never hidden" posture.
+    print -u2 "COULD NOT WRITE THE LOCAL REFUSAL RECEIPT — out/ may be full or unwritable."
+    return 1
+  fi
+}
+
+escalate_refusal() {   # escalate_refusal <receipt_path>
+  # Design §3's retry-then-escalate route for open-incident and
+  # add-room-turn, each followed by an independent readback (get-incident /
+  # read-room), lives entirely in the python helper below — it still only
+  # ever reaches the record layer through "$RUN_DOOR" call <verb> '<json>',
+  # the same sanctioned door a human would type by hand. Escalation's own
+  # outcome never changes migrate-prod.sh's exit code (design §6): this is
+  # notification, never a second production write path, so a failure here is
+  # swallowed by `|| true` — the loud fallback message on stderr, printed by
+  # the helper itself when a leg does not land, is what carries the signal.
+  "$MP_PY" "$REPO/tools/migrate-prod-support.py" escalate \
+    --receipt-path "$1" \
+    --reason-class "${LAST_REASON_CLASS:-wrapper_terminated}" \
+    --detail "${LAST_DETAIL:-migrate-prod.sh exited with no named cause}" \
+    --migration "${LAST_MIGRATION:-}" \
+    --run-door "$RUN_DOOR" \
+  || true
+}
+
+# CORRECTED per cross-family round 3 (design §4): signal handlers write the
+# receipt UNCONDITIONALLY and exit 128+signo themselves — never rely on $?,
+# which reads 0 inside a signal-interrupted trap — and the EXIT handler gates
+# on the explicit COMPLETED flag, never on $?, so a signal that already ran
+# on_signal cannot make on_exit fire a second time for the same refusal.
+#
+# SIGNAL_HANDLED, found during this build's own verification and NOT in the
+# design's literal sketch: `trap - EXIT` alone does not stop zsh's EXIT trap
+# from also firing when the CURRENT trap handler is itself what calls `exit`
+# — reproduced directly (a minimal `trap 'f' TERM` + `trap onexit EXIT`
+# script; `f` runs `trap - EXIT; exit 143`; `onexit` still ran). Gating
+# on_exit on an explicit flag, exactly like COMPLETED, is what actually
+# prevents the double-fire in this shell; `trap - EXIT` is kept too (it is
+# correct in spirit and harmless) but the flag is the real guard.
+on_signal() {   # on_signal <signal-name> <signal-number>
+  local receipt_path
+  receipt_path="$(write_refusal_receipt "${LAST_REASON_CLASS:-wrapper_terminated}" \
+                   "${LAST_DETAIL:-migrate-prod.sh received SIG$1 mid-run}" \
+                   "${LAST_MIGRATION:-}")"
+  escalate_refusal "$receipt_path"
+  SIGNAL_HANDLED=1
+  trap - EXIT   # the receipt is written; do not let the EXIT trap double-fire
+  exit $((128 + $2))
+}
+trap 'on_signal INT 2'  INT
+trap 'on_signal TERM 15' TERM
+
+on_exit() {
+  local rc=$?
+  [ "$COMPLETED" -eq 1 ] && return 0
+  [ "$SIGNAL_HANDLED" -eq 1 ] && return 0
+  local receipt_path
+  receipt_path="$(write_refusal_receipt "${LAST_REASON_CLASS:-wrapper_terminated}" \
+                   "${LAST_DETAIL:-migrate-prod.sh exited (rc=$rc) with no named cause}" \
+                   "${LAST_MIGRATION:-}")"
+  escalate_refusal "$receipt_path"
+}
+trap on_exit EXIT
+# ── end prevention wiring setup; the wrapper's existing body runs below,
+#    each of its five refusal points setting LAST_* first (set -u discipline
+#    unchanged), COMPLETED=1 marking the one successful path at the very end.
+
 APPLY=0
 THROUGH=""
 while (( $# )); do
@@ -56,6 +162,8 @@ if (( APPLY )); then
   dirty=$(cd "$REPO" && git status --porcelain migrations/)
   if [[ -n "$dirty" ]]; then
     stamp "REFUSED uncommitted migrations: ${dirty//$'\n'/ · }"
+    LAST_REASON_CLASS="uncommitted_migrations"
+    LAST_DETAIL="REFUSED uncommitted migrations: ${dirty//$'\n'/ · }"
     print -u2 "REFUSED: uncommitted files under migrations/ — commit them first."
     print -u2 "$dirty"
     exit 1
@@ -88,6 +196,8 @@ if [ -z "${NEON_API_KEY:-}" ] && [ -f "$HOME/.config/carr/db.env" ]; then
   . "$REPO/bin/routine-credential-env.sh"
   carr_require_sourceable_db_env "migrate-prod" || {
     stamp "FAIL db.env is not sourceable — nothing applied"
+    LAST_REASON_CLASS="db_env_unsourceable"
+    LAST_DETAIL="FAIL db.env is not sourceable — nothing applied"
     exit 78
   }
   set -a; . "$HOME/.config/carr/db.env"; set +a
@@ -131,6 +241,8 @@ if [[ -z "$DSN" ]]; then
   reason="$(head -1 /tmp/migrate-prod-neonctl.err 2>/dev/null)"
   rm -f /tmp/migrate-prod-neonctl.err
   stamp "FAIL no DSN from neonctl: ${reason:-no error text}"
+  LAST_REASON_CLASS="dsn_unavailable"
+  LAST_DETAIL="FAIL no DSN from neonctl: ${reason:-no error text}"
   print -u2 "could not derive the production owner DSN from neonctl (logged)."
   print -u2 "neonctl said: ${reason:-nothing at all}"
   exit 1
@@ -181,9 +293,19 @@ if (( APPLY )); then
   else
     rc=$?
     stamp "FAIL apply rc=$rc"
+    LAST_REASON_CLASS="apply_refused"
+    LAST_DETAIL="FAIL apply rc=$rc"
+    LAST_MIGRATION="$THROUGH"   # best-effort: the exact refusing file inside a
+                                # multi-migration apply is not otherwise known
+                                # to this wrapper; --through, when passed, is
+                                # the closest thing to a name it has.
     exit $rc
   fi
 else
   DATABASE_URL="$DSN" "$REPO/.venv/bin/python" "$REPO/tools/migrate.py" "${migrate_args[@]}"
   stamp "OK dry-run${THROUGH:+ through $THROUGH}"
 fi
+
+COMPLETED=1   # the LAST line before a successful natural exit — everything
+              # above this point that reaches here did so without an
+              # explicit refusal exit, so the EXIT trap has nothing to do.
