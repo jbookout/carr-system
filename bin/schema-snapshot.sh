@@ -1158,9 +1158,9 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
     # ops/untracked-anomaly-report.py, so v10's source set grows by two beyond
     # R05's base of 805. v1-v9 are sealed history and sum to 12660; 12660 + 1451
     # = 14111. All three re-derived live from the generator, not hand-added.
-    SCAC_TOTAL_ENTRY_COUNT=14113
-    SCAC_CURRENT_ENTRY_COUNT=1453
-    SCAC_CURRENT_SOURCE_COUNT=809
+    SCAC_TOTAL_ENTRY_COUNT=14116
+    SCAC_CURRENT_ENTRY_COUNT=1456
+    SCAC_CURRENT_SOURCE_COUNT=812
     SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v10.generated.js"
     SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10'"
     SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9'"
