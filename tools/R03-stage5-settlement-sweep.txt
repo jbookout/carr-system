@@ -1,0 +1,39 @@
+R03 stage-5 settlement-sweep runner
+
+Entrypoint: tools/r03-settlement-sweep-runner.py
+Fixture acceptance: tools/test-r03-settlement-sweep.py
+
+The runner accepts only three read-only descriptor inputs supplied by the
+settlement capability: an approved JSON manifest, the bound command/pathspec
+allowlist, and its redemption receipt.  There are no live manifest or receipt
+paths to substitute after admission.
+
+The manifest schema is carr.r03-stage5-settlement-sweep.v1.  It carries the
+origin/main pin, clean pathspecs and expected dry-run candidates, the full
+never-cleanable register, restore blob expectations, PARK archive data,
+classified branches, closing readback expectations, and two recorded gates:
+capability denial tests passed and a fresh verified production backup.  The
+receipt binds the exact manifest bytes to the admitted capability.
+
+Default mode is dry-run.  It performs only git clean -nd against the approved
+pathspecs, compares that candidate set to the manifest, rejects any
+never-cleanable result, prints the planned stages, and makes no mutation.
+
+Execute mode is deliberately fixture-only in this build: it refuses the
+canonical checkout and every child of it.  In a disposable repository it does:
+stage 3 fetches and pins origin/main, anchors HEAD/index state and branch tips
+under refs/backup/<run-id>/, atomically pushes branch backup refs to origin and
+reads their object ids back, then age-encrypts PARK data in a 0700 directory
+with 0600 artifacts and verifies every archived path after decrypt/extract;
+stage 4 fingerprints tracked and untracked-nonignored content; stage 5 repeats
+the capability, approval, and production-backup gates, restores only manifest
+paths, runs git clean -fd only after its matching -nd diff, and removes PARK
+paths only after archive verification; stage 6 re-reads pinned HEAD, status,
+and branch count.
+
+Branch law is encoded per branch: an ancestry-merged tip is safe-deleted only
+after its backup ref exists; a squash-merged tip needs GitHub MERGED-to-main
+evidence bound to its current tip plus that backup ref before forced deletion;
+an unmerged-without-PR branch is always retained.  There is no ignored-files
+cleaning flag, no bare or repo-wide clean, no shell execution, and no remote
+branch deletion path.
