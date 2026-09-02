@@ -735,7 +735,15 @@ class RuntimeWorkflowFactCollector:
         if fact.endswith('.weekday') or fact.endswith('.weekday_slot'):
             return local.weekday() < 5
         if fact == 'notes.business_hour_weekday':
-            return local.weekday() < 5 and 8 <= local.hour < 18
+            # Cron is "0 8-18 * * 1-5" (America/Chicago) -- it fires a run AT
+            # 18:00 on purpose. The old `< 18` bound excluded exactly that
+            # run, so every 6pm weekday dispatch routed straight to
+            # dead-letter: loop 568 measured every "routing predicate was
+            # not satisfied" notes-sweep-hourly failure landing on hour==18
+            # (2026-08-26 through 2026-09-01, no exceptions). bin/notes-sweep-
+            # post.sh's own --scheduled guard already tolerates hour 18
+            # (`-gt 18`, not `-ge 18`), so this bound was the one out of step.
+            return local.weekday() < 5 and 8 <= local.hour <= 18
         if fact == 'calendar.eventkit_bundle_registered':
             # REGISTERED means the bundle's tracked SOURCES are in the repo, not
             # that a compiled artifact is sitting in the working tree. Until
