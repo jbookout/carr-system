@@ -1032,6 +1032,8 @@ check_migration() {
     return
   fi
 
+  local _mt0 _mt; _mt0="$(date +%s)"; MIGRATION_STEP_TIMINGS=""
+  _mstep() { _mt="$(date +%s)"; MIGRATION_STEP_TIMINGS="$MIGRATION_STEP_TIMINGS $1=$(( _mt - _mt0 ))s"; _mt0="$_mt"; }
   if ! PGOPTIONS='--client-min-messages=warning' run_quiet "$LOGDIR/migration-load.log" \
        "$psql_bin" -v ON_ERROR_STOP=1 -q -d "$dsn" -f db/schema.sql; then
     tail -25 "$LOGDIR/migration-load.log" >&2
@@ -1053,6 +1055,7 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     return
   fi
 
+  _mstep load
   if ! DATABASE_URL="$dsn" run_quiet "$LOGDIR/migration.log" "$PY" tools/migrate.py --apply --yes; then
     tail -30 "$LOGDIR/migration.log" >&2
     bad migration "a pending migration did not apply to the committed schema"
@@ -1064,6 +1067,7 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
   # Run every slice's transaction-scoped acceptance proof on the same
   # disposable database after pending migrations apply. Each proof rolls back
   # every fixture row and must be independently green.
+  _mstep migrate
   local tour_pg_proof tour_pg_log
   for tour_pg_proof in \
     mcp-server/test/tour-operations-slice2-postgres.sql \
@@ -1091,6 +1095,7 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
   # the interlock where the ABSENT column is the point. A flattening bug that
   # turned column grants into table grants would pass every positive and be
   # caught only there.
+  _mstep tour
   if run_quiet "$LOGDIR/migration-grants.log" "$psql_bin" -X -v ON_ERROR_STOP=1 -Atq -d "$dsn" -c "
     do \$\$ begin
       if not has_table_privilege('carr_writer', 'public.lead', 'insert') then
@@ -1118,6 +1123,7 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     # caller, and grants never fire for the owner, so no rehearsal as owner can
     # see it — which is why this lives here, against the built database, rather
     # than in the gates class against a synthetic tree.
+    _mstep grants
     if ! CARR_CI_DATABASE_URL="$dsn" run_quiet "$LOGDIR/migration-triggers.log" \
          "$PY" ops/trigger-grant-check.py; then
       tail -25 "$LOGDIR/migration-triggers.log" >&2
@@ -1130,6 +1136,7 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     # checked-in inventory and writes it only after job definitions exist.
     # Do that real sync on this disposable database before acceptance gates;
     # copied seed SQL would bypass exactly the ordering this class must prove.
+    _mstep triggers
     if ! DATABASE_URL="$dsn" run_quiet "$LOGDIR/migration-control-plane-sync.log" \
          "$PY" tools/control-plane.py sync; then
       tail -30 "$LOGDIR/migration-control-plane-sync.log" >&2
@@ -1197,15 +1204,19 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     # alone. That agreement is what makes the two rules below safe.
     local dsn_read='environ\.get\("(CARR_CI_)?DATABASE_URL"|environ\["(CARR_CI_)?DATABASE_URL"\]|getenv\("(CARR_CI_)?DATABASE_URL"'
     local db_gate_failures="" db_gate_count=0 db_gate_unmarked="" db_gate_declared=""
+    _mstep sync
+    local db_gate_timings="" _gt0
     for g in ops/*-gate.py; do
       [ -f "$g" ] || continue
       if grep -q '^# ci: db-gate' "$g"; then
         db_gate_count=$((db_gate_count+1))
+        _gt0="$(date +%s)"
         if ! DATABASE_URL="$dsn" run_quiet "$LOGDIR/db-gate-$(basename "$g").log" \
              "$PY" "$g"; then
           db_gate_failures="$db_gate_failures $(basename "$g")"
           tail -20 "$LOGDIR/db-gate-$(basename "$g").log" >&2
         fi
+        db_gate_timings="$db_gate_timings $(basename "$g" .py)=$(( $(date +%s) - _gt0 ))s"
       elif grep -qE "$dsn_read" "$g"; then
         # A gate that reads a DSN and carries no marker really is unrun, and
         # this is now a FAILURE rather than a line in the margin. The whole
@@ -1220,6 +1231,14 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
         db_gate_declared="$db_gate_declared\n            $(basename "$g"): $(sed -n 's/^# ci: runs-outside-ci *— *//p' "$g" | head -1)"
       fi
     done
+    _mstep gates
+    # Two greppable lines, same contract as ci-timing: which STEP of this class
+    # grew, and which GATE PROGRAM grew. Seconds, sorted slowest first. Added
+    # 2026-09-01 when the class went 77s -> 652s on hosted runners in one day
+    # while reproducing at 48s on a Mac, and nothing in the hosted log could
+    # say which of the ~60 silent children was responsible.
+    echo "migration-step-timing:${MIGRATION_STEP_TIMINGS}"
+    echo "db-gate-timing:$(printf '%s\n' $db_gate_timings | sort -t= -k2,2 -rn | tr '\n' ' ' | sed 's/ $//')"
     if [ -n "$db_gate_declared" ]; then
       printf '        \033[33moutside CI\033[0m  gate(s) declared to run elsewhere:%b\n' \
         "$db_gate_declared" >&2
