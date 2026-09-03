@@ -141,7 +141,59 @@
           "sha256:39c51c478ceff930a43bdb6846c17515c2a6c236603472866c8ad018c4c7604c",
           "sha256:78d122e08129a489f3f14ef850f890c5a7ba276096924f448eb48f7d8103914a"
         ]}
-      }
+      },
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["resource_ref", "revision_ref", "content_digest"],
+          "properties": {
+            "resource_ref": {"const": "resource:source-lock"},
+            "revision_ref": {"const": "revision:3"},
+            "content_digest": {"const": "sha256:a4bd7234feadf4556abc10091a6e7464b96fcb8a293fc0dbfce3ad6171a6996d"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["resource_ref", "revision_ref", "content_digest"],
+          "properties": {
+            "resource_ref": {"const": "resource:evaluation-contract"},
+            "revision_ref": {"const": "revision:3"},
+            "content_digest": {"const": "sha256:9deb92a11ce6e86c96427b26d53d1600163888d69a6ddc8e4950327e11cf471c"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["resource_ref", "revision_ref", "content_digest"],
+          "properties": {
+            "resource_ref": {"const": "resource:threat-model"},
+            "revision_ref": {"const": "revision:3"},
+            "content_digest": {"const": "sha256:f802c5ef05ebb49c64adc28725f544fb2d34c60b4ee63b9cce6ba7c11aefc0ff"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["resource_ref", "revision_ref", "content_digest"],
+          "properties": {
+            "resource_ref": {"const": "resource:cost-model"},
+            "revision_ref": {"const": "revision:3"},
+            "content_digest": {"const": "sha256:39c51c478ceff930a43bdb6846c17515c2a6c236603472866c8ad018c4c7604c"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["resource_ref", "revision_ref", "content_digest"],
+          "properties": {
+            "resource_ref": {"const": "resource:legacy-inventory"},
+            "revision_ref": {"const": "revision:3"},
+            "content_digest": {"const": "sha256:78d122e08129a489f3f14ef850f890c5a7ba276096924f448eb48f7d8103914a"}
+          }
+        }
+      ]
     },
     "resource_binding": {
       "type": "object",
