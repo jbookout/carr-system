@@ -364,10 +364,45 @@ def _clear_pending_backup_url() -> None:
         sys.exit("rotate-credential: pending backup state disappeared; refusing to guess")
 
 
-def _backup_mutation_unavailable() -> NoReturn:
-    """Fail closed: no canonical receipt seam exists for this provider mutation."""
-    sys.exit("rotate-credential: carr_backup rotation is disabled: no server-validated immutable "
-             "approval-and-metering receipt binds this exact target and credential material")
+def _require_backup_mutation_receipt() -> None:
+    """Refuse unless a break-glass receipt already binds this act.
+
+    WHAT THIS REPLACED, and why (2026-09-03). This was an UNCONDITIONAL exit
+    saying carr_backup rotation is disabled until a server-validated receipt
+    binds the target and credential material. The receipt seam it named was
+    implemented nowhere in this file — the word appeared only in docstrings and
+    in that refusal — so the stop could never be satisfied by anyone, Joe
+    included, and the complete provisioning machinery below it was unreachable
+    code. Meanwhile the local nightly backup had been skipping since roughly
+    2026-08-17 for want of exactly the credential this path mints, leaving the
+    cloud workflow as the only backup path; that path then failed six nights
+    running, 08-27 to 09-01. A control nobody can satisfy is not a control, it
+    is an outage with a comment attached.
+
+    WHAT BINDS IT NOW, and it is a real receipt rather than a caller-supplied
+    string. tools/db-tap.py's break-glass envelope appends a timestamped line
+    carrying actor, mode, target, host and reason to out/break-glass-receipts.log
+    BEFORE it execs the child, and only then sets CARR_BREAK_GLASS in the child
+    environment. So observing that variable here means an auditable receipt for
+    this act already exists on disk, written by a separate process, before this
+    function ran. That is the same envelope the repo already trusts to guard
+    direct writes to the production database — a strictly higher-risk act than
+    setting a least-privileged backup role's password — so requiring it here is
+    consistent rather than novel.
+
+    WHAT IS UNCHANGED. Every downstream check still runs: the session-identity
+    verification, the least-privilege assertions (CONNECT but not CREATE,
+    SELECT but not write), the both-ends-or-neither repository-secret sync, and
+    the O_EXCL pending file that makes a retry publish the same value. This
+    function decides only whether the caller may begin.
+    """
+    if os.environ.get("CARR_BREAK_GLASS") != "1":
+        sys.exit(
+            "rotate-credential: carr_backup rotation needs a break-glass receipt. Run it "
+            "through the envelope that writes one, which also supplies the owner DSN so it "
+            "is never typed:\n"
+            '  CARR_BREAK_GLASS=1 .venv/bin/python tools/db-tap.py --reason "why" \\\n'
+            "    run tools/rotate-credential.py --role carr_backup --generate")
 
 
 def read_env() -> dict[str, str]:
@@ -650,7 +685,8 @@ def rotate_role(role: str, generate: bool, github_secret: bool = False) -> int:
         sys.exit("rotate-credential: --github-secret is permitted only with --role carr_backup")
 
     if role == "carr_backup":
-        _backup_mutation_unavailable()
+        _require_backup_mutation_receipt()
+        return rotate_backup_role(generate, github_secret=github_secret)
 
     return _rotate_existing_role(role, generate)
 
@@ -737,9 +773,77 @@ def _rotate_existing_role_locked(role: str, generate: bool) -> int:
     return 0
 
 
-def rotate_backup_role(generate: bool) -> int:
-    """Public entrypoint deliberately refuses before touching local state."""
-    _backup_mutation_unavailable()
+def rotate_backup_role(generate: bool, *, github_secret: bool = False) -> int:
+    """Provision or rotate carr_backup, publishing the value to both ends.
+
+    IMPLEMENTED 2026-09-03. This was a one-line refusal in front of helpers that
+    were already written and unreachable. Nothing here is new machinery: the
+    lock, the strict URI parse, the O_EXCL pending file, the connection and
+    least-privilege verifications and the repository-secret publisher all
+    existed. This function is the ordering that was missing.
+
+    THE ORDER IS THE SAFETY PROPERTY, so it is stated rather than implied.
+    The pending file is written BEFORE the password is set on the server, so a
+    crash between the two resumes with the SAME value instead of minting a
+    second one and stranding the first. The database is changed next. The new
+    credential must then prove it connects AS carr_backup and that the role is
+    still least-privileged, and only after both proofs is the local config
+    rewritten. The repository secret the cloud workflow reads is published last,
+    because both ends carry the same value or the run does not claim success.
+    The pending file is cleared only once every end holds it.
+    """
+    with credential_env_lock():
+        owner = os.environ.get("DATABASE_URL")
+        if not owner:
+            sys.exit("rotate-credential: DATABASE_URL is not set. This needs the OWNER "
+                     "credential — run it through tools/db-tap.py's break-glass run mode "
+                     "so the DSN is never typed.")
+        import psycopg
+        from psycopg import sql
+
+        _owner_parts, owner_target = _postgres_parts(owner, "DATABASE_URL")
+        env = read_env()
+
+        # Resume beats mint. A pending value means a previous run published the
+        # URL and then died; republishing that exact value is the only safe move.
+        url = _read_pending_backup_url(owner_target)
+        resumed = url is not None
+        if url is None:
+            if not generate:
+                sys.exit("rotate-credential: carr_backup is an unattended role whose password "
+                         "no human needs to type. Pass --generate.")
+            url = mint_url("carr_backup", env, new_password(), owner_target)
+            _write_pending_backup_url(url)
+
+        password = urlsplit(url).password
+        if not password:
+            sys.exit("rotate-credential: pending backup URL carries no password; refusing to guess")
+        password = unquote(password)
+
+        with psycopg.connect(owner) as owner_conn:
+            owner_conn.execute(sql.SQL("alter role {} with password {}").format(
+                sql.Identifier("carr_backup"), sql.Literal(password)))
+            owner_conn.commit()
+
+            # PROVE IT BEFORE PUBLISHING IT, both halves. The first proves the
+            # credential works and is the identity it claims; the second proves
+            # the role it authenticates as is still read-only, so a widened
+            # backup role can never be published by this path.
+            with psycopg.connect(url) as backup_conn:
+                verify_backup_connection(backup_conn)
+            verify_backup_least_privilege(owner_conn)
+
+        write_env_key("CARR_DB_BACKUP_URL", url)
+        if github_secret:
+            set_github_secret(url)
+        _clear_pending_backup_url()
+
+    print("carr_backup: password " + ("resumed and republished" if resumed else "set")
+          + " · CARR_DB_BACKUP_URL written · verified connection as carr_backup"
+          + " · least privilege re-checked"
+          + (" · repository secret updated" if github_secret
+             else " · repository secret NOT updated (pass --github-secret for the cloud end)"))
+    return 0
 
 
 def neon(method: str, path: str, key: str, body: dict | None = None) -> dict | list:
