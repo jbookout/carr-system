@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -118,6 +119,38 @@ def check_file_of(cmd: list[str], repo: str) -> str | None:
         cand = os.path.normpath(os.path.join(repo, arg))
         if os.path.isfile(cand) and cand.startswith(repo + os.sep):
             return os.path.relpath(cand, repo)
+    return None
+
+
+def missing_replay_prerequisite(repo: str, tree: str, output: str) -> str | None:
+    """Name a caller-only runtime path that made detached replay non-equivalent.
+
+    A Git worktree materialises tracked source, not ignored installed runtimes
+    such as node_modules. If a failed replay names a path absent from the
+    detached tree but present and untracked in the caller checkout, the replay
+    did not reproduce the caller's environment. That is uncertainty, never
+    evidence that the base is broken.
+    """
+    roots = ((tree, repo), (os.path.realpath(tree), os.path.realpath(repo)))
+    seen: set[str] = set()
+    for replay_root, caller_root in roots:
+        pattern = re.compile(re.escape(replay_root) + r"/[^\s'\"():,\[\]]+")
+        for match in pattern.finditer(output):
+            replay_path = match.group(0).rstrip(".;")
+            if replay_path in seen:
+                continue
+            seen.add(replay_path)
+            if os.path.lexists(replay_path):
+                continue
+            rel = os.path.relpath(replay_path, replay_root)
+            if rel == os.pardir or rel.startswith(os.pardir + os.sep):
+                continue
+            caller_path = os.path.join(caller_root, rel)
+            if not os.path.lexists(caller_path):
+                continue
+            if git(repo, "ls-files", "--error-unmatch", "--", rel)[0] == 0:
+                continue
+            return rel
     return None
 
 
@@ -207,6 +240,14 @@ def main() -> int:
         if p.returncode in (126, 127):
             return refuse(f"{name} could not be executed at the merge base (exit {p.returncode})")
 
+        replay_output = (p.stdout or "") + (p.stderr or "")
+        prerequisite = missing_replay_prerequisite(repo, tree, replay_output)
+        if prerequisite:
+            return refuse(
+                "runtime prerequisite is absent from the merge-base worktree "
+                f"but present only in the caller checkout: {prerequisite}"
+            )
+
         # THE ANSWER. It fails on a tree that contains none of this branch.
         print(f"INHERITED FROM MAIN — do not diagnose this branch; "
               f"the break is {name} on main")
@@ -217,7 +258,7 @@ def main() -> int:
               f"merge freeze holds until it is fixed — then re-run this check.")
         print(f"  If you mean to be the one who fixes it, fix it ON MAIN in its own change; "
               f"a fix smuggled into this branch merges a second unrelated thing.")
-        tail = ((p.stdout or "") + (p.stderr or "")).strip().splitlines()[-6:]
+        tail = replay_output.strip().splitlines()[-6:]
         for line in tail:
             print(f"    | {line}")
         return INHERITED

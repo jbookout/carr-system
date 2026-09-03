@@ -60,7 +60,7 @@ test("review-and-triage admits a machine actor, and still refuses extras, stale 
   assert.equal(machine.state, "triaged");
   for (const extra of [{ state: "ready" }, { executor: "codex" }, { approval: "yes" }]) {
     const db = new TriageFake(); const out = await rejected(() => executeRegisteredTool(db, JOE, "review-and-triage", { ...ARGS, ...extra }));
-    assert.ok(["caller_authority_field_forbidden", "invalid_triage_fields"].includes(out.error)); assert.equal(db.calls.length, 0);
+    assert.ok(["caller_authority_field_forbidden", "invalid_triage_fields", "unregistered_operation_fields"].includes(out.error)); assert.equal(db.calls.length, 0);
   }
   const stale = await rejected(() => executeRegisteredTool(new TriageFake(), JOE, "review-and-triage", { ...ARGS, base_version: 99 }));
   assert.equal(stale.error, "version_conflict");

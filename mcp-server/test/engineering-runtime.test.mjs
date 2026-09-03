@@ -12,6 +12,7 @@ import {
   runEngineeringWorker,
   admitEngineeringSlice,
   recordEngineeringReview,
+  resolveSourceMergeAuthority,
   engineeringRuntimeTools,
 } from "../src/engineering-runtime.js";
 
@@ -221,7 +222,7 @@ test("the committed plan shape is validated and Passport closure is schema-shape
   assert.throws(() => requirePlan({ ...typedPlan, slices: [{ ...item, risk_class: "R9" }] }, Error));
   const facts = { source: { work_request: source.work, accepted_plan: source.plan }, slice_plans: [{ accepted_plan_id: source.plan.record_id, accepted_plan_hash: source.plan.digest, plan: typedPlan }], envelopes: [], receipts: [], reviewer_facts: [] };
   const projection = closureProjection(facts, Error);
-  assert.deepEqual(Object.keys(projection).sort(), ["accepted_plan_revision", "closure", "closure_state", "execution_envelopes", "operator_receipt", "plan_digest", "projection_digest", "qa_facts", "receipts", "reviewer_facts", "schema_version", "slice_plan", "slices", "stale_conflict", "work_request"].sort());
+  assert.deepEqual(Object.keys(projection).sort(), ["accepted_plan_revision", "closure", "closure_state", "current_receipts", "current_reviewer_facts", "execution_envelopes", "operator_receipt", "plan_digest", "projection_digest", "qa_facts", "receipts", "reviewer_facts", "schema_version", "slice_plan", "slices", "stale_conflict", "work_request"].sort());
   for (const key of ["slice_plan", "execution_envelopes", "receipts", "reviewer_facts", "qa_facts", "operator_receipt", "projection_digest"]) assert.ok(projection[key]);
   for (const key of ["work", "proof", "explanation", "release"]) assert.deepEqual(Object.keys(projection.closure[key]).sort(), ["evidence_refs", "note", "state"]);
   assert.deepEqual(Object.keys(projection.closure.learning).sort(), ["evidence_refs", "note", "route", "state"]);
@@ -440,6 +441,8 @@ test("closure projection is generation-aware: exact review completes, unreviewed
   assert.equal(exact.closure_state, "complete");
   assert.deepEqual(exact.receipts, [failed.receipt, success.receipt]);
   assert.deepEqual(exact.reviewer_facts, [oldPass.fact, exactPass.fact]);
+  assert.deepEqual(exact.current_receipts, [success.receipt]);
+  assert.deepEqual(exact.current_reviewer_facts, [exactPass.fact]);
 
   const staleFacts = structuredClone({ ...throughSuccess, reviewer_facts: [oldPass, exactPass] });
   staleFacts.source.work_request.version += 1;
@@ -455,6 +458,66 @@ test("closure projection is generation-aware: exact review completes, unreviewed
   const noReceiptSuccessor = closureProjection({ ...base, receipts: [failed, success], reviewer_facts: [oldPass, exactPass] }, Error);
   assert.equal(noReceiptSuccessor.slices[0].state, "eligible", "an unsuperseded leaf without a receipt must fence an older reviewed pass");
   assert.equal(noReceiptSuccessor.closure_state, "blocked");
+});
+
+test("source merge authority comes from one reader-safe projection, never direct runtime table reads", async () => {
+  const head = "a".repeat(40);
+  const plan = typedEngineeringPlan([engineeringSlice("slice:one", 1)]);
+  const envelope = envelopeRow("11111111-1111-4111-8111-111111111111", "slice:one", "2026-08-26T00:00:01Z");
+  const receipt = receiptRow("22222222-2222-4222-8222-222222222222", envelope.id, "slice:one", "claimed_complete", "2026-08-26T00:00:02Z");
+  receipt.receipt.source_evidence.source_sha = head;
+  bindReceiptLineage(receipt, plan, envelope);
+  const review = reviewerRow("33333333-3333-4333-8333-333333333333", receipt.id, "slice:one", "passed", "2026-08-26T00:00:03Z");
+  const facts = passportFacts(plan, { envelopes: [envelope], receipts: [receipt], reviewer_facts: [review] });
+  facts.source.accepted_plan.accepted_by_actor_id = actor.id;
+  const calls = [];
+  const c = { query: async (sql, params) => {
+    calls.push({ sql, params });
+    if (sql.includes("source_merge_authority_projection")) return { rows: [{ authority: {
+      ok: true,
+      passport_facts: facts,
+      authority: {
+      schema_version: "source-merge-authority.v1",
+      derived_by: "source-merge-authority-projection",
+      decision: {
+        decision_ref: "decision:4eaae0e1-f3b0-4e5d-af93-c44f39adc687",
+        event_ref: "event:44444444-4444-4444-8444-444444444444",
+        title: "Routine authorized green PRs merge without asking Joe for ceremonial approval",
+        sponsoring_human_slug: "joe",
+      },
+      source_merge_only: true,
+      allowed_actions: ["repository:merge-pr"],
+      scope_ref: "source-merge-scope:99999999-9999-4999-8999-999999999999",
+      scope_digest: `sha256:${"6".repeat(64)}`,
+      authorized_path_claims: [{ lease_ref: "canonical-ownership-lease:99999999-9999-4999-8999-999999999999", path: "mcp-server/src/source-merge-policy.js", mode: "file", operation: "write", claim_path: "mcp-server/src/source-merge-policy.js", claim_mode: "file", claim_operation: "write" }],
+      assurance_bindings: [{
+        slice_ref: "slice:one", attempt_id: receipt.attempt_id,
+        evidence_manifest_ref: "assurance-manifest:55555555-5555-4555-8555-555555555555",
+        review_manifest_ref: "assurance-manifest:66666666-6666-4666-8666-666666666666",
+        evidence_ref: "assurance-evidence:77777777-7777-4777-8777-777777777777",
+        reviewer_fact_ref: "engineering-review:33333333-3333-4333-8333-333333333333",
+        review_extension_ref: "assurance-review:88888888-8888-4888-8888-888888888888",
+        reviewer_state: "passed", evidence_digest: `sha256:${"4".repeat(64)}`,
+        review_digest: `sha256:${"5".repeat(64)}`, repository_commit_sha: head,
+        repository_tree_sha: "b".repeat(40), snapshot_valid_until: new Date(Date.now() + 60_000).toISOString(),
+      }],
+      exact_head_sha: head, pr_number: 42,
+      currentness_evaluated_at: new Date().toISOString(),
+    } } }] };
+    return { rows: [] };
+  } };
+  const authority = await resolveSourceMergeAuthority(c, {
+    decision_id: "4eaae0e1-f3b0-4e5d-af93-c44f39adc687",
+    work_request: source.work.ref, pr_number: 42, head_sha: head,
+  }, EngineeringToolError);
+  assert.equal(authority.derived_by, "source-merge-authority-projection");
+  assert.equal(authority.decision.sponsoring_human_slug, "joe");
+  assert.equal(authority.passport.closure_state, "complete");
+  assert.equal(authority.authorized_path_claims[0].path, "mcp-server/src/source-merge-policy.js");
+  assert.match(authority.scope_ref, /^source-merge-scope:[0-9a-f-]{36}$/);
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].sql, /source_merge_authority_projection/);
+  assert.doesNotMatch(calls[0].sql, /canonical_ownership_claim|assurance_evidence_extension|from event/i);
 });
 
 test("dependency preflight and closure fail closed on malformed latest receipt or reviewer lineage", async () => {
@@ -615,6 +678,150 @@ test("admission refuses source drift after serialization before any write", asyn
   assert.equal(calls.some(call => /engineering_enqueue_slice_job|insert into ops\.|update ops\./i.test(call.sql)), false);
   assert.ok(calls.findIndex(call => call.sql.includes("from actor")) <
             calls.findIndex(call => call.sql.includes("pg_advisory_xact_lock")));
+});
+
+function priorSessionAdmissionFixture({
+  sessionState = "completed",
+  sessionScope = "slice:slice:one",
+  sessionExecutorId = actor.id,
+  actorRow = { id: actor.id, slug: actor.slug },
+  bindingSessionId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  currentness = { eligible: false, dispatch_runway_sufficient: false },
+  jobState = "completed",
+} = {}) {
+  const typedPlan = typedEngineeringPlan([engineeringSlice("slice:one", 1)]);
+  const priorId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const priorSession = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  const priorJob = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  const nextSession = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const nextJob = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const nextEnvelope = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+  const prior = buildCodexEnvelope({ source, plan: typedPlan, slice: typedPlan.slices[0],
+    jobId: priorJob, sessionId: priorSession, actor });
+  const facts = passportFacts(typedPlan, { envelopes: [{
+    id: priorId, job_id: priorJob, agent_session_id: priorSession,
+    accepted_plan_id: source.plan.record_id,
+    slice_plan_id: "12121212-1212-4212-8212-121212121212",
+    slice_ref: "slice:one", created_at: prior.issued_at, envelope: prior,
+  }] });
+  const counts = { cancellation: 0, session: 0, job: 0, envelope: 0, currentness: 0 };
+  const c = { query: async (sql) => {
+    if (sql.includes("engineering_passport_facts")) return { rows: [{ facts }] };
+    if (sql.includes("from ops.engineering_execution_envelope e")) return { rows: [{
+      id: priorId, job_id: priorJob, work_request_id: source.work.id.replace(/^wr:/, ""),
+      accepted_plan_id: source.plan.record_id,
+      slice_plan_id: "12121212-1212-4212-8212-121212121212", slice_ref: "slice:one",
+      agent_session_id: bindingSessionId, envelope: prior, job_state: jobState,
+    }] };
+    if (sql.includes("where id=$1::uuid for update")) return { rows: [{
+      id: priorSession, work_request_id: source.work.id.replace(/^wr:/, ""),
+      executor_actor_id: sessionExecutorId, state: sessionState,
+      lease_expires_at: prior.agent_session.lease_expires_at, scope_ref: sessionScope,
+      worktree_ref: "engineering:server-admission", source_commit_sha: "0".repeat(40),
+    }] };
+    if (sql.includes("from actor")) return { rows: actorRow ? [actorRow] : [] };
+    if (sql.includes("engineering_envelope_currentness")) {
+      counts.currentness += 1;
+      return { rows: [{ currentness }] };
+    }
+    if (sql.includes("update ops.capability_agent_session")) {
+      counts.cancellation += 1;
+      return { rows: [] };
+    }
+    if (sql.includes("insert into ops.capability_agent_session")) {
+      counts.session += 1;
+      return { rows: [{ id: nextSession, executor_actor_id: actor.id, state: "claimed",
+        lease_expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString() }] };
+    }
+    if (sql.trimStart().startsWith("select id from ops.engineering_slice_plan"))
+      return { rows: [{ id: "12121212-1212-4212-8212-121212121212" }] };
+    if (sql.includes("select id from ops.work_request"))
+      return { rows: [{ id: source.work.id.replace(/^wr:/, "") }] };
+    if (sql.includes("engineering_enqueue_slice_job")) {
+      counts.job += 1;
+      return { rows: [{ id: nextJob }] };
+    }
+    if (sql.includes("insert into ops.engineering_execution_envelope")) {
+      counts.envelope += 1;
+      return { rows: [{ id: nextEnvelope }] };
+    }
+    return { rows: [] };
+  } };
+  return { c, counts, priorId, priorJob, priorSession, nextSession, nextJob, nextEnvelope };
+}
+
+test("admission creates one successor after a correctly bound completed or cancelled session without mutating the predecessor", async t => {
+  for (const sessionState of ["completed", "cancelled"]) await t.test(sessionState, async () => {
+    const fixture = priorSessionAdmissionFixture({ sessionState });
+    const result = await admitEngineeringSlice(fixture.c, actor, {
+      idempotency_key: "12121212-1212-4212-8212-121212121212",
+      work_request: source.work.ref,
+      slice_ref: "slice:one",
+    }, EngineeringToolError, async () => {});
+    assert.equal(result.replayed, false);
+    assert.equal(result.supersedes_envelope_id, fixture.priorId);
+    assert.equal(result.agent_session_id, fixture.nextSession);
+    assert.equal(result.job_id, fixture.nextJob);
+    assert.equal(result.envelope_id, fixture.nextEnvelope);
+    assert.deepEqual(fixture.counts, { cancellation: 0, session: 1, job: 1, envelope: 1, currentness: 0 });
+  });
+});
+
+test("admission replays an active current predecessor only with sufficient dispatch runway and creates no duplicate records", async () => {
+  const fixture = priorSessionAdmissionFixture({
+    sessionState: "in_progress", jobState: "running",
+    currentness: { eligible: true, dispatch_runway_sufficient: true },
+  });
+  const result = await admitEngineeringSlice(fixture.c, actor, {
+    idempotency_key: "23232323-2323-4232-8232-232323232323",
+    work_request: source.work.ref,
+    slice_ref: "slice:one",
+  }, EngineeringToolError, async () => {});
+  assert.equal(result.replayed, true);
+  assert.equal(result.envelope_id, fixture.priorId);
+  assert.deepEqual(fixture.counts, { cancellation: 0, session: 0, job: 0, envelope: 0, currentness: 1 });
+});
+
+test("admission refuses active replay with insufficient runway before successor writes", async () => {
+  const fixture = priorSessionAdmissionFixture({
+    sessionState: "claimed", jobState: "queued",
+    currentness: { eligible: true, dispatch_runway_sufficient: false },
+  });
+  await assert.rejects(
+    () => admitEngineeringSlice(fixture.c, actor, {
+      idempotency_key: "24242424-2424-4242-8242-242424242424",
+      work_request: source.work.ref,
+      slice_ref: "slice:one",
+    }, EngineeringToolError, async () => {}),
+    error => error.error === "engineering_envelope_insufficient_runway",
+  );
+  assert.deepEqual(fixture.counts, { cancellation: 0, session: 0, job: 0, envelope: 0, currentness: 1 });
+});
+
+test("admission refuses mismatched predecessor session, scope, or executor before successor writes", async t => {
+  const cases = [
+    ["session", { bindingSessionId: "abababab-abab-4aba-8aba-abababababab" }, "engineering_session_conflict"],
+    ["scope", { sessionScope: "slice:other" }, "engineering_session_conflict"],
+    ["executor", {
+      sessionExecutorId: "56565656-5656-4565-8565-565656565656",
+      actorRow: { id: actor.id, slug: actor.slug },
+    }, "engineering_codex_actor_not_provisioned"],
+  ];
+  for (const [name, overrides, expected] of cases) await t.test(name, async () => {
+    const fixture = priorSessionAdmissionFixture(overrides);
+    await assert.rejects(
+      () => admitEngineeringSlice(fixture.c, actor, {
+        idempotency_key: "34343434-3434-4343-8343-343434343434",
+        work_request: source.work.ref,
+        slice_ref: "slice:one",
+      }, EngineeringToolError, async () => {}),
+      error => error.error === expected,
+    );
+    assert.equal(fixture.counts.cancellation, 0);
+    assert.equal(fixture.counts.session, 0);
+    assert.equal(fixture.counts.job, 0);
+    assert.equal(fixture.counts.envelope, 0);
+  });
 });
 
 test("admission replaces a stale read-only envelope whose prior job is terminal with a new immutable generation", async () => {

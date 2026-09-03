@@ -115,7 +115,19 @@ OUT="$OUTDIR/carr-$STAMP.sql.age"
 # We restore SCHEMA AND DATA, never the source cluster's permission model: roles
 # and grants are rebuilt by the migrations, which are in git. Dropping them from
 # the dump costs nothing and is what makes it portable.
-if ! "$PG_DUMP_BIN" --no-owner --no-acl --schema=public --schema=ops "$URL" \
+#
+# --enable-row-security ADDED 2026-09-01 (WR-000044, decision 11376c54). 0324
+# enabled RLS on ops.work_request; pg_dump's default row_security=off makes a
+# non-BYPASSRLS role's read of an RLS table a hard ERROR ("query would be
+# affected by row-level security policy"), which is what broke the nightly dump.
+# Turning row_security ON lets the dump read under RLS, where migration 0475's
+# permissive carr_backup SELECT policy (USING (true)) returns every row. This
+# was chosen over ALTER ROLE carr_backup BYPASSRLS specifically to avoid moving
+# the pinned SCAC v10 role-attribute census (see 0475's header). The cost of
+# row_security=on is that a future RLS-enabled table WITHOUT a carr_backup
+# read-all policy would dump short and silent; ops/backup-role-rls-coverage-*
+# make that a loud failure instead. carr_backup stays SELECT-only.
+if ! "$PG_DUMP_BIN" --no-owner --no-acl --enable-row-security --schema=public --schema=ops "$URL" \
      | age -r "$PUBKEY" > "$OUT.tmp"; then
   echo "DUMP FAILED (pg_dump or age exited non-zero) — aborting, previous backups untouched" >&2
   rm -f "$OUT.tmp"

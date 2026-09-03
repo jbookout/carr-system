@@ -43,9 +43,10 @@ const ACCEPT = { idempotency_key: "20000000-0000-0000-0000-000000000099", human_
 async function refused(fn) { try { await fn(); assert.fail("expected refusal"); } catch (error) { assert.ok(error instanceof ToolError); return error.payload; } }
 
 class PlanFake {
-  constructor({ tier = "standard", shapeReady = false } = {}) { this.calls = []; this.toolCalls = new Map(); this.tier = tier; this.shapeReady = shapeReady; }
+  constructor({ tier = "standard", shapeReady = false, registryError = false } = {}) { this.calls = []; this.toolCalls = new Map(); this.tier = tier; this.shapeReady = shapeReady; this.registryError = registryError; }
   async query(text, params = []) {
     const sql = text.replace(/\s+/g, " ").trim(); this.calls.push({ sql, params });
+    if (/^(savepoint|release savepoint|rollback to savepoint)/i.test(sql)) return { rows: [] };
     if (sql.startsWith("select pg_advisory_xact_lock")) return { rows: [] };
     if (sql.startsWith("select request_hash, response")) { const row = this.toolCalls.get(params[0]); return { rows: row ? [row] : [] }; }
     if (sql.includes("classify_sourced_work_request_build")) return { rows: [{ work_request_id: "40000000-0000-0000-0000-000000000001",
@@ -55,6 +56,16 @@ class PlanFake {
       work_request_id: "40000000-0000-0000-0000-000000000001", ref: "WR-000001", state: "triaged", version: 2,
       scope_summary: PROPOSE.scope_summary, runbook_ref: PROPOSE.runbook_ref,
       runbook_revision_id: "50000000-0000-0000-0000-000000000001", runbook_content_hash: `sha256:${"b".repeat(64)}` }] };
+    if (sql.includes("rule-delivery-source-snapshot")) {
+      if (this.registryError) throw new Error("synthetic registry unavailable");
+      return { rows: [{ map_versions: 1,
+      map_digest: "f".repeat(64), tagged_rules: 2, work_request_title: "Bounded maintenance",
+      desired_outcome: "Keep the existing bounded behavior truthful.", acceptance_criteria: [],
+      pack_index: [
+        { pack: "engineering-git", title: "Engineering", triggers: ["migration", "schema", "deploy", "test"], rule_count: 2 },
+        { pack: "source-study", title: "Study", triggers: ["new capability"], rule_count: 1 },
+      ] }] };
+    }
     if (sql.includes("record_sourced_heavy_build_admission")) return { rows: [{ admission_ref: "HBA-000001",
       admission_hash: `sha256:${"c".repeat(64)}`, tier: "heavy", classifier_reasons: ["signal:new_capability", "scale:max_steps"],
       builder_session_ref: HEAVY_BUILD.builder_session_ref, replayed: false }] };
@@ -85,12 +96,40 @@ test("ready-plan schemas are closed and acceptance is human authority only", () 
 
 test("proposal returns explicit plan readback and audits the Work Request entity", async () => {
   const db = new PlanFake(); const out = await executeRegisteredTool(db, JOE, "propose-ready-plan", structuredClone(PROPOSE));
-  assert.deepEqual(out, { ok: true, human_ref: "WR-000001", state: "triaged", version: 2, plan_ref: "PLAN-000001", plan_hash: ACCEPT.plan_hash,
-    scope_summary: PROPOSE.scope_summary, runbook_ref: PROPOSE.runbook_ref, runbook_revision_id: "50000000-0000-0000-0000-000000000001", runbook_content_hash: `sha256:${"b".repeat(64)}`,
-    build_admission: { tier: "standard", reasons: [], required: false } });
+  assert.equal(out.ok, true); assert.equal(out.human_ref, "WR-000001"); assert.equal(out.state, "triaged");
+  assert.equal(out.version, 2); assert.equal(out.plan_ref, "PLAN-000001"); assert.equal(out.plan_hash, ACCEPT.plan_hash);
+  assert.equal(out.scope_summary, PROPOSE.scope_summary); assert.equal(out.runbook_ref, PROPOSE.runbook_ref);
+  assert.deepEqual(out.build_admission, { tier: "standard", reasons: [], required: false });
+  assert.equal(out.rule_delivery_source.schema_version, "rule-delivery-source.v1");
+  assert.equal(out.rule_delivery_source.trigger_map.map_digest, `sha256:${"f".repeat(64)}`);
+  assert.match(out.rule_delivery_source.contract_digest, /^sha256:[0-9a-f]{64}$/);
   const event = db.calls.find(call => call.sql.startsWith("insert into event"));
   assert.equal(event.params[4], "40000000-0000-0000-0000-000000000001");
   assert.equal(JSON.parse(event.params[7]).plan_ref, "PLAN-000001");
+});
+
+test("source merge scope is an exact sorted file set inside the human-accepted plan hash", async () => {
+  const scoped = structuredClone(PROPOSE);
+  scoped.idempotency_key = "10000000-0000-0000-0000-000000000098";
+  scoped.caps.source_merge = {
+    schema_version: "source-merge-scope.v1",
+    repository: "jbookout/carr-system",
+    base_branch: "main",
+    authorized_paths: [
+      "mcp-server/src/source-merge-policy.js",
+      "mcp-server/test/source-merge-policy.test.mjs",
+    ],
+  };
+  const db = new PlanFake();
+  await executeRegisteredTool(db, JOE, "propose-ready-plan", scoped);
+  const proposal = db.calls.find(call => call.sql.includes("propose_sourced_work_request_plan"));
+  assert.deepEqual(JSON.parse(proposal.params[7]).source_merge, scoped.caps.source_merge);
+
+  const invalid = structuredClone(scoped);
+  invalid.idempotency_key = "10000000-0000-0000-0000-000000000097";
+  invalid.caps.source_merge.authorized_paths.reverse();
+  const error = await refused(() => executeRegisteredTool(new PlanFake(), JOE, "propose-ready-plan", invalid));
+  assert.equal(error.error, "invalid_source_merge_scope");
 });
 
 test("heavy classification refuses before plan creation when shape or the typed contract is missing", async () => {
@@ -188,4 +227,27 @@ test("validation and human authority boundaries refuse before DB I/O", async () 
   assert.ok(machineError, "expected the machine actor to reach the database fake");
   assert.notEqual(machineError?.payload?.error, "human_only");
   const noAuthority = await refused(() => callTool({}, JOE, "accept-ready-plan", structuredClone(ACCEPT), "full")); assert.equal(noAuthority.error, "authority_connection_unavailable");
+});
+
+test("caller delivery labels are closed out and the registry snapshot uses the server tenant", async () => {
+  for (const field of ["packs", "workflow", "tier", "reasons", "map_digest", "actor", "tenant_id"]) {
+    const db = { query: async () => { throw new Error("database must not be called"); } };
+    const error = await refused(() => executeRegisteredTool(db, JOE, "propose-ready-plan",
+      { ...structuredClone(PROPOSE), [field]: field === "packs" ? ["engineering-git"] : "forged" }));
+    assert.ok(["unregistered_operation_fields", "caller_authority_field_forbidden"].includes(error.error), field);
+  }
+  const db = new PlanFake();
+  await executeRegisteredTool(db, JOE, "propose-ready-plan", structuredClone(PROPOSE));
+  const snapshot = db.calls.find(call => call.sql.includes("rule-delivery-source-snapshot"));
+  assert.equal(snapshot.params[3], "carr-internal");
+});
+
+test("catalog failure rolls back its savepoint and leaves proposal audit writes committable", async () => {
+  const db = new PlanFake({ registryError: true });
+  const out = await executeRegisteredTool(db, JOE, "propose-ready-plan", structuredClone(PROPOSE));
+  assert.equal(out.rule_delivery_source.status, "unavailable");
+  assert.equal(out.rule_delivery_source.reason, "rule_delivery_registry_unavailable");
+  assert.ok(db.calls.some(call => /^rollback to savepoint siep02_rule_delivery_source/i.test(call.sql)));
+  assert.ok(db.calls.some(call => call.sql.startsWith("insert into event")));
+  assert.ok(db.calls.some(call => call.sql.startsWith("insert into tool_call")));
 });

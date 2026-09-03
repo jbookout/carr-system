@@ -25,6 +25,12 @@
     "Add the date and initials of the check in 'verified'."
   ],
   "hooks": {
+    "canonical-edit-gate.py": {
+      "catch_class": "an edit to a file git already tracks inside the shared canonical checkout, at the moment of the edit",
+      "also_caught_by": "none-known",
+      "verified": "2026-09-01 — checked against the two controls that look like they overlap and do not. ops/githooks/pre-commit refuses a commit on `main` and the PR-only ruleset rejects a direct push, but both bind LATER, at commit/push/merge; by then the dirty state already exists in the shared tree, which is the whole failure this gate catches. No pre-commit check and no ops/ci.sh class sees a file edit before it lands. The class is unowned at this binding moment.",
+      "note": "REINSTATED 2026-09-01 (Joe's ruling 7f48abf6, Repo Hygiene Program R02) after WR-000019 slice S3 retired it on 2026-08-27. NOTE FOR THE RETIRE-CANDIDATE RULE: this gate shows zero true positives for its first windows simply because it did not exist during them, and ops/gate-lifecycle-report.py already proposes retirement on that basis. 'none-known' blocks candidacy, which is the correct outcome — a quiet window here means the shared tree stayed clean, not that the gate is redundant."
+    },
     "guard-unattended.py": {
       "catch_class": "destructive-or-exfiltrating action from a session (rm/force-git/key-read/unknown-host/destructive-SQL)",
       "also_caught_by": "none-known",
@@ -68,7 +74,7 @@
     "conduct-stop-gate.py": {"catch_class": "conduct violation in the turn being ended", "also_caught_by": "unverified"},
     "completion-evidence-gate.py": {"catch_class": "completion claimed without evidence", "also_caught_by": "unverified"},
     "ledger-sweep.py": {"catch_class": "ruling in the turn that belongs in the decision ledger", "also_caught_by": "unverified"},
-    "context-handoff-gate.py": {"catch_class": "context ending with no handoff written", "also_caught_by": "unverified"},
+    "context-handoff-gate.py": {"catch_class": "context threshold crossed without a verified same-task successor takeover", "also_caught_by": "none-known", "verified": "2026-08-31 — no other hook preserves precompact high-water and binds Stop to immutable cross-surface takeover evidence."},
     "scheduled-run-record.py": {"catch_class": "scheduled run finishing with no run row", "also_caught_by": "unverified"},
     "chat-lint-gate.py": {"catch_class": "writing lint on the turn's prose", "also_caught_by": "unverified"},
     "chat-lint-carryover.py": {"catch_class": "carryover of the previous turn's lint", "also_caught_by": "unverified"},

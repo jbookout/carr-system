@@ -141,6 +141,16 @@ def main():
         case("negative control: a PENDING seeding migration is not a finding "
              "(it still replays, so a rebuild loses nothing)", found == [])
 
+        pending_excluded = build_repo(
+            tmp + "/pending-excluded",
+            {"0100_seed.sql": seeding},
+            {"carried": {}, "excluded": {"ops.widget": "future runtime evidence"}},
+        )
+        case(
+            "excluded permits a decision before its seeding migration is applied",
+            module.check(pending_excluded, artifact([])) == [],
+        )
+
         repo = build_repo(
             tmp + "/pending-carried",
             {"0100_seed.sql": seeding},
@@ -1164,6 +1174,11 @@ def main():
     case("every live classification entry states a reason",
          all(str(v).strip() for v in
              list(carried.values()) + list(subset.values()) + list(excluded.values())))
+    case("source-merge plan scope is operational authority history, never snapshot seed",
+         "ops.source_merge_plan_scope" in excluded
+         and "accepted-plan" in excluded["ops.source_merge_plan_scope"]
+         and "ops.source_merge_plan_scope" not in carried
+         and "ops.source_merge_plan_scope" not in subset)
 
     if FAILURES:
         print(f"\nFAILED {len(FAILURES)}: {'; '.join(FAILURES)}")

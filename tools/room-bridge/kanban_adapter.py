@@ -109,9 +109,21 @@ class KanbanAdapter:
         self.command_runner = command_runner
 
     def create(self, command: dict, turn: dict, target: dict) -> dict:
+        raw_source_seq = turn.get("seq")
+        if isinstance(raw_source_seq, bool):
+            raise QueueError("source_invalid", "room source sequence is invalid")
+        if isinstance(raw_source_seq, int):
+            source_seq = raw_source_seq
+        elif isinstance(raw_source_seq, str) and raw_source_seq.isdigit():
+            # Postgres bigint values cross the deployed Worker boundary as
+            # JSON strings. Normalize at queue ingress so the durable task
+            # metadata retains the integer contract its executor validates.
+            source_seq = int(raw_source_seq)
+        else:
+            raise QueueError("source_invalid", "room source sequence is invalid")
         meta = {
             "v": 1, "target": command["target"], "cap": command["cap"],
-            "source_seq": turn.get("seq"), "source_msg_id": turn.get("msg_id"),
+            "source_seq": source_seq, "source_msg_id": turn.get("msg_id"),
             "finish": command["finish"],
         }
         task_body = f"[CARR_QUEUE_META {json.dumps(meta, separators=(',', ':'))}]\n{command['body']}".rstrip()

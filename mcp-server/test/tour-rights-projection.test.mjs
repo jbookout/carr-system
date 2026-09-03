@@ -12,14 +12,41 @@ const ids = {
   revokedRights: "10000000-0000-4000-8000-000000000002",
   evidence: "20000000-0000-4000-8000-000000000001",
   assertion: "30000000-0000-4000-8000-000000000001",
+  addressAssertion: "30000000-0000-4000-8000-000000000002",
   property: "40000000-0000-4000-8000-000000000001",
   tour: "50000000-0000-4000-8000-000000000001",
   projection: "60000000-0000-4000-8000-000000000001",
 };
 const digest = value => `sha256:${value.repeat(64)}`;
 const idempotency = "70000000-0000-4000-8000-000000000001";
+const publicFact = {
+  property_id: ids.property,
+  field_assertion_id: ids.assertion,
+  display_field_key: "display.name",
+  value: "Medical Plaza",
+  source_evidence_id: ids.evidence,
+  rights_receipt_id: ids.rights,
+  observed_at: "2026-08-27T12:05:00Z",
+  effective_from: "2026-08-27T00:00:00Z",
+  effective_to: null,
+};
+const publicAddressFact = {
+  ...publicFact,
+  field_assertion_id: ids.addressAssertion,
+  display_field_key: "display.address",
+  value: "100 Clinic Way",
+};
+const databaseProjection = {
+  projection_id: ids.projection,
+  tour_id: ids.tour,
+  projection_version: 1,
+  route_version: 1,
+  as_of: "2026-08-27T12:15:00Z",
+  projection_digest: digest("f"),
+  facts: [publicFact, publicAddressFact],
+};
 
-function harness() {
+function harness({ projection = databaseProjection } = {}) {
   const calls = [];
   const envelopes = [];
   const events = [];
@@ -32,7 +59,7 @@ function harness() {
       if (sql.includes("append_tour_field_assertion")) return { rows: [{ field_assertion_id: ids.assertion }] };
       if (sql.includes("create_tour_public_projection_draft")) return { rows: [{ projection_id: ids.projection }] };
       if (sql.includes("seal_tour_public_projection")) return { rows: [{ projection_digest: digest("f") }] };
-      if (sql.includes("read_tour_public_projection")) return { rows: [{ projection: { projection_id: ids.projection, projection_digest: digest("f"), facts: [] } }] };
+      if (sql.includes("read_tour_public_projection")) return { rows: [{ projection }] };
       throw new Error(`unexpected query: ${sql}`);
     },
   };
@@ -139,6 +166,117 @@ test("read is tenant-scoped, approved-only, and never enters a write envelope", 
   assert.equal(h.events.length, 0);
 });
 
+test("public read canonicalizes PostgreSQL offset timestamps", async () => {
+  const databaseShaped = {
+    ...databaseProjection,
+    as_of: "2026-08-27T12:15:00+00:00",
+    facts: [publicFact, publicAddressFact].map(item => ({
+      ...item,
+      observed_at: "2026-08-27T07:05:00-05:00",
+      effective_from: "2026-08-26T19:00:00-05:00",
+      effective_to: null,
+    })),
+  };
+  const h = harness({ projection: databaseShaped });
+  const result = await h.tools["read-tour-public-projection"].handler(
+    h.client, actor, { projection_id: ids.projection });
+  assert.equal(result.projection.as_of, "2026-08-27T12:15:00Z");
+  assert.equal(result.projection.facts[0].observed_at, "2026-08-27T12:05:00Z");
+  assert.equal(result.projection.facts[0].effective_from, "2026-08-27T00:00:00Z");
+});
+
+test("public read projection ignores internal-only metadata and rejects forbidden fact classes", async () => {
+  const internalOnly = {
+    ...databaseProjection,
+    broker_contact: { email: "internal@example.invalid" },
+    analysis: "broker conclusion",
+    credentials: "secret",
+    notes: "internal note",
+    restrictions: "provider terms",
+    recommendation: "choose this property",
+    ranking: 1,
+    facts: [
+      { ...publicFact, internal_note: "do not expose", broker_rank: 1 },
+      { ...publicAddressFact, internal_note: "do not expose" },
+    ],
+  };
+  const cleanHarness = harness();
+  const clean = await cleanHarness.tools["read-tour-public-projection"].handler(
+    cleanHarness.client, actor, { projection_id: ids.projection });
+  const h = harness({ projection: internalOnly });
+  const projected = await h.tools["read-tour-public-projection"].handler(
+    h.client, actor, { projection_id: ids.projection });
+  assert.deepEqual(projected.projection, clean.projection);
+  assert.deepEqual(Object.keys(projected.projection).sort(), [
+    "as_of", "facts", "projection_digest", "projection_id", "projection_version", "route_version", "tour_id",
+  ]);
+  assert.deepEqual(Object.keys(projected.projection.facts[0]).sort(), [
+    "display_field_key", "effective_from", "effective_to", "field_assertion_id", "observed_at",
+    "property_id", "rights_receipt_id", "source_evidence_id", "value",
+  ]);
+
+  for (const display_field_key of [
+    "broker_contact", "analysis", "credentials", "notes", "restrictions", "recommendation", "ranking",
+  ]) {
+    const rejected = harness({ projection: {
+      ...databaseProjection,
+      facts: [{ ...publicFact, display_field_key }, publicAddressFact],
+    } });
+    await assert.rejects(
+      rejected.tools["read-tour-public-projection"].handler(
+        rejected.client, actor, { projection_id: ids.projection }),
+      error => error instanceof ToolError && error.payload.error === "tour_public_projection_invalid",
+    );
+  }
+});
+
+test("public read snapshots plain data once and rejects hostile arrays or accessors", async () => {
+  const poisonedFacts = [publicFact, publicAddressFact];
+  Object.defineProperty(poisonedFacts, "map", {
+    value: () => [{ ...publicFact, value: { notes: "broker-only", credentials: "secret" } }],
+  });
+  const poisoned = harness({ projection: { ...databaseProjection, facts: poisonedFacts } });
+  await assert.rejects(
+    poisoned.tools["read-tour-public-projection"].handler(
+      poisoned.client, actor, { projection_id: ids.projection }),
+    error => error instanceof ToolError && error.payload.error === "tour_public_projection_invalid",
+  );
+
+  const changingFact = { ...publicFact };
+  delete changingFact.value;
+  let reads = 0;
+  Object.defineProperty(changingFact, "value", {
+    enumerable: true,
+    get() { return reads++ === 0 ? "Medical Plaza" : { notes: "broker-only", credentials: "secret" }; },
+  });
+  const changing = harness({ projection: {
+    ...databaseProjection, facts: [changingFact, publicAddressFact],
+  } });
+  await assert.rejects(
+    changing.tools["read-tour-public-projection"].handler(
+      changing.client, actor, { projection_id: ids.projection }),
+    error => error instanceof ToolError && error.payload.error === "tour_public_projection_invalid",
+  );
+  assert.equal(reads, 0, "rejected accessors must never execute");
+});
+
+test("public read projection refuses incomplete, duplicate, or temporally impossible facts", async () => {
+  for (const facts of [
+    [publicFact],
+    [publicFact, publicAddressFact, { ...publicAddressFact, field_assertion_id: ids.assertion }],
+    [{ ...publicFact, observed_at: "2026-08-28T00:00:00Z" }, publicAddressFact],
+    [{ ...publicFact, effective_from: "2026-08-28T00:00:00Z" }, publicAddressFact],
+    [{ ...publicFact, effective_to: "2026-08-27T12:00:00Z" }, publicAddressFact],
+  ]) {
+    const h = harness({ projection: { ...databaseProjection, facts } });
+    await assert.rejects(
+      h.tools["read-tour-public-projection"].handler(
+        h.client, actor, { projection_id: ids.projection }),
+      error => error instanceof ToolError && error.payload.error === "tour_public_projection_invalid",
+    );
+  }
+});
+
 test("authority selectors and actor/reviewer impersonation are refused before database access", async () => {
   for (const injected of [
     { organization_tenant_id: "other" }, { tenant: "other" }, { actor_id: "other" },
@@ -165,4 +303,76 @@ test("malformed identifiers, digests, timestamps, and selected fact sets fail cl
     receipt_digest: digest("d"),
   }), error => error instanceof ToolError && error.payload.error === "tour_selected_facts_invalid");
   assert.equal(h.calls.length, 0);
+});
+
+test("PostgreSQL-unrepresentable rights text fails before envelope or database access", async () => {
+  const invalidCases = [
+    { provider: "bad\u0000provider" },
+    { provider: "bad\ud800provider" },
+    { policy_key: "bad\udc00policy" },
+    { intended_use: "bad\ud800use" },
+    { allowed_field_classes: ["display.name\u0000internal"] },
+    { allowed_use_classes: ["client_public_display\ud800"] },
+  ];
+  for (const invalid of invalidCases) {
+    const h = harness();
+    await assert.rejects(
+      h.tools["append-tour-rights-receipt"].handler(
+        h.client, actor, { ...rightsArgs, ...invalid }),
+      error => error instanceof ToolError && error.payload.error === "tour_input_invalid",
+    );
+    assert.equal(h.calls.length, 0);
+    assert.equal(h.envelopes.length, 0);
+  }
+});
+
+test("field assertions bind one detached PostgreSQL-safe JSON snapshot to the envelope and database write", async () => {
+  const h = harness();
+  const value = { name: "Medical Plaza", details: [null, true, 4200] };
+  const args = {
+    idempotency_key: idempotency, property_id: ids.property, field_key: "display.name", value,
+    source_evidence_id: ids.evidence, rights_receipt_id: ids.rights,
+    observed_at: "2026-08-27T12:05:00Z", effective_from: "2026-08-27T00:00:00Z",
+    effective_to: null, confidence: "high", data_classification: "public", review_state: "reviewed",
+  };
+  await h.tools["append-tour-field-assertion"].handler(h.client, actor, args);
+  value.name = "changed after validation";
+  value.details[2] = 0;
+  assert.deepEqual(JSON.parse(JSON.stringify(h.envelopes[0].args.value)),
+    { name: "Medical Plaza", details: [null, true, 4200] });
+  assert.notEqual(h.envelopes[0].args.value, value);
+  assert.deepEqual(JSON.parse(h.calls[0].params[0]).value,
+    { name: "Medical Plaza", details: [null, true, 4200] });
+});
+
+test("field assertions reject hostile or PostgreSQL-unrepresentable JSON before envelope or database access", async () => {
+  const changing = {};
+  let reads = 0;
+  Object.defineProperty(changing, "name", {
+    enumerable: true,
+    get() { return reads++ === 0 ? "safe" : "changed"; },
+  });
+  const sparse = new Array(2);
+  sparse[0] = "only";
+  const withToJson = { name: "safe", toJSON() { return { name: "changed" }; } };
+  for (const value of [
+    null, "bad\u0000value", "bad\ud800value", { nested: "bad\udc00value" },
+    sparse, { amount: Number.NaN }, { amount: Number.POSITIVE_INFINITY },
+    withToJson, changing, JSON.parse('{"__proto__":{"a":1}}'),
+  ]) {
+    const h = harness();
+    await assert.rejects(
+      h.tools["append-tour-field-assertion"].handler(h.client, actor, {
+        idempotency_key: idempotency, property_id: ids.property, field_key: "display.name", value,
+        source_evidence_id: ids.evidence, rights_receipt_id: ids.rights,
+        observed_at: "2026-08-27T12:05:00Z", effective_from: "2026-08-27T00:00:00Z",
+        effective_to: null, confidence: "high", data_classification: "public", review_state: "reviewed",
+      }),
+      error => error instanceof ToolError && error.payload.error === "tour_input_invalid" &&
+        error.payload.field === "value",
+    );
+    assert.equal(h.calls.length, 0);
+    assert.equal(h.envelopes.length, 0);
+  }
+  assert.equal(reads, 0, "rejected assertion accessors must never execute");
 });

@@ -13,6 +13,7 @@ from pathlib import Path
 
 MODULE_PATH = Path(__file__).with_name("automerge_pilot.py")
 WORKFLOW_PATH = Path(__file__).parents[1] / ".github" / "workflows" / "automerge-pilot.yml"
+CI_WORKFLOW_PATH = Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
 SPEC = importlib.util.spec_from_file_location("automerge_pilot", MODULE_PATH)
 assert SPEC and SPEC.loader
 pilot = importlib.util.module_from_spec(SPEC)
@@ -396,6 +397,18 @@ class TransactionTests(unittest.TestCase):
 class WorkflowBoundaryTests(unittest.TestCase):
     def setUp(self):
         self.workflow = WORKFLOW_PATH.read_text()
+        self.ci_workflow = CI_WORKFLOW_PATH.read_text()
+
+    def test_full_strict_jobs_have_current_runtime_headroom(self):
+        ci_checks = self.ci_workflow.split(
+            "\n  checks:\n", 1)[1].split("\n    services:\n", 1)[0]
+        pilot_verify = self.workflow.split(
+            "\n  verify:\n", 1)[1].split("\n    permissions:\n", 1)[0]
+        for block in (ci_checks, pilot_verify):
+            timeout_line = next(
+                line for line in block.splitlines()
+                if "timeout-minutes:" in line)
+            self.assertGreaterEqual(int(timeout_line.split(":", 1)[1]), 30)
 
     def test_untrusted_pull_request_code_never_gets_write_permissions(self):
         verify_block = self.workflow.split("\n  verify:\n", 1)[1].split("\n  merge:\n", 1)[0]

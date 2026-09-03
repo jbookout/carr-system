@@ -243,6 +243,12 @@ carr_load_routine_db_env CARR_DB_JOBS_URL CARR_DB_EXPORTER_URL CARR_DB_BACKUP_UR
 # variable here is what lets that graceful path be reached at all: the callee's
 # fallback cannot run if dereferencing the variable kills the caller first.
 CARR_DB_BACKUP_URL="${CARR_DB_BACKUP_URL:-}"
+# The portability mirror binds the exporter capability (see its step below) and
+# needs the same treatment for the same reason: ops/nightly-tombstone-selftest.py
+# runs this chain with a stripped environment, and an unset variable under set -u
+# aborts the whole run before any step can report — which is the failure the
+# paragraph above exists to prevent, not a second one.
+CARR_DB_EXPORTER_URL="${CARR_DB_EXPORTER_URL:-}"
 
 rc_total=0
 # LAST_STEP_RC carries the outcome of the step that just ran (0 = OK, 78 = SKIP,
@@ -1064,8 +1070,30 @@ BACKUP_RC=$LAST_STEP_RC
 # later, which is a long way from the cause.
 portability_root="${CARR_EXPORT_HOME:-}"
 [ -n "$portability_root" ] || portability_root="/Users/booko/Library/CloudStorage/OneDrive-CARR,Inc/Joe's Folder/CARR AI"
+# THE CAPABILITY THIS STEP WAS PINNED TO IS ONE NO AGENT MAY EVER HOLD, so the
+# step deleted itself quietly. carr_backup's password is deliberately a value
+# nothing here can possess — migration 0119 says so in capitals ("THE PASSWORD IS
+# NOT IN THIS FILE AND NOBODY HAS EVER SEEN IT") because that role's purpose is
+# the GitHub-Actions pg_dump, whose secret lives in Actions and not on this Mac.
+# So CARR_DB_BACKUP_URL is absent from ~/.config/carr/db.env, doctrine_mirror.py
+# exited 78 on it every night from 2026-08-16, and 78 is the house SKIP contract,
+# which reads as "nothing to do" rather than as a step that has not run in two
+# weeks. INC-20260817-01 stayed open the whole time.
+#
+# THE MIRROR IS A RENDER, NOT A DUMP. It reads the doctrine database and writes
+# markdown and csv — the same shape as the six business exports a few steps
+# above, which is why the exporter capability fits it and the backup capability
+# was only ever incidental.
+#
+# AND THE EXPORTER ROLE IS STRICTLY NARROWER, measured against production rather
+# than argued: over public+ops, app_exporter_local can SELECT 236 relations and
+# carr_backup 459; relations the exporter can read that the backup role cannot is
+# ZERO, the reverse is 223, and the exporter holds no non-SELECT grant anywhere.
+# ops/routine-credential-boundary-selftest.py holds that ceiling and was updated
+# in this same commit, because the check it was making pinned a variable NAME
+# where its stated intent was a privilege LIMIT.
 step "portability mirror (md+csv, 2 locations)" \
-  env DATABASE_URL="$CARR_DB_BACKUP_URL" .venv/bin/python pipelines/doctrine_mirror.py \
+  env DATABASE_URL="$CARR_DB_EXPORTER_URL" .venv/bin/python pipelines/doctrine_mirror.py \
     --out "$portability_root/Backups/portability-mirror" \
     --also "$HOME/carr-system/out/mirror"
 # NO BACKUP_RC HERE ANY MORE — it is captured beside the encrypted backup above,
@@ -1081,6 +1109,24 @@ step "portability mirror (md+csv, 2 locations)" \
 # Shortcuts drop files, so archiving survives a dead Shortcut. Exit 78 = SKIP
 # when ~/.config/carr/calendar.env is absent, same contract as the other steps.
 step "calendar archive (both partners' feeds)"       ./bin/archive-calendar.sh
+
+# MAIL, loop #169. The calendar lane proves a meeting happened; most follow-up
+# never becomes one, so a calendar-only view of the relationship sees a fraction
+# of the real contact. That gap is why vendor touch coverage sat at 0.7%.
+#
+# WHY IT LIVES IN THIS CHAIN RATHER THAN A 25TH LAUNCHD AGENT. The row asked for
+# "launchd, weekly is enough", written before the scheduler cutover. Recurrence
+# is moving to ONE adapter (loop #532), and this file's own scheduled-task note
+# says anything the chain gains in future goes inside bin/nightly.sh. Apple Mail
+# is a LOCAL store the cloud tick cannot reach, so the local edge is right and a
+# new scheduler is not. Daily also beats the weekly the row settled for.
+#
+# NEITHER STEP WRITES TO THE RECORD. The extractor emits envelope metadata only,
+# never message bodies (decision 745ab4aa admits derived facts); the matcher
+# emits proposals to out/mail-matched.json. Exit 78 = SKIP when Mail is not
+# running, because launching Joe's mail client at 02:05 with nobody at the
+# machine is a side effect no capture is worth.
+step "mail capture (extract + match, writes nothing)" ./bin/mail-capture.sh
 
 # Added 2026-08-12 (Joe's go, "put settings in the repo"): mirror the Claude Code
 # permission surface — the three settings.json files carrying the allow list, the

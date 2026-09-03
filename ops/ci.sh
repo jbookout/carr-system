@@ -500,6 +500,19 @@ PYEOF
   # ops/ci-selftest.py's test_every_test_file_in_the_tree_is_collected reads
   # these globs back out of this file and fails if ANY test-shaped file in the
   # tree is matched by none of them.
+  # THE PYTHON SUITES RUN IN A BOUNDED PARALLEL POOL (2026-09-02). Measured
+  # sequentially this loop cost 495s on the canary's biggest class: ten suites
+  # carry ~235s of subprocess work and the other ~330 average 0.8s of
+  # interpreter start-up each. Three 4-way parallel sweeps of all 341 suites
+  # finished in 125s with zero new failures, no cross-suite collisions, and a
+  # byte-clean tree fingerprint (evidence in the PR that landed this).
+  # Execution is parallel; REPORTING stays sequential in stable name order
+  # below, so the output contract, the exit-78 skip handling, inherited_abort,
+  # and the timeout classing are unchanged. Suites must already be isolated —
+  # the git-isolation selftest and the class-level tree fingerprint enforce
+  # that — and each still runs under the same per-suite timeout helper.
+  # Pool width: hosted runners have 4 vCPUs; CARR_CI_GATE_JOBS overrides.
+  local eligible=""
   for t in ops/*-selftest.py tools/test-*.py tools/test_*.py; do
     [ -f "$t" ] || continue
     local base; base="$(basename "$t")"
@@ -510,10 +523,30 @@ PYEOF
       continue
     fi
     count=$((count+1))
-    local grc
-    run_quiet "$LOGDIR/gate-$base.log" "$PY" "$CI_TIMEOUT_HELPER" \
-      "$CI_SELFTEST_TIMEOUT_SECONDS" "$PY" "$t"
-    grc=$?
+    eligible="$eligible $t"
+  done
+  # THE POOLED CAP SCALES WITH THE POOL (2026-09-02). The 120s per-suite cap
+  # was calibrated for a suite running alone; four suites sharing four hosted
+  # vCPUs stretch wall time roughly by the pool width, and the first canary
+  # after the pool landed proved it: ci-selftest (27s alone) was starved past
+  # 120s, killed, and its nested runs leaked children that then collided with
+  # the migration class (run 33634323225). Scaling by width keeps the cap's
+  # meaning — "several times slower than the slowest honest run is a hang" —
+  # at every pool size, and width 1 restores today's exact 120s.
+  local pooled_timeout=$(( CI_SELFTEST_TIMEOUT_SECONDS * ${CARR_CI_GATE_JOBS:-4} ))
+  export CI_TIMEOUT_HELPER CI_SELFTEST_TIMEOUT_SECONDS LOGDIR PY pooled_timeout
+  # -n1 with the path as $1, NOT -I{}: BSD xargs -I substitutes into the whole
+  # script and refuses with "command line cannot be assembled, too long".
+  printf '%s\n' $eligible | xargs -P "${CARR_CI_GATE_JOBS:-4}" -n1 bash -c '
+    b="$(basename "$1")"
+    "$PY" "$CI_TIMEOUT_HELPER" "$pooled_timeout" "$PY" "$1" \
+      >"$LOGDIR/gate-$b.log" 2>&1
+    echo $? >"$LOGDIR/gate-$b.rc"
+  ' _
+  local grc
+  for t in $eligible; do
+    base="$(basename "$t")"
+    grc="$(cat "$LOGDIR/gate-$base.rc" 2>/dev/null || echo 1)"
     # EXIT 78 IS "NOT CONFIGURED HERE", NOT A FAILURE. It is EX_CONFIG, and it is
     # already the repo's convention: bin/type-check.sh's header states it and the
     # types class above honours it. This loop counted every nonzero the same, so
@@ -525,8 +558,8 @@ PYEOF
     if [ "$grc" -eq 124 ]; then
       failures="$failures TIMEOUT:$base"
       gates_timed_out=1
-      printf '        \033[31mTIMEOUT\033[0m  %s — exceeded %ss; aborting remaining gate selftests\n' \
-        "$base" "$CI_SELFTEST_TIMEOUT_SECONDS" >&2
+      printf '        \033[31mTIMEOUT\033[0m  %s — exceeded %ss (pool-scaled); aborting remaining gate selftests\n' \
+        "$base" "$pooled_timeout" >&2
       tail -12 "$LOGDIR/gate-$base.log" >&2
       break
     elif [ "$grc" -eq 78 ]; then
@@ -953,11 +986,41 @@ check_dependency() {
   # value, so "0" would have passed --strict too. Caught while testing the skip path.
   local strictflag=""
   [ "$STRICT" = "1" ] && strictflag="--strict"
+  # THE SECOND HALF OF THE SAME DOCTRINE CLASS, IN SHADOW. ci-dep-check.py below
+  # reads the LOCKFILES; it never reads an install COMMAND, so a tree with a
+  # perfect lock can still install around it (`npm install` re-resolves the lock
+  # it was handed; `pip install -r requirements.txt` takes the loose declaration
+  # instead of the pinned output beside it). ops/frozen-install-check.py closes
+  # that half and belongs in this class rather than a new one.
+  #
+  # IT RUNS AND REPORTS; IT DOES NOT BLOCK, AND THAT IS DELIBERATE. `ops/ci.sh
+  # --strict` is the required status check on main, so failing the class here
+  # would make this a REQUIRED hosted gate the moment it merged. Slice R05's
+  # authority is explicitly build-only: hosted and required activation belongs to
+  # the master plan's CI/CD hardening owner, and the contract change asking for
+  # it is out/repo-hygiene-program/r05-contract-change-draft.md. Flipping it is
+  # one line — move the `frozen_rc` test into the verdict below — and that line
+  # is that owner's to write, not this slice's.
+  #
+  # SHADOW IS NOT SILENCE. It runs on every local and hosted run and prints what
+  # it found, because the failure shape this repo keeps rediscovering is a
+  # control that exists, is correct, and is connected to nothing.
+  local frozen_rc=0
+  run_quiet "$LOGDIR/dep-frozen.log" "$PY" ops/frozen-install-check.py || frozen_rc=$?
+  local frozen_note
+  if [ "$frozen_rc" -eq 0 ]; then
+    frozen_note="$(tail -1 "$LOGDIR/dep-frozen.log")"
+  else
+    cat "$LOGDIR/dep-frozen.log" >&2
+    printf '        \033[33mSHADOW\033[0m  frozen-install-check reports unfrozen install(s) — NOT blocking; activation is the CI/CD hardening owner (see out/repo-hygiene-program/r05-contract-change-draft.md)\n' >&2
+    frozen_note="frozen installs: SHADOW FAIL (not blocking) — see above"
+  fi
+
   if run_quiet "$LOGDIR/dep.log" "$PY" ops/ci-dep-check.py $strictflag; then
-    ok dependency "$(tail -1 "$LOGDIR/dep.log")"
+    ok dependency "$(tail -1 "$LOGDIR/dep.log"); $frozen_note"
   else
     cat "$LOGDIR/dep.log" >&2
-    bad dependency "see above"
+    bad dependency "see above; $frozen_note"
   fi
 }
 
@@ -1002,6 +1065,8 @@ check_migration() {
     return
   fi
 
+  local _mt0 _mt; _mt0="$(date +%s)"; MIGRATION_STEP_TIMINGS=""
+  _mstep() { _mt="$(date +%s)"; MIGRATION_STEP_TIMINGS="$MIGRATION_STEP_TIMINGS $1=$(( _mt - _mt0 ))s"; _mt0="$_mt"; }
   if ! PGOPTIONS='--client-min-messages=warning' run_quiet "$LOGDIR/migration-load.log" \
        "$psql_bin" -v ON_ERROR_STOP=1 -q -d "$dsn" -f db/schema.sql; then
     tail -25 "$LOGDIR/migration-load.log" >&2
@@ -1023,6 +1088,7 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     return
   fi
 
+  _mstep load
   if ! DATABASE_URL="$dsn" run_quiet "$LOGDIR/migration.log" "$PY" tools/migrate.py --apply --yes; then
     tail -30 "$LOGDIR/migration.log" >&2
     bad migration "a pending migration did not apply to the committed schema"
@@ -1034,6 +1100,7 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
   # Run every slice's transaction-scoped acceptance proof on the same
   # disposable database after pending migrations apply. Each proof rolls back
   # every fixture row and must be independently green.
+  _mstep migrate
   local tour_pg_proof tour_pg_log
   for tour_pg_proof in \
     mcp-server/test/tour-operations-slice2-postgres.sql \
@@ -1061,6 +1128,7 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
   # the interlock where the ABSENT column is the point. A flattening bug that
   # turned column grants into table grants would pass every positive and be
   # caught only there.
+  _mstep tour
   if run_quiet "$LOGDIR/migration-grants.log" "$psql_bin" -X -v ON_ERROR_STOP=1 -Atq -d "$dsn" -c "
     do \$\$ begin
       if not has_table_privilege('carr_writer', 'public.lead', 'insert') then
@@ -1088,6 +1156,7 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     # caller, and grants never fire for the owner, so no rehearsal as owner can
     # see it — which is why this lives here, against the built database, rather
     # than in the gates class against a synthetic tree.
+    _mstep grants
     if ! CARR_CI_DATABASE_URL="$dsn" run_quiet "$LOGDIR/migration-triggers.log" \
          "$PY" ops/trigger-grant-check.py; then
       tail -25 "$LOGDIR/migration-triggers.log" >&2
@@ -1100,6 +1169,7 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     # checked-in inventory and writes it only after job definitions exist.
     # Do that real sync on this disposable database before acceptance gates;
     # copied seed SQL would bypass exactly the ordering this class must prove.
+    _mstep triggers
     if ! DATABASE_URL="$dsn" run_quiet "$LOGDIR/migration-control-plane-sync.log" \
          "$PY" tools/control-plane.py sync; then
       tail -30 "$LOGDIR/migration-control-plane-sync.log" >&2
@@ -1167,15 +1237,19 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     # alone. That agreement is what makes the two rules below safe.
     local dsn_read='environ\.get\("(CARR_CI_)?DATABASE_URL"|environ\["(CARR_CI_)?DATABASE_URL"\]|getenv\("(CARR_CI_)?DATABASE_URL"'
     local db_gate_failures="" db_gate_count=0 db_gate_unmarked="" db_gate_declared=""
+    _mstep sync
+    local db_gate_timings="" _gt0
     for g in ops/*-gate.py; do
       [ -f "$g" ] || continue
       if grep -q '^# ci: db-gate' "$g"; then
         db_gate_count=$((db_gate_count+1))
+        _gt0="$(date +%s)"
         if ! DATABASE_URL="$dsn" run_quiet "$LOGDIR/db-gate-$(basename "$g").log" \
              "$PY" "$g"; then
           db_gate_failures="$db_gate_failures $(basename "$g")"
           tail -20 "$LOGDIR/db-gate-$(basename "$g").log" >&2
         fi
+        db_gate_timings="$db_gate_timings $(basename "$g" .py)=$(( $(date +%s) - _gt0 ))s"
       elif grep -qE "$dsn_read" "$g"; then
         # A gate that reads a DSN and carries no marker really is unrun, and
         # this is now a FAILURE rather than a line in the margin. The whole
@@ -1190,6 +1264,14 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
         db_gate_declared="$db_gate_declared\n            $(basename "$g"): $(sed -n 's/^# ci: runs-outside-ci *— *//p' "$g" | head -1)"
       fi
     done
+    _mstep gates
+    # Two greppable lines, same contract as ci-timing: which STEP of this class
+    # grew, and which GATE PROGRAM grew. Seconds, sorted slowest first. Added
+    # 2026-09-01 when the class went 77s -> 652s on hosted runners in one day
+    # while reproducing at 48s on a Mac, and nothing in the hosted log could
+    # say which of the ~60 silent children was responsible.
+    echo "migration-step-timing:${MIGRATION_STEP_TIMINGS}"
+    echo "db-gate-timing:$(printf '%s\n' $db_gate_timings | sort -t= -k2,2 -rn | tr '\n' ' ' | sed 's/ $//')"
     if [ -n "$db_gate_declared" ]; then
       printf '        \033[33moutside CI\033[0m  gate(s) declared to run elsewhere:%b\n' \
         "$db_gate_declared" >&2

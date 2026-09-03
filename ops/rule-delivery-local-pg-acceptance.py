@@ -36,6 +36,15 @@ PY = REPO / ".venv" / "bin" / "python"
 MIGRATION_0363 = REPO / "migrations" / "0363_rule_delivery_activation_digest_repin.sql"
 PRIOR_ACTIVATION_DIGEST = "4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218"
 CURRENT_ACTIVATION_DIGEST = "f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904"
+# The chain has a fourth link as of 2026-09-01. Reinstating canonical_edit into
+# control_catalog (Joe's ruling 7f48abf6, Repo Hygiene Program R02) moved the
+# rule-enforcement-map digest, so the REGENERATED 0471 carries the generator's
+# designed, guarded rule-map repin and the eight targets end on this value.
+# NAMED FOR 0471, NOT 0474: 0474 reinstates the catalog control, but it is
+# 0471's repin block that actually moves ops.rule_delivery_activation_target.
+# PRIOR (pre-0363) and CURRENT (post-0363) are deliberately untouched -- 0363
+# still produces CURRENT, and its assertions below must keep expecting it.
+POST_0471_ACTIVATION_DIGEST = "6d21c37d533a5d98debfe4991c902164cf3c1fee88e7f42a3112468268e3335c"
 ACTIVATION_TO_TEST_REF = (
     "ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; "
     "ops/rule-pack-preuse-reselection-selftest.py"
@@ -69,6 +78,17 @@ def uuid_for(short: str, tail: int = 1) -> str:
     return f"{short}-0000-4000-8000-{tail:012d}"
 
 
+def cutover_as(cur, role: str, mode: str, reason: str, digest: str) -> tuple:
+    cur.execute(f"set session authorization {role}")
+    try:
+        cur.execute("select * from ops.set_rule_delivery_mode(%s,%s,%s)",
+                    (mode, reason, digest))
+        row = one(cur)
+    finally:
+        cur.execute("reset session authorization")
+    return row
+
+
 def first_do_block(source: str) -> str:
     start = source.index("do $$")
     end = source.index("end $$;", start) + len("end $$;")
@@ -92,6 +112,15 @@ def main() -> int:
     store_scope_by_id[synthetic_dell] = "dell"
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        cur.execute("""do $$ begin
+          if not exists(select 1 from pg_roles where rolname='carr_authority_joe') then
+            create role carr_authority_joe login;
+          end if;
+          if not exists(select 1 from pg_roles where rolname='carr_authority_dell') then
+            create role carr_authority_dell login;
+          end if;
+        end $$""")
+        cur.execute("grant carr_authority to carr_authority_joe,carr_authority_dell")
         cur.execute(
             """insert into ops.rule_delivery_activation_target
                  (short_id,expected_scope,expected_pack,
@@ -315,6 +344,27 @@ def main() -> int:
         )
         check("the restored post-0363 fixture is the exact current eight",
               one(cur)[0] == len(EXPECTED_IDS))
+
+        # FOURTH LINK: 0471's repin. The fixture above reconstructs the state as
+        # of 0363; the cutover below is handed the digest read from the live
+        # overlay, which is now the post-0471 value. Without this step the two
+        # disagree and the database refuses with "activation map digest preimage
+        # differs" -- which is exactly how this gap was found.
+        cur.execute(
+            """update ops.rule_delivery_activation_target
+                  set map_digest=%s
+                where map_digest=%s""",
+            (POST_0471_ACTIVATION_DIGEST, CURRENT_ACTIVATION_DIGEST),
+        )
+        check("0471 repins exactly the eight current targets",
+              cur.rowcount == len(EXPECTED_IDS))
+        cur.execute(
+            """select count(*) from ops.rule_delivery_activation_target
+                where map_digest=%s""",
+            (POST_0471_ACTIVATION_DIGEST,),
+        )
+        check("the post-0471 fixture is the exact eight on the current map",
+              one(cur)[0] == len(EXPECTED_IDS))
         cur.execute("""insert into actor (slug,kind,display_name) values ('joe','human','Joe')
                        on conflict (slug) do nothing returning id""")
         cur.execute("select id from actor where slug='joe'")
@@ -334,6 +384,17 @@ def main() -> int:
         # the tags install, select and refuse. Production's triggers are untouched;
         # this statement needs table ownership, which no application role holds.
         cur.execute("alter table rule disable trigger user")
+        # This older acceptance deliberately creates inconsistent delivery
+        # states across separate autocommit connections so it can test the
+        # backfill's refusals. SIEP-12 correctly rejects those states. Suspend
+        # only its observers on this throwaway fixture; SIEP-12's own rollback-
+        # only gate exercises the observers and their fail-closed semantics.
+        for table, trigger in (
+            ("ops.rule_pack", "scac_epoch_rule_pack"),
+            ("ops.rule_load_layer", "scac_epoch_rule_load_layer"),
+            ("ops.rule_delivery_policy", "scac_epoch_rule_delivery_policy"),
+        ):
+            cur.execute(f"alter table {table} disable trigger {trigger}")
         cur.execute("delete from ops.rule_load_layer")
         cur.execute("delete from ops.rule_pack")
         cur.execute("delete from rule where statement like 'delivery acceptance %'")
@@ -398,8 +459,46 @@ def main() -> int:
         cur.execute("select count(*) from ops.rule_pack_index()")
         check("the pack index names every pack", one(cur)[0] == len(data["rule_packs"]))
 
+        expected_digest = load_validated()[1]["base_map_sha256"]
+        # SIEP-02 reads Work Request prose, map currentness, and the pack index
+        # in one writer snapshot. Exercise the actual runtime grant.
+        cur.execute("set session authorization carr_writer")
+        try:
+            cur.execute("""with registry as (
+              select count(distinct map_digest)::integer map_versions,
+                     min(map_digest) map_digest,count(*)::integer tagged_rules
+                from ops.rule_load_layer
+            ), packs as (
+              select coalesce(jsonb_agg(to_jsonb(p) order by p.pack),'[]'::jsonb) pack_index
+                from ops.rule_pack_index() p
+            )
+            select registry.map_versions,registry.map_digest,registry.tagged_rules,
+                   jsonb_array_length(packs.pack_index),w.title
+              from registry cross join packs
+              join ops.work_request w on w.ref='WR-SIEP-02'
+               and w.organization_tenant_id='carr-internal'""")
+            snapshot = one(cur)
+        finally:
+            cur.execute("reset session authorization")
+        check("the writer reads one coherent SIEP-02 delivery-source snapshot",
+              snapshot[0] == 1 and snapshot[1] == expected_digest
+              and snapshot[2] == len(layers) and snapshot[3] == len(data["rule_packs"])
+              and snapshot[4] == "Deterministic trigger classifier and scoped delivery",
+              str(snapshot))
+
         cur.execute("select mode from ops.rule_delivery_policy")
         check("delivery starts in shadow mode", one(cur)[0] == "shadow")
+        proposal_ids = [f"00000000-0000-4000-8000-{index:012d}"
+                        for index in range(1, 39)]
+        cur.execute("set session authorization carr_authority_joe")
+        try:
+            cur.execute("select * from ops.rule_delivery_cutover_preflight(%s::uuid[])",
+                        (proposal_ids,))
+            preflight = one(cur)
+        finally:
+            cur.execute("reset session authorization")
+        check("Joe reads only the typed aggregate cutover preflight",
+              preflight == ("shadow", len(EXPECTED_IDS), 0, 0, 0, 0), str(preflight))
 
         # A scope-only corruption used to pass both the backfill and audit.
         victim = synthetic_dell
@@ -464,11 +563,38 @@ def main() -> int:
         admission = run("tools/sync-rule-admission.py", dsn)
         check("the admission sync builds the eight-control preimage",
               admission.returncode == 0, admission.stderr.strip()[-500:])
-        digest = load_validated()[1]["base_map_sha256"]
+        digest = expected_digest
+        for role in (None, "carr_writer", "carr_authority_dell"):
+            if role:
+                cur.execute(f"set session authorization {role}")
+            try:
+                cur.execute("select * from ops.set_rule_delivery_mode(%s,%s,%s)",
+                            ("enforced", "forged authority fixture", digest))
+                check(f"{role or 'owner'} cannot cut over rule delivery", False,
+                      "cutover was accepted")
+            except psycopg.Error as exc:
+                check(f"{role or 'owner'} cannot cut over rule delivery",
+                      exc.sqlstate == "42501", str(exc))
+            finally:
+                if role:
+                    cur.execute("reset session authorization")
+        for role in (None, "carr_writer", "carr_authority_dell"):
+            if role:
+                cur.execute(f"set session authorization {role}")
+            try:
+                cur.execute("select * from ops.rule_delivery_cutover_preflight(%s::uuid[])",
+                            (proposal_ids,))
+                check(f"{role or 'owner'} cannot read cutover preflight", False,
+                      "preflight was accepted")
+            except psycopg.Error as exc:
+                check(f"{role or 'owner'} cannot read cutover preflight",
+                      exc.sqlstate in ("42501", "42883"), str(exc))
+            finally:
+                if role:
+                    cur.execute("reset session authorization")
         try:
-            cur.execute("""select * from ops.set_rule_delivery_mode(
-                           'enforced','local-pg-acceptance','seven-day evidence fixture',%s)""",
-                        (digest,))
+            cutover = cutover_as(cur, "carr_authority_joe", "enforced",
+                                "seven-day evidence fixture", digest)
         except psycopg.Error as exc:
             # psycopg appends a PL/pgSQL CONTEXT line after the useful refusal.
             # The local runner reports only the final line, so preserve the
@@ -476,10 +602,14 @@ def main() -> int:
             raise RuntimeError(
                 "rule-delivery cutover refused: " + str(exc).splitlines()[0]
             ) from None
-        cutover = one(cur)
         check("cutover reports the exact eight", cutover[0] == "enforced" and cutover[1] == len(EXPECTED_IDS))
         cur.execute("select mode from ops.rule_delivery_policy")
         check("cutover flips policy to enforced", one(cur)[0] == "enforced")
+        cur.execute("select changed_by from ops.rule_delivery_policy")
+        check("cutover derives Joe attribution", one(cur)[0] == "joe")
+        cur.execute("""select changed_by from ops.rule_delivery_activation_receipt
+                        order by created_at desc limit 1""")
+        check("cutover receipt derives Joe attribution", one(cur)[0] == "joe")
         cur.execute("""select count(*) from ops.rule_enforcement_point ep
                        join rule r on r.id=ep.rule_id
                       where left(r.id::text,8)=any(%s) and ep.control_key='pack_delivery'
@@ -501,11 +631,10 @@ def main() -> int:
             check("a direct policy-only update is refused", False, "update was accepted")
         except psycopg.Error as exc:
             check("a direct policy-only update is refused",
-                  "use ops.set_rule_delivery_mode" in str(exc), str(exc))
+                  exc.sqlstate == "42501" and "Joe authority" in str(exc), str(exc))
 
-        cur.execute("""select * from ops.set_rule_delivery_mode(
-                       'shadow','local-pg-acceptance','rollback fixture',%s)""", (digest,))
-        rollback = one(cur)
+        rollback = cutover_as(cur, "carr_authority_joe", "shadow",
+                             "rollback fixture", digest)
         check("rollback reports the exact eight", rollback[0] == "shadow" and rollback[1] == len(EXPECTED_IDS))
         cur.execute("""select count(*) from ops.rule_enforcement_point ep
                        join rule r on r.id=ep.rule_id
@@ -516,15 +645,22 @@ def main() -> int:
         check("cutover and rollback each leave an append-only receipt", one(cur)[0] == 2)
 
         try:
-            cur.execute("""select * from ops.set_rule_delivery_mode(
-                           'enforced','local-pg-acceptance','wrong digest',%s)""",
-                        ("0" * 64,))
+            cutover_as(cur, "carr_authority_joe", "enforced",
+                       "wrong digest", "0" * 64)
             check("a stale map digest refuses cutover", False, "cutover was accepted")
         except psycopg.Error as exc:
             check("a stale map digest refuses cutover", "digest preimage" in str(exc), str(exc))
         cur.execute("select mode from ops.rule_delivery_policy")
         check("a refused cutover leaves policy in shadow", one(cur)[0] == "shadow")
         cur.execute("alter table rule enable trigger user")
+        for table, trigger in (
+            ("ops.rule_pack", "scac_epoch_rule_pack"),
+            ("ops.rule_load_layer", "scac_epoch_rule_load_layer"),
+            ("ops.rule_delivery_policy", "scac_epoch_rule_delivery_policy"),
+        ):
+            cur.execute(f"alter table {table} enable trigger {trigger}")
+        cur.execute("""update ops.rule_pack set updated_at=updated_at
+                        where pack=(select min(pack) from ops.rule_pack)""")
 
     if FAILURES:
         print("rule-delivery-acceptance: FAIL", file=sys.stderr)

@@ -108,6 +108,137 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 # and mcp-server/src/release.js store and display the string without extracting
 # a number from it, so widening here cannot desync a second reader.
 NAME_RE = re.compile(r"^\d{4}[a-z]?_[a-z0-9_]+\.sql$")
+OUTER_TRANSACTION_MIGRATION = "0339_"
+# Production's immutable ledger and the canonical schema snapshot already bind
+# these historical artifacts byte-for-byte. They predate enforcement of the
+# outer-transaction scanner on their merge lanes; allow only their exact
+# recorded digests so the scanner cannot become a general bypass.
+HISTORICAL_TRANSACTION_CONTROL_ARTIFACTS = {
+    "0344_demote_evidence_activation_bookkeeping.sql":
+        "50e2b885db6b92e0a24f0a90fad7b48449f347007d8683c27adf0a4be1a75def",
+    "0345_governance_queue_projection.sql":
+        "c1788dd8ee23d7a7a6dfc88b17d4a11c67a9ad5057c8bb97e3112035863be3ba",
+    "0348_pr_only_main_ruleset_control.sql":
+        "ab901c8e528109bb56375403f0ebb350758678079d7727c9ba24042b0d0bbcdb",
+    "0349_versioned_rule_amendment.sql":
+        "4fb76045cf8ce46ba793a90d0582e6b095a17ba63edf57e91c548e7850ba37f0",
+    "0351_legacy_rule_lifecycle_admission.sql":
+        "59439e1a12c035e61578b85c765d7bbd131bf555b95bbecd49c6d675b5c4d808",
+}
+# Reviewed migrations merged after the original SIEP branch was cut deliberately
+# keep explicit transactions around atomic control-plane changes and receipt
+# readbacks. Preserve those independently reviewed source artifacts exactly
+# rather than rewriting them during SIEP integration. These are separate from
+# the five Production-applied historical artifacts above: an unreviewed filename
+# or one-byte change still refuses before any SQL executes.
+REVIEWED_TRANSACTION_CONTROL_ARTIFACTS = {
+    "0363_rule_delivery_activation_digest_repin.sql":
+        "03133d0627cf63d2a0a2a7dd8a392065bc19ba17d56d0b2cfabd3dbccafdcb65",
+    "0382_standing_guidance_reader_boundary.sql":
+        "a6ffe5f29e9224f263b0c6a90c414b4828915a5ed3265e52e8fadbe31ef8c2bc",
+    "0383_control_plane_not_configured_state.sql":
+        "f0cb86f97fcd87db8412be1f4c36544fe40f1ba9e524182bb3cb3b9ad3148bfa",
+    "0387_control_plane_record_queue_priority_tiers.sql":
+        "ba2f9ce18e54f8ceca330a5478ad66d72b76bbc832aba9c20734ebe8a701310e",
+    "0425_disable_legacy_schedule_readback_grant.sql":
+        "f1b0f6677363c3a0463a30660b379544b9a7093867c8847c3453b149da17aaed",
+    "0426_withdraw_a_work_request_captured_in_error.sql":
+        "151eddaae36b60fd1a6f0ad43f9577c03381ebd11b17b9a9741269d93bd2d395",
+    "0427_tour_rights_projection_hardening.sql":
+        "00dd241ccf86bf379cc20aec22dfd0b852754bc30224bae39cb707d8e66729a2",
+    "0428_tour_property_identity_jurisdiction.sql":
+        "3c32933288ecf780ee3ea54bffeddb1df0a22bdf862c1487eea0f021bd682975",
+    "0429_tour_domain_route_cheat_sheet.sql":
+        "6b217caf48ce0742045a1d3093c5bd85727a4511dabe4e739d9d271a61bcc8e4",
+    "0430_tour_delivery_data_plane.sql":
+        "f04d685a6ae2ba124694ff11f6d88695bed25774290e6b2997c59ad9fd9049be",
+    "0431_completion_register_schema.sql":
+        "7886498e34f7874aa1f1ac2df931aefbe036eb73e013eb4e81fd02112f145f70",
+    "0450_canonical_ownership_lease_kernel.sql":
+        "2130de773f09f5dd8621cfe5add3f8939ddd1d48f06c5d9a6908e19375a57847",
+    "0451_assurance_evidence_acceptance_persistence.sql":
+        "f17f538bafd602c9d90b3b46fe3cc377b746b03b1d5fe070a5fb597af4d2013c",
+}
+TRANSACTION_CONTROL_RE = re.compile(
+    r"(?is)^\s*(?:(?:begin|commit|end|rollback|abort)\b|"
+    r"(?:start|prepare)\s+transaction\b)"
+)
+
+
+def contains_transaction_control(sql: str) -> bool:
+    """Detect top-level SQL transaction statements, ignoring quoted bodies.
+
+    Migrations contain PL/pgSQL ``begin``/``end`` inside dollar-quoted bodies;
+    those are not transaction control.  Conversely, psycopg accepts several
+    top-level statements on one line, so a line-oriented regex is unsafe.
+    This small lexer splits only on top-level semicolons after removing SQL
+    comments and quoted strings/identifiers.
+    """
+    statements: list[str] = []
+    current: list[str] = []
+    i = 0
+    block_depth = 0
+    quote: str | None = None
+    dollar_tag: str | None = None
+    while i < len(sql):
+        if dollar_tag is not None:
+            if sql.startswith(dollar_tag, i):
+                i += len(dollar_tag)
+                dollar_tag = None
+            else:
+                i += 1
+            continue
+        if block_depth:
+            if sql.startswith("/*", i):
+                block_depth += 1
+                i += 2
+            elif sql.startswith("*/", i):
+                block_depth -= 1
+                i += 2
+            else:
+                i += 1
+            continue
+        if quote is not None:
+            if sql[i] == quote:
+                if i + 1 < len(sql) and sql[i + 1] == quote:
+                    i += 2
+                else:
+                    quote = None
+                    i += 1
+            else:
+                i += 1
+            continue
+        if sql.startswith("--", i):
+            newline = sql.find("\n", i + 2)
+            i = len(sql) if newline < 0 else newline + 1
+            current.append(" ")
+            continue
+        if sql.startswith("/*", i):
+            block_depth = 1
+            i += 2
+            current.append(" ")
+            continue
+        if sql[i] in ("'", '"'):
+            quote = sql[i]
+            i += 1
+            current.append(" ")
+            continue
+        if sql[i] == "$":
+            match = re.match(r"\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$", sql[i:])
+            if match:
+                dollar_tag = match.group(0)
+                i += len(dollar_tag)
+                current.append(" ")
+                continue
+        if sql[i] == ";":
+            statements.append("".join(current))
+            current = []
+            i += 1
+            continue
+        current.append(sql[i])
+        i += 1
+    statements.append("".join(current))
+    return any(TRANSACTION_CONTROL_RE.match(statement) for statement in statements)
 
 # ── DDL TIMEOUTS (added 2026-08-02, cold-session audit) ──────────────────────
 # WHY. Migrations are applied by hand against production Neon while a Cloudflare
@@ -168,7 +299,22 @@ def load_migrations() -> list[tuple[str, str, str]]:
             if not NAME_RE.match(p.name):
                 fail(f"bad migration filename (want NNNN_name.sql): {p.name}")
             sql = p.read_text()
-            out.append((p.name, sql, hashlib.sha256(sql.encode()).hexdigest()))
+            digest = hashlib.sha256(sql.encode()).hexdigest()
+            # SIEP-12 makes the migration file, its immutable ledger row, the
+            # sealed mutation-registry successor, and the resulting policy
+            # epoch one transaction. An internal COMMIT would expose schema
+            # with the old epoch before the runner records the file hash.
+            reviewed_transaction_digest = (
+                HISTORICAL_TRANSACTION_CONTROL_ARTIFACTS.get(p.name)
+                or REVIEWED_TRANSACTION_CONTROL_ARTIFACTS.get(p.name)
+            )
+            if p.name >= OUTER_TRANSACTION_MIGRATION and contains_transaction_control(sql) \
+                    and reviewed_transaction_digest != digest:
+                fail(
+                    f"{p.name} contains explicit transaction control; migrations from "
+                    f"{OUTER_TRANSACTION_MIGRATION} onward must use the runner's single transaction"
+                )
+            out.append((p.name, sql, digest))
     if not out:
         fail("no .sql files in migrations/")
     try:

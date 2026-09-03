@@ -99,6 +99,20 @@
       ]
     },
     {
+      "key": "migrate-prod",
+      "name": "Production migration door (bin/migrate-prod.sh)",
+      "purpose": "Registered so the door's own WR-000048 prevention wiring can open-incident against a real service key — open-incident refuses an unregistered one rather than inventing it (mcp-server/src/incident.js). This is the WRAPPER SCRIPT ITSELF as a monitored subject, distinct from neon-record-layer above (the data store migrate-prod.sh writes to, which lists bin/migrate-prod.sh only as ITS deploy_mechanism).",
+      "family": "Data",
+      "criticality": "high",
+      "owner_actor": "joe",
+      "repo_path": "bin/migrate-prod.sh",
+      "runtime": "operator-invoked",
+      "environments": [
+        { "environment": "production",
+          "notes": "No cadence: this door is run by hand or by a session, never on a schedule, so absence of activity is not itself an anomaly — same 'a service with no cadence is not an oversight' posture as carr-mcp above." }
+      ]
+    },
+    {
       "key": "nightly-record-layer",
       "name": "Nightly record-layer chain",
       "purpose": "Cadence, matcher, exports, corpus push, consumers, graph, backup — in that order.",
@@ -214,7 +228,7 @@
     {
       "key": "room-bridge",
       "name": "Partner room bridge",
-      "purpose": "Polls the shared partner room (add-room-turn/read-room, Idea 78) and routes new turns to local desks (claude-session, codex-session), captures each desk's reply and posts it back, and runs the assignment grammar. On the same existing wake, the separate lease-bound Engineering Passport controller may drain one already-admitted engineering-slice job through the fixed fresh Codex desk; it never creates work or exposes its carr_jobs credential to that desk. Queue projection alone uses the locked, shape-checked project-room-queue door; ordinary room traffic remains on the local-machine identity. The live wire between the room and the desks registered in ~/.config/carr/hermes-desks.json.",
+      "purpose": "Polls the shared partner room (add-room-turn/read-room, Idea 78) and routes new turns to local desks (claude-session, codex-session), captures each desk's reply and posts it back, and runs the assignment grammar. The explicit claude-desktop queue target starts a durable Claude background session only after a queue claim, then uses Claude Code's supported /desktop handoff after completion; it is excluded from ordinary conversational fan-out. On the same existing wake, the separate lease-bound Engineering Passport controller may drain one already-admitted engineering-slice job through the fixed fresh Codex desk; it never creates work or exposes its carr_jobs credential to that desk. Queue projection alone uses the locked, shape-checked project-room-queue door; ordinary room traffic remains on the local-machine identity. The live wire between the room and the desks registered in ~/.config/carr/hermes-desks.json.",
       "family": "Local Mac edge",
       "criticality": "medium",
       "owner_actor": "joe",

@@ -5,7 +5,8 @@ Hermes remains the only task-state authority.  This module reads ready cards,
 claims one atomically, delivers it through the existing named-desk wire, and
 applies only the task's admitted terminal transition.  It never calls a model
 directly, never falls back to another target, and never republishes raw model
-output into the partner room.
+output into the partner room. It does expose a bounded typed completion payload
+so the bridge can wake the originating room's dispatcher without a human relay.
 
 The claim uses Hermes' canonical 900-second lease.  Hermes
 ``release_stale_claims`` restores an expired, workerless run to its retry
@@ -193,6 +194,10 @@ class QueueDeskExecutor:
     @staticmethod
     def _prompt(parsed: dict) -> str:
         task_id = parsed["task_id"]
+        source = (
+            f"[Model Room source seq {parsed['meta']['source_seq']} "
+            f"msg_id {parsed['meta']['source_msg_id']}]\n"
+        )
         evidence = ""
         if parsed["meta"]["cap"] == "record-write":
             evidence = (
@@ -200,9 +205,10 @@ class QueueDeskExecutor:
                 "and readback_record_id fields in that JSON; no evidence means Review or Blocked, never Done."
             )
         return (
-            f"[Hermes queue {task_id}] {parsed['title']}\n\n{parsed['instructions']}\n\n"
+            f"[Hermes queue {task_id}] {parsed['title']}\n{source}\n{parsed['instructions']}\n\n"
             "Your final non-empty line must be exactly one JSON object prefixed with "
             f"CARR_QUEUE_RESULT and must bind task_id={task_id}. Allowed outcomes: success, blocked. "
+            "The JSON object must include the exact field \"v\":1. "
             "Keep summary to one redacted sentence of at most 500 characters. If broader authority is needed, "
             "return outcome=blocked with code=capability_escalation_required." + evidence
         )
@@ -330,14 +336,20 @@ class QueueDeskExecutor:
 
         status = row.get("status") if isinstance(row, dict) else None
         if status == "delivered":
+            session_id = row.get("session_id")
+            transport = row.get("transport")
             return {
                 "outcome": "pending", "task_id": task_id, "target": target_alias,
                 "pending": {
                     "origin_kind": "queue", "kanban_task_id": task_id,
                     "target": target_alias, "finish": parsed["meta"]["finish"],
                     "cap": parsed["meta"]["cap"],
+                    "source_seq": parsed["meta"]["source_seq"],
+                    "source_msg_id": parsed["meta"]["source_msg_id"],
                     "dispatch_msg_id": row.get("msg_id"),
                     "injected_at": row.get("dispatched_at"),
+                    **({"session_id": session_id} if isinstance(session_id, str) else {}),
+                    **({"transport": transport} if isinstance(transport, str) else {}),
                 },
             }
         if status != "completed":
@@ -345,17 +357,63 @@ class QueueDeskExecutor:
         raw_result = row.get("result")
         return self.finish_pending(
             {"kanban_task_id": task_id, "target": target_alias, "finish": parsed["meta"]["finish"],
-             "cap": parsed["meta"]["cap"]},
+             "cap": parsed["meta"]["cap"], "source_seq": parsed["meta"]["source_seq"],
+             "source_msg_id": parsed["meta"]["source_msg_id"]},
             raw_result if isinstance(raw_result, str) else "",
         )
+
+    @staticmethod
+    def completion_payload(pending: dict, raw_result: str) -> dict:
+        """Return the bounded callback contract; never return model prose."""
+        task_id = pending.get("kanban_task_id")
+        if not isinstance(task_id, str) or not task_id.startswith("t_"):
+            raise QueueDispatchError("pending queue task identity is invalid")
+        cap = str(pending.get("cap") or "read")
+        try:
+            terminal = parse_terminal_result(raw_result, task_id, cap)
+        except RecordWriteEvidenceMissing:
+            terminal = {
+                "outcome": "blocked", "summary": "record_write_evidence_missing",
+                "code": "record_write_evidence_missing",
+            }
+        except QueueDispatchError:
+            terminal = {
+                "outcome": "blocked", "summary": "result_protocol_error",
+                "code": "result_protocol_error",
+            }
+        callback = {
+            "v": 1,
+            "task_id": task_id,
+            "target": pending.get("target"),
+            "outcome": terminal["outcome"],
+            "summary": terminal["summary"],
+            "source_seq": pending.get("source_seq"),
+            "source_msg_id": pending.get("source_msg_id"),
+            "dispatcher_instruction": (
+                "Continue the originating workflow autonomously within its existing authority. "
+                "Consume this result and take the next permitted coordination step; do not merely acknowledge."
+            ),
+        }
+        if isinstance(terminal.get("code"), str):
+            callback["code"] = terminal["code"]
+        if cap == "record-write" and terminal["outcome"] == "success":
+            callback["record_write"] = {
+                field: terminal[field] for field in RECORD_WRITE_EVIDENCE_FIELDS
+            }
+        return {"queue_completion": callback}
 
     def finish_pending(self, pending: dict, raw_result: str) -> dict:
         task_id = pending.get("kanban_task_id")
         if not isinstance(task_id, str) or not task_id.startswith("t_"):
             raise QueueDispatchError("pending queue task identity is invalid")
+        completion = self.completion_payload(pending, raw_result)
+
+        def result(outcome: str) -> dict:
+            return {"outcome": outcome, "task_id": task_id, "completion": completion}
+
         current = _task_status(self.adapter.show(task_id))
         if current in TERMINAL_STATES:
-            return {"outcome": "already_terminal", "task_id": task_id}
+            return result("already_terminal")
         try:
             terminal = parse_terminal_result(raw_result, task_id, str(pending.get("cap") or "read"))
         except RecordWriteEvidenceMissing:
@@ -363,12 +421,12 @@ class QueueDeskExecutor:
                         "outcome": "unverified", "verification": "record_write_evidence_missing"}
             if pending.get("finish") == "review":
                 self.adapter.request_review(task_id, "record_write_evidence_missing", metadata)
-                return {"outcome": "review", "task_id": task_id}
+                return result("review")
             self.adapter.block(task_id, "record_write_evidence_missing", kind="needs_input")
-            return {"outcome": "record_write_evidence_missing", "task_id": task_id}
+            return result("record_write_evidence_missing")
         except QueueDispatchError:
             self.adapter.block(task_id, "result_protocol_error")
-            return {"outcome": "result_protocol_error", "task_id": task_id}
+            return result("result_protocol_error")
 
         summary = terminal["summary"]
         metadata = {
@@ -380,15 +438,15 @@ class QueueDeskExecutor:
             metadata["record_write"] = {key: terminal[key] for key in RECORD_WRITE_EVIDENCE_FIELDS}
         if terminal["outcome"] == "blocked":
             self.adapter.block(task_id, terminal.get("code") or summary, kind="needs_input")
-            return {"outcome": "blocked", "task_id": task_id}
+            return result("blocked")
         if pending.get("finish") == "review":
             self.adapter.request_review(task_id, summary, metadata)
-            return {"outcome": "review", "task_id": task_id}
+            return result("review")
         if pending.get("finish") != "done":
             self.adapter.block(task_id, "result_protocol_error")
-            return {"outcome": "result_protocol_error", "task_id": task_id}
+            return result("result_protocol_error")
         self.adapter.complete(task_id, summary, metadata)
-        return {"outcome": "done", "task_id": task_id}
+        return result("done")
 
     def fail_pending(self, pending: dict, reason: str, *, now: str | None = None) -> dict:
         task_id = pending.get("kanban_task_id")

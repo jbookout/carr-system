@@ -3,6 +3,7 @@
 // does not own a lifecycle transition, an executor, or an approval.
 import { searchDoctrineSituations } from "./situation-retrieval.js";
 import { organizationTenantForActor } from "./identity.js";
+import { deriveRuleDeliverySource, normalizeRuleMapDigest } from "./rule-delivery-source.js";
 
 const FIELDS = new Set(["idempotency_key", "situation", "title", "desired_outcome", "acceptance_criteria"]);
 const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
@@ -28,6 +29,77 @@ const EVIDENCE_CLASS = Object.freeze({ primary_sources: "primary_source", mainta
   practitioner_evidence: "practitioner_evidence", current_baseline: "current_baseline", failure_modes: "failure_mode" });
 
 function text(value) { return typeof value === "string" ? value.trim() : ""; }
+
+async function deliverySourceForPlan(c, actor, row, args, classified, admission) {
+  await c.query("savepoint siep02_rule_delivery_source");
+  let registry;
+  try {
+    registry = await c.query(
+      `with registry as (
+         select count(distinct map_digest)::integer as map_versions,
+                min(map_digest) as map_digest,
+                count(*)::integer as tagged_rules
+           from ops.rule_load_layer
+       ), packs as (
+         select coalesce(jsonb_agg(to_jsonb(p) order by p.pack),'[]'::jsonb) as pack_index
+           from ops.rule_pack_index() p
+       )
+       select registry.*,packs.pack_index,w.title as work_request_title,
+              w.desired_outcome,w.acceptance_criteria
+         from registry cross join packs
+         join ops.work_request w on w.id=$1::uuid and w.ref=$2::text
+          and w.version=$3::integer and w.organization_tenant_id=$4::text
+         /* work-request-intake:rule-delivery-source-snapshot */`,
+      [row.work_request_id, row.ref, Number(row.version), organizationTenantForActor(actor)]);
+    await c.query("release savepoint siep02_rule_delivery_source");
+  } catch (error) {
+    await c.query("rollback to savepoint siep02_rule_delivery_source");
+    await c.query("release savepoint siep02_rule_delivery_source");
+    return { schema_version: "rule-delivery-source.v1", status: "unavailable",
+      reason: "rule_delivery_registry_unavailable", detail: String(error?.message || error).slice(0, 160) };
+  }
+  try {
+    const state = registry.rows[0] || {};
+    const digest = normalizeRuleMapDigest(state.map_digest);
+    if (Number(state.map_versions) !== 1 || Number(state.tagged_rules) < 1 || !digest) {
+      return { schema_version: "rule-delivery-source.v1", status: "unavailable",
+        reason: "installed_rule_map_is_not_one_coherent_nonempty_version",
+        map_versions: Number(state.map_versions || 0), tagged_rules: Number(state.tagged_rules || 0) };
+    }
+    return await deriveRuleDeliverySource({
+      plan: {
+        work_request_ref: row.ref,
+        work_request_title: state.work_request_title,
+        desired_outcome: state.desired_outcome,
+        acceptance_criteria: state.acceptance_criteria,
+        base_version: Number(row.version),
+        plan_ref: row.plan_ref,
+        plan_hash: row.plan_hash,
+        scope_summary: row.scope_summary,
+        runbook_ref: row.runbook_ref,
+        dependency_refs: args.dependency_refs,
+        recovery_ref: args.recovery_ref,
+        observability_ref: args.observability_ref,
+        caps: args.caps,
+      },
+      heavyClassification: {
+        tier: admission ? "heavy" : classified.tier,
+        reasons: admission?.classifier_reasons || classified.reasons || [],
+      },
+      admittedHeavyContract: admission ? {
+        admission_ref: admission.admission_ref,
+        admission_hash: admission.admission_hash,
+        builder_session_ref: admission.builder_session_ref,
+        master_plan: args.heavy_build.master_plan,
+      } : null,
+      packIndex: state.pack_index,
+      mapDigest: digest,
+    });
+  } catch (error) {
+    return { schema_version: "rule-delivery-source.v1", status: "unavailable",
+      reason: "rule_delivery_source_invalid", detail: String(error?.message || error).slice(0, 160) };
+  }
+}
 function exactKeys(value, keys) {
   return value && typeof value === "object" && !Array.isArray(value) &&
     Object.keys(value).sort().join(",") === [...keys].sort().join(",");
@@ -185,10 +257,26 @@ function validatePlan(args, ToolError) {
   if (Object.keys(args).some(k => !PLAN_FIELDS.has(k))) throw new ToolError({ error: "invalid_ready_plan_fields" });
   if (!UUID.test(args.idempotency_key || "") || !/^WR-[0-9]{1,12}$/.test(args.human_ref || "") || !Number.isInteger(args.base_version) || args.base_version < 1 ||
       !text(args.scope_summary) || text(args.scope_summary).length > 1000 || !/^doctrine:runbook#[a-z0-9][a-z0-9-]*$/.test(args.runbook_ref || "") ||
-      typeof args.recovery_ref !== "string" || args.recovery_ref.length > 300 || typeof args.observability_ref !== "string" || args.observability_ref.length > 300 || !SAFE_REF.test(args.recovery_ref || "") || !SAFE_REF.test(args.observability_ref || "") || !args.caps || Object.keys(args.caps).sort().join(",") !== "max_duration_minutes,max_steps" ||
+      typeof args.recovery_ref !== "string" || args.recovery_ref.length > 300 || typeof args.observability_ref !== "string" || args.observability_ref.length > 300 || !SAFE_REF.test(args.recovery_ref || "") || !SAFE_REF.test(args.observability_ref || "") || !args.caps || !["max_duration_minutes,max_steps", "max_duration_minutes,max_steps,source_merge"].includes(Object.keys(args.caps).sort().join(",")) ||
       !Number.isInteger(args.caps.max_steps) || args.caps.max_steps < 1 || args.caps.max_steps > 20 || !Number.isInteger(args.caps.max_duration_minutes) || args.caps.max_duration_minutes < 1 || args.caps.max_duration_minutes > 120 ||
       !Array.isArray(args.dependency_refs) || args.dependency_refs.length > 12 || args.dependency_refs.some(x => typeof x !== "string" || x.length > 300 || !SAFE_REF.test(x)) || new Set(args.dependency_refs).size !== args.dependency_refs.length)
     throw new ToolError({ error: "invalid_ready_plan" });
+  const merge = args.caps.source_merge;
+  if (merge !== undefined && (!merge || typeof merge !== "object" || Array.isArray(merge) ||
+      Object.keys(merge).sort().join(",") !== "authorized_paths,base_branch,repository,schema_version" ||
+      merge.schema_version !== "source-merge-scope.v1" || merge.repository !== "jbookout/carr-system" ||
+      merge.base_branch !== "main" || !Array.isArray(merge.authorized_paths) || !merge.authorized_paths.length ||
+      merge.authorized_paths.length > 100 || merge.authorized_paths.some(path => typeof path !== "string" ||
+        path.length > 500 || !/^[!-~]+$/.test(path) || path.startsWith("/") || path.endsWith("/") ||
+        path.includes("\\") || /[*?\[\]{}!]/.test(path) ||
+        path.split("/").some(part => !part || part === "." || part === "..")) ||
+      new Set(merge.authorized_paths.map(path => path.toLowerCase())).size !== merge.authorized_paths.length ||
+      JSON.stringify(merge.authorized_paths) !== JSON.stringify([...merge.authorized_paths].sort((left, right) => {
+        const lowerLeft = left.toLowerCase();
+        const lowerRight = right.toLowerCase();
+        return lowerLeft < lowerRight ? -1 : lowerLeft > lowerRight ? 1 : left < right ? -1 : left > right ? 1 : 0;
+      }))))
+    throw new ToolError({ error: "invalid_source_merge_scope" });
   if (args.heavy_build !== undefined) validateHeavyBuildContract(args.heavy_build, ToolError);
 }
 function validateAcceptPlan(args, ToolError) {
@@ -746,6 +834,15 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
           required: ["max_steps", "max_duration_minutes"], properties: {
             max_steps: { type: "integer", minimum: 1, maximum: 20 },
             max_duration_minutes: { type: "integer", minimum: 1, maximum: 120 },
+            source_merge: { type: "object", additionalProperties: false,
+              required: ["schema_version", "repository", "base_branch", "authorized_paths"], properties: {
+                schema_version: { type: "string", const: "source-merge-scope.v1" },
+                repository: { type: "string", const: "jbookout/carr-system" },
+                base_branch: { type: "string", const: "main" },
+                authorized_paths: { type: "array", minItems: 1, maxItems: 100,
+                  uniqueItems: true, items: { type: "string", minLength: 1, maxLength: 500 } },
+              },
+            },
           } },
         heavy_build: HEAVY_BUILD_SCHEMA,
       }, required:["idempotency_key","human_ref","base_version","scope_summary","runbook_ref","dependency_refs","recovery_ref","observability_ref","caps"] },
@@ -783,16 +880,19 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
               [row.plan_id, args.human_ref, args.base_version, JSON.stringify(effectiveReasons), JSON.stringify(args.heavy_build), actor.id, args.idempotency_key])).rows[0];
             if (!admission) throw new ToolError({ error: "heavy_build_admission_not_recorded" });
           }
+          const ruleDeliverySource = await deliverySourceForPlan(c, actor, row, args, classified, admission);
           await writeEvent(c, actor, "propose-ready-plan", "ops_work_request", row.work_request_id, {
             field: "ready_plan", new: { plan_ref: row.plan_ref, plan_hash: row.plan_hash, runbook_ref: row.runbook_ref,
-              build_tier: heavy ? "heavy" : "standard", admission_hash: admission?.admission_hash || null }, idempotency_key: args.idempotency_key,
+              build_tier: heavy ? "heavy" : "standard", admission_hash: admission?.admission_hash || null,
+              rule_delivery_contract_digest: ruleDeliverySource.contract_digest || null }, idempotency_key: args.idempotency_key,
           });
           return { ok: true, human_ref: row.ref, state: row.state, version: Number(row.version), plan_ref: row.plan_ref,
             plan_hash: row.plan_hash, scope_summary: row.scope_summary, runbook_ref: row.runbook_ref,
             runbook_revision_id: row.runbook_revision_id, runbook_content_hash: row.runbook_content_hash,
             build_admission: heavy ? { tier: "heavy", reasons: admission.classifier_reasons || reasons, required: true,
               admission_ref: admission.admission_ref, admission_hash: admission.admission_hash,
-              next_required_action: "fresh independent plan review" } : { tier: "standard", reasons, required: false } };
+              next_required_action: "fresh independent plan review" } : { tier: "standard", reasons, required: false },
+            rule_delivery_source: ruleDeliverySource };
         });
       },
     },

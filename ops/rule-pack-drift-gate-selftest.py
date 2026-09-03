@@ -29,7 +29,7 @@ assert SPEC and SPEC.loader
 gate = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(gate)
 
-TRIGGERS, MEMBERS = gate.load_packs()
+TRIGGERS, MEMBERS, MAP_DIGEST = gate.load_packs()
 FAILURES: list[str] = []
 
 
@@ -75,7 +75,8 @@ def assistant_tool(name: str, payload: dict) -> dict:
 
 
 def standing_context_result(mode: str, declared: list[str], omit: list[str],
-                            packs_not_found: list[str] | None = None) -> dict:
+                            packs_not_found: list[str] | None = None,
+                            map_digest: str = MAP_DIGEST) -> dict:
     # The REAL payload carries the pack index, and the pack index carries every
     # pack's triggers. A gate that scanned tool results would therefore fire
     # every pack the moment a session booted. It is in this fixture on purpose.
@@ -85,6 +86,7 @@ def standing_context_result(mode: str, declared: list[str], omit: list[str],
              )["rule_packs"].items()]
     delivery = {"mode": mode, "enforcing": mode == "enforced",
                 "declared_packs": declared, "would_omit": omit,
+                "map_digest": map_digest,
                 "pack_index": index}
     if packs_not_found:
         delivery["packs_not_found"] = packs_not_found
@@ -99,6 +101,7 @@ def codex_standing_context_result(mode: str, declared: list[str], omit: list[str
     body = {"ok": True, "rule_delivery": {"mode": mode,
                                           "enforcing": mode == "enforced",
                                           "declared_packs": declared,
+                                          "map_digest": MAP_DIGEST,
                                           "would_omit": omit}}
     return {"type": "event_msg", "payload": {"type": "mcp_tool_call_end",
             "result": {"Ok": {"content": [
@@ -183,6 +186,9 @@ check("every pack in the reviewed map compiles a trigger", len(TRIGGERS) >= 8,
 check("every pack has at least one rule in it",
       all(MEMBERS.get(name) for name in TRIGGERS),
       str(sorted(set(TRIGGERS) - set(MEMBERS))))
+check("the classifier digest covers the exact parsed map bytes",
+      MAP_DIGEST == hashlib.sha256(
+          (REPO / "ops/config/rule-enforcement-map.json").read_bytes()).hexdigest())
 
 # The recorder must be installed on every interactive client that consumes the
 # standing-context payload. A parity check alone cannot catch a source contract

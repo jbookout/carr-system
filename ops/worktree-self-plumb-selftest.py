@@ -50,6 +50,30 @@ def git(*args: str, cwd: str) -> str:
     return p.stdout.strip()
 
 
+def age_tree(wt: str, hours: float) -> None:
+    """Backdate every path INSIDE the working tree.
+
+    The reaper's second liveness signal is the newest mtime in the tree, so
+    a fixture that only backdates the index models a worktree nobody has
+    written to for 7h but whose files were all created seconds ago — which
+    is not a state that occurs, and which every candidate would (correctly)
+    be kept for. Symlinks are backdated in place, never followed.
+    """
+    past = time.time() - hours * 3600
+    for root, dirs, files in os.walk(wt, followlinks=False):
+        dirs[:] = [d for d in dirs if d != ".git"]
+        for name in files + dirs:
+            try:
+                os.utime(os.path.join(root, name), (past, past),
+                         follow_symlinks=False)
+            except (OSError, NotImplementedError):
+                pass
+    try:
+        os.utime(wt, (past, past))
+    except OSError:
+        pass
+
+
 def age_index(canon: str, wt: str, hours: float) -> None:
     """Backdate the worktree's private index so the 6h rule sees it idle."""
     gitdir = mod.index_gitdir(wt)
@@ -73,6 +97,10 @@ with tempfile.TemporaryDirectory() as tmp:
     first_sha = git("rev-parse", "HEAD", cwd=canon)
     with open(os.path.join(canon, "second.txt"), "w") as fh:
         fh.write("two\n")
+    # a build seat's evidence directory is gitignored, exactly as out/ is in
+    # the real repo — so `git status` reports a busy build's tree as CLEAN
+    with open(os.path.join(canon, ".gitignore"), "w") as fh:
+        fh.write("evidence/\n")
     git("add", "-A", cwd=canon)
     git("commit", "-qm", "two", cwd=canon)
     # a local stand-in for origin/main at today's tip
@@ -107,12 +135,37 @@ with tempfile.TemporaryDirectory() as tmp:
     # read clean here too (found live 2026-08-18: ~20 worktrees kept for it)
     wt_plumbed = add_wt("plumbed-orphan", "-b", "plumbed-orphan")
     os.symlink(os.path.join(canon, ".venv"), os.path.join(wt_plumbed, ".venv"))
+    # THE DEFECT a4abb972 CASE, and the reason the tree signal exists: a build
+    # seat that writes evidence for hours without ever running a git command.
+    # Its index is stone cold and `git status` is clean (its output is not
+    # tracked yet), so on the index signal alone it classifies as reap and its
+    # in-flight evidence is destroyed. It must be KEPT on the tree signal.
+    wt_paused = add_wt("paused-build", "-b", "paused-build-branch")
 
     # everything except wt_fresh has sat idle 7h; wt_fresh stays warm
     ALL_IDLE = (wt_orphan, wt_dirty, wt_locked, wt_det_anc, wt_det_no,
-                wt_mine, wt_plumbed)
+                wt_mine, wt_plumbed, wt_paused)
     for wt in ALL_IDLE:
+        age_tree(wt, 7)
         age_index(canon, wt, 7)
+    # ...then the paused build writes one file, as a live builder would. Its
+    # index stays 7h old; only the tree moves.
+    ev = os.path.join(wt_paused, "evidence")
+    os.makedirs(ev, exist_ok=True)
+    with open(os.path.join(ev, "capture-004.png"), "w") as fh:
+        fh.write("in-flight evidence\n")
+    # the fixture is only honest if git genuinely cannot see that write
+    if mod.run_git(["status", "--porcelain"], wt_paused, timeout=30):
+        failures.append("paused-build fixture is visible to git status — it "
+                        "would be kept as dirty work and the tree-age signal "
+                        "would never be exercised")
+    # that `git status` just refreshed the index, which would keep this tree
+    # for the WRONG reason and hide whether the tree signal works at all.
+    # Re-age the index only — the tree must stay fresh, that is the case.
+    age_index(canon, wt_paused, 7)
+    if mod.index_age_s(wt_paused) < mod.REAP_MIN_IDLE_S:
+        failures.append("paused-build index is still warm — the tree-age "
+                        "signal would not be what keeps it")
 
     # ── classification, entry by entry ────────────────────────────────────
     skip = {os.path.realpath(canon), os.path.realpath(wt_mine)}
@@ -131,6 +184,9 @@ with tempfile.TemporaryDirectory() as tmp:
         "det-ancestor": "reap",     # detached, already on origin/main
         "det-unpublished": "keep",  # detached, commit not upstream
         "plumbed-orphan": "reap",   # untracked plumbing symlink is not work
+        # index 7h cold, tree written seconds ago — a live build, defect
+        # a4abb972. Reaping this is what destroyed evidence.
+        "paused-build": "keep",
     }
     for name, want in expect.items():
         got = verdicts.get(name, "MISSING")
@@ -159,6 +215,7 @@ with tempfile.TemporaryDirectory() as tmp:
     # correctly re-marks them "possibly live" for 6h — so back-date them again
     # before the live pass, as a night of real idleness would.
     for wt in ALL_IDLE:
+        age_tree(wt, 7)
         age_index(canon, wt, 7)
     if shutil.which("zsh"):
         os.makedirs(os.path.join(canon, "bin"))

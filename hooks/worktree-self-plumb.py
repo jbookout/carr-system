@@ -70,7 +70,10 @@ sweep proved safe, for each REGISTERED worktree (git worktree list --porcelain):
 
   skip  the canonical checkout, and this session's own worktree
   skip  locked worktrees (someone said keep, in git's own vocabulary)
-  skip  a .git index touched under 6h ago — a possibly-live session; this
+  skip  a .git index touched under 6h ago, OR any file inside the working
+        tree written under 6h ago — either is a possibly-live session, and
+        a build seat that writes for hours without running git only moves
+        the second one (defect a4abb972); this
         hook also TOUCHES its own worktree's index at every boot, so a
         resumed session re-marks itself live the moment it starts
   skip  any tree where `git status --porcelain` shows real work or errors —
@@ -228,6 +231,52 @@ def index_age_s(wt):
         return None
 
 
+# A build seat can write files for hours without running a single git
+# command, which leaves .git/index cold while the worktree is very much
+# alive. That is exactly how defect a4abb972 happened: an automated sweep
+# removed a paused build's in-flight evidence because the only liveness
+# signal it had was a file the build never touched. So idleness is judged
+# on BOTH signals and the youngest one wins.
+TREE_SCAN_MAX_ENTRIES = 20000  # past this the tree is too big to judge cheaply
+
+
+def tree_age_s(wt):
+    """Seconds since ANY file inside the worktree moved; None when unknowable.
+
+    Complements index_age_s, which only sees git operations. This sees the
+    writes themselves — the signal a build seat actually produces.
+
+    Symlinks are never followed: .venv, out and mcp-server/node_modules are
+    plumbing links into the canonical repo, and walking them would read
+    canonical's activity as this worktree's and keep every worktree forever.
+    A tree too large to scan, or any error, returns None, which classify()
+    reads as "do not judge it" — the keep direction, same as every other
+    uncertain answer here.
+    """
+    newest = 0.0
+    seen = 0
+    skip = {".git", "node_modules", ".venv", "__pycache__"}
+    try:
+        for root, dirs, files in os.walk(wt, followlinks=False):
+            dirs[:] = [d for d in dirs if d not in skip]
+            for name in files + dirs:
+                seen += 1
+                if seen > TREE_SCAN_MAX_ENTRIES:
+                    return None
+                fp = os.path.join(root, name)
+                try:
+                    st = os.lstat(fp)
+                except OSError:
+                    continue
+                if st.st_mtime > newest:
+                    newest = st.st_mtime
+    except Exception:
+        return None
+    if not newest:
+        return None
+    return time.time() - newest
+
+
 def mark_alive(wt):
     """Touch this session's own index so the 6h rule reads it as live.
 
@@ -267,6 +316,15 @@ def classify(canon, entry, skip_paths):
         return ("keep", "cannot read .git index — not judging it")
     if age < REAP_MIN_IDLE_S:
         return ("keep", f"index touched {age / 3600:.1f}h ago (<6h, possibly live)")
+    # Second liveness signal: the writes themselves. A build that never runs
+    # git leaves the index cold while filling the tree — defect a4abb972.
+    twork = tree_age_s(wt)
+    if twork is None:
+        return ("keep", "cannot judge working-tree mtimes — not judging it")
+    if twork < REAP_MIN_IDLE_S:
+        return ("keep", f"working tree written {twork / 3600:.1f}h ago "
+                        "(<6h, possibly a live build)")
+    age = min(age, twork)
     status = run_git(["status", "--porcelain"], wt, timeout=30)
     if status is None:
         return ("keep", "git status failed — not judging it")
