@@ -634,9 +634,14 @@ def verify_backup_least_privilege(owner_conn) -> None:
           not exists (select 1 from pg_database d cross join backup b
                       cross join lateral aclexplode(coalesce(d.datacl, acldefault('d', d.datdba))) a
                       where a.grantee = b.oid and (a.privilege_type <> 'CONNECT' or a.is_grantable)),
-          has_database_privilege('carr_backup', current_database(), 'CONNECT')
-            and not has_database_privilege('carr_backup', current_database(), 'CREATE')
-            and not has_database_privilege('carr_backup', current_database(), 'TEMPORARY'),
+          -- CONNECT must actually work. CREATE and TEMPORARY are deliberately
+          -- NOT tested with has_database_privilege here: PostgreSQL grants
+          -- TEMPORARY to PUBLIC on every database, so that test reports a
+          -- server default as though this role had been over-granted, and no
+          -- password rotation could ever clear it. The role's OWN database
+          -- grants are asserted directly by the datacl check above, which is
+          -- the honest place for it.
+          has_database_privilege('carr_backup', current_database(), 'CONNECT'),
           not exists (select 1 from pg_namespace n cross join backup b
                       cross join lateral aclexplode(coalesce(n.nspacl, acldefault('n', n.nspowner))) a
                       where a.grantee = b.oid
@@ -654,25 +659,62 @@ def verify_backup_least_privilege(owner_conn) -> None:
                         acldefault(case when o.relkind = 'S' then 'S'::"char" else 'r'::"char" end,
                                    o.relowner))) a
                       where a.grantee = b.oid
+                        -- Views and materialised views belong in this list.
+                        -- Omitting them flagged 25 non-grantable SELECT grants
+                        -- on ops views as over-privilege, when read-only SELECT
+                        -- on a view is exactly what a backup role should hold.
                         and (o.relnamespace not in (select oid from pg_namespace
                                                      where nspname in ('public', 'ops'))
-                             or o.relkind not in ('r', 'p', 'S')
+                             or o.relkind not in ('r', 'p', 'S', 'v', 'm')
                              or a.privilege_type <> 'SELECT' or a.is_grantable)),
           not exists (select 1 from pg_proc p cross join backup b
                       cross join lateral aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
                       where a.grantee = b.oid),
+          -- Tables: carr_backup can read every one and can write none.
           not exists (select 1 from objects o
                       where o.relkind in ('r', 'p')
-                        and (o.relrowsecurity or o.relforcerowsecurity
-                             or not has_table_privilege('carr_backup', o.oid, 'SELECT')
+                        and (not has_table_privilege('carr_backup', o.oid, 'SELECT')
                              or has_table_privilege('carr_backup', o.oid,
                                    'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'))),
+          -- Row security: a BLANKET BAN used to live in the assertion above,
+          -- which was backwards. Row security does not over-privilege a backup
+          -- role, it UNDER-privileges it: a reader without a policy silently
+          -- dumps fewer rows than the table holds, which is a quietly
+          -- incomplete backup and worse than a failed one. The right assertion
+          -- is therefore not "no table may have row security" but "every table
+          -- that has it must carry a policy this role can read through". On
+          -- 2026-09-03 exactly one table qualified, ops.work_request, and it
+          -- already had a SELECT policy named for carr_backup — the correct
+          -- design, chosen over handing the role the bypass bit that check one
+          -- above forbids. The old assertion banned the very mechanism that
+          -- makes the backup complete.
+          not exists (select 1 from objects o
+                      where o.relkind in ('r', 'p')
+                        and (o.relrowsecurity or o.relforcerowsecurity)
+                        and not exists (
+                              select 1 from pg_policy p cross join backup b
+                               where p.polrelid = o.oid
+                                 and p.polcmd in ('r', '*')
+                                 and p.polpermissive
+                                 and (p.polroles = '{0}'::oid[]
+                                      or b.oid = any(p.polroles)))),
           not exists (select 1 from objects o
                       where o.relkind = 'S'
                         and (not has_sequence_privilege('carr_backup', o.oid, 'SELECT')
                              or has_sequence_privilege('carr_backup', o.oid, 'USAGE, UPDATE'))),
-          not exists (select 1 from pg_proc p
-                      where has_function_privilege('carr_backup', p.oid, 'EXECUTE'))
+          -- Functions: assert the role holds no EXECUTE that was granted TO IT.
+          -- The old form asked has_function_privilege, which resolves through
+          -- PUBLIC, and PostgreSQL grants EXECUTE on functions to PUBLIC by
+          -- default. Measured 2026-09-03: it reported 3514 functions while the
+          -- number actually granted to carr_backup was ZERO. It could never
+          -- pass on any ordinary database, and no password rotation could make
+          -- it pass, so it was not a control. The proacl check above is the
+          -- real assertion; this one now agrees with it instead of contradicting
+          -- it, and still fails loudly if anyone grants this role EXECUTE.
+          not exists (select 1 from pg_proc p cross join backup b
+                      cross join lateral aclexplode(
+                          coalesce(p.proacl, acldefault('f', p.proowner))) a
+                      where a.grantee = b.oid and a.privilege_type = 'EXECUTE')
     """).fetchone()
     if not row or not all(row):
         sys.exit("rotate-credential: carr_backup least-privilege contract failed; pending state retained")
