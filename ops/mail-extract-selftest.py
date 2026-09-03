@@ -33,7 +33,7 @@ check("a display-name sender resolves to the bare address",
       mx.addr_of("Joe Bookout <Joe.Bookout@carr.us>") == "joe.bookout@carr.us",
       mx.addr_of("Joe Bookout <Joe.Bookout@carr.us>"))
 check("a bare address survives unchanged and is lowercased",
-      mx.addr_of("  RFrancis@criadv.com ") == "rfrancis@criadv.com")
+      mx.addr_of("  RFrancis@practice.example ") == "rfrancis@practice.example")
 check("an empty recipient field yields no addresses, never one empty string",
       mx.split_addrs("") == [] and mx.split_addrs(None) == [])
 check("a multi-recipient field splits on the comma the script joins with",

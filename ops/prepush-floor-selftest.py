@@ -127,15 +127,16 @@ def main():
         repo = build(tmp)
         log = tmp / "calls.log"
 
-        # 1. A GREEN floor lets the push through, and calls the fast subset.
+        # 1. A GREEN floor lets the push through, and calls the whole suite.
         (repo / "a.txt").write_text("a\n")
         git(repo, "add", "a.txt", check_rc=True)
         git(repo, "commit", "-qm", "first", check_rc=True)
         r = push(repo, "feature-a", rc="0", log=log)
         check("a green floor allows the push", r.returncode == 0, r.stderr)
         calls = log.read_text() if log.exists() else ""
-        check("the hook selected the fast subset, not the whole suite",
-              "args:--only pushfloor secret" in calls, calls)
+        check("the hook selected the whole suite, not the old fast subset",
+              "args:--only pushfloor unit types contract gates secret dependency "
+              "migration binding artifact freshness" in calls, calls)
         # THE SEPARATOR IS LOAD-BEARING, so it is pinned rather than left to the
         # substring above to imply. ci.sh has only understood a COMMA list since
         # the push-floor change that taught --only to split them; before that
@@ -176,38 +177,32 @@ def main():
         check("the range ends at the commit being pushed",
               head[:12] in calls, calls)
 
-        # 3b. THE CLASS LIST IS THE FLOOR THE COUNCIL RULED, and `freshness` is
-        #     part of it. Asserted on the recorded argv rather than by reading
-        #     the hook, so a change to the list has to change this line too.
-        check("the floor runs the ruled classes",
-              "args:--only pushfloor secret freshness" in calls, calls)
-        check("the floor does NOT run the full suite",
-              "args:--only\n" not in calls and "gates" not in calls, calls)
+        # 3b. THE CLASS LIST IS THE WHOLE SUITE (Joe's ruling, 2026-09-02). From
+        #     2026-08-23 the council's floor was "pushfloor secret freshness" and
+        #     this test pinned it; measured 2026-09-01..02 that floor made hosted
+        #     CI the debugger (12 of 25 branches red on first push, 4.1 pushes
+        #     per merge, 2,911 of 3,000 included minutes gone by day two). The
+        #     floor is now every class ci.sh knows, named explicitly. Asserted
+        #     on the recorded argv rather than by reading the hook, so a change
+        #     to the list has to change this line too.
+        FULL = ("pushfloor unit types contract gates secret dependency "
+                "migration binding artifact freshness")
+        check("the floor runs the whole suite, every class named",
+              f"args:--only {FULL}" in calls, calls)
+        check("the floor is not the old 9-second three-class list",
+              "args:--only pushfloor secret freshness\n" not in calls, calls)
 
-        # 3c. MIGRATION IS CONDITIONAL. The class needs a throwaway Postgres and
-        #     SKIPs on a laptop, so running it on every push buys a skip line;
-        #     running it when the diff touches migrations/ buys the check.
-        (repo / "migrations").mkdir(exist_ok=True)
-        (repo / "migrations" / "0001_probe.sql").write_text("-- probe\n")
-        git(repo, "add", "migrations/0001_probe.sql", check_rc=True)
-        git(repo, "commit", "-qm", "a migration", check_rc=True)
-        log.write_text("")
-        push(repo, "feature-migration", rc="0", log=log)
-        check("a diff touching migrations/ adds the migration class",
-              "migration" in log.read_text(), log.read_text())
-
-        # The negative case must be an INCREMENTAL push of the same branch. A
-        # fresh branch's range runs back to the merge base, so it still carries
-        # the migration commit above — and adding the class there is correct,
-        # because that push really does ship a migration. Pushing again after a
-        # non-migration commit is the case that must not add it.
+        # 3c. MIGRATION IS UNCONDITIONAL NOW. It SKIPs without a throwaway
+        #     Postgres and ci.sh reports the skip without failing the push; the
+        #     old diff-scoped conditional is gone, so a push that does NOT touch
+        #     migrations/ still names the class.
         (repo / "plain.txt").write_text("no migration here\n")
         git(repo, "add", "plain.txt", check_rc=True)
         git(repo, "commit", "-qm", "no migration", check_rc=True)
         log.write_text("")
         push(repo, "feature-migration", rc="0", log=log)
-        check("a diff with no migration does NOT add the migration class",
-              "migration" not in log.read_text(), log.read_text())
+        check("migration is in the floor even when the diff has no migration",
+              "migration" in log.read_text(), log.read_text())
 
         # 4. A SECOND PUSH of the same branch uses remote..local, not the whole
         #    branch: the incremental case is the common one.
@@ -304,7 +299,7 @@ def main():
     if failures:
         print("FAILED: " + ", ".join(failures))
         return 1
-    print("PRE-PUSH FLOOR SELFTEST PASSED: the hook runs the fast subset, "
+    print("PRE-PUSH FLOOR SELFTEST PASSED: the hook runs the whole suite, "
           "exports the pushed range, still refuses a red floor and a non-owner "
           "push to main, and honours its escape hatch.")
     return 0
