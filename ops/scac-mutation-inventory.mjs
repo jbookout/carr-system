@@ -7,8 +7,20 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { TOOLS } from "../mcp-server/src/tools.js";
 import { renderPolicyEpochMigration } from "./scac-policy-epoch-sql.mjs";
+
+let defaultTools;
+
+async function loadDefaultTools() {
+  if (!defaultTools) ({ TOOLS: defaultTools } = await import("../mcp-server/src/tools.js"));
+  return defaultTools;
+}
+
+function requireTools(tools) {
+  if (!tools)
+    throw new Error("live MCP tools inventory is not loaded; pass TOOLS explicitly");
+  return tools;
+}
 
 export const REGISTRY_VERSION = "scac-mutation-registry.v1";
 export const REGISTRY_V2_VERSION = "scac-mutation-registry.v2";
@@ -360,8 +372,8 @@ function delegatesTo(name) {
   return [];
 }
 
-export function mcpInventory(tools = TOOLS) {
-  return Object.entries(tools).sort(([left], [right]) => left.localeCompare(right)).map(([name, tool]) => {
+export function mcpInventory(tools = defaultTools) {
+  return Object.entries(requireTools(tools)).sort(([left], [right]) => left.localeCompare(right)).map(([name, tool]) => {
     const write = tool.write === true;
     const authorityOnly = tool.authorityOnly === true;
     const humanOnly = tool.humanOnly === true;
@@ -798,7 +810,8 @@ export function workflowDefinitionInventory() {
   return [...github, ...launchd].sort((left, right) => left.ingress_key.localeCompare(right.ingress_key));
 }
 
-export function fullInventory(tools = TOOLS) {
+export function fullInventory(tools = defaultTools) {
+  requireTools(tools);
   return [...mcpInventory(tools), ...nonMcpInventory(), ...jobDefinitionInventory(), ...workflowDefinitionInventory()]
     .sort((left, right) => left.ingress_key.localeCompare(right.ingress_key));
 }
@@ -853,8 +866,8 @@ export function frozenInventory(version) {
   return Object.freeze(rows.map(row => Object.freeze(structuredClone(row))));
 }
 
-export function assertCurrentSourceInventoryMatchesFixture() {
-  const current = fullInventory();
+export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools) {
+  const current = fullInventory(tools);
   const frozen = frozenInventory(REGISTRY_V10_VERSION);
   const currentDigest = sourceInventoryFixtureDigest(current);
   const frozenDigest = sourceInventoryFixtureDigest(frozen);
@@ -2440,14 +2453,14 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   } else if (rebasedRuntimeModes[process.argv[2]]) {
     const [version, dbCatalogBaseline, defaultTarget] = rebasedRuntimeModes[process.argv[2]];
     const target = resolve(process.argv[3] || defaultTarget);
-    const rows = version === REGISTRY_VERSION ? fullInventory() : frozenInventory(version);
+    const rows = version === REGISTRY_VERSION ? fullInventory(await loadDefaultTools()) : frozenInventory(version);
     await writeFile(target, renderRuntimeProjection(rows, { version, dbCatalogBaseline }));
     process.stdout.write(`${target}\n`);
   } else if (rebasedMigrationModes[process.argv[2]]) {
     const [render, defaultTarget] = rebasedMigrationModes[process.argv[2]];
     const target = resolve(process.argv[3] || defaultTarget);
     const version = process.argv[2].match(/v(\d+)$/)?.[1];
-    const rows = version === "1" ? fullInventory() : frozenInventory(`scac-mutation-registry.v${version}`);
+    const rows = version === "1" ? fullInventory(await loadDefaultTools()) : frozenInventory(`scac-mutation-registry.v${version}`);
     await writeFile(target, render(rows));
     process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--write-rebased-migration-v2") {
@@ -2507,13 +2520,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     await writeFile(target, renderSourceMergeForwardRegistrySql(rows));
     process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
-    assertCurrentSourceInventoryMatchesFixture();
+    assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools());
     process.stdout.write("source inventory matches frozen v10 frontier fixture\n");
   } else if (process.argv[2] === "--check-generated-frontier") {
     const paths = assertGeneratedFrontierMatchesCommitted();
     process.stdout.write(`generated frontier is byte-exact (${paths.length} artifacts)\n`);
   } else {
-    const rows = fullInventory();
+    const rows = fullInventory(await loadDefaultTools());
     process.stdout.write(`${JSON.stringify({ schema_version: REGISTRY_VERSION, digest: registryDigest(rows), rows }, null, 2)}\n`);
   }
 }

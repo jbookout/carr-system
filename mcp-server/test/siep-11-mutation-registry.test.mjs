@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   assertCurrentSourceInventoryMatchesFixture,
@@ -24,6 +27,7 @@ import {
   REGISTRY_V9_VERSION,
   REGISTRY_V10_VERSION,
   replaceExactlyOnce,
+  renderGeneratedFrontier,
   renderRuntimeProjection,
   renderSIEP16IntegratedRegistrySql,
   renderSIEP17ForwardRegistrySql,
@@ -109,7 +113,7 @@ test("successor generation refuses absent or ambiguous predecessor markers", () 
 });
 
 test("reviewed MCP inventory is an exact immutable projection of the assembled registry", () => {
-  const rows = mcpInventory();
+  const rows = mcpInventory(TOOLS);
   assert.equal(rows.length, 221);
   assert.equal(rows.filter(row => row.write).length, 155);
   assert.equal(rows.filter(row => !row.write).length, 66);
@@ -277,7 +281,7 @@ test("v10 successor seals v9 and carries the generated source-merge control", ()
 });
 
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
-  assert.equal(assertCurrentSourceInventoryMatchesFixture(), true);
+  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
   assert.equal(migrations.length, 18);
@@ -285,6 +289,47 @@ test("the complete source-only frontier is byte-reproducible from frozen inputs"
     Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")));
   assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 9);
   assert.equal(paths.length, 27);
+});
+
+test("the complete frontier renders when every generated target is absent", () => {
+  const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
+  const isolatedRoot = fs.mkdtempSync(path.join(repoRoot, ".tmp.wr48-targetless-"));
+  const outputRoot = path.join(isolatedRoot, "generated");
+  const frontier = renderGeneratedFrontier();
+  const frontierPaths = Object.keys(frontier);
+  const frontierSet = new Set(frontierPaths);
+  try {
+    const trackedPaths = parseGitIndexEntries(execFileSync("git", ["ls-files", "--stage", "-z"], {
+      cwd: repoRoot,
+      encoding: "buffer",
+    })).map(entry => entry.path);
+    for (const trackedPath of trackedPaths) {
+      if (frontierSet.has(trackedPath)) continue;
+      const source = path.join(repoRoot, trackedPath);
+      const target = path.join(isolatedRoot, trackedPath);
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.copyFileSync(source, target);
+    }
+    assert.equal(frontierPaths.filter(target => fs.existsSync(path.join(isolatedRoot, target))).length, 0);
+    const stdout = execFileSync(process.execPath, [
+      path.join(isolatedRoot, "ops/scac-mutation-inventory.mjs"),
+      "--write-generated-frontier",
+      outputRoot,
+    ], {
+      cwd: isolatedRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GIT_DIR: path.join(repoRoot, ".git"),
+        GIT_WORK_TREE: isolatedRoot,
+      },
+    });
+    assert.match(stdout, /\(27 artifacts\)/);
+    for (const [target, expected] of Object.entries(frontier))
+      assert.equal(fs.readFileSync(path.join(outputRoot, target), "utf8"), expected, target);
+  } finally {
+    fs.rmSync(isolatedRoot, { recursive: true, force: true });
+  }
 });
 
 test("every direct catalog redefinition preserves the portable role census", () => {
@@ -344,7 +389,7 @@ test("migration is read-only at runtime and preserves the SIEP-18 boundary", () 
 });
 
 test("reviewed non-MCP source locators resolve and remain explicitly non-authorizing", () => {
-  const rows = fullInventory().filter(row => !["mcp_tool", "job_definition", "workflow_entrypoint"].includes(row.ingress_kind));
+  const rows = fullInventory(TOOLS).filter(row => !["mcp_tool", "job_definition", "workflow_entrypoint"].includes(row.ingress_kind));
   assert.equal(rows.length, 536);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
