@@ -833,7 +833,19 @@ def rotate_backup_role(generate: bool, *, github_secret: bool = False) -> int:
     rewritten. The repository secret the cloud workflow reads is published last,
     because both ends carry the same value or the run does not claim success.
     The pending file is cleared only once every end holds it.
+
+    THE RECEIPT IS RE-CHECKED HERE, not only in rotate_role above. This function
+    is public and importable, and while it was a stub its docstring read "Public
+    entrypoint deliberately refuses before touching local state" -- implementing
+    it dropped that property, so an importing caller could reach ALTER ROLE on
+    production with no break-glass receipt ever written to disk. The CLI is not
+    exposed (main goes through rotate_role, which checks first), but the file's
+    standing invariant is that EVERY entrypoint carries its own gate: the two
+    generic helpers below re-check their allowlist twice for precisely this
+    reason. The paired selftest asserts this on all four entrypoints, and it is
+    what caught the omission.
     """
+    _require_backup_mutation_receipt()
     with credential_env_lock():
         owner = os.environ.get("DATABASE_URL")
         if not owner:
