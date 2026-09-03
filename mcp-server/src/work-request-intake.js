@@ -109,8 +109,63 @@ function boundedStrings(value, min, max, minLength = 10, maxLength = 1000) {
     value.every(item => text(item).length >= minLength && text(item).length <= maxLength);
 }
 
+// A REFUSAL THAT NAMES NO FIELD COSTS THE CALLER A READ OF THIS FILE.
+//
+// Measured 2026-09-02: filing ONE outcome record on WR-000040 took five
+// attempts, and each attempt came back as a bare {"error":"invalid_outcome_
+// feedback"} naming nothing. The five causes — criterion_results sent as an
+// object instead of an array, a "not_assessed" result, a "capability" blocker,
+// plain file paths where safe: refs are required, and a 607-character summary
+// against an undocumented 500 cap — were every one of them knowable only by
+// reading the constants and the validator below. A session that cannot read
+// this file cannot file the record, so it writes the narrative into a loop's
+// blocker_detail instead, which is exactly why "what is actually done?" needs
+// archaeology to answer. The recording surface cost more than the work.
+//
+// So every refusal in this file now names the failing field and what that field
+// wanted. The error NAME is unchanged and stays the contract callers and tests
+// switch on; `field` and `detail` are additive.
+//
+// This is a different question from the one tools.js's assertRequiredArgs
+// answers. That one fires when a required argument is ABSENT and reports
+// {error, missing, hint}. These fire when an argument is PRESENT and wrong, so
+// the useful answer is which field and what shape it wanted — the same {error,
+// field, detail} shape validateHeavyBuildContract has always thrown.
+function refuser(ToolError, error) {
+  return (field, detail) => { throw new ToolError({ error, field, detail }); };
+}
+
+// The unknown-key refusal every closed schema here shares. Echoing the keys it
+// did not accept is the whole value: the observed failure is a caller who sent
+// a plausible synonym and read the bare refusal as "this verb is broken".
+function assertClosed(args, allowed, ToolError, error) {
+  const unrecognised = Object.keys(args).filter(key => !allowed.has(key));
+  if (unrecognised.length)
+    throw new ToolError({ error, unrecognised,
+      detail: `this verb accepts only ${[...allowed].join(", ")}` });
+}
+
+// idempotency_key / human_ref / base_version are the same three arguments on
+// six verbs, and a caller gets them wrong the same three ways.
+function assertRequestIdentity(args, fail) {
+  if (!UUID.test(args.idempotency_key || "")) fail("idempotency_key", "a fresh UUID per intended action, never a reused one");
+  if (!/^WR-[0-9]{1,12}$/.test(args.human_ref || "")) fail("human_ref", "a work request ref such as WR-000040");
+  if (!Number.isInteger(args.base_version) || args.base_version < 1) fail("base_version", "the integer version from a fresh read of the request");
+}
+
+function assertSafeRefs(value, field, fail, { min, max }) {
+  if (!Array.isArray(value)) fail(field, `an ARRAY of ${min}-${max} safe: references` + (min ? "" : " (send [] when there are none)"));
+  if (value.length < min || value.length > max) fail(field, `${min}-${max} items, received ${value.length}`);
+  value.forEach((ref, index) => {
+    if (typeof ref !== "string" || ref.length > 300) fail(`${field}[${index}]`, "a string of at most 300 characters");
+    if (!SAFE_REF.test(ref)) fail(`${field}[${index}]`,
+      `must match ^safe:[a-z0-9][a-z0-9:_./-]*$ — a bare path such as ${JSON.stringify(ref.slice(0, 60))} is refused; write safe:<path>`);
+  });
+  if (new Set(value).size !== value.length) fail(field, "references must be unique");
+}
+
 function validateHeavyBuildContract(raw, ToolError) {
-  const fail = (field, detail) => { throw new ToolError({ error: "invalid_heavy_build_contract", field, detail }); };
+  const fail = refuser(ToolError, "invalid_heavy_build_contract");
   if (!exactKeys(raw, ["builder_session_ref", "research_manifest", "master_plan"])) fail("heavy_build", "closed typed contract required");
   if (!SESSION_REF.test(raw.builder_session_ref || "")) fail("builder_session_ref", "use session:<stable-fresh-context-ref>");
   const research = raw.research_manifest;
@@ -159,31 +214,47 @@ function validateHeavyBuildContract(raw, ToolError) {
 }
 
 function validateHeavyReview(args, ToolError) {
-  if (Object.keys(args).some(key => !HEAVY_REVIEW_FIELDS.has(key))) throw new ToolError({ error: "invalid_heavy_build_review_fields" });
-  if (!UUID.test(args.idempotency_key || "") || !/^WR-[0-9]{1,12}$/.test(args.human_ref || "") || !SHA256.test(args.plan_hash || "") ||
-      !SHA256.test(args.admission_hash || "") || !new Set(["pass", "fail"]).has(args.verdict) || !SESSION_REF.test(args.reviewer_session_ref || "") ||
-      text(args.review_summary).length < 20 || text(args.review_summary).length > 1000 ||
-      !Array.isArray(args.evidence_refs) || !args.evidence_refs.length || args.evidence_refs.length > 12 || args.evidence_refs.some(ref => !SAFE_REF.test(ref || "")) ||
-      new Set(args.evidence_refs).size !== args.evidence_refs.length || !boundedStrings(args.gaps, 0, 12, 10, 500) ||
-      (args.verdict === "pass" && args.gaps.length) || (args.verdict === "fail" && !args.gaps.length))
-    throw new ToolError({ error: "invalid_heavy_build_review" });
+  assertClosed(args, HEAVY_REVIEW_FIELDS, ToolError, "invalid_heavy_build_review_fields");
+  const fail = refuser(ToolError, "invalid_heavy_build_review");
+  if (!UUID.test(args.idempotency_key || "")) fail("idempotency_key", "a fresh UUID per intended action, never a reused one");
+  if (!/^WR-[0-9]{1,12}$/.test(args.human_ref || "")) fail("human_ref", "a work request ref such as WR-000040");
+  if (!SHA256.test(args.plan_hash || "")) fail("plan_hash", "the exact sha256:<64 hex> the proposal returned");
+  if (!SHA256.test(args.admission_hash || "")) fail("admission_hash", "the exact sha256:<64 hex> recorded at heavy-build admission");
+  if (!new Set(["pass", "fail"]).has(args.verdict)) fail("verdict", "exactly pass or fail");
+  if (!SESSION_REF.test(args.reviewer_session_ref || "")) fail("reviewer_session_ref", "session:<stable-fresh-context-ref>, 9-200 characters after the prefix");
+  if (text(args.review_summary).length < 20 || text(args.review_summary).length > 1000)
+    fail("review_summary", `20-1000 characters, received ${text(args.review_summary).length}`);
+  assertSafeRefs(args.evidence_refs, "evidence_refs", fail, { min: 1, max: 12 });
+  if (!boundedStrings(args.gaps, 0, 12, 10, 500)) fail("gaps", "an array of 0-12 statements, each 10-500 characters");
+  if (args.verdict === "pass" && args.gaps.length) fail("gaps", "a pass records no gaps");
+  if (args.verdict === "fail" && !args.gaps.length) fail("gaps", "a fail must name at least one gap");
 }
 
 function validate(args, ToolError) {
-  if (Object.keys(args).some(key => !FIELDS.has(key)))
-    throw new ToolError({ error: "invalid_report_problem_fields" });
-  if (!UUID.test(args.idempotency_key || "") || !text(args.situation) || text(args.situation).length > 1000 ||
-      !text(args.title) || text(args.title).length > 200 || !text(args.desired_outcome) || text(args.desired_outcome).length > 2000 ||
-      !Array.isArray(args.acceptance_criteria) || !args.acceptance_criteria.length || args.acceptance_criteria.length > 12)
-    throw new ToolError({ error: "invalid_report_problem" });
-  const ids = new Set();
-  for (const criterion of args.acceptance_criteria) {
-    if (!criterion || typeof criterion !== "object" || Object.keys(criterion).some(key => key !== "id" && key !== "text") ||
-        !text(criterion.id) || !CRITERION_ID.test(criterion.id.trim()) || !text(criterion.text) || text(criterion.text).length > 500 ||
-        ids.has(criterion.id.trim()))
-      throw new ToolError({ error: "invalid_acceptance_criteria" });
-    ids.add(criterion.id.trim());
+  assertClosed(args, FIELDS, ToolError, "invalid_report_problem_fields");
+  const fail = refuser(ToolError, "invalid_report_problem");
+  if (!UUID.test(args.idempotency_key || "")) fail("idempotency_key", "a fresh UUID per intended action, never a reused one");
+  for (const [field, cap] of [["situation", 1000], ["title", 200], ["desired_outcome", 2000]]) {
+    if (!text(args[field])) fail(field, `required; 1-${cap} characters`);
+    if (text(args[field]).length > cap) fail(field, `${cap} characters maximum, received ${text(args[field]).length}`);
   }
+  if (!Array.isArray(args.acceptance_criteria)) fail("acceptance_criteria", "an ARRAY of {id, text} — an object keyed by criterion id is refused");
+  if (!args.acceptance_criteria.length || args.acceptance_criteria.length > 12)
+    fail("acceptance_criteria", `1-12 items, received ${args.acceptance_criteria.length}`);
+  const criteria = refuser(ToolError, "invalid_acceptance_criteria");
+  const ids = new Set();
+  args.acceptance_criteria.forEach((criterion, index) => {
+    const where = `acceptance_criteria[${index}]`;
+    if (!criterion || typeof criterion !== "object" || Array.isArray(criterion)) criteria(where, "each item is an object {id, text}");
+    const extra = Object.keys(criterion).filter(key => key !== "id" && key !== "text");
+    if (extra.length) criteria(where, `unrecognised ${extra.join(", ")}; each item is exactly {id, text}`);
+    if (!text(criterion.id) || !CRITERION_ID.test(criterion.id.trim()))
+      criteria(`${where}.id`, "SCREAMING-KEBAB, 2-64 characters, matching ^[A-Z][A-Z0-9-]{1,63}$");
+    if (ids.has(criterion.id.trim())) criteria(`${where}.id`, `duplicate id ${criterion.id.trim()}`);
+    if (!text(criterion.text)) criteria(`${where}.text`, "required; 1-500 characters");
+    if (text(criterion.text).length > 500) criteria(`${where}.text`, `500 characters maximum, received ${text(criterion.text).length}`);
+    ids.add(criterion.id.trim());
+  });
 }
 
 function sourceProjection(row) {
@@ -216,10 +287,10 @@ function pendingOutcomeFeedbackProjection(row) {
 }
 
 function validateTriage(args, ToolError) {
-  if (Object.keys(args).some(key => !TRIAGE_FIELDS.has(key))) throw new ToolError({ error: "invalid_triage_fields" });
-  if (!UUID.test(args.idempotency_key || "") || !/^WR-[0-9]{1,12}$/.test(args.human_ref || "") ||
-      !Number.isInteger(args.base_version) || args.base_version < 1 || !TRIAGE_CLASSES.has(args.classification))
-    throw new ToolError({ error: "invalid_triage" });
+  assertClosed(args, TRIAGE_FIELDS, ToolError, "invalid_triage_fields");
+  const fail = refuser(ToolError, "invalid_triage");
+  assertRequestIdentity(args, fail);
+  if (!TRIAGE_CLASSES.has(args.classification)) fail("classification", `exactly one of ${[...TRIAGE_CLASSES].join(" / ")}`);
 }
 
 // WITHDRAWAL IS TWO VALIDATORS, not one with an optional successor. See the two
@@ -231,93 +302,145 @@ function validateTriage(args, ToolError) {
 // case is refused here AND by the function; duplicating it costs nothing and
 // stops a blank reason before the idempotency lock turns it into I/O.
 function validateDecline(args, ToolError) {
-  if (Object.keys(args).some(key => !DECLINE_FIELDS.has(key))) throw new ToolError({ error: "invalid_decline_work_request_fields" });
-  if (!UUID.test(args.idempotency_key || "") || !/^WR-[0-9]{1,12}$/.test(args.human_ref || "") ||
-      !Number.isInteger(args.base_version) || args.base_version < 1 ||
-      !text(args.exit_reason) || text(args.exit_reason).length > 500)
-    throw new ToolError({ error: "invalid_decline_work_request" });
+  assertClosed(args, DECLINE_FIELDS, ToolError, "invalid_decline_work_request_fields");
+  const fail = refuser(ToolError, "invalid_decline_work_request");
+  assertRequestIdentity(args, fail);
+  if (!text(args.exit_reason)) fail("exit_reason", "required; 1-500 characters saying why this request is being withdrawn");
+  if (text(args.exit_reason).length > 500) fail("exit_reason", `500 characters maximum, received ${text(args.exit_reason).length}`);
 }
 
 function validateSupersede(args, ToolError) {
-  if (Object.keys(args).some(key => !SUPERSEDE_FIELDS.has(key))) throw new ToolError({ error: "invalid_supersede_work_request_fields" });
-  if (!UUID.test(args.idempotency_key || "") || !/^WR-[0-9]{1,12}$/.test(args.human_ref || "") ||
-      !Number.isInteger(args.base_version) || args.base_version < 1 ||
-      !text(args.exit_reason) || text(args.exit_reason).length > 500 ||
-      !/^WR-[0-9]{1,12}$/.test(args.superseded_by || "") ||
-      // Self-supersession is refused by the function too, and that refusal is the
-      // one that counts. This copy exists only so the obvious typo never reaches
-      // a row lock. The three refusals that need a SECOND row — a withdrawn
-      // successor, a non-sourced successor, a two-row cycle — are deliberately
-      // NOT re-implemented here: they cannot be decided without the database.
-      args.superseded_by.trim() === args.human_ref.trim())
-    throw new ToolError({ error: "invalid_supersede_work_request" });
+  assertClosed(args, SUPERSEDE_FIELDS, ToolError, "invalid_supersede_work_request_fields");
+  const fail = refuser(ToolError, "invalid_supersede_work_request");
+  assertRequestIdentity(args, fail);
+  if (!text(args.exit_reason)) fail("exit_reason", "required; 1-500 characters saying why this request is being superseded");
+  if (text(args.exit_reason).length > 500) fail("exit_reason", `500 characters maximum, received ${text(args.exit_reason).length}`);
+  if (!/^WR-[0-9]{1,12}$/.test(args.superseded_by || "")) fail("superseded_by", "the successor request's ref, such as WR-000041");
+  // Self-supersession is refused by the function too, and that refusal is the
+  // one that counts. This copy exists only so the obvious typo never reaches
+  // a row lock. The three refusals that need a SECOND row — a withdrawn
+  // successor, a non-sourced successor, a two-row cycle — are deliberately
+  // NOT re-implemented here: they cannot be decided without the database.
+  if (args.superseded_by.trim() === args.human_ref.trim())
+    fail("superseded_by", "a request cannot supersede itself; name the successor request");
+}
+
+// The source-merge scope is its own refusal name because it is its own
+// contract: an authorized_paths list is a grant of write reach, and a caller
+// that gets it wrong needs to know WHICH path and WHY, not that "the plan" was
+// invalid.
+function validateSourceMergeScope(merge, ToolError) {
+  if (merge === undefined) return;
+  const fail = refuser(ToolError, "invalid_source_merge_scope");
+  if (!merge || typeof merge !== "object" || Array.isArray(merge) ||
+      Object.keys(merge).sort().join(",") !== "authorized_paths,base_branch,repository,schema_version")
+    fail("caps.source_merge", "exactly {schema_version, repository, base_branch, authorized_paths}");
+  if (merge.schema_version !== "source-merge-scope.v1") fail("caps.source_merge.schema_version", "must be source-merge-scope.v1");
+  if (merge.repository !== "jbookout/carr-system") fail("caps.source_merge.repository", "must be jbookout/carr-system");
+  if (merge.base_branch !== "main") fail("caps.source_merge.base_branch", "must be main");
+  if (!Array.isArray(merge.authorized_paths) || !merge.authorized_paths.length || merge.authorized_paths.length > 100)
+    fail("caps.source_merge.authorized_paths", "1-100 repository-relative paths");
+  merge.authorized_paths.forEach((path, index) => {
+    const where = `caps.source_merge.authorized_paths[${index}]`;
+    if (typeof path !== "string" || path.length > 500) fail(where, "a string of 1-500 characters");
+    if (!/^[!-~]+$/.test(path)) fail(where, "printable ASCII with no spaces");
+    if (path.startsWith("/") || path.endsWith("/")) fail(where, "repository-relative; no leading or trailing slash");
+    if (path.includes("\\") || /[*?\[\]{}!]/.test(path)) fail(where, "a literal path; globs and backslashes are refused");
+    if (path.split("/").some(part => !part || part === "." || part === "..")) fail(where, "no empty, . or .. path segments");
+  });
+  const lowered = merge.authorized_paths.map(path => path.toLowerCase());
+  if (new Set(lowered).size !== lowered.length) fail("caps.source_merge.authorized_paths", "paths must be unique, compared case-insensitively");
+  const sorted = [...merge.authorized_paths].sort((left, right) => {
+    const lowerLeft = left.toLowerCase();
+    const lowerRight = right.toLowerCase();
+    return lowerLeft < lowerRight ? -1 : lowerLeft > lowerRight ? 1 : left < right ? -1 : left > right ? 1 : 0;
+  });
+  if (JSON.stringify(merge.authorized_paths) !== JSON.stringify(sorted))
+    fail("caps.source_merge.authorized_paths", "must be sorted case-insensitively, ties broken by exact value");
 }
 
 function validatePlan(args, ToolError) {
-  if (Object.keys(args).some(k => !PLAN_FIELDS.has(k))) throw new ToolError({ error: "invalid_ready_plan_fields" });
-  if (!UUID.test(args.idempotency_key || "") || !/^WR-[0-9]{1,12}$/.test(args.human_ref || "") || !Number.isInteger(args.base_version) || args.base_version < 1 ||
-      !text(args.scope_summary) || text(args.scope_summary).length > 1000 || !/^doctrine:runbook#[a-z0-9][a-z0-9-]*$/.test(args.runbook_ref || "") ||
-      typeof args.recovery_ref !== "string" || args.recovery_ref.length > 300 || typeof args.observability_ref !== "string" || args.observability_ref.length > 300 || !SAFE_REF.test(args.recovery_ref || "") || !SAFE_REF.test(args.observability_ref || "") || !args.caps || !["max_duration_minutes,max_steps", "max_duration_minutes,max_steps,source_merge"].includes(Object.keys(args.caps).sort().join(",")) ||
-      !Number.isInteger(args.caps.max_steps) || args.caps.max_steps < 1 || args.caps.max_steps > 20 || !Number.isInteger(args.caps.max_duration_minutes) || args.caps.max_duration_minutes < 1 || args.caps.max_duration_minutes > 120 ||
-      !Array.isArray(args.dependency_refs) || args.dependency_refs.length > 12 || args.dependency_refs.some(x => typeof x !== "string" || x.length > 300 || !SAFE_REF.test(x)) || new Set(args.dependency_refs).size !== args.dependency_refs.length)
-    throw new ToolError({ error: "invalid_ready_plan" });
-  const merge = args.caps.source_merge;
-  if (merge !== undefined && (!merge || typeof merge !== "object" || Array.isArray(merge) ||
-      Object.keys(merge).sort().join(",") !== "authorized_paths,base_branch,repository,schema_version" ||
-      merge.schema_version !== "source-merge-scope.v1" || merge.repository !== "jbookout/carr-system" ||
-      merge.base_branch !== "main" || !Array.isArray(merge.authorized_paths) || !merge.authorized_paths.length ||
-      merge.authorized_paths.length > 100 || merge.authorized_paths.some(path => typeof path !== "string" ||
-        path.length > 500 || !/^[!-~]+$/.test(path) || path.startsWith("/") || path.endsWith("/") ||
-        path.includes("\\") || /[*?\[\]{}!]/.test(path) ||
-        path.split("/").some(part => !part || part === "." || part === "..")) ||
-      new Set(merge.authorized_paths.map(path => path.toLowerCase())).size !== merge.authorized_paths.length ||
-      JSON.stringify(merge.authorized_paths) !== JSON.stringify([...merge.authorized_paths].sort((left, right) => {
-        const lowerLeft = left.toLowerCase();
-        const lowerRight = right.toLowerCase();
-        return lowerLeft < lowerRight ? -1 : lowerLeft > lowerRight ? 1 : left < right ? -1 : left > right ? 1 : 0;
-      }))))
-    throw new ToolError({ error: "invalid_source_merge_scope" });
+  assertClosed(args, PLAN_FIELDS, ToolError, "invalid_ready_plan_fields");
+  const fail = refuser(ToolError, "invalid_ready_plan");
+  assertRequestIdentity(args, fail);
+  if (!text(args.scope_summary)) fail("scope_summary", "required; 1-1000 characters");
+  if (text(args.scope_summary).length > 1000) fail("scope_summary", `1000 characters maximum, received ${text(args.scope_summary).length}`);
+  if (!/^doctrine:runbook#[a-z0-9][a-z0-9-]*$/.test(args.runbook_ref || "")) fail("runbook_ref", "looks like doctrine:runbook#<kebab-slug>");
+  for (const field of ["recovery_ref", "observability_ref"]) {
+    if (typeof args[field] !== "string" || args[field].length > 300) fail(field, "a string of at most 300 characters");
+    if (!SAFE_REF.test(args[field])) fail(field, "must match ^safe:[a-z0-9][a-z0-9:_./-]*$ — a bare path is refused; write safe:<path>");
+  }
+  assertSafeRefs(args.dependency_refs, "dependency_refs", fail, { min: 0, max: 12 });
+  const capKeys = args.caps && typeof args.caps === "object" && !Array.isArray(args.caps) ? Object.keys(args.caps).sort().join(",") : null;
+  if (!["max_duration_minutes,max_steps", "max_duration_minutes,max_steps,source_merge"].includes(capKeys))
+    fail("caps", "exactly {max_steps, max_duration_minutes}, plus the optional source_merge");
+  if (!Number.isInteger(args.caps.max_steps) || args.caps.max_steps < 1 || args.caps.max_steps > 20) fail("caps.max_steps", "an integer 1-20");
+  if (!Number.isInteger(args.caps.max_duration_minutes) || args.caps.max_duration_minutes < 1 || args.caps.max_duration_minutes > 120)
+    fail("caps.max_duration_minutes", "an integer 1-120");
+  validateSourceMergeScope(args.caps.source_merge, ToolError);
   if (args.heavy_build !== undefined) validateHeavyBuildContract(args.heavy_build, ToolError);
 }
+
 function validateAcceptPlan(args, ToolError) {
-  if (Object.keys(args).some(k => !ACCEPT_PLAN_FIELDS.has(k))) throw new ToolError({ error: "invalid_accept_plan_fields" });
-  if (!UUID.test(args.idempotency_key || "") || !/^WR-[0-9]{1,12}$/.test(args.human_ref || "") || !Number.isInteger(args.base_version) || args.base_version < 1 || !/^sha256:[0-9a-f]{64}$/.test(args.plan_hash || "")) throw new ToolError({ error: "invalid_accept_plan" });
+  assertClosed(args, ACCEPT_PLAN_FIELDS, ToolError, "invalid_accept_plan_fields");
+  const fail = refuser(ToolError, "invalid_accept_plan");
+  assertRequestIdentity(args, fail);
+  if (!SHA256.test(args.plan_hash || "")) fail("plan_hash", "the exact sha256:<64 hex> the proposal returned, copied verbatim");
 }
 
 function validateOutcomeProposal(args, ToolError) {
-  if (Object.keys(args).some(k => !OUTCOME_PROPOSAL_FIELDS.has(k))) throw new ToolError({ error: "invalid_outcome_feedback_fields" });
-  if (!UUID.test(args.idempotency_key || "") || !/^WR-[0-9]{1,12}$/.test(args.human_ref || "") ||
-      !Number.isInteger(args.base_version) || args.base_version < 1 || !/^sha256:[0-9a-f]{64}$/.test(args.plan_hash || "") ||
-      !Array.isArray(args.criterion_results) || !args.criterion_results.length || args.criterion_results.length > 12 ||
-      !Array.isArray(args.evidence_refs) || !args.evidence_refs.length || args.evidence_refs.length > 12 ||
-      args.evidence_refs.some(x => typeof x !== "string" || x.length > 300 || !SAFE_REF.test(x)) ||
-      new Set(args.evidence_refs).size !== args.evidence_refs.length ||
-      !OUTCOME_BLOCKER.has(args.blocker_code) || !text(args.result_summary) || text(args.result_summary).length > 500 ||
-      !Number.isInteger(args.observed_minutes) || args.observed_minutes < 1 || args.observed_minutes > 1440 ||
-      !INTERACTION_SURFACE.has(args.interaction_surface) || typeof args.heavy_session_used !== "boolean" ||
-      !Number.isInteger(args.manual_context_transfers) || args.manual_context_transfers < 0 || args.manual_context_transfers > 100)
-    throw new ToolError({ error: "invalid_outcome_feedback" });
+  assertClosed(args, OUTCOME_PROPOSAL_FIELDS, ToolError, "invalid_outcome_feedback_fields");
+  const fail = refuser(ToolError, "invalid_outcome_feedback");
+  assertRequestIdentity(args, fail);
+  if (!SHA256.test(args.plan_hash || "")) fail("plan_hash", "the exact sha256:<64 hex> the accepted plan returned, copied verbatim");
+  if (!Array.isArray(args.criterion_results))
+    fail("criterion_results", "an ARRAY of {id, result} — an object keyed by criterion id is refused");
+  if (!args.criterion_results.length || args.criterion_results.length > 12)
+    fail("criterion_results", `1-12 items, received ${args.criterion_results.length}`);
+  assertSafeRefs(args.evidence_refs, "evidence_refs", fail, { min: 1, max: 12 });
+  if (!OUTCOME_BLOCKER.has(args.blocker_code)) fail("blocker_code", `exactly one of ${[...OUTCOME_BLOCKER].join(" / ")}`);
+  if (!text(args.result_summary)) fail("result_summary", "required; 1-500 characters");
+  if (text(args.result_summary).length > 500) fail("result_summary", `500 characters maximum, received ${text(args.result_summary).length}`);
+  if (!Number.isInteger(args.observed_minutes) || args.observed_minutes < 1 || args.observed_minutes > 1440) fail("observed_minutes", "an integer 1-1440");
+  if (!INTERACTION_SURFACE.has(args.interaction_surface)) fail("interaction_surface", `exactly one of ${[...INTERACTION_SURFACE].join(" / ")}`);
+  if (typeof args.heavy_session_used !== "boolean") fail("heavy_session_used", "a boolean");
+  if (!Number.isInteger(args.manual_context_transfers) || args.manual_context_transfers < 0 || args.manual_context_transfers > 100)
+    fail("manual_context_transfers", "an integer 0-100");
+
+  const criteria = refuser(ToolError, "invalid_outcome_criteria");
   const ids = new Set();
-  for (const criterion of args.criterion_results) {
-    if (!criterion || typeof criterion !== "object" || Object.keys(criterion).some(k => k !== "id" && k !== "result") ||
-        !text(criterion.id) || !CRITERION_ID.test(criterion.id.trim()) || !CRITERION_RESULT.has(criterion.result) ||
-        ids.has(criterion.id.trim()))
-      throw new ToolError({ error: "invalid_outcome_criteria" });
+  args.criterion_results.forEach((criterion, index) => {
+    const where = `criterion_results[${index}]`;
+    if (!criterion || typeof criterion !== "object" || Array.isArray(criterion)) criteria(where, "each item is an object {id, result}");
+    const extra = Object.keys(criterion).filter(key => key !== "id" && key !== "result");
+    if (extra.length) criteria(where, `unrecognised ${extra.join(", ")}; each item is exactly {id, result}`);
+    if (!text(criterion.id) || !CRITERION_ID.test(criterion.id.trim()))
+      criteria(`${where}.id`, "an acceptance criterion id from the request, matching ^[A-Z][A-Z0-9-]{1,63}$");
+    if (!CRITERION_RESULT.has(criterion.result))
+      criteria(`${where}.result`, `exactly one of ${[...CRITERION_RESULT].join(" / ")}, received ${JSON.stringify(criterion.result)}`);
+    if (ids.has(criterion.id.trim())) criteria(`${where}.id`, `duplicate id ${criterion.id.trim()}`);
     ids.add(criterion.id.trim());
-  }
+  });
+
+  // The outcome is DERIVED, never sent. A caller therefore cannot see why its
+  // blocker_code was refused without being told which derivation it collided
+  // with, so each refusal below names the derived outcome and the codes it admits.
   const results = args.criterion_results.map(criterion => criterion.result);
   const outcome = results.includes("not_met") ? "criteria_not_met" : results.every(result => result === "met") ? "criteria_met" : "inconclusive";
-  if ((outcome === "criteria_met" && args.blocker_code !== "none") ||
-      (outcome === "criteria_not_met" && args.blocker_code === "none") ||
-      (outcome === "inconclusive" && !new Set(["evidence_missing", "external_dependency", "system_error"]).has(args.blocker_code)))
-    throw new ToolError({ error: "inconsistent_outcome_feedback" });
+  const consistency = refuser(ToolError, "inconsistent_outcome_feedback");
+  if (outcome === "criteria_met" && args.blocker_code !== "none")
+    consistency("blocker_code", `every criterion is met, so the outcome derives to criteria_met, which takes blocker_code none — received ${args.blocker_code}`);
+  if (outcome === "criteria_not_met" && args.blocker_code === "none")
+    consistency("blocker_code", "a not_met criterion derives the outcome to criteria_not_met, which needs a blocker_code other than none");
+  if (outcome === "inconclusive" && !new Set(["evidence_missing", "external_dependency", "system_error"]).has(args.blocker_code))
+    consistency("blocker_code", `a not_observed criterion derives the outcome to inconclusive, which takes evidence_missing / external_dependency / system_error — received ${args.blocker_code}`);
 }
 
 function validateOutcomeAcceptance(args, ToolError) {
-  if (Object.keys(args).some(k => !ACCEPT_OUTCOME_FIELDS.has(k))) throw new ToolError({ error: "invalid_accept_outcome_fields" });
-  if (!UUID.test(args.idempotency_key || "") || !/^WR-[0-9]{1,12}$/.test(args.human_ref || "") ||
-      !Number.isInteger(args.base_version) || args.base_version < 1 || !/^sha256:[0-9a-f]{64}$/.test(args.feedback_hash || ""))
-    throw new ToolError({ error: "invalid_accept_outcome" });
+  assertClosed(args, ACCEPT_OUTCOME_FIELDS, ToolError, "invalid_accept_outcome_fields");
+  const fail = refuser(ToolError, "invalid_accept_outcome");
+  assertRequestIdentity(args, fail);
+  if (!SHA256.test(args.feedback_hash || "")) fail("feedback_hash", "the exact sha256:<64 hex> the proposal returned, copied verbatim");
 }
 
 const HEAVY_EVIDENCE_SCHEMA = { type: "object", additionalProperties: false,
@@ -551,7 +674,7 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
     },
     "report-problem": {
       write: true,
-      description: "Capture one operational problem from the current deterministic situation source. It only creates a captured Work Request; it never triages, assigns, dispatches, approves, executes, or changes an existing request.",
+      description: "Capture one operational problem from the current deterministic situation source. It only creates a captured Work Request; it never triages, assigns, dispatches, approves, executes, or changes an existing request. CAPS the refusals enforce: situation 1-1000 characters, title 1-200, desired_outcome 1-2000, and acceptance_criteria an ARRAY of 1-12 items, each exactly {id, text}, with unique ids matching ^[A-Z][A-Z0-9-]{1,63}$ and text of 1-500 characters. Every refusal names the failing field and what that field wanted.",
       inputSchema: { type: "object", properties: {
         idempotency_key: { type: "string", pattern: "^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$" },
         situation: { type: "string", minLength: 1, maxLength: 1000 }, title: { type: "string", minLength: 1, maxLength: 200 },
@@ -943,12 +1066,17 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
     },
     "propose-outcome-feedback": {
       write: true,
-      description: "Propose evidence-bound outcome feedback for one accepted sourced ready plan. It creates no success claim, state transition, execution, assignment, dispatch, approval, or completion.",
+      description: "Propose evidence-bound outcome feedback for one accepted sourced ready plan. It creates no success claim, state transition, execution, assignment, dispatch, approval, or completion. SHAPES AND CAPS, so the call is composed once rather than discovered by refusal: criterion_results is an ARRAY of {id, result}, never an object keyed by criterion id, 1-12 items with unique ids matching ^[A-Z][A-Z0-9-]{1,63}$ and result exactly met | not_met | not_observed; evidence_refs is 1-12 unique strings each matching ^safe:[a-z0-9][a-z0-9:_./-]*$, so a bare file path is refused and safe:<path> is the form; blocker_code is exactly none | evidence_missing | criterion_not_met | external_dependency | system_error; result_summary is 1-500 characters; observed_minutes 1-1440; manual_context_transfers 0-100. The outcome is DERIVED from criterion_results, never sent, and blocker_code must agree with it: any not_met derives criteria_not_met and needs a blocker other than none, all met derives criteria_met and takes only none, otherwise it derives inconclusive and takes evidence_missing, external_dependency or system_error. Every refusal names the failing field and what that field wanted.",
       inputSchema: { type: "object", additionalProperties: false, properties: {
         idempotency_key: { type: "string", pattern: "^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$" },
         human_ref: { type: "string", pattern: "^WR-[0-9]{1,12}$" }, base_version: { type: "integer", minimum: 1 },
         plan_hash: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
         criterion_results: { type: "array", minItems: 1, maxItems: 12, items: { type: "object", additionalProperties: false, required: ["id", "result"], properties: { id: { type: "string", minLength: 2, maxLength: 64, pattern: "^[A-Z][A-Z0-9-]{1,63}$" }, result: { type: "string", enum: ["met", "not_met", "not_observed"] } } } },
+        // The safe: format is stated in this verb's description and in every
+        // refusal it throws, NOT here. inputSchema is what the SCAC mutation
+        // registry digests (mutation-registry.js assertRegisteredOperation), so
+        // adding the pattern here would demand a registry reseal across versions
+        // 1-10 and their migrations to document a rule the caller already reads.
         evidence_refs: { type: "array", minItems: 1, maxItems: 12, items: { type: "string", minLength: 6, maxLength: 300 } },
         blocker_code: { type: "string", enum: ["none", "evidence_missing", "criterion_not_met", "external_dependency", "system_error"] },
         result_summary: { type: "string", minLength: 1, maxLength: 500 },

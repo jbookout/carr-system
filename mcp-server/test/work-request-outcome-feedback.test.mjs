@@ -149,3 +149,78 @@ test("card exposes pending separately and reads accepted history A then B withou
   assert.equal(accepted.pending_outcome_feedback, null);
   assert.deepEqual(accepted.next_human_action, { label: "Outcome feedback accepted", effect: "none" });
 });
+
+// THE FIVE REFUSALS THAT COST FIVE ATTEMPTS, each asserted to name its field.
+//
+// Filing one outcome record on WR-000040 on 2026-09-02 took five tries because
+// every refusal was a bare {"error":"invalid_outcome_feedback"} naming nothing.
+// These are those five exact wrong calls. The assertion is not that they are
+// refused -- they always were -- but that the refusal says WHICH field and what
+// it wanted, so the sixth caller does not have to read the validator to find out.
+test("every outcome-feedback refusal names the failing field and what it wanted", async () => {
+  const noDb = { query: async () => { throw new Error("database must not be called"); } };
+  const refuse = (args) => refused(() => executeRegisteredTool(noDb, JOE, "propose-outcome-feedback", args));
+
+  // 1. criterion_results sent as an object keyed by id, not an array.
+  const shape = await refuse({ ...PROPOSE, criterion_results: { "READY-PLAN": "met" } });
+  assert.equal(shape.error, "invalid_outcome_feedback");
+  assert.equal(shape.field, "criterion_results");
+  assert.match(shape.detail, /ARRAY/);
+
+  // 2. a result outside the met / not_met / not_observed vocabulary.
+  const vocabulary = await refuse({ ...PROPOSE, criterion_results: [{ id: "READY-PLAN", result: "not_assessed" }] });
+  assert.equal(vocabulary.error, "invalid_outcome_criteria");
+  assert.equal(vocabulary.field, "criterion_results[0].result");
+  assert.match(vocabulary.detail, /met \/ not_met \/ not_observed/);
+  assert.match(vocabulary.detail, /not_assessed/);
+
+  // 3. a blocker_code outside the enum.
+  const blocker = await refuse({ ...PROPOSE, blocker_code: "capability" });
+  assert.equal(blocker.error, "invalid_outcome_feedback");
+  assert.equal(blocker.field, "blocker_code");
+  assert.match(blocker.detail, /evidence_missing/);
+
+  // 4. plain file paths where safe: references are required. The refusal echoes
+  //    the path, because "evidence_refs is wrong" does not tell you it is the FORM.
+  const ref = await refuse({ ...PROPOSE, evidence_refs: ["out/repo-hygiene-program/handoff.md"] });
+  assert.equal(ref.error, "invalid_outcome_feedback");
+  assert.equal(ref.field, "evidence_refs[0]");
+  assert.match(ref.detail, /\^safe:/);
+  assert.match(ref.detail, /out\/repo-hygiene-program\/handoff\.md/);
+
+  // 5. a summary over the undocumented 500 cap. The refusal states the cap AND
+  //    the length received, which is the whole difference between one more
+  //    attempt and one more guess.
+  const long = await refuse({ ...PROPOSE, result_summary: "x".repeat(607) });
+  assert.equal(long.error, "invalid_outcome_feedback");
+  assert.equal(long.field, "result_summary");
+  assert.match(long.detail, /500 characters maximum, received 607/);
+
+  // The derived-outcome collision names the derivation it collided with, since
+  // the outcome is never sent and a caller cannot otherwise see what it hit.
+  const derived = await refuse({ ...PROPOSE, criterion_results: [{ id: "READY-PLAN", result: "met" }], blocker_code: "evidence_missing" });
+  assert.equal(derived.error, "inconsistent_outcome_feedback");
+  assert.equal(derived.field, "blocker_code");
+  assert.match(derived.detail, /criteria_met/);
+
+  // An unrecognised argument echoes the key it did not accept, so a plausible
+  // synonym does not read as "this verb is broken". At this boundary the SCAC
+  // mutation registry answers first and already names the keys, which is why
+  // this asserts its refusal rather than the validator's -- the validator's own
+  // assertClosed still covers the paths that reach it directly.
+  const closed = await refuse({ ...PROPOSE, outcome: "criteria_met" });
+  assert.equal(closed.error, "unregistered_operation_fields");
+  assert.deepEqual(closed.fields, ["outcome"]);
+});
+
+test("the caps a caller needs are on the tool description, not only in the validator", () => {
+  const described = TOOLS["propose-outcome-feedback"].description;
+  for (const shown of ["not_observed", "^safe:", "1-500 characters", "external_dependency", "ARRAY"])
+    assert.ok(described.includes(shown), `description must state ${shown}`);
+  // action-risk-registry.v1.json derives its "does" from description.split(".")[0].
+  assert.equal(described.split(".")[0], "Propose evidence-bound outcome feedback for one accepted sourced ready plan");
+  // inputSchema is DELIBERATELY untouched: mutation-registry.js digests it, so
+  // any addition here -- even a documenting one -- demands a registry reseal.
+  // The description and the refusals carry the format instead.
+  assert.equal(TOOLS["propose-outcome-feedback"].inputSchema.properties.evidence_refs.items.pattern, undefined);
+});
