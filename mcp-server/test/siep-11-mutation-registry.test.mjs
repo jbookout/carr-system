@@ -3,9 +3,12 @@ import fs from "node:fs";
 import test from "node:test";
 
 import {
+  assertCurrentSourceInventoryMatchesFixture,
+  assertGeneratedFrontierMatchesCommitted,
   assertLegacyLaunchdSource,
   DB_CATALOG_BASELINE,
   discoverScriptEntrypoints,
+  frozenInventory,
   fullInventory,
   HISTORICAL_REGISTRY_ARTIFACT_SHA256,
   HISTORICAL_REGISTRY_SEALS,
@@ -89,6 +92,12 @@ const v10Migration = fs.readFileSync(
   new URL("../../migrations/0471_source_merge_catalog_registry_successor.sql", import.meta.url), "utf8");
 const siep18MonitorMigration = fs.readFileSync(
   new URL("../../migrations/0467_siep18_atomic_db_monitor_grants.sql", import.meta.url), "utf8");
+const directRegistryRedefinitions = [
+  "0460_siep15_device_enrollment.sql",
+  "0465_siep17_token_challenge_authority.sql",
+  "0467_siep18_atomic_db_monitor_grants.sql",
+  "0470_source_merge_authority_projection.sql",
+].map(name => [name, fs.readFileSync(new URL(`../../migrations/${name}`, import.meta.url), "utf8")]);
 
 test("successor generation refuses absent or ambiguous predecessor markers", () => {
   assert.equal(replaceExactlyOnce("before marker after", "marker", "successor", "unit"),
@@ -201,8 +210,8 @@ test("v9 successor seals v8 and binds the measured SIEP-18 grant snapshot", () =
     HISTORICAL_REGISTRY_ARTIFACT_SHA256["mcp-server/src/scac-mutation-registry.v9.generated.js"]);
   assert.equal(sha256(v9Migration),
     HISTORICAL_REGISTRY_ARTIFACT_SHA256["migrations/0468_siep18_forward_mutation_registry.sql"]);
-  assert.equal(HISTORICAL_REGISTRY_SEALS.v9.sourceEntryCount, 814);
-  assert.equal(expectedEntryCount, 1453);
+  assert.equal(HISTORICAL_REGISTRY_SEALS.v9.sourceEntryCount, 800);
+  assert.equal(expectedEntryCount, 1439);
   assert.equal(sha256(siep18MonitorMigration), SIEP18_MONITOR_ARTIFACT_SHA256);
   assert.equal(SIEP18_PRE_V9_DB_CATALOG_BASELINE.secdef_execute.count, 338);
   assert.equal(SIEP18_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count -
@@ -217,7 +226,7 @@ test("v9 successor seals v8 and binds the measured SIEP-18 grant snapshot", () =
     /scac_policy_epoch_snapshot_v8\(\)/,
   ])
     assert.match(v9Migration, selfEffect);
-  assert.match(v9Migration, new RegExp(`'${HISTORICAL_REGISTRY_SEALS.v9.digest}',${expectedEntryCount},814,`));
+  assert.match(v9Migration, new RegExp(`'${HISTORICAL_REGISTRY_SEALS.v9.digest}',${expectedEntryCount},800,`));
   assert.match(v9Migration, /scac_mutation_catalog_v8_live_at_seal\(\)/);
   assert.match(v9Migration, /scac_mutation_registry_v8_seal_available\(\)/);
   assert.match(v9Migration, /scac_mutation_catalog_v9_current\(\)/);
@@ -231,7 +240,7 @@ test("v9 successor seals v8 and binds the measured SIEP-18 grant snapshot", () =
 });
 
 test("v10 successor seals v9 and carries the generated source-merge control", () => {
-  const rows = fullInventory();
+  const rows = frozenInventory(REGISTRY_V10_VERSION);
   assert.equal(rows.length, 814);
   assert.equal(generatedV10, renderRuntimeProjection(rows, {
     version: REGISTRY_V10_VERSION, dbCatalogBaseline: SOURCE_MERGE_FORWARD_DB_CATALOG_BASELINE,
@@ -265,6 +274,23 @@ test("v10 successor seals v9 and carries the generated source-merge control", ()
   assert.match(v10Migration, /registry\.registry_version='scac-mutation-registry\.v10'/);
   assert.match(v10Migration, /direct_database_grant_cutover',false/);
   assert.match(v10Migration, /production_enforcement_active',false/);
+});
+
+test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
+  assert.equal(assertCurrentSourceInventoryMatchesFixture(), true);
+  const paths = assertGeneratedFrontierMatchesCommitted();
+  assert.equal(paths.filter(path => path.startsWith("migrations/")).length, 13);
+  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 9);
+});
+
+test("every direct catalog redefinition preserves the portable role census", () => {
+  for (const [name, sql] of directRegistryRedefinitions) {
+    assert.match(sql, /rolname~'\^carr_' and rolname<>'carr_ci' and not rolcanlogin and not rolsuper/, name);
+    assert.match(sql, /mem\.rolname~'\^carr_' and \(g\.rolsuper or g\.rolname~'\^\(neon_\|pg_\)'\)/, name);
+    assert.match(sql, /return observed_count=12 and observed_digest='sha256:eb650de73032466b46787f4a5826b60b100591657489a7990d9161e2d6588648'/, name);
+    assert.doesNotMatch(sql, /observed_count=95|082b8570b428c33296c801871177f6bfb34e9c070513d4b1db23007f4edecafb/, name);
+  }
+  assert.equal((siep18MonitorMigration.match(/a\.grantee<>c\.relowner/g) || []).length, 8);
 });
 
 test("unknown, changed, and open operation contracts refuse deterministically", async () => {

@@ -263,12 +263,14 @@ begin
   ), writable as (
     select distinct c.oid from pg_class c join pg_namespace n on n.oid=c.relnamespace
     cross join lateral aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a
-    where c.relkind in ('r','p') and (a.grantee=0 or a.grantee in(select oid from connected))
+    where c.relkind in ('r','p') and a.grantee<>c.relowner
+      and (a.grantee=0 or a.grantee in(select oid from connected))
       and a.privilege_type in ('INSERT','UPDATE','DELETE','TRUNCATE')
     union
     select distinct c.oid from pg_attribute att join pg_class c on c.oid=att.attrelid
     cross join lateral aclexplode(att.attacl) a
     where c.relkind in ('r','p') and att.attnum>0 and not att.attisdropped
+      and a.grantee<>c.relowner
       and (a.grantee=0 or a.grantee in(select oid from connected))
       and a.privilege_type in ('INSERT','UPDATE')
   )
@@ -282,7 +284,7 @@ begin
     select distinct c.oid from pg_class c join pg_namespace n on n.oid=c.relnamespace
     cross join lateral aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a
     where n.nspname not in ('pg_catalog','information_schema') and
-      c.relkind in ('v','m','f') and
+      c.relkind in ('v','m','f') and a.grantee<>c.relowner and
       (a.grantee=0 or a.grantee in(select oid from runtime_roles))
       and a.privilege_type in ('INSERT','UPDATE','DELETE','TRUNCATE')
     union
@@ -291,6 +293,7 @@ begin
     cross join lateral aclexplode(att.attacl) a
     where n.nspname not in ('pg_catalog','information_schema') and
       c.relkind in ('v','m','f') and att.attnum>0 and not att.attisdropped and
+      a.grantee<>c.relowner and
       (a.grantee=0 or a.grantee in(select oid from runtime_roles))
       and a.privilege_type in ('INSERT','UPDATE')
   ) select count(*) into unsupported_writable from unsupported;
@@ -768,7 +771,7 @@ begin
       select distinct c.oid,n.nspname,c.relname from pg_class c
       join pg_namespace n on n.oid=c.relnamespace
       cross join lateral aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a
-      where c.relkind in ('r','p') and
+      where c.relkind in ('r','p') and a.grantee<>c.relowner and
         (a.grantee=0 or a.grantee in(select oid from runtime_roles))
         and a.privilege_type in ('INSERT','UPDATE','DELETE','TRUNCATE')
       union
@@ -776,6 +779,7 @@ begin
       join pg_class c on c.oid=att.attrelid join pg_namespace n on n.oid=c.relnamespace
       cross join lateral aclexplode(att.attacl) a
       where c.relkind in ('r','p') and att.attnum>0 and not att.attisdropped
+        and a.grantee<>c.relowner
         and (a.grantee=0 or a.grantee in(select oid from runtime_roles))
         and a.privilege_type in ('INSERT','UPDATE')
     ) select * from writable order by nspname,relname
@@ -846,13 +850,13 @@ begin
   ), writable as (
     select distinct c.oid from pg_class c cross join lateral
       aclexplode(coalesce(c.relacl,acldefault('r',c.relowner))) a
-      where c.relkind in ('r','p') and
+      where c.relkind in ('r','p') and a.grantee<>c.relowner and
         (a.grantee=0 or a.grantee in(select oid from runtime_roles))
         and a.privilege_type in ('INSERT','UPDATE','DELETE','TRUNCATE')
     union
     select distinct c.oid from pg_attribute att join pg_class c on c.oid=att.attrelid
       cross join lateral aclexplode(att.attacl) a where c.relkind in ('r','p')
-        and att.attnum>0 and not att.attisdropped and
+        and att.attnum>0 and not att.attisdropped and a.grantee<>c.relowner and
         (a.grantee=0 or a.grantee in(select oid from runtime_roles))
         and a.privilege_type in ('INSERT','UPDATE')
   ) select count(*) into missing from writable w where not exists(
@@ -885,8 +889,8 @@ begin
   select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key collate "C", ops.scac_canonical_json(row) collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex') into observed_count,observed_digest from observed;
   if observed_count<>12 or observed_digest<>'sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f' then return false; end if;
   with recursive connected(oid) as (
-    select oid from pg_roles where rolname~'^carr_' and rolname<>'carr_ci' union
-    select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end where other.rolname<>'carr_ci'
+    select oid from pg_roles where rolname~'^carr_' and rolname<>'carr_ci' and not rolcanlogin and not rolsuper union
+    select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end where other.rolname~'^carr_' and other.rolname<>'carr_ci' and not other.rolcanlogin and not other.rolsuper
   ), role_rows as (
     select 'db-role:'||r.rolname ingress_key,jsonb_build_object('ingress_key','db-role:'||r.rolname,'row_kind','role','role',r.rolname,'login',r.rolcanlogin,'inherit',r.rolinherit,'superuser',r.rolsuper,'create_role',r.rolcreaterole,'create_db',r.rolcreatedb,'replication',r.rolreplication,'bypass_rls',r.rolbypassrls) row from pg_roles r where r.oid in(select oid from connected)
   ), membership_rows as (
@@ -896,5 +900,6 @@ begin
     select 'db-relation-owner:'||n.nspname||'.'||c.relname||':'||owner.rolname,jsonb_build_object('ingress_key','db-relation-owner:'||n.nspname||'.'||c.relname||':'||owner.rolname,'row_kind','relation_owner','relation',n.nspname||'.'||c.relname,'relation_kind',c.relkind,'owner',owner.rolname) row from pg_class c join pg_namespace n on n.oid=c.relnamespace join pg_roles owner on owner.oid=c.relowner where n.nspname not in ('pg_catalog','information_schema') and c.relkind in ('r','p','v','m','f') and owner.oid in(select oid from connected) and not owner.rolsuper and owner.rolname<>'neondb_owner'
   ), observed as (select * from role_rows union all select * from membership_rows union all select * from ownership_rows)
   select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(coalesce(jsonb_agg(row order by ingress_key collate "C", ops.scac_canonical_json(row) collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex') into observed_count,observed_digest from observed;
-  return observed_count=95 and observed_digest='sha256:082b8570b428c33296c801871177f6bfb34e9c070513d4b1db23007f4edecafb';
+  if exists (select 1 from pg_auth_members m join pg_roles g on g.oid=m.roleid join pg_roles mem on mem.oid=m.member where mem.rolname~'^carr_' and (g.rolsuper or g.rolname~'^(neon_|pg_)')) then return false; end if;
+  return observed_count=12 and observed_digest='sha256:eb650de73032466b46787f4a5826b60b100591657489a7990d9161e2d6588648';
 end $function$;

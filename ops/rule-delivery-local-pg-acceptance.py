@@ -120,6 +120,21 @@ def main() -> int:
     store_scope_by_id[synthetic_dell] = "dell"
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
+        # Observe the actual post-migration state before this acceptance mutates
+        # any fixture row. This proves the committed 0471 f7->6d and 0478
+        # 6d->eeb sequence reached its real terminal state.
+        cur.execute(
+            """select count(*),
+                      count(*) filter (where map_digest=%s),
+                      count(*) filter (where short_id=any(%s))
+                 from ops.rule_delivery_activation_target""",
+            (POST_0478_ACTIVATION_DIGEST, sorted(EXPECTED_IDS)),
+        )
+        post_migrate = one(cur)
+        check("the real post-migrate state is the exact eight on the 0478 map",
+              post_migrate == (len(EXPECTED_IDS), len(EXPECTED_IDS), len(EXPECTED_IDS)),
+              str(post_migrate))
+
         cur.execute("""do $$ begin
           if not exists(select 1 from pg_roles where rolname='carr_authority_joe') then
             create role carr_authority_joe login;
