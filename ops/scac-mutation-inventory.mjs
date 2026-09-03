@@ -172,7 +172,7 @@ export const SOURCE_MERGE_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
   secdef_execute: { count: 347, digest: "sha256:03624b669043c5e2e5a81633837f29ffb096b824a840456b26d7b6f3b405b467" },
   relation_dml: { count: 285, digest: "sha256:53d12ebf83db4661b0e55eb81f91ab510c34828424a2b945b66c0286134b0b0b" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
-  role_authority: { count: 95, digest: "sha256:082b8570b428c33296c801871177f6bfb34e9c070513d4b1db23007f4edecafb" },
+  role_authority: { count: 12, digest: "sha256:eb650de73032466b46787f4a5826b60b100591657489a7990d9161e2d6588648" },
   runtime_dml_grants: { count: 297, digest: "sha256:0f04a50d8bc65e2dcc765b1981ab1d5091c809570f0a773db3f5c6e2b9d43501" },
 });
 export const JOB_DEFINITION_BASELINE = Object.freeze({
@@ -1702,7 +1702,7 @@ export function renderSourceMergeForwardRegistrySql(rows = fullInventory(),
 `$fn$;\n` +
 `comment on function ops.scac_mutation_registry_v9_seal_available() is 'Exact immutable v9 registry seal; separate from whether the live catalog still equals v9.';\n` +
 `comment on function ops.scac_mutation_catalog_v9_current() is 'Historical v9 live-catalog validator; expected to become false after the v10 authority surface is installed.';\n\n`;
-  const v10Current = replaceExactlyOnce(
+  let v10Current = replaceExactlyOnce(
     v9Current
       .replaceAll("scac_mutation_catalog_v9_current", "scac_mutation_catalog_v10_current")
       .replaceAll("scac-mutation-registry.v9", "scac-mutation-registry.v10"),
@@ -1710,6 +1710,41 @@ export function renderSourceMergeForwardRegistrySql(rows = fullInventory(),
     `if observed_count<>${dbCatalogBaseline.secdef_execute.count} or observed_digest<>'${dbCatalogBaseline.secdef_execute.digest}' then return false; end if;`,
     "source-merge v10 current catalog baseline",
   );
+  // WR-000048: v10 is the first version whose role-authority census differs from
+  // its predecessor (the portable-scope fix, defect ec742b5f). Unlike the
+  // secdef/relation/column baselines the forward renders already rebaseline,
+  // the role-authority CENSUS SCOPE and its return predicate were identical
+  // across v1-v9, so no transform existed. Rebaseline both here, scoped to the
+  // v10 current-catalog function only — historical validators keep the old
+  // scope and their sealed 95 baseline untouched.
+  v10Current = replaceExactlyOnce(v10Current,
+    `    select oid from pg_roles where rolname~'^carr_' and rolname<>'carr_ci' union\n` +
+    `    select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end where other.rolname<>'carr_ci'\n`,
+    `    select oid from pg_roles where rolname~'^carr_' and rolname<>'carr_ci' and not rolcanlogin and not rolsuper union\n` +
+    `    select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end where other.rolname~'^carr_' and other.rolname<>'carr_ci' and not other.rolcanlogin and not other.rolsuper\n`,
+    "source-merge v10 role-authority census scope");
+  v10Current = replaceExactlyOnce(v10Current,
+    `return observed_count=${SIEP18_FORWARD_DB_CATALOG_BASELINE.role_authority.count} and observed_digest='${SIEP18_FORWARD_DB_CATALOG_BASELINE.role_authority.digest}';`,
+    `return observed_count=${dbCatalogBaseline.role_authority.count} and observed_digest='${dbCatalogBaseline.role_authority.digest}';`,
+    "source-merge v10 role-authority baseline");
+  // WR-000048 runtime escalation guard (dispatcher ruling 2 + Joe decision
+  // 23df893f, loop 569). The portable census no longer ENUMERATES platform /
+  // superuser roles, so this compensating control runs in the RUNTIME monitor:
+  // any carr_ role that is a member of a superuser role or a neon_*/pg_* bundle
+  // (write-all leaks in through neon_superuser -> pg_write_all_data) fails the
+  // v10 catalog current-check, which fails the policy epoch closed. Exactly one
+  // ruled exception is inlined and named; every other carr_ role still trips it,
+  // and a mutation test (a second fake carr_ role in a bundle) must FAIL closed.
+  v10Current = replaceExactlyOnce(v10Current,
+    `return observed_count=${dbCatalogBaseline.role_authority.count} and observed_digest='${dbCatalogBaseline.role_authority.digest}';`,
+    `-- Known exception (decision 23df893f, loop 569): carr_program5_forward_fix_verifier\n` +
+    `  -- is a Neon-console-created login role auto-granted neon_superuser; the grant\n` +
+    `  -- cannot be revoked in place and the role is load-bearing (migrations 0315/0322\n` +
+    `  -- CHECK/trigger on session_user, tools/ops-record.py). loop 569 tracks the durable\n` +
+    `  -- drop-and-recreate-via-SQL fix. bypass_rls on it is a separate open defect.\n` +
+    `  if exists (select 1 from pg_auth_members m join pg_roles g on g.oid=m.roleid join pg_roles mem on mem.oid=m.member where mem.rolname~'^carr_' and (g.rolsuper or g.rolname~'^(neon_|pg_)') and not (mem.rolname='carr_program5_forward_fix_verifier' and g.rolname='neon_superuser')) then return false; end if;\n` +
+    `  return observed_count=${dbCatalogBaseline.role_authority.count} and observed_digest='${dbCatalogBaseline.role_authority.digest}';`,
+    "source-merge v10 role-escalation guard");
 
   let sql = replaceExactlyOnce(v9Core, v9Current,
     "__SOURCE_MERGE_V9_CATALOG_SUCCESSOR__", "source-merge v9 current catalog block");

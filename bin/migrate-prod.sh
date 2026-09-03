@@ -107,9 +107,17 @@ escalate_refusal() {   # escalate_refusal <receipt_path>
 # correct in spirit and harmless) but the flag is the real guard.
 on_signal() {   # on_signal <signal-name> <signal-number>
   local receipt_path
+  # A failed receipt write (out/ full or unwritable) must NOT abort this handler
+  # under `set -e`: escalation is the load-bearing half and has to run even when
+  # the local receipt could not be persisted. write_refusal_receipt already
+  # printed its loud "COULD NOT WRITE..." line to stderr; fall through to
+  # escalation with a sentinel path the python helper treats as a missing
+  # receipt (it still opens the incident and posts to the room — only the
+  # receipt-update legs note the file is absent).
   receipt_path="$(write_refusal_receipt "${LAST_REASON_CLASS:-wrapper_terminated}" \
                    "${LAST_DETAIL:-migrate-prod.sh received SIG$1 mid-run}" \
-                   "${LAST_MIGRATION:-}")"
+                   "${LAST_MIGRATION:-}")" \
+    || receipt_path="$REPO/out/refusal-receipt-unwritten"
   escalate_refusal "$receipt_path"
   SIGNAL_HANDLED=1
   trap - EXIT   # the receipt is written; do not let the EXIT trap double-fire
@@ -123,9 +131,12 @@ on_exit() {
   [ "$COMPLETED" -eq 1 ] && return 0
   [ "$SIGNAL_HANDLED" -eq 1 ] && return 0
   local receipt_path
+  # Same set -e guard as on_signal: a failed receipt write must not abort the
+  # EXIT handler before escalation runs. Fall through with a sentinel path.
   receipt_path="$(write_refusal_receipt "${LAST_REASON_CLASS:-wrapper_terminated}" \
                    "${LAST_DETAIL:-migrate-prod.sh exited (rc=$rc) with no named cause}" \
-                   "${LAST_MIGRATION:-}")"
+                   "${LAST_MIGRATION:-}")" \
+    || receipt_path="$REPO/out/refusal-receipt-unwritten"
   escalate_refusal "$receipt_path"
 }
 trap on_exit EXIT
