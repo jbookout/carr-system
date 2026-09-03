@@ -184,6 +184,25 @@ def main() -> int:
             ).fetchone()[0] is not True:
                 raise RuntimeError("sealed v9 predecessor is unavailable")
 
+            # WR-000048 role-escalation guard (decision 23df893f, loop 569). The
+            # portable role-authority census no longer enumerates platform/superuser
+            # roles, so the v10 catalog current-check carries a compensating control:
+            # any carr_ role that is a member of a superuser role or a neon_*/pg_*
+            # bundle fails it closed. Exactly one ruled exception exists
+            # (carr_program5_forward_fix_verifier in neon_superuser); every OTHER
+            # carr_ role must still trip it. Mutation-test both facts here.
+            if cur.execute("select ops.scac_mutation_catalog_v10_current()").fetchone()[0] is not True:
+                raise RuntimeError("v10 catalog not current before escalation mutation")
+            cur.execute("savepoint escalation_mutation")
+            cur.execute("create role carr_siep18_escalation_probe")
+            cur.execute("grant pg_write_all_data to carr_siep18_escalation_probe")
+            if cur.execute("select ops.scac_mutation_catalog_v10_current()").fetchone()[0] is not False:
+                raise RuntimeError(
+                    "escalation guard did not trip on a carr_ role granted pg_write_all_data"
+                )
+            cur.execute("rollback to savepoint escalation_mutation")
+            cur.execute("release savepoint escalation_mutation")
+
             cur.execute("savepoint grant_drift")
             cur.execute("grant insert on public.lead to carr_reader")
             drifted = cur.execute("select ops.scac_reference_monitor_state()").fetchone()[0]

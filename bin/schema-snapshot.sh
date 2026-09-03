@@ -1156,11 +1156,15 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
     # +2 on 2026-09-01: the Repo Hygiene Program's R02 landing (Joe's ruling
     # 7f48abf6) adds two script entrypoints, hooks/canonical-edit-gate.py and
     # ops/untracked-anomaly-report.py, so v10's source set grows by two beyond
-    # R05's base of 805. v1-v9 are sealed history and sum to 12660; 12660 + 1451
-    # = 14111. All three re-derived live from the generator, not hand-added.
-    SCAC_TOTAL_ENTRY_COUNT=14113
-    SCAC_CURRENT_ENTRY_COUNT=1453
-    SCAC_CURRENT_SOURCE_COUNT=809
+    # R05's base of 805. v1-v9 are sealed history and sum to 12660. WR-000048's
+    # regeneration atom adds two more script entrypoints on top of main's #853
+    # count (tools/run-breakglass.py, the tracked break-glass launcher, and
+    # tools/migrate-prod-support.py, the migration door's receipt/escalation
+    # command), so v10 current grows by two: 1456 -> 1458, source 812 -> 814,
+    # total 12660 + 1458 = 14118. All three re-derived live from the generator.
+    SCAC_TOTAL_ENTRY_COUNT=14118
+    SCAC_CURRENT_ENTRY_COUNT=1458
+    SCAC_CURRENT_SOURCE_COUNT=814
     SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v10.generated.js"
     SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10'"
     SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9'"
@@ -1203,6 +1207,34 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
   ' "$SCAC_FULL_SET_SEALS" "$SCAC_VERSION_COUNT")" || {
     echo "schema-snapshot: immutable SCAC full-entry-set seals are unavailable or malformed" >&2; exit 1
   }
+  # WHAT THIS CHECK ASKS, AND WHAT IT DELIBERATELY DOES NOT. Every comparison
+  # below is about the registry being INTERNALLY CONSISTENT: the version rows,
+  # their counts, their digests recomputed from their own entries, the sealed
+  # entry sets, and the current version's row against the reviewed runtime file.
+  # All of it is a property of the data, so it answers the same way on any
+  # machine that applied the same migrations.
+  #
+  # ${SCAC_CURRENT_CATALOG_FUNCTION} USED TO BE ONE OF THESE ARMS AND IS NOT ANY
+  # MORE. That function re-derives the catalog from the LIVE CLUSTER and also
+  # carries the role-escalation guard, so it answers a different question — is
+  # the cluster's privilege state clean RIGHT NOW — and roles are cluster-wide,
+  # not database-scoped. The disposable-Postgres lane runs 52 acceptance
+  # programs against one cluster before this point, and at least one of them
+  # mints a probe role matching ^carr_ with an escalated grant on purpose, as
+  # its own permanent mutation test. That made writing a schema snapshot depend
+  # on the order the gates happened to run in, and on 2026-09-03 it failed the
+  # database class while all twelve genuine consistency arms were true. Proven
+  # by injection: creating one such role on a passing database flipped this arm
+  # alone and reproduced the failure exactly; dropping the role restored it.
+  #
+  # THE ASSERTION IS NOT DELETED, it is left where it belongs and still fires in
+  # two places that are about privilege rather than about snapshots: migration
+  # 0471 raises from inside the database when the live catalog is not current,
+  # and ops/siep18-reference-monitor-local-pg-gate.py asserts the function true
+  # and then asserts it false under a deliberately escalated probe role. The
+  # emitted snapshot below also keeps its own `not ${SCAC_CURRENT_CATALOG_FUNCTION}`
+  # guard, so a snapshot still refuses to seed onto a cluster with drifted
+  # privileges. Only the WRITE decision stopped asking a privilege question.
   SCAC_REGISTRY_EXACT="$("$PSQL" "$URL" -Atqc \
     "select count(*)=$SCAC_VERSION_COUNT
        and array_agg(registry_version order by split_part(registry_version,'.v',2)::integer)=array[$SCAC_VERSION_ARRAY]::text[]
@@ -1228,10 +1260,31 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
                 and e.ingress_kind not in ('db_function_acl','db_relation_acl','db_column_acl'))
        and (select 'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(v.catalog_projection),'UTF8'),'sha256'),'hex')='$SCAC_EXPECTED_CURRENT_CATALOG'
               from ops.scac_mutation_registry_version v where v.registry_version='scac-mutation-registry.v$SCAC_CURRENT_NUMBER')
-       and $SCAC_CURRENT_CATALOG_FUNCTION
      from ops.scac_mutation_registry_version v" 2>/dev/null)"
   [ "$SCAC_REGISTRY_EXACT" = t ] || {
     echo "schema-snapshot: SCAC v1-v${SCAC_CURRENT_NUMBER} registry is missing or internally drifted — nothing written" >&2
+    # NAME THE ARM THAT FAILED. The check above is one long AND across nine
+    # independent comparisons, so on failure it said only "drifted" and left
+    # the reader to re-derive the whole reseal cascade blind. That cost two
+    # rounds on 2026-09-03 and sent one session re-pinning a seal that was not
+    # the cause. This re-evaluates the SAME comparisons one at a time and
+    # prints each — it is diagnostic only and runs ONLY after the gate has
+    # already decided to fail, so it cannot turn a red check green.
+    "$PSQL" "$URL" -Atqc \
+      "select 'arm version_count            = '||(count(*)=$SCAC_VERSION_COUNT)::text
+         ||E'\n'||'arm version_array           = '||(array_agg(registry_version order by split_part(registry_version,'.v',2)::integer)=array[$SCAC_VERSION_ARRAY]::text[])::text
+         ||E'\n'||'arm total_entry_count       = '||(sum(entry_count)=$SCAC_TOTAL_ENTRY_COUNT)::text||' (observed '||sum(entry_count)||', expected $SCAC_TOTAL_ENTRY_COUNT)'
+         ||E'\n'||'arm per_version_counts      = '||bool_and(entry_count=(select count(*) from ops.scac_mutation_registry_entry e where e.registry_version=v.registry_version))::text
+         ||E'\n'||'arm entry_set_recompute     = '||bool_and(entry_set_digest=(select 'sha256:'||encode(public.digest(convert_to(coalesce(string_agg(e.entry_digest,',' order by e.ingress_key collate \"C\"),''),'UTF8'),'sha256'),'hex') from ops.scac_mutation_registry_entry e where e.registry_version=v.registry_version))::text
+         ||E'\n'||'arm sealed_entry_sets       = '||(not exists(select 1 from (values $SCAC_FULL_SET_SQL) expected(registry_version,entry_set_digest) left join ops.scac_mutation_registry_version sealed using(registry_version) where sealed.entry_set_digest is distinct from expected.entry_set_digest))::text
+         ||E'\n'||'arm entry_digest_self       = '||(not exists(select 1 from ops.scac_mutation_registry_entry e where e.entry_digest is distinct from 'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(e.contract),'UTF8'),'sha256'),'hex')))::text
+         ||E'\n'||'arm historical_seals_valid  = '||(not exists(select 1 from unnest(array[$SCAC_HISTORICAL_ARRAY]) historical(registry_version) where not ops.scac_mutation_registry_seal_valid(historical.registry_version)))::text
+         ||E'\n'||'arm current_version_row     = '||(select (registry_digest='$SCAC_EXPECTED_CURRENT_DIGEST' and entry_count=$SCAC_CURRENT_ENTRY_COUNT and source_entry_count=$SCAC_CURRENT_SOURCE_COUNT)::text||' (digest '||registry_digest||', entries '||entry_count||', source '||source_entry_count||')' from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v$SCAC_CURRENT_NUMBER')
+         ||E'\n'||'arm current_source_set      = '||(select (('sha256:'||encode(public.digest(convert_to(string_agg(e.entry_digest,',' order by e.entry_digest collate \"C\"),'UTF8'),'sha256'),'hex'))='$SCAC_EXPECTED_CURRENT_SOURCE_SET')::text from ops.scac_mutation_registry_entry e where e.registry_version='scac-mutation-registry.v$SCAC_CURRENT_NUMBER' and e.ingress_kind not in ('db_function_acl','db_relation_acl','db_column_acl'))
+         ||E'\n'||'arm current_catalog_digest  = '||(select (('sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(v2.catalog_projection),'UTF8'),'sha256'),'hex'))='$SCAC_EXPECTED_CURRENT_CATALOG')::text from ops.scac_mutation_registry_version v2 where v2.registry_version='scac-mutation-registry.v$SCAC_CURRENT_NUMBER')
+         ||E'\n'||'live_catalog_fn (not an arm)= '||($SCAC_CURRENT_CATALOG_FUNCTION)::text
+       from ops.scac_mutation_registry_version v" >&2 2>/dev/null ||
+      echo "schema-snapshot: the per-arm breakdown could not be read" >&2
     exit 1
   }
 

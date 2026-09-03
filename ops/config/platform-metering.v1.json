@@ -327,8 +327,8 @@
     },
     {
       "key": "local-mac",
-      "covers_service_runtimes": ["launchd"],
-      "scope": "Joe's local deterministic jobs and launchd adapters",
+      "covers_service_runtimes": ["launchd", "operator-invoked"],
+      "scope": "Joe's local deterministic jobs and launchd adapters, plus operator-invoked local doors (the WR-000048 migrate-prod wrapper)",
       "billing_model": "no per-run vendor charge; bounded by local power, storage and network",
       "meter_units": ["local runtime", "local disk bytes", "network bytes sent to metered services"],
       "current_plan": "owned_hardware",
