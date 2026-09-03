@@ -106,16 +106,30 @@ from ops.job_definition order by key collate "C",version
 """
 
 # Role membership changes effective DB authority without changing relation or
-# function ACL rows.  Project the complete connected component rooted at CARR
-# roles, including role options for every reachable member/bundle.
+# function ACL rows.  Project the ENVIRONMENT-INVARIANT connected component of
+# CARR *bundle* (non-login) roles, so the sealed census is identical on a
+# from-scratch migration build and on production.  The walk deliberately stays
+# inside the CARR namespace and never crosses into a login role, a superuser,
+# neondb_owner, or a neon_*/pg_* platform role: those are provisioned per
+# deployment (login/per-human roles) or by the provider (the
+# EXPECTED_PROVIDER_REACHABLE_ROLES bundle in tools/cleanup-staging-app-writer.py)
+# and are not part of what the migrations define.  A CARR role reaching a
+# superuser/write-all bundle is NOT dropped silently — ESCALATION_SQL below is a
+# separate, environment-independent assertion that catches exactly that, so
+# narrowing the census for portability does not blind the monitor.  (Root cause:
+# defect ec742b5f — the old walk lacked `not rolsuper` and swept neondb_owner +
+# the whole Neon/PG platform graph in, giving 95 rows on a clone and 52 on a
+# virgin DB, so no single seal could pass both.)
 ROLE_AUTHORITY_SQL = r"""
 with recursive connected(oid) as (
   select oid from pg_roles where rolname ~ '^carr_' and rolname<>'carr_ci'
+    and not rolcanlogin and not rolsuper
   union
   select other.oid
     from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid
     join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end
-   where other.rolname<>'carr_ci'
+   where other.rolname ~ '^carr_' and other.rolname<>'carr_ci'
+     and not other.rolcanlogin and not other.rolsuper
 ), role_rows as (
   select 'db-role:'||r.rolname ingress_key,
     jsonb_build_object('ingress_key','db-role:'||r.rolname,'row_kind','role',
@@ -150,6 +164,26 @@ select row from (select * from role_rows union all select * from membership_rows
 order by ingress_key collate "C"
 """
 
+# Environment-independent escalation assertion.  The portable census above
+# deliberately excludes platform/superuser/login roles for reproducibility; this
+# is the compensating control so that exclusion never hides a real escalation.
+# It flags any CARR role that is a member of a superuser role or a neon_*/pg_*
+# platform bundle (which is how write-all leaks in — e.g. neon_superuser carries
+# pg_write_all_data).  It MUST be empty on a correctly-provisioned database; a
+# from-scratch build has none.  Finding cf7b565e: production currently trips it
+# on carr_program5_forward_fix_verifier -> neon_superuser (an unremediated Neon
+# provider artifact), which is exactly what this is meant to surface.
+ESCALATION_SQL = r"""
+select jsonb_build_object('ingress_key','db-role-escalation:'||mem.rolname||':'||g.rolname,
+  'row_kind','escalation','carr_role',mem.rolname,'dangerous_bundle',g.rolname,
+  'bundle_superuser',g.rolsuper) row
+  from pg_auth_members m
+  join pg_roles g on g.oid=m.roleid
+  join pg_roles mem on mem.oid=m.member
+ where mem.rolname ~ '^carr_' and (g.rolsuper or g.rolname ~ '^(neon_|pg_)')
+ order by mem.rolname collate "C", g.rolname collate "C"
+"""
+
 QUERIES = {
     "secdef_execute": SECDEF_EXECUTE_SQL,
     "relation_dml": RELATION_DML_SQL,
@@ -182,4 +216,12 @@ def summarize(projection: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
 
 def project_role_authority(cur: Any) -> dict[str, Any]:
     rows = [row[0] for row in cur.execute(ROLE_AUTHORITY_SQL)]
+    return {"count": len(rows), "digest": digest(rows), "rows": rows}
+
+
+def project_escalation(cur: Any) -> dict[str, Any]:
+    """CARR roles reaching a superuser/write-all platform bundle. Empty on a
+    correctly-provisioned database; a non-empty result is an authority
+    escalation the portable census intentionally does not enumerate."""
+    rows = [row[0] for row in cur.execute(ESCALATION_SQL)]
     return {"count": len(rows), "digest": digest(rows), "rows": rows}

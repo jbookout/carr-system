@@ -327,6 +327,29 @@ def make_coord(cur, lease: dict, session: str, host: str, *, seconds: int = 300)
     return value
 
 
+# A snapshot minted for a negative case has to be genuinely expired by the time
+# the assertion runs, and "sleep a bit longer than the window" is not a way to
+# know that. It assumes the client and server clocks agree and that no time was
+# lost between minting the snapshot and reaching the wait -- neither of which a
+# loaded runner honours. Ask the server how much of ITS window is left, sleep
+# exactly that, then read it back and refuse to continue if the snapshot is
+# somehow still live. A negative test that runs against a still-valid snapshot
+# does not fail; it passes for the wrong reason, which is worse.
+def wait_out_snapshot(cur, coord: dict, *, margin: float = 0.5) -> float:
+    remaining = float(one(cur, """select extract(epoch from
+      (%s::timestamptz - clock_timestamp()))""", (coord["valid_until"],))[0])
+    if remaining > 0:
+        one(cur, "select pg_sleep(%s)", (remaining + margin,))
+    left = float(one(cur, """select extract(epoch from
+      (%s::timestamptz - clock_timestamp()))""", (coord["valid_until"],))[0])
+    if left > 0:
+        raise RuntimeError(
+            f"coordination snapshot {coord['valid_until']} still valid after "
+            f"waiting it out: {left:.3f}s remain, so the expiry assertion below "
+            "would have proved nothing")
+    return remaining
+
+
 def compiler_fixture() -> dict:
     return json.loads((ROOT / "control-room/contracts/fixtures/execution-fabric/"
                        "assurance-compiler.valid.v1.json").read_text())
@@ -642,8 +665,20 @@ def race_mixed_calls(dsn: str, calls: list[tuple]) -> list[dict]:
 
 
 def manifest_id(value: dict) -> uuid.UUID:
+    # Lead with the fields that decide what to do next. The caller in
+    # ops/local-pg-ci.py caps each reported line at 240 characters, and the raw
+    # payload spends its first 200 on schema noise -- so hosted run 33710296533
+    # printed `actual` and `causal_object` and was cut off before `expected`,
+    # which was the one number that would have identified the window at fault.
     if value.get("ok") is not True:
-        raise RuntimeError(f"manifest insert failed: {safe(value)}")
+        refusal_detail = value.get("refusal") or {}
+        summary = " ".join(
+            f"{field}={refusal_detail[field]}"
+            for field in ("code", "causal_object", "expected", "actual")
+            if field in refusal_detail)
+        raise RuntimeError(
+            f"manifest insert failed: {summary or '(no refusal block)'} "
+            f":: {safe(value)}")
     return uuid.UUID(str(value["manifest_id"]))
 
 
@@ -1113,14 +1148,47 @@ def main() -> int:
                   and mint_results[0].get("refusal", {}).get("causal_object") ==
                       "assurance.token_nondisclosure")
 
-            expired_coord = make_coord(cur, lease, session, host, seconds=1)
+            # THIS SNAPSHOT HAS TWO JOBS THAT PULL IN OPPOSITE DIRECTIONS, and
+            # for a long time it did both on a one-second window. The manifest
+            # insert immediately below must land INSIDE the window -- it is a
+            # positive insert whose id the rest of the block depends on. The
+            # currentness call further down must run OUTSIDE it, because that is
+            # the assertion proving an expired snapshot refuses.
+            #
+            # seconds=1 could not honestly serve the first job. make_coord
+            # truncates `now` to whole seconds and iso() truncates valid_until
+            # the same way, so a one-second window carries somewhere between
+            # zero and one second of REAL headroom -- and the insert has to fit
+            # a compile_input and a record_manifest round trip inside it. That
+            # is close to a coin flip on a fast machine and a lost bet on a slow
+            # one. Hosted run 33710296533 refused this exact insert 27ms past
+            # the boundary, and it surfaced as ASSURANCE_SNAPSHOT_EXPIRED on a
+            # branch whose diff could not reach assurance at all, so a harness
+            # race was read as a data defect. Second occurrence of the family.
+            #
+            # So the window is now sized for the insert rather than for the
+            # expiry, and the expiry is reached by MEASURING the server clock
+            # instead of outrunning it with a fixed sleep. Five seconds is not a
+            # magic number: the insert costs tens of milliseconds locally, so
+            # this is roughly two orders of magnitude of headroom, and the wait
+            # afterwards costs the same five seconds of CI wall clock whatever
+            # the runner's speed, because it sleeps the REMAINDER of the window
+            # and not a constant.
+            #
+            # What is deliberately NOT changed: the seconds=2 snapshot further
+            # up, whose insert is expected to refuse, and this block's own
+            # refusal assertion below. Both still prove exactly what they proved
+            # before -- see the mutation test in the commit that introduced this.
+            EXPIRING_SNAPSHOT_WINDOW_SECONDS = 5
+            expired_coord = make_coord(cur, lease, session, host,
+                                       seconds=EXPIRING_SNAPSHOT_WINDOW_SECONDS)
             expired_input, expired_manifest = compile_input(
                 cur, lease, plan, rules, expired_coord, session, host,
                 evidence_requirements=contract_evidence_requirements)
             expired_row = record_manifest(cur, lease, "write", expired_input,
                 expired_manifest, rules, expired_coord, uuid.uuid4())
             expired_id = manifest_id(expired_row)
-            one(cur, "select pg_sleep(1.1)")
+            wait_out_snapshot(cur, expired_coord)
             renewed = call(cur, "ops.renew_canonical_ownership_lease", (
                 lease["lease_id"], lease["lease_token"], lease["fencing_generation"], 900,
             ))
