@@ -99,6 +99,20 @@
       ]
     },
     {
+      "key": "migrate-prod",
+      "name": "Production migration door (bin/migrate-prod.sh)",
+      "purpose": "Registered so the door's own WR-000048 prevention wiring can open-incident against a real service key — open-incident refuses an unregistered one rather than inventing it (mcp-server/src/incident.js). This is the WRAPPER SCRIPT ITSELF as a monitored subject, distinct from neon-record-layer above (the data store migrate-prod.sh writes to, which lists bin/migrate-prod.sh only as ITS deploy_mechanism).",
+      "family": "Data",
+      "criticality": "high",
+      "owner_actor": "joe",
+      "repo_path": "bin/migrate-prod.sh",
+      "runtime": "operator-invoked",
+      "environments": [
+        { "environment": "production",
+          "notes": "No cadence: this door is run by hand or by a session, never on a schedule, so absence of activity is not itself an anomaly — same 'a service with no cadence is not an oversight' posture as carr-mcp above." }
+      ]
+    },
+    {
       "key": "nightly-record-layer",
       "name": "Nightly record-layer chain",
       "purpose": "Cadence, matcher, exports, corpus push, consumers, graph, backup — in that order.",
