@@ -413,7 +413,7 @@ def main():
     # manifest-declared type. No rule was reclassified; every dropped count
     # is a whole rule leaving the active set, not a type change.
     reviewed_counts = {
-        "constraint": 73, "procedure": 73, "doctrine": 12, "rubric": 36,
+        "constraint": 73, "procedure": 74, "doctrine": 12, "rubric": 36,
         "preference": 11, "precedent": 3, "example": 0,
     }
     split_compile_pass = (
@@ -451,7 +451,7 @@ def main():
         "source_manifest_provenance": {
             "path": "audits/guidance-migration-manifest.v1.tsv", "sha256": "a" * 64,
             "manifest": "carr-guidance-migration", "schema_version": "1.0.0",
-            "source_classification": "judgment_ambient", "entry_count": 90,
+            "source_classification": "judgment_ambient", "entry_count": 91,
         },
         "base_inventory": {
             "path": "ops/config/rule-enforcement-map.json", "sha256": "b" * 64,
@@ -486,7 +486,13 @@ def main():
         # same change (3 of the 11 retired ids -- 006a7eaa, 8117b414,
         # d367188d -- were judgment_ambient rows in the TSV; the other 8
         # were built classes with no manifest row to begin with).
-        and len(activation_manifest["entries"]) == 208
+        # 90 -> 91 and 208 -> 209 on 2026-09-03 (WR-000048 activation unblock):
+        # rule 1fcaa63a, the heavy-build-protocol rule taught 2026-09-01, was
+        # added to the enforcement map as judgment_ambient, so it owes a
+        # manifest row (procedure) and compiles to one more guidance item.
+        # procedure 73 -> 74. Nothing was reclassified; this is one whole rule
+        # ENTERING the active set, the mirror of the 2026-08-27 retirement batch.
+        and len(activation_manifest["entries"]) == 209
         and registry.activation_manifest_bytes(activation_manifest).endswith(b"\n")
         and len(registry.activation_manifest_sha256(activation_manifest)) == 64
         and registry.activation_manifest_sha256(activation_manifest)

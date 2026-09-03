@@ -210,7 +210,8 @@
       "6ec7312d",
       "893aeec5",
       "7b4ba3aa",
-      "1f750181"
+      "1f750181",
+      "1fcaa63a"
     ]
   },
   "categories": {
@@ -1135,6 +1136,11 @@
       "planned_control": "A guest-list check that runs the same pairing predicate as e6e0b0e7 over an invite list, once events and vendor Category are both on the record.",
       "rule_surface": "intro_politics",
       "why_unenforceable": "No tool call represents 'introduce' or 'co-invite' \u2014 the pairing is chosen inside prose a human sends, and the vendor attributes these rules key on (Category, Stage, Vertical, Territory, Links, delivery tier) live in vendors.xlsx and deals.md rather than on a gated write path. Guest lists are assembled outside any tool call, and the rule hands the exception to Joe explicitly for a given event."
+    },
+    "1fcaa63a": {
+      "category": "judgment_advisory",
+      "enforcement_class": "judgment_ambient",
+      "why_unenforceable": "The admission validators already refuse a heavy proposal lacking shape, manifest, typed master plan and a resolving runbook section. The half THIS rule adds -- the upfront research fleet, cheapest-qualified routing per slice, genuinely fresh review seats, and dispatcher-managed execution -- is the half doctrine heavy-build-protocol marks as binding by law with no mechanical gate behind it."
     },
     "1fddcffb": {
       "category": "judgment_advisory",
@@ -2465,6 +2471,13 @@
       "packs": [
         "vendor-intros"
       ]
+    },
+    "1fcaa63a": {
+      "load_layer": "pack",
+      "packs": [
+        "governance-rules"
+      ],
+      "why": "Joe's ruling 554db63d, overruling a layer0 call: \"i would argue its triggered by me calling for a heavy build.\" Nothing task-specific belongs in layer0 (rule 1fddcffb), and the boot cap is 24 of 35 used; this rule fires on an occasion, not at every boot."
     },
     "1fddcffb": {
       "load_layer": "layer0",

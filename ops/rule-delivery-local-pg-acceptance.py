@@ -45,6 +45,14 @@ CURRENT_ACTIVATION_DIGEST = "f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f3
 # PRIOR (pre-0363) and CURRENT (post-0363) are deliberately untouched -- 0363
 # still produces CURRENT, and its assertions below must keep expecting it.
 POST_0471_ACTIVATION_DIGEST = "6d21c37d533a5d98debfe4991c902164cf3c1fee88e7f42a3112468268e3335c"
+# A FIFTH LINK as of 2026-09-03. Tagging rule 1fcaa63a (heavy-build-protocol)
+# into the reviewed map moved its digest again. 0471 is a sealed artifact inside
+# the 0454-0471 generation chain and cannot be rewritten to follow, so
+# migrations/0478 repins the eight targets forward -- the same shape 0363 -> 0471
+# already used. POST_0471 above is deliberately NOT bumped: it is the value 0471
+# actually writes, and this fixture reconstructs the real sequence rather than
+# jumping to the end state.
+POST_0478_ACTIVATION_DIGEST = "eebfa2d627dfbbc65ae06e623724487158b940c9376cd30dbb067aec2779e8bb"
 ACTIVATION_TO_TEST_REF = (
     "ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; "
     "ops/rule-pack-preuse-reselection-selftest.py"
@@ -363,7 +371,28 @@ def main() -> int:
                 where map_digest=%s""",
             (POST_0471_ACTIVATION_DIGEST,),
         )
-        check("the post-0471 fixture is the exact eight on the current map",
+        check("the post-0471 fixture is the exact eight on the post-0471 map",
+              one(cur)[0] == len(EXPECTED_IDS))
+
+        # FIFTH LINK: 0478's repin. The cutover below is handed the digest read
+        # from the live overlay, which is now the post-0478 value. Without this
+        # step the two disagree and the database refuses with "activation map
+        # digest preimage differs" -- which is how the gap was found the first
+        # time too, at the fourth link.
+        cur.execute(
+            """update ops.rule_delivery_activation_target
+                  set map_digest=%s
+                where map_digest=%s""",
+            (POST_0478_ACTIVATION_DIGEST, POST_0471_ACTIVATION_DIGEST),
+        )
+        check("0478 repins exactly the eight post-0471 targets",
+              cur.rowcount == len(EXPECTED_IDS))
+        cur.execute(
+            """select count(*) from ops.rule_delivery_activation_target
+                where map_digest=%s""",
+            (POST_0478_ACTIVATION_DIGEST,),
+        )
+        check("the post-0478 fixture is the exact eight on the current map",
               one(cur)[0] == len(EXPECTED_IDS))
         cur.execute("""insert into actor (slug,kind,display_name) values ('joe','human','Joe')
                        on conflict (slug) do nothing returning id""")
