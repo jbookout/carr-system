@@ -1032,12 +1032,33 @@ def direct_metered_dispatch(cmd):
          "direct Cloudflare release bypasses bin/deploy-worker.sh"),
         (re.compile(r"\bneonctl\b[^\n;&|]*\bbranches\s+create\b", re.I),
          "direct Neon branch create bypasses neon-disposable-branch admission"),
-        (re.compile(r"\bgh\s+(?:workflow\s+run|run\s+rerun)\b", re.I),
-         "direct GitHub Actions dispatch bypasses the remote-CI budget gate"),
+        # `gh workflow run` and `gh run rerun` were refused here from the
+        # 2026-08-23 metering ruling until 2026-09-02. The repo went public on
+        # 2026-09-02 and standard-runner minutes stopped being metered; Joe
+        # ruled the same day that the dispatch refusal "is not needed now that
+        # its free". A session may re-run its own flaky hosted job again. The
+        # Cloudflare and Neon patterns above stay: those dispatches still cost.
     )
     for pattern, reason in patterns:
         if pattern.search(executable):
             return reason + " — blocked by the CARR metering gate"
+    return None
+
+
+def skipped_floor_push(cmd):
+    """Refuse a push that switches the local quality floor off.
+
+    CARR_SKIP_CI=1 exists for one human case: reconciling the canonical
+    checkout by hand. A session that sets it beside a `git push` is pushing
+    untested code and saying so in the environment (Engineering Workflow SOP,
+    section 2; Joe's 2026-09-02 ruling that hosted CI is the merge gate, not
+    the debugger). Prose describing the variable stays inert.
+    """
+    executable = strip_inert_text(cmd)
+    if not re.search(r"\bCARR_SKIP_CI=1\b", executable):
+        return None
+    if re.search(r"\bgit\s+push\b", executable):
+        return "CARR_SKIP_CI=1 beside a git push skips the local floor — blocked by the CARR guard; run ops/ci.sh and push green"
     return None
 
 
@@ -1047,6 +1068,10 @@ def check(cmd):
         return None
 
     reason = delegation_control_plane_write(cmd)
+    if reason:
+        return reason
+
+    reason = skipped_floor_push(cmd)
     if reason:
         return reason
 

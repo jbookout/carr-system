@@ -177,8 +177,16 @@ case("sanctioned Worker release wrapper is allowed", bash("./bin/deploy-worker.s
 case("direct Neon branch create is metering-refused",
      bash("neonctl branches create --project-id p --name x"), DENY)
 case("reviewed Neon rebuild wrapper is allowed", bash("python3 ops/p1-rebuild-gate.py"), ALLOW)
-case("direct GitHub workflow dispatch is metering-refused",
-     bash("gh workflow run ci.yml"), DENY)
+case("GitHub Actions re-run is allowed again (public repo, unmetered, Joe 2026-09-02)",
+     bash("gh run rerun 33666079689 --failed"), ALLOW)
+case("GitHub workflow dispatch is allowed again (same ruling)",
+     bash("gh workflow run ci.yml"), ALLOW)
+case("skipping the local floor beside a push is refused (SOP section 2)",
+     bash("CARR_SKIP_CI=1 git push -u origin HEAD"), DENY)
+case("the skip variable without a push is not a push and is untouched",
+     bash("CARR_SKIP_CI=1 ./ops/ci.sh --list"), ALLOW)
+case("prose naming the skip variable in a PR body stays inert",
+     bash('gh pr create --body "never use CARR_SKIP_CI=1 git push to dodge the floor"'), ALLOW)
 case("prose describing a metered dispatch remains inert",
      bash('gh pr create --body "npx wrangler deploy is refused"'), ALLOW)
 
