@@ -162,7 +162,10 @@ begin
   select count(*),'sha256:'||encode(public.digest(convert_to(ops.scac_canonical_json(
     coalesce(jsonb_agg(row order by ingress_key collate "C"),'[]'::jsonb)),'UTF8'),'sha256'),'hex')
     into observed_count,observed_digest from observed;
-  return observed_count=52 and observed_digest='sha256:345871802aa8f5b57aa87f3edfeac5187d06be0cb1ab5695371bcdfba4a49433';
+  if exists (select 1 from pg_auth_members m join pg_roles g on g.oid=m.roleid
+    join pg_roles mem on mem.oid=m.member
+    where mem.rolname~'^carr_' and (g.rolsuper or g.rolname~'^(neon_|pg_)')) then return false; end if;
+  return observed_count=${dbCatalogBaseline.role_authority.count} and observed_digest='${dbCatalogBaseline.role_authority.digest}';
 end $fn$;
 
 create or replace function ops.scac_policy_epoch_snapshot()
