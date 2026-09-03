@@ -172,7 +172,13 @@ order by ingress_key collate "C"
 # pg_write_all_data).  It MUST be empty on a correctly-provisioned database; a
 # from-scratch build has none.  Finding cf7b565e: production currently trips it
 # on carr_program5_forward_fix_verifier -> neon_superuser (an unremediated Neon
-# provider artifact), which is exactly what this is meant to surface.
+# provider artifact). UPDATED 2026-09-03 (WR-000048 repair cascade): this was
+# previously "exactly what this is meant to surface" because the SQL-side v10
+# catalog guard carried a named exception for that one role and only this
+# Python-side scan flagged it. The exception has been REMOVED from the guard —
+# it is no longer merely surfaced here, it now also fails the v10 catalog
+# current-check and the policy epoch closed on any database where this query
+# returns a non-empty result, carr_program5_forward_fix_verifier included.
 ESCALATION_SQL = r"""
 select jsonb_build_object('ingress_key','db-role-escalation:'||mem.rolname||':'||g.rolname,
   'row_kind','escalation','carr_role',mem.rolname,'dangerous_bundle',g.rolname,

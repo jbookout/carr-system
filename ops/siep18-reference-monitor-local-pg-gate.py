@@ -184,13 +184,19 @@ def main() -> int:
             ).fetchone()[0] is not True:
                 raise RuntimeError("sealed v9 predecessor is unavailable")
 
-            # WR-000048 role-escalation guard (decision 23df893f, loop 569). The
-            # portable role-authority census no longer enumerates platform/superuser
-            # roles, so the v10 catalog current-check carries a compensating control:
-            # any carr_ role that is a member of a superuser role or a neon_*/pg_*
-            # bundle fails it closed. Exactly one ruled exception exists
-            # (carr_program5_forward_fix_verifier in neon_superuser); every OTHER
-            # carr_ role must still trip it. Mutation-test both facts here.
+            # WR-000048 role-escalation guard (dispatcher ruling 2 + Joe decision
+            # 23df893f, loop 569 -- SUPERSEDED 2026-09-03: the named exception for
+            # carr_program5_forward_fix_verifier -> neon_superuser was REMOVED from
+            # the guard as part of the WR-000048 repair cascade, so the guard now
+            # reads plainly with no exceptions. The portable role-authority census
+            # no longer enumerates platform/superuser roles, so the v10 catalog
+            # current-check carries a compensating control: ANY carr_ role that is a
+            # member of a superuser role or a neon_*/pg_* bundle fails it closed --
+            # no exceptions, including carr_program5_forward_fix_verifier itself.
+            # Mutation-test both trip paths here: the neon_*/pg_* bundle-name path
+            # (an existing pg_* role) and the plain rolsuper path (a role this test
+            # creates and marks superuser itself, since no platform role in a local
+            # database is guaranteed to carry rolsuper).
             if cur.execute("select ops.scac_mutation_catalog_v10_current()").fetchone()[0] is not True:
                 raise RuntimeError("v10 catalog not current before escalation mutation")
             cur.execute("savepoint escalation_mutation")
@@ -202,6 +208,27 @@ def main() -> int:
                 )
             cur.execute("rollback to savepoint escalation_mutation")
             cur.execute("release savepoint escalation_mutation")
+
+            # Second, distinct trip path (WR-000048): a carr_ role that is a member
+            # of an ACTUAL superuser role -- not a neon_*/pg_* NAMED bundle -- must
+            # also fail the v10 current-check closed, with no exception for any
+            # carr_ role including the one named in the now-removed carve-out.
+            if cur.execute("select ops.scac_mutation_catalog_v10_current()").fetchone()[0] is not True:
+                raise RuntimeError("v10 catalog not current before superuser-bundle mutation")
+            cur.execute("savepoint superuser_bundle_mutation")
+            cur.execute("create role carr_siep18_superuser_bundle_probe")
+            cur.execute("create role siep18_gate_synthetic_superuser superuser")
+            cur.execute(
+                "grant siep18_gate_synthetic_superuser to carr_siep18_superuser_bundle_probe"
+            )
+            if cur.execute("select ops.scac_mutation_catalog_v10_current()").fetchone()[0] is not False:
+                raise RuntimeError(
+                    "escalation guard did not trip on a carr_ role granted an actual "
+                    "superuser role (rolsuper path, distinct from the neon_/pg_ "
+                    "bundle-name path above)"
+                )
+            cur.execute("rollback to savepoint superuser_bundle_mutation")
+            cur.execute("release savepoint superuser_bundle_mutation")
 
             cur.execute("savepoint grant_drift")
             cur.execute("grant insert on public.lead to carr_reader")
