@@ -14,6 +14,13 @@ const canonical = value => {
   return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
 };
 const digest = value => `sha256:${crypto.createHash("sha256").update(canonical(value)).digest("hex")}`;
+const ACCEPTED_S0_RESOURCE_REVISIONS = [
+  {resource_ref: "resource:source-lock", revision_ref: "revision:3", content_digest: "sha256:a4bd7234feadf4556abc10091a6e7464b96fcb8a293fc0dbfce3ad6171a6996d"},
+  {resource_ref: "resource:evaluation-contract", revision_ref: "revision:3", content_digest: "sha256:9deb92a11ce6e86c96427b26d53d1600163888d69a6ddc8e4950327e11cf471c"},
+  {resource_ref: "resource:threat-model", revision_ref: "revision:3", content_digest: "sha256:f802c5ef05ebb49c64adc28725f544fb2d34c60b4ee63b9cce6ba7c11aefc0ff"},
+  {resource_ref: "resource:cost-model", revision_ref: "revision:3", content_digest: "sha256:39c51c478ceff930a43bdb6846c17515c2a6c236603472866c8ad018c4c7604c"},
+  {resource_ref: "resource:legacy-inventory", revision_ref: "revision:3", content_digest: "sha256:78d122e08129a489f3f14ef850f890c5a7ba276096924f448eb48f7d8103914a"}
+];
 const sourceVerificationIsFresh = (verification, nowMs = Date.now()) => {
   const observedMs = Date.parse(verification.observed_at);
   if (!Number.isFinite(observedMs) || !Number.isInteger(verification.max_age_days)) return false;
@@ -262,6 +269,21 @@ test("S0 memory evaluation baseline is frozen, complete, and non-authoritative",
     runbook_content_digest: "sha256:ad2316cf6c9f28c56f9c19f3033601a78021c3ade5628c2f3ea1d09d4434c718",
     slice_ref: "slice:learning-baseline-contracts-v2"
   });
+  assert.deepEqual(fixture.record_state_binding, {
+    work_request_id: "wr:7225c61a-324b-46b4-a234-8aff42f831fd",
+    state_version: 3,
+    canonical_record_digest: "sha256:7d3e18d350d0241af9e060fa336fb978b97b5053629a4c60b1a04a09e51b680c",
+    accepted_resource_revisions: ACCEPTED_S0_RESOURCE_REVISIONS
+  });
+  const resourceDigestDrift = structuredClone(fixture);
+  resourceDigestDrift.record_state_binding.accepted_resource_revisions[0].content_digest = `sha256:${"0".repeat(64)}`;
+  assert.equal(validate(resourceDigestDrift).valid, false, "unaccepted controller resource digest is rejected");
+  const resourceDigestSwap = structuredClone(fixture);
+  const sourceLockDigest = resourceDigestSwap.record_state_binding.accepted_resource_revisions[0].content_digest;
+  resourceDigestSwap.record_state_binding.accepted_resource_revisions[0].content_digest =
+    resourceDigestSwap.record_state_binding.accepted_resource_revisions[1].content_digest;
+  resourceDigestSwap.record_state_binding.accepted_resource_revisions[1].content_digest = sourceLockDigest;
+  assert.equal(validate(resourceDigestSwap).valid, false, "accepted controller resource digests cannot be permuted across resource refs");
 
   const resourceBindings = new Map(fixture.resource_bindings.map(row => [row.resource_ref, row]));
   const resourceBodies = {
@@ -461,6 +483,7 @@ test("check:S0-1 pins every research revision and separates claims from reproduc
   const validate = compileSchema(schema);
   assert.equal(validate(fixture).valid, true);
   assert.equal(fixture.source_lock.gate_ref, "gate:S0-1-source-lock");
+  assert.deepEqual(fixture.record_state_binding.accepted_resource_revisions, ACCEPTED_S0_RESOURCE_REVISIONS);
 
   const allowedClasses = new Set(["vendor_claim", "packet_bound_claim", "source_inspected", "locally_reproduced"]);
   for (const source of fixture.source_lock.sources) {
