@@ -27,34 +27,34 @@ const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 // refused so an accidental invocation cannot rewrite a reviewed seal.
 export const HISTORICAL_REGISTRY_SEALS = Object.freeze({
   v1: Object.freeze({ version: REGISTRY_VERSION, digest: "sha256:7cc2feacec82bf7cce2af9af309dc4ae9426922003471703af010f6728957190", entryCount: 1387, sourceEntryCount: 800 }),
-  v2: Object.freeze({ version: REGISTRY_V2_VERSION, digest: "sha256:d78696444c3f9d6dc9f82b71469986671b3846b762be7096ef4370bf4f6d609e", entryCount: 1391, sourceEntryCount: 800 }),
-  v3: Object.freeze({ version: REGISTRY_V3_VERSION, digest: "sha256:b5b32aeb7c777cf726c5cb526a860a5b7d644afa54c3ce1fd55a42132fc0b298", entryCount: 1395, sourceEntryCount: 800 }),
-  v4: Object.freeze({ version: REGISTRY_V4_VERSION, digest: "sha256:1bdf011d492a611eb528ddb907292871d099fea507e4fca11646978944a42c91", entryCount: 1399, sourceEntryCount: 800 }),
-  v5: Object.freeze({ version: REGISTRY_V5_VERSION, digest: "sha256:18a0bcb000edd6bad0f82b229748592173c6de31b18663718418a2d5fd95b36b", entryCount: 1404, sourceEntryCount: 800 }),
-  v6: Object.freeze({ version: REGISTRY_V6_VERSION, digest: "sha256:9538ff0f43a6b5cbd7bcabb0f79bd78852e1f9c23f29291b42b25f61035f9dc2", entryCount: 1408, sourceEntryCount: 800 }),
-  v7: Object.freeze({ version: REGISTRY_V7_VERSION, digest: "sha256:0662449e25ab7cb26eb2ba922d4e2177b22e62066c8d5a3eac01daa9879a1aec", entryCount: 1412, sourceEntryCount: 800 }),
-  v8: Object.freeze({ version: REGISTRY_V8_VERSION, digest: "sha256:aac53ad8a01b1e2bbf4cd633b6f4cacdf4d66195556be31a64b0795091d4f397", entryCount: 1425, sourceEntryCount: 800 }),
-  v9: Object.freeze({ version: REGISTRY_V9_VERSION, digest: "sha256:af77a09256a23a31c616e89136eb2adb861fef99a2068f2950c223d6d1828dc6", entryCount: 1439, sourceEntryCount: 800 }),
+  v2: Object.freeze({ version: REGISTRY_V2_VERSION, digest: "sha256:0312f989587b54893e413bdb9cd645ebd5902f9f0c4c77e254cbcd3346ae1b85", entryCount: 1405, sourceEntryCount: 814 }),
+  v3: Object.freeze({ version: REGISTRY_V3_VERSION, digest: "sha256:63157c3d8cd03033e6fc8575fd5bf165dabda424c26ae7d0efdea83c92af3458", entryCount: 1409, sourceEntryCount: 814 }),
+  v4: Object.freeze({ version: REGISTRY_V4_VERSION, digest: "sha256:6c72a6462d5715f23d31c2bfc72dd1d5a819fa531f12ca7dbb2ef47e6b9a71dc", entryCount: 1413, sourceEntryCount: 814 }),
+  v5: Object.freeze({ version: REGISTRY_V5_VERSION, digest: "sha256:5e03e221294021b1a70c9a845c2fc202045d1219ce1a8d6d3abcda557110208e", entryCount: 1418, sourceEntryCount: 814 }),
+  v6: Object.freeze({ version: REGISTRY_V6_VERSION, digest: "sha256:0326b6ca83dd51da64fab90582f17653f08174ea471b9a6d8188e4e61d8e8728", entryCount: 1422, sourceEntryCount: 814 }),
+  v7: Object.freeze({ version: REGISTRY_V7_VERSION, digest: "sha256:72250b895ef1baaefc502970c0be3867d9143e1114a42594b3473121c50fd5c1", entryCount: 1426, sourceEntryCount: 814 }),
+  v8: Object.freeze({ version: REGISTRY_V8_VERSION, digest: "sha256:4f5dc1e6d3ec0ceec9cb713f46b364eb5c041aa23d60980794334a8061b747a4", entryCount: 1439, sourceEntryCount: 814 }),
+  v9: Object.freeze({ version: REGISTRY_V9_VERSION, digest: "sha256:ac123ac20bfb2fe3037da940699a07fe22ff84a92c6d70b2455bcba24835ecc8", entryCount: 1453, sourceEntryCount: 814 }),
 });
 export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
   "migrations/0454_siep11_mutation_registry.sql": "7985d42b9b36964b33503f4ff42d332e6bcce085217f06464a9d6abf58126bdd",
-  "migrations/0455_siep12_policy_epoch.sql": "ad3e10165c764799fea2b70f7328e6bc935f737216e03921726363175245adc6",
-  "migrations/0457_siep13_forward_mutation_registry.sql": "010d94e1ad6be6d34209492a54e6b9497702e6e3d2203448466df00602cec8a8",
-  "migrations/0459_siep14_forward_mutation_registry.sql": "1a4980d92f8f024147d57619fa7eb4858805a3314cd61ea8eb0f8a0f1704a2ef",
+  "migrations/0455_siep12_policy_epoch.sql": "eb92e9366dd9442b121998bf9d61a26a20a984cd7ed0aea387a15714a6aa0785",
+  "migrations/0457_siep13_forward_mutation_registry.sql": "35d46cad7a5d2ff2818605bfc41f44fb165eb1ca130861baa9241335be9bdcb1",
+  "migrations/0459_siep14_forward_mutation_registry.sql": "429f85ec6150252c386cfb7c4239f517e292a6b379fd9f903746801bdc954465",
   "mcp-server/src/scac-mutation-registry.generated.js": "e8cf336806337ba0ba25532816692ac2a24b48f9df58cee2966baaeafdae5abc",
-  "mcp-server/src/scac-mutation-registry.v2.generated.js": "7e2e680f5eb0c20aa01dab605d9040c2b71841f75bf51fd9a02468ca1c2da23d",
-  "mcp-server/src/scac-mutation-registry.v3.generated.js": "45e03d5c8fde6f44067cc2a6ec97b262f251182f77a95efdeafdcf29adc9e0c5",
-  "mcp-server/src/scac-mutation-registry.v4.generated.js": "bcece72c3089b3970128e306094836b3c88f5d8f41c0e1b92262eee2662c918f",
-  "migrations/0461_siep15_forward_mutation_registry.sql": "ef1d65080c684275278c380e867abfef1d3ce101f31061e8653f6f716a2b9694",
-  "mcp-server/src/scac-mutation-registry.v5.generated.js": "ad999f53bb954cda52708050845946e2beddcc2fa3cc44239336a043d2279cf3",
-  "migrations/0462_siep16_forward_mutation_registry.sql": "bdcd95597a966a9828b29d3c0875b747bcc781f4351816899d533e87901aadea",
-  "mcp-server/src/scac-mutation-registry.v6.generated.js": "be5c28d7ab1cc7f6b00ae2c556ab4359ec8a1f3ef0d64f3b57ecf8ab43a25137",
-  "migrations/0464_siep16_integrated_mutation_registry.sql": "83b442d96e2a73cf34efc5384994a60fc0df11ff899a3c03ec3f9d343490c288",
-  "mcp-server/src/scac-mutation-registry.v7.generated.js": "b2f8bee1c5027d97cfaf9930b7b9bf0130b51802f1af398e5f0c1867911ab45d",
-  "migrations/0466_siep17_forward_mutation_registry.sql": "f23d89bf7862b67eb2eb979a3eb3bf0947fb170c5f02cd83b4f316f4897bec13",
-  "mcp-server/src/scac-mutation-registry.v8.generated.js": "2388c79ae79b76b433ce69e237fd43d850deeebfb42cf787490882191ae8ddf0",
-  "migrations/0468_siep18_forward_mutation_registry.sql": "2edee53cbfc70e8585ac9004a93ba0002728c88972bc1aedad840f411b55e794",
-  "mcp-server/src/scac-mutation-registry.v9.generated.js": "5d01afe2f0e035441f3f8ec406db8a53557eb536652624609d151ce12f09706e",
+  "mcp-server/src/scac-mutation-registry.v2.generated.js": "14a6440f94338c10d20a02f367b7ae446069dbc3fb5c67f0fba5b6ab28263eb2",
+  "mcp-server/src/scac-mutation-registry.v3.generated.js": "7664f0870f47670287446872c3cfea790d4b4d52662366d88f6a6244e585bbb7",
+  "mcp-server/src/scac-mutation-registry.v4.generated.js": "cbf2ebc58e70b18af1d810a75a1d9ebcda0520180dd7a32a2ae4ffd2466bcd8f",
+  "migrations/0461_siep15_forward_mutation_registry.sql": "811d8cffe0f1d09402f569e550e2cc5d043cd722583177a8a84c35aeb4dda10b",
+  "mcp-server/src/scac-mutation-registry.v5.generated.js": "3a9d1f4a9c42b0f3beff1b808b49059b1bc7281bcc2783df799ef69c55911e1c",
+  "migrations/0462_siep16_forward_mutation_registry.sql": "9343b829ac1d08aa481dcf4ed08a0dbf513e6c489b6d44fc6e6e285a5c073b3d",
+  "mcp-server/src/scac-mutation-registry.v6.generated.js": "4cd55b85d6b51374d71d2e4d63ab87510cd5df417fca2be773acc10b316f25fd",
+  "migrations/0464_siep16_integrated_mutation_registry.sql": "161d9a50b718559757bea32d7b7ae69397d6c57af450432569718e050e9839c7",
+  "mcp-server/src/scac-mutation-registry.v7.generated.js": "d3c668a7ac7a5a8a188603e8cc1315fcfc6993200a921768e3bf3be7722b46f4",
+  "migrations/0466_siep17_forward_mutation_registry.sql": "d5afb809f48aed1887c03f1db57de9e0ab27f01ec55dc937b0136fe9e89ef221",
+  "mcp-server/src/scac-mutation-registry.v8.generated.js": "d8592fcdcb79f36ce5998581c148311cbc10ea98eed7ee0a503da05a702c646f",
+  "migrations/0468_siep18_forward_mutation_registry.sql": "923417a32fbdbc84e942acec1aed79c252cd430d3515abea88efe4d71ca0fc10",
+  "mcp-server/src/scac-mutation-registry.v9.generated.js": "76808c89e7d813c017f437611f2e97dbae15fadf3ed609bfbb9244eb50d808a6",
 });
 // 0467 is the reviewed SIEP-18 monitor source consumed by the v9 generator.
 // It is not historical yet, but its bytes must still be exact: otherwise a
@@ -781,7 +781,16 @@ function catalogSeedSql(version = REGISTRY_VERSION) {
 function renderSuccessorRegistrySql(rows = fullInventory(),
   dbCatalogBaseline = SIEP12_DB_CATALOG_BASELINE) {
   const version = REGISTRY_V2_VERSION;
-  const predecessor = registrySeal(REGISTRY_VERSION, rows, DB_CATALOG_BASELINE);
+  // WR-000048: v1 (migration 0454) is sealed/frozen, not part of this
+  // regeneration cascade -- its predecessor reference must be the FROZEN
+  // HISTORICAL_REGISTRY_SEALS.v1 (which matches 0454's actual committed
+  // bytes exactly), never a fresh registrySeal() computed against the
+  // CURRENT (larger, still-growing) fullInventory(). Using a fresh
+  // computation here silently drifted from what 0454 actually contains as
+  // the codebase's tool/rule inventory grew after 0454 was authored, and
+  // would raise "sealed SCAC mutation registry v1 changed during successor
+  // creation" the first time this generator was actually re-run end to end.
+  const predecessor = HISTORICAL_REGISTRY_SEALS.v1;
   const digest = registryDigestFor(version, rows, dbCatalogBaseline);
   const catalogCount = dbCatalogBaseline.secdef_execute.count +
     dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
@@ -2044,7 +2053,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--write-rebased-migration-v2") {
     const target = resolve(process.argv[3] || "migrations/0455_siep12_policy_epoch.sql");
-    const v1Seal = registrySeal(REGISTRY_VERSION, rows, DB_CATALOG_BASELINE);
+    // WR-000048: v1Seal must be the FROZEN HISTORICAL_REGISTRY_SEALS.v1, matching
+    // migration 0454's actual committed bytes -- see the matching comment in
+    // renderSuccessorRegistrySql above.
+    const v1Seal = HISTORICAL_REGISTRY_SEALS.v1;
     await writeFile(target, renderPolicyEpochMigration(renderSuccessorRegistrySql(rows), {
       v1Seal,
       dbCatalogBaseline: SIEP12_DB_CATALOG_BASELINE,

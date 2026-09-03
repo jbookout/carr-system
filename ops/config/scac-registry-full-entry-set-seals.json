@@ -1,12 +1,12 @@
 {
   "scac-mutation-registry.v1": "sha256:9ac6c128ffa04b7f88cdc68fae1739e88d0e5d367799b3b2a37f9f4931c36757",
-  "scac-mutation-registry.v2": "sha256:09847d91bbf2e77ca810651d5fcb7ad1a1d94deec5219486a9ccaafa3553613c",
-  "scac-mutation-registry.v3": "sha256:811f2db1346132550935bf8ed6981b7e4b91df921dc955bd3dba6d22cd80dcd4",
-  "scac-mutation-registry.v4": "sha256:822fdecb166e4eab7d2c42ff5fb6d89aebe97a362ca58b00713a13953e20e867",
-  "scac-mutation-registry.v5": "sha256:f9c7564830d5e57d760d1a043a650dfb729cec79cdcdab2b3862c3f1b630ec0d",
-  "scac-mutation-registry.v6": "sha256:3a909bf4f9826a3abca2bb27fbed8f99c8a67233a6d796f3248028cfdd4a31ef",
-  "scac-mutation-registry.v7": "sha256:ecb1de3f712ce26eadbefc584a4ff9cd8b515d2e8e7a908a0cd6af6daf07f26a",
-  "scac-mutation-registry.v8": "sha256:00a09739dc8bfa869e82886ebbec2f2a48b3e7c0ec4801eeedde0a7c5c9664fd",
-  "scac-mutation-registry.v9": "sha256:1afe13ec52a979bafb97488209253c4fb60a4a7f2a62b46c4f00d1350b68f9c1",
-  "scac-mutation-registry.v10": "sha256:bded6b7832f8b3082b80e900214ba97a49de279c70a7634a137df4358f052687"
+  "scac-mutation-registry.v2": "sha256:92f1106e11f194d1b85c8f056d649bb5f361610c0b8cdc2097b8e76588bb8e97",
+  "scac-mutation-registry.v3": "sha256:21e3abe52b1c93e50a8e7fb1492b8f669e39995af10fd928d2e0e30f24fff9e4",
+  "scac-mutation-registry.v4": "sha256:b6be09ccb19a7245f4586bb3e47cd038b0cdbfe560a1695c9855764ffe339284",
+  "scac-mutation-registry.v5": "sha256:b3dd623cd6a84bc6a725a21739ee7550a994a32c6ab8b1ba616a6662f29b2041",
+  "scac-mutation-registry.v6": "sha256:35057c123a9752b844a22ae18d7bde14e92f3ee227de52da6ca42a572e4499ab",
+  "scac-mutation-registry.v7": "sha256:d3381a84462a643799fc1265ac4e3322882b7e603d73528467586348f84e78dd",
+  "scac-mutation-registry.v8": "sha256:70ee8f74d62214681b44d239d974b6aa9a452c7018b48584fc5de8201e8309d3",
+  "scac-mutation-registry.v9": "sha256:0747384fca3f176162fe168559c04ecb3f908c4b0b078bfcb9e125ea94178ab1",
+  "scac-mutation-registry.v10": "sha256:ba68eb38bc7e39d4b76cbc251d5452c5ae73c5e0afbf1b7c056f33cc275aa777"
 }

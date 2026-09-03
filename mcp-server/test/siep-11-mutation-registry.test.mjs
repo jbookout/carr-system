@@ -201,8 +201,8 @@ test("v9 successor seals v8 and binds the measured SIEP-18 grant snapshot", () =
     HISTORICAL_REGISTRY_ARTIFACT_SHA256["mcp-server/src/scac-mutation-registry.v9.generated.js"]);
   assert.equal(sha256(v9Migration),
     HISTORICAL_REGISTRY_ARTIFACT_SHA256["migrations/0468_siep18_forward_mutation_registry.sql"]);
-  assert.equal(HISTORICAL_REGISTRY_SEALS.v9.sourceEntryCount, 800);
-  assert.equal(expectedEntryCount, 1439);
+  assert.equal(HISTORICAL_REGISTRY_SEALS.v9.sourceEntryCount, 814);
+  assert.equal(expectedEntryCount, 1453);
   assert.equal(sha256(siep18MonitorMigration), SIEP18_MONITOR_ARTIFACT_SHA256);
   assert.equal(SIEP18_PRE_V9_DB_CATALOG_BASELINE.secdef_execute.count, 338);
   assert.equal(SIEP18_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count -
@@ -217,7 +217,7 @@ test("v9 successor seals v8 and binds the measured SIEP-18 grant snapshot", () =
     /scac_policy_epoch_snapshot_v8\(\)/,
   ])
     assert.match(v9Migration, selfEffect);
-  assert.match(v9Migration, new RegExp(`'${HISTORICAL_REGISTRY_SEALS.v9.digest}',${expectedEntryCount},800,`));
+  assert.match(v9Migration, new RegExp(`'${HISTORICAL_REGISTRY_SEALS.v9.digest}',${expectedEntryCount},814,`));
   assert.match(v9Migration, /scac_mutation_catalog_v8_live_at_seal\(\)/);
   assert.match(v9Migration, /scac_mutation_registry_v8_seal_available\(\)/);
   assert.match(v9Migration, /scac_mutation_catalog_v9_current\(\)/);
@@ -403,8 +403,8 @@ test("job definitions and live DB capabilities have exact reviewed baselines", (
   assert.match(migration, /for category,kind in values \('secdef_execute','db_function_acl'\)/);
   assert.match(migration, /actual_digest<>expected->>'digest'/);
   assert.deepEqual(SIEP12_DB_CATALOG_BASELINE.role_authority, {
-    count: 95,
-    digest: "sha256:082b8570b428c33296c801871177f6bfb34e9c070513d4b1db23007f4edecafb",
+    count: 12,
+    digest: "sha256:eb650de73032466b46787f4a5826b60b100591657489a7990d9161e2d6588648",
   });
   assert.match(successorMigration, /pg_auth_members/);
 });
