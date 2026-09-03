@@ -1156,14 +1156,15 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
     # +2 on 2026-09-01: the Repo Hygiene Program's R02 landing (Joe's ruling
     # 7f48abf6) adds two script entrypoints, hooks/canonical-edit-gate.py and
     # ops/untracked-anomaly-report.py, so v10's source set grows by two beyond
-    # R05's base of 805. +2 again on 2026-09-02: WR-000048's registry re-pin
-    # registers tools/run-breakglass.py (the tracked break-glass launcher) and
-    # tools/migrate-prod-support.py (the migration door's receipt/escalation
-    # command). v1-v9 are sealed history and sum to 12660; 12660 + 1455
-    # = 14115. All three re-derived live from the generator, not hand-added.
-    SCAC_TOTAL_ENTRY_COUNT=14115
-    SCAC_CURRENT_ENTRY_COUNT=1455
-    SCAC_CURRENT_SOURCE_COUNT=811
+    # R05's base of 805. v1-v9 are sealed history and sum to 12660. WR-000048's
+    # regeneration atom adds two more script entrypoints on top of main's #853
+    # count (tools/run-breakglass.py, the tracked break-glass launcher, and
+    # tools/migrate-prod-support.py, the migration door's receipt/escalation
+    # command), so v10 current grows by two: 1456 -> 1458, source 812 -> 814,
+    # total 12660 + 1458 = 14118. All three re-derived live from the generator.
+    SCAC_TOTAL_ENTRY_COUNT=14118
+    SCAC_CURRENT_ENTRY_COUNT=1458
+    SCAC_CURRENT_SOURCE_COUNT=814
     SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v10.generated.js"
     SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10'"
     SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9'"
