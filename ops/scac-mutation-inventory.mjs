@@ -3,8 +3,8 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { TOOLS } from "../mcp-server/src/tools.js";
@@ -29,6 +29,12 @@ const DIRECT_MIGRATION_PREIMAGE_PATH = new URL(
   "./config/scac-direct-registry-migration-preimages.v1.json", import.meta.url);
 const DIRECT_MIGRATION_PREIMAGES = JSON.parse(
   readFileSync(DIRECT_MIGRATION_PREIMAGE_PATH, "utf8"));
+const STATIC_FRONTIER_PREIMAGE_PATH = new URL(
+  "./config/scac-static-frontier-migration-preimages.v1.json", import.meta.url);
+const STATIC_FRONTIER_PREIMAGES = JSON.parse(
+  readFileSync(STATIC_FRONTIER_PREIMAGE_PATH, "utf8"));
+const FULL_ENTRY_SET_SEALS_PATH = new URL(
+  "./config/scac-registry-full-entry-set-seals.json", import.meta.url);
 // v1-v9 remain source-only until Joe approves Production application. Their
 // active post-main tail may be regenerated only through the explicit
 // --write-rebased-* commands below; ordinary historical write modes stay
@@ -74,6 +80,12 @@ export const DIRECT_REGISTRY_MIGRATION_ARTIFACT_SHA256 = Object.freeze({
   "migrations/0465_siep17_token_challenge_authority.sql": "4000706bc923738b6365e476a0a035093f19135ce8d76b6a22ca0b339764aef7",
   "migrations/0467_siep18_atomic_db_monitor_grants.sql": "96d9972351de67295c683096b9780243da6efe35db18b4baa80cfbe913969a9f",
   "migrations/0470_source_merge_authority_projection.sql": "979c1312a6c6d41807c97a4893abe3bc6dc6716f21d83e5969be7f1372130967",
+});
+export const STATIC_FRONTIER_MIGRATION_ARTIFACT_SHA256 = Object.freeze({
+  "migrations/0456_siep13_artifact_registry.sql": "246b170ce9d7ef021b51fba34de391ff7ed4c7c4fd60c03ecd0504f7d220be7e",
+  "migrations/0458_siep14_root_trust.sql": "9d76f539908d5d20c7a443f6f51641faafa090024111cf18316a4d3cf0abfe5a",
+  "migrations/0463_retired_rule_delivery_cleanup.sql": "707c41c049174fdde4dfcf488ea100e96aabcb1e7b17a6c554c7bed336c316e5",
+  "migrations/0469_siep18_exact_effects_trusted_principal.sql": "ab92662d77576f40c21330ac52aa145d861c288c5f64fc71ff52ad1212398ef1",
 });
 export const DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v1",
@@ -227,6 +239,59 @@ function directMigrationPreimage(path) {
       DIRECT_REGISTRY_MIGRATION_ARTIFACT_SHA256[path])
     throw new Error(`${path} direct-migration output SHA pin drifted`);
   return fixture;
+}
+
+function staticFrontierMigration(path) {
+  if (STATIC_FRONTIER_PREIMAGES.schema_version !==
+      "scac-static-frontier-migration-preimages.v1")
+    throw new Error("unsupported static-frontier preimage schema");
+  if (STATIC_FRONTIER_PREIMAGES.source_commit !==
+      "f422e1720f33c8f7c24cd7433f151b115ef37ee7")
+    throw new Error("unexpected static-frontier preimage provenance");
+  const fixturePaths = Object.keys(STATIC_FRONTIER_PREIMAGES.artifacts).sort();
+  const expectedPaths = Object.keys(STATIC_FRONTIER_MIGRATION_ARTIFACT_SHA256).sort();
+  if (JSON.stringify(fixturePaths) !== JSON.stringify(expectedPaths))
+    throw new Error("static-frontier preimage path set is incomplete");
+  const fixture = STATIC_FRONTIER_PREIMAGES.artifacts[path];
+  if (!fixture || typeof fixture.preimage !== "string")
+    throw new Error(`${path} static-frontier preimage is malformed`);
+  const digest = sha256(fixture.preimage);
+  if (digest !== fixture.preimage_sha256 || digest !== fixture.expected_output_sha256 ||
+      digest !== STATIC_FRONTIER_MIGRATION_ARTIFACT_SHA256[path])
+    throw new Error(`${path} static-frontier preimage SHA drifted`);
+  return fixture.preimage;
+}
+
+function fullEntrySetSealsFromLocalDatabase(dsn) {
+  let parsed;
+  try {
+    parsed = new URL(dsn);
+  } catch {
+    throw new Error("full-entry-set seal blessing requires a PostgreSQL URL");
+  }
+  if (!["postgres:", "postgresql:"].includes(parsed.protocol) ||
+      !["127.0.0.1", "localhost"].includes(parsed.hostname))
+    throw new Error("full-entry-set seals may be blessed only from a local disposable database");
+  const sql = `
+select v.registry_version,
+       v.entry_set_digest,
+       'sha256:'||encode(public.digest(convert_to(
+         coalesce(string_agg(e.entry_digest,',' order by e.ingress_key collate "C"),''),
+         'UTF8'),'sha256'),'hex') recomputed
+  from ops.scac_mutation_registry_version v
+  left join ops.scac_mutation_registry_entry e using(registry_version)
+ group by v.registry_version,v.entry_set_digest
+ order by split_part(v.registry_version,'.v',2)::integer`;
+  const output = execFileSync("psql", [dsn, "-X", "-A", "-t", "-F", "\t",
+    "-v", "ON_ERROR_STOP=1", "-c", sql], { encoding: "utf8" });
+  const rows = output.trim().split("\n").filter(Boolean).map(line => line.split("\t"));
+  const expectedVersions = Array.from({ length: 10 }, (_, index) =>
+    `scac-mutation-registry.v${index + 1}`);
+  if (rows.length !== expectedVersions.length ||
+      rows.some((row, index) => row.length !== 3 || row[0] !== expectedVersions[index] ||
+        row[1] !== row[2] || !/^sha256:[0-9a-f]{64}$/.test(row[2])))
+    throw new Error("local database registry entry sets are incomplete, stale, or malformed");
+  return Object.fromEntries(rows.map(([version, _stored, recomputed]) => [version, recomputed]));
 }
 
 export function replaceExactlyOnce(value, search, replacement, label) {
@@ -1175,14 +1240,15 @@ function renderSIEP14RegistrySql(rows = fullInventory(),
 }
 
 export function renderSIEP15RegistrySql(rows = fullInventory(),
-  dbCatalogBaseline = SIEP15_DB_CATALOG_BASELINE) {
+  dbCatalogBaseline = SIEP15_DB_CATALOG_BASELINE, predecessorSql = undefined) {
   const { v1: v1Seal, v2: v2Seal, v3: v3Seal, v4: v4Seal } = HISTORICAL_REGISTRY_SEALS;
   const v5Digest = registryDigestFor(REGISTRY_V5_VERSION, rows, dbCatalogBaseline);
   const v5CatalogCount = dbCatalogBaseline.secdef_execute.count +
     dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
   const v5EntryCount = rows.length + v5CatalogCount;
   const v4Path = "migrations/0459_siep14_forward_mutation_registry.sql";
-  const v4Sql = readFileSync(resolve(REPO_ROOT, v4Path), "utf8");
+  const v4Sql = predecessorSql ?? renderSIEP14RegistrySql(
+    frozenInventory(REGISTRY_V4_VERSION), SIEP14_DB_CATALOG_BASELINE);
   const observedV4Sha = sha256(v4Sql);
   if (observedV4Sha !== HISTORICAL_REGISTRY_ARTIFACT_SHA256[v4Path])
     throw new Error(`sealed historical SCAC v4 migration changed: ${observedV4Sha}`);
@@ -1309,14 +1375,15 @@ export function renderSIEP15RegistrySql(rows = fullInventory(),
 }
 
 export function renderSIEP16RegistrySql(rows = fullInventory(),
-  dbCatalogBaseline = SIEP16_DB_CATALOG_BASELINE) {
+  dbCatalogBaseline = SIEP16_DB_CATALOG_BASELINE, predecessorSql = undefined) {
   const { v4: v4Seal, v5: v5Seal } = HISTORICAL_REGISTRY_SEALS;
   const v6Digest = registryDigestFor(REGISTRY_V6_VERSION, rows, dbCatalogBaseline);
   const v6CatalogCount = dbCatalogBaseline.secdef_execute.count +
     dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
   const v6EntryCount = rows.length + v6CatalogCount;
   const v5Path = "migrations/0461_siep15_forward_mutation_registry.sql";
-  const v5Sql = readFileSync(resolve(REPO_ROOT, v5Path), "utf8");
+  const v5Sql = predecessorSql ?? renderSIEP15RegistrySql(
+    frozenInventory(REGISTRY_V5_VERSION), SIEP15_DB_CATALOG_BASELINE);
   const observedV5Sha = sha256(v5Sql);
   if (observedV5Sha !== HISTORICAL_REGISTRY_ARTIFACT_SHA256[v5Path])
     throw new Error(`sealed historical SCAC v5 migration changed: ${observedV5Sha}`);
@@ -1403,14 +1470,16 @@ create or replace function ops.scac_mutation_catalog_v6_current()`)
 }
 
 export function renderSIEP16IntegratedRegistrySql(rows = fullInventory(),
-  dbCatalogBaseline = SIEP16_INTEGRATED_DB_CATALOG_BASELINE) {
+  dbCatalogBaseline = SIEP16_INTEGRATED_DB_CATALOG_BASELINE,
+  predecessorSql = undefined) {
   const { v5: v5Seal, v6: v6Seal } = HISTORICAL_REGISTRY_SEALS;
   const v7Digest = registryDigestFor(REGISTRY_V7_VERSION, rows, dbCatalogBaseline);
   const v7CatalogCount = dbCatalogBaseline.secdef_execute.count +
     dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
   const v7EntryCount = rows.length + v7CatalogCount;
   const v6Path = "migrations/0462_siep16_forward_mutation_registry.sql";
-  const v6Sql = readFileSync(resolve(REPO_ROOT, v6Path), "utf8");
+  const v6Sql = predecessorSql ?? renderSIEP16RegistrySql(
+    frozenInventory(REGISTRY_V6_VERSION), SIEP16_DB_CATALOG_BASELINE);
   const observedV6Sha = sha256(v6Sql);
   if (observedV6Sha !== HISTORICAL_REGISTRY_ARTIFACT_SHA256[v6Path])
     throw new Error(`sealed historical SCAC v6 migration changed: ${observedV6Sha}`);
@@ -1496,7 +1565,8 @@ export function renderSIEP16IntegratedRegistrySql(rows = fullInventory(),
 }
 
 export function renderSIEP17ForwardRegistrySql(rows = fullInventory(),
-  dbCatalogBaseline = SIEP17_FORWARD_DB_CATALOG_BASELINE) {
+  dbCatalogBaseline = SIEP17_FORWARD_DB_CATALOG_BASELINE,
+  predecessorArtifacts = undefined) {
   const { v7: v7Seal } = HISTORICAL_REGISTRY_SEALS;
   const v8Digest = registryDigestFor(REGISTRY_V8_VERSION, rows, dbCatalogBaseline);
   const catalogCount = dbCatalogBaseline.secdef_execute.count +
@@ -1504,9 +1574,16 @@ export function renderSIEP17ForwardRegistrySql(rows = fullInventory(),
   const entryCount = rows.length + catalogCount;
   const v7MigrationPath = "migrations/0464_siep16_integrated_mutation_registry.sql";
   const v7RuntimePath = "mcp-server/src/scac-mutation-registry.v7.generated.js";
-  const v7Migration = readFileSync(resolve(REPO_ROOT, v7MigrationPath), "utf8");
-  for (const path of [v7MigrationPath, v7RuntimePath]) {
-    const observed = sha256(readFileSync(resolve(REPO_ROOT, path), "utf8"));
+  const v7Rows = frozenInventory(REGISTRY_V7_VERSION);
+  const v7Migration = predecessorArtifacts?.migration ??
+    renderSIEP16IntegratedRegistrySql(v7Rows, SIEP16_INTEGRATED_DB_CATALOG_BASELINE);
+  const v7Runtime = predecessorArtifacts?.runtime ?? renderRuntimeProjection(v7Rows, {
+    version: REGISTRY_V7_VERSION, dbCatalogBaseline: SIEP16_INTEGRATED_DB_CATALOG_BASELINE,
+  });
+  for (const [path, source] of [
+    [v7MigrationPath, v7Migration], [v7RuntimePath, v7Runtime],
+  ]) {
+    const observed = sha256(source);
     if (observed !== HISTORICAL_REGISTRY_ARTIFACT_SHA256[path])
       throw new Error(`sealed historical SCAC v7 artifact changed: ${path}: ${observed}`);
   }
@@ -1601,7 +1678,8 @@ export function renderSIEP17ForwardRegistrySql(rows = fullInventory(),
 }
 
 export function renderSIEP18ForwardRegistrySql(rows = fullInventory(),
-  dbCatalogBaseline = SIEP18_FORWARD_DB_CATALOG_BASELINE) {
+  dbCatalogBaseline = SIEP18_FORWARD_DB_CATALOG_BASELINE,
+  predecessorArtifacts = undefined) {
   const { v8: v8Seal } = HISTORICAL_REGISTRY_SEALS;
   const v9Digest = registryDigestFor(REGISTRY_V9_VERSION, rows, dbCatalogBaseline);
   const catalogCount = dbCatalogBaseline.secdef_execute.count +
@@ -1609,9 +1687,16 @@ export function renderSIEP18ForwardRegistrySql(rows = fullInventory(),
   const entryCount = rows.length + catalogCount;
   const v8MigrationPath = "migrations/0466_siep17_forward_mutation_registry.sql";
   const v8RuntimePath = "mcp-server/src/scac-mutation-registry.v8.generated.js";
-  const v8Migration = readFileSync(resolve(REPO_ROOT, v8MigrationPath), "utf8");
-  for (const path of [v8MigrationPath, v8RuntimePath]) {
-    const observed = sha256(readFileSync(resolve(REPO_ROOT, path), "utf8"));
+  const v8Rows = frozenInventory(REGISTRY_V8_VERSION);
+  const v8Migration = predecessorArtifacts?.migration ??
+    renderSIEP17ForwardRegistrySql(v8Rows, SIEP17_FORWARD_DB_CATALOG_BASELINE);
+  const v8Runtime = predecessorArtifacts?.runtime ?? renderRuntimeProjection(v8Rows, {
+    version: REGISTRY_V8_VERSION, dbCatalogBaseline: SIEP17_FORWARD_DB_CATALOG_BASELINE,
+  });
+  for (const [path, source] of [
+    [v8MigrationPath, v8Migration], [v8RuntimePath, v8Runtime],
+  ]) {
+    const observed = sha256(source);
     if (observed !== HISTORICAL_REGISTRY_ARTIFACT_SHA256[path])
       throw new Error(`sealed historical SCAC v8 artifact changed: ${path}: ${observed}`);
   }
@@ -1778,8 +1863,12 @@ export function renderSIEP18ForwardRegistrySql(rows = fullInventory(),
   const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
   sql = `${sql.slice(0, seedStart + seedStartMarker.length)}${sqlLiteral(seed)}${sql.slice(seedEnd)}`;
 
-  const monitorMigration = readFileSync(
-    resolve(REPO_ROOT, "migrations/0467_siep18_atomic_db_monitor_grants.sql"), "utf8");
+  const monitorPath = "migrations/0467_siep18_atomic_db_monitor_grants.sql";
+  const monitorFixture = directMigrationPreimage(monitorPath);
+  const monitorMigration = predecessorArtifacts?.monitor ??
+    renderDirectRegistryRedefinition(monitorFixture.preimage, {
+      ownerExclusion: monitorFixture.owner_exclusion,
+    });
   const monitorDigest = sha256(monitorMigration);
   if (monitorDigest !== SIEP18_MONITOR_ARTIFACT_SHA256)
     throw new Error(`reviewed SIEP-18 monitor artifact changed: ${monitorDigest}`);
@@ -1809,7 +1898,8 @@ export function renderSIEP18ForwardRegistrySql(rows = fullInventory(),
 }
 
 export function renderSourceMergeForwardRegistrySql(rows = fullInventory(),
-  dbCatalogBaseline = SOURCE_MERGE_FORWARD_DB_CATALOG_BASELINE) {
+  dbCatalogBaseline = SOURCE_MERGE_FORWARD_DB_CATALOG_BASELINE,
+  predecessorArtifacts = undefined) {
   const { v9: v9Seal } = HISTORICAL_REGISTRY_SEALS;
   const v10Digest = registryDigestFor(REGISTRY_V10_VERSION, rows, dbCatalogBaseline);
   const catalogCount = dbCatalogBaseline.secdef_execute.count +
@@ -1817,9 +1907,16 @@ export function renderSourceMergeForwardRegistrySql(rows = fullInventory(),
   const entryCount = rows.length + catalogCount;
   const v9MigrationPath = "migrations/0468_siep18_forward_mutation_registry.sql";
   const v9RuntimePath = "mcp-server/src/scac-mutation-registry.v9.generated.js";
-  const v9Migration = readFileSync(resolve(REPO_ROOT, v9MigrationPath), "utf8");
-  for (const path of [v9MigrationPath, v9RuntimePath]) {
-    const observed = sha256(readFileSync(resolve(REPO_ROOT, path), "utf8"));
+  const v9Rows = frozenInventory(REGISTRY_V9_VERSION);
+  const v9Migration = predecessorArtifacts?.migration ??
+    renderSIEP18ForwardRegistrySql(v9Rows, SIEP18_FORWARD_DB_CATALOG_BASELINE);
+  const v9Runtime = predecessorArtifacts?.runtime ?? renderRuntimeProjection(v9Rows, {
+    version: REGISTRY_V9_VERSION, dbCatalogBaseline: SIEP18_FORWARD_DB_CATALOG_BASELINE,
+  });
+  for (const [path, source] of [
+    [v9MigrationPath, v9Migration], [v9RuntimePath, v9Runtime],
+  ]) {
+    const observed = sha256(source);
     if (observed !== HISTORICAL_REGISTRY_ARTIFACT_SHA256[path])
       throw new Error(`sealed historical SCAC v9 artifact changed: ${path}: ${observed}`);
   }
@@ -2036,47 +2133,23 @@ export function renderSourceMergeForwardRegistrySql(rows = fullInventory(),
 
 export function renderGeneratedFrontier() {
   const v2Rows = frozenInventory(REGISTRY_V2_VERSION);
-  const artifacts = {
-    "mcp-server/src/scac-mutation-registry.v2.generated.js": renderRuntimeProjection(v2Rows, {
+  const artifacts = {};
+  artifacts["migrations/0454_siep11_mutation_registry.sql"] = renderMigration(v2Rows);
+  if (sha256(artifacts["migrations/0454_siep11_mutation_registry.sql"]) !==
+      HISTORICAL_REGISTRY_ARTIFACT_SHA256["migrations/0454_siep11_mutation_registry.sql"])
+    throw new Error("generated historical SCAC v1 migration SHA drifted");
+  artifacts["mcp-server/src/scac-mutation-registry.v2.generated.js"] =
+    renderRuntimeProjection(v2Rows, {
       version: REGISTRY_V2_VERSION, dbCatalogBaseline: SIEP12_DB_CATALOG_BASELINE,
-    }),
-    "migrations/0455_siep12_policy_epoch.sql": renderPolicyEpochMigration(
-      renderSuccessorRegistrySql(v2Rows), {
-        v1Seal: HISTORICAL_REGISTRY_SEALS.v1,
-        dbCatalogBaseline: SIEP12_DB_CATALOG_BASELINE,
-      }),
-  };
-  const generatedVersions = [
-    [REGISTRY_V3_VERSION, SIEP13_DB_CATALOG_BASELINE,
-      "mcp-server/src/scac-mutation-registry.v3.generated.js",
-      "migrations/0457_siep13_forward_mutation_registry.sql", renderSIEP13RegistrySql],
-    [REGISTRY_V4_VERSION, SIEP14_DB_CATALOG_BASELINE,
-      "mcp-server/src/scac-mutation-registry.v4.generated.js",
-      "migrations/0459_siep14_forward_mutation_registry.sql", renderSIEP14RegistrySql],
-    [REGISTRY_V5_VERSION, SIEP15_DB_CATALOG_BASELINE,
-      "mcp-server/src/scac-mutation-registry.v5.generated.js",
-      "migrations/0461_siep15_forward_mutation_registry.sql", renderSIEP15RegistrySql],
-    [REGISTRY_V6_VERSION, SIEP16_DB_CATALOG_BASELINE,
-      "mcp-server/src/scac-mutation-registry.v6.generated.js",
-      "migrations/0462_siep16_forward_mutation_registry.sql", renderSIEP16RegistrySql],
-    [REGISTRY_V7_VERSION, SIEP16_INTEGRATED_DB_CATALOG_BASELINE,
-      "mcp-server/src/scac-mutation-registry.v7.generated.js",
-      "migrations/0464_siep16_integrated_mutation_registry.sql", renderSIEP16IntegratedRegistrySql],
-    [REGISTRY_V8_VERSION, SIEP17_FORWARD_DB_CATALOG_BASELINE,
-      "mcp-server/src/scac-mutation-registry.v8.generated.js",
-      "migrations/0466_siep17_forward_mutation_registry.sql", renderSIEP17ForwardRegistrySql],
-    [REGISTRY_V9_VERSION, SIEP18_FORWARD_DB_CATALOG_BASELINE,
-      "mcp-server/src/scac-mutation-registry.v9.generated.js",
-      "migrations/0468_siep18_forward_mutation_registry.sql", renderSIEP18ForwardRegistrySql],
-    [REGISTRY_V10_VERSION, SOURCE_MERGE_FORWARD_DB_CATALOG_BASELINE,
-      "mcp-server/src/scac-mutation-registry.v10.generated.js",
-      "migrations/0471_source_merge_catalog_registry_successor.sql", renderSourceMergeForwardRegistrySql],
-  ];
-  for (const [version, dbCatalogBaseline, runtimePath, migrationPath, renderMigrationVersion] of generatedVersions) {
-    const rows = frozenInventory(version);
-    artifacts[runtimePath] = renderRuntimeProjection(rows, { version, dbCatalogBaseline });
-    artifacts[migrationPath] = renderMigrationVersion(rows);
-  }
+    });
+  artifacts["migrations/0455_siep12_policy_epoch.sql"] = renderPolicyEpochMigration(
+    renderSuccessorRegistrySql(v2Rows), {
+      v1Seal: HISTORICAL_REGISTRY_SEALS.v1,
+      dbCatalogBaseline: SIEP12_DB_CATALOG_BASELINE,
+    });
+
+  for (const path of Object.keys(STATIC_FRONTIER_MIGRATION_ARTIFACT_SHA256))
+    artifacts[path] = staticFrontierMigration(path);
   for (const [path, expectedSha] of Object.entries(DIRECT_REGISTRY_MIGRATION_ARTIFACT_SHA256)) {
     const fixture = directMigrationPreimage(path);
     const rendered = renderDirectRegistryRedefinition(fixture.preimage, {
@@ -2086,6 +2159,88 @@ export function renderGeneratedFrontier() {
       throw new Error(`${path} direct migration artifact SHA drifted`);
     artifacts[path] = rendered;
   }
+
+  const v3Rows = frozenInventory(REGISTRY_V3_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v3.generated.js"] =
+    renderRuntimeProjection(v3Rows, {
+      version: REGISTRY_V3_VERSION, dbCatalogBaseline: SIEP13_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0457_siep13_forward_mutation_registry.sql"] =
+    renderSIEP13RegistrySql(v3Rows, SIEP13_DB_CATALOG_BASELINE);
+
+  const v4Rows = frozenInventory(REGISTRY_V4_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v4.generated.js"] =
+    renderRuntimeProjection(v4Rows, {
+      version: REGISTRY_V4_VERSION, dbCatalogBaseline: SIEP14_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0459_siep14_forward_mutation_registry.sql"] =
+    renderSIEP14RegistrySql(v4Rows, SIEP14_DB_CATALOG_BASELINE);
+
+  const v5Rows = frozenInventory(REGISTRY_V5_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v5.generated.js"] =
+    renderRuntimeProjection(v5Rows, {
+      version: REGISTRY_V5_VERSION, dbCatalogBaseline: SIEP15_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0461_siep15_forward_mutation_registry.sql"] =
+    renderSIEP15RegistrySql(v5Rows, SIEP15_DB_CATALOG_BASELINE,
+      artifacts["migrations/0459_siep14_forward_mutation_registry.sql"]);
+
+  const v6Rows = frozenInventory(REGISTRY_V6_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v6.generated.js"] =
+    renderRuntimeProjection(v6Rows, {
+      version: REGISTRY_V6_VERSION, dbCatalogBaseline: SIEP16_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0462_siep16_forward_mutation_registry.sql"] =
+    renderSIEP16RegistrySql(v6Rows, SIEP16_DB_CATALOG_BASELINE,
+      artifacts["migrations/0461_siep15_forward_mutation_registry.sql"]);
+
+  const v7Rows = frozenInventory(REGISTRY_V7_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v7.generated.js"] =
+    renderRuntimeProjection(v7Rows, {
+      version: REGISTRY_V7_VERSION, dbCatalogBaseline: SIEP16_INTEGRATED_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0464_siep16_integrated_mutation_registry.sql"] =
+    renderSIEP16IntegratedRegistrySql(v7Rows, SIEP16_INTEGRATED_DB_CATALOG_BASELINE,
+      artifacts["migrations/0462_siep16_forward_mutation_registry.sql"]);
+
+  const v8Rows = frozenInventory(REGISTRY_V8_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v8.generated.js"] =
+    renderRuntimeProjection(v8Rows, {
+      version: REGISTRY_V8_VERSION, dbCatalogBaseline: SIEP17_FORWARD_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0466_siep17_forward_mutation_registry.sql"] =
+    renderSIEP17ForwardRegistrySql(v8Rows, SIEP17_FORWARD_DB_CATALOG_BASELINE, {
+      migration: artifacts["migrations/0464_siep16_integrated_mutation_registry.sql"],
+      runtime: artifacts["mcp-server/src/scac-mutation-registry.v7.generated.js"],
+    });
+
+  const v9Rows = frozenInventory(REGISTRY_V9_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v9.generated.js"] =
+    renderRuntimeProjection(v9Rows, {
+      version: REGISTRY_V9_VERSION, dbCatalogBaseline: SIEP18_FORWARD_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0468_siep18_forward_mutation_registry.sql"] =
+    renderSIEP18ForwardRegistrySql(v9Rows, SIEP18_FORWARD_DB_CATALOG_BASELINE, {
+      migration: artifacts["migrations/0466_siep17_forward_mutation_registry.sql"],
+      runtime: artifacts["mcp-server/src/scac-mutation-registry.v8.generated.js"],
+      monitor: artifacts["migrations/0467_siep18_atomic_db_monitor_grants.sql"],
+    });
+
+  const v10Rows = frozenInventory(REGISTRY_V10_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v10.generated.js"] =
+    renderRuntimeProjection(v10Rows, {
+      version: REGISTRY_V10_VERSION, dbCatalogBaseline: SOURCE_MERGE_FORWARD_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0471_source_merge_catalog_registry_successor.sql"] =
+    renderSourceMergeForwardRegistrySql(v10Rows, SOURCE_MERGE_FORWARD_DB_CATALOG_BASELINE, {
+      migration: artifacts["migrations/0468_siep18_forward_mutation_registry.sql"],
+      runtime: artifacts["mcp-server/src/scac-mutation-registry.v9.generated.js"],
+    });
+
+  const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
+  const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
+  if (migrationCount !== 18 || runtimeCount !== 9 || Object.keys(artifacts).length !== 27)
+    throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
 
@@ -2258,7 +2413,23 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     "--write-direct-migration-0467": "migrations/0467_siep18_atomic_db_monitor_grants.sql",
     "--write-direct-migration-0470": "migrations/0470_source_merge_authority_projection.sql",
   };
-  if (directMigrationModes[process.argv[2]]) {
+  if (process.argv[2] === "--bless-full-entry-set-seals-from-local-db") {
+    const dsn = process.env.CARR_LOCAL_PG_DSN || "";
+    if (!dsn) throw new Error("CARR_LOCAL_PG_DSN is required for local seal blessing");
+    const seals = fullEntrySetSealsFromLocalDatabase(dsn);
+    await writeFile(FULL_ENTRY_SET_SEALS_PATH, `${JSON.stringify(seals, null, 2)}\n`);
+    process.stdout.write(`${fileURLToPath(FULL_ENTRY_SET_SEALS_PATH)} (10 recomputed seals)\n`);
+  } else if (process.argv[2] === "--write-generated-frontier") {
+    if (!process.argv[3]) throw new Error("--write-generated-frontier requires an output directory");
+    const outputRoot = resolve(process.argv[3]);
+    const artifacts = renderGeneratedFrontier();
+    for (const [path, source] of Object.entries(artifacts)) {
+      const target = resolve(outputRoot, path);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, source);
+    }
+    process.stdout.write(`${outputRoot} (${Object.keys(artifacts).length} artifacts)\n`);
+  } else if (directMigrationModes[process.argv[2]]) {
     const sourcePath = directMigrationModes[process.argv[2]];
     const target = resolve(process.argv[3] || sourcePath);
     const fixture = directMigrationPreimage(sourcePath);

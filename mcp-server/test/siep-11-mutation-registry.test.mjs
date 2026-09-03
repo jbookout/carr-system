@@ -279,8 +279,12 @@ test("v10 successor seals v9 and carries the generated source-merge control", ()
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
   assert.equal(assertCurrentSourceInventoryMatchesFixture(), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
-  assert.equal(paths.filter(path => path.startsWith("migrations/")).length, 13);
+  const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
+  assert.equal(migrations.length, 18);
+  assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
+    Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")));
   assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 9);
+  assert.equal(paths.length, 27);
 });
 
 test("every direct catalog redefinition preserves the portable role census", () => {

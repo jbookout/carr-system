@@ -21843,7 +21843,7 @@
     {
       "version": "v10",
       "expected_count": 814,
-      "expected_sha256": "725bcd3367c14e11edaafcd0c007e0e339cb5dcad14ba7e361dce74ecf0cdefb",
+      "expected_sha256": "b08f0261463b24f47ecf25703b2f20396e3ce6e4dfbd9ded1f14ad264922eb9f",
       "remove": [],
       "upsert": [
         {
@@ -23876,8 +23876,8 @@
           "operation": "ops/scac-mutation-inventory.mjs",
           "effect_class": "administrative_mutation",
           "source_locator": "ops/scac-mutation-inventory.mjs",
-          "schema_digest": "4efde24a40b28d1316553378d8ada79c0dc9816c5e856b1718831b9d1e3756c7",
-          "handler_digest": "4efde24a40b28d1316553378d8ada79c0dc9816c5e856b1718831b9d1e3756c7",
+          "schema_digest": "3ce74bb2f30e2ec7fc00e74f0fffc9ac047bc7323782b4af25c3ae82ffa589fe",
+          "handler_digest": "3ce74bb2f30e2ec7fc00e74f0fffc9ac047bc7323782b4af25c3ae82ffa589fe",
           "write": true,
           "human_only": false,
           "authority_only": true,
