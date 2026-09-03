@@ -75,7 +75,7 @@ export const SIEP12_DB_CATALOG_BASELINE = Object.freeze({
   secdef_execute: { count: 294, digest: "sha256:8e1f8ed8984bc1f1a627020d1b5b0384124c5e5adba79ac17df0b21702bf6cc5" },
   relation_dml: { count: 285, digest: "sha256:53d12ebf83db4661b0e55eb81f91ab510c34828424a2b945b66c0286134b0b0b" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
-  role_authority: { count: 95, digest: "sha256:082b8570b428c33296c801871177f6bfb34e9c070513d4b1db23007f4edecafb" },
+  role_authority: { count: 12, digest: "sha256:eb650de73032466b46787f4a5826b60b100591657489a7990d9161e2d6588648" },
 });
 // SIEP-13's forward-only successor includes the v3 typed registry lookup.
 // The digest is replaced only from disposable-DB readback when 0341 changes.
@@ -84,7 +84,7 @@ export const SIEP13_DB_CATALOG_BASELINE = Object.freeze({
   secdef_execute: { count: 298, digest: "sha256:d8306fc5bb4bd3348fe5197f0946c251c4f0486ecdf98914ba11a7af6e4682c5" },
   relation_dml: { count: 285, digest: "sha256:53d12ebf83db4661b0e55eb81f91ab510c34828424a2b945b66c0286134b0b0b" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
-  role_authority: { count: 95, digest: "sha256:082b8570b428c33296c801871177f6bfb34e9c070513d4b1db23007f4edecafb" },
+  role_authority: { count: 12, digest: "sha256:eb650de73032466b46787f4a5826b60b100591657489a7990d9161e2d6588648" },
 });
 // SIEP-14's successor includes the read-only v4 registry projection. The
 // category digest is replaced only from disposable-DB readback.
@@ -93,7 +93,7 @@ export const SIEP14_DB_CATALOG_BASELINE = Object.freeze({
   secdef_execute: { count: 302, digest: "sha256:abe2fb9009736fa4ae47270fcf5d2153bbf3e7a8ed01de861cced9a1bb2fee82" },
   relation_dml: { count: 285, digest: "sha256:53d12ebf83db4661b0e55eb81f91ab510c34828424a2b945b66c0286134b0b0b" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
-  role_authority: { count: 95, digest: "sha256:082b8570b428c33296c801871177f6bfb34e9c070513d4b1db23007f4edecafb" },
+  role_authority: { count: 12, digest: "sha256:eb650de73032466b46787f4a5826b60b100591657489a7990d9161e2d6588648" },
 });
 // SIEP-15 adds the safe device-status projection and the v5 registry lookup.
 // The secdef digest starts fail-closed and is replaced only by disposable-DB readback.
@@ -102,7 +102,7 @@ export const SIEP15_DB_CATALOG_BASELINE = Object.freeze({
   secdef_execute: { count: 307, digest: "sha256:d4671fbc10a54406acece348dbeaef08b044b8231037bf4ecce8e1d85cd2d24d" },
   relation_dml: { count: 285, digest: "sha256:53d12ebf83db4661b0e55eb81f91ab510c34828424a2b945b66c0286134b0b0b" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
-  role_authority: { count: 95, digest: "sha256:082b8570b428c33296c801871177f6bfb34e9c070513d4b1db23007f4edecafb" },
+  role_authority: { count: 12, digest: "sha256:eb650de73032466b46787f4a5826b60b100591657489a7990d9161e2d6588648" },
 });
 // SIEP-16 itself is source-only. This forward successor records the measured
 // post-main database catalog and the current source inventory without
@@ -112,7 +112,7 @@ export const SIEP16_DB_CATALOG_BASELINE = Object.freeze({
   secdef_execute: { count: 311, digest: "sha256:78771a23004af05b61ea9491ed70248ee8cbbe77aa6ace8c6f0437983624470b" },
   relation_dml: { count: 285, digest: "sha256:53d12ebf83db4661b0e55eb81f91ab510c34828424a2b945b66c0286134b0b0b" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
-  role_authority: { count: 95, digest: "sha256:082b8570b428c33296c801871177f6bfb34e9c070513d4b1db23007f4edecafb" },
+  role_authority: { count: 12, digest: "sha256:eb650de73032466b46787f4a5826b60b100591657489a7990d9161e2d6588648" },
 });
 // Upstream source integration after the v6 seal adds source entrances. The v7
 // successor also adds five read-only registry projection functions; the
@@ -122,7 +122,7 @@ export const SIEP16_INTEGRATED_DB_CATALOG_BASELINE = Object.freeze({
   secdef_execute: { count: 315, digest: "sha256:d47181d79ffb352fdf2c707a6fa265f093a8c7edde76df4358a6805c89651022" },
   relation_dml: { count: 285, digest: "sha256:53d12ebf83db4661b0e55eb81f91ab510c34828424a2b945b66c0286134b0b0b" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
-  role_authority: { count: 95, digest: "sha256:082b8570b428c33296c801871177f6bfb34e9c070513d4b1db23007f4edecafb" },
+  role_authority: { count: 12, digest: "sha256:eb650de73032466b46787f4a5826b60b100591657489a7990d9161e2d6588648" },
 });
 // SIEP-17's forward successor includes the token/challenge authority source
 // surface. Values are measured from disposable-DB readback only.
@@ -131,7 +131,7 @@ export const SIEP17_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
   secdef_execute: { count: 328, digest: "sha256:7c6a54dda8f8c4c6f4fcb6004f2544ba8231f212e1b2d8e5c9cc39651a2a216c" },
   relation_dml: { count: 285, digest: "sha256:53d12ebf83db4661b0e55eb81f91ab510c34828424a2b945b66c0286134b0b0b" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
-  role_authority: { count: 95, digest: "sha256:082b8570b428c33296c801871177f6bfb34e9c070513d4b1db23007f4edecafb" },
+  role_authority: { count: 12, digest: "sha256:eb650de73032466b46787f4a5826b60b100591657489a7990d9161e2d6588648" },
 });
 // The disposable-DB receipt before 0468 is applied. 0468 must first seal this
 // exact predecessor catalog, then its four security-definer self-effects yield
@@ -141,7 +141,7 @@ export const SIEP18_PRE_V9_DB_CATALOG_BASELINE = Object.freeze({
   secdef_execute: { count: 338, digest: "sha256:ccf023867a696884b2b9e50ae6eccc7b4e2afd9d7d6dbd1a93c01d8b1ec38555" },
   relation_dml: { count: 285, digest: "sha256:53d12ebf83db4661b0e55eb81f91ab510c34828424a2b945b66c0286134b0b0b" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
-  role_authority: { count: 95, digest: "sha256:082b8570b428c33296c801871177f6bfb34e9c070513d4b1db23007f4edecafb" },
+  role_authority: { count: 12, digest: "sha256:eb650de73032466b46787f4a5826b60b100591657489a7990d9161e2d6588648" },
 });
 // SIEP-18's forward successor binds the exact post-0468 catalog and the
 // separately measured runtime DML grant snapshot. The grant snapshot is a
@@ -151,7 +151,7 @@ export const SIEP18_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
   secdef_execute: { count: 342, digest: "sha256:57444b408258e9ec0a0dd8d2b8062cc6f6575e0b97cd0e9faebbb7ca322e17af" },
   relation_dml: { count: 285, digest: "sha256:53d12ebf83db4661b0e55eb81f91ab510c34828424a2b945b66c0286134b0b0b" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
-  role_authority: { count: 95, digest: "sha256:082b8570b428c33296c801871177f6bfb34e9c070513d4b1db23007f4edecafb" },
+  role_authority: { count: 12, digest: "sha256:eb650de73032466b46787f4a5826b60b100591657489a7990d9161e2d6588648" },
   runtime_dml_grants: { count: 297, digest: "sha256:0f04a50d8bc65e2dcc765b1981ab1d5091c809570f0a773db3f5c6e2b9d43501" },
 });
 // The exact catalog after 0470 and before the v10 registration function is
@@ -162,7 +162,7 @@ export const SOURCE_MERGE_PRE_V10_DB_CATALOG_BASELINE = Object.freeze({
   secdef_execute: { count: 343, digest: "sha256:5a43e0558b6559dbb2461fbb9064424330698cf0a8dc5a347652fb0774195669" },
   relation_dml: { count: 285, digest: "sha256:53d12ebf83db4661b0e55eb81f91ab510c34828424a2b945b66c0286134b0b0b" },
   column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
-  role_authority: { count: 95, digest: "sha256:082b8570b428c33296c801871177f6bfb34e9c070513d4b1db23007f4edecafb" },
+  role_authority: { count: 12, digest: "sha256:eb650de73032466b46787f4a5826b60b100591657489a7990d9161e2d6588648" },
   runtime_dml_grants: { count: 297, digest: "sha256:0f04a50d8bc65e2dcc765b1981ab1d5091c809570f0a773db3f5c6e2b9d43501" },
 });
 // The successor's registration ACL changes the security-definer projection by
