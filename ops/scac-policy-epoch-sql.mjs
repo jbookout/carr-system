@@ -123,10 +123,12 @@ begin
 
   with recursive connected(oid) as (
     select oid from pg_roles where rolname~'^carr_' and rolname<>'carr_ci'
+      and not rolcanlogin and not rolsuper
     union
     select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid
       join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end
-     where other.rolname<>'carr_ci'
+     where other.rolname~'^carr_' and other.rolname<>'carr_ci'
+       and not other.rolcanlogin and not other.rolsuper
   ), role_rows as (
     select 'db-role:'||r.rolname ingress_key,jsonb_build_object(
       'ingress_key','db-role:'||r.rolname,'row_kind','role','role',r.rolname,
