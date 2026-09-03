@@ -90,7 +90,22 @@ ROLE_ENV = {
     "carr_jobs": "CARR_DB_JOBS_URL",
     "app_exporter_local": "CARR_DB_EXPORTER_URL",
     "carr_backup": "CARR_DB_BACKUP_URL",
+    # Added 2026-09-03 for open loop 569. The verifier is being rebuilt through
+    # SQL so it is born without neon_superuser, and a rebuilt role needs its
+    # password set. Routing that through this tool instead of a hand-typed
+    # ALTER ROLE is the whole reason this file exists.
+    "carr_program5_forward_fix_verifier": "CARR_DB_PROGRAM5_FORWARD_FIX_VERIFIER_URL",
 }
+
+# The roles this tool may rotate. carr_backup is deliberately ABSENT: its path
+# stays disabled until a server-validated receipt binds Joe's approval to the
+# target and the credential material. Both defence-in-depth guards below read
+# this ONE set, so they cannot drift apart the way two hand-written literals can.
+ROTATABLE_ROLES = frozenset({
+    "carr_jobs",
+    "app_exporter_local",
+    "carr_program5_forward_fix_verifier",
+})
 
 # No role may mint a connection while the backup provider mutation is disabled.
 #
@@ -644,8 +659,9 @@ def _rotate_existing_role(role: str, generate: bool) -> int:
     # This private helper is intentionally an allowlist too: callers importing
     # it must not bypass the public carr_backup refusal before any lock, import,
     # environment read, password generation, or database work.
-    if role not in {"carr_jobs", "app_exporter_local"}:
-        sys.exit("rotate-credential: generic rotation is permitted only for carr_jobs or app_exporter_local")
+    if role not in ROTATABLE_ROLES:
+        sys.exit("rotate-credential: generic rotation is permitted only for "
+                 + ", ".join(sorted(ROTATABLE_ROLES)))
     with credential_env_lock():
         return _rotate_existing_role_locked(role, generate)
 
@@ -653,8 +669,9 @@ def _rotate_existing_role(role: str, generate: bool) -> int:
 def _rotate_existing_role_locked(role: str, generate: bool) -> int:
     # Defense in depth for imported/private callers: this is the deepest helper
     # that holds ALTER ROLE, so it carries the same closed non-backup allowlist.
-    if role not in {"carr_jobs", "app_exporter_local"}:
-        sys.exit("rotate-credential: generic rotation is permitted only for carr_jobs or app_exporter_local")
+    if role not in ROTATABLE_ROLES:
+        sys.exit("rotate-credential: generic rotation is permitted only for "
+                 + ", ".join(sorted(ROTATABLE_ROLES)))
     import psycopg
     from psycopg import sql
 
