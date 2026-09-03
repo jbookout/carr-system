@@ -170,15 +170,19 @@ order by ingress_key collate "C"
 # It flags any CARR role that is a member of a superuser role or a neon_*/pg_*
 # platform bundle (which is how write-all leaks in — e.g. neon_superuser carries
 # pg_write_all_data).  It MUST be empty on a correctly-provisioned database; a
-# from-scratch build has none.  Finding cf7b565e: production currently trips it
-# on carr_program5_forward_fix_verifier -> neon_superuser (an unremediated Neon
-# provider artifact). UPDATED 2026-09-03 (WR-000048 repair cascade): this was
-# previously "exactly what this is meant to surface" because the SQL-side v10
-# catalog guard carried a named exception for that one role and only this
-# Python-side scan flagged it. The exception has been REMOVED from the guard —
-# it is no longer merely surfaced here, it now also fails the v10 catalog
-# current-check and the policy epoch closed on any database where this query
-# returns a non-empty result, carr_program5_forward_fix_verifier included.
+# from-scratch build has none.
+#
+# UPDATED 2026-09-03 (WR-000048 repair cascade). Finding cf7b565e (production
+# tripping this on carr_program5_forward_fix_verifier -> neon_superuser) is
+# NO LONGER CURRENT: measured today, the grant is gone from production,
+# ESCALATION_SQL returns zero rows, and bypass_rls on that role reads false.
+# Separately, and regardless of that measurement: the SQL-side v10 catalog
+# guard previously carried a named exception for exactly that one role, so
+# this scan's job was only to SURFACE a finding the guard itself tolerated.
+# That exception has been REMOVED from the guard with no replacement -- any
+# non-empty result from this query now also fails the v10 catalog
+# current-check and the policy epoch closed, for every carr_ role including
+# carr_program5_forward_fix_verifier, not merely reported here.
 ESCALATION_SQL = r"""
 select jsonb_build_object('ingress_key','db-role-escalation:'||mem.rolname||':'||g.rolname,
   'row_kind','escalation','carr_role',mem.rolname,'dangerous_bundle',g.rolname,

@@ -20,6 +20,45 @@ EXPECTED_GRANT_DIGEST = (
     "sha256:0f04a50d8bc65e2dcc765b1981ab1d5091c809570f0a773db3f5c6e2b9d43501"
 )
 
+# WR-000048 mutation test fixtures. NARROWED_ROLE_AUTHORITY_SCOPE is the
+# portable census scope this repair cascade installs (verbatim from the
+# templates: ops/scac-policy-epoch-sql.mjs and renderSIEP13RegistrySql in
+# ops/scac-mutation-inventory.mjs, which this session edited). It must appear
+# exactly once inside the live ops.scac_mutation_catalog_v10_current()
+# definition in migrations/0471_source_merge_catalog_registry_successor.sql --
+# if it does not, the migration no longer carries the fix this test exists to
+# guard, and that is a louder failure than a silently-skipped mutation test.
+# UNNARROWED_ROLE_AUTHORITY_SCOPE is the pre-fix scope, lifted verbatim (never
+# retyped) from `git show 5788cec1:migrations/0455_siep12_policy_epoch.sql`,
+# which the RESCOPE and handoff documents identify as the exact defect: the
+# recursive term constrains only `other.rolname<>'carr_ci'`, so the walk
+# crosses out of the carr_ namespace into neon_superuser and the pg_* built-ins.
+NARROWED_ROLE_AUTHORITY_SCOPE = (
+    "  with recursive connected(oid) as (\n"
+    "    select oid from pg_roles where rolname~'^carr_' and rolname<>'carr_ci' and not rolcanlogin and not rolsuper union\n"
+    "    select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end where other.rolname~'^carr_' and other.rolname<>'carr_ci' and not other.rolcanlogin and not other.rolsuper\n"
+    "  ), role_rows as ("
+)
+UNNARROWED_ROLE_AUTHORITY_SCOPE = (
+    "  with recursive connected(oid) as (\n"
+    "    select oid from pg_roles where rolname~'^carr_' and rolname<>'carr_ci'\n"
+    "    union\n"
+    "    select other.oid from connected c join pg_auth_members m on m.roleid=c.oid or m.member=c.oid\n"
+    "      join pg_roles other on other.oid=case when m.roleid=c.oid then m.member else m.roleid end\n"
+    "     where other.rolname<>'carr_ci'\n"
+    "  ), role_rows as ("
+)
+
+
+def v10_current_function_sql(source: str) -> str:
+    """Extract the exact, currently-installed ops.scac_mutation_catalog_v10_current()
+    definition from a migration file's text, start marker through its closing $fn$;."""
+    start_marker = "create or replace function ops.scac_mutation_catalog_v10_current()"
+    end_marker = "end $fn$;"
+    start = source.index(start_marker)
+    end = source.index(end_marker, start) + len(end_marker)
+    return source[start:end]
+
 
 def fail(message: str) -> int:
     print(f"siep18-reference-monitor-local-pg-gate: FAIL — {message}", file=sys.stderr)
@@ -229,6 +268,61 @@ def main() -> int:
                 )
             cur.execute("rollback to savepoint superuser_bundle_mutation")
             cur.execute("release savepoint superuser_bundle_mutation")
+
+            # WR-000048 census-scope mutation test. ops.scac_policy_epoch_refresh()
+            # (migrations/0455) takes a bootstrap escape hatch and returns null
+            # without ever reaching the catalog guard when there is no prior epoch
+            # AND the rule-delivery projection is empty -- true of every CI fixture
+            # that never seeds a rule, which is exactly how this defect (mechanism
+            # pinned in RECEIPT-A1) went unnoticed through 14/14 unit tests and a
+            # 52-program acceptance suite. seed_reviewed_rule_projection() above
+            # seeds a genuinely non-empty rule/doctrine projection specifically so
+            # the real (non-bootstrap) path runs; the epoch_chain assertion above
+            # already required the real deferred trigger to succeed once. Assert
+            # that explicitly here, then prove the assertion is not vacuous: widen
+            # the live current-check function's role-authority scope back to the
+            # pre-fix (unnarrowed) CTE inside a savepoint, and require the same
+            # real (non-bootstrap) snapshot path to now raise.
+            snapshot = cur.execute("select ops.scac_policy_epoch_snapshot()").fetchone()[0]
+            if not isinstance(snapshot, dict) or snapshot.get("registry_version") != "scac-mutation-registry.v10":
+                raise RuntimeError(
+                    f"ops.scac_policy_epoch_snapshot() did not succeed on the real, "
+                    f"non-bootstrap path with the repaired templates: {snapshot!r}"
+                )
+            v10_migration_path = REPO / "migrations/0471_source_merge_catalog_registry_successor.sql"
+            v10_migration_sql = v10_migration_path.read_text(encoding="utf-8")
+            live_v10_current = v10_current_function_sql(v10_migration_sql)
+            if NARROWED_ROLE_AUTHORITY_SCOPE not in live_v10_current:
+                raise RuntimeError(
+                    "the live ops.scac_mutation_catalog_v10_current() definition no "
+                    "longer contains the expected narrowed role-authority scope -- "
+                    "the mutation test below would be vacuous; the fix or the "
+                    "generator moved without this test being updated"
+                )
+            widened_v10_current = live_v10_current.replace(
+                NARROWED_ROLE_AUTHORITY_SCOPE, UNNARROWED_ROLE_AUTHORITY_SCOPE
+            )
+            if widened_v10_current == live_v10_current:
+                raise RuntimeError("widening the role-authority scope for the mutation test was a no-op")
+            cur.execute("savepoint census_scope_mutation")
+            cur.execute(widened_v10_current)
+            try:
+                cur.execute("select ops.scac_policy_epoch_snapshot()")
+            except Exception as exc:  # noqa: BLE001 - the raise IS the assertion
+                if "drifted" not in str(exc).lower() and "corrupt" not in str(exc).lower():
+                    raise RuntimeError(
+                        f"widened role-authority scope raised the wrong error: {exc}"
+                    ) from exc
+            else:
+                raise RuntimeError(
+                    "ops.scac_policy_epoch_snapshot() did not raise with the "
+                    "pre-fix (unnarrowed) role-authority scope reinstated -- the "
+                    "narrowing fix is not what makes this pass"
+                )
+            cur.execute("rollback to savepoint census_scope_mutation")
+            cur.execute("release savepoint census_scope_mutation")
+            if cur.execute("select ops.scac_mutation_catalog_v10_current()").fetchone()[0] is not True:
+                raise RuntimeError("v10 catalog current-check did not re-arm after the census-scope rollback")
 
             cur.execute("savepoint grant_drift")
             cur.execute("grant insert on public.lead to carr_reader")
