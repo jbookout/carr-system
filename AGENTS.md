@@ -74,6 +74,23 @@ cd .claude/worktrees/<name>
 Reconciling that checkout is the one real exception, and it is a commit on main
 by definition: `CARR_ALLOW_MAIN_COMMIT=1 git commit ...`, for one command only.
 
+## The three operating SOPs (read before your first push)
+
+Since 2026-09-02 the day-to-day loop is written down in the doctrine store and
+is binding. Read the first one before you push anything; the other two when
+your change touches the database or the edge:
+
+    read-doctrine engineering-workflow-sop   # branch, prove locally, PR, merge, CI, tests, sealed files
+    read-doctrine neon-database-sop          # the production door, roles, backups, Neon branches
+    read-doctrine cloudflare-edge-sop        # Worker releases, rollback, secrets, R2
+
+The two rules from Joe's 2026-09-02 ruling that the workflow SOP enforces:
+run the whole suite locally (`ops/ci.sh`) and fix red there BEFORE any push,
+because hosted CI is the merge gate and not the debugger; and never use
+`CARR_SKIP_CI=1` to get past a slow or red floor. Measured before the ruling:
+12 of 25 branches red on first push, 4.1 pushes per merge, 2,911 of 3,000
+included Actions minutes gone by the second day of the month.
+
 ## Checks
 
 `ops/ci.sh` is the ONE check script. The GitHub workflow and the pre-push hook
