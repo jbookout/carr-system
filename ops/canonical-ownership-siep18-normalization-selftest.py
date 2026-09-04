@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
+import os
 from typing import Any
 
 from canonical_ownership_siep18_normalization import (
@@ -135,4 +137,20 @@ other_trigger["tables"][TARGET]["triggers"].insert(
 )
 assert normalize_siep18_reference_monitor_guards(other_trigger, validated) != BASELINE
 
-print("canonical ownership SIEP-18 normalization selftest — 21/21 passed")
+snapshot_baseline = candidate()
+os.environ["CARR_OWNERSHIP_PRE_0450_FINGERPRINT"] = json.dumps(snapshot_baseline)
+try:
+    assert normalize_siep18_reference_monitor_guards(candidate(), validated) == snapshot_baseline
+    malformed_baseline = candidate()
+    malformed_baseline["tables"][TARGET]["triggers"][-1]["enabled"] = "D"
+    os.environ["CARR_OWNERSHIP_PRE_0450_FINGERPRINT"] = json.dumps(malformed_baseline)
+    try:
+        normalize_siep18_reference_monitor_guards(candidate(), validated)
+    except SIEP18NormalizationError:
+        pass
+    else:
+        raise AssertionError("a nonexact snapshot-baseline guard was normalized")
+finally:
+    os.environ.pop("CARR_OWNERSHIP_PRE_0450_FINGERPRINT", None)
+
+print("canonical ownership SIEP-18 normalization selftest — 23/23 passed")

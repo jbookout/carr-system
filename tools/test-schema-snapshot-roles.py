@@ -131,6 +131,38 @@ def main():
               normalized_sql,
           ) is not None)
 
+    # The schema body installs deferred policy-epoch triggers before the
+    # appended data seeds are restored.  The migration ledger arrives before
+    # the rule-delivery policy and sealed SCAC registry, so autocommitting the
+    # ledger COPY makes the trigger inspect a deliberately incomplete restore.
+    # Keep the whole appended data region in one transaction: the deferred
+    # triggers then settle against the final coherent seed set at COMMIT.
+    restore_begin = sql.find("-- CARR SNAPSHOT DATA RESTORE TRANSACTION BEGIN")
+    ledger_copy = sql.find(
+        "COPY public.schema_migrations (filename, sha256, applied_at) FROM stdin;"
+    )
+    registry_seed = sql.find("insert into ops.scac_mutation_registry_version")
+    restore_commit = sql.rfind("-- CARR SNAPSHOT DATA RESTORE TRANSACTION COMMIT")
+    check("the appended data restore is one deferred-trigger transaction",
+          restore_begin >= 0
+          and ledger_copy > restore_begin
+          and registry_seed > ledger_copy
+          and restore_commit > registry_seed
+          and re.search(r"\bBEGIN;", sql[restore_begin:ledger_copy], re.I) is not None
+          and re.search(r"\bCOMMIT;", sql[restore_commit:], re.I) is not None)
+    registry_entry_tail = sql.rfind("insert into ops.scac_mutation_registry_entry")
+    registry_trigger_enable = sql.find(
+        "alter table ops.scac_mutation_registry_entry enable trigger"
+    )
+    check("deferred epoch events settle before sealed registry triggers re-enable",
+          registry_entry_tail > registry_seed
+          and registry_trigger_enable > registry_entry_tail
+          and re.search(
+              r"set constraints all immediate;",
+              sql[registry_entry_tail:registry_trigger_enable],
+              re.I,
+          ) is not None)
+
     # Ordering is the whole point: a grant that runs before its role exists
     # fails, and pg_dump puts the schema body after whatever we prepend.
     # Compared by LINE NUMBER over statement lines only — the first cut of this
