@@ -201,10 +201,11 @@ def main():
                     generator, re.S) is not None)
     renewal_delivery_applied = bool(re.search(
         r"^0230_renewal_decision_delivery\.sql\t", sql, re.M))
+    canonical_grants = "\n".join(canonical_section)
     check("composite function arguments stay schema-qualified in ACL statements",
           (not renewal_delivery_applied)
-          or ("ops.renewal_decision_candidate_digest(p_candidate public.candidate_pool)" in sql
-              and "ops.renewal_decision_candidate_digest(p_candidate candidate_pool)" not in sql))
+          or ("ops.renewal_decision_candidate_digest(p_candidate public.candidate_pool)" in canonical_grants
+              and "ops.renewal_decision_candidate_digest(p_candidate candidate_pool)" not in canonical_grants))
     membership_query = re.search(
         r"select distinct format\('grant %s to %s;', gr\.rolname, mem\.rolname\)"
         r".*?from pg_auth_members m.*?order by 1;",
