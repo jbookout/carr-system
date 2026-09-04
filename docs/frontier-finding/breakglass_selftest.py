@@ -91,6 +91,47 @@ def check(name: str, expectation: str, ok: bool, observed: str) -> bool:
     return ok
 
 
+def test_duplicate_snapshot_identities_are_lossless() -> None:
+    """A logical census identity may have multiple physical catalog rows."""
+
+    rows = [
+        ("db-role-membership:carr_exporter:neondb_owner",
+         {"admin_option": False, "inherit_option": True, "set_option": True}),
+        ("db-role-membership:carr_exporter:neondb_owner",
+         {"admin_option": True, "inherit_option": True, "set_option": True}),
+        ("db-role-membership:carr_exporter:neondb_owner",
+         {"admin_option": False, "inherit_option": True, "set_option": True}),
+        ("db-role:carr_exporter", {"login": True}),
+    ]
+
+    class FakeCursor:
+        def __init__(self, result_rows):
+            self.result_rows = result_rows
+
+        def fetchall(self):
+            return self.result_rows
+
+    observed = breakglass_run._rows_to_map(FakeCursor(rows))
+    reversed_observed = breakglass_run._rows_to_map(FakeCursor(list(reversed(rows))))
+    duplicate_keys = sorted(
+        key for key in observed
+        if key.startswith("db-role-membership:carr_exporter:neondb_owner#duplicate:")
+    )
+    ok = (
+        len(observed) == 4
+        and len(duplicate_keys) == 3
+        and "db-role-membership:carr_exporter:neondb_owner" not in observed
+        and observed == reversed_observed
+        and observed["db-role:carr_exporter"] == {"login": True}
+    )
+    check(
+        "duplicate_snapshot_identities_are_lossless",
+        "duplicate logical identities survive under deterministic receipt-only keys",
+        ok,
+        f"keys={sorted(observed)}",
+    )
+
+
 # ── disposable local PostgreSQL (never a Neon branch, never production) ────
 
 
@@ -774,6 +815,9 @@ def main() -> int:
     WORK_DIR.mkdir(parents=True, exist_ok=True)
     if TEST_RECEIPTS_PATH.exists():
         TEST_RECEIPTS_PATH.unlink()
+
+    print("breakglass_selftest: receipt-map regression tests")
+    test_duplicate_snapshot_identities_are_lossless()
 
     bin_dir = find_pg_bin_dir()
     port = pick_port()
