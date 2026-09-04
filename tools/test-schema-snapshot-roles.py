@@ -117,6 +117,20 @@ def main():
           "that already has them is not an error",
           re.search(r"pg_roles", head, re.I) is not None)
 
+    # 0475 creates this policy only on production-like clusters where the
+    # externally provisioned carr_backup login exists. pg_dump renders the
+    # resulting policy as an unconditional CREATE POLICY, which makes the
+    # portable snapshot unloadable on vanilla CI PostgreSQL unless the checked-
+    # in artifact preserves 0475's conditional role boundary.
+    normalized_sql = re.sub(r"\s+", " ", sql.lower())
+    check("the external carr_backup policy is conditional on that role existing",
+          re.search(
+              r"if exists \(select 1 from pg_roles where rolname = 'carr_backup'\) then "
+              r"create policy carr_backup_full_read on ops\.work_request "
+              r"for select to carr_backup using \(true\); end if",
+              normalized_sql,
+          ) is not None)
+
     # Ordering is the whole point: a grant that runs before its role exists
     # fails, and pg_dump puts the schema body after whatever we prepend.
     # Compared by LINE NUMBER over statement lines only — the first cut of this
