@@ -90,6 +90,13 @@ PROD_BRANCH="production"
 NEONCTL="$REPO/mcp-server/node_modules/.bin/neonctl"
 IDENTITY="${CARR_AGE_IDENTITY:-$HOME/.config/carr/age-key.txt}"
 RESTORE_DB="restore_rehearse"
+# $PY is used once, at the platform-metering-gate call in phase 0, and was never
+# assigned — so under `set -u` every run died there with "PY: parameter not set"
+# BEFORE the metering gate could be consulted. That is why this rehearsal has
+# never completed. Same two-line idiom as bin/deploy-worker.sh, which calls the
+# same gate the same way.
+PY="$REPO/.venv/bin/python"
+[ -x "$PY" ] || PY="$(command -v python3 || true)"
 
 # The tables whose absence means the restore is worthless rather than merely
 # odd. These are the record layer's spine: a dump that comes back without them

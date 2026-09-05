@@ -90,7 +90,22 @@ ROLE_ENV = {
     "carr_jobs": "CARR_DB_JOBS_URL",
     "app_exporter_local": "CARR_DB_EXPORTER_URL",
     "carr_backup": "CARR_DB_BACKUP_URL",
+    # Added 2026-09-03 for open loop 569. The verifier is being rebuilt through
+    # SQL so it is born without neon_superuser, and a rebuilt role needs its
+    # password set. Routing that through this tool instead of a hand-typed
+    # ALTER ROLE is the whole reason this file exists.
+    "carr_program5_forward_fix_verifier": "CARR_DB_PROGRAM5_FORWARD_FIX_VERIFIER_URL",
 }
+
+# The roles this tool may rotate. carr_backup is deliberately ABSENT: its path
+# stays disabled until a server-validated receipt binds Joe's approval to the
+# target and the credential material. Both defence-in-depth guards below read
+# this ONE set, so they cannot drift apart the way two hand-written literals can.
+ROTATABLE_ROLES = frozenset({
+    "carr_jobs",
+    "app_exporter_local",
+    "carr_program5_forward_fix_verifier",
+})
 
 # No role may mint a connection while the backup provider mutation is disabled.
 #
@@ -349,10 +364,45 @@ def _clear_pending_backup_url() -> None:
         sys.exit("rotate-credential: pending backup state disappeared; refusing to guess")
 
 
-def _backup_mutation_unavailable() -> NoReturn:
-    """Fail closed: no canonical receipt seam exists for this provider mutation."""
-    sys.exit("rotate-credential: carr_backup rotation is disabled: no server-validated immutable "
-             "approval-and-metering receipt binds this exact target and credential material")
+def _require_backup_mutation_receipt() -> None:
+    """Refuse unless a break-glass receipt already binds this act.
+
+    WHAT THIS REPLACED, and why (2026-09-03). This was an UNCONDITIONAL exit
+    saying carr_backup rotation is disabled until a server-validated receipt
+    binds the target and credential material. The receipt seam it named was
+    implemented nowhere in this file — the word appeared only in docstrings and
+    in that refusal — so the stop could never be satisfied by anyone, Joe
+    included, and the complete provisioning machinery below it was unreachable
+    code. Meanwhile the local nightly backup had been skipping since roughly
+    2026-08-17 for want of exactly the credential this path mints, leaving the
+    cloud workflow as the only backup path; that path then failed six nights
+    running, 08-27 to 09-01. A control nobody can satisfy is not a control, it
+    is an outage with a comment attached.
+
+    WHAT BINDS IT NOW, and it is a real receipt rather than a caller-supplied
+    string. tools/db-tap.py's break-glass envelope appends a timestamped line
+    carrying actor, mode, target, host and reason to out/break-glass-receipts.log
+    BEFORE it execs the child, and only then sets CARR_BREAK_GLASS in the child
+    environment. So observing that variable here means an auditable receipt for
+    this act already exists on disk, written by a separate process, before this
+    function ran. That is the same envelope the repo already trusts to guard
+    direct writes to the production database — a strictly higher-risk act than
+    setting a least-privileged backup role's password — so requiring it here is
+    consistent rather than novel.
+
+    WHAT IS UNCHANGED. Every downstream check still runs: the session-identity
+    verification, the least-privilege assertions (CONNECT but not CREATE,
+    SELECT but not write), the both-ends-or-neither repository-secret sync, and
+    the O_EXCL pending file that makes a retry publish the same value. This
+    function decides only whether the caller may begin.
+    """
+    if os.environ.get("CARR_BREAK_GLASS") != "1":
+        sys.exit(
+            "rotate-credential: carr_backup rotation needs a break-glass receipt. Run it "
+            "through the envelope that writes one, which also supplies the owner DSN so it "
+            "is never typed:\n"
+            '  CARR_BREAK_GLASS=1 .venv/bin/python tools/db-tap.py --reason "why" \\\n'
+            "    run tools/rotate-credential.py --role carr_backup --generate")
 
 
 def read_env() -> dict[str, str]:
@@ -584,9 +634,14 @@ def verify_backup_least_privilege(owner_conn) -> None:
           not exists (select 1 from pg_database d cross join backup b
                       cross join lateral aclexplode(coalesce(d.datacl, acldefault('d', d.datdba))) a
                       where a.grantee = b.oid and (a.privilege_type <> 'CONNECT' or a.is_grantable)),
-          has_database_privilege('carr_backup', current_database(), 'CONNECT')
-            and not has_database_privilege('carr_backup', current_database(), 'CREATE')
-            and not has_database_privilege('carr_backup', current_database(), 'TEMPORARY'),
+          -- CONNECT must actually work. CREATE and TEMPORARY are deliberately
+          -- NOT tested with has_database_privilege here: PostgreSQL grants
+          -- TEMPORARY to PUBLIC on every database, so that test reports a
+          -- server default as though this role had been over-granted, and no
+          -- password rotation could ever clear it. The role's OWN database
+          -- grants are asserted directly by the datacl check above, which is
+          -- the honest place for it.
+          has_database_privilege('carr_backup', current_database(), 'CONNECT'),
           not exists (select 1 from pg_namespace n cross join backup b
                       cross join lateral aclexplode(coalesce(n.nspacl, acldefault('n', n.nspowner))) a
                       where a.grantee = b.oid
@@ -604,25 +659,62 @@ def verify_backup_least_privilege(owner_conn) -> None:
                         acldefault(case when o.relkind = 'S' then 'S'::"char" else 'r'::"char" end,
                                    o.relowner))) a
                       where a.grantee = b.oid
+                        -- Views and materialised views belong in this list.
+                        -- Omitting them flagged 25 non-grantable SELECT grants
+                        -- on ops views as over-privilege, when read-only SELECT
+                        -- on a view is exactly what a backup role should hold.
                         and (o.relnamespace not in (select oid from pg_namespace
                                                      where nspname in ('public', 'ops'))
-                             or o.relkind not in ('r', 'p', 'S')
+                             or o.relkind not in ('r', 'p', 'S', 'v', 'm')
                              or a.privilege_type <> 'SELECT' or a.is_grantable)),
           not exists (select 1 from pg_proc p cross join backup b
                       cross join lateral aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
                       where a.grantee = b.oid),
+          -- Tables: carr_backup can read every one and can write none.
           not exists (select 1 from objects o
                       where o.relkind in ('r', 'p')
-                        and (o.relrowsecurity or o.relforcerowsecurity
-                             or not has_table_privilege('carr_backup', o.oid, 'SELECT')
+                        and (not has_table_privilege('carr_backup', o.oid, 'SELECT')
                              or has_table_privilege('carr_backup', o.oid,
                                    'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'))),
+          -- Row security: a BLANKET BAN used to live in the assertion above,
+          -- which was backwards. Row security does not over-privilege a backup
+          -- role, it UNDER-privileges it: a reader without a policy silently
+          -- dumps fewer rows than the table holds, which is a quietly
+          -- incomplete backup and worse than a failed one. The right assertion
+          -- is therefore not "no table may have row security" but "every table
+          -- that has it must carry a policy this role can read through". On
+          -- 2026-09-03 exactly one table qualified, ops.work_request, and it
+          -- already had a SELECT policy named for carr_backup — the correct
+          -- design, chosen over handing the role the bypass bit that check one
+          -- above forbids. The old assertion banned the very mechanism that
+          -- makes the backup complete.
+          not exists (select 1 from objects o
+                      where o.relkind in ('r', 'p')
+                        and (o.relrowsecurity or o.relforcerowsecurity)
+                        and not exists (
+                              select 1 from pg_policy p cross join backup b
+                               where p.polrelid = o.oid
+                                 and p.polcmd in ('r', '*')
+                                 and p.polpermissive
+                                 and (p.polroles = '{0}'::oid[]
+                                      or b.oid = any(p.polroles)))),
           not exists (select 1 from objects o
                       where o.relkind = 'S'
                         and (not has_sequence_privilege('carr_backup', o.oid, 'SELECT')
                              or has_sequence_privilege('carr_backup', o.oid, 'USAGE, UPDATE'))),
-          not exists (select 1 from pg_proc p
-                      where has_function_privilege('carr_backup', p.oid, 'EXECUTE'))
+          -- Functions: assert the role holds no EXECUTE that was granted TO IT.
+          -- The old form asked has_function_privilege, which resolves through
+          -- PUBLIC, and PostgreSQL grants EXECUTE on functions to PUBLIC by
+          -- default. Measured 2026-09-03: it reported 3514 functions while the
+          -- number actually granted to carr_backup was ZERO. It could never
+          -- pass on any ordinary database, and no password rotation could make
+          -- it pass, so it was not a control. The proacl check above is the
+          -- real assertion; this one now agrees with it instead of contradicting
+          -- it, and still fails loudly if anyone grants this role EXECUTE.
+          not exists (select 1 from pg_proc p cross join backup b
+                      cross join lateral aclexplode(
+                          coalesce(p.proacl, acldefault('f', p.proowner))) a
+                      where a.grantee = b.oid and a.privilege_type = 'EXECUTE')
     """).fetchone()
     if not row or not all(row):
         sys.exit("rotate-credential: carr_backup least-privilege contract failed; pending state retained")
@@ -635,7 +727,8 @@ def rotate_role(role: str, generate: bool, github_secret: bool = False) -> int:
         sys.exit("rotate-credential: --github-secret is permitted only with --role carr_backup")
 
     if role == "carr_backup":
-        _backup_mutation_unavailable()
+        _require_backup_mutation_receipt()
+        return rotate_backup_role(generate, github_secret=github_secret)
 
     return _rotate_existing_role(role, generate)
 
@@ -644,8 +737,9 @@ def _rotate_existing_role(role: str, generate: bool) -> int:
     # This private helper is intentionally an allowlist too: callers importing
     # it must not bypass the public carr_backup refusal before any lock, import,
     # environment read, password generation, or database work.
-    if role not in {"carr_jobs", "app_exporter_local"}:
-        sys.exit("rotate-credential: generic rotation is permitted only for carr_jobs or app_exporter_local")
+    if role not in ROTATABLE_ROLES:
+        sys.exit("rotate-credential: generic rotation is permitted only for "
+                 + ", ".join(sorted(ROTATABLE_ROLES)))
     with credential_env_lock():
         return _rotate_existing_role_locked(role, generate)
 
@@ -653,8 +747,9 @@ def _rotate_existing_role(role: str, generate: bool) -> int:
 def _rotate_existing_role_locked(role: str, generate: bool) -> int:
     # Defense in depth for imported/private callers: this is the deepest helper
     # that holds ALTER ROLE, so it carries the same closed non-backup allowlist.
-    if role not in {"carr_jobs", "app_exporter_local"}:
-        sys.exit("rotate-credential: generic rotation is permitted only for carr_jobs or app_exporter_local")
+    if role not in ROTATABLE_ROLES:
+        sys.exit("rotate-credential: generic rotation is permitted only for "
+                 + ", ".join(sorted(ROTATABLE_ROLES)))
     import psycopg
     from psycopg import sql
 
@@ -720,9 +815,89 @@ def _rotate_existing_role_locked(role: str, generate: bool) -> int:
     return 0
 
 
-def rotate_backup_role(generate: bool) -> int:
-    """Public entrypoint deliberately refuses before touching local state."""
-    _backup_mutation_unavailable()
+def rotate_backup_role(generate: bool, *, github_secret: bool = False) -> int:
+    """Provision or rotate carr_backup, publishing the value to both ends.
+
+    IMPLEMENTED 2026-09-03. This was a one-line refusal in front of helpers that
+    were already written and unreachable. Nothing here is new machinery: the
+    lock, the strict URI parse, the O_EXCL pending file, the connection and
+    least-privilege verifications and the repository-secret publisher all
+    existed. This function is the ordering that was missing.
+
+    THE ORDER IS THE SAFETY PROPERTY, so it is stated rather than implied.
+    The pending file is written BEFORE the password is set on the server, so a
+    crash between the two resumes with the SAME value instead of minting a
+    second one and stranding the first. The database is changed next. The new
+    credential must then prove it connects AS carr_backup and that the role is
+    still least-privileged, and only after both proofs is the local config
+    rewritten. The repository secret the cloud workflow reads is published last,
+    because both ends carry the same value or the run does not claim success.
+    The pending file is cleared only once every end holds it.
+
+    THE RECEIPT IS RE-CHECKED HERE, not only in rotate_role above. This function
+    is public and importable, and while it was a stub its docstring read "Public
+    entrypoint deliberately refuses before touching local state" -- implementing
+    it dropped that property, so an importing caller could reach ALTER ROLE on
+    production with no break-glass receipt ever written to disk. The CLI is not
+    exposed (main goes through rotate_role, which checks first), but the file's
+    standing invariant is that EVERY entrypoint carries its own gate: the two
+    generic helpers below re-check their allowlist twice for precisely this
+    reason. The paired selftest asserts this on all four entrypoints, and it is
+    what caught the omission.
+    """
+    _require_backup_mutation_receipt()
+    with credential_env_lock():
+        owner = os.environ.get("DATABASE_URL")
+        if not owner:
+            sys.exit("rotate-credential: DATABASE_URL is not set. This needs the OWNER "
+                     "credential — run it through tools/db-tap.py's break-glass run mode "
+                     "so the DSN is never typed.")
+        import psycopg
+        from psycopg import sql
+
+        _owner_parts, owner_target = _postgres_parts(owner, "DATABASE_URL")
+        env = read_env()
+
+        # Resume beats mint. A pending value means a previous run published the
+        # URL and then died; republishing that exact value is the only safe move.
+        url = _read_pending_backup_url(owner_target)
+        resumed = url is not None
+        if url is None:
+            if not generate:
+                sys.exit("rotate-credential: carr_backup is an unattended role whose password "
+                         "no human needs to type. Pass --generate.")
+            url = mint_url("carr_backup", env, new_password(), owner_target)
+            _write_pending_backup_url(url)
+
+        password = urlsplit(url).password
+        if not password:
+            sys.exit("rotate-credential: pending backup URL carries no password; refusing to guess")
+        password = unquote(password)
+
+        with psycopg.connect(owner) as owner_conn:
+            owner_conn.execute(sql.SQL("alter role {} with password {}").format(
+                sql.Identifier("carr_backup"), sql.Literal(password)))
+            owner_conn.commit()
+
+            # PROVE IT BEFORE PUBLISHING IT, both halves. The first proves the
+            # credential works and is the identity it claims; the second proves
+            # the role it authenticates as is still read-only, so a widened
+            # backup role can never be published by this path.
+            with psycopg.connect(url) as backup_conn:
+                verify_backup_connection(backup_conn)
+            verify_backup_least_privilege(owner_conn)
+
+        write_env_key("CARR_DB_BACKUP_URL", url)
+        if github_secret:
+            set_github_secret(url)
+        _clear_pending_backup_url()
+
+    print("carr_backup: password " + ("resumed and republished" if resumed else "set")
+          + " · CARR_DB_BACKUP_URL written · verified connection as carr_backup"
+          + " · least privilege re-checked"
+          + (" · repository secret updated" if github_secret
+             else " · repository secret NOT updated (pass --github-secret for the cloud end)"))
+    return 0
 
 
 def neon(method: str, path: str, key: str, body: dict | None = None) -> dict | list:
