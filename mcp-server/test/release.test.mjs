@@ -164,6 +164,27 @@ test("buildRelease: a database failure degrades schema and doctrine_generation t
   assert.equal(out.verb_count, 50);
 });
 
+test("buildRelease: independent database readbacks overlap and fail independently", async () => {
+  let active = 0;
+  let maxActive = 0;
+  const sql = async (strings) => {
+    const query = strings.join(" ");
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await new Promise(resolve => setImmediate(resolve));
+    active -= 1;
+    if (query.includes("v_schema_ledger")) throw new Error("schema read unavailable");
+    if (query.includes("doctrine_meta")) return [{ generation: 42 }];
+    throw new Error(`unmocked query: ${query}`);
+  };
+  const out = await buildRelease({ env: { GIT_SHA: "b".repeat(40) },
+    sql, verbCount: 50, now: FIXED_NOW });
+  assert.equal(maxActive, 2, "schema and doctrine reads must start before either settles");
+  assert.match(out.schema.reason, /schema read unavailable/);
+  assert.deepEqual(out.doctrine_generation, { value: 42, reason: null },
+    "one failed readback must not erase the independent successful field");
+});
+
 test("buildRelease: an empty v_schema_ledger reports zero, not an error", async () => {
   const sql = fakeSql([
     ["v_schema_ledger", [{ applied_count: 0, highest_applied_migration: null }]],

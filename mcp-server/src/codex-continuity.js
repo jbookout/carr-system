@@ -11,6 +11,7 @@ const TEXT_LIMIT = 4000;
 const STATE_LIMIT = 24000;
 const CURSOR_LIMIT = 2000;
 const RECOVERY_TURN_LIMIT = 25;
+const MAX_CHECKPOINT_VERSION = Number.MAX_SAFE_INTEGER;
 
 const STATE_FIELDS = new Set([
   "objective", "acceptance", "latest_corrections", "constraints", "decisions",
@@ -158,9 +159,22 @@ function common(args, ToolError) {
 }
 
 function expectedVersion(value, ToolError) {
-  if (!Number.isInteger(value) || value < 0)
+  if (!Number.isSafeInteger(value) || value < 0)
     throw new ToolError({ error: "codex_checkpoint_expected_version_invalid" });
   return value;
+}
+
+function checkpointVersion(value, ToolError) {
+  const normalized = typeof value === "string" && /^[1-9][0-9]*$/.test(value)
+    ? Number(value) : value;
+  if (!Number.isSafeInteger(normalized) || normalized < 1 ||
+      normalized > MAX_CHECKPOINT_VERSION)
+    throw new ToolError({ error: "codex_checkpoint_version_invalid" });
+  return normalized;
+}
+
+function checkpointRow(row, ToolError) {
+  return { ...row, checkpoint_version: checkpointVersion(row?.checkpoint_version, ToolError) };
 }
 
 function bindingConflict(error, ToolError) {
@@ -176,7 +190,8 @@ async function lockTask(c, tenant, owner, nativeTaskId) {
     `${tenant}:${owner}:${nativeTaskId}`]);
 }
 
-async function readTaskBindings(c, tenant, owner, nativeTaskId, checkpointForUpdate = false) {
+async function readTaskBindings(c, tenant, owner, nativeTaskId, ToolError,
+  checkpointForUpdate = false) {
   const checkpoint = await c.query(
     `select id,native_task_id,project_id,cwd,checkpoint_version${checkpointForUpdate ? "" : ",state,cursor,updated_at"}
        from codex_continuity_checkpoint
@@ -189,7 +204,8 @@ async function readTaskBindings(c, tenant, owner, nativeTaskId, checkpointForUpd
         and native_task_id=$3
       order by created_at asc,id asc limit 1`,
     [tenant, owner, nativeTaskId]);
-  return { checkpoint: checkpoint.rows[0] || null, firstEvent: firstEvent.rows[0] || null };
+  return { checkpoint: checkpoint.rows[0] ? checkpointRow(checkpoint.rows[0], ToolError) : null,
+    firstEvent: firstEvent.rows[0] || null };
 }
 
 function assertBinding(bindings, key, error, ToolError) {
@@ -208,7 +224,7 @@ export function codexContinuityTools({ withEnvelope, writeEvent, ToolError, asse
       inputSchema: { type: "object", properties: {
         idempotency_key: { type: "string" }, runtime: { type: "string", enum: [RUNTIME] },
         native_task_id: { type: "string" }, project_id: { type: "string" }, cwd: { type: "string" },
-        expected_version: { type: "integer", minimum: 0 }, state: stateSchema, cursor: { type: "object" },
+        expected_version: { type: "integer", minimum: 0, maximum: MAX_CHECKPOINT_VERSION }, state: stateSchema, cursor: { type: "object" },
       }, required: ["idempotency_key", "runtime", "native_task_id", "project_id", "cwd", "expected_version", "state"] },
       handler: async (c, actor, args) => { guard(args); requireNativeCodex(actor, ToolError); const key = common(args, ToolError);
         const expected = expectedVersion(args.expected_version, ToolError);
@@ -218,7 +234,8 @@ export function codexContinuityTools({ withEnvelope, writeEvent, ToolError, asse
           const tenant = organizationTenantForActor(actor);
           const owner = ownerSlug(actor);
           await lockTask(c, tenant, owner, key.nativeTaskId);
-          const bindings = await readTaskBindings(c, tenant, owner, key.nativeTaskId, true);
+          const bindings = await readTaskBindings(c, tenant, owner, key.nativeTaskId,
+            ToolError, true);
           assertBinding(bindings, key, "codex_checkpoint_binding_conflict", ToolError);
           const existing = bindings.checkpoint;
           let row;
@@ -230,11 +247,14 @@ export function codexContinuityTools({ withEnvelope, writeEvent, ToolError, asse
                values ($1,(select id from actor where slug=$2),$3,$4,$5,$6::jsonb,$7::jsonb)
                returning id, native_task_id, project_id, cwd, state, cursor, checkpoint_version, updated_at`,
               [tenant, owner, key.nativeTaskId, key.projectId, key.cwd, JSON.stringify(state), dbCursor(cur)]);
-            row = inserted.rows[0];
+            row = checkpointRow(inserted.rows[0], ToolError);
           } else {
-            const current = Number(existing.checkpoint_version);
+            const current = existing.checkpoint_version;
             if (current !== expected)
               throw new ToolError({ error: "codex_checkpoint_version_conflict", current_version: current, expected_version: expected });
+            if (current === MAX_CHECKPOINT_VERSION)
+              throw new ToolError({ error: "codex_checkpoint_version_exhausted",
+                current_version: current });
             const updated = await c.query(
               `update codex_continuity_checkpoint set state=$4::jsonb,cursor=$5::jsonb,
                  checkpoint_version=checkpoint_version+1,updated_at=now()
@@ -243,7 +263,7 @@ export function codexContinuityTools({ withEnvelope, writeEvent, ToolError, asse
               [existing.id, tenant, owner, JSON.stringify(state), dbCursor(cur), expected]);
             if (!updated.rows.length)
               throw new ToolError({ error: "codex_checkpoint_version_conflict", current_version: expected + 1 });
-            row = updated.rows[0];
+            row = checkpointRow(updated.rows[0], ToolError);
           }
           await c.query(
             `insert into codex_continuity_revision
@@ -263,7 +283,8 @@ export function codexContinuityTools({ withEnvelope, writeEvent, ToolError, asse
       handler: async (c, actor, args) => { guard(args); requireNativeCodex(actor, ToolError); const key = common(args, ToolError);
         const tenant = organizationTenantForActor(actor);
         const owner = ownerSlug(actor);
-        const bindings = await readTaskBindings(c, tenant, owner, key.nativeTaskId);
+        const bindings = await readTaskBindings(c, tenant, owner, key.nativeTaskId,
+          ToolError);
         assertBinding(bindings, key, "codex_recovery_binding_conflict", ToolError);
         const checkpoint = bindings.checkpoint;
         const highwaterResult = await c.query(
@@ -272,7 +293,7 @@ export function codexContinuityTools({ withEnvelope, writeEvent, ToolError, asse
               and native_task_id=$3 and project_id=$4 and cwd=$5 and cursor is not null
             order by created_at desc,id desc limit 1`,
           [tenant, owner, key.nativeTaskId, key.projectId, key.cwd]);
-        const currentVersion = checkpoint ? Number(checkpoint.checkpoint_version) : null;
+        const currentVersion = checkpoint?.checkpoint_version ?? null;
         const turnsResult = await c.query(
           `with prompts as (
              select event_type,cursor,transcript_ref,created_at,id,
@@ -319,7 +340,8 @@ export function codexContinuityTools({ withEnvelope, writeEvent, ToolError, asse
           const tenant = organizationTenantForActor(actor);
           const owner = ownerSlug(actor);
           await lockTask(c, tenant, owner, key.nativeTaskId);
-          const bindings = await readTaskBindings(c, tenant, owner, key.nativeTaskId);
+          const bindings = await readTaskBindings(c, tenant, owner, key.nativeTaskId,
+            ToolError);
           assertBinding(bindings, key, "codex_event_binding_conflict", ToolError);
           const ref = args.transcript_ref ? text(args.transcript_ref, "transcript_ref", ToolError, 1000) : null;
           const r = await c.query(

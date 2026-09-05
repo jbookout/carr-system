@@ -1246,6 +1246,34 @@ echo "  because git_sha and schema are IDENTICAL across environments by design."
 # The deploy and the check share ONE correlation id, which is the entire point:
 # a deploy that breaks a read verb now leaves a deployment and a failed check
 # under one id instead of two unrelated facts in two places.
+measure_release_response_ms() {
+  _measure_url="$1"
+  _measure_rows=""
+  for _measure_sample in 1 2 3 4 5; do
+    if ! _measure_row="$(curl -sS -o /dev/null -w '%{time_pretransfer} %{time_total}' \
+        --max-time 30 "$_measure_url")"; then
+      return 1
+    fi
+    _measure_rows="${_measure_rows}${_measure_row}
+"
+  done
+  printf '%s' "$_measure_rows" | "$PY" -c '
+import math
+import sys
+rows = [line.split() for line in sys.stdin.read().splitlines() if line.strip()]
+if len(rows) != 5 or any(len(row) != 2 for row in rows):
+    raise SystemExit(2)
+try:
+    values = [(float(total) - float(pretransfer)) * 1000
+              for pretransfer, total in rows]
+except ValueError:
+    raise SystemExit(2)
+if any(not math.isfinite(value) or value <= 0 for value in values):
+    raise SystemExit(2)
+print(max(1, max(round(value) for value in values)))
+'
+}
+
 if [ "$TARGET_ENV" = "production" ] && [ ! -x "$REPO/bin/smoke-and-record.sh" ]; then
   [ "${LIVE_RELEASE_VERIFIED:-0}" = "1" ] || {
     DEPLOYMENT_EVIDENCE_REF="https://api.doctorcre.com/release#not-verified"
@@ -1296,16 +1324,19 @@ if [ "$TARGET_ENV" = "production" ] && [ -x "$REPO/bin/smoke-and-record.sh" ]; t
     # for a deploy shipping 131 to pass the guard and drop ten live verbs.
     #
     # So measure what the budget is actually about: how long production takes to
-    # answer. Slowest of five samples, not the mean — a budget met on average
-    # and blown one call in five is not met. Measured on the same endpoint the
-    # identity read-back already uses, so this adds no new dependency. Real
-    # readings that morning: 101, 156, 187, 446, 589 ms.
-    PERFORMANCE_ELAPSED_MS="$(
-      for _ in 1 2 3 4 5; do
-        curl -s -o /dev/null -w '%{time_total}\n' --max-time 30 "$LIVE_RELEASE_URL" || echo 999
-      done | "$PY" -c 'import sys; print(max(int(float(x) * 1000) for x in sys.stdin.read().split()))'
-    )"
-    echo "  slowest of 5 live requests: ${PERFORMANCE_ELAPSED_MS}ms (suite took ${SUITE_ELAPSED_MS}ms, not gated)"
+    # answer after curl has completed DNS, TCP and TLS setup. Five separate
+    # requests retain independent Worker samples; subtracting time_pretransfer
+    # from time_total removes client connection setup without warming away a
+    # Worker cold start. Slowest of five samples, not the mean — a budget met on
+    # average and blown one call in five is not met. On 2026-09-05 total times
+    # reached 1546ms while the measured response portions were 173-440ms.
+    if ! PERFORMANCE_ELAPSED_MS="$(measure_release_response_ms "$LIVE_RELEASE_URL")"; then
+      DEPLOYMENT_EVIDENCE_REF="$LIVE_RELEASE_URL#performance-sampling-unavailable"
+      DEPLOYMENT_FAILURE_CLASS="performance_gate_unavailable"
+      record_deployment verifying "$CARR_CORRELATION_ID"
+      exit 1
+    fi
+    echo "  slowest of 5 live responses after connection setup: ${PERFORMANCE_ELAPSED_MS}ms (suite took ${SUITE_ELAPSED_MS}ms, not gated)"
     PERFORMANCE_EVIDENCE_REF="$LIVE_RELEASE_URL#performance-$CARR_CORRELATION_ID"
     set +e
     "$PY" "$REPO/ops/performance-budget-gate.py" \

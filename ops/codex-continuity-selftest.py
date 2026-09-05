@@ -353,6 +353,25 @@ class CodexHookTests(AdapterCase):
             "unincorporated_user_turns_omitted": 0,
             "source_coverage": "known"}
 
+    def test_checkpoint_version_requires_a_safe_json_integer(self):
+        hook = load_hook_module()
+        highwater = {"byte_offset": 12, "device": 1, "inode": 2,
+                     "source_digest": "a" * 64}
+        for version in (1, 7, (2 ** 53) - 1):
+            recovery = {"status": "ok", "response": self.checkpoint(version=version)}
+            self.assertEqual(hook.checkpoint_marker(recovery), {
+                "checkpoint_version": version, "checkpoint_status": "available"})
+            self.assertIn(f"checkpoint version: {version}",
+                          hook.checkpoint_freshness(
+                              recovery["response"]["checkpoint"], highwater))
+        for malformed in ("1", "01", True, 0, 2 ** 53):
+            recovery = {"status": "ok", "response": self.checkpoint(version=malformed)}
+            self.assertEqual(hook.checkpoint_marker(recovery), {
+                "checkpoint_version": None, "checkpoint_status": "unavailable"})
+            self.assertIn("checkpoint version: unknown",
+                          hook.checkpoint_freshness(
+                              recovery["response"]["checkpoint"], highwater))
+
     def test_session_start_native_payload_delivers_prioritized_bounded_recovery(self):
         self.native_rollout({"type": "event_msg", "payload": {"message": "latest"}})
         env, log = self.install_fake_record_call(

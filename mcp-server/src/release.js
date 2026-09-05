@@ -87,44 +87,50 @@ export async function buildRelease({ env, sql, verbCount, now = () => new Date()
         : "CF_VERSION_METADATA binding is unavailable; no Cloudflare Worker version identity was observed",
     };
 
-  let schema;
-  try {
-    const rows = await sql`
-      select count(*)::int as applied_count, max(filename) as highest_applied_migration,
-             'sha256:' || encode(public.digest(coalesce(string_agg(
-               convert_to(filename, 'UTF8') || decode('00', 'hex') ||
-               convert_to(sha256, 'UTF8') || decode('0a', 'hex'),
-               ''::bytea order by filename collate "C"), ''::bytea),
-               'sha256'), 'hex') as ledger_sha256
-        from v_schema_ledger`;
-    const row = (rows && rows[0]) || {};
-    schema = {
-      highest_applied_migration: row.highest_applied_migration ?? null,
-      applied_count: row.applied_count != null ? Number(row.applied_count) : 0,
-      ledger_sha256: row.ledger_sha256 ?? null,
-      reason: null,
-    };
-  } catch (e) {
-    schema = {
-      highest_applied_migration: null,
-      applied_count: null,
-      ledger_sha256: null,
-      reason: "database unreachable: " + String((e && e.message) || e).slice(0, 200),
-    };
-  }
-
-  let doctrineGeneration;
-  try {
-    const rows = await sql`select generation from doctrine_meta where id = 1`;
-    doctrineGeneration = rows && rows.length
-      ? { value: Number(rows[0].generation), reason: null }
-      : { value: null, reason: "doctrine_meta has no row with id=1" };
-  } catch (e) {
-    doctrineGeneration = {
-      value: null,
-      reason: "database unreachable: " + String((e && e.message) || e).slice(0, 200),
-    };
-  }
+  // These readbacks are independent and Neon executes each tagged query over
+  // its own HTTP request. Start both before awaiting either so /release pays
+  // the slower database round trip once, while each field still degrades on
+  // its own if only one source is unavailable.
+  const schemaPromise = (async () => {
+    try {
+      const rows = await sql`
+        select count(*)::int as applied_count, max(filename) as highest_applied_migration,
+               'sha256:' || encode(public.digest(coalesce(string_agg(
+                 convert_to(filename, 'UTF8') || decode('00', 'hex') ||
+                 convert_to(sha256, 'UTF8') || decode('0a', 'hex'),
+                 ''::bytea order by filename collate "C"), ''::bytea),
+                 'sha256'), 'hex') as ledger_sha256
+          from v_schema_ledger`;
+      const row = (rows && rows[0]) || {};
+      return {
+        highest_applied_migration: row.highest_applied_migration ?? null,
+        applied_count: row.applied_count != null ? Number(row.applied_count) : 0,
+        ledger_sha256: row.ledger_sha256 ?? null,
+        reason: null,
+      };
+    } catch (e) {
+      return {
+        highest_applied_migration: null,
+        applied_count: null,
+        ledger_sha256: null,
+        reason: "database unreachable: " + String((e && e.message) || e).slice(0, 200),
+      };
+    }
+  })();
+  const doctrinePromise = (async () => {
+    try {
+      const rows = await sql`select generation from doctrine_meta where id = 1`;
+      return rows && rows.length
+        ? { value: Number(rows[0].generation), reason: null }
+        : { value: null, reason: "doctrine_meta has no row with id=1" };
+    } catch (e) {
+      return {
+        value: null,
+        reason: "database unreachable: " + String((e && e.message) || e).slice(0, 200),
+      };
+    }
+  })();
+  const [schema, doctrineGeneration] = await Promise.all([schemaPromise, doctrinePromise]);
 
   // WHICH DEPLOYMENT AM I? Added 2026-08-14, the day a staging Worker deployed
   // without `routes = []`, inherited all three production domains, and served
