@@ -20,6 +20,7 @@ HISTORY_PATH = pathlib.Path(__file__).with_name("codex-history.py")
 MAX_CONTEXT_BYTES = 12000
 EVENT_DEADLINE_SECONDS = 8.0
 MIN_STORE_CALL_SECONDS = 0.05
+MAX_SAFE_INTEGER = (2 ** 53) - 1
 EVENTS = {"SessionStart", "UserPromptSubmit", "PreCompact", "PostCompact"}
 SESSION_SOURCES = {"startup", "resume", "compact"}
 COMPACT_TRIGGERS = {"manual", "auto"}
@@ -172,10 +173,18 @@ def _checkpoint_cursor(checkpoint):
     return cursor if isinstance(cursor, dict) else None
 
 
+def _checkpoint_version(checkpoint):
+    version = checkpoint.get("checkpoint_version") if isinstance(checkpoint, dict) else None
+    if (not isinstance(version, int) or isinstance(version, bool)
+            or version < 1 or version > MAX_SAFE_INTEGER):
+        return None
+    return version
+
+
 def checkpoint_freshness(checkpoint, highwater):
     cursor = _checkpoint_cursor(checkpoint)
-    version = checkpoint.get("checkpoint_version") if isinstance(checkpoint, dict) else None
-    prefix = f"checkpoint version: {version}" if isinstance(version, int) else "checkpoint version: unknown"
+    version = _checkpoint_version(checkpoint)
+    prefix = f"checkpoint version: {version}" if version is not None else "checkpoint version: unknown"
     if not cursor:
         return f"{prefix}; checkpoint freshness is unknown because it has no source cursor."
     offset = cursor.get("byte_offset")
@@ -426,8 +435,8 @@ def checkpoint_marker(recovery):
     checkpoint = response.get("checkpoint")
     if response.get("found") is False or checkpoint is None:
         return {"checkpoint_version": 0, "checkpoint_status": "missing"}
-    version = checkpoint.get("checkpoint_version") if isinstance(checkpoint, dict) else None
-    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+    version = _checkpoint_version(checkpoint)
+    if version is None:
         return {"checkpoint_version": None, "checkpoint_status": "unavailable"}
     return {"checkpoint_version": version, "checkpoint_status": "available"}
 

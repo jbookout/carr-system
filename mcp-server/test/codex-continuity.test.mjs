@@ -21,17 +21,24 @@ function tools() {
   });
 }
 
-test("checkpoint creates a version-one revision and uses task binding", async () => {
+test("checkpoint normalizes the database bigint version and uses it in the revision", async () => {
   const statements = [];
+  const events = [];
   const client = { query: async (sql, params) => {
     statements.push({ sql, params });
     if (sql.startsWith("select pg_advisory")) return { rows: [] };
     if (sql.startsWith("select id,native_task_id,project_id")) return { rows: [] };
-    if (sql.startsWith("insert into codex_continuity_checkpoint")) return { rows: [{ id: "cp-1", native_task_id: "task-1", project_id: "p", cwd: "/repo", state, cursor: null, checkpoint_version: 1 }] };
+    if (sql.startsWith("insert into codex_continuity_checkpoint")) return { rows: [{ id: "cp-1", native_task_id: "task-1", project_id: "p", cwd: "/repo", state, cursor: null, checkpoint_version: "1" }] };
     if (sql.startsWith("insert into codex_continuity_revision")) return { rows: [] };
     return { rows: [] };
   } };
-  const out = await tools()["codex-checkpoint"].handler(client, actor, {
+  const checkpointTools = codexContinuityTools({
+    ToolError: TestToolError,
+    assertNoCallerAuthorityFields: () => {},
+    withEnvelope: async (_c, _a, _v, _args, fn) => fn(),
+    writeEvent: async (...args) => { events.push(args); },
+  });
+  const out = await checkpointTools["codex-checkpoint"].handler(client, actor, {
     idempotency_key: key, runtime: "codex", native_task_id: "task-1", project_id: "p", cwd: "/repo",
     expected_version: 0, state,
   });
@@ -40,6 +47,8 @@ test("checkpoint creates a version-one revision and uses task binding", async ()
   assert.match(statements.find(x => x.sql.startsWith("insert into codex_continuity_revision")).sql, /state/);
   assert.equal(statements.find(x => x.sql.startsWith("insert into codex_continuity_checkpoint")).params[6], null);
   assert.equal(statements.find(x => x.sql.startsWith("insert into codex_continuity_revision")).params[3], null);
+  assert.equal(statements.find(x => x.sql.startsWith("insert into codex_continuity_revision")).params[1], 1);
+  assert.equal(events[0][5].new.version, 1);
 });
 
 test("recovery scopes owner through actor slug lookup, never a raw slug-to-uuid comparison", async () => {
@@ -77,9 +86,9 @@ test("ten repeated recovery cycles preserve correction and next action in one bo
   let version = 0;
   const client = { query: async (sql, params) => {
     if (sql.startsWith("select pg_advisory")) return { rows: [] };
-    if (sql.startsWith("select id,native_task_id,project_id")) return version ? { rows: [{ id: "cp-1", project_id: "p", cwd: "/repo", checkpoint_version: version }] } : { rows: [] };
-    if (sql.startsWith("insert into codex_continuity_checkpoint")) { version = 1; return { rows: [{ id: "cp-1", native_task_id: "task-1", project_id: "p", cwd: "/repo", state: params[5], checkpoint_version: version }] }; }
-    if (sql.startsWith("update codex_continuity_checkpoint")) { version += 1; return { rows: [{ id: "cp-1", native_task_id: "task-1", project_id: "p", cwd: "/repo", state: params[3], checkpoint_version: version }] }; }
+    if (sql.startsWith("select id,native_task_id,project_id")) return version ? { rows: [{ id: "cp-1", project_id: "p", cwd: "/repo", checkpoint_version: String(version) }] } : { rows: [] };
+    if (sql.startsWith("insert into codex_continuity_checkpoint")) { version = 1; return { rows: [{ id: "cp-1", native_task_id: "task-1", project_id: "p", cwd: "/repo", state: params[5], checkpoint_version: String(version) }] }; }
+    if (sql.startsWith("update codex_continuity_checkpoint")) { version += 1; return { rows: [{ id: "cp-1", native_task_id: "task-1", project_id: "p", cwd: "/repo", state: params[3], checkpoint_version: String(version) }] }; }
     return { rows: [] };
   } };
   const verb = tools()["codex-checkpoint"];
@@ -99,6 +108,51 @@ test("ten repeated recovery cycles preserve correction and next action in one bo
   }
   assert.equal(current, 10);
   assert.ok(JSON.stringify(state).length < 24000);
+});
+
+test("checkpoint refuses malformed or unsafe database bigint versions before CAS", async () => {
+  const checkpoint = tools()["codex-checkpoint"];
+  assert.equal(checkpoint.inputSchema.properties.expected_version.maximum,
+    Number.MAX_SAFE_INTEGER);
+  for (const checkpoint_version of ["01", "9007199254740992", true]) {
+    let updated = false;
+    const client = { query: async sql => {
+      if (sql.startsWith("select pg_advisory")) return { rows: [] };
+      if (sql.startsWith("select id,native_task_id,project_id")) return { rows: [{
+        id: "cp-1", project_id: "p", cwd: "/repo", checkpoint_version,
+      }] };
+      if (sql.startsWith("select project_id,cwd from codex_continuity_event")) return { rows: [] };
+      if (sql.startsWith("update codex_continuity_checkpoint")) updated = true;
+      return { rows: [] };
+    } };
+    await assert.rejects(() => checkpoint.handler(client, actor, {
+      idempotency_key: key, runtime: "codex", native_task_id: "task-1",
+      project_id: "p", cwd: "/repo", expected_version: 1, state,
+    }), error => error.payload?.error === "codex_checkpoint_version_invalid");
+    assert.equal(updated, false);
+  }
+  const client = { query: async () => { throw new Error("unsafe input must not query"); } };
+  await assert.rejects(() => checkpoint.handler(client, actor, {
+    idempotency_key: key, runtime: "codex", native_task_id: "task-1",
+    project_id: "p", cwd: "/repo", expected_version: Number.MAX_SAFE_INTEGER + 1, state,
+  }), error => error.payload?.error === "codex_checkpoint_expected_version_invalid");
+
+  let exhaustedUpdate = false;
+  const exhaustedClient = { query: async sql => {
+    if (sql.startsWith("select pg_advisory")) return { rows: [] };
+    if (sql.startsWith("select id,native_task_id,project_id")) return { rows: [{
+      id: "cp-max", project_id: "p", cwd: "/repo",
+      checkpoint_version: String(Number.MAX_SAFE_INTEGER),
+    }] };
+    if (sql.startsWith("select project_id,cwd from codex_continuity_event")) return { rows: [] };
+    if (sql.startsWith("update codex_continuity_checkpoint")) exhaustedUpdate = true;
+    return { rows: [] };
+  } };
+  await assert.rejects(() => checkpoint.handler(exhaustedClient, actor, {
+    idempotency_key: key, runtime: "codex", native_task_id: "task-1",
+    project_id: "p", cwd: "/repo", expected_version: Number.MAX_SAFE_INTEGER, state,
+  }), error => error.payload?.error === "codex_checkpoint_version_exhausted");
+  assert.equal(exhaustedUpdate, false, "CAS never increments beyond the JSON safe-integer boundary");
 });
 
 test("state list items are closed and required text is documented in the schema", async () => {
@@ -254,9 +308,10 @@ test("recovery returns bounded pending prompt receipts, highwater, omission coun
     transcript_ref: "/native/rollout.jsonl", created_at: "2026-09-05T12:00:00Z",
   };
   let pendingSql;
-  const client = { query: async sql => {
+  let pendingParams;
+  const client = { query: async (sql, params) => {
     if (sql.startsWith("select id,native_task_id,project_id")) return { rows: [{
-      id: "cp-1", native_task_id: "task-1", project_id: "p", cwd: "/repo", checkpoint_version: 7,
+      id: "cp-1", native_task_id: "task-1", project_id: "p", cwd: "/repo", checkpoint_version: "7",
       state, cursor: { byte_offset: 800 }, updated_at: "2026-09-05T11:59:00Z",
     }] };
     if (sql.startsWith("select project_id,cwd from codex_continuity_event"))
@@ -265,6 +320,7 @@ test("recovery returns bounded pending prompt receipts, highwater, omission coun
       return { rows: [{ cursor: { byte_offset: 900, checkpoint_version: 7 } }] };
     if (sql.includes("with prompts as")) {
       pendingSql = sql;
+      pendingParams = params;
       return { rows: [{ turns: [prompt], omitted: 4, coverage_known: true }] };
     }
     throw new Error(`unexpected SQL: ${sql}`);
@@ -274,6 +330,8 @@ test("recovery returns bounded pending prompt receipts, highwater, omission coun
   });
   assert.deepEqual(out.source_highwater, { byte_offset: 900, checkpoint_version: 7 });
   assert.equal(out.checkpoint.native_task_id, "task-1");
+  assert.equal(out.checkpoint.checkpoint_version, 7);
+  assert.equal(pendingParams[5], 7);
   assert.deepEqual(out.unincorporated_user_turns, [prompt]);
   assert.equal(out.unincorporated_user_turns_omitted, 4);
   assert.equal(out.source_coverage, "known");
