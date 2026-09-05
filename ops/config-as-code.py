@@ -48,6 +48,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lib.machine_prerequisites import machine_prerequisites, prerequisite_failure_report
@@ -173,6 +174,7 @@ HOOKS_REPO = os.path.join(REPO, "ops", "config", "hooks.json")
 CODEX_HOOKS_SRC = os.path.join(HOME, ".codex", "hooks.json")
 CODEX_HOOKS_REPO = os.path.join(REPO, "ops", "config", "codex-hooks.json")
 CODEX_CONFIG = os.path.join(HOME, ".codex", "config.toml")
+CODEX_CONTINUITY_EVENTS = ("PreCompact", "PostCompact", "SessionStart", "UserPromptSubmit")
 CODEX_PERMISSIONS_REPO = os.path.join(REPO, "ops", "config", "codex-permissions.toml")
 CODEX_PERMISSIONS_BEGIN = "# >>> CARR managed permissions >>>"
 CODEX_PERMISSIONS_END = "# <<< CARR managed permissions <<<"
@@ -606,7 +608,12 @@ def is_carr_hook_command(command):
     if not isinstance(command, str):
         return False
     candidate = command.replace("\\", "/").lower()
-    return "/carr-system/hooks/" in candidate or "/my drive/carr ai/hooks/" in candidate
+    return ("/carr-system/hooks/" in candidate or
+            "/my drive/carr ai/hooks/" in candidate or
+            "/carr-system/ops/codex-continuity-hook.py" in candidate or
+            "/my drive/carr ai/ops/codex-continuity-hook.py" in candidate or
+            "{{repo}}/hooks/" in candidate or
+            "{{repo}}/ops/codex-continuity-hook.py" in candidate)
 
 
 def carr_owned_hooks_document(document, include_events=()):
@@ -655,6 +662,47 @@ def merge_codex_carr_hooks(live, desired):
                 retained.append(clone)
         desired_groups = (desired_hooks or {}).get(event, [])
         retained.extend(json.loads(json.dumps(desired_groups)) if isinstance(desired_groups, list) else [])
+        live_hooks[event] = retained
+    result["hooks"] = live_hooks
+    return result
+
+
+def is_codex_continuity_hook_command(command):
+    """Recognize only the continuity wrapper owned by the narrow installer."""
+    if not isinstance(command, str):
+        return False
+    candidate = command.replace("\\", "/").lower()
+    return ("/carr-system/ops/codex-continuity-hook.py" in candidate or
+            "/my drive/carr ai/ops/codex-continuity-hook.py" in candidate or
+            "{{repo}}/ops/codex-continuity-hook.py" in candidate)
+
+
+def merge_codex_continuity_hooks(live, desired):
+    """Merge continuity groups while preserving all other Codex configuration."""
+    result = json.loads(json.dumps(live if isinstance(live, dict) else {}))
+    live_hooks = result.get("hooks")
+    if not isinstance(live_hooks, dict):
+        live_hooks = {}
+    desired_hooks = desired.get("hooks") if isinstance(desired, dict) else {}
+    if not isinstance(desired_hooks, dict):
+        desired_hooks = {}
+    for event in CODEX_CONTINUITY_EVENTS:
+        retained = []
+        groups = live_hooks.get(event, [])
+        for group in groups if isinstance(groups, list) else []:
+            if not isinstance(group, dict):
+                retained.append(group)
+                continue
+            non_continuity = [hook for hook in group.get("hooks", [])
+                              if not (isinstance(hook, dict) and
+                                      is_codex_continuity_hook_command(hook.get("command")))]
+            if non_continuity:
+                clone = dict(group)
+                clone["hooks"] = non_continuity
+                retained.append(clone)
+        desired_groups = desired_hooks.get(event, [])
+        if isinstance(desired_groups, list):
+            retained.extend(json.loads(json.dumps(desired_groups)))
         live_hooks[event] = retained
     result["hooks"] = live_hooks
     return result
@@ -721,6 +769,92 @@ def codex_configuration_state():
     if has_hooks:
         return "partial"
     return "absent"
+
+
+def cmd_install_codex_continuity(apply, remove=False):
+    """Install only the four CARR continuity hook groups owned by Codex.
+
+    This intentionally has no relationship to the broad machine reconciler:
+    it never reads or writes Claude settings, Codex permissions, LaunchAgents,
+    scheduled tasks, git configuration, or any other global client state.
+    """
+    desired = {"hooks": {event: [] for event in CODEX_CONTINUITY_EVENTS}}
+    if not remove:
+        source = read(CODEX_HOOKS_REPO)
+        if source is None:
+            print(f"ERROR: no tracked Codex hooks at {CODEX_HOOKS_REPO}.")
+            return 1
+        try:
+            desired_document = json.loads(concrete(source))
+        except Exception as exc:
+            print(f"ERROR: {CODEX_HOOKS_REPO} is not valid JSON ({exc}).")
+            return 1
+        if not isinstance(desired_document, dict) or not isinstance(desired_document.get("hooks"), dict):
+            print(f"ERROR: {CODEX_HOOKS_REPO} must contain a hooks object.")
+            return 1
+        desired = {"hooks": {event: desired_document["hooks"].get(event, [])
+                              for event in CODEX_CONTINUITY_EVENTS}}
+        if not any(desired["hooks"].get(event) for event in CODEX_CONTINUITY_EVENTS):
+            print(f"ERROR: {CODEX_HOOKS_REPO} contains no continuity hook groups.")
+            return 1
+
+    raw_live = read(CODEX_HOOKS_SRC)
+    if raw_live is None:
+        if remove:
+            print("  No Codex continuity hook file exists; nothing to remove")
+            return 0
+        live = {}
+        print(f"  Codex continuity hooks: {'WILL CREATE' if apply else 'would create'} {CODEX_HOOKS_SRC}")
+    else:
+        try:
+            live = json.loads(raw_live)
+        except Exception as exc:
+            print(f"ERROR: {CODEX_HOOKS_SRC} is not valid JSON ({exc}) — refusing to touch it.")
+            return 1
+        if not isinstance(live, dict):
+            print(f"ERROR: {CODEX_HOOKS_SRC} must contain a JSON object — refusing to touch it.")
+            return 1
+
+    merged = merge_codex_continuity_hooks(live, desired)
+    rendered = json.dumps(merged, indent=2) + "\n"
+    unchanged = raw_live is not None and raw_live == rendered
+    if unchanged:
+        print("  Codex continuity hooks already match the repo (unrelated configuration preserved)")
+        return 0
+    if not apply:
+        print(f"  Codex continuity hooks: would write {CODEX_HOOKS_SRC}")
+        action = "remove-codex-continuity" if remove else "install-codex-continuity"
+        print(f"\nDRY RUN — nothing written. Re-run with `{action} --apply`.")
+        return 0
+
+    parent = os.path.dirname(CODEX_HOOKS_SRC)
+    os.makedirs(parent, exist_ok=True)
+    backup = CODEX_HOOKS_SRC + ".bak-codex-continuity"
+    had_live = raw_live is not None
+    if had_live:
+        shutil.copy2(CODEX_HOOKS_SRC, backup)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=parent,
+                                         prefix=".codex-continuity-", delete=False) as fh:
+            temp_path = fh.name
+            json.dump(merged, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temp_path, CODEX_HOOKS_SRC)
+        json.loads(read(CODEX_HOOKS_SRC))
+    except Exception as exc:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
+        if had_live and os.path.exists(backup):
+            shutil.copy2(backup, CODEX_HOOKS_SRC)
+        elif not had_live and os.path.exists(CODEX_HOOKS_SRC):
+            os.unlink(CODEX_HOOKS_SRC)
+        print(f"ERROR: Codex continuity hook write failed ({exc}) — original restored.")
+        return 1
+    print(f"  WROTE OK  {CODEX_HOOKS_SRC} (backup: {backup if had_live else 'none; new file'})")
+    return 0
 
 
 # A DEFINITION-ONLY TASK IS NOT A MISSING JOB. Four calendar-prebrief contracts
@@ -1293,6 +1427,10 @@ def main():
         return cmd_check()
     if mode == "pull":
         return cmd_pull(apply)
+    if mode == "install-codex-continuity":
+        return cmd_install_codex_continuity(apply)
+    if mode == "remove-codex-continuity":
+        return cmd_install_codex_continuity(apply, remove=True)
     if mode == "install":
         return cmd_install(apply)
     print(__doc__)
