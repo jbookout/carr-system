@@ -36,19 +36,25 @@ exactly as they bind Joe, with zero mechanical enforcement on his side today.
     ops/config-as-code.py check      # drift report; exit 1 if any. THE DEFAULT.
     ops/config-as-code.py pull       # machine -> repo (capture what is live)
     ops/config-as-code.py install    # repo -> machine (deploy; needs --apply)
+    ops/config-as-code.py install-codex-continuity --apply
+    ops/config-as-code.py verify-codex-continuity
+    ops/config-as-code.py remove-codex-continuity --apply
 
 `check` is what belongs in run.sh health: it answers "is the live config still
 the config we think we have", which is the question nobody could answer tonight.
 """
 
+import copy
 import json
 import os
 import plistlib
 import re
+import select
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lib.machine_prerequisites import machine_prerequisites, prerequisite_failure_report
@@ -175,6 +181,14 @@ CODEX_HOOKS_SRC = os.path.join(HOME, ".codex", "hooks.json")
 CODEX_HOOKS_REPO = os.path.join(REPO, "ops", "config", "codex-hooks.json")
 CODEX_CONFIG = os.path.join(HOME, ".codex", "config.toml")
 CODEX_CONTINUITY_EVENTS = ("PreCompact", "PostCompact", "SessionStart", "UserPromptSubmit")
+CODEX_CONTINUITY_APP_EVENTS = {
+    "PreCompact": "preCompact",
+    "PostCompact": "postCompact",
+    "SessionStart": "sessionStart",
+    "UserPromptSubmit": "userPromptSubmit",
+}
+CODEX_APP_SERVER_TIMEOUT_SECONDS = 15
+CODEX_APP_SERVER_OUTPUT_LIMIT = 4 * 1024 * 1024
 CODEX_PERMISSIONS_REPO = os.path.join(REPO, "ops", "config", "codex-permissions.toml")
 CODEX_PERMISSIONS_BEGIN = "# >>> CARR managed permissions >>>"
 CODEX_PERMISSIONS_END = "# <<< CARR managed permissions <<<"
@@ -771,6 +785,348 @@ def codex_configuration_state():
     return "absent"
 
 
+def codex_app_server_request(method, params):
+    """Call one bounded experimental Codex app-server method over JSONL stdio."""
+    command = [os.environ.get("CARR_CODEX_CLI", "codex"), "app-server", "--stdio"]
+    messages = [
+        {"method": "initialize", "id": 1, "params": {
+            "clientInfo": {"name": "carr-continuity-installer", "version": "1.0.0"},
+            "capabilities": {"experimentalApi": True},
+        }},
+        {"method": "initialized", "params": {}},
+        {"method": method, "id": 2, "params": params},
+    ]
+    process = None
+    try:
+        process = subprocess.Popen(
+            command, cwd=REPO, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if process.stdin is None or process.stdout is None or process.stderr is None:
+            raise RuntimeError("Codex app-server stdio pipes were not created")
+        payload = b"".join((json.dumps(message) + "\n").encode() for message in messages)
+        process.stdin.write(payload)
+        process.stdin.flush()
+        deadline = time.monotonic() + CODEX_APP_SERVER_TIMEOUT_SECONDS
+        buffer = b""
+        stderr_buffer = b""
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select(
+                [process.stdout, process.stderr], [], [],
+                min(0.25, max(0, deadline - time.monotonic())))
+            if not ready:
+                if process.poll() is not None:
+                    break
+                continue
+            for stream in ready:
+                chunk = os.read(stream.fileno(), 65536)
+                if stream is process.stderr:
+                    stderr_buffer += chunk
+                    if len(stderr_buffer) > CODEX_APP_SERVER_OUTPUT_LIMIT:
+                        raise RuntimeError("Codex app-server stderr exceeded the 4 MiB limit")
+                    continue
+                if not chunk:
+                    continue
+                buffer += chunk
+                if len(buffer) > CODEX_APP_SERVER_OUTPUT_LIMIT:
+                    raise RuntimeError("Codex app-server response exceeded the 4 MiB limit")
+            while b"\n" in buffer:
+                line, buffer = buffer.split(b"\n", 1)
+                if not line.strip():
+                    continue
+                try:
+                    response = json.loads(line)
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise RuntimeError(f"Codex app-server returned invalid JSON ({exc})") from exc
+                if response.get("id") != 2:
+                    continue
+                if "error" in response:
+                    error = response.get("error") or {}
+                    message = str(error.get("message") or "request refused")[:500]
+                    raise RuntimeError(f"Codex app-server {method} failed: {message}")
+                result = response.get("result")
+                if not isinstance(result, dict):
+                    raise RuntimeError(f"Codex app-server {method} returned no object result")
+                return result
+        raise RuntimeError(f"Codex app-server {method} did not answer within "
+                           f"{CODEX_APP_SERVER_TIMEOUT_SECONDS}s")
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"Codex app-server {method} unavailable ({exc})") from exc
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+
+
+def canonical_codex_continuity_hooks():
+    """Load and validate the four exact rendered hook contracts from the repo."""
+    source = read(CODEX_HOOKS_REPO)
+    if source is None:
+        raise RuntimeError(f"no tracked Codex hooks at {CODEX_HOOKS_REPO}")
+    try:
+        document = json.loads(concrete(source))
+    except Exception as exc:
+        raise RuntimeError(f"{CODEX_HOOKS_REPO} is not valid JSON ({exc})") from exc
+    hooks = document.get("hooks") if isinstance(document, dict) else None
+    if not isinstance(hooks, dict):
+        raise RuntimeError(f"{CODEX_HOOKS_REPO} must contain a hooks object")
+    desired = {"hooks": {event: hooks.get(event, [])
+                          for event in CODEX_CONTINUITY_EVENTS}}
+    contracts = []
+    for event in CODEX_CONTINUITY_EVENTS:
+        groups = desired["hooks"][event]
+        if (not isinstance(groups, list) or len(groups) != 1 or
+                not isinstance(groups[0], dict)):
+            raise RuntimeError(f"{event} must contain exactly one continuity group")
+        group = groups[0]
+        handlers = group.get("hooks")
+        if (not isinstance(handlers, list) or len(handlers) != 1 or
+                not isinstance(handlers[0], dict)):
+            raise RuntimeError(f"{event} must contain exactly one continuity handler")
+        handler = handlers[0]
+        if (handler.get("type") != "command" or
+                not isinstance(handler.get("command"), str) or
+                not isinstance(handler.get("timeout"), int) or
+                isinstance(handler.get("timeout"), bool)):
+            raise RuntimeError(f"{event} continuity handler shape is invalid")
+        contracts.append({
+            "eventName": CODEX_CONTINUITY_APP_EVENTS[event],
+            "command": handler["command"],
+            "matcher": group.get("matcher"),
+            "handlerType": handler["type"],
+            "timeoutSec": handler["timeout"],
+        })
+    return desired, contracts
+
+
+def codex_continuity_hook_entries(contracts, require_trusted=False):
+    """Return the exact four user hook instances observed by Codex itself."""
+    response = codex_app_server_request("hooks/list", {"cwds": [REPO]})
+    data = response.get("data")
+    if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict):
+        raise RuntimeError("hooks/list did not return exactly one requested working directory")
+    listing = data[0]
+    if listing.get("errors"):
+        raise RuntimeError("hooks/list reported hook configuration errors")
+    hooks = listing.get("hooks")
+    if not isinstance(hooks, list):
+        raise RuntimeError("hooks/list returned no hook array")
+    source_path = os.path.realpath(CODEX_HOOKS_SRC)
+    candidates = []
+    for contract in contracts:
+        matches = [hook for hook in hooks if isinstance(hook, dict) and
+                   os.path.realpath(str(hook.get("sourcePath") or "")) == source_path and
+                   all(hook.get(field) == value for field, value in contract.items())]
+        if len(matches) != 1:
+            raise RuntimeError("hooks/list did not uniquely match the canonical "
+                               f"{contract['eventName']} continuity hook")
+        candidates.append(matches[0])
+    keys = set()
+    for hook in candidates:
+        key = hook.get("key")
+        current_hash = hook.get("currentHash")
+        if (hook.get("source") != "user" or hook.get("handlerType") != "command" or
+                hook.get("enabled") is not True or not isinstance(key, str) or not key or
+                not isinstance(current_hash, str) or
+                not re.fullmatch(r"sha256:[0-9a-f]{64}", current_hash)):
+            raise RuntimeError("hooks/list returned malformed continuity hook metadata")
+        if key in keys:
+            raise RuntimeError("hooks/list returned a duplicate continuity hook key")
+        keys.add(key)
+        if require_trusted and hook.get("trustStatus") != "trusted":
+            raise RuntimeError(f"{hook.get('eventName')} continuity hook is "
+                               f"{hook.get('trustStatus') or 'not trusted'}")
+    return candidates
+
+
+def _codex_user_config_layer():
+    response = codex_app_server_request(
+        "config/read", {"cwd": REPO, "includeLayers": True})
+    layers = response.get("layers")
+    if not isinstance(layers, list):
+        raise RuntimeError("config/read returned no configuration layers")
+    expected_path = os.path.realpath(CODEX_CONFIG)
+    matches = []
+    for layer in layers:
+        if not isinstance(layer, dict):
+            continue
+        name = layer.get("name")
+        if (isinstance(name, dict) and name.get("type") == "user" and
+                os.path.realpath(str(name.get("file") or "")) == expected_path):
+            matches.append(layer)
+    if len(matches) != 1:
+        raise RuntimeError("config/read did not uniquely identify the user config layer")
+    layer = matches[0]
+    if (not isinstance(layer.get("config"), dict) or
+            not re.fullmatch(r"sha256:[0-9a-f]{64}", str(layer.get("version") or ""))):
+        raise RuntimeError("config/read returned malformed user config metadata")
+    return layer
+
+
+def _without_continuity_trust(config, keys):
+    """Mask only selected trust tables so every unrelated value can be compared."""
+    masked = copy.deepcopy(config)
+    hooks = masked.get("hooks")
+    if not isinstance(hooks, dict):
+        return masked
+    state = hooks.get("state")
+    if isinstance(state, dict):
+        for key in keys:
+            state.pop(key, None)
+        if not state:
+            hooks.pop("state", None)
+    if not hooks:
+        masked.pop("hooks", None)
+    return masked
+
+
+def _hook_trust_state(config):
+    hooks = config.get("hooks") if isinstance(config, dict) else None
+    state = hooks.get("state") if isinstance(hooks, dict) else None
+    return state if isinstance(state, dict) else {}
+
+
+def _write_codex_config_edits(edits, expected_version):
+    result = codex_app_server_request("config/batchWrite", {
+        "edits": edits,
+        "expectedVersion": expected_version,
+        "filePath": CODEX_CONFIG,
+        "reloadUserConfig": True,
+    })
+    if (result.get("status") != "ok" or
+            os.path.realpath(str(result.get("filePath") or "")) !=
+            os.path.realpath(CODEX_CONFIG)):
+        raise RuntimeError("config/batchWrite did not confirm an effective user-config write")
+    return _codex_user_config_layer()
+
+
+def _restore_codex_continuity_trust(before_config, keys):
+    """Restore selected trust tables without reverting unrelated concurrent config."""
+    current = _codex_user_config_layer()
+    current_config = current["config"]
+    before_state = _hook_trust_state(before_config)
+    current_state = _hook_trust_state(current_config)
+    edits = []
+    for key in keys:
+        prior = before_state.get(key)
+        if key in before_state and current_state.get(key) != prior:
+            edits.append({"keyPath": f"hooks.state.{json.dumps(key)}",
+                          "value": copy.deepcopy(prior), "mergeStrategy": "replace"})
+        elif key not in before_state and key in current_state:
+            edits.append({"keyPath": f"hooks.state.{json.dumps(key)}",
+                          "value": None, "mergeStrategy": "upsert"})
+    if not edits:
+        return
+    restored = _write_codex_config_edits(edits, current["version"])
+    if (_without_continuity_trust(current_config, keys) !=
+            _without_continuity_trust(restored["config"], keys)):
+        raise RuntimeError("trust rollback changed unrelated Codex configuration")
+    restored_state = _hook_trust_state(restored["config"])
+    if any((key in before_state) != (key in restored_state) or
+           (key in before_state and restored_state.get(key) != before_state.get(key))
+           for key in keys):
+        raise RuntimeError("trust rollback did not restore prior continuity entries")
+
+
+def persist_codex_continuity_trust(entries, contracts, remove=False):
+    """Atomically upsert or delete only four app-server-derived trust tables."""
+    before = _codex_user_config_layer()
+    config = before["config"]
+    state = _hook_trust_state(config)
+    expected = {entry["key"]: entry["currentHash"] for entry in entries}
+    if remove:
+        if all(key not in state for key in expected):
+            print("  Codex continuity hook trust already absent")
+            return 0
+    elif (all(state.get(key) == {"trusted_hash": current_hash}
+              for key, current_hash in expected.items()) and
+          all(entry.get("trustStatus") == "trusted" for entry in entries)):
+        print("  Codex continuity hooks already trusted")
+        return 0
+
+    edits = []
+    for key, current_hash in expected.items():
+        quoted = json.dumps(key)
+        edits.append({
+            "keyPath": (f"hooks.state.{quoted}" if remove else
+                        f"hooks.state.{quoted}.trusted_hash"),
+            "value": None if remove else current_hash,
+            "mergeStrategy": "upsert",
+        })
+    try:
+        after = _write_codex_config_edits(edits, before["version"])
+        after_state = _hook_trust_state(after["config"])
+        if _without_continuity_trust(config, expected) != _without_continuity_trust(
+                after["config"], expected):
+            raise RuntimeError("config/batchWrite changed unrelated Codex configuration")
+        if remove:
+            if any(key in after_state for key in expected):
+                raise RuntimeError("config/batchWrite left continuity trust entries behind")
+            print("  REMOVED   four Codex continuity hook trust entries")
+            return 0
+        if any(after_state.get(key) != {"trusted_hash": current_hash}
+               for key, current_hash in expected.items()):
+            raise RuntimeError("config/batchWrite did not persist exact continuity hook hashes")
+        verified = codex_continuity_hook_entries(contracts, require_trusted=True)
+        observed = {entry["key"]: entry["currentHash"] for entry in verified}
+        if observed != expected:
+            raise RuntimeError("hooks/list changed continuity identity during trust installation")
+        print("  TRUSTED   four Codex continuity hooks using authoritative current hashes")
+        return 0
+    except RuntimeError as exc:
+        try:
+            _restore_codex_continuity_trust(config, expected)
+        except RuntimeError as rollback_exc:
+            raise RuntimeError(f"{exc}; trust rollback failed ({rollback_exc})") from exc
+        raise
+
+
+def cmd_verify_codex_continuity():
+    """Read-only proof that Codex will automatically execute all four hooks."""
+    try:
+        _, contracts = canonical_codex_continuity_hooks()
+        entries = codex_continuity_hook_entries(contracts, require_trusted=True)
+    except RuntimeError as exc:
+        print(f"ERROR: Codex continuity trust verification failed ({exc}).")
+        return 1
+    for entry in entries:
+        print(f"  TRUSTED   {entry['eventName']}: {entry['currentHash']}")
+    print("  Codex hooks/list confirms all four continuity hooks are trusted")
+    return 0
+
+
+def _write_codex_hooks_text(raw):
+    """Atomically write or restore hooks.json after validating its object shape."""
+    if raw is None:
+        if os.path.exists(CODEX_HOOKS_SRC):
+            os.unlink(CODEX_HOOKS_SRC)
+        return
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Codex hooks restore content is not a JSON object")
+    parent = os.path.dirname(CODEX_HOOKS_SRC)
+    os.makedirs(parent, exist_ok=True)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=parent,
+                                         prefix=".codex-continuity-", delete=False) as fh:
+            temp_path = fh.name
+            fh.write(raw)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(temp_path, CODEX_HOOKS_SRC)
+        check = json.loads(read(CODEX_HOOKS_SRC))
+        if not isinstance(check, dict):
+            raise RuntimeError("written Codex hooks are not a JSON object")
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
 def cmd_install_codex_continuity(apply, remove=False):
     """Install only the four CARR continuity hook groups owned by Codex.
 
@@ -778,25 +1134,13 @@ def cmd_install_codex_continuity(apply, remove=False):
     it never reads or writes Claude settings, Codex permissions, LaunchAgents,
     scheduled tasks, git configuration, or any other global client state.
     """
-    desired = {"hooks": {event: [] for event in CODEX_CONTINUITY_EVENTS}}
-    if not remove:
-        source = read(CODEX_HOOKS_REPO)
-        if source is None:
-            print(f"ERROR: no tracked Codex hooks at {CODEX_HOOKS_REPO}.")
-            return 1
-        try:
-            desired_document = json.loads(concrete(source))
-        except Exception as exc:
-            print(f"ERROR: {CODEX_HOOKS_REPO} is not valid JSON ({exc}).")
-            return 1
-        if not isinstance(desired_document, dict) or not isinstance(desired_document.get("hooks"), dict):
-            print(f"ERROR: {CODEX_HOOKS_REPO} must contain a hooks object.")
-            return 1
-        desired = {"hooks": {event: desired_document["hooks"].get(event, [])
-                              for event in CODEX_CONTINUITY_EVENTS}}
-        if not any(desired["hooks"].get(event) for event in CODEX_CONTINUITY_EVENTS):
-            print(f"ERROR: {CODEX_HOOKS_REPO} contains no continuity hook groups.")
-            return 1
+    try:
+        canonical_desired, contracts = canonical_codex_continuity_hooks()
+    except RuntimeError as exc:
+        print(f"ERROR: Codex continuity hook source is invalid ({exc}).")
+        return 1
+    desired = ({"hooks": {event: [] for event in CODEX_CONTINUITY_EVENTS}}
+               if remove else canonical_desired)
 
     raw_live = read(CODEX_HOOKS_SRC)
     if raw_live is None:
@@ -818,7 +1162,7 @@ def cmd_install_codex_continuity(apply, remove=False):
     merged = merge_codex_continuity_hooks(live, desired)
     rendered = json.dumps(merged, indent=2) + "\n"
     unchanged = raw_live is not None and raw_live == rendered
-    if unchanged:
+    if unchanged and (remove or not apply):
         print("  Codex continuity hooks already match the repo (unrelated configuration preserved)")
         return 0
     if not apply:
@@ -827,33 +1171,68 @@ def cmd_install_codex_continuity(apply, remove=False):
         print(f"\nDRY RUN — nothing written. Re-run with `{action} --apply`.")
         return 0
 
-    parent = os.path.dirname(CODEX_HOOKS_SRC)
-    os.makedirs(parent, exist_ok=True)
-    backup = CODEX_HOOKS_SRC + ".bak-codex-continuity"
-    had_live = raw_live is not None
-    if had_live:
-        shutil.copy2(CODEX_HOOKS_SRC, backup)
-    temp_path = None
+    # Removal must capture Codex's exact keys and prior trust state before
+    # hooks.json stops exposing them. Its trust deletion is phase one; if the
+    # hook rewrite fails, only those four trust tables are restored. Install is
+    # the inverse: hooks.json is phase one and is restored if trust phase two
+    # refuses.
+    entries = None
+    removal_config = None
+    if remove:
+        try:
+            entries = codex_continuity_hook_entries(contracts)
+            removal_config = _codex_user_config_layer()["config"]
+            persist_codex_continuity_trust(entries, contracts, remove=True)
+        except RuntimeError as exc:
+            print(f"ERROR: Codex continuity trust removal failed ({exc}).")
+            return 1
+
+    if not unchanged:
+        parent = os.path.dirname(CODEX_HOOKS_SRC)
+        os.makedirs(parent, exist_ok=True)
+        backup = CODEX_HOOKS_SRC + ".bak-codex-continuity"
+        had_live = raw_live is not None
+        if had_live:
+            shutil.copy2(CODEX_HOOKS_SRC, backup)
+        try:
+            _write_codex_hooks_text(rendered)
+        except Exception as exc:
+            rollback_errors = []
+            try:
+                _write_codex_hooks_text(raw_live)
+            except Exception as rollback_exc:
+                rollback_errors.append(f"hooks rollback failed ({rollback_exc})")
+            if remove and removal_config is not None and entries is not None:
+                try:
+                    _restore_codex_continuity_trust(
+                        removal_config, {entry["key"] for entry in entries})
+                except RuntimeError as rollback_exc:
+                    rollback_errors.append(f"trust rollback failed ({rollback_exc})")
+            suffix = ("; " + "; ".join(rollback_errors)) if rollback_errors else ""
+            print(f"ERROR: Codex continuity hook write failed ({exc}){suffix}.")
+            return 1
+        print(f"  WROTE OK  {CODEX_HOOKS_SRC} "
+              f"(backup: {backup if had_live else 'none; new file'})")
+    else:
+        print("  Codex continuity hooks already match the repo "
+              "(unrelated configuration preserved)")
+
+    if remove:
+        return 0
     try:
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=parent,
-                                         prefix=".codex-continuity-", delete=False) as fh:
-            temp_path = fh.name
-            json.dump(merged, fh, indent=2)
-            fh.write("\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(temp_path, CODEX_HOOKS_SRC)
-        json.loads(read(CODEX_HOOKS_SRC))
-    except Exception as exc:
-        if temp_path and os.path.exists(temp_path):
-            os.unlink(temp_path)
-        if had_live and os.path.exists(backup):
-            shutil.copy2(backup, CODEX_HOOKS_SRC)
-        elif not had_live and os.path.exists(CODEX_HOOKS_SRC):
-            os.unlink(CODEX_HOOKS_SRC)
-        print(f"ERROR: Codex continuity hook write failed ({exc}) — original restored.")
+        entries = codex_continuity_hook_entries(contracts)
+        persist_codex_continuity_trust(entries, contracts)
+    except RuntimeError as exc:
+        try:
+            _write_codex_hooks_text(raw_live)
+        except Exception as rollback_exc:
+            print("ERROR: Codex continuity trust update failed "
+                  f"({exc}); hooks rollback failed ({rollback_exc}).")
+            return 1
+        action = "removal" if remove else "installation"
+        print(f"ERROR: Codex continuity trust {action} failed ({exc}); "
+              "prior hooks restored.")
         return 1
-    print(f"  WROTE OK  {CODEX_HOOKS_SRC} (backup: {backup if had_live else 'none; new file'})")
     return 0
 
 
@@ -1431,6 +1810,8 @@ def main():
         return cmd_install_codex_continuity(apply)
     if mode == "remove-codex-continuity":
         return cmd_install_codex_continuity(apply, remove=True)
+    if mode == "verify-codex-continuity":
+        return cmd_verify_codex_continuity()
     if mode == "install":
         return cmd_install(apply)
     print(__doc__)
