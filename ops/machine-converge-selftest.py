@@ -37,6 +37,26 @@ SELF_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from git_env import fixture_env  # noqa: E402
 
+
+def fixture_git_env():
+    """Keep Git's automatic maintenance inside the fixture command lifetime.
+
+    Porcelain commands may start `git maintenance run --auto` or `git gc
+    --auto`. Both detach controls default to true, which lets a maintenance
+    child keep writing `.git/objects` after subprocess.run() has returned and
+    race TemporaryDirectory cleanup. The fixture still exercises automatic
+    maintenance; it merely waits for that child like every other subprocess.
+    """
+    env = fixture_env()
+    env.update({
+        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_KEY_0": "maintenance.autoDetach",
+        "GIT_CONFIG_VALUE_0": "false",
+        "GIT_CONFIG_KEY_1": "gc.autoDetach",
+        "GIT_CONFIG_VALUE_1": "false",
+    })
+    return env
+
 # The checkout under test supplies the real hook, the real installer and the
 # real tracked template — a hand-copied template here would let the template
 # and the test drift apart, which is the two-homes disease.
@@ -72,11 +92,11 @@ DRIFTED_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 
 def sh(args, cwd=None, env=None):
     # Callers that don't need a special environment (every raw `git` call in
-    # this file) get fixture_env() by default, so a stray fixture git call
-    # can never fall through to the ambient environment. Callers that do need
-    # something specific (run_hook(), below) build on top of fixture_env()
-    # rather than passing os.environ straight through.
-    return subprocess.run(args, cwd=cwd, env=fixture_env() if env is None else env,
+    # this file) get the scrubbed, joined fixture environment by default, so a
+    # stray fixture git call can never fall through to ambient identity or
+    # leave maintenance behind. Callers needing something specific build on
+    # the same environment rather than passing os.environ straight through.
+    return subprocess.run(args, cwd=cwd, env=fixture_git_env() if env is None else env,
                           capture_output=True, text=True)
 
 
@@ -85,6 +105,12 @@ def git(repo, *args, env=None):
     if r.returncode != 0:
         raise RuntimeError(f"fixture git {' '.join(args)} failed: {r.stderr}")
     return r.stdout.strip()
+
+
+def keep_maintenance_joined(repo):
+    """Persist the fixture-only lifetime rule for nested Git subprocesses."""
+    git(repo, "config", "maintenance.autoDetach", "false")
+    git(repo, "config", "gc.autoDetach", "false")
 
 
 def owner_email():
@@ -132,6 +158,7 @@ def build_fixture(root, email, actor_slug=None, behind=True, dirty=False,
         fh.write("fixture\n")
 
     git(repo, "init", "-q", "-b", "main")
+    keep_maintenance_joined(repo)
     git(repo, "config", "user.email", email)
     git(repo, "config", "user.name", "Fixture")
     git(repo, "add", "-A")
@@ -139,12 +166,14 @@ def build_fixture(root, email, actor_slug=None, behind=True, dirty=False,
 
     origin = os.path.join(root, "origin.git")
     sh(["git", "clone", "-q", "--bare", repo, origin])
+    keep_maintenance_joined(origin)
     git(repo, "remote", "add", "origin", origin)
     git(repo, "fetch", "-q", "origin")
 
     if behind:
         work = os.path.join(root, "work")
         sh(["git", "clone", "-q", origin, work])
+        keep_maintenance_joined(work)
         git(work, "config", "user.email", email)
         git(work, "config", "user.name", "Fixture")
         with open(os.path.join(work, "README.md"), "a", encoding="utf-8") as fh:
@@ -175,13 +204,13 @@ def build_fixture(root, email, actor_slug=None, behind=True, dirty=False,
 
 
 def run_hook(repo, home, stubs, root):
-    # fixture_env() is the base rather than a hand-rolled `for var in
+    # fixture_git_env() is the base rather than a hand-rolled `for var in
     # list(env): if var.startswith("GIT_") ...` loop, so this can't drift
     # from ops/git_env.py's list the way the sync-enforcement-map copies did
     # (see the git_env.py docstring). CLAUDE_PROJECT_DIR still has to go by
     # hand — it isn't a git variable, but it's another pointer back at the
     # real checkout that the hook must not be able to discover.
-    env = dict(fixture_env(), HOME=home,
+    env = dict(fixture_git_env(), HOME=home,
                PATH=stubs + os.pathsep + os.environ.get("PATH", ""),
                LAUNCHCTL_LOG=os.path.join(root, "launchctl.log"))
     env.pop("CLAUDE_PROJECT_DIR", None)
