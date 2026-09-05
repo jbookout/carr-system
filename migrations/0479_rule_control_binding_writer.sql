@@ -5,9 +5,7 @@
 -- activation path could write. Historical one-off migrations wrote those
 -- rows, leaving every future rule blocked on bespoke SQL. approve-rule is
 -- already the public verb for this transition, so this adds a private binding
--- primitive and invokes it inside that verb's existing database transaction.
-
-begin;
+-- primitive and invokes it inside that verb's runner-owned database transaction.
 
 create or replace function ops.bind_rule_controls(
   p_rule_id uuid,
@@ -173,5 +171,3 @@ begin
     raise exception '0479 FAILED: approval does not bind and activate atomically';
   end if;
 end $$;
-
-commit;
