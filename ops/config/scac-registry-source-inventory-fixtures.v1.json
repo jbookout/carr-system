@@ -24125,5 +24125,36 @@
         }
       ]
     }
-  ]
+  ],
+  "current_source_review": {
+    "base_version": "v10",
+    "expected_count": 814,
+    "expected_sha256": "b4b83bed1aabb7433fd67e1542583bd4fc8155fffa64e832c2cff664fac684f9",
+    "reason": "Migration 0481 advances the disposable-only rule-delivery acceptance fixture to the reviewed map digest. The production runtime and sealed v10 artifacts are unchanged.",
+    "upsert": [
+      {
+        "ingress_key": "script-entrypoint:ops/rule-delivery-local-pg-acceptance.py",
+        "ingress_kind": "script_entrypoint",
+        "operation": "ops/rule-delivery-local-pg-acceptance.py",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/rule-delivery-local-pg-acceptance.py",
+        "schema_digest": "95eb4c6588acaefe3758b8aefc909df73f1e39a506fa5057587960f4087bfb3a",
+        "handler_digest": "95eb4c6588acaefe3758b8aefc909df73f1e39a506fa5057587960f4087bfb3a",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "existing_script_specific_credential_boundary",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [],
+        "request_shape": "fixed_script_cli_contract",
+        "idempotency_mode": "script_specific_registered_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      }
+    ]
+  }
 }

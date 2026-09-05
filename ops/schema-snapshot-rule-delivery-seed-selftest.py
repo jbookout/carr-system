@@ -27,11 +27,15 @@ SECOND_REFRESH_MIGRATION_SOURCE = (
 CURRENT_MIGRATION = "0363_rule_delivery_activation_digest_repin.sql"
 SOURCE_MERGE_MIGRATION = "0471_source_merge_catalog_registry_successor.sql"
 TAIL_REPIN_MIGRATION = "0478_repin_rule_delivery_activation_after_heavy_build_tag.sql"
+FINAL_REPIN_MIGRATION = "0481_rule_delivery_activation_digest_repin.sql"
 SOURCE_MERGE_MIGRATION_SOURCE = (
     ROOT / "migrations" / SOURCE_MERGE_MIGRATION
 ).read_text(encoding="utf-8")
 TAIL_REPIN_MIGRATION_SOURCE = (
     ROOT / "migrations" / TAIL_REPIN_MIGRATION
+).read_text(encoding="utf-8")
+FINAL_REPIN_MIGRATION_SOURCE = (
+    ROOT / "migrations" / FINAL_REPIN_MIGRATION
 ).read_text(encoding="utf-8")
 POLICY_MARKER = "-- CARR RULE DELIVERY POLICY (bin/schema-snapshot.sh)"
 TARGET_POST_MARKER = (
@@ -52,6 +56,7 @@ THIRD_DIGEST = "4038e097f571f73499aee79b8c9e7b5bd3cea4ca0ba0f3847873e2f720106218
 CURRENT_DIGEST = "f7bf5726d329dd240434e51f7401fac9a977a3fb710636738f379f60f565f904"
 SOURCE_MERGE_DIGEST = "6d21c37d533a5d98debfe4991c902164cf3c1fee88e7f42a3112468268e3335c"
 TAIL_REPIN_DIGEST = "eebfa2d627dfbbc65ae06e623724487158b940c9376cd30dbb067aec2779e8bb"
+FINAL_REPIN_DIGEST = "784e05273341f5f7c16f96d1f0fb1516d8c605cb3287dec32aa37a1211dd0cb8"
 EXPECTED_TARGETS = [
     "25fcddee", "3fa17fa0", "72e06bdf", "581cb3fe", "113b3833",
     "57d13061", "c66dc739", "49533583", "557838a5",
@@ -137,6 +142,9 @@ source_merge_ledger_applied = bool(
 tail_repin_ledger_applied = bool(
     re.search(rf"^{re.escape(TAIL_REPIN_MIGRATION)}\t", SNAPSHOT, re.M)
 )
+final_repin_ledger_applied = bool(
+    re.search(rf"^{re.escape(FINAL_REPIN_MIGRATION)}\t", SNAPSHOT, re.M)
+)
 snapshot_targets = snapshot_target_rows(SNAPSHOT)
 
 assert "RULE_DELIVERY_APPLIED" in GENERATOR
@@ -185,7 +193,8 @@ expected_snapshot_targets = (
 )
 assert [row[0] for row in snapshot_targets] == expected_snapshot_targets
 expected_snapshot_digest = (
-    TAIL_REPIN_DIGEST if tail_repin_ledger_applied
+    FINAL_REPIN_DIGEST if final_repin_ledger_applied
+    else TAIL_REPIN_DIGEST if tail_repin_ledger_applied
     else SOURCE_MERGE_DIGEST if source_merge_ledger_applied
     else CURRENT_DIGEST if current_ledger_applied
     else THIRD_DIGEST if second_refresh_ledger_applied
@@ -220,6 +229,8 @@ assert CURRENT_DIGEST in SOURCE_MERGE_MIGRATION_SOURCE
 assert SOURCE_MERGE_DIGEST in SOURCE_MERGE_MIGRATION_SOURCE
 assert SOURCE_MERGE_DIGEST in TAIL_REPIN_MIGRATION_SOURCE
 assert TAIL_REPIN_DIGEST in TAIL_REPIN_MIGRATION_SOURCE
+assert TAIL_REPIN_DIGEST in FINAL_REPIN_MIGRATION_SOURCE
+assert FINAL_REPIN_DIGEST in FINAL_REPIN_MIGRATION_SOURCE
 policy_lock = CURRENT_MIGRATION_SOURCE.index("select p.mode into v_policy_mode")
 rule_lock = CURRENT_MIGRATION_SOURCE.index("perform r.id")
 target_delete = CURRENT_MIGRATION_SOURCE.index(

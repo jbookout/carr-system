@@ -50,21 +50,30 @@ begin
     raise exception 'rule % has unsupported delivery scope %',p_rule_id,v_scope;
   end if;
 
-  -- Approval replay happens after the receipt/activation continuation has
-  -- normalized the admission projection. At that point the durable delivery
-  -- row is the contract; replay verifies it without rewriting history.
-  if v_rule.status='active' then
-    select * into v_existing from ops.rule_load_layer where rule_id=p_rule_id;
-    if not found then
-      raise exception 'active rule % lacks its delivery binding',p_rule_id;
-    end if;
+  -- A durable row can predate this writer (migrations and existing acceptance
+  -- fixtures used the owner-only table directly). Verify that legacy prebind
+  -- instead of demanding it be rewritten through a newer admission shape.
+  -- Active approval replay uses the same exact verification path.
+  select * into v_existing from ops.rule_load_layer where rule_id=p_rule_id;
+  if found then
     if v_existing.short_id<>left(p_rule_id::text,8)
-       or v_existing.scope<>v_scope then
-      raise exception 'active rule % delivery binding no longer matches its durable identity',p_rule_id;
+       or v_existing.scope<>v_scope
+       or v_existing.load_layer not in ('layer0','control','pack')
+       or (v_existing.load_layer='layer0' and
+           (cardinality(v_existing.packs)<>0 or nullif(btrim(coalesce(v_existing.why,'')),'') is null))
+       or (v_existing.load_layer='pack' and cardinality(v_existing.packs)=0)
+       or exists (select 1 from unnest(v_existing.packs) pack where pack='' or pack='*') then
+      raise exception 'rule % delivery binding no longer matches its durable identity or activation contract',
+        p_rule_id;
     end if;
     return jsonb_build_object(
       'ok',true,'replayed',true,'rule_id',p_rule_id,
       'load_layer',v_existing.load_layer,'packs',v_existing.packs,'scope',v_existing.scope);
+  end if;
+  if v_rule.status='active' then
+    if v_existing.rule_id is null then
+      raise exception 'active rule % lacks its delivery binding',p_rule_id;
+    end if;
   end if;
 
   select * into v_admission from ops.rule_admission

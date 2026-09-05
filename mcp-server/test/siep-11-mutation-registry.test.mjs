@@ -6,7 +6,6 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  assertCurrentSourceInventoryMatchesFixture,
   assertGeneratedFrontierMatchesCommitted,
   assertLegacyLaunchdSource,
   DB_CATALOG_BASELINE,
@@ -281,7 +280,20 @@ test("v10 successor seals v9 and carries the generated source-merge control", ()
 });
 
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
-  assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
+  const fixture = JSON.parse(fs.readFileSync(new URL(
+    "../../ops/config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url), "utf8"));
+  const review = fixture.current_source_review;
+  assert.equal(review.base_version, "v10");
+  const reviewed = new Map(frozenInventory(REGISTRY_V10_VERSION)
+    .map(row => [row.ingress_key, row]));
+  for (const row of review.upsert) reviewed.set(row.ingress_key, row);
+  const reviewedRows = [...reviewed.values()]
+    .sort((left, right) => left.ingress_key.localeCompare(right.ingress_key));
+  const currentRows = fullInventory(TOOLS);
+  const digest = rows => sha256(JSON.stringify(rows));
+  assert.equal(reviewedRows.length, review.expected_count);
+  assert.equal(digest(reviewedRows), review.expected_sha256);
+  assert.deepEqual(currentRows, reviewedRows);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
   assert.equal(migrations.length, 18);

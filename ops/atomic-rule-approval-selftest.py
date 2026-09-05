@@ -112,6 +112,10 @@ def main() -> int:
           and "projection->'delivery'" in delivery_repair
           and "insert into ops.rule_load_layer" in delivery_repair
           and "from public,carr_reader,carr_writer,carr_jobs,carr_authority" in delivery_repair)
+    check("the delivery writer preserves verified owner-prebound compatibility",
+          "a durable row can predate this writer" in delivery_repair
+          and "select * into v_existing from ops.rule_load_layer" in delivery_repair
+          and "delivery binding no longer matches its durable identity or activation contract" in delivery_repair)
     check("approval binds delivery before controls and activation",
           "perform ops.bind_rule_delivery(" in delivery_repair
           and "perform ops.bind_rule_controls(" in delivery_repair
@@ -232,7 +236,7 @@ def main() -> int:
           not delivery_repair.startswith("begin;")
           and not delivery_repair.endswith("commit;"))
 
-    total = 31
+    total = 32
     print()
     print(f"atomic-rule-approval-selftest: {total-len(failures)}/{total} passed")
     return 1 if failures else 0
