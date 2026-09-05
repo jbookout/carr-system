@@ -8,6 +8,7 @@ const COLUMN = /^[a-z_][a-z0-9_$]*$/;
 const FUNCTION_SIGNATURE = /^[a-z_][a-z0-9_$]*\.[a-z_][a-z0-9_$]*\([^;\n\r]*\)$/;
 const SESSION_PRINCIPALS = new Map([
   ["carr_writer", "carr_writer"],
+  ["app_writer", "carr_writer"],
   ["carr_jobs", "carr_jobs"],
   ["carr_authority_joe", "carr_authority"],
   ["carr_authority_dell", "carr_authority"],
@@ -16,12 +17,26 @@ const SESSION_PRINCIPALS = new Map([
 export const SCAC_TRUSTED_PRINCIPAL_READBACK_SQL = Object.freeze({
   text: `select session_user::text as session_principal,
                 current_user::text as current_principal,
-                case session_user
-                  when 'carr_writer' then 'carr_writer'
-                  when 'carr_jobs' then 'carr_jobs'
-                  when 'carr_authority_joe' then 'carr_authority'
-                  when 'carr_authority_dell' then 'carr_authority'
+                case
+                  when session_user in ('carr_writer','app_writer')
+                    and pg_has_role(session_user,'carr_writer','member')
+                    and not pg_has_role(session_user,'carr_jobs','member')
+                    and not pg_has_role(session_user,'carr_authority','member')
+                    then 'carr_writer'
+                  when session_user='carr_jobs'
+                    and not pg_has_role(session_user,'carr_writer','member')
+                    and pg_has_role(session_user,'carr_jobs','member')
+                    and not pg_has_role(session_user,'carr_authority','member')
+                    then 'carr_jobs'
+                  when session_user in ('carr_authority_joe','carr_authority_dell')
+                    and not pg_has_role(session_user,'carr_writer','member')
+                    and not pg_has_role(session_user,'carr_jobs','member')
+                    and pg_has_role(session_user,'carr_authority','member')
+                    then 'carr_authority'
                   else null end as privilege_bundle,
+                pg_has_role(session_user,'carr_writer','member') as member_carr_writer,
+                pg_has_role(session_user,'carr_jobs','member') as member_carr_jobs,
+                pg_has_role(session_user,'carr_authority','member') as member_carr_authority,
                 pg_backend_pid()::integer as backend_pid`,
   values: Object.freeze([]),
 });
@@ -177,7 +192,8 @@ export function resolveExactEffects(ingressKey, contracts = SCAC_EXACT_EFFECT_CO
 }
 
 export async function deriveTrustedPrincipalBinding(actor, readback, requiredBundle) {
-  exactObject(readback, ["session_principal", "current_principal", "privilege_bundle", "backend_pid"],
+  exactObject(readback, ["session_principal", "current_principal", "privilege_bundle",
+    "member_carr_writer", "member_carr_jobs", "member_carr_authority", "backend_pid"],
     "scac_trusted_principal_readback");
   if (!actor || typeof actor !== "object" || typeof actor.id !== "string" ||
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(actor.id) ||
@@ -189,11 +205,22 @@ export async function deriveTrustedPrincipalBinding(actor, readback, requiredBun
   const authoritySponsor = requiredBundle === "carr_authority"
     ? partnerAuthoritySlugForActor(actor) : null;
   const observedBundle = SESSION_PRINCIPALS.get(readback.session_principal);
+  const memberships = new Map([
+    ["carr_writer", readback.member_carr_writer],
+    ["carr_jobs", readback.member_carr_jobs],
+    ["carr_authority", readback.member_carr_authority],
+  ]);
+  const membershipShapeValid = [...memberships.values()]
+    .every(value => typeof value === "boolean");
+  const activeMemberships = [...memberships.entries()]
+    .filter(([, member]) => member === true).map(([bundle]) => bundle);
   const expectedAuthoritySession = scope.status === "personal"
     ? `carr_authority_${scope.sponsor}` : null;
   if (!observedBundle || observedBundle !== readback.privilege_bundle ||
       !["carr_writer", "carr_jobs", "carr_authority"].includes(requiredBundle) ||
-      observedBundle !== requiredBundle || readback.current_principal !== readback.session_principal ||
+      observedBundle !== requiredBundle || !membershipShapeValid ||
+      activeMemberships.length !== 1 || activeMemberships[0] !== observedBundle ||
+      readback.current_principal !== readback.session_principal ||
       (requiredBundle === "carr_authority" && readback.session_principal !== expectedAuthoritySession) ||
       (requiredBundle === "carr_authority" && authoritySponsor !== scope.sponsor) ||
       !Number.isSafeInteger(readback.backend_pid) || readback.backend_pid <= 0)

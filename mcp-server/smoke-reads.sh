@@ -9,31 +9,29 @@
 #
 # RUN THIS AFTER EVERY WORKER DEPLOY.
 #   ./mcp-server/smoke-reads.sh
-# Exit 0 = all read verbs healthy. Non-zero = at least one check failed.
+# Exit 0 = all enabled checks healthy. Non-zero = at least one check failed.
 #
-# NOT read-only any more, and deliberately so (ORDER 18 addendum, 2026-07-31).
-# Every verb here is write:false EXCEPT the last two checks, which use FIXED
-# idempotency keys: they wrote once, on the first run in history, and replay for
-# ever after. Those few rows are the price of covering the write path, and a
-# twelve-hour production outage is what not covering it cost.
+# Read-only under CARR_MCP_PROBE_TOKEN. SIEP-11 binds every mutation receipt to
+# its server-derived principal, so a frozen key created by a partner is not a
+# capability the probe identity can replay. Under a partner's full OAuth
+# session, the fixed-key write, completion, auto-edge and analysis checks still
+# run and retain the production write-path coverage added after ORDER 18.
 # FORTY-EIGHT checks as of the 2026-08-23 incident-verb pass: seventeen plumbing
 # checks (ORDER 36's analysis write path was the seventeenth), EIGHTEEN
 # negative-answer probes, TEN 0066 marketing probes, and THREE incident-ledger
 # reads at the very bottom.
-# Twenty-seven of them sit behind SEVEN capability gates (org visibility, the
+# Thirty of them sit behind capability gates (org visibility, the
 # merge-split response shape, the unwalkable-edge report, the 0063 contract,
-# 0066's two-stage worker/migration gate, — added 2026-08-14 — the auto-edge
-# path's 'probe' profile gate, and — added 2026-08-23 — the incident verbs'
-# deploy gate) and print SKIP rather than FAIL when the Worker, the schema or the
-# credential's profile predates or excludes the thing they cover, so a healthy
-# run is anywhere from 21 to 48 — the script says which gate is closed and why.
+# 0066's two-stage worker/migration gate, the read-only probe profile, the
+# auto-edge path's profile gate, and the incident verbs' deploy gate) and print
+# SKIP rather than FAIL when the Worker, schema or credential profile predates
+# or excludes the thing they cover. The script says which gate is closed and why.
 # The count had been stale at "eleven as of ORDER 19" since ORDER 27 — ORDERS 27,
 # 33, 34 and 36 each added a check without moving it. Recount when you add one.
 #
-# MEASURED 2026-08-14 under CARR_MCP_PROBE_TOKEN against production:
-# passed 33 · failed 0, with three SKIP blocks (auto-edge, record-counter 0063,
-# 0066 marketing) — all three profile-locked rather than broken. That is the
-# baseline a scheduled run is expected to reproduce; a drop below it is real.
+# EXPECTED under CARR_MCP_PROBE_TOKEN against the current Worker:
+# passed 33 · failed 0, with six profile SKIP blocks (fixed-key write,
+# completion, auto-edge, analysis, record-counter 0063 and 0066 marketing).
 #
 # THE 0066 SECTION IS ALL REFUSALS, and that is not a shortcut — it is the only
 # safe shape for those verbs (a success probe would mint a permanent fake
@@ -53,12 +51,10 @@
 # THE FIX IS A NEW, NARROWER CREDENTIAL, NOT A REBUILT OLD ONE. `PROBE_TOKENS`
 # (mcp-server/src/index.js) is a bearer, checked before the OAuthProvider ever
 # sees the request, that maps to ONE actor ('smoke-probe') pinned server-side to
-# a 'probe' capability profile (mcp-server/src/mcp.js) — reads, plus EXACTLY the
-# three write verbs this file replays under a frozen idempotency key
-# (log-activity, set-next-action, complete-action). ?profile= cannot widen it;
-# every other write verb refuses with not_in_profile. It is not a second copy of
-# the retired bearer: that one authenticated as a full human actor on the full
-# profile, and this one cannot.
+# a read-only 'probe' capability profile (mcp-server/src/mcp.js). ?profile=
+# cannot widen it; every write verb refuses with not_in_profile. It is not a
+# second copy of the retired bearer: that one authenticated as a full human
+# actor on the full profile, and this one cannot.
 #
 # PROVISIONING (JOE ONLY — an agent is blocked from production writes and from
 # ever holding a secret value):
@@ -74,8 +70,8 @@
 #      run, as pipelines/provision-smoke-probe.sql. Apply it through db-tap
 #      (never a raw psql command substitution — see that tool's own docstring):
 #        cd ~/carr-system && .venv/bin/python tools/db-tap.py sql pipelines/provision-smoke-probe.sql
-#      Without this row, every one of the three probe write verbs refuses with
-#      actor_not_provisioned even though the token authenticates fine.
+#      The row preserves the probe identity in the shared actor catalog even
+#      though this smoke profile currently performs no mutations.
 #   4. Add the SAME token from step 1 to this suite's env file:
 #        # ~/.config/carr/mcp-tokens.env (600, outside the repo)
 #        CARR_MCP_PROBE_TOKEN=<the token from step 1>
@@ -122,8 +118,8 @@ if printf '%s' "$_pf" | grep -q '"invalid_token"'; then
     echo "match the Worker's PROBE_TOKENS secret — re-check step 2 of the provisioning"
     echo "runbook above; (2) the Worker has not been deployed with the probe-token check in"
     echo "mcp-server/src/index.js yet. Note this failure is auth, not provisioning — even a"
-    echo "correctly-authenticating token still needs the 'smoke-probe' actor row (step 3,"
-    echo "pipelines/provision-smoke-probe.sql) before any write check below will pass."
+    echo "correctly-authenticating token should retain the 'smoke-probe' actor row (step 3,"
+    echo "pipelines/provision-smoke-probe.sql) as its catalog identity."
     exit 3
   fi
   echo "RETIRED AUTH — this token is no longer accepted by the Worker (PARTNER_TOKENS"
@@ -135,10 +131,9 @@ if printf '%s' "$_pf" | grep -q '"invalid_token"'; then
   exit 3
 fi
 if [ "$PROBE_MODE" -eq 1 ]; then
-  echo "probe token accepted — running under the locked 'probe' profile: reads, plus"
-  echo "log-activity / set-next-action / complete-action only. Checks needing any other"
-  echo "write verb are expected to print SKIP (profile: probe), not FAIL — that is the"
-  echo "server-side lock working, not a regression."
+  echo "probe token accepted — running under the locked, read-only 'probe' profile."
+  echo "Every write-path check is expected to print SKIP (profile: probe), not FAIL —"
+  echo "that is the server-side lock working, not a regression."
   echo
 fi
 
@@ -303,6 +298,10 @@ fi
 # catching. kind is 'note' on purpose: is_contact=false since 0017, so the probe
 # cannot move a Last Touch value in the exports.
 echo
+if [ "$PROBE_MODE" -eq 1 ]; then
+  echo "  SKIP  write path — log-activity is outside the read-only 'probe' profile."
+  echo "        Run under a partner's OAuth session to exercise the fixed-key write path."
+else
 _w_ok=1; _w_why=""
 for i in $(seq 1 "$REPS"); do
   call log-activity '{"idempotency_key":"smoke-write-probe-permanent","ref":"V-CPA-006","kind":"note","summary":"smoke write probe — replayed, never duplicated"}'
@@ -320,6 +319,7 @@ if [ "$_w_ok" -eq 1 ]; then
 else
   echo "  FAIL  write path — $_w_why"
   echo "        $(echo "$RESULT" | head -c 220)"; fail=$((fail+1))
+fi
 fi
 
 # --- ORDER 19: the completion path, the same fixed-key replay pattern ----------
@@ -342,6 +342,10 @@ fi
 # future run return `key_reuse` instead of a replay, and the probe fails for
 # ever after on a typo. Change the key too, or leave them alone.
 echo
+if [ "$PROBE_MODE" -eq 1 ]; then
+  echo "  SKIP  completion path — set-next-action and complete-action are outside the"
+  echo "        read-only 'probe' profile. Run under a partner's OAuth session to exercise it."
+else
 _c_ok=1; _c_why=""
 for i in $(seq 1 "$REPS"); do
   call set-next-action '{"idempotency_key":"smoke-ball-probe-permanent","ref":"AMA Law Office","description":"smoke probe fixture — permanent, replayed, never a real ball"}'
@@ -361,6 +365,7 @@ if [ "$_c_ok" -eq 1 ]; then
 else
   echo "  FAIL  completion path — $_c_why"
   echo "        $(echo "$RESULT" | head -c 220)"; fail=$((fail+1))
+fi
 fi
 
 # --- ORDER 27 EXT / ORDER 33: the counterparty + attribution views are live ----
@@ -383,14 +388,11 @@ check "source-attribution: lanes answer incl. the unattributed reconciler" \
 # graph. Rep 1 may insert the one fixture activity row; every later rep replays.
 #
 # PROFILE-GATED 2026-08-14 (Program 3 triage). This was the SIXTH gate and it was
-# missing: the locked 'probe' profile (mcp-server/src/mcp.js) admits log-activity
-# but NOT log-activity carrying links[], which the server refuses as
-# not_in_profile — correctly, since an edge write is exactly what the narrow
-# profile exists to withhold. The check had no gate, so it printed a hard FAIL on
-# every probe-token run and read as a broken auto-edge path when nothing was
-# broken at all. It is a SKIP under 'probe' for the same reason the other five
-# gates are: the suite must not report a deliberate server-side lock as a
-# regression. Under a partner's OAuth session PROBE_MODE is 0 and it runs for real.
+# missing: the locked 'probe' profile (mcp-server/src/mcp.js) admits no mutation,
+# including log-activity carrying links[], which the server refuses as
+# not_in_profile. The check had no gate, so it printed a hard FAIL on every
+# probe-token run and read as a broken auto-edge path when nothing was broken at
+# all. Under a partner's OAuth session PROBE_MODE is 0 and it runs for real.
 echo
 if [ "$PROBE_MODE" -eq 1 ]; then
   echo "  SKIP  auto-edge path — log-activity links[] is outside the locked 'probe' profile"
@@ -437,6 +439,10 @@ fi
 # is_contact=false in 0028, so like the note probe above it cannot move a Last
 # Touch value in the exports.
 echo
+if [ "$PROBE_MODE" -eq 1 ]; then
+  echo "  SKIP  analysis path — log-activity kind:analysis is outside the read-only"
+  echo "        'probe' profile. Run under a partner's OAuth session to exercise it."
+else
 _a_ok=1; _a_why=""
 for i in $(seq 1 "$REPS"); do
   call log-activity '{"idempotency_key":"smoke-analysis-probe-permanent","ref":"V-CPA-006","kind":"analysis","summary":"smoke analysis probe — replayed, never duplicated","detail":"ORDER 36 probe: proves the analysis slug clears both the Worker enum and the activity_kind ref table."}'
@@ -455,6 +461,7 @@ if [ "$_a_ok" -eq 1 ]; then
 else
   echo "  FAIL  analysis path — $_a_why"
   echo "        $(echo "$RESULT" | head -c 220)"; fail=$((fail+1))
+fi
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
