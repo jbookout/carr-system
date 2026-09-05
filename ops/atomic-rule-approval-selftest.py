@@ -9,6 +9,7 @@ LEGACY_MIGRATION = REPO / "migrations" / "0194_atomic_rule_approval.sql"
 MIGRATION = REPO / "migrations" / "0228_atomic_rule_lifecycle_forward_upgrade.sql"
 SCOPE_FIX = REPO / "migrations" / "0247_system_rule_scope_binding.sql"
 BINDING_REPAIR = REPO / "migrations" / "0479_rule_control_binding_writer.sql"
+DELIVERY_REPAIR = REPO / "migrations" / "0482_rule_delivery_binding_writer.sql"
 TOOLS = REPO / "mcp-server" / "src" / "tools.js"
 DB_GATE = REPO / "ops" / "control-plane-db-gate.py"
 LOCAL_ACCEPTANCE = REPO / "ops" / "atomic-rule-approval-local-pg-acceptance.py"
@@ -19,7 +20,9 @@ def main() -> int:
     scope_fix = SCOPE_FIX.read_text(encoding="utf-8").lower() if SCOPE_FIX.exists() else ""
     catalog_seed = forward_sql.split("-- two joe-approved system rules", 1)[0]
     binding_repair = BINDING_REPAIR.read_text(encoding="utf-8").lower() if BINDING_REPAIR.exists() else ""
-    sql = LEGACY_MIGRATION.read_text(encoding="utf-8").lower() + forward_sql + binding_repair
+    delivery_repair = DELIVERY_REPAIR.read_text(encoding="utf-8").lower() if DELIVERY_REPAIR.exists() else ""
+    sql = (LEGACY_MIGRATION.read_text(encoding="utf-8").lower()
+           + forward_sql + binding_repair + delivery_repair)
     tools = TOOLS.read_text(encoding="utf-8")
     gate = DB_GATE.read_text(encoding="utf-8")
     acceptance = LOCAL_ACCEPTANCE.read_text(encoding="utf-8")
@@ -101,6 +104,25 @@ def main() -> int:
           and "return ops.approve_rule_receipt_activation_v1(" in binding_repair
           and binding_repair.index("perform ops.bind_rule_controls(")
               < binding_repair.index("return ops.approve_rule_receipt_activation_v1("))
+    check("a private database primitive writes the admitted delivery contract",
+          bool(delivery_repair)
+          and "function ops.bind_rule_delivery(" in delivery_repair
+          and "ops.authority_actor_slug()" in delivery_repair
+          and "from ops.rule_admission" in delivery_repair
+          and "projection->'delivery'" in delivery_repair
+          and "insert into ops.rule_load_layer" in delivery_repair
+          and "from public,carr_reader,carr_writer,carr_jobs,carr_authority" in delivery_repair)
+    check("the delivery writer preserves verified owner-prebound compatibility",
+          "a durable row can predate this writer" in delivery_repair
+          and "select * into v_existing from ops.rule_load_layer" in delivery_repair
+          and "delivery binding no longer matches its durable identity or activation contract" in delivery_repair)
+    check("approval binds delivery before controls and activation",
+          "perform ops.bind_rule_delivery(" in delivery_repair
+          and "perform ops.bind_rule_controls(" in delivery_repair
+          and "return ops.approve_rule_receipt_activation_v1(" in delivery_repair
+          and delivery_repair.index("perform ops.bind_rule_delivery(")
+              < delivery_repair.index("perform ops.bind_rule_controls(")
+              < delivery_repair.index("return ops.approve_rule_receipt_activation_v1("))
     check("cost control is registered with implementation and tests",
           "platform_metering_pre_dispatch" in sql
           and "ops/platform-metering-gate-selftest.py" in sql)
@@ -210,8 +232,11 @@ def main() -> int:
     check("binding repair leaves transaction ownership to the migration runner",
           not binding_repair.startswith("begin;")
           and not binding_repair.endswith("commit;"))
+    check("delivery repair leaves transaction ownership to the migration runner",
+          not delivery_repair.startswith("begin;")
+          and not delivery_repair.endswith("commit;"))
 
-    total = 28
+    total = 32
     print()
     print(f"atomic-rule-approval-selftest: {total-len(failures)}/{total} passed")
     return 1 if failures else 0

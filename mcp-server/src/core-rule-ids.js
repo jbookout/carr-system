@@ -13,7 +13,7 @@
 export const CORE_RULE_TRIAGE_SOURCE = "ops/config/rule-triage.v1.json";
 export const CORE_RULE_WORK_REQUEST = "WR-000019";
 export const CORE_RULE_TRIAGE_SLICE = "s7";
-export const CORE_RULE_COUNT = 20;
+export const CORE_RULE_COUNT = 22;
 
 export const CORE_RULE_IDS = Object.freeze([
   "0f38532e",
@@ -26,7 +26,9 @@ export const CORE_RULE_IDS = Object.freeze([
   "4f7c348f",
   "58b44ccb",
   "6a4e6283",
+  "737a68d6",
   "88e9b5eb",
+  "a7784a18",
   "a8c55a47",
   "aa411351",
   "ab814a26",

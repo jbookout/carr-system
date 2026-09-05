@@ -211,7 +211,9 @@
       "893aeec5",
       "7b4ba3aa",
       "1f750181",
-      "1fcaa63a"
+      "1fcaa63a",
+      "737a68d6",
+      "a7784a18"
     ]
   },
   "categories": {
@@ -375,7 +377,9 @@
       "0156e9fa",
       "49533583",
       "557838a5",
-      "fb110a39"
+      "fb110a39",
+      "737a68d6",
+      "a7784a18"
     ],
     "transactional_schema": [
       "b42e217e",
@@ -1651,6 +1655,13 @@
       "enforcement_class": "judgment_ambient",
       "why_unenforceable": "Requires judging what counts as a personality assessment vs a design observation."
     },
+    "737a68d6": {
+      "binding_moment": "whenever system work discovers a required record-layer capability has no verb",
+      "category": "session_task_rail",
+      "control": "session_boot",
+      "enforcement_class": "surfacing",
+      "exceptions": "none — create and register the missing verb in the same work"
+    },
     "7105955b": {
       "binding_moment": "close-loop for a renumbered, superseded, merged or split row",
       "category": "transactional_schema",
@@ -1886,6 +1897,13 @@
       "control": "completion_evidence",
       "enforcement_class": "stop_gate",
       "exceptions": "no preexisting baseline"
+    },
+    "a7784a18": {
+      "binding_moment": "before the first repository edit and through delivery completion",
+      "category": "session_task_rail",
+      "control": "session_boot",
+      "enforcement_class": "surfacing",
+      "exceptions": "the shared checkout is coordination-only; each coding session owns an isolated tree and the full merge path"
     },
     "a8c55a47": {
       "category": "judgment_advisory",
@@ -2929,6 +2947,11 @@
         "governance-rules"
       ]
     },
+    "737a68d6": {
+      "load_layer": "layer0",
+      "packs": [],
+      "why": "A missing verb can be discovered in any system task, so the create-it-now rule must be present before work is routed."
+    },
     "7105955b": {
       "load_layer": "control",
       "packs": [
@@ -3162,6 +3185,11 @@
         "engineering-git"
       ],
       "why": "An installed stop gate delivers this at its binding moment."
+    },
+    "a7784a18": {
+      "load_layer": "layer0",
+      "packs": [],
+      "why": "Repository isolation and end-to-end delivery bind every coding session before its first edit."
     },
     "a8c55a47": {
       "load_layer": "pack",

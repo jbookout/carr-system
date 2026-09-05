@@ -1,6 +1,6 @@
 {
   "counts": {
-    "core": 20,
+    "core": 22,
     "gate": 62,
     "gone": 0,
     "jit": 127
@@ -831,6 +831,12 @@
       "title_gist": "A CONFIG FILE READ BY TWO PARSERS HAS TWO CONTRACTS, AND FIXING ONE BREAKS THE OTHER UNLESS YOU CHECK"
     },
     {
+      "home": "core",
+      "id": "737a68d6",
+      "reason": "Any system task can expose a missing record-layer capability. The create-it-now rule must therefore be present before work is routed, not discovered through a narrower pack afterward.",
+      "title_gist": "If a verb needs to be created to do something, create the verb immediately and add it to the system"
+    },
+    {
       "home": "jit",
       "id": "740bb505",
       "jit_trigger_hint": "Delivered by pack(s) scheduled-automation \u2014 fires on: PROJECTING A LONG JOB: EXCLUDE DEAD TIME, INCLUDE CRASH OVERHEAD, AND SAY WHICH YOU DID",
@@ -1109,6 +1115,12 @@
       "id": "a6e6ab4e",
       "reason": "Already machine-enforced via control 'completion_evidence' (hooks/completion-evidence-gate.py); binds changed-system completion. Failure mode on violation: Stop block",
       "title_gist": "CHECK AGAINST THE BASELINE, NOT ONLY AGAINST THE SPEC"
+    },
+    {
+      "home": "core",
+      "id": "a7784a18",
+      "reason": "Repository isolation binds before the first edit, and complete delivery binds until merge and cleanup. Both apply to every coding session, so this is always-loaded operating law.",
+      "title_gist": "Each coding session owns an isolated checkout and the full delivery path through merge, verification, and cleanup"
     },
     {
       "home": "core",
