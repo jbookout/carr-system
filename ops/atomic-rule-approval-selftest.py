@@ -8,6 +8,7 @@ REPO = Path(__file__).resolve().parent.parent
 LEGACY_MIGRATION = REPO / "migrations" / "0194_atomic_rule_approval.sql"
 MIGRATION = REPO / "migrations" / "0228_atomic_rule_lifecycle_forward_upgrade.sql"
 SCOPE_FIX = REPO / "migrations" / "0247_system_rule_scope_binding.sql"
+BINDING_REPAIR = REPO / "migrations" / "0479_rule_control_binding_writer.sql"
 TOOLS = REPO / "mcp-server" / "src" / "tools.js"
 DB_GATE = REPO / "ops" / "control-plane-db-gate.py"
 LOCAL_ACCEPTANCE = REPO / "ops" / "atomic-rule-approval-local-pg-acceptance.py"
@@ -17,7 +18,8 @@ def main() -> int:
     forward_sql = MIGRATION.read_text(encoding="utf-8").lower()
     scope_fix = SCOPE_FIX.read_text(encoding="utf-8").lower() if SCOPE_FIX.exists() else ""
     catalog_seed = forward_sql.split("-- two joe-approved system rules", 1)[0]
-    sql = LEGACY_MIGRATION.read_text(encoding="utf-8").lower() + forward_sql
+    binding_repair = BINDING_REPAIR.read_text(encoding="utf-8").lower() if BINDING_REPAIR.exists() else ""
+    sql = LEGACY_MIGRATION.read_text(encoding="utf-8").lower() + forward_sql + binding_repair
     tools = TOOLS.read_text(encoding="utf-8")
     gate = DB_GATE.read_text(encoding="utf-8")
     acceptance = LOCAL_ACCEPTANCE.read_text(encoding="utf-8")
@@ -83,6 +85,22 @@ def main() -> int:
           "rule_control_binding" in sql
           and "b.rule_id=p_rule_id" in sql
           and "b.statement_hash=encode(digest(v_rule.statement,'sha256'),'hex')" in sql)
+    check("a private database primitive writes exact rule-control bindings",
+          bool(binding_repair)
+          and "function ops.bind_rule_controls(" in binding_repair
+          and "ops.authority_actor_slug()" in binding_repair
+          and "insert into ops.rule_control_binding" in binding_repair
+          and "encode(digest(v_rule.statement,'sha256'),'hex')" in binding_repair
+          and "from ops.enforcement_control_catalog" in binding_repair
+          and "c.installed and c.verified_at is not null" in binding_repair
+          and "p_implementation_ref" not in binding_repair
+          and "revoke all on function ops.bind_rule_controls" in binding_repair
+          and "from public,carr_reader,carr_writer,carr_jobs,carr_authority" in binding_repair)
+    check("approval repairs missing exact bindings inside its atomic transaction",
+          "perform ops.bind_rule_controls(" in binding_repair
+          and "return ops.approve_rule_receipt_activation_v1(" in binding_repair
+          and binding_repair.index("perform ops.bind_rule_controls(")
+              < binding_repair.index("return ops.approve_rule_receipt_activation_v1("))
     check("cost control is registered with implementation and tests",
           "platform_metering_pre_dispatch" in sql
           and "ops/platform-metering-gate-selftest.py" in sql)
@@ -189,7 +207,8 @@ def main() -> int:
           and "mislabeled as unbreakable enforcement" in sql)
     check("migration invariants run before commit", sql.rfind("do $$") < sql.rfind("commit;"))
 
-    print(f"\natomic-rule-approval-selftest: {23-len(failures)}/23 passed")
+    total = 27
+    print(f"\natomic-rule-approval-selftest: {total-len(failures)}/{total} passed")
     return 1 if failures else 0
 
 
