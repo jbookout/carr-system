@@ -53,10 +53,6 @@ POST_0471_ACTIVATION_DIGEST = "6d21c37d533a5d98debfe4991c902164cf3c1fee88e7f42a3
 # actually writes, and this fixture reconstructs the real sequence rather than
 # jumping to the end state.
 POST_0478_ACTIVATION_DIGEST = "eebfa2d627dfbbc65ae06e623724487158b940c9376cd30dbb067aec2779e8bb"
-# A SIXTH LINK as of 2026-09-05. Activating the verb-creation and isolated-tree
-# rules moves the reviewed map digest without changing any of the eight pack
-# cutover targets. Migration 0481 carries that guarded forward repin.
-POST_0481_ACTIVATION_DIGEST = "f76a976fc39e19aeb6c4e962e0ac36510fb9ca68f3b73ba01acd60d27f571816"
 ACTIVATION_TO_TEST_REF = (
     "ops/rule-pack-drift-gate-selftest.py; ops/rule-load-layer-check-selftest.py; "
     "ops/rule-pack-preuse-reselection-selftest.py"
@@ -125,17 +121,17 @@ def main() -> int:
 
     with psycopg.connect(dsn, autocommit=True) as conn, conn.cursor() as cur:
         # Observe the actual post-migration state before this acceptance mutates
-        # any fixture row. This proves the committed 0471 f7->6d, 0478
-        # 6d->eeb, and 0481 eeb->f76 sequence reached its real terminal state.
+        # any fixture row. This proves the committed 0471 f7->6d and 0478
+        # 6d->eeb sequence reached its real terminal state.
         cur.execute(
             """select count(*),
                       count(*) filter (where map_digest=%s),
                       count(*) filter (where short_id=any(%s))
                  from ops.rule_delivery_activation_target""",
-            (POST_0481_ACTIVATION_DIGEST, sorted(EXPECTED_IDS)),
+            (POST_0478_ACTIVATION_DIGEST, sorted(EXPECTED_IDS)),
         )
         post_migrate = one(cur)
-        check("the real post-migrate state is the exact eight on the 0481 map",
+        check("the real post-migrate state is the exact eight on the 0478 map",
               post_migrate == (len(EXPECTED_IDS), len(EXPECTED_IDS), len(EXPECTED_IDS)),
               str(post_migrate))
 
@@ -411,26 +407,7 @@ def main() -> int:
                 where map_digest=%s""",
             (POST_0478_ACTIVATION_DIGEST,),
         )
-        check("the post-0478 fixture is the exact eight on the post-0478 map",
-              one(cur)[0] == len(EXPECTED_IDS))
-
-        # SIXTH LINK: 0481's repin after the two Layer 0 rule additions. The
-        # eight cutover contracts are unchanged; only their base-map identity
-        # moves forward.
-        cur.execute(
-            """update ops.rule_delivery_activation_target
-                  set map_digest=%s
-                where map_digest=%s""",
-            (POST_0481_ACTIVATION_DIGEST, POST_0478_ACTIVATION_DIGEST),
-        )
-        check("0481 repins exactly the eight post-0478 targets",
-              cur.rowcount == len(EXPECTED_IDS))
-        cur.execute(
-            """select count(*) from ops.rule_delivery_activation_target
-                where map_digest=%s""",
-            (POST_0481_ACTIVATION_DIGEST,),
-        )
-        check("the post-0481 fixture is the exact eight on the current map",
+        check("the post-0478 fixture is the exact eight on the current map",
               one(cur)[0] == len(EXPECTED_IDS))
         cur.execute("""insert into actor (slug,kind,display_name) values ('joe','human','Joe')
                        on conflict (slug) do nothing returning id""")

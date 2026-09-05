@@ -4,7 +4,7 @@ artifact, ops/config/rule-triage.v1.json, plus a smoke test of the two tools
 that read it (rule-triage-report.py, rule-triage-apply.py).
 
 WHAT THIS PINS, per the slice's own definition of done:
-  1. 209/209 coverage — every id in ops/config/rule-enforcement-map.json's
+  1. 211/211 coverage — every id in ops/config/rule-enforcement-map.json's
      rule_controls (the full active-rule set) appears exactly once in the
      triage, and the triage names no id the enforcement map does not know.
   2. No rule sits in two homes (trivially true from dict construction, but
@@ -13,7 +13,7 @@ WHAT THIS PINS, per the slice's own definition of done:
      failure) if it drifts from the 15-20 target band.
   4. Every GATE rule names a carrying_control, and that control is a real key
      in the enforcement map's control_catalog — never an invented name.
-  5. Every GONE rule names a merge_target that (a) exists among the 209 ids
+  5. Every GONE rule names a merge_target that (a) exists among the 211 ids
      and (b) is not itself GONE — a merge chain into a retired rule would be
      a dangling reference the moment Joe's batch actually retires anything.
   6. Every JIT rule carries a jit_trigger_hint (non-empty).
@@ -81,13 +81,15 @@ def main() -> int:
     # 208 -> 209 on 2026-09-03: rule 1fcaa63a (heavy-build-protocol, taught
     # 2026-09-01) entered the reviewed map. Joe's ruling 554db63d put it in
     # pack governance-rules rather than layer0.
-    check("209 expected active rules in the enforcement map",
-          len(expected_ids) == 209, f"found {len(expected_ids)}")
+    # 209 -> 211 on 2026-09-05: rules 737a68d6 and a7784a18 joined as the
+    # create-missing-verbs and isolated-full-delivery session rails.
+    check("211 expected active rules in the enforcement map",
+          len(expected_ids) == 211, f"found {len(expected_ids)}")
     check("triage carries exactly one row per rule (no duplicates)",
           len(ids) == len(id_set), f"{len(ids)} rows, {len(id_set)} unique ids")
     missing = expected_ids - id_set
     extra = id_set - expected_ids
-    check("triage covers every id the enforcement map knows (209/209)",
+    check("triage covers every id the enforcement map knows (211/211)",
           not missing, f"missing: {sorted(missing)[:10]}")
     check("triage names no id the enforcement map does not know",
           not extra, f"extra: {sorted(extra)[:10]}")
@@ -133,7 +135,7 @@ def main() -> int:
           not missing_target, f"missing on: {missing_target}")
     bad_target = [r["id"] for r in gone_rows
                   if r.get("merge_target") and r["merge_target"] not in id_set]
-    check("every GONE rule's merge_target exists among the 209 ids",
+    check("every GONE rule's merge_target exists among the 211 ids",
           not bad_target, f"dangling targets on: {bad_target}")
     chained_into_gone = [r["id"] for r in gone_rows
                          if r.get("merge_target") in homes_by_id

@@ -119,9 +119,6 @@ def main() -> int:
           and delivery_repair.index("perform ops.bind_rule_delivery(")
               < delivery_repair.index("perform ops.bind_rule_controls(")
               < delivery_repair.index("return ops.approve_rule_receipt_activation_v1("))
-    check("local acceptance proves approval needs no manual preactivation rows",
-          "approval created its delivery row" in acceptance
-          and "approval created its control binding" in acceptance)
     check("cost control is registered with implementation and tests",
           "platform_metering_pre_dispatch" in sql
           and "ops/platform-metering-gate-selftest.py" in sql)
@@ -235,7 +232,7 @@ def main() -> int:
           not delivery_repair.startswith("begin;")
           and not delivery_repair.endswith("commit;"))
 
-    total = 32
+    total = 31
     print()
     print(f"atomic-rule-approval-selftest: {total-len(failures)}/{total} passed")
     return 1 if failures else 0

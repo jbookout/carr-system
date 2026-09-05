@@ -130,10 +130,6 @@ def main():
               r"for select to carr_backup using \(true\); end if",
               normalized_sql,
           ) is not None)
-    check("the generator restores the conditional carr_backup policy after pg_dump",
-          "BACKUP_POLICY_COUNT" in generator
-          and "carr_backup_snapshot_policy" in generator
-          and "refusing ambiguous normalization" in generator)
 
     # The schema body installs deferred policy-epoch triggers before the
     # appended data seeds are restored.  The migration ledger arrives before
@@ -166,10 +162,6 @@ def main():
               sql[registry_entry_tail:registry_trigger_enable],
               re.I,
           ) is not None)
-    check("the generator owns the same atomic appended-data restore contract",
-          "CARR SNAPSHOT DATA RESTORE TRANSACTION BEGIN" in generator
-          and "CARR SNAPSHOT DATA RESTORE TRANSACTION COMMIT" in generator
-          and "set constraints all immediate;" in generator)
 
     # Ordering is the whole point: a grant that runs before its role exists
     # fails, and pg_dump puts the schema body after whatever we prepend.

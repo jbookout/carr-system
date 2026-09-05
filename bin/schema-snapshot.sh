@@ -314,34 +314,6 @@ if ! "$PG_DUMP" --schema-only --no-owner --no-acl "$URL" >> "$TMP"; then
   exit 1
 fi
 
-# 0475 creates this policy only where the externally provisioned carr_backup
-# login exists. pg_dump flattens that conditional DDL into a role-bearing
-# CREATE POLICY, which makes the portable snapshot unloadable on a vanilla
-# PostgreSQL cluster. Restore the exact conditional boundary after the dump.
-BACKUP_POLICY='CREATE POLICY carr_backup_full_read ON ops.work_request FOR SELECT TO carr_backup USING (true);'
-BACKUP_POLICY_COUNT="$(grep -Fxc "$BACKUP_POLICY" "$TMP" || true)"
-case "$BACKUP_POLICY_COUNT" in
-  0) ;;
-  1)
-    awk -v policy="$BACKUP_POLICY" '
-      $0 == policy {
-        print "do $carr_backup_snapshot_policy$"
-        print "begin"
-        print "  if exists (select 1 from pg_roles where rolname = '\''carr_backup'\'') then"
-        print "    create policy carr_backup_full_read on ops.work_request"
-        print "      for select to carr_backup using (true);"
-        print "  end if;"
-        print "end"
-        print "$carr_backup_snapshot_policy$;"
-        next
-      }
-      { print }
-    ' "$TMP" > "$TMP.policy"
-    mv "$TMP.policy" "$TMP"
-    ;;
-  *) echo "schema-snapshot: found $BACKUP_POLICY_COUNT carr_backup policies — refusing ambiguous normalization" >&2; exit 1 ;;
-esac
-
 # THE CARR GRANTS SECTION. --no-acl stays — a raw ACL dump names Neon's own
 # principals and whatever login roles neonctl has minted per environment, and
 # the first grant naming an absent role aborts the load. Instead the app roles'
@@ -546,17 +518,6 @@ fi
 # database honestly reports itself up to date and the ONLY thing pending is a
 # genuinely new migration — which is exactly the question worth gating a change
 # on: does this new change apply cleanly to the database we actually have?
-cat >> "$TMP" <<'RESTORE_TRANSACTION_BEGIN'
-
--- CARR SNAPSHOT DATA RESTORE TRANSACTION BEGIN
--- The schema body above installs deferred policy-epoch triggers. Keep every
--- appended data and canonical-seed statement in one transaction so those
--- triggers settle only after the rule-delivery policy and sealed SCAC registry
--- have both been restored.
-BEGIN;
-
-RESTORE_TRANSACTION_BEGIN
-
 if ! "$PG_DUMP" --data-only --no-owner --no-acl --table=schema_migrations "$URL" >> "$TMP"; then
   echo "schema-snapshot: could not dump the applied-migration ledger — nothing written" >&2
   exit 1
@@ -1354,10 +1315,6 @@ SCAC_REGISTRY_ROWS
   fi
 
   cat >> "$TMP" <<SCAC_REGISTRY_FOOTER
--- The registry-version insert queued policy-epoch constraint triggers. Settle
--- them only after every sealed registry entry is present; PostgreSQL will not
--- change trigger state on a table that still has pending trigger events.
-set constraints all immediate;
 alter table ops.scac_mutation_registry_entry enable trigger scac_mutation_registry_entry_sealed;
 alter table ops.scac_mutation_registry_version enable trigger scac_mutation_registry_version_sealed;
 do \$carr_scac_registry\$
@@ -1535,12 +1492,6 @@ COMPLETION_POLICY_ROW
     exit 1
   fi
 fi
-
-cat >> "$TMP" <<'RESTORE_TRANSACTION_COMMIT'
-
--- CARR SNAPSHOT DATA RESTORE TRANSACTION COMMIT
-COMMIT;
-RESTORE_TRANSACTION_COMMIT
 
 # THE SIXTH INSTANCE WAS CAUGHT BY HAND; THE SEVENTH IS CAUGHT HERE. Every block
 # above this line was written one at a time, each after a database rebuilt from

@@ -413,7 +413,7 @@ def main():
     # manifest-declared type. No rule was reclassified; every dropped count
     # is a whole rule leaving the active set, not a type change.
     reviewed_counts = {
-        "constraint": 73, "procedure": 74, "doctrine": 12, "rubric": 36,
+        "constraint": 73, "procedure": 76, "doctrine": 12, "rubric": 36,
         "preference": 11, "precedent": 3, "example": 0,
     }
     split_compile_pass = (
@@ -492,7 +492,9 @@ def main():
         # manifest row (procedure) and compiles to one more guidance item.
         # procedure 73 -> 74. Nothing was reclassified; this is one whole rule
         # ENTERING the active set, the mirror of the 2026-08-27 retirement batch.
-        and len(activation_manifest["entries"]) == 209
+        # 209 -> 211 on 2026-09-05: the isolated-delivery and create-missing-
+        # verbs rules are both session rails, so each compiles as one procedure.
+        and len(activation_manifest["entries"]) == 211
         and registry.activation_manifest_bytes(activation_manifest).endswith(b"\n")
         and len(registry.activation_manifest_sha256(activation_manifest)) == 64
         and registry.activation_manifest_sha256(activation_manifest)
