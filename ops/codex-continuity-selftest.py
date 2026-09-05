@@ -238,8 +238,18 @@ class CodexHistoryTests(AdapterCase):
         truncated = self.run_history("search", {**self.hook_payload(query="x"),
                                                 "cursor": cursor})
         self.assertEqual(json.loads(truncated.stdout)["error"], "transcript_truncated")
-        self.rollout.unlink()
-        self.native_rollout({"type": "event_msg", "payload": {"message": "replacement"}})
+        old_identity = (self.rollout.stat().st_dev, self.rollout.stat().st_ino)
+        replacement = self.rollout.with_suffix(".replacement")
+        replacement.write_text(
+            "\n".join(json.dumps(row, separators=(",", ":"), ensure_ascii=False)
+                      for row in [native_row(self.session_id, self.project),
+                                  {"type": "event_msg", "payload": {
+                                      "message": "replacement"}}]) + "\n",
+            encoding="utf-8",
+        )
+        replacement_identity = (replacement.stat().st_dev, replacement.stat().st_ino)
+        self.assertNotEqual(replacement_identity, old_identity)
+        os.replace(replacement, self.rollout)
         rotated = self.run_history("search", {**self.hook_payload(query="x"),
                                               "cursor": cursor})
         self.assertEqual(json.loads(rotated.stdout)["error"], "transcript_rotated")
