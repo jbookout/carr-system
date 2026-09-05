@@ -24289,8 +24289,8 @@
   "current_source_review": {
     "base_version": "v11",
     "expected_count": 819,
-    "expected_sha256": "535b0f4e770720027e28b49ad447be4f7c9466b953674cb8d84f15d50dc6e938",
-    "reason": "Migration 0483 advances the disposable rule-delivery acceptance fixture. The production 0480 refusal proved that continuity and its v11 SCAC successor must commit as one reviewed group. This combined review binds the exact migration runner, refusal attribution, escalation readback, read-only probe smoke contract, portable snapshot generator, migration 0484 owner-decision acceptance fixture, checkpoint bigint normalization, bounded hook version handling, concurrent release readback, and connection-independent five-sample release performance measurement without changing the sealed v11 artifacts. The Codex checkpoint public schema is restored byte-for-byte to its sealed v11 contract while JSON-safe version enforcement remains in the handler. The Codex-only continuity installer now binds app-server-derived hook hashes through atomic user-config writes, preserves unrelated configuration, and verifies all four trusted instances without changing sealed v11 artifacts.",
+    "expected_sha256": "f61ce3d8307833cf4e517f3d4ca5279c3a15c6ae4e98735596101d882b47db32",
+    "reason": "Migration 0483 advances the disposable rule-delivery acceptance fixture. The production 0480 refusal proved that continuity and its v11 SCAC successor must commit as one reviewed group. This combined review binds the exact migration runner, refusal attribution, escalation readback, read-only probe smoke contract, portable snapshot generator, migration 0484 owner-decision acceptance fixture, checkpoint bigint normalization, bounded hook version handling, concurrent release readback, and connection-independent five-sample release performance measurement without changing the sealed v11 artifacts. The Codex checkpoint public schema is restored byte-for-byte to its sealed v11 contract while JSON-safe version enforcement remains in the handler. The Codex-only continuity installer now binds app-server-derived hook hashes through atomic user-config writes, preserves unrelated configuration, and verifies all four trusted instances without changing sealed v11 artifacts. The follow-up makes hook/trust changes transactional on failure and binds trust selection to the exact rendered event, matcher, command, handler type, and timeout.",
     "upsert": [
       {
         "ingress_key": "script-entrypoint:ops/rule-delivery-local-pg-acceptance.py",
@@ -24597,8 +24597,8 @@
         "operation": "ops/config-as-code.py",
         "effect_class": "administrative_mutation",
         "source_locator": "ops/config-as-code.py",
-        "schema_digest": "97af30f93aa6b88606c871b04f444935bc756e8ef9ef967b8a460e015c3cd8d1",
-        "handler_digest": "97af30f93aa6b88606c871b04f444935bc756e8ef9ef967b8a460e015c3cd8d1",
+        "schema_digest": "32e314be6a3929bae2b2a4e47a3334678c1d8852512b60d62756a174802da9fe",
+        "handler_digest": "32e314be6a3929bae2b2a4e47a3334678c1d8852512b60d62756a174802da9fe",
         "write": true,
         "human_only": false,
         "authority_only": true,
