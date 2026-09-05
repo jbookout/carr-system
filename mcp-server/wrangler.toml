@@ -104,7 +104,7 @@ compatibility_date = "2026-07-01"
 # Required by workers-oauth-provider for Client ID Metadata Document support:
 # it disables the legacy same-zone fetch shortcut, which is the SSRF guard for
 # fetching a client's metadata document.
-compatibility_flags = ["global_fetch_strictly_public"]
+compatibility_flags = ["global_fetch_strictly_public", "nodejs_compat"]
 
 # Custom domains. api.* is the machine surface; reports.* is the isolated
 # client-link surface routed through the same Worker so its digest-only exchange
@@ -212,7 +212,7 @@ bucket_name = "carr-documents"
 name = "carr-mcp-staging"
 main = "src/index.js"
 compatibility_date = "2026-07-01"
-compatibility_flags = ["global_fetch_strictly_public"]
+compatibility_flags = ["global_fetch_strictly_public", "nodejs_compat"]
 workers_dev = true
 
 # `routes = []` IS LOAD-BEARING AND CAUSED A PRODUCTION INCIDENT BY ITS ABSENCE.
