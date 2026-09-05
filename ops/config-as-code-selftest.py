@@ -58,8 +58,14 @@ def main():
     names = commands(merged)
     again = mod.merge_codex_carr_hooks(merged, DESIRED)
     live_permissions = (
-        'default_permissions = "carr_drive_readonly"\n\n'
+        'default_permissions = "carr_unattended"\n\n'
         f'{mod.CODEX_PERMISSIONS_BEGIN}\n'
+        '[permissions.carr_unattended]\n'
+        'extends = ":workspace"\n\n'
+        '[permissions.carr_unattended.workspace_roots]\n'
+        f'"{mod.REPO}" = true\n\n'
+        '[permissions.carr_unattended.network]\n'
+        'enabled = true\n\n'
         '[permissions.carr_drive_readonly.filesystem]\n'
         f'"{mod.REPO}" = "write"\n'
         f'{mod.CODEX_PERMISSIONS_END}\n'
@@ -114,12 +120,22 @@ def main():
             json.dumps(desired_codex, indent=2) + "\n", encoding="utf-8"
         )
         (config / "codex-permissions.toml").write_text(
-            'default_permissions = "carr_drive_readonly"\n\n'
+            'default_permissions = "carr_unattended"\n\n'
+            '[permissions.carr_unattended]\n'
+            'extends = ":workspace"\n\n'
+            '[permissions.carr_unattended.workspace_roots]\n'
+            '"{{REPO}}" = true\n\n'
+            '[permissions.carr_unattended.network]\n'
+            'enabled = true\n\n'
             '[permissions.carr_drive_readonly.filesystem]\n'
             '"{{REPO}}" = "write"\n',
             encoding="utf-8",
         )
-        Path(mod.CODEX_CONFIG).write_text('model = "test"\n', encoding="utf-8")
+        Path(mod.CODEX_CONFIG).write_text(
+            'model = "test"\n'
+            'default_permissions = "carr_drive_readonly"\n',
+            encoding="utf-8",
+        )
         mod.CODEX_HOOKS_REPO = str(config / "codex-hooks.json")
         mod.CODEX_PERMISSIONS_REPO = str(config / "codex-permissions.toml")
         with contextlib.redirect_stdout(io.StringIO()):
@@ -507,7 +523,11 @@ def main():
         ("desired CARR hook installed once", names.count("/Users/booko/carr-system/hooks/completion-evidence-gate.py") == 1),
         ("second merge is idempotent", again == merged),
         ("live Codex permission paths become portable tokens",
-         portable_permissions is not None and '"{{REPO}}" = "write"' in portable_permissions),
+         portable_permissions is not None
+         and '"{{REPO}}" = "write"' in portable_permissions
+         and 'default_permissions = "carr_unattended"' in portable_permissions
+         and '[permissions.carr_unattended.network]' in portable_permissions
+         and 'enabled = true' in portable_permissions),
         ("Call Mode LaunchAgent resolves to its tracked tool source",
          call_mode_source.endswith(
              "/tools/dictation-rig/launchd/com.carr.call-mode.plist")),
@@ -539,6 +559,9 @@ def main():
          'model = "test"' in configured_toml
          and mod.CODEX_PERMISSIONS_BEGIN in configured_toml
          and mod.CODEX_PERMISSIONS_END in configured_toml),
+        ("configured Codex replaces the restrictive default with scoped unattended access",
+         configured_toml.count('default_permissions = "carr_unattended"') == 1
+         and 'default_permissions = "carr_drive_readonly"' not in configured_toml),
         ("fresh primary install renders all tracked scheduled-task definitions",
          primary_task_install_rc == 0 and primary_task_rendered
          and "WRITE  scheduled task task-01" in primary_task_out.getvalue()),
