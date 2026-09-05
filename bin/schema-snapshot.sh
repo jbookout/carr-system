@@ -195,6 +195,14 @@ case "$SOURCE_MERGE_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the source-merge registry ledger state" >&2; exit 1 ;;
 esac
 
+CODEX_CONTINUITY_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0481_codex_continuity_registry_activation.sql')" \
+  2>/dev/null)"
+case "$CODEX_CONTINUITY_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the Codex continuity registry ledger state" >&2; exit 1 ;;
+esac
+
 # pg_dump renders timestamptz in the server session timezone; pin it so the
 # Production and disposable-local paths serialize identical instants alike.
 export PGOPTIONS='-c timezone=UTC'
@@ -1150,7 +1158,18 @@ case "$SCAC_REGISTRY_APPLIED" in
 esac
 
 if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
-  if [ "$SOURCE_MERGE_REGISTRY_APPLIED" = t ]; then
+  if [ "$CODEX_CONTINUITY_REGISTRY_APPLIED" = t ]; then
+    SCAC_CURRENT_NUMBER=11
+    SCAC_VERSION_COUNT=11
+    SCAC_TOTAL_ENTRY_COUNT=15589
+    SCAC_CURRENT_ENTRY_COUNT=1471
+    SCAC_CURRENT_SOURCE_COUNT=819
+    SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v11.generated.js"
+    SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11'"
+    SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10'"
+    SCAC_FULL_SET_SEAL_COUNT=10
+    SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v11_current()"
+  elif [ "$SOURCE_MERGE_REGISTRY_APPLIED" = t ]; then
     SCAC_CURRENT_NUMBER=10
     SCAC_VERSION_COUNT=10
     # +2 on 2026-09-01: the Repo Hygiene Program's R02 landing (Joe's ruling
@@ -1168,6 +1187,7 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
     SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v10.generated.js"
     SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10'"
     SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9'"
+    SCAC_FULL_SET_SEAL_COUNT=10
     SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v10_current()"
   else
     SCAC_CURRENT_NUMBER=9
@@ -1178,6 +1198,7 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
     SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v9.generated.js"
     SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9'"
     SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8'"
+    SCAC_FULL_SET_SEAL_COUNT=9
     SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v9_current()"
   fi
   SCAC_EXPECTED_CURRENT_DIGEST="$(sed -n 's/^export const SCAC_MUTATION_REGISTRY_DIGEST = "\([0-9a-f]\{64\}\)";$/\1/p' "$SCAC_CURRENT_RUNTIME")"
@@ -1204,7 +1225,7 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
     const quote=String.fromCharCode(39);
     const literal=value=>quote+String(value).replaceAll(quote,quote+quote)+quote;
     process.stdout.write(keys.map(key=>`(${literal(key)},${literal(seals[key])})`).join(","));
-  ' "$SCAC_FULL_SET_SEALS" "$SCAC_VERSION_COUNT")" || {
+  ' "$SCAC_FULL_SET_SEALS" "$SCAC_FULL_SET_SEAL_COUNT")" || {
     echo "schema-snapshot: immutable SCAC full-entry-set seals are unavailable or malformed" >&2; exit 1
   }
   # WHAT THIS CHECK ASKS, AND WHAT IT DELIBERATELY DOES NOT. Every comparison

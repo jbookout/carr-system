@@ -18,7 +18,7 @@ FULL_SET_SEALS = json.loads(
 RUNTIME_V9 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v9.generated.js").read_text(
     encoding="utf-8"
 )
-RUNTIME_V10 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v10.generated.js").read_text(
+RUNTIME_V11 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v11.generated.js").read_text(
     encoding="utf-8"
 )
 
@@ -57,11 +57,13 @@ assert "SCAC_EXPECTED_CURRENT_DIGEST" in GENERATOR
 assert "registry_digest='${SCAC_EXPECTED_CURRENT_DIGEST}'" in GENERATOR
 assert "SCAC_EXPECTED_CURRENT_SOURCE_SET" in GENERATOR
 assert "SCAC_EXPECTED_CURRENT_CATALOG" in GENERATOR
+assert "SCAC_CURRENT_NUMBER=11" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=10" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=9" in GENERATOR
-assert "SCAC_TOTAL_ENTRY_COUNT=14118" in GENERATOR
-assert "SCAC_CURRENT_ENTRY_COUNT=1458" in GENERATOR
-assert "SCAC_CURRENT_SOURCE_COUNT=814" in GENERATOR
+assert "SCAC_TOTAL_ENTRY_COUNT=15589" in GENERATOR
+assert "SCAC_CURRENT_ENTRY_COUNT=1471" in GENERATOR
+assert "SCAC_CURRENT_SOURCE_COUNT=819" in GENERATOR
+assert "ops.scac_mutation_catalog_v11_current()" in GENERATOR
 assert "ops.scac_mutation_catalog_v10_current()" in GENERATOR
 assert GENERATOR.count("order by e.entry_digest collate") >= 2
 assert "not ${SCAC_CURRENT_CATALOG_FUNCTION}" in GENERATOR
@@ -70,14 +72,14 @@ numeric_registry_order = (
     "split_part(registry_version,'.v',2)::integer)"
 )
 assert numeric_registry_order in GENERATOR
-versions = [f"scac-mutation-registry.v{version}" for version in range(1, 11)]
+versions = [f"scac-mutation-registry.v{version}" for version in range(1, 12)]
 assert sorted(versions, key=lambda value: int(value.rsplit("v", 1)[1])) == versions
 assert sorted(versions) != versions
 
 loader_start = GENERATOR.index("SCAC_FULL_SET_SQL=\"$(node -e '\n") + len(
     "SCAC_FULL_SET_SQL=\"$(node -e '\n"
 )
-loader_end = GENERATOR.index("\n  ' \"$SCAC_FULL_SET_SEALS\" \"$SCAC_VERSION_COUNT\")\"", loader_start)
+loader_end = GENERATOR.index("\n  ' \"$SCAC_FULL_SET_SEALS\" \"$SCAC_FULL_SET_SEAL_COUNT\")\"", loader_start)
 loader = GENERATOR[loader_start:loader_end]
 loaded_sql = subprocess.run(
     ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "10"],
@@ -94,7 +96,7 @@ def runtime_seal(source: str, name: str) -> str:
     return match.group(1)
 
 
-runtime_seals = {name: runtime_seal(RUNTIME_V10, name) for name in (
+runtime_seals = {name: runtime_seal(RUNTIME_V11, name) for name in (
     "SCAC_MUTATION_REGISTRY_DIGEST",
     "SCAC_MUTATION_SOURCE_CONTRACT_SET_DIGEST",
     "SCAC_MUTATION_DB_CATALOG_BASELINE_DIGEST",
@@ -107,7 +109,7 @@ validation_env = {
     "SCAC_EXPECTED_CURRENT_DIGEST": runtime_seals["SCAC_MUTATION_REGISTRY_DIGEST"],
     "SCAC_EXPECTED_CURRENT_SOURCE_SET": runtime_seals["SCAC_MUTATION_SOURCE_CONTRACT_SET_DIGEST"],
     "SCAC_EXPECTED_CURRENT_CATALOG": runtime_seals["SCAC_MUTATION_DB_CATALOG_BASELINE_DIGEST"],
-    "SCAC_CURRENT_NUMBER": "10",
+    "SCAC_CURRENT_NUMBER": "11",
 }
 subprocess.run(["sh", "-c", validation], check=True, env=validation_env)
 
