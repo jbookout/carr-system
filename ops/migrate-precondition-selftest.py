@@ -118,7 +118,8 @@ def test_source_enforces_the_contract() -> None:
     exception handler. A version that caught the migration's error and carried on
     would pass every behavioural test above while being the door this must not be."""
     src = (REPO / "tools" / "migrate.py").read_text(encoding="utf-8")
-    loop = src[src.index("for name, sql, digest in pending:"):]
+    loop = src[src.index("for batch in migration_batches(pending):"):]
+    execute_loop = loop[:loop.index("            try:\n                conn.commit()")]
     check("the guard consults DATA_DEPENDENT_MIGRATIONS inside the apply loop",
           "DATA_DEPENDENT_MIGRATIONS.get(name)" in loop)
     check("the discharge path runs the probe and tests for no row",
@@ -133,7 +134,7 @@ def test_source_enforces_the_contract() -> None:
           and "(name, digest)" in discharge,
           "a discharged row with a fake sha makes validate_applied_ledger reject the tree later")
     check("nothing swallows a migration exception into a discharge",
-          "except Exception" not in loop and "except psycopg.Error" not in loop,
+          "except Exception" not in execute_loop and "except psycopg.Error" not in execute_loop,
           "a broad handler here would turn this table into skip-on-failure")
     check("the two documented timeout handlers still fail the run",
           "LockNotAvailable" in loop and "QueryCanceled" in loop and loop.count("fail(") >= 2)

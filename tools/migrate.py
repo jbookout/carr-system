@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """carr-system migrations runner (record layer, scaffolded 2026-07-30).
 
-Applies migrations/NNNN_*.sql in filename order, each in its own transaction,
-tracked in schema_migrations. Forward-only by design: a bad migration is
+Applies migrations/NNNN_*.sql in filename order, normally one transaction per
+file, tracked in schema_migrations. A small reviewed group may share one outer
+transaction when an authority-surface migration and its registry successor
+must become visible atomically. Forward-only by design: a bad migration is
 fixed by a NEW migration, never by editing an applied file (applied files'
 sha256 is recorded and re-checked, so drift is caught).
 
@@ -85,6 +87,24 @@ DATA_DEPENDENT_MIGRATIONS: dict[str, tuple[str, str]] = {
         "which this database does not carry",
     ),
 }
+
+# ── MIGRATIONS WHOSE INTERMEDIATE CATALOG MUST NEVER COMMIT ────────────────
+#
+# 0480 adds the Codex continuity writer surface. That correctly makes the
+# sealed SCAC v10 live catalog cease to be current; 0481 installs and activates
+# the exact v11 successor. ops.scac_policy_epoch_refresh() is a DEFERRABLE
+# constraint trigger on schema_migrations, so committing 0480 by itself asks
+# the old v10 snapshot to bless the intentionally-new surface and must fail.
+# The two reviewed files therefore share ONE runner-owned transaction: both
+# SQL bodies and both immutable ledger rows commit together, and the deferred
+# trigger observes only the final v11 state. A caller may not cut this group in
+# half with --through.
+ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
+    (
+        "0480_codex_continuity.sql",
+        "0481_codex_continuity_registry_activation.sql",
+    ),
+)
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 # NNNN_name.sql, plus an OPTIONAL single lowercase letter after the number:
@@ -355,7 +375,42 @@ def migrations_through(
         )
     selected = [item for item in pending if item[0] <= through]
     held_back = [item for item in pending if item[0] > through]
+    selected_names = {item[0] for item in selected}
+    held_names = {item[0] for item in held_back}
+    for group in ATOMIC_MIGRATION_GROUPS:
+        if selected_names.intersection(group) and held_names.intersection(group):
+            raise ValueError(
+                "--through target cuts reviewed atomic migration group: "
+                + ", ".join(group)
+                + ". Select through the final file so the intermediate authority "
+                  "catalog can never commit."
+            )
     return selected, held_back
+
+
+def migration_batches(
+    pending: list[tuple[str, str, str]],
+) -> list[list[tuple[str, str, str]]]:
+    """Return ordered transaction batches for an already-authorized prefix.
+
+    A complete pending reviewed group is one batch. A suffix whose earlier
+    member is already in the immutable ledger remains individually resumable;
+    this is the recovery shape for a database that predated the group rule.
+    """
+    by_first = {group[0]: group for group in ATOMIC_MIGRATION_GROUPS}
+    batches: list[list[tuple[str, str, str]]] = []
+    i = 0
+    while i < len(pending):
+        group = by_first.get(pending[i][0])
+        if group is not None:
+            candidate = pending[i:i + len(group)]
+            if tuple(item[0] for item in candidate) == group:
+                batches.append(candidate)
+                i += len(group)
+                continue
+        batches.append([pending[i]])
+        i += 1
+    return batches
 
 
 class AppliedMigrationLedgerError(ValueError):
@@ -496,62 +551,76 @@ def main() -> None:
                 fail("confirmation did not match host; nothing applied")
 
         print(f"lock_timeout: {LOCK_TIMEOUT}   statement_timeout: {STATEMENT_TIMEOUT}")
-        for name, sql, digest in pending:
+        for batch in migration_batches(pending):
+            staged: list[tuple[str, str]] = []
             with conn.cursor() as cur:
-                precondition = DATA_DEPENDENT_MIGRATIONS.get(name)
-                if precondition is not None:
-                    probe, inert_because = precondition
-                    cur.execute(probe)
-                    if cur.fetchone() is None:
-                        # RECORDED AS DISCHARGED, NOT SILENTLY SKIPPED. The row it
-                        # binds does not exist here, so the file has nothing to do
-                        # and its own proof would raise. The reason it is safe is
-                        # stated in the table beside it and is checkable, not
-                        # asserted.
-                        cur.execute(
-                            "insert into schema_migrations (filename, sha256) values (%s, %s)",
-                            (name, digest),
-                        )
-                        conn.commit()
-                        print(f"discharged (precondition absent) — {inert_because}")
-                        continue
-                print(f"applying {name} ...", end=" ", flush=True)
-                # SET LOCAL, not SET: scoped to THIS migration's transaction and
-                # reverted at commit, so one migration can never leak a timeout
-                # onto the next. It is re-issued per migration on purpose — a
-                # migration that resets the session must not silently disarm the
-                # guard for everything that follows it.
-                cur.execute(f"set local lock_timeout = '{LOCK_TIMEOUT}'")
-                cur.execute(f"set local statement_timeout = '{STATEMENT_TIMEOUT}'")
-                try:
-                    cur.execute(sql)
-                except psycopg.errors.LockNotAvailable:
-                    # Named explicitly so nobody debugs the migration. Nothing is
-                    # applied: this migration's transaction rolls back whole, and
-                    # every migration before it is already committed and recorded,
-                    # so a re-run picks up exactly here. Forward-only is intact.
-                    conn.rollback()
-                    fail(f"{name} could not acquire its lock within {LOCK_TIMEOUT} and was "
-                         "ABANDONED (nothing applied from this file).\n"
-                         "  This is the guard working, not a broken migration. Something else "
-                         "is holding a lock on the tables it touches — usually a long-running "
-                         "read from the Worker.\n"
-                         "  Check pg_stat_activity for the blocker, then just re-run: earlier "
-                         "migrations are already committed and will be skipped.\n"
-                         f"  To wait longer on purpose: CARR_MIGRATE_LOCK_TIMEOUT=30s")
-                except psycopg.errors.QueryCanceled:
-                    conn.rollback()
-                    fail(f"{name} exceeded statement_timeout ({STATEMENT_TIMEOUT}) and was "
-                         "ABANDONED (nothing applied from this file).\n"
-                         "  If this migration genuinely needs longer, raise the ceiling "
-                         "deliberately rather than removing it:\n"
-                         f"  CARR_MIGRATE_STATEMENT_TIMEOUT=30min python3 tools/migrate.py --apply")
-                cur.execute(
-                    "insert into schema_migrations (filename, sha256) values (%s, %s)",
-                    (name, digest),
+                for name, sql, digest in batch:
+                    precondition = DATA_DEPENDENT_MIGRATIONS.get(name)
+                    if precondition is not None:
+                        probe, inert_because = precondition
+                        cur.execute(probe)
+                        if cur.fetchone() is None:
+                            # RECORDED AS DISCHARGED, NOT SILENTLY SKIPPED. The
+                            # row it binds does not exist here, so the file has
+                            # nothing to do and its own proof would raise.
+                            cur.execute(
+                                "insert into schema_migrations (filename, sha256) values (%s, %s)",
+                                (name, digest),
+                            )
+                            staged.append((
+                                name,
+                                f"discharged (precondition absent) — {inert_because}",
+                            ))
+                            continue
+                    print(f"applying {name} ...", end=" ", flush=True)
+                    # SET LOCAL is scoped to the current batch transaction. It
+                    # is re-issued per file so a migration cannot disarm the
+                    # guard for its successor inside an atomic group.
+                    cur.execute(f"set local lock_timeout = '{LOCK_TIMEOUT}'")
+                    cur.execute(f"set local statement_timeout = '{STATEMENT_TIMEOUT}'")
+                    try:
+                        cur.execute(sql)
+                    except psycopg.errors.LockNotAvailable:
+                        conn.rollback()
+                        fail(f"{name} could not acquire its lock within {LOCK_TIMEOUT} and was "
+                             "ABANDONED (its whole transaction batch was rolled back).\n"
+                             "  This is the guard working, not a broken migration. Something else "
+                             "is holding a lock on the tables it touches — usually a long-running "
+                             "read from the Worker.\n"
+                             "  Check pg_stat_activity for the blocker, then just re-run: earlier "
+                             "batches are already committed and will be skipped.\n"
+                             f"  To wait longer on purpose: CARR_MIGRATE_LOCK_TIMEOUT=30s")
+                    except psycopg.errors.QueryCanceled:
+                        conn.rollback()
+                        fail(f"{name} exceeded statement_timeout ({STATEMENT_TIMEOUT}) and was "
+                             "ABANDONED (its whole transaction batch was rolled back).\n"
+                             "  If this migration genuinely needs longer, raise the ceiling "
+                             "deliberately rather than removing it:\n"
+                             f"  CARR_MIGRATE_STATEMENT_TIMEOUT=30min python3 tools/migrate.py --apply")
+                    cur.execute(
+                        "insert into schema_migrations (filename, sha256) values (%s, %s)",
+                        (name, digest),
+                    )
+                    staged.append((name, "ok"))
+                    if len(batch) > 1:
+                        print("staged")
+            try:
+                conn.commit()
+            except psycopg.Error as exc:
+                conn.rollback()
+                names = ", ".join(name for name, _sql, _digest in batch)
+                fail(
+                    f"commit refused for migration batch [{names}] and the whole batch was "
+                    f"rolled back: {exc}"
                 )
-            conn.commit()
-            print("ok")
+            for _name, outcome in staged:
+                if len(batch) == 1 and outcome == "ok":
+                    print("ok")
+                elif outcome != "ok":
+                    print(outcome)
+            if len(batch) > 1:
+                print("atomic migration group committed: "
+                      + ", ".join(name for name, _sql, _digest in batch))
         print("done")
 
 
