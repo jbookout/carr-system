@@ -205,10 +205,15 @@ def main() -> int:
           "advisory guidance is not an unbreakable rule" in sql
           and "standing_context_runtime" in sql
           and "mislabeled as unbreakable enforcement" in sql)
-    check("migration invariants run before commit", sql.rfind("do $$") < sql.rfind("commit;"))
+    check("historical migration invariants run before their commit",
+          forward_sql.rfind("do $$") < forward_sql.rfind("commit;"))
+    check("binding repair leaves transaction ownership to the migration runner",
+          not binding_repair.startswith("begin;")
+          and not binding_repair.endswith("commit;"))
 
-    total = 27
-    print(f"\natomic-rule-approval-selftest: {total-len(failures)}/{total} passed")
+    total = 28
+    print()
+    print(f"atomic-rule-approval-selftest: {total-len(failures)}/{total} passed")
     return 1 if failures else 0
 
 
