@@ -5390,14 +5390,20 @@ export const TOOLS = {
 
   "admit-rule": {
     write: true,
-    description: "Normalize and admit one PROPOSED rule into executable authority. Capture remains free; this is the separate human gate. Applicability, projection, reachability, input contract, binding moment, fixtures, and enforcement points are all explicit. A machine-enforceable rule is refused unless at least one installed enforcement point and fixture are named. Admission writes an immutable authority receipt but does not activate the rule; activate-rule remains a second explicit human act.",
+    description: "Normalize and admit one PROPOSED rule into executable authority. Capture remains free; this is the separate human gate. Applicability, projection, reachability, input contract, binding moment, fixtures, and enforcement points are all explicit. Projection must include delivery with load_layer, packs, and a reason for layer0; approve-rule writes that delivery atomically before activation. A machine-enforceable rule is refused unless at least one installed enforcement point and fixture are named. Admission writes an immutable authority receipt but does not activate the rule; approve-rule remains a second explicit human act.",
     inputSchema: { type: "object", properties: {
       idempotency_key: { type: "string" },
       rule_id: { type: "string" },
       enforcement_class: { type: "string", enum: ["machine_enforceable","judgment_advisory","human_only"] },
       binding_moment: { type: "string" },
       applicability: { type: "object" },
-      projection: { type: "object" },
+      projection: { type: "object", properties: {
+        delivery: { type: "object", properties: {
+          load_layer: { type: "string", enum: ["layer0","control","pack"] },
+          packs: { type: "array", items: { type: "string" } },
+          why: { type: "string" },
+        }, required: ["load_layer","packs"] },
+      }, required: ["delivery"] },
       reachability: { type: "object" },
       input_contract: { type: "object" },
       fixture_refs: { type: "array", items: { type: "string" } },
@@ -5423,6 +5429,19 @@ export const TOOLS = {
       const reason = String(args.reason || "").trim();
       const binding = String(args.binding_moment || "").trim();
       if (!reason || !binding) throw new ToolError({ error: "admission_explanation_required" });
+      const delivery = args.projection?.delivery;
+      const loadLayer = String(delivery?.load_layer || "").trim();
+      const packs = delivery?.packs;
+      const deliveryWhy = String(delivery?.why || "").trim();
+      const deliveryInvalid = !delivery || typeof delivery !== "object" || Array.isArray(delivery)
+        || !["layer0", "control", "pack"].includes(loadLayer)
+        || !Array.isArray(packs) || packs.some(p => typeof p !== "string" || !p.trim() || p === "*")
+        || (loadLayer === "layer0" && (packs.length !== 0 || !deliveryWhy))
+        || (loadLayer === "pack" && packs.length === 0);
+      if (deliveryInvalid) throw new ToolError({
+        error: "rule_delivery_contract_required",
+        hint: "projection.delivery requires load_layer (layer0, control, or pack), non-wildcard packs, and why for layer0",
+      });
       if (args.enforcement_class === "machine_enforceable") {
         if (!args.fixture_refs.length) throw new ToolError({ error: "fixture_required" });
         if (!args.enforcement_points.some(p => p.installed === true))

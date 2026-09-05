@@ -109,28 +109,17 @@ def main() -> int:
                                'transactional_schema',true,now())""",
                     (control_key,),
                 )
-                # The SIEP-12 epoch snapshot is intentionally fail-closed when
-                # an active rule has no delivery layer. This fixture installs a
-                # real transactional control below, so declare that exact
-                # control-layer delivery before activation; otherwise the
-                # acceptance itself creates an untagged rule and can no longer
-                # settle its deferred epoch triggers.
                 cur.execute(
-                    """insert into ops.rule_load_layer
-                         (rule_id,short_id,load_layer,packs,scope,why,source,map_digest)
-                       values (%s,left(%s::text,8),'control','{}'::text[],'shared',
-                               'local atomic acceptance transactional control',
-                               'ops/atomic-rule-approval-local-pg-acceptance.py',
-                               repeat('0',64))""",
-                    (rule_id, rule_id),
-                )
-                cur.execute(
-                    """insert into ops.rule_control_binding
-                         (rule_id,control_key,statement_hash,binding_contract)
-                       select id,%s,encode(digest(statement,'sha256'),'hex'),
-                              '{"fixture":"local atomic approval"}'::jsonb
-                         from rule where id=%s""",
-                    (control_key, rule_id),
+                    """insert into ops.rule_admission
+                         (rule_id,enforcement_class,enforcement_status,binding_moment,
+                          applicability,projection,reachability,input_contract,fixture_refs,
+                          state,admitted_by,admitted_at,reason)
+                       values (%s,'machine_enforceable','blocked','local approval',
+                               '{}'::jsonb,
+                               '{"delivery":{"load_layer":"control","packs":[]}}'::jsonb,
+                               '{}'::jsonb,'{}'::jsonb,array['local-pg-acceptance'],
+                               'admitted',%s,now(),'local activation-safe admission')""",
+                    (rule_id, actor[0]),
                 )
 
                 cur.execute("set session authorization carr_authority_joe")
@@ -142,6 +131,20 @@ def main() -> int:
                 if approved is None or approved[0].get("policy_status") != "active" \
                         or approved[0].get("replayed") is not False:
                     refuse("atomic approve did not activate exact enforcement")
+                cur.execute("reset session authorization")
+                cur.execute(
+                    """select load_layer='control' and scope='shared'
+                         from ops.rule_load_layer where rule_id=%s""", (rule_id,))
+                delivery_bound = cur.fetchone()
+                if delivery_bound is None or delivery_bound[0] is not True:
+                    refuse("approval created its delivery row incorrectly")
+                cur.execute(
+                    """select count(*)=1 from ops.rule_control_binding
+                        where rule_id=%s and control_key=%s""", (rule_id, control_key))
+                control_bound = cur.fetchone()
+                if control_bound is None or control_bound[0] is not True:
+                    refuse("approval created its control binding incorrectly")
+                cur.execute("set session authorization carr_authority_joe")
                 cur.execute(
                     "select ops.approve_rule(%s,'machine_enforceable',array[%s],%s,%s)",
                     (rule_id, control_key, approve_key, "Joe local authority acceptance"),
@@ -201,10 +204,9 @@ def main() -> int:
                 # This second fixture intentionally remains active after the
                 # first rule is retired. Make it a real pack-backed rule so
                 # SIEP-12 can settle the final deferred policy epoch with one
-                # non-empty pack and no untagged/orphaned delivery rows. The
-                # acceptance therefore proves retirement cleanup without
-                # weakening the live snapshot invariant or manufacturing a
-                # separate rule solely to satisfy the health check.
+                # non-empty pack and no untagged/orphaned delivery rows. Its
+                # admission names the pack; approve_rule must materialize the
+                # delivery row in the activation transaction.
                 cur.execute(
                     """insert into ops.rule_pack
                          (pack,title,description,triggers,source)
@@ -215,21 +217,17 @@ def main() -> int:
                     (amend_pack,),
                 )
                 cur.execute(
-                    """insert into ops.rule_load_layer
-                         (rule_id,short_id,load_layer,packs,scope,why,source,map_digest)
-                       values (%s,left(%s::text,8),'pack',array[%s],'shared',
-                               'local amendment acceptance remains active after retirement test',
-                               'ops/atomic-rule-approval-local-pg-acceptance.py',
-                               repeat('0',64))""",
-                    (amend_rule_id, amend_rule_id, amend_pack),
-                )
-                cur.execute(
-                    """insert into ops.rule_control_binding
-                         (rule_id,control_key,statement_hash,binding_contract)
-                       select id,%s,encode(digest(statement,'sha256'),'hex'),
-                              '{"fixture":"local amendment"}'::jsonb
-                         from rule where id=%s""",
-                    (amend_control_key, amend_rule_id),
+                    """insert into ops.rule_admission
+                         (rule_id,enforcement_class,enforcement_status,binding_moment,
+                          applicability,projection,reachability,input_contract,fixture_refs,
+                          state,admitted_by,admitted_at,reason)
+                       values (%s,'machine_enforceable','blocked','local amendment approval',
+                               '{}'::jsonb,
+                               jsonb_build_object('delivery',jsonb_build_object(
+                                 'load_layer','pack','packs',jsonb_build_array(%s::text))),
+                               '{}'::jsonb,'{}'::jsonb,array['local-pg-acceptance'],
+                               'admitted',%s,now(),'local pack delivery admission')""",
+                    (amend_rule_id, amend_pack, actor[0]),
                 )
                 cur.execute("set session authorization carr_authority_joe")
                 cur.execute(

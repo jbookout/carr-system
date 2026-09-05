@@ -32,6 +32,25 @@ test("admit-rule is an explicit human-only authority verb with all four D-04 dim
                        "applicability", "projection", "reachability", "input_contract",
                        "fixture_refs", "enforcement_points", "reason"])
     assert.equal(required.has(field), true, `${field} must be required`);
+  assert.deepEqual(tool.inputSchema.properties.projection.required, ["delivery"]);
+});
+
+test("admit-rule refuses a contract with no activation-safe delivery decision", async () => {
+  const c = fakeClient((sql) => {
+    if (/select status,statement from rule/i.test(sql))
+      return { rows: [{ status: "proposed", statement: "fixture rule" }] };
+    return { rows: [] };
+  });
+  await assert.rejects(
+    () => TOOLS["admit-rule"].handler(c, ACTOR, {
+      idempotency_key: "admit-without-delivery", rule_id: RULE,
+      enforcement_class: "human_only", binding_moment: "during system work",
+      applicability: {}, projection: {}, reachability: {}, input_contract: {},
+      fixture_refs: [], enforcement_points: [], reason: "fixture",
+    }),
+    e => e instanceof ToolError && e.payload.error === "rule_delivery_contract_required",
+  );
+  assert.equal(c.calls.some(x => /insert into ops\.rule_admission/i.test(x.sql)), false);
 });
 
 test("teach captures guidance intake in the same envelope but leaves it non-authoritative", async () => {
