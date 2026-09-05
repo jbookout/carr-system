@@ -125,6 +125,35 @@ def main() -> int:
     else:
         raise AssertionError("unknown --through boundary was accepted")
 
+    # 0480 creates a writer-visible authority surface and 0481 seals its SCAC
+    # successor. They must be selected and committed together: the deferred
+    # policy-epoch trigger correctly refuses the catalog between those files.
+    continuity = [item for item in loaded if item[0].startswith(("0480_", "0481_"))]
+    assert [item[0] for item in continuity] == [
+        "0480_codex_continuity.sql",
+        "0481_codex_continuity_registry_activation.sql",
+    ]
+    batches = migration_runner.migration_batches(continuity)
+    assert len(batches) == 1
+    assert [item[0] for item in batches[0]] == [
+        "0480_codex_continuity.sql",
+        "0481_codex_continuity_registry_activation.sql",
+    ]
+    before_continuity = [item for item in loaded if item[0] < "0480_codex_continuity.sql"]
+    try:
+        migration_runner.migrations_through(
+            loaded,
+            continuity,
+            "0480_codex_continuity.sql",
+        )
+    except ValueError as exc:
+        assert "cuts reviewed atomic migration group" in str(exc), str(exc)
+    else:
+        raise AssertionError("--through was allowed to expose the v10/v11 catalog gap")
+    assert before_continuity
+    resumed_batches = migration_runner.migration_batches([continuity[1]])
+    assert resumed_batches == [[continuity[1]]]
+
     # A bounded prefix must not make an out-of-order ledger look safe.  If a
     # later file is already applied while an earlier file is absent, history
     # has drifted and the runner must stop before selecting anything.
