@@ -110,10 +110,8 @@ test("ten repeated recovery cycles preserve correction and next action in one bo
   assert.ok(JSON.stringify(state).length < 24000);
 });
 
-test("checkpoint refuses malformed or unsafe database bigint versions before CAS", async () => {
+test("checkpoint handler refuses malformed or unsafe versions before CAS", async () => {
   const checkpoint = tools()["codex-checkpoint"];
-  assert.equal(checkpoint.inputSchema.properties.expected_version.maximum,
-    Number.MAX_SAFE_INTEGER);
   for (const checkpoint_version of ["01", "9007199254740992", true]) {
     let updated = false;
     const client = { query: async sql => {

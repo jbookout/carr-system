@@ -224,7 +224,7 @@ export function codexContinuityTools({ withEnvelope, writeEvent, ToolError, asse
       inputSchema: { type: "object", properties: {
         idempotency_key: { type: "string" }, runtime: { type: "string", enum: [RUNTIME] },
         native_task_id: { type: "string" }, project_id: { type: "string" }, cwd: { type: "string" },
-        expected_version: { type: "integer", minimum: 0, maximum: MAX_CHECKPOINT_VERSION }, state: stateSchema, cursor: { type: "object" },
+        expected_version: { type: "integer", minimum: 0 }, state: stateSchema, cursor: { type: "object" },
       }, required: ["idempotency_key", "runtime", "native_task_id", "project_id", "cwd", "expected_version", "state"] },
       handler: async (c, actor, args) => { guard(args); requireNativeCodex(actor, ToolError); const key = common(args, ToolError);
         const expected = expectedVersion(args.expected_version, ToolError);
