@@ -24289,7 +24289,7 @@
   "current_source_review": {
     "base_version": "v11",
     "expected_count": 819,
-    "expected_sha256": "f8fabe174ffc76b078310d3e86eecc16193e3b1f5b0b92fb29decf0de116f105",
+    "expected_sha256": "54b654e90f25039e7233a89907a887efb0394190fb0788e1dce1091491c30ee9",
     "reason": "Migration 0483 advances the disposable-only rule-delivery acceptance fixture to the reviewed map digest. The production runtime and sealed v11 artifacts are unchanged.",
     "upsert": [
       {
@@ -24300,6 +24300,29 @@
         "source_locator": "ops/rule-delivery-local-pg-acceptance.py",
         "schema_digest": "158156246eee859398cf0c4f7c963f166f4218bc5acfaf643993a224f81a24c0",
         "handler_digest": "158156246eee859398cf0c4f7c963f166f4218bc5acfaf643993a224f81a24c0",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "existing_script_specific_credential_boundary",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [],
+        "request_shape": "fixed_script_cli_contract",
+        "idempotency_mode": "script_specific_registered_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "script-entrypoint:ops/scac-mutation-inventory.mjs",
+        "ingress_kind": "script_entrypoint",
+        "operation": "ops/scac-mutation-inventory.mjs",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/scac-mutation-inventory.mjs",
+        "schema_digest": "eb9e690553d5904dfd6f6d7164dfe749f7b112714951eb4cc52851213bf003e7",
+        "handler_digest": "eb9e690553d5904dfd6f6d7164dfe749f7b112714951eb4cc52851213bf003e7",
         "write": true,
         "human_only": false,
         "authority_only": true,

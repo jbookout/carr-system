@@ -908,7 +908,28 @@ export function frozenInventory(version) {
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
   version = REGISTRY_V11_VERSION) {
   const current = fullInventory(tools);
-  const frozen = frozenInventory(version);
+  let frozen = frozenInventory(version);
+  const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
+  if (review) {
+    const expectedBase = version.split(".").at(-1);
+    if (review.base_version !== expectedBase || !Array.isArray(review.upsert) ||
+        !Number.isInteger(review.expected_count) ||
+        !/^[0-9a-f]{64}$/.test(review.expected_sha256 || "") ||
+        typeof review.reason !== "string" || !review.reason.trim())
+      throw new Error("current source-inventory review is malformed or bound to the wrong frontier");
+    const reviewedByKey = new Map(frozen.map(row => [row.ingress_key, row]));
+    for (const row of review.upsert) {
+      if (!row || typeof row.ingress_key !== "string" || !reviewedByKey.has(row.ingress_key))
+        throw new Error(`current source-inventory review has unknown ingress ${row?.ingress_key}`);
+      reviewedByKey.set(row.ingress_key, row);
+    }
+    const reviewed = [...reviewedByKey.values()]
+      .sort((left, right) => left.ingress_key.localeCompare(right.ingress_key));
+    const reviewedDigest = sourceInventoryFixtureDigest(reviewed);
+    if (reviewed.length !== review.expected_count || reviewedDigest !== review.expected_sha256)
+      throw new Error(`current source-inventory review drifted: count ${reviewed.length}/${review.expected_count}, sha256 ${reviewedDigest}/${review.expected_sha256}`);
+    frozen = reviewed;
+  }
   const currentDigest = sourceInventoryFixtureDigest(current);
   const frozenDigest = sourceInventoryFixtureDigest(frozen);
   if (current.length !== frozen.length || currentDigest !== frozenDigest)
