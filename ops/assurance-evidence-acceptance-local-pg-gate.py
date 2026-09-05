@@ -1806,7 +1806,7 @@ def main() -> int:
                     )), "ASSURANCE_INPUT_INVALID", "owner_acceptance")
             backdated_acceptance = copy.deepcopy(acceptance)
             backdated_acceptance["decided_at"] = iso(one(
-                cur, "select date_trunc('second',clock_timestamp())-interval '2 seconds'")[0])
+                cur, "select date_trunc('second',clock_timestamp())-interval '31 seconds'")[0])
             refusal("backdated owner decision refuses", call(
                 cur, "ops.record_assurance_owner_acceptance", (
                     review_manifest_id, ev_id, "accept", Jsonb(backdated_acceptance),

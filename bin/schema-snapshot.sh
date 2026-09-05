@@ -208,7 +208,8 @@ esac
 export PGOPTIONS='-c timezone=UTC'
 
 TMP="$(mktemp)"
-trap 'rm -f "$TMP"' EXIT
+SCHEMA_BODY="$(mktemp)"
+trap 'rm -f "$TMP" "$SCHEMA_BODY"' EXIT
 
 # THE ROLE PREAMBLE, first in the file so the roles exist before anything that
 # could reference them. See the header for why this cannot be left to 0115.
@@ -317,10 +318,43 @@ end $$;
 
 ROLES
 
-if ! "$PG_DUMP" --schema-only --no-owner --no-acl "$URL" >> "$TMP"; then
+# Keep the raw dump separate so pg_dump's exit status cannot be hidden behind a
+# filter pipeline. Production has an externally provisioned carr_backup login,
+# so pg_dump renders 0475's role-conditional policy as an unconditional CREATE
+# POLICY naming that role. A disposable rebuild deliberately does NOT mint this
+# production credential; preserve the migration's original conditional boundary
+# in the portable snapshot instead of making CI depend on a fake login.
+if ! "$PG_DUMP" --schema-only --no-owner --no-acl "$URL" > "$SCHEMA_BODY"; then
   echo "schema-snapshot: pg_dump failed — nothing written" >&2
   exit 1
 fi
+if ! awk '
+$0 == "CREATE POLICY carr_backup_full_read ON ops.work_request FOR SELECT TO carr_backup USING (true);" {
+  print "do $carr_backup_snapshot_policy$"
+  print "begin"
+  print "  if exists (select 1 from pg_roles where rolname = '\''carr_backup'\'') then"
+  print "    create policy carr_backup_full_read on ops.work_request"
+  print "      for select to carr_backup using (true);"
+  print "  end if;"
+  print "end"
+  print "$carr_backup_snapshot_policy$;"
+  next
+}
+{ print }
+' "$SCHEMA_BODY" >> "$TMP"; then
+  echo "schema-snapshot: could not preserve the carr_backup policy boundary — nothing written" >&2
+  exit 1
+fi
+
+cat >> "$TMP" <<'SNAPSHOT_DATA_RESTORE_BEGIN'
+
+-- CARR SNAPSHOT DATA RESTORE TRANSACTION BEGIN
+-- The schema body above installs deferred policy-epoch triggers. Keep the
+-- ledger and every bounded configuration seed below in one transaction so a
+-- restore can expose only the final coherent epoch, never a half-restored one.
+BEGIN;
+
+SNAPSHOT_DATA_RESTORE_BEGIN
 
 # THE CARR GRANTS SECTION. --no-acl stays — a raw ACL dump names Neon's own
 # principals and whatever login roles neonctl has minted per environment, and
@@ -1336,6 +1370,11 @@ SCAC_REGISTRY_ROWS
   fi
 
   cat >> "$TMP" <<SCAC_REGISTRY_FOOTER
+-- Settle every deferred policy-epoch event raised by the ledger/configuration
+-- restore while the exact registry rows are present and the sealed triggers
+-- are still disabled. Re-enabling first makes settlement depend on COMMIT
+-- internals and can reject a valid portable rebuild.
+set constraints all immediate;
 alter table ops.scac_mutation_registry_entry enable trigger scac_mutation_registry_entry_sealed;
 alter table ops.scac_mutation_registry_version enable trigger scac_mutation_registry_version_sealed;
 do \$carr_scac_registry\$
@@ -1535,9 +1574,23 @@ fi
 # because someone read its rows and can say what is in them, never because a
 # migration seeded it. All this does is refuse to let an unclassified one pass
 # in silence.
+cat >> "$TMP" <<'SNAPSHOT_DATA_RESTORE_COMMIT'
+
+-- CARR SNAPSHOT DATA RESTORE TRANSACTION COMMIT
+COMMIT;
+
+SNAPSHOT_DATA_RESTORE_COMMIT
+
 if ! "$CATALOG_PY" "$REPO/ops/snapshot-seed-coverage.py" "$REPO" "$TMP"; then
   exit 1
 fi
+
+# Several bounded configuration blocks are appended after pg_dump's random
+# tokens and banners are stripped above. Normalize EOF again only after the
+# complete artifact exists, so the final generated file—not an intermediate
+# prefix—owns the one-newline invariant.
+normalise_eof < "$TMP" > "$TMP.clean"
+mv "$TMP.clean" "$TMP"
 
 if [ "$VERIFY_ONLY" = "1" ]; then
   echo "schema snapshot: disposable candidate valid; tracked snapshot unchanged"
