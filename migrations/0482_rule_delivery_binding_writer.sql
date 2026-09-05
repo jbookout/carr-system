@@ -1,4 +1,4 @@
--- 0480_rule_delivery_binding_writer.sql
+-- 0482_rule_delivery_binding_writer.sql
 --
 -- SIEP-12 correctly refuses an active rule without a delivery layer, but the
 -- only delivery writer historically synchronized an already-active reviewed
@@ -172,7 +172,7 @@ declare
 begin
   if has_function_privilege('carr_authority',
        'ops.bind_rule_delivery(uuid,text)'::regprocedure,'execute') then
-    raise exception '0480 FAILED: authority role can bypass atomic delivery binding';
+    raise exception '0482 FAILED: authority role can bypass atomic delivery binding';
   end if;
   select pg_get_functiondef(
       'ops.approve_rule(uuid,text,text[],text,text)'::regprocedure)
@@ -182,6 +182,6 @@ begin
      or v_definition not like '%ops.approve_rule_receipt_activation_v1%'
      or strpos(v_definition,'ops.bind_rule_delivery') >= strpos(v_definition,'ops.bind_rule_controls')
      or strpos(v_definition,'ops.bind_rule_controls') >= strpos(v_definition,'ops.approve_rule_receipt_activation_v1') then
-    raise exception '0480 FAILED: approval does not bind delivery, bind controls, and activate in order';
+    raise exception '0482 FAILED: approval does not bind delivery, bind controls, and activate in order';
   end if;
 end $$;

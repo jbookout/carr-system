@@ -154,6 +154,8 @@ WRITE_ACTION_PREFIXES = {
     "update", "write",
 }
 WRITE_ACTION_EXACT = {
+    "codex-checkpoint",      # durable semantic checkpoint write
+    "codex-record-event",    # append-only native lifecycle receipt
     "adjudicate-incident",   # partner judgment on an operational incident — severity, owner,
                               # duplicate-of. Same reasoning as its investigation sibling below:
                               # "adjudicate" stays an exact entry rather than becoming a prefix,

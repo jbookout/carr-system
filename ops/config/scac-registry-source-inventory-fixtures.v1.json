@@ -24124,13 +24124,173 @@
           "classification_authorizing": false
         }
       ]
+    },
+    {
+      "version": "v11",
+      "expected_count": 819,
+      "expected_sha256": "6b7e2b5bfb0ca346084ab501e456411fbeb8c2adb3e9c53c550436ab34fc4ca2",
+      "remove": [],
+      "source_digest_replacements": {
+        "mcp-server/src/tools.js": "58da97e316c56d65b352dea98181af1194c171ffe6e135b6794c142e8e4ddd9b"
+      },
+      "row_replacements": {
+        "script-entrypoint:ops/scac-mutation-inventory.mjs": {
+          "schema_digest": "8a39a5dd8879268dfd3d00443a8a259870f3f0c1aec933fdbee4f85b46bb59ba",
+          "handler_digest": "8a39a5dd8879268dfd3d00443a8a259870f3f0c1aec933fdbee4f85b46bb59ba"
+        },
+        "script-entrypoint:ops/config-as-code.py": {
+          "schema_digest": "52a10075e598cb4a95aafb6d2bfd2ec3b6d07a58e5ce4ccc8b201e0db54387d4",
+          "handler_digest": "52a10075e598cb4a95aafb6d2bfd2ec3b6d07a58e5ce4ccc8b201e0db54387d4"
+        },
+        "script-entrypoint:ops/ci.sh": {
+          "schema_digest": "69bd0a71fe2b36afe9594e1929952162ab65719aa1e94ab7d9b50738964ce12c",
+          "handler_digest": "69bd0a71fe2b36afe9594e1929952162ab65719aa1e94ab7d9b50738964ce12c"
+        },
+        "script-entrypoint:ops/siep11-mutation-registry-local-pg-gate.py": {
+          "schema_digest": "d031612d5fa18e995cf039f6ed9169776b601d1d3aae2e5c2c9ce3b8928075f6",
+          "handler_digest": "d031612d5fa18e995cf039f6ed9169776b601d1d3aae2e5c2c9ce3b8928075f6"
+        },
+        "script-entrypoint:ops/siep18-exact-effects-local-pg-gate.py": {
+          "schema_digest": "7663aa4fd5e95bc38458b764a809289a889462d0575bbf284ec5ce971b91f88b",
+          "handler_digest": "7663aa4fd5e95bc38458b764a809289a889462d0575bbf284ec5ce971b91f88b"
+        },
+        "script-entrypoint:ops/siep18-reference-monitor-local-pg-gate.py": {
+          "schema_digest": "727dfe8a09df1d95b581b9fb82e9be955eaa457ae3ad30ba01da202579ea34f2",
+          "handler_digest": "727dfe8a09df1d95b581b9fb82e9be955eaa457ae3ad30ba01da202579ea34f2"
+        },
+        "script-entrypoint:bin/schema-snapshot.sh": {
+          "schema_digest": "493b7641a486b9f04631f1e4989c870943cefee226b463d97061010ae5b228a1",
+          "handler_digest": "493b7641a486b9f04631f1e4989c870943cefee226b463d97061010ae5b228a1"
+        },
+        "script-entrypoint:hooks/completion-evidence-gate.py": {
+          "schema_digest": "5d07706c2502a852590601b338531edbf879d693bd1025c824d8fb50c9b73fda",
+          "handler_digest": "5d07706c2502a852590601b338531edbf879d693bd1025c824d8fb50c9b73fda"
+        }
+      },
+      "upsert": [
+        {
+          "ingress_key": "mcp-tool:codex-checkpoint",
+          "ingress_kind": "mcp_tool",
+          "operation": "codex-checkpoint",
+          "effect_class": "administrative_mutation",
+          "source_locator": "mcp-server/src/codex-continuity.js",
+          "schema_digest": "c19344c49e59fb799584ccdd2829053c7b43b8a072d72fd90b2c759a9e17b760",
+          "source_digest": "f5bb99886a7b267623e11f9593f1e629466ee591d4e959465260e3c5852ef915",
+          "write": true,
+          "human_only": false,
+          "authority_only": false,
+          "principal_mode": "authenticated_registered_principal",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.database",
+          "delegates_to": [],
+          "request_shape": "closed_top_level_schema",
+          "idempotency_mode": "operation_principal_manifest_bound",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "application_default_deny",
+          "owner_package": "11",
+          "implementation_state": "source_guarded_not_deployed",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "mcp-tool:codex-read-recovery",
+          "ingress_kind": "mcp_tool",
+          "operation": "codex-read-recovery",
+          "effect_class": "audit_side_effect",
+          "source_locator": "mcp-server/src/codex-continuity.js",
+          "schema_digest": "7cae00805446b65625f8b8f8653c4b3356ed177f80a97b7d7481d63c20c970bd",
+          "source_digest": "f5bb99886a7b267623e11f9593f1e629466ee591d4e959465260e3c5852ef915",
+          "write": false,
+          "human_only": false,
+          "authority_only": false,
+          "principal_mode": "authenticated_registered_principal",
+          "mutation_kind": null,
+          "target_surface": "scac.surface.database",
+          "delegates_to": [],
+          "request_shape": "closed_top_level_schema",
+          "idempotency_mode": "not_applicable",
+          "rollback_class": "append_only_audit",
+          "admission_class": "application_default_deny",
+          "owner_package": "11",
+          "implementation_state": "source_guarded_not_deployed",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "mcp-tool:codex-record-event",
+          "ingress_kind": "mcp_tool",
+          "operation": "codex-record-event",
+          "effect_class": "administrative_mutation",
+          "source_locator": "mcp-server/src/codex-continuity.js",
+          "schema_digest": "5898532b27c1fcd7d604e5b979cea355dbb47dafe4d06037a8b48245913b4b22",
+          "source_digest": "f5bb99886a7b267623e11f9593f1e629466ee591d4e959465260e3c5852ef915",
+          "write": true,
+          "human_only": false,
+          "authority_only": false,
+          "principal_mode": "authenticated_registered_principal",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.database",
+          "delegates_to": [],
+          "request_shape": "closed_top_level_schema",
+          "idempotency_mode": "operation_principal_manifest_bound",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "application_default_deny",
+          "owner_package": "11",
+          "implementation_state": "source_guarded_not_deployed",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:ops/codex-continuity-hook.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "ops/codex-continuity-hook.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "ops/codex-continuity-hook.py",
+          "schema_digest": "e3bde634cf2d73241dc26ba2419bde07c6265d69c1098f2fbd0b4f3590d8627a",
+          "handler_digest": "e3bde634cf2d73241dc26ba2419bde07c6265d69c1098f2fbd0b4f3590d8627a",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:ops/codex-history.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "ops/codex-history.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "ops/codex-history.py",
+          "schema_digest": "cb3c9595eef0a87b385c401a2a6db013d3cd47b11be039adf2d068f34753aa49",
+          "handler_digest": "cb3c9595eef0a87b385c401a2a6db013d3cd47b11be039adf2d068f34753aa49",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ]
     }
   ],
   "current_source_review": {
-    "base_version": "v10",
-    "expected_count": 814,
-    "expected_sha256": "b4b83bed1aabb7433fd67e1542583bd4fc8155fffa64e832c2cff664fac684f9",
-    "reason": "Migration 0481 advances the disposable-only rule-delivery acceptance fixture to the reviewed map digest. The production runtime and sealed v10 artifacts are unchanged.",
+    "base_version": "v11",
+    "expected_count": 819,
+    "expected_sha256": "f8fabe174ffc76b078310d3e86eecc16193e3b1f5b0b92fb29decf0de116f105",
+    "reason": "Migration 0483 advances the disposable-only rule-delivery acceptance fixture to the reviewed map digest. The production runtime and sealed v11 artifacts are unchanged.",
     "upsert": [
       {
         "ingress_key": "script-entrypoint:ops/rule-delivery-local-pg-acceptance.py",
@@ -24138,8 +24298,8 @@
         "operation": "ops/rule-delivery-local-pg-acceptance.py",
         "effect_class": "administrative_mutation",
         "source_locator": "ops/rule-delivery-local-pg-acceptance.py",
-        "schema_digest": "95eb4c6588acaefe3758b8aefc909df73f1e39a506fa5057587960f4087bfb3a",
-        "handler_digest": "95eb4c6588acaefe3758b8aefc909df73f1e39a506fa5057587960f4087bfb3a",
+        "schema_digest": "158156246eee859398cf0c4f7c963f166f4218bc5acfaf643993a224f81a24c0",
+        "handler_digest": "158156246eee859398cf0c4f7c963f166f4218bc5acfaf643993a224f81a24c0",
         "write": true,
         "human_only": false,
         "authority_only": true,

@@ -1,4 +1,4 @@
--- 0481: repin the eight rule-delivery activation targets onto the reviewed map
+-- 0483: repin the eight rule-delivery activation targets onto the reviewed map
 -- that carries rules 737a68d6 and a7784a18.
 --
 -- The two additions are Layer 0 rules and do not change any of the eight
@@ -14,7 +14,7 @@ begin
     from ops.rule_delivery_activation_target
    where map_digest='eebfa2d627dfbbc65ae06e623724487158b940c9376cd30dbb067aec2779e8bb';
   if preimage<>8 then
-    raise exception '0481 REFUSED: expected eight activation targets on the post-0478 map digest, found %',preimage;
+    raise exception '0483 REFUSED: expected eight activation targets on the post-0478 map digest, found %',preimage;
   end if;
 
   update ops.rule_delivery_activation_target
@@ -22,6 +22,6 @@ begin
    where map_digest='eebfa2d627dfbbc65ae06e623724487158b940c9376cd30dbb067aec2779e8bb';
   get diagnostics updated=row_count;
   if updated<>8 then
-    raise exception '0481 REFUSED: expected eight exact rule-delivery target repins, changed %',updated;
+    raise exception '0483 REFUSED: expected eight exact rule-delivery target repins, changed %',updated;
   end if;
 end $rule_map_repin_after_rule_activation_repair$;

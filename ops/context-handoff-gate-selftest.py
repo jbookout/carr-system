@@ -3276,14 +3276,26 @@ def static_contract_cases():
     # would be false. It is dropped from this list, not silently: the map is now
     # covered by gate-integrity's contract hash (re-blessed in the same R02
     # commit) and by control-catalog-parity-gate. stop_latch.py,
-    # ops/stop_latch-selftest.py and ops/config/codex-hooks.json stay frozen —
-    # R02 did not touch them, and the context-handoff scoping guard for those is
-    # unchanged.
-    for path in ("ops/stop_latch-selftest.py", "ops/config/codex-hooks.json"):
+    # ops/stop_latch-selftest.py stays frozen. Codex hook continuity additions
+    # are checked below against the historical PreToolUse/Stop groups.
+    for path in ("ops/stop_latch-selftest.py",):
         base = subprocess.check_output(
             ["git", "show",
              f"01c3977580e8d9d490380f6c2135d1c4d7d20fd7:{path}"], cwd=REPO)
         check(path + " is explicitly unchanged", base == (REPO / path).read_bytes())
+    old_codex = json.loads(subprocess.check_output(
+        ["git", "show", "01c3977580e8d9d490380f6c2135d1c4d7d20fd7:ops/config/codex-hooks.json"],
+        cwd=REPO))
+    current_codex = json.loads((REPO / "ops/config/codex-hooks.json").read_text())
+    old_hooks = old_codex.get("hooks", {})
+    current_hooks = current_codex.get("hooks", {})
+    check("Codex historical PreToolUse/Stop groups preserved",
+          current_hooks.get("PreToolUse") == old_hooks.get("PreToolUse")
+          and current_hooks.get("Stop") == old_hooks.get("Stop"),
+          {"historical": old_hooks, "current": {k: current_hooks.get(k) for k in ("PreToolUse", "Stop")}})
+    check("Codex continuity lifecycle groups registered",
+          all(event in current_hooks for event in ("PreCompact", "PostCompact", "SessionStart", "UserPromptSubmit")),
+          sorted(current_hooks))
 
 
 def main():

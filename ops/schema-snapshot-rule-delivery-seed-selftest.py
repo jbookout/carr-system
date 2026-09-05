@@ -27,7 +27,7 @@ SECOND_REFRESH_MIGRATION_SOURCE = (
 CURRENT_MIGRATION = "0363_rule_delivery_activation_digest_repin.sql"
 SOURCE_MERGE_MIGRATION = "0471_source_merge_catalog_registry_successor.sql"
 TAIL_REPIN_MIGRATION = "0478_repin_rule_delivery_activation_after_heavy_build_tag.sql"
-FINAL_REPIN_MIGRATION = "0481_rule_delivery_activation_digest_repin.sql"
+FINAL_REPIN_MIGRATION = "0483_rule_delivery_activation_digest_repin.sql"
 SOURCE_MERGE_MIGRATION_SOURCE = (
     ROOT / "migrations" / SOURCE_MERGE_MIGRATION
 ).read_text(encoding="utf-8")
