@@ -317,7 +317,7 @@ const TRUSTED_SHAPE = {
 };
 const FROZEN = Object.freeze({
   "design": "9bbdc2f5124fc3939c883e572f5c9077b347804b030f313e60756c28dfab07a6",
-  "constitution": "eb280463efe6e665983155257f956883dda5774c6d30b8450ee17aa8f7f70945",
+  "constitution": "3a5bc5c410bcf43e868aa9ae461fdfb2229a8ce9002dd96a171199025982ab71",
   "requirements": "51e0a89442fda95e537738e8321f9301af8ef48cf79d5ddb979c63421e8990ec"
 });
 const DEADLINE = {
