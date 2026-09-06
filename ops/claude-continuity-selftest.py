@@ -12,9 +12,13 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 HOOK = ROOT / "ops/claude-continuity-hook.py"
+from git_env import fixture_env
+
+GIT_ENV = fixture_env()
 
 
 def load_hook():
@@ -213,16 +217,17 @@ else:
 
     def test_project_affinity_survives_worktree_path_change(self):
         repo = self.root / "repo"
-        subprocess.run(["git", "init", "-q", str(repo)], check=True)
-        subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
-        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+        subprocess.run(["git", "init", "-q", str(repo)], check=True, env=GIT_ENV)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True, env=GIT_ENV)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True, env=GIT_ENV)
         (repo / "a").write_text("a")
-        subprocess.run(["git", "-C", str(repo), "add", "a"], check=True)
-        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True)
+        subprocess.run(["git", "-C", str(repo), "add", "a"], check=True, env=GIT_ENV)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True, env=GIT_ENV)
         other = self.root / "other-worktree"
-        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "other", str(other)], check=True)
+        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "other", str(other)], check=True, env=GIT_ENV)
         hook = load_hook()
-        self.assertEqual(hook.project_affinity(repo.resolve()), hook.project_affinity(other.resolve()))
+        with mock.patch.dict(os.environ, GIT_ENV, clear=True):
+            self.assertEqual(hook.project_affinity(repo.resolve()), hook.project_affinity(other.resolve()))
 
     def test_post_tool_sampling_is_stable_and_requires_native_tool_id(self):
         hook = load_hook()
