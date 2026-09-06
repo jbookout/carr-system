@@ -236,7 +236,9 @@ CLAUSE_REASON = "unaccounted clause"
 FLOOR_REASONS = ("terminal completion claim has no fresh verification",
                  "delivery claim names no recipient")
 
-NESTED_CARR_CALL = re.compile(r"(?:tools\.)?(mcp__carr(?:_records)?__([A-Za-z0-9_]+))")
+CARR_MCP_PREFIXES = ("mcp__carr__", "mcp__carr_records__", "mcp__carr-continuity__")
+NESTED_CARR_CALL = re.compile(
+    r"(?:tools\.)?(mcp__carr(?:_records|-continuity)?__([A-Za-z0-9_-]+))")
 CALL_VERB = re.compile(r"\b(?:verb|name)\s*[:=]\s*['\"]([A-Za-z0-9_-]+)['\"]", re.I)
 SYNTHETIC_CODEX_USER_PREFIXES = (
     "The following is the Codex agent history",
@@ -336,7 +338,7 @@ def transcript_is_carr(recs):
     """
     for rec in recs:
         name, value = tool(rec)
-        if name.startswith(("mcp__carr__", "mcp__carr_records__")):
+        if name.startswith(CARR_MCP_PREFIXES):
             return True
         if name == "functions.exec" and nested_carr_actions(value):
             return True
@@ -424,7 +426,7 @@ def mutation(name, value):
     cmd = command(value)
     if DEPLOY.search(cmd):
         return True
-    if name.startswith(("mcp__carr__", "mcp__carr_records__")) and write_verb(name, value):
+    if name.startswith(CARR_MCP_PREFIXES) and write_verb(name, value):
         return True
     # In the real Codex JSONL, an in-process MCP invocation is represented as
     # a `functions.exec` custom call whose raw JS visibly contains
@@ -440,7 +442,7 @@ def verification(name, value):
         return True
     # A visible CARR read after an embedded CARR write is fresh evidence even
     # when Codex's outer custom call remains named only `functions.exec`.
-    if name.startswith(("mcp__carr__", "mcp__carr_records__")):
+    if name.startswith(CARR_MCP_PREFIXES):
         return not write_verb(name, value)
     return name == "functions.exec" and any(not is_write_action(action)
                                               for action in nested_carr_actions(value))

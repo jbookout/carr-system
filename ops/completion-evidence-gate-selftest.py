@@ -115,6 +115,22 @@ CASES = [
     ("named recipient permits delivery", [user("update it"), tool("mcp__carr__update-deal"), tool("Read"), assistant("Delivered to Dell after a fresh read.")], False),
     ("deploy gets checked", [user("release"), tool("Bash", {"command": "npx wrangler deploy"}), assistant("Deployed.")], True),
     ("unrelated historical tool does not matter", [user("status"), tool("Read"), assistant("Done with the explanation.")], False),
+    ("Claude continuity direct write requires evidence", [
+        user("checkpoint this milestone"),
+        tool("mcp__carr-continuity__claude-checkpoint"),
+        assistant("Done."),
+    ], True),
+    ("Claude continuity direct recovery is fresh evidence", [
+        user("checkpoint this milestone"),
+        tool("mcp__carr-continuity__claude-checkpoint"),
+        tool("mcp__carr-continuity__claude-read-recovery"),
+        assistant("Done and verified."),
+    ], False),
+    ("Claude continuity nested write requires evidence", [
+        codex_user("checkpoint this milestone"),
+        codex_tool("exec", 'await tools["mcp__carr-continuity__claude-record-event"]({});'),
+        codex_assistant("Done."),
+    ], True),
     ("Codex nested CARR write requires evidence", [
         codex_user("reconcile Musicologie"),
         codex_tool("exec", "const row = await tools.mcp__carr__update_deal({ id: 'd1', stage: 'LOI' });"),
