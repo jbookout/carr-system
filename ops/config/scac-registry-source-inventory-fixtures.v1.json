@@ -24289,7 +24289,7 @@
       "version": "v12",
       "reason": "Claude-native continuity activation and independent surface authority.",
       "expected_count": 825,
-      "expected_sha256": "7b0623bfd51ef1297307cd86f36874895f232379249a3c0b2d0247cc17a1b9e6",
+      "expected_sha256": "f4ba9989fea3fd40ce0bffaaf6c9980e8e8cdd5ce10d2355d9cf02f729a65094",
       "remove": [],
       "upsert": [
         {
@@ -27165,6 +27165,52 @@
           "classification_authorizing": false
         },
         {
+          "ingress_key": "script-entrypoint:ops/siep11-mutation-registry-local-pg-gate.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "ops/siep11-mutation-registry-local-pg-gate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "ops/siep11-mutation-registry-local-pg-gate.py",
+          "schema_digest": "e52a4b248df4126fb3a96ce75810eab80818f3b427996803e937051494d71339",
+          "handler_digest": "e52a4b248df4126fb3a96ce75810eab80818f3b427996803e937051494d71339",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:ops/siep18-reference-monitor-local-pg-gate.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "ops/siep18-reference-monitor-local-pg-gate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "ops/siep18-reference-monitor-local-pg-gate.py",
+          "schema_digest": "8f5a964b9ac6698695405a6592b0554f89ef5aeddb2fc88d5d5242a733a40a23",
+          "handler_digest": "8f5a964b9ac6698695405a6592b0554f89ef5aeddb2fc88d5d5242a733a40a23",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
           "ingress_key": "worker-route:deal-room-turn",
           "ingress_kind": "worker_route",
           "operation": "deal-room-turn",
@@ -27240,7 +27286,7 @@
     "base_version": "v12",
     "reason": "No reviewed source delta beyond the v12 seal.",
     "expected_count": 825,
-    "expected_sha256": "7b0623bfd51ef1297307cd86f36874895f232379249a3c0b2d0247cc17a1b9e6",
+    "expected_sha256": "f4ba9989fea3fd40ce0bffaaf6c9980e8e8cdd5ce10d2355d9cf02f729a65094",
     "upsert": []
   }
 }
