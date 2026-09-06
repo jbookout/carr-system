@@ -62,7 +62,6 @@
     "rule-enforcement-map.json": "784e05273341f5f7c16f96d1f0fb1516d8c605cb3287dec32aa37a1211dd0cb8",
     "model-floors.json": "298d84503a8730197dcd51613e73bd18505f1ee448562803603308cd278ce062",
     "hooks.json": "2d8df78bb7614b4987237c6e3ba0e3f4bff478e399630136959c9e2bbaf601bd",
-    "session-context-lifecycle.v1.json": "372cea4b2df13f5f2fc98f8fc77b027eb4f251523f702bb4f2f56f86321e7175",
     "session-context-lifecycle.v2.json": "84bcbe1b6266f4a893187a5ca7ec628d87d3b716ce4bcc7cfe719fae0deff0d8"
   }
 }

@@ -447,7 +447,7 @@ with tempfile.TemporaryDirectory(prefix="rule-dedupe-") as temp_name:
             "schema_version": 1, "mode": "checkpoint",
             "config_digest": dedupe.expected_config_digest(),
         }))
-        parallel_outputs = []
+        parallel_outputs: list[dict | None] = []
         barrier = threading.Barrier(2)
         def invoke(index):
             candidate = payload()

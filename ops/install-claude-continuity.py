@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import pathlib
+import sys
 import tempfile
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -90,8 +91,11 @@ def desired_mcp_server() -> dict:
 def _commands(entry: object) -> list[str]:
     if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
         return []
-    return [hook.get("command") for hook in entry["hooks"]
-            if isinstance(hook, dict) and isinstance(hook.get("command"), str)]
+    commands: list[str] = []
+    for hook in entry["hooks"]:
+        if isinstance(hook, dict) and isinstance(hook.get("command"), str):
+            commands.append(hook["command"])
+    return commands
 
 
 def _is_continuity(entry: object) -> bool:
@@ -197,11 +201,13 @@ def apply_transaction(settings: dict, mcp_config: dict, mode: str | None, remove
                 raise OSError("injected mode failure")
             target_mode.unlink(missing_ok=True)
         else:
+            assert mode is not None
             _write_atomic(target_mode, _encoded(mode_document(mode)), "mode")
         _write_atomic(target_mcp, _encoded(mcp_config), "mcp")
         # Parse both resources after the transaction before declaring success.
         _load_json(target_settings)
         if not remove:
+            assert mode is not None
             parsed_mode = _load_json(target_mode)
             if parsed_mode != mode_document(mode):
                 raise RuntimeError("mode verification failed")
@@ -256,7 +262,7 @@ def main() -> int:
         print(f"{args.action.upper()} OK: unrelated Claude settings and MCP servers preserved")
         return 0
     except (OSError, RuntimeError) as exc:
-        print(f"ERROR: {exc}", file=os.sys.stderr)
+        print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
 

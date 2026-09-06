@@ -24289,7 +24289,7 @@
       "version": "v12",
       "reason": "Claude-native continuity activation and independent surface authority.",
       "expected_count": 825,
-      "expected_sha256": "847b65db81878e22c671caed162bff34aa812c711b14775c79e0367becc04360",
+      "expected_sha256": "d6d51ffeff6bf1f4a719b74db50699dfe4a0934a6b5fc5ad27d7e64377c04562",
       "remove": [],
       "upsert": [
         {
@@ -24344,8 +24344,8 @@
           "operation": "ops/install-claude-continuity.py",
           "effect_class": "administrative_mutation",
           "source_locator": "ops/install-claude-continuity.py",
-          "schema_digest": "42e76d6544ed85933ceaf5987f7afafdc483fbb8badb96dc94f30068c0a10ae4",
-          "handler_digest": "42e76d6544ed85933ceaf5987f7afafdc483fbb8badb96dc94f30068c0a10ae4",
+          "schema_digest": "733bf45cc56187bd1c7ba038d1cb0d74a16a7e4bc59177c4b31f06aa664be6b6",
+          "handler_digest": "733bf45cc56187bd1c7ba038d1cb0d74a16a7e4bc59177c4b31f06aa664be6b6",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -27240,7 +27240,7 @@
     "base_version": "v12",
     "reason": "No reviewed source delta beyond the v12 seal.",
     "expected_count": 825,
-    "expected_sha256": "847b65db81878e22c671caed162bff34aa812c711b14775c79e0367becc04360",
+    "expected_sha256": "d6d51ffeff6bf1f4a719b74db50699dfe4a0934a6b5fc5ad27d7e64377c04562",
     "upsert": []
   }
 }
