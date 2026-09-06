@@ -1698,7 +1698,7 @@ def cmd_install(apply):
             print(f"  SKIP  {f} (the nightly chain already does this here)")
             continue
         dest = os.path.join(LAUNCHD_SRC, f)
-        source = read(os.path.join(LAUNCHD_REPO, f))
+        source = read(launchd_repo_path(f))
         if source is None:
             print(f"  ERROR  cannot render {f} because its tracked source is missing")
             return 1
