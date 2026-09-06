@@ -9,12 +9,13 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("config_as_code_continuity_test",
                                               ROOT / "ops/config-as-code.py")
 assert SPEC and SPEC.loader
-config = importlib.util.module_from_spec(SPEC)
+config: Any = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(config)
 
 
@@ -183,7 +184,7 @@ class ContinuityOverlayTest(unittest.TestCase):
         installer_spec = importlib.util.spec_from_file_location(
             "continuity_installer_for_config_test", ROOT / "ops/install-claude-continuity.py")
         assert installer_spec and installer_spec.loader
-        installer = importlib.util.module_from_spec(installer_spec)
+        installer: Any = importlib.util.module_from_spec(installer_spec)
         installer_spec.loader.exec_module(installer)
         installer.REPO = self.repo
         installed = json.loads(self.settings.read_text())
