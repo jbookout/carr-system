@@ -24289,7 +24289,7 @@
       "version": "v12",
       "reason": "Claude-native continuity activation and independent surface authority.",
       "expected_count": 825,
-      "expected_sha256": "f4ba9989fea3fd40ce0bffaaf6c9980e8e8cdd5ce10d2355d9cf02f729a65094",
+      "expected_sha256": "939c005b0f59e4161c01927c3372eb76df298e5db5f562275c9caaf4f159afab",
       "remove": [],
       "upsert": [
         {
@@ -26866,6 +26866,29 @@
           "classification_authorizing": false
         },
         {
+          "ingress_key": "script-entrypoint:hooks/completion-evidence-gate.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "hooks/completion-evidence-gate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "hooks/completion-evidence-gate.py",
+          "schema_digest": "11d4e834a0a338e4a961fbb351610b178fbf46ace555ad73979202f40d122bf7",
+          "handler_digest": "11d4e834a0a338e4a961fbb351610b178fbf46ace555ad73979202f40d122bf7",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
           "ingress_key": "script-entrypoint:hooks/context-handoff-gate.py",
           "ingress_kind": "script_entrypoint",
           "operation": "hooks/context-handoff-gate.py",
@@ -27286,7 +27309,7 @@
     "base_version": "v12",
     "reason": "No reviewed source delta beyond the v12 seal.",
     "expected_count": 825,
-    "expected_sha256": "f4ba9989fea3fd40ce0bffaaf6c9980e8e8cdd5ce10d2355d9cf02f729a65094",
+    "expected_sha256": "939c005b0f59e4161c01927c3372eb76df298e5db5f562275c9caaf4f159afab",
     "upsert": []
   }
 }

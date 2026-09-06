@@ -154,6 +154,8 @@ WRITE_ACTION_PREFIXES = {
     "update", "write",
 }
 WRITE_ACTION_EXACT = {
+    "claude-checkpoint",     # durable Claude semantic checkpoint write
+    "claude-record-event",   # append-only Claude lifecycle receipt
     "codex-checkpoint",      # durable semantic checkpoint write
     "codex-record-event",    # append-only native lifecycle receipt
     "adjudicate-incident",   # partner judgment on an operational incident — severity, owner,
