@@ -34,6 +34,8 @@ export const REGISTRY_V9_VERSION = "scac-mutation-registry.v9";
 export const REGISTRY_V10_VERSION = "scac-mutation-registry.v10";
 // v11 binds the exact post-0480 disposable-Postgres catalog receipt.
 export const REGISTRY_V11_VERSION = "scac-mutation-registry.v11";
+// v12 binds the exact post-0485 disposable-Postgres catalog receipt.
+export const REGISTRY_V12_VERSION = "scac-mutation-registry.v12";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -64,6 +66,7 @@ export const HISTORICAL_REGISTRY_SEALS = Object.freeze({
   v8: Object.freeze({ version: REGISTRY_V8_VERSION, digest: "sha256:56edcf25393a1c7b47985b9e2a272a8e7fcf0930709147ae823ca9b15290212e", entryCount: 1425, sourceEntryCount: 800 }),
   v9: Object.freeze({ version: REGISTRY_V9_VERSION, digest: "sha256:398ddf5f86a46110518f7498af63782b65e047b9f624b798bf3c798058a79b4d", entryCount: 1439, sourceEntryCount: 800 }),
   v10: Object.freeze({ version: REGISTRY_V10_VERSION, digest: "sha256:9109437968d4ab76090980ff9ec370da1ccfbb65e0683f485e0239d3d5158a62", entryCount: 1458, sourceEntryCount: 814 }),
+  v11: Object.freeze({ version: REGISTRY_V11_VERSION, digest: "sha256:27d615d0a07d519b8e902a3a21b53918a314cfefdadfe5a50e2c4da33b2f9ad7", entryCount: 1471, sourceEntryCount: 819 }),
 });
 export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
   "migrations/0454_siep11_mutation_registry.sql": "7985d42b9b36964b33503f4ff42d332e6bcce085217f06464a9d6abf58126bdd",
@@ -86,6 +89,8 @@ export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
   "mcp-server/src/scac-mutation-registry.v9.generated.js": "c85115b40f7bd52f533a875decc78f298030f50daef1f12f772a306142c78ae0",
   "migrations/0471_source_merge_catalog_registry_successor.sql": "7d93dfb007a27e2e6798d1ff12cd7f57763745d82e564e49b056442ac47cc4d1",
   "mcp-server/src/scac-mutation-registry.v10.generated.js": "471c8609889a2fd4f55a413f4b2fca48ffdffbfdadb6cf6b3e72c2c5d8e7d8c2",
+  "migrations/0481_codex_continuity_registry_activation.sql": "7a63ba4d86cdc15b25005c5874011a1441325c28235c2ccf8785ebfaba1bc8f3",
+  "mcp-server/src/scac-mutation-registry.v11.generated.js": "19478e6a1b7f548dc55ee15bf0166826ad1eb29aa3f81199ee79d60290f9bad3",
 });
 // 0467 is the reviewed SIEP-18 monitor source consumed by the v9 generator.
 // It is not historical yet, but its bytes must still be exact: otherwise a
@@ -236,6 +241,20 @@ export const CODEX_CONTINUITY_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
   ...CODEX_CONTINUITY_PRE_V11_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v11",
   secdef_execute: { count: 351, digest: "sha256:6bb739ea0422615f8150affcf24b83de0c2454ea485dc07d72f63bcda45a7014" },
+});
+// Replaced only from disposable-PG17 readback after 0485.
+export const CLAUDE_CONTINUITY_PRE_V12_DB_CATALOG_BASELINE = Object.freeze({
+  projection_version: "scac-db-catalog-projection.v12-pre",
+  secdef_execute: { count: 351, digest: "sha256:6bb739ea0422615f8150affcf24b83de0c2454ea485dc07d72f63bcda45a7014" },
+  relation_dml: { count: 295, digest: "sha256:a525431d9742a01545e1a63b6ef5c1ad64d783add25794782ee175c3e4c82904" },
+  column_dml: { count: 12, digest: "sha256:607e31d990653776243350d001ca465234e321349b05259751f8231ae3c2c44f" },
+  role_authority: { count: 12, digest: "sha256:eb650de73032466b46787f4a5826b60b100591657489a7990d9161e2d6588648" },
+  runtime_dml_grants: { count: 307, digest: "sha256:5ac46a8d4226dae12c5a455be0080a472bf4e7f9dd3aa725004ec9c105be74a1" },
+});
+export const CLAUDE_CONTINUITY_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
+  ...CLAUDE_CONTINUITY_PRE_V12_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v12",
+  secdef_execute: { count: 355, digest: "sha256:bb6d53a5fce3aee0b694303a346862423cb6a38efa80faf5decebb30aff3d783" },
 });
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
@@ -851,6 +870,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V9_VERSION]: "v9",
   [REGISTRY_V10_VERSION]: "v10",
   [REGISTRY_V11_VERSION]: "v11",
+  [REGISTRY_V12_VERSION]: "v12",
 });
 
 function sourceInventoryFixtureDigest(rows) {
@@ -906,7 +926,7 @@ export function frozenInventory(version) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V11_VERSION) {
+  version = REGISTRY_V12_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -940,7 +960,8 @@ export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
 export function registryDigestFor(version, rows = fullInventory(), dbCatalogBaseline = DB_CATALOG_BASELINE) {
   if (![REGISTRY_VERSION, REGISTRY_V2_VERSION, REGISTRY_V3_VERSION, REGISTRY_V4_VERSION,
     REGISTRY_V5_VERSION, REGISTRY_V6_VERSION, REGISTRY_V7_VERSION, REGISTRY_V8_VERSION,
-    REGISTRY_V9_VERSION, REGISTRY_V10_VERSION, REGISTRY_V11_VERSION].includes(version))
+    REGISTRY_V9_VERSION, REGISTRY_V10_VERSION, REGISTRY_V11_VERSION,
+    REGISTRY_V12_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -2444,6 +2465,246 @@ end $codex_continuity_monitor_guards$;
   return `${predecessorPreflight}${continuityGuardBinding}${sql}`.replace(/\n+$/, "\n");
 }
 
+export function renderClaudeContinuityForwardRegistrySql(rows = fullInventory(),
+  dbCatalogBaseline = CLAUDE_CONTINUITY_FORWARD_DB_CATALOG_BASELINE,
+  predecessorArtifacts = undefined) {
+  const { v11: v11Seal } = HISTORICAL_REGISTRY_SEALS;
+  const v12Digest = registryDigestFor(REGISTRY_V12_VERSION, rows, dbCatalogBaseline);
+  const catalogCount = dbCatalogBaseline.secdef_execute.count +
+    dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
+  const entryCount = rows.length + catalogCount;
+  const v11MigrationPath = "migrations/0481_codex_continuity_registry_activation.sql";
+  const v11RuntimePath = "mcp-server/src/scac-mutation-registry.v11.generated.js";
+  const v11Rows = frozenInventory(REGISTRY_V11_VERSION);
+  const v11Migration = predecessorArtifacts?.migration ??
+    renderCodexContinuityForwardRegistrySql(v11Rows, CODEX_CONTINUITY_FORWARD_DB_CATALOG_BASELINE);
+  const v11Runtime = predecessorArtifacts?.runtime ?? renderRuntimeProjection(v11Rows, {
+    version: REGISTRY_V11_VERSION, dbCatalogBaseline: CODEX_CONTINUITY_FORWARD_DB_CATALOG_BASELINE,
+  });
+  for (const [path, source] of [
+    [v11MigrationPath, v11Migration], [v11RuntimePath, v11Runtime],
+  ]) {
+    const observed = sha256(source);
+    if (observed !== HISTORICAL_REGISTRY_ARTIFACT_SHA256[path])
+      throw new Error(`sealed historical SCAC v11 artifact changed: ${path}: ${observed}`);
+  }
+
+  const headerMarker = "-- SCAC-10: forward-only mutation registry v11 after Codex continuity activation.";
+  const coreStart = v11Migration.indexOf(headerMarker);
+  if (coreStart < 0 || v11Migration.indexOf(headerMarker, coreStart + headerMarker.length) >= 0)
+    throw new Error("sealed SCAC v11 migration has no exact successor core boundary");
+  const v11Core = v11Migration.slice(coreStart);
+  const currentV11Marker = "create or replace function ops.scac_mutation_catalog_v11_current()";
+  const policyMarker =
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v10;";
+  const currentV11Start = v11Core.indexOf(currentV11Marker);
+  const secondCurrentV11 = v11Core.indexOf(
+    currentV11Marker, currentV11Start + currentV11Marker.length);
+  const v10HistoryMarker =
+    "alter function ops.scac_mutation_catalog_v10_current() rename to scac_mutation_catalog_v10_live_at_seal;";
+  const v10HistoryStart = v11Core.indexOf(v10HistoryMarker);
+  const secondV10History = v11Core.indexOf(
+    v10HistoryMarker, v10HistoryStart + v10HistoryMarker.length);
+  const policyStart = v11Core.indexOf(policyMarker);
+  const secondPolicy = v11Core.indexOf(policyMarker, policyStart + policyMarker.length);
+  if (v10HistoryStart < 0 || secondV10History >= 0 || currentV11Start <= v10HistoryStart ||
+      secondCurrentV11 >= 0 || policyStart <= currentV11Start || secondPolicy >= 0)
+    throw new Error("sealed SCAC v11 migration has no exact catalog successor boundary");
+  const installedV10History = v11Core.slice(v10HistoryStart, currentV11Start);
+  const v11Current = v11Core.slice(currentV11Start, policyStart);
+  const v11History =
+`alter function ops.scac_mutation_catalog_v11_current() rename to scac_mutation_catalog_v11_live_at_seal;
+create or replace function ops.scac_mutation_registry_v11_seal_available()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_registry_seal_valid('scac-mutation-registry.v11')
+$fn$;
+create or replace function ops.scac_mutation_catalog_v11_current()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_catalog_v11_live_at_seal()
+$fn$;
+comment on function ops.scac_mutation_registry_v11_seal_available() is 'Exact immutable v11 registry seal; separate from whether the live catalog still equals v11.';
+comment on function ops.scac_mutation_catalog_v11_current() is 'Historical v11 live-catalog validator; expected to become false after the v12 authority surface is installed.';
+
+`;
+  const renderV12Current = baseline => {
+    let current = v11Current
+      .replaceAll("scac_mutation_catalog_v11_current", "scac_mutation_catalog_v12_current")
+      .replaceAll("scac-mutation-registry.v11", "scac-mutation-registry.v12");
+    current = replaceExactlyOnce(current,
+      `if observed_count<>${CODEX_CONTINUITY_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count} or observed_digest<>'${CODEX_CONTINUITY_FORWARD_DB_CATALOG_BASELINE.secdef_execute.digest}' then return false; end if;`,
+      `if observed_count<>${baseline.secdef_execute.count} or observed_digest<>'${baseline.secdef_execute.digest}' then return false; end if;`,
+      "Claude continuity v12 security-definer baseline");
+    current = replaceExactlyOnce(current,
+      `if observed_count<>${CODEX_CONTINUITY_FORWARD_DB_CATALOG_BASELINE.relation_dml.count} or observed_digest<>'${CODEX_CONTINUITY_FORWARD_DB_CATALOG_BASELINE.relation_dml.digest}' then return false; end if;`,
+      `if observed_count<>${baseline.relation_dml.count} or observed_digest<>'${baseline.relation_dml.digest}' then return false; end if;`,
+      "Claude continuity v12 relation baseline");
+    current = replaceExactlyOnce(current,
+      `if observed_count<>${CODEX_CONTINUITY_FORWARD_DB_CATALOG_BASELINE.column_dml.count} or observed_digest<>'${CODEX_CONTINUITY_FORWARD_DB_CATALOG_BASELINE.column_dml.digest}' then return false; end if;`,
+      `if observed_count<>${baseline.column_dml.count} or observed_digest<>'${baseline.column_dml.digest}' then return false; end if;`,
+      "Claude continuity v12 column baseline");
+    return replaceExactlyOnce(current,
+      `return observed_count=${CODEX_CONTINUITY_FORWARD_DB_CATALOG_BASELINE.role_authority.count} and observed_digest='${CODEX_CONTINUITY_FORWARD_DB_CATALOG_BASELINE.role_authority.digest}';`,
+      `return observed_count=${baseline.role_authority.count} and observed_digest='${baseline.role_authority.digest}';`,
+      "Claude continuity v12 role-authority baseline");
+  };
+  const v12Current = renderV12Current(dbCatalogBaseline);
+
+  let sql = replaceExactlyOnce(v11Core, v11Current,
+    "__CLAUDE_CONTINUITY_V11_CATALOG_SUCCESSOR__", "Claude continuity v11 current catalog block");
+  sql = replaceExactlyOnce(sql, installedV10History, "",
+    "Claude continuity already-installed v10 catalog history");
+  sql = replaceExactlyOnce(sql, headerMarker,
+    "-- SCAC-11: forward-only mutation registry v12 after Claude continuity activation.",
+    "Claude continuity migration header");
+  sql = sql
+    .replaceAll("scac-mutation-registry.v11", "scac-mutation-registry.v12")
+    .replaceAll("_v11", "_v12")
+    .replaceAll(" v11", " v12");
+  sql = replaceExactlyOnce(sql, JSON.stringify(CODEX_CONTINUITY_FORWARD_DB_CATALOG_BASELINE),
+    JSON.stringify(dbCatalogBaseline), "Claude continuity v12 catalog projection");
+  sql = replaceExactlyOnce(sql,
+    `'${v11Seal.digest}',${v11Seal.entryCount},${v11Seal.sourceEntryCount},`,
+    `'sha256:${v12Digest}',${entryCount},${rows.length},`,
+    "Claude continuity v12 registry row");
+  sql = replaceExactlyOnce(sql,
+    `ops.scac_mutation_registration_v12('${v11Seal.digest}',`,
+    `ops.scac_mutation_registration_v12('sha256:${v12Digest}',`,
+    "Claude continuity v12 snapshot registry lookup");
+  sql = replaceExactlyOnce(sql,
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v10;",
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v11;",
+    "Claude continuity policy snapshot predecessor");
+  sql = replaceExactlyOnce(sql, "__CLAUDE_CONTINUITY_V11_CATALOG_SUCCESSOR__",
+    `${v11History}${v12Current}`, "Claude continuity v11 catalog history insertion");
+
+  const v11CatalogJson = JSON.stringify(CODEX_CONTINUITY_FORWARD_DB_CATALOG_BASELINE);
+  sql = replaceExactlyOnce(sql,
+    "check (registry_version in ('scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v12'))",
+    "check (registry_version in ('scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12'))",
+    "Claude continuity registry-version constraint");
+  sql = replaceExactlyOnce(sql,
+    "if p_registry_version not in ('scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10') then return false; end if;",
+    "if p_registry_version not in ('scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11') then return false; end if;",
+    "Claude continuity historical seal allowlist");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v10' then '${HISTORICAL_REGISTRY_SEALS.v10.digest}' end;`,
+    `    when 'scac-mutation-registry.v10' then '${HISTORICAL_REGISTRY_SEALS.v10.digest}'\n    when '${v11Seal.version}' then '${v11Seal.digest}' end;`,
+    "Claude continuity historical digest case");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v10' then '${JSON.stringify(SOURCE_MERGE_FORWARD_DB_CATALOG_BASELINE)}'::jsonb end;`,
+    `    when 'scac-mutation-registry.v10' then '${JSON.stringify(SOURCE_MERGE_FORWARD_DB_CATALOG_BASELINE)}'::jsonb\n    when '${v11Seal.version}' then '${v11CatalogJson}'::jsonb end;`,
+    "Claude continuity historical catalog case");
+  sql = replaceExactlyOnce(sql,
+    `    ('scac-mutation-registry.v10','${HISTORICAL_REGISTRY_SEALS.v10.digest}',${HISTORICAL_REGISTRY_SEALS.v10.entryCount},${HISTORICAL_REGISTRY_SEALS.v10.sourceEntryCount})\n`,
+    `    ('scac-mutation-registry.v10','${HISTORICAL_REGISTRY_SEALS.v10.digest}',${HISTORICAL_REGISTRY_SEALS.v10.entryCount},${HISTORICAL_REGISTRY_SEALS.v10.sourceEntryCount}),\n    ('${v11Seal.version}','${v11Seal.digest}',${v11Seal.entryCount},${v11Seal.sourceEntryCount})\n`,
+    "Claude continuity historical seal tuple");
+  sql = replaceExactlyOnce(sql,
+    "    ops.scac_mutation_registry_v10_seal_available()) then",
+    "    ops.scac_mutation_registry_v10_seal_available() and\n    ops.scac_mutation_registry_v11_seal_available()) then",
+    "Claude continuity snapshot predecessor seal");
+  sql = replaceExactlyOnce(sql,
+    `or (r.registry_version='scac-mutation-registry.v12' and r.registry_digest='${v11Seal.digest}')`,
+    `or (r.registry_version='scac-mutation-registry.v11' and r.registry_digest='${v11Seal.digest}')\n         or (r.registry_version='scac-mutation-registry.v12' and r.registry_digest='sha256:${v12Digest}')`,
+    "Claude continuity epoch-chain digest cases");
+  sql = replaceExactlyOnce(sql,
+    `  (registry_version='scac-mutation-registry.v12' and registry_digest='${v11Seal.digest}')`,
+    `  (registry_version='scac-mutation-registry.v11' and registry_digest='${v11Seal.digest}') or\n  (registry_version='scac-mutation-registry.v12' and registry_digest='sha256:${v12Digest}')`,
+    "Claude continuity epoch constraint digest cases");
+  sql = replaceExactlyOnce(sql,
+    `'{registry_digest}',to_jsonb('${v11Seal.digest}'::text)`,
+    `'{registry_digest}',to_jsonb('sha256:${v12Digest}'::text)`,
+    "Claude continuity snapshot registry digest");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_mutation_registry_v10_seal_available(),ops.scac_mutation_catalog_v12_current()",
+    "ops.scac_mutation_registry_v10_seal_available(),ops.scac_mutation_catalog_v11_live_at_seal(),ops.scac_mutation_catalog_v11_current(),ops.scac_mutation_registry_v11_seal_available(),ops.scac_mutation_catalog_v12_current()",
+    "Claude continuity historical function revoke list");
+  sql = replaceExactlyOnce(sql,
+    "Codex continuity successor snapshot: current policy epochs bind mutation registry v12 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10 epochs remain immutable.",
+    "Claude continuity successor snapshot: current policy epochs bind mutation registry v12 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11 epochs remain immutable.",
+    "Claude continuity policy snapshot comment");
+  sql = replaceExactlyOnce(sql,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v12')<>${v11Seal.entryCount}`,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v12')<>${entryCount}`,
+    "Claude continuity v12 entry count guard");
+  sql = replaceExactlyOnce(sql,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v10')<>'${HISTORICAL_REGISTRY_SEALS.v10.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v10')<>${HISTORICAL_REGISTRY_SEALS.v10.entryCount} then raise exception 'sealed SCAC mutation registry v10 changed during successor creation'; end if;`,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v11')<>'${v11Seal.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v11')<>${v11Seal.entryCount} then raise exception 'sealed SCAC mutation registry v11 changed during successor creation'; end if;`,
+    "Claude continuity predecessor seal guard");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),",
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),",
+    "Claude continuity historical policy snapshot revoke list");
+
+  const seedStartMarker = "with seed as (select value as contract from jsonb_array_elements(";
+  const seedEndMarker = "::jsonb))\ninsert into ops.scac_mutation_registry_entry";
+  const seedStart = sql.indexOf(seedStartMarker);
+  const secondSeedStart = sql.indexOf(seedStartMarker, seedStart + seedStartMarker.length);
+  const seedEnd = sql.indexOf(seedEndMarker, seedStart + seedStartMarker.length);
+  const secondSeedEnd = sql.indexOf(seedEndMarker, seedEnd + seedEndMarker.length);
+  if (seedStart < 0 || secondSeedStart >= 0 || seedEnd < 0 || secondSeedEnd >= 0)
+    throw new Error("sealed SCAC v11 migration has no exact source-seed boundary");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart + seedStartMarker.length)}${sqlLiteral(seed)}${sql.slice(seedEnd)}`;
+  sql = replaceExactlyOnce(sql,
+    `(grant_snapshot->>'entry_count')::integer=${CODEX_CONTINUITY_FORWARD_DB_CATALOG_BASELINE.runtime_dml_grants.count} and\n    grant_snapshot->>'grant_digest'='${CODEX_CONTINUITY_FORWARD_DB_CATALOG_BASELINE.runtime_dml_grants.digest}'`,
+    `(grant_snapshot->>'entry_count')::integer=${dbCatalogBaseline.runtime_dml_grants.count} and\n    grant_snapshot->>'grant_digest'='${dbCatalogBaseline.runtime_dml_grants.digest}'`,
+    "Claude continuity exact runtime grant binding");
+
+  const preflightCurrent = renderV12Current(CLAUDE_CONTINUITY_PRE_V12_DB_CATALOG_BASELINE);
+  const preflightBegin = preflightCurrent.indexOf("begin\n");
+  const preflightEnd = preflightCurrent.lastIndexOf("end $fn$;");
+  if (preflightBegin < 0 || preflightEnd <= preflightBegin)
+    throw new Error("generated v12 catalog predicate has no exact preflight body boundary");
+  let preflightBody = preflightCurrent.slice(preflightBegin + "begin\n".length, preflightEnd);
+  preflightBody = preflightBody.replaceAll(
+    "then return false; end if;",
+    "then raise exception 'Claude continuity pre-v12 catalog receipt drifted'; end if;");
+  preflightBody = replaceExactlyOnce(preflightBody,
+    `return observed_count=${CLAUDE_CONTINUITY_PRE_V12_DB_CATALOG_BASELINE.role_authority.count} and observed_digest='${CLAUDE_CONTINUITY_PRE_V12_DB_CATALOG_BASELINE.role_authority.digest}';`,
+    `if observed_count<>${CLAUDE_CONTINUITY_PRE_V12_DB_CATALOG_BASELINE.role_authority.count} or observed_digest<>'${CLAUDE_CONTINUITY_PRE_V12_DB_CATALOG_BASELINE.role_authority.digest}' then raise exception 'Claude continuity pre-v12 role-authority receipt drifted'; end if;`,
+    "Claude continuity pre-v12 role receipt");
+  const predecessorPreflight =
+`-- Exact disposable-PG17 post-0485 receipt. Refuse before creating any v12 function.
+do $claude_continuity_preflight$
+declare observed_count integer; observed_digest text; grant_snapshot jsonb;
+begin
+  if (select count(*) from public.schema_migrations where filename='0485_claude_continuity.sql')<>1
+     or not exists(select 1 from public.schema_migrations where filename='0485_claude_continuity.sql'
+       and sha256='d9fccd80e7cd63bedfdd4c1bdf0b431882735f6cc22ed7e1445c276d2d365322') then
+    raise exception 'Claude continuity pre-v12 migration ledger receipt drifted';
+  end if;
+  grant_snapshot:=ops.scac_runtime_dml_grant_snapshot();
+  if (grant_snapshot->>'entry_count')::integer<>${CLAUDE_CONTINUITY_PRE_V12_DB_CATALOG_BASELINE.runtime_dml_grants.count}
+     or grant_snapshot->>'grant_digest'<>'${CLAUDE_CONTINUITY_PRE_V12_DB_CATALOG_BASELINE.runtime_dml_grants.digest}' then
+    raise exception 'Claude continuity pre-v12 runtime grant receipt drifted';
+  end if;
+${preflightBody}end $claude_continuity_preflight$;
+
+`;
+  const continuityGuardBinding =
+`-- Bind every newly writable continuity relation into the existing atomic monitor.
+do $claude_continuity_monitor_guards$
+declare relation_name text; relation_oid regclass;
+begin
+  foreach relation_name in array array['claude_continuity_leaf','claude_continuity_checkpoint','claude_continuity_revision','claude_continuity_event'] loop
+    relation_oid:=to_regclass('public.'||relation_name);
+    if relation_oid is null then
+      raise exception 'Claude continuity monitor relation is unavailable: %',relation_name;
+    end if;
+    if exists(select 1 from pg_trigger where tgrelid=relation_oid and not tgisinternal
+      and tgfoid='ops.scac_reference_monitor_guard()'::regprocedure) then
+      raise exception 'Claude continuity monitor relation was already bound: %',relation_name;
+    end if;
+    execute format('create trigger scac_reference_monitor_guard_row before insert or update or delete on public.%I for each row execute function ops.scac_reference_monitor_guard()',relation_name);
+    execute format('create trigger scac_reference_monitor_guard_truncate before truncate on public.%I for each statement execute function ops.scac_reference_monitor_guard()',relation_name);
+  end loop;
+end $claude_continuity_monitor_guards$;
+
+`;
+  return `${predecessorPreflight}${continuityGuardBinding}${sql}`.replace(/\n+$/, "\n");
+}
+
+
 export function renderGeneratedFrontier() {
   const v2Rows = frozenInventory(REGISTRY_V2_VERSION);
   const artifacts = {};
@@ -2563,9 +2824,22 @@ export function renderGeneratedFrontier() {
         runtime: artifacts["mcp-server/src/scac-mutation-registry.v10.generated.js"],
       });
 
+  const v12Rows = frozenInventory(REGISTRY_V12_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v12.generated.js"] =
+    renderRuntimeProjection(v12Rows, {
+      version: REGISTRY_V12_VERSION,
+      dbCatalogBaseline: CLAUDE_CONTINUITY_FORWARD_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0486_claude_continuity_registry_activation.sql"] =
+    renderClaudeContinuityForwardRegistrySql(v12Rows,
+      CLAUDE_CONTINUITY_FORWARD_DB_CATALOG_BASELINE, {
+        migration: artifacts["migrations/0481_codex_continuity_registry_activation.sql"],
+        runtime: artifacts["mcp-server/src/scac-mutation-registry.v11.generated.js"],
+      });
+
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 19 || runtimeCount !== 10 || Object.keys(artifacts).length !== 29)
+  if (migrationCount !== 20 || runtimeCount !== 11 || Object.keys(artifacts).length !== 31)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
@@ -2845,9 +3119,22 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const rows = frozenInventory(REGISTRY_V11_VERSION);
     await writeFile(target, renderCodexContinuityForwardRegistrySql(rows));
     process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-runtime-v12") {
+    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v12.generated.js");
+    const rows = frozenInventory(REGISTRY_V12_VERSION);
+    await writeFile(target, renderRuntimeProjection(rows, {
+      version: REGISTRY_V12_VERSION,
+      dbCatalogBaseline: CLAUDE_CONTINUITY_FORWARD_DB_CATALOG_BASELINE,
+    }));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-claude-continuity-registry-migration") {
+    const target = resolve(process.argv[3] || "migrations/0486_claude_continuity_registry_activation.sql");
+    const rows = frozenInventory(REGISTRY_V12_VERSION);
+    await writeFile(target, renderClaudeContinuityForwardRegistrySql(rows));
+    process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools());
-    process.stdout.write("source inventory matches frozen v11 frontier fixture\n");
+    process.stdout.write("source inventory matches frozen v12 frontier fixture\n");
   } else if (process.argv[2] === "--check-generated-frontier") {
     const paths = assertGeneratedFrontierMatchesCommitted();
     process.stdout.write(`generated frontier is byte-exact (${paths.length} artifacts)\n`);

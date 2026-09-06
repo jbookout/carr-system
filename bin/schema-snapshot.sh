@@ -203,6 +203,14 @@ case "$CODEX_CONTINUITY_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the Codex continuity registry ledger state" >&2; exit 1 ;;
 esac
 
+CLAUDE_CONTINUITY_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0486_claude_continuity_registry_activation.sql')" \
+  2>/dev/null)"
+case "$CLAUDE_CONTINUITY_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the Claude continuity registry ledger state" >&2; exit 1 ;;
+esac
+
 # pg_dump renders timestamptz in the server session timezone; pin it so the
 # Production and disposable-local paths serialize identical instants alike.
 export PGOPTIONS='-c timezone=UTC'
@@ -1192,7 +1200,18 @@ case "$SCAC_REGISTRY_APPLIED" in
 esac
 
 if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
-  if [ "$CODEX_CONTINUITY_REGISTRY_APPLIED" = t ]; then
+  if [ "$CLAUDE_CONTINUITY_REGISTRY_APPLIED" = t ]; then
+    SCAC_CURRENT_NUMBER=12
+    SCAC_VERSION_COUNT=12
+    SCAC_TOTAL_ENTRY_COUNT=17076
+    SCAC_CURRENT_ENTRY_COUNT=1487
+    SCAC_CURRENT_SOURCE_COUNT=825
+    SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v12.generated.js"
+    SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12'"
+    SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11'"
+    SCAC_FULL_SET_SEAL_COUNT=11
+    SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v12_current()"
+  elif [ "$CODEX_CONTINUITY_REGISTRY_APPLIED" = t ]; then
     SCAC_CURRENT_NUMBER=11
     SCAC_VERSION_COUNT=11
     SCAC_TOTAL_ENTRY_COUNT=15589
@@ -1251,10 +1270,10 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
   SCAC_FULL_SET_SEALS="$REPO/ops/config/scac-registry-full-entry-set-seals.json"
   SCAC_FULL_SET_SQL="$(node -e '
     const fs=require("fs"); const seals=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
-    const allKeys=Array.from({length:10},(_,i)=>`scac-mutation-registry.v${i+1}`);
+    const allKeys=Array.from({length:11},(_,i)=>`scac-mutation-registry.v${i+1}`);
     const count=Number(process.argv[2]); const keys=allKeys.slice(0,count);
     if (Object.keys(seals).sort().join("|")!==allKeys.sort().join("|") ||
-        !Number.isInteger(count) || count<9 || count>10 ||
+        !Number.isInteger(count) || count<9 || count>11 ||
         allKeys.some(key=>!/^sha256:[0-9a-f]{64}$/.test(seals[key]))) process.exit(2);
     const quote=String.fromCharCode(39);
     const literal=value=>quote+String(value).replaceAll(quote,quote+quote)+quote;

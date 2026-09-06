@@ -35,9 +35,9 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from stop_latch import announce  # noqa: E402
 
-MANIFEST_DEFAULT = REPO / "ops/config/session-context-lifecycle.v1.json"
+MANIFEST_DEFAULT = REPO / "ops/config/session-context-lifecycle.v2.json"
 STATE_DIR_DEFAULT = REPO / "out/session-context-lifecycle"
-ACTIONS = {"NOOP", "RECOVER_SAME_TASK", "REFUSE"}
+ACTIONS = {"NOOP", "ANNOUNCE", "RECOVER_SAME_TASK", "REFUSE"}
 REASONS = {
     "CONTEXT_HANDOFF_REQUIRED", "CONTEXT_SIGNAL_UNAVAILABLE",
     "CONTEXT_SIGNAL_AMBIGUOUS", "CONTEXT_SIGNAL_INVALID",
@@ -124,21 +124,44 @@ def load_manifest() -> dict[str, Any]:
     except Exception as exc:
         raise LifecycleError("WINDOW_CONFIG_INVALID", f"manifest unreadable: {exc}") from exc
     try:
-        if data.get("schema_version") != 1:
-            raise ValueError("schema_version must be 1")
-        thresholds = data["thresholds_percent"]
-        dense = positive(thresholds["dense_soft"])
-        normal = positive(thresholds["normal_soft"])
-        hard = positive(thresholds["hard"])
-        if not dense or not normal or not hard or not dense < normal < hard <= 100:
-            raise ValueError("thresholds must satisfy 0 < dense < normal < hard <= 100")
+        if data.get("schema_version") != 2:
+            raise ValueError("schema_version must be 2")
+        if set(data.get("surface_policies") or {}) != SURFACES:
+            raise ValueError("surface policies must be exact")
+        for surface in sorted(SURFACES):
+            policy = data["surface_policies"][surface]
+            thresholds = policy["thresholds_percent"]
+            dense = positive(thresholds["dense_soft"])
+            normal = positive(thresholds["normal_soft"])
+            hard = positive(thresholds["hard"])
+            if not dense or not normal or not hard or not dense < normal < hard <= 100:
+                raise ValueError(f"{surface} thresholds must satisfy 0 < dense < normal < hard <= 100")
+            if not isinstance(policy["model_windows"], dict):
+                raise ValueError(f"{surface} model_windows must be an object")
+        claude = data["surface_policies"]["claude"]
+        if any(claude.get(key) != "announce_only" for key in (
+                "stop_outcome", "signal_failures", "fallback_caps_outcome",
+                "control_errors")):
+            raise ValueError("Claude context outcomes must be announce-only")
+        if "claude-fable-5-1" not in claude["model_windows"]:
+            raise ValueError("Claude Fable 5.1 model alias is required")
         if set(data["actions"]) != ACTIONS or set(data["reasons"]) != REASONS:
             raise ValueError("action/reason vocabulary drift")
-        if not isinstance(data["model_windows"], dict):
-            raise ValueError("model_windows must be an object")
     except Exception as exc:
         raise LifecycleError("WINDOW_CONFIG_INVALID", f"manifest invalid: {exc}") from exc
     return data
+
+
+def surface_policy(manifest: dict[str, Any], surface: str) -> dict[str, Any]:
+    try:
+        policy = manifest["surface_policies"][surface]
+    except Exception as exc:
+        raise LifecycleError("WINDOW_CONFIG_INVALID",
+                             f"{surface} surface policy unavailable") from exc
+    if not isinstance(policy, dict):
+        raise LifecycleError("WINDOW_CONFIG_INVALID",
+                             f"{surface} surface policy invalid")
+    return policy
 
 
 def state_root(manifest: dict[str, Any] | None = None) -> Path:
@@ -1997,14 +2020,15 @@ def latest_explicit_windows(
     return False, set()
 
 
-def resolve_window(rows: list[dict[str, Any]], manifest: dict[str, Any]) -> dict[str, Any]:
+def resolve_window(rows: list[dict[str, Any]], manifest: dict[str, Any],
+                   surface: str = "claude") -> dict[str, Any]:
     if "CARR_CONTEXT_WINDOW" in os.environ:
         number = positive(os.environ.get("CARR_CONTEXT_WINDOW"))
         if not number:
             return {"ok": False, "reason": "WINDOW_CONFIG_INVALID", "tier": "override"}
         return {"ok": True, "window": number, "tier": "override"}
 
-    bindings = manifest.get("model_windows", {})
+    bindings = surface_policy(manifest, surface).get("model_windows", {})
     models = latest_models(rows)
     # Distinct declarations in the newest authoritative row are contradictory
     # even when they map to the same numeric window, or one is unknown. Never
@@ -2216,7 +2240,7 @@ def update_observation(current: dict[str, Any] | None, task_key: str, owner_id: 
     if last:
         try:
             elapsed = max(0.0, (now - parse_time(last)).total_seconds())
-            cap = int(manifest["fallback_caps"]["adjacent_activity_cap_seconds"])
+            cap = int(surface_policy(manifest, "claude")["fallback_caps"]["adjacent_activity_cap_seconds"])
             signal["active_minutes"] = round(float(signal.get("active_minutes", 0.0))
                                                     + min(elapsed, cap) / 60.0, 3)
         except Exception:
@@ -2238,8 +2262,9 @@ def update_observation(current: dict[str, Any] | None, task_key: str, owner_id: 
     return state
 
 
-def density(signal: dict[str, Any], manifest: dict[str, Any]) -> bool:
-    cfg = manifest["density"]
+def density(signal: dict[str, Any], manifest: dict[str, Any],
+            surface: str = "claude") -> bool:
+    cfg = surface_policy(manifest, surface)["density"]
     return (
         signal.get("risk") in set(cfg["risk_levels"])
         or int(signal.get("generation_tool_calls", 0)) >= int(cfg["generation_tool_calls"])
@@ -2248,8 +2273,9 @@ def density(signal: dict[str, Any], manifest: dict[str, Any]) -> bool:
     )
 
 
-def fallback_level(signal: dict[str, Any], manifest: dict[str, Any], dense: bool) -> str | None:
-    caps = manifest["fallback_caps"]
+def fallback_level(signal: dict[str, Any], manifest: dict[str, Any], dense: bool,
+                   surface: str = "claude") -> str | None:
+    caps = surface_policy(manifest, surface)["fallback_caps"]
     values = (int(signal.get("invocations", 0)), float(signal.get("active_minutes", 0.0)),
               int(signal.get("cycles", 0)))
     for level in ("hard", "dense_soft" if dense else "normal_soft"):
@@ -2263,16 +2289,17 @@ def fallback_level(signal: dict[str, Any], manifest: dict[str, Any], dense: bool
 def context_decision(rows: list[dict[str, Any]], state: dict[str, Any],
                      manifest: dict[str, Any]) -> dict[str, Any]:
     signal_state = state.get("signal") or {}
-    window = resolve_window(rows, manifest)
+    policy = surface_policy(manifest, "claude")
+    window = resolve_window(rows, manifest, "claude")
     used = max([positive(signal_state.get("highwater")) or 0]
                + [number for number in (usage_total(row) for row in rows) if number])
     is_dense = density(signal_state, manifest)
     fallback = fallback_level(signal_state, manifest, is_dense)
     threshold_name = "dense_soft" if is_dense else "normal_soft"
-    threshold = int(manifest["thresholds_percent"][threshold_name])
+    threshold = int(policy["thresholds_percent"][threshold_name])
     if window.get("ok") and used:
         ratio = 100.0 * used / int(window["window"])
-        hard = int(manifest["thresholds_percent"]["hard"])
+        hard = int(policy["thresholds_percent"]["hard"])
         crossed = ratio >= hard or ratio >= threshold
         return {"available": True, "used": used, "window": window["window"],
                 "ratio": round(ratio, 3), "ratio_label": "claude_transcript",
@@ -2310,9 +2337,7 @@ def refuse_stop_on_control_error(event: str, task_key: str, reason: str,
                                  version: int = -1) -> None:
     if event != "Stop":
         return
-    signal = {"available": False, "crossed": True, "reason": reason,
-              "signal_reason": reason, "window_tier": "control_error"}
-    print(canonical(block_payload(task_key, version, signal, reason)).decode("utf-8"))
+    announce(f"Claude context lifecycle control warning ({reason}); native Claude behavior continues.")
 
 
 def hook_main() -> int:
@@ -2348,13 +2373,13 @@ def hook_main() -> int:
         task_key, owner_id = hook_task_key(payload, manifest)
     except LifecycleError as exc:
         audit({"session": owner_id, "event": event,
-               "action": "REFUSE" if event == "Stop" else "NOOP",
+               "action": "ANNOUNCE" if event == "Stop" else "NOOP",
                "reason": exc.reason, "detail": exc.detail[:500]}, manifest)
         refuse_stop_on_control_error(event, task_key, exc.reason)
         return 0
     except Exception as exc:
         audit({"session": owner_id, "event": event,
-               "action": "REFUSE" if event == "Stop" else "NOOP",
+               "action": "ANNOUNCE" if event == "Stop" else "NOOP",
                "reason": "LIFECYCLE_INVALID", "detail": str(exc)[:500]}, manifest)
         refuse_stop_on_control_error(event, task_key, "LIFECYCLE_INVALID")
         return 0
@@ -2367,13 +2392,13 @@ def hook_main() -> int:
         )
     except LifecycleError as exc:
         audit({"session": owner_id, "event": event,
-               "action": "REFUSE" if event == "Stop" else "NOOP",
+               "action": "ANNOUNCE" if event == "Stop" else "NOOP",
                "reason": exc.reason}, manifest)
         refuse_stop_on_control_error(event, task_key, exc.reason)
         return 0
     except Exception as exc:
         audit({"session": owner_id, "event": event,
-               "action": "REFUSE" if event == "Stop" else "NOOP",
+               "action": "ANNOUNCE" if event == "Stop" else "NOOP",
                "reason": "LIFECYCLE_INVALID", "detail": str(exc)[:500]}, manifest)
         refuse_stop_on_control_error(event, task_key, "LIFECYCLE_INVALID")
         return 0
@@ -2384,7 +2409,7 @@ def hook_main() -> int:
         # semantically malformed scalar must refuse Stop just like unreadable
         # JSON does; letting ValueError escape disables the only blocking seam.
         audit({"session": owner_id, "event": event,
-               "action": "REFUSE" if event == "Stop" else "NOOP",
+               "action": "ANNOUNCE" if event == "Stop" else "NOOP",
                "reason": "LIFECYCLE_INVALID", "detail": str(exc)[:500]}, manifest)
         version = state.get("version", -1)
         if isinstance(version, bool) or not isinstance(version, int):
@@ -2393,6 +2418,7 @@ def hook_main() -> int:
                                      version)
         return 0
     audit({"session": owner_id, "event": event, "task_key": task_key,
+           "action": "ANNOUNCE" if event == "Stop" and signal.get("crossed") else "NOOP",
            "version": state["version"], "caught": bool(signal.get("crossed")),
            "signal": signal}, manifest)
     if event == "PreCompact":
@@ -2405,8 +2431,7 @@ def hook_main() -> int:
             verify_handoff_state(task_key, state, manifest)
         except LifecycleError as exc:
             if event == "Stop":
-                print(canonical(block_payload(
-                    task_key, state["version"], signal, exc.reason)).decode("utf-8"))
+                announce(f"Claude continuity could not verify prior handoff ({exc.reason}); native Claude behavior continues.")
             return 0
     caller = (state.get("owners") or {}).get(owner_id) or {}
     if (caller.get("surface") == "claude"
@@ -2418,9 +2443,7 @@ def hook_main() -> int:
         return 0
     if state.get("active_owner") != owner_id:
         if event == "Stop":
-            print(canonical(block_payload(
-                task_key, state["version"], signal,
-                "OWNERSHIP_MISMATCH")).decode("utf-8"))
+            announce("Claude continuity ownership evidence does not match; native Claude behavior continues.")
         return 0
     if event == "Stop" and signal.get("crossed"):
         signal_reason = signal.get("reason")
@@ -2428,8 +2451,7 @@ def hook_main() -> int:
                        if signal_reason in {
                            "WINDOW_CONFIG_INVALID", "CONTEXT_SIGNAL_AMBIGUOUS"}
                        else "CONTEXT_HANDOFF_REQUIRED")
-        print(canonical(block_payload(
-            task_key, state["version"], signal, reason_code)).decode("utf-8"))
+        announce("Claude context headroom notice: checkpoint durable semantic progress when appropriate; native auto-compaction and Stop remain available.")
         return 0
     if event == "PostToolUse" and (signal.get("crossed") or not signal.get("available")):
         notice_key = str(signal.get("reason") or signal.get("signal_reason")
@@ -3157,7 +3179,8 @@ def codex_rollout_metrics(path: str, manifest: dict[str, Any]) -> dict[str, Any]
         if row.get("type") == "event_msg" and kind == "task_started":
             cycles += 1
     timestamps.sort()
-    cap = int(manifest["fallback_caps"]["adjacent_activity_cap_seconds"])
+    policy = surface_policy(manifest, "codex")
+    cap = int(policy["fallback_caps"]["adjacent_activity_cap_seconds"])
     active_seconds = sum(min(max(0.0, (b - a).total_seconds()), cap)
                          for a, b in zip(timestamps, timestamps[1:]))
     highwater = max([number for number in
@@ -3166,9 +3189,9 @@ def codex_rollout_metrics(path: str, manifest: dict[str, Any]) -> dict[str, Any]
               "active_minutes": round(active_seconds / 60.0, 3), "cycles": cycles,
               "generation_tool_calls": invocations, "mutated_paths": sorted(mutated),
               "worker_starts": worker_starts}
-    is_dense = density(signal, manifest)
-    fallback = fallback_level(signal, manifest, is_dense)
-    window = resolve_window(rows, manifest)
+    is_dense = density(signal, manifest, "codex")
+    fallback = fallback_level(signal, manifest, is_dense, "codex")
+    window = resolve_window(rows, manifest, "codex")
     result = {"ratio_label": "internal_rollout", "signal": signal, "dense": is_dense,
               "fallback_level": fallback, "window": window}
     if window.get("ok") and highwater:

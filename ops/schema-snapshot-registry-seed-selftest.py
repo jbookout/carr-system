@@ -21,6 +21,9 @@ RUNTIME_V9 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v9.generated
 RUNTIME_V11 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v11.generated.js").read_text(
     encoding="utf-8"
 )
+RUNTIME_V12 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v12.generated.js").read_text(
+    encoding="utf-8"
+)
 
 for table, key in (
     ("doctrine_gate_check", "check_key"),
@@ -49,7 +52,7 @@ assert GENERATOR.count("e.entry_digest is distinct from 'sha256:'||encode(public
 assert GENERATOR.count("ops.scac_mutation_registry_seal_valid(historical.registry_version)") >= 2
 for version in range(1, 9):
     assert GENERATOR.count(f"'scac-mutation-registry.v{version}'") >= 2
-assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 11)}
+assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 12)}
 assert all(len(value) == 71 and value.startswith("sha256:") for value in FULL_SET_SEALS.values())
 assert FULL_SET_SEALS["scac-mutation-registry.v10"] != "sha256:" + "0" * 64
 assert GENERATOR.count("SCAC_FULL_SET_SQL") >= 3
@@ -57,12 +60,17 @@ assert "SCAC_EXPECTED_CURRENT_DIGEST" in GENERATOR
 assert "registry_digest='${SCAC_EXPECTED_CURRENT_DIGEST}'" in GENERATOR
 assert "SCAC_EXPECTED_CURRENT_SOURCE_SET" in GENERATOR
 assert "SCAC_EXPECTED_CURRENT_CATALOG" in GENERATOR
+assert "SCAC_CURRENT_NUMBER=12" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=11" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=10" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=9" in GENERATOR
+assert "SCAC_TOTAL_ENTRY_COUNT=17076" in GENERATOR
 assert "SCAC_TOTAL_ENTRY_COUNT=15589" in GENERATOR
+assert "SCAC_CURRENT_ENTRY_COUNT=1487" in GENERATOR
 assert "SCAC_CURRENT_ENTRY_COUNT=1471" in GENERATOR
+assert "SCAC_CURRENT_SOURCE_COUNT=825" in GENERATOR
 assert "SCAC_CURRENT_SOURCE_COUNT=819" in GENERATOR
+assert "ops.scac_mutation_catalog_v12_current()" in GENERATOR
 assert "ops.scac_mutation_catalog_v11_current()" in GENERATOR
 assert "ops.scac_mutation_catalog_v10_current()" in GENERATOR
 assert GENERATOR.count("order by e.entry_digest collate") >= 2
@@ -72,7 +80,7 @@ numeric_registry_order = (
     "split_part(registry_version,'.v',2)::integer)"
 )
 assert numeric_registry_order in GENERATOR
-versions = [f"scac-mutation-registry.v{version}" for version in range(1, 12)]
+versions = [f"scac-mutation-registry.v{version}" for version in range(1, 13)]
 assert sorted(versions, key=lambda value: int(value.rsplit("v", 1)[1])) == versions
 assert sorted(versions) != versions
 

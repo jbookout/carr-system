@@ -68,6 +68,15 @@ export const PROFILES = {
   // Everything. The default, and what both partners' interactive sessions use.
   full: null,
 
+  // Native lifecycle credentials are purpose-bound server-side. They expose
+  // only their own record surface even if a caller asks for ?profile=full.
+  "codex-continuity": new Set([
+    "codex-checkpoint", "codex-read-recovery", "codex-record-event",
+  ]),
+  "claude-continuity": new Set([
+    "claude-checkpoint", "claude-read-recovery", "claude-record-event",
+  ]),
+
   // Reads plus the capture verbs that are safe to run unattended: each one is
   // additive, carries an idempotency key, and cannot destroy or re-point an
   // existing record. This is the profile for scheduled runs and delegated seats
@@ -324,6 +333,10 @@ function profileFor(request) {
  * voluntary limiter for everyone else and a no-op for these three.
  */
 export function profileForActor(actor, request) {
+  if (actor?.continuity_surface === "codex" && actor?.via === "codex-continuity-token")
+    return "codex-continuity";
+  if (actor?.continuity_surface === "claude" && actor?.via === "claude-continuity-token")
+    return "claude-continuity";
   if (actor?.probe) return "probe";
   if (actor?.review) return "reviewer";
   if (actor?.hermesCos === true && actor?.via === "hermes-cos-token") return "hermes-cos";
