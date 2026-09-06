@@ -173,6 +173,12 @@ def main() -> int:
             ok, message = verify()
             print(message)
             return 0 if ok else 1
+        # The mode receipt is the authority for the installed overlay.  Never
+        # repair or remove an existing receipt implicitly: a stale digest means
+        # the local resources no longer describe the contract this installer
+        # can safely mutate.  Absence remains valid for a first install and an
+        # idempotent remove.
+        continuity_config.read_mode(mode_path(), continuity_config.load(REPO))
         current = _load_json(settings_path(), missing={})
         updated = remove_document(current) if args.action == "remove" else install_document(current)
         mcp_current = _load_json(claude_config_path(), missing={})

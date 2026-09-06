@@ -27602,7 +27602,7 @@
       "version": "v15",
       "reason": "Claude continuity config preservation integration after the immutable v14 seal.",
       "expected_count": 825,
-      "expected_sha256": "93fe6d2756a1a766f8830a0c75ad3cbd90ffa20272a0dd6c623e59d7ece9757a",
+      "expected_sha256": "25b853d538268e2583f4c20154d583fcb1cc23f3ec2bc0ba3affc5c3d8207e97",
       "remove": [],
       "upsert": [
         {
@@ -27611,8 +27611,8 @@
           "operation": "ops/install-claude-continuity.py",
           "effect_class": "administrative_mutation",
           "source_locator": "ops/install-claude-continuity.py",
-          "schema_digest": "b5271b4313d53b810fc9371dada57e99cf46ae85c1e2eb69b2c3ab0280c12053",
-          "handler_digest": "b5271b4313d53b810fc9371dada57e99cf46ae85c1e2eb69b2c3ab0280c12053",
+          "schema_digest": "a27e4abe4f849e2856ccdb27044fc55e53feee2969c3acdb2a39d71d7e945f8b",
+          "handler_digest": "a27e4abe4f849e2856ccdb27044fc55e53feee2969c3acdb2a39d71d7e945f8b",
           "write": true,
           "human_only": false,
           "authority_only": true,
@@ -27773,7 +27773,7 @@
     "base_version": "v15",
     "reason": "No reviewed source delta beyond the v15 seal.",
     "expected_count": 825,
-    "expected_sha256": "93fe6d2756a1a766f8830a0c75ad3cbd90ffa20272a0dd6c623e59d7ece9757a",
+    "expected_sha256": "25b853d538268e2583f4c20154d583fcb1cc23f3ec2bc0ba3affc5c3d8207e97",
     "upsert": []
   }
 }

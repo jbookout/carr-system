@@ -484,7 +484,7 @@ test("v15 seals Claude continuity config preservation without rewriting v14", ()
   assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
     JSON.parse(generatedV15.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]));
   assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
-    "1e21b55de9c79ff3d73ee70703752db8a5a5667e97ab7910ef6a48af9d4c164f");
+    "5f81f4579cf584a1807715f68b8297ddc4a5997a2c20906ef5300672d195360f");
   assert.deepEqual(CLAUDE_CONFIG_PRESERVATION_PRE_V15_DB_CATALOG_BASELINE,
     CLAUDE_ACTOR_HYDRATION_FORWARD_DB_CATALOG_BASELINE);
   assert.equal(CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count, 367);
