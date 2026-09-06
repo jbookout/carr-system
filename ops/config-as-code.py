@@ -58,6 +58,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lib.machine_prerequisites import machine_prerequisites, prerequisite_failure_report
+from lib import claude_continuity_config as continuity_config
 
 HOME = os.path.expanduser("~")
 # THE CHECKOUT THIS FILE SITS IN — the source of the tracked copies to compare.
@@ -180,6 +181,10 @@ HOOKS_REPO = os.path.join(REPO, "ops", "config", "hooks.json")
 CODEX_HOOKS_SRC = os.path.join(HOME, ".codex", "hooks.json")
 CODEX_HOOKS_REPO = os.path.join(REPO, "ops", "config", "codex-hooks.json")
 CODEX_CONFIG = os.path.join(HOME, ".codex", "config.toml")
+CLAUDE_CONTINUITY_MODE_FILE = os.path.join(
+    HOME, ".config", "carr", "claude-continuity-mode.json"
+)
+CLAUDE_MCP_CONFIG = os.path.join(HOME, ".claude.json")
 CODEX_CONTINUITY_EVENTS = ("PreCompact", "PostCompact", "SessionStart", "UserPromptSubmit")
 CODEX_CONTINUITY_APP_EVENTS = {
     "PreCompact": "preCompact",
@@ -549,7 +554,7 @@ def hook_scripts_untracked():
 
     Returns a list of (path, why) — repo-relative where possible.
     """
-    block = live_hooks_block()
+    block = raw_live_hooks_block()
     if not block:
         return []
     out = []
@@ -592,11 +597,60 @@ def launchd_repo_path(name):
     return LAUNCHD_ALT_REPO.get(name, os.path.join(LAUNCHD_REPO, name))
 
 
-def live_hooks_block():
+def raw_live_hooks_block():
     raw = read(SETTINGS)
     if raw is None:
         return None
-    return json.loads(raw).get("hooks")
+    document = json.loads(raw)
+    if not isinstance(document, dict):
+        raise RuntimeError("Claude settings root must be an object")
+    return document.get("hooks")
+
+
+def _read_claude_mcp_config():
+    raw = read(CLAUDE_MCP_CONFIG)
+    if raw is None:
+        return {}
+    if len(raw.encode("utf-8")) > continuity_config.MAX_CONFIG_BYTES:
+        raise RuntimeError(f"Claude MCP configuration is too large: {CLAUDE_MCP_CONFIG}")
+    try:
+        document = json.loads(raw)
+    except Exception as exc:
+        raise RuntimeError(f"Claude MCP configuration is invalid: {CLAUDE_MCP_CONFIG}") from exc
+    if not isinstance(document, dict):
+        raise RuntimeError("Claude MCP configuration root must be an object")
+    return document
+
+
+def claude_continuity_state(live_hooks, *, require_complete):
+    """Validate the independent continuity receipt, hooks, and MCP binding."""
+    contract = continuity_config.load(REPO)
+    mode = continuity_config.read_mode(CLAUDE_CONTINUITY_MODE_FILE, contract)
+    installed = mode in continuity_config.MODES
+    continuity_config.validate_hooks(
+        live_hooks, contract, require_complete=installed and require_complete
+    )
+    mcp = _read_claude_mcp_config()
+    continuity_config.validate_mcp(mcp, contract, required=installed)
+    servers = mcp.get("mcpServers") if isinstance(mcp, dict) else None
+    has_mcp = isinstance(servers, dict) and continuity_config.MCP_SERVER_NAME in servers
+    if not installed and (continuity_config.has_overlay(live_hooks) or has_mcp):
+        raise RuntimeError(
+            "Claude continuity hooks or MCP binding exist without a valid installed mode; "
+            "use install-claude-continuity.py remove --apply"
+        )
+    return contract, mode
+
+
+def live_hooks_block():
+    """Return the base hook projection after validating the live overlay."""
+    live = raw_live_hooks_block()
+    contract, mode = claude_continuity_state(
+        {} if live is None else live, require_complete=True
+    )
+    if live is None:
+        return None
+    return continuity_config.strip_installed_overlay(live, contract, mode)
 
 
 def live_codex_hooks():
@@ -1318,8 +1372,14 @@ def cmd_check():
               f"{CODEX_CONFIG} does not; refusing to treat this client as absent")
         return 1
 
+    try:
+        configured_pairs = pairs()
+    except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        print(f"config-as-code: CLAUDE CONTINUITY INVALID — {exc}")
+        return 1
+
     missing, untracked, different = [], [], []
-    for label, live, repo_path in pairs():
+    for label, live, repo_path in configured_pairs:
         have = read(repo_path)
         if live is None:
             missing.append((label, "on disk: MISSING; in repo: present"))
@@ -1345,7 +1405,12 @@ def cmd_check():
         if prerequisite_report:
             print(prerequisite_report)
             return 1
-        print(f"config-as-code: OK — {len(pairs())} items, repo matches machine")
+        mode = continuity_config.read_mode(
+            CLAUDE_CONTINUITY_MODE_FILE, continuity_config.load(REPO)
+        )
+        if mode in continuity_config.MODES:
+            print(f"  Claude continuity overlay and dedicated MCP binding verified; mode={mode}")
+        print(f"config-as-code: OK — {len(configured_pairs)} items, repo matches machine")
         return 0
     if not drift and unversioned:
         print(f"config-as-code: UNVERSIONED HOOKS — {len(unversioned)} script(s) the live "
@@ -1362,7 +1427,7 @@ def cmd_check():
     # intentionally omitted from normal pairs() on a secondary.  Otherwise
     # "16 of 4" could claim to have checked only four items while reporting
     # sixteen violations, which is operationally misleading.
-    checked_items = len(pairs()) + len(disallowed)
+    checked_items = len(configured_pairs) + len(disallowed)
     headline = f"config-as-code: DRIFT — {len(drift)} of {checked_items} items"
     if missing:
         headline += f" — {len(missing)} MISSING FROM MACHINE: " + ", ".join(
@@ -1402,8 +1467,13 @@ def cmd_pull(apply):
         print("ERROR: unapproved scheduled task(s) on this secondary machine: "
               + ", ".join(disallowed) + "; refusing to capture them into the repo.")
         return 1
+    try:
+        configured_pairs = pairs()
+    except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        print(f"ERROR: Claude continuity configuration is invalid ({exc}); refusing to capture it.")
+        return 1
     wrote = 0
-    for label, live, repo_path in pairs():
+    for label, live, repo_path in configured_pairs:
         if live is None:
             print(f"  SKIP  {label} (not on this machine; left in the repo)")
             continue
@@ -1478,7 +1548,28 @@ def cmd_install(apply):
         print(f"ERROR: no tracked hooks block at {HOOKS_REPO}. Run `pull` first.")
         return 1
 
-    planned = json.loads(concrete(src))
+    try:
+        base_planned = json.loads(concrete(src))
+        live_hooks = cfg.get("hooks", {})
+        contract, continuity_mode = claude_continuity_state(
+            live_hooks, require_complete=False
+        )
+        planned = continuity_config.render_effective_hooks(
+            base_planned, live_hooks, contract, continuity_mode
+        )
+    except (RuntimeError, ValueError, json.JSONDecodeError) as exc:
+        print(f"ERROR: Claude continuity configuration is invalid ({exc}); "
+              "settings left untouched.")
+        return 1
+
+    if continuity_mode in continuity_config.MODES:
+        present = all(
+            continuity_config.observed_entries(live_hooks.get(event)) == wanted
+            for event, wanted in contract.hooks.items()
+        )
+        action = "PRESERVE" if present else "RESTORE"
+        print(f"  Claude continuity overlay: WILL {action} five canonical entries; "
+              f"mode={continuity_mode}; dedicated MCP binding verified")
 
     # REFUSE A BLOCK WHOSE SCRIPTS ARE NOT THERE (added after 2026-08-24).
     # Settings apply on the very next prompt of every session, so a hooks block

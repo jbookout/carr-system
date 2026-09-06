@@ -40,6 +40,8 @@ export const REGISTRY_V12_VERSION = "scac-mutation-registry.v12";
 export const REGISTRY_V13_VERSION = "scac-mutation-registry.v13";
 // v14 binds the Claude recovery actor-hydration repair after the v13 seal.
 export const REGISTRY_V14_VERSION = "scac-mutation-registry.v14";
+// v15 binds the Claude continuity config-preservation repair after the v14 seal.
+export const REGISTRY_V15_VERSION = "scac-mutation-registry.v15";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -73,6 +75,7 @@ export const HISTORICAL_REGISTRY_SEALS = Object.freeze({
   v11: Object.freeze({ version: REGISTRY_V11_VERSION, digest: "sha256:27d615d0a07d519b8e902a3a21b53918a314cfefdadfe5a50e2c4da33b2f9ad7", entryCount: 1471, sourceEntryCount: 819 }),
   v12: Object.freeze({ version: REGISTRY_V12_VERSION, digest: "sha256:4e8ae7fc6a017d7d3cd55452fbe4da7a302b93b8cfb34a43ba018dcf2b84f2a6", entryCount: 1487, sourceEntryCount: 825 }),
   v13: Object.freeze({ version: REGISTRY_V13_VERSION, digest: "sha256:7b2270375fe6a83d04dd3c62146db54321183d8ca202ee909e050663d2a050b8", entryCount: 1491, sourceEntryCount: 825 }),
+  v14: Object.freeze({ version: REGISTRY_V14_VERSION, digest: "sha256:7f2987fe1dcb5bdf5bcbc269f9714261166419b992dc40f6fc446d6889e18558", entryCount: 1495, sourceEntryCount: 825 }),
 });
 export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
   "migrations/0454_siep11_mutation_registry.sql": "7985d42b9b36964b33503f4ff42d332e6bcce085217f06464a9d6abf58126bdd",
@@ -101,6 +104,8 @@ export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
   "mcp-server/src/scac-mutation-registry.v12.generated.js": "6f924c4b4df73ec8505c81db8824555a930dab2e047503d0f15f35f56f8bb2be",
   "migrations/0487_claude_startup_registry_activation.sql": "04fe724c10278534638562575fda16bc5b9dc963c1478e063ba13fbf9db620aa",
   "mcp-server/src/scac-mutation-registry.v13.generated.js": "c6abfd1cc8a89778ae938ac819e3fcdf8fb9f158129a9f32e7a34188b6c64bdc",
+  "migrations/0488_claude_actor_hydration_registry_activation.sql": "2f170e330ab4582485e9074bbb69fdbbaeb4f2a635d6e0326f440ef1cfb8c948",
+  "mcp-server/src/scac-mutation-registry.v14.generated.js": "a5032bb27133c1acc2feb214c2c701c5931ffa30a432d23cc6b3f6505507a5b9",
 });
 // 0467 is the reviewed SIEP-18 monitor source consumed by the v9 generator.
 // It is not historical yet, but its bytes must still be exact: otherwise a
@@ -281,6 +286,13 @@ export const CLAUDE_ACTOR_HYDRATION_FORWARD_DB_CATALOG_BASELINE = Object.freeze(
   ...CLAUDE_ACTOR_HYDRATION_PRE_V14_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v14",
   secdef_execute: { count: 363, digest: "sha256:c3dcffa37314df9b44f68b20a0baac5555531d3d9cf136a91020196f88234a8a" },
+});
+export const CLAUDE_CONFIG_PRESERVATION_PRE_V15_DB_CATALOG_BASELINE =
+  CLAUDE_ACTOR_HYDRATION_FORWARD_DB_CATALOG_BASELINE;
+export const CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
+  ...CLAUDE_CONFIG_PRESERVATION_PRE_V15_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v15",
+  secdef_execute: { count: 367, digest: "sha256:2fd333dec1d4ed6b33439e07f29fef53c86ce02a413a8121275a8e3ebc0e8064" },
 });
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
@@ -899,6 +911,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V12_VERSION]: "v12",
   [REGISTRY_V13_VERSION]: "v13",
   [REGISTRY_V14_VERSION]: "v14",
+  [REGISTRY_V15_VERSION]: "v15",
 });
 
 function sourceInventoryFixtureDigest(rows) {
@@ -954,7 +967,7 @@ export function frozenInventory(version) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V14_VERSION) {
+  version = REGISTRY_V15_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -989,7 +1002,8 @@ export function registryDigestFor(version, rows = fullInventory(), dbCatalogBase
   if (![REGISTRY_VERSION, REGISTRY_V2_VERSION, REGISTRY_V3_VERSION, REGISTRY_V4_VERSION,
     REGISTRY_V5_VERSION, REGISTRY_V6_VERSION, REGISTRY_V7_VERSION, REGISTRY_V8_VERSION,
     REGISTRY_V9_VERSION, REGISTRY_V10_VERSION, REGISTRY_V11_VERSION,
-    REGISTRY_V12_VERSION, REGISTRY_V13_VERSION, REGISTRY_V14_VERSION].includes(version))
+    REGISTRY_V12_VERSION, REGISTRY_V13_VERSION, REGISTRY_V14_VERSION,
+    REGISTRY_V15_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -3176,6 +3190,228 @@ ${preflightBody}end $claude_actor_hydration_preflight$;
 }
 
 
+export function renderClaudeConfigPreservationForwardRegistrySql(rows = fullInventory(),
+  dbCatalogBaseline = CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE,
+  predecessorArtifacts = undefined) {
+  const { v14: v14Seal } = HISTORICAL_REGISTRY_SEALS;
+  const v15Digest = registryDigestFor(REGISTRY_V15_VERSION, rows, dbCatalogBaseline);
+  const catalogCount = dbCatalogBaseline.secdef_execute.count +
+    dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
+  const entryCount = rows.length + catalogCount;
+  const v14MigrationPath = "migrations/0488_claude_actor_hydration_registry_activation.sql";
+  const v14RuntimePath = "mcp-server/src/scac-mutation-registry.v14.generated.js";
+  const v14Rows = frozenInventory(REGISTRY_V14_VERSION);
+  const v14Migration = predecessorArtifacts?.migration ??
+    renderClaudeActorHydrationForwardRegistrySql(v14Rows, CLAUDE_ACTOR_HYDRATION_FORWARD_DB_CATALOG_BASELINE);
+  const v14Runtime = predecessorArtifacts?.runtime ?? renderRuntimeProjection(v14Rows, {
+    version: REGISTRY_V14_VERSION,
+    dbCatalogBaseline: CLAUDE_ACTOR_HYDRATION_FORWARD_DB_CATALOG_BASELINE,
+  });
+  for (const [path, source] of [
+    [v14MigrationPath, v14Migration], [v14RuntimePath, v14Runtime],
+  ]) {
+    const observed = sha256(source);
+    if (observed !== HISTORICAL_REGISTRY_ARTIFACT_SHA256[path])
+      throw new Error(`sealed historical SCAC v14 artifact changed: ${path}: ${observed}`);
+  }
+
+  const headerMarker =
+    "-- SCAC-12: forward-only mutation registry v14 after Claude recovery actor hydration.";
+  const coreStart = v14Migration.indexOf(headerMarker);
+  if (coreStart < 0 || v14Migration.indexOf(headerMarker, coreStart + headerMarker.length) >= 0)
+    throw new Error("sealed SCAC v14 migration has no exact successor core boundary");
+  const v14Core = v14Migration.slice(coreStart);
+  const currentV14Marker = "create or replace function ops.scac_mutation_catalog_v14_current()";
+  const policyMarker =
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v13;";
+  const currentV14Start = v14Core.indexOf(currentV14Marker);
+  const secondCurrentV14 = v14Core.indexOf(
+    currentV14Marker, currentV14Start + currentV14Marker.length);
+  const v13HistoryMarker =
+    "alter function ops.scac_mutation_catalog_v13_current() rename to scac_mutation_catalog_v13_live_at_seal;";
+  const v13HistoryStart = v14Core.indexOf(v13HistoryMarker);
+  const secondV13History = v14Core.indexOf(
+    v13HistoryMarker, v13HistoryStart + v13HistoryMarker.length);
+  const policyStart = v14Core.indexOf(policyMarker);
+  const secondPolicy = v14Core.indexOf(policyMarker, policyStart + policyMarker.length);
+  if (v13HistoryStart < 0 || secondV13History >= 0 || currentV14Start <= v13HistoryStart ||
+      secondCurrentV14 >= 0 || policyStart <= currentV14Start || secondPolicy >= 0)
+    throw new Error("sealed SCAC v14 migration has no exact catalog successor boundary");
+  const installedV13History = v14Core.slice(v13HistoryStart, currentV14Start);
+  const v14Current = v14Core.slice(currentV14Start, policyStart);
+  const v14History =
+`alter function ops.scac_mutation_catalog_v14_current() rename to scac_mutation_catalog_v14_live_at_seal;
+create or replace function ops.scac_mutation_registry_v14_seal_available()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_registry_seal_valid('scac-mutation-registry.v14')
+$fn$;
+create or replace function ops.scac_mutation_catalog_v14_current()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_catalog_v14_live_at_seal()
+$fn$;
+comment on function ops.scac_mutation_registry_v14_seal_available() is 'Exact immutable v14 registry seal; separate from whether the live catalog still equals v14.';
+comment on function ops.scac_mutation_catalog_v14_current() is 'Historical v14 live-catalog validator; expected to become false after the v15 authority surface is installed.';
+
+`;
+  const renderV15Current = baseline => {
+    let current = v14Current
+      .replaceAll("scac_mutation_catalog_v14_current", "scac_mutation_catalog_v15_current")
+      .replaceAll("scac-mutation-registry.v14", "scac-mutation-registry.v15");
+    current = replaceExactlyOnce(current,
+      `if observed_count<>${CLAUDE_ACTOR_HYDRATION_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count} or observed_digest<>'${CLAUDE_ACTOR_HYDRATION_FORWARD_DB_CATALOG_BASELINE.secdef_execute.digest}' then return false; end if;`,
+      `if observed_count<>${baseline.secdef_execute.count} or observed_digest<>'${baseline.secdef_execute.digest}' then return false; end if;`,
+      "Claude config preservation v15 security-definer baseline");
+    current = replaceExactlyOnce(current,
+      `if observed_count<>${CLAUDE_ACTOR_HYDRATION_FORWARD_DB_CATALOG_BASELINE.relation_dml.count} or observed_digest<>'${CLAUDE_ACTOR_HYDRATION_FORWARD_DB_CATALOG_BASELINE.relation_dml.digest}' then return false; end if;`,
+      `if observed_count<>${baseline.relation_dml.count} or observed_digest<>'${baseline.relation_dml.digest}' then return false; end if;`,
+      "Claude config preservation v15 relation baseline");
+    current = replaceExactlyOnce(current,
+      `if observed_count<>${CLAUDE_ACTOR_HYDRATION_FORWARD_DB_CATALOG_BASELINE.column_dml.count} or observed_digest<>'${CLAUDE_ACTOR_HYDRATION_FORWARD_DB_CATALOG_BASELINE.column_dml.digest}' then return false; end if;`,
+      `if observed_count<>${baseline.column_dml.count} or observed_digest<>'${baseline.column_dml.digest}' then return false; end if;`,
+      "Claude config preservation v15 column baseline");
+    return replaceExactlyOnce(current,
+      `return observed_count=${CLAUDE_ACTOR_HYDRATION_FORWARD_DB_CATALOG_BASELINE.role_authority.count} and observed_digest='${CLAUDE_ACTOR_HYDRATION_FORWARD_DB_CATALOG_BASELINE.role_authority.digest}';`,
+      `return observed_count=${baseline.role_authority.count} and observed_digest='${baseline.role_authority.digest}';`,
+      "Claude config preservation v15 role-authority baseline");
+  };
+  const v15Current = renderV15Current(dbCatalogBaseline);
+
+  let sql = replaceExactlyOnce(v14Core, v14Current,
+    "__CLAUDE_ACTOR_HYDRATION_V14_CATALOG_SUCCESSOR__", "Claude config preservation v14 current catalog block");
+  sql = replaceExactlyOnce(sql, installedV13History, "",
+    "Claude config preservation already-installed v13 catalog history");
+  sql = replaceExactlyOnce(sql, headerMarker,
+    "-- SCAC-12: forward-only mutation registry v15 after Claude continuity config preservation.",
+    "Claude config preservation migration header");
+  sql = sql
+    .replaceAll("scac-mutation-registry.v14", "scac-mutation-registry.v15")
+    .replaceAll("_v14", "_v15")
+    .replaceAll(" v14", " v15");
+  sql = replaceExactlyOnce(sql, JSON.stringify(CLAUDE_ACTOR_HYDRATION_FORWARD_DB_CATALOG_BASELINE),
+    JSON.stringify(dbCatalogBaseline), "Claude config preservation v15 catalog projection");
+  sql = replaceExactlyOnce(sql,
+    `'${v14Seal.digest}',${v14Seal.entryCount},${v14Seal.sourceEntryCount},`,
+    `'sha256:${v15Digest}',${entryCount},${rows.length},`,
+    "Claude config preservation v15 registry row");
+  sql = replaceExactlyOnce(sql,
+    `ops.scac_mutation_registration_v15('${v14Seal.digest}',`,
+    `ops.scac_mutation_registration_v15('sha256:${v15Digest}',`,
+    "Claude config preservation v15 snapshot registry lookup");
+  sql = replaceExactlyOnce(sql,
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v13;",
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v14;",
+    "Claude config preservation policy snapshot predecessor");
+  sql = replaceExactlyOnce(sql, "__CLAUDE_ACTOR_HYDRATION_V14_CATALOG_SUCCESSOR__",
+    `${v14History}${v15Current}`, "Claude config preservation v14 catalog history insertion");
+
+  const versionsThrough14 = Array.from({ length: 14 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  const versionsThrough13 = Array.from({ length: 13 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  sql = replaceExactlyOnce(sql,
+    `check (registry_version in (${versionsThrough13},'scac-mutation-registry.v15'))`,
+    `check (registry_version in (${versionsThrough14},'scac-mutation-registry.v15'))`,
+    "Claude config preservation registry-version constraint");
+  sql = replaceExactlyOnce(sql,
+    `if p_registry_version not in (${versionsThrough13}) then return false; end if;`,
+    `if p_registry_version not in (${versionsThrough14}) then return false; end if;`,
+    "Claude config preservation historical seal allowlist");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v13' then '${HISTORICAL_REGISTRY_SEALS.v13.digest}' end;`,
+    `    when 'scac-mutation-registry.v13' then '${HISTORICAL_REGISTRY_SEALS.v13.digest}'\n    when '${v14Seal.version}' then '${v14Seal.digest}' end;`,
+    "Claude config preservation historical digest case");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v13' then '${JSON.stringify(CLAUDE_STARTUP_FORWARD_DB_CATALOG_BASELINE)}'::jsonb end;`,
+    `    when 'scac-mutation-registry.v13' then '${JSON.stringify(CLAUDE_STARTUP_FORWARD_DB_CATALOG_BASELINE)}'::jsonb\n    when '${v14Seal.version}' then '${JSON.stringify(CLAUDE_ACTOR_HYDRATION_FORWARD_DB_CATALOG_BASELINE)}'::jsonb end;`,
+    "Claude config preservation historical catalog case");
+  sql = replaceExactlyOnce(sql,
+    `    ('scac-mutation-registry.v13','${HISTORICAL_REGISTRY_SEALS.v13.digest}',${HISTORICAL_REGISTRY_SEALS.v13.entryCount},${HISTORICAL_REGISTRY_SEALS.v13.sourceEntryCount})\n`,
+    `    ('scac-mutation-registry.v13','${HISTORICAL_REGISTRY_SEALS.v13.digest}',${HISTORICAL_REGISTRY_SEALS.v13.entryCount},${HISTORICAL_REGISTRY_SEALS.v13.sourceEntryCount}),\n    ('${v14Seal.version}','${v14Seal.digest}',${v14Seal.entryCount},${v14Seal.sourceEntryCount})\n`,
+    "Claude config preservation historical seal tuple");
+  sql = replaceExactlyOnce(sql,
+    "    ops.scac_mutation_registry_v13_seal_available()) then",
+    "    ops.scac_mutation_registry_v13_seal_available() and\n    ops.scac_mutation_registry_v14_seal_available()) then",
+    "Claude config preservation snapshot predecessor seal");
+  sql = replaceExactlyOnce(sql,
+    `or (r.registry_version='scac-mutation-registry.v15' and r.registry_digest='${v14Seal.digest}')`,
+    `or (r.registry_version='scac-mutation-registry.v14' and r.registry_digest='${v14Seal.digest}')\n         or (r.registry_version='scac-mutation-registry.v15' and r.registry_digest='sha256:${v15Digest}')`,
+    "Claude config preservation epoch-chain digest cases");
+  sql = replaceExactlyOnce(sql,
+    `  (registry_version='scac-mutation-registry.v15' and registry_digest='${v14Seal.digest}')`,
+    `  (registry_version='scac-mutation-registry.v14' and registry_digest='${v14Seal.digest}') or\n  (registry_version='scac-mutation-registry.v15' and registry_digest='sha256:${v15Digest}')`,
+    "Claude config preservation epoch constraint digest cases");
+  sql = replaceExactlyOnce(sql,
+    `'{registry_digest}',to_jsonb('${v14Seal.digest}'::text)`,
+    `'{registry_digest}',to_jsonb('sha256:${v15Digest}'::text)`,
+    "Claude config preservation snapshot registry digest");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_mutation_registry_v13_seal_available(),ops.scac_mutation_catalog_v15_current()",
+    "ops.scac_mutation_registry_v13_seal_available(),ops.scac_mutation_catalog_v14_live_at_seal(),ops.scac_mutation_catalog_v14_current(),ops.scac_mutation_registry_v14_seal_available(),ops.scac_mutation_catalog_v15_current()",
+    "Claude config preservation historical function revoke list");
+  sql = replaceExactlyOnce(sql,
+    "Claude recovery successor snapshot: current policy epochs bind mutation registry v15 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13 epochs remain immutable.",
+    "Claude config-preservation successor snapshot: current policy epochs bind mutation registry v15 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14 epochs remain immutable.",
+    "Claude config preservation policy snapshot comment");
+  sql = replaceExactlyOnce(sql,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v15')<>${v14Seal.entryCount}`,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v15')<>${entryCount}`,
+    "Claude config preservation v15 entry count guard");
+  sql = replaceExactlyOnce(sql,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v13')<>'${HISTORICAL_REGISTRY_SEALS.v13.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v13')<>${HISTORICAL_REGISTRY_SEALS.v13.entryCount} then raise exception 'sealed SCAC mutation registry v13 changed during successor creation'; end if;`,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v14')<>'${v14Seal.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v14')<>${v14Seal.entryCount} then raise exception 'sealed SCAC mutation registry v14 changed during successor creation'; end if;`,
+    "Claude config preservation predecessor seal guard");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),",
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),",
+    "Claude config preservation historical policy snapshot revoke list");
+
+  const seedStartMarker = "with seed as (select value as contract from jsonb_array_elements(";
+  const seedEndMarker = "::jsonb))\ninsert into ops.scac_mutation_registry_entry";
+  const seedStart = sql.indexOf(seedStartMarker);
+  const secondSeedStart = sql.indexOf(seedStartMarker, seedStart + seedStartMarker.length);
+  const seedEnd = sql.indexOf(seedEndMarker, seedStart + seedStartMarker.length);
+  const secondSeedEnd = sql.indexOf(seedEndMarker, seedEnd + seedEndMarker.length);
+  if (seedStart < 0 || secondSeedStart >= 0 || seedEnd < 0 || secondSeedEnd >= 0)
+    throw new Error("sealed SCAC v14 migration has no exact source-seed boundary");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart + seedStartMarker.length)}${sqlLiteral(seed)}${sql.slice(seedEnd)}`;
+
+  const preflightCurrent = renderV15Current(CLAUDE_CONFIG_PRESERVATION_PRE_V15_DB_CATALOG_BASELINE);
+  const preflightBegin = preflightCurrent.indexOf("begin\n");
+  const preflightEnd = preflightCurrent.lastIndexOf("end $fn$;");
+  if (preflightBegin < 0 || preflightEnd <= preflightBegin)
+    throw new Error("generated v15 catalog predicate has no exact preflight body boundary");
+  let preflightBody = preflightCurrent.slice(preflightBegin + "begin\n".length, preflightEnd);
+  preflightBody = preflightBody.replaceAll(
+    "then return false; end if;",
+    "then raise exception 'Claude config preservation pre-v15 catalog receipt drifted'; end if;");
+  preflightBody = replaceExactlyOnce(preflightBody,
+    `return observed_count=${CLAUDE_CONFIG_PRESERVATION_PRE_V15_DB_CATALOG_BASELINE.role_authority.count} and observed_digest='${CLAUDE_CONFIG_PRESERVATION_PRE_V15_DB_CATALOG_BASELINE.role_authority.digest}';`,
+    `if observed_count<>${CLAUDE_CONFIG_PRESERVATION_PRE_V15_DB_CATALOG_BASELINE.role_authority.count} or observed_digest<>'${CLAUDE_CONFIG_PRESERVATION_PRE_V15_DB_CATALOG_BASELINE.role_authority.digest}' then raise exception 'Claude config preservation pre-v15 role-authority receipt drifted'; end if;`,
+    "Claude config preservation pre-v15 role receipt");
+  const predecessorHash = sha256(v14Migration);
+  const predecessorPreflight =
+`-- Exact disposable-PG17 post-0488 receipt. Refuse before creating any v15 function.
+do $claude_config_preservation_preflight$
+declare observed_count integer; observed_digest text; grant_snapshot jsonb;
+begin
+  if (select count(*) from public.schema_migrations where filename='0488_claude_actor_hydration_registry_activation.sql')<>1
+     or not exists(select 1 from public.schema_migrations where filename='0488_claude_actor_hydration_registry_activation.sql'
+       and sha256='${predecessorHash}') then
+    raise exception 'Claude config preservation pre-v15 migration ledger receipt drifted';
+  end if;
+  grant_snapshot:=ops.scac_runtime_dml_grant_snapshot();
+  if (grant_snapshot->>'entry_count')::integer<>${CLAUDE_CONFIG_PRESERVATION_PRE_V15_DB_CATALOG_BASELINE.runtime_dml_grants.count}
+     or grant_snapshot->>'grant_digest'<>'${CLAUDE_CONFIG_PRESERVATION_PRE_V15_DB_CATALOG_BASELINE.runtime_dml_grants.digest}' then
+    raise exception 'Claude config preservation pre-v15 runtime grant receipt drifted';
+  end if;
+${preflightBody}end $claude_config_preservation_preflight$;
+
+`;
+  return `${predecessorPreflight}${sql}`.replace(/\n+$/, "\n");
+}
+
+
 export function renderGeneratedFrontier() {
   const v2Rows = frozenInventory(REGISTRY_V2_VERSION);
   const artifacts = {};
@@ -3334,9 +3570,22 @@ export function renderGeneratedFrontier() {
         runtime: artifacts["mcp-server/src/scac-mutation-registry.v13.generated.js"],
       });
 
+  const v15Rows = frozenInventory(REGISTRY_V15_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v15.generated.js"] =
+    renderRuntimeProjection(v15Rows, {
+      version: REGISTRY_V15_VERSION,
+      dbCatalogBaseline: CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0489_claude_config_preservation_registry_activation.sql"] =
+    renderClaudeConfigPreservationForwardRegistrySql(v15Rows,
+      CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE, {
+        migration: artifacts["migrations/0488_claude_actor_hydration_registry_activation.sql"],
+        runtime: artifacts["mcp-server/src/scac-mutation-registry.v14.generated.js"],
+      });
+
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 22 || runtimeCount !== 13 || Object.keys(artifacts).length !== 35)
+  if (migrationCount !== 23 || runtimeCount !== 14 || Object.keys(artifacts).length !== 37)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
@@ -3655,9 +3904,22 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const rows = frozenInventory(REGISTRY_V14_VERSION);
     await writeFile(target, renderClaudeActorHydrationForwardRegistrySql(rows));
     process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-runtime-v15") {
+    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v15.generated.js");
+    const rows = frozenInventory(REGISTRY_V15_VERSION);
+    await writeFile(target, renderRuntimeProjection(rows, {
+      version: REGISTRY_V15_VERSION,
+      dbCatalogBaseline: CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE,
+    }));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-claude-config-preservation-registry-migration") {
+    const target = resolve(process.argv[3] || "migrations/0489_claude_config_preservation_registry_activation.sql");
+    const rows = frozenInventory(REGISTRY_V15_VERSION);
+    await writeFile(target, renderClaudeConfigPreservationForwardRegistrySql(rows));
+    process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools());
-    process.stdout.write("source inventory matches frozen v14 frontier fixture\n");
+    process.stdout.write("source inventory matches frozen v15 frontier fixture\n");
   } else if (process.argv[2] === "--check-generated-frontier") {
     const paths = assertGeneratedFrontierMatchesCommitted();
     process.stdout.write(`generated frontier is byte-exact (${paths.length} artifacts)\n`);

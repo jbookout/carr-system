@@ -25,12 +25,13 @@ import unicodedata
 from datetime import datetime, timezone
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from lib import claude_continuity_config as continuity_config  # noqa: E402
 from lib.claude_rule_delivery_dedupe import reset as reset_rule_delivery  # noqa: E402
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 HOOK_CONFIG = REPO / "ops/config/claude-continuity-hooks.json"
 MCP_PROXY = REPO / "mcp-server/continuity-stdio-proxy.mjs"
-MODES = {"disabled", "shadow", "checkpoint", "inject"}
+MODES = continuity_config.MODES
 EVENTS = {"UserPromptSubmit", "PostToolUse", "PreCompact", "SessionStart", "Stop"}
 EVENT_MAP = {
     "UserPromptSubmit": "user_prompt_submit", "PostToolUse": "post_tool_use",
@@ -64,30 +65,15 @@ def spool_dir() -> pathlib.Path:
 
 
 def expected_config_digest() -> str:
-    rendered = HOOK_CONFIG.read_text(encoding="utf-8").replace("{{REPO}}", str(REPO)).encode("utf-8")
-    digest = hashlib.sha256()
-    digest.update(rendered)
-    digest.update(b"\0")
-    digest.update(pathlib.Path(__file__).read_bytes())
-    digest.update(b"\0")
-    digest.update(MCP_PROXY.read_bytes())
-    return "sha256:" + digest.hexdigest()
+    return continuity_config.load(REPO).config_digest
 
 
 def _read_mode() -> str:
     try:
-        raw = mode_path().read_bytes()
-        if len(raw) > 4096:
-            raise ValueError("mode file too large")
-        doc = json.loads(raw)
-        if (not isinstance(doc, dict) or set(doc) != {"schema_version", "mode", "config_digest"}
-                or doc.get("schema_version") != 1 or doc.get("mode") not in MODES
-                or doc.get("config_digest") != expected_config_digest()):
-            raise ValueError("invalid mode document")
-        return doc["mode"]
-    except FileNotFoundError:
-        return "disabled"
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return continuity_config.read_mode(
+            mode_path(), continuity_config.load(REPO)
+        ) or "disabled"
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as exc:
         _warn(f"invalid mode; disabled ({exc.__class__.__name__})")
         return "disabled"
 

@@ -9,6 +9,8 @@ import pathlib
 import tempfile
 from datetime import datetime, timezone
 
+from lib import claude_continuity_config as continuity_config
+
 REPO = pathlib.Path(__file__).resolve().parents[1]
 HOOK_CONFIG = REPO / "ops/config/claude-continuity-hooks.json"
 HOOK_ADAPTER = REPO / "ops/claude-continuity-hook.py"
@@ -21,10 +23,7 @@ def _canonical(value: object) -> bytes:
 
 
 def expected_config_digest() -> str:
-    rendered = HOOK_CONFIG.read_text().replace("{{REPO}}", str(REPO)).encode()
-    value = hashlib.sha256(rendered + b"\0" + HOOK_ADAPTER.read_bytes()
-                           + b"\0" + MCP_PROXY.read_bytes()).hexdigest()
-    return "sha256:" + value
+    return continuity_config.load(REPO).config_digest
 
 
 def _mode_file() -> pathlib.Path:
@@ -34,11 +33,11 @@ def _mode_file() -> pathlib.Path:
 
 def active() -> bool:
     try:
-        doc = json.loads(_mode_file().read_bytes())
-        return (isinstance(doc, dict) and doc.get("schema_version") == 1
-                and doc.get("mode") in ACTIVE_MODES
-                and doc.get("config_digest") == expected_config_digest())
-    except (OSError, ValueError, json.JSONDecodeError):
+        mode = continuity_config.read_mode(
+            _mode_file(), continuity_config.load(REPO)
+        )
+        return mode in ACTIVE_MODES
+    except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
         return False
 
 
