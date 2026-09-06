@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import unittest
+import uuid
 from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -18,6 +19,10 @@ HISTORY = ROOT / "ops" / "codex-history.py"
 HOOK = ROOT / "ops" / "codex-continuity-hook.py"
 TEST_TMP = pathlib.Path(os.environ.get("TMPDIR", ROOT / "out" / "test-tmp"))
 ROLLOUT_NAME = "rollout-2026-09-05T12-00-00-01a0715a-6623-7220-82df-506062d5072f.jsonl"
+
+
+def window_id(label):
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"codex-selftest-window:{label}"))
 
 
 def load_history_module():
@@ -39,7 +44,7 @@ def native_row(session_id, cwd):
         "timestamp": "2026-09-05T12:00:00Z", "type": "session_meta",
         "payload": {"id": session_id, "session_id": session_id,
                     "cwd": str(pathlib.Path(cwd).resolve()), "originator": "codex_cli_rs",
-                    "context_window": {"window_id": "window-initial"}},
+                    "context_window": {"window_id": window_id("window-initial")}},
     }
 
 
@@ -47,8 +52,10 @@ def compacted_row(number, previous_window, window):
     return {
         "timestamp": f"2026-09-05T12:00:{number:02d}Z", "type": "compacted",
         "payload": {"message": "", "replacement_history": [],
-                    "window_number": number, "first_window_id": "window-initial",
-                    "previous_window_id": previous_window, "window_id": window},
+                    "window_number": number,
+                    "first_window_id": window_id("window-initial"),
+                    "previous_window_id": window_id(previous_window),
+                    "window_id": window_id(window)},
     }
 
 
@@ -372,6 +379,201 @@ class CodexHookTests(AdapterCase):
                           hook.checkpoint_freshness(
                               recovery["response"]["checkpoint"], highwater))
 
+    def test_compact_session_requires_one_exact_window_checkpoint_refresh(self):
+        compacted = compacted_row(1, "window-initial", "window-current")
+        compacted["payload"]["replacement_history"] = ["never-store-opaque-compact-body"]
+        self.native_rollout(compacted)
+        payload = self.hook_payload(source="compact")
+        history = load_history_module()
+        with mock.patch.dict(os.environ, self.env):
+            meta = history.validate_native_rollout(payload)
+            highwater = history.source_highwater(meta)
+        response = self.checkpoint(cursor={
+            "byte_offset": 1, "source_digest": "0" * 64,
+            "source_window_id": window_id("window-initial"), "source_window_number": 0,
+        })
+        env, _ = self.install_fake_record_call(response)
+
+        result = self.run_hook(payload, env)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        material = json.dumps({
+            "operation": "codex-compaction-checkpoint-refresh",
+            "runtime": "codex", "native_task_id": self.session_id,
+            "project_id": meta["project_id"], "cwd": meta["cwd"],
+            "source_window_id": window_id("window-current"), "source_window_number": 1,
+        }, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        expected_key = str(uuid.uuid5(uuid.NAMESPACE_URL, material))
+        for expected in (
+            "HIGH PRIORITY CARR COMPACTION CHECKPOINT REPAIR",
+            f'"native_task_id":"{self.session_id}"',
+            f'"project_id":{json.dumps(meta["project_id"])}',
+            f'"cwd":{json.dumps(meta["cwd"])}',
+            '"expected_version":7', f'"idempotency_key":"{expected_key}"',
+            f'"source_window_id":"{window_id("window-current")}"',
+            '"source_window_number":1',
+            f'"byte_offset":{highwater["byte_offset"]}',
+            f'"source_digest":"{highwater["source_digest"]}"',
+            "before normal work", "full replacement state", "one fresh codex-read-recovery",
+            "retry at most once", "read back and verify", "mcp__carr__codex_checkpoint",
+            "CARR_MCP_CLIENT_PROFILE=codex-continuity ./run.sh call codex-checkpoint",
+            "never use generic or unscoped authentication",
+        ):
+            self.assertIn(expected, context)
+        self.assertNotIn("never-store-opaque-compact-body", context)
+        self.assertLessEqual(len(context.encode("utf-8")), 12000)
+
+        same_env, _ = self.install_fake_record_call(self.checkpoint(cursor={
+            "byte_offset": 1, "source_digest": "0" * 64,
+            "source_window_id": window_id("window-current"), "source_window_number": 1,
+        }))
+        same = json.loads(self.run_hook(payload, same_env).stdout)[
+            "hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("COMPACTION CHECKPOINT REPAIR", same)
+        self.assertIn("checkpoint covers current context window 1", same)
+        self.assertIn("later native bytes or turns may remain unincorporated", same)
+
+    def test_compact_session_repairs_from_bounded_tail_of_sparse_large_rollout(self):
+        self.native_rollout()
+        mib = 1024 * 1024
+        with self.rollout.open("r+b") as handle:
+            # Sparse one-MiB rows keep the physical fixture small while making
+            # the logical transcript larger than the bounded 64-MiB tail.
+            for offset in range(20 * mib, 71 * mib, mib):
+                handle.seek(offset)
+                handle.write(b"\n")
+            handle.seek(0, os.SEEK_END)
+            opaque = "never-surface-large-rollout-opaque-body"
+            # A complete ordinary row can itself be larger than the former
+            # per-row cap and can quote the candidate word inside its payload.
+            # Only its authenticated depth-one type may classify the row.
+            handle.write((json.dumps({
+                "timestamp": "2026-09-05T12:00:06Z", "ordinal": 6,
+                "type": "event_msg",
+                "payload": {"message": f'payload says "compacted" {"x" * (3 * mib)}'},
+            }, separators=(",", ":")) + "\n").encode())
+            row_seven = compacted_row(7, "window-before-7", "window-seven")
+            handle.write((json.dumps(row_seven, separators=(",", ":")) + "\n").encode())
+            # The authenticated compacted row also exceeds the former cap.
+            # Its opaque replacement body is streamed past while the bounded
+            # outer metadata at the end remains available for verification.
+            row_eight = compacted_row(8, "window-seven", "window-eight")
+            row_eight["payload"]["replacement_history"] = [
+                opaque + ("z" * (3 * mib))]
+            for row in (row_eight,):
+                handle.write((json.dumps(row, separators=(",", ":")) + "\n").encode())
+        self.assertGreater(self.rollout.stat().st_size, 64 * mib)
+        self.assertGreater(20 * mib - (self.rollout.stat().st_size - 64 * mib),
+                           2 * mib)
+        response = self.checkpoint(cursor={
+            "byte_offset": 1, "source_digest": "0" * 64,
+            "source_window_id": window_id("window-seven"),
+            "source_window_number": 7,
+        })
+        env, _ = self.install_fake_record_call(response)
+
+        result = self.run_hook(self.hook_payload(source="compact"), env)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("COMPACTION CHECKPOINT REPAIR", context)
+        self.assertIn(f'"source_window_id":"{window_id("window-eight")}"', context)
+        self.assertIn('"source_window_number":8', context)
+        self.assertNotIn(opaque, context)
+        self.assertLessEqual(len(context.encode("utf-8")), 12000)
+
+    def test_checkpoint_refresh_directive_is_compact_only(self):
+        self.native_rollout(compacted_row(1, "window-initial", "window-current"))
+        response = self.checkpoint(cursor={
+            "byte_offset": 1, "source_digest": "0" * 64,
+            "source_window_id": window_id("window-initial"), "source_window_number": 0,
+        })
+        env, _ = self.install_fake_record_call(response)
+        compact = json.loads(self.run_hook(
+            self.hook_payload(source="compact"), env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+        self.assertIn("COMPACTION CHECKPOINT REPAIR", compact)
+        for source in ("startup", "resume"):
+            context = json.loads(self.run_hook(
+                self.hook_payload(source=source), env).stdout)[
+                    "hookSpecificOutput"]["additionalContext"]
+            self.assertNotIn("COMPACTION CHECKPOINT REPAIR", context, source)
+
+    def test_compact_refresh_refuses_blind_write_paths(self):
+        self.native_rollout(compacted_row(1, "window-initial", "window-current"))
+        payload = self.hook_payload(source="compact")
+
+        outage_env, _ = self.install_fake_record_call(outage=True)
+        outage = json.loads(self.run_hook(payload, outage_env).stdout)[
+            "hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("COMPACTION CHECKPOINT REPAIR", outage)
+        self.assertIn("record store is unavailable", outage)
+
+        incomplete_env, _ = self.install_fake_record_call(
+            self.checkpoint(state={"objective": "missing next action"}, cursor={
+                "source_window_id": window_id("window-initial"),
+                "source_window_number": 0}))
+        incomplete = json.loads(self.run_hook(payload, incomplete_env).stdout)[
+            "hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("COMPACTION CHECKPOINT REPAIR", incomplete)
+        self.assertIn("complete replacement state is unavailable", incomplete)
+
+        for cursor in (
+            {"source_window_id": "window-future", "source_window_number": 2},
+            {"source_window_id": "window-conflict", "source_window_number": 1},
+        ):
+            unknown_env, _ = self.install_fake_record_call(
+                self.checkpoint(cursor=cursor))
+            unknown = json.loads(self.run_hook(payload, unknown_env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+            self.assertNotIn("COMPACTION CHECKPOINT REPAIR", unknown)
+            self.assertIn("ahead, malformed, or conflicting", unknown)
+
+        missing_env, _ = self.install_fake_record_call(
+            {"ok": True, "found": False, "checkpoint": None})
+        missing = json.loads(self.run_hook(payload, missing_env).stdout)[
+            "hookSpecificOutput"]["additionalContext"]
+        self.assertIn("COMPACTION CHECKPOINT REPAIR", missing)
+        self.assertIn('"expected_version":0', missing)
+        self.assertIn("If a complete replacement state cannot be assembled", missing)
+        self.assertIn("warn and continue without writing", missing)
+
+        self.native_rollout({"type": "event_msg", "payload": {"message": "no boundary"}})
+        invalid_env, _ = self.install_fake_record_call(response=self.checkpoint())
+        invalid = json.loads(self.run_hook(payload, invalid_env).stdout)[
+            "hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("COMPACTION CHECKPOINT REPAIR", invalid)
+        self.assertIn("trusted compact window marker is unavailable", invalid)
+
+    def test_window_freshness_is_semantic_when_current_marker_is_trusted(self):
+        hook = load_hook_module()
+        highwater = {"byte_offset": 900, "device": 1, "inode": 2,
+                     "source_digest": "a" * 64}
+        current = {"source_window_id": "window-current", "source_window_number": 2}
+        exact = self.checkpoint(cursor={"byte_offset": 1,
+                                        "source_window_id": "window-current",
+                                        "source_window_number": 2})["checkpoint"]
+        behind = self.checkpoint(cursor={"byte_offset": 1,
+                                         "source_window_id": "window-old",
+                                         "source_window_number": 1})["checkpoint"]
+        ahead = self.checkpoint(cursor={"byte_offset": 9999,
+                                        "source_window_id": "window-future",
+                                        "source_window_number": 3})["checkpoint"]
+        malformed = self.checkpoint(cursor={"byte_offset": 1,
+                                            "source_window_id": "window-other",
+                                            "source_window_number": 2})["checkpoint"]
+        self.assertIn("covers current context window 2",
+                      hook.checkpoint_freshness(exact, highwater, current))
+        self.assertIn("semantically stale",
+                      hook.checkpoint_freshness(behind, highwater, current))
+        self.assertIn("freshness is unknown",
+                      hook.checkpoint_freshness(ahead, highwater, current))
+        self.assertIn("freshness is unknown",
+                      hook.checkpoint_freshness(malformed, highwater, current))
+        self.assertIn("checkpoint is stale",
+                      hook.checkpoint_freshness(behind, highwater))
+
     def test_session_start_native_payload_delivers_prioritized_bounded_recovery(self):
         self.native_rollout({"type": "event_msg", "payload": {"message": "latest"}})
         env, log = self.install_fake_record_call(
@@ -408,20 +610,25 @@ class CodexHookTests(AdapterCase):
                          {self.session_id})
 
     def test_large_recovery_omits_whole_items_with_warning_and_pointer(self):
-        self.native_rollout({"type": "event_msg", "payload": {"message": "latest"}})
+        self.native_rollout(
+            compacted_row(1, "window-initial", "window-current"),
+            {"type": "event_msg", "payload": {"message": "latest"}})
         state = {"objective": "objective",
                  "latest_corrections": [{"text": "latest correction",
                                           "refs": ["rollout:2"]}],
                  "constraints": [{"text": f"constraint-{i}-" + "z" * 3000,
-                                  "refs": ["rollout:3"]}
-                                 for i in range(8)],
+                                 "refs": ["rollout:3"]}
+                                 for i in range(6)],
                  "next_action": "next action"}
-        env, _ = self.install_fake_record_call(self.checkpoint(state=state))
+        env, _ = self.install_fake_record_call(self.checkpoint(
+            state=state, cursor={"byte_offset": 1, "source_digest": "0" * 64,
+                                 "source_window_id": window_id("window-initial"),
+                                 "source_window_number": 0}))
         context = json.loads(self.run_hook(
             self.hook_payload(source="compact"), env).stdout)["hookSpecificOutput"]["additionalContext"]
         self.assertLessEqual(len(context.encode("utf-8")), 12000)
         for expected in ("latest correction", "next action", "coverage warning",
-                         "codex-history.py search"):
+                         "codex-history.py search", "COMPACTION CHECKPOINT REPAIR"):
             self.assertIn(expected, context)
         self.assertNotIn('"text":"constraint-3-', context)
 
@@ -605,7 +812,7 @@ class CodexHookTests(AdapterCase):
         self.assertNotEqual(pre_events[0]["args"]["cursor"]["source_digest"],
                             pre_events[1]["args"]["cursor"]["source_digest"])
         self.assertEqual(pre_events[0]["args"]["cursor"]["source_window_id"],
-                         "window-initial")
+                         window_id("window-initial"))
         self.assertEqual(pre_events[0]["args"]["cursor"]["source_window_number"], 0)
         self.assertNotEqual(pre_events[1]["args"]["idempotency_key"],
                             pre_events[2]["args"]["idempotency_key"])
@@ -614,7 +821,7 @@ class CodexHookTests(AdapterCase):
         self.assertNotEqual(pre_events[1]["args"]["idempotency_key"],
                             pre_events[3]["args"]["idempotency_key"])
         self.assertEqual(pre_events[3]["args"]["cursor"]["source_window_id"],
-                         "window-after-1")
+                         window_id("window-after-1"))
         post_events = [call for call in calls
                        if call["args"].get("event_type") == "post_compact"]
         self.assertNotEqual(post_events[0]["args"]["idempotency_key"],
@@ -633,22 +840,33 @@ class CodexHookTests(AdapterCase):
         self.assertFalse(log.exists(), log.read_text() if log.exists() else "")
 
         history = load_history_module()
-        self.native_rollout()
-        with self.rollout.open("ab") as handle:
-            handle.write(b"x" * 65 + b"\n")
+        bad_header = native_row(self.session_id, self.project)
+        bad_header["payload"]["context_window"]["window_id"] = "not-a-uuid"
+        self.write_rollout([bad_header])
         with mock.patch.dict(os.environ, self.env):
             meta = history.validate_native_rollout(self.hook_payload())
-            with mock.patch.object(history, "MAX_COMPACTION_ROW_BYTES", 64):
-                with self.assertRaises(history.HistoryFailure) as oversized:
-                    history.compaction_occurrence(meta, "pre")
-        self.assertEqual(oversized.exception.payload["error"],
-                         "native_compaction_row_invalid")
+            with self.assertRaises(history.HistoryFailure) as bad_first:
+                history.compaction_occurrence(meta, "pre")
+        self.assertEqual(bad_first.exception.payload["error"],
+                         "native_context_window_invalid")
 
-        self.native_rollout({"type": "event_msg", "payload": {"message": "scan"}})
+        invalid_window = compacted_row(1, "window-initial", "window-after-1")
+        invalid_window["payload"]["window_id"] = "not-a-uuid"
+        self.native_rollout(invalid_window)
         with mock.patch.dict(os.environ, self.env):
             meta = history.validate_native_rollout(self.hook_payload())
-            with mock.patch.object(history, "MAX_COMPACTION_SCAN_BYTES",
-                                   meta["size"] - 1):
+            with self.assertRaises(history.HistoryFailure) as bad_window:
+                history.compaction_occurrence(meta, "post")
+        self.assertEqual(bad_window.exception.payload["error"],
+                         "native_compaction_chain_invalid")
+
+        self.native_rollout(
+            {"type": "event_msg", "payload": {"message": "scan-one"}},
+            {"type": "event_msg", "payload": {"message": "scan-two"}},
+        )
+        with mock.patch.dict(os.environ, self.env):
+            meta = history.validate_native_rollout(self.hook_payload())
+            with mock.patch.object(history, "MAX_COMPACTION_SCAN_LINES", 1):
                 with self.assertRaises(history.HistoryFailure) as scan_limit:
                     history.compaction_occurrence(meta, "pre")
         self.assertEqual(scan_limit.exception.payload["error"],

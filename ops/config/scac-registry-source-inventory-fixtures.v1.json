@@ -27767,13 +27767,47 @@
           "classification_authorizing": false
         }
       ]
+    },
+    {
+      "version": "v16",
+      "reason": "Codex post-compaction checkpoint refresh after the immutable v15 seal.",
+      "expected_count": 825,
+      "expected_sha256": "90efdfaafe31939b37e266fec96548b9f693eff37e342c0db6ff2d2ab209a6ce",
+      "remove": [],
+      "row_replacements": {
+        "script-entrypoint:bin/schema-snapshot.sh": {
+          "schema_digest": "ff3b96a94aa92a32e4baa5a627fe37ba47c04689199c17f91d4cfada31dc3753",
+          "handler_digest": "ff3b96a94aa92a32e4baa5a627fe37ba47c04689199c17f91d4cfada31dc3753"
+        },
+        "script-entrypoint:ops/codex-continuity-hook.py": {
+          "schema_digest": "cad2c2d2e9b6b03a02197e7742e699be2168358bcccb4362ddd3db6d8cb7e5a1",
+          "handler_digest": "cad2c2d2e9b6b03a02197e7742e699be2168358bcccb4362ddd3db6d8cb7e5a1"
+        },
+        "script-entrypoint:ops/scac-mutation-inventory.mjs": {
+          "schema_digest": "3d3fd772f5fc7ea46e3fb6bd66cda43d94e4be1aa8aa9b53341190afa4ae497a",
+          "handler_digest": "3d3fd772f5fc7ea46e3fb6bd66cda43d94e4be1aa8aa9b53341190afa4ae497a"
+        },
+        "script-entrypoint:ops/siep11-mutation-registry-local-pg-gate.py": {
+          "schema_digest": "9ff59d6ae795681af4b424e17d5cdf5adc7e4c0353a5cbd83c6e75e44cf7d47e",
+          "handler_digest": "9ff59d6ae795681af4b424e17d5cdf5adc7e4c0353a5cbd83c6e75e44cf7d47e"
+        },
+        "script-entrypoint:ops/siep18-reference-monitor-local-pg-gate.py": {
+          "schema_digest": "2c6c76964455bc1964de34e2abeb6b4e85a794d9cc163dc35675c50fe94449a0",
+          "handler_digest": "2c6c76964455bc1964de34e2abeb6b4e85a794d9cc163dc35675c50fe94449a0"
+        },
+        "script-entrypoint:ops/codex-history.py": {
+          "schema_digest": "c4e49488fe76fcfe01430506f75937745548569aa928bcbc76ea1388f41f7a05",
+          "handler_digest": "c4e49488fe76fcfe01430506f75937745548569aa928bcbc76ea1388f41f7a05"
+        }
+      },
+      "upsert": []
     }
   ],
   "current_source_review": {
-    "base_version": "v15",
-    "reason": "No reviewed source delta beyond the v15 seal.",
+    "base_version": "v16",
+    "reason": "No reviewed source delta beyond the v16 seal.",
     "expected_count": 825,
-    "expected_sha256": "25b853d538268e2583f4c20154d583fcb1cc23f3ec2bc0ba3affc5c3d8207e97",
+    "expected_sha256": "90efdfaafe31939b37e266fec96548b9f693eff37e342c0db6ff2d2ab209a6ce",
     "upsert": []
   }
 }

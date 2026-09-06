@@ -42,6 +42,8 @@ export const REGISTRY_V13_VERSION = "scac-mutation-registry.v13";
 export const REGISTRY_V14_VERSION = "scac-mutation-registry.v14";
 // v15 binds the Claude continuity config-preservation repair after the v14 seal.
 export const REGISTRY_V15_VERSION = "scac-mutation-registry.v15";
+// v16 binds the Codex post-compaction checkpoint refresh after the v15 seal.
+export const REGISTRY_V16_VERSION = "scac-mutation-registry.v16";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -76,6 +78,7 @@ export const HISTORICAL_REGISTRY_SEALS = Object.freeze({
   v12: Object.freeze({ version: REGISTRY_V12_VERSION, digest: "sha256:4e8ae7fc6a017d7d3cd55452fbe4da7a302b93b8cfb34a43ba018dcf2b84f2a6", entryCount: 1487, sourceEntryCount: 825 }),
   v13: Object.freeze({ version: REGISTRY_V13_VERSION, digest: "sha256:7b2270375fe6a83d04dd3c62146db54321183d8ca202ee909e050663d2a050b8", entryCount: 1491, sourceEntryCount: 825 }),
   v14: Object.freeze({ version: REGISTRY_V14_VERSION, digest: "sha256:7f2987fe1dcb5bdf5bcbc269f9714261166419b992dc40f6fc446d6889e18558", entryCount: 1495, sourceEntryCount: 825 }),
+  v15: Object.freeze({ version: REGISTRY_V15_VERSION, digest: "sha256:5f81f4579cf584a1807715f68b8297ddc4a5997a2c20906ef5300672d195360f", entryCount: 1499, sourceEntryCount: 825 }),
 });
 export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
   "migrations/0454_siep11_mutation_registry.sql": "7985d42b9b36964b33503f4ff42d332e6bcce085217f06464a9d6abf58126bdd",
@@ -106,6 +109,8 @@ export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
   "mcp-server/src/scac-mutation-registry.v13.generated.js": "c6abfd1cc8a89778ae938ac819e3fcdf8fb9f158129a9f32e7a34188b6c64bdc",
   "migrations/0488_claude_actor_hydration_registry_activation.sql": "2f170e330ab4582485e9074bbb69fdbbaeb4f2a635d6e0326f440ef1cfb8c948",
   "mcp-server/src/scac-mutation-registry.v14.generated.js": "a5032bb27133c1acc2feb214c2c701c5931ffa30a432d23cc6b3f6505507a5b9",
+  "migrations/0489_claude_config_preservation_registry_activation.sql": "838be13404202e1a2077c8b52cc48a27572179f2814a3fe9c7f48e56b280cbec",
+  "mcp-server/src/scac-mutation-registry.v15.generated.js": "6fecd62c9407ad47ae11c8ecd1c2f0d7f9cfedffc27c9500f23bc5c9ebfeee1b",
 });
 // 0467 is the reviewed SIEP-18 monitor source consumed by the v9 generator.
 // It is not historical yet, but its bytes must still be exact: otherwise a
@@ -293,6 +298,14 @@ export const CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE = Object.fre
   ...CLAUDE_CONFIG_PRESERVATION_PRE_V15_DB_CATALOG_BASELINE,
   projection_version: "scac-db-catalog-projection.v15",
   secdef_execute: { count: 367, digest: "sha256:2fd333dec1d4ed6b33439e07f29fef53c86ce02a413a8121275a8e3ebc0e8064" },
+});
+export const CODEX_COMPACTION_CHECKPOINT_PRE_V16_DB_CATALOG_BASELINE =
+  CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE;
+export const CODEX_COMPACTION_CHECKPOINT_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
+  ...CODEX_COMPACTION_CHECKPOINT_PRE_V16_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v16",
+  // Exact disposable-Postgres 17 readback after the generated 0490 successor.
+  secdef_execute: { count: 371, digest: "sha256:0afe988d8320a159151cd8f4673c586983d8df3d91578ef344c00e7d57bc9413" },
 });
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
@@ -912,6 +925,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V13_VERSION]: "v13",
   [REGISTRY_V14_VERSION]: "v14",
   [REGISTRY_V15_VERSION]: "v15",
+  [REGISTRY_V16_VERSION]: "v16",
 });
 
 function sourceInventoryFixtureDigest(rows) {
@@ -967,7 +981,7 @@ export function frozenInventory(version) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V15_VERSION) {
+  version = REGISTRY_V16_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -1003,7 +1017,7 @@ export function registryDigestFor(version, rows = fullInventory(), dbCatalogBase
     REGISTRY_V5_VERSION, REGISTRY_V6_VERSION, REGISTRY_V7_VERSION, REGISTRY_V8_VERSION,
     REGISTRY_V9_VERSION, REGISTRY_V10_VERSION, REGISTRY_V11_VERSION,
     REGISTRY_V12_VERSION, REGISTRY_V13_VERSION, REGISTRY_V14_VERSION,
-    REGISTRY_V15_VERSION].includes(version))
+    REGISTRY_V15_VERSION, REGISTRY_V16_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -3411,6 +3425,229 @@ ${preflightBody}end $claude_config_preservation_preflight$;
   return `${predecessorPreflight}${sql}`.replace(/\n+$/, "\n");
 }
 
+export function renderCodexCompactionCheckpointForwardRegistrySql(rows = fullInventory(),
+  dbCatalogBaseline = CODEX_COMPACTION_CHECKPOINT_FORWARD_DB_CATALOG_BASELINE,
+  predecessorArtifacts = undefined) {
+  const { v15: v15Seal } = HISTORICAL_REGISTRY_SEALS;
+  const v16Digest = registryDigestFor(REGISTRY_V16_VERSION, rows, dbCatalogBaseline);
+  const catalogCount = dbCatalogBaseline.secdef_execute.count +
+    dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
+  const entryCount = rows.length + catalogCount;
+  const v15MigrationPath = "migrations/0489_claude_config_preservation_registry_activation.sql";
+  const v15RuntimePath = "mcp-server/src/scac-mutation-registry.v15.generated.js";
+  const v15Rows = frozenInventory(REGISTRY_V15_VERSION);
+  const v15Migration = predecessorArtifacts?.migration ??
+    renderClaudeConfigPreservationForwardRegistrySql(
+      v15Rows, CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE);
+  const v15Runtime = predecessorArtifacts?.runtime ?? renderRuntimeProjection(v15Rows, {
+    version: REGISTRY_V15_VERSION,
+    dbCatalogBaseline: CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE,
+  });
+  for (const [path, source] of [
+    [v15MigrationPath, v15Migration], [v15RuntimePath, v15Runtime],
+  ]) {
+    const observed = sha256(source);
+    if (observed !== HISTORICAL_REGISTRY_ARTIFACT_SHA256[path])
+      throw new Error(`sealed historical SCAC v15 artifact changed: ${path}: ${observed}`);
+  }
+
+  const headerMarker =
+    "-- SCAC-12: forward-only mutation registry v15 after Claude continuity config preservation.";
+  const coreStart = v15Migration.indexOf(headerMarker);
+  if (coreStart < 0 || v15Migration.indexOf(headerMarker, coreStart + headerMarker.length) >= 0)
+    throw new Error("sealed SCAC v15 migration has no exact successor core boundary");
+  const v15Core = v15Migration.slice(coreStart);
+  const currentV15Marker = "create or replace function ops.scac_mutation_catalog_v15_current()";
+  const policyMarker =
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v14;";
+  const currentV15Start = v15Core.indexOf(currentV15Marker);
+  const secondCurrentV15 = v15Core.indexOf(
+    currentV15Marker, currentV15Start + currentV15Marker.length);
+  const v14HistoryMarker =
+    "alter function ops.scac_mutation_catalog_v14_current() rename to scac_mutation_catalog_v14_live_at_seal;";
+  const v14HistoryStart = v15Core.indexOf(v14HistoryMarker);
+  const secondV14History = v15Core.indexOf(
+    v14HistoryMarker, v14HistoryStart + v14HistoryMarker.length);
+  const policyStart = v15Core.indexOf(policyMarker);
+  const secondPolicy = v15Core.indexOf(policyMarker, policyStart + policyMarker.length);
+  if (v14HistoryStart < 0 || secondV14History >= 0 || currentV15Start <= v14HistoryStart ||
+      secondCurrentV15 >= 0 || policyStart <= currentV15Start || secondPolicy >= 0)
+    throw new Error("sealed SCAC v15 migration has no exact catalog successor boundary");
+  const installedV14History = v15Core.slice(v14HistoryStart, currentV15Start);
+  const v15Current = v15Core.slice(currentV15Start, policyStart);
+  const v15History =
+`alter function ops.scac_mutation_catalog_v15_current() rename to scac_mutation_catalog_v15_live_at_seal;
+create or replace function ops.scac_mutation_registry_v15_seal_available()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_registry_seal_valid('scac-mutation-registry.v15')
+$fn$;
+create or replace function ops.scac_mutation_catalog_v15_current()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_catalog_v15_live_at_seal()
+$fn$;
+comment on function ops.scac_mutation_registry_v15_seal_available() is 'Exact immutable v15 registry seal; separate from whether the live catalog still equals v15.';
+comment on function ops.scac_mutation_catalog_v15_current() is 'Historical v15 live-catalog validator; expected to become false after the v16 authority surface is installed.';
+
+`;
+  const renderV16Current = baseline => {
+    let current = v15Current
+      .replaceAll("scac_mutation_catalog_v15_current", "scac_mutation_catalog_v16_current")
+      .replaceAll("scac-mutation-registry.v15", "scac-mutation-registry.v16");
+    current = replaceExactlyOnce(current,
+      `if observed_count<>${CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count} or observed_digest<>'${CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE.secdef_execute.digest}' then return false; end if;`,
+      `if observed_count<>${baseline.secdef_execute.count} or observed_digest<>'${baseline.secdef_execute.digest}' then return false; end if;`,
+      "Codex compaction checkpoint v16 security-definer baseline");
+    current = replaceExactlyOnce(current,
+      `if observed_count<>${CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE.relation_dml.count} or observed_digest<>'${CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE.relation_dml.digest}' then return false; end if;`,
+      `if observed_count<>${baseline.relation_dml.count} or observed_digest<>'${baseline.relation_dml.digest}' then return false; end if;`,
+      "Codex compaction checkpoint v16 relation baseline");
+    current = replaceExactlyOnce(current,
+      `if observed_count<>${CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE.column_dml.count} or observed_digest<>'${CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE.column_dml.digest}' then return false; end if;`,
+      `if observed_count<>${baseline.column_dml.count} or observed_digest<>'${baseline.column_dml.digest}' then return false; end if;`,
+      "Codex compaction checkpoint v16 column baseline");
+    return replaceExactlyOnce(current,
+      `return observed_count=${CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE.role_authority.count} and observed_digest='${CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE.role_authority.digest}';`,
+      `return observed_count=${baseline.role_authority.count} and observed_digest='${baseline.role_authority.digest}';`,
+      "Codex compaction checkpoint v16 role-authority baseline");
+  };
+  const v16Current = renderV16Current(dbCatalogBaseline);
+
+  let sql = replaceExactlyOnce(v15Core, v15Current,
+    "__CLAUDE_CONFIG_PRESERVATION_V15_CATALOG_SUCCESSOR__",
+    "Codex compaction checkpoint v15 current catalog block");
+  sql = replaceExactlyOnce(sql, installedV14History, "",
+    "Codex compaction checkpoint already-installed v14 catalog history");
+  sql = replaceExactlyOnce(sql, headerMarker,
+    "-- SCAC-12: forward-only mutation registry v16 after Codex compaction checkpoint refresh.",
+    "Codex compaction checkpoint migration header");
+  sql = sql
+    .replaceAll("scac-mutation-registry.v15", "scac-mutation-registry.v16")
+    .replaceAll("_v15", "_v16")
+    .replaceAll(" v15", " v16");
+  sql = replaceExactlyOnce(sql, JSON.stringify(CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE),
+    JSON.stringify(dbCatalogBaseline), "Codex compaction checkpoint v16 catalog projection");
+  sql = replaceExactlyOnce(sql,
+    `'${v15Seal.digest}',${v15Seal.entryCount},${v15Seal.sourceEntryCount},`,
+    `'sha256:${v16Digest}',${entryCount},${rows.length},`,
+    "Codex compaction checkpoint v16 registry row");
+  sql = replaceExactlyOnce(sql,
+    `ops.scac_mutation_registration_v16('${v15Seal.digest}',`,
+    `ops.scac_mutation_registration_v16('sha256:${v16Digest}',`,
+    "Codex compaction checkpoint v16 snapshot registry lookup");
+  sql = replaceExactlyOnce(sql,
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v14;",
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v15;",
+    "Codex compaction checkpoint policy snapshot predecessor");
+  sql = replaceExactlyOnce(sql, "__CLAUDE_CONFIG_PRESERVATION_V15_CATALOG_SUCCESSOR__",
+    `${v15History}${v16Current}`, "Codex compaction checkpoint v15 catalog history insertion");
+
+  const versionsThrough15 = Array.from({ length: 15 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  const versionsThrough14 = Array.from({ length: 14 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  sql = replaceExactlyOnce(sql,
+    `check (registry_version in (${versionsThrough14},'scac-mutation-registry.v16'))`,
+    `check (registry_version in (${versionsThrough15},'scac-mutation-registry.v16'))`,
+    "Codex compaction checkpoint registry-version constraint");
+  sql = replaceExactlyOnce(sql,
+    `if p_registry_version not in (${versionsThrough14}) then return false; end if;`,
+    `if p_registry_version not in (${versionsThrough15}) then return false; end if;`,
+    "Codex compaction checkpoint historical seal allowlist");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v14' then '${HISTORICAL_REGISTRY_SEALS.v14.digest}' end;`,
+    `    when 'scac-mutation-registry.v14' then '${HISTORICAL_REGISTRY_SEALS.v14.digest}'\n    when '${v15Seal.version}' then '${v15Seal.digest}' end;`,
+    "Codex compaction checkpoint historical digest case");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v14' then '${JSON.stringify(CLAUDE_ACTOR_HYDRATION_FORWARD_DB_CATALOG_BASELINE)}'::jsonb end;`,
+    `    when 'scac-mutation-registry.v14' then '${JSON.stringify(CLAUDE_ACTOR_HYDRATION_FORWARD_DB_CATALOG_BASELINE)}'::jsonb\n    when '${v15Seal.version}' then '${JSON.stringify(CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE)}'::jsonb end;`,
+    "Codex compaction checkpoint historical catalog case");
+  sql = replaceExactlyOnce(sql,
+    `    ('scac-mutation-registry.v14','${HISTORICAL_REGISTRY_SEALS.v14.digest}',${HISTORICAL_REGISTRY_SEALS.v14.entryCount},${HISTORICAL_REGISTRY_SEALS.v14.sourceEntryCount})\n`,
+    `    ('scac-mutation-registry.v14','${HISTORICAL_REGISTRY_SEALS.v14.digest}',${HISTORICAL_REGISTRY_SEALS.v14.entryCount},${HISTORICAL_REGISTRY_SEALS.v14.sourceEntryCount}),\n    ('${v15Seal.version}','${v15Seal.digest}',${v15Seal.entryCount},${v15Seal.sourceEntryCount})\n`,
+    "Codex compaction checkpoint historical seal tuple");
+  sql = replaceExactlyOnce(sql,
+    "    ops.scac_mutation_registry_v14_seal_available()) then",
+    "    ops.scac_mutation_registry_v14_seal_available() and\n    ops.scac_mutation_registry_v15_seal_available()) then",
+    "Codex compaction checkpoint snapshot predecessor seal");
+  sql = replaceExactlyOnce(sql,
+    `or (r.registry_version='scac-mutation-registry.v16' and r.registry_digest='${v15Seal.digest}')`,
+    `or (r.registry_version='scac-mutation-registry.v15' and r.registry_digest='${v15Seal.digest}')\n         or (r.registry_version='scac-mutation-registry.v16' and r.registry_digest='sha256:${v16Digest}')`,
+    "Codex compaction checkpoint epoch-chain digest cases");
+  sql = replaceExactlyOnce(sql,
+    `  (registry_version='scac-mutation-registry.v16' and registry_digest='${v15Seal.digest}')`,
+    `  (registry_version='scac-mutation-registry.v15' and registry_digest='${v15Seal.digest}') or\n  (registry_version='scac-mutation-registry.v16' and registry_digest='sha256:${v16Digest}')`,
+    "Codex compaction checkpoint epoch constraint digest cases");
+  sql = replaceExactlyOnce(sql,
+    `'{registry_digest}',to_jsonb('${v15Seal.digest}'::text)`,
+    `'{registry_digest}',to_jsonb('sha256:${v16Digest}'::text)`,
+    "Codex compaction checkpoint snapshot registry digest");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_mutation_registry_v14_seal_available(),ops.scac_mutation_catalog_v16_current()",
+    "ops.scac_mutation_registry_v14_seal_available(),ops.scac_mutation_catalog_v15_live_at_seal(),ops.scac_mutation_catalog_v15_current(),ops.scac_mutation_registry_v15_seal_available(),ops.scac_mutation_catalog_v16_current()",
+    "Codex compaction checkpoint historical function revoke list");
+  sql = replaceExactlyOnce(sql,
+    "Claude config-preservation successor snapshot: current policy epochs bind mutation registry v16 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14 epochs remain immutable.",
+    "Codex compaction checkpoint successor snapshot: current policy epochs bind mutation registry v16 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15 epochs remain immutable.",
+    "Codex compaction checkpoint policy snapshot comment");
+  sql = replaceExactlyOnce(sql,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v16')<>${v15Seal.entryCount}`,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v16')<>${entryCount}`,
+    "Codex compaction checkpoint v16 entry count guard");
+  sql = replaceExactlyOnce(sql,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v14')<>'${HISTORICAL_REGISTRY_SEALS.v14.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v14')<>${HISTORICAL_REGISTRY_SEALS.v14.entryCount} then raise exception 'sealed SCAC mutation registry v14 changed during successor creation'; end if;`,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v15')<>'${v15Seal.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v15')<>${v15Seal.entryCount} then raise exception 'sealed SCAC mutation registry v15 changed during successor creation'; end if;`,
+    "Codex compaction checkpoint predecessor seal guard");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),",
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),ops.scac_policy_epoch_snapshot_v15(),",
+    "Codex compaction checkpoint historical policy snapshot revoke list");
+
+  const seedStartMarker = "with seed as (select value as contract from jsonb_array_elements(";
+  const seedEndMarker = "::jsonb))\ninsert into ops.scac_mutation_registry_entry";
+  const seedStart = sql.indexOf(seedStartMarker);
+  const secondSeedStart = sql.indexOf(seedStartMarker, seedStart + seedStartMarker.length);
+  const seedEnd = sql.indexOf(seedEndMarker, seedStart + seedStartMarker.length);
+  const secondSeedEnd = sql.indexOf(seedEndMarker, seedEnd + seedEndMarker.length);
+  if (seedStart < 0 || secondSeedStart >= 0 || seedEnd < 0 || secondSeedEnd >= 0)
+    throw new Error("sealed SCAC v15 migration has no exact source-seed boundary");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart + seedStartMarker.length)}${sqlLiteral(seed)}${sql.slice(seedEnd)}`;
+
+  const preflightCurrent = renderV16Current(CODEX_COMPACTION_CHECKPOINT_PRE_V16_DB_CATALOG_BASELINE);
+  const preflightBegin = preflightCurrent.indexOf("begin\n");
+  const preflightEnd = preflightCurrent.lastIndexOf("end $fn$;");
+  if (preflightBegin < 0 || preflightEnd <= preflightBegin)
+    throw new Error("generated v16 catalog predicate has no exact preflight body boundary");
+  let preflightBody = preflightCurrent.slice(preflightBegin + "begin\n".length, preflightEnd);
+  preflightBody = preflightBody.replaceAll(
+    "then return false; end if;",
+    "then raise exception 'Codex compaction checkpoint pre-v16 catalog receipt drifted'; end if;");
+  preflightBody = replaceExactlyOnce(preflightBody,
+    `return observed_count=${CODEX_COMPACTION_CHECKPOINT_PRE_V16_DB_CATALOG_BASELINE.role_authority.count} and observed_digest='${CODEX_COMPACTION_CHECKPOINT_PRE_V16_DB_CATALOG_BASELINE.role_authority.digest}';`,
+    `if observed_count<>${CODEX_COMPACTION_CHECKPOINT_PRE_V16_DB_CATALOG_BASELINE.role_authority.count} or observed_digest<>'${CODEX_COMPACTION_CHECKPOINT_PRE_V16_DB_CATALOG_BASELINE.role_authority.digest}' then raise exception 'Codex compaction checkpoint pre-v16 role-authority receipt drifted'; end if;`,
+    "Codex compaction checkpoint pre-v16 role receipt");
+  const predecessorHash = sha256(v15Migration);
+  const predecessorPreflight =
+`-- Exact disposable-Postgres post-0489 receipt. Refuse before creating any v16 function.
+do $codex_compaction_checkpoint_preflight$
+declare observed_count integer; observed_digest text; grant_snapshot jsonb;
+begin
+  if (select count(*) from public.schema_migrations where filename='0489_claude_config_preservation_registry_activation.sql')<>1
+     or not exists(select 1 from public.schema_migrations where filename='0489_claude_config_preservation_registry_activation.sql'
+       and sha256='${predecessorHash}') then
+    raise exception 'Codex compaction checkpoint pre-v16 migration ledger receipt drifted';
+  end if;
+  grant_snapshot:=ops.scac_runtime_dml_grant_snapshot();
+  if (grant_snapshot->>'entry_count')::integer<>${CODEX_COMPACTION_CHECKPOINT_PRE_V16_DB_CATALOG_BASELINE.runtime_dml_grants.count}
+     or grant_snapshot->>'grant_digest'<>'${CODEX_COMPACTION_CHECKPOINT_PRE_V16_DB_CATALOG_BASELINE.runtime_dml_grants.digest}' then
+    raise exception 'Codex compaction checkpoint pre-v16 runtime grant receipt drifted';
+  end if;
+${preflightBody}end $codex_compaction_checkpoint_preflight$;
+
+`;
+  return `${predecessorPreflight}${sql}`.replace(/\n+$/, "\n");
+}
+
 
 export function renderGeneratedFrontier() {
   const v2Rows = frozenInventory(REGISTRY_V2_VERSION);
@@ -3583,9 +3820,22 @@ export function renderGeneratedFrontier() {
         runtime: artifacts["mcp-server/src/scac-mutation-registry.v14.generated.js"],
       });
 
+  const v16Rows = frozenInventory(REGISTRY_V16_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v16.generated.js"] =
+    renderRuntimeProjection(v16Rows, {
+      version: REGISTRY_V16_VERSION,
+      dbCatalogBaseline: CODEX_COMPACTION_CHECKPOINT_FORWARD_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0490_codex_compaction_checkpoint_registry_activation.sql"] =
+    renderCodexCompactionCheckpointForwardRegistrySql(v16Rows,
+      CODEX_COMPACTION_CHECKPOINT_FORWARD_DB_CATALOG_BASELINE, {
+        migration: artifacts["migrations/0489_claude_config_preservation_registry_activation.sql"],
+        runtime: artifacts["mcp-server/src/scac-mutation-registry.v15.generated.js"],
+      });
+
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 23 || runtimeCount !== 14 || Object.keys(artifacts).length !== 37)
+  if (migrationCount !== 24 || runtimeCount !== 15 || Object.keys(artifacts).length !== 39)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
@@ -3917,9 +4167,22 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const rows = frozenInventory(REGISTRY_V15_VERSION);
     await writeFile(target, renderClaudeConfigPreservationForwardRegistrySql(rows));
     process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-runtime-v16") {
+    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v16.generated.js");
+    const rows = frozenInventory(REGISTRY_V16_VERSION);
+    await writeFile(target, renderRuntimeProjection(rows, {
+      version: REGISTRY_V16_VERSION,
+      dbCatalogBaseline: CODEX_COMPACTION_CHECKPOINT_FORWARD_DB_CATALOG_BASELINE,
+    }));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-codex-compaction-checkpoint-registry-migration") {
+    const target = resolve(process.argv[3] || "migrations/0490_codex_compaction_checkpoint_registry_activation.sql");
+    const rows = frozenInventory(REGISTRY_V16_VERSION);
+    await writeFile(target, renderCodexCompactionCheckpointForwardRegistrySql(rows));
+    process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools());
-    process.stdout.write("source inventory matches frozen v15 frontier fixture\n");
+    process.stdout.write("source inventory matches frozen v16 frontier fixture\n");
   } else if (process.argv[2] === "--check-generated-frontier") {
     const paths = assertGeneratedFrontierMatchesCommitted();
     process.stdout.write(`generated frontier is byte-exact (${paths.length} artifacts)\n`);

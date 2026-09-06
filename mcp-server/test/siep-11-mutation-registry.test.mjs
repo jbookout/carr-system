@@ -31,6 +31,7 @@ import {
   REGISTRY_V13_VERSION,
   REGISTRY_V14_VERSION,
   REGISTRY_V15_VERSION,
+  REGISTRY_V16_VERSION,
   replaceExactlyOnce,
   renderGeneratedFrontier,
   renderRuntimeProjection,
@@ -42,6 +43,7 @@ import {
   renderClaudeStartupForwardRegistrySql,
   renderClaudeActorHydrationForwardRegistrySql,
   renderClaudeConfigPreservationForwardRegistrySql,
+  renderCodexCompactionCheckpointForwardRegistrySql,
   renderSourceMergeForwardRegistrySql,
   sha256,
   SIEP16_INTEGRATED_DB_CATALOG_BASELINE,
@@ -59,6 +61,8 @@ import {
   CLAUDE_ACTOR_HYDRATION_PRE_V14_DB_CATALOG_BASELINE,
   CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE,
   CLAUDE_CONFIG_PRESERVATION_PRE_V15_DB_CATALOG_BASELINE,
+  CODEX_COMPACTION_CHECKPOINT_FORWARD_DB_CATALOG_BASELINE,
+  CODEX_COMPACTION_CHECKPOINT_PRE_V16_DB_CATALOG_BASELINE,
   SOURCE_MERGE_FORWARD_DB_CATALOG_BASELINE,
   SOURCE_MERGE_PRE_V10_DB_CATALOG_BASELINE,
   SIEP12_DB_CATALOG_BASELINE,
@@ -134,6 +138,10 @@ const generatedV15 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v15.generated.js", import.meta.url), "utf8");
 const v15Migration = fs.readFileSync(
   new URL("../../migrations/0489_claude_config_preservation_registry_activation.sql", import.meta.url), "utf8");
+const generatedV16 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v16.generated.js", import.meta.url), "utf8");
+const v16Migration = fs.readFileSync(
+  new URL("../../migrations/0490_codex_compaction_checkpoint_registry_activation.sql", import.meta.url), "utf8");
 const siep18MonitorMigration = fs.readFileSync(
   new URL("../../migrations/0467_siep18_atomic_db_monitor_grants.sql", import.meta.url), "utf8");
 const directRegistryRedefinitions = [
@@ -481,9 +489,7 @@ test("v15 seals Claude continuity config preservation without rewriting v14", ()
     dbCatalogBaseline: CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE,
   }));
   assert.equal(v15Migration, renderClaudeConfigPreservationForwardRegistrySql(rows));
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
-    JSON.parse(generatedV15.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]));
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
+  assert.equal(JSON.parse(generatedV15.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]),
     "5f81f4579cf584a1807715f68b8297ddc4a5997a2c20906ef5300672d195360f");
   assert.deepEqual(CLAUDE_CONFIG_PRESERVATION_PRE_V15_DB_CATALOG_BASELINE,
     CLAUDE_ACTOR_HYDRATION_FORWARD_DB_CATALOG_BASELINE);
@@ -504,19 +510,55 @@ test("v15 seals Claude continuity config preservation without rewriting v14", ()
   assert.match(v15Migration, /scac_mutation_catalog_v15_current[(][)]/);
   assert.match(v15Migration, /scac_policy_epoch_snapshot_v14[(][)]/);
   assert.match(v15Migration, /registry_version='scac-mutation-registry[.]v15'[^\n]+<>1499/);
-  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS))
+  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS)
+    .filter(seal => Number(seal.version.split(".v")[1]) < 15))
     assert.match(v15Migration, new RegExp(`\\('${seal.version.replaceAll(".", "\\.")}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount}\\)`));
+});
+
+test("v16 seals the Codex compaction checkpoint refresh without rewriting v15", () => {
+  const rows = frozenInventory(REGISTRY_V16_VERSION);
+  assert.equal(rows.length, 825);
+  assert.equal(generatedV16, renderRuntimeProjection(rows, {
+    version: REGISTRY_V16_VERSION,
+    dbCatalogBaseline: CODEX_COMPACTION_CHECKPOINT_FORWARD_DB_CATALOG_BASELINE,
+  }));
+  assert.equal(v16Migration, renderCodexCompactionCheckpointForwardRegistrySql(rows));
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
+    JSON.parse(generatedV16.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]));
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
+    "d5418b025506b131252ddb214d75c2e1f995235db8b72ac56765485ccb5a1a54");
+  assert.deepEqual(CODEX_COMPACTION_CHECKPOINT_PRE_V16_DB_CATALOG_BASELINE,
+    CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE);
+  assert.equal(CODEX_COMPACTION_CHECKPOINT_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count, 371);
+  assert.equal(CODEX_COMPACTION_CHECKPOINT_FORWARD_DB_CATALOG_BASELINE.secdef_execute.digest,
+    "sha256:0afe988d8320a159151cd8f4673c586983d8df3d91578ef344c00e7d57bc9413");
+  assert.equal(CODEX_COMPACTION_CHECKPOINT_FORWARD_DB_CATALOG_BASELINE.runtime_dml_grants.count, 307);
+  assert.equal(sha256(v15Migration),
+    HISTORICAL_REGISTRY_ARTIFACT_SHA256["migrations/0489_claude_config_preservation_registry_activation.sql"]);
+  assert.equal(sha256(generatedV15),
+    HISTORICAL_REGISTRY_ARTIFACT_SHA256["mcp-server/src/scac-mutation-registry.v15.generated.js"]);
+  assert.match(v16Migration,
+    /0489_claude_config_preservation_registry_activation[.]sql'[\s\S]+838be13404202e1a2077c8b52cc48a27572179f2814a3fe9c7f48e56b280cbec/);
+  assert.match(v16Migration,
+    /alter function ops[.]scac_mutation_catalog_v15_current[(][)] rename to scac_mutation_catalog_v15_live_at_seal/);
+  assert.match(v16Migration, /scac_mutation_registry_v15_seal_available[(][)]/);
+  assert.match(v16Migration, /scac_mutation_registration_v16[(]text,text[)]/);
+  assert.match(v16Migration, /scac_mutation_catalog_v16_current[(][)]/);
+  assert.match(v16Migration, /scac_policy_epoch_snapshot_v15[(][)]/);
+  assert.match(v16Migration, /registry_version='scac-mutation-registry[.]v16'[^\n]+<>1503/);
+  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS))
+    assert.match(v16Migration, new RegExp(`\\('${seal.version.replaceAll(".", "\\.")}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount}\\)`));
 });
 
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
   assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
-  assert.equal(migrations.length, 23);
+  assert.equal(migrations.length, 24);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489"]);
-  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 14);
-  assert.equal(paths.length, 37);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490"]);
+  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 15);
+  assert.equal(paths.length, 39);
 });
 
 test("the complete frontier renders when every generated target is absent", () => {
@@ -552,7 +594,7 @@ test("the complete frontier renders when every generated target is absent", () =
         GIT_WORK_TREE: isolatedRoot,
       },
     });
-    assert.match(stdout, /\(37 artifacts\)/);
+    assert.match(stdout, /\(39 artifacts\)/);
     for (const [target, expected] of Object.entries(frontier))
       assert.equal(fs.readFileSync(path.join(outputRoot, target), "utf8"), expected, target);
   } finally {
