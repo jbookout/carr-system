@@ -13,6 +13,7 @@ import hmac
 import json
 import os
 import pathlib
+import re
 import secrets
 import shlex
 import stat
@@ -41,6 +42,7 @@ MAX_CAPSULE_BYTES = 4_800
 MAX_SPOOL_BYTES = 1_000_000
 MAX_SPOOL_FILES = 100
 CALL_TIMEOUT_SECONDS = 7.0
+NATIVE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}\Z")
 
 
 def _warn(message: str) -> None:
@@ -181,7 +183,7 @@ def _identity(payload: dict) -> tuple[dict, pathlib.Path]:
     session_id = payload.get("session_id")
     transcript_raw = payload.get("transcript_path")
     cwd_raw = payload.get("cwd")
-    if not isinstance(session_id, str) or not session_id or len(session_id) > 200:
+    if not isinstance(session_id, str) or NATIVE_ID.fullmatch(session_id) is None:
         raise ValueError("invalid session id")
     if not isinstance(transcript_raw, str) or not transcript_raw or len(transcript_raw) > 4096:
         raise ValueError("invalid transcript path")
@@ -190,7 +192,8 @@ def _identity(payload: dict) -> tuple[dict, pathlib.Path]:
     transcript = _normalized_path(transcript_raw)
     cwd = _normalized_path(cwd_raw)
     agent_id = payload.get("agent_id")
-    if agent_id is not None and (not isinstance(agent_id, str) or not agent_id or len(agent_id) > 200):
+    if agent_id is not None and (not isinstance(agent_id, str)
+                                 or NATIVE_ID.fullmatch(agent_id) is None):
         raise ValueError("invalid agent_id")
     _validate_transcript_location(transcript, session_id, agent_id)
     base = {"runtime": "claude", "session_id": session_id,

@@ -190,6 +190,15 @@ test("event replay is idempotent and a changed payload is refused", async () => 
     { ...args, event_type: "stop" }), error => error.payload?.error === "claude_event_key_conflict");
 });
 
+test("multibyte native leaf identifiers are refused before database access", async () => {
+  const args = { ...base, native_agent_id: "🧭".repeat(200), idempotency_key: "invalid-leaf",
+    event_type: "pre_compact", cursor: {}, observed_at: state.source_observed_at };
+  await assert.rejects(() => tools()["claude-record-event"].handler(
+    { query: async () => { throw new Error("must not query"); } }, actor, args),
+  error => ["claude_continuity_field_invalid", "claude_native_identity_invalid"].includes(error.payload?.error) &&
+    error.payload?.field === "native_agent_id");
+});
+
 test("worst-case capsule reserves all mandatory recovery sections before optional evidence", () => {
   const huge = "🧭".repeat(1000);
   const capsule = buildClaudeRecoveryCapsule({ checkpoint_version: 7, state: {
@@ -201,7 +210,7 @@ test("worst-case capsule reserves all mandatory recovery sections before optiona
     decisions: Array.from({ length: 20 }, (_, index) => ({ text: `optional-${index} ${huge}`, why: huge, refs: [`decision:${index}`] })),
   } });
   const capsuleBytes = new TextEncoder().encode(capsule).byteLength;
-  assert.ok(capsuleBytes <= 3600);
+  assert.ok(capsuleBytes <= 3200);
   // A deliberately conservative measured budget (3 UTF-8 bytes/token) keeps
   // the Worker capsule at or below 1,200 tokens before the native envelope.
   assert.ok(Math.ceil(capsuleBytes / 3) <= 1200);

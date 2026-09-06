@@ -98,8 +98,16 @@ def _commands(entry: object) -> list[str]:
     return commands
 
 
-def _is_continuity(entry: object) -> bool:
+def _mentions_continuity(entry: object) -> bool:
     return any(HOOK_BASENAME in command for command in _commands(entry))
+
+
+def _validated_continuity_entries(event: str, entries: list,
+                                  wanted: list[dict] | None) -> list:
+    observed = [entry for entry in entries if _mentions_continuity(entry)]
+    if observed and (wanted is None or observed != wanted):
+        raise RuntimeError(f"noncanonical Claude continuity hook present: {event}")
+    return observed
 
 
 def install_document(current: dict) -> dict:
@@ -107,13 +115,15 @@ def install_document(current: dict) -> dict:
     hooks = result.setdefault("hooks", {})
     if not isinstance(hooks, dict):
         raise RuntimeError("settings hooks must be an object")
-    for event, wanted in desired_hooks().items():
+    desired = desired_hooks()
+    for event, entries in hooks.items():
+        if isinstance(entries, list):
+            _validated_continuity_entries(event, entries, desired.get(event))
+    for event, wanted in desired.items():
         entries = hooks.setdefault(event, [])
         if not isinstance(entries, list):
             raise RuntimeError(f"settings hook event must be a list: {event}")
-        observed = [entry for entry in entries if _is_continuity(entry)]
-        if observed and observed != wanted:
-            raise RuntimeError(f"noncanonical Claude continuity hook present: {event}")
+        observed = _validated_continuity_entries(event, entries, wanted)
         if not observed:
             entries.extend(copy.deepcopy(wanted))
     return result
@@ -124,10 +134,13 @@ def remove_document(current: dict) -> dict:
     hooks = result.get("hooks")
     if not isinstance(hooks, dict):
         return result
-    for event in desired_hooks():
-        entries = hooks.get(event)
-        if isinstance(entries, list):
-            hooks[event] = [entry for entry in entries if not _is_continuity(entry)]
+    desired = desired_hooks()
+    for event, entries in hooks.items():
+        if not isinstance(entries, list):
+            continue
+        observed = _validated_continuity_entries(event, entries, desired.get(event))
+        if observed:
+            hooks[event] = [entry for entry in entries if entry not in desired[event]]
     return result
 
 
@@ -223,9 +236,16 @@ def apply_transaction(settings: dict, mcp_config: dict, mode: str | None, remove
 def verify() -> tuple[bool, str]:
     current = _load_json(settings_path(), missing={})
     hooks = current.get("hooks", {})
-    for event, wanted in desired_hooks().items():
-        entries = hooks.get(event, []) if isinstance(hooks, dict) else []
-        observed = [entry for entry in entries if _is_continuity(entry)] if isinstance(entries, list) else []
+    if not isinstance(hooks, dict):
+        return False, "Claude settings hooks are invalid"
+    desired = desired_hooks()
+    for event, entries in hooks.items():
+        if isinstance(entries, list):
+            _validated_continuity_entries(event, entries, desired.get(event))
+    for event, wanted in desired.items():
+        entries = hooks.get(event, [])
+        observed = (_validated_continuity_entries(event, entries, wanted)
+                    if isinstance(entries, list) else [])
         if observed != wanted:
             return False, f"{event} does not contain exactly the canonical continuity hook"
     mode = _load_json(mode_path())

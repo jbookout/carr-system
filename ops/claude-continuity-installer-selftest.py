@@ -121,6 +121,29 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(self.invoke("remove", "--apply").returncode, 0)
         self.assertEqual(self.settings.read_bytes(), first)
 
+    def test_remove_refuses_substring_collision_without_deleting_either_hook(self):
+        self.assertEqual(self.invoke("install", "--mode", "inject", "--apply").returncode, 0)
+        configured = json.loads(self.settings.read_text())
+        canonical = next(entry for entry in configured["hooks"]["UserPromptSubmit"]
+                         if "claude-continuity-hook.py" in json.dumps(entry))
+        wrapper = copy.deepcopy(canonical)
+        wrapper["hooks"][0]["command"] = (
+            "/usr/bin/env python3 /tmp/diagnose.py --mentions "
+            + wrapper["hooks"][0]["command"]
+        )
+        configured["hooks"]["UserPromptSubmit"].append(wrapper)
+        self.settings.write_text(json.dumps(configured), encoding="utf-8")
+        before = self.settings.read_bytes()
+
+        result = self.invoke("remove", "--apply")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("noncanonical Claude continuity hook", result.stderr)
+        self.assertEqual(self.settings.read_bytes(), before)
+        remaining = json.loads(self.settings.read_text())["hooks"]["UserPromptSubmit"]
+        self.assertIn(canonical, remaining)
+        self.assertIn(wrapper, remaining)
+
     def test_install_rolls_back_settings_if_mode_write_fails(self):
         before_settings = self.settings.read_bytes()
         before_codex = self.codex.read_bytes()

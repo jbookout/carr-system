@@ -6,7 +6,7 @@ import { canonicalJson } from "./artifact-trust.js";
 
 const RUNTIME = "claude";
 const MAX_VERSION = Number.MAX_SAFE_INTEGER;
-const STATE_BYTES = 24000, CURSOR_BYTES = 2000, TELEMETRY_BYTES = 4000, CAPSULE_BYTES = 3600, TEXT = 4000;
+const STATE_BYTES = 24000, CURSOR_BYTES = 2000, TELEMETRY_BYTES = 4000, CAPSULE_BYTES = 3200, TEXT = 4000;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 const EVENT_TYPES = new Set(["user_prompt_submit", "post_tool_use", "pre_compact", "stop"]);
@@ -48,6 +48,12 @@ function text(value, field, ToolError, limit = TEXT) {
 }
 function optionalText(value, field, ToolError, limit = TEXT) {
   return value === undefined || value === null ? null : text(value, field, ToolError, limit);
+}
+function optionalId(value, field, ToolError) {
+  const normalized = optionalText(value, field, ToolError, 200);
+  if (normalized !== null && !ID.test(normalized))
+    fail(ToolError, "claude_native_identity_invalid", { field });
+  return normalized;
 }
 function digest(value, field, ToolError) {
   const normalized = text(value, field, ToolError, 64);
@@ -104,8 +110,8 @@ function common(args, ToolError) {
     sessionId, transcriptPathDigest: digest(args.transcript_path_digest, "transcript_path_digest", ToolError),
     projectAffinity: text(args.project_affinity, "project_affinity", ToolError, 500),
     cwd: optionalText(args.cwd, "cwd", ToolError, 1000),
-    parentSessionId: optionalText(args.parent_session_id, "parent_session_id", ToolError, 200),
-    nativeAgentId: optionalText(args.native_agent_id, "native_agent_id", ToolError, 200),
+    parentSessionId: optionalId(args.parent_session_id, "parent_session_id", ToolError),
+    nativeAgentId: optionalId(args.native_agent_id, "native_agent_id", ToolError),
     modelId: optionalText(args.model_id, "model_id", ToolError, 200),
   };
 }
@@ -208,7 +214,7 @@ export function buildClaudeRecoveryCapsule(checkpoint) {
     const candidate = `${out}\n${line}`;
     if (utf8(candidate) > CAPSULE_BYTES) {
       const suffix = "\n[Optional detail truncated at the Worker byte boundary.]";
-      return byteSlice(out, CAPSULE_BYTES - utf8(suffix)) + suffix;
+      return utf8(out + suffix) <= CAPSULE_BYTES ? out + suffix : out;
     }
     out = candidate;
   }
@@ -217,7 +223,10 @@ export function buildClaudeRecoveryCapsule(checkpoint) {
 const commonProperties = {
   runtime: { type: "string", enum: [RUNTIME] }, session_id: { type: "string" },
   transcript_path_digest: { type: "string", pattern: "^[0-9a-f]{64}$" }, project_affinity: { type: "string" },
-  cwd: { type: "string" }, parent_session_id: { type: "string" }, native_agent_id: { type: "string" }, model_id: { type: "string" },
+  cwd: { type: "string" },
+  parent_session_id: { type: "string", maxLength: 200, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$" },
+  native_agent_id: { type: "string", maxLength: 200, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$" },
+  model_id: { type: "string" },
 };
 const commonRequired = ["runtime", "session_id", "transcript_path_digest", "project_affinity"];
 

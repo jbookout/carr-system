@@ -46,7 +46,7 @@ if name=='claude-read-recovery':
  if os.environ.get('RECOVERY_EMPTY')=='1':
   print(json.dumps({'ok':True,'found':False,'checkpoint':None,'capsule':None}))
  else:
-  print(json.dumps({'ok':True,'found':True,'checkpoint':{'checkpoint_version':'3'},'capsule':'bounded recovery capsule'}))
+  print(json.dumps({'ok':True,'found':True,'checkpoint':{'checkpoint_version':'3'},'capsule':os.environ.get('RECOVERY_CAPSULE','bounded recovery capsule')}))
 else:
  print(json.dumps({'ok':True}))
 """, encoding="utf-8")
@@ -140,6 +140,38 @@ else:
         self.assertIn("expected_version=current_checkpoint_version", context)
         self.assertIn("must never be replayed automatically", context)
         self.assertLessEqual(len(context.encode()), 4800)
+
+    def test_maximum_subagent_binding_and_worker_capsule_fit_native_limit(self):
+        self.set_mode("inject")
+        session_id = "s" + "a" * 199
+        agent_id = "g" + "b" * 199
+        subagents = self.root / "subagents"
+        subagents.mkdir()
+        transcript = subagents / f"{agent_id}.jsonl"
+        transcript.write_text('{"type":"user","message":"local only"}\n', encoding="utf-8")
+        mandatory = ("Objective:\n- objective sentinel\nCurrent corrections:\n- correction sentinel\n"
+                     "Current constraints:\n- constraint sentinel\n"
+                     "Pending external effects (verify; never replay):\n- pending sentinel\n"
+                     "Next action:\n- next sentinel\n")
+        self.base_env["RECOVERY_CAPSULE"] = mandatory + "x" * (3200 - len(mandatory.encode()))
+
+        result = self.run_hook("SessionStart", source="compact", session_id=session_id,
+                               agent_id=agent_id, transcript_path=str(transcript))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertLessEqual(len(context.encode()), 4800)
+        for sentinel in ("objective sentinel", "correction sentinel", "constraint sentinel",
+                         "pending sentinel", "next sentinel"):
+            self.assertIn(sentinel, context)
+
+    def test_multibyte_agent_identifier_is_refused_before_recovery(self):
+        self.set_mode("inject")
+        result = self.run_hook("SessionStart", source="compact", agent_id="🧭" * 200)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("unverified native input ignored", result.stderr)
+        self.assertEqual(self.call_rows(), [])
 
     def test_precompact_and_compact_resume_reset_rule_delivery_generation(self):
         self.set_mode("checkpoint")
