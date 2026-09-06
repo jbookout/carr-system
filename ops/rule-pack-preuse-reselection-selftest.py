@@ -436,6 +436,7 @@ check("the compiled trigger table participates in the epoch source digest too",
 # digest, whose canonical hooks guarantee reset callbacks are installed.
 dedupe = load("claude_rule_delivery_dedupe_test",
               REPO / "lib/claude_rule_delivery_dedupe.py")
+runtime_dedupe = __import__("lib.claude_rule_delivery_dedupe", fromlist=["*"])
 with tempfile.TemporaryDirectory(prefix="rule-dedupe-") as temp_name:
     temp = Path(temp_name)
     old_env = dict(os.environ)
@@ -445,20 +446,38 @@ with tempfile.TemporaryDirectory(prefix="rule-dedupe-") as temp_name:
         os.environ["CARR_CLAUDE_RULE_DEDUPE_AUDIT"] = str(temp / "audit.jsonl")
         (temp / "mode.json").write_text(json.dumps({
             "schema_version": 1, "mode": "checkpoint",
-            "config_digest": dedupe.expected_config_digest(),
+            # Prime the process contract before introducing a transient source
+            # read failure. The verified receipt must keep every concurrent
+            # caller on the same dedupe path after that successful read.
+            "config_digest": runtime_dedupe.expected_config_digest(),
         }))
         parallel_outputs: list[dict | None] = []
         barrier = threading.Barrier(2)
+        source_barrier = threading.Barrier(2)
+        source_attempt = iter((True, False))
+        source_lock = threading.Lock()
+        real_contract_load = runtime_dedupe.continuity_config.load
+        def unstable_contract_load(repo):
+            with source_lock:
+                fail = next(source_attempt)
+            source_barrier.wait()
+            if fail:
+                raise OSError("transient canonical contract read failure")
+            return real_contract_load(repo)
         def invoke(index):
             candidate = payload()
             candidate["tool_use_id"] = f"parallel-{index}"
             barrier.wait()
             parallel_outputs.append(rail.process(candidate, runner=Runner()))
-        threads = [threading.Thread(target=invoke, args=(index,)) for index in range(2)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
+        runtime_dedupe.continuity_config.load = unstable_contract_load
+        try:
+            threads = [threading.Thread(target=invoke, args=(index,)) for index in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        finally:
+            runtime_dedupe.continuity_config.load = real_contract_load
         check("concurrent identical Claude rule sets inject exactly once",
               sum(output is not None for output in parallel_outputs) == 1,
               parallel_outputs)

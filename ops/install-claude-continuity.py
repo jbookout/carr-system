@@ -4,20 +4,17 @@ from __future__ import annotations
 
 import argparse
 import copy
-import hashlib
 import json
 import os
 import pathlib
 import sys
 import tempfile
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from lib import claude_continuity_config as continuity_config  # noqa: E402
+
 REPO = pathlib.Path(__file__).resolve().parents[1]
-SOURCE = REPO / "ops/config/claude-continuity-hooks.json"
-MODES = {"disabled", "shadow", "checkpoint", "inject"}
-HOOK_BASENAME = "/ops/claude-continuity-hook.py"
-HOOK_PATH = REPO / "ops/claude-continuity-hook.py"
-MCP_SERVER_NAME = "carr-continuity"
-MCP_PROXY = REPO / "mcp-server/continuity-stdio-proxy.mjs"
+MODES = continuity_config.MODES
 
 
 def settings_path() -> pathlib.Path:
@@ -54,121 +51,35 @@ def _load_json(path: pathlib.Path, missing: dict | None = None) -> dict:
 
 
 def desired_hooks() -> dict[str, list[dict]]:
-    source = _load_json(SOURCE)
-    rendered = json.loads(json.dumps(source).replace("{{REPO}}", str(REPO)))
-    hooks = rendered.get("hooks")
-    if not isinstance(hooks, dict) or set(hooks) != {
-            "UserPromptSubmit", "PostToolUse", "PreCompact", "SessionStart", "Stop"}:
-        raise RuntimeError("canonical Claude continuity hook set is invalid")
-    return hooks
+    return continuity_config.load(REPO).hooks
 
 
 def expected_config_digest() -> str:
-    rendered = SOURCE.read_text(encoding="utf-8").replace("{{REPO}}", str(REPO)).encode("utf-8")
-    digest = hashlib.sha256()
-    digest.update(rendered)
-    digest.update(b"\0")
-    digest.update(HOOK_PATH.read_bytes())
-    digest.update(b"\0")
-    digest.update(MCP_PROXY.read_bytes())
-    return "sha256:" + digest.hexdigest()
+    return continuity_config.load(REPO).config_digest
 
 
 def mode_document(mode: str) -> dict:
-    return {"schema_version": 1, "mode": mode,
-            "config_digest": expected_config_digest()}
+    return continuity_config.mode_document(mode, continuity_config.load(REPO))
 
 
 def desired_mcp_server() -> dict:
-    return {
-        "type": "stdio",
-        "command": "/usr/bin/env",
-        "args": ["node", str(MCP_PROXY)],
-        "env": {"CARR_MCP_CLIENT_PROFILE": "claude-continuity"},
-    }
-
-
-def _commands(entry: object) -> list[str]:
-    if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
-        return []
-    commands: list[str] = []
-    for hook in entry["hooks"]:
-        if isinstance(hook, dict) and isinstance(hook.get("command"), str):
-            commands.append(hook["command"])
-    return commands
-
-
-def _mentions_continuity(entry: object) -> bool:
-    return any(HOOK_BASENAME in command for command in _commands(entry))
-
-
-def _validated_continuity_entries(event: str, entries: list,
-                                  wanted: list[dict] | None) -> list:
-    observed = [entry for entry in entries if _mentions_continuity(entry)]
-    if observed and (wanted is None or observed != wanted):
-        raise RuntimeError(f"noncanonical Claude continuity hook present: {event}")
-    return observed
+    return continuity_config.load(REPO).mcp_server
 
 
 def install_document(current: dict) -> dict:
-    result = copy.deepcopy(current)
-    hooks = result.setdefault("hooks", {})
-    if not isinstance(hooks, dict):
-        raise RuntimeError("settings hooks must be an object")
-    desired = desired_hooks()
-    for event, entries in hooks.items():
-        if isinstance(entries, list):
-            _validated_continuity_entries(event, entries, desired.get(event))
-    for event, wanted in desired.items():
-        entries = hooks.setdefault(event, [])
-        if not isinstance(entries, list):
-            raise RuntimeError(f"settings hook event must be a list: {event}")
-        observed = _validated_continuity_entries(event, entries, wanted)
-        if not observed:
-            entries.extend(copy.deepcopy(wanted))
-    return result
+    return continuity_config.add_overlay(current, continuity_config.load(REPO))
 
 
 def remove_document(current: dict) -> dict:
-    result = copy.deepcopy(current)
-    hooks = result.get("hooks")
-    if not isinstance(hooks, dict):
-        return result
-    desired = desired_hooks()
-    for event, entries in hooks.items():
-        if not isinstance(entries, list):
-            continue
-        observed = _validated_continuity_entries(event, entries, desired.get(event))
-        if observed:
-            hooks[event] = [entry for entry in entries if entry not in desired[event]]
-    return result
+    return continuity_config.remove_overlay(current, continuity_config.load(REPO))
 
 
 def install_mcp_document(current: dict) -> dict:
-    result = copy.deepcopy(current)
-    servers = result.setdefault("mcpServers", {})
-    if not isinstance(servers, dict):
-        raise RuntimeError("Claude mcpServers must be an object")
-    observed = servers.get(MCP_SERVER_NAME)
-    wanted = desired_mcp_server()
-    if observed is not None and observed != wanted:
-        raise RuntimeError("noncanonical carr-continuity MCP server present")
-    servers[MCP_SERVER_NAME] = wanted
-    return result
+    return continuity_config.install_mcp(current, continuity_config.load(REPO))
 
 
 def remove_mcp_document(current: dict) -> dict:
-    result = copy.deepcopy(current)
-    servers = result.get("mcpServers")
-    if not isinstance(servers, dict):
-        return result
-    observed = servers.get(MCP_SERVER_NAME)
-    if observed is not None and observed != desired_mcp_server():
-        raise RuntimeError("refusing to remove noncanonical carr-continuity MCP server")
-    servers.pop(MCP_SERVER_NAME, None)
-    if not servers:
-        result.pop("mcpServers", None)
-    return result
+    return continuity_config.remove_mcp(current, continuity_config.load(REPO))
 
 
 def _encoded(value: dict) -> bytes:
@@ -236,26 +147,19 @@ def apply_transaction(settings: dict, mcp_config: dict, mode: str | None, remove
 def verify() -> tuple[bool, str]:
     current = _load_json(settings_path(), missing={})
     hooks = current.get("hooks", {})
-    if not isinstance(hooks, dict):
-        return False, "Claude settings hooks are invalid"
-    desired = desired_hooks()
-    for event, entries in hooks.items():
-        if isinstance(entries, list):
-            _validated_continuity_entries(event, entries, desired.get(event))
-    for event, wanted in desired.items():
-        entries = hooks.get(event, [])
-        observed = (_validated_continuity_entries(event, entries, wanted)
-                    if isinstance(entries, list) else [])
-        if observed != wanted:
-            return False, f"{event} does not contain exactly the canonical continuity hook"
-    mode = _load_json(mode_path())
-    mode_name = mode.get("mode")
-    if mode_name not in MODES or mode != mode_document(mode_name):
+    contract = continuity_config.load(REPO)
+    try:
+        continuity_config.validate_hooks(hooks, contract, require_complete=True)
+        mode_name = continuity_config.read_mode(mode_path(), contract)
+    except RuntimeError as exc:
+        return False, str(exc)
+    if mode_name is None:
         return False, "continuity mode is invalid"
-    config = _load_json(claude_config_path())
-    if config.get("mcpServers", {}).get(MCP_SERVER_NAME) != desired_mcp_server():
-        return False, "carr-continuity MCP server is absent or noncanonical"
-    return True, f"all five Claude continuity hooks and dedicated MCP server match; mode={mode['mode']}"
+    try:
+        continuity_config.validate_mcp(_load_json(claude_config_path()), contract, required=True)
+    except RuntimeError as exc:
+        return False, str(exc)
+    return True, f"all five Claude continuity hooks and dedicated MCP server match; mode={mode_name}"
 
 
 def main() -> int:
@@ -269,6 +173,12 @@ def main() -> int:
             ok, message = verify()
             print(message)
             return 0 if ok else 1
+        # The mode receipt is the authority for the installed overlay.  Never
+        # repair or remove an existing receipt implicitly: a stale digest means
+        # the local resources no longer describe the contract this installer
+        # can safely mutate.  Absence remains valid for a first install and an
+        # idempotent remove.
+        continuity_config.read_mode(mode_path(), continuity_config.load(REPO))
         current = _load_json(settings_path(), missing={})
         updated = remove_document(current) if args.action == "remove" else install_document(current)
         mcp_current = _load_json(claude_config_path(), missing={})

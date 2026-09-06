@@ -121,6 +121,23 @@ class InstallerTest(unittest.TestCase):
         self.assertEqual(self.invoke("remove", "--apply").returncode, 0)
         self.assertEqual(self.settings.read_bytes(), first)
 
+    def test_install_and_remove_refuse_stale_mode_without_mutation(self):
+        self.assertEqual(self.invoke("install", "--mode", "inject", "--apply").returncode, 0)
+        tampered = json.loads(self.mode.read_text())
+        tampered["config_digest"] = "sha256:" + "0" * 64
+        self.mode.write_text(json.dumps(tampered), encoding="utf-8")
+        before_settings = self.settings.read_bytes()
+        before_mode = self.mode.read_bytes()
+        before_mcp = self.claude_config.read_bytes()
+
+        for action in ("install", "remove"):
+            result = self.invoke(action, "--apply")
+            self.assertNotEqual(result.returncode, 0, action)
+            self.assertIn("mode document is stale or noncanonical", result.stderr, action)
+            self.assertEqual(self.settings.read_bytes(), before_settings, action)
+            self.assertEqual(self.mode.read_bytes(), before_mode, action)
+            self.assertEqual(self.claude_config.read_bytes(), before_mcp, action)
+
     def test_remove_refuses_substring_collision_without_deleting_either_hook(self):
         self.assertEqual(self.invoke("install", "--mode", "inject", "--apply").returncode, 0)
         configured = json.loads(self.settings.read_text())
