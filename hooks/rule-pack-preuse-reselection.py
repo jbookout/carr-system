@@ -58,6 +58,7 @@ from lib.rule_delivery_preuse import (  # noqa:E402
 from lib.rule_delivery_shadow import (  # noqa:E402
     WINDOW_SOURCE_PATHS, file_sha256, source_sha256,
 )
+from lib.claude_rule_delivery_dedupe import should_deliver, transcript_path_digest  # noqa:E402
 
 
 MAP = REPO / "ops/config/rule-enforcement-map.json"
@@ -249,6 +250,20 @@ def _context(text: str) -> dict:
     }}
 
 
+def _deduped_context(payload: dict, receipt: dict) -> dict | None:
+    text = canonical(receipt).decode("utf-8")
+    rule_set = {key: receipt.get(key) for key in (
+        "schema", "pack", "packs", "trigger_ids", "rule_ids", "rules",
+        "map_digest", "source_digest", "triggers_digest", "rule_delivery")}
+    if (_client(payload) == "claude"
+            and _nonempty(payload.get("transcript_path"))
+            and not should_deliver(payload["session_id"],
+                                   transcript_path_digest(payload["transcript_path"]),
+                                   digest(rule_set), len(text.encode("utf-8")))):
+        return None
+    return _context(text)
+
+
 # ---------------------------------------------------------------------------
 # GENERALIZED RAIL (WR-000019 slice S9) — same shape as the four functions
 # above, parameterized over the compiled trigger table's (trigger_ids, packs,
@@ -342,7 +357,7 @@ def process(payload: dict, *, runner: Callable = subprocess.run) -> dict | None:
         try:
             ids = scheduled_rule_ids()
             response = _run_selector(ids, runner)
-            return _context(canonical(_receipt(payload, response, ids)).decode("utf-8"))
+            return _deduped_context(payload, _receipt(payload, response, ids))
         except Exception:
             # Never surface provider/auth/network exception text: it may contain a
             # bearer, URL, or local path.  The fixed category is enough for Stop to
@@ -361,9 +376,8 @@ def process(payload: dict, *, runner: Callable = subprocess.run) -> dict | None:
     try:
         trigger_ids, packs, ids = merge_trigger_delivery(rows)
         response = _run_generalized_selector(packs, ids, runner)
-        return _context(canonical(
-            _generalized_receipt(payload, response, trigger_ids, packs, ids)
-        ).decode("utf-8"))
+        return _deduped_context(payload,
+                                _generalized_receipt(payload, response, trigger_ids, packs, ids))
     except Exception:
         return _context(GENERALIZED_FAILURE_CONTEXT)
 

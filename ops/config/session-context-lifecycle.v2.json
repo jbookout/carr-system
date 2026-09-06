@@ -1,48 +1,8 @@
 {
-  "schema_version": 1,
-  "control": "session_context_lifecycle_gate_v1",
+  "schema_version": 2,
+  "control": "session_context_lifecycle_gate_v2",
   "state_directory": "out/session-context-lifecycle",
   "audit_log": "out/context-handoff.jsonl",
-  "thresholds_percent": {
-    "dense_soft": 50,
-    "normal_soft": 55,
-    "hard": 70
-  },
-  "density": {
-    "risk_levels": ["R3", "R4", "R5", "R6"],
-    "generation_tool_calls": 20,
-    "distinct_mutated_paths": 8,
-    "worker_starts": 3
-  },
-  "model_windows": {
-    "claude-opus-4-1": 1000000,
-    "claude-opus-4-1-20250805": 1000000,
-    "claude-opus-5": 1000000,
-    "claude-sonnet-5": 1000000,
-    "claude-haiku-4-5-20251001": 200000,
-    "claude-fable-5": 1000000,
-    "gpt-5.6-sol": 258400,
-    "gpt-5.6-terra": 258400,
-    "gpt-5.6-luna": 258400
-  },
-  "fallback_caps": {
-    "dense_soft": {
-      "invocations": 20,
-      "active_minutes": 75,
-      "cycles": 6
-    },
-    "normal_soft": {
-      "invocations": 24,
-      "active_minutes": 90,
-      "cycles": 8
-    },
-    "hard": {
-      "invocations": 40,
-      "active_minutes": 120,
-      "cycles": 12
-    },
-    "adjacent_activity_cap_seconds": 300
-  },
   "dispatcher": {
     "snapshot_schema": "session_context_dispatcher_snapshot_v1",
     "freshness_seconds": 120,
@@ -77,6 +37,7 @@
   },
   "actions": [
     "NOOP",
+    "ANNOUNCE",
     "RECOVER_SAME_TASK",
     "REFUSE"
   ],
@@ -107,15 +68,25 @@
   ],
   "surface_contracts": {
     "claude": {
-      "events": ["PostToolUse", "PreCompact", "Stop"],
-      "blocking_event": "Stop",
+      "events": [
+        "PostToolUse",
+        "PreCompact",
+        "Stop"
+      ],
       "evidence_trust_boundary": "controller_callback",
       "evidence_binding": "every nonterminal hook callback verifies logical session identity and a live readable transcript path; controller_callback_id is the native controller trust boundary; a provenance-verified historical terminal callback may no-op after its transcript is archived",
       "native_evidence_fields": [
         "session_id",
         "transcript_path",
         "controller_callback_id"
-      ]
+      ],
+      "advisory_events": [
+        "PostToolUse",
+        "Stop"
+      ],
+      "receipt_only_event": "PreCompact",
+      "prose_injection_event": "SessionStart",
+      "context_stop_policy": "announce_only"
     },
     "codex": {
       "adapter": "bare_cli",
@@ -130,6 +101,105 @@
         "pinnedIndex",
         "event_id"
       ]
+    }
+  },
+  "surface_policies": {
+    "codex": {
+      "thresholds_percent": {
+        "dense_soft": 50,
+        "normal_soft": 55,
+        "hard": 70
+      },
+      "density": {
+        "risk_levels": [
+          "R3",
+          "R4",
+          "R5",
+          "R6"
+        ],
+        "generation_tool_calls": 20,
+        "distinct_mutated_paths": 8,
+        "worker_starts": 3
+      },
+      "model_windows": {
+        "gpt-5.6-sol": 258400,
+        "gpt-5.6-terra": 258400,
+        "gpt-5.6-luna": 258400
+      },
+      "fallback_caps": {
+        "dense_soft": {
+          "invocations": 20,
+          "active_minutes": 75,
+          "cycles": 6
+        },
+        "normal_soft": {
+          "invocations": 24,
+          "active_minutes": 90,
+          "cycles": 8
+        },
+        "hard": {
+          "invocations": 40,
+          "active_minutes": 120,
+          "cycles": 12
+        },
+        "adjacent_activity_cap_seconds": 300
+      },
+      "stop_outcome": "verified_handoff"
+    },
+    "claude": {
+      "thresholds_percent": {
+        "dense_soft": 50,
+        "normal_soft": 55,
+        "hard": 70
+      },
+      "density": {
+        "risk_levels": [
+          "R3",
+          "R4",
+          "R5",
+          "R6"
+        ],
+        "generation_tool_calls": 20,
+        "distinct_mutated_paths": 8,
+        "worker_starts": 3
+      },
+      "model_windows": {
+        "claude-opus-4-1": 1000000,
+        "claude-opus-4-1-20250805": 1000000,
+        "claude-opus-5": 1000000,
+        "claude-sonnet-5": 1000000,
+        "claude-haiku-4-5-20251001": 200000,
+        "claude-fable-5": 1000000,
+        "claude-fable-5-1": 1000000
+      },
+      "fallback_caps": {
+        "dense_soft": {
+          "invocations": 20,
+          "active_minutes": 75,
+          "cycles": 6
+        },
+        "normal_soft": {
+          "invocations": 24,
+          "active_minutes": 90,
+          "cycles": 8
+        },
+        "hard": {
+          "invocations": 40,
+          "active_minutes": 120,
+          "cycles": 12
+        },
+        "adjacent_activity_cap_seconds": 300
+      },
+      "stop_outcome": "announce_only",
+      "signal_failures": "announce_only",
+      "fallback_caps_outcome": "announce_only",
+      "control_errors": "announce_only",
+      "native_auto_compaction": true,
+      "headroom_notice": {
+        "basis": "absolute_measured_tokens",
+        "reserve": "p95_next_tool_burst_plus_maximum_response",
+        "outcome": "announce_only"
+      }
     }
   }
 }

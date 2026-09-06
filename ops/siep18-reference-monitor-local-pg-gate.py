@@ -15,17 +15,17 @@ from gate_runtime_role import rollback_only_connection
 
 REPO = Path(__file__).resolve().parents[1]
 
-EXPECTED_GRANT_COUNT = 301
+EXPECTED_GRANT_COUNT = 307
 EXPECTED_GRANT_DIGEST = (
-    "sha256:dcf95363b3388bbb104e455a154fbe1da0a228f38df0c9317d8c191373706e73"
+    "sha256:5ac46a8d4226dae12c5a455be0080a472bf4e7f9dd3aa725004ec9c105be74a1"
 )
 
 # WR-000048 mutation test fixtures. NARROWED_ROLE_AUTHORITY_SCOPE is the
 # portable census scope this repair cascade installs (verbatim from the
 # templates: ops/scac-policy-epoch-sql.mjs and renderSIEP13RegistrySql in
 # ops/scac-mutation-inventory.mjs, which this session edited). It must appear
-# exactly once inside the live ops.scac_mutation_catalog_v11_current()
-# definition in migrations/0481_codex_continuity_registry_activation.sql --
+# exactly once inside the live ops.scac_mutation_catalog_v12_current()
+# definition in migrations/0486_claude_continuity_registry_activation.sql --
 # if it does not, the migration no longer carries the fix this test exists to
 # guard, and that is a louder failure than a silently-skipped mutation test.
 # UNNARROWED_ROLE_AUTHORITY_SCOPE is the pre-fix scope, lifted verbatim (never
@@ -50,10 +50,10 @@ UNNARROWED_ROLE_AUTHORITY_SCOPE = (
 )
 
 
-def v11_current_function_sql(source: str) -> str:
-    """Extract the exact, currently-installed ops.scac_mutation_catalog_v11_current()
+def current_function_sql(source: str, version: int) -> str:
+    """Extract the exact, currently-installed SCAC catalog current function
     definition from a migration file's text, start marker through its closing $fn$;."""
-    start_marker = "create or replace function ops.scac_mutation_catalog_v11_current()"
+    start_marker = f"create or replace function ops.scac_mutation_catalog_v{version}_current()"
     end_marker = "end $fn$;"
     start = source.index(start_marker)
     end = source.index(end_marker, start) + len(end_marker)
@@ -171,14 +171,14 @@ def main() -> int:
                           atomic_database_mediation_operational,direct_database_grant_cutover,
                           production_enforcement_active
                      from ops.scac_mutation_registry_version
-                    where registry_version='scac-mutation-registry.v11'"""
+                    where registry_version='scac-mutation-registry.v12'"""
             ).fetchone()
             if registry is None or registry[4:] != (False, False, False):
-                raise RuntimeError(f"v11 registry is absent or authority-expanding: {registry!r}")
+                raise RuntimeError(f"v12 registry is absent or authority-expanding: {registry!r}")
             if registry[3].get("runtime_dml_grants") != {
                 "count": EXPECTED_GRANT_COUNT, "digest": EXPECTED_GRANT_DIGEST,
             }:
-                raise RuntimeError(f"v11 grant projection is not exact: {registry[3]!r}")
+                raise RuntimeError(f"v12 grant projection is not exact: {registry[3]!r}")
 
             # A fresh reconstructed database intentionally has no policy epoch
             # until nonempty reviewed doctrine/rule data arrives. Seed that
@@ -193,10 +193,10 @@ def main() -> int:
             ).fetchone()[0]
             if epoch_chain.get("valid") is not True or \
                epoch_chain.get("reason") != "valid" or \
-               epoch_chain.get("registry_version") != "scac-mutation-registry.v11" or \
+               epoch_chain.get("registry_version") != "scac-mutation-registry.v12" or \
                epoch_chain.get("registry_digest") != registry[0] or \
                epoch_chain.get("current_source_digest") != epoch_chain.get("live_source_digest"):
-                raise RuntimeError(f"real v11 policy epoch chain is not current: {epoch_chain!r}")
+                raise RuntimeError(f"real v12 policy epoch chain is not current: {epoch_chain!r}")
 
             # The bulk fixture seed suppresses public.rule lifecycle triggers so
             # it does not pretend 218 synthetic rows passed the real admission
@@ -236,7 +236,7 @@ def main() -> int:
             ).fetchone()[0]
             if epoch_chain.get("valid") is not True or \
                epoch_chain.get("reason") != "valid" or \
-               epoch_chain.get("registry_version") != "scac-mutation-registry.v11" or \
+               epoch_chain.get("registry_version") != "scac-mutation-registry.v12" or \
                epoch_chain.get("registry_digest") != registry[0] or \
                epoch_chain.get("current_source_digest") != epoch_chain.get("live_source_digest"):
                 raise RuntimeError(
@@ -261,29 +261,29 @@ def main() -> int:
                state.get("missing_guard_count") != 0 or \
                state.get("unsupported_writable_relation_count") != 0 or \
                state.get("policy_epoch_state") != "current" or \
-               state.get("registry_version") != "scac-mutation-registry.v11" or \
+               state.get("registry_version") != "scac-mutation-registry.v12" or \
                state.get("direct_database_grant_cutover") is not False or \
                state.get("production_enforcement_active") is not False:
                 raise RuntimeError(f"reference monitor did not become exactly current: {state!r}")
 
             lookup = cur.execute(
-                "select ops.scac_mutation_registration_v11(%s,'mcp-tool:standing-context')",
+                "select ops.scac_mutation_registration_v12(%s,'mcp-tool:standing-context')",
                 (registry[0],),
             ).fetchone()[0]
             if lookup.get("registered") is not True or \
-               lookup.get("registry_version") != "scac-mutation-registry.v11":
-                raise RuntimeError(f"v11 exact registry lookup refused: {lookup!r}")
+               lookup.get("registry_version") != "scac-mutation-registry.v12":
+                raise RuntimeError(f"v12 exact registry lookup refused: {lookup!r}")
             if cur.execute(
-                "select ops.scac_mutation_registry_v10_seal_available()"
+                "select ops.scac_mutation_registry_v11_seal_available()"
             ).fetchone()[0] is not True:
-                raise RuntimeError("sealed v10 predecessor is unavailable")
+                raise RuntimeError("sealed v11 predecessor is unavailable")
 
             # WR-000048 role-escalation guard (dispatcher ruling 2 + Joe decision
             # 23df893f, loop 569 -- SUPERSEDED 2026-09-03: the named exception for
             # carr_program5_forward_fix_verifier -> neon_superuser was REMOVED from
             # the guard as part of the WR-000048 repair cascade, so the guard now
             # reads plainly with no exceptions. The portable role-authority census
-            # no longer enumerates platform/superuser roles, so the v11 catalog
+            # no longer enumerates platform/superuser roles, so the v12 catalog
             # current-check carries a compensating control: ANY carr_ role that is a
             # member of a superuser role or a neon_*/pg_* bundle fails it closed --
             # no exceptions, including carr_program5_forward_fix_verifier itself.
@@ -291,12 +291,12 @@ def main() -> int:
             # (an existing pg_* role) and the plain rolsuper path (a role this test
             # creates and marks superuser itself, since no platform role in a local
             # database is guaranteed to carry rolsuper).
-            if cur.execute("select ops.scac_mutation_catalog_v11_current()").fetchone()[0] is not True:
-                raise RuntimeError("v11 catalog not current before escalation mutation")
+            if cur.execute("select ops.scac_mutation_catalog_v12_current()").fetchone()[0] is not True:
+                raise RuntimeError("v12 catalog not current before escalation mutation")
             cur.execute("savepoint escalation_mutation")
             cur.execute("create role carr_siep18_escalation_probe")
             cur.execute("grant pg_write_all_data to carr_siep18_escalation_probe")
-            if cur.execute("select ops.scac_mutation_catalog_v11_current()").fetchone()[0] is not False:
+            if cur.execute("select ops.scac_mutation_catalog_v12_current()").fetchone()[0] is not False:
                 raise RuntimeError(
                     "escalation guard did not trip on a carr_ role granted pg_write_all_data"
                 )
@@ -305,17 +305,17 @@ def main() -> int:
 
             # Second, distinct trip path (WR-000048): a carr_ role that is a member
             # of an ACTUAL superuser role -- not a neon_*/pg_* NAMED bundle -- must
-            # also fail the v11 current-check closed, with no exception for any
+            # also fail the v12 current-check closed, with no exception for any
             # carr_ role including the one named in the now-removed carve-out.
-            if cur.execute("select ops.scac_mutation_catalog_v11_current()").fetchone()[0] is not True:
-                raise RuntimeError("v11 catalog not current before superuser-bundle mutation")
+            if cur.execute("select ops.scac_mutation_catalog_v12_current()").fetchone()[0] is not True:
+                raise RuntimeError("v12 catalog not current before superuser-bundle mutation")
             cur.execute("savepoint superuser_bundle_mutation")
             cur.execute("create role carr_siep18_superuser_bundle_probe")
             cur.execute("create role siep18_gate_synthetic_superuser superuser")
             cur.execute(
                 "grant siep18_gate_synthetic_superuser to carr_siep18_superuser_bundle_probe"
             )
-            if cur.execute("select ops.scac_mutation_catalog_v11_current()").fetchone()[0] is not False:
+            if cur.execute("select ops.scac_mutation_catalog_v12_current()").fetchone()[0] is not False:
                 raise RuntimeError(
                     "escalation guard did not trip on a carr_ role granted an actual "
                     "superuser role (rolsuper path, distinct from the neon_/pg_ "
@@ -339,45 +339,45 @@ def main() -> int:
             # pre-fix (unnarrowed) CTE inside a savepoint, and require the same
             # real (non-bootstrap) snapshot path to now raise.
             snapshot = cur.execute("select ops.scac_policy_epoch_snapshot()").fetchone()[0]
-            if not isinstance(snapshot, dict) or snapshot.get("registry_version") != "scac-mutation-registry.v11":
+            if not isinstance(snapshot, dict) or snapshot.get("registry_version") != "scac-mutation-registry.v12":
                 raise RuntimeError(
                     f"ops.scac_policy_epoch_snapshot() did not succeed on the real, "
                     f"non-bootstrap path with the repaired templates: {snapshot!r}"
                 )
-            v11_migration_path = REPO / "migrations/0481_codex_continuity_registry_activation.sql"
-            v11_migration_sql = v11_migration_path.read_text(encoding="utf-8")
-            committed_v11_current = v11_current_function_sql(v11_migration_sql)
-            committed_v11_body = function_body(committed_v11_current)
+            v12_migration_path = REPO / "migrations/0486_claude_continuity_registry_activation.sql"
+            v12_migration_sql = v12_migration_path.read_text(encoding="utf-8")
+            committed_v12_current = current_function_sql(v12_migration_sql, 12)
+            committed_v12_body = function_body(committed_v12_current)
 
             # Prove the canonical migration class installed the committed
             # catalog functions before this gate mutates anything. Historical
             # v2-v10 `*_current` functions are deliberately retained as seal/live
             # wrappers, while the full catalog validators that remain installed
-            # under `*_live_at_seal` plus v11 must all carry the narrowed census.
+            # under `*_live_at_seal` plus v12 must all carry the narrowed census.
             installed_catalog_functions = cur.execute(
                 """select p.proname, pg_get_functiondef(p.oid), p.prosrc
                      from pg_proc p
                      join pg_namespace n on n.oid=p.pronamespace
                     where n.nspname='ops'
-                      and p.proname~'^scac_mutation_catalog_v([2-9]|10|11)_(current|live_at_seal)$'
+                      and p.proname~'^scac_mutation_catalog_v([2-9]|10|11|12)_(current|live_at_seal)$'
                     order by p.proname"""
             ).fetchall()
             installed_names = {row[0] for row in installed_catalog_functions}
             expected_current_names = {
-                f"scac_mutation_catalog_v{version}_current" for version in range(2, 12)
+                f"scac_mutation_catalog_v{version}_current" for version in range(2, 13)
             }
             if not expected_current_names.issubset(installed_names):
                 raise RuntimeError(
-                    "canonical migration chain did not install every v2-v11 current "
+                    "canonical migration chain did not install every v2-v12 current "
                     f"function: missing {sorted(expected_current_names - installed_names)!r}"
                 )
             installed_validators = [
                 row for row in installed_catalog_functions if "role_rows as (" in row[2]
             ]
-            if len(installed_validators) != 8:
+            if len(installed_validators) != 9:
                 raise RuntimeError(
-                    "canonical migration chain did not retain the expected eight "
-                    f"role-authority validators (v4-v11): {[row[0] for row in installed_validators]!r}"
+                    "canonical migration chain did not retain the expected nine "
+                    f"role-authority validators (v4-v12): {[row[0] for row in installed_validators]!r}"
                 )
             for function_name, definition, _body in installed_validators:
                 if NARROWED_ROLE_AUTHORITY_SCOPE not in definition or \
@@ -387,39 +387,39 @@ def main() -> int:
                         "role-authority scope"
                     )
 
-            installed_v11 = next(
+            installed_v12 = next(
                 row for row in installed_catalog_functions
-                if row[0] == "scac_mutation_catalog_v11_current"
+                if row[0] == "scac_mutation_catalog_v12_current"
             )
-            installed_v11_definition = installed_v11[1]
-            installed_v11_body = installed_v11[2].strip()
-            if installed_v11_body != committed_v11_body:
+            installed_v12_definition = installed_v12[1]
+            installed_v12_body = installed_v12[2].strip()
+            if installed_v12_body != committed_v12_body:
                 raise RuntimeError(
-                    "installed ops.scac_mutation_catalog_v11_current() body does not "
-                    "match the committed 0480 migration definition"
+                    "installed ops.scac_mutation_catalog_v12_current() body does not "
+                    "match the committed 0486 migration definition"
                 )
-            if NARROWED_ROLE_AUTHORITY_SCOPE not in installed_v11_definition:
+            if NARROWED_ROLE_AUTHORITY_SCOPE not in installed_v12_definition:
                 raise RuntimeError(
-                    "the installed ops.scac_mutation_catalog_v11_current() definition no "
+                    "the installed ops.scac_mutation_catalog_v12_current() definition no "
                     "longer contains the expected narrowed role-authority scope -- "
                     "the mutation test below would be vacuous; the fix or the "
                     "generator moved without this test being updated"
                 )
-            widened_v11_current = installed_v11_definition.replace(
+            widened_v12_current = installed_v12_definition.replace(
                 NARROWED_ROLE_AUTHORITY_SCOPE, UNNARROWED_ROLE_AUTHORITY_SCOPE
             )
-            if widened_v11_current == installed_v11_definition:
+            if widened_v12_current == installed_v12_definition:
                 raise RuntimeError("widening the role-authority scope for the mutation test was a no-op")
             cur.execute("savepoint census_scope_mutation")
-            cur.execute(widened_v11_current)
+            cur.execute(widened_v12_current)
             active_widened_definition = cur.execute(
-                "select pg_get_functiondef('ops.scac_mutation_catalog_v11_current()'::regprocedure)"
+                "select pg_get_functiondef('ops.scac_mutation_catalog_v12_current()'::regprocedure)"
             ).fetchone()[0]
             if UNNARROWED_ROLE_AUTHORITY_SCOPE not in active_widened_definition or \
                NARROWED_ROLE_AUTHORITY_SCOPE in active_widened_definition:
                 raise RuntimeError(
                     "the deliberate widened mutation was not installed in the live "
-                    "v11 current-check function"
+                    "v12 current-check function"
                 )
             try:
                 cur.execute("select ops.scac_policy_epoch_snapshot()")
@@ -436,15 +436,15 @@ def main() -> int:
                 )
             cur.execute("rollback to savepoint census_scope_mutation")
             cur.execute("release savepoint census_scope_mutation")
-            restored_v11_definition = cur.execute(
-                "select pg_get_functiondef('ops.scac_mutation_catalog_v11_current()'::regprocedure)"
+            restored_v12_definition = cur.execute(
+                "select pg_get_functiondef('ops.scac_mutation_catalog_v12_current()'::regprocedure)"
             ).fetchone()[0]
-            if restored_v11_definition != installed_v11_definition:
+            if restored_v12_definition != installed_v12_definition:
                 raise RuntimeError(
-                    "rollback did not restore the committed v11 current-check definition"
+                    "rollback did not restore the committed v12 current-check definition"
                 )
-            if cur.execute("select ops.scac_mutation_catalog_v11_current()").fetchone()[0] is not True:
-                raise RuntimeError("v11 catalog current-check did not re-arm after the census-scope rollback")
+            if cur.execute("select ops.scac_mutation_catalog_v12_current()").fetchone()[0] is not True:
+                raise RuntimeError("v12 catalog current-check did not re-arm after the census-scope rollback")
 
             cur.execute("savepoint grant_drift")
             cur.execute("grant insert on public.lead to carr_reader")
@@ -472,7 +472,7 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001 - gate reports the exact refusal
         return fail(str(exc))
     print(
-        "siep18-reference-monitor-local-pg-gate passed: exact v11 grant seal, "
+        "siep18-reference-monitor-local-pg-gate passed: exact v12 grant seal, "
         "complete guards, drift refusal, and unsupported-view refusal"
     )
     return 0

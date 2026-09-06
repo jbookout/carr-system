@@ -122,13 +122,14 @@ function dbCursor(value) {
 }
 
 function requireNativeCodex(actor, ToolError) {
-  // The server-derived native_agent_verified flag is the only authority for a
-  // Codex MCP principal.  runtime in a request is metadata, never auth.
-  const localSponsored = actor?.via === "local-token" &&
-    (actor.slug === "joe-local" || actor.slug === "dell-local") &&
-    actor.native_agent_verified === true && typeof actor.sponsoring_human_slug === "string";
+  // Surface and native-agent verification are both derived by authentication.
+  // runtime in a request is metadata and can never select this authority.
+  const localSponsored = (actor?.via === "codex-continuity-token" ||
+    (actor?.via === "local-token" && actor?.continuity_surface_compat === true)) &&
+    actor.continuity_surface === "codex" && actor.native_agent_verified === true &&
+    typeof actor.sponsoring_human_slug === "string";
   const nativeOAuth = actor?.slug === "codex" && actor.human === false &&
-    actor.native_agent_verified === true;
+    actor.native_agent_verified === true && actor.continuity_surface === "codex";
   if (!(nativeOAuth || localSponsored))
     throw new ToolError({ error: "codex_native_principal_required",
       hint: "continuity writes require a server-verified native Codex principal" });

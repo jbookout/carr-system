@@ -181,10 +181,18 @@ export function actorFromProps(props, currentNativeAgentBindings = null) {
   // avoiding a forced reauthorization rollout window.
   const native_agent_verified = !human &&
     verifiedAgentSlugForClient(props.client_id, props.slug, currentNativeAgentBindings) === props.slug;
+  // Codex continuity existed on this OAuth door before local continuity
+  // credentials were split. Preserve that authorized path by deriving the
+  // surface from the current server-held client-id binding. Claude OAuth is
+  // deliberately not granted the Claude continuity surface: its native hook
+  // uses the separately provisioned local credential.
+  const continuity_surface = native_agent_verified && props.slug === "codex"
+    ? "codex" : null;
   return { slug: props.slug, display: DISPLAY[props.slug], human,
            via: props.via || null, client_id: props.client_id || null,
            sponsoring_human_slug,
            ...(native_agent_verified ? { native_agent_verified: true } : {}),
+           ...(continuity_surface ? { continuity_surface } : {}),
            // Compatibility alias for existing internal readers. New code must
            // use sponsoring_human_slug so runtime and sponsor never blur.
            human_slug: sponsoring_human_slug,
@@ -341,6 +349,44 @@ export function agentActorForToken(authorizationHeader, agentTokensRaw, viaLabel
            via: viaLabel, client_id: null,
            sponsoring_human_slug, human_slug: sponsoring_human_slug, sponsor_required: false,
            ...(native_agent_verified ? { native_agent_verified: true } : {}) };
+}
+
+/**
+ * Match a bearer against the two isolated continuity secret maps.
+ *
+ * Each map is sponsor -> token. The authenticated sponsor and selected map
+ * jointly determine the runtime actor and continuity surface; no tool input,
+ * client profile name, model id, or request parameter participates. A token
+ * present in both maps is ambiguous and refuses instead of inheriting check
+ * order as authority.
+ */
+export function continuityActorForTokenMaps(
+  authorizationHeader, codexTokensRaw, claudeTokensRaw,
+) {
+  const token = String(authorizationHeader || "").replace(/^Bearer\s+/i, "");
+  if (!token) return null;
+  const candidates = [];
+  for (const [surface, raw] of [
+    ["codex", codexTokensRaw], ["claude", claudeTokensRaw],
+  ]) {
+    let tokens;
+    try { tokens = JSON.parse(raw || "{}"); }
+    catch { continue; }
+    if (!tokens || typeof tokens !== "object" || Array.isArray(tokens)) continue;
+    const sponsors = Object.keys(tokens).filter(
+      sponsor => isKnownPartner(sponsor) && tokens[sponsor] && tokens[sponsor] === token,
+    );
+    if (sponsors.length === 1) candidates.push({ surface, sponsor: sponsors[0] });
+    else if (sponsors.length > 1) return null;
+  }
+  if (candidates.length !== 1) return null;
+  const { surface, sponsor } = candidates[0];
+  return {
+    slug: surface, display: DISPLAY[surface], human: false, agent: true,
+    via: `${surface}-continuity-token`, client_id: null,
+    sponsoring_human_slug: sponsor, human_slug: sponsor, sponsor_required: false,
+    native_agent_verified: true, continuity_surface: surface,
+  };
 }
 
 /**

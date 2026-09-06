@@ -156,7 +156,7 @@ def equivalence_cases(tmp):
     check("the equivalence matrix actually exercised a DENY", seen_deny,
           "every case allowed — the test proves less than it claims")
 
-    # The lifecycle gate publishes a structured Stop refusal and persists a
+    # The Claude lifecycle gate publishes a structured Stop announcement and persists a
     # per-task version. Give bare and wrapped runs independent empty state
     # roots so the wrapper comparison is byte-for-byte, not normalized after
     # the fact.
@@ -197,9 +197,12 @@ def equivalence_cases(tmp):
           bare_err == wrap_err, f"bare={bare_err!r} wrapped={wrap_err!r}")
     lifecycle_rows = [row for row in records(tmp)
                       if row.get("hook") == "context-handoff-gate.py"]
-    check("context lifecycle telemetry preserves canonical refusal reason",
+    check("context lifecycle telemetry records the announce-only outcome",
           lifecycle_rows
-          and lifecycle_rows[-1].get("deny_class") == "CONTEXT_HANDOFF_REQUIRED",
+          and lifecycle_rows[-1].get("outcome") == "allow"
+          and lifecycle_rows[-1].get("register") == "announce"
+          and lifecycle_rows[-1].get("reopen") is False
+          and lifecycle_rows[-1].get("deny_class") is None,
           lifecycle_rows[-1] if lifecycle_rows else "no row")
 
     malformed_env = env_for(
@@ -217,10 +220,10 @@ def equivalence_cases(tmp):
           malformed_rc == 0 and malformed_out.strip()
           and not malformed_err.strip()
           and malformed_row.get("event") == "Stop"
-          and malformed_row.get("outcome") == "deny"
-          and malformed_row.get("register") == "reopen"
-          and malformed_row.get("reopen") is True
-          and malformed_row.get("deny_class") == "LIFECYCLE_INVALID",
+          and malformed_row.get("outcome") == "allow"
+          and malformed_row.get("register") == "announce"
+          and malformed_row.get("reopen") is False
+          and malformed_row.get("deny_class") is None,
           (malformed_rc, malformed_out, malformed_err, malformed_row))
 
 

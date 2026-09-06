@@ -154,6 +154,25 @@ def main() -> int:
     resumed_batches = migration_runner.migration_batches([continuity[1]])
     assert resumed_batches == [[continuity[1]]]
 
+    claude_continuity = [
+        item for item in loaded if item[0].startswith(("0485_", "0486_"))
+    ]
+    assert [item[0] for item in claude_continuity] == [
+        "0485_claude_continuity.sql",
+        "0486_claude_continuity_registry_activation.sql",
+    ]
+    assert migration_runner.migration_batches(claude_continuity) == [claude_continuity]
+    try:
+        migration_runner.migrations_through(
+            loaded,
+            claude_continuity,
+            "0485_claude_continuity.sql",
+        )
+    except ValueError as exc:
+        assert "cuts reviewed atomic migration group" in str(exc), str(exc)
+    else:
+        raise AssertionError("--through was allowed to expose the v11/v12 catalog gap")
+
     # A bounded prefix must not make an out-of-order ledger look safe.  If a
     # later file is already applied while an earlier file is absent, history
     # has drifted and the runner must stop before selecting anything.

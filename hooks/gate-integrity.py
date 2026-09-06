@@ -122,14 +122,14 @@ RULE_ENFORCEMENT_MAP_CHECK = os.path.join(REPO, "ops", "rule-enforcement-map-che
 # exists to make visible.
 MODEL_FLOORS = os.path.join(REPO, "ops", "config", "model-floors.json")
 SESSION_CONTEXT_LIFECYCLE = os.path.join(
-    REPO, "ops", "config", "session-context-lifecycle.v1.json")
+    REPO, "ops", "config", "session-context-lifecycle.v2.json")
 CONTRACTS = {
     "delegation-gate-hook.json": DELEGATION_HOOK_CONFIG,
     "hooks.json": REPO_HOOKS_JSON,
     "codex-hooks.json": CODEX_HOOKS_REPO,
     "rule-enforcement-map.json": RULE_ENFORCEMENT_MAP,
     "model-floors.json": MODEL_FLOORS,
-    "session-context-lifecycle.v1.json": SESSION_CONTEXT_LIFECYCLE,
+    "session-context-lifecycle.v2.json": SESSION_CONTEXT_LIFECYCLE,
 }
 SETTINGS = os.path.expanduser("~/.claude/settings.json")
 

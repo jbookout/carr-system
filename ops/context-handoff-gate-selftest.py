@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Executable acceptance for session_context_lifecycle_gate_v1."""
+"""Executable acceptance for session_context_lifecycle_gate_v2."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -19,7 +20,7 @@ from types import SimpleNamespace
 REPO = Path(__file__).resolve().parent.parent
 HOOK = REPO / "hooks/context-handoff-gate.py"
 RUNNER = REPO / "hooks/hook-meter-run.py"
-MANIFEST = REPO / "ops/config/session-context-lifecycle.v1.json"
+MANIFEST = REPO / "ops/config/session-context-lifecycle.v2.json"
 APPROVED_BASE = "01c3977580e8d9d490380f6c2135d1c4d7d20fd7"
 PASS: list[str] = []
 FAIL: list[str] = []
@@ -74,7 +75,7 @@ def base_env(root: Path, **extra):
     env.update({
         "CARR_SESSION_CONTEXT_STATE_DIR": str(root / "state"),
         "CARR_SESSION_CONTEXT_MANIFEST": str(root / "manifest.json"),
-        "CARR_CONTEXT_AUDIT": "off",
+        "CARR_CONTEXT_AUDIT": str(root / "audit.jsonl"),
         "CARR_HOOK_TELEMETRY": str(root / "telemetry.jsonl"),
         "CARR_HOOK_FIXTURE": "1",
     })
@@ -107,6 +108,12 @@ def run_hook(root: Path, event: str, transcript: Path | None, *,
             parsed = json.loads(proc.stdout)
         except Exception:
             parsed = {"unparseable": proc.stdout}
+    audit_path = root / "audit.jsonl"
+    if isinstance(parsed, dict) and audit_path.exists():
+        rows = [json.loads(line) for line in audit_path.read_text().splitlines() if line.strip()]
+        matching = [row for row in rows if row.get("session") == session and row.get("event") == event]
+        if matching:
+            parsed["_audit"] = matching[-1]
     return proc, parsed
 
 
@@ -123,7 +130,24 @@ def run_cli(root: Path, *args):
 
 
 def reason(parsed):
-    if not isinstance(parsed, dict) or parsed.get("decision") != "block":
+    if not isinstance(parsed, dict):
+        return None
+    audit = parsed.get("_audit")
+    if isinstance(audit, dict) and audit.get("action") == "ANNOUNCE":
+        signal = audit.get("signal") if isinstance(audit.get("signal"), dict) else {}
+        reason_code = audit.get("reason") or signal.get("reason")
+        return {"reason": reason_code, "signal": {"window_tier": "control_error", **signal,
+            "signal_reason": signal.get("signal_reason") or reason_code}}
+    context = parsed.get("hookSpecificOutput", {}).get("additionalContext")
+    if isinstance(context, str):
+        warning = re.search(r"warning \(([A-Z_]+)\)", context)
+        if warning:
+            return {"reason": warning.group(1), "signal": {
+                "signal_reason": warning.group(1), "window_tier": "control_error"}}
+        if "headroom notice" in context:
+            return {"reason": "CONTEXT_HANDOFF_REQUIRED", "signal": {
+                "signal_reason": "CONTEXT_HANDOFF_REQUIRED"}}
+    if parsed.get("decision") != "block":
         return None
     try:
         return json.loads(parsed["reason"])

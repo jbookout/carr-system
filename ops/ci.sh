@@ -1125,6 +1125,13 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     bad migration "Codex continuity PostgreSQL acceptance failed"
     return
   fi
+  if ! run_quiet "$LOGDIR/claude-continuity-postgres.log" \
+       "$psql_bin" -X -v ON_ERROR_STOP=1 -d "$dsn" \
+       -f mcp-server/test/claude-continuity-postgres.sql; then
+    tail -30 "$LOGDIR/claude-continuity-postgres.log" >&2
+    bad migration "Claude continuity PostgreSQL acceptance failed"
+    return
+  fi
 
   # THE GRANTS CANARY, added 2026-08-14. The snapshot is pg_dump --no-acl, so
   # for months this class built a database where the app roles existed and held

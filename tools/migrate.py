@@ -104,6 +104,13 @@ ATOMIC_MIGRATION_GROUPS: tuple[tuple[str, ...], ...] = (
         "0480_codex_continuity.sql",
         "0481_codex_continuity_registry_activation.sql",
     ),
+    # 0485 adds the Claude continuity writer surface and 0486 seals that
+    # catalog as SCAC v12. They have the same deferred-policy boundary as the
+    # Codex pair above and must become visible in one transaction.
+    (
+        "0485_claude_continuity.sql",
+        "0486_claude_continuity_registry_activation.sql",
+    ),
 )
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"

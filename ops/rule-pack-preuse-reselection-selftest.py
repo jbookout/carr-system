@@ -6,6 +6,9 @@ import copy
 import hashlib
 import importlib.util
 import json
+import os
+import tempfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -118,6 +121,8 @@ def payload(*, tool: str = "Bash", background: object = True,
     if client == "codex":
         row["turn_id"] = "turn-exact"
         row["permission_mode"] = "default"
+    else:
+        row["transcript_path"] = "/tmp/claude/session-exact.jsonl"
     return row
 
 
@@ -426,6 +431,97 @@ check("the compiled trigger table participates in the epoch source digest too",
       "ops/config/rule-jit-triggers.v1.json" in rail.WINDOW_SOURCE_PATHS
       and "ops/rule-jit-compile.py" in rail.WINDOW_SOURCE_PATHS)
 
+# Claude-only compaction-scoped dedupe. Codex and disabled Claude retain the
+# exact historical output path; active dedupe requires the continuity config
+# digest, whose canonical hooks guarantee reset callbacks are installed.
+dedupe = load("claude_rule_delivery_dedupe_test",
+              REPO / "lib/claude_rule_delivery_dedupe.py")
+with tempfile.TemporaryDirectory(prefix="rule-dedupe-") as temp_name:
+    temp = Path(temp_name)
+    old_env = dict(os.environ)
+    try:
+        os.environ["CARR_CLAUDE_CONTINUITY_MODE_FILE"] = str(temp / "mode.json")
+        os.environ["CARR_CLAUDE_RULE_DEDUPE_DIR"] = str(temp / "state")
+        os.environ["CARR_CLAUDE_RULE_DEDUPE_AUDIT"] = str(temp / "audit.jsonl")
+        (temp / "mode.json").write_text(json.dumps({
+            "schema_version": 1, "mode": "checkpoint",
+            "config_digest": dedupe.expected_config_digest(),
+        }))
+        parallel_outputs: list[dict | None] = []
+        barrier = threading.Barrier(2)
+        def invoke(index):
+            candidate = payload()
+            candidate["tool_use_id"] = f"parallel-{index}"
+            barrier.wait()
+            parallel_outputs.append(rail.process(candidate, runner=Runner()))
+        threads = [threading.Thread(target=invoke, args=(index,)) for index in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        check("concurrent identical Claude rule sets inject exactly once",
+              sum(output is not None for output in parallel_outputs) == 1,
+              parallel_outputs)
+        audit_rows = [json.loads(line) for line in (temp / "audit.jsonl").read_text().splitlines()]
+        check("dedupe telemetry measures delivered and suppressed bytes",
+              sum(row["delivered_bytes"] > 0 for row in audit_rows) == 1
+              and sum(row["suppressed_bytes"] > 0 for row in audit_rows) == 1,
+              audit_rows)
+
+        check("identical Claude rule set stays suppressed in one generation",
+              rail.process(payload(), runner=Runner()) is None)
+        check("compaction reset allows the same Claude rule set once more",
+              dedupe.reset("session-exact", dedupe.transcript_path_digest(
+                  "/tmp/claude/session-exact.jsonl"))
+              and rail.process(payload(), runner=Runner()) is not None)
+
+        parent = payload()
+        parent["session_id"] = "shared-native-session"
+        parent["transcript_path"] = "/tmp/claude/shared-native-session.jsonl"
+        subagent = copy.deepcopy(parent)
+        subagent["tool_use_id"] = "subagent-tool"
+        subagent["transcript_path"] = "/tmp/claude/subagents/agent-leaf.jsonl"
+        check("parent leaf receives its first rule set",
+              rail.process(parent, runner=Runner()) is not None)
+        check("subagent leaf independently receives the same rule set",
+              rail.process(subagent, runner=Runner()) is not None)
+        check("subagent repeat is suppressed within only that leaf",
+              rail.process(subagent, runner=Runner()) is None)
+        check("subagent compaction reset does not reset the parent leaf",
+              dedupe.reset("shared-native-session", dedupe.transcript_path_digest(
+                  subagent["transcript_path"]))
+              and rail.process(parent, runner=Runner()) is None
+              and rail.process(subagent, runner=Runner()) is not None)
+
+        baseline_receipt = receipt(output)
+        # Claim the baseline receipt, then independently vary every provenance
+        # component that is required to invalidate a prior dedupe claim.
+        session = "provenance-change"
+        base_payload = payload()
+        base_payload["session_id"] = session
+        check("baseline provenance set delivers",
+              rail._deduped_context(base_payload, baseline_receipt) is not None)
+        for field in ("source_digest", "map_digest"):
+            changed = copy.deepcopy(baseline_receipt)
+            changed[field] = "f" * 64
+            check(f"changed {field} reinjects Claude rules",
+                  rail._deduped_context(base_payload, changed) is not None)
+        changed_trigger = copy.deepcopy(baseline_receipt)
+        changed_trigger["schema"] = rail.GENERALIZED_RECEIPT_SCHEMA
+        changed_trigger["trigger_ids"] = ["changed-trigger"]
+        check("changed trigger digest reinjects Claude rules",
+              rail._deduped_context(base_payload, changed_trigger) is not None)
+
+        codex_candidate = payload(client="codex")
+        first_codex = rail.process(codex_candidate, runner=Runner())
+        codex_candidate["tool_use_id"] = "codex-repeat"
+        second_codex = rail.process(codex_candidate, runner=Runner())
+        check("Codex delivery remains byte-present on every matching call",
+              first_codex is not None and second_codex is not None)
+    finally:
+        os.environ.clear()
+        os.environ.update(old_env)
+
 
 # ===========================================================================
 # GENERALIZED RAIL (WR-000019 slice S9) — the declarative trigger-table path.
@@ -450,6 +546,8 @@ def gen_payload(*, tool: str, tool_input: dict, client: str = "claude",
     if client == "codex":
         row["turn_id"] = "g-turn"
         row["permission_mode"] = "default"
+    else:
+        row["transcript_path"] = f"/tmp/claude/{session}.jsonl"
     return row
 
 
