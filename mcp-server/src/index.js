@@ -80,7 +80,7 @@ import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { neon, Pool } from "@neondatabase/serverless";
 import { mcpApiHandler, dispatch } from "./mcp.js";
 import { handleAuthorize, handleCallback } from "./google-oidc.js";
-import { actorFromProps, agentActorForToken, hermesActorForTokenMaps,
+import { actorFromProps, agentActorForToken, continuityActorForTokenMaps, hermesActorForTokenMaps,
          hermesCosActorForToken } from "./identity.js";
 import { pipelineChanges } from "./dealroom.js";
 import { authorizeProgram6Action, createDealroomHandler, isDealroomRequest, isLegacyDealroomRequest } from "./dealroom-web.js";
@@ -521,7 +521,24 @@ function agentActorFor(request, env) {
 // and a token colliding across maps resolves deterministically to whichever
 // is checked first — in practice a caller holds exactly one.
 function localActorFor(request, env) {
-  return agentActorForToken(request.headers.get("authorization"), env.LOCAL_TOKENS, "local-token");
+  const actor = agentActorForToken(
+    request.headers.get("authorization"), env.LOCAL_TOKENS, "local-token");
+  // Compatibility exists only for the staged production cutover. Deploy the
+  // Worker in compat, provision both isolated maps, rotate the Codex hook to
+  // its new client profile, then promote this server-side flag to required.
+  // In required mode the shared local token carries no continuity surface and
+  // both continuity families refuse it.
+  return actor && env.CONTINUITY_SURFACE_ENFORCEMENT === "compat"
+    ? { ...actor, continuity_surface: "codex", continuity_surface_compat: true }
+    : actor;
+}
+
+function continuityActorFor(request, env) {
+  return continuityActorForTokenMaps(
+    request.headers.get("authorization"),
+    env.CODEX_CONTINUITY_TOKENS,
+    env.CLAUDE_CONTINUITY_TOKENS,
+  );
 }
 
 // ---------- the provider ----------
@@ -635,6 +652,8 @@ async function routeRequest(request, env, ctx) {
     if (hermesActor) return dispatch(request, env, ctx, hermesActor);
     const agentActor = agentActorFor(request, env);
     if (agentActor) return dispatch(request, env, ctx, agentActor);
+    const continuityActor = continuityActorFor(request, env);
+    if (continuityActor) return dispatch(request, env, ctx, continuityActor);
     const localActor = localActorFor(request, env);
     if (localActor) return dispatch(request, env, ctx, localActor);
   }

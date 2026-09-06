@@ -63,7 +63,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env python3 {{REPO}}/ops/codex-continuity-hook.py",
+            "command": "CARR_MCP_CLIENT_PROFILE=codex-continuity /usr/bin/env python3 {{REPO}}/ops/codex-continuity-hook.py",
             "timeout": 10
           }
         ]
@@ -74,7 +74,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env python3 {{REPO}}/ops/codex-continuity-hook.py",
+            "command": "CARR_MCP_CLIENT_PROFILE=codex-continuity /usr/bin/env python3 {{REPO}}/ops/codex-continuity-hook.py",
             "timeout": 10
           }
         ]
@@ -86,7 +86,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env python3 {{REPO}}/ops/codex-continuity-hook.py",
+            "command": "CARR_MCP_CLIENT_PROFILE=codex-continuity /usr/bin/env python3 {{REPO}}/ops/codex-continuity-hook.py",
             "timeout": 10
           }
         ]
@@ -97,7 +97,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env python3 {{REPO}}/ops/codex-continuity-hook.py",
+            "command": "CARR_MCP_CLIENT_PROFILE=codex-continuity /usr/bin/env python3 {{REPO}}/ops/codex-continuity-hook.py",
             "timeout": 10
           }
         ]

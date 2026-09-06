@@ -2,13 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { codexContinuityTools } from "../src/codex-continuity.js";
-import { agentActorForToken, actorFromProps } from "../src/identity.js";
+import { agentActorForToken, actorFromProps, continuityActorForTokenMaps } from "../src/identity.js";
 
 class TestToolError extends Error {
   constructor(payload) { super(payload.error); this.payload = payload; }
 }
 const actor = { id: "actor-codex", slug: "codex", human: false, native_agent_verified: true,
-  sponsoring_human_slug: "joe", via: "oauth-google" };
+  sponsoring_human_slug: "joe", via: "oauth-google", continuity_surface: "codex" };
 const key = "00000000-0000-4000-8000-000000000001";
 const state = { objective: "keep working", next_action: "verify result", progress: [{ text: "started", refs: [] }] };
 
@@ -192,6 +192,8 @@ test("Claude and unverified callers are rejected before database use", async () 
   const client = { query: async () => { throw new Error("must not query"); } };
   for (const bad of [
     { ...actor, slug: "claude" },
+    { ...actor, continuity_surface: "claude" },
+    { ...actor, continuity_surface: undefined },
     { ...actor, native_agent_verified: false },
   ]) {
     await assert.rejects(() => tools()["codex-read-recovery"].handler(client, bad, {
@@ -200,12 +202,19 @@ test("Claude and unverified callers are rejected before database use", async () 
   }
 });
 
-test("Codex OAuth and sponsored local transport share the verified owner key", () => {
+test("Codex OAuth and surface-isolated local transport share the verified owner key", () => {
   const local = agentActorForToken("Bearer local-secret", JSON.stringify({ "joe-local": "local-secret" }), "local-token");
+  const continuity = continuityActorForTokenMaps(
+    "Bearer codex-secret", JSON.stringify({ joe: "codex-secret" }), JSON.stringify({ joe: "claude-secret" }));
   const oauth = actorFromProps({ slug: "codex", human: false, client_id: "client-1", sponsoring_human_slug: "joe", via: "oauth-google" }, JSON.stringify({ "client-1": "codex" }));
   assert.equal(local.native_agent_verified, true);
   assert.equal(local.sponsoring_human_slug, "joe");
+  assert.equal(local.continuity_surface, undefined);
+  assert.equal(continuity.native_agent_verified, true);
+  assert.equal(continuity.continuity_surface, "codex");
+  assert.equal(continuity.sponsoring_human_slug, "joe");
   assert.equal(oauth.native_agent_verified, true);
+  assert.equal(oauth.continuity_surface, "codex");
   assert.equal(oauth.sponsoring_human_slug, "joe");
 });
 

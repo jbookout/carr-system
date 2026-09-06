@@ -22,7 +22,41 @@ import {
   isKnownActor,
   isKnownPartner,
   agentActorForToken,
+  continuityActorForTokenMaps,
 } from "../src/identity.js";
+
+test("continuity bearer maps derive one exact surface and sponsor", () => {
+  const codex = continuityActorForTokenMaps(
+    "Bearer codex-secret",
+    JSON.stringify({ joe: "codex-secret" }),
+    JSON.stringify({ joe: "claude-secret" }),
+  );
+  assert.deepEqual(codex, {
+    slug: "codex", display: "Codex", human: false, agent: true,
+    via: "codex-continuity-token", client_id: null,
+    sponsoring_human_slug: "joe", human_slug: "joe", sponsor_required: false,
+    native_agent_verified: true, continuity_surface: "codex",
+  });
+
+  const claude = continuityActorForTokenMaps(
+    "Bearer claude-secret",
+    JSON.stringify({ joe: "codex-secret" }),
+    JSON.stringify({ dell: "claude-secret" }),
+  );
+  assert.equal(claude.slug, "claude");
+  assert.equal(claude.sponsoring_human_slug, "dell");
+  assert.equal(claude.continuity_surface, "claude");
+});
+
+test("continuity bearer maps refuse shared, cross-map duplicate, and malformed credentials", () => {
+  assert.equal(continuityActorForTokenMaps(
+    "Bearer joe-local", '{"joe":"codex-secret"}', '{"joe":"claude-secret"}'), null);
+  assert.equal(continuityActorForTokenMaps(
+    "Bearer repeated", '{"joe":"repeated"}', '{"joe":"repeated"}'), null);
+  assert.equal(continuityActorForTokenMaps(
+    "Bearer secret", '{"mallory":"secret"}', '{}'), null);
+  assert.equal(continuityActorForTokenMaps("Bearer secret", '[]', '{}'), null);
+});
 
 // ---------- slugForEmail: unchanged behavior, regression-guarded ----------
 
