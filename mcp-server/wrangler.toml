@@ -154,13 +154,11 @@ DEALROOM_PROGRAM6_ACTIONS_ENABLED = "true"
 # Authenticated Command Center cutover: / serves workspace.html while enabled;
 # /deals remains the explicit Deal Room route. Disable to roll back the root.
 WORKSPACE_COMMAND_CENTER_READ_ENABLED = "true"
-# First half of the reviewed zero-downtime credential cutover. This release
-# keeps only the existing joe-local Codex lifecycle usable while the dedicated
-# Codex and Claude token maps and native profiles are installed. After both
-# isolated profiles pass live lifecycle checks, a follow-up config-only release
-# changes this exact value to "required"; absent/unknown values already fail
-# closed in index.js. The shared token never receives Claude authority.
-CONTINUITY_SURFACE_ENFORCEMENT = "compat"
+# Required phase of the reviewed credential cutover. Deploy this release only
+# after the dedicated Codex and Claude token maps and native profiles pass live
+# lifecycle checks. Both continuity mutation families then require their
+# server-derived surface; missing or unknown values fail closed in index.js.
+CONTINUITY_SURFACE_ENFORCEMENT = "required"
 
 # Cloudflare supplies the immutable version ID, optional tag, and creation
 # timestamp at runtime. /release reads this binding as provider identity; it is
@@ -247,7 +245,7 @@ CARR_ENV = "staging"
 APP_HOST = "carr-mcp-staging.joe-bookout-carr-us.workers.dev"
 DEALROOM_PROGRAM6_ACTIONS_ENABLED = "true"
 WORKSPACE_COMMAND_CENTER_READ_ENABLED = "true"
-CONTINUITY_SURFACE_ENFORCEMENT = "compat"
+CONTINUITY_SURFACE_ENFORCEMENT = "required"
 
 # Environment configuration is explicit: staging's separate Worker needs the
 # same runtime version-identity binding and must not depend on inheritance.

@@ -179,6 +179,49 @@ def source_cursor(transcript: pathlib.Path) -> tuple[dict, str]:
              "source_digest": source_digest}, source_digest)
 
 
+def startup_source_cursor(transcript: pathlib.Path, identity: dict) -> tuple[dict, str]:
+    """Bind a main-session startup before Claude creates its transcript inode."""
+    if identity.get("native_agent_id") is not None or transcript.suffix != ".jsonl":
+        raise ValueError("pending startup transcript is not a main-session JSONL path")
+    roots = _transcript_roots()
+    if not any(transcript.parent.parent == root for root in roots):
+        raise ValueError("pending startup transcript lacks a direct Claude project parent")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    parent_fd = os.open(transcript.parent, flags)
+    try:
+        before = os.fstat(parent_fd)
+        named_before = os.stat(transcript.parent, follow_symlinks=False)
+        if (not stat.S_ISDIR(before.st_mode) or stat.S_ISLNK(named_before.st_mode)
+                or (before.st_dev, before.st_ino) != (named_before.st_dev, named_before.st_ino)):
+            raise ValueError("pending startup transcript parent is unverified")
+        try:
+            os.stat(transcript.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise ValueError("pending startup transcript unexpectedly exists")
+        after = os.fstat(parent_fd)
+        named_after = os.stat(transcript.parent, follow_symlinks=False)
+        if ((before.st_dev, before.st_ino, before.st_mtime_ns)
+                != (after.st_dev, after.st_ino, after.st_mtime_ns)
+                or (after.st_dev, after.st_ino) != (named_after.st_dev, named_after.st_ino)):
+            raise ValueError("pending startup transcript parent changed during verification")
+        try:
+            os.stat(transcript.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise ValueError("pending startup transcript appeared during verification")
+    finally:
+        os.close(parent_fd)
+    source_digest = hashlib.sha256(_canonical({
+        "kind": "claude_startup_pending_v1",
+        "transcript_path_digest": identity["transcript_path_digest"],
+    })).hexdigest()
+    return ({"byte_offset": 0, "mtime_ns": 0, "source_digest": source_digest,
+             "startup_pending": True}, source_digest)
+
+
 def _identity(payload: dict) -> tuple[dict, pathlib.Path]:
     session_id = payload.get("session_id")
     transcript_raw = payload.get("transcript_path")
@@ -352,7 +395,8 @@ def _activation_envelope(identity: dict, cursor: dict, response: dict | None) ->
     binding = {key: identity.get(key) for key in (
         "runtime", "session_id", "transcript_path_digest", "project_affinity",
         "parent_session_id", "native_agent_id") if identity.get(key) is not None}
-    source = {key: cursor[key] for key in ("byte_offset", "mtime_ns", "source_digest")}
+    source = {key: cursor[key] for key in (
+        "byte_offset", "mtime_ns", "source_digest", "startup_pending") if key in cursor}
     version_text = str(current_version) if current_version is not None else "unavailable"
     return "\n".join([
         "CARR Claude continuity activation (trusted native controller binding).",
@@ -377,13 +421,18 @@ def main() -> int:
         payload = json.loads(raw)
         if not isinstance(payload, dict) or payload.get("hook_event_name") not in EVENTS:
             raise ValueError("unsupported event")
+        event_name = payload["hook_event_name"]
         identity, transcript = _identity(payload)
-        cursor, source_digest = source_cursor(transcript)
+        try:
+            cursor, source_digest = source_cursor(transcript)
+        except FileNotFoundError:
+            if event_name != "SessionStart" or payload.get("source") != "startup":
+                raise
+            cursor, source_digest = startup_source_cursor(transcript, identity)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         _warn(f"unverified native input ignored ({exc.__class__.__name__})")
         return 0
 
-    event_name = payload["hook_event_name"]
     if ((event_name == "PreCompact") or
             (event_name == "SessionStart" and payload.get("source") in {"compact", "resume"})):
         reset_rule_delivery(identity["session_id"], identity["transcript_path_digest"])

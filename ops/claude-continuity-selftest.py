@@ -145,6 +145,45 @@ else:
         self.assertIn("must never be replayed automatically", context)
         self.assertLessEqual(len(context.encode()), 4800)
 
+    def test_startup_before_transcript_creation_emits_verified_pending_cursor(self):
+        self.set_mode("checkpoint")
+        projects = self.root / "projects"
+        project = projects / "-Users-booko-carr-system"
+        project.mkdir(parents=True)
+        self.base_env["CARR_CLAUDE_TRANSCRIPT_ROOTS"] = str(projects)
+        self.transcript = project / "session-1.jsonl"
+
+        result = self.run_hook("SessionStart", source="startup")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("current_checkpoint_version=3", context)
+        cursor = json.loads(context.split("source_cursor=", 1)[1].split("\n", 1)[0])
+        self.assertEqual(cursor["byte_offset"], 0)
+        self.assertEqual(cursor["mtime_ns"], 0)
+        self.assertTrue(cursor["startup_pending"])
+        self.assertRegex(cursor["source_digest"], r"^[0-9a-f]{64}$")
+        rows = self.call_rows()
+        self.assertEqual([row["name"] for row in rows], ["claude-read-recovery"])
+        self.assertEqual(rows[0]["args"]["session_id"], "session-1")
+
+    def test_missing_transcript_fallback_is_startup_only_and_direct_project_only(self):
+        self.set_mode("checkpoint")
+        projects = self.root / "projects"
+        project = projects / "-Users-booko-carr-system"
+        nested = project / "nested"
+        nested.mkdir(parents=True)
+        self.base_env["CARR_CLAUDE_TRANSCRIPT_ROOTS"] = str(projects)
+        self.transcript = project / "session-1.jsonl"
+        resume = self.run_hook("SessionStart", source="resume")
+        self.assertEqual(resume.stdout, "")
+        self.assertEqual(self.call_rows(), [])
+
+        self.transcript = nested / "session-1.jsonl"
+        startup = self.run_hook("SessionStart", source="startup")
+        self.assertEqual(startup.stdout, "")
+        self.assertEqual(self.call_rows(), [])
+
     def test_maximum_subagent_binding_and_worker_capsule_fit_native_limit(self):
         self.set_mode("inject")
         session_id = "s" + "a" * 199

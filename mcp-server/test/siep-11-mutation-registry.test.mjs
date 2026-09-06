@@ -28,6 +28,7 @@ import {
   REGISTRY_V10_VERSION,
   REGISTRY_V11_VERSION,
   REGISTRY_V12_VERSION,
+  REGISTRY_V13_VERSION,
   replaceExactlyOnce,
   renderGeneratedFrontier,
   renderRuntimeProjection,
@@ -36,6 +37,7 @@ import {
   renderSIEP18ForwardRegistrySql,
   renderCodexContinuityForwardRegistrySql,
   renderClaudeContinuityForwardRegistrySql,
+  renderClaudeStartupForwardRegistrySql,
   renderSourceMergeForwardRegistrySql,
   sha256,
   SIEP16_INTEGRATED_DB_CATALOG_BASELINE,
@@ -47,6 +49,8 @@ import {
   CODEX_CONTINUITY_PRE_V11_DB_CATALOG_BASELINE,
   CLAUDE_CONTINUITY_FORWARD_DB_CATALOG_BASELINE,
   CLAUDE_CONTINUITY_PRE_V12_DB_CATALOG_BASELINE,
+  CLAUDE_STARTUP_FORWARD_DB_CATALOG_BASELINE,
+  CLAUDE_STARTUP_PRE_V13_DB_CATALOG_BASELINE,
   SOURCE_MERGE_FORWARD_DB_CATALOG_BASELINE,
   SOURCE_MERGE_PRE_V10_DB_CATALOG_BASELINE,
   SIEP12_DB_CATALOG_BASELINE,
@@ -110,6 +114,10 @@ const generatedV12 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v12.generated.js", import.meta.url), "utf8");
 const v12Migration = fs.readFileSync(
   new URL("../../migrations/0486_claude_continuity_registry_activation.sql", import.meta.url), "utf8");
+const generatedV13 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v13.generated.js", import.meta.url), "utf8");
+const v13Migration = fs.readFileSync(
+  new URL("../../migrations/0487_claude_startup_registry_activation.sql", import.meta.url), "utf8");
 const siep18MonitorMigration = fs.readFileSync(
   new URL("../../migrations/0467_siep18_atomic_db_monitor_grants.sql", import.meta.url), "utf8");
 const directRegistryRedefinitions = [
@@ -344,7 +352,8 @@ test("v11 seals the measured Codex continuity frontier", () => {
     /grant_snapshot->>'grant_digest'='sha256:dcf95363b3388bbb104e455a154fbe1da0a228f38df0c9317d8c191373706e73'/);
   assert.match(v11Migration,
     /registry_version='scac-mutation-registry[.]v11'[^\n]+<>1471/);
-  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS).filter(seal => seal.version !== REGISTRY_V11_VERSION))
+  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS)
+    .filter(seal => Number(seal.version.split(".v")[1]) < 11))
     assert.match(v11Migration, new RegExp(`\\('${seal.version.replaceAll(".", "\\.")}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount}\\)`));
 });
 
@@ -359,8 +368,8 @@ test("v12 seals the measured Claude continuity frontier", () => {
     dbCatalogBaseline: CLAUDE_CONTINUITY_FORWARD_DB_CATALOG_BASELINE,
   }));
   assert.equal(v12Migration, renderClaudeContinuityForwardRegistrySql(rows));
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
-    JSON.parse(generatedV12.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]));
+  assert.equal(JSON.parse(generatedV12.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]),
+    HISTORICAL_REGISTRY_SEALS.v12.digest.slice("sha256:".length));
   assert.equal(CLAUDE_CONTINUITY_PRE_V12_DB_CATALOG_BASELINE.relation_dml.count, 295);
   assert.equal(CLAUDE_CONTINUITY_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count, 355);
   assert.equal(CLAUDE_CONTINUITY_FORWARD_DB_CATALOG_BASELINE.secdef_execute.digest,
@@ -375,19 +384,55 @@ test("v12 seals the measured Claude continuity frontier", () => {
   assert.match(v12Migration, /scac_mutation_registration_v12[(]text,text[)]/);
   assert.match(v12Migration, /scac_policy_epoch_snapshot_v11[(][)]/);
   assert.match(v12Migration, /registry_version='scac-mutation-registry[.]v12'[^\n]+<>1487/);
-  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS))
+  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS)
+    .filter(seal => Number(seal.version.split(".v")[1]) < 12))
     assert.match(v12Migration, new RegExp(`\\('${seal.version.replaceAll(".", "\\.")}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount}\\)`));
+});
+
+test("v13 seals the reviewed Claude startup frontier without rewriting v12", () => {
+  const rows = frozenInventory(REGISTRY_V13_VERSION);
+  assert.equal(rows.length, 825);
+  assert.equal(generatedV13, renderRuntimeProjection(rows, {
+    version: REGISTRY_V13_VERSION,
+    dbCatalogBaseline: CLAUDE_STARTUP_FORWARD_DB_CATALOG_BASELINE,
+  }));
+  assert.equal(v13Migration, renderClaudeStartupForwardRegistrySql(rows));
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
+    JSON.parse(generatedV13.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]));
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
+    "87a93870857d174b76279b562b8442b5f9f82c4ba2d9797834408384224b9f5b");
+  assert.deepEqual(CLAUDE_STARTUP_PRE_V13_DB_CATALOG_BASELINE,
+    CLAUDE_CONTINUITY_FORWARD_DB_CATALOG_BASELINE);
+  assert.equal(CLAUDE_STARTUP_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count, 359);
+  assert.equal(CLAUDE_STARTUP_FORWARD_DB_CATALOG_BASELINE.secdef_execute.digest,
+    "sha256:586dc084ef9eb234a352f1c97c69692af498b9581d1e2bd770bbd1e89f09414e");
+  assert.equal(CLAUDE_STARTUP_FORWARD_DB_CATALOG_BASELINE.runtime_dml_grants.count, 307);
+  assert.equal(sha256(v12Migration),
+    HISTORICAL_REGISTRY_ARTIFACT_SHA256["migrations/0486_claude_continuity_registry_activation.sql"]);
+  assert.equal(sha256(generatedV12),
+    HISTORICAL_REGISTRY_ARTIFACT_SHA256["mcp-server/src/scac-mutation-registry.v12.generated.js"]);
+  assert.match(v13Migration,
+    /0486_claude_continuity_registry_activation[.]sql'[\s\S]+270f817ef74fa87bbfaa4630fc26ce313f5684a7613975c80a64cf4d25ffb127/);
+  assert.match(v13Migration,
+    /alter function ops[.]scac_mutation_catalog_v12_current[(][)] rename to scac_mutation_catalog_v12_live_at_seal/);
+  assert.match(v13Migration, /scac_mutation_registry_v12_seal_available[(][)]/);
+  assert.match(v13Migration, /scac_mutation_registration_v13[(]text,text[)]/);
+  assert.match(v13Migration, /scac_mutation_catalog_v13_current[(][)]/);
+  assert.match(v13Migration, /scac_policy_epoch_snapshot_v12[(][)]/);
+  assert.match(v13Migration, /registry_version='scac-mutation-registry[.]v13'[^\n]+<>1491/);
+  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS))
+    assert.match(v13Migration, new RegExp(`\\('${seal.version.replaceAll(".", "\\.")}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount}\\)`));
 });
 
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
   assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
-  assert.equal(migrations.length, 20);
+  assert.equal(migrations.length, 21);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486"]);
-  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 11);
-  assert.equal(paths.length, 31);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487"]);
+  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 12);
+  assert.equal(paths.length, 33);
 });
 
 test("the complete frontier renders when every generated target is absent", () => {
@@ -423,7 +468,7 @@ test("the complete frontier renders when every generated target is absent", () =
         GIT_WORK_TREE: isolatedRoot,
       },
     });
-    assert.match(stdout, /\(31 artifacts\)/);
+    assert.match(stdout, /\(33 artifacts\)/);
     for (const [target, expected] of Object.entries(frontier))
       assert.equal(fs.readFileSync(path.join(outputRoot, target), "utf8"), expected, target);
   } finally {
