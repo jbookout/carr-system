@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { buildClaudeRecoveryCapsule, claudeContinuityTools } from "../src/claude-continuity.js";
+import { continuityActorForTokenMaps } from "../src/identity.js";
 import { allowedIn, profileForActor } from "../src/mcp.js";
 
 class TestToolError extends Error {
@@ -59,6 +60,8 @@ function memoryClient() {
     events,
     async query(sql, params = []) {
       queries.push({ sql, params });
+      if (sql === "select id from actor where slug=$1")
+        return { rows: params[0] === "claude" ? [{ id: "actor-claude" }] : [] };
       if (sql.startsWith("select pg_advisory")) return { rows: [] };
       if (sql.startsWith("insert into claude_continuity_leaf")) {
         if (!leaf) leaf = {
@@ -69,7 +72,10 @@ function memoryClient() {
         };
         return { rows: [] };
       }
-      if (sql.startsWith("select l.* from claude_continuity_leaf")) return { rows: leaf ? [leaf] : [] };
+      if (sql.startsWith("select l.* from claude_continuity_leaf"))
+        return { rows: leaf && leaf.organization_tenant_id === params[0] &&
+          leaf.surface_principal_actor_id === params[1] && leaf.session_id === params[3] &&
+          leaf.transcript_path_digest === params[4] ? [leaf] : [] };
       if (sql.startsWith("update claude_continuity_leaf")) {
         leaf = { ...leaf, latest_cwd: params[1], latest_model_id: params[2] };
         return { rows: [] };
@@ -111,6 +117,39 @@ function memoryClient() {
     },
   };
 }
+
+test("a dedicated Claude token actor can read the leaf written by its hydrated write call", async () => {
+  const tokenActor = continuityActorForTokenMaps(
+    "Bearer claude-secret", "{}", JSON.stringify({ joe: "claude-secret" }),
+  );
+  assert.equal(tokenActor.id, undefined);
+  const client = memoryClient();
+  const registered = tools();
+  const invokeLikeDispatch = (verb, args) => {
+    const tool = registered[verb];
+    const callActor = tool.write ? { ...tokenActor, id: "actor-claude" } : tokenActor;
+    return tool.handler(client, callActor, args);
+  };
+  await invokeLikeDispatch("claude-checkpoint", { ...base, idempotency_key: "checkpoint-token",
+    expected_version: 0, state, compaction_generation: 1 });
+  const recovered = await invokeLikeDispatch("claude-read-recovery", base);
+  assert.equal(recovered.found, true);
+  assert.equal(recovered.checkpoint.checkpoint_version, 1);
+  assert.equal(tokenActor.id, "actor-claude");
+});
+
+test("Claude recovery fails closed when its authenticated actor row is unavailable", async () => {
+  const tokenActor = continuityActorForTokenMaps(
+    "Bearer claude-secret", "{}", JSON.stringify({ joe: "claude-secret" }),
+  );
+  const client = { query: async (sql, params) => {
+    assert.equal(sql, "select id from actor where slug=$1");
+    assert.deepEqual(params, ["claude"]);
+    return { rows: [] };
+  } };
+  await assert.rejects(() => tools()["claude-read-recovery"].handler(client, tokenActor, base),
+    error => error.payload?.error === "claude_continuity_actor_unavailable");
+});
 
 test("every Claude continuity verb refuses wrong-surface, shared, and unverified credentials before SQL", async () => {
   const client = { query: async () => { throw new Error("authority refusal must precede SQL"); } };

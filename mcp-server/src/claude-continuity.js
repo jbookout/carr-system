@@ -120,28 +120,36 @@ async function lockLeaf(c, tenant, actor, owner, key) {
   await c.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
     `${tenant}:${actor.slug}:${owner}:${key.sessionId}:${key.transcriptPathDigest}`]);
 }
-async function readLeaf(c, tenant, actor, owner, key, ToolError, forUpdate = false) {
+async function actorId(c, actor, ToolError) {
+  if (typeof actor.id === "string" && actor.id) return actor.id;
+  const result = await c.query("select id from actor where slug=$1", [actor.slug]);
+  const id = result.rows[0]?.id;
+  if (typeof id !== "string" || !id) fail(ToolError, "claude_continuity_actor_unavailable");
+  actor.id = id;
+  return id;
+}
+async function readLeaf(c, tenant, principalActorId, owner, key, ToolError, forUpdate = false) {
   const result = await c.query(
     `select l.* from claude_continuity_leaf l
       where l.organization_tenant_id=$1 and l.surface_principal_actor_id=$2
         and l.owner_actor_id=(select id from actor where slug=$3)
         and l.session_id=$4 and l.transcript_path_digest=$5${forUpdate ? " for update" : ""}`,
-    [tenant, actor.id, owner, key.sessionId, key.transcriptPathDigest]);
+    [tenant, principalActorId, owner, key.sessionId, key.transcriptPathDigest]);
   const leaf = result.rows[0] || null;
   if (leaf && (leaf.project_affinity !== key.projectAffinity || leaf.parent_session_id !== key.parentSessionId ||
       leaf.native_agent_id !== key.nativeAgentId))
     fail(ToolError, "claude_continuity_binding_conflict");
   return leaf;
 }
-async function bindLeaf(c, tenant, actor, owner, key, ToolError) {
+async function bindLeaf(c, tenant, principalActorId, owner, key, ToolError) {
   await c.query(`insert into claude_continuity_leaf
     (organization_tenant_id,surface_principal_actor_id,owner_actor_id,session_id,transcript_path_digest,
      project_affinity,parent_session_id,native_agent_id,latest_cwd,latest_model_id)
     values ($1,$2,(select id from actor where slug=$3),$4,$5,$6,$7,$8,$9,$10)
     on conflict (organization_tenant_id,surface_principal_actor_id,owner_actor_id,session_id,transcript_path_digest)
-    do nothing`, [tenant, actor.id, owner, key.sessionId, key.transcriptPathDigest, key.projectAffinity,
+    do nothing`, [tenant, principalActorId, owner, key.sessionId, key.transcriptPathDigest, key.projectAffinity,
       key.parentSessionId, key.nativeAgentId, key.cwd, key.modelId]);
-  const leaf = await readLeaf(c, tenant, actor, owner, key, ToolError, true);
+  const leaf = await readLeaf(c, tenant, principalActorId, owner, key, ToolError, true);
   if (!leaf) fail(ToolError, "claude_continuity_leaf_unavailable");
   await c.query(`update claude_continuity_leaf set latest_cwd=$2,latest_model_id=$3,updated_at=now()
     where id=$1`, [leaf.id, key.cwd, key.modelId]);
@@ -249,8 +257,9 @@ export function claudeContinuityTools({ withEnvelope, writeEvent, ToolError, ass
         if (!Number.isSafeInteger(generation) || generation < 0) fail(ToolError, "claude_compaction_generation_invalid");
         return withEnvelope(c, actor, "claude-checkpoint", args, async () => {
           const tenant = organizationTenantForActor(actor), owner = actor.sponsoring_human_slug;
+          const principalActorId = await actorId(c, actor, ToolError);
           await lockLeaf(c, tenant, actor, owner, key);
-          const leaf = await bindLeaf(c, tenant, actor, owner, key, ToolError);
+          const leaf = await bindLeaf(c, tenant, principalActorId, owner, key, ToolError);
           const existing = await readBinding(c, leaf, ToolError, true);
           if (existing && generation < Number(existing.compaction_generation))
             fail(ToolError, "claude_compaction_generation_regressed", {
@@ -293,7 +302,8 @@ export function claudeContinuityTools({ withEnvelope, writeEvent, ToolError, ass
       inputSchema: { type: "object", additionalProperties: false, properties: commonProperties, required: commonRequired },
       handler: async (c, actor, args) => {
         guard(args); requireNativeClaude(actor, ToolError); const key = common(args, ToolError);
-        const leaf = await readLeaf(c, organizationTenantForActor(actor), actor,
+        const principalActorId = await actorId(c, actor, ToolError);
+        const leaf = await readLeaf(c, organizationTenantForActor(actor), principalActorId,
           actor.sponsoring_human_slug, key, ToolError);
         if (!leaf) return { ok: true, found: false, checkpoint: null, capsule: null, capsule_bytes: 0 };
         const checkpoint = await readBinding(c, leaf, ToolError);
@@ -323,9 +333,10 @@ export function claudeContinuityTools({ withEnvelope, writeEvent, ToolError, ass
         if (!Number.isSafeInteger(checkpointVersion) || checkpointVersion < 0) fail(ToolError, "claude_event_checkpoint_version_invalid");
         return withEnvelope(c, actor, "claude-record-event", args, async () => {
           const tenant = organizationTenantForActor(actor), owner = actor.sponsoring_human_slug;
+          const principalActorId = await actorId(c, actor, ToolError);
           await lockLeaf(c, tenant, actor, owner, key);
-          const leaf = await bindLeaf(c, tenant, actor, owner, key, ToolError);
-          const params = [tenant, actor.id, leaf.id, args.event_type, JSON.stringify(cursor), transcriptDigest,
+          const leaf = await bindLeaf(c, tenant, principalActorId, owner, key, ToolError);
+          const params = [tenant, principalActorId, leaf.id, args.event_type, JSON.stringify(cursor), transcriptDigest,
             observedAt, telemetry == null ? null : JSON.stringify(telemetry), checkpointVersion, args.idempotency_key];
           const inserted = await c.query(`insert into claude_continuity_event
             (organization_tenant_id,surface_principal_actor_id,leaf_id,event_type,cursor,transcript_digest,
@@ -335,7 +346,7 @@ export function claudeContinuityTools({ withEnvelope, writeEvent, ToolError, ass
           let event = inserted.rows[0];
           if (!event) {
             event = (await c.query(`select * from claude_continuity_event where organization_tenant_id=$1
-              and surface_principal_actor_id=$2 and idempotency_key=$3`, [tenant, actor.id, args.idempotency_key])).rows[0];
+              and surface_principal_actor_id=$2 and idempotency_key=$3`, [tenant, principalActorId, args.idempotency_key])).rows[0];
             const same = event && event.leaf_id === leaf.id && event.event_type === args.event_type &&
               canonicalDbJson(event.cursor) === canonicalDbJson(cursor) && canonicalDbJson(event.telemetry) === canonicalDbJson(telemetry) &&
               event.transcript_digest === transcriptDigest && Number(event.checkpoint_version) === checkpointVersion;
