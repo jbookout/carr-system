@@ -62,8 +62,12 @@ def fixture_git_env():
 # and the test drift apart, which is the two-homes disease.
 COPIES = [
     "hooks/machine-converge.py",
+    "lib/claude_continuity_config.py",
     "lib/machine_prerequisites.py",
+    "mcp-server/continuity-stdio-proxy.mjs",
+    "ops/claude-continuity-hook.py",
     "ops/config-as-code.py",
+    "ops/config/claude-continuity-hooks.json",
     "ops/git_env.py",
     "ops/githooks/pre-push",
     "ops/config/hooks.json",
