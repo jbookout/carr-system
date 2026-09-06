@@ -1,0 +1,231 @@
+#!/usr/bin/env python3
+"""Deterministic lifecycle checks for the native Claude continuity adapter."""
+from __future__ import annotations
+
+import hashlib
+import hmac
+import importlib.util
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import tempfile
+import unittest
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+HOOK = ROOT / "ops/claude-continuity-hook.py"
+
+
+def load_hook():
+    spec = importlib.util.spec_from_file_location("claude_continuity_hook", HOOK)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class ClaudeContinuityHookTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="carr-claude-continuity-")
+        self.root = pathlib.Path(self.temp.name)
+        self.transcript = self.root / "session-1.jsonl"
+        self.transcript.write_text('{"type":"user","message":"local only"}\n', encoding="utf-8")
+        self.mode = self.root / "mode.json"
+        self.spool = self.root / "spool"
+        self.calls = self.root / "calls.jsonl"
+        self.audit = self.root / "audit.jsonl"
+        self.dedupe = self.root / "dedupe"
+        self.caller = self.root / "call.py"
+        self.caller.write_text("""#!/usr/bin/env python3
+import json,os,sys
+name,args=sys.argv[1],json.loads(sys.argv[2])
+with open(os.environ['CALL_LOG'],'a',encoding='utf-8') as out:
+ out.write(json.dumps({'name':name,'args':args,'profile':os.environ.get('CARR_MCP_CLIENT_PROFILE')})+'\\n')
+if name=='claude-read-recovery':
+ if os.environ.get('RECOVERY_EMPTY')=='1':
+  print(json.dumps({'ok':True,'found':False,'checkpoint':None,'capsule':None}))
+ else:
+  print(json.dumps({'ok':True,'found':True,'checkpoint':{'checkpoint_version':'3'},'capsule':'bounded recovery capsule'}))
+else:
+ print(json.dumps({'ok':True}))
+""", encoding="utf-8")
+        self.caller.chmod(0o755)
+        self.base_env = {**os.environ,
+            "CARR_CLAUDE_CONTINUITY_MODE_FILE": str(self.mode),
+            "CARR_CLAUDE_CONTINUITY_SPOOL_DIR": str(self.spool),
+            "CARR_CLAUDE_CONTINUITY_CALL": str(self.caller),
+            "CARR_CLAUDE_TRANSCRIPT_ROOTS": str(self.root),
+            "CARR_CLAUDE_CONTINUITY_AUDIT": str(self.audit),
+            "CARR_CLAUDE_RULE_DEDUPE_DIR": str(self.dedupe),
+            "CARR_CLAUDE_RULE_DEDUPE_AUDIT": str(self.root / "rule-dedupe-audit.jsonl"),
+            "CALL_LOG": str(self.calls),
+        }
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def set_mode(self, mode):
+        digest = load_hook().expected_config_digest()
+        self.mode.write_text(json.dumps({"schema_version": 1, "mode": mode,
+                                         "config_digest": digest}), encoding="utf-8")
+
+    def run_hook(self, event, **extra):
+        payload = {"hook_event_name": event, "session_id": "session-1",
+                   "transcript_path": str(self.transcript), "cwd": str(self.root), **extra}
+        return subprocess.run([sys.executable, str(HOOK)], input=json.dumps(payload), text=True,
+                              capture_output=True, env=self.base_env, timeout=10, check=False)
+
+    def call_rows(self):
+        if not self.calls.exists():
+            return []
+        return [json.loads(line) for line in self.calls.read_text().splitlines()]
+
+    def test_disabled_and_shadow_never_contact_the_store(self):
+        self.assertEqual(self.run_hook("UserPromptSubmit").returncode, 0)
+        self.set_mode("shadow")
+        result = self.run_hook("PreCompact")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(self.call_rows(), [])
+        audit = [json.loads(line) for line in self.audit.read_text().splitlines()]
+        self.assertEqual(audit[0]["event"], "PreCompact")
+        self.assertEqual(audit[0]["mode"], "shadow")
+        self.assertNotIn("transcript_path", audit[0])
+
+    def test_stale_config_digest_disables_all_activity(self):
+        self.mode.write_text(json.dumps({"schema_version": 1, "mode": "inject",
+                                         "config_digest": "sha256:" + "0" * 64}))
+        result = self.run_hook("SessionStart", source="resume")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(self.call_rows(), [])
+
+    def test_checkpoint_mode_records_receipts_and_never_blocks_stop(self):
+        self.set_mode("checkpoint")
+        for event in ("UserPromptSubmit", "PreCompact", "Stop"):
+            result = self.run_hook(event)
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+        rows = self.call_rows()
+        self.assertEqual([row["args"]["event_type"] for row in rows],
+                         ["user_prompt_submit", "pre_compact", "stop"])
+        self.assertTrue(all(row["profile"] == "claude-continuity" for row in rows))
+        self.assertTrue(all("transcript_path" not in row["args"] for row in rows))
+        self.assertTrue(all(len(row["args"]["transcript_path_digest"]) == 64 for row in rows))
+
+    def test_inject_reads_only_on_compact_or_resume_session_start(self):
+        self.set_mode("inject")
+        startup = self.run_hook("SessionStart", source="startup")
+        compact = self.run_hook("SessionStart", source="compact")
+        startup_output = json.loads(startup.stdout)
+        self.assertIn("current_checkpoint_version=3", startup_output["hookSpecificOutput"]["additionalContext"])
+        self.assertNotIn("bounded recovery capsule", startup_output["hookSpecificOutput"]["additionalContext"])
+        output = json.loads(compact.stdout)
+        self.assertEqual(output["hookSpecificOutput"]["hookEventName"], "SessionStart")
+        self.assertIn("bounded recovery capsule", output["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual([row["name"] for row in self.call_rows()],
+                         ["claude-read-recovery", "claude-read-recovery"])
+
+    def test_new_session_activation_exposes_exact_first_checkpoint_contract(self):
+        self.set_mode("checkpoint")
+        self.base_env["RECOVERY_EMPTY"] = "1"
+        result = self.run_hook("SessionStart", source="startup")
+        context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn('"session_id":"session-1"', context)
+        self.assertIn('"transcript_path_digest":', context)
+        self.assertIn('"project_affinity":', context)
+        self.assertIn("current_checkpoint_version=0", context)
+        self.assertIn("call mcp__carr-continuity__claude-checkpoint", context)
+        self.assertIn("expected_version=current_checkpoint_version", context)
+        self.assertIn("must never be replayed automatically", context)
+        self.assertLessEqual(len(context.encode()), 4800)
+
+    def test_precompact_and_compact_resume_reset_rule_delivery_generation(self):
+        self.set_mode("checkpoint")
+        leaf_digest = hashlib.sha256(str(self.transcript.resolve()).encode()).hexdigest()
+        token = hashlib.sha256(f"session-1\0{leaf_digest}".encode()).hexdigest()
+        self.dedupe.mkdir()
+        state_path = self.dedupe / f"{token}.json"
+        state_path.write_text(json.dumps({"schema_version": 1,
+                                          "compaction_generation": 4,
+                                          "digests": ["old-rule-set"]}))
+        self.run_hook("PreCompact")
+        first = json.loads(state_path.read_text())
+        self.assertEqual(first, {"schema_version": 1,
+                                 "compaction_generation": 5, "digests": []})
+        self.run_hook("SessionStart", source="compact")
+        second = json.loads(state_path.read_text())
+        self.assertEqual(second["compaction_generation"], 6)
+        self.assertEqual(second["digests"], [])
+
+    def test_outage_spools_signed_receipt_but_never_replays_it(self):
+        self.set_mode("checkpoint")
+        self.base_env["CARR_CLAUDE_CONTINUITY_CALL"] = "/definitely/missing"
+        first = self.run_hook("PreCompact")
+        second = self.run_hook("Stop")
+        self.assertEqual((first.returncode, second.returncode), (0, 0))
+        receipts = sorted(self.spool.glob("*.json"))
+        self.assertEqual(len(receipts), 2)
+        key = self.spool.with_suffix(".key").read_bytes()
+        self.assertEqual(len(key), 32)
+        for receipt in receipts:
+            doc = json.loads(receipt.read_text())
+            signature = doc.pop("hmac_sha256")
+            canonical = json.dumps(doc, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+            self.assertTrue(hmac.compare_digest(signature, hmac.new(key, canonical, hashlib.sha256).hexdigest()))
+        self.base_env["CARR_CLAUDE_CONTINUITY_CALL"] = str(self.caller)
+        self.run_hook("SessionStart", source="resume")
+        self.assertEqual(len(list(self.spool.glob("*.json"))), 2,
+                         "recovery never replays pending receipt files")
+
+    def test_project_affinity_survives_worktree_path_change(self):
+        repo = self.root / "repo"
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+        (repo / "a").write_text("a")
+        subprocess.run(["git", "-C", str(repo), "add", "a"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True)
+        other = self.root / "other-worktree"
+        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "other", str(other)], check=True)
+        hook = load_hook()
+        self.assertEqual(hook.project_affinity(repo.resolve()), hook.project_affinity(other.resolve()))
+
+    def test_post_tool_sampling_is_stable_and_requires_native_tool_id(self):
+        hook = load_hook()
+        identity = {"session_id": "session"}
+        self.assertFalse(hook._sample_post_tool({}, identity))
+        values = [hook._sample_post_tool({"tool_use_id": f"tool-{index}"}, identity)
+                  for index in range(1000)]
+        self.assertEqual(values, [hook._sample_post_tool({"tool_use_id": f"tool-{index}"}, identity)
+                                  for index in range(1000)])
+        self.assertGreater(sum(values), 70)
+        self.assertLess(sum(values), 130)
+
+    def test_transcript_must_be_rooted_and_session_or_subagent_bound(self):
+        self.set_mode("checkpoint")
+        wrong = self.root / "other-session.jsonl"
+        wrong.write_text("{}\n")
+        self.transcript = wrong
+        self.assertEqual(self.run_hook("PreCompact").returncode, 0)
+        self.assertEqual(self.call_rows(), [])
+        outside = pathlib.Path(self.temp.name).parent / f"outside-{os.getpid()}.jsonl"
+        outside.write_text("{}\n")
+        try:
+            self.transcript = outside
+            self.assertEqual(self.run_hook("PreCompact").returncode, 0)
+            self.assertEqual(self.call_rows(), [])
+        finally:
+            outside.unlink(missing_ok=True)
+        subdir = self.root / "subagents"
+        subdir.mkdir()
+        self.transcript = subdir / "agent-leaf-7.jsonl"
+        self.transcript.write_text("{}\n")
+        result = self.run_hook("PreCompact", agent_id="leaf-7")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(self.call_rows()[0]["args"]["parent_session_id"], "session-1")
+
+
+if __name__ == "__main__":
+    unittest.main()
