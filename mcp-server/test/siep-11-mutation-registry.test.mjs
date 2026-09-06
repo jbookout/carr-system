@@ -400,7 +400,7 @@ test("v13 seals the reviewed Claude startup frontier without rewriting v12", () 
   assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
     JSON.parse(generatedV13.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]));
   assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
-    "87a93870857d174b76279b562b8442b5f9f82c4ba2d9797834408384224b9f5b");
+    "7b2270375fe6a83d04dd3c62146db54321183d8ca202ee909e050663d2a050b8");
   assert.deepEqual(CLAUDE_STARTUP_PRE_V13_DB_CATALOG_BASELINE,
     CLAUDE_CONTINUITY_FORWARD_DB_CATALOG_BASELINE);
   assert.equal(CLAUDE_STARTUP_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count, 359);

@@ -27308,9 +27308,32 @@
       "version": "v13",
       "reason": "Claude startup cursor activation and required surface enforcement.",
       "expected_count": 825,
-      "expected_sha256": "0434e668585f842436583ba4d6e2766f958359bd716fcce8ad696013809a75b1",
+      "expected_sha256": "b1c5702017bd3f067db6a1f1dc6f85ecbf9d96017e6a4863fc27590679b1a53c",
       "remove": [],
       "upsert": [
+        {
+          "ingress_key": "script-entrypoint:bin/schema-snapshot.sh",
+          "ingress_kind": "script_entrypoint",
+          "operation": "bin/schema-snapshot.sh",
+          "effect_class": "administrative_mutation",
+          "source_locator": "bin/schema-snapshot.sh",
+          "schema_digest": "ba8ad07c5598c64ad327536e447d7ef4cdc40f7db9100d5749d51fc1b6b046cf",
+          "handler_digest": "ba8ad07c5598c64ad327536e447d7ef4cdc40f7db9100d5749d51fc1b6b046cf",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
         {
           "ingress_key": "script-entrypoint:ops/claude-continuity-hook.py",
           "ingress_kind": "script_entrypoint",
@@ -27410,7 +27433,7 @@
     "base_version": "v13",
     "reason": "No reviewed source delta beyond the v13 seal.",
     "expected_count": 825,
-    "expected_sha256": "0434e668585f842436583ba4d6e2766f958359bd716fcce8ad696013809a75b1",
+    "expected_sha256": "b1c5702017bd3f067db6a1f1dc6f85ecbf9d96017e6a4863fc27590679b1a53c",
     "upsert": []
   }
 }
