@@ -27801,13 +27801,107 @@
         }
       },
       "upsert": []
+    },
+    {
+      "version": "v17",
+      "reason": "WR54 locked-snapshot backup guard and exact artifact-status provenance; two new helper entrypoints and their existing consumers.",
+      "expected_count": 827,
+      "expected_sha256": "1f46fec62096aa88fb4df35558947af06d2714ace45bc13e64a9755d26f92605",
+      "remove": [],
+      "row_replacements": {
+        "github-workflow:backup-nightly.yml": {
+          "schema_digest": "7e88518a00e94b3722e5cf4ee8fcca2e06c2fa53f1bb270fa4f6bf701ff04b7a",
+          "handler_digest": "7e88518a00e94b3722e5cf4ee8fcca2e06c2fa53f1bb270fa4f6bf701ff04b7a",
+          "permissions_contract_digest": "d38a0c9ed6d8d04244725b78cf7bc966fe894adc76d4036c34bf639632c9257e",
+          "delegates_to": [
+            "github-action:actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "github-action:actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+            "github-action:actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+            "script:bin/backup-dump.sh",
+            "script:ops/backup-workflow-status.py",
+            "shell:aws-s3api-put-object"
+          ]
+        },
+        "script-entrypoint:bin/backup-dump.sh": {
+          "schema_digest": "c176d8a696a08c661beb5f90f947726b14a32b19dc6dcfb3a4a812a5f18ffc13",
+          "handler_digest": "c176d8a696a08c661beb5f90f947726b14a32b19dc6dcfb3a4a812a5f18ffc13"
+        },
+        "script-entrypoint:bin/schema-snapshot.sh": {
+          "schema_digest": "19df4375e58b1c7a849c3d58ccb2b66917321696838c1443528087e2b2ce940b",
+          "handler_digest": "19df4375e58b1c7a849c3d58ccb2b66917321696838c1443528087e2b2ce940b"
+        },
+        "script-entrypoint:ops/recovery-point.py": {
+          "schema_digest": "2fba6e8303a442d3da672f9dd89ab55cfd478126c4da16d6d710f8016a6db0ea",
+          "handler_digest": "2fba6e8303a442d3da672f9dd89ab55cfd478126c4da16d6d710f8016a6db0ea"
+        },
+        "script-entrypoint:ops/scac-mutation-inventory.mjs": {
+          "schema_digest": "d8a1c33299639b7b31569ec8d83a2eb8215fa04c06b86803863903a9092ee134",
+          "handler_digest": "d8a1c33299639b7b31569ec8d83a2eb8215fa04c06b86803863903a9092ee134"
+        },
+        "script-entrypoint:ops/siep11-mutation-registry-local-pg-gate.py": {
+          "schema_digest": "c16d66e398ab9c8a8d991b14c224d7f0e0c0d9c45a09e5efdf91a0d98f241410",
+          "handler_digest": "c16d66e398ab9c8a8d991b14c224d7f0e0c0d9c45a09e5efdf91a0d98f241410"
+        },
+        "script-entrypoint:ops/siep18-reference-monitor-local-pg-gate.py": {
+          "schema_digest": "a9744da798bb74379d36a30637df1bba3fd1f10dae1ef52c1783f29b70cf356a",
+          "handler_digest": "a9744da798bb74379d36a30637df1bba3fd1f10dae1ef52c1783f29b70cf356a"
+        }
+      },
+      "upsert": [
+        {
+          "ingress_key": "script-entrypoint:bin/backup-guard.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "bin/backup-guard.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "bin/backup-guard.py",
+          "schema_digest": "adec676407c45b7dfffa4bc90eb65b6dfb3ce5d68f296330a50d9f5a293d5964",
+          "handler_digest": "adec676407c45b7dfffa4bc90eb65b6dfb3ce5d68f296330a50d9f5a293d5964",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:ops/backup-workflow-status.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "ops/backup-workflow-status.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "ops/backup-workflow-status.py",
+          "schema_digest": "47cb1258a9d4d7bfc79a99c56591ba5ffcd78d91e1691f2c3a0f5641461ff58c",
+          "handler_digest": "47cb1258a9d4d7bfc79a99c56591ba5ffcd78d91e1691f2c3a0f5641461ff58c",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        }
+      ]
     }
   ],
   "current_source_review": {
-    "base_version": "v16",
-    "reason": "No reviewed source delta beyond the v16 seal.",
-    "expected_count": 825,
-    "expected_sha256": "90efdfaafe31939b37e266fec96548b9f693eff37e342c0db6ff2d2ab209a6ce",
+    "base_version": "v17",
+    "reason": "No reviewed source delta beyond the v17 seal.",
+    "expected_count": 827,
+    "expected_sha256": "1f46fec62096aa88fb4df35558947af06d2714ace45bc13e64a9755d26f92605",
     "upsert": []
   }
 }
