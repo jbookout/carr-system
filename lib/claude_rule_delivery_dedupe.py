@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import tempfile
+import threading
 from datetime import datetime, timezone
 
 from lib import claude_continuity_config as continuity_config
@@ -16,14 +17,26 @@ HOOK_CONFIG = REPO / "ops/config/claude-continuity-hooks.json"
 HOOK_ADAPTER = REPO / "ops/claude-continuity-hook.py"
 MCP_PROXY = REPO / "mcp-server/continuity-stdio-proxy.mjs"
 ACTIVE_MODES = {"checkpoint", "inject"}
+_CONTRACT: continuity_config.Contract | None = None
+_CONTRACT_LOCK = threading.Lock()
 
 
 def _canonical(value: object) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
 
+def _contract() -> continuity_config.Contract:
+    """Load one immutable contract for this short-lived hook process."""
+    global _CONTRACT
+    if _CONTRACT is None:
+        with _CONTRACT_LOCK:
+            if _CONTRACT is None:
+                _CONTRACT = continuity_config.load(REPO)
+    return _CONTRACT
+
+
 def expected_config_digest() -> str:
-    return continuity_config.load(REPO).config_digest
+    return _contract().config_digest
 
 
 def _mode_file() -> pathlib.Path:
@@ -33,9 +46,7 @@ def _mode_file() -> pathlib.Path:
 
 def active() -> bool:
     try:
-        mode = continuity_config.read_mode(
-            _mode_file(), continuity_config.load(REPO)
-        )
+        mode = continuity_config.read_mode(_mode_file(), _contract())
         return mode in ACTIVE_MODES
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
         return False
