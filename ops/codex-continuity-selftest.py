@@ -731,6 +731,33 @@ class CodexHookTests(AdapterCase):
         self.assertIn("20,000-byte normalization target", context)
         self.assertIn('"expected_version":7', context)
 
+    def test_oversized_legacy_reference_list_still_emits_bounded_repair_directive(self):
+        self.native_rollout(compacted_row(1, "window-initial", "window-current"))
+        state = {
+            "objective": "keep the active task",
+            "latest_corrections": [{
+                "text": "preserve correction",
+                "refs": ["legacy:{REF1}"] * 10,
+            }
+                for _ in range(100)],
+            "next_action": "repair unresolved references before writing",
+        }
+        env, _ = self.install_fake_record_call(self.checkpoint(state=state, cursor={
+            "byte_offset": 1, "source_digest": "0" * 64,
+            "source_window_id": window_id("window-current"),
+            "source_window_number": 1,
+        }))
+
+        context = json.loads(self.run_hook(
+            self.hook_payload(source="resume"), env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+        self.assertIn("COMPACTION CHECKPOINT REPAIR", context)
+        self.assertIn("additional unresolved reference locations omitted", context)
+        self.assertNotIn("bounded repair directive exceeded its output limit", context)
+        directive = context.split("\n\nCARR Codex recovery checkpoint.", 1)[0]
+        self.assertLessEqual(len(directive.encode("utf-8")), 6000)
+        self.assertLessEqual(len(context.encode("utf-8")), 12000)
+
     def test_user_prompt_reports_rejected_receipt_without_claiming_outage(self):
         self.native_rollout({"type": "event_msg", "payload": {"message": "receipt"}})
         env, _ = self.install_fake_record_call(

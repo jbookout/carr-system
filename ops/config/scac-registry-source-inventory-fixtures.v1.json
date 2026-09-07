@@ -27899,9 +27899,9 @@
   ],
   "current_source_review": {
     "base_version": "v17",
-    "reason": "Reviewed Codex continuity preparation guard: one-pass checkpoint sizing guidance, condensed-state reference checks, and write-boundary rejection of malformed references; canonical records remain authoritative.",
+    "reason": "Reviewed Codex continuity preparation guard: one-pass checkpoint sizing guidance, bounded repair-directive reference reporting, condensed-state reference checks, and write-boundary rejection of malformed references; canonical records remain authoritative.",
     "expected_count": 827,
-    "expected_sha256": "cb8079a2a8f3f41bc010cc72d6b386ededcbf4be16bc95ccf3f18c59fcd90f18",
+    "expected_sha256": "ce02cf35bf01a9a0e664c344e011d0a430a2b3ec24b2405f7e053c9b0b6aea90",
     "upsert": [
       {
         "ingress_key": "script-entrypoint:ops/codex-continuity-hook.py",
@@ -27909,8 +27909,8 @@
         "operation": "ops/codex-continuity-hook.py",
         "effect_class": "administrative_mutation",
         "source_locator": "ops/codex-continuity-hook.py",
-        "schema_digest": "bf25e6e5321dd88fefde86848f9f6ac198d5f27c00e9f59846ec6ce930824929",
-        "handler_digest": "bf25e6e5321dd88fefde86848f9f6ac198d5f27c00e9f59846ec6ce930824929",
+        "schema_digest": "23217e1465a62492bc34027d78add279e0a990a9574604722d2c325f5ee0b5af",
+        "handler_digest": "23217e1465a62492bc34027d78add279e0a990a9574604722d2c325f5ee0b5af",
         "write": true,
         "human_only": false,
         "authority_only": true,

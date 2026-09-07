@@ -37,6 +37,9 @@ STATE_LIMIT_BYTES = 24000
 STATE_TARGET_BYTES = 20000
 STATE_PLAN_BYTES = 18000
 UNRESOLVED_REFERENCE_RE = re.compile(r"\{REF[0-9]+\}", re.IGNORECASE)
+REFERENCE_ISSUE_PATH_LIMIT = 1
+REFERENCE_ISSUE_PATH_BYTES = 80
+REFERENCE_SCAN_NODE_LIMIT = 10000
 CONTINUE_NATIVE_SESSION = (
     "Continue in this native session through routine context-length or stale-detail situations. "
     "Do not create or recommend a handoff or fresh session solely for context length; use a "
@@ -616,24 +619,40 @@ def _complete_checkpoint_state(checkpoint):
 
 
 def _checkpoint_reference_issues(checkpoint):
-    """Return paths containing unresolved reference placeholders."""
+    """Return a bounded summary of paths containing unresolved placeholders."""
     state = checkpoint.get("state") if isinstance(checkpoint, dict) else None
     if not isinstance(state, dict):
         return []
     issues = []
+    stack = [(state, "")]
+    scanned = 0
+    additional = False
 
-    def inspect(value, path):
+    def bounded_path(path):
+        encoded = path.encode("utf-8")
+        if len(encoded) <= REFERENCE_ISSUE_PATH_BYTES:
+            return path
+        return encoded[:REFERENCE_ISSUE_PATH_BYTES - 3].decode("utf-8", "ignore") + "..."
+
+    while stack and scanned < REFERENCE_SCAN_NODE_LIMIT:
+        value, path = stack.pop()
+        scanned += 1
         if isinstance(value, str):
             if UNRESOLVED_REFERENCE_RE.search(value):
-                issues.append(path)
+                if len(issues) < REFERENCE_ISSUE_PATH_LIMIT:
+                    issues.append(bounded_path(path))
+                else:
+                    additional = True
         elif isinstance(value, list):
-            for index, item in enumerate(value):
-                inspect(item, f"{path}[{index}]")
+            stack.extend((item, f"{path}[{index}]")
+                         for index, item in enumerate(value))
         elif isinstance(value, dict):
-            for key, item in value.items():
-                inspect(item, f"{path}.{key}" if path else key)
-
-    inspect(state, "")
+            stack.extend((item, f"{path}.{key}" if path else key)
+                         for key, item in value.items())
+    if stack:
+        additional = True
+    if additional:
+        issues.append("additional unresolved reference locations omitted")
     return issues
 
 
