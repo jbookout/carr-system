@@ -98,7 +98,8 @@ class AdapterCase(unittest.TestCase):
                               input=json.dumps(payload), text=True, capture_output=True,
                               check=False, env=self.env)
 
-    def install_fake_record_call(self, response=None, outage=False, event_response=None):
+    def install_fake_record_call(self, response=None, outage=False, event_response=None,
+                                 recovery_tool_error=False, event_tool_error=False):
         fake = self.base / "fake-call.py"
         log = self.base / "calls.jsonl"
         if log.exists():
@@ -121,9 +122,19 @@ if os.environ.get("FAKE_CALL_OUTAGE") == "1":
     raise SystemExit(1)
 if sys.argv[1] == "codex-read-recovery":
     path = os.environ.get("FAKE_RESPONSE")
-    print(pathlib.Path(path).read_text(encoding="utf-8") if path else '{"ok":true,"found":false,"checkpoint":null}')
+    value = pathlib.Path(path).read_text(encoding="utf-8") if path else '{"ok":true,"found":false,"checkpoint":null}'
+    if os.environ.get("FAKE_RECOVERY_TOOL_ERROR") == "1":
+        print("wrapper diagnostic", file=sys.stderr)
+        print("TOOL ERROR " + value, file=sys.stderr)
+        raise SystemExit(1)
+    print(value)
 elif os.environ.get("FAKE_EVENT_RESPONSE"):
-    print(pathlib.Path(os.environ["FAKE_EVENT_RESPONSE"]).read_text(encoding="utf-8"))
+    value = pathlib.Path(os.environ["FAKE_EVENT_RESPONSE"]).read_text(encoding="utf-8")
+    if os.environ.get("FAKE_EVENT_TOOL_ERROR") == "1":
+        print("wrapper diagnostic", file=sys.stderr)
+        print("TOOL ERROR " + value, file=sys.stderr)
+        raise SystemExit(1)
+    print(value)
 else:
     print('{"ok":true}')
 """, encoding="utf-8")
@@ -133,6 +144,10 @@ else:
             env["FAKE_RESPONSE"] = str(response_path)
         if event_response is not None:
             env["FAKE_EVENT_RESPONSE"] = str(event_response_path)
+        if recovery_tool_error:
+            env["FAKE_RECOVERY_TOOL_ERROR"] = "1"
+        if event_tool_error:
+            env["FAKE_EVENT_TOOL_ERROR"] = "1"
         if outage:
             env["FAKE_CALL_OUTAGE"] = "1"
         return env, log
@@ -437,6 +452,12 @@ class CodexHookTests(AdapterCase):
             "Do not claim success before readback",
             "Continuity degraded: checkpoint repair failed (<specific reason>); native history remains available.",
             "Never hide a degraded repair",
+            "perform one fresh codex-read-recovery",
+            "complete checkpoint.state as the authoritative starting point",
+            "orientation only and may omit whole items",
+            "never treat an omitted item as absent",
+            "If the complete fresh checkpoint.state is unavailable, do not write",
+            "do not issue a knowingly stale write",
         ):
             self.assertIn(expected, context)
         self.assertNotIn("never-store-opaque-compact-body", context)
@@ -566,12 +587,36 @@ class CodexHookTests(AdapterCase):
         self.native_rollout({"type": "event_msg", "payload": {"message": "receipt"}})
         env, _ = self.install_fake_record_call(
             self.checkpoint(cursor={"byte_offset": 1}),
-            event_response={"ok": False, "error": "codex_event_key_conflict"})
+            event_response={"error": "codex_event_key_conflict"},
+            event_tool_error=True)
         context = json.loads(self.run_hook(
             self.hook_payload("UserPromptSubmit", turn_id="turn-rejected"), env).stdout)[
                 "hookSpecificOutput"]["additionalContext"]
         self.assertIn("was rejected by the record store (codex_event_key_conflict)", context)
         self.assertNotIn("receipt could not be stored because the record store is unavailable", context)
+
+    def test_sanctioned_tool_error_rejection_is_not_reported_as_outage(self):
+        self.native_rollout(compacted_row(1, "window-initial", "window-current"))
+        response = {"error": "codex_recovery_binding_conflict"}
+        env, _ = self.install_fake_record_call(
+            response, recovery_tool_error=True)
+
+        startup = json.loads(self.run_hook(
+            self.hook_payload(source="resume"), env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+        self.assertIn("checkpoint recovery rejected (codex_recovery_binding_conflict)",
+                      startup)
+        self.assertIn("Continuity degraded: checkpoint recovery rejected (codex_recovery_binding_conflict)",
+                      startup)
+        self.assertNotIn("record store is unavailable", startup)
+
+        prompt = json.loads(self.run_hook(
+            self.hook_payload("UserPromptSubmit", turn_id="turn-recovery-rejected"),
+            env).stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("repair could not start because recovery was rejected (codex_recovery_binding_conflict)",
+                      prompt)
+        self.assertIn("checkpoint recovery (codex_recovery_binding_conflict)", prompt)
+        self.assertNotIn("record store is unavailable", prompt)
 
     def test_compact_refresh_refuses_blind_write_paths(self):
         self.native_rollout(compacted_row(1, "window-initial", "window-current"))
@@ -701,7 +746,11 @@ class CodexHookTests(AdapterCase):
             self.hook_payload(source="compact"), env).stdout)["hookSpecificOutput"]["additionalContext"]
         self.assertLessEqual(len(context.encode("utf-8")), 12000)
         for expected in ("latest correction", "next action", "coverage warning",
-                         "codex-history.py search", "COMPACTION CHECKPOINT REPAIR"):
+                         "codex-history.py search", "COMPACTION CHECKPOINT REPAIR",
+                         "complete checkpoint.state as the authoritative starting point",
+                         "orientation only and may omit whole items",
+                         "never treat an omitted item as absent",
+                         "If the complete fresh checkpoint.state is unavailable, do not write"):
             self.assertIn(expected, context)
         self.assertNotIn('"text":"constraint-3-', context)
 

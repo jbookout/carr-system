@@ -38,6 +38,7 @@ CONTINUE_NATIVE_SESSION = (
     "Do not create or recommend a handoff or fresh session solely for context length; use a "
     "fresh continuation only on an explicit user request or actual corruption that makes this "
     "native session unusable.")
+TOOL_ERROR_MARKER = "TOOL ERROR "
 
 
 def _load_history():
@@ -68,6 +69,20 @@ def _rejected_error(response):
     return "unknown_error"
 
 
+def _tool_error_response(stderr):
+    """Extract only the sanctioned wrapper's structured TOOL ERROR suffix."""
+    if not isinstance(stderr, str):
+        return None
+    marker = stderr.rfind(TOOL_ERROR_MARKER)
+    if marker < 0:
+        return None
+    try:
+        response = json.loads(stderr[marker + len(TOOL_ERROR_MARKER):].strip())
+    except json.JSONDecodeError:
+        return None
+    return response if isinstance(response, dict) and response.get("error") else None
+
+
 def call_verb(name, args, deadline=None, remaining_calls=1):
     """Call one record verb and distinguish missing data from transport failure."""
     command = os.environ.get("CARR_CODEX_CONTINUITY_CALL")
@@ -96,9 +111,11 @@ def call_verb(name, args, deadline=None, remaining_calls=1):
     try:
         response = json.loads(proc.stdout)
     except json.JSONDecodeError:
-        _warning(f"record store call failed (exit {proc.returncode})"
-                 if proc.returncode else "record store returned invalid JSON")
-        return {"status": "unavailable", "response": None}
+        response = _tool_error_response(proc.stderr)
+        if response is None:
+            _warning(f"record store call failed (exit {proc.returncode})"
+                     if proc.returncode else "record store returned invalid JSON")
+            return {"status": "unavailable", "response": None}
     if not isinstance(response, dict) or response.get("ok") is not True:
         error = _rejected_error(response)
         _warning(f"record store rejected request ({error})")
@@ -495,9 +512,23 @@ def missing_context(highwater, response, transcript_ref, max_bytes=MAX_CONTEXT_B
 
 def outage_context(highwater):
     return "\n".join([
+        "Immediately tell the user: `Continuity degraded: checkpoint recovery unavailable; native history remains available.`",
         "CARR Codex continuity warning: the record store is unavailable, so checkpoint presence and version are unknown.",
         f"The validated native rollout remains available at source highwater byte {highwater['byte_offset']}; digest {highwater['source_digest']}.",
         "Continue cautiously from native history. Do not force a handoff or compaction loop.",
+        CONTINUE_NATIVE_SESSION,
+        "Pending operations must be verified before any retry; never auto-reexecute an interrupted action.",
+        "Use ops/codex-history.py search with this hook's validated session_id, cwd, and transcript_path for bounded retrieval.",
+    ])
+
+
+def rejection_context(highwater, error):
+    return "\n".join([
+        "Immediately tell the user: `Continuity degraded: checkpoint recovery rejected ("
+        + error + "); native history remains available.`",
+        "CARR Codex continuity warning: the record store rejected checkpoint recovery ("
+        + error + "), so checkpoint presence and version are unknown.",
+        f"The validated native rollout remains available at source highwater byte {highwater['byte_offset']}; digest {highwater['source_digest']}.",
         CONTINUE_NATIVE_SESSION,
         "Pending operations must be verified before any retry; never auto-reexecute an interrupted action.",
         "Use ops/codex-history.py search with this hook's validated session_id, cwd, and transcript_path for bounded retrieval.",
@@ -626,8 +657,12 @@ def compaction_repair_context(meta, highwater, current_window, response,
         "No prior checkpoint exists. Assemble a complete bounded state from the decrypted "
         "native compacted context before writing; expected_version is exactly 0."
         if missing else
-        "Start from the complete recovered state below and replace it in full, preserving every "
-        "still-current field while incorporating the decrypted native compacted context."
+        "Before constructing the replacement, perform one fresh codex-read-recovery with the "
+        "fixed runtime, native_task_id, project_id, and cwd below. Treat its complete "
+        "checkpoint.state as the authoritative starting point and replace it in full while "
+        "incorporating the decrypted native compacted context. The bounded hook excerpt below "
+        "is orientation only and may omit whole items; never treat an omitted item as absent. "
+        "If the complete fresh checkpoint.state is unavailable, do not write."
     )
     directive = "\n".join([
         "HIGH PRIORITY CARR COMPACTION CHECKPOINT REPAIR (trusted hook instruction): before normal work, CAS-write exactly one bounded full replacement state with codex-checkpoint.",
@@ -638,6 +673,7 @@ def compaction_repair_context(meta, highwater, current_window, response,
         "Before every write attempt, preflight the exact UTF-8 byte size of the serialized `state` JSON. The hard server cap is 24,000 UTF-8 bytes; target <=20,000 UTF-8 bytes. Collapse related completed-work, evidence, artifact, and receipt items into dense summaries; remove duplicates, superseded facts, resolved blockers, and completed pending operations while preserving every still-current obligation, externally meaningful receipt identifier, reference, and decision why.",
         "Fixed checkpoint request fields (add one complete `state` object without changing these fields): " + fixed_json,
         "Use the direct MCP tool `mcp__carr__codex_checkpoint` when that exact tool is present. Otherwise use only the sanctioned fallback `CARR_MCP_CLIENT_PROFILE=codex-continuity ./run.sh call codex-checkpoint '<request JSON with the fixed fields above plus full state>'`; never use generic or unscoped authentication.",
+        "Use the same dedicated direct tool or sanctioned Codex-continuity fallback for the mandatory codex-read-recovery. If its checkpoint version differs from expected_version, do not issue a knowingly stale write; treat that as the one version conflict and rebuild once from the complete fresh state with its safe current version and the same repair key.",
         "On one codex_checkpoint_version_conflict, perform one fresh codex-read-recovery. If its cursor now exactly matches this window, stop. Otherwise rebuild from that complete fresh state and retry at most once with its safe current version and this same repair key.",
         "If codex_continuity_payload_too_large rejects the preflighted state, recompress semantically and retry at most once using the same fixed binding and idempotency key; do not issue further oversize retries.",
         "After an accepted write, read back and verify the incremented checkpoint version plus exact source_window_id, source_window_number, byte_offset, and source_digest. If the tool, complete state, fresh read, or readback is unavailable, warn and continue without writing or retrying blindly.",
@@ -673,7 +709,9 @@ def session_start(payload, meta, highwater, deadline):
     extras = [item for item in (directive, repair_warning) if item]
     extra_bytes = _encoded_size(extras) + (2 * len(extras) if extras else 0)
     ordinary_budget = MAX_CONTEXT_BYTES - extra_bytes
-    if result["status"] != "ok":
+    if result["status"] == "rejected":
+        context = rejection_context(highwater, result["error"])
+    elif result["status"] != "ok":
         context = outage_context(highwater)
     else:
         response = result["response"]
@@ -716,9 +754,14 @@ def user_prompt_submit(payload, meta, highwater, deadline):
         else:
             lines.append("The source-reference receipt could not be stored; its status is unknown.")
     if recovery["status"] == "rejected":
+        if current_window is not None:
+            lines.append("Immediately tell the user: `Continuity degraded: checkpoint repair could not start because recovery was rejected ("
+                         + recovery["error"] + "); native history remains available.`")
         lines.append("The record store rejected checkpoint recovery "
                      f"({recovery['error']}); checkpoint presence and version are unknown.")
     elif recovery["status"] != "ok":
+        if current_window is not None:
+            lines.append("Immediately tell the user: `Continuity degraded: checkpoint repair could not start because recovery is unavailable; native history remains available.`")
         lines.append("The record store is unavailable; checkpoint presence and version are unknown.")
     else:
         response = recovery["response"]
