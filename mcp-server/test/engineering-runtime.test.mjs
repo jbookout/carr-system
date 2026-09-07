@@ -254,10 +254,32 @@ test("the worker invokes the fresh Codex path and submits the returned typed rec
   assert.deepEqual(calls.find(row => row.options)?.options, { fresh: true });
   assert.equal(calls.find(row => row.options)?.task.engineering_plan.plan_digest, typed.plan_digest);
   assert.equal(calls.find(row => row.options)?.task.work_request, typed.work_request.id);
+  assert.equal(calls.find(row => row.options)?.task.work_request_ref, "WR-301",
+    "the canonical human Work Request ref must survive beside the immutable UUID binding");
   assert.equal(calls.find(row => row.options)?.task.claim_lease_expires_at, fakeClaim.envelope.expires_at);
   assert.ok(!calls.some(sql => typeof sql === "string" && /from ops\.work_request/i.test(sql)));
   assert.equal(calls.filter(sql => typeof sql === "string" && /ops\.(?:complete_job|fail_job)/.test(sql)).length, 0,
     "runtime must leave post-receipt job finalization to the transactional database seam");
+});
+
+test("the controller fails closed without launching Codex when the claim payload has no canonical Work Request ref", async () => {
+  const typed = controllerPlan();
+  const claim = { definition_key: "engineering-slice", job_id: "66666666-6666-4666-8666-666666666666", attempt: 1, lease_token: "77777777-7777-4777-8777-777777777777", envelope_id: "88888888-8888-4888-8888-888888888888", envelope_digest: `sha256:${"a".repeat(64)}`, envelope: currentClaimEnvelope(), payload: { slice_ref: "slice:one", plan_digest: typed.plan_digest } };
+  const calls = [];
+  const c = { query: async (sql) => {
+    calls.push(sql);
+    if (sql.includes("ops.engineering_claim_slice")) return { rows: [claim] };
+    if (sql.includes("engineering_execution_envelope")) return { rows: [{ id: claim.envelope_id, job_id: claim.job_id, work_request_id: "11111111-1111-4111-8111-111111111111", issued_at: claim.envelope.issued_at, expires_at: claim.envelope.expires_at, agent_session_id: "99999999-9999-4999-8999-999999999999", agent_session_lease_expires_at: claim.envelope.agent_session.lease_expires_at, envelope: claim.envelope, envelope_digest: claim.envelope_digest }] };
+    if (sql.includes("engineering_controller_binding")) return { rows: [{ binding: { envelope_id: claim.envelope_id, envelope_digest: claim.envelope_digest, slice_ref: "slice:one", plan_digest: typed.plan_digest, slice_plan: typed, executor_actor: { id: actor.id, slug: actor.slug }, agent_session_lease_expires_at: claim.envelope.expires_at, job_lease_expires_at: claim.envelope.expires_at } }] };
+    if (sql.includes("ops.engineering_fail_claim")) return { rows: [{ state: "retry_wait" }] };
+    return { rows: [] };
+  } };
+  let launched = 0;
+  const result = await runEngineeringWorker({ c, worker: "engineering-worker", desk: "engineering-codex", ToolError: EngineeringToolError,
+    dispatchEnvelope: async () => { launched += 1; return {}; } });
+  assert.equal(launched, 0);
+  assert.equal(result.completed, 0);
+  assert.deepEqual(result.results[0], { job_id: claim.job_id, state: "retry_wait", failure_class: "engineering_dispatch_failed" });
 });
 
 test("an atomically finalized receipt survives controller readback failure without a compensating scoped failure", async () => {

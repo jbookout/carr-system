@@ -39,11 +39,19 @@ GATE_SPEC.loader.exec_module(rule_pack_gate)
 
 
 FAILURES: list[str] = []
+SKIPS: list[str] = []
+
+
+class SkippedTest(Exception):
+    """A visible, non-passing check whose optional local evidence is absent."""
 
 
 def check(label, fn):
     try:
         fn()
+    except SkippedTest as exc:
+        SKIPS.append(f"{label}: {exc}")
+        print(f"SKIP {label}: {exc}")
     except AssertionError as exc:
         FAILURES.append(f"{label}: {exc}")
         print(f"FAIL {label}: {exc}")
@@ -127,7 +135,8 @@ def valid_receipt(envelope: dict = ENVELOPE) -> dict:
 def request() -> dict:
     first = PLAN["slices"][0]
     return {"desk": "engineering-codex", "envelope": copy.deepcopy(ENVELOPE), "executor_slug": "codex",
-            "task": {"work_request": PLAN["work_request"]["id"], "slice_ref": "slice:a", "plan_digest": PLAN["plan_digest"],
+            "task": {"work_request": PLAN["work_request"]["id"], "work_request_ref": "WR-000301",
+                     "slice_ref": "slice:a", "plan_digest": PLAN["plan_digest"],
                      "job_ref": ENVELOPE["request"]["job_ref"], "attempt_id": "attempt:1",
                      "claim_lease_expires_at": ENVELOPE["expires_at"],
                      "generation": 1,
@@ -240,6 +249,45 @@ def test_success_is_fresh_and_database_capability_is_not_forwarded():
     assert "reuse a predecessor envelope" in seen["prompt"]
     assert "never inherit the predecessor transcript" in seen["prompt"]
     assert "or its unverified conclusions" in seen["prompt"]
+    # Source hydration and the receipt template sit between the rule chunks and
+    # the immutable packet; the packet and task binding stay the exact tail.
+    assert "ACCEPTED SOURCE HYDRATION (after every rule chunk is read" in seen["prompt"]
+    assert "tools.mcp__carr__engineering_passport_source" in seen["prompt"]
+    assert "tools.mcp__carr__doctrine_sections" in seen["prompt"]
+    assert "ENGINEERING SOURCE NATIVE PROJECTION CODE (exact):" in seen["prompt"]
+    assert "RUNBOOK NATIVE CHUNK CODE (repeat until remaining=0):" in seen["prompt"]
+    assert adapter.RUNBOOK_NATIVE_CHUNK_JS in seen["prompt"]
+    assert "never read a local, ignored, or cached runbook file" in seen["prompt"]
+    assert "This slice does not name source_merge" in seen["prompt"]
+    assert '"work_request_ref":"WR-000301"' in seen["prompt"]
+    assert "RECEIPT TEMPLATE (exact engineering-slice-receipt.v1 field set" in seen["prompt"]
+    assert "Replace every null placeholder at exactly these paths" in seen["prompt"]
+    assert ", ".join(adapter.RECEIPT_TEMPLATE_PLACEHOLDER_PATHS) in seen["prompt"]
+    assert "locally check your final object against the template's field names" in seen["prompt"]
+    assert "never invent evidence, artifacts, deviations, or passed checks" in seen["prompt"]
+    assert seen["prompt"].index("STANDING-CONTEXT NATIVE RULE CHUNK CODE") < seen["prompt"].index(
+        "ENGINEERING SOURCE NATIVE PROJECTION CODE") < seen["prompt"].index(
+        "RECEIPT TEMPLATE (exact") < seen["prompt"].index("SERVER-ISSUED SLICE PACKET (immutable):")
+    assert "ALL_TOOLS" not in adapter.ENGINEERING_SOURCE_NATIVE_PROJECTION_JS_TEMPLATE
+    assert "ALL_TOOLS" not in adapter.RUNBOOK_NATIVE_CHUNK_JS
+    # The qualified GitHub route: per-command overrides, nothing persisted,
+    # no credential exposure, no hook bypass, no push authorization claim.
+    assert adapter.GITHUB_GIT_COMMAND_PREFIX == (
+        "git -c url.https://github.com/.insteadOf=git@github.com: -c credential.helper= "
+        "-c 'credential.helper=!gh auth git-credential' -c credential.interactive=never "
+        "-c core.askPass=/bin/false")
+    assert "REPOSITORY NETWORK AUTH (per command, exact):" in seen["prompt"]
+    assert f"`{adapter.GITHUB_GIT_COMMAND_PREFIX} <subcommand>`" in seen["prompt"]
+    assert "passing these `-c` overrides on that one command only" in seen["prompt"]
+    assert "Never run `git config`, never edit `.git/config` or `~/.gitconfig`" in seen["prompt"]
+    assert "never print, log, echo, or store a token or credential" in seen["prompt"]
+    assert "never pass `--no-verify` or otherwise bypass hooks" in seen["prompt"]
+    assert "never change the desk, model, or envelope" in seen["prompt"]
+    assert "This route is not push authorization" in seen["prompt"]
+    assert "proven only when the actual command succeeds" in seen["prompt"]
+    assert "stop and return a typed blocked receipt naming the failure" in seen["prompt"]
+    assert "GH_TOKEN" not in seen["prompt"] and "GITHUB_TOKEN" not in seen["prompt"]
+    assert "GH_TOKEN" not in seen["env"] and "GITHUB_TOKEN" not in seen["env"]
     prompt_record = {"type": "response_item", "payload": {"type": "message",
                      "role": "user", "content": [
                          {"type": "input_text", "text": seen["prompt"]}]}}
@@ -574,6 +622,547 @@ def test_bridge_controller_readback_is_typed_and_never_relays_child_stderr():
             "claimed": 1, "completed": 1, "results": [{"job_id": "job:opaque"}]}
     finally:
         bridge.subprocess.run = original
+
+
+WR68_ARTIFACTS = ROOT / "out" / "v5-build-clearance" / "wr68"
+WR68_SOURCE_MERGE_PATHS = [
+    "bin/schema-snapshot.sh",
+    "mcp-server/src/mutation-registry.js",
+    "mcp-server/src/scac-mutation-registry.v18.generated.js",
+    "mcp-server/src/work-shape.js",
+    "mcp-server/test/siep-11-mutation-registry.test.mjs",
+    "mcp-server/test/work-request-ready-plan.test.mjs",
+    "mcp-server/test/work-shape.test.mjs",
+    "migrations/0492_sourced_shape_forward_correction_and_scac_successor.sql",
+    "ops/config/scac-registry-full-entry-set-seals.json",
+    "ops/config/scac-registry-source-inventory-fixtures.v1.json",
+    "ops/scac-mutation-inventory.mjs",
+    "ops/schema-snapshot-registry-seed-selftest.py",
+    "ops/siep11-mutation-registry-local-pg-gate.py",
+    "ops/siep18-reference-monitor-local-pg-gate.py",
+]
+RUNBOOK_SECTION_ID = "b4545844-6113-4497-ad21-718f33ca378d"
+RUNBOOK_REVISION_ID = "c3dcb0f5-465b-4d0c-9ebb-8e51bf2997fe"
+
+
+def wr68_like_slice() -> dict:
+    """A slice whose accepted text and checks literally name source_merge."""
+    row = copy.deepcopy(PLAN["slices"][0])
+    row["scope_boundary"] = "Only the accepted C-sorted 14-path source_merge cap."
+    row["planned_checks"] = [{"check_ref": "check:wr68-exact-scope", "evidence_requirement": "metadata_only_sufficient",
+                              "failure_condition": "Any changed path is outside the 14 accepted source_merge paths"}]
+    return row
+
+
+def synthetic_binding(*, source_merge_required: bool) -> dict:
+    return {
+        "work_request_ref": "WR-000301",
+        "work_request": copy.deepcopy(PLAN["work_request"]),
+        "accepted_plan_revision": copy.deepcopy(PLAN["accepted_plan_revision"]),
+        "slice_ref": "slice:a",
+        "source_merge_required": source_merge_required,
+    }
+
+
+def text_encoder_bytes(value: str) -> bytes:
+    """Test oracle for the sealed content hash, not a general TextEncoder model.
+
+    It replaces every surrogate code point in a Python str with U+FFFD and then
+    UTF-8 encodes.  That agrees with the doctrine store's TextEncoder for the
+    bodies these tests build: proper astral characters (one Python code point,
+    one UTF-16 pair in JavaScript) and isolated lone surrogates.  It does NOT
+    model adjacent standalone high+low surrogate Python code points, which
+    JSON transport would deliver to JavaScript as one valid pair; no fixture
+    here contains that shape.
+    """
+    return "".join("�" if "\ud800" <= char <= "\udfff" else char for char in value).encode("utf-8")
+
+
+def synthetic_runbook_body(chars: int = 52_129) -> str:
+    line = "Step: read the accepted runbook, then act only inside the accepted paths. \"quoted\" \\ text\n"
+    return (line * (chars // len(line) + 1))[:chars]
+
+
+def synthetic_source(binding: dict, runbook_body: str, *, source_merge=WR68_SOURCE_MERGE_PATHS,
+                     oversized: bool = True) -> dict:
+    caps: dict[str, object] = {"max_steps": 16, "max_duration_minutes": 120}
+    if source_merge is not None:
+        caps["source_merge"] = {
+            "repository": "jbookout/carr-system", "base_branch": "main",
+            "schema_version": "source-merge-scope.v1", "authorized_paths": list(source_merge),
+        }
+    return {
+        "schema_version": "engineering-passport-source.v1",
+        "work_request": {
+            "id": binding["work_request"]["id"], "ref": binding["work_request_ref"], "state": "ready",
+            "version": binding["work_request"]["state_version"],
+            "canonical_record_digest": binding["work_request"]["canonical_record_digest"],
+            "acceptance_criteria": [{"id": f"AC-{index}", "text": "A" * 400} for index in range(20)] if oversized else [],
+        },
+        "accepted_plan_revision": {
+            "id": binding["accepted_plan_revision"]["id"], "plan_ref": binding["accepted_plan_revision"]["id"],
+            "revision": binding["accepted_plan_revision"]["revision"],
+            "digest": binding["accepted_plan_revision"]["digest"], "caps": caps,
+            "preimage": {
+                "plan": {"large_unrelated_prefix": "X" * 200_000} if oversized else {},
+                "runbook": {"ref": "doctrine:runbook#wr68-sourced-shape-forward-correction",
+                            "section_id": RUNBOOK_SECTION_ID, "revision_id": RUNBOOK_REVISION_ID,
+                            "content_hash": "sha256:" + hashlib.sha256(text_encoder_bytes(runbook_body)).hexdigest()},
+            },
+        },
+    }
+
+
+def synthetic_doctrine(runbook_body: str, *, current_version="2", status="active",
+                       section_id=RUNBOOK_SECTION_ID, content_hash=None, missing=()) -> dict:
+    return {"ok": True, "missing": list(missing), "sections": [{
+        "id": section_id, "section_key": "wr68-sourced-shape-forward-correction",
+        "title": "WR68 forward Shape correction", "ordinal": 1080, "status": status,
+        "current_version": current_version, "review_after": "2027-03-06T14:30:38.005Z",
+        "doc_slug": "runbook", "content_class": "sop", "visibility": "shared",
+        "body": {"text": runbook_body},
+        "content_hash": content_hash if content_hash is not None else hashlib.sha256(text_encoder_bytes(runbook_body)).hexdigest(),
+    }]}
+
+
+def execute_source_projection(binding: dict, source_response: dict, doctrine_response: dict) -> dict:
+    """Run the exact per-dispatch hydration code and chunk loop at the JavaScript seam.
+
+    The probed Codex functions.exec isolate has no crypto, TextEncoder, Buffer,
+    or require; the harness removes all four before the generated code runs.
+    """
+    harness = f'''const sourceResponse = {json.dumps(source_response)};
+const doctrineResponse = {json.dumps(doctrine_response)};
+for (const name of ["crypto", "TextEncoder", "Buffer", "require"]) {{
+  Object.defineProperty(globalThis, name, {{value: undefined, configurable: true, writable: true}});
+  if (typeof globalThis[name] !== "undefined") throw new Error(name + " is still defined");
+}}
+const calls = [];
+const state = new Map();
+const output = [];
+const tools = {{
+  mcp__carr__engineering_passport_source: async (input) => {{ calls.push(["engineering_passport_source", input]); return {{content:[{{type:"text",text:JSON.stringify(sourceResponse)}}]}}; }},
+  mcp__carr__doctrine_sections: async (input) => {{ calls.push(["doctrine_sections", input]); return {{content:[{{type:"text",text:JSON.stringify(doctrineResponse)}}]}}; }},
+}};
+const store = (key, value) => state.set(key, value);
+const load = (key) => state.get(key);
+const text = (value) => output.push(String(value));
+const AsyncFunction = Object.getPrototypeOf(async function(){{}}).constructor;
+const run = async (source) => await new AsyncFunction(
+  "tools","store","load","text","crypto","TextEncoder","Buffer","require",source)(
+  tools,store,load,text,undefined,undefined,undefined,undefined);
+let error = null;
+try {{
+  await run({json.dumps(adapter.engineering_source_projection_js(binding))});
+  let remaining = JSON.parse(output[0]).runbook.body_chars;
+  while (remaining > 0) {{
+    await run({json.dumps(adapter.RUNBOOK_NATIVE_CHUNK_JS)});
+    remaining = JSON.parse(output[output.length - 1]).remaining;
+  }}
+}} catch (caught) {{
+  error = String(caught && caught.message || caught);
+}}
+process.stdout.write(JSON.stringify({{output, calls, error}}));'''
+    run = subprocess.run(
+        ["node", "--input-type=module", "-e", harness],
+        capture_output=True, text=True, timeout=30, check=False)
+    assert run.returncode == 0, run.stderr
+    result = json.loads(run.stdout)
+    result["output"] = [json.loads(value) for value in result["output"]]
+    return result
+
+
+def test_slice_text_decides_whether_the_source_merge_cap_is_required():
+    assert adapter.slice_requires_source_merge(PLAN["slices"][0]) is False
+    assert adapter.slice_requires_source_merge(wr68_like_slice()) is True
+    only_check = copy.deepcopy(PLAN["slices"][0])
+    only_check["planned_checks"][0]["failure_condition"] = "A changed path is outside the accepted source-merge cap"
+    assert adapter.slice_requires_source_merge(only_check) is True
+    candidate = WR68_ARTIFACTS / "wr68-engineering-slice-plan-candidate.json"
+    if candidate.is_file():
+        actual = json.loads(candidate.read_text())["slices"][0]
+        assert adapter.slice_requires_source_merge(actual) is True
+
+
+def test_controller_task_without_a_canonical_work_request_ref_refuses_before_dispatch():
+    value = request()
+    del value["task"]["work_request_ref"]
+    dispatched = False
+
+    def fake_dispatch(*_args, **_kwargs):
+        nonlocal dispatched
+        dispatched = True
+        return {}
+    try:
+        adapter.run(value, dispatch_fn=fake_dispatch, registry=ValidEngineeringDesk())
+    except adapter.DispatchRefusal:
+        assert dispatched is False
+        return
+    raise AssertionError("a task without the canonical Work Request ref reached dispatch")
+
+
+def test_prompt_task_binding_keeps_the_gate_shape_while_the_hydration_binding_carries_the_ref():
+    seen = {}
+
+    def fake_dispatch(desk, prompt, **kwargs):
+        seen["prompt"] = prompt
+        return {"status": "completed", "result": json.dumps(valid_receipt())}
+
+    adapter.run(request(), dispatch_fn=fake_dispatch, registry=ValidEngineeringDesk())
+    task_text = seen["prompt"].split("\n\nCONTROLLER TASK BINDING (immutable):\n", 1)[1]
+    prompt_task = json.loads(task_text)
+    assert set(prompt_task) == {"attempt_id", "engineering_plan", "engineering_slice", "generation",
+                                "job_ref", "plan_digest", "slice_ref", "work_request"}
+    assert prompt_task["work_request"] == PLAN["work_request"]["id"]
+    code_start = seen["prompt"].index("ENGINEERING SOURCE NATIVE PROJECTION CODE (exact):\n")
+    code = seen["prompt"][code_start:].split("\n\n", 1)[0].split("\n", 1)[1]
+    expected = adapter.engineering_source_projection_js(adapter.source_hydration_binding(
+        request()["task"], PLAN, PLAN["slices"][0]))
+    assert code == expected
+    assert '"work_request_ref":"WR-000301"' in code
+    assert '"source_merge_required":false' in code
+
+
+def test_native_source_projection_stays_bounded_and_chunks_the_full_runbook_once():
+    binding = synthetic_binding(source_merge_required=True)
+    body = synthetic_runbook_body()
+    assert len(body) == 52_129
+    result = execute_source_projection(binding, synthetic_source(binding, body), synthetic_doctrine(body))
+    assert result["error"] is None, result["error"]
+    assert result["calls"] == [
+        ["engineering_passport_source", {"work_request": "WR-000301"}],
+        ["doctrine_sections", {"section_ids": [RUNBOOK_SECTION_ID]}],
+    ]
+    projection = result["output"][0]
+    assert projection["schema_version"] == "engineering-source-native-projection.v1"
+    assert projection["provenance"] == "native_call_tool_result"
+    assert projection["source_calls"] == [
+        {"tool_name": "mcp__carr__engineering_passport_source", "input": {"work_request": "WR-000301"}},
+        {"tool_name": "mcp__carr__doctrine_sections", "input": {"section_ids": [RUNBOOK_SECTION_ID]}},
+    ]
+    assert projection["work_request"] == {
+        "ref": "WR-000301", "id": PLAN["work_request"]["id"], "version": PLAN["work_request"]["state_version"],
+        "canonical_record_digest": PLAN["work_request"]["canonical_record_digest"]}
+    assert projection["accepted_plan_revision"] == {
+        "plan_ref": PLAN["accepted_plan_revision"]["id"], "revision": PLAN["accepted_plan_revision"]["revision"],
+        "digest": PLAN["accepted_plan_revision"]["digest"]}
+    assert projection["verification"] == {
+        "work_request_current": True, "accepted_plan_current": True, "source_merge_required": True,
+        "source_merge_present": True, "runbook_hash_verified": True}
+    assert projection["source_merge"] == {
+        "schema_version": "source-merge-scope.v1", "repository": "jbookout/carr-system", "base_branch": "main",
+        "authorized_paths": WR68_SOURCE_MERGE_PATHS, "path_count": 14}
+    assert projection["source_merge"]["authorized_paths"] == sorted(WR68_SOURCE_MERGE_PATHS)
+    expected_hash = "sha256:" + hashlib.sha256(body.encode()).hexdigest()
+    assert projection["runbook"] == {
+        "ref": "doctrine:runbook#wr68-sourced-shape-forward-correction", "section_id": RUNBOOK_SECTION_ID,
+        "revision_id": RUNBOOK_REVISION_ID, "section_key": "wr68-sourced-shape-forward-correction",
+        "doc_slug": "runbook", "title": "WR68 forward Shape correction", "status": "active", "current_version": 2,
+        "content_hash": expected_hash, "body_chars": 52_129,
+        "chunk": {"store_key": adapter.RUNBOOK_STORE_KEY, "size": adapter.RUNBOOK_CHUNK_CHARS, "next": 0}}
+    assert len(json.dumps(projection)) < 3_000
+    serialized = json.dumps(result["output"])
+    assert "large_unrelated_prefix" not in serialized and "acceptance_criteria" not in serialized
+    chunks = result["output"][1:]
+    assert len(chunks) == 14
+    assert all(row["provenance"] == "native_call_tool_result" for row in chunks)
+    assert all(row["schema_version"] == "engineering-runbook-native-chunk.v1" for row in chunks)
+    assert all(row["section_id"] == RUNBOOK_SECTION_ID and row["current_version"] == 2
+               and row["content_hash"] == expected_hash and row["total"] == 52_129 for row in chunks)
+    assert all(len(json.dumps(row)) < 8_000 for row in chunks)
+    assert "".join(row["text"] for row in chunks) == body
+    assert [(row["start"], row["end"]) for row in chunks] == [
+        (index * 4000, min((index + 1) * 4000, 52_129)) for index in range(14)]
+    assert chunks[-1]["remaining"] == 0 and all(row["remaining"] > 0 for row in chunks[:-1])
+
+
+def test_native_source_projection_hashes_unicode_without_crypto_text_encoder_buffer_or_require():
+    binding = synthetic_binding(source_merge_required=True)
+    # A surrogate pair straddles the 4000-code-unit chunk boundary on purpose.
+    body = ("a" * 3_999 + "\U0001f642" + "Résumé — 日本語 \"quoted\" \\ text\n" + "é" * 5_000
+            + "\U0001f9ea" * 300 + "\ud83d" + "tail\n")
+    assert body.encode("utf-8", "surrogatepass")  # a lone surrogate is deliberately present
+    expected_hash = hashlib.sha256(text_encoder_bytes(body)).hexdigest()
+    assert text_encoder_bytes(body) != body.encode("utf-8", "replace"), "Python's replace handler is not TextEncoder"
+    source = synthetic_source(binding, body, oversized=False)
+    source["accepted_plan_revision"]["preimage"]["runbook"]["content_hash"] = "sha256:" + expected_hash
+    doctrine = synthetic_doctrine(body, content_hash=expected_hash)
+    result = execute_source_projection(binding, source, doctrine)
+    assert result["error"] is None, result["error"]
+    projection = result["output"][0]
+    assert projection["runbook"]["content_hash"] == "sha256:" + expected_hash
+    utf16_units = len(body.encode("utf-16-le", "surrogatepass")) // 2
+    assert utf16_units > len(body), "astral characters occupy two UTF-16 units"
+    assert projection["runbook"]["body_chars"] == utf16_units
+    chunks = result["output"][1:]
+    assert chunks[0]["end"] == 3_999, "the chunk boundary must not split the surrogate pair"
+    assert all(len(row["text"]) <= adapter.RUNBOOK_CHUNK_CHARS for row in chunks)
+    for row in chunks[:-1]:
+        row["text"].encode("utf-8")  # raises if a chunk carries a split surrogate
+    assert "".join(row["text"] for row in chunks) == body
+    assert chunks[-1]["remaining"] == 0
+
+    # Known-answer checks for the self-contained SHA-256 across byte lengths.
+    for sample in ("", "abc", "é", "日本語", "\U0001f642", "a" * 55, "a" * 56, "a" * 64, "ü" * 1_000):
+        digest = hashlib.sha256(sample.encode("utf-8")).hexdigest()
+        known_source = synthetic_source(binding, sample, oversized=False)
+        known = execute_source_projection(binding, known_source, synthetic_doctrine(sample))
+        if sample == "":
+            assert known["error"] and "body text is unavailable" in known["error"]
+            continue
+        assert known["error"] is None, (sample, known["error"])
+        assert known["output"][0]["runbook"]["content_hash"] == "sha256:" + digest
+
+    edited = body.replace("日本語", "日本誤", 1)
+    mismatch = execute_source_projection(binding, source, synthetic_doctrine(edited, content_hash=expected_hash))
+    assert mismatch["error"] and "does not match the accepted content_hash" in mismatch["error"]
+    assert mismatch["output"] == []
+    code_only = "\n".join(
+        line for source in (adapter.ENGINEERING_SOURCE_NATIVE_PROJECTION_JS_TEMPLATE, adapter.RUNBOOK_NATIVE_CHUNK_JS)
+        for line in source.splitlines() if not line.lstrip().startswith("//"))
+    for absent in ("crypto", "TextEncoder", "Buffer", "require(", "import("):
+        assert absent not in code_only, absent
+
+
+def test_stale_work_request_plan_or_runbook_fails_closed_before_source_work():
+    binding = synthetic_binding(source_merge_required=True)
+    body = synthetic_runbook_body(6_000)
+    good_source = synthetic_source(binding, body, oversized=False)
+    good_doctrine = synthetic_doctrine(body)
+
+    def refused(source, doctrine, *, before_doctrine=False):
+        result = execute_source_projection(binding, source, doctrine)
+        assert result["error"] and "engineering source hydration refused" in result["error"], result
+        assert result["output"] == []
+        if before_doctrine:
+            assert [name for name, _input in result["calls"]] == ["engineering_passport_source"]
+        return result["error"]
+
+    stale_version = copy.deepcopy(good_source)
+    stale_version["work_request"]["version"] = binding["work_request"]["state_version"] + 1
+    assert "Work Request id/version/digest" in refused(stale_version, good_doctrine, before_doctrine=True)
+    stale_digest = copy.deepcopy(good_source)
+    stale_digest["work_request"]["canonical_record_digest"] = "sha256:" + "d" * 64
+    assert "Work Request id/version/digest" in refused(stale_digest, good_doctrine, before_doctrine=True)
+    other_ref = copy.deepcopy(good_source)
+    other_ref["work_request"]["ref"] = "WR-000302"
+    assert "different Work Request ref" in refused(other_ref, good_doctrine, before_doctrine=True)
+    stale_plan = copy.deepcopy(good_source)
+    stale_plan["accepted_plan_revision"]["digest"] = "sha256:" + "e" * 64
+    assert "accepted plan ref/revision/digest" in refused(stale_plan, good_doctrine, before_doctrine=True)
+    stale_revision = copy.deepcopy(good_source)
+    stale_revision["accepted_plan_revision"]["revision"] = binding["accepted_plan_revision"]["revision"] + 1
+    assert "accepted plan ref/revision/digest" in refused(stale_revision, good_doctrine, before_doctrine=True)
+
+    current_body_changed = synthetic_doctrine(body + "\nedited after acceptance")
+    assert "does not match the accepted content_hash" in refused(good_source, current_body_changed)
+    returned_hash_stale = synthetic_doctrine(body, content_hash="f" * 64)
+    assert "does not match the accepted content_hash" in refused(good_source, returned_hash_stale)
+    accepted_hash_stale = copy.deepcopy(good_source)
+    accepted_hash_stale["accepted_plan_revision"]["preimage"]["runbook"]["content_hash"] = "sha256:" + "f" * 64
+    assert "does not match the accepted content_hash" in refused(accepted_hash_stale, good_doctrine)
+    assert "missing from the doctrine store" in refused(
+        good_source, {"ok": True, "sections": [], "missing": [RUNBOOK_SECTION_ID]})
+    assert "different section id" in refused(
+        good_source, synthetic_doctrine(body, section_id="c3dcb0f5-465b-4d0c-9ebb-8e51bf2997fe"))
+    assert "not active" in refused(good_source, synthetic_doctrine(body, status="retired"))
+    assert "positive exact integer" in refused(good_source, synthetic_doctrine(body, current_version="0"))
+    assert "positive exact integer" in refused(good_source, synthetic_doctrine(body, current_version="2.0"))
+    two_sections = synthetic_doctrine(body)
+    two_sections["sections"].append(copy.deepcopy(two_sections["sections"][0]))
+    assert "exactly one runbook section" in refused(good_source, two_sections)
+    no_runbook = copy.deepcopy(good_source)
+    del no_runbook["accepted_plan_revision"]["preimage"]["runbook"]
+    assert "preimage.runbook pointer is malformed" in refused(no_runbook, good_doctrine)
+
+
+def test_source_merge_absence_is_accepted_only_for_slices_that_do_not_name_it():
+    body = synthetic_runbook_body(3_000)
+    optional = synthetic_binding(source_merge_required=False)
+    result = execute_source_projection(
+        optional, synthetic_source(optional, body, source_merge=None, oversized=False), synthetic_doctrine(body))
+    assert result["error"] is None, result["error"]
+    assert result["output"][0]["source_merge"] is None
+    assert result["output"][0]["verification"]["source_merge_required"] is False
+    assert result["output"][0]["verification"]["source_merge_present"] is False
+    assert result["output"][-1]["remaining"] == 0
+
+    required = synthetic_binding(source_merge_required=True)
+
+    def refused(paths=None, mutate=None):
+        source = synthetic_source(required, body, source_merge=paths, oversized=False)
+        if mutate:
+            mutate(source["accepted_plan_revision"]["caps"])
+        result = execute_source_projection(required, source, synthetic_doctrine(body))
+        assert result["error"] and "caps.source_merge" in result["error"], result
+        assert result["output"] == []
+        assert [name for name, _input in result["calls"]] == ["engineering_passport_source"]
+        return result["error"]
+
+    assert "carries no caps.source_merge" in refused(None)
+    assert "not unique and C-sorted" in refused(list(reversed(WR68_SOURCE_MERGE_PATHS)))
+    assert "not unique and C-sorted" in refused(WR68_SOURCE_MERGE_PATHS + [WR68_SOURCE_MERGE_PATHS[-1]])
+    # Python's default sort and C order agree here; a locale-style ordering
+    # that puts "Zeta" after "alpha" must still refuse.
+    assert "not unique and C-sorted" in refused(["alpha/one.py", "Zeta/two.py"])
+    assert "authorized_paths is empty" in refused([])
+    assert "authorized_paths[0] is invalid" in refused(["/etc/passwd"])
+    assert "authorized_paths[0] is invalid" in refused(["../outside.py"])
+    assert "authorized_paths[0] is invalid" in refused(["has space.py"])
+
+    def bad_repository(caps):
+        caps["source_merge"]["repository"] = "not a repository"
+    assert "repository is invalid" in refused(WR68_SOURCE_MERGE_PATHS, bad_repository)
+
+    def bad_base(caps):
+        caps["source_merge"]["base_branch"] = ""
+    assert "base_branch is invalid" in refused(WR68_SOURCE_MERGE_PATHS, bad_base)
+
+    def bad_schema(caps):
+        caps["source_merge"]["schema_version"] = "source-merge-scope.v2"
+    assert "schema_version is invalid" in refused(WR68_SOURCE_MERGE_PATHS, bad_schema)
+
+    def extra_field(caps):
+        caps["source_merge"]["extra"] = True
+    assert "is malformed" in refused(WR68_SOURCE_MERGE_PATHS, extra_field)
+
+    # A present-but-malformed cap refuses even where the slice does not name it.
+    unsorted_optional = synthetic_source(optional, body, source_merge=list(reversed(WR68_SOURCE_MERGE_PATHS)), oversized=False)
+    result = execute_source_projection(optional, unsorted_optional, synthetic_doctrine(body))
+    assert result["error"] and "not unique and C-sorted" in result["error"]
+
+
+def test_captured_wr68_source_and_runbook_hydrate_the_exact_fourteen_paths():
+    source_path = WR68_ARTIFACTS / "successor-final-engineering-passport-source.json"
+    runbook_path = WR68_ARTIFACTS / "runbook-v2-readback.json"
+    plan_path = WR68_ARTIFACTS / "wr68-engineering-slice-plan-candidate.json"
+    if not (source_path.is_file() and runbook_path.is_file() and plan_path.is_file()):
+        raise SkippedTest("captured WR68 artifacts are absent; tracked synthetic exact-14 coverage still runs")
+    captured_plan = json.loads(plan_path.read_text())
+    captured_slice = captured_plan["slices"][0]
+    binding = adapter.source_hydration_binding(
+        {"work_request_ref": "WR-000068", "slice_ref": captured_slice["slice_ref"]}, captured_plan, captured_slice)
+    assert binding["source_merge_required"] is True
+    result = execute_source_projection(binding, json.loads(source_path.read_text()), json.loads(runbook_path.read_text()))
+    assert result["error"] is None, result["error"]
+    projection = result["output"][0]
+    assert projection["work_request"]["ref"] == "WR-000068"
+    assert projection["source_merge"]["authorized_paths"] == WR68_SOURCE_MERGE_PATHS
+    assert projection["source_merge"]["path_count"] == 14
+    assert projection["runbook"]["section_id"] == RUNBOOK_SECTION_ID
+    assert projection["runbook"]["current_version"] == 2
+    assert projection["runbook"]["content_hash"] == (
+        "sha256:394b4c7b5a7314982373e47907642b31737f132492d9c9de351b989fdcb8662c")
+    assert len(json.dumps(projection)) < 3_000
+    body = json.loads(runbook_path.read_text())["sections"][0]["body"]["text"]
+    assert "".join(row["text"] for row in result["output"][1:]) == body
+    assert result["output"][-1]["remaining"] == 0
+    assert "preimage" not in json.dumps(result["output"])
+
+
+def test_receipt_template_fills_to_a_valid_blocked_receipt_and_the_captured_receipt_stays_rejected():
+    value = request()
+    packet = passport.build_engineering_slice_packet(value["envelope"], PLAN, "slice:a")
+    template = adapter.build_engineering_slice_receipt_template(
+        packet, value["task"], value["envelope"], PLAN["slices"][0], "codex")
+    assert set(template) == passport.RECEIPT_FIELDS
+    assert template["outcome"] == "blocked"
+    assert template["attribution"] == valid_receipt()["attribution"]
+    assert template["envelope_digest"] == contract.execution_envelope_digest(value["envelope"])
+    assert template["plan_digest"] == PLAN["plan_digest"] and template["slice_ref"] == "slice:a"
+    assert template["attempt_id"] == "attempt:1"
+    assert template["planned_resource_refs"] == PLAN["slices"][0]["declared_resource_refs"]
+    assert template["planned_component_refs"] == PLAN["slices"][0]["declared_component_refs"]
+    assert [row["check_ref"] for row in template["checks"]] == [
+        row["check_ref"] for row in PLAN["slices"][0]["planned_checks"]]
+    assert all(row["state"] == "not_run" and row["evidence_refs"] == [] for row in template["checks"])
+    assert template["executor_claim"]["claimed_by"] == "codex"
+    assert template["independent_verification_required"] is True
+
+    def placeholder_values(row: dict) -> dict:
+        return {path: row[path.split(".")[0]][path.split(".")[1]]
+                for path in adapter.RECEIPT_TEMPLATE_PLACEHOLDER_PATHS}
+    assert all(item is None for item in placeholder_values(template).values())
+
+    try:
+        passport.validate_engineering_slice_receipt(copy.deepcopy(template), PLAN, value["envelope"])
+    except passport.EngineeringContractError:
+        pass
+    else:
+        raise AssertionError("an unfilled receipt template validated as a receipt")
+
+    truthful = {
+        "source_evidence.worktree_ref": "worktree:wr68-source-repair-v1",
+        "source_evidence.branch_ref": "branch:wr68-source-repair-v1",
+        "source_evidence.source_sha": "a0dfbf5fa1a4b881ab9c4930fab3d3a26c2ad587",
+        "reset_reconstruction.reconstruction_free": True,
+        "executor_claim.claimed_at": "2026-09-07T14:01:02Z",
+    }
+
+    def filled(skip=None) -> dict:
+        row = copy.deepcopy(template)
+        for path, item in truthful.items():
+            if path == skip:
+                continue
+            parent, field = path.split(".")
+            row[parent][field] = item
+        return row
+
+    blocked = passport.validate_engineering_slice_receipt(filled(), PLAN, value["envelope"])
+    assert blocked["outcome"] == "blocked"
+    for path in truthful:
+        try:
+            passport.validate_engineering_slice_receipt(filled(skip=path), PLAN, value["envelope"])
+        except passport.EngineeringContractError:
+            continue
+        raise AssertionError(f"placeholder {path} is not deliberately invalid")
+
+    def fake_dispatch(*_args, **_kwargs):
+        return {"status": "completed", "result": json.dumps(filled())}
+    outcome = adapter.run(request(), dispatch_fn=fake_dispatch, registry=ValidEngineeringDesk())
+    assert outcome["ok"] is True and outcome["receipt"]["outcome"] == "blocked"
+
+    # The exact top-level shape the successor native child actually returned
+    # (blocked, off-schema): repository-local so the rejection never depends on
+    # an ignored out/ artifact.
+    off_schema_shapes = [{
+        "schema_version": "engineering-slice-receipt.v1",
+        "envelope_id": "env:6553856d-eeb0-41d5-be49-6f725032b7a3", "attempt_id": "attempt:1",
+        "work_request_id": PLAN["work_request"]["id"], "job_ref": ENVELOPE["request"]["job_ref"],
+        "slice_ref": "slice:a", "outcome": "blocked",
+        "executor_claim": {"claimed_by": "codex", "agent_session_id": ENVELOPE["agent_session"]["id"],
+                           "native_session_id": "01a07d3e-ca71-7b41-97b1-d2a99dfa02c2"},
+        "blocker": {"code": "accepted_source_merge_path_list_unavailable", "detail": "no paths supplied"},
+        "standing_context": {"ok": True, "declared_packs": list(adapter.REQUIRED_RULE_PACKS),
+                             "packs_not_found": [], "rule_counts": {"shared": 6, "personal": 0, "total": 6}},
+        "fresh_session_reconstruction": {"worktree_clean": True, "exact_slice_branch_checkpoint_found": False},
+        "source_evidence": [{"kind": "repository_reconstruction", "finding": "no 0492 artifact exists"}],
+        "planned_checks": [{"check_ref": "check:contracts", "status": "not_run",
+                            "evidence_requirement": "redacted_evidence_required", "evidence_digest": None}],
+        "delivery": {"changed_paths": [], "commit": None, "push": None, "pull_request": None,
+                     "checks_run": [], "independent_verification_required": True},
+        "semantic_checkpoint": {"objective": "blocked", "next_action": "provide the accepted paths"},
+    }]
+    captured = WR68_ARTIFACTS / "successor-native-child-public-final-receipt.json"
+    if captured.is_file():
+        off_schema_shapes.append(json.loads(captured.read_text()))
+    for off_schema in off_schema_shapes:
+        assert off_schema["schema_version"] == "engineering-slice-receipt.v1"
+        try:
+            passport.validate_engineering_slice_receipt(off_schema, PLAN, value["envelope"])
+        except passport.EngineeringContractError as exc:
+            assert "unknown fields" in str(exc)
+        else:
+            raise AssertionError("the captured off-schema receipt validated")
+
+        def captured_dispatch(*_args, **_kwargs):
+            return {"status": "completed", "result": json.dumps(off_schema)}
+        try:
+            adapter.run(request(), dispatch_fn=captured_dispatch, registry=ValidEngineeringDesk())
+        except passport.EngineeringContractError:
+            pass
+        else:
+            raise AssertionError("the captured off-schema receipt reached the controller")
 
 
 if __name__ == "__main__":
