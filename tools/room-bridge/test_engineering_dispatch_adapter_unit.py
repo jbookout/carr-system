@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -254,7 +255,7 @@ def test_success_is_fresh_and_database_capability_is_not_forwarded():
     assert "ACCEPTED SOURCE HYDRATION (after every rule chunk is read" in seen["prompt"]
     assert "tools.mcp__carr__engineering_passport_source" in seen["prompt"]
     assert "tools.mcp__carr__doctrine_sections" in seen["prompt"]
-    assert "ENGINEERING SOURCE NATIVE PROJECTION CODE (exact):" in seen["prompt"]
+    assert "ENGINEERING SOURCE NATIVE LOADER CODE (exact):" in seen["prompt"]
     assert "RUNBOOK NATIVE CHUNK CODE (repeat until remaining=0):" in seen["prompt"]
     assert adapter.RUNBOOK_NATIVE_CHUNK_JS in seen["prompt"]
     assert "never read a local, ignored, or cached runbook file" in seen["prompt"]
@@ -266,9 +267,10 @@ def test_success_is_fresh_and_database_capability_is_not_forwarded():
     assert "locally check your final object against the template's field names" in seen["prompt"]
     assert "never invent evidence, artifacts, deviations, or passed checks" in seen["prompt"]
     assert seen["prompt"].index("STANDING-CONTEXT NATIVE RULE CHUNK CODE") < seen["prompt"].index(
-        "ENGINEERING SOURCE NATIVE PROJECTION CODE") < seen["prompt"].index(
+        "ENGINEERING SOURCE NATIVE LOADER CODE") < seen["prompt"].index(
         "RECEIPT TEMPLATE (exact") < seen["prompt"].index("SERVER-ISSUED SLICE PACKET (immutable):")
-    assert "ALL_TOOLS" not in adapter.ENGINEERING_SOURCE_NATIVE_PROJECTION_JS_TEMPLATE
+    assert "ALL_TOOLS" not in adapter.ENGINEERING_SOURCE_NATIVE_LOADER_JS_TEMPLATE
+    assert "ALL_TOOLS" not in adapter.ENGINEERING_SOURCE_HELPER_PATH.read_text()
     assert "ALL_TOOLS" not in adapter.RUNBOOK_NATIVE_CHUNK_JS
     # The qualified GitHub route: per-command overrides, nothing persisted,
     # no credential exposure, no hook bypass, no push authorization claim.
@@ -725,22 +727,36 @@ def synthetic_doctrine(runbook_body: str, *, current_version="2", status="active
     }]}
 
 
-def execute_source_projection(binding: dict, source_response: dict, doctrine_response: dict) -> dict:
-    """Run the exact per-dispatch hydration code and chunk loop at the JavaScript seam.
+def execute_source_projection(binding: dict, source_response: dict, doctrine_response: dict,
+                              *, helper_sha256: str | None = None,
+                              helper_byte_length: int | None = None,
+                              helper_exit_code: int = 0) -> dict:
+    """Run the exact loader, tracked helper, and chunk loop at the JavaScript seam.
 
     The probed Codex functions.exec isolate has no crypto, TextEncoder, Buffer,
     or require; the harness removes all four before the generated code runs.
     """
+    helper_bytes = adapter.ENGINEERING_SOURCE_HELPER_PATH.read_bytes()
+    helper_payload = {
+        "schema_version": "engineering-source-helper-read.v1",
+        "byte_length": len(helper_bytes) if helper_byte_length is None else helper_byte_length,
+        "sha256": helper_sha256 or hashlib.sha256(helper_bytes).hexdigest(),
+        "code": helper_bytes.decode("utf-8"),
+    }
     harness = f'''const sourceResponse = {json.dumps(source_response)};
 const doctrineResponse = {json.dumps(doctrine_response)};
+const helperPayload = {json.dumps(helper_payload)};
+const helperExitCode = {helper_exit_code};
 for (const name of ["crypto", "TextEncoder", "Buffer", "require"]) {{
   Object.defineProperty(globalThis, name, {{value: undefined, configurable: true, writable: true}});
   if (typeof globalThis[name] !== "undefined") throw new Error(name + " is still defined");
 }}
 const calls = [];
+const helperReads = [];
 const state = new Map();
 const output = [];
 const tools = {{
+  exec_command: async (input) => {{ helperReads.push(input); return {{exit_code:helperExitCode,output:JSON.stringify(helperPayload),stderr:""}}; }},
   mcp__carr__engineering_passport_source: async (input) => {{ calls.push(["engineering_passport_source", input]); return {{content:[{{type:"text",text:JSON.stringify(sourceResponse)}}]}}; }},
   mcp__carr__doctrine_sections: async (input) => {{ calls.push(["doctrine_sections", input]); return {{content:[{{type:"text",text:JSON.stringify(doctrineResponse)}}]}}; }},
 }};
@@ -753,7 +769,7 @@ const run = async (source) => await new AsyncFunction(
   tools,store,load,text,undefined,undefined,undefined,undefined);
 let error = null;
 try {{
-  await run({json.dumps(adapter.engineering_source_projection_js(binding))});
+  await run({json.dumps(adapter.engineering_source_loader_js(binding))});
   let remaining = JSON.parse(output[0]).runbook.body_chars;
   while (remaining > 0) {{
     await run({json.dumps(adapter.RUNBOOK_NATIVE_CHUNK_JS)});
@@ -762,7 +778,7 @@ try {{
 }} catch (caught) {{
   error = String(caught && caught.message || caught);
 }}
-process.stdout.write(JSON.stringify({{output, calls, error}}));'''
+process.stdout.write(JSON.stringify({{output, calls, helperReads, error}}));'''
     run = subprocess.run(
         ["node", "--input-type=module", "-e", harness],
         capture_output=True, text=True, timeout=30, check=False)
@@ -814,13 +830,75 @@ def test_prompt_task_binding_keeps_the_gate_shape_while_the_hydration_binding_ca
     assert set(prompt_task) == {"attempt_id", "engineering_plan", "engineering_slice", "generation",
                                 "job_ref", "plan_digest", "slice_ref", "work_request"}
     assert prompt_task["work_request"] == PLAN["work_request"]["id"]
-    code_start = seen["prompt"].index("ENGINEERING SOURCE NATIVE PROJECTION CODE (exact):\n")
+    code_start = seen["prompt"].index("ENGINEERING SOURCE NATIVE LOADER CODE (exact):\n")
     code = seen["prompt"][code_start:].split("\n\n", 1)[0].split("\n", 1)[1]
-    expected = adapter.engineering_source_projection_js(adapter.source_hydration_binding(
+    expected = adapter.engineering_source_loader_js(adapter.source_hydration_binding(
         request()["task"], PLAN, PLAN["slices"][0]))
     assert code == expected
     assert '"work_request_ref":"WR-000301"' in code
     assert '"source_merge_required":false' in code
+    assert len(code) < 3_000
+    assert len(code) * 3 < 11_623
+    assert adapter.ENGINEERING_SOURCE_HELPER_SHA256 in code
+    assert str(adapter.ENGINEERING_SOURCE_HELPER_PATH) in code
+    assert "sha256Hex" not in code
+    assert adapter.ENGINEERING_SOURCE_HELPER_PATH.read_text() not in seen["prompt"]
+
+
+def test_helper_reader_hashes_and_emits_the_same_exact_bytes_once():
+    run = subprocess.run(
+        adapter.ENGINEERING_SOURCE_HELPER_READ_COMMAND,
+        cwd=ROOT, shell=True, capture_output=True, text=True, timeout=10, check=False)
+    assert run.returncode == 0, run.stderr
+    assert run.stderr == ""
+    payload = json.loads(run.stdout)
+    helper_bytes = adapter.ENGINEERING_SOURCE_HELPER_PATH.read_bytes()
+    assert helper_bytes.isascii(), "loader code.length is byte-exact only for the tracked ASCII helper"
+    assert set(payload) == {"schema_version", "byte_length", "sha256", "code"}
+    assert payload["schema_version"] == "engineering-source-helper-read.v1"
+    assert payload["byte_length"] == len(helper_bytes) == adapter.ENGINEERING_SOURCE_HELPER_BYTE_LENGTH
+    assert payload["sha256"] == hashlib.sha256(helper_bytes).hexdigest() == adapter.ENGINEERING_SOURCE_HELPER_SHA256
+    assert payload["code"].encode("utf-8") == helper_bytes
+
+
+def test_helper_reader_shell_quotes_paths_with_spaces_dollars_backticks_and_substitution_text():
+    with tempfile.TemporaryDirectory(prefix="wr68 $CARR_TEST_SHELL_LITERAL `false` $(false) ") as directory:
+        path = Path(directory) / "helper $CARR_TEST_SHELL_LITERAL `false` $(false).js"
+        path.write_text("return 'literal path';\n")
+        command = adapter._engineering_source_helper_read_command(path)
+        run = subprocess.run(
+            command, cwd=ROOT, shell=True, capture_output=True, text=True,
+            timeout=10, check=False,
+            env={**os.environ, "CARR_TEST_SHELL_LITERAL": "/must-not-expand"})
+        assert run.returncode == 0, run.stderr
+        assert run.stderr == ""
+        payload = json.loads(run.stdout)
+        assert payload["code"] == "return 'literal path';\n"
+        assert payload["byte_length"] == len(path.read_bytes())
+        assert payload["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_loader_refuses_helper_mismatch_or_read_failure_before_native_source_calls():
+    binding = synthetic_binding(source_merge_required=True)
+    body = synthetic_runbook_body()
+    for kwargs, phrase in (
+            ({"helper_sha256": "0" * 64}, "digest or byte length mismatch"),
+            ({"helper_byte_length": adapter.ENGINEERING_SOURCE_HELPER_BYTE_LENGTH + 1},
+             "digest or byte length mismatch"),
+            ({"helper_exit_code": 1}, "reader command failed")):
+        result = execute_source_projection(
+            binding, synthetic_source(binding, body), synthetic_doctrine(body), **kwargs)
+        assert result["error"] and phrase in result["error"], result
+        assert result["calls"] == []
+        assert result["output"] == []
+        assert len(result["helperReads"]) == 1
+    hostile = copy.deepcopy(binding)
+    hostile["work_request_ref"] = 'WR-000301`); throw new Error("injected"); // $()'
+    result = execute_source_projection(
+        hostile, synthetic_source(hostile, body), synthetic_doctrine(body), helper_sha256="0" * 64)
+    assert result["error"] and "digest or byte length mismatch" in result["error"]
+    assert "injected" not in result["error"]
+    assert result["calls"] == [] and result["output"] == []
 
 
 def test_native_source_projection_stays_bounded_and_chunks_the_full_runbook_once():
@@ -829,6 +907,10 @@ def test_native_source_projection_stays_bounded_and_chunks_the_full_runbook_once
     assert len(body) == 52_129
     result = execute_source_projection(binding, synthetic_source(binding, body), synthetic_doctrine(body))
     assert result["error"] is None, result["error"]
+    assert len(result["helperReads"]) == 1
+    assert result["helperReads"][0] == {
+        "cmd": adapter.ENGINEERING_SOURCE_HELPER_READ_COMMAND,
+        "workdir": str(ROOT), "yield_time_ms": 10_000, "max_output_tokens": 16_000}
     assert result["calls"] == [
         ["engineering_passport_source", {"work_request": "WR-000301"}],
         ["doctrine_sections", {"section_ids": [RUNBOOK_SECTION_ID]}],
@@ -918,7 +1000,7 @@ def test_native_source_projection_hashes_unicode_without_crypto_text_encoder_buf
     assert mismatch["error"] and "does not match the accepted content_hash" in mismatch["error"]
     assert mismatch["output"] == []
     code_only = "\n".join(
-        line for source in (adapter.ENGINEERING_SOURCE_NATIVE_PROJECTION_JS_TEMPLATE, adapter.RUNBOOK_NATIVE_CHUNK_JS)
+        line for source in (adapter.ENGINEERING_SOURCE_HELPER_PATH.read_text(), adapter.RUNBOOK_NATIVE_CHUNK_JS)
         for line in source.splitlines() if not line.lstrip().startswith("//"))
     for absent in ("crypto", "TextEncoder", "Buffer", "require(", "import("):
         assert absent not in code_only, absent
