@@ -32,6 +32,7 @@ import {
   REGISTRY_V14_VERSION,
   REGISTRY_V15_VERSION,
   REGISTRY_V16_VERSION,
+  REGISTRY_V17_VERSION,
   replaceExactlyOnce,
   renderGeneratedFrontier,
   renderRuntimeProjection,
@@ -44,6 +45,7 @@ import {
   renderClaudeActorHydrationForwardRegistrySql,
   renderClaudeConfigPreservationForwardRegistrySql,
   renderCodexCompactionCheckpointForwardRegistrySql,
+  renderBackupGuardStatusForwardRegistrySql,
   renderSourceMergeForwardRegistrySql,
   sha256,
   SIEP16_INTEGRATED_DB_CATALOG_BASELINE,
@@ -63,6 +65,8 @@ import {
   CLAUDE_CONFIG_PRESERVATION_PRE_V15_DB_CATALOG_BASELINE,
   CODEX_COMPACTION_CHECKPOINT_FORWARD_DB_CATALOG_BASELINE,
   CODEX_COMPACTION_CHECKPOINT_PRE_V16_DB_CATALOG_BASELINE,
+  BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE,
+  BACKUP_GUARD_STATUS_PRE_V17_DB_CATALOG_BASELINE,
   SOURCE_MERGE_FORWARD_DB_CATALOG_BASELINE,
   SOURCE_MERGE_PRE_V10_DB_CATALOG_BASELINE,
   SIEP12_DB_CATALOG_BASELINE,
@@ -142,6 +146,10 @@ const generatedV16 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v16.generated.js", import.meta.url), "utf8");
 const v16Migration = fs.readFileSync(
   new URL("../../migrations/0490_codex_compaction_checkpoint_registry_activation.sql", import.meta.url), "utf8");
+const generatedV17 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v17.generated.js", import.meta.url), "utf8");
+const v17Migration = fs.readFileSync(
+  new URL("../../migrations/0491_backup_guard_status_registry_activation.sql", import.meta.url), "utf8");
 const siep18MonitorMigration = fs.readFileSync(
   new URL("../../migrations/0467_siep18_atomic_db_monitor_grants.sql", import.meta.url), "utf8");
 const directRegistryRedefinitions = [
@@ -523,9 +531,7 @@ test("v16 seals the Codex compaction checkpoint refresh without rewriting v15", 
     dbCatalogBaseline: CODEX_COMPACTION_CHECKPOINT_FORWARD_DB_CATALOG_BASELINE,
   }));
   assert.equal(v16Migration, renderCodexCompactionCheckpointForwardRegistrySql(rows));
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
-    JSON.parse(generatedV16.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]));
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
+  assert.equal(JSON.parse(generatedV16.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]),
     "d5418b025506b131252ddb214d75c2e1f995235db8b72ac56765485ccb5a1a54");
   assert.deepEqual(CODEX_COMPACTION_CHECKPOINT_PRE_V16_DB_CATALOG_BASELINE,
     CLAUDE_CONFIG_PRESERVATION_FORWARD_DB_CATALOG_BASELINE);
@@ -546,19 +552,47 @@ test("v16 seals the Codex compaction checkpoint refresh without rewriting v15", 
   assert.match(v16Migration, /scac_mutation_catalog_v16_current[(][)]/);
   assert.match(v16Migration, /scac_policy_epoch_snapshot_v15[(][)]/);
   assert.match(v16Migration, /registry_version='scac-mutation-registry[.]v16'[^\n]+<>1503/);
-  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS))
+  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS)
+    .filter(seal => Number(seal.version.split(".v")[1]) < 16))
     assert.match(v16Migration, new RegExp(`\\('${seal.version.replaceAll(".", "\\.")}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount}\\)`));
+});
+
+
+test("v17 admits both backup helper ingresses and preserves the v16 predecessor", () => {
+  const rows = frozenInventory(REGISTRY_V17_VERSION);
+  assert.equal(rows.length, 827);
+  for (const key of ["script-entrypoint:bin/backup-guard.py", "script-entrypoint:ops/backup-workflow-status.py"])
+    assert.equal(rows.filter(row => row.ingress_key === key).length, 1);
+  assert.equal(generatedV17, renderRuntimeProjection(rows, {
+    version: REGISTRY_V17_VERSION,
+    dbCatalogBaseline: BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE,
+  }));
+  assert.equal(v17Migration, renderBackupGuardStatusForwardRegistrySql(rows));
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
+    JSON.parse(generatedV17.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]));
+  assert.deepEqual(BACKUP_GUARD_STATUS_PRE_V17_DB_CATALOG_BASELINE,
+    CODEX_COMPACTION_CHECKPOINT_FORWARD_DB_CATALOG_BASELINE);
+  assert.equal(BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count, 375);
+  assert.equal(BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE.runtime_dml_grants.count, 307);
+  assert.equal(sha256(v16Migration), HISTORICAL_REGISTRY_ARTIFACT_SHA256[
+    "migrations/0490_codex_compaction_checkpoint_registry_activation.sql"]);
+  assert.equal(sha256(generatedV16), HISTORICAL_REGISTRY_ARTIFACT_SHA256[
+    "mcp-server/src/scac-mutation-registry.v16.generated.js"]);
+  assert.match(v17Migration, /scac_mutation_registry_v16_seal_available[(][)]/);
+  assert.match(v17Migration, /registry_version='scac-mutation-registry[.]v17'[^\n]+<>1509/);
+  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS))
+    assert.ok(v17Migration.includes(`('${seal.version}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount})`));
 });
 
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
   assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
-  assert.equal(migrations.length, 24);
+  assert.equal(migrations.length, 25);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490"]);
-  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 15);
-  assert.equal(paths.length, 39);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491"]);
+  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 16);
+  assert.equal(paths.length, 41);
 });
 
 test("the complete frontier renders when every generated target is absent", () => {
@@ -594,7 +628,7 @@ test("the complete frontier renders when every generated target is absent", () =
         GIT_WORK_TREE: isolatedRoot,
       },
     });
-    assert.match(stdout, /\(39 artifacts\)/);
+    assert.match(stdout, /\(41 artifacts\)/);
     for (const [target, expected] of Object.entries(frontier))
       assert.equal(fs.readFileSync(path.join(outputRoot, target), "utf8"), expected, target);
   } finally {
@@ -680,7 +714,7 @@ test("migration is read-only at runtime and preserves the SIEP-18 boundary", () 
 
 test("reviewed non-MCP source locators resolve and remain explicitly non-authorizing", () => {
   const rows = fullInventory(TOOLS).filter(row => !["mcp_tool", "job_definition", "workflow_entrypoint"].includes(row.ingress_kind));
-  assert.equal(rows.length, 541);
+  assert.equal(rows.length, 543);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -688,7 +722,7 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
     assert.equal(row.implementation_state, "inventoried_not_atomically_mediated");
   }
   const scripts = discoverScriptEntrypoints();
-  assert.equal(scripts.length, 532);
+  assert.equal(scripts.length, 534);
   assert.equal(scripts.some(path => path === "ops/rule-delivery-cutover.py"), true);
   assert.equal(scripts.some(path => path === "ops/control-plane-scheduler-cutover.py"), true);
   assert.equal(scripts.some(path => path === "run.sh"), true);

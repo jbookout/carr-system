@@ -68,7 +68,13 @@ jobs:
     name: pg_dump -> age-encrypt -> artifact
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      checks: write
+      actions: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - name: Gate the schedule on CARR_CLOUD_BACKUP_ENABLED
         id: gate
         run: |
@@ -80,8 +86,31 @@ jobs:
             echo "Cloud backup provisioning is disabled pending a canonical server-validated receipt seam; do not treat workflow_dispatch as a provisioning path."
           fi
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Record and verify disabled state, then cancel this run
+        if: steps.gate.outputs.enabled == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 ops/backup-workflow-status.py neutral-cancel
+
+      - name: Start the artifact evidence Check
+        id: status_start
         if: steps.gate.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 ops/backup-workflow-status.py producer-start
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: steps.gate.outputs.enabled == 'true'
+        with:
+          python-version-file: .python-version
+
+      - name: Install Python dependencies from the lock
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r requirements.lock
+          .venv/bin/python -c 'import psycopg; print(psycopg.__version__)'
 
       - name: Install postgresql-client-18 (PGDG apt repo) and age
         if: steps.gate.outputs.enabled == 'true'
@@ -144,19 +173,49 @@ jobs:
           echo "size-floor guard passed (bin/backup-dump.sh would have exited nonzero above otherwise) — uploading."
           ls -la "${{ github.workspace }}/backup-out"
 
-      - name: Compute the artifact name (YYYYMMDD, UTC — matches the dump's own STAMP)
+      - name: Bind the one dump filename to this run and attempt
         if: steps.gate.outputs.enabled == 'true'
-        id: stamp
-        run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+        id: artifact
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=("${GITHUB_WORKSPACE}/backup-out"/carr-*.sql.age)
+          if [ "${#files[@]}" -ne 1 ]; then
+            echo "expected exactly one encrypted dump, found ${#files[@]}" >&2
+            exit 1
+          fi
+          FILE="${files[0]}"
+          BASE="$(basename "$FILE")"
+          if [[ ! "$BASE" =~ ^carr-([0-9]{8})\.sql\.age$ ]]; then
+            echo "unexpected dump filename: $BASE" >&2
+            exit 1
+          fi
+          STAMP="${BASH_REMATCH[1]}"
+          ARTIFACT_NAME="carr-backup-${STAMP}-run-${GITHUB_RUN_ID}-attempt-${GITHUB_RUN_ATTEMPT}"
+          echo "path=$FILE" >> "$GITHUB_OUTPUT"
+          echo "stamp=$STAMP" >> "$GITHUB_OUTPUT"
+          echo "name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
 
       - name: Upload the encrypted dump as a workflow artifact
         if: steps.gate.outputs.enabled == 'true'
+        id: upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: carr-backup-${{ steps.stamp.outputs.date }}
-          path: ${{ github.workspace }}/backup-out/carr-*.sql.age
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ steps.artifact.outputs.path }}
           if-no-files-found: error
           retention-days: 90
+
+      - name: Read back artifact metadata and complete the evidence Check
+        id: status_complete
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 ops/backup-workflow-status.py producer-complete \
+            --artifact-id '${{ steps.upload.outputs.artifact-id }}' \
+            --artifact-name '${{ steps.artifact.outputs.name }}' \
+            --artifact-digest '${{ steps.upload.outputs.artifact-digest }}'
 
       # ── the second Mac-independent copy ──────────────────────────────────
       # The artifact above is one off-Mac copy with a 90-day ceiling GitHub
@@ -192,7 +251,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: auto
           ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-          STAMP: ${{ steps.stamp.outputs.date }}
+          STAMP: ${{ steps.artifact.outputs.stamp }}
         run: |
           if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ] || [ -z "${ACCOUNT_ID:-}" ]; then
             echo "R2 archive SKIPPED: R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY secrets or CLOUDFLARE_ACCOUNT_ID variable is not set."
@@ -218,3 +277,11 @@ jobs:
             exit 1
           fi
           echo "R2 archive OK -> ${KEY} (${REMOTE} bytes, read back and matched)"
+
+      - name: Record required backup pipeline failure
+        if: ${{ failure() && steps.gate.outputs.enabled == 'true' && steps.status_start.outcome == 'success' && steps.status_complete.outcome != 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 ops/backup-workflow-status.py producer-fail \
+            --reason 'required backup pipeline failed before artifact evidence completed'
