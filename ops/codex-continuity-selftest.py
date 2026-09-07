@@ -98,7 +98,8 @@ class AdapterCase(unittest.TestCase):
                               input=json.dumps(payload), text=True, capture_output=True,
                               check=False, env=self.env)
 
-    def install_fake_record_call(self, response=None, outage=False):
+    def install_fake_record_call(self, response=None, outage=False, event_response=None,
+                                 recovery_tool_error=False, event_tool_error=False):
         fake = self.base / "fake-call.py"
         log = self.base / "calls.jsonl"
         if log.exists():
@@ -106,6 +107,9 @@ class AdapterCase(unittest.TestCase):
         response_path = self.base / "response.json"
         if response is not None:
             response_path.write_text(json.dumps(response), encoding="utf-8")
+        event_response_path = self.base / "event-response.json"
+        if event_response is not None:
+            event_response_path.write_text(json.dumps(event_response), encoding="utf-8")
         fake.write_text(
             """#!/usr/bin/env python3
 import json, os, pathlib, sys, time
@@ -118,7 +122,19 @@ if os.environ.get("FAKE_CALL_OUTAGE") == "1":
     raise SystemExit(1)
 if sys.argv[1] == "codex-read-recovery":
     path = os.environ.get("FAKE_RESPONSE")
-    print(pathlib.Path(path).read_text(encoding="utf-8") if path else '{"ok":true,"found":false,"checkpoint":null}')
+    value = pathlib.Path(path).read_text(encoding="utf-8") if path else '{"ok":true,"found":false,"checkpoint":null}'
+    if os.environ.get("FAKE_RECOVERY_TOOL_ERROR") == "1":
+        print("wrapper diagnostic", file=sys.stderr)
+        print("TOOL ERROR " + value, file=sys.stderr)
+        raise SystemExit(1)
+    print(value)
+elif os.environ.get("FAKE_EVENT_RESPONSE"):
+    value = pathlib.Path(os.environ["FAKE_EVENT_RESPONSE"]).read_text(encoding="utf-8")
+    if os.environ.get("FAKE_EVENT_TOOL_ERROR") == "1":
+        print("wrapper diagnostic", file=sys.stderr)
+        print("TOOL ERROR " + value, file=sys.stderr)
+        raise SystemExit(1)
+    print(value)
 else:
     print('{"ok":true}')
 """, encoding="utf-8")
@@ -126,6 +142,12 @@ else:
                "FAKE_CALL_LOG": str(log)}
         if response is not None:
             env["FAKE_RESPONSE"] = str(response_path)
+        if event_response is not None:
+            env["FAKE_EVENT_RESPONSE"] = str(event_response_path)
+        if recovery_tool_error:
+            env["FAKE_RECOVERY_TOOL_ERROR"] = "1"
+        if event_tool_error:
+            env["FAKE_EVENT_TOOL_ERROR"] = "1"
         if outage:
             env["FAKE_CALL_OUTAGE"] = "1"
         return env, log
@@ -399,9 +421,10 @@ class CodexHookTests(AdapterCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
         material = json.dumps({
-            "operation": "codex-compaction-checkpoint-refresh",
+            "operation": "codex-compaction-checkpoint-refresh-v2",
             "runtime": "codex", "native_task_id": self.session_id,
             "project_id": meta["project_id"], "cwd": meta["cwd"],
+            "checkpoint_version": 7,
             "source_window_id": window_id("window-current"), "source_window_number": 1,
         }, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         expected_key = str(uuid.uuid5(uuid.NAMESPACE_URL, material))
@@ -415,10 +438,27 @@ class CodexHookTests(AdapterCase):
             '"source_window_number":1',
             f'"byte_offset":{highwater["byte_offset"]}',
             f'"source_digest":"{highwater["source_digest"]}"',
+            '"source":"compact"',
             "before normal work", "full replacement state", "one fresh codex-read-recovery",
             "retry at most once", "read back and verify", "mcp__carr__codex_checkpoint",
             "CARR_MCP_CLIENT_PROFILE=codex-continuity ./run.sh call codex-checkpoint",
-            "never use generic or unscoped authentication",
+            "never use generic or unscoped authentication", "hard server cap is 24,000 UTF-8 bytes",
+            "target <=20,000 UTF-8 bytes", "exact UTF-8 byte size of the serialized `state` JSON",
+            "Preserve the semantics", "not its wording or item count",
+            "Collapse related completed-work, evidence, artifact, and receipt items",
+            "resolved blockers", "externally meaningful receipt identifier",
+            "codex_continuity_payload_too_large", "same fixed binding and idempotency key",
+            "do not issue further oversize retries",
+            "Continuity verified: checkpoint v<version> · window <source_window_number>.",
+            "Do not claim success before readback",
+            "Continuity degraded: checkpoint repair failed (<specific reason>); native history remains available.",
+            "Never hide a degraded repair",
+            "perform one fresh codex-read-recovery",
+            "complete checkpoint.state as the authoritative starting point",
+            "orientation only and may omit whole items",
+            "never treat an omitted item as absent",
+            "If the complete fresh checkpoint.state is unavailable, do not write",
+            "do not issue a knowingly stale write",
         ):
             self.assertIn(expected, context)
         self.assertNotIn("never-store-opaque-compact-body", context)
@@ -483,7 +523,7 @@ class CodexHookTests(AdapterCase):
         self.assertNotIn(opaque, context)
         self.assertLessEqual(len(context.encode("utf-8")), 12000)
 
-    def test_checkpoint_refresh_directive_is_compact_only(self):
+    def test_checkpoint_refresh_bootstraps_resume_and_user_prompt_after_compaction(self):
         self.native_rollout(compacted_row(1, "window-initial", "window-current"))
         response = self.checkpoint(cursor={
             "byte_offset": 1, "source_digest": "0" * 64,
@@ -498,7 +538,117 @@ class CodexHookTests(AdapterCase):
             context = json.loads(self.run_hook(
                 self.hook_payload(source=source), env).stdout)[
                     "hookSpecificOutput"]["additionalContext"]
-            self.assertNotIn("COMPACTION CHECKPOINT REPAIR", context, source)
+            self.assertEqual("COMPACTION CHECKPOINT REPAIR" in context,
+                             source == "resume", source)
+            if source == "resume":
+                self.assertIn('"source":"resume"', context)
+        prompt = json.loads(self.run_hook(
+            self.hook_payload("UserPromptSubmit", turn_id="turn-bootstrap"), env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+        self.assertIn("COMPACTION CHECKPOINT REPAIR", prompt)
+        self.assertIn('"source":"user_prompt_submit"', prompt)
+        self.assertIn('"turn_id":"turn-bootstrap"', prompt)
+        self.assertIn("CARR Codex recovery checkpoint", prompt)
+
+    def test_fresh_window_zero_never_emits_compaction_repair(self):
+        self.native_rollout({"type": "event_msg", "payload": {"message": "fresh"}})
+        env, _ = self.install_fake_record_call(
+            {"ok": True, "found": False, "checkpoint": None})
+        for payload in (
+            self.hook_payload(source="resume"),
+            self.hook_payload("UserPromptSubmit", turn_id="turn-fresh"),
+        ):
+            context = json.loads(self.run_hook(payload, env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+            self.assertNotIn("COMPACTION CHECKPOINT REPAIR", context)
+
+    def test_user_prompt_repairs_legacy_checkpoint_but_exact_window_is_noop(self):
+        self.native_rollout(compacted_row(1, "window-initial", "window-current"))
+        legacy_env, _ = self.install_fake_record_call(
+            self.checkpoint(cursor={"byte_offset": 1, "source_digest": "0" * 64}))
+        legacy = json.loads(self.run_hook(
+            self.hook_payload("UserPromptSubmit", turn_id="turn-legacy"), legacy_env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+        self.assertIn("COMPACTION CHECKPOINT REPAIR", legacy)
+        exact_env, _ = self.install_fake_record_call(self.checkpoint(cursor={
+            "byte_offset": 1, "source_digest": "0" * 64,
+            "source_window_id": window_id("window-current"), "source_window_number": 1,
+        }))
+        exact = json.loads(self.run_hook(
+            self.hook_payload("UserPromptSubmit", turn_id="turn-exact"), exact_env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("COMPACTION CHECKPOINT REPAIR", exact)
+        self.assertNotIn("Continuity verified:", exact)
+        self.assertNotIn("Continuity degraded:", exact)
+        self.assertIn("covers current context window 1", exact)
+        self.assertIn("later native bytes or turns may remain unincorporated", exact)
+        self.assertIn("no compaction repair is required until the next native compaction", exact)
+
+    def test_exact_window_checkpoint_above_target_is_normalized(self):
+        self.native_rollout(compacted_row(1, "window-initial", "window-current"))
+        state = {
+            "objective": "keep the active task",
+            "latest_corrections": [{"text": "preserve correction",
+                                     "refs": ["user:proof"]}],
+            "constraints": [{"text": f"current-obligation-{index}-" + "z" * 2950}
+                            for index in range(7)],
+            "decisions": [{"text": "preserve decision", "why": "still binding",
+                           "refs": ["decision:proof"]}],
+            "receipts": [{"text": "meaningful receipt proof-receipt-1"}],
+            "next_action": "normalize without losing current meaning",
+        }
+        state_bytes = len(json.dumps(
+            state, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+        self.assertGreater(state_bytes, 20000)
+        self.assertLessEqual(state_bytes, 24000)
+        env, _ = self.install_fake_record_call(self.checkpoint(state=state, cursor={
+            "byte_offset": 1, "source_digest": "0" * 64,
+            "source_window_id": window_id("window-current"),
+            "source_window_number": 1,
+        }))
+
+        context = json.loads(self.run_hook(
+            self.hook_payload(source="resume"), env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+        self.assertIn("COMPACTION CHECKPOINT REPAIR", context)
+        self.assertIn(f"serialized state is {state_bytes} UTF-8 bytes", context)
+        self.assertIn("20,000-byte normalization target", context)
+        self.assertIn('"expected_version":7', context)
+
+    def test_user_prompt_reports_rejected_receipt_without_claiming_outage(self):
+        self.native_rollout({"type": "event_msg", "payload": {"message": "receipt"}})
+        env, _ = self.install_fake_record_call(
+            self.checkpoint(cursor={"byte_offset": 1}),
+            event_response={"error": "codex_event_key_conflict"},
+            event_tool_error=True)
+        context = json.loads(self.run_hook(
+            self.hook_payload("UserPromptSubmit", turn_id="turn-rejected"), env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+        self.assertIn("was rejected by the record store (codex_event_key_conflict)", context)
+        self.assertNotIn("receipt could not be stored because the record store is unavailable", context)
+
+    def test_sanctioned_tool_error_rejection_is_not_reported_as_outage(self):
+        self.native_rollout(compacted_row(1, "window-initial", "window-current"))
+        response = {"error": "codex_recovery_binding_conflict"}
+        env, _ = self.install_fake_record_call(
+            response, recovery_tool_error=True)
+
+        startup = json.loads(self.run_hook(
+            self.hook_payload(source="resume"), env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+        self.assertIn("checkpoint recovery rejected (codex_recovery_binding_conflict)",
+                      startup)
+        self.assertIn("Continuity degraded: checkpoint recovery rejected (codex_recovery_binding_conflict)",
+                      startup)
+        self.assertNotIn("record store is unavailable", startup)
+
+        prompt = json.loads(self.run_hook(
+            self.hook_payload("UserPromptSubmit", turn_id="turn-recovery-rejected"),
+            env).stdout)["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("repair could not start because recovery was rejected (codex_recovery_binding_conflict)",
+                      prompt)
+        self.assertIn("checkpoint recovery (codex_recovery_binding_conflict)", prompt)
+        self.assertNotIn("record store is unavailable", prompt)
 
     def test_compact_refresh_refuses_blind_write_paths(self):
         self.native_rollout(compacted_row(1, "window-initial", "window-current"))
@@ -628,7 +778,11 @@ class CodexHookTests(AdapterCase):
             self.hook_payload(source="compact"), env).stdout)["hookSpecificOutput"]["additionalContext"]
         self.assertLessEqual(len(context.encode("utf-8")), 12000)
         for expected in ("latest correction", "next action", "coverage warning",
-                         "codex-history.py search", "COMPACTION CHECKPOINT REPAIR"):
+                         "codex-history.py search", "COMPACTION CHECKPOINT REPAIR",
+                         "complete checkpoint.state as the authoritative starting point",
+                         "orientation only and may omit whole items",
+                         "never treat an omitted item as absent",
+                         "If the complete fresh checkpoint.state is unavailable, do not write"):
             self.assertIn(expected, context)
         self.assertNotIn('"text":"constraint-3-', context)
 
@@ -749,6 +903,9 @@ class CodexHookTests(AdapterCase):
                         "hookSpecificOutput"]["additionalContext"]
                     self.assertIn("checkpoint presence and version are unknown",
                                   context)
+                    self.assertIn("receipt could not be stored; its status is unknown",
+                                  context)
+                    self.assertNotIn("checkpoint recovery remains available", context)
                 else:
                     self.assertEqual(stdout.getvalue(), "")
 
@@ -770,15 +927,18 @@ class CodexHookTests(AdapterCase):
         prior_rollout.rename(self.rollout)
         prompt["transcript_path"] = str(self.rollout)
         second = self.run_hook(prompt, env)
+        third = self.run_hook(prompt, env)
         self.assertIn("checkpoint is stale",
                       json.loads(first.stdout)["hookSpecificOutput"]["additionalContext"])
         self.assertIn("turn-native-1 is not incorporated",
                       json.loads(first.stdout)["hookSpecificOutput"]["additionalContext"])
-        self.assertEqual((first.returncode, second.returncode), (0, 0))
+        self.assertEqual((first.returncode, second.returncode, third.returncode), (0, 0, 0))
         calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
         events = [call for call in calls if call["verb"] == "codex-record-event"]
-        self.assertEqual(events[0]["args"]["idempotency_key"],
-                         events[1]["args"]["idempotency_key"])
+        self.assertNotEqual(events[0]["args"]["idempotency_key"],
+                            events[1]["args"]["idempotency_key"])
+        self.assertEqual(events[1]["args"]["idempotency_key"],
+                         events[2]["args"]["idempotency_key"])
         self.assertNotEqual(events[0]["args"]["transcript_ref"],
                             events[1]["args"]["transcript_ref"])
         self.assertNotEqual(events[0]["args"]["cursor"]["source_digest"],

@@ -27899,9 +27899,33 @@
   ],
   "current_source_review": {
     "base_version": "v17",
-    "reason": "No reviewed source delta beyond the v17 seal.",
+    "reason": "Reviewed Codex continuity hook repair: highwater-aware prompt receipts, bounded checkpoint normalization, exact readback status, and distinct rejection/outage handling.",
     "expected_count": 827,
-    "expected_sha256": "1f46fec62096aa88fb4df35558947af06d2714ace45bc13e64a9755d26f92605",
-    "upsert": []
+    "expected_sha256": "8e40d46d59e5e59a4f38a2fc2e81c3453efdd257244c6dd3e8b186fc7812a573",
+    "upsert": [
+      {
+        "ingress_key": "script-entrypoint:ops/codex-continuity-hook.py",
+        "ingress_kind": "script_entrypoint",
+        "operation": "ops/codex-continuity-hook.py",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/codex-continuity-hook.py",
+        "schema_digest": "6a58300d90802fa384bdda3bc05205cb4b0276f2bd7a7de7885cf20bd69db911",
+        "handler_digest": "6a58300d90802fa384bdda3bc05205cb4b0276f2bd7a7de7885cf20bd69db911",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "existing_script_specific_credential_boundary",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [],
+        "request_shape": "fixed_script_cli_contract",
+        "idempotency_mode": "script_specific_registered_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      }
+    ]
   }
 }
