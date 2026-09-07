@@ -41,6 +41,81 @@ AUTHORIZED_CODEX_CONFIG_OVERRIDES = (
     "sandbox_workspace_write.network_access=true",
     'features.network_proxy={enabled=true,domains={"github.com"="allow","api.github.com"="allow"}}',
 )
+REQUIRED_RULE_PACKS = (
+    "engineering-git",
+    "delegation-council",
+    "scheduled-automation",
+    "source-study",
+)
+STANDING_CONTEXT_STORE_KEY = "carr_engineering_standing_context_rules_v1"
+STANDING_CONTEXT_RULE_CHUNK_SIZE = 8
+REQUIRED_RULE_PACKS_JSON = json.dumps(list(REQUIRED_RULE_PACKS), separators=(",", ":"))
+STANDING_CONTEXT_NATIVE_PROJECTION_JS = r'''// @exec: {"max_output_tokens": 3000}
+const requiredPacks = __REQUIRED_RULE_PACKS_JSON__;
+const toolName = "mcp__carr__standing_context";
+const result = await tools.mcp__carr__standing_context({packs: requiredPacks});
+const textBlocks = Array.isArray(result?.content)
+  ? result.content.filter((item) => item?.type === "text" && typeof item.text === "string")
+  : [];
+if (textBlocks.length !== 1) throw new Error("standing-context returned an unsupported native CallToolResult");
+const response = JSON.parse(textBlocks[0].text);
+const delivery = response?.rule_delivery;
+if (!delivery || !Array.isArray(delivery.declared_packs)) {
+  throw new Error("standing-context native response omitted rule_delivery.declared_packs");
+}
+const packsNotFound = Array.isArray(delivery.packs_not_found) ? delivery.packs_not_found : [];
+const sharedRules = Array.isArray(response.shared_rules) ? response.shared_rules : [];
+const personalRules = Array.isArray(response.personal_rules) ? response.personal_rules : [];
+const rules = [
+  ...sharedRules.map((rule) => ({scope:"shared",...rule})),
+  ...personalRules.map((rule) => ({scope:"personal",...rule})),
+];
+store(__STANDING_CONTEXT_STORE_KEY_JSON__, {rules, next: 0});
+text(JSON.stringify({
+  schema_version:"engineering-standing-context-native-projection.v1",
+  provenance:"native_call_tool_result",
+  source_call:{tool_name:toolName,input:{packs:requiredPacks}},
+  ok:response.ok === true,
+  recite:response.recite,
+  identity:response.identity,
+  rule_delivery:{
+    mode:delivery.mode,
+    declared_packs:delivery.declared_packs,
+    packs_not_found:packsNotFound,
+  },
+  verification:{
+    exact_required_packs:JSON.stringify(delivery.declared_packs) === JSON.stringify(requiredPacks),
+    packs_not_found_empty:packsNotFound.length === 0,
+  },
+  rule_counts:{shared:sharedRules.length,personal:personalRules.length,total:rules.length},
+  rule_chunk:{store_key:__STANDING_CONTEXT_STORE_KEY_JSON__,size:__RULE_CHUNK_SIZE__,next:0},
+}));'''.replace(
+    "__REQUIRED_RULE_PACKS_JSON__", REQUIRED_RULE_PACKS_JSON,
+).replace(
+    "__STANDING_CONTEXT_STORE_KEY_JSON__", json.dumps(STANDING_CONTEXT_STORE_KEY),
+).replace("__RULE_CHUNK_SIZE__", str(STANDING_CONTEXT_RULE_CHUNK_SIZE))
+STANDING_CONTEXT_RULE_CHUNK_JS = r'''// @exec: {"max_output_tokens": 3000}
+const key = __STANDING_CONTEXT_STORE_KEY_JSON__;
+const state = load(key);
+if (!state || !Array.isArray(state.rules) || !Number.isInteger(state.next)) {
+  throw new Error("standing-context native rule store is unavailable");
+}
+const start = state.next;
+const end = Math.min(start + __RULE_CHUNK_SIZE__, state.rules.length);
+const rules = state.rules.slice(start, end);
+store(key, {rules: state.rules, next: end});
+text(JSON.stringify({
+  schema_version:"engineering-standing-context-native-rule-chunk.v1",
+  provenance:"native_call_tool_result",
+  source_call:{tool_name:"mcp__carr__standing_context"},
+  start,
+  end,
+  total:state.rules.length,
+  remaining:state.rules.length-end,
+  rules,
+}));'''.replace(
+    "__STANDING_CONTEXT_STORE_KEY_JSON__", json.dumps(STANDING_CONTEXT_STORE_KEY),
+).replace("__RULE_CHUNK_SIZE__", str(STANDING_CONTEXT_RULE_CHUNK_SIZE))
 
 
 class DispatchRefusal(RuntimeError):
@@ -152,14 +227,27 @@ def _prompt(packet: dict, task: dict) -> str:
     return (
         "You are the fresh, dedicated Codex executor for one bounded CARR Engineering Passport slice.\n\n"
         "RULE-DELIVERY WORKFLOW: engineering-slice\n"
-        "RULE-DELIVERY PACKS: engineering-git,delegation-council,scheduled-automation,source-study\n"
+        f"RULE-DELIVERY PACKS: {','.join(REQUIRED_RULE_PACKS)}\n"
         "FIRST: call `standing-context` with exactly this input and read the returned rules: "
-        "{\"packs\":[\"engineering-git\",\"delegation-council\",\"scheduled-automation\",\"source-study\"]}. "
+        f"{{\"packs\":{REQUIRED_RULE_PACKS_JSON}}}. "
         "Do not pass `workflow`: standing-context also interprets that field as a pack name, and "
         "`engineering-slice` is a workflow label rather than a canonical rule pack. "
+        "The direct tool is available inside `functions.exec` as "
+        "`tools.mcp__carr__standing_context`; do not inspect or print `ALL_TOOLS`. Run the exact "
+        "native projection code below in one `functions.exec` call. It stores the complete delivered "
+        "shared and personal rule arrays while printing the small authoritative gate projection first.\n\n"
+        "STANDING-CONTEXT NATIVE PROJECTION CODE (exact):\n"
+        f"{STANDING_CONTEXT_NATIVE_PROJECTION_JS}\n\n"
+        "A `rule-jit-trigger-delivery/v1` PreToolUse additional-context receipt is supplemental JIT "
+        "delivery from a separate local selector. Obey its delivered rules, but never treat its "
+        "`declared_packs`, identity, or receipt id as the native standing-context response above. "
         "REFUSE before inspecting the envelope, source, or job if that call fails, reports any "
         "packs_not_found, or does not read back all four canonical names. Never substitute an alias or "
-        "a full-set fallback.\n\n"
+        "a full-set fallback. After that gate passes, run the exact chunk code below repeatedly in "
+        "`functions.exec`, reading every returned rule chunk, until `remaining` is zero. Never print "
+        "the raw CallToolResult.\n\n"
+        "STANDING-CONTEXT NATIVE RULE CHUNK CODE (repeat until remaining=0):\n"
+        f"{STANDING_CONTEXT_RULE_CHUNK_JS}\n\n"
         "The controller—not you—owns the database lease, identity, authority, and lifecycle. "
         "Do not connect directly to any database, do not claim/retry/complete a job, do not reuse a session, "
         "and do not widen the accepted slice. Work only inside the controller's isolated Git worktree.\n\n"
