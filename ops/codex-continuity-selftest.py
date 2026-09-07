@@ -421,9 +421,10 @@ class CodexHookTests(AdapterCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
         material = json.dumps({
-            "operation": "codex-compaction-checkpoint-refresh",
+            "operation": "codex-compaction-checkpoint-refresh-v2",
             "runtime": "codex", "native_task_id": self.session_id,
             "project_id": meta["project_id"], "cwd": meta["cwd"],
+            "checkpoint_version": 7,
             "source_window_id": window_id("window-current"), "source_window_number": 1,
         }, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         expected_key = str(uuid.uuid5(uuid.NAMESPACE_URL, material))
@@ -582,6 +583,37 @@ class CodexHookTests(AdapterCase):
         self.assertIn("covers current context window 1", exact)
         self.assertIn("later native bytes or turns may remain unincorporated", exact)
         self.assertIn("no compaction repair is required until the next native compaction", exact)
+
+    def test_exact_window_checkpoint_above_target_is_normalized(self):
+        self.native_rollout(compacted_row(1, "window-initial", "window-current"))
+        state = {
+            "objective": "keep the active task",
+            "latest_corrections": [{"text": "preserve correction",
+                                     "refs": ["user:proof"]}],
+            "constraints": [{"text": f"current-obligation-{index}-" + "z" * 2950}
+                            for index in range(7)],
+            "decisions": [{"text": "preserve decision", "why": "still binding",
+                           "refs": ["decision:proof"]}],
+            "receipts": [{"text": "meaningful receipt proof-receipt-1"}],
+            "next_action": "normalize without losing current meaning",
+        }
+        state_bytes = len(json.dumps(
+            state, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+        self.assertGreater(state_bytes, 20000)
+        self.assertLessEqual(state_bytes, 24000)
+        env, _ = self.install_fake_record_call(self.checkpoint(state=state, cursor={
+            "byte_offset": 1, "source_digest": "0" * 64,
+            "source_window_id": window_id("window-current"),
+            "source_window_number": 1,
+        }))
+
+        context = json.loads(self.run_hook(
+            self.hook_payload(source="resume"), env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+        self.assertIn("COMPACTION CHECKPOINT REPAIR", context)
+        self.assertIn(f"serialized state is {state_bytes} UTF-8 bytes", context)
+        self.assertIn("20,000-byte normalization target", context)
+        self.assertIn('"expected_version":7', context)
 
     def test_user_prompt_reports_rejected_receipt_without_claiming_outage(self):
         self.native_rollout({"type": "event_msg", "payload": {"message": "receipt"}})
