@@ -27899,9 +27899,9 @@
   ],
   "current_source_review": {
     "base_version": "v17",
-    "reason": "Reviewed Codex continuity preparation guard: one-pass checkpoint sizing guidance, bounded repair-directive reference reporting, condensed-state reference checks, and write-boundary rejection of malformed references; reviewed Engineering Passport adapter repair: bounded native standing-context projection and complete chunked rule delivery, controller task work_request_ref beside the immutable UUID binding, bounded native accepted-source and runbook hydration validated against the controller plan with slice-text-scoped source_merge fail-closed checks, and an exact blocked-safe engineering-slice-receipt.v1 template; canonical records remain authoritative.",
+    "reason": "Reviewed Codex continuity preparation guard: one-pass checkpoint sizing guidance, bounded repair-directive reference reporting, condensed-state reference checks, and write-boundary rejection of malformed references; reviewed Engineering Passport adapter repairs: bounded native standing-context projection and complete chunked rule delivery, controller task work_request_ref beside the immutable UUID binding, exact blocked-safe engineering-slice-receipt.v1 guidance, and digest-bound single-read loading of the tracked accepted-source/runbook hydration helper so the model no longer transcribes the long validation program; canonical records remain authoritative.",
     "expected_count": 827,
-    "expected_sha256": "4437d187d252172abc644fc5bfdb4a5b83eb2473fdce3df72828ced94b14e427",
+    "expected_sha256": "224626d5a84d8343aff197eae6caef1c01617174e34ceaaba19eec731a396a29",
     "upsert": [
       {
         "ingress_key": "script-entrypoint:ops/codex-continuity-hook.py",
@@ -28001,8 +28001,8 @@
         "operation": "tools/room-bridge/engineering_dispatch_adapter.py",
         "effect_class": "administrative_mutation",
         "source_locator": "tools/room-bridge/engineering_dispatch_adapter.py",
-        "schema_digest": "08a006e2c004a9cc80bda28049c5829481294d7997e084f9660687eb8cfe881b",
-        "handler_digest": "08a006e2c004a9cc80bda28049c5829481294d7997e084f9660687eb8cfe881b",
+        "schema_digest": "66f2852c695031b3433b1aa2919e734e9ea4b1051917abc92e621455ae45ec27",
+        "handler_digest": "66f2852c695031b3433b1aa2919e734e9ea4b1051917abc92e621455ae45ec27",
         "write": true,
         "human_only": false,
         "authority_only": true,
