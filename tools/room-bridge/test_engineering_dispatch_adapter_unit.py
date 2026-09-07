@@ -110,7 +110,7 @@ def request() -> dict:
 class ValidEngineeringDesk:
     def resolve(self, name):
         assert name == "engineering-codex"
-        return {"name": name, "kind": "codex-session", "model": "gpt-5.6-sol", "effort": "high",
+        return {"name": name, "kind": "codex-session", "model": "gpt-5.6-terra", "effort": "high",
                 "cwd": str(ROOT), "sandbox": "workspace-write",
                 "add_dirs": adapter._dedicated_writable_roots(), "room_seat": None}
 
@@ -361,7 +361,7 @@ def test_tracked_bootstrap_registers_one_unseated_exact_desk_and_wrapper_has_no_
         registry = adapter.desks.Registry(Path(root) / "hermes-desks.json")
         entry = adapter.install_dedicated_codex_desk(registry)
         assert entry["name"] == "engineering-codex"
-        assert entry["kind"] == "codex-session" and entry["model"] == "gpt-5.6-sol"
+        assert entry["kind"] == "codex-session" and entry["model"] == "gpt-5.6-terra"
         assert entry["effort"] == "high" and entry["sandbox"] == "workspace-write"
         assert entry["add_dirs"] == adapter._dedicated_writable_roots()
         assert entry.get("room_seat") is None and entry["thread_id"] is None
