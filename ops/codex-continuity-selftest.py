@@ -443,7 +443,8 @@ class CodexHookTests(AdapterCase):
             "retry at most once", "read back and verify", "mcp__carr__codex_checkpoint",
             "CARR_MCP_CLIENT_PROFILE=codex-continuity ./run.sh call codex-checkpoint",
             "never use generic or unscoped authentication", "hard server cap is 24,000 UTF-8 bytes",
-            "target <=20,000 UTF-8 bytes", "exact UTF-8 byte size of the serialized `state` JSON",
+            "single <=18,000-byte JSON budget", "2,000-byte working reserve",
+            "preflight its exact serialized UTF-8 size",
             "Preserve the semantics", "not its wording or item count",
             "Collapse related completed-work, evidence, artifact, and receipt items",
             "resolved blockers", "externally meaningful receipt identifier",
@@ -583,6 +584,121 @@ class CodexHookTests(AdapterCase):
         self.assertIn("covers current context window 1", exact)
         self.assertIn("later native bytes or turns may remain unincorporated", exact)
         self.assertIn("no compaction repair is required until the next native compaction", exact)
+
+    def test_exact_checkpoint_with_placeholder_refs_requests_repair(self):
+        self.native_rollout(compacted_row(1, "window-initial", "window-current"))
+        state = {
+            "objective": "keep the active task",
+            "latest_corrections": [{"text": "preserve correction",
+                                     "refs": ["doctrine-section:{REF1}"]}],
+            "decisions": [{"text": "preserve decision", "why": "still binding",
+                           "refs": ["native-user-turn:{REF2}"]}],
+            "next_action": "repair references before accepting the checkpoint",
+        }
+        env, _ = self.install_fake_record_call(self.checkpoint(state=state, cursor={
+            "byte_offset": 1, "source_digest": "0" * 64,
+            "source_window_id": window_id("window-current"),
+            "source_window_number": 1,
+        }))
+
+        context = json.loads(self.run_hook(
+            self.hook_payload(source="resume"), env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+        self.assertIn("COMPACTION CHECKPOINT REPAIR", context)
+        self.assertIn("condensed checkpoint state contains unresolved reference placeholders",
+                      context)
+        self.assertIn("canonical source records remain authoritative and available", context)
+        self.assertNotIn("{REF1}", context)
+        self.assertNotIn("{REF2}", context)
+
+    def test_user_prompt_placeholder_repair_has_no_healthy_noop_message(self):
+        self.native_rollout(compacted_row(1, "window-initial", "window-current"))
+        state = {
+            "objective": "keep the active task through {REF3}",
+            "latest_corrections": [{"text": "preserve correction",
+                                     "refs": ["user:valid"]}],
+            "next_action": "repair the unresolved placeholder",
+        }
+        env, _ = self.install_fake_record_call(self.checkpoint(state=state, cursor={
+            "byte_offset": 1, "source_digest": "0" * 64,
+            "source_window_id": window_id("window-current"),
+            "source_window_number": 1,
+        }))
+
+        context = json.loads(self.run_hook(self.hook_payload(
+            "UserPromptSubmit", turn_id="turn-placeholder"), env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+        self.assertIn("COMPACTION CHECKPOINT REPAIR", context)
+        self.assertIn("checkpoint state requires repair now", context)
+        self.assertNotIn("no compaction repair is required", context)
+        self.assertNotIn("{REF3}", context)
+
+    def test_user_prompt_malformed_legacy_state_warns_without_crashing(self):
+        self.native_rollout(compacted_row(1, "window-initial", "window-current"))
+        response = self.checkpoint(cursor={
+            "byte_offset": 1, "source_digest": "0" * 64,
+            "source_window_id": window_id("window-current"),
+            "source_window_number": 1,
+        })
+        response["checkpoint"]["state"] = None
+        env, _ = self.install_fake_record_call(response)
+
+        result = self.run_hook(self.hook_payload(
+            "UserPromptSubmit", turn_id="turn-malformed"), env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        context = json.loads(result.stdout)[
+            "hookSpecificOutput"]["additionalContext"]
+        self.assertIn("complete replacement state is unavailable", context)
+        self.assertIn("checkpoint state requires repair now", context)
+        self.assertNotIn("no compaction repair is required", context)
+
+    def test_exact_checkpoint_with_valid_path_and_url_refs_stays_healthy(self):
+        self.native_rollout(compacted_row(1, "window-initial", "window-current"))
+        state = {
+            "objective": "keep the active task",
+            "latest_corrections": [{
+                "text": "preserve path citation",
+                "refs": ["/tmp/canonical-evidence.json"],
+            }],
+            "decisions": [{
+                "text": "preserve URL citation",
+                "why": "still binding",
+                "refs": ["https://github.com/jbookout/carr-system/pull/897"],
+            }],
+            "next_action": "continue without repairing valid references",
+        }
+        env, _ = self.install_fake_record_call(self.checkpoint(state=state, cursor={
+            "byte_offset": 1, "source_digest": "0" * 64,
+            "source_window_id": window_id("window-current"),
+            "source_window_number": 1,
+        }))
+
+        context = json.loads(self.run_hook(
+            self.hook_payload(source="resume"), env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("COMPACTION CHECKPOINT REPAIR", context)
+        self.assertIn("checkpoint covers current context window 1", context)
+
+    def test_repair_directive_requires_one_pass_size_plan(self):
+        self.native_rollout(compacted_row(1, "window-initial", "window-current"))
+        state = {
+            "objective": "keep the active task",
+            "constraints": [{"text": "z" * 3000} for _ in range(7)],
+            "next_action": "normalize once before writing",
+        }
+        env, _ = self.install_fake_record_call(self.checkpoint(state=state, cursor={
+            "byte_offset": 1, "source_digest": "0" * 64,
+            "source_window_id": window_id("window-current"),
+            "source_window_number": 1,
+        }))
+        context = json.loads(self.run_hook(
+            self.hook_payload(source="resume"), env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+        self.assertIn("one semantic compression pass", context)
+        self.assertIn("single <=18,000-byte JSON budget", context)
+        self.assertIn("2,000-byte working reserve", context)
+        self.assertIn("at most one corrective compression pass", context)
+        self.assertIn("copy every already-valid reference byte-for-byte", context)
 
     def test_exact_window_checkpoint_above_target_is_normalized(self):
         self.native_rollout(compacted_row(1, "window-initial", "window-current"))

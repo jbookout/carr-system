@@ -162,6 +162,8 @@ test("state list items are closed and required text is documented in the schema"
   assert.equal(correctionSchema.properties.refs.minItems, 1);
   assert.equal(correctionSchema.properties.refs.items.minLength, 1);
   assert.equal(correctionSchema.properties.refs.items.pattern, "\\S");
+  assert.match("/tmp/canonical-evidence.json", new RegExp(correctionSchema.properties.refs.items.pattern));
+  assert.match("https://github.com/jbookout/carr-system/pull/897", new RegExp(correctionSchema.properties.refs.items.pattern));
   const decisionSchema = checkpoint.inputSchema.properties.state.properties.decisions.items;
   assert.deepEqual(decisionSchema.required, ["text", "why", "refs"]);
   assert.equal(decisionSchema.properties.why.minLength, 1);
@@ -186,6 +188,25 @@ test("state list items are closed and required text is documented in the schema"
       expected_version: 0, state: invalid,
     }), error => error.payload?.error === "codex_checkpoint_field_invalid");
   }
+  for (const invalid of [
+    { ...state, latest_corrections: [{ text: "placeholder citation", refs: ["doctrine-section:{REF1}"] }] },
+    { ...state, decisions: [{ text: "placeholder decision", why: "because", refs: ["native-user-turn:{ref2}"] }] },
+    { ...state, objective: "continue from {REF3}" },
+    { ...state, progress: [{ text: "resolved against {REF4}" }] },
+    { ...state, decisions: [{ text: "decision", why: "evidence {REF5}", refs: ["decision:valid"] }] },
+  ]) {
+    await assert.rejects(() => checkpoint.handler(client, actor, {
+      idempotency_key: key, runtime: "codex", native_task_id: "task-1", project_id: "p", cwd: "/repo",
+      expected_version: 0, state: invalid,
+    }), error => error.payload?.error === "codex_checkpoint_reference_invalid" &&
+      error.payload?.paths?.length === 1);
+  }
+  let deeplyNested = "leaf";
+  for (let depth = 0; depth < 10000; depth += 1) deeplyNested = [deeplyNested];
+  await assert.rejects(() => checkpoint.handler(client, actor, {
+    idempotency_key: key, runtime: "codex", native_task_id: "task-1", project_id: "p", cwd: "/repo",
+    expected_version: 0, state: { ...state, progress: deeplyNested },
+  }), error => error.payload?.error === "codex_checkpoint_field_invalid");
 });
 
 test("Claude and unverified callers are rejected before database use", async () => {

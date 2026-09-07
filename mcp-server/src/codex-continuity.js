@@ -12,6 +12,7 @@ const STATE_LIMIT = 24000;
 const CURSOR_LIMIT = 2000;
 const RECOVERY_TURN_LIMIT = 25;
 const MAX_CHECKPOINT_VERSION = Number.MAX_SAFE_INTEGER;
+const UNRESOLVED_REFERENCE_RE = /\{REF[0-9]+\}/i;
 
 const STATE_FIELDS = new Set([
   "objective", "acceptance", "latest_corrections", "constraints", "decisions",
@@ -70,7 +71,8 @@ function validateStateShape(value, ToolError) {
       if (Object.keys(item).some(key => !STATE_ITEM_FIELDS.has(key))) return true;
       if (typeof item.text !== "string" || !item.text.trim() || item.text.length > TEXT_LIMIT) return true;
       if (item.why !== undefined && (typeof item.why !== "string" || item.why.length > TEXT_LIMIT)) return true;
-      if (item.refs !== undefined && (!Array.isArray(item.refs) || item.refs.some(ref => typeof ref !== "string" || ref.length > 500))) return true;
+      if (item.refs !== undefined && (!Array.isArray(item.refs) || item.refs.some(ref =>
+        typeof ref !== "string" || ref.length > 500))) return true;
       if (field === "latest_corrections" && (!Array.isArray(item.refs) || !item.refs.length ||
           item.refs.some(ref => !ref.trim()))) return true;
       if (field === "decisions" && (typeof item.why !== "string" || !item.why.trim() ||
@@ -80,6 +82,25 @@ function validateStateShape(value, ToolError) {
       throw new ToolError({ error: "codex_checkpoint_field_invalid", field,
         hint: "checkpoint list fields contain bounded objects; corrections require refs and decisions require why plus refs" });
   }
+  const referenceIssues = [];
+  for (const field of ["objective", "next_action"])
+    if (UNRESOLVED_REFERENCE_RE.test(value[field])) referenceIssues.push(field);
+  for (const field of STATE_LIST_FIELDS) {
+    if (!Array.isArray(value[field])) continue;
+    value[field].forEach((item, itemIndex) => {
+      for (const key of ["text", "why"])
+        if (typeof item[key] === "string" && UNRESOLVED_REFERENCE_RE.test(item[key]))
+          referenceIssues.push(`${field}[${itemIndex}].${key}`);
+      if (Array.isArray(item.refs)) item.refs.forEach((ref, refIndex) => {
+        if (UNRESOLVED_REFERENCE_RE.test(ref))
+          referenceIssues.push(`${field}[${itemIndex}].refs[${refIndex}]`);
+      });
+    });
+  }
+  if (referenceIssues.length)
+    throw new ToolError({ error: "codex_checkpoint_reference_invalid",
+      paths: referenceIssues.slice(0, 25),
+      hint: "replace unresolved {REF<number>} tokens from canonical evidence before writing" });
 }
 
 function text(value, field, ToolError, limit = TEXT_LIMIT) {
