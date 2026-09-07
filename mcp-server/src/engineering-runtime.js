@@ -1019,7 +1019,12 @@ export async function runEngineeringWorker({ c, worker, desk, dispatchEnvelope, 
       if (claim.controller_error) error(ToolError, { error: claim.controller_error });
       const actor = controllerActor(claim, ToolError);
       const { plan, slice, jobLeaseExpiresAt } = controllerPlan(claim, ToolError);
+      // The job payload carries the canonical human Work Request ref that the
+      // read-only engineering-passport-source verb resolves.  Preserve it as a
+      // distinct field: task.work_request stays the immutable UUID binding.
+      const workRequestRef = text(claim.payload?.work_request, "payload.work_request", ToolError);
       const task = { ...(claim.payload || {}), work_request: plan.work_request.id,
+        work_request_ref: workRequestRef,
         job_ref: `job:${claim.job_id}`,
         attempt_id: `attempt:${claim.attempt}`, claim_lease_expires_at: jobLeaseExpiresAt,
         engineering_plan: plan, engineering_slice: slice };

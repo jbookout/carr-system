@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -116,10 +117,316 @@ text(JSON.stringify({
 }));'''.replace(
     "__STANDING_CONTEXT_STORE_KEY_JSON__", json.dumps(STANDING_CONTEXT_STORE_KEY),
 ).replace("__RULE_CHUNK_SIZE__", str(STANDING_CONTEXT_RULE_CHUNK_SIZE))
+# The immutable packet deliberately projects no accepted plan caps or runbook.
+# The child hydrates them itself from the two existing read-only verbs, bound
+# to the controller plan; a mismatch refuses before any repository work.
+SOURCE_MERGE_TOKEN = re.compile(r"source[_-]merge", re.IGNORECASE)
+RUNBOOK_STORE_KEY = "carr_engineering_runbook_body_v1"
+RUNBOOK_CHUNK_CHARS = 4000
+ENGINEERING_SOURCE_NATIVE_PROJECTION_JS_TEMPLATE = r'''// @exec: {"max_output_tokens": 3000}
+const expected = __EXPECTED_BINDING_JSON__;
+const runbookStoreKey = __RUNBOOK_STORE_KEY_JSON__;
+const decodeOne = (result, label) => {
+  const blocks = Array.isArray(result?.content)
+    ? result.content.filter((item) => item?.type === "text" && typeof item.text === "string")
+    : [];
+  if (blocks.length !== 1) throw new Error(label + " returned an unsupported native CallToolResult");
+  return JSON.parse(blocks[0].text);
+};
+const refuse = (reason) => { throw new Error("engineering source hydration refused: " + reason); };
+const isObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
+const bareSha256 = (value) => {
+  const match = typeof value === "string" ? /^(?:sha256:)?([0-9a-f]{64})$/.exec(value) : null;
+  return match ? match[1] : null;
+};
+// The Codex functions.exec isolate exposes no crypto, TextEncoder, Buffer, or
+// require.  UTF-8 encoding and SHA-256 are therefore computed from basic
+// ECMAScript primitives only; lone surrogates encode as U+FFFD exactly as the
+// doctrine store's TextEncoder did when it sealed content_hash.
+const utf8Bytes = (value) => {
+  const bytes = [];
+  for (let index = 0; index < value.length; index += 1) {
+    let code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff && index + 1 < value.length) {
+      const low = value.charCodeAt(index + 1);
+      if (low >= 0xdc00 && low <= 0xdfff) {
+        code = 0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00);
+        index += 1;
+      }
+    }
+    if (code >= 0xd800 && code <= 0xdfff) code = 0xfffd;
+    if (code < 0x80) bytes.push(code);
+    else if (code < 0x800) bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+    else if (code < 0x10000) bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+    else bytes.push(0xf0 | (code >> 18), 0x80 | ((code >> 12) & 0x3f), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+  }
+  return bytes;
+};
+const sha256Hex = (value) => {
+  const K = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+  ];
+  const message = utf8Bytes(value);
+  const bitLength = message.length * 8;
+  message.push(0x80);
+  while (message.length % 64 !== 56) message.push(0);
+  const high = Math.floor(bitLength / 0x100000000);
+  const low = bitLength >>> 0;
+  message.push((high >>> 24) & 0xff, (high >>> 16) & 0xff, (high >>> 8) & 0xff, high & 0xff,
+    (low >>> 24) & 0xff, (low >>> 16) & 0xff, (low >>> 8) & 0xff, low & 0xff);
+  const state = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+  const rotr = (word, bits) => ((word >>> bits) | (word << (32 - bits))) >>> 0;
+  const w = new Array(64);
+  for (let offset = 0; offset < message.length; offset += 64) {
+    for (let t = 0; t < 16; t += 1) {
+      const i = offset + t * 4;
+      w[t] = ((message[i] << 24) | (message[i + 1] << 16) | (message[i + 2] << 8) | message[i + 3]) >>> 0;
+    }
+    for (let t = 16; t < 64; t += 1) {
+      const s0 = rotr(w[t - 15], 7) ^ rotr(w[t - 15], 18) ^ (w[t - 15] >>> 3);
+      const s1 = rotr(w[t - 2], 17) ^ rotr(w[t - 2], 19) ^ (w[t - 2] >>> 10);
+      w[t] = (w[t - 16] + (s0 >>> 0) + w[t - 7] + (s1 >>> 0)) >>> 0;
+    }
+    let [a, b, c, d, e, f, g, h] = state;
+    for (let t = 0; t < 64; t += 1) {
+      const s1 = (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) >>> 0;
+      const ch = ((e & f) ^ (~e & g)) >>> 0;
+      const temp1 = (h + s1 + ch + K[t] + w[t]) >>> 0;
+      const s0 = (rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) >>> 0;
+      const maj = ((a & b) ^ (a & c) ^ (b & c)) >>> 0;
+      const temp2 = (s0 + maj) >>> 0;
+      h = g; g = f; f = e; e = (d + temp1) >>> 0; d = c; c = b; b = a; a = (temp1 + temp2) >>> 0;
+    }
+    const round = [a, b, c, d, e, f, g, h];
+    for (let index = 0; index < 8; index += 1) state[index] = (state[index] + round[index]) >>> 0;
+  }
+  return state.map((word) => word.toString(16).padStart(8, "0")).join("");
+};
+const sourceInput = {work_request: expected.work_request_ref};
+const source = decodeOne(await tools.mcp__carr__engineering_passport_source(sourceInput), "engineering-passport-source");
+if (source?.schema_version !== "engineering-passport-source.v1") refuse("unexpected passport source schema");
+const work = source.work_request;
+const plan = source.accepted_plan_revision;
+if (!isObject(work) || !isObject(plan)) refuse("passport source omitted the Work Request or accepted plan");
+if (work.ref !== expected.work_request_ref) refuse("passport source resolved a different Work Request ref");
+if (work.id !== expected.work_request.id
+    || Number(work.version) !== expected.work_request.state_version
+    || work.canonical_record_digest !== expected.work_request.canonical_record_digest)
+  refuse("current Work Request id/version/digest do not match the controller plan binding");
+if (plan.plan_ref !== expected.accepted_plan_revision.id
+    || Number(plan.revision) !== expected.accepted_plan_revision.revision
+    || plan.digest !== expected.accepted_plan_revision.digest)
+  refuse("current accepted plan ref/revision/digest do not match the controller plan binding");
+const caps = isObject(plan.caps) ? plan.caps : {};
+const sourceMerge = caps.source_merge;
+let sourceMergeProjection = null;
+if (sourceMerge !== undefined && sourceMerge !== null) {
+  if (!isObject(sourceMerge)
+      || Object.keys(sourceMerge).sort().join(",") !== "authorized_paths,base_branch,repository,schema_version")
+    refuse("accepted caps.source_merge is malformed");
+  if (sourceMerge.schema_version !== "source-merge-scope.v1") refuse("accepted caps.source_merge schema_version is invalid");
+  if (typeof sourceMerge.repository !== "string"
+      || !/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(sourceMerge.repository))
+    refuse("accepted caps.source_merge repository is invalid");
+  if (typeof sourceMerge.base_branch !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._\/-]*$/.test(sourceMerge.base_branch))
+    refuse("accepted caps.source_merge base_branch is invalid");
+  const paths = sourceMerge.authorized_paths;
+  if (!Array.isArray(paths) || paths.length === 0) refuse("accepted caps.source_merge authorized_paths is empty or not a list");
+  for (const [index, path] of paths.entries()) {
+    if (typeof path !== "string" || !/^[!-~]+$/.test(path) || path.startsWith("/") || path.includes("\\")
+        || /(^|\/)\.\.(\/|$)/.test(path))
+      refuse("accepted caps.source_merge authorized_paths[" + index + "] is invalid");
+    if (index > 0 && !(paths[index - 1] < path)) refuse("accepted caps.source_merge authorized_paths are not unique and C-sorted");
+  }
+  sourceMergeProjection = {
+    schema_version: sourceMerge.schema_version, repository: sourceMerge.repository,
+    base_branch: sourceMerge.base_branch, authorized_paths: paths.slice(), path_count: paths.length,
+  };
+} else if (expected.source_merge_required === true) {
+  refuse("the accepted slice names source_merge but the accepted plan carries no caps.source_merge");
+}
+const runbook = isObject(plan.preimage) ? plan.preimage.runbook : undefined;
+if (!isObject(runbook) || Object.keys(runbook).sort().join(",") !== "content_hash,ref,revision_id,section_id")
+  refuse("accepted plan preimage.runbook pointer is malformed");
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+if (!uuidPattern.test(runbook.section_id) || !uuidPattern.test(runbook.revision_id)
+    || typeof runbook.ref !== "string" || !runbook.ref.trim())
+  refuse("accepted plan preimage.runbook identifiers are invalid");
+const acceptedHash = bareSha256(runbook.content_hash);
+if (!acceptedHash) refuse("accepted runbook content_hash is not a sha256 digest");
+const sectionsInput = {section_ids: [runbook.section_id]};
+const doc = decodeOne(await tools.mcp__carr__doctrine_sections(sectionsInput), "doctrine-sections");
+if (doc?.ok !== true || !Array.isArray(doc.sections) || !Array.isArray(doc.missing))
+  refuse("doctrine-sections returned an unsupported response");
+if (doc.missing.length !== 0) refuse("accepted runbook section is missing from the doctrine store");
+if (doc.sections.length !== 1) refuse("doctrine-sections did not return exactly one runbook section");
+const section = doc.sections[0];
+if (!isObject(section) || section.id !== runbook.section_id) refuse("doctrine-sections returned a different section id");
+if (section.status !== "active") refuse("accepted runbook section is not active");
+const currentVersion = Number(section.current_version);
+if (!Number.isInteger(currentVersion) || currentVersion < 1 || String(currentVersion) !== String(section.current_version))
+  refuse("accepted runbook current_version is not a positive exact integer");
+const body = isObject(section.body) ? section.body.text : undefined;
+if (typeof body !== "string" || body.length === 0) refuse("accepted runbook body text is unavailable");
+const returnedHash = bareSha256(section.content_hash);
+const computedHash = sha256Hex(body);
+if (returnedHash !== acceptedHash || computedHash !== acceptedHash)
+  refuse("current runbook body does not match the accepted content_hash");
+store(runbookStoreKey, {section_id: section.id, current_version: currentVersion,
+  content_hash: "sha256:" + acceptedHash, text: body, next: 0});
+text(JSON.stringify({
+  schema_version: "engineering-source-native-projection.v1",
+  provenance: "native_call_tool_result",
+  source_calls: [
+    {tool_name: "mcp__carr__engineering_passport_source", input: sourceInput},
+    {tool_name: "mcp__carr__doctrine_sections", input: sectionsInput},
+  ],
+  work_request: {ref: work.ref, id: work.id, version: Number(work.version),
+    canonical_record_digest: work.canonical_record_digest},
+  accepted_plan_revision: {plan_ref: plan.plan_ref, revision: Number(plan.revision), digest: plan.digest},
+  verification: {
+    work_request_current: true, accepted_plan_current: true,
+    source_merge_required: expected.source_merge_required === true,
+    source_merge_present: sourceMergeProjection !== null,
+    runbook_hash_verified: true,
+  },
+  source_merge: sourceMergeProjection,
+  runbook: {
+    ref: runbook.ref, section_id: section.id, revision_id: runbook.revision_id, section_key: section.section_key,
+    doc_slug: section.doc_slug, title: section.title, status: section.status, current_version: currentVersion,
+    content_hash: "sha256:" + acceptedHash, body_chars: body.length,
+    chunk: {store_key: runbookStoreKey, size: __RUNBOOK_CHUNK_CHARS__, next: 0},
+  },
+}));'''.replace(
+    "__RUNBOOK_STORE_KEY_JSON__", json.dumps(RUNBOOK_STORE_KEY),
+).replace("__RUNBOOK_CHUNK_CHARS__", str(RUNBOOK_CHUNK_CHARS))
+RUNBOOK_NATIVE_CHUNK_JS = r'''// @exec: {"max_output_tokens": 3000}
+const key = __RUNBOOK_STORE_KEY_JSON__;
+const state = load(key);
+if (!state || typeof state.text !== "string" || !Number.isInteger(state.next)) {
+  throw new Error("engineering runbook native store is unavailable");
+}
+const start = state.next;
+let end = Math.min(start + __RUNBOOK_CHUNK_CHARS__, state.text.length);
+// Never split a surrogate pair across chunks; the reader sees whole characters.
+if (end < state.text.length && end - start > 1) {
+  const code = state.text.charCodeAt(end - 1);
+  if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+}
+const chunk = state.text.slice(start, end);
+store(key, {...state, next: end});
+text(JSON.stringify({
+  schema_version:"engineering-runbook-native-chunk.v1",
+  provenance:"native_call_tool_result",
+  source_call:{tool_name:"mcp__carr__doctrine_sections"},
+  section_id:state.section_id,
+  current_version:state.current_version,
+  content_hash:state.content_hash,
+  start,
+  end,
+  total:state.text.length,
+  remaining:state.text.length-end,
+  text:chunk,
+}));'''.replace(
+    "__RUNBOOK_STORE_KEY_JSON__", json.dumps(RUNBOOK_STORE_KEY),
+).replace("__RUNBOOK_CHUNK_CHARS__", str(RUNBOOK_CHUNK_CHARS))
+# Facts only the fresh child can truthfully observe.  Each placeholder is a
+# null the existing receipt validator rejects, so an unfilled template can
+# never persist as evidence.
+RECEIPT_TEMPLATE_PLACEHOLDER_PATHS = (
+    "source_evidence.worktree_ref",
+    "source_evidence.branch_ref",
+    "source_evidence.source_sha",
+    "reset_reconstruction.reconstruction_free",
+    "executor_claim.claimed_at",
+)
+# The prompt task binding keeps the exact eight keys the rule-pack drift gate
+# parses; controller-only fields ride in the hydration binding instead.
+PROMPT_TASK_EXCLUDED_KEYS = frozenset({"claim_lease_expires_at", "work_request_ref"})
+# The independently qualified GitHub route: per-command overrides only, so no
+# Git configuration changes, no credential ever printed or stored by the
+# child, no interactive prompt, and no hook bypass.
+GITHUB_GIT_COMMAND_PREFIX = (
+    "git -c url.https://github.com/.insteadOf=git@github.com: -c credential.helper= "
+    "-c 'credential.helper=!gh auth git-credential' -c credential.interactive=never "
+    "-c core.askPass=/bin/false"
+)
 
 
 class DispatchRefusal(RuntimeError):
     pass
+
+
+def slice_requires_source_merge(slice_row: dict) -> bool:
+    """True only when the accepted slice text or checks literally name source_merge."""
+    fragments = [slice_row.get(field) for field in ("objective", "definition_of_done", "scope_boundary")]
+    for check in slice_row.get("planned_checks") or []:
+        if isinstance(check, dict):
+            fragments.extend((check.get("check_ref"), check.get("failure_condition")))
+    return any(isinstance(fragment, str) and SOURCE_MERGE_TOKEN.search(fragment) for fragment in fragments)
+
+
+def source_hydration_binding(task: dict, plan: dict, slice_row: dict) -> dict:
+    """The exact expectations the child verifies the live source against."""
+    ref = task.get("work_request_ref")
+    if not isinstance(ref, str) or not ref.strip():
+        raise DispatchRefusal("engineering controller task has no canonical Work Request ref")
+    return {
+        "work_request_ref": ref,
+        "work_request": plan["work_request"],
+        "accepted_plan_revision": plan["accepted_plan_revision"],
+        "slice_ref": task["slice_ref"],
+        "source_merge_required": slice_requires_source_merge(slice_row),
+    }
+
+
+def engineering_source_projection_js(binding: dict) -> str:
+    return ENGINEERING_SOURCE_NATIVE_PROJECTION_JS_TEMPLATE.replace(
+        "__EXPECTED_BINDING_JSON__", json.dumps(binding, sort_keys=True, separators=(",", ":")))
+
+
+def build_engineering_slice_receipt_template(packet: dict, task: dict, envelope: dict,
+                                             slice_row: dict, executor_slug: str) -> dict:
+    """Exact engineering-slice-receipt.v1 field set with blocked-safe defaults."""
+    attempt_id = task.get("attempt_id")
+    if not isinstance(attempt_id, str) or not attempt_id.strip():
+        raise DispatchRefusal("engineering controller task has no attempt id")
+    identity = envelope["server_binding"]["identity"]
+    adapter_binding = envelope["server_binding"]["adapter"]
+    return {
+        "schema_version": "engineering-slice-receipt.v1",
+        "envelope_digest": packet["envelope_digest"],
+        "attempt_id": attempt_id,
+        "slice_ref": packet["slice_ref"],
+        "plan_digest": packet["plan_digest"],
+        "attribution": {
+            "actor_ref": identity["agent_principal_id"],
+            "session_ref": envelope["agent_session"]["id"],
+            "adapter_ref": adapter_binding["adapter_id"],
+        },
+        "planned_resource_refs": list(slice_row["declared_resource_refs"]),
+        "actual_resource_refs": [],
+        "planned_component_refs": list(slice_row["declared_component_refs"]),
+        "actual_component_refs": [],
+        "checks": [{"check_ref": check["check_ref"], "state": "not_run", "evidence_refs": []}
+                   for check in packet["planned_checks"]],
+        "outcome": "blocked",
+        "artifact_refs": [],
+        "evidence_refs": [],
+        "deviations": [],
+        "source_evidence": {"worktree_ref": None, "branch_ref": None, "source_sha": None, "evidence_refs": []},
+        "reset_reconstruction": {"fresh_session": True, "inherited_transcript_used": False,
+                                 "reconstruction_free": None, "remediation_action": None},
+        "executor_claim": {"claim_state": "executor_claim", "claimed_by": executor_slug, "claimed_at": None},
+        "independent_verification_required": True,
+    }
 
 
 def _git_common_dir() -> Path:
@@ -222,8 +529,16 @@ def _read_request() -> dict:
     return raw
 
 
-def _prompt(packet: dict, task: dict) -> str:
+def _prompt(packet: dict, task: dict, source_projection_js: str, receipt_template: dict,
+            source_merge_required: bool) -> str:
     """One exact execution request.  The executor cannot select authority."""
+    source_merge_note = (
+        "The accepted slice names source_merge: the projection carries the exact accepted "
+        "authorized_paths, and they are the only paths this slice may change."
+        if source_merge_required else
+        "This slice does not name source_merge; the projection carries source_merge only when "
+        "the accepted plan declares it, and its absence is not a blocker."
+    )
     return (
         "You are the fresh, dedicated Codex executor for one bounded CARR Engineering Passport slice.\n\n"
         "RULE-DELIVERY WORKFLOW: engineering-slice\n"
@@ -248,6 +563,23 @@ def _prompt(packet: dict, task: dict) -> str:
         "the raw CallToolResult.\n\n"
         "STANDING-CONTEXT NATIVE RULE CHUNK CODE (repeat until remaining=0):\n"
         f"{STANDING_CONTEXT_RULE_CHUNK_JS}\n\n"
+        "ACCEPTED SOURCE HYDRATION (after every rule chunk is read, before any repository work): the "
+        "immutable packet below describes the accepted slice but deliberately projects no accepted plan caps "
+        "and no runbook. Run the exact native source projection code below in one `functions.exec` call. It "
+        "calls `tools.mcp__carr__engineering_passport_source` with the canonical Work Request ref and "
+        "`tools.mcp__carr__doctrine_sections` for the accepted runbook section, validates the current Work "
+        "Request id/version/digest and accepted plan ref/revision/digest against this controller binding, "
+        "verifies the current runbook body against the accepted content hash, stores the complete runbook "
+        "body, and prints one bounded source projection. If it throws, REFUSE with a typed blocked receipt: "
+        "never retry with a different Work Request, never print the raw CallToolResult, and never read a "
+        f"local, ignored, or cached runbook file in its place. {source_merge_note}\n\n"
+        "ENGINEERING SOURCE NATIVE PROJECTION CODE (exact):\n"
+        f"{source_projection_js}\n\n"
+        "After it prints, run the exact runbook chunk code below repeatedly in `functions.exec`, reading "
+        "every returned chunk of the runbook body, until `remaining` is zero. Do not begin repository work "
+        "before the runbook is fully read.\n\n"
+        "RUNBOOK NATIVE CHUNK CODE (repeat until remaining=0):\n"
+        f"{RUNBOOK_NATIVE_CHUNK_JS}\n\n"
         "The controller—not you—owns the database lease, identity, authority, and lifecycle. "
         "Do not connect directly to any database, do not claim/retry/complete a job, do not reuse a session, "
         "and do not widen the accepted slice. Work only inside the controller's isolated Git worktree.\n\n"
@@ -266,12 +598,29 @@ def _prompt(packet: dict, task: dict) -> str:
         "slice, push an unreviewed checkpoint, or reuse a predecessor envelope. Do not discard or recreate valid "
         "declared-scope progress merely because the native session is fresh; never inherit the predecessor transcript "
         "or its unverified conclusions.\n\n"
+        "REPOSITORY NETWORK AUTH (per command, exact): run every GitHub network Git command (fetch, ls-remote, "
+        f"push) as `{GITHUB_GIT_COMMAND_PREFIX} <subcommand>`, passing these `-c` overrides on that one command "
+        "only. Never run `git config`, never edit `.git/config` or `~/.gitconfig`, never print, log, echo, or "
+        "store a token or credential, never pass `--no-verify` or otherwise bypass hooks, and never change the "
+        "desk, model, or envelope. This route is not push authorization: a push is authorized only by the "
+        "envelope's allowed actions and is proven only when the actual command succeeds. If the command fails, "
+        "stop and return a typed blocked receipt naming the failure.\n\n"
         "Complete the bounded slice below. Run the declared checks and preserve any unrelated dirty work. "
         "If the work cannot be completed within the envelope, return a typed failed or blocked receipt; do not "
         "invent success. Your final response must be a single JSON object and nothing else: an exact "
         "engineering-slice-receipt.v1 bound to this envelope and attempt. It must include every planned check, "
         "metadata-only/redacted evidence digests where required, source evidence, fresh-session reconstruction, "
         "and executor_claim.claimed_by exactly `codex`. Independent verification remains required.\n\n"
+        "RECEIPT TEMPLATE (exact engineering-slice-receipt.v1 field set derived from this packet, task, and "
+        "envelope; blocked-safe defaults):\n"
+        f"{json.dumps(receipt_template, sort_keys=True, separators=(',', ':'))}\n"
+        "Start from this template. Replace every null placeholder at exactly these paths with the value you "
+        f"truthfully observed: {', '.join(RECEIPT_TEMPLATE_PLACEHOLDER_PATHS)}. "
+        "Keep every field name exactly as written, add no field, drop no field, and locally check your final "
+        "object against the template's field names before answering. Move a check from not_run only to a "
+        "state you actually reached, attach evidence digests only for evidence you actually produced, and "
+        "never invent evidence, artifacts, deviations, or passed checks. Leave outcome blocked unless the "
+        "accepted definition of done is truly met or the work truly failed.\n\n"
         f"SERVER-ISSUED SLICE PACKET (immutable):\n{json.dumps(packet, sort_keys=True, separators=(',', ':'))}\n\n"
         f"CONTROLLER TASK BINDING (immutable):\n{json.dumps(task, sort_keys=True, separators=(',', ':'))}"
     )
@@ -359,12 +708,20 @@ def run(request: dict, *, dispatch_fn=dispatch.dispatch, registry: desks.Registr
     packet = engineering_passport.build_engineering_slice_packet(envelope, plan, task["slice_ref"])
     if packet["slice_ref"] != slice_row.get("slice_ref") or task.get("plan_digest") != packet["plan_digest"]:
         raise DispatchRefusal("engineering controller task does not match its accepted packet")
+    hydration = source_hydration_binding(task, plan, slice_row)
+    receipt_template = build_engineering_slice_receipt_template(
+        packet, task, envelope, slice_row, request["executor_slug"])
     _require_dispatch_runway(envelope, task.get("claim_lease_expires_at"))
     # The database lease deadline is controller authority, not model input; it
-    # must be checked at launch but excluded from the packet/task digest.
-    prompt_task = {key: value for key, value in task.items() if key != "claim_lease_expires_at"}
+    # must be checked at launch but excluded from the packet/task digest.  The
+    # canonical Work Request ref rides in the hydration binding, keeping the
+    # task binding exactly the shape the rule-pack drift gate verifies.
+    prompt_task = {key: value for key, value in task.items() if key not in PROMPT_TASK_EXCLUDED_KEYS}
     row = dispatch_fn(
-        request["desk"], _prompt(packet, prompt_task), env=_safe_child_env(), fresh=True,
+        request["desk"],
+        _prompt(packet, prompt_task, engineering_source_projection_js(hydration), receipt_template,
+                hydration["source_merge_required"]),
+        env=_safe_child_env(), fresh=True,
         config_overrides=AUTHORIZED_CODEX_CONFIG_OVERRIDES,
     )
     if not isinstance(row, dict) or row.get("status") != "completed":
