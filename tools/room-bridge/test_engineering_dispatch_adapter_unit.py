@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -60,6 +61,33 @@ PLAN = json.loads((FIXTURES / "engineering-passport.synthetic.plan.v1.json").rea
 
 def canonical_second(value: datetime) -> str:
     return value.astimezone(timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def execute_standing_context_projection(response: dict, initial_output=()) -> list[dict]:
+    """Run the exact prompt snippets at their real JavaScript output seam."""
+    harness = f'''const response = {json.dumps(response)};
+const state = new Map();
+const output = {json.dumps(list(initial_output))};
+const tools = {{mcp__carr__standing_context: async (input) => ({{content:[{{type:"text",text:JSON.stringify(response)}}]}})}};
+const store = (key, value) => state.set(key, value);
+const load = (key) => state.get(key);
+const text = (value) => output.push(String(value));
+const AsyncFunction = Object.getPrototypeOf(async function(){{}}).constructor;
+const run = async (source) => await new AsyncFunction("tools","store","load","text",source)(tools,store,load,text);
+const projectionIndex = output.length;
+await run({json.dumps(adapter.STANDING_CONTEXT_NATIVE_PROJECTION_JS)});
+let remaining = JSON.parse(output[projectionIndex]).rule_counts.total;
+while (remaining > 0) {{
+  await run({json.dumps(adapter.STANDING_CONTEXT_RULE_CHUNK_JS)});
+  remaining = JSON.parse(output[output.length - 1]).remaining;
+}}
+process.stdout.write(JSON.stringify(output));'''
+    run = subprocess.run(
+        ["node", "--input-type=module", "-e", harness],
+        capture_output=True, text=True, timeout=10, check=False)
+    assert run.returncode == 0, run.stderr
+    return [json.loads(value) if isinstance(value, str) else value
+            for value in json.loads(run.stdout)]
 
 
 # The tracked fixture is an immutable historical contract.  This adapter test
@@ -186,6 +214,14 @@ def test_success_is_fresh_and_database_capability_is_not_forwarded():
             '"scheduled-automation","source-study"]}') in seen["prompt"]
     assert "Do not pass `workflow`" in seen["prompt"]
     assert "`engineering-slice` is a workflow label rather than a canonical rule pack" in seen["prompt"]
+    assert "tools.mcp__carr__standing_context" in seen["prompt"]
+    assert "do not inspect or print `ALL_TOOLS`" in seen["prompt"]
+    assert adapter.STANDING_CONTEXT_NATIVE_PROJECTION_JS in seen["prompt"]
+    assert adapter.STANDING_CONTEXT_RULE_CHUNK_JS in seen["prompt"]
+    assert "rule-jit-trigger-delivery/v1" in seen["prompt"]
+    assert "never treat its `declared_packs`, identity, or receipt id as the native" in seen["prompt"]
+    assert "repeat until remaining=0" in seen["prompt"]
+    assert "Never print the raw CallToolResult" in seen["prompt"]
     assert "REFUSE before inspecting the envelope, source, or job" in seen["prompt"]
     assert f"stops this native turn after {adapter.EXECUTOR_TIMEOUT_SECONDS} seconds" in seen["prompt"]
     assert f"Reserve the final {adapter.EXECUTOR_RECEIPT_RESERVE_SECONDS} seconds" in seen["prompt"]
@@ -223,6 +259,137 @@ def test_success_is_fresh_and_database_capability_is_not_forwarded():
         prompt_prefix + task_marker
         + json.dumps(unbound_task, sort_keys=True, separators=(",", ":")))
     assert rule_pack_gate.engineering_workflow_packs(unbound_prompt) == []
+
+
+def test_native_standing_context_projection_stays_bounded_and_chunks_every_rule():
+    required = list(adapter.REQUIRED_RULE_PACKS)
+    shared = [
+        {"id": f"shared-{index}", "statement": "S" * 700}
+        for index in range(19)
+    ]
+    personal = [
+        {"id": f"personal-{index}", "statement": "P" * 700}
+        for index in range(7)
+    ]
+    response = {
+        "ok": True,
+        "core_preview": {"large_unrelated_prefix": "X" * 200_000},
+        "recite": "Rules loaded: 166 shared, 31 joe-personal",
+        "identity": {
+            "agent_principal_id": "codex",
+            "runtime_principal": "codex",
+            "session_capability_profile": "sponsored_agent",
+        },
+        "shared_rules": shared,
+        "personal_rules": personal,
+        "rule_delivery": {
+            "mode": "shadow",
+            "declared_packs": required,
+        },
+    }
+    outputs = execute_standing_context_projection(response)
+    projection = outputs[0]
+    assert projection == {
+        "schema_version": "engineering-standing-context-native-projection.v1",
+        "provenance": "native_call_tool_result",
+        "source_call": {
+            "tool_name": "mcp__carr__standing_context",
+            "input": {"packs": required},
+        },
+        "ok": True,
+        "recite": "Rules loaded: 166 shared, 31 joe-personal",
+        "identity": response["identity"],
+        "rule_delivery": {
+            "mode": "shadow", "declared_packs": required, "packs_not_found": []},
+        "verification": {"exact_required_packs": True, "packs_not_found_empty": True},
+        "rule_counts": {"shared": 19, "personal": 7, "total": 26},
+        "rule_chunk": {
+            "store_key": adapter.STANDING_CONTEXT_STORE_KEY,
+            "size": adapter.STANDING_CONTEXT_RULE_CHUNK_SIZE,
+            "next": 0,
+        },
+    }
+    assert len(json.dumps(projection)) < 3_000
+    assert "large_unrelated_prefix" not in json.dumps(projection)
+    chunks = outputs[1:]
+    assert len(chunks) == 4
+    assert all(row["provenance"] == "native_call_tool_result" for row in chunks)
+    assert all(len(json.dumps(row)) < 8_000 for row in chunks)
+    observed = [rule for row in chunks for rule in row["rules"]]
+    expected = ([{"scope": "shared", **rule} for rule in shared]
+                + [{"scope": "personal", **rule} for rule in personal])
+    assert observed == expected
+    assert [(row["start"], row["end"], row["remaining"]) for row in chunks] == [
+        (0, 8, 18), (8, 16, 10), (16, 24, 2), (24, 26, 0)]
+    assert "ALL_TOOLS" not in adapter.STANDING_CONTEXT_NATIVE_PROJECTION_JS
+    assert "ALL_TOOLS" not in adapter.STANDING_CONTEXT_RULE_CHUNK_JS
+
+
+def test_native_projection_stays_authoritative_beside_a_three_pack_jit_receipt():
+    required = list(adapter.REQUIRED_RULE_PACKS)
+    response = {
+        "ok": True,
+        "recite": "Rules loaded: 166 shared, 31 joe-personal",
+        "identity": {"agent_principal_id": "codex", "runtime_principal": "codex"},
+        "shared_rules": [{"id": "native-rule", "gist": "native rule"}],
+        "personal_rules": [],
+        "rule_delivery": {"mode": "shadow", "declared_packs": required},
+    }
+    jit = {
+        "schema": "rule-jit-trigger-delivery/v1",
+        "identity": {"agent_principal_id": "joe-local", "runtime_principal": "joe-local"},
+        "rule_delivery": {
+            "mode": "shadow",
+            "declared_packs": ["engineering-git", "scheduled-automation", "source-study"],
+            "packs_not_found": [],
+        },
+    }
+    outputs = execute_standing_context_projection(response, [jit])
+    assert outputs[0] == jit
+    projection = outputs[1]
+    assert projection["provenance"] == "native_call_tool_result"
+    assert projection["identity"]["agent_principal_id"] == "codex"
+    assert projection["rule_delivery"]["declared_packs"] == required
+    assert projection["verification"] == {
+        "exact_required_packs": True, "packs_not_found_empty": True}
+
+
+def test_native_projection_makes_a_real_missing_pack_falsifiable_before_source():
+    required = list(adapter.REQUIRED_RULE_PACKS)
+    response = {
+        "ok": True,
+        "recite": "Rules loaded: 166 shared, 31 joe-personal",
+        "identity": {"agent_principal_id": "codex", "runtime_principal": "codex"},
+        "shared_rules": [],
+        "personal_rules": [],
+        "rule_delivery": {
+            "mode": "shadow",
+            "declared_packs": [pack for pack in required if pack != "delegation-council"],
+            "packs_not_found": [],
+        },
+    }
+    projection = execute_standing_context_projection(response)[0]
+    assert projection["provenance"] == "native_call_tool_result"
+    assert projection["verification"] == {
+        "exact_required_packs": False, "packs_not_found_empty": True}
+    assert projection["rule_chunk"]["next"] == 0
+
+
+def test_captured_native_response_projects_all_four_without_printing_its_large_prefix():
+    captured = ROOT / "out" / "v5-build-clearance" / "wr68" / "worker-standing-context-actual-response.json"
+    if not captured.is_file():
+        return  # Hosted CI uses the synthetic oversized fixture above.
+    response = json.loads(captured.read_text())
+    outputs = execute_standing_context_projection(response)
+    projection = outputs[0]
+    assert projection["provenance"] == "native_call_tool_result"
+    assert projection["identity"]["agent_principal_id"] == "codex"
+    assert projection["rule_delivery"]["declared_packs"] == list(adapter.REQUIRED_RULE_PACKS)
+    assert projection["verification"] == {
+        "exact_required_packs": True, "packs_not_found_empty": True}
+    assert projection["rule_counts"] == {"shared": 6, "personal": 0, "total": 6}
+    assert len(json.dumps(projection)) < 3_000
+    assert "core_preview" not in json.dumps(outputs)
 
 
 def test_authority_runway_refuses_expired_near_expiry_or_mismatched_session_before_dispatch():

@@ -27899,9 +27899,9 @@
   ],
   "current_source_review": {
     "base_version": "v17",
-    "reason": "Reviewed Codex continuity preparation guard: one-pass checkpoint sizing guidance, bounded repair-directive reference reporting, condensed-state reference checks, and write-boundary rejection of malformed references; canonical records remain authoritative.",
+    "reason": "Reviewed Codex continuity preparation guard: one-pass checkpoint sizing guidance, bounded repair-directive reference reporting, condensed-state reference checks, and write-boundary rejection of malformed references; reviewed Engineering Passport adapter repair: bounded native standing-context projection and complete chunked rule delivery; canonical records remain authoritative.",
     "expected_count": 827,
-    "expected_sha256": "ce02cf35bf01a9a0e664c344e011d0a430a2b3ec24b2405f7e053c9b0b6aea90",
+    "expected_sha256": "5a25825297392dad79183b93ac81867b7f32a1f1014ab7e8a005fc26b98271dd",
     "upsert": [
       {
         "ingress_key": "script-entrypoint:ops/codex-continuity-hook.py",
@@ -27993,6 +27993,29 @@
         "admission_class": "application_default_deny",
         "owner_package": "11",
         "implementation_state": "source_guarded_not_deployed",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "script-entrypoint:tools/room-bridge/engineering_dispatch_adapter.py",
+        "ingress_kind": "script_entrypoint",
+        "operation": "tools/room-bridge/engineering_dispatch_adapter.py",
+        "effect_class": "administrative_mutation",
+        "source_locator": "tools/room-bridge/engineering_dispatch_adapter.py",
+        "schema_digest": "331c3446fc751fefd15f49c9ea50ae5bde746896df155fdc84e7fba17fdbb2ae",
+        "handler_digest": "331c3446fc751fefd15f49c9ea50ae5bde746896df155fdc84e7fba17fdbb2ae",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "existing_script_specific_credential_boundary",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [],
+        "request_shape": "fixed_script_cli_contract",
+        "idempotency_mode": "script_specific_registered_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
         "classification_authorizing": false
       }
     ]
