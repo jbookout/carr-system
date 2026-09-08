@@ -27938,9 +27938,33 @@
   ],
   "current_source_review": {
     "base_version": "v18",
-    "reason": "No reviewed source delta beyond the v18 seal.",
+    "reason": "WR54 post-v18 source review: bin/restore-rehearse.sh assigns $PY (repo venv, python3 fallback) before its platform-metering-gate call. One script-entrypoint ingress re-digested; row count unchanged.",
     "expected_count": 827,
-    "expected_sha256": "99be05f89e29b5a1b805e067b2ba99b402dfcb6b6d8e773ccb7547b895da52f4",
-    "upsert": []
+    "expected_sha256": "be9be4044459d25025aa3d35ab5d1482670a99eac998ef67d2c5290b6156544c",
+    "upsert": [
+      {
+        "ingress_key": "script-entrypoint:bin/restore-rehearse.sh",
+        "ingress_kind": "script_entrypoint",
+        "operation": "bin/restore-rehearse.sh",
+        "effect_class": "administrative_mutation",
+        "source_locator": "bin/restore-rehearse.sh",
+        "schema_digest": "bf537cccf87bd1c72dcb2949cbb7d93c52847b87d1d7b9c01f7724ed400481f9",
+        "handler_digest": "bf537cccf87bd1c72dcb2949cbb7d93c52847b87d1d7b9c01f7724ed400481f9",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "existing_script_specific_credential_boundary",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [],
+        "request_shape": "fixed_script_cli_contract",
+        "idempotency_mode": "script_specific_registered_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      }
+    ]
   }
 }
