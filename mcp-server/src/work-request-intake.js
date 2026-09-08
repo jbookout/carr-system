@@ -665,6 +665,7 @@ export function workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }) 
           pending_outcome_feedback: pendingOutcomeFeedback,
           outcome_feedback_history: Array.isArray(row.outcome_feedback_history) ? row.outcome_feedback_history.map(outcomeFeedbackProjection) : [],
           accepted_feedback_count: Number(row.accepted_feedback_count || 0),
+          incident_evidence: Array.isArray(row.incident_evidence) ? row.incident_evidence : [],
           shape: row.shape_disposition ? { disposition: row.shape_disposition, fixed_surface_ref: row.shape_fixed_surface_ref || null } : null,
           // REASON SURVIVES COLLAPSE. Both terminals project to one label, so the
           // crosswalk's own invariant obliges the card to carry what actually
