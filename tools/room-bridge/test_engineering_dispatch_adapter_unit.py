@@ -878,7 +878,7 @@ try {{
 }}
 process.stdout.write(JSON.stringify({{output, calls, helperReads, error}}));'''
     run = subprocess.run(
-        ["node", "--input-type=module", "-e", harness],
+        ["node", "--input-type=module"], input=harness,
         capture_output=True, text=True, timeout=30, check=False)
     assert run.returncode == 0, run.stderr
     result = json.loads(run.stdout)
