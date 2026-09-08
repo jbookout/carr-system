@@ -99,6 +99,13 @@ class RuntimeIsolation:
         with self._locked():
             state = self._read(); now = self.clock()
             for run_id, entry in state["allocations"].items():
+                if (not isinstance(run_id, str) or not isinstance(entry, dict)
+                        or not isinstance(entry.get("owner"), str)
+                        or not isinstance(entry.get("idempotency_key"), str)
+                        or not isinstance(entry.get("expires_at"), (int, float))
+                        or not isinstance(entry.get("resources"), list)
+                        or not all(isinstance(item, str) for item in entry["resources"])):
+                    raise IsolationRefusal("malformed allocation entry is preserved")
                 if entry["owner"] == self.owner.key and entry["idempotency_key"] == key:
                     if entry["expires_at"] <= now: raise IsolationRefusal("expired allocation is preserved")
                     return {"run_id": run_id, "generation": entry["generation"], "artifact": self._artifact(run_id)}
