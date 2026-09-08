@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { codexContinuityTools } from "../src/codex-continuity.js";
+import { TOOLS } from "../src/tools.js";
 import { agentActorForToken, actorFromProps, continuityActorForTokenMaps } from "../src/identity.js";
 
 class TestToolError extends Error {
@@ -120,6 +121,66 @@ test("checkpoint replay confirms an accepted write without repeating its effects
   assert.equal(recovered.checkpoint.cursor.turn_id, "turn-1",
     "a stale competing write must not claim the newer turn was incorporated");
   assert.deepEqual(effects, ["checkpoint", "revision"]);
+});
+
+test("production checkpoint handler replays through the real envelope and rejects changed or stale retries", async () => {
+  const calls = [];
+  const toolCalls = new Map();
+  let checkpoint = null;
+  const client = { query: async (sql, params = []) => {
+    calls.push({ sql, params });
+    if (sql.startsWith("select pg_advisory_xact_lock")) return { rows: [] };
+    if (sql.startsWith("select request_hash, response from tool_call")) {
+      const prior = toolCalls.get(params[0]);
+      return { rows: prior ? [{ request_hash: prior.request_hash, response: prior.response }] : [] };
+    }
+    if (sql.startsWith("select id,native_task_id,project_id"))
+      return { rows: checkpoint ? [checkpoint] : [] };
+    if (sql.startsWith("select project_id,cwd from codex_continuity_event")) return { rows: [] };
+    if (sql.startsWith("insert into codex_continuity_checkpoint")) {
+      checkpoint = {
+        id: "cp-production-envelope", native_task_id: params[2], project_id: params[3], cwd: params[4],
+        state: JSON.parse(params[5]), cursor: params[6] === null ? null : JSON.parse(params[6]),
+        checkpoint_version: "1", updated_at: "2026-09-08T12:00:00Z",
+      };
+      return { rows: [checkpoint] };
+    }
+    if (sql.startsWith("insert into codex_continuity_revision")) return { rows: [] };
+    if (sql.startsWith("insert into event (")) return { rows: [] };
+    if (sql.startsWith("insert into tool_call (")) {
+      toolCalls.set(params[0], { request_hash: params[3], response: JSON.parse(params[4]) });
+      return { rows: [] };
+    }
+    throw new Error(`unexpected SQL: ${sql}`);
+  } };
+  const verb = TOOLS["codex-checkpoint"];
+  const base = {
+    idempotency_key: "00000000-0000-4000-8000-000000000021", runtime: "codex",
+    native_task_id: "task-production-envelope", project_id: "p", cwd: "/repo",
+    expected_version: 0, state,
+    cursor: { source_window_id: "window-1", source_window_number: 1, turn_id: "turn-1" },
+  };
+  const first = await verb.handler(client, actor, base);
+  const exactRetry = await verb.handler(client, actor, base);
+  assert.equal(first.ok, true);
+  assert.equal(exactRetry.replayed, true);
+  assert.equal(exactRetry.checkpoint.checkpoint_version, 1);
+  assert.equal(calls.filter(call => call.sql.startsWith("insert into codex_continuity_checkpoint")).length, 1);
+  assert.equal(calls.filter(call => call.sql.startsWith("insert into codex_continuity_revision")).length, 1);
+  assert.equal(calls.filter(call => call.sql.startsWith("insert into event (")).length, 1);
+  assert.equal(calls.filter(call => call.sql.startsWith("insert into tool_call (")).length, 1);
+
+  await assert.rejects(() => verb.handler(client, actor, {
+    ...base, cursor: { ...base.cursor, turn_id: "turn-2" },
+  }), error => error.payload?.error === "key_reuse");
+  assert.equal(calls.filter(call => call.sql.startsWith("insert into codex_continuity_checkpoint")).length, 1);
+
+  await assert.rejects(() => verb.handler(client, actor, {
+    ...base, idempotency_key: "00000000-0000-4000-8000-000000000022",
+  }), error => error.payload?.error === "codex_checkpoint_version_conflict");
+  assert.equal(calls.filter(call => call.sql.startsWith("insert into codex_continuity_checkpoint")).length, 1);
+  assert.equal(calls.filter(call => call.sql.startsWith("insert into codex_continuity_revision")).length, 1);
+  assert.equal(calls.filter(call => call.sql.startsWith("insert into tool_call (")).length, 1);
 });
 
 test("recovery scopes owner through actor slug lookup, never a raw slug-to-uuid comparison", async () => {

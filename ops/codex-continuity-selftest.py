@@ -733,6 +733,26 @@ class CodexHookTests(AdapterCase):
         self.assertIn("every live correction/decision ref remain directly in state", context)
         self.assertIn("if unavailable, retain them", context)
 
+    def test_repair_directive_keeps_current_approval_refs_within_bound(self):
+        self.native_rollout(compacted_row(1, "window-initial", "window-current"))
+        state = {
+            "objective": "keep the active task",
+            "acceptance": [{"text": "approved rollout " + "z" * 3000,
+                            "refs": ["approval:current"]} for _ in range(7)],
+            "next_action": "preserve approval while repairing",
+        }
+        env, _ = self.install_fake_record_call(self.checkpoint(state=state, cursor={
+            "byte_offset": 1, "source_digest": "0" * 64,
+            "source_window_id": window_id("window-current"),
+            "source_window_number": 1,
+        }))
+        context = json.loads(self.run_hook(
+            self.hook_payload(source="resume"), env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+        directive = context.split("\n\nCARR Codex recovery checkpoint.", 1)[0]
+        self.assertIn("current approval text/refs remain directly in state byte-for-byte wherever stored", directive)
+        self.assertLessEqual(len(directive.encode("utf-8")), 6000)
+
     def test_exact_window_checkpoint_above_target_is_normalized(self):
         self.native_rollout(compacted_row(1, "window-initial", "window-current"))
         state = {

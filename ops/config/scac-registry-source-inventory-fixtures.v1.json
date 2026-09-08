@@ -27901,7 +27901,7 @@
     "base_version": "v17",
     "reason": "Reviewed Codex continuity preparation guard: one-pass checkpoint sizing guidance, bounded repair-directive reference reporting, condensed-state reference checks, and write-boundary rejection of malformed references; reviewed Engineering Passport adapter repairs: bounded native standing-context projection and complete chunked rule delivery, controller task work_request_ref beside the immutable UUID binding, exact blocked-safe engineering-slice-receipt.v1 guidance, and digest-bound single-read loading of the tracked accepted-source/runbook hydration helper so the model no longer transcribes the long validation program; reviewed R09 dispatch boundary repair: the exact accepted operator assignment is hydrated and validated before worktree selection, sanctioned per-command GitHub configuration reaches the helper nested fetch, and typed receipt preflight preserves opaque source references; canonical records remain authoritative.",
     "expected_count": 827,
-    "expected_sha256": "a02cf749aa37550d18959b66c0493bdd5a60ecd6d2551e6c7e2effcbe3cc5662",
+    "expected_sha256": "23442e59168d002244c5fe904fa62d919be62d9099b9fbbb118d8e10fc86e5eb",
     "upsert": [
       {
         "ingress_key": "script-entrypoint:ops/codex-continuity-hook.py",
@@ -27909,8 +27909,8 @@
         "operation": "ops/codex-continuity-hook.py",
         "effect_class": "administrative_mutation",
         "source_locator": "ops/codex-continuity-hook.py",
-        "schema_digest": "f358236f6de1a333db7e03b602857d39b0b1669787ae300b89001c4da291629f",
-        "handler_digest": "f358236f6de1a333db7e03b602857d39b0b1669787ae300b89001c4da291629f",
+        "schema_digest": "a60bff4004537234a5281ee10285cb1c1ea75d21a20962aace95f7a10c4c9029",
+        "handler_digest": "a60bff4004537234a5281ee10285cb1c1ea75d21a20962aace95f7a10c4c9029",
         "write": true,
         "human_only": false,
         "authority_only": true,
