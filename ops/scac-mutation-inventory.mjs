@@ -46,6 +46,8 @@ export const REGISTRY_V15_VERSION = "scac-mutation-registry.v15";
 export const REGISTRY_V16_VERSION = "scac-mutation-registry.v16";
 // v17 registers the snapshot-guarded backup and artifact-status helper ingresses.
 export const REGISTRY_V17_VERSION = "scac-mutation-registry.v17";
+// v18 binds the WR-000068 sourced shape forward-correction surface after the v17 seal.
+export const REGISTRY_V18_VERSION = "scac-mutation-registry.v18";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -82,6 +84,7 @@ export const HISTORICAL_REGISTRY_SEALS = Object.freeze({
   v14: Object.freeze({ version: REGISTRY_V14_VERSION, digest: "sha256:7f2987fe1dcb5bdf5bcbc269f9714261166419b992dc40f6fc446d6889e18558", entryCount: 1495, sourceEntryCount: 825 }),
   v15: Object.freeze({ version: REGISTRY_V15_VERSION, digest: "sha256:5f81f4579cf584a1807715f68b8297ddc4a5997a2c20906ef5300672d195360f", entryCount: 1499, sourceEntryCount: 825 }),
   v16: Object.freeze({ version: REGISTRY_V16_VERSION, digest: "sha256:d5418b025506b131252ddb214d75c2e1f995235db8b72ac56765485ccb5a1a54", entryCount: 1503, sourceEntryCount: 825 }),
+  v17: Object.freeze({ version: REGISTRY_V17_VERSION, digest: "sha256:5aab15679a2d26207210bde3e16be265301b9c69816e08dc90b2f2e8a48c7db2", entryCount: 1509, sourceEntryCount: 827 }),
 });
 export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
   "migrations/0454_siep11_mutation_registry.sql": "7985d42b9b36964b33503f4ff42d332e6bcce085217f06464a9d6abf58126bdd",
@@ -116,6 +119,18 @@ export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
   "mcp-server/src/scac-mutation-registry.v15.generated.js": "6fecd62c9407ad47ae11c8ecd1c2f0d7f9cfedffc27c9500f23bc5c9ebfeee1b",
   "migrations/0490_codex_compaction_checkpoint_registry_activation.sql": "febd1bd3b6170767874636e34770dea84f814a24f170c39b955a7ec4465545a1",
   "mcp-server/src/scac-mutation-registry.v16.generated.js": "2bdcf517c9e2c418a20a75e742805686f1b6c83afbbc1fa070af0a2874018315",
+  "migrations/0491_backup_guard_status_registry_activation.sql": "49129915fe40f41400c5fc769f82633b2da68949a29d193329fba2c6016e3913",
+  "mcp-server/src/scac-mutation-registry.v17.generated.js": "5a1945eea59704fe7f1200937215be9f4fba6fda3a65d5a4321df9245873432d",
+});
+// WR-000068 rebases four Production-applied consumers of the sourced shape
+// columns on the effective receipt-backed lineage. The v18 generator reads the
+// exact witness definitions from these migrations, verifies their bytes, and
+// rewrites only the named guard predicates; a drifted witness halts rendering.
+export const SOURCED_SHAPE_FORWARD_CORRECTION_WITNESS_SHA256 = Object.freeze({
+  "migrations/0306_sourced_work_shape_disposition.sql": "9a205a2c8c2ca50b61d5ee60b8883c0ff66a8138691d822faaf7ce4295ffb7af",
+  "migrations/0333_shape_preserving_outcome_guards.sql": "431e77ebd8889172bb29493d7ec2833d0d8b3f7e64b9ba591cbec29742d624b5",
+  "migrations/0426_withdraw_a_work_request_captured_in_error.sql": "151eddaae36b60fd1a6f0ad43f9577c03381ebd11b17b9a9741269d93bd2d395",
+  "migrations/0470_source_merge_authority_projection.sql": "979c1312a6c6d41807c97a4893abe3bc6dc6716f21d83e5969be7f1372130967",
 });
 // 0467 is the reviewed SIEP-18 monitor source consumed by the v9 generator.
 // It is not historical yet, but its bytes must still be exact: otherwise a
@@ -319,6 +334,16 @@ export const BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
   projection_version: "scac-db-catalog-projection.v17",
   // Four registration-function ACLs; verified against the complete local successor.
   secdef_execute: { count: 375, digest: "sha256:07e5d503bd30646b1a697d911cf9df3749eab5bc57c111dfe751f63a6fb20eb8" },
+});
+export const SOURCED_SHAPE_FORWARD_CORRECTION_PRE_V18_DB_CATALOG_BASELINE =
+  BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE;
+export const SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
+  ...SOURCED_SHAPE_FORWARD_CORRECTION_PRE_V18_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v18",
+  // Four v18 registration-function ACLs plus the two narrow lineage-projection
+  // grants (carr_reader, carr_writer); read back from the complete disposable
+  // 0492 successor, never from Production or a caller.
+  secdef_execute: { count: 381, digest: "sha256:71595cc691e0c48d139a843f6aae5ddd5b72f428a91821741c1ac830e8a6ff75" },
 });
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
@@ -940,6 +965,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V15_VERSION]: "v15",
   [REGISTRY_V16_VERSION]: "v16",
   [REGISTRY_V17_VERSION]: "v17",
+  [REGISTRY_V18_VERSION]: "v18",
 });
 
 function sourceInventoryFixtureDigest(rows) {
@@ -995,7 +1021,7 @@ export function frozenInventory(version) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V17_VERSION) {
+  version = REGISTRY_V18_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -1031,7 +1057,8 @@ export function registryDigestFor(version, rows = fullInventory(), dbCatalogBase
     REGISTRY_V5_VERSION, REGISTRY_V6_VERSION, REGISTRY_V7_VERSION, REGISTRY_V8_VERSION,
     REGISTRY_V9_VERSION, REGISTRY_V10_VERSION, REGISTRY_V11_VERSION,
     REGISTRY_V12_VERSION, REGISTRY_V13_VERSION, REGISTRY_V14_VERSION,
-    REGISTRY_V15_VERSION, REGISTRY_V16_VERSION, REGISTRY_V17_VERSION].includes(version))
+    REGISTRY_V15_VERSION, REGISTRY_V16_VERSION, REGISTRY_V17_VERSION,
+    REGISTRY_V18_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -3886,6 +3913,776 @@ ${preflightBody}end $backup_guard_status_preflight$;
   return `${predecessorPreflight}${sql}`.replace(/\n+$/, "\n");
 }
 
+
+// ── WR-000068: sourced shape forward correction ─────────────────────────────
+//
+// The domain half of migration 0492. Everything below is emitted verbatim into
+// the generated file so the accepted migration path stays byte-reproducible
+// from this generator; the four rebased consumers are lifted from their exact
+// Production-applied witness migrations (sha-pinned above) and only the named
+// guard predicates are rewritten through replaceExactlyOnce, which refuses a
+// witness that no longer carries the predicate it is asked to rebase.
+
+function sourcedShapeWitness(path, witnesses = {}) {
+  // 0470 is itself a generated frontier artifact, so a frontier render passes
+  // its rendered text here instead of depending on the committed file.
+  const source = witnesses[path] ?? readFileSync(resolve(REPO_ROOT, path), "utf8");
+  const observed = sha256(source);
+  if (observed !== SOURCED_SHAPE_FORWARD_CORRECTION_WITNESS_SHA256[path])
+    throw new Error(`sourced shape forward-correction witness changed: ${path}: ${observed}`);
+  return source;
+}
+
+function sliceFunctionDefinition(source, startMarker, label) {
+  const start = source.indexOf(startMarker);
+  if (start < 0 || source.indexOf(startMarker, start + startMarker.length) >= 0)
+    throw new Error(`${label}: witness function definition is absent or ambiguous`);
+  const terminator = "\n$$;\n";
+  const end = source.indexOf(terminator, start);
+  if (end < 0) throw new Error(`${label}: witness function definition has no terminator`);
+  return source.slice(start, end + terminator.length);
+}
+
+const SOURCED_SHAPE_RECEIPT_LOOKUP_0306 =
+`     and exists (select 1 from ops.sourced_work_request_shape_disposition_receipt r
+                  where r.work_request_id=w.id and r.result_version=w.version
+                    and (w.shape_disposition,w.shape_fixed_surface_ref,w.shape_rationale,w.shape_decided_by_actor_id,w.shape_decided_at)
+                        is not distinct from (r.disposition,r.fixed_surface_ref,r.rationale,r.decided_by_actor_id,r.decided_at))`;
+const SOURCED_SHAPE_RECEIPT_LOOKUP_0470 =
+`      and exists (select 1 from ops.sourced_work_request_shape_disposition_receipt r where r.work_request_id=w.id and r.result_version=w.version
+                    and (w.shape_disposition,w.shape_fixed_surface_ref,w.shape_rationale,w.shape_decided_by_actor_id,w.shape_decided_at)
+                        is not distinct from (r.disposition,r.fixed_surface_ref,r.rationale,r.decided_by_actor_id,r.decided_at))`;
+const SOURCED_SHAPE_BINDING_GUARD_0333 =
+`              and sb.disposition is not distinct from w.shape_disposition
+              and sb.fixed_surface_ref is not distinct from w.shape_fixed_surface_ref)) then`;
+const SOURCED_SHAPE_BINDING_GUARD_REBASED =
+`              and sb.disposition is not distinct from w.shape_disposition
+              and sb.fixed_surface_ref is not distinct from w.shape_fixed_surface_ref
+              and exists (select 1 from ops.sourced_work_request_shape_disposition_lineage(w.id) e
+                           where (e.disposition,e.fixed_surface_ref,e.rationale,e.decided_by_actor_id,e.decided_at)
+                             is not distinct from (sb.disposition,sb.fixed_surface_ref,sb.rationale,sb.decided_by_actor_id,sb.decided_at)))) then`;
+
+const SOURCED_SHAPE_FORWARD_CORRECTION_SURFACE_SQL = String.raw`-- WR-000068: append-only forward correction for a sourced shape disposition.
+--
+-- A sourced triaged Work Request may carry an immutable not_required receipt
+-- that later proves incompatible with its intrinsic-heavy classification
+-- (WR-000063). The original receipt is preserved byte-for-byte; exactly one
+-- linked, monotonic not_required -> required correction is admitted before any
+-- Work Shape revision or ready-plan transition. The correction table's unique
+-- work_request_id is the durable one-time control. Every consumer of the five
+-- shape columns is rebased below on the effective receipt-backed lineage;
+-- unsourced Work Requests keep their direct update, Shape, and read behavior.
+
+create table ops.sourced_work_request_shape_disposition_correction_receipt (
+  id uuid primary key default gen_random_uuid(),
+  work_request_id uuid not null unique references ops.work_request(id),
+  idempotency_key uuid not null unique,
+  original_receipt_id uuid not null unique references ops.sourced_work_request_shape_disposition_receipt(id),
+  base_version integer not null check (base_version > 0),
+  result_version integer not null check (result_version = base_version + 1),
+  disposition text not null check (disposition = 'required'),
+  fixed_surface_ref text check (fixed_surface_ref is null),
+  rationale text not null check (btrim(rationale) <> ''),
+  decided_by_actor_id uuid not null references public.actor(id),
+  decided_at timestamptz not null default now()
+);
+
+comment on table ops.sourced_work_request_shape_disposition_correction_receipt is
+  'Private append-only one-time forward correction linked to an immutable sourced not_required receipt. '
+  'Unique work_request_id is the durable one-time control across SCAC registry identities.';
+
+create trigger sourced_work_request_shape_disposition_correction_immutable
+before update or delete on ops.sourced_work_request_shape_disposition_correction_receipt
+for each row execute function ops.sourced_work_shape_receipts_are_immutable();
+
+-- Structural lineage: the original receipt and, when present, its one linked
+-- correction. Zero rows when the request holds no receipt; an exception when
+-- the receipts disagree with each other, because an ambiguous lineage must
+-- never resolve to either side. It does not compare against the Work Request
+-- row, so ready-state consumers can read the lineage that a binding froze.
+create or replace function ops.sourced_work_request_shape_disposition_lineage(p_work_request_id uuid)
+returns table (
+  work_request_id uuid, original_receipt_id uuid, correction_receipt_id uuid,
+  receipt_kind text, disposition text, fixed_surface_ref text, rationale text,
+  decided_by_actor_id uuid, decided_at timestamptz, base_version integer, result_version integer
+)
+language plpgsql stable security definer
+set search_path = pg_catalog, ops
+as $$
+declare
+  original ops.sourced_work_request_shape_disposition_receipt%rowtype;
+  correction ops.sourced_work_request_shape_disposition_correction_receipt%rowtype;
+begin
+  if p_work_request_id is null then return; end if;
+  select r.* into original from ops.sourced_work_request_shape_disposition_receipt r
+   where r.work_request_id = p_work_request_id;
+  if not found then return; end if;
+  select c.* into correction from ops.sourced_work_request_shape_disposition_correction_receipt c
+   where c.work_request_id = p_work_request_id;
+  if not found then
+    if exists (select 1 from ops.sourced_work_request_shape_disposition_correction_receipt c
+                where c.original_receipt_id = original.id) then
+      raise exception 'sourced shape disposition lineage is ambiguous';
+    end if;
+    return query select original.work_request_id, original.id, null::uuid, 'original'::text,
+      original.disposition, original.fixed_surface_ref, original.rationale,
+      original.decided_by_actor_id, original.decided_at, original.base_version, original.result_version;
+    return;
+  end if;
+  if correction.original_receipt_id is distinct from original.id
+     or correction.base_version is distinct from original.result_version
+     or correction.result_version is distinct from original.result_version + 1
+     or original.disposition is distinct from 'not_required'
+     or correction.disposition is distinct from 'required'
+     or correction.fixed_surface_ref is not null then
+    raise exception 'sourced shape disposition lineage is ambiguous';
+  end if;
+  return query select original.work_request_id, original.id, correction.id, 'correction'::text,
+    correction.disposition, correction.fixed_surface_ref, correction.rationale,
+    correction.decided_by_actor_id, correction.decided_at, correction.base_version, correction.result_version;
+end;
+$$;
+
+-- Effective backed disposition for one exact Work Request row image. Callers
+-- pass the row they are judging: NEW inside a BEFORE UPDATE trigger, or the
+-- row they just locked. One row is returned only when the effective receipt
+-- (the correction when it exists, else the original) is exactly current for
+-- that image: same version and the same five shape fields. Stale, mismatched,
+-- unsourced, or unbacked images return no row, so every consumer that wraps
+-- this in exists() fails closed.
+create or replace function ops.effective_sourced_work_request_shape_disposition(p_work_request ops.work_request)
+returns table (
+  work_request_id uuid, original_receipt_id uuid, correction_receipt_id uuid,
+  receipt_kind text, disposition text, fixed_surface_ref text, rationale text,
+  decided_by_actor_id uuid, decided_at timestamptz, base_version integer, result_version integer
+)
+language plpgsql stable security definer
+set search_path = pg_catalog, ops
+as $$
+declare
+  e record;
+begin
+  if p_work_request.id is null or p_work_request.capture_idempotency_key is null then return; end if;
+  select l.* into e from ops.sourced_work_request_shape_disposition_lineage(p_work_request.id) l;
+  if not found then return; end if;
+  if e.result_version is distinct from p_work_request.version
+     or (p_work_request.shape_disposition, p_work_request.shape_fixed_surface_ref, p_work_request.shape_rationale,
+         p_work_request.shape_decided_by_actor_id, p_work_request.shape_decided_at)
+        is distinct from (e.disposition, e.fixed_surface_ref, e.rationale, e.decided_by_actor_id, e.decided_at) then
+    return;
+  end if;
+  return query select e.work_request_id, e.original_receipt_id, e.correction_receipt_id, e.receipt_kind,
+    e.disposition, e.fixed_surface_ref, e.rationale, e.decided_by_actor_id, e.decided_at,
+    e.base_version, e.result_version;
+end;
+$$;
+
+-- The sole sourced-receipt seam keeps its exact seven-argument signature,
+-- return shape, and carr_writer-only grant. The initial disposition path is
+-- 0306's, plus one refusal: an intrinsically heavy request may not record
+-- not_required, because heavy work needs a Work Shape. The new path admits one
+-- not_required -> required correction with no classifier refusal, which is
+-- what lets an already-mistaken heavy receipt be repaired.
+create or replace function ops.set_sourced_work_request_shape_disposition(
+  p_work_request text,
+  p_base_version integer,
+  p_disposition text,
+  p_fixed_surface_ref text,
+  p_rationale text,
+  p_decided_by_actor_id uuid,
+  p_idempotency_key uuid
+)
+returns table (
+  work_request_id uuid,
+  ref text,
+  state text,
+  version integer,
+  shape_disposition text,
+  shape_fixed_surface_ref text,
+  shape_rationale text,
+  shape_decided_by_actor_id uuid,
+  shape_decided_at timestamptz,
+  replayed boolean
+)
+language plpgsql security definer
+set search_path = pg_catalog, ops
+as $$
+declare
+  w ops.work_request%rowtype;
+  original ops.sourced_work_request_shape_disposition_receipt%rowtype;
+  correction ops.sourced_work_request_shape_disposition_correction_receipt%rowtype;
+  actor public.actor%rowtype;
+  classification jsonb;
+  normalized_fixed_surface text := nullif(btrim(coalesce(p_fixed_surface_ref,'')), '');
+  normalized_rationale text := nullif(btrim(coalesce(p_rationale,'')), '');
+begin
+  if coalesce(btrim(p_work_request),'') !~ '^WR-[0-9]{1,12}$'
+     or p_base_version is null or p_base_version < 1
+     or p_disposition not in ('required','not_required')
+     or normalized_rationale is null
+     or p_decided_by_actor_id is null
+     or p_idempotency_key is null
+     or (p_disposition = 'required' and normalized_fixed_surface is not null)
+     or (p_disposition = 'not_required' and normalized_fixed_surface is null) then
+    raise exception 'sourced shape disposition requires exact Work Request/base version, closed disposition, exact fixed surface rule, rationale, active actor, and UUID idempotency key';
+  end if;
+
+  select a.* into actor from public.actor a
+   where a.id = p_decided_by_actor_id and a.active
+   for share;
+  if not found then
+    raise exception 'sourced shape disposition actor is not active';
+  end if;
+
+  -- One advisory lock on the caller key precedes BOTH receipt lookups, so two
+  -- first calls with the same key serialize before either can observe an
+  -- empty table, and a key can never be reused across the two tables.
+  perform pg_advisory_xact_lock(hashtextextended('program6-sourced-shape-disposition:' || p_idempotency_key, 0));
+  select r.* into original
+    from ops.sourced_work_request_shape_disposition_receipt r
+   where r.idempotency_key = p_idempotency_key
+   for share;
+  if found then
+    select x.* into w from ops.work_request x where x.id = original.work_request_id for share;
+    if not found
+       or w.ref is distinct from p_work_request
+       or original.base_version is distinct from p_base_version
+       or original.disposition is distinct from p_disposition
+       or original.fixed_surface_ref is distinct from normalized_fixed_surface
+       or original.rationale is distinct from normalized_rationale
+       or original.decided_by_actor_id is distinct from p_decided_by_actor_id
+       or w.state is distinct from 'triaged'
+       or w.version is distinct from original.result_version
+       or (w.shape_disposition,w.shape_fixed_surface_ref,w.shape_rationale,w.shape_decided_by_actor_id,w.shape_decided_at)
+          is distinct from
+          (original.disposition,original.fixed_surface_ref,original.rationale,original.decided_by_actor_id,original.decided_at) then
+      raise exception 'idempotency key already names a different sourced shape disposition';
+    end if;
+    return query select w.id,w.ref,w.state,w.version,w.shape_disposition,w.shape_fixed_surface_ref,
+      w.shape_rationale,w.shape_decided_by_actor_id,w.shape_decided_at,true;
+    return;
+  end if;
+  select c.* into correction
+    from ops.sourced_work_request_shape_disposition_correction_receipt c
+   where c.idempotency_key = p_idempotency_key
+   for share;
+  if found then
+    select x.* into w from ops.work_request x where x.id = correction.work_request_id for share;
+    if not found
+       or w.ref is distinct from p_work_request
+       or correction.base_version is distinct from p_base_version
+       or p_disposition is distinct from 'required'
+       or normalized_fixed_surface is not null
+       or correction.rationale is distinct from normalized_rationale
+       or correction.decided_by_actor_id is distinct from p_decided_by_actor_id
+       or w.state is distinct from 'triaged'
+       or w.version is distinct from correction.result_version
+       or (w.shape_disposition,w.shape_fixed_surface_ref,w.shape_rationale,w.shape_decided_by_actor_id,w.shape_decided_at)
+          is distinct from
+          (correction.disposition,correction.fixed_surface_ref,correction.rationale,correction.decided_by_actor_id,correction.decided_at) then
+      raise exception 'idempotency key already names a different sourced shape correction';
+    end if;
+    return query select w.id,w.ref,w.state,w.version,w.shape_disposition,w.shape_fixed_surface_ref,
+      w.shape_rationale,w.shape_decided_by_actor_id,w.shape_decided_at,true;
+    return;
+  end if;
+
+  select x.* into w from ops.work_request x
+   where x.ref = p_work_request
+   for update;
+  if not found
+     or w.capture_idempotency_key is null
+     or w.organization_tenant_id is distinct from 'carr-internal'
+     or w.state is distinct from 'triaged'
+     or w.version is distinct from p_base_version
+     or w.program_key is not null or w.program_ordinal is not null then
+    raise exception 'exact current triaged sourced Work Request required';
+  end if;
+
+  select r.* into original
+    from ops.sourced_work_request_shape_disposition_receipt r
+   where r.work_request_id = w.id
+   for share;
+  if found then
+    -- Forward correction: exactly one monotonic not_required -> required on
+    -- the exact current receipt-backed row, before any Shape revision, with
+    -- no prior correction. No classifier call: an intrinsically heavy request
+    -- is precisely the one that must be able to move to required.
+    if p_disposition is distinct from 'required'
+       or normalized_fixed_surface is not null
+       or original.disposition is distinct from 'not_required'
+       or original.result_version is distinct from w.version
+       or (w.shape_disposition,w.shape_fixed_surface_ref,w.shape_rationale,w.shape_decided_by_actor_id,w.shape_decided_at)
+          is distinct from
+          (original.disposition,original.fixed_surface_ref,original.rationale,original.decided_by_actor_id,original.decided_at)
+       or exists (select 1 from ops.work_shape_revision sr where sr.work_request_id = w.id)
+       or exists (select 1 from ops.sourced_work_request_shape_disposition_correction_receipt c
+                   where c.work_request_id = w.id or c.original_receipt_id = original.id) then
+      raise exception 'only an exact current sourced not_required receipt may receive one required correction before Shape';
+    end if;
+    insert into ops.sourced_work_request_shape_disposition_correction_receipt
+      (work_request_id,idempotency_key,original_receipt_id,base_version,result_version,disposition,fixed_surface_ref,rationale,decided_by_actor_id)
+    values
+      (w.id,p_idempotency_key,original.id,w.version,w.version + 1,'required',null,normalized_rationale,p_decided_by_actor_id)
+    returning * into correction;
+    update ops.work_request x
+       set shape_disposition = correction.disposition,
+           shape_fixed_surface_ref = correction.fixed_surface_ref,
+           shape_rationale = correction.rationale,
+           shape_decided_by_actor_id = correction.decided_by_actor_id,
+           shape_decided_at = correction.decided_at,
+           version = correction.result_version,
+           updated_at = now()
+     where x.id = w.id;
+  else
+    if (w.shape_disposition,w.shape_fixed_surface_ref,w.shape_rationale,w.shape_decided_by_actor_id,w.shape_decided_at)
+         is distinct from (null::text,null::text,null::text,null::uuid,null::timestamptz)
+       or exists (select 1 from ops.work_shape_revision sr where sr.work_request_id = w.id) then
+      raise exception 'only the exact current unshaped triaged sourced Work Request may record a shape disposition';
+    end if;
+    if p_disposition = 'not_required' then
+      classification := ops.heavy_build_classification(w.id, '', '[]'::jsonb, '{}'::jsonb);
+      if classification is null or classification->>'tier' is distinct from 'standard' then
+        raise exception 'an intrinsically heavy sourced Work Request requires a Work Shape; not_required is refused';
+      end if;
+    end if;
+    insert into ops.sourced_work_request_shape_disposition_receipt
+      (work_request_id,idempotency_key,base_version,result_version,disposition,fixed_surface_ref,rationale,decided_by_actor_id)
+    values
+      (w.id,p_idempotency_key,p_base_version,w.version + 1,p_disposition,normalized_fixed_surface,normalized_rationale,p_decided_by_actor_id)
+    returning * into original;
+    update ops.work_request x
+       set shape_disposition = original.disposition,
+           shape_fixed_surface_ref = original.fixed_surface_ref,
+           shape_rationale = original.rationale,
+           shape_decided_by_actor_id = original.decided_by_actor_id,
+           shape_decided_at = original.decided_at,
+           version = original.result_version,
+           updated_at = now()
+     where x.id = w.id;
+  end if;
+  select x.* into w from ops.work_request x where x.id = w.id;
+  return query select w.id,w.ref,w.state,w.version,w.shape_disposition,w.shape_fixed_surface_ref,
+    w.shape_rationale,w.shape_decided_by_actor_id,w.shape_decided_at,false;
+end;
+$$;
+
+`;
+
+const SOURCED_SHAPE_FORWARD_CORRECTION_TAIL_SQL = String.raw`-- Once a sourced Work Request holds a disposition receipt, a Work Shape
+-- revision must follow the EFFECTIVE receipt-backed required disposition at
+-- the exact current version: a Shape can neither precede the correction of a
+-- mistaken not_required receipt nor attach to a stale version. A sourced
+-- request that holds no receipt yet has no lineage to bind; it stays under the
+-- 0132 column gates as before, and the public write-work-shape verb already
+-- refuses it through the lineage projection. Unsourced requests are untouched.
+create or replace function ops.sourced_work_shape_revision_requires_effective_required()
+returns trigger language plpgsql security definer
+set search_path = pg_catalog, ops
+as $$
+declare
+  w ops.work_request%rowtype;
+begin
+  select x.* into w from ops.work_request x where x.id = new.work_request_id;
+  if not found or w.capture_idempotency_key is null
+     or not exists (select 1 from ops.sourced_work_request_shape_disposition_receipt r
+                     where r.work_request_id = w.id) then
+    return new;
+  end if;
+  if new.work_request_version is distinct from w.version
+     or not exists (select 1 from ops.effective_sourced_work_request_shape_disposition(w) e
+                     where e.disposition = 'required') then
+    raise exception 'a sourced Work Shape revision requires the exact current receipt-backed required disposition';
+  end if;
+  return new;
+end;
+$$;
+
+create trigger sourced_work_shape_revision_requires_effective_required
+before insert on ops.work_shape_revision
+for each row execute function ops.sourced_work_shape_revision_requires_effective_required();
+
+-- The only runtime-readable lineage surface: original and correction
+-- summaries plus the effective marker for a sourced Work Request, null for an
+-- unsourced one. Idempotency keys stay private; the receipt tables stay denied.
+create or replace function ops.read_sourced_work_request_shape_disposition_lineage(p_work_request_id uuid)
+returns jsonb language plpgsql stable security definer
+set search_path = pg_catalog, ops
+as $$
+declare
+  w ops.work_request%rowtype;
+  original ops.sourced_work_request_shape_disposition_receipt%rowtype;
+  correction ops.sourced_work_request_shape_disposition_correction_receipt%rowtype;
+  e record;
+  backed boolean;
+begin
+  select x.* into w from ops.work_request x where x.id = p_work_request_id;
+  if not found or w.capture_idempotency_key is null then return null; end if;
+  select r.* into original from ops.sourced_work_request_shape_disposition_receipt r where r.work_request_id = w.id;
+  if not found then
+    return jsonb_build_object('status','none','effective',null,'original',null,'correction',null,
+      'backs_current_version',false);
+  end if;
+  select c.* into correction from ops.sourced_work_request_shape_disposition_correction_receipt c where c.work_request_id = w.id;
+  select l.* into e from ops.sourced_work_request_shape_disposition_lineage(w.id) l;
+  backed := exists (select 1 from ops.effective_sourced_work_request_shape_disposition(w));
+  return jsonb_build_object(
+    'status', case when e.receipt_kind = 'correction' then 'corrected' else 'original' end,
+    'effective', jsonb_build_object('receipt_kind', e.receipt_kind,
+      'receipt_id', coalesce(e.correction_receipt_id, e.original_receipt_id),
+      'disposition', e.disposition, 'fixed_surface_ref', e.fixed_surface_ref, 'rationale', e.rationale,
+      'decided_by_actor_id', e.decided_by_actor_id, 'decided_at', e.decided_at,
+      'base_version', e.base_version, 'result_version', e.result_version),
+    'original', jsonb_build_object('receipt_id', original.id, 'disposition', original.disposition,
+      'fixed_surface_ref', original.fixed_surface_ref, 'rationale', original.rationale,
+      'decided_by_actor_id', original.decided_by_actor_id, 'decided_at', original.decided_at,
+      'base_version', original.base_version, 'result_version', original.result_version),
+    'correction', case when correction.id is null then null::jsonb else jsonb_build_object(
+      'receipt_id', correction.id, 'original_receipt_id', correction.original_receipt_id,
+      'disposition', correction.disposition, 'fixed_surface_ref', correction.fixed_surface_ref,
+      'rationale', correction.rationale, 'decided_by_actor_id', correction.decided_by_actor_id,
+      'decided_at', correction.decided_at, 'base_version', correction.base_version,
+      'result_version', correction.result_version) end,
+    'backs_current_version', backed);
+end;
+$$;
+
+revoke all on table ops.sourced_work_request_shape_disposition_correction_receipt
+  from public,carr_reader,carr_writer,carr_jobs,carr_authority;
+revoke all on function ops.sourced_work_request_shape_disposition_lineage(uuid),
+  ops.effective_sourced_work_request_shape_disposition(ops.work_request),
+  ops.sourced_work_shape_revision_requires_effective_required(),
+  ops.read_sourced_work_request_shape_disposition_lineage(uuid)
+  from public,carr_reader,carr_writer,carr_jobs,carr_authority;
+grant execute on function ops.read_sourced_work_request_shape_disposition_lineage(uuid) to carr_reader,carr_writer;
+revoke all on function ops.set_sourced_work_request_shape_disposition(text,integer,text,text,text,uuid,uuid)
+  from public,carr_reader,carr_jobs,carr_authority;
+grant execute on function ops.set_sourced_work_request_shape_disposition(text,integer,text,text,text,uuid,uuid)
+  to carr_writer;
+
+do $wr68_privilege_boundary$
+begin
+  if (select count(*) from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+       where n.nspname='ops' and p.proname='set_sourced_work_request_shape_disposition') <> 1
+     or pg_get_function_identity_arguments('ops.set_sourced_work_request_shape_disposition(text,integer,text,text,text,uuid,uuid)'::regprocedure)
+        <> 'p_work_request text, p_base_version integer, p_disposition text, p_fixed_surface_ref text, p_rationale text, p_decided_by_actor_id uuid, p_idempotency_key uuid'
+     or not has_function_privilege('carr_writer','ops.set_sourced_work_request_shape_disposition(text,integer,text,text,text,uuid,uuid)','execute')
+     or has_function_privilege('carr_reader','ops.set_sourced_work_request_shape_disposition(text,integer,text,text,text,uuid,uuid)','execute')
+     or has_function_privilege('carr_jobs','ops.set_sourced_work_request_shape_disposition(text,integer,text,text,text,uuid,uuid)','execute')
+     or has_function_privilege('carr_authority','ops.set_sourced_work_request_shape_disposition(text,integer,text,text,text,uuid,uuid)','execute')
+     or has_table_privilege('carr_reader','ops.sourced_work_request_shape_disposition_correction_receipt','select')
+     or has_table_privilege('carr_writer','ops.sourced_work_request_shape_disposition_correction_receipt','select')
+     or has_table_privilege('carr_writer','ops.sourced_work_request_shape_disposition_receipt','select')
+     or has_function_privilege('carr_writer','ops.effective_sourced_work_request_shape_disposition(ops.work_request)','execute')
+     or has_function_privilege('carr_writer','ops.sourced_work_request_shape_disposition_lineage(uuid)','execute')
+     or not has_function_privilege('carr_reader','ops.read_sourced_work_request_shape_disposition_lineage(uuid)','execute')
+     or not has_function_privilege('carr_writer','ops.read_sourced_work_request_shape_disposition_lineage(uuid)','execute')
+     or has_function_privilege('carr_jobs','ops.read_sourced_work_request_shape_disposition_lineage(uuid)','execute') then
+    raise exception '0492 FAILED: sourced shape forward-correction privilege boundary is not narrow';
+  end if;
+end $wr68_privilege_boundary$;
+
+`;
+
+export function renderSourcedShapeForwardCorrectionDomainSql(witnesses = {}) {
+  const shape0306 = sourcedShapeWitness("migrations/0306_sourced_work_shape_disposition.sql", witnesses);
+  const guards0333 = sourcedShapeWitness("migrations/0333_shape_preserving_outcome_guards.sql", witnesses);
+  const withdrawal0426 = sourcedShapeWitness("migrations/0426_withdraw_a_work_request_captured_in_error.sql", witnesses);
+  const proposal0470 = sourcedShapeWitness("migrations/0470_source_merge_authority_projection.sql", witnesses);
+
+  // 0426 immutability trigger: the triaged shape-disposition arm accepts the
+  // receipt that backs NEW, whether that is the original or the correction.
+  let immutable = sliceFunctionDefinition(withdrawal0426,
+    "CREATE OR REPLACE FUNCTION ops.sourced_work_request_is_immutable() RETURNS trigger",
+    "0426 sourced_work_request_is_immutable");
+  immutable = replaceExactlyOnce(immutable,
+`     and exists (
+       select 1 from ops.sourced_work_request_shape_disposition_receipt r
+        where r.work_request_id = old.id and r.base_version = old.version and r.result_version = new.version
+          and (new.shape_disposition,new.shape_fixed_surface_ref,new.shape_rationale,new.shape_decided_by_actor_id,new.shape_decided_at)
+             is not distinct from
+             (r.disposition,r.fixed_surface_ref,r.rationale,r.decided_by_actor_id,r.decided_at)
+     ) then`,
+`     and exists (
+       select 1 from ops.effective_sourced_work_request_shape_disposition(new) e
+        where e.base_version = old.version and e.result_version = new.version
+     ) then`,
+    "0426 triaged shape-disposition arm");
+
+  // 0470 proposal: both receipt-backed shape arms read the effective lineage.
+  let propose = sliceFunctionDefinition(proposal0470,
+    "create or replace function ops.propose_sourced_work_request_plan(",
+    "0470 propose_sourced_work_request_plan");
+  propose = replaceExactlyOnce(propose,
+`    (w.shape_disposition='required' and w.shape_fixed_surface_ref is null and w.shape_rationale is not null and btrim(w.shape_rationale) <> ''
+${SOURCED_SHAPE_RECEIPT_LOOKUP_0470}`,
+`    (w.shape_disposition='required' and w.shape_fixed_surface_ref is null and w.shape_rationale is not null and btrim(w.shape_rationale) <> ''
+      and exists (select 1 from ops.effective_sourced_work_request_shape_disposition(w) e where e.disposition='required')`,
+    "0470 required shape arm");
+  propose = replaceExactlyOnce(propose, SOURCED_SHAPE_RECEIPT_LOOKUP_0470,
+`      and exists (select 1 from ops.effective_sourced_work_request_shape_disposition(w) e where e.disposition='not_required')`,
+    "0470 not_required shape arm");
+
+  // 0306 acceptance: the preserve-shape decision reads the effective lineage;
+  // the human authority check and every other line stay exact.
+  let accept = sliceFunctionDefinition(shape0306,
+    "create or replace function ops.accept_sourced_work_request_plan(",
+    "0306 accept_sourced_work_request_plan");
+  accept = replaceExactlyOnce(accept,
+`     and w.shape_decided_by_actor_id is not null and w.shape_decided_at is not null
+${SOURCED_SHAPE_RECEIPT_LOOKUP_0306}`,
+`     and w.shape_decided_by_actor_id is not null and w.shape_decided_at is not null
+     and exists (select 1 from ops.effective_sourced_work_request_shape_disposition(w) e where e.disposition='required')`,
+    "0306 required preserve-shape arm");
+  accept = replaceExactlyOnce(accept, SOURCED_SHAPE_RECEIPT_LOOKUP_0306,
+`     and exists (select 1 from ops.effective_sourced_work_request_shape_disposition(w) e where e.disposition='not_required')`,
+    "0306 not_required preserve-shape arm");
+
+  // 0333 outcome guards: a shape binding must also equal the effective lineage.
+  let proposeOutcome = sliceFunctionDefinition(guards0333,
+    "create or replace function ops.propose_sourced_work_request_outcome_feedback(",
+    "0333 propose_sourced_work_request_outcome_feedback");
+  proposeOutcome = replaceExactlyOnce(proposeOutcome, SOURCED_SHAPE_BINDING_GUARD_0333,
+    SOURCED_SHAPE_BINDING_GUARD_REBASED, "0333 outcome proposal shape binding guard");
+  let acceptOutcome = sliceFunctionDefinition(guards0333,
+    "create or replace function ops.accept_sourced_work_request_outcome_feedback(",
+    "0333 accept_sourced_work_request_outcome_feedback");
+  acceptOutcome = replaceExactlyOnce(acceptOutcome, SOURCED_SHAPE_BINDING_GUARD_0333,
+    SOURCED_SHAPE_BINDING_GUARD_REBASED, "0333 outcome acceptance shape binding guard");
+
+  return `${SOURCED_SHAPE_FORWARD_CORRECTION_SURFACE_SQL}` +
+    "-- Consumers rebased on the effective lineage. Each definition is the exact\n" +
+    "-- Production-applied witness with only the named guard predicate rewritten.\n\n" +
+    `${immutable}\n${propose}\n${accept}\n${proposeOutcome}\n${acceptOutcome}\n` +
+    `${SOURCED_SHAPE_FORWARD_CORRECTION_TAIL_SQL}`;
+}
+
+export function renderSourcedShapeForwardCorrectionRegistrySql(rows = fullInventory(),
+  dbCatalogBaseline = SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE,
+  predecessorArtifacts = undefined) {
+  const { v17: v17Seal } = HISTORICAL_REGISTRY_SEALS;
+  const v18Digest = registryDigestFor(REGISTRY_V18_VERSION, rows, dbCatalogBaseline);
+  const catalogCount = dbCatalogBaseline.secdef_execute.count +
+    dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
+  const entryCount = rows.length + catalogCount;
+  const v17MigrationPath = "migrations/0491_backup_guard_status_registry_activation.sql";
+  const v17RuntimePath = "mcp-server/src/scac-mutation-registry.v17.generated.js";
+  const v17Rows = frozenInventory(REGISTRY_V17_VERSION);
+  const v17Migration = predecessorArtifacts?.migration ??
+    renderBackupGuardStatusForwardRegistrySql(
+      v17Rows, BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE);
+  const v17Runtime = predecessorArtifacts?.runtime ?? renderRuntimeProjection(v17Rows, {
+    version: REGISTRY_V17_VERSION,
+    dbCatalogBaseline: BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE,
+  });
+  for (const [path, source] of [
+    [v17MigrationPath, v17Migration], [v17RuntimePath, v17Runtime],
+  ]) {
+    const observed = sha256(source);
+    if (observed !== HISTORICAL_REGISTRY_ARTIFACT_SHA256[path])
+      throw new Error(`sealed historical SCAC v17 artifact changed: ${path}: ${observed}`);
+  }
+
+  const headerMarker =
+    "-- SCAC-12: forward-only mutation registry v17 after backup guard/status repair.";
+  const coreStart = v17Migration.indexOf(headerMarker);
+  if (coreStart < 0 || v17Migration.indexOf(headerMarker, coreStart + headerMarker.length) >= 0)
+    throw new Error("sealed SCAC v17 migration has no exact successor core boundary");
+  const v17Core = v17Migration.slice(coreStart);
+  const currentV17Marker = "create or replace function ops.scac_mutation_catalog_v17_current()";
+  const policyMarker =
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v16;";
+  const currentV17Start = v17Core.indexOf(currentV17Marker);
+  const secondCurrentV17 = v17Core.indexOf(
+    currentV17Marker, currentV17Start + currentV17Marker.length);
+  const v16HistoryMarker =
+    "alter function ops.scac_mutation_catalog_v16_current() rename to scac_mutation_catalog_v16_live_at_seal;";
+  const v16HistoryStart = v17Core.indexOf(v16HistoryMarker);
+  const secondV16History = v17Core.indexOf(
+    v16HistoryMarker, v16HistoryStart + v16HistoryMarker.length);
+  const policyStart = v17Core.indexOf(policyMarker);
+  const secondPolicy = v17Core.indexOf(policyMarker, policyStart + policyMarker.length);
+  if (v16HistoryStart < 0 || secondV16History >= 0 || currentV17Start <= v16HistoryStart ||
+      secondCurrentV17 >= 0 || policyStart <= currentV17Start || secondPolicy >= 0)
+    throw new Error("sealed SCAC v17 migration has no exact catalog successor boundary");
+  const installedV16History = v17Core.slice(v16HistoryStart, currentV17Start);
+  const v17Current = v17Core.slice(currentV17Start, policyStart);
+  const v17History =
+`alter function ops.scac_mutation_catalog_v17_current() rename to scac_mutation_catalog_v17_live_at_seal;
+create or replace function ops.scac_mutation_registry_v17_seal_available()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_registry_seal_valid('scac-mutation-registry.v17')
+$fn$;
+create or replace function ops.scac_mutation_catalog_v17_current()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_catalog_v17_live_at_seal()
+$fn$;
+comment on function ops.scac_mutation_registry_v17_seal_available() is 'Exact immutable v17 registry seal; separate from whether the live catalog still equals v17.';
+comment on function ops.scac_mutation_catalog_v17_current() is 'Historical v17 live-catalog validator; expected to become false after the v18 authority surface is installed.';
+
+`;
+  const renderV18Current = baseline => {
+    let current = v17Current
+      .replaceAll("scac_mutation_catalog_v17_current", "scac_mutation_catalog_v18_current")
+      .replaceAll("scac-mutation-registry.v17", "scac-mutation-registry.v18");
+    current = replaceExactlyOnce(current,
+      `if observed_count<>${BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count} or observed_digest<>'${BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE.secdef_execute.digest}' then return false; end if;`,
+      `if observed_count<>${baseline.secdef_execute.count} or observed_digest<>'${baseline.secdef_execute.digest}' then return false; end if;`,
+      "Sourced shape forward-correction v18 security-definer baseline");
+    current = replaceExactlyOnce(current,
+      `if observed_count<>${BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE.relation_dml.count} or observed_digest<>'${BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE.relation_dml.digest}' then return false; end if;`,
+      `if observed_count<>${baseline.relation_dml.count} or observed_digest<>'${baseline.relation_dml.digest}' then return false; end if;`,
+      "Sourced shape forward-correction v18 relation baseline");
+    current = replaceExactlyOnce(current,
+      `if observed_count<>${BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE.column_dml.count} or observed_digest<>'${BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE.column_dml.digest}' then return false; end if;`,
+      `if observed_count<>${baseline.column_dml.count} or observed_digest<>'${baseline.column_dml.digest}' then return false; end if;`,
+      "Sourced shape forward-correction v18 column baseline");
+    return replaceExactlyOnce(current,
+      `return observed_count=${BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE.role_authority.count} and observed_digest='${BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE.role_authority.digest}';`,
+      `return observed_count=${baseline.role_authority.count} and observed_digest='${baseline.role_authority.digest}';`,
+      "Sourced shape forward-correction v18 role-authority baseline");
+  };
+  const v18Current = renderV18Current(dbCatalogBaseline);
+
+  let sql = replaceExactlyOnce(v17Core, v17Current,
+    "__BACKUP_GUARD_STATUS_V17_CATALOG_SUCCESSOR__",
+    "Sourced shape forward-correction v17 current catalog block");
+  sql = replaceExactlyOnce(sql, installedV16History, "",
+    "Sourced shape forward-correction already-installed v16 catalog history");
+  sql = replaceExactlyOnce(sql, headerMarker,
+    "-- SCAC-12: forward-only mutation registry v18 after sourced shape forward correction.",
+    "Sourced shape forward-correction migration header");
+  sql = sql
+    .replaceAll("scac-mutation-registry.v17", "scac-mutation-registry.v18")
+    .replaceAll("_v17", "_v18")
+    .replaceAll(" v17", " v18");
+  sql = replaceExactlyOnce(sql, JSON.stringify(BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE),
+    JSON.stringify(dbCatalogBaseline), "Sourced shape forward-correction v18 catalog projection");
+  sql = replaceExactlyOnce(sql,
+    `'${v17Seal.digest}',${v17Seal.entryCount},${v17Seal.sourceEntryCount},`,
+    `'sha256:${v18Digest}',${entryCount},${rows.length},`,
+    "Sourced shape forward-correction v18 registry row");
+  sql = replaceExactlyOnce(sql,
+    `ops.scac_mutation_registration_v18('${v17Seal.digest}',`,
+    `ops.scac_mutation_registration_v18('sha256:${v18Digest}',`,
+    "Sourced shape forward-correction v18 snapshot registry lookup");
+  sql = replaceExactlyOnce(sql,
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v16;",
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v17;",
+    "Sourced shape forward-correction policy snapshot predecessor");
+  sql = replaceExactlyOnce(sql, "__BACKUP_GUARD_STATUS_V17_CATALOG_SUCCESSOR__",
+    `${v17History}${v18Current}`, "Sourced shape forward-correction v17 catalog history insertion");
+
+  const versionsThrough17 = Array.from({ length: 17 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  const versionsThrough16 = Array.from({ length: 16 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  sql = replaceExactlyOnce(sql,
+    `check (registry_version in (${versionsThrough16},'scac-mutation-registry.v18'))`,
+    `check (registry_version in (${versionsThrough17},'scac-mutation-registry.v18'))`,
+    "Sourced shape forward-correction registry-version constraint");
+  sql = replaceExactlyOnce(sql,
+    `if p_registry_version not in (${versionsThrough16}) then return false; end if;`,
+    `if p_registry_version not in (${versionsThrough17}) then return false; end if;`,
+    "Sourced shape forward-correction historical seal allowlist");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v16' then '${HISTORICAL_REGISTRY_SEALS.v16.digest}' end;`,
+    `    when 'scac-mutation-registry.v16' then '${HISTORICAL_REGISTRY_SEALS.v16.digest}'\n    when '${v17Seal.version}' then '${v17Seal.digest}' end;`,
+    "Sourced shape forward-correction historical digest case");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v16' then '${JSON.stringify(CODEX_COMPACTION_CHECKPOINT_FORWARD_DB_CATALOG_BASELINE)}'::jsonb end;`,
+    `    when 'scac-mutation-registry.v16' then '${JSON.stringify(CODEX_COMPACTION_CHECKPOINT_FORWARD_DB_CATALOG_BASELINE)}'::jsonb\n    when '${v17Seal.version}' then '${JSON.stringify(BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE)}'::jsonb end;`,
+    "Sourced shape forward-correction historical catalog case");
+  sql = replaceExactlyOnce(sql,
+    `    ('scac-mutation-registry.v16','${HISTORICAL_REGISTRY_SEALS.v16.digest}',${HISTORICAL_REGISTRY_SEALS.v16.entryCount},${HISTORICAL_REGISTRY_SEALS.v16.sourceEntryCount})\n`,
+    `    ('scac-mutation-registry.v16','${HISTORICAL_REGISTRY_SEALS.v16.digest}',${HISTORICAL_REGISTRY_SEALS.v16.entryCount},${HISTORICAL_REGISTRY_SEALS.v16.sourceEntryCount}),\n    ('${v17Seal.version}','${v17Seal.digest}',${v17Seal.entryCount},${v17Seal.sourceEntryCount})\n`,
+    "Sourced shape forward-correction historical seal tuple");
+  sql = replaceExactlyOnce(sql,
+    "    ops.scac_mutation_registry_v16_seal_available()) then",
+    "    ops.scac_mutation_registry_v16_seal_available() and\n    ops.scac_mutation_registry_v17_seal_available()) then",
+    "Sourced shape forward-correction snapshot predecessor seal");
+  sql = replaceExactlyOnce(sql,
+    `or (r.registry_version='scac-mutation-registry.v18' and r.registry_digest='${v17Seal.digest}')`,
+    `or (r.registry_version='scac-mutation-registry.v17' and r.registry_digest='${v17Seal.digest}')\n         or (r.registry_version='scac-mutation-registry.v18' and r.registry_digest='sha256:${v18Digest}')`,
+    "Sourced shape forward-correction epoch-chain digest cases");
+  sql = replaceExactlyOnce(sql,
+    `  (registry_version='scac-mutation-registry.v18' and registry_digest='${v17Seal.digest}')`,
+    `  (registry_version='scac-mutation-registry.v17' and registry_digest='${v17Seal.digest}') or\n  (registry_version='scac-mutation-registry.v18' and registry_digest='sha256:${v18Digest}')`,
+    "Sourced shape forward-correction epoch constraint digest cases");
+  sql = replaceExactlyOnce(sql,
+    `'{registry_digest}',to_jsonb('${v17Seal.digest}'::text)`,
+    `'{registry_digest}',to_jsonb('sha256:${v18Digest}'::text)`,
+    "Sourced shape forward-correction snapshot registry digest");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_mutation_registry_v16_seal_available(),ops.scac_mutation_catalog_v18_current()",
+    "ops.scac_mutation_registry_v16_seal_available(),ops.scac_mutation_catalog_v17_live_at_seal(),ops.scac_mutation_catalog_v17_current(),ops.scac_mutation_registry_v17_seal_available(),ops.scac_mutation_catalog_v18_current()",
+    "Sourced shape forward-correction historical function revoke list");
+  sql = replaceExactlyOnce(sql,
+    "Backup guard/status successor snapshot: current policy epochs bind mutation registry v18 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16 epochs remain immutable.",
+    "Sourced shape forward-correction successor snapshot: current policy epochs bind mutation registry v18 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17 epochs remain immutable.",
+    "Sourced shape forward-correction policy snapshot comment");
+  sql = replaceExactlyOnce(sql,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v18')<>${v17Seal.entryCount}`,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v18')<>${entryCount}`,
+    "Sourced shape forward-correction v18 entry count guard");
+  sql = replaceExactlyOnce(sql,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v16')<>'${HISTORICAL_REGISTRY_SEALS.v16.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v16')<>${HISTORICAL_REGISTRY_SEALS.v16.entryCount} then raise exception 'sealed SCAC mutation registry v16 changed during successor creation'; end if;`,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v17')<>'${v17Seal.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v17')<>${v17Seal.entryCount} then raise exception 'sealed SCAC mutation registry v17 changed during successor creation'; end if;`,
+    "Sourced shape forward-correction predecessor seal guard");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),ops.scac_policy_epoch_snapshot_v15(),ops.scac_policy_epoch_snapshot_v16(),",
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),ops.scac_policy_epoch_snapshot_v15(),ops.scac_policy_epoch_snapshot_v16(),ops.scac_policy_epoch_snapshot_v17(),",
+    "Sourced shape forward-correction historical policy snapshot revoke list");
+
+  const seedStartMarker = "with seed as (select value as contract from jsonb_array_elements(";
+  const seedEndMarker = "::jsonb))\ninsert into ops.scac_mutation_registry_entry";
+  const seedStart = sql.indexOf(seedStartMarker);
+  const secondSeedStart = sql.indexOf(seedStartMarker, seedStart + seedStartMarker.length);
+  const seedEnd = sql.indexOf(seedEndMarker, seedStart + seedStartMarker.length);
+  const secondSeedEnd = sql.indexOf(seedEndMarker, seedEnd + seedEndMarker.length);
+  if (seedStart < 0 || secondSeedStart >= 0 || seedEnd < 0 || secondSeedEnd >= 0)
+    throw new Error("sealed SCAC v17 migration has no exact source-seed boundary");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart + seedStartMarker.length)}${sqlLiteral(seed)}${sql.slice(seedEnd)}`;
+
+  const preflightCurrent = renderV18Current(SOURCED_SHAPE_FORWARD_CORRECTION_PRE_V18_DB_CATALOG_BASELINE);
+  const preflightBegin = preflightCurrent.indexOf("begin\n");
+  const preflightEnd = preflightCurrent.lastIndexOf("end $fn$;");
+  if (preflightBegin < 0 || preflightEnd <= preflightBegin)
+    throw new Error("generated v18 catalog predicate has no exact preflight body boundary");
+  let preflightBody = preflightCurrent.slice(preflightBegin + "begin\n".length, preflightEnd);
+  preflightBody = preflightBody.replaceAll(
+    "then return false; end if;",
+    "then raise exception 'Sourced shape forward-correction pre-v18 catalog receipt drifted'; end if;");
+  preflightBody = replaceExactlyOnce(preflightBody,
+    `return observed_count=${SOURCED_SHAPE_FORWARD_CORRECTION_PRE_V18_DB_CATALOG_BASELINE.role_authority.count} and observed_digest='${SOURCED_SHAPE_FORWARD_CORRECTION_PRE_V18_DB_CATALOG_BASELINE.role_authority.digest}';`,
+    `if observed_count<>${SOURCED_SHAPE_FORWARD_CORRECTION_PRE_V18_DB_CATALOG_BASELINE.role_authority.count} or observed_digest<>'${SOURCED_SHAPE_FORWARD_CORRECTION_PRE_V18_DB_CATALOG_BASELINE.role_authority.digest}' then raise exception 'Sourced shape forward-correction pre-v18 role-authority receipt drifted'; end if;`,
+    "Sourced shape forward-correction pre-v18 role receipt");
+  const predecessorHash = sha256(v17Migration);
+  const predecessorPreflight =
+`-- Exact disposable-Postgres post-0491 receipt. Refuse before the WR-000068
+-- surface or any v18 function exists; the domain SQL below then changes the
+-- catalog and the v18 successor seals the resulting catalog in one transaction.
+do $sourced_shape_forward_correction_preflight$
+declare observed_count integer; observed_digest text; grant_snapshot jsonb;
+begin
+  if (select count(*) from public.schema_migrations where filename='0491_backup_guard_status_registry_activation.sql')<>1
+     or not exists(select 1 from public.schema_migrations where filename='0491_backup_guard_status_registry_activation.sql'
+       and sha256='${predecessorHash}') then
+    raise exception 'Sourced shape forward-correction pre-v18 migration ledger receipt drifted';
+  end if;
+  grant_snapshot:=ops.scac_runtime_dml_grant_snapshot();
+  if (grant_snapshot->>'entry_count')::integer<>${SOURCED_SHAPE_FORWARD_CORRECTION_PRE_V18_DB_CATALOG_BASELINE.runtime_dml_grants.count}
+     or grant_snapshot->>'grant_digest'<>'${SOURCED_SHAPE_FORWARD_CORRECTION_PRE_V18_DB_CATALOG_BASELINE.runtime_dml_grants.digest}' then
+    raise exception 'Sourced shape forward-correction pre-v18 runtime grant receipt drifted';
+  end if;
+${preflightBody}end $sourced_shape_forward_correction_preflight$;
+
+`;
+  const domainSql = renderSourcedShapeForwardCorrectionDomainSql(predecessorArtifacts?.witnesses ?? {});
+  return `${predecessorPreflight}${domainSql}${sql}`.replace(/\n+$/, "\n");
+}
+
 export function renderGeneratedFrontier() {
   const v2Rows = frozenInventory(REGISTRY_V2_VERSION);
   const artifacts = {};
@@ -4083,9 +4880,26 @@ export function renderGeneratedFrontier() {
         runtime: artifacts["mcp-server/src/scac-mutation-registry.v16.generated.js"],
       });
 
+  const v18Rows = frozenInventory(REGISTRY_V18_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v18.generated.js"] =
+    renderRuntimeProjection(v18Rows, {
+      version: REGISTRY_V18_VERSION,
+      dbCatalogBaseline: SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0492_sourced_shape_forward_correction_and_scac_successor.sql"] =
+    renderSourcedShapeForwardCorrectionRegistrySql(v18Rows,
+      SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE, {
+        migration: artifacts["migrations/0491_backup_guard_status_registry_activation.sql"],
+        runtime: artifacts["mcp-server/src/scac-mutation-registry.v17.generated.js"],
+        witnesses: {
+          "migrations/0470_source_merge_authority_projection.sql":
+            artifacts["migrations/0470_source_merge_authority_projection.sql"],
+        },
+      });
+
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 25 || runtimeCount !== 16 || Object.keys(artifacts).length !== 41)
+  if (migrationCount !== 26 || runtimeCount !== 17 || Object.keys(artifacts).length !== 43)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
@@ -4443,9 +5257,22 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const rows = frozenInventory(REGISTRY_V17_VERSION);
     await writeFile(target, renderBackupGuardStatusForwardRegistrySql(rows));
     process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-runtime-v18") {
+    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v18.generated.js");
+    const rows = frozenInventory(REGISTRY_V18_VERSION);
+    await writeFile(target, renderRuntimeProjection(rows, {
+      version: REGISTRY_V18_VERSION,
+      dbCatalogBaseline: SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE,
+    }));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-sourced-shape-forward-correction-registry-migration") {
+    const target = resolve(process.argv[3] || "migrations/0492_sourced_shape_forward_correction_and_scac_successor.sql");
+    const rows = frozenInventory(REGISTRY_V18_VERSION);
+    await writeFile(target, renderSourcedShapeForwardCorrectionRegistrySql(rows));
+    process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools());
-    process.stdout.write("source inventory matches frozen v17 frontier fixture\n");
+    process.stdout.write("source inventory matches frozen v18 frontier fixture\n");
   } else if (process.argv[2] === "--check-generated-frontier") {
     const paths = assertGeneratedFrontierMatchesCommitted();
     process.stdout.write(`generated frontier is byte-exact (${paths.length} artifacts)\n`);
