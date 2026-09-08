@@ -3,8 +3,10 @@ import json, os, sys, tempfile, threading, time
 from pathlib import Path
 ROOT=Path(__file__).resolve().parent; sys.path.insert(0,str(ROOT / "room-bridge")); sys.path.insert(0,str(ROOT.parent / "ops"))
 from git_env import fixture_env
-from worktree_runtime_isolation import Bundle, IsolationRefusal, Owner, RuntimeIsolation
+from worktree_runtime_isolation import Bundle, IsolationRefusal, Owner, RuntimeIsolation, read_lock_posture
 def owner(name): return Owner(name, f"fixture-{name}", "fixture-source")
+def tree_snapshot(root):
+  return {(path.relative_to(root).as_posix(),path.is_dir()):(None if path.is_dir() else path.read_bytes(),path.stat().st_mode) for path in root.rglob("*")}
 def run_race(iterations):
     begun=time.monotonic(); witnessed=0
     with tempfile.TemporaryDirectory() as tmp:
@@ -53,7 +55,10 @@ def test_entrant_and_read_seam():
     try:b.acquire_entrant(bb["run_id"],stale_after_seconds=0,owner_alive=lambda _:True)
     except IsolationRefusal:pass
     else:raise AssertionError("second entrant")
-    assert b.lock_posture()==before; now[0]+=2; assert b.lock_posture(lambda _:None)["state"]=="stale_uncertain"
+    before_files=tree_snapshot(Path(tmp))
+    assert read_lock_posture(Path(tmp))==before
+    assert tree_snapshot(Path(tmp))==before_files
+    now[0]+=2; assert read_lock_posture(Path(tmp),lambda _:None)["state"]=="stale_uncertain"
     for liveness in (True,None):
       try:b.acquire_entrant(bb["run_id"],stale_after_seconds=1,owner_alive=lambda _,value=liveness:value)
       except IsolationRefusal:pass

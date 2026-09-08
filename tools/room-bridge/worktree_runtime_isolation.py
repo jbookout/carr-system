@@ -30,6 +30,41 @@ DENIED_CREDENTIAL_FRAGMENTS = ("PROD", "BREAK", "AUTHORITY", "OWNER", "BACKUP", 
 ALLOWED_FAKE_CREDENTIAL_NAMES = frozenset({"R09_FAKE_TOKEN", "R09_FAKE_DATABASE_URL"})
 
 
+def _decode_state(state_path: Path) -> dict:
+    if not state_path.exists():
+        return {"allocations": {}, "entrant": None, "receipts": []}
+    try:
+        with state_path.open(encoding="utf-8") as handle:
+            state = json.load(handle)
+    except (OSError, ValueError, TypeError) as exc:
+        raise IsolationRefusal("unknown registry state is preserved") from exc
+    if not isinstance(state, dict) or set(state) != {"allocations", "entrant", "receipts"}:
+        raise IsolationRefusal("unknown registry state is preserved")
+    return state
+
+
+def read_lock_posture(root: Path, owner_alive: Callable[[str], bool | None] | None = None) -> dict:
+    """Read the R07 preservation posture without creating any registry artifact."""
+    root = Path(root)
+    state_path, lock_path = root / "r09-state.json", root / "r09-registry.lock"
+    if not state_path.exists():
+        return {"state": "none", "entrant": None}
+    try:
+        with lock_path.open("r", encoding="utf-8") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+            try:
+                state = _decode_state(state_path)
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError as exc:
+        raise IsolationRefusal("registry read lock missing; state preserved") from exc
+    current = state["entrant"]
+    state_name = "none" if current is None else "active"
+    if current and owner_alive is not None and owner_alive(current["owner"]) is None:
+        state_name = "stale_uncertain"
+    return {"state": state_name, "entrant": current.copy() if current else None}
+
+
 @dataclass(frozen=True)
 class Owner:
     session: str
@@ -62,16 +97,7 @@ class RuntimeIsolation:
         return handle
 
     def _read(self) -> dict:
-        if not self.state_path.exists():
-            return {"allocations": {}, "entrant": None, "receipts": []}
-        try:
-            with self.state_path.open(encoding="utf-8") as handle:
-                state = json.load(handle)
-        except (OSError, ValueError, TypeError) as exc:
-            raise IsolationRefusal("unknown registry state is preserved") from exc
-        if not isinstance(state, dict) or set(state) != {"allocations", "entrant", "receipts"}:
-            raise IsolationRefusal("unknown registry state is preserved")
-        return state
+        return _decode_state(self.state_path)
 
     def _write(self, state: dict) -> None:
         fd, name = tempfile.mkstemp(dir=self.root, prefix=".r09-", text=True)
@@ -164,11 +190,7 @@ class RuntimeIsolation:
             return generation
 
     def lock_posture(self, owner_alive: Callable[[str], bool | None] | None = None) -> dict:
-        with self._locked():
-            current = self._read()["entrant"]
-            state = "none" if current is None else "active"
-            if current and owner_alive is not None and owner_alive(current["owner"]) is None: state = "stale_uncertain"
-            return {"state": state, "entrant": current.copy() if current else None}
+        return read_lock_posture(self.root, owner_alive)
 
     def teardown(self, allocation: Mapping[str, object], entrant_generation: str | None = None) -> None:
         with self._locked():
