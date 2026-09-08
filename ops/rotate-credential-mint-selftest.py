@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
-"""Hermetic tests for the dormant carr_backup rotation primitives.
+"""Tests for the carr_backup rotation primitives and its privilege contract.
 
-Backup mutation is deliberately unavailable until a canonical server-validated
-receipt exists.  These tests therefore exercise no provider or database: they
-cover the fail-closed entrypoints and the future-enablement helpers only.
+Most of this file is hermetic: it covers the fail-closed entrypoints, the URL
+parser and the durable-write guard, touching no provider and no database.
+
+The LAST suite is different and deliberately so.  verify_backup_least_privilege
+is thirteen SQL assertions about a live role, and four of them were rewritten on
+2026-09-03 after they refused a real provisioning run for reasons that were
+defects in the assertions rather than over-privilege in the role.  Assertions of
+that shape cannot be tested by asserting a fake row: the previous versions were
+never once executed against a database, which is exactly how they came to be
+wrong.  So that suite builds a disposable PostgreSQL cluster, reproduces the
+production shapes, and MUTATES THE DATABASE STATE the assertions read -- never
+the SQL text -- to prove each one refuses the over-privilege it claims to catch.
+It skips, without failing, when no local PostgreSQL is installed.
 """
 from __future__ import annotations
 
@@ -11,6 +21,7 @@ import contextlib
 import ast
 import importlib.util
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -74,16 +85,231 @@ class Connection:
         return Result(self.row)
 
 
+# --------------------------------------------------------------------------
+# The least-privilege contract, mutation-tested against a real cluster.
+#
+# WHY A REAL CLUSTER.  Every assertion here reads a PostgreSQL system catalog,
+# and the four rewritten on 2026-09-03 were wrong precisely because nobody had
+# ever run them against one: two tested PUBLIC defaults (TEMPORARY on the
+# database, EXECUTE on functions) and blamed the role for a server default that
+# no rotation could clear; one omitted views from its allowed-kind list and so
+# flagged correct read-only grants as over-privilege; and one banned row
+# security outright when row security UNDER-privileges a backup reader -- a
+# reader with no policy silently dumps fewer rows than the table holds, which is
+# a quietly incomplete backup and worse than a failed one.  A fake row cannot
+# catch any of that.
+#
+# WHAT IS MUTATED.  The database state, never the SQL.  Mutating the text would
+# only prove the text is load-bearing; mutating the state proves the assertion
+# catches the real defect.  Two mutations (M1b, M1c) exercise clauses the
+# rewrite DELETED, because dropping a clause is only safe if a neighbouring
+# check really covers what it covered -- both land on the datacl check, which is
+# what makes the deletion honest rather than a silently removed control.
+
+LEAST_PRIVILEGE_FIXTURE = """
+create role carr_backup login password 'fixturepw';
+create schema ops;
+create table public.plain (id int primary key, body text);
+create table ops.work_request (id int primary key, body text);
+create table ops.other (id int primary key);
+create table public.parted (id int) partition by range (id);
+create table public.parted_1 partition of public.parted for values from (0) to (10);
+create view ops.v_summary as select id from ops.other;
+create materialized view ops.m_summary as select id from ops.other;
+create sequence ops.seq_thing;
+create function ops.f_thing() returns int language sql as 'select 1';
+create extension file_fdw;
+create server fileserver foreign data wrapper file_fdw;
+create foreign table ops.ft_thing (id text) server fileserver
+  options (filename '/dev/null', format 'csv');
+create schema elsewhere;
+create table elsewhere.hidden (id int);
+
+-- row security on exactly one table, mirroring production's ops.work_request
+alter table ops.work_request enable row level security;
+create policy carr_backup_full_read on ops.work_request
+  for select to carr_backup using (true);
+
+-- the least-privilege grant set the contract is supposed to accept
+grant usage on schema ops to carr_backup;
+grant select on ops.work_request, ops.other, ops.v_summary, ops.m_summary to carr_backup;
+grant select on public.plain, public.parted, public.parted_1 to carr_backup;
+grant select on sequence ops.seq_thing to carr_backup;
+"""
+
+# (label, expectation, break, restore)
+LEAST_PRIVILEGE_MUTATIONS = (
+    ("check 5 refuses when CONNECT is revoked from the role and from PUBLIC", "REFUSE",
+     "revoke connect on database carr_ci from public;"
+     " revoke connect on database carr_ci from carr_backup;",
+     "grant connect on database carr_ci to public;"),
+    ("the DELETED CREATE clause is covered: CREATE on the database still refuses", "REFUSE",
+     "grant create on database carr_ci to carr_backup;",
+     "revoke create on database carr_ci from carr_backup;"),
+    ("the DELETED TEMPORARY clause is covered: TEMPORARY still refuses", "REFUSE",
+     "grant temporary on database carr_ci to carr_backup;",
+     "revoke temporary on database carr_ci from carr_backup;"),
+    ("check 4 refuses CONNECT granted WITH GRANT OPTION", "REFUSE",
+     "grant connect on database carr_ci to carr_backup with grant option;",
+     "revoke grant option for connect on database carr_ci from carr_backup;"),
+
+    ("check 8 refuses a grantable SELECT on a view", "REFUSE",
+     "grant select on ops.v_summary to carr_backup with grant option;",
+     "revoke grant option for select on ops.v_summary from carr_backup;"),
+    ("check 8 refuses INSERT on a view", "REFUSE",
+     "grant insert on ops.v_summary to carr_backup;",
+     "revoke insert on ops.v_summary from carr_backup;"),
+    ("check 8 refuses UPDATE on a materialised view", "REFUSE",
+     "grant update on ops.m_summary to carr_backup;",
+     "revoke update on ops.m_summary from carr_backup;"),
+    ("check 8 refuses any grant outside public and ops", "REFUSE",
+     "grant usage on schema elsewhere to carr_backup;"
+     " grant select on elsewhere.hidden to carr_backup;",
+     "revoke all on elsewhere.hidden from carr_backup;"
+     " revoke all on schema elsewhere from carr_backup;"),
+    ("adding v and m did not open the kind list: a foreign table still refuses", "REFUSE",
+     "grant select on ops.ft_thing to carr_backup;",
+     "revoke select on ops.ft_thing from carr_backup;"),
+
+    ("check 11 refuses row security with NO policy at all", "REFUSE",
+     "alter table ops.other enable row level security;",
+     "alter table ops.other disable row level security;"),
+    ("check 11 refuses a policy that names a different role", "REFUSE",
+     "drop policy carr_backup_full_read on ops.work_request;"
+     " create policy p on ops.work_request for select to carr_ci using (true);",
+     "drop policy p on ops.work_request;"
+     " create policy carr_backup_full_read on ops.work_request"
+     " for select to carr_backup using (true);"),
+    ("check 11 refuses a RESTRICTIVE-only policy, which grants no read", "REFUSE",
+     "drop policy carr_backup_full_read on ops.work_request;"
+     " create policy p on ops.work_request as restrictive"
+     " for select to carr_backup using (true);",
+     "drop policy p on ops.work_request;"
+     " create policy carr_backup_full_read on ops.work_request"
+     " for select to carr_backup using (true);"),
+    ("check 11 refuses a policy that is not a read command", "REFUSE",
+     "drop policy carr_backup_full_read on ops.work_request;"
+     " create policy p on ops.work_request for insert to carr_backup with check (true);",
+     "drop policy p on ops.work_request;"
+     " create policy carr_backup_full_read on ops.work_request"
+     " for select to carr_backup using (true);"),
+    ("check 11 ACCEPTS forced row security while the read policy stands", "PASS",
+     "alter table ops.work_request force row level security;",
+     "alter table ops.work_request no force row level security;"),
+
+    ("check 13 refuses EXECUTE granted on a function", "REFUSE",
+     "grant execute on function ops.f_thing() to carr_backup;",
+     "revoke execute on function ops.f_thing() from carr_backup;"),
+
+    # Controls on assertions the rewrite did NOT touch.  A fixture that passed
+    # everything for the wrong reason would show up here first.
+    ("check 1 refuses a role granted BYPASSRLS", "REFUSE",
+     "alter role carr_backup bypassrls;", "alter role carr_backup nobypassrls;"),
+    ("check 10 refuses INSERT on a table", "REFUSE",
+     "grant insert on ops.other to carr_backup;",
+     "revoke insert on ops.other from carr_backup;"),
+    ("check 12 refuses USAGE on a sequence", "REFUSE",
+     "grant usage on sequence ops.seq_thing to carr_backup;",
+     "revoke usage on sequence ops.seq_thing from carr_backup;"),
+)
+
+
+def _free_port(start: int = 55600) -> int:
+    import socket
+    for port in range(start, start + 400):
+        with socket.socket() as probe:
+            try:
+                probe.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                continue
+    raise RuntimeError("no free port for the disposable cluster")
+
+
+def _contract_refuses(conn) -> bool:
+    try:
+        rc.verify_backup_least_privilege(conn)
+    except SystemExit:
+        return True
+    return False
+
+
+def least_privilege_mutation_suite() -> None:
+    """Prove each assertion refuses the over-privilege it claims to catch."""
+    missing = [name for name in ("initdb", "pg_ctl", "createdb") if not shutil.which(name)]
+    if missing:
+        print(f"  skip  least-privilege mutations: no local PostgreSQL ({', '.join(missing)})")
+        return
+    try:
+        import psycopg
+    except ImportError:
+        print("  skip  least-privilege mutations: psycopg is not installed")
+        return
+
+    port = _free_port()
+    workdir = tempfile.mkdtemp(prefix="carr-lp-mutation-")
+    data = Path(workdir) / "data"
+    env = dict(os.environ)
+    env["LC_ALL"] = "C"          # initdb refuses some inherited locales on this Mac
+    started = False
+    try:
+        subprocess.run(["initdb", "-D", str(data), "-U", "carr_ci", "--auth=trust",
+                        "-E", "UTF8", "--no-sync"],
+                       check=True, env=env, stdout=subprocess.DEVNULL)
+        subprocess.run(["pg_ctl", "-D", str(data), "-w", "-o",
+                        f"-h 127.0.0.1 -p {port} -c fsync=off",
+                        "-l", str(Path(workdir) / "log"), "start"],
+                       check=True, env=env, stdout=subprocess.DEVNULL)
+        started = True
+        subprocess.run(["createdb", "-h", "127.0.0.1", "-p", str(port),
+                        "-U", "carr_ci", "carr_ci"],
+                       check=True, env=env, stdout=subprocess.DEVNULL)
+
+        with psycopg.connect(f"postgres://carr_ci@127.0.0.1:{port}/carr_ci",
+                             autocommit=True) as conn:
+            conn.execute(LEAST_PRIVILEGE_FIXTURE)
+
+            # The control.  A fixture the contract already refuses would make
+            # every mutation below vacuously "fail correctly".
+            check("a correctly least-privileged carr_backup satisfies the contract",
+                  not _contract_refuses(conn))
+            if _contract_refuses(conn):
+                return
+
+            for label, expectation, break_sql, restore_sql in LEAST_PRIVILEGE_MUTATIONS:
+                conn.execute(break_sql)
+                observed = "REFUSE" if _contract_refuses(conn) else "PASS"
+                check(label, observed == expectation)
+                conn.execute(restore_sql)
+                # A restore that does not return the fixture to a passing state
+                # would silently poison every later mutation.
+                check(f"fixture restored after: {label}", not _contract_refuses(conn))
+    finally:
+        if started:
+            subprocess.run(["pg_ctl", "-D", str(data), "-m", "immediate", "stop"],
+                           env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def main() -> int:
     source = (REPO / "tools" / "rotate-credential.py").read_text(encoding="utf-8")
     workflow = (REPO / ".github" / "workflows" / "backup-nightly.yml").read_text(encoding="utf-8")
     tree = ast.parse(source)
     function_names = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
-    check("no callable carr_backup ALTER ROLE path remains",
-          "_rotate_backup_role_enabled" not in function_names
-          and 'sql.Identifier("carr_backup")' not in source
-          and "alter role carr_backup" not in source.lower()
-          and {"rotate_role", "rotate_backup_role"}.issubset(function_names)
+    # SUPERSEDED 2026-09-03.  This assertion used to require that NO callable
+    # carr_backup ALTER ROLE path existed at all, because rotation was dormant
+    # behind an unconditional refusal.  That refusal named a receipt seam that
+    # was implemented nowhere, so it could never be satisfied by anyone -- and
+    # the local nightly backup went unprovisioned for weeks behind it.  The
+    # refusal is now satisfiable by the repo's real break-glass envelope, so a
+    # callable path is the intended state and asserting its absence would be
+    # asserting the outage.  What replaces it is the property that still
+    # matters: the path exists, and it is reachable ONLY behind that receipt.
+    check("the carr_backup ALTER ROLE path exists and is receipt-gated",
+          {"rotate_role", "rotate_backup_role",
+           "_require_backup_mutation_receipt"}.issubset(function_names)
+          and 'sql.Identifier("carr_backup")' in source
+          and "CARR_BREAK_GLASS" in source
           and rc.MINTABLE == set())
     check("workflow documentation does not sanction direct backup credential mutation",
           "PROVISIONING IS DISABLED" in workflow
@@ -110,23 +336,34 @@ def main() -> int:
           all("ambiguous libpq query override" in refused(lambda value=value: rc._postgres_parts(value, "test"))
               for value in ("postgresql://x:y@host/db?sslmode=require&user=x",) * 4))
 
-    # Both public backup entrypoints must stop before every local or provider
-    # primitive.  Replacements would throw if any one were reached.
+    # EVERY backup entrypoint must stop before every local or provider primitive
+    # when no break-glass receipt exists.  The replacements below throw if any
+    # one is reached, so a missing gate surfaces as a crash rather than a pass.
+    #
+    # THIS IS FOUR ENTRYPOINTS ON PURPOSE, not one plus decoration.  On
+    # 2026-09-03 implementing rotate_backup_role dropped the receipt check from
+    # that function alone: the CLI stayed gated (main goes through rotate_role)
+    # while the public, importable entrypoint reached ALTER ROLE on production
+    # with no receipt written.  Only the per-entrypoint form catches that; a
+    # test of the CLI path would have passed.
     real_lock, real_read, real_run = rc.credential_env_lock, rc.read_env, rc.subprocess.run
+    real_break_glass = os.environ.pop("CARR_BREAK_GLASS", None)
     rc.credential_env_lock = lambda: (_ for _ in ()).throw(AssertionError("lock reached"))
     rc.read_env = lambda: (_ for _ in ()).throw(AssertionError("env reached"))
     rc.subprocess.run = lambda *a, **k: (_ for _ in ()).throw(AssertionError("subprocess reached"))
     try:
-        check("rotate_role backup refusal precedes all mutation primitives",
-              "disabled" in refused(lambda: rc.rotate_role("carr_backup", True, True)))
-        check("direct backup entrypoint refusal precedes all mutation primitives",
-              "disabled" in refused(lambda: rc.rotate_backup_role(True)))
+        check("rotate_role refuses carr_backup without a receipt, before any primitive",
+              "break-glass receipt" in refused(lambda: rc.rotate_role("carr_backup", True, True)))
+        check("the public backup entrypoint refuses on its own, before any primitive",
+              "break-glass receipt" in refused(lambda: rc.rotate_backup_role(True)))
         check("generic internal helper cannot bypass carr_backup refusal",
               "permitted only" in refused(lambda: rc._rotate_existing_role("carr_backup", True)))
         check("deepest ALTER ROLE helper cannot bypass carr_backup refusal",
               "permitted only" in refused(lambda: rc._rotate_existing_role_locked("carr_backup", True)))
     finally:
         rc.credential_env_lock, rc.read_env, rc.subprocess.run = real_lock, real_read, real_run
+        if real_break_glass is not None:
+            os.environ["CARR_BREAK_GLASS"] = real_break_glass
 
     with isolated_state() as raw:
         pending = "postgresql://carr_backup:Z@host/db?sslmode=require"
@@ -296,6 +533,8 @@ def main() -> int:
                      if entry.name.startswith(".db.env.")]
         check("a refused write leaves the live file byte-identical and no temp behind",
               env_path.read_bytes() == original and leftovers == [])
+
+    least_privilege_mutation_suite()
 
     if FAILURES:
         print(f"rotate-credential-mint-selftest: {len(FAILURES)} FAILED")
