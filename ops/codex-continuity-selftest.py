@@ -450,6 +450,8 @@ class CodexHookTests(AdapterCase):
             "never generic or unscoped authentication", "hard server cap is 24,000 UTF-8 bytes",
             "single <=18,000-byte JSON budget", "2,000-byte working reserve",
             "preflight its exact serialized UTF-8 size",
+            "20,000 preferred", "write any complete valid <=24,000 state once",
+            "never withhold for target alone",
             "Preserve the semantics", "not its wording or item count",
             "Collapse related completed-work, evidence, artifact, and receipt items",
             "resolved blockers", "externally meaningful receipt identifier",
@@ -739,6 +741,8 @@ class CodexHookTests(AdapterCase):
             "objective": "keep the active task",
             "acceptance": [{"text": "approved rollout " + "z" * 3000,
                             "refs": ["approval:current"]} for _ in range(7)],
+            "latest_corrections": [{"text": "repair this reference",
+                                     "refs": ["legacy:{REF1}"]}],
             "next_action": "preserve approval while repairing",
         }
         env, _ = self.install_fake_record_call(self.checkpoint(state=state, cursor={
@@ -750,25 +754,22 @@ class CodexHookTests(AdapterCase):
             self.hook_payload(source="resume"), env).stdout)[
                 "hookSpecificOutput"]["additionalContext"]
         directive = context.split("\n\nCARR Codex recovery checkpoint.", 1)[0]
-        self.assertIn("current approval text/refs remain directly in state byte-for-byte wherever stored", directive)
+        self.assertIn("current approval text/refs stay directly in state wherever stored", directive)
         self.assertLessEqual(len(directive.encode("utf-8")), 6000)
 
-    def test_exact_window_checkpoint_above_target_is_normalized(self):
+    def test_exact_window_target_excess_is_healthy_until_next_compaction(self):
         self.native_rollout(compacted_row(1, "window-initial", "window-current"))
         state = {
             "objective": "keep the active task",
-            "latest_corrections": [{"text": "preserve correction",
-                                     "refs": ["user:proof"]}],
-            "constraints": [{"text": f"current-obligation-{index}-" + "z" * 2950}
-                            for index in range(7)],
-            "decisions": [{"text": "preserve decision", "why": "still binding",
-                           "refs": ["decision:proof"]}],
-            "receipts": [{"text": "meaningful receipt proof-receipt-1"}],
-            "next_action": "normalize without losing current meaning",
+            "constraints": [{"text": ""}],
+            "next_action": "continue without target-only repair",
         }
+        base_bytes = len(json.dumps(
+            state, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+        state["constraints"][0]["text"] = "z" * (20143 - base_bytes)
         state_bytes = len(json.dumps(
             state, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
-        self.assertGreater(state_bytes, 20000)
+        self.assertEqual(state_bytes, 20143)
         self.assertLessEqual(state_bytes, 24000)
         env, _ = self.install_fake_record_call(self.checkpoint(state=state, cursor={
             "byte_offset": 1, "source_digest": "0" * 64,
@@ -779,10 +780,9 @@ class CodexHookTests(AdapterCase):
         context = json.loads(self.run_hook(
             self.hook_payload(source="resume"), env).stdout)[
                 "hookSpecificOutput"]["additionalContext"]
-        self.assertIn("COMPACTION CHECKPOINT REPAIR", context)
-        self.assertIn(f"serialized state is {state_bytes} UTF-8 bytes", context)
-        self.assertIn("20,000-byte normalization target", context)
-        self.assertIn('"expected_version":7', context)
+        self.assertNotIn("COMPACTION CHECKPOINT REPAIR", context)
+        self.assertIn("checkpoint covers current context window 1", context)
+        self.assertNotIn("bounded repair directive exceeded its output limit", context)
 
     def test_oversized_legacy_reference_list_still_emits_bounded_repair_directive(self):
         self.native_rollout(compacted_row(1, "window-initial", "window-current"))
