@@ -33,6 +33,7 @@ import {
   REGISTRY_V15_VERSION,
   REGISTRY_V16_VERSION,
   REGISTRY_V17_VERSION,
+  REGISTRY_V18_VERSION,
   replaceExactlyOnce,
   renderGeneratedFrontier,
   renderRuntimeProjection,
@@ -46,6 +47,8 @@ import {
   renderClaudeConfigPreservationForwardRegistrySql,
   renderCodexCompactionCheckpointForwardRegistrySql,
   renderBackupGuardStatusForwardRegistrySql,
+  renderSourcedShapeForwardCorrectionDomainSql,
+  renderSourcedShapeForwardCorrectionRegistrySql,
   renderSourceMergeForwardRegistrySql,
   sha256,
   SIEP16_INTEGRATED_DB_CATALOG_BASELINE,
@@ -67,6 +70,9 @@ import {
   CODEX_COMPACTION_CHECKPOINT_PRE_V16_DB_CATALOG_BASELINE,
   BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE,
   BACKUP_GUARD_STATUS_PRE_V17_DB_CATALOG_BASELINE,
+  SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE,
+  SOURCED_SHAPE_FORWARD_CORRECTION_PRE_V18_DB_CATALOG_BASELINE,
+  SOURCED_SHAPE_FORWARD_CORRECTION_WITNESS_SHA256,
   SOURCE_MERGE_FORWARD_DB_CATALOG_BASELINE,
   SOURCE_MERGE_PRE_V10_DB_CATALOG_BASELINE,
   SIEP12_DB_CATALOG_BASELINE,
@@ -150,6 +156,10 @@ const generatedV17 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v17.generated.js", import.meta.url), "utf8");
 const v17Migration = fs.readFileSync(
   new URL("../../migrations/0491_backup_guard_status_registry_activation.sql", import.meta.url), "utf8");
+const generatedV18 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v18.generated.js", import.meta.url), "utf8");
+const v18Migration = fs.readFileSync(
+  new URL("../../migrations/0492_sourced_shape_forward_correction_and_scac_successor.sql", import.meta.url), "utf8");
 const siep18MonitorMigration = fs.readFileSync(
   new URL("../../migrations/0467_siep18_atomic_db_monitor_grants.sql", import.meta.url), "utf8");
 const directRegistryRedefinitions = [
@@ -568,8 +578,8 @@ test("v17 admits both backup helper ingresses and preserves the v16 predecessor"
     dbCatalogBaseline: BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE,
   }));
   assert.equal(v17Migration, renderBackupGuardStatusForwardRegistrySql(rows));
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
-    JSON.parse(generatedV17.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]));
+  assert.equal(JSON.parse(generatedV17.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]),
+    "5aab15679a2d26207210bde3e16be265301b9c69816e08dc90b2f2e8a48c7db2");
   assert.deepEqual(BACKUP_GUARD_STATUS_PRE_V17_DB_CATALOG_BASELINE,
     CODEX_COMPACTION_CHECKPOINT_FORWARD_DB_CATALOG_BASELINE);
   assert.equal(BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count, 375);
@@ -580,19 +590,63 @@ test("v17 admits both backup helper ingresses and preserves the v16 predecessor"
     "mcp-server/src/scac-mutation-registry.v16.generated.js"]);
   assert.match(v17Migration, /scac_mutation_registry_v16_seal_available[(][)]/);
   assert.match(v17Migration, /registry_version='scac-mutation-registry[.]v17'[^\n]+<>1509/);
-  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS))
+  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS)
+    .filter(seal => Number(seal.version.split(".v")[1]) < 17))
     assert.ok(v17Migration.includes(`('${seal.version}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount})`));
+});
+
+test("v18 seals the WR68 sourced shape forward correction and preserves the v17 predecessor", () => {
+  const rows = frozenInventory(REGISTRY_V18_VERSION);
+  assert.equal(rows.length, 827);
+  assert.equal(generatedV18, renderRuntimeProjection(rows, {
+    version: REGISTRY_V18_VERSION,
+    dbCatalogBaseline: SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE,
+  }));
+  assert.equal(v18Migration, renderSourcedShapeForwardCorrectionRegistrySql(rows));
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
+    JSON.parse(generatedV18.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]));
+  assert.deepEqual(SOURCED_SHAPE_FORWARD_CORRECTION_PRE_V18_DB_CATALOG_BASELINE,
+    BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE);
+  // Four v18 registration ACLs plus the two narrow lineage-projection grants.
+  assert.equal(SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count, 381);
+  assert.equal(SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE.relation_dml.count, 295);
+  assert.equal(SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE.runtime_dml_grants.count, 307);
+  assert.equal(sha256(v17Migration), HISTORICAL_REGISTRY_ARTIFACT_SHA256[
+    "migrations/0491_backup_guard_status_registry_activation.sql"]);
+  assert.equal(sha256(generatedV17), HISTORICAL_REGISTRY_ARTIFACT_SHA256[
+    "mcp-server/src/scac-mutation-registry.v17.generated.js"]);
+  for (const [path, digest] of Object.entries(SOURCED_SHAPE_FORWARD_CORRECTION_WITNESS_SHA256))
+    assert.equal(sha256(fs.readFileSync(new URL(`../../${path}`, import.meta.url), "utf8")), digest, path);
+  assert.match(v18Migration,
+    /0491_backup_guard_status_registry_activation[.]sql'[\s\S]+49129915fe40f41400c5fc769f82633b2da68949a29d193329fba2c6016e3913/);
+  assert.match(v18Migration,
+    /alter function ops[.]scac_mutation_catalog_v17_current[(][)] rename to scac_mutation_catalog_v17_live_at_seal/);
+  assert.match(v18Migration, /scac_mutation_registry_v17_seal_available[(][)]/);
+  assert.match(v18Migration, /scac_mutation_registration_v18[(]text,text[)]/);
+  assert.match(v18Migration, /scac_mutation_catalog_v18_current[(][)]/);
+  assert.match(v18Migration, /scac_policy_epoch_snapshot_v17[(][)]/);
+  assert.match(v18Migration, /registry_version='scac-mutation-registry[.]v18'[^\n]+<>1515/);
+  assert.doesNotMatch(v18Migration, /^\s*(begin|commit)\s*;\s*$/im);
+  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS))
+    assert.ok(v18Migration.includes(`('${seal.version}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount})`));
+  // The domain half precedes the registry core and follows the pre-v18 preflight.
+  const domain = renderSourcedShapeForwardCorrectionDomainSql();
+  const preflightAt = v18Migration.indexOf("do $sourced_shape_forward_correction_preflight$");
+  const domainAt = v18Migration.indexOf(domain);
+  const coreAt = v18Migration.indexOf("-- SCAC-12: forward-only mutation registry v18 after sourced shape forward correction.");
+  assert.ok(preflightAt >= 0 && preflightAt < domainAt && domainAt < coreAt);
+  assert.equal(v18Migration.indexOf(domain, domainAt + 1), -1);
 });
 
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
   assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
-  assert.equal(migrations.length, 25);
+  assert.equal(migrations.length, 26);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491"]);
-  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 16);
-  assert.equal(paths.length, 41);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492"]);
+  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 17);
+  assert.equal(paths.length, 43);
 });
 
 test("the complete frontier renders when every generated target is absent", () => {
@@ -628,7 +682,7 @@ test("the complete frontier renders when every generated target is absent", () =
         GIT_WORK_TREE: isolatedRoot,
       },
     });
-    assert.match(stdout, /\(41 artifacts\)/);
+    assert.match(stdout, /\(43 artifacts\)/);
     for (const [target, expected] of Object.entries(frontier))
       assert.equal(fs.readFileSync(path.join(outputRoot, target), "utf8"), expected, target);
   } finally {
