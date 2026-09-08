@@ -32,10 +32,44 @@ SPEC.loader.exec_module(gate)
 TRIGGERS, MEMBERS, MAP_DIGEST = gate.load_packs()
 FAILURES: list[str] = []
 
+# HOST-EVIDENCE AUDIT IS OPT-IN. The replays near the bottom of this file bind
+# native Claude/Codex session transcripts by digest, and those files exist only
+# on the evidence-owning machine. That made this suite report a different
+# verdict per host: green wherever the files were absent, red wherever they were
+# present and no longer matched. Neither verdict was the suite's own to give.
+# The pins, the transcripts and the audit's semantics are unchanged — only WHEN
+# the audit runs. Ordinary CI is hermetic and reads no local evidence;
+# `--verify-host-evidence` runs the audit, and an audit whose evidence has
+# changed still FAILS, which is the point of pinning it.
+# OBSERVED, CAUSE NOT ESTABLISHED: the bytes of several pinned transcripts on
+# the evidence-owning machine differ from the recorded digests, and the change
+# is not confined to appended rows. Nothing here diagnoses why, and no
+# explanation should be inferred from this suite passing hermetically.
+_ARGUMENTS = sys.argv[1:]
+_UNKNOWN = [argument for argument in _ARGUMENTS if argument != "--verify-host-evidence"]
+if _UNKNOWN:
+    # A mistyped flag must never read as a passing audit.
+    raise SystemExit(f"unknown argument(s): {' '.join(_UNKNOWN)}")
+VERIFY_HOST_EVIDENCE = "--verify-host-evidence" in _ARGUMENTS
+
 
 def check(label: str, ok: bool, detail: str = "") -> None:
     if not ok:
         FAILURES.append(f"{label}{': ' + detail if detail else ''}")
+
+
+def host_evidence_required(path: Path) -> bool:
+    """Gate one host-evidence replay, and refuse to pass over absent evidence.
+
+    Ordinary CI never reads these files. Under the explicit audit, an absent
+    transcript is a failure rather than a skip: an audit that quietly verifies
+    nothing is indistinguishable from one that verified everything.
+    """
+    if not VERIFY_HOST_EVIDENCE:
+        return False
+    present = path.is_file()
+    check(f"host evidence is present to audit: {path.name}", present)
+    return present
 
 
 def user(text: str) -> dict:
@@ -379,16 +413,17 @@ for label, negative in skill_chain_negatives:
 # Only inert machine syntax is normalized.  A negated search glob is not vendor
 # work; typed receipt evidence keys are not governance or surface work.  The
 # surrounding commands remain visible and still trigger engineering work.
+metadata_payload = ("const receipt={schema_version:"
+                    "'engineering-slice-receipt.v1',artifact_refs:"
+                    "['artifact:red-test'],replacement_checkpoint_ref:"
+                    "'checkpoint:reissue'}; tools.exec_command({cmd:\"rg --files "
+                    "--glob '!vendor' && git status\"});")
 metadata_only = run([
     user("inspect the repository"),
     assistant_tool("mcp__carr__standing-context", {
         "packs": list(gate.ENGINEERING_WORKFLOW_PACKS)}),
     standing_context_result("shadow", list(gate.ENGINEERING_WORKFLOW_PACKS), []),
-    codex_tool("exec", "const receipt={schema_version:"
-               "'engineering-slice-receipt.v1',artifact_refs:"
-               "['artifact:red-test'],replacement_checkpoint_ref:"
-               "'checkpoint:reissue'}; tools.exec_command({cmd:\"rg --files "
-               "--glob '!vendor' && git status\"});"),
+    codex_tool("exec", metadata_payload),
 ])
 check("negated glob and receipt metadata do not create unrelated packs",
       set(metadata_only["needed"]) <= {
@@ -405,6 +440,12 @@ tampered_metadata = run([codex_tool(
 check("one-byte metadata payload change restores full lexical scanning",
       {"governance-rules", "records-intake", "surface-doctrine"}
       <= set(tampered_metadata["needed"]), str(tampered_metadata))
+# Normalization is bound to the tool identity as well as the bytes. The same
+# assertion exists in the host replay against the captured receipt payloads;
+# proving it here keeps the identity binding covered on every machine.
+check("pinned bytes under another tool identity fail closed",
+      "!vendor" in gate.custom_tool_text(
+          {"type": "custom_tool_call", "name": "other", "input": metadata_payload}))
 
 # Harness notifications are turn boundaries, not partner work. Walking backward
 # past one would pull stale work into a later agent action; scanning its static
@@ -736,6 +777,59 @@ for label, prefix, suffix in (
           "engineering-git" in implicit_execution["needed"],
           str(implicit_execution))
 
+# ── the two pin semantics, proven on bytes this repository owns ─────────────
+# The replays below bind native session files two different ways: the Codex
+# rollouts by WHOLE-FILE digest, and the Claude session by a line-count PREFIX
+# digest. Those files are host evidence, so the semantics themselves are proven
+# here on synthetic JSONL instead — mutation and truncation must break both
+# pins, and a lawful later append must break the whole-file pin while leaving
+# the prefix pin intact. This runs on every machine, including one where no
+# session transcript exists at all.
+with tempfile.TemporaryDirectory() as directory:
+    pinned_path = Path(directory) / "rollout-synthetic.jsonl"
+    original = b"".join(
+        json.dumps({"type": "response_item",
+                    "payload": {"type": "message", "role": "assistant",
+                                "content": [{"type": "output_text",
+                                             "text": f"row {n}"}]}},
+                   sort_keys=True).encode() + b"\n"
+        for n in range(1, 5))
+    PINNED_ROWS = 3
+
+    def pins(payload: bytes) -> tuple[str, str]:
+        """Whole-file and PINNED_ROWS-prefix digests of one candidate file."""
+        pinned_path.write_bytes(payload)
+        prefix = b"".join(pinned_path.read_bytes().splitlines(keepends=True)[:PINNED_ROWS])
+        return gate.file_sha256(pinned_path), hashlib.sha256(prefix).hexdigest()
+
+    whole_pin, prefix_pin = pins(original)
+    check("the whole-file pin is the digest of the pinned bytes",
+          whole_pin == hashlib.sha256(original).hexdigest())
+    check("the prefix pin covers only the pinned rows",
+          prefix_pin == hashlib.sha256(
+              b"".join(original.splitlines(keepends=True)[:PINNED_ROWS])).hexdigest())
+    check("a pinned file with no pinned rows would not be provable",
+          len(original.splitlines()) > PINNED_ROWS)
+
+    mutated_whole, mutated_prefix = pins(original.replace(b"row 2", b"row 9", 1))
+    check("one changed byte inside the pinned rows breaks the whole-file pin",
+          mutated_whole != whole_pin)
+    check("one changed byte inside the pinned rows breaks the prefix pin",
+          mutated_prefix != prefix_pin)
+
+    truncated_whole, truncated_prefix = pins(
+        b"".join(original.splitlines(keepends=True)[:2]))
+    check("truncation breaks the whole-file pin", truncated_whole != whole_pin)
+    check("truncation below the pinned rows breaks the prefix pin",
+          truncated_prefix != prefix_pin)
+
+    appended_whole, appended_prefix = pins(
+        original + json.dumps({"type": "event_msg"}).encode() + b"\n")
+    check("a lawful later append still breaks a WHOLE-FILE pin",
+          appended_whole != whole_pin)
+    check("a lawful later append leaves a PREFIX pin intact",
+          appended_prefix == prefix_pin)
+
 # On the evidence-owning machine, replay the immutable 69-record prefix that
 # produced event 10529812. The only hypothetical inputs are the landed
 # source-owned wrapper rail and its required four-pack readback; every original
@@ -743,7 +837,7 @@ for label, prefix, suffix in (
 exact_replay_path = Path(
     "/Users/booko/.codex/sessions/2026/08/26/"
     "rollout-2026-08-26T04-40-10-01a03d70-fd22-7e63-bbcf-78a0cee529fa.jsonl")
-if exact_replay_path.is_file():
+if host_evidence_required(exact_replay_path):
     exact_raw = exact_replay_path.read_bytes()
     check("event 10529812 transcript digest is immutable",
           gate.file_sha256(exact_replay_path)
@@ -802,7 +896,7 @@ engineering_replays = [
 codex_session_dir = Path("/Users/booko/.codex/sessions/2026/08/26")
 for event, filename, line_count, digest, expected_missing in engineering_replays:
     replay_path = codex_session_dir / filename
-    if not replay_path.is_file():
+    if not host_evidence_required(replay_path):
         continue
     check(f"event {event} transcript digest is immutable",
           gate.file_sha256(replay_path) == digest)
@@ -826,7 +920,7 @@ for event, filename, line_count, digest, expected_missing in engineering_replays
 claude_replay_path = Path(
     "/Users/booko/.claude/projects/-Users-booko-carr-system/"
     "48574aa2-9289-4e90-906c-b4f958806026.jsonl")
-if claude_replay_path.is_file():
+if host_evidence_required(claude_replay_path):
     claude_prefix = b"\n".join(
         claude_replay_path.read_bytes().splitlines()[:1081]) + b"\n"
     check("event 2b17ed65 immutable prefix is preserved",
@@ -936,4 +1030,13 @@ if FAILURES:
     for line in FAILURES:
         print(f"  {line}", file=sys.stderr)
     raise SystemExit(1)
-print("rule-pack-drift-gate-selftest: all cases passed")
+if VERIFY_HOST_EVIDENCE:
+    print("rule-pack-drift-gate-selftest: all cases passed, "
+          "INCLUDING the pinned host-evidence replays")
+else:
+    # Say the audit did not run. A hermetic pass proves the gate's behaviour;
+    # it proves nothing about the historical transcripts, and a reader who is
+    # not told that will assume it did.
+    print("rule-pack-drift-gate-selftest: all hermetic cases passed; "
+          "pinned host-evidence replays NOT audited "
+          "(run with --verify-host-evidence on the evidence-owning machine)")

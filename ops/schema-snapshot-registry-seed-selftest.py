@@ -42,6 +42,9 @@ RUNTIME_V17 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v17.generat
 RUNTIME_V18 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v18.generated.js").read_text(
     encoding="utf-8"
 )
+RUNTIME_V19 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v19.generated.js").read_text(
+    encoding="utf-8"
+)
 
 for table, key in (
     ("doctrine_gate_check", "check_key"),
@@ -70,7 +73,7 @@ assert GENERATOR.count("e.entry_digest is distinct from 'sha256:'||encode(public
 assert GENERATOR.count("ops.scac_mutation_registry_seal_valid(historical.registry_version)") >= 2
 for version in range(1, 9):
     assert GENERATOR.count(f"'scac-mutation-registry.v{version}'") >= 2
-assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 18)}
+assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 19)}
 assert all(len(value) == 71 and value.startswith("sha256:") for value in FULL_SET_SEALS.values())
 assert FULL_SET_SEALS["scac-mutation-registry.v10"] != "sha256:" + "0" * 64
 assert FULL_SET_SEALS["scac-mutation-registry.v12"] == (
@@ -90,6 +93,11 @@ assert "SCAC_EXPECTED_CURRENT_DIGEST" in GENERATOR
 assert "registry_digest='${SCAC_EXPECTED_CURRENT_DIGEST}'" in GENERATOR
 assert "SCAC_EXPECTED_CURRENT_SOURCE_SET" in GENERATOR
 assert "SCAC_EXPECTED_CURRENT_CATALOG" in GENERATOR
+assert "SCAC_CURRENT_NUMBER=19" in GENERATOR
+assert "SCAC_TOTAL_ENTRY_COUNT=27608" in GENERATOR
+assert "SCAC_CURRENT_ENTRY_COUNT=1520" in GENERATOR
+assert "SCAC_CURRENT_SOURCE_COUNT=828" in GENERATOR
+assert "ops.scac_mutation_catalog_v19_current()" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=18" in GENERATOR
 assert "SCAC_TOTAL_ENTRY_COUNT=26088" in GENERATOR
 assert "SCAC_CURRENT_ENTRY_COUNT=1515" in GENERATOR
@@ -134,7 +142,7 @@ numeric_registry_order = (
     "split_part(registry_version,'.v',2)::integer)"
 )
 assert numeric_registry_order in GENERATOR
-versions = [f"scac-mutation-registry.v{version}" for version in range(1, 19)]
+versions = [f"scac-mutation-registry.v{version}" for version in range(1, 20)]
 assert sorted(versions, key=lambda value: int(value.rsplit("v", 1)[1])) == versions
 assert sorted(versions) != versions
 
@@ -144,13 +152,13 @@ loader_start = GENERATOR.index("SCAC_FULL_SET_SQL=\"$(node -e '\n") + len(
 loader_end = GENERATOR.index("\n  ' \"$SCAC_FULL_SET_SEALS\" \"$SCAC_FULL_SET_SEAL_COUNT\")\"", loader_start)
 loader = GENERATOR[loader_start:loader_end]
 loaded_sql = subprocess.run(
-    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "17"],
+    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "18"],
     check=True,
     capture_output=True,
     text=True,
 ).stdout
-assert loaded_sql.count("scac-mutation-registry.v") == 17
-assert loaded_sql.count("sha256:") == 17
+assert loaded_sql.count("scac-mutation-registry.v") == 18
+assert loaded_sql.count("sha256:") == 18
 
 def runtime_seal(source: str, name: str) -> str:
     match = re.search(rf'^export const {name} = "([0-9a-f]{{64}})";$', source, re.MULTILINE)
@@ -158,7 +166,7 @@ def runtime_seal(source: str, name: str) -> str:
     return match.group(1)
 
 
-runtime_seals = {name: runtime_seal(RUNTIME_V18, name) for name in (
+runtime_seals = {name: runtime_seal(RUNTIME_V19, name) for name in (
     "SCAC_MUTATION_REGISTRY_DIGEST",
     "SCAC_MUTATION_SOURCE_CONTRACT_SET_DIGEST",
     "SCAC_MUTATION_DB_CATALOG_BASELINE_DIGEST",
@@ -171,7 +179,7 @@ validation_env = {
     "SCAC_EXPECTED_CURRENT_DIGEST": runtime_seals["SCAC_MUTATION_REGISTRY_DIGEST"],
     "SCAC_EXPECTED_CURRENT_SOURCE_SET": runtime_seals["SCAC_MUTATION_SOURCE_CONTRACT_SET_DIGEST"],
     "SCAC_EXPECTED_CURRENT_CATALOG": runtime_seals["SCAC_MUTATION_DB_CATALOG_BASELINE_DIGEST"],
-    "SCAC_CURRENT_NUMBER": "18",
+    "SCAC_CURRENT_NUMBER": "19",
 }
 subprocess.run(["sh", "-c", validation], check=True, env=validation_env)
 
@@ -192,4 +200,7 @@ print("schema snapshot registry seeds: public-qualified and rebuild-safe")
 assert FULL_SET_SEALS["scac-mutation-registry.v16"] == "sha256:605e5566322523db7606375f01931e15379225cd26367d76581df17575c6eebc"
 assert FULL_SET_SEALS["scac-mutation-registry.v17"] == (
     "sha256:bbcf8140e89da1b4b7f7cfced199ddd2fa11c110bdbad2852f562742625e2c16"
+)
+assert FULL_SET_SEALS["scac-mutation-registry.v18"] == (
+    "sha256:c4666a4bf4e06ddb9254a319ae19ad67b3a6c10590a994da7aa26481b73bc0c4"
 )

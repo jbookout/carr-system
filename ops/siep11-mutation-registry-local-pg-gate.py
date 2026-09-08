@@ -8,7 +8,11 @@ from __future__ import annotations
 import os
 import json
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+import psycopg
 
 from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connection, set_local_role
 from scac_mutation_db_inventory import project, summarize
@@ -26,6 +30,40 @@ JOB_DEFINITION_CATALOG = {
 def fail(message: str) -> int:
     print(f"siep11-mutation-registry-local-pg-gate: FAIL — {message}", file=sys.stderr)
     return 1
+
+
+def validate_incident_work_request_same_key_serialization(dsn: str) -> None:
+    """The WR69 handler takes this lock before withEnvelope reads replay state.
+
+    The JS unit test proves that call order. This disposable-Postgres check
+    proves that two real transactions using the same key cannot cross that
+    boundary together.
+    """
+    uppercase_input = "A0B0C0D0-E0F0-4A00-8B00-C00000000069"
+    key = uppercase_input.lower()
+    case_variant = uppercase_input.lower()  # the handler's UUID normalization
+    second_started = threading.Event()
+
+    def acquire_second() -> bool:
+        with psycopg.connect(dsn, autocommit=False) as second:
+            second_started.set()
+            second.execute(
+                "select pg_advisory_xact_lock(hashtextextended(%s,0))", (case_variant,)
+            )
+            second.rollback()
+        return True
+
+    with psycopg.connect(dsn, autocommit=False) as first:
+        first.execute("select pg_advisory_xact_lock(hashtextextended(%s,0))", (key,))
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            waiting = pool.submit(acquire_second)
+            if not second_started.wait(timeout=2):
+                raise RuntimeError("second same-key transaction did not start")
+            if waiting.done():
+                raise RuntimeError("same-key transaction crossed the pre-envelope lock")
+            first.rollback()
+            if waiting.result(timeout=5) is not True:
+                raise RuntimeError("same-key transaction did not continue after lock release")
 
 
 def refusal(cur, query: str, params: tuple, fragment: str) -> None:
@@ -94,6 +132,7 @@ def main() -> int:
     if not dsn:
         return fail("DATABASE_URL or CARR_LOCAL_PG_DSN is required")
     try:
+        validate_incident_work_request_same_key_serialization(dsn)
         registry = json.loads((REPO / "ops/config/control-plane-scheduler-cutover.v1.json").read_text(encoding="utf-8"))
         manifest = json.loads((REPO / "ops/config/control-plane-workflows.v1.json").read_text(encoding="utf-8"))
         services = json.loads((REPO / "ops/config/services.json").read_text(encoding="utf-8"))
@@ -137,7 +176,7 @@ def main() -> int:
             ).fetchone()
             digest = version[0]
             runtime_version = successor[0] if successor is not None else "scac-mutation-registry.v1"
-            if runtime_version not in {"scac-mutation-registry.v2", "scac-mutation-registry.v3", "scac-mutation-registry.v4", "scac-mutation-registry.v5", "scac-mutation-registry.v6", "scac-mutation-registry.v7", "scac-mutation-registry.v8", "scac-mutation-registry.v9", "scac-mutation-registry.v10", "scac-mutation-registry.v11", "scac-mutation-registry.v12", "scac-mutation-registry.v13", "scac-mutation-registry.v14", "scac-mutation-registry.v15", "scac-mutation-registry.v16", "scac-mutation-registry.v17", "scac-mutation-registry.v18"}:
+            if runtime_version not in {"scac-mutation-registry.v2", "scac-mutation-registry.v3", "scac-mutation-registry.v4", "scac-mutation-registry.v5", "scac-mutation-registry.v6", "scac-mutation-registry.v7", "scac-mutation-registry.v8", "scac-mutation-registry.v9", "scac-mutation-registry.v10", "scac-mutation-registry.v11", "scac-mutation-registry.v12", "scac-mutation-registry.v13", "scac-mutation-registry.v14", "scac-mutation-registry.v15", "scac-mutation-registry.v16", "scac-mutation-registry.v17", "scac-mutation-registry.v18", "scac-mutation-registry.v19"}:
                 raise RuntimeError(f"unsupported live successor {runtime_version!r}")
             lookup_function = f"ops.scac_mutation_registration_{runtime_version.rsplit('.', 1)[1]}"
             runtime_digest = cur.execute(
