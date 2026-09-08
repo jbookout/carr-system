@@ -125,8 +125,8 @@ SOURCE_MERGE_TOKEN = re.compile(r"source[_-]merge", re.IGNORECASE)
 RUNBOOK_STORE_KEY = "carr_engineering_runbook_body_v1"
 RUNBOOK_CHUNK_CHARS = 4000
 ENGINEERING_SOURCE_HELPER_PATH = HERE / "engineering_source_projection.js"
-ENGINEERING_SOURCE_HELPER_SHA256 = "d9a0d7383ec63938a78838aa27f57a1b37985f3d9f1cbd55de2e3ea8f372cee9"
-ENGINEERING_SOURCE_HELPER_BYTE_LENGTH = 11_297
+ENGINEERING_SOURCE_HELPER_SHA256 = "3cd0cd7f1ef18940dd5232bd3a72611618b0137b398e86ffc974777bc64294a4"
+ENGINEERING_SOURCE_HELPER_BYTE_LENGTH = 17068
 def _engineering_source_helper_read_command(path: Path) -> str:
     reader = (
         "import hashlib,json,pathlib;"
@@ -238,6 +238,31 @@ GITHUB_GIT_COMMAND_PREFIX = (
 )
 
 
+# A pointer to operator-authored restrictions, not a caller-selected authority.
+# The live revision must bind the exact envelope before the child may use it.
+R09_ASSIGNMENT = {
+    "section_id": "4b671fec-bc0b-4dad-a91d-2f154e0b6f7b",
+    "scope_section_id": "dcc241e4-9454-49a4-8e62-839d25a0c449",
+    "scope_sha256": "3e854d36d91f5bba3540274417f45838682d1d149ba6d856de9f683d74ceaa6e",
+    "packet_section_id": "5845e7b4-3b51-431a-835f-51d21c06977d",
+    "packet_sha256": "4a34daafdbce5fa95dbcdb0bc12e40e255ed7ca328afe4bf528a322b789faeda",
+    # Return constraints derived from that pinned scope; native hydration
+    # cross-checks them against the current record before any repository work.
+    "expected_worktree_ref": "worktree:sha256:4fdd7e2e37d820d398d38225de2960380b715527f5e962f1d1e6dbad3cdf3b1b",
+    "expected_branch_ref": "branch:sha256:88653a24843986c51ca26c9025a1466463f4e5c9717a07ba84c76afd13995449",
+}
+GITHUB_WORKTREE_COMMAND_PREFIX = (
+    GITHUB_GIT_COMMAND_PREFIX + " -c 'alias.carr-worktree=!./run.sh worktree' carr-worktree"
+)
+ASSIGNMENT_NATIVE_CHUNK_JS = RUNBOOK_NATIVE_CHUNK_JS.replace(
+    "carr_engineering_runbook_body_v1", "carr_engineering_assignment_body_v1"
+).replace("engineering-runbook-native-chunk.v1", "engineering-assignment-native-chunk.v1").replace(
+    "engineering runbook native store", "engineering assignment native store"
+).replace(
+    'provenance:"native_call_tool_result"', 'provenance:"derived_from_verified_native_records"'
+)
+
+
 class DispatchRefusal(RuntimeError):
     pass
 
@@ -263,6 +288,47 @@ def source_hydration_binding(task: dict, plan: dict, slice_row: dict) -> dict:
         "slice_ref": task["slice_ref"],
         "source_merge_required": slice_requires_source_merge(slice_row),
     }
+
+
+def bind_operator_assignment(binding: dict, task: dict, envelope: dict) -> dict:
+    """Only the reviewed WR70/R09 route may resolve this stable section pointer."""
+    if binding["work_request_ref"] == "WR-000070" and binding["slice_ref"] == "R09":
+        if not isinstance(task.get("attempt_id"), str) or not task["attempt_id"].strip():
+            raise DispatchRefusal("engineering controller task has no attempt id")
+        if binding["accepted_plan_revision"] != {
+            "id": "PLAN-745ea4f7e374-v1", "revision": 1,
+            "digest": "sha256:745ea4f7e3745c86ee6aae273e5ec915a539493f4a1b0dafe2144b7d3d70eb60",
+        }:
+            raise DispatchRefusal("R09 assignment route requires its exact accepted plan")
+        binding = {**binding, "operator_assignment": {
+            **R09_ASSIGNMENT, "envelope_id": envelope["envelope_id"],
+            "envelope_digest": engineering_passport.base.execution_envelope_digest(envelope),
+            "attempt_id": task["attempt_id"],
+        }}
+    return binding
+
+
+def require_assignment_return(receipt: dict, binding: dict) -> None:
+    """A completed claim must describe the worktree and branch in the pinned scope.
+
+    Blocked reports may truthfully describe a failed/pre-existing checkout. This
+    does not prove a clean diff: exact-head changed-path review remains required.
+    """
+    assignment = binding.get("operator_assignment")
+    if assignment and receipt["outcome"] == "claimed_complete":
+        source = receipt["source_evidence"]
+        if (source["worktree_ref"] != assignment["expected_worktree_ref"]
+                or source["branch_ref"] != assignment["expected_branch_ref"]):
+            raise DispatchRefusal("completed receipt source does not match the dispatcher assignment")
+
+
+def validate_receipt_document(value: dict) -> dict:
+    """Read-only preflight using the same validator as the dispatch boundary."""
+    if not isinstance(value, dict) or set(value) != {"receipt", "plan", "envelope"}:
+        raise DispatchRefusal("receipt preflight requires receipt, plan and envelope")
+    engineering_passport.validate_engineering_slice_receipt(
+        value["receipt"], value["plan"], value["envelope"])
+    return {"ok": True, "validation": "engineering-slice-receipt.v1", "persisted": False}
 
 
 def engineering_source_loader_js(binding: dict) -> str:
@@ -408,7 +474,7 @@ def _read_request() -> dict:
 
 
 def _prompt(packet: dict, task: dict, source_loader_js: str, receipt_template: dict,
-            source_merge_required: bool) -> str:
+            source_merge_required: bool, source_envelope: dict) -> str:
     """One exact execution request.  The executor cannot select authority."""
     source_merge_note = (
         "The accepted slice names source_merge: the projection carries the exact accepted "
@@ -460,6 +526,15 @@ def _prompt(packet: dict, task: dict, source_loader_js: str, receipt_template: d
         "before the runbook is fully read.\n\n"
         "RUNBOOK NATIVE CHUNK CODE (repeat until remaining=0):\n"
         f"{RUNBOOK_NATIVE_CHUNK_JS}\n\n"
+        "When the source projection has operator_assignment, it is the exact dispatcher restriction for "
+        "this envelope. Before selecting or creating a worktree, read its complete supplemental scope and "
+        "implementation packet using the following chunk code until remaining=0. Its specific worktree "
+        "creation method supersedes historical examples in the packets. Missing/stale/mismatched assignment "
+        "is a hard refusal; never invent a name or use another worktree.\n\n"
+        f"ASSIGNMENT CHUNK CODE (only when operator_assignment is present):\n{ASSIGNMENT_NATIVE_CHUNK_JS}\n\n"
+        "For an assigned worktree, first verify a fresh GitHub origin/main equals source_main; create ONLY "
+        "the assigned helper_name, then rename to the assigned branch. Verify the registered path, branch, "
+        "clean HEAD and standard plumbing before edits. Only assignment.paths may change.\n\n"
         "The controller—not you—owns the database lease, identity, authority, and lifecycle. "
         "Do not connect directly to any database, do not claim/retry/complete a job, do not reuse a session, "
         "and do not widen the accepted slice. Work only inside the controller's isolated Git worktree.\n\n"
@@ -485,6 +560,12 @@ def _prompt(packet: dict, task: dict, source_loader_js: str, receipt_template: d
         "desk, model, or envelope. This route is not push authorization: a push is authorized only by the "
         "envelope's allowed actions and is proven only when the actual command succeeds. If the command fails, "
         "stop and return a typed blocked receipt naming the failure.\n\n"
+        "WORKTREE HELPER AUTH: direct Git -c options do not reach a separately invoked shell script. "
+        "Invoke the sanctioned helper through this exact per-command Git shell alias, which propagates "
+        "those same options to its nested fetch without changing any config file: "
+        f"`{GITHUB_WORKTREE_COMMAND_PREFIX} <assigned-helper-name> --from <verified-source-main>`. "
+        "Run from the canonical repository. Do not invoke plain run.sh worktree in the child. An internal "
+        "fetch warning is a refusal even when the helper returns zero; preserve any created tree.\n\n"
         "Complete the bounded slice below. Run the declared checks and preserve any unrelated dirty work. "
         "If the work cannot be completed within the envelope, return a typed failed or blocked receipt; do not "
         "invent success. Your final response must be a single JSON object and nothing else: an exact "
@@ -496,11 +577,24 @@ def _prompt(packet: dict, task: dict, source_loader_js: str, receipt_template: d
         f"{json.dumps(receipt_template, sort_keys=True, separators=(',', ':'))}\n"
         "Start from this template. Replace every null placeholder at exactly these paths with the value you "
         f"truthfully observed: {', '.join(RECEIPT_TEMPLATE_PLACEHOLDER_PATHS)}. "
+        "source_evidence.worktree_ref and branch_ref are opaque identifiers, NEVER paths or raw branch "
+        "names: for each actually observed path/name use worktree:sha256:<lowercase SHA256 of UTF-8 path> "
+        "and branch:sha256:<lowercase SHA256 of UTF-8 branch name>. These labels describe observations, "
+        "not authority. If setup stopped before an observation, use worktree:unobserved, branch:unobserved, "
+        "and source_sha=unobserved for the respective unknown fields; never claim existence or a commit "
+        "you did not inspect. The identifier grammar is ^[A-Za-z][A-Za-z0-9._:-]{2,127}$. "
+        "Before responding, run this exact read-only preflight command: "
+        f"`{shlex.quote(str(REPO / '.venv' / 'bin' / 'python'))} "
+        f"{shlex.quote(str(HERE / 'engineering_dispatch_adapter.py'))} --validate-receipt` "
+        "with JSON stdin containing exactly receipt, plan (CONTROLLER TASK engineering_plan), and envelope "
+        "(RECEIPT VALIDATION SOURCE ENVELOPE below). It validates without persisting. Fix only the current "
+        "unsubmitted report from observed facts; never repair/import a prior attempt receipt. "
         "Keep every field name exactly as written, add no field, drop no field, and locally check your final "
         "object against the template's field names before answering. Move a check from not_run only to a "
         "state you actually reached, attach evidence digests only for evidence you actually produced, and "
         "never invent evidence, artifacts, deviations, or passed checks. Leave outcome blocked unless the "
         "accepted definition of done is truly met or the work truly failed.\n\n"
+        f"RECEIPT VALIDATION SOURCE ENVELOPE (immutable, original digest authority):\n{json.dumps(source_envelope, sort_keys=True, separators=(',', ':'))}\n\n"
         f"SERVER-ISSUED SLICE PACKET (immutable):\n{json.dumps(packet, sort_keys=True, separators=(',', ':'))}\n\n"
         f"CONTROLLER TASK BINDING (immutable):\n{json.dumps(task, sort_keys=True, separators=(',', ':'))}"
     )
@@ -588,7 +682,7 @@ def run(request: dict, *, dispatch_fn=dispatch.dispatch, registry: desks.Registr
     packet = engineering_passport.build_engineering_slice_packet(envelope, plan, task["slice_ref"])
     if packet["slice_ref"] != slice_row.get("slice_ref") or task.get("plan_digest") != packet["plan_digest"]:
         raise DispatchRefusal("engineering controller task does not match its accepted packet")
-    hydration = source_hydration_binding(task, plan, slice_row)
+    hydration = bind_operator_assignment(source_hydration_binding(task, plan, slice_row), task, envelope)
     receipt_template = build_engineering_slice_receipt_template(
         packet, task, envelope, slice_row, request["executor_slug"])
     _require_dispatch_runway(envelope, task.get("claim_lease_expires_at"))
@@ -600,7 +694,7 @@ def run(request: dict, *, dispatch_fn=dispatch.dispatch, registry: desks.Registr
     row = dispatch_fn(
         request["desk"],
         _prompt(packet, prompt_task, engineering_source_loader_js(hydration), receipt_template,
-                hydration["source_merge_required"]),
+                hydration["source_merge_required"], envelope),
         env=_safe_child_env(), fresh=True,
         config_overrides=AUTHORIZED_CODEX_CONFIG_OVERRIDES,
     )
@@ -612,6 +706,7 @@ def run(request: dict, *, dispatch_fn=dispatch.dispatch, registry: desks.Registr
     except json.JSONDecodeError as exc:
         raise DispatchRefusal("engineering desk did not return one JSON receipt") from exc
     engineering_passport.validate_engineering_slice_receipt(receipt, plan, envelope)
+    require_assignment_return(receipt, hydration)
     attribution = receipt.get("attribution")
     identity = envelope.get("server_binding", {}).get("identity", {})
     adapter_binding = envelope.get("server_binding", {}).get("adapter", {})
@@ -635,6 +730,24 @@ def run(request: dict, *, dispatch_fn=dispatch.dispatch, registry: desks.Registr
 
 def main() -> int:
     try:
+        if sys.argv[1:] == ["--validate-receipt"]:
+            raw = sys.stdin.read(1_000_001)
+            if len(raw) > 1_000_000:
+                raise DispatchRefusal("receipt preflight input is too large")
+            try:
+                value = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise DispatchRefusal("receipt preflight input is not JSON") from exc
+            try:
+                result = validate_receipt_document(value)
+            except (DispatchRefusal, engineering_passport.EngineeringContractError) as exc:
+                # This read-only mode receives no credentials and echoes no input
+                # values; validator diagnostics name the failing contract field.
+                print(json.dumps({"ok": False, "error": type(exc).__name__,
+                                  "detail": str(exc)}, separators=(",", ":")), file=sys.stderr)
+                return 1
+            print(json.dumps(result, separators=(",", ":")))
+            return 0
         if sys.argv[1:] == ["--preflight"]:
             entry = _dedicated_codex_desk(desks.Registry(DEDICATED_REGISTRY_PATH))
             print(json.dumps({"ok": True, "desk": {key: entry[key] for key in

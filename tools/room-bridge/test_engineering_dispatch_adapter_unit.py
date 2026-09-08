@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -131,6 +132,21 @@ def valid_receipt(envelope: dict = ENVELOPE) -> dict:
         "executor_claim": {"claim_state": "executor_claim", "claimed_by": "codex", "claimed_at": "2026-08-25T18:00:00Z"},
         "independent_verification_required": True,
     }
+
+
+def valid_blocked_receipt(envelope: dict = ENVELOPE) -> dict:
+    receipt = valid_receipt(envelope)
+    receipt["checks"] = [
+        {"check_ref": row["check_ref"], "state": "not_run", "evidence_refs": []}
+        for row in PLAN["slices"][0]["planned_checks"]
+    ]
+    receipt["outcome"] = "blocked"
+    receipt["artifact_refs"] = []
+    receipt["evidence_refs"] = []
+    receipt["actual_resource_refs"] = []
+    receipt["actual_component_refs"] = []
+    receipt["source_evidence"]["evidence_refs"] = []
+    return receipt
 
 
 def request() -> dict:
@@ -279,6 +295,18 @@ def test_success_is_fresh_and_database_capability_is_not_forwarded():
         "-c 'credential.helper=!gh auth git-credential' -c credential.interactive=never "
         "-c core.askPass=/bin/false")
     assert "REPOSITORY NETWORK AUTH (per command, exact):" in seen["prompt"]
+    assert adapter.GITHUB_WORKTREE_COMMAND_PREFIX in seen["prompt"]
+    assert "WORKTREE HELPER AUTH:" in seen["prompt"]
+    assert "ASSIGNMENT CHUNK CODE" in seen["prompt"]
+    assert adapter.ASSIGNMENT_NATIVE_CHUNK_JS in seen["prompt"]
+    assert "worktree:sha256:" in seen["prompt"]
+    assert "^[A-Za-z][A-Za-z0-9._:-]{2,127}$" in seen["prompt"]
+    assert "--validate-receipt`" in seen["prompt"]
+    assert str(adapter.HERE / "engineering_dispatch_adapter.py") in seen["prompt"]
+    validation_envelope = seen["prompt"].split(
+        "RECEIPT VALIDATION SOURCE ENVELOPE (immutable, original digest authority):\n", 1)[1].split(
+        "\n\nSERVER-ISSUED SLICE PACKET", 1)[0]
+    assert json.loads(validation_envelope) == request()["envelope"]
     assert f"`{adapter.GITHUB_GIT_COMMAND_PREFIX} <subcommand>`" in seen["prompt"]
     assert "passing these `-c` overrides on that one command only" in seen["prompt"]
     assert "Never run `git config`, never edit `.git/config` or `~/.gitconfig`" in seen["prompt"]
@@ -309,6 +337,58 @@ def test_success_is_fresh_and_database_capability_is_not_forwarded():
         prompt_prefix + task_marker
         + json.dumps(unbound_task, sort_keys=True, separators=(",", ":")))
     assert rule_pack_gate.engineering_workflow_packs(unbound_prompt) == []
+
+
+def test_worktree_alias_passes_sanctioned_git_config_to_nested_fetch_boundary():
+    with tempfile.TemporaryDirectory() as directory:
+        repo = Path(directory)
+        initialized = subprocess.run(
+            ["git", "init", "-q"], cwd=repo, capture_output=True, text=True, check=False)
+        assert initialized.returncode == 0, initialized.stderr
+        local_config = repo / ".git" / "config"
+        before = local_config.read_bytes()
+        capture = repo / "nested-git-config.json"
+        fake_helper = repo / "run.sh"
+        fake_helper.write_text("""#!/usr/bin/env python3
+import json
+import os
+import subprocess
+import sys
+
+def values(key):
+    result = subprocess.run(
+        ["git", "config", "--get-all", key], capture_output=True, text=True, check=False)
+    if result.returncode not in (0, 1):
+        raise SystemExit(result.returncode)
+    return result.stdout.splitlines()
+
+payload = {
+    "argv": sys.argv[1:],
+    "rewrite": values("url.https://github.com/.insteadOf"),
+    "credential_helper": values("credential.helper"),
+    "credential_interactive": values("credential.interactive"),
+    "askpass": values("core.askPass"),
+}
+with open(os.environ["CARR_TEST_NESTED_GIT_CAPTURE"], "w", encoding="utf-8") as stream:
+    json.dump(payload, stream, sort_keys=True)
+""")
+        fake_helper.chmod(0o755)
+        environment = os.environ.copy()
+        environment["CARR_TEST_NESTED_GIT_CAPTURE"] = str(capture)
+        command = shlex.split(adapter.GITHUB_WORKTREE_COMMAND_PREFIX) + [
+            "proof-tree", "--from", "deadbeef"]
+        invoked = subprocess.run(
+            command, cwd=repo, env=environment, capture_output=True, text=True, check=False)
+        assert invoked.returncode == 0, invoked.stderr
+        assert local_config.read_bytes() == before
+        observed = json.loads(capture.read_text())
+        assert observed["argv"] == ["worktree", "proof-tree", "--from", "deadbeef"]
+        assert observed["rewrite"][-1:] == ["git@github.com:"]
+        # A machine helper may precede these rows, but the empty value resets
+        # that inherited list before the sanctioned gh helper is selected.
+        assert observed["credential_helper"][-2:] == ["", "!gh auth git-credential"]
+        assert observed["credential_interactive"][-1:] == ["never"]
+        assert observed["askpass"][-1:] == ["/bin/false"]
 
 
 def test_native_standing_context_projection_stays_bounded_and_chunks_every_rule():
@@ -728,7 +808,7 @@ def synthetic_doctrine(runbook_body: str, *, current_version="2", status="active
 
 
 def execute_source_projection(binding: dict, source_response: dict, doctrine_response: dict,
-                              *, helper_sha256: str | None = None,
+                              assignment_response: dict | None = None, *, helper_sha256: str | None = None,
                               helper_byte_length: int | None = None,
                               helper_exit_code: int = 0) -> dict:
     """Run the exact loader, tracked helper, and chunk loop at the JavaScript seam.
@@ -745,6 +825,8 @@ def execute_source_projection(binding: dict, source_response: dict, doctrine_res
     }
     harness = f'''const sourceResponse = {json.dumps(source_response)};
 const doctrineResponse = {json.dumps(doctrine_response)};
+const assignmentResponse = {json.dumps(assignment_response)};
+const assignmentSectionId = {json.dumps((binding.get("operator_assignment") or {}).get("section_id"))};
 const helperPayload = {json.dumps(helper_payload)};
 const helperExitCode = {helper_exit_code};
 for (const name of ["crypto", "TextEncoder", "Buffer", "require"]) {{
@@ -758,7 +840,12 @@ const output = [];
 const tools = {{
   exec_command: async (input) => {{ helperReads.push(input); return {{exit_code:helperExitCode,output:JSON.stringify(helperPayload),stderr:""}}; }},
   mcp__carr__engineering_passport_source: async (input) => {{ calls.push(["engineering_passport_source", input]); return {{content:[{{type:"text",text:JSON.stringify(sourceResponse)}}]}}; }},
-  mcp__carr__doctrine_sections: async (input) => {{ calls.push(["doctrine_sections", input]); return {{content:[{{type:"text",text:JSON.stringify(doctrineResponse)}}]}}; }},
+  mcp__carr__doctrine_sections: async (input) => {{
+    calls.push(["doctrine_sections", input]);
+    const response = assignmentSectionId && Array.isArray(input?.section_ids)
+      && input.section_ids.includes(assignmentSectionId) ? assignmentResponse : doctrineResponse;
+    return {{content:[{{type:"text",text:JSON.stringify(response)}}]}};
+  }},
 }};
 const store = (key, value) => state.set(key, value);
 const load = (key) => state.get(key);
@@ -770,10 +857,18 @@ const run = async (source) => await new AsyncFunction(
 let error = null;
 try {{
   await run({json.dumps(adapter.engineering_source_loader_js(binding))});
-  let remaining = JSON.parse(output[0]).runbook.body_chars;
+  const projection = JSON.parse(output[0]);
+  let remaining = projection.runbook.body_chars;
   while (remaining > 0) {{
     await run({json.dumps(adapter.RUNBOOK_NATIVE_CHUNK_JS)});
     remaining = JSON.parse(output[output.length - 1]).remaining;
+  }}
+  if (projection.operator_assignment) {{
+    let assignmentRemaining = 1;
+    while (assignmentRemaining > 0) {{
+      await run({json.dumps(adapter.ASSIGNMENT_NATIVE_CHUNK_JS)});
+      assignmentRemaining = JSON.parse(output[output.length - 1]).remaining;
+    }}
   }}
 }} catch (caught) {{
   error = String(caught && caught.message || caught);
@@ -1140,6 +1235,51 @@ def test_captured_wr68_source_and_runbook_hydrate_the_exact_fourteen_paths():
     assert "".join(row["text"] for row in result["output"][1:]) == body
     assert result["output"][-1]["remaining"] == 0
     assert "preimage" not in json.dumps(result["output"])
+
+
+def test_receipt_preflight_accepts_typed_outcomes_and_rejects_raw_paths_or_schema_drift():
+    for receipt in (valid_receipt(), valid_blocked_receipt()):
+        assert adapter.validate_receipt_document({
+            "receipt": receipt, "plan": PLAN, "envelope": ENVELOPE,
+        }) == {
+            "ok": True,
+            "validation": "engineering-slice-receipt.v1",
+            "persisted": False,
+        }
+
+    invalid_refs = (
+        ("worktree_ref", "/Users/booko/carr-system/.claude/worktrees/r09-runtime-isolation"),
+        ("branch_ref", "codex/wr70-r09-runtime-isolation"),
+    )
+    for field, raw_value in invalid_refs:
+        receipt = valid_blocked_receipt()
+        receipt["source_evidence"][field] = raw_value
+        try:
+            adapter.validate_receipt_document({
+                "receipt": receipt, "plan": PLAN, "envelope": ENVELOPE,
+            })
+        except passport.EngineeringContractError as exc:
+            assert "source_evidence" in str(exc) and "identifier" in str(exc)
+        else:
+            raise AssertionError(f"raw {field} crossed the receipt preflight")
+
+    drifted = valid_receipt()
+    drifted["worktree_ref"] = "worktree:invented-top-level-field"
+    try:
+        adapter.validate_receipt_document({
+            "receipt": drifted, "plan": PLAN, "envelope": ENVELOPE,
+        })
+    except passport.EngineeringContractError as exc:
+        assert "unknown fields" in str(exc)
+    else:
+        raise AssertionError("off-schema receipt crossed the receipt preflight")
+
+    try:
+        adapter.validate_receipt_document({"receipt": valid_receipt(), "plan": PLAN})
+    except adapter.DispatchRefusal as exc:
+        assert "requires receipt, plan and envelope" in str(exc)
+    else:
+        raise AssertionError("incomplete preflight document reached the receipt validator")
 
 
 def test_receipt_template_fills_to_a_valid_blocked_receipt_and_the_captured_receipt_stays_rejected():
