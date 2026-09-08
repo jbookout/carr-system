@@ -48,6 +48,8 @@ export const REGISTRY_V16_VERSION = "scac-mutation-registry.v16";
 export const REGISTRY_V17_VERSION = "scac-mutation-registry.v17";
 // v18 binds the WR-000068 sourced shape forward-correction surface after the v17 seal.
 export const REGISTRY_V18_VERSION = "scac-mutation-registry.v18";
+// v19 binds WR-000069's incident/work-request evidence edge after the v18 seal.
+export const REGISTRY_V19_VERSION = "scac-mutation-registry.v19";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -85,6 +87,7 @@ export const HISTORICAL_REGISTRY_SEALS = Object.freeze({
   v15: Object.freeze({ version: REGISTRY_V15_VERSION, digest: "sha256:5f81f4579cf584a1807715f68b8297ddc4a5997a2c20906ef5300672d195360f", entryCount: 1499, sourceEntryCount: 825 }),
   v16: Object.freeze({ version: REGISTRY_V16_VERSION, digest: "sha256:d5418b025506b131252ddb214d75c2e1f995235db8b72ac56765485ccb5a1a54", entryCount: 1503, sourceEntryCount: 825 }),
   v17: Object.freeze({ version: REGISTRY_V17_VERSION, digest: "sha256:5aab15679a2d26207210bde3e16be265301b9c69816e08dc90b2f2e8a48c7db2", entryCount: 1509, sourceEntryCount: 827 }),
+  v18: Object.freeze({ version: REGISTRY_V18_VERSION, digest: "sha256:680d42c68be736fe3f227019e3a4afd3e0aad53ed63d115db1fbb0467ea884c8", entryCount: 1515, sourceEntryCount: 827 }),
 });
 export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
   "migrations/0454_siep11_mutation_registry.sql": "7985d42b9b36964b33503f4ff42d332e6bcce085217f06464a9d6abf58126bdd",
@@ -121,6 +124,8 @@ export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
   "mcp-server/src/scac-mutation-registry.v16.generated.js": "2bdcf517c9e2c418a20a75e742805686f1b6c83afbbc1fa070af0a2874018315",
   "migrations/0491_backup_guard_status_registry_activation.sql": "49129915fe40f41400c5fc769f82633b2da68949a29d193329fba2c6016e3913",
   "mcp-server/src/scac-mutation-registry.v17.generated.js": "5a1945eea59704fe7f1200937215be9f4fba6fda3a65d5a4321df9245873432d",
+  "migrations/0492_sourced_shape_forward_correction_and_scac_successor.sql": "3c38ac9b0b22984603f58838aabcf97094e451ad166bc8526b09273f3f9755c6",
+  "mcp-server/src/scac-mutation-registry.v18.generated.js": "980da606f08812d7f256427ca2f64a0209b8652cef834b4cf69de7a6f2afc59f",
 });
 // WR-000068 rebases four Production-applied consumers of the sourced shape
 // columns on the effective receipt-backed lineage. The v18 generator reads the
@@ -344,6 +349,14 @@ export const SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE = Obje
   // grants (carr_reader, carr_writer); read back from the complete disposable
   // 0492 successor, never from Production or a caller.
   secdef_execute: { count: 381, digest: "sha256:71595cc691e0c48d139a843f6aae5ddd5b72f428a91821741c1ac830e8a6ff75" },
+});
+export const INCIDENT_WORK_REQUEST_LINK_PRE_V19_DB_CATALOG_BASELINE =
+  SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE;
+export const INCIDENT_WORK_REQUEST_LINK_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
+  ...INCIDENT_WORK_REQUEST_LINK_PRE_V19_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v19",
+  // Filled from the complete disposable-Postgres 0493 successor readback.
+  secdef_execute: { count: 385, digest: "sha256:1ae04999d90aaebabeecb0564536b53e8a4b878ac128ffe2f6e25fe1a4dc0080" },
 });
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
@@ -966,6 +979,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V16_VERSION]: "v16",
   [REGISTRY_V17_VERSION]: "v17",
   [REGISTRY_V18_VERSION]: "v18",
+  [REGISTRY_V19_VERSION]: "v19",
 });
 
 function sourceInventoryFixtureDigest(rows) {
@@ -1021,7 +1035,7 @@ export function frozenInventory(version) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V18_VERSION) {
+  version = REGISTRY_V19_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -1058,7 +1072,7 @@ export function registryDigestFor(version, rows = fullInventory(), dbCatalogBase
     REGISTRY_V9_VERSION, REGISTRY_V10_VERSION, REGISTRY_V11_VERSION,
     REGISTRY_V12_VERSION, REGISTRY_V13_VERSION, REGISTRY_V14_VERSION,
     REGISTRY_V15_VERSION, REGISTRY_V16_VERSION, REGISTRY_V17_VERSION,
-    REGISTRY_V18_VERSION].includes(version))
+    REGISTRY_V18_VERSION, REGISTRY_V19_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -4683,6 +4697,347 @@ ${preflightBody}end $sourced_shape_forward_correction_preflight$;
   return `${predecessorPreflight}${domainSql}${sql}`.replace(/\n+$/, "\n");
 }
 
+
+// ── WR-000069: contextual incident/work-request evidence ────────────────────
+export function renderIncidentWorkRequestLinkDomainSql(witnesses = {}) {
+  const witnessPath = "migrations/0426_withdraw_a_work_request_captured_in_error.sql";
+  const source = witnesses[witnessPath] ?? readFileSync(resolve(REPO_ROOT, witnessPath), "utf8");
+  if (sha256(source) !== SOURCED_SHAPE_FORWARD_CORRECTION_WITNESS_SHA256[witnessPath])
+    throw new Error(`incident/work-request card witness changed: ${witnessPath}`);
+  let card = sliceFunctionDefinition(source,
+    "CREATE FUNCTION ops.work_request_card(", "0426 work_request_card");
+  card = replaceExactlyOnce(card,
+    "closed_at timestamp with time zone, superseded_by_ref text)",
+    "closed_at timestamp with time zone, superseded_by_ref text, incident_evidence jsonb)",
+    "WR69 card return shape");
+  card = replaceExactlyOnce(card,
+    "w.exit_reason,w.closed_at,succ.ref",
+    "w.exit_reason,w.closed_at,succ.ref,coalesce(incident_evidence.items,'[]'::jsonb)",
+    "WR69 card incident evidence projection");
+  card = replaceExactlyOnce(card,
+`    ) counted on true
+   where`,
+`    ) counted on true
+    left join lateral (
+      select jsonb_agg(to_jsonb(projected) order by projected.detected_at,projected.incident_ref) as items
+        from (
+          select i.ref as incident_ref,i.title,i.state,i.severity,i.environment,
+                 to_jsonb(i.detected_at)#>>'{}' as detected_at,
+                 to_jsonb(i.observed_at)#>>'{}' as observed_at,
+                 to_jsonb(i.resolved_at)#>>'{}' as resolved_at,
+                 occurrence.occurrences,occurrence.occurrence_evidence_status,
+                 occurrence.legacy_overlap_unknown,occurrence.unresolved_occurrence_edge_count,
+                 jsonb_build_object('kind','work_request','ref',w.ref) as association,
+                 coalesce(evidence.items,'[]'::jsonb) as evidence
+            from ops.incident_link anchor
+            join ops.incident i on i.id=anchor.incident_id
+            left join lateral (
+              with occurrence_links as (
+                select l.kind,l.ref,
+                       case when l.ref ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+                            then l.ref::uuid else null::uuid end as target_uuid
+                  from ops.incident_link l
+                 where l.incident_id=i.id and l.kind in ('run','deployment')
+              ), resolved_links as (
+                select x.kind,x.ref,
+                       case when x.kind='run' then
+                              (select r.correlation_id::text from ops.run r where r.id=x.target_uuid)
+                            when x.kind='deployment' then
+                              (select dep.correlation_id::text from ops.deployment dep where dep.id=x.target_uuid)
+                       end as resolved_correlation
+                  from occurrence_links x
+              ), correlation_suffixes as (
+                select distinct substring(f.source_ref from 13) as correlation_suffix
+                  from ops.incident_fact f
+                 where f.incident_id=i.id and f.source_ref like 'correlation:%'
+              ), occurrence_counts as (
+                select (select count(*) from resolved_links)::int as link_count,
+                       (select count(*) from correlation_suffixes)::int as correlation_count,
+                       (select count(*) from resolved_links where resolved_correlation is null)::int as unresolved_count,
+                       (select count(*) from correlation_suffixes c where not exists (
+                          select 1 from resolved_links r where r.resolved_correlation=c.correlation_suffix
+                       ))::int as unpaired_correlation_count
+              )
+              select case when unresolved_count=0
+                          then greatest(1,link_count+unpaired_correlation_count)
+                          else greatest(1,link_count,correlation_count) end::int as occurrences,
+                     case when unresolved_count>0 then 'legacy_overlap_unknown' else 'complete' end as occurrence_evidence_status,
+                     (unresolved_count>0) as legacy_overlap_unknown,
+                     unresolved_count as unresolved_occurrence_edge_count
+                from occurrence_counts
+            ) occurrence on true
+            left join lateral (
+              select jsonb_agg(item order by item->>'occurred_at' nulls last,item->>'kind',
+                                            coalesce(item->>'ref',item->>'source_ref')) as items
+                from (
+                  select jsonb_build_object('evidence_type','link','kind',l.kind,'ref',l.ref,
+                                            'occurred_at',null) as item
+                    from ops.incident_link l
+                   where l.incident_id=i.id and l.kind in ('run','deployment')
+                  union all
+                  select jsonb_build_object('evidence_type','fact','kind','fact','text',f.text,
+                                            'source_ref',f.source_ref,
+                                            'recorded_at',to_jsonb(f.recorded_at)#>>'{}',
+                                            'occurred_at',to_jsonb(f.recorded_at)#>>'{}') as item
+                    from ops.incident_fact f
+                   where f.incident_id=i.id and f.source_ref is not null
+                  union all
+                  select jsonb_build_object('evidence_type','trace','kind',t.kind,'ref',t.ref,
+                                            'correlation_id',t.correlation_id,'state',t.state,
+                                            'environment',t.environment,'service_key',t.service_key,
+                                            'failure_class',t.failure_class,'detail',t.detail,
+                                            'source_kind',t.source_kind,'source_ref',t.source_ref,
+                                            'freshness_state',t.freshness_state,
+                                            'occurred_at',to_jsonb(t.occurred_at)#>>'{}') as item
+                    from ops.v_trace t
+                   where t.correlation_id=i.correlation_id
+                      or t.correlation_id in (
+                        select substring(f.source_ref from 13)::uuid
+                          from ops.incident_fact f
+                         where f.incident_id=i.id
+                           and f.source_ref ~ '^correlation:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+                      )
+                ) evidence_rows
+            ) evidence on true
+           where anchor.kind='work_request' and anchor.ref=w.ref
+        ) projected
+    ) incident_evidence on true
+   where`,
+    "WR69 card bounded incident evidence aggregate");
+  return `-- WR-000069: bound the per-incident fact lookup used by every occurrence consumer.\n` +
+    `create index if not exists incident_fact_incident_source_idx\n` +
+    `  on ops.incident_fact (incident_id,source_ref);\n\n` +
+    `-- Add the contextual incident evidence projection to the existing safe card.\n` +
+    `drop function ops.work_request_card(text,text);\n\n${card}\n` +
+    "grant execute on function ops.work_request_card(text,text) to carr_reader,carr_writer;\n\n";
+}
+export function renderIncidentWorkRequestLinkRegistrySql(rows = fullInventory(),
+  dbCatalogBaseline = INCIDENT_WORK_REQUEST_LINK_FORWARD_DB_CATALOG_BASELINE,
+  predecessorArtifacts = undefined) {
+  const { v18: v18Seal } = HISTORICAL_REGISTRY_SEALS;
+  const v19Digest = registryDigestFor(REGISTRY_V19_VERSION, rows, dbCatalogBaseline);
+  const catalogCount = dbCatalogBaseline.secdef_execute.count +
+    dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
+  const entryCount = rows.length + catalogCount;
+  const v18MigrationPath = "migrations/0492_sourced_shape_forward_correction_and_scac_successor.sql";
+  const v18RuntimePath = "mcp-server/src/scac-mutation-registry.v18.generated.js";
+  const v18Rows = frozenInventory(REGISTRY_V18_VERSION);
+  const v18Migration = predecessorArtifacts?.migration ??
+    renderSourcedShapeForwardCorrectionRegistrySql(
+      v18Rows, SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE);
+  const v18Runtime = predecessorArtifacts?.runtime ?? renderRuntimeProjection(v18Rows, {
+    version: REGISTRY_V18_VERSION,
+    dbCatalogBaseline: SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE,
+  });
+  for (const [path, source] of [
+    [v18MigrationPath, v18Migration], [v18RuntimePath, v18Runtime],
+  ]) {
+    const observed = sha256(source);
+    if (observed !== HISTORICAL_REGISTRY_ARTIFACT_SHA256[path])
+      throw new Error(`sealed historical SCAC v18 artifact changed: ${path}: ${observed}`);
+  }
+
+  const headerMarker =
+    "-- SCAC-12: forward-only mutation registry v18 after sourced shape forward correction.";
+  const coreStart = v18Migration.indexOf(headerMarker);
+  if (coreStart < 0 || v18Migration.indexOf(headerMarker, coreStart + headerMarker.length) >= 0)
+    throw new Error("sealed SCAC v18 migration has no exact successor core boundary");
+  const v18Core = v18Migration.slice(coreStart);
+  const currentV18Marker = "create or replace function ops.scac_mutation_catalog_v18_current()";
+  const policyMarker =
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v17;";
+  const currentV18Start = v18Core.indexOf(currentV18Marker);
+  const secondCurrentV18 = v18Core.indexOf(
+    currentV18Marker, currentV18Start + currentV18Marker.length);
+  const v17HistoryMarker =
+    "alter function ops.scac_mutation_catalog_v17_current() rename to scac_mutation_catalog_v17_live_at_seal;";
+  const v17HistoryStart = v18Core.indexOf(v17HistoryMarker);
+  const secondV17History = v18Core.indexOf(
+    v17HistoryMarker, v17HistoryStart + v17HistoryMarker.length);
+  const policyStart = v18Core.indexOf(policyMarker);
+  const secondPolicy = v18Core.indexOf(policyMarker, policyStart + policyMarker.length);
+  if (v17HistoryStart < 0 || secondV17History >= 0 || currentV18Start <= v17HistoryStart ||
+      secondCurrentV18 >= 0 || policyStart <= currentV18Start || secondPolicy >= 0)
+    throw new Error("sealed SCAC v18 migration has no exact catalog successor boundary");
+  const installedV17History = v18Core.slice(v17HistoryStart, currentV18Start);
+  const v18Current = v18Core.slice(currentV18Start, policyStart);
+  const v18History =
+`alter function ops.scac_mutation_catalog_v18_current() rename to scac_mutation_catalog_v18_live_at_seal;
+create or replace function ops.scac_mutation_registry_v18_seal_available()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_registry_seal_valid('scac-mutation-registry.v18')
+$fn$;
+create or replace function ops.scac_mutation_catalog_v18_current()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_catalog_v18_live_at_seal()
+$fn$;
+comment on function ops.scac_mutation_registry_v18_seal_available() is 'Exact immutable v18 registry seal; separate from whether the live catalog still equals v18.';
+comment on function ops.scac_mutation_catalog_v18_current() is 'Historical v18 live-catalog validator; expected to become false after the v19 authority surface is installed.';
+
+`;
+  const renderV19Current = baseline => {
+    let current = v18Current
+      .replaceAll("scac_mutation_catalog_v18_current", "scac_mutation_catalog_v19_current")
+      .replaceAll("scac-mutation-registry.v18", "scac-mutation-registry.v19");
+    current = replaceExactlyOnce(current,
+      `if observed_count<>${SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count} or observed_digest<>'${SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE.secdef_execute.digest}' then return false; end if;`,
+      `if observed_count<>${baseline.secdef_execute.count} or observed_digest<>'${baseline.secdef_execute.digest}' then return false; end if;`,
+      "Incident work-request link v19 security-definer baseline");
+    current = replaceExactlyOnce(current,
+      `if observed_count<>${SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE.relation_dml.count} or observed_digest<>'${SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE.relation_dml.digest}' then return false; end if;`,
+      `if observed_count<>${baseline.relation_dml.count} or observed_digest<>'${baseline.relation_dml.digest}' then return false; end if;`,
+      "Incident work-request link v19 relation baseline");
+    current = replaceExactlyOnce(current,
+      `if observed_count<>${SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE.column_dml.count} or observed_digest<>'${SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE.column_dml.digest}' then return false; end if;`,
+      `if observed_count<>${baseline.column_dml.count} or observed_digest<>'${baseline.column_dml.digest}' then return false; end if;`,
+      "Incident work-request link v19 column baseline");
+    return replaceExactlyOnce(current,
+      `return observed_count=${SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE.role_authority.count} and observed_digest='${SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE.role_authority.digest}';`,
+      `return observed_count=${baseline.role_authority.count} and observed_digest='${baseline.role_authority.digest}';`,
+      "Incident work-request link v19 role-authority baseline");
+  };
+  const v19Current = renderV19Current(dbCatalogBaseline);
+
+  let sql = replaceExactlyOnce(v18Core, v18Current,
+    "__SOURCED_SHAPE_V18_CATALOG_SUCCESSOR__",
+    "Incident work-request link v18 current catalog block");
+  sql = replaceExactlyOnce(sql, installedV17History, "",
+    "Incident work-request link already-installed v17 catalog history");
+  sql = replaceExactlyOnce(sql, headerMarker,
+    "-- SCAC-12: forward-only mutation registry v19 after incident work-request link.",
+    "Incident work-request link migration header");
+  sql = sql
+    .replaceAll("scac-mutation-registry.v18", "scac-mutation-registry.v19")
+    .replaceAll("_v18", "_v19")
+    .replaceAll(" v18", " v19");
+  sql = replaceExactlyOnce(sql, JSON.stringify(SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE),
+    JSON.stringify(dbCatalogBaseline), "Incident work-request link v19 catalog projection");
+  sql = replaceExactlyOnce(sql,
+    `'${v18Seal.digest}',${v18Seal.entryCount},${v18Seal.sourceEntryCount},`,
+    `'sha256:${v19Digest}',${entryCount},${rows.length},`,
+    "Incident work-request link v19 registry row");
+  sql = replaceExactlyOnce(sql,
+    `ops.scac_mutation_registration_v19('${v18Seal.digest}',`,
+    `ops.scac_mutation_registration_v19('sha256:${v19Digest}',`,
+    "Incident work-request link v19 snapshot registry lookup");
+  sql = replaceExactlyOnce(sql,
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v17;",
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v18;",
+    "Incident work-request link policy snapshot predecessor");
+  sql = replaceExactlyOnce(sql, "__SOURCED_SHAPE_V18_CATALOG_SUCCESSOR__",
+    `${v18History}${v19Current}`, "Incident work-request link v18 catalog history insertion");
+
+  const versionsThrough18 = Array.from({ length: 18 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  const versionsThrough17 = Array.from({ length: 17 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  sql = replaceExactlyOnce(sql,
+    `check (registry_version in (${versionsThrough17},'scac-mutation-registry.v19'))`,
+    `check (registry_version in (${versionsThrough18},'scac-mutation-registry.v19'))`,
+    "Incident work-request link registry-version constraint");
+  sql = replaceExactlyOnce(sql,
+    `if p_registry_version not in (${versionsThrough17}) then return false; end if;`,
+    `if p_registry_version not in (${versionsThrough18}) then return false; end if;`,
+    "Incident work-request link historical seal allowlist");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v17' then '${HISTORICAL_REGISTRY_SEALS.v17.digest}' end;`,
+    `    when 'scac-mutation-registry.v17' then '${HISTORICAL_REGISTRY_SEALS.v17.digest}'\n    when '${v18Seal.version}' then '${v18Seal.digest}' end;`,
+    "Incident work-request link historical digest case");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v17' then '${JSON.stringify(BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE)}'::jsonb end;`,
+    `    when 'scac-mutation-registry.v17' then '${JSON.stringify(BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE)}'::jsonb\n    when '${v18Seal.version}' then '${JSON.stringify(SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE)}'::jsonb end;`,
+    "Incident work-request link historical catalog case");
+  sql = replaceExactlyOnce(sql,
+    `    ('scac-mutation-registry.v17','${HISTORICAL_REGISTRY_SEALS.v17.digest}',${HISTORICAL_REGISTRY_SEALS.v17.entryCount},${HISTORICAL_REGISTRY_SEALS.v17.sourceEntryCount})\n`,
+    `    ('scac-mutation-registry.v17','${HISTORICAL_REGISTRY_SEALS.v17.digest}',${HISTORICAL_REGISTRY_SEALS.v17.entryCount},${HISTORICAL_REGISTRY_SEALS.v17.sourceEntryCount}),\n    ('${v18Seal.version}','${v18Seal.digest}',${v18Seal.entryCount},${v18Seal.sourceEntryCount})\n`,
+    "Incident work-request link historical seal tuple");
+  sql = replaceExactlyOnce(sql,
+    "    ops.scac_mutation_registry_v17_seal_available()) then",
+    "    ops.scac_mutation_registry_v17_seal_available() and\n    ops.scac_mutation_registry_v18_seal_available()) then",
+    "Incident work-request link snapshot predecessor seal");
+  sql = replaceExactlyOnce(sql,
+    `or (r.registry_version='scac-mutation-registry.v19' and r.registry_digest='${v18Seal.digest}')`,
+    `or (r.registry_version='scac-mutation-registry.v18' and r.registry_digest='${v18Seal.digest}')\n         or (r.registry_version='scac-mutation-registry.v19' and r.registry_digest='sha256:${v19Digest}')`,
+    "Incident work-request link epoch-chain digest cases");
+  sql = replaceExactlyOnce(sql,
+    `  (registry_version='scac-mutation-registry.v19' and registry_digest='${v18Seal.digest}')`,
+    `  (registry_version='scac-mutation-registry.v18' and registry_digest='${v18Seal.digest}') or\n  (registry_version='scac-mutation-registry.v19' and registry_digest='sha256:${v19Digest}')`,
+    "Incident work-request link epoch constraint digest cases");
+  sql = replaceExactlyOnce(sql,
+    `'{registry_digest}',to_jsonb('${v18Seal.digest}'::text)`,
+    `'{registry_digest}',to_jsonb('sha256:${v19Digest}'::text)`,
+    "Incident work-request link snapshot registry digest");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_mutation_registry_v17_seal_available(),ops.scac_mutation_catalog_v19_current()",
+    "ops.scac_mutation_registry_v17_seal_available(),ops.scac_mutation_catalog_v18_live_at_seal(),ops.scac_mutation_catalog_v18_current(),ops.scac_mutation_registry_v18_seal_available(),ops.scac_mutation_catalog_v19_current()",
+    "Incident work-request link historical function revoke list");
+  sql = replaceExactlyOnce(sql,
+    "Sourced shape forward-correction successor snapshot: current policy epochs bind mutation registry v19 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17 epochs remain immutable.",
+    "Incident work-request link successor snapshot: current policy epochs bind mutation registry v19 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18 epochs remain immutable.",
+    "Incident work-request link policy snapshot comment");
+  sql = replaceExactlyOnce(sql,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v19')<>${v18Seal.entryCount}`,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v19')<>${entryCount}`,
+    "Incident work-request link v19 entry count guard");
+  sql = replaceExactlyOnce(sql,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v17')<>'${HISTORICAL_REGISTRY_SEALS.v17.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v17')<>${HISTORICAL_REGISTRY_SEALS.v17.entryCount} then raise exception 'sealed SCAC mutation registry v17 changed during successor creation'; end if;`,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v18')<>'${v18Seal.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v18')<>${v18Seal.entryCount} then raise exception 'sealed SCAC mutation registry v18 changed during successor creation'; end if;`,
+    "Incident work-request link predecessor seal guard");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),ops.scac_policy_epoch_snapshot_v15(),ops.scac_policy_epoch_snapshot_v16(),ops.scac_policy_epoch_snapshot_v17(),",
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),ops.scac_policy_epoch_snapshot_v15(),ops.scac_policy_epoch_snapshot_v16(),ops.scac_policy_epoch_snapshot_v17(),ops.scac_policy_epoch_snapshot_v18(),",
+    "Incident work-request link historical policy snapshot revoke list");
+
+  const seedStartMarker = "with seed as (select value as contract from jsonb_array_elements(";
+  const seedEndMarker = "::jsonb))\ninsert into ops.scac_mutation_registry_entry";
+  const seedStart = sql.indexOf(seedStartMarker);
+  const secondSeedStart = sql.indexOf(seedStartMarker, seedStart + seedStartMarker.length);
+  const seedEnd = sql.indexOf(seedEndMarker, seedStart + seedStartMarker.length);
+  const secondSeedEnd = sql.indexOf(seedEndMarker, seedEnd + seedEndMarker.length);
+  if (seedStart < 0 || secondSeedStart >= 0 || seedEnd < 0 || secondSeedEnd >= 0)
+    throw new Error("sealed SCAC v18 migration has no exact source-seed boundary");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart + seedStartMarker.length)}${sqlLiteral(seed)}${sql.slice(seedEnd)}`;
+
+  const preflightCurrent = renderV19Current(SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE);
+  const preflightBegin = preflightCurrent.indexOf("begin\n");
+  const preflightEnd = preflightCurrent.lastIndexOf("end $fn$;");
+  if (preflightBegin < 0 || preflightEnd <= preflightBegin)
+    throw new Error("generated v19 catalog predicate has no exact preflight body boundary");
+  let preflightBody = preflightCurrent.slice(preflightBegin + "begin\n".length, preflightEnd);
+  preflightBody = preflightBody.replaceAll(
+    "then return false; end if;",
+    "then raise exception 'Incident work-request link pre-v19 catalog receipt drifted'; end if;");
+  preflightBody = replaceExactlyOnce(preflightBody,
+    `return observed_count=${SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE.role_authority.count} and observed_digest='${SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE.role_authority.digest}';`,
+    `if observed_count<>${SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE.role_authority.count} or observed_digest<>'${SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE.role_authority.digest}' then raise exception 'Incident work-request link pre-v19 role-authority receipt drifted'; end if;`,
+    "Incident work-request link pre-v19 role receipt");
+  const predecessorHash = sha256(v18Migration);
+  const predecessorPreflight =
+`-- Exact disposable-Postgres post-0492 receipt. Refuse before the WR-000069
+-- incident/work-request surface or any v19 function exists; the domain SQL then changes the
+-- catalog and the v19 successor seals the resulting catalog in one transaction.
+do $incident_work_request_link_preflight$
+declare observed_count integer; observed_digest text; grant_snapshot jsonb;
+begin
+  if (select count(*) from public.schema_migrations where filename='0492_sourced_shape_forward_correction_and_scac_successor.sql')<>1
+     or not exists(select 1 from public.schema_migrations where filename='0492_sourced_shape_forward_correction_and_scac_successor.sql'
+       and sha256='${predecessorHash}') then
+    raise exception 'Incident work-request link pre-v19 migration ledger receipt drifted';
+  end if;
+  grant_snapshot:=ops.scac_runtime_dml_grant_snapshot();
+  if (grant_snapshot->>'entry_count')::integer<>${SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE.runtime_dml_grants.count}
+     or grant_snapshot->>'grant_digest'<>'${SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE.runtime_dml_grants.digest}' then
+    raise exception 'Incident work-request link pre-v19 runtime grant receipt drifted';
+  end if;
+${preflightBody}end $incident_work_request_link_preflight$;
+
+`;
+  const domainSql = renderIncidentWorkRequestLinkDomainSql(predecessorArtifacts?.witnesses ?? {});
+  return `${predecessorPreflight}${domainSql}${sql}`.replace(/\n+$/, "\n");
+}
+
+
 export function renderGeneratedFrontier() {
   const v2Rows = frozenInventory(REGISTRY_V2_VERSION);
   const artifacts = {};
@@ -4897,9 +5252,22 @@ export function renderGeneratedFrontier() {
         },
       });
 
+  const v19Rows = frozenInventory(REGISTRY_V19_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v19.generated.js"] =
+    renderRuntimeProjection(v19Rows, {
+      version: REGISTRY_V19_VERSION,
+      dbCatalogBaseline: INCIDENT_WORK_REQUEST_LINK_FORWARD_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0493_incident_work_request_link_scac_successor.sql"] =
+    renderIncidentWorkRequestLinkRegistrySql(v19Rows,
+      INCIDENT_WORK_REQUEST_LINK_FORWARD_DB_CATALOG_BASELINE, {
+        migration: artifacts["migrations/0492_sourced_shape_forward_correction_and_scac_successor.sql"],
+        runtime: artifacts["mcp-server/src/scac-mutation-registry.v18.generated.js"],
+      });
+
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 26 || runtimeCount !== 17 || Object.keys(artifacts).length !== 43)
+  if (migrationCount !== 27 || runtimeCount !== 18 || Object.keys(artifacts).length !== 45)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
@@ -5270,9 +5638,22 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const rows = frozenInventory(REGISTRY_V18_VERSION);
     await writeFile(target, renderSourcedShapeForwardCorrectionRegistrySql(rows));
     process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-runtime-v19") {
+    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v19.generated.js");
+    const rows = frozenInventory(REGISTRY_V19_VERSION);
+    await writeFile(target, renderRuntimeProjection(rows, {
+      version: REGISTRY_V19_VERSION,
+      dbCatalogBaseline: INCIDENT_WORK_REQUEST_LINK_FORWARD_DB_CATALOG_BASELINE,
+    }));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-incident-work-request-link-registry-migration") {
+    const target = resolve(process.argv[3] || "migrations/0493_incident_work_request_link_scac_successor.sql");
+    const rows = frozenInventory(REGISTRY_V19_VERSION);
+    await writeFile(target, renderIncidentWorkRequestLinkRegistrySql(rows));
+    process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools());
-    process.stdout.write("source inventory matches frozen v18 frontier fixture\n");
+    process.stdout.write("source inventory matches frozen v19 frontier fixture\n");
   } else if (process.argv[2] === "--check-generated-frontier") {
     const paths = assertGeneratedFrontierMatchesCommitted();
     process.stdout.write(`generated frontier is byte-exact (${paths.length} artifacts)\n`);

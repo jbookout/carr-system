@@ -34,6 +34,7 @@ import {
   REGISTRY_V16_VERSION,
   REGISTRY_V17_VERSION,
   REGISTRY_V18_VERSION,
+  REGISTRY_V19_VERSION,
   replaceExactlyOnce,
   renderGeneratedFrontier,
   renderRuntimeProjection,
@@ -49,6 +50,8 @@ import {
   renderBackupGuardStatusForwardRegistrySql,
   renderSourcedShapeForwardCorrectionDomainSql,
   renderSourcedShapeForwardCorrectionRegistrySql,
+  renderIncidentWorkRequestLinkDomainSql,
+  renderIncidentWorkRequestLinkRegistrySql,
   renderSourceMergeForwardRegistrySql,
   sha256,
   SIEP16_INTEGRATED_DB_CATALOG_BASELINE,
@@ -73,6 +76,8 @@ import {
   SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE,
   SOURCED_SHAPE_FORWARD_CORRECTION_PRE_V18_DB_CATALOG_BASELINE,
   SOURCED_SHAPE_FORWARD_CORRECTION_WITNESS_SHA256,
+  INCIDENT_WORK_REQUEST_LINK_FORWARD_DB_CATALOG_BASELINE,
+  INCIDENT_WORK_REQUEST_LINK_PRE_V19_DB_CATALOG_BASELINE,
   SOURCE_MERGE_FORWARD_DB_CATALOG_BASELINE,
   SOURCE_MERGE_PRE_V10_DB_CATALOG_BASELINE,
   SIEP12_DB_CATALOG_BASELINE,
@@ -160,6 +165,10 @@ const generatedV18 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v18.generated.js", import.meta.url), "utf8");
 const v18Migration = fs.readFileSync(
   new URL("../../migrations/0492_sourced_shape_forward_correction_and_scac_successor.sql", import.meta.url), "utf8");
+const generatedV19 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v19.generated.js", import.meta.url), "utf8");
+const v19Migration = fs.readFileSync(
+  new URL("../../migrations/0493_incident_work_request_link_scac_successor.sql", import.meta.url), "utf8");
 const siep18MonitorMigration = fs.readFileSync(
   new URL("../../migrations/0467_siep18_atomic_db_monitor_grants.sql", import.meta.url), "utf8");
 const directRegistryRedefinitions = [
@@ -180,8 +189,8 @@ test("successor generation refuses absent or ambiguous predecessor markers", () 
 
 test("reviewed MCP inventory is an exact immutable projection of the assembled registry", () => {
   const rows = mcpInventory(TOOLS);
-  assert.equal(rows.length, 227);
-  assert.equal(rows.filter(row => row.write).length, 159);
+  assert.equal(rows.length, 228);
+  assert.equal(rows.filter(row => row.write).length, 160);
   assert.equal(rows.filter(row => !row.write).length, 68);
   assert.deepEqual(rows.map(row => row.operation), Object.keys(TOOLS).sort());
   assert.equal(Object.isFrozen(TOOLS), true);
@@ -603,7 +612,7 @@ test("v18 seals the WR68 sourced shape forward correction and preserves the v17 
     dbCatalogBaseline: SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE,
   }));
   assert.equal(v18Migration, renderSourcedShapeForwardCorrectionRegistrySql(rows));
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
+  assert.equal("680d42c68be736fe3f227019e3a4afd3e0aad53ed63d115db1fbb0467ea884c8",
     JSON.parse(generatedV18.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]));
   assert.deepEqual(SOURCED_SHAPE_FORWARD_CORRECTION_PRE_V18_DB_CATALOG_BASELINE,
     BACKUP_GUARD_STATUS_FORWARD_DB_CATALOG_BASELINE);
@@ -627,7 +636,8 @@ test("v18 seals the WR68 sourced shape forward correction and preserves the v17 
   assert.match(v18Migration, /scac_policy_epoch_snapshot_v17[(][)]/);
   assert.match(v18Migration, /registry_version='scac-mutation-registry[.]v18'[^\n]+<>1515/);
   assert.doesNotMatch(v18Migration, /^\s*(begin|commit)\s*;\s*$/im);
-  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS))
+  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS)
+    .filter(seal => Number(seal.version.split(".v")[1]) < 18))
     assert.ok(v18Migration.includes(`('${seal.version}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount})`));
   // The domain half precedes the registry core and follows the pre-v18 preflight.
   const domain = renderSourcedShapeForwardCorrectionDomainSql();
@@ -638,15 +648,58 @@ test("v18 seals the WR68 sourced shape forward correction and preserves the v17 
   assert.equal(v18Migration.indexOf(domain, domainAt + 1), -1);
 });
 
+test("v19 seals the WR69 incident/work-request association and preserves the v18 predecessor", () => {
+  const rows = frozenInventory(REGISTRY_V19_VERSION);
+  assert.equal(rows.length, 828);
+  assert.equal(generatedV19, renderRuntimeProjection(rows, {
+    version: REGISTRY_V19_VERSION,
+    dbCatalogBaseline: INCIDENT_WORK_REQUEST_LINK_FORWARD_DB_CATALOG_BASELINE,
+  }));
+  assert.equal(v19Migration, renderIncidentWorkRequestLinkRegistrySql(rows));
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
+    JSON.parse(generatedV19.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]));
+  assert.deepEqual(INCIDENT_WORK_REQUEST_LINK_PRE_V19_DB_CATALOG_BASELINE,
+    SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE);
+  assert.equal(INCIDENT_WORK_REQUEST_LINK_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count, 385);
+  assert.equal(INCIDENT_WORK_REQUEST_LINK_FORWARD_DB_CATALOG_BASELINE.relation_dml.count, 295);
+  assert.equal(INCIDENT_WORK_REQUEST_LINK_FORWARD_DB_CATALOG_BASELINE.runtime_dml_grants.count, 307);
+  assert.equal(sha256(v18Migration), HISTORICAL_REGISTRY_ARTIFACT_SHA256[
+    "migrations/0492_sourced_shape_forward_correction_and_scac_successor.sql"]);
+  assert.equal(sha256(generatedV18), HISTORICAL_REGISTRY_ARTIFACT_SHA256[
+    "mcp-server/src/scac-mutation-registry.v18.generated.js"]);
+  assert.match(v19Migration,
+    /0492_sourced_shape_forward_correction_and_scac_successor[.]sql'[\s\S]+3c38ac9b0b22984603f58838aabcf97094e451ad166bc8526b09273f3f9755c6/);
+  assert.match(v19Migration,
+    /alter function ops[.]scac_mutation_catalog_v18_current[(][)] rename to scac_mutation_catalog_v18_live_at_seal/);
+  assert.match(v19Migration, /scac_mutation_registry_v18_seal_available[(][)]/);
+  assert.match(v19Migration, /scac_mutation_registration_v19[(]text,text[)]/);
+  assert.match(v19Migration, /scac_mutation_catalog_v19_current[(][)]/);
+  assert.match(v19Migration, /scac_policy_epoch_snapshot_v18[(][)]/);
+  assert.match(v19Migration, /registry_version='scac-mutation-registry[.]v19'[^\n]+<>1520/);
+  assert.doesNotMatch(v19Migration, /^\s*(begin|commit)\s*;\s*$/im);
+  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS))
+    assert.ok(v19Migration.includes(`('${seal.version}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount})`));
+  const domain = renderIncidentWorkRequestLinkDomainSql();
+  const preflightAt = v19Migration.indexOf("do $incident_work_request_link_preflight$");
+  const domainAt = v19Migration.indexOf(domain);
+  const coreAt = v19Migration.indexOf("-- SCAC-12: forward-only mutation registry v19 after incident work-request link.");
+  assert.ok(preflightAt >= 0 && preflightAt < domainAt && domainAt < coreAt);
+  assert.equal(v19Migration.indexOf(domain, domainAt + 1), -1);
+  assert.match(domain, /incident_evidence jsonb/);
+  assert.match(domain, /unresolved_occurrence_edge_count/);
+  assert.match(domain, /from ops[.]v_trace t/);
+  assert.match(domain, /as association/);
+});
+
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
   assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
-  assert.equal(migrations.length, 26);
+  assert.equal(migrations.length, 27);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492"]);
-  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 17);
-  assert.equal(paths.length, 43);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493"]);
+  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 18);
+  assert.equal(paths.length, 45);
 });
 
 test("the complete frontier renders when every generated target is absent", () => {
@@ -682,7 +735,7 @@ test("the complete frontier renders when every generated target is absent", () =
         GIT_WORK_TREE: isolatedRoot,
       },
     });
-    assert.match(stdout, /\(43 artifacts\)/);
+    assert.match(stdout, /\(45 artifacts\)/);
     for (const [target, expected] of Object.entries(frontier))
       assert.equal(fs.readFileSync(path.join(outputRoot, target), "utf8"), expected, target);
   } finally {
