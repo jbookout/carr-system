@@ -28478,9 +28478,9 @@
   ],
   "current_source_review": {
     "base_version": "v19",
-    "reason": "WR54 controlled-failure seam at the v19 frontier. Two existing ingresses changed source and nothing was added: github-workflow:backup-nightly.yml (three-mode gate plus two optional workflow_dispatch proof inputs) moves schema_digest, handler_digest and trigger_contract_digest, while its permissions_contract_digest and delegate set stay byte-identical; and script-entrypoint:ops/backup-workflow-status.py (validate-controlled-failure and controlled-failure commands) moves schema_digest and handler_digest only, with classification, authority, principal, effect, rollback, admission and owner fields unchanged. Registering the backup-nightly-cloud service in ops/config/services.json additionally propagates a new physical_authority_catalog_digests.services value to every launchd-workflow row, because that field is the sha256 of the services catalog itself; that propagation is a catalog-baseline consequence, not a change of authority on any launchd ingress. No new ingress, no successor, no delegate or permission expansion. Frozen v1-v19 inventories and the entry-set seal are unchanged; the prior Codex-only hook reliability row is preserved. TEMPORARY ADDITION: this branch also carries one date-specific cron entry (10 0 9 9 *) on the same workflow, which exists only so a real schedule event can be observed inside an attended window. It moves the workflow row's trigger_contract_digest and file digests again and nothing else; permissions and delegates stay byte-identical. A forward cleanup commit removes that cron and returns this row and expected_sha256 to their pre-cron values.",
+    "reason": "WR54 controlled-failure seam at the v19 frontier. Two existing ingresses changed source and nothing was added: github-workflow:backup-nightly.yml (three-mode gate plus two optional workflow_dispatch proof inputs) moves schema_digest, handler_digest and trigger_contract_digest, while its permissions_contract_digest and delegate set stay byte-identical; and script-entrypoint:ops/backup-workflow-status.py (validate-controlled-failure and controlled-failure commands) moves schema_digest and handler_digest only, with classification, authority, principal, effect, rollback, admission and owner fields unchanged. Registering the backup-nightly-cloud service in ops/config/services.json additionally propagates a new physical_authority_catalog_digests.services value to every launchd-workflow row, because that field is the sha256 of the services catalog itself; that propagation is a catalog-baseline consequence, not a change of authority on any launchd ingress. No new ingress, no successor, no delegate or permission expansion. Frozen v1-v19 inventories and the entry-set seal are unchanged; the prior Codex-only hook reliability row is preserved.",
     "expected_count": 828,
-    "expected_sha256": "542293ec26bee1d75746c1aae5ded0d014e7186478702407549ea51495d554d7",
+    "expected_sha256": "4d54e0eabc96ba058c418bebea67bc72508b6417a951d294a64c5bc2af79ee0e",
     "upsert": [
       {
         "ingress_key": "github-workflow:backup-nightly.yml",
@@ -28488,9 +28488,9 @@
         "operation": ".github/workflows/backup-nightly.yml",
         "effect_class": "administrative_mutation",
         "source_locator": ".github/workflows/backup-nightly.yml",
-        "schema_digest": "61ecf55a71208f715a4349bbc74dab82c59c28fbaa96952370447f4a87dc6fc8",
-        "handler_digest": "61ecf55a71208f715a4349bbc74dab82c59c28fbaa96952370447f4a87dc6fc8",
-        "trigger_contract_digest": "5c6efe27b756c51dd379ffbd7fb61493b8d68641458ad81aa48abd2fd393bac7",
+        "schema_digest": "a677dd9fad26da57e5a2c1e3f14b1acaeaa43ce67557250b917b89d795589371",
+        "handler_digest": "a677dd9fad26da57e5a2c1e3f14b1acaeaa43ce67557250b917b89d795589371",
+        "trigger_contract_digest": "227882210a922dc3c9597b62770266047d9afbb55cdf8be6c56051b0bfbf4d3c",
         "permissions_contract_digest": "d38a0c9ed6d8d04244725b78cf7bc966fe894adc76d4036c34bf639632c9257e",
         "write": true,
         "human_only": false,

@@ -82,10 +82,6 @@ on:
     # never land in the same minute of GitHub's scheduler queue or the same
     # moment against Neon.
     - cron: "35 2 * * *"
-    # TEMPORARY, WR54 disabled-proof only. Date-specific (9 September), and
-    # annual rather than one-shot, so it MUST be removed by a forward commit
-    # whether the proof succeeds or fails. Removing it is the cleanup PR.
-    - cron: "10 0 9 9 *"
   workflow_dispatch:
     inputs:
       # BOTH DEFAULT TO EMPTY, and empty is the whole compatibility contract:
