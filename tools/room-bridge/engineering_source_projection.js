@@ -157,12 +157,92 @@ if (returnedHash !== acceptedHash || computedHash !== acceptedHash)
   refuse("current runbook body does not match the accepted content_hash");
 store(runbookStoreKey, {section_id: section.id, current_version: currentVersion,
   content_hash: "sha256:" + acceptedHash, text: body, next: 0});
+// The section selector is controller metadata. Authority remains the current
+// canonical operator record, narrowed by the independently pinned scope packet.
+let assignmentProjection = null;
+const assignmentCalls = [];
+if (expected.operator_assignment) {
+  const binding = expected.operator_assignment;
+  const input = {section_ids: [binding.section_id, binding.scope_section_id, binding.packet_section_id]};
+  const records = decodeOne(await tools.mcp__carr__doctrine_sections(input), "operator assignment");
+  assignmentCalls.push({tool_name: "mcp__carr__doctrine_sections", input});
+  if (records?.ok !== true || !Array.isArray(records.sections) || records.sections.length !== 3
+      || !Array.isArray(records.missing) || records.missing.length) refuse("operator assignment records missing");
+  const readRecord = (id, pinnedHash) => {
+    const rows = records.sections.filter((row) => row?.id === id);
+    if (rows.length !== 1) refuse("operator assignment section identity mismatch");
+    const row = rows[0];
+    if (row.status !== "active" || !isObject(row.body) || typeof row.body.text !== "string"
+        || !Number.isInteger(Number(row.current_version)) || Number(row.current_version) < 1
+        || String(Number(row.current_version)) !== String(row.current_version))
+      refuse("operator assignment section not active or versioned");
+    const digest = sha256Hex(row.body.text);
+    if (bareSha256(row.content_hash) !== digest || (pinnedHash && digest !== pinnedHash))
+      refuse("operator assignment section hash mismatch");
+    let data;
+    try { data = JSON.parse(row.body.text); } catch { refuse("operator assignment body is not JSON"); }
+    if (!isObject(data)) refuse("operator assignment body is not an object");
+    return {row, data, digest};
+  };
+  const current = readRecord(binding.section_id, null);
+  const scope = readRecord(binding.scope_section_id, binding.scope_sha256);
+  const implementation = readRecord(binding.packet_section_id, binding.packet_sha256);
+  const a = current.data;
+  const required = ["schema_version", "state", "work_request", "accepted_plan", "accepted_plan_digest",
+    "slice_ref", "envelope_id", "envelope_digest", "attempt_id", "source_main", "paths", "worktree",
+    "branch", "helper_name", "scope_section_id", "scope_sha256"];
+  if (Object.keys(a).sort().join(",") !== required.sort().join(",")) refuse("operator assignment shape mismatch");
+  if (a.schema_version !== "engineering-source-assignment.v1" || a.state !== "assigned"
+      || a.work_request !== expected.work_request_ref || a.slice_ref !== expected.slice_ref
+      || a.accepted_plan !== expected.accepted_plan_revision.id
+      || a.accepted_plan_digest !== expected.accepted_plan_revision.digest
+      || a.envelope_id !== binding.envelope_id || a.envelope_digest !== binding.envelope_digest
+      || a.attempt_id !== binding.attempt_id) refuse("operator assignment does not bind this exact attempt");
+  if (a.scope_section_id !== binding.scope_section_id || a.scope_sha256 !== binding.scope_sha256)
+    refuse("operator assignment does not bind the immutable scope");
+  const lease = scope.data.exact_scoped_source_lease;
+  if (!isObject(lease) || scope.data.work_request?.ref !== a.work_request
+      || scope.data.work_request?.accepted_plan !== a.accepted_plan
+      || scope.data.registered_plan?.slice_ref !== a.slice_ref)
+    refuse("immutable scope does not bind the accepted slice");
+  if (!Array.isArray(a.paths) || a.paths.length === 0 || JSON.stringify(a.paths) !== JSON.stringify(lease.paths)
+      || a.paths.some((path, i) => typeof path !== "string" || path.startsWith("/")
+        || path.split("/").some((part) => !part || part === "." || part === "..")
+        || (i > 0 && !(a.paths[i - 1] < path)))) refuse("operator paths differ from immutable scope");
+  if (a.worktree !== lease.worktree || a.branch !== lease.branch
+      || !/^[a-z0-9][a-z0-9-]{2,79}$/.test(a.helper_name)
+      || a.worktree !== "/Users/booko/carr-system/.claude/worktrees/" + a.helper_name
+      || a.branch !== "codex/" + a.helper_name || !/^[0-9a-f]{40}$/.test(a.source_main))
+    refuse("operator worktree, branch or source identity is invalid");
+  if ("worktree:sha256:" + sha256Hex(a.worktree) !== binding.expected_worktree_ref
+      || "branch:sha256:" + sha256Hex(a.branch) !== binding.expected_branch_ref)
+    refuse("operator source references differ from pinned return constraints");
+  if (!isObject(implementation.data.packet) || implementation.data.slice !== a.slice_ref)
+    refuse("implementation packet slice mismatch");
+  const supplemental = JSON.stringify({assignment: a,
+    source_bindings: [current, scope, implementation].map((item) => ({section_id: item.row.id,
+      current_version: Number(item.row.current_version), content_hash: "sha256:" + item.digest})),
+    scope: {allowed_change: lease.allowed_change, forbidden: lease.forbidden,
+      scac_constraint: lease.scac_constraint, worktree_creation_route: lease.worktree_creation_route,
+      f7_overlap_evidence: scope.data.f7_overlap_evidence},
+    implementation_packet: implementation.data.packet});
+  store("carr_engineering_assignment_body_v1", {section_id: binding.section_id,
+    current_version: Number(current.row.current_version), content_hash: "sha256:" + sha256Hex(supplemental),
+    text: supplemental, next: 0});
+  assignmentProjection = {...a, section_id: binding.section_id,
+    current_version: Number(current.row.current_version), content_hash: "sha256:" + current.digest,
+    source_main_requires_fresh_git_verification: true,
+    chunk: {store_key: "carr_engineering_assignment_body_v1", size: 4000, next: 0,
+      derived_body_sha256: "sha256:" + sha256Hex(supplemental)}};
+}
+
 return {
   schema_version: "engineering-source-native-projection.v1",
   provenance: "native_call_tool_result",
   source_calls: [
     {tool_name: "mcp__carr__engineering_passport_source", input: sourceInput},
     {tool_name: "mcp__carr__doctrine_sections", input: sectionsInput},
+    ...assignmentCalls,
   ],
   work_request: {ref: work.ref, id: work.id, version: Number(work.version),
     canonical_record_digest: work.canonical_record_digest},
@@ -174,6 +254,7 @@ return {
     runbook_hash_verified: true,
   },
   source_merge: sourceMergeProjection,
+  operator_assignment: assignmentProjection,
   runbook: {
     ref: runbook.ref, section_id: section.id, revision_id: runbook.revision_id, section_key: section.section_key,
     doc_slug: section.doc_slug, title: section.title, status: section.status, current_version: currentVersion,

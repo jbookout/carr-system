@@ -27899,9 +27899,9 @@
   ],
   "current_source_review": {
     "base_version": "v17",
-    "reason": "Reviewed Codex continuity preparation guard: one-pass checkpoint sizing guidance, bounded repair-directive reference reporting, condensed-state reference checks, and write-boundary rejection of malformed references; reviewed Engineering Passport adapter repairs: bounded native standing-context projection and complete chunked rule delivery, controller task work_request_ref beside the immutable UUID binding, exact blocked-safe engineering-slice-receipt.v1 guidance, and digest-bound single-read loading of the tracked accepted-source/runbook hydration helper so the model no longer transcribes the long validation program; canonical records remain authoritative.",
+    "reason": "Reviewed Codex continuity preparation guard: one-pass checkpoint sizing guidance, bounded repair-directive reference reporting, condensed-state reference checks, and write-boundary rejection of malformed references; reviewed Engineering Passport adapter repairs: bounded native standing-context projection and complete chunked rule delivery, controller task work_request_ref beside the immutable UUID binding, exact blocked-safe engineering-slice-receipt.v1 guidance, and digest-bound single-read loading of the tracked accepted-source/runbook hydration helper so the model no longer transcribes the long validation program; reviewed R09 dispatch boundary repair: the exact accepted operator assignment is hydrated and validated before worktree selection, sanctioned per-command GitHub configuration reaches the helper nested fetch, and typed receipt preflight preserves opaque source references; canonical records remain authoritative.",
     "expected_count": 827,
-    "expected_sha256": "224626d5a84d8343aff197eae6caef1c01617174e34ceaaba19eec731a396a29",
+    "expected_sha256": "1f67566d281dfab83f8237d892f78e454e7f2dd3e941a7ef74d88ef6a6342c47",
     "upsert": [
       {
         "ingress_key": "script-entrypoint:ops/codex-continuity-hook.py",
@@ -28001,8 +28001,8 @@
         "operation": "tools/room-bridge/engineering_dispatch_adapter.py",
         "effect_class": "administrative_mutation",
         "source_locator": "tools/room-bridge/engineering_dispatch_adapter.py",
-        "schema_digest": "66f2852c695031b3433b1aa2919e734e9ea4b1051917abc92e621455ae45ec27",
-        "handler_digest": "66f2852c695031b3433b1aa2919e734e9ea4b1051917abc92e621455ae45ec27",
+        "schema_digest": "d26a47663d49060ab561af81c6d6832471b243c6678d3b4ca8af5493401ee042",
+        "handler_digest": "d26a47663d49060ab561af81c6d6832471b243c6678d3b4ca8af5493401ee042",
         "write": true,
         "human_only": false,
         "authority_only": true,
