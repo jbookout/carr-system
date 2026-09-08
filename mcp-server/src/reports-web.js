@@ -17,10 +17,10 @@ const STATIC_ASSETS = new Map([
   ["/share-bootstrap.js", "/reports/share-bootstrap.js"],
   ["/share.js", "/reports/share.js"],
   ["/share.css", "/reports/share.css"],
-  ["/vendor/maplibre-gl-6.1.0/maplibre-gl.mjs", "/reports/vendor/maplibre-gl-6.1.0/maplibre-gl.mjs"],
-  ["/vendor/maplibre-gl-6.1.0/maplibre-gl-shared.mjs", "/reports/vendor/maplibre-gl-6.1.0/maplibre-gl-shared.mjs"],
-  ["/vendor/maplibre-gl-6.1.0/maplibre-gl-worker.mjs", "/reports/vendor/maplibre-gl-6.1.0/maplibre-gl-worker.mjs"],
-  ["/vendor/maplibre-gl-6.1.0/maplibre-gl.css", "/reports/vendor/maplibre-gl-6.1.0/maplibre-gl.css"],
+  ["/vendor/maplibre-gl-6.4.1/maplibre-gl.mjs", "/reports/vendor/maplibre-gl-6.4.1/maplibre-gl.mjs"],
+  ["/vendor/maplibre-gl-6.4.1/maplibre-gl-shared.mjs", "/reports/vendor/maplibre-gl-6.4.1/maplibre-gl-shared.mjs"],
+  ["/vendor/maplibre-gl-6.4.1/maplibre-gl-worker.mjs", "/reports/vendor/maplibre-gl-6.4.1/maplibre-gl-worker.mjs"],
+  ["/vendor/maplibre-gl-6.4.1/maplibre-gl.css", "/reports/vendor/maplibre-gl-6.4.1/maplibre-gl.css"],
 ]);
 const API_METHODS = new Map([
   ["/api/share/exchange", "POST"],
