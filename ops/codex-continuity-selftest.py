@@ -714,6 +714,8 @@ class CodexHookTests(AdapterCase):
         state = {
             "objective": "keep the active task",
             "constraints": [{"text": "z" * 3000} for _ in range(7)],
+            "latest_corrections": [{"text": "repair this reference",
+                                     "refs": ["legacy:{REF1}"]}],
             "next_action": "normalize once before writing",
         }
         env, _ = self.install_fake_record_call(self.checkpoint(state=state, cursor={

@@ -45,7 +45,7 @@ on:
       - "ops/**"
       - "lib/**"
       - "tools/**"
-      - "mcp-server/src/codex-continuity.js"
+      - "mcp-server/src/**"
       - "mcp-server/test/codex-continuity.test.mjs"
       - "mcp-server/test/codex-continuity-migration.test.mjs"
       - "mcp-server/test/codex-continuity-postgres.sql"

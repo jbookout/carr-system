@@ -27940,7 +27940,7 @@
     "base_version": "v18",
     "reason": "Reviewed Codex continuity reentry identity, auth fallback, exact cursor readback, and bounded historical revision archive readiness on the v18 source frontier.",
     "expected_count": 827,
-    "expected_sha256": "510b844f19d7598a6d9b5bc35a7f595b1b5abb679a967b20d2c467174c584b50",
+    "expected_sha256": "9ea5cf7c044b0d2650046747a261aa7b931c50ff418c286e73a067d882ffee10",
     "upsert": [
       {
         "ingress_key": "script-entrypoint:ops/codex-continuity-hook.py",
@@ -28040,9 +28040,9 @@
         "operation": ".github/workflows/db-acceptance.yml",
         "effect_class": "administrative_mutation",
         "source_locator": ".github/workflows/db-acceptance.yml",
-        "schema_digest": "3c97dac7b2d8d550e2ad13e0f005dbbf24573570a5ebb5358ce88037fe83aff6",
-        "handler_digest": "3c97dac7b2d8d550e2ad13e0f005dbbf24573570a5ebb5358ce88037fe83aff6",
-        "trigger_contract_digest": "9f6e83e9819d9e301ad04fade658d430d613d3743ef30bdaf947a7457606276f",
+        "schema_digest": "bcd824b9828f23f7b7aaf9bce957eff5a16d6b986cf66dc2d1a29330b6af012e",
+        "handler_digest": "bcd824b9828f23f7b7aaf9bce957eff5a16d6b986cf66dc2d1a29330b6af012e",
+        "trigger_contract_digest": "d1ec31d3614b5c582271e7ec569c42022764997f4565cd0ac54fdb236f00b544",
         "permissions_contract_digest": "e95b04a3565aac49f604cbb82cec85970219fadf30a3a3c56b53a58dce74b871",
         "write": true,
         "human_only": false,
