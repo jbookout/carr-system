@@ -95,6 +95,7 @@ import {
   MutationRegistryRefusal,
   registeredOperation,
   SCAC_MUTATION_REGISTRY_DIGEST,
+  SCAC_MUTATION_REGISTRY_VERSION,
 } from "../src/mutation-registry.js";
 import { TOOLS } from "../src/tools.js";
 
@@ -665,8 +666,14 @@ test("v19 seals the WR69 incident/work-request association and preserves the v18
     dbCatalogBaseline: INCIDENT_WORK_REQUEST_LINK_FORWARD_DB_CATALOG_BASELINE,
   }));
   assert.equal(v19Migration, renderIncidentWorkRequestLinkRegistrySql(rows));
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
-    JSON.parse(generatedV19.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1]));
+  // v19 is sealed history now that the active import is the v20 successor (the
+  // live binding is asserted by "the ACTIVE runtime registry is v20"). Bind the
+  // generated v19 artifact to its FROZEN seal rather than to the live import,
+  // so this keeps proving v19 immutability instead of silently re-following
+  // whatever the runtime currently points at.
+  assert.equal(
+    `sha256:${JSON.parse(generatedV19.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1])}`,
+    HISTORICAL_REGISTRY_SEALS.v19.digest);
   assert.deepEqual(INCIDENT_WORK_REQUEST_LINK_PRE_V19_DB_CATALOG_BASELINE,
     SOURCED_SHAPE_FORWARD_CORRECTION_FORWARD_DB_CATALOG_BASELINE);
   assert.equal(INCIDENT_WORK_REQUEST_LINK_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count, 385);
@@ -765,6 +772,55 @@ test("v20 seals the Codex continuity archive frontier and preserves the v19 pred
   for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS))
     assert.ok(v20Migration.includes(
       `('${seal.version}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount})`), seal.version);
+});
+
+test("the ACTIVE runtime registry is v20, and a stale v19 import fails admission", async () => {
+  // mutation-registry.js is the module every TOOLS admission actually runs
+  // through, so this binds the LIVE import rather than the mere existence of a
+  // generated v20 file. Re-pinning the generated artifact without re-pointing
+  // this import is exactly the miss this test exists to catch.
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V20_VERSION);
+  const v20GeneratedDigest = generatedV20.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v20GeneratedDigest);
+  assert.notEqual(`sha256:${SCAC_MUTATION_REGISTRY_DIGEST}`, HISTORICAL_REGISTRY_SEALS.v19.digest);
+
+  // The decisive stale-import catch, and the reason this is a RUNTIME test and
+  // not a string check: v20 re-derived codex-read-recovery's schema_digest.
+  // assertRegisteredOperation recomputes that digest from the LIVE tool's
+  // inputSchema and refuses on mismatch, so an import still pointing at v19
+  // makes real admission throw mutation_contract_mismatch here.
+  const name = "codex-read-recovery";
+  const tool = TOOLS[name];
+  assert.ok(tool, `${name} must be a live registered tool`);
+  const v19Row = frozenInventory(REGISTRY_V19_VERSION).find(row => row.operation === name);
+  const v20Row = frozenInventory(REGISTRY_V20_VERSION).find(row => row.operation === name);
+  // Non-vacuity: the two versions genuinely disagree about this operation, so
+  // passing below cannot be satisfied by either version indifferently.
+  assert.notEqual(v19Row.schema_digest, v20Row.schema_digest);
+
+  const admitted = await assertRegisteredOperation(name, tool, {});
+  assert.equal(admitted.schema_digest, v20Row.schema_digest);
+  assert.equal(registeredOperation(name).schema_digest, v20Row.schema_digest);
+  assert.notEqual(registeredOperation(name).schema_digest, v19Row.schema_digest);
+
+  // Prove the refusal path is real: the v19 contract for this operation, fed to
+  // the same admission check, is rejected rather than quietly tolerated.
+  await assert.rejects(
+    () => assertRegisteredOperation(name, { ...tool, registrySource: "mcp-server/src/stale.js" }, {}),
+    error => error instanceof MutationRegistryRefusal
+      && error.error === "mutation_contract_mismatch" && error.operation === name,
+  );
+
+  // Every operation v20 re-derived must be admitted by the active registry.
+  for (const operation of ["codex-checkpoint", "codex-read-recovery", "codex-record-event"]) {
+    const live = TOOLS[operation];
+    assert.ok(live, `${operation} must be a live registered tool`);
+    const row = await assertRegisteredOperation(operation, live, {});
+    assert.equal(row.ingress_key, `mcp-tool:${operation}`);
+    assert.equal(row.source_digest,
+      frozenInventory(REGISTRY_V20_VERSION).find(r => r.operation === operation).source_digest);
+  }
 });
 
 test("a partial or absent v20 predecessor bundle regenerates the same successor", () => {
