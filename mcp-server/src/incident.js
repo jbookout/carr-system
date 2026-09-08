@@ -28,6 +28,7 @@
 
 import { incidentSignature } from "./trace.js";
 import { canExercisePartnerAuthority } from "./partner-authority.js";
+import { organizationTenantForActor } from "./identity.js";
 
 /** The watch a recovered service gets before a human may call it resolved.
  * Same 24 hours tools/ops-record.py and trace.js both use: a reader's sense of
@@ -352,18 +353,59 @@ const TRACE_CORRELATION_MAX = 25;
 // correlation fact are ONE event). Counting links alone reads ZERO for every
 // incident the Worker opened — eleven of the twenty-two open rows on
 // 2026-08-23, including the one carrying twenty-eight recurrences. So the
-// number is the greater of the two, which is exact for each writer alone and
-// never below the truth for a row both have touched.
+// Old rows can carry both shapes for one occurrence. Resolve run/deployment
+// targets before combining them so a shared correlation counts once. Rows
+// whose legacy target cannot be resolved retain the conservative greater-of
+// count and say that the overlap is unknown.
 //
 // Derived, never stored. A counter column would read 1 for every one of the
 // existing rows until someone backfilled it, and a count that is wrong about
 // history is worse than one computed on read.
-const OCCURRENCES_SQL = `
-  greatest(
-    (select count(*) from ops.incident_link  l where l.incident_id = i.id),
-    (select count(*) from ops.incident_fact  f where f.incident_id = i.id
-       and f.source_ref like 'correlation:%')
-  )::int`;
+export const INCIDENT_OCCURRENCE_JOIN_SQL = `
+  left join lateral (
+    with occurrence_links as (
+      select l.kind, l.ref,
+             case when l.ref ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+                  then l.ref::uuid else null::uuid end as target_uuid
+        from ops.incident_link l
+       where l.incident_id = i.id and l.kind in ('run','deployment')
+    ), resolved_links as (
+      select x.kind, x.ref,
+             case when x.kind = 'run' then
+                    (select r.correlation_id::text from ops.run r where r.id = x.target_uuid)
+                  when x.kind = 'deployment' then
+                    (select d.correlation_id::text from ops.deployment d where d.id = x.target_uuid)
+             end as resolved_correlation
+        from occurrence_links x
+    ), correlation_suffixes as (
+      select distinct substring(f.source_ref from 13) as correlation_suffix
+        from ops.incident_fact f
+       where f.incident_id = i.id and f.source_ref like 'correlation:%'
+    ), occurrence_counts as (
+      select (select count(*) from resolved_links)::int as link_count,
+             (select count(*) from correlation_suffixes)::int as correlation_count,
+             (select count(*) from resolved_links where resolved_correlation is null)::int as unresolved_count,
+             (select count(*) from correlation_suffixes c
+                where not exists (
+                  select 1 from resolved_links r
+                   where r.resolved_correlation = c.correlation_suffix
+                ))::int as unpaired_correlation_count
+    )
+    select case when unresolved_count = 0
+                then greatest(1, link_count + unpaired_correlation_count)
+                else greatest(1, link_count, correlation_count) end::int as occurrences,
+           (unresolved_count > 0) as legacy_overlap_unknown,
+           unresolved_count as unresolved_occurrence_edge_count,
+           case when unresolved_count > 0 then 'legacy_overlap_unknown' else 'complete' end
+             as occurrence_evidence_status
+      from occurrence_counts
+  ) occurrence on true`;
+
+export const INCIDENT_OCCURRENCE_COLUMNS = `
+  occurrence.occurrences as occurrences,
+  occurrence.occurrence_evidence_status,
+  occurrence.legacy_overlap_unknown,
+  occurrence.unresolved_occurrence_edge_count`;
 
 /** The row shape both reads return, so the board and the card never disagree
  * about what an incident says. */
@@ -381,7 +423,7 @@ const INCIDENT_COLUMNS = `
   dup.ref as duplicate_of,
   (i.monitoring_until is not null and i.monitoring_until > now()) as monitoring_window_open,
   floor(extract(epoch from (now() - i.detected_at)) / 86400)::int as age_days,
-  ${OCCURRENCES_SQL} as occurrences`;
+  ${INCIDENT_OCCURRENCE_COLUMNS}`;
 
 /**
  * What a partner needs to know before reaching for close-incident: can this row
@@ -426,6 +468,7 @@ export function incidentTools({ withEnvelope, writeEvent, ToolError, authorizati
       `select ${INCIDENT_COLUMNS}, i.duplicate_of_id, to_jsonb(now())#>>'{}' as db_now
          from ops.incident i
          left join ops.incident dup on dup.id = i.duplicate_of_id
+         ${INCIDENT_OCCURRENCE_JOIN_SQL}
         where i.ref = $1`, [String(ref || "").trim()]);
     if (!r.rows.length)
       throw new ToolError({ error: "no_such_incident", ref,
@@ -476,6 +519,7 @@ export function incidentTools({ withEnvelope, writeEvent, ToolError, authorizati
           `select ${INCIDENT_COLUMNS}, to_jsonb(now())#>>'{}' as db_now
              from ops.incident i
              left join ops.incident dup on dup.id = i.duplicate_of_id
+             ${INCIDENT_OCCURRENCE_JOIN_SQL}
             ${where.length ? `where ${where.join(" and ")}` : ""}
             -- SEVERITY FIRST, THEN OLDEST FIRST. Severity is a text sort and
             -- 'SEV-1' < 'SEV-2' lexically, which is the order a person means.
@@ -770,7 +814,9 @@ export function incidentTools({ withEnvelope, writeEvent, ToolError, authorizati
               where id = $1`, [incidentId]);
 
         const count = await c.query(
-          `select ${OCCURRENCES_SQL} as occurrences from ops.incident i where i.id = $1`, [incidentId]);
+          `select occurrence.occurrences as occurrences from ops.incident i
+             ${INCIDENT_OCCURRENCE_JOIN_SQL}
+            where i.id = $1`, [incidentId]);
 
         await writeEvent(c, actor, "open-incident", "incident", incidentId, {
           field: opened ? "state" : "observed_at",
@@ -792,6 +838,71 @@ export function incidentTools({ withEnvelope, writeEvent, ToolError, authorizati
               "incident rather than opening a second one",
         };
       }),
+    },
+
+    "link-incident-work-request": {
+      write: true,
+      description:
+        "Attach one same-tenant public Work Request to an incident as contextual evidence. The link " +
+        "does not count as an occurrence and changes neither lifecycle. Same-key concurrent calls " +
+        "serialize before the existing envelope replay boundary.",
+      inputSchema: { type: "object", additionalProperties: false, properties: {
+        idempotency_key: { type: "string", pattern: "^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$" },
+        incident_ref: { type: "string", pattern: "^INC-[0-9]{8}-[0-9]{2}$" },
+        work_request: { type: "string", pattern: "^WR-[0-9]{1,12}$" },
+      }, required: ["idempotency_key", "incident_ref", "work_request"] },
+      handler: async (c, actor, args) => {
+        const idempotencyKey = String(args.idempotency_key || "").trim().toLowerCase();
+        const incidentRef = String(args.incident_ref || "").trim();
+        const workRequest = String(args.work_request || "").trim();
+        if (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(idempotencyKey))
+          throw new ToolError({ error: "invalid_idempotency_key" });
+
+        // withEnvelope reads before it writes. Serialize equal keys first so
+        // two first calls cannot both miss the receipt and perform the body.
+        await c.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [idempotencyKey]);
+        return withEnvelope(c, actor, "link-incident-work-request", {
+          idempotency_key: idempotencyKey, incident_ref: incidentRef, work_request: workRequest,
+        }, async () => {
+          const incident = await c.query(
+            "select id, ref from ops.incident where ref=$1", [incidentRef]);
+          if (!incident.rows.length)
+            throw new ToolError({ error: "incident_not_found", incident_ref: incidentRef });
+
+          const target = await c.query(
+            `select ref, state from ops.work_request_card($1::text,$2::text)
+               /* incident:link-work-request-target */`,
+            [workRequest, organizationTenantForActor(actor)]);
+          if (!target.rows.length || !["captured", "triaged", "ready", "declined", "superseded"].includes(target.rows[0].state))
+            throw new ToolError({ error: "work_request_not_found", work_request: workRequest });
+
+          await c.query(
+            "select pg_advisory_xact_lock(hashtextextended($1,0))",
+            [`incident-work-request:${incidentRef}`]);
+          const conflict = await c.query(
+            `select ref from ops.incident_link
+              where incident_id=$1 and kind='work_request' and ref<>$2
+              order by ref limit 1`, [incident.rows[0].id, workRequest]);
+          if (conflict.rows.length)
+            throw new ToolError({ error: "incident_work_request_conflict", incident_ref: incidentRef,
+              existing_work_request: conflict.rows[0].ref, requested_work_request: workRequest });
+
+          const inserted = await c.query(
+            `insert into ops.incident_link (incident_id,kind,ref,note)
+             values ($1,'work_request',$2,'contextual evidence')
+             on conflict do nothing returning incident_id`, [incident.rows[0].id, workRequest]);
+          const linked = inserted.rows.length > 0;
+          if (linked)
+            await writeEvent(c, actor, "link-incident-work-request", "incident", incident.rows[0].id, {
+              field: "contextual_work_request",
+              new: { incident_ref: incidentRef, work_request: workRequest },
+              idempotency_key: idempotencyKey,
+            });
+          return { ok: true, incident_ref: incidentRef, work_request: workRequest,
+            linked, already_linked: !linked, link_kind: "work_request",
+            relationship: "contextual_evidence", occurrence_effect: "none", lifecycle_effect: "none" };
+        });
+      },
     },
 
     "close-incident": {

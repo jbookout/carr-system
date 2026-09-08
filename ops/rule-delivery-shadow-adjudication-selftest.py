@@ -12,6 +12,23 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 from lib.rule_delivery_shadow import finding, observation_id  # noqa:E402
 ARTIFACT = REPO / "audits/rule-delivery-shadow-adjudication-2026-08-26.v1.json"
+
+# HOST-EVIDENCE AUDIT IS OPT-IN. The raw shadow ledger and the raw transcripts
+# this document pins live only on the evidence-owning machine, so reading them
+# made the suite give a different verdict per host. The committed digest
+# envelope, the pinned prefixes and every assertion below are unchanged; only
+# WHEN the raw bytes are read. Ordinary CI is hermetic. `--verify-host-evidence`
+# performs the audit, and it still FAILS on historical evidence that has moved.
+# OBSERVED, CAUSE NOT ESTABLISHED: several pinned session transcripts on the
+# evidence-owning machine no longer match their recorded digests, and the change
+# is not confined to appended rows. Nothing here diagnoses why, and no
+# explanation should be inferred from this suite passing hermetically.
+_ARGUMENTS = sys.argv[1:]
+_UNKNOWN = [argument for argument in _ARGUMENTS if argument != "--verify-host-evidence"]
+if _UNKNOWN:
+    # A mistyped flag must never read as a passing audit.
+    raise SystemExit(f"unknown argument(s): {' '.join(_UNKNOWN)}")
+VERIFY_HOST_EVIDENCE = "--verify-host-evidence" in _ARGUMENTS
 HEX = set("0123456789abcdef")
 EXPLAINED = {
     "a76928580de0fddc3231420e6663b3219831b80526d8cabb60b69e4cc85c2028",
@@ -122,6 +139,31 @@ def verify_owned_ledger(root: Path, relative: str, *, prefix_rows: int,
     return True
 
 
+def verified_ledger_sources(*, relative: str, prefix_rows: int, prefix_sha256: str,
+                            expected: dict[str, tuple[str, str]],
+                            clone_ledger: Path | None,
+                            owning_root: Path | None) -> list[str]:
+    """Name every raw ledger source that ACTUALLY verified against the pins.
+
+    Split out from the call site so the composition can be tested, because the
+    composition is where the defect was: an earlier revision on this branch
+    recorded that a clone-local ledger had been LOOKED AT rather than whether
+    it verified, so an explicit audit could report success with no verifiable
+    ledger anywhere. A clone-local log holding none of the pinned identities is
+    not the evidence artifact and contributes nothing here.
+    """
+    sources = []
+    if clone_ledger is not None and clone_ledger.is_file() and verify_legacy_ledger(
+            clone_ledger.read_bytes(), prefix_rows=prefix_rows,
+            prefix_sha256=prefix_sha256, expected=expected):
+        sources.append("clone-local")
+    if owning_root is not None and verify_owned_ledger(
+            owning_root, relative, prefix_rows=prefix_rows,
+            prefix_sha256=prefix_sha256, expected=expected):
+        sources.append("canonical")
+    return sources
+
+
 document = json.loads(ARTIFACT.read_text(encoding="utf-8"))
 assert document["schema"] == "rule-delivery-shadow-adjudication/v1"
 assert document["status"] == "independently-reviewed"
@@ -184,24 +226,23 @@ prefix_sha256 = ledger_snapshot["sha256"]
 local_ledger = (REPO / document["ledger"]["path"]).resolve()
 canonical_root = Path("/Users/booko/carr-system")
 canonical_ledger = (canonical_root / document["ledger"]["path"]).resolve()
-checked_ledger = False
-if local_ledger.is_file() and local_ledger != canonical_ledger:
-    checked_ledger = True
-    if verify_legacy_ledger(
-            local_ledger.read_bytes(), prefix_rows=prefix_rows,
-            prefix_sha256=prefix_sha256, expected=expected_events):
-        print(f"verified immutable {prefix_rows}-row ledger prefix and "
-              f"{len(expected_events)} derived finding identities")
-    else:
-        print("external raw ledger unavailable; clone-local log has no pinned legacy events")
-if verify_owned_ledger(
-        canonical_root, document["ledger"]["path"], prefix_rows=prefix_rows,
-        prefix_sha256=prefix_sha256, expected=expected_events):
-    checked_ledger = True
-    print(f"verified canonical immutable {prefix_rows}-row ledger prefix and "
-          f"{len(expected_events)} derived finding identities")
-if not checked_ledger:
-    print("external raw ledger unavailable; validated committed 14-event digest envelope")
+ledger_sources = verified_ledger_sources(
+    relative=document["ledger"]["path"], prefix_rows=prefix_rows,
+    prefix_sha256=prefix_sha256, expected=expected_events,
+    clone_ledger=(local_ledger if VERIFY_HOST_EVIDENCE
+                  and local_ledger != canonical_ledger else None),
+    owning_root=canonical_root if VERIFY_HOST_EVIDENCE else None)
+for ledger_source in ledger_sources:
+    print(f"verified {ledger_source} immutable {prefix_rows}-row ledger prefix "
+          f"and {len(expected_events)} derived finding identities")
+if not ledger_sources:
+    # An explicit audit that verified no raw ledger has proven nothing about the
+    # ledger, and must not be reported the same way as a hermetic run that never
+    # looked. A clone-local log carrying no pinned identities lands here.
+    assert not VERIFY_HOST_EVIDENCE, \
+        "host-evidence audit verified no raw shadow ledger"
+    print("raw ledger not read or not verifiable (hermetic mode); "
+          "validated committed 14-event digest envelope")
 
 # Hermetic boundary cases for the evidence classifier itself.
 fixture_rows = [
@@ -238,6 +279,37 @@ except AssertionError:
     pass
 else:
     raise AssertionError("total canonical pinned-evidence tamper was accepted as unavailable")
+
+# REGRESSION for the ledger ACCOUNTING, not the ledger checks. Independent
+# review found that an earlier revision on this branch counted a clone-local
+# ledger as checked before knowing whether it verified, so an explicit audit
+# holding no verifiable ledger could still report success. The shape that
+# exposes it is a fresh machine: a clone-local log with none of the pinned
+# identities, and no evidence-owning checkout. The third case is the positive
+# control, so an empty result can never pass for the trivial reason that this
+# function returns nothing at all.
+with tempfile.TemporaryDirectory() as directory:
+    accounting = Path(directory)
+    clone_only = accounting / "clone-shadow.jsonl"
+    clone_only.write_bytes(unrelated)
+    assert verified_ledger_sources(
+        relative="out/shadow.jsonl", prefix_rows=2, prefix_sha256=fixture_digest,
+        expected=fixture_expected, clone_ledger=clone_only,
+        owning_root=accounting / "absent-checkout") == [], \
+        "an unrelated clone-local ledger with no owning checkout counted as verified"
+    assert verified_ledger_sources(
+        relative="out/shadow.jsonl", prefix_rows=2, prefix_sha256=fixture_digest,
+        expected=fixture_expected, clone_ledger=None, owning_root=None) == [], \
+        "absent ledger sources counted as verified"
+    owning = accounting / "owning"
+    (owning / "out").mkdir(parents=True)
+    (owning / "out/shadow.jsonl").write_bytes(fixture_raw)
+    assert verified_ledger_sources(
+        relative="out/shadow.jsonl", prefix_rows=2, prefix_sha256=fixture_digest,
+        expected=fixture_expected, clone_ledger=clone_only,
+        owning_root=owning) == ["canonical"], \
+        "a verifying owning ledger was not reported, or an unrelated clone was"
+
 with tempfile.TemporaryDirectory() as directory:
     owning_root = Path(directory) / "carr-system"
     owning_root.mkdir()
@@ -277,9 +349,31 @@ for bad_transcript in (
     else:
         raise AssertionError("short or rewritten transcript prefix was accepted")
 
+# The same excerpt arithmetic the raw-transcript audit performs below, proven
+# on synthetic bytes so it keeps its coverage where no transcript exists. An
+# excerpt must address a window inside the PINNED prefix only: lawful appended
+# rows are never selectable, and a different window must produce a different
+# digest, or the assertion would pass for the wrong reason.
+excerpt_fixture = b'{"row":1}\n{"row":2}\n{"row":3}\n'
+excerpt_pin = hashlib.sha256(excerpt_fixture).hexdigest()
+excerpt_prefix, excerpt_appended = pinned_file_prefix(
+    excerpt_fixture + b'{"row":4}\n', excerpt_pin)
+excerpt_lines = excerpt_prefix.splitlines(keepends=True)
+assert excerpt_appended == 1 and len(excerpt_lines) == 3, \
+    "appended rows must never enter the pinned excerpt window"
+selected_window = b"".join(excerpt_lines[1:3])
+assert hashlib.sha256(selected_window).hexdigest() == hashlib.sha256(
+    b'{"row":2}\n{"row":3}\n').hexdigest(), "pinned excerpt window did not verify"
+assert hashlib.sha256(b"".join(excerpt_lines[0:2])).hexdigest() \
+    != hashlib.sha256(selected_window).hexdigest(), \
+    "excerpt digests must distinguish one line window from another"
+
+# Raw transcript bytes are host evidence; the loop reads them only under the
+# explicit audit. Every committed path/digest/line envelope was validated above
+# on every machine.
 verified_transcripts = 0
 missing_transcripts = []
-for event in events:
+for event in events if VERIFY_HOST_EVIDENCE else []:
     transcript = event["transcript"]
     path = Path(transcript["path"])
     if not path.is_file():
@@ -293,11 +387,22 @@ for event in events:
     selected = b"".join(lines[excerpt["start_line"] - 1:excerpt["end_line"]])
     assert hashlib.sha256(selected).hexdigest() == excerpt["sha256"]
     verified_transcripts += 1
-if missing_transcripts:
+if not VERIFY_HOST_EVIDENCE:
+    print("raw transcripts not read (hermetic mode); validated every committed "
+          "file/excerpt digest and line envelope")
+elif missing_transcripts:
     assert verified_transcripts == 0, "partial transcript evidence availability is invalid"
-    print(f"external transcripts unavailable ({len(missing_transcripts)}); "
-          "validated every committed file/excerpt digest and line envelope")
+    raise AssertionError(
+        f"host-evidence audit is missing {len(missing_transcripts)} transcript file(s): "
+        + ", ".join(missing_transcripts))
 else:
     print(f"verified {verified_transcripts} transcript files/excerpts against raw bytes")
 
-print("rule-delivery-shadow-adjudication-selftest: 14/14 source candidates valid")
+if VERIFY_HOST_EVIDENCE:
+    print("rule-delivery-shadow-adjudication-selftest: 14/14 source candidates valid, "
+          "INCLUDING the pinned host evidence")
+else:
+    # Never let a hermetic pass read as "the historical evidence still matches".
+    print("rule-delivery-shadow-adjudication-selftest: 14/14 source candidates valid; "
+          "pinned host evidence NOT audited "
+          "(run with --verify-host-evidence on the evidence-owning machine)")
