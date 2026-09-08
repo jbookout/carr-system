@@ -39,6 +39,31 @@ say so rather than improvising a home — a cloud session once filed an entire
 system audit into an unrelated empty scaffold repo, which is the same as losing
 it.
 
+## The shared root is NOT an agent work surface
+
+`~/carr-system` is the stable bootstrap and coordination checkout. It exists so
+sessions can load these instructions, inspect shared state read-only, and create
+their own isolated worktree or clone. No coding session may implement a change
+in that shared checkout.
+
+Before the first repository edit, create and enter a session-owned tree:
+
+```
+./run.sh worktree <name>
+cd .claude/worktrees/<name>
+```
+
+If that helper is unavailable, use a separate clone rather than falling back to
+the shared checkout. One session owns one tree and one branch. It owns the full
+delivery path too: checks, explicit-path staging, commit, push, pull request,
+green CI, merge, verification on `main`, and cleanup. A patch, commit, pushed
+branch, or open PR is intermediate state, not completion. Stop short only for a
+concrete human-only gate, and name that gate and the exact remaining action.
+
+The only permitted writes in the shared root are deliberate bootstrap or
+coordination-state changes to the session machinery itself. Those changes still
+must be copied into an isolated tree and delivered through the normal PR path.
+
 ## Map work has one mandatory front door
 
 For any request to recommend, design, build, revise, review, or publish a map,
@@ -108,3 +133,42 @@ Content goes through the record layer's verbs, never into a markdown file — a
 hard gate enforces it. `./run.sh call <verb> '<json>'` reaches any verb.
 This file and the vault's `CLAUDE.md`/`AGENTS.md` are among the few
 exact-path exceptions.
+
+## Active WR-000070 R09 executor recovery
+
+This coordination note applies only to the accepted R09 source-recovery slice;
+it grants no new source scope, model route, live canary, or release authority.
+The dispatcher owns independent review and final delivery after the builder's
+typed executor claim. Complete the accepted executor definition of done before
+returning the receipt; pending independent review is not itself an executor
+failure. A passing reviewer fact requires an existing `claimed_complete` receipt.
+
+After the mandatory source/plan/assignment reads, capture fresh model-route
+evidence with this read-only command:
+
+```
+/Users/booko/carr-system/.venv/bin/python /Users/booko/carr-system/tools/room-bridge/engineering_dispatch_adapter.py --preflight
+```
+
+Require `ok: true` and the accepted `engineering-codex` desk with
+`gpt-5.6-terra` / `high`, `workspace-write`, and the assigned root. Attach the
+observed readback and its digest to `check:r09-model-route`; an actual mismatch
+must still refuse. Do not omit this check after a successful preflight.
+
+Verify the other five declared checks from the current source bindings and
+bounded R09 fixture evidence. Reuse and verify existing PR 906 with `gh pr view`;
+do not create a duplicate. Verify hosted strict CI and database acceptance on
+the delivered source, including the exact tree relationship when local commits
+contain coordination metadata only. Known local sandbox listener/network
+restrictions are environment observations; they do not negate a verified hosted
+result for the same source. Do not repeat a known unavailable local network gate
+when the accepted check can be established through its hosted result. Report
+real new failures honestly.
+
+Record the actual assigned worktree's observed HEAD as `source_evidence.source_sha`;
+the assignment's `source_main` is its base, not its recovered implementation.
+Validate the new receipt with the adapter's `--validate-receipt` command and the
+current immutable plan/envelope. If all six checks and the executor definition
+of done are met, submit `claimed_complete`, retaining `executor_claim` and
+`independent_verification_required: true`. Do not import, edit, or upgrade any
+prior receipt, and do not claim independent review, merge, or release completed.
