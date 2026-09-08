@@ -19,6 +19,28 @@ DEPLOY = ROOT / "bin" / "deploy-worker.sh"
 WRANGLER = ROOT / "mcp-server" / "node_modules" / ".bin" / "wrangler"
 RUNTIME = ROOT / "mcp-server" / "node_modules"
 FIXTURE_ENV = fixture_env()
+
+
+def fixture_git_env() -> dict[str, str]:
+    """Keep Git's automatic maintenance inside the fixture command lifetime.
+
+    The fixture `git commit` may start `git maintenance run --auto`, which
+    detaches by default and keeps writing `.git/objects` after
+    subprocess.run() returns; TemporaryDirectory cleanup then fails with
+    ENOTEMPTY. Same fixture-only rule as ops/machine-converge-selftest.py.
+    """
+    env = fixture_env()
+    env.update({
+        "GIT_CONFIG_COUNT": "2",
+        "GIT_CONFIG_KEY_0": "maintenance.autoDetach",
+        "GIT_CONFIG_VALUE_0": "false",
+        "GIT_CONFIG_KEY_1": "gc.autoDetach",
+        "GIT_CONFIG_VALUE_1": "false",
+    })
+    return env
+
+
+FIXTURE_GIT_ENV = fixture_git_env()
 RECOVERY_ARGS = (
     "--env", "staging",
     "--release-key", "candidate",
@@ -45,22 +67,22 @@ def make_source(*, mismatch: bool = False, broken_attachment: bool = False) -> t
             config.read_text(encoding="utf-8").replace("routes = []\n", "", 1),
             encoding="utf-8",
         )
-    subprocess.run(["git", "init", "-q", str(root)], check=True, env=FIXTURE_ENV)
+    subprocess.run(["git", "init", "-q", str(root)], check=True, env=FIXTURE_GIT_ENV)
     subprocess.run(["git", "-C", str(root), "config", "user.email", "selftest@example.invalid"],
-                   check=True, env=FIXTURE_ENV)
+                   check=True, env=FIXTURE_GIT_ENV)
     subprocess.run(["git", "-C", str(root), "config", "user.name", "selftest"],
-                   check=True, env=FIXTURE_ENV)
+                   check=True, env=FIXTURE_GIT_ENV)
     subprocess.run(["git", "-C", str(root), "add", "mcp-server", "dealroom"],
-                   check=True, env=FIXTURE_ENV)
+                   check=True, env=FIXTURE_GIT_ENV)
     subprocess.run(["git", "-C", str(root), "commit", "-qm", "fixture"],
-                   check=True, env=FIXTURE_ENV)
+                   check=True, env=FIXTURE_GIT_ENV)
     sha = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"],
-                                  text=True, env=FIXTURE_ENV).strip()
+                                  text=True, env=FIXTURE_GIT_ENV).strip()
     subprocess.run(["git", "-C", str(root), "checkout", "-q", "--detach", sha],
-                   check=True, env=FIXTURE_ENV)
+                   check=True, env=FIXTURE_GIT_ENV)
     if broken_attachment:
         subprocess.run(["git", "-C", str(root), "update-ref",
-                        "refs/remotes/origin/main", sha], check=True, env=FIXTURE_ENV)
+                        "refs/remotes/origin/main", sha], check=True, env=FIXTURE_GIT_ENV)
     return holder, root, sha
 
 
