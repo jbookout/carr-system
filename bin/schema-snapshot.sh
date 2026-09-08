@@ -251,6 +251,14 @@ case "$BACKUP_GUARD_STATUS_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the backup guard/status registry ledger state" >&2; exit 1 ;;
 esac
 
+SOURCED_SHAPE_FORWARD_CORRECTION_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0492_sourced_shape_forward_correction_and_scac_successor.sql')" \
+  2>/dev/null)"
+case "$SOURCED_SHAPE_FORWARD_CORRECTION_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the sourced shape forward-correction registry ledger state" >&2; exit 1 ;;
+esac
+
 # pg_dump renders timestamptz in the server session timezone; pin it so the
 # Production and disposable-local paths serialize identical instants alike.
 export PGOPTIONS='-c timezone=UTC'
@@ -1240,7 +1248,18 @@ case "$SCAC_REGISTRY_APPLIED" in
 esac
 
 if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
-  if [ "$BACKUP_GUARD_STATUS_REGISTRY_APPLIED" = t ]; then
+  if [ "$SOURCED_SHAPE_FORWARD_CORRECTION_REGISTRY_APPLIED" = t ]; then
+    SCAC_CURRENT_NUMBER=18
+    SCAC_VERSION_COUNT=18
+    SCAC_TOTAL_ENTRY_COUNT=26088
+    SCAC_CURRENT_ENTRY_COUNT=1515
+    SCAC_CURRENT_SOURCE_COUNT=827
+    SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v18.generated.js"
+    SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18'"
+    SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17'"
+    SCAC_FULL_SET_SEAL_COUNT=17
+    SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v18_current()"
+  elif [ "$BACKUP_GUARD_STATUS_REGISTRY_APPLIED" = t ]; then
     SCAC_CURRENT_NUMBER=17
     SCAC_VERSION_COUNT=17
     SCAC_TOTAL_ENTRY_COUNT=24573
@@ -1365,10 +1384,10 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
   SCAC_FULL_SET_SEALS="$REPO/ops/config/scac-registry-full-entry-set-seals.json"
   SCAC_FULL_SET_SQL="$(node -e '
     const fs=require("fs"); const seals=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
-    const allKeys=Array.from({length:16},(_,i)=>`scac-mutation-registry.v${i+1}`);
+    const allKeys=Array.from({length:17},(_,i)=>`scac-mutation-registry.v${i+1}`);
     const count=Number(process.argv[2]); const keys=allKeys.slice(0,count);
     if (Object.keys(seals).sort().join("|")!==allKeys.sort().join("|") ||
-        !Number.isInteger(count) || count<9 || count>16 ||
+        !Number.isInteger(count) || count<9 || count>17 ||
         allKeys.some(key=>!/^sha256:[0-9a-f]{64}$/.test(seals[key]))) process.exit(2);
     const quote=String.fromCharCode(39);
     const literal=value=>quote+String(value).replaceAll(quote,quote+quote)+quote;

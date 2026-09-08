@@ -130,7 +130,7 @@ test("production checkpoint handler replays through the real envelope and reject
   const client = { query: async (sql, params = []) => {
     calls.push({ sql, params });
     if (sql.startsWith("select pg_advisory_xact_lock")) return { rows: [] };
-    if (sql.startsWith("select request_hash, response from tool_call")) {
+    if (sql.startsWith("select request_hash, response")) {
       const prior = toolCalls.get(params[0]);
       return { rows: prior ? [{ request_hash: prior.request_hash, response: prior.response }] : [] };
     }
@@ -148,7 +148,10 @@ test("production checkpoint handler replays through the real envelope and reject
     if (sql.startsWith("insert into codex_continuity_revision")) return { rows: [] };
     if (sql.startsWith("insert into event (")) return { rows: [] };
     if (sql.startsWith("insert into tool_call (")) {
-      toolCalls.set(params[0], { request_hash: params[3], response: JSON.parse(params[4]) });
+      toolCalls.set(params[0], {
+        request_hash: params[3], response: JSON.parse(params[4]), actor_id: params[2],
+        organization_tenant_id: params[7], application_session_id: params[12] ?? null,
+      });
       return { rows: [] };
     }
     throw new Error(`unexpected SQL: ${sql}`);
@@ -169,6 +172,9 @@ test("production checkpoint handler replays through the real envelope and reject
   assert.equal(calls.filter(call => call.sql.startsWith("insert into codex_continuity_revision")).length, 1);
   assert.equal(calls.filter(call => call.sql.startsWith("insert into event (")).length, 1);
   assert.equal(calls.filter(call => call.sql.startsWith("insert into tool_call (")).length, 1);
+  assert.equal(toolCalls.get(base.idempotency_key).actor_id, actor.id);
+  assert.equal(toolCalls.get(base.idempotency_key).organization_tenant_id, "carr-internal");
+  assert.equal(toolCalls.get(base.idempotency_key).application_session_id, null);
 
   await assert.rejects(() => verb.handler(client, actor, {
     ...base, cursor: { ...base.cursor, turn_id: "turn-2" },
