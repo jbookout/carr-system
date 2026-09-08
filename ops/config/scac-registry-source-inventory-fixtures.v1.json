@@ -28475,5 +28475,36 @@
         }
       ]
     }
-  ]
+  ],
+  "current_source_review": {
+    "base_version": "v19",
+    "reason": "Record the Codex-only hook reliability update at the v19 frontier: cursor-bound repair keys, hard-limit healthy checks, and dedicated-auth fallback. The WR54 restore-script review is retired because bin/restore-rehearse.sh is already sealed in the frozen v19 inventory. Frozen v1-v19 inventories remain unchanged.",
+    "expected_count": 828,
+    "expected_sha256": "4a6db8c685d888b58a6c7f902d62656d9006a94aaa0edf79c2f18b6d56e97083",
+    "upsert": [
+      {
+        "ingress_key": "script-entrypoint:ops/codex-continuity-hook.py",
+        "ingress_kind": "script_entrypoint",
+        "operation": "ops/codex-continuity-hook.py",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/codex-continuity-hook.py",
+        "schema_digest": "631660320b0651624cfb031c7c088cec1c6cb58376caee314593a42540ad395c",
+        "handler_digest": "631660320b0651624cfb031c7c088cec1c6cb58376caee314593a42540ad395c",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "existing_script_specific_credential_boundary",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [],
+        "request_shape": "fixed_script_cli_contract",
+        "idempotency_mode": "script_specific_registered_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      }
+    ]
+  }
 }
