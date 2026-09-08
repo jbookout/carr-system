@@ -10,16 +10,20 @@ def run_race(iterations):
     with tempfile.TemporaryDirectory() as tmp:
       for i in range(iterations):
         if time.monotonic()-begun>120: return {"outcome":"blocked","reason":"wall_cap","witnessed":witnessed}
-        root=Path(tmp)/str(i); gate=threading.Barrier(2, timeout=5); starts=[]; results=[]; errors=[]
+        root=Path(tmp)/str(i); gate=threading.Barrier(2, timeout=5); attempts=[]; results=[]; errors=[]
         def contender(n):
-          s=RuntimeIsolation(root,owner(f"{i}-{n}")); starts.append(time.monotonic())
+          s=RuntimeIsolation(root,owner(f"{i}-{n}")); started=time.monotonic()
           try:
             gate.wait(); a=s.allocate(Bundle((31000+i,),f"c{i}",f"d{i}"),idempotency_key=f"same-{n}"); results.append((s,a,time.monotonic()))
           except Exception as e: errors.append(e)
+          finally: attempts.append((n, started, time.monotonic()))
         ts=[threading.Thread(target=contender,args=(n,),daemon=True) for n in range(2)]
         [t.start() for t in ts]; [t.join(10) for t in ts]
         if any(t.is_alive() for t in ts) or len(results)!=1 or len(errors)!=1 or not isinstance(errors[0],IsolationRefusal): return {"outcome":"failed","reason":"collision","witnessed":witnessed}
-        if max(starts)<=results[0][2]: witnessed+=1
+        # Each attempt starts before the synchronized barrier and ends only after
+        # its allocation call returns or refuses.  Intersecting intervals are a
+        # timestamped witness of real contention, not merely two thread starts.
+        if len(attempts)==2 and max(item[1] for item in attempts)<=min(item[2] for item in attempts): witnessed+=1
         state=json.loads((root/"r09-state.json").read_text());
         if len(state["allocations"])!=1 or len(list((root/"runs").iterdir()))!=1: return {"outcome":"failed","reason":"partial","witnessed":witnessed}
         results[0][0].teardown(results[0][1])
