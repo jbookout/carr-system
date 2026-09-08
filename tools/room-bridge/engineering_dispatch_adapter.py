@@ -579,7 +579,12 @@ def _prompt(packet: dict, task: dict, source_loader_js: str, receipt_template: d
         f"truthfully observed: {', '.join(RECEIPT_TEMPLATE_PLACEHOLDER_PATHS)}. "
         "source_evidence.worktree_ref and branch_ref are opaque identifiers, NEVER paths or raw branch "
         "names: for each actually observed path/name use worktree:sha256:<lowercase SHA256 of UTF-8 path> "
-        "and branch:sha256:<lowercase SHA256 of UTF-8 branch name>. These labels describe observations, "
+        "and branch:sha256:<lowercase SHA256 of UTF-8 branch name>. Run both Git observations inside "
+        "the assigned worktree: `git rev-parse --show-toplevel` supplies the absolute root path with no "
+        "trailing slash; `git rev-parse --abbrev-ref HEAD` supplies the short branch name with no "
+        "refs/heads/ prefix. Remove only the command's terminating newline before hashing each UTF-8 "
+        "value; do not hash the desk cwd, a subdirectory, or a fully qualified branch ref. "
+        "These labels describe observations, "
         "not authority. If setup stopped before an observation, use worktree:unobserved, branch:unobserved, "
         "and source_sha=unobserved for the respective unknown fields; never claim existence or a commit "
         "you did not inspect. The identifier grammar is ^[A-Za-z][A-Za-z0-9._:-]{2,127}$. "
@@ -741,8 +746,8 @@ def main() -> int:
             try:
                 result = validate_receipt_document(value)
             except (DispatchRefusal, engineering_passport.EngineeringContractError) as exc:
-                # This read-only mode receives no credentials and echoes no input
-                # values; validator diagnostics name the failing contract field.
+                # This read-only mode receives no credentials. Diagnostics may
+                # include field names or slice refs from the caller's own input.
                 print(json.dumps({"ok": False, "error": type(exc).__name__,
                                   "detail": str(exc)}, separators=(",", ":")), file=sys.stderr)
                 return 1
