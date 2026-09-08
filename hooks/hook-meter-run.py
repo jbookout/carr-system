@@ -98,6 +98,7 @@ DENY_MARKER = "DENY-CLASS:"
 STOP_EVENTS = ("Stop", "SubagentStop")
 
 MAX_FIELD = 300
+INVOCATION_REPO_ENV = "CARR_HOOK_INVOCATION_REPO"
 
 
 class Tee(io.TextIOBase):
@@ -195,6 +196,68 @@ def _scan_field(raw, key):
         return value.decode("utf-8", "replace")
     except Exception:
         return None
+
+
+def _top_level_cwd(raw):
+    """Return only the root object's ``cwd`` string, without parsing payload bodies.
+
+    Tool input can contain arbitrary source text, including a seeded ``"cwd"``
+    key.  A substring search would let that fixture select the evidence writer.
+    This small scanner tracks JSON nesting and accepts the key only at depth one;
+    unusual escapes fall back to no context, which makes hook_meter use canonical.
+    """
+    try:
+        depth = 0
+        in_string = False
+        escaped = False
+        start = None
+        tokens = []
+        for index, byte in enumerate(raw):
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif byte == 0x5C:
+                    escaped = True
+                elif byte == 0x22:
+                    token = raw[start:index]
+                    in_string = False
+                    if depth == 1:
+                        tokens.append((index, token))
+                continue
+            if byte == 0x22:
+                in_string = True
+                start = index + 1
+            elif byte in (0x7B, 0x5B):
+                depth += 1
+            elif byte in (0x7D, 0x5D):
+                depth -= 1
+            if depth < 0:
+                return None
+        for end, token in tokens:
+            if token != b"cwd":
+                continue
+            pos = end + 1
+            while pos < len(raw) and raw[pos] in b" \t\r\n":
+                pos += 1
+            if pos >= len(raw) or raw[pos] != 0x3A:
+                continue
+            pos += 1
+            while pos < len(raw) and raw[pos] in b" \t\r\n":
+                pos += 1
+            if pos >= len(raw) or raw[pos] != 0x22:
+                return None
+            pos += 1
+            value_start = pos
+            while pos < len(raw):
+                if raw[pos] == 0x5C:
+                    return None
+                if raw[pos] == 0x22:
+                    return raw[value_start:pos].decode("utf-8", "strict")
+                pos += 1
+            return None
+    except Exception:
+        pass
+    return None
 
 
 def _payload_facts(raw):
@@ -394,6 +457,15 @@ def main():
         raw = sys.stdin.buffer.read()
     except Exception:
         raw = b""
+    try:
+        # Never inherit an earlier wrapper's routing hint.  Only this payload's
+        # existing top-level cwd may nominate an invocation checkout.
+        os.environ.pop(INVOCATION_REPO_ENV, None)
+        invocation_cwd = _top_level_cwd(raw)
+        if invocation_cwd and os.path.isdir(invocation_cwd):
+            os.environ[INVOCATION_REPO_ENV] = os.path.abspath(invocation_cwd)
+    except Exception:
+        pass
     try:
         sys.stdin = replacement_stdin(raw)
     except Exception:

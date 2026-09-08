@@ -1531,6 +1531,40 @@ def install_launchd_plist(filename, dest, body, body_matches):
     return "failed"
 
 
+def write_claude_settings(path, document, before, sink=None):
+    """Write the settings render, optionally exposing one redacted fake witness.
+
+    ``sink`` is a callback used by the R06 fixture only.  Production supplies no
+    callback, and this function contains no notification or target transport.
+    The callback runs before overwrite and receives hashes/counts, never config
+    values or paths.
+    """
+    import hashlib
+    body = json.dumps(document, indent=2) + "\n"
+    before = before if before is not None else ""
+    permissions = document.get("permissions", {}) if isinstance(document, dict) else {}
+    permission_count = sum(
+        len(value) for value in permissions.values() if isinstance(value, list)
+    ) if isinstance(permissions, dict) else 0
+    event = {
+        "schema_version": "r06-config-pre-overwrite.v1",
+        "writer": "ops/config-as-code.py:write_claude_settings",
+        "target_class": "claude-settings",
+        "before_sha256": "sha256:" + hashlib.sha256(before.encode("utf-8")).hexdigest(),
+        "after_sha256": "sha256:" + hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        "preserved_top_level_key_count": len([
+            key for key in document if key != "hooks"
+        ]) if isinstance(document, dict) else 0,
+        "preserved_permission_entry_count": permission_count,
+        "actual_notification": False,
+    }
+    if sink is not None:
+        sink(copy.deepcopy(event))
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    return event
+
+
 def cmd_install(apply):
     """repo -> machine. The half that makes a second machine possible."""
     settings_existed = os.path.exists(SETTINGS)
@@ -1789,9 +1823,7 @@ def cmd_install(apply):
     backup = SETTINGS + ".bak-config-as-code"
     if settings_existed:
         shutil.copy2(SETTINGS, backup)
-    with open(SETTINGS, "w", encoding="utf-8") as fh:
-        json.dump(cfg, fh, indent=2)
-        fh.write("\n")
+    write_claude_settings(SETTINGS, cfg, raw)
     try:
         json.loads(read(SETTINGS))
     except Exception as exc:
