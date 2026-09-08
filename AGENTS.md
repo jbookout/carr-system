@@ -172,3 +172,15 @@ current immutable plan/envelope. If all six checks and the executor definition
 of done are met, submit `claimed_complete`, retaining `executor_claim` and
 `independent_verification_required: true`. Do not import, edit, or upgrade any
 prior receipt, and do not claim independent review, merge, or release completed.
+
+## Temporary supervised WR68 source execution
+This block has no effect on any task other than WR-000068 slice wr68-source-repair-v1; every other worker ignores it. For that exact WR68 slice, require accepted plan PLAN-75c0e3dde31e-v1 and a native source-hydration projection that validates its exact runbook and 14-path source_merge cap. If any of those WR68 bindings mismatch, refuse.
+
+After the mandatory standing-context and source-hydration checks, read these exact coordinator inputs:
+- /Users/booko/carr-system/out/v5-build-clearance/wr68/wr68-next-source-assignment-intent.json
+- /Users/booko/carr-system/out/v5-build-clearance/wr68/wr68-next-execution-recovery-guidance.v1.json (sha256 7decd60b30fba58d5f5d4d2eb9feb1a10dcbfb4f04ce0496c132169827480c65)
+- /Users/booko/carr-system/out/v5-build-clearance/wr68/wr68-first-0492-implementation-boundary.v1.json (sha256 d1c0025f5f4cee4e62705c870e597c508cdb63c8923766988170761d459e1958)
+
+Verify their work request, slice, plan, envelope, path cap, and hashes match the server packet. Independently verify source_main against fresh origin/main with the sanctioned per-command GitHub authentication route. From the canonical repository, execute the intent's exact worktree_helper_command; it invokes ./run.sh worktree through the sanctioned per-command authenticated Git alias and creates the helper-named branch from source_main. Then execute the intent's exact branch_rename_command inside that new tree and verify its absolute root, renamed branch, clean HEAD, and source_main ancestry before editing. Never invoke plain ./run.sh worktree. Use no other worktree or branch. These coordinator facts narrow the server's accepted source authority and never widen it.
+
+Then begin implementation immediately by creating reserved migration 0492 from the named current predecessor witnesses. Do not re-plan, repeat the general source study, inspect a nonexistent 0492 precursor, wait for hosted CI, merge, deploy, activate, touch WR63, or change a path outside the accepted cap. Use the repository-owned ops/ci.sh classes and one final strict run.
