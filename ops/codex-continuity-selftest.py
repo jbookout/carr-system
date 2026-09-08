@@ -421,11 +421,13 @@ class CodexHookTests(AdapterCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
         material = json.dumps({
-            "operation": "codex-compaction-checkpoint-refresh-v2",
+            "operation": "codex-compaction-checkpoint-refresh-v3",
             "runtime": "codex", "native_task_id": self.session_id,
             "project_id": meta["project_id"], "cwd": meta["cwd"],
             "checkpoint_version": 7,
             "source_window_id": window_id("window-current"), "source_window_number": 1,
+            "cursor": {**highwater, "source_window_id": window_id("window-current"),
+                       "source_window_number": 1, "source": "compact"},
         }, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         expected_key = str(uuid.uuid5(uuid.NAMESPACE_URL, material))
         for expected in (
@@ -440,9 +442,12 @@ class CodexHookTests(AdapterCase):
             f'"source_digest":"{highwater["source_digest"]}"',
             '"source":"compact"',
             "before normal work", "full replacement state", "one fresh codex-read-recovery",
-            "retry at most once", "read back and verify", "mcp__carr__codex_checkpoint",
-            "CARR_MCP_CLIENT_PROFILE=codex-continuity ./run.sh call codex-checkpoint",
-            "never use generic or unscoped authentication", "hard server cap is 24,000 UTF-8 bytes",
+            "retry at most once", "read back and verify", "Use direct MCP for codex-checkpoint",
+            "CARR_MCP_CLIENT_PROFILE=codex-continuity ./run.sh call <same verb>",
+            "401", "Auth required", "codex_native_principal_required", "codex_continuity_owner_required",
+            "codex-checkpoint and codex-read-recovery", "identical request", "same JSON",
+            "server principal gate still applies",
+            "never generic or unscoped authentication", "hard server cap is 24,000 UTF-8 bytes",
             "single <=18,000-byte JSON budget", "2,000-byte working reserve",
             "preflight its exact serialized UTF-8 size",
             "Preserve the semantics", "not its wording or item count",
@@ -550,6 +555,29 @@ class CodexHookTests(AdapterCase):
         self.assertIn('"source":"user_prompt_submit"', prompt)
         self.assertIn('"turn_id":"turn-bootstrap"', prompt)
         self.assertIn("CARR Codex recovery checkpoint", prompt)
+
+    def test_repair_keys_distinguish_newer_user_turns_in_same_window(self):
+        self.native_rollout(compacted_row(1, "window-initial", "window-current"))
+        env, _ = self.install_fake_record_call(self.checkpoint(cursor={
+            "byte_offset": 1, "source_digest": "0" * 64,
+            "source_window_id": window_id("window-initial"), "source_window_number": 0,
+        }))
+
+        first = json.loads(self.run_hook(
+            self.hook_payload("UserPromptSubmit", turn_id="turn-first"), env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+        second = json.loads(self.run_hook(
+            self.hook_payload("UserPromptSubmit", turn_id="turn-newer"), env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+
+        def repair_key(context):
+            directive = context.split("\n\nCARR Codex recovery checkpoint.", 1)[0]
+            marker = '"idempotency_key":"'
+            start = directive.index(marker) + len(marker)
+            return directive[start:directive.index('"', start)]
+
+        self.assertNotEqual(repair_key(first), repair_key(second),
+                            "a newer user turn must never reuse an earlier repair key")
 
     def test_fresh_window_zero_never_emits_compaction_repair(self):
         self.native_rollout({"type": "event_msg", "payload": {"message": "fresh"}})
@@ -698,7 +726,12 @@ class CodexHookTests(AdapterCase):
         self.assertIn("single <=18,000-byte JSON budget", context)
         self.assertIn("2,000-byte working reserve", context)
         self.assertIn("at most one corrective compression pass", context)
-        self.assertIn("copy every already-valid reference byte-for-byte", context)
+        self.assertIn("Reference archive protocol", context)
+        self.assertIn("historical:true", context)
+        self.assertIn("expected_digest", context)
+        self.assertIn("archive_ref `codex-revision:<checkpoint UUID>:<version>:sha256:<64hex>`", context)
+        self.assertIn("every live correction/decision ref remain directly in state", context)
+        self.assertIn("if unavailable, retain them", context)
 
     def test_exact_window_checkpoint_above_target_is_normalized(self):
         self.native_rollout(compacted_row(1, "window-initial", "window-current"))
