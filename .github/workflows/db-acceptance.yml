@@ -29,24 +29,29 @@
 # to let it run for a while and see its false-positive rate first.
 #
 # COST. ci.yml records that spend has to come out of run COUNT, not duration.
-# This adds roughly one run per DB-touching PR plus one daily, against a lane
-# that was previously never checked at all.
+# This ran once per DB-touching PR plus once daily until 2026-09-02; the
+# per-PR run was removed as a duplicate of work ci.yml had just done (see the
+# trigger block below for the measurement). It now runs once daily.
 
 name: DB acceptance
 
 on:
-  pull_request:
-    # Only the paths that can actually break the disposable-Postgres lane: the
-    # migrations themselves, the committed snapshot they apply onto, the CI
-    # entry points, and the libraries/tools the acceptance programs import.
-    paths:
-      - "migrations/**"
-      - "db/**"
-      - "ops/**"
-      - "lib/**"
-      - "tools/**"
-      - "run.sh"
-      - ".github/workflows/db-acceptance.yml"
+  # NO pull_request TRIGGER since 2026-09-02, and the reason is measured.
+  #
+  # ops/local-pg-ci.py --class migration calls `ops/ci.sh --only migration` —
+  # the same schema load, the same 300+ forward migrations and the same 52
+  # `# ci: db-gate` programs that the required ci.yml run had just finished on
+  # the very same push — and then adds three acceptance programs ci.sh does not
+  # run (atomic-rule-approval, rule-delivery, calendar-canary). Measured over
+  # 2026-09-01..02: 100 runs, 942 billed minutes, a third of the repository's
+  # entire Actions spend, of which the unique tail is seconds. Per PR push the
+  # pair cost 24.5 billed minutes; this lane was 9.4 of them.
+  #
+  # The daily schedule and manual dispatch stay, so the three unique programs
+  # keep hosted cover on the cadence this header always described as provisional.
+  # THE HONEST NEXT STEP is to mark those three `# ci: db-gate` so the required
+  # context runs them per PR at their real cost, then this lane is a pure
+  # Linux-install smoke test of local-pg-ci.py itself, which daily covers.
   schedule:
     # 06:45 UTC daily — after ci.yml's 06:20 backstop, so a quiet-period failure
     # here lands next to that run rather than racing it.
