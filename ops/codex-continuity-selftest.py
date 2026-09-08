@@ -421,11 +421,13 @@ class CodexHookTests(AdapterCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
         material = json.dumps({
-            "operation": "codex-compaction-checkpoint-refresh-v2",
+            "operation": "codex-compaction-checkpoint-refresh-v3",
             "runtime": "codex", "native_task_id": self.session_id,
             "project_id": meta["project_id"], "cwd": meta["cwd"],
             "checkpoint_version": 7,
             "source_window_id": window_id("window-current"), "source_window_number": 1,
+            "cursor": {**highwater, "source_window_id": window_id("window-current"),
+                       "source_window_number": 1, "source": "compact"},
         }, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
         expected_key = str(uuid.uuid5(uuid.NAMESPACE_URL, material))
         for expected in (
@@ -440,11 +442,16 @@ class CodexHookTests(AdapterCase):
             f'"source_digest":"{highwater["source_digest"]}"',
             '"source":"compact"',
             "before normal work", "full replacement state", "one fresh codex-read-recovery",
-            "retry at most once", "read back and verify", "mcp__carr__codex_checkpoint",
-            "CARR_MCP_CLIENT_PROFILE=codex-continuity ./run.sh call codex-checkpoint",
-            "never use generic or unscoped authentication", "hard server cap is 24,000 UTF-8 bytes",
+            "retry at most once", "read back and verify", "Use direct MCP for codex-checkpoint",
+            "CARR_MCP_CLIENT_PROFILE=codex-continuity ./run.sh call <same verb>",
+            "401", "Auth required", "codex_native_principal_required", "codex_continuity_owner_required",
+            "codex-checkpoint and codex-read-recovery", "identical request", "same JSON",
+            "server principal gate still applies",
+            "never generic or unscoped authentication", "hard server cap is 24,000 UTF-8 bytes",
             "single <=18,000-byte JSON budget", "2,000-byte working reserve",
             "preflight its exact serialized UTF-8 size",
+            "20,000 preferred", "write any complete valid <=24,000 state once",
+            "never withhold for target alone",
             "Preserve the semantics", "not its wording or item count",
             "Collapse related completed-work, evidence, artifact, and receipt items",
             "resolved blockers", "externally meaningful receipt identifier",
@@ -550,6 +557,29 @@ class CodexHookTests(AdapterCase):
         self.assertIn('"source":"user_prompt_submit"', prompt)
         self.assertIn('"turn_id":"turn-bootstrap"', prompt)
         self.assertIn("CARR Codex recovery checkpoint", prompt)
+
+    def test_repair_keys_distinguish_newer_user_turns_in_same_window(self):
+        self.native_rollout(compacted_row(1, "window-initial", "window-current"))
+        env, _ = self.install_fake_record_call(self.checkpoint(cursor={
+            "byte_offset": 1, "source_digest": "0" * 64,
+            "source_window_id": window_id("window-initial"), "source_window_number": 0,
+        }))
+
+        first = json.loads(self.run_hook(
+            self.hook_payload("UserPromptSubmit", turn_id="turn-first"), env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+        second = json.loads(self.run_hook(
+            self.hook_payload("UserPromptSubmit", turn_id="turn-newer"), env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+
+        def repair_key(context):
+            directive = context.split("\n\nCARR Codex recovery checkpoint.", 1)[0]
+            marker = '"idempotency_key":"'
+            start = directive.index(marker) + len(marker)
+            return directive[start:directive.index('"', start)]
+
+        self.assertNotEqual(repair_key(first), repair_key(second),
+                            "a newer user turn must never reuse an earlier repair key")
 
     def test_fresh_window_zero_never_emits_compaction_repair(self):
         self.native_rollout({"type": "event_msg", "payload": {"message": "fresh"}})
@@ -684,6 +714,8 @@ class CodexHookTests(AdapterCase):
         state = {
             "objective": "keep the active task",
             "constraints": [{"text": "z" * 3000} for _ in range(7)],
+            "latest_corrections": [{"text": "repair this reference",
+                                    "refs": ["legacy:{REF1}"]}],
             "next_action": "normalize once before writing",
         }
         env, _ = self.install_fake_record_call(self.checkpoint(state=state, cursor={
@@ -698,38 +730,108 @@ class CodexHookTests(AdapterCase):
         self.assertIn("single <=18,000-byte JSON budget", context)
         self.assertIn("2,000-byte working reserve", context)
         self.assertIn("at most one corrective compression pass", context)
-        self.assertIn("copy every already-valid reference byte-for-byte", context)
+        self.assertIn("Reference manifest: copy valid refs byte-for-byte", context)
+        self.assertIn("Every live correction/decision ref remains directly in state", context)
 
-    def test_exact_window_checkpoint_above_target_is_normalized(self):
+    def test_repair_directive_keeps_current_approval_refs_within_bound(self):
         self.native_rollout(compacted_row(1, "window-initial", "window-current"))
         state = {
             "objective": "keep the active task",
-            "latest_corrections": [{"text": "preserve correction",
-                                     "refs": ["user:proof"]}],
-            "constraints": [{"text": f"current-obligation-{index}-" + "z" * 2950}
-                            for index in range(7)],
-            "decisions": [{"text": "preserve decision", "why": "still binding",
-                           "refs": ["decision:proof"]}],
-            "receipts": [{"text": "meaningful receipt proof-receipt-1"}],
-            "next_action": "normalize without losing current meaning",
+            "acceptance": [{"text": "approved rollout " + "z" * 3000,
+                            "refs": ["approval:current"]} for _ in range(7)],
+            "latest_corrections": [{"text": "repair this reference",
+                                    "refs": ["legacy:{REF1}"]}],
+            "next_action": "preserve approval while repairing",
         }
-        state_bytes = len(json.dumps(
-            state, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
-        self.assertGreater(state_bytes, 20000)
-        self.assertLessEqual(state_bytes, 24000)
         env, _ = self.install_fake_record_call(self.checkpoint(state=state, cursor={
             "byte_offset": 1, "source_digest": "0" * 64,
             "source_window_id": window_id("window-current"),
             "source_window_number": 1,
         }))
+        context = json.loads(self.run_hook(
+            self.hook_payload(source="resume"), env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+        directive = context.split("\n\nCARR Codex recovery checkpoint.", 1)[0]
+        self.assertIn("COMPACTION CHECKPOINT REPAIR", directive)
+        self.assertIn("current approval text/refs stay directly in state wherever stored",
+                      directive)
+        self.assertLessEqual(len(directive.encode("utf-8")), 6000)
+
+    def test_exact_window_target_excess_is_healthy_until_next_compaction(self):
+        self.native_rollout(compacted_row(1, "window-initial", "window-current"))
+        # Every item stays inside the per-item text limit so the fixture is a
+        # genuinely complete state: the no-op must come from the 24,000-byte
+        # server limit, never from an incomplete-state warning.
+        state = {
+            "objective": "keep the active task",
+            "constraints": [{"text": "z" * 3900} for _ in range(5)] + [{"text": ""}],
+            "next_action": "continue without target-only repair",
+        }
+        base_bytes = len(json.dumps(
+            state, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+        state["constraints"][-1]["text"] = "z" * (20143 - base_bytes)
+        state_bytes = len(json.dumps(
+            state, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+        self.assertEqual(state_bytes, 20143)
+        self.assertGreater(state_bytes, 20000)
+        self.assertLessEqual(state_bytes, 24000)
+        response = self.checkpoint(state=state, cursor={
+            "byte_offset": 1, "source_digest": "0" * 64,
+            "source_window_id": window_id("window-current"),
+            "source_window_number": 1,
+        })
+        self.assertTrue(
+            load_hook_module()._complete_checkpoint_state(response["checkpoint"]),
+            "the healthy-path fixture must itself be a complete checkpoint state")
+        env, _ = self.install_fake_record_call(response)
+
+        context = json.loads(self.run_hook(
+            self.hook_payload(source="resume"), env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("COMPACTION CHECKPOINT REPAIR", context)
+        self.assertNotIn("COMPACTION CHECKPOINT WARNING", context)
+        self.assertIn("checkpoint covers current context window 1", context)
+        self.assertNotIn("bounded repair directive exceeded its output limit", context)
+
+    def test_placeholder_repair_above_target_never_cites_the_soft_target(self):
+        self.native_rollout(compacted_row(1, "window-initial", "window-current"))
+        # A complete 21,000-byte state whose only defect is an unresolved
+        # reference.  Being above the 20,000-byte soft target is not itself a
+        # repair reason, so the directive must not order a normalization pass.
+        state = {
+            "objective": "keep the active task",
+            "latest_corrections": [{"text": "repair this reference",
+                                    "refs": ["legacy:{REF1}"]}],
+            "constraints": [{"text": "z" * 3900} for _ in range(5)] + [{"text": ""}],
+            "next_action": "repair the unresolved reference before writing",
+        }
+        base_bytes = len(json.dumps(
+            state, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+        state["constraints"][-1]["text"] = "z" * (21000 - base_bytes)
+        state_bytes = len(json.dumps(
+            state, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+        self.assertEqual(state_bytes, 21000)
+        self.assertGreater(state_bytes, 20000)
+        self.assertLessEqual(state_bytes, 24000)
+        response = self.checkpoint(state=state, cursor={
+            "byte_offset": 1, "source_digest": "0" * 64,
+            "source_window_id": window_id("window-current"),
+            "source_window_number": 1,
+        })
+        self.assertTrue(
+            load_hook_module()._complete_checkpoint_state(response["checkpoint"]),
+            "the fixture must itself be a complete checkpoint state")
+        env, _ = self.install_fake_record_call(response)
 
         context = json.loads(self.run_hook(
             self.hook_payload(source="resume"), env).stdout)[
                 "hookSpecificOutput"]["additionalContext"]
         self.assertIn("COMPACTION CHECKPOINT REPAIR", context)
-        self.assertIn(f"serialized state is {state_bytes} UTF-8 bytes", context)
-        self.assertIn("20,000-byte normalization target", context)
-        self.assertIn('"expected_version":7', context)
+        self.assertIn("unresolved reference placeholders", context)
+        self.assertNotIn("normalization target", context)
+        self.assertNotIn("normalize it now", context)
+        self.assertNotIn("{REF1}", context)
+        self.assertLessEqual(len(context.encode("utf-8")), 12000)
 
     def test_oversized_legacy_reference_list_still_emits_bounded_repair_directive(self):
         self.native_rollout(compacted_row(1, "window-initial", "window-current"))
