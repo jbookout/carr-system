@@ -108,7 +108,7 @@
   "platforms": [
     {
       "key": "github",
-      "covers_service_runtimes": [],
+      "covers_service_runtimes": ["github-actions"],
       "scope": "source control, pull requests, packages and GitHub Actions",
       "billing_model": "fixed GitHub plan plus metered Actions minutes and retained artifact/cache/package storage",
       "meter_units": ["hosted runner minutes", "GB-month artifact and package storage", "GB-month cache storage"],
