@@ -317,12 +317,34 @@ $$;
  * event it binds. Three fractional digits, fixed, so the text is stable and the
  * canonical bytes are reproducible.
  */
+/**
+ * One stored instant, rendered in the exact canonical form ops.f01_now_text uses.
+ *
+ * ONE COPY OF THE FORMAT, for the same reason there is one copy of every
+ * predicate here. The custody instant a retention period starts from is READ BACK
+ * from a stored timestamptz column, and it has to render byte-identically to the
+ * instants this schema writes, or the digests taken over it would differ between
+ * the row that produced it and the row that re-derives it.
+ */
+-- STABLE, NOT IMMUTABLE, and the distinction is the planner's rather than a
+-- preference: to_char(timestamp, text) is itself STABLE, so declaring this
+-- immutable would be a promise this function cannot keep. It is never used in a
+-- CHECK constraint or an index for exactly that reason; ops.f01_is_instant_text,
+-- which is a pure regular expression, is what the constraints use.
+CREATE OR REPLACE FUNCTION ops.f01_instant_text(p_at timestamptz)
+RETURNS text
+LANGUAGE sql STABLE STRICT
+SET search_path = pg_catalog, ops, public
+AS $$
+  SELECT to_char(p_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"');
+$$;
+
 CREATE OR REPLACE FUNCTION ops.f01_now_text()
 RETURNS text
 LANGUAGE sql STABLE
 SET search_path = pg_catalog, ops, public
 AS $$
-  SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"');
+  SELECT ops.f01_instant_text(now());
 $$;
 
 -- ===========================================================================
@@ -472,8 +494,20 @@ BEGIN
   GET DIAGNOSTICS v_context = PG_CONTEXT;
   -- Every frame naming this guard itself is discounted; what must remain is a
   -- frame naming one of the registered writers.
+  --
+  -- insert_document_source_provenance IS NAMED HERE EVEN THOUGH THIS FILE DOES
+  -- NOT CREATE IT, for the same reason sections 10 and 11 name it in their
+  -- private-helper lists: it is the document-source seam's private inserter, it
+  -- arrives with that hunk, and this alternation is REPLACED wholesale by a later
+  -- re-apply of this file. Without the name here, applying domain.sql after the
+  -- hunk reverts the guard to a list that does not know the helper exists, and
+  -- every provenance insert — and every document completion with it — is refused
+  -- as direct DML. That failure is loud and closed rather than dangerous, but it
+  -- is still a schema that cannot write a document, and the name costs nothing in
+  -- a database where the helper is not installed yet: a frame can only match a
+  -- function that exists, and nothing else may define one under this prefix.
   IF regexp_replace(v_context, 'PL/pgSQL function (ops\.)?f01_guard_direct_dml\(\)[^\n]*', '', 'g')
-       !~ 'PL/pgSQL function (ops\.)?f01_(install_policy|apply_observation|record_artifact|record_proposal|record_document|record_hold|record_deletion_evaluation|register_derivative_link|insert_derivative_link|claim_idempotency|settle_idempotency)\('
+       !~ 'PL/pgSQL function (ops\.)?f01_(install_policy|apply_observation|record_artifact|record_proposal|record_document|record_hold|record_deletion_evaluation|register_derivative_link|insert_derivative_link|insert_document_source_provenance|claim_idempotency|settle_idempotency)\('
   THEN
     RAISE EXCEPTION 'f01_direct_dml_refused: %.% is written only through the registered ops.f01_* writers',
       TG_TABLE_SCHEMA, TG_TABLE_NAME USING ERRCODE = '42501';
@@ -1381,6 +1415,41 @@ ALTER TABLE ops.f01_deletion_evaluation
               OR (envelope -> 'record' ->> 'derivative_coverage_state') = 'established'))
   NOT VALID;
 
+-- THE SECOND HALF OF THE SAME DISCIPLINE, for the retention TRIGGER.
+--
+-- WHAT IT MAKES IMPOSSIBLE. An evaluation that does not say which trigger its
+-- retention period was measured from, one that names a trigger kind this contract
+-- does not register, one whose start instant is unreadable, and — the one that
+-- matters — one whose trigger admits it used the source's own observed instant.
+-- The writer refuses each of those earlier and with a better message; this is the
+-- version that holds if somebody edits the writer, which is exactly when a
+-- retention period measured from a value a source can backdate would come back.
+--
+-- PRESENCE IS TESTED FIRST, for the reason the coverage constraint above spells
+-- out: `->>` over an ABSENT key is SQL NULL, ops.f01_is_instant_text is non-strict
+-- over `~` and answers NULL too, and a CHECK fails only on FALSE — so a record
+-- carrying no clock at all would satisfy a constraint written the other way round.
+--
+-- NOT VALID, STATED HONESTLY. Evaluations written before this tightening are NOT
+-- re-checked and are NOT retro-verified; they were taken against a period measured
+-- from the artifact's observed instant, and this constraint makes no claim about
+-- them. It binds every evaluation inserted from here on.
+ALTER TABLE ops.f01_deletion_evaluation
+  DROP CONSTRAINT IF EXISTS f01_deletion_retention_clock_bound;
+ALTER TABLE ops.f01_deletion_evaluation
+  ADD CONSTRAINT f01_deletion_retention_clock_bound
+  CHECK ((envelope -> 'record' ->> 'retention_clock_digest') IS NOT NULL
+         AND (envelope -> 'record' -> 'retention_clock' ->> 'kind') IS NOT NULL
+         AND (envelope -> 'record' -> 'retention_clock' ->> 'started_at') IS NOT NULL
+         AND ops.f01_is_digest_ref(envelope -> 'record' ->> 'retention_clock_digest')
+         AND (envelope -> 'record' -> 'retention_clock' ->> 'kind')
+               IN ('server_recorded_custody', 'explicit_retention_clock_event')
+         AND ops.f01_is_instant_text(
+               envelope -> 'record' -> 'retention_clock' ->> 'started_at')
+         AND coalesce(envelope -> 'record' -> 'retention_clock'
+                        ->> 'source_observed_at_used', '') = 'false')
+  NOT VALID;
+
 -- --- 5.7 idempotency -------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS ops.f01_idempotency (
@@ -1627,7 +1696,16 @@ BEGIN
   RETURN jsonb_build_object(
     'artifact_digest', v_row.artifact_digest,
     'artifact', v_row.envelope -> 'record',
+    -- THE SOURCE'S OWN INSTANT. `created_at` is the artifact's observed_at: what
+    -- the source says it saw, and part of the artifact's identity and provenance.
+    -- It is NOT when this record layer took custody of it, and it is not what a
+    -- retention period runs from — see ops.f01_retention_clock below.
     'created_at', v_row.observed_at_text,
+    'source_observed_at', v_row.observed_at_text,
+    -- THE SERVER'S OWN INSTANT, stamped by the writer that stored the row and
+    -- selectable by nobody. Returned here so a caller never has to reach for the
+    -- source's timestamp to answer a question about custody.
+    'recorded_at', ops.f01_instant_text(v_row.recorded_at),
     'envelope', v_row.envelope,
     'envelope_digest', v_row.envelope_digest,
     'integrity', 'recomputed_from_committed_row');
@@ -1859,6 +1937,82 @@ LANGUAGE sql STABLE
 SET search_path = pg_catalog, ops, public
 AS $$ SELECT ops.f01_digest_jsonb(ops.f01_hold_inventory(p_artifact_digest)) $$;
 
+/**
+ * WHEN ONE ARTIFACT'S RETENTION PERIOD STARTED, derived and never accepted.
+ *
+ * THE DEFAULT IS CUSTODY, and custody is a SERVER STAMP. `recorded_at` is written
+ * by the definer writer that stored the artifact, from now(), inside the
+ * transaction that took the bytes into the record layer. No caller supplies it, no
+ * source influences it, and no payload can move it.
+ *
+ * THE SOURCE'S OBSERVED INSTANT IS NOT A CLOCK, and this function will not let it
+ * become one. `observed_at` is what a corporate source says it saw and when — it
+ * is identity and provenance, it is the value an adapter, an export or a person
+ * with access to that source can set to any date they like, and a retention period
+ * measured from it can be shortened, or expired outright, by backdating a single
+ * field. It is returned below as `source_observed_at` so an operator can see BOTH
+ * timestamps and see that they are different facts, and `source_observed_at_used`
+ * is false in the bytes this answer hashes to.
+ *
+ * THIS SLICE PRODUCES EXACTLY ONE KIND. A retention class may register an explicit
+ * retention-clock EVENT — a typed event with its own provenance, not a timestamp
+ * borrowed from somewhere else — but nothing in this schema produces, approves or
+ * authenticates such an event, so no artifact has one and this function never
+ * returns one. The kernel refuses a deletion for a class that registers an event
+ * clock, by name, rather than quietly measuring from custody instead. Building the
+ * event ingress is a separate piece of work; inventing an event here would be the
+ * one shortcut that makes every later retention answer unverifiable.
+ *
+ * NULL FOR AN ARTIFACT NOBODY STORED. A clock for a row that does not exist would
+ * be a period started by nothing.
+ */
+CREATE OR REPLACE FUNCTION ops.f01_retention_clock(p_artifact_digest text)
+RETURNS jsonb LANGUAGE plpgsql STABLE
+SET search_path = pg_catalog, ops, public
+AS $$
+DECLARE
+  v_row ops.f01_corporate_artifact%ROWTYPE;
+BEGIN
+  SELECT * INTO v_row FROM ops.f01_corporate_artifact
+   WHERE tenant = ops.f01_tenant() AND artifact_digest = p_artifact_digest;
+  IF NOT FOUND THEN
+    RETURN NULL;
+  END IF;
+  -- The row is verified before its instant is used, exactly as every other
+  -- readback here verifies before it answers: a clock read off a corrupt row is a
+  -- retention period measured from bytes nobody can vouch for.
+  PERFORM ops.f01_verify_envelope(v_row.envelope, v_row.envelope_digest,
+                                  v_row.artifact_digest, 'stored_corporate_artifact');
+  IF v_row.observed_at_text IS DISTINCT FROM (v_row.envelope -> 'record' ->> 'observed_at') THEN
+    RAISE EXCEPTION 'f01_corrupt_stored_record: artifact observed_at column mismatch'
+      USING ERRCODE = '22000';
+  END IF;
+  RETURN jsonb_build_object(
+    'artifact_digest', v_row.artifact_digest,
+    'kind', 'server_recorded_custody',
+    'event_kind', NULL,
+    'started_at', ops.f01_instant_text(v_row.recorded_at),
+    'reference', 'ops.f01_corporate_artifact.recorded_at',
+    'provenance', 'server_stamped_custody',
+    'event_digest', NULL,
+    -- Verified because it is this server's own stamp on its own row, which is the
+    -- only thing in this slice that can be. An explicit event would have to earn
+    -- this flag from something that authenticated it, and nothing does yet.
+    'verified', true,
+    -- Both halves of the anti-alias statement: the source's instant is reported,
+    -- and reported as NOT the thing the period runs from.
+    'source_observed_at', v_row.observed_at_text,
+    'source_observed_at_used', false,
+    'integrity', 'recomputed_from_committed_row');
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ops.f01_retention_clock_digest(p_artifact_digest text)
+RETURNS text
+LANGUAGE sql STABLE
+SET search_path = pg_catalog, ops, public
+AS $$ SELECT ops.f01_digest_jsonb(ops.f01_retention_clock(p_artifact_digest)) $$;
+
 -- ===========================================================================
 -- 8. Idempotency.
 --
@@ -2022,24 +2176,43 @@ $$;
 --           f01_record_deletion_evaluation, which read the policy but never move it)
 --   tier 3  f01:field:<tenant>:<entity>:<field>   (f01_apply_observation)
 --           f01:artifact:<identity tuple>         (f01_record_artifact)
---           f01:document:<tenant>:<document_id>   (f01_record_document)
---           f01:artifact-retention:<tenant>:<artifact digest>
+--           f01:artifact-retention:<tenant>:<artifact digest>   [tier 3a]
 --                                                 (f01_record_hold,
 --           f01_record_deletion_evaluation AND f01_register_derivative_link —
 --           deliberately the SAME key for all three, so that neither a hold nor
 --           a derivative registration can land underneath a deletion evaluation
 --           that has already read the inventory and the coverage it will be
 --           bound to. f01_record_proposal takes it too, because it registers a
---           derivative link of its own)
+--           derivative link of its own, and so does the document writer once it
+--           registers one)
+--           f01:document:<tenant>:<document_id>   [tier 3b] (f01_record_document)
 --   tier 4  f01:hold:<tenant>:<hold_id>           (f01_record_hold)
---           f01:derivative:<tenant>:<kind>:<id>   (f01_register_derivative_link
---                                                  and f01_record_proposal)
+--           f01:derivative:<tenant>:<kind>:<id>   (f01_register_derivative_link,
+--                                                  f01_record_proposal and
+--                                                  f01_record_document)
 --
--- Tier 3 keys are mutually disjoint and no writer takes two of them, so the
--- observed acquisition orders are exactly 1→2, 1→2→3, 1→2→3→4, 1→3 and 1→3→4.
--- Tier 4 keys are disjoint from each other and no writer takes two of them
--- either. There is no edge from a lower tier back to a higher one, hence no
+-- TIER 3 IS ORDERED INTERNALLY: RETENTION BEFORE DOCUMENT, and that ordering is
+-- what keeps this acyclic now that one writer takes two tier-3 keys. The document
+-- writer, when the version it is completing is DERIVED, acquires
+-- f01:artifact-retention: (3a) and only then f01:document: (3b) and only then
+-- f01:derivative: (4) — for the same reason f01_record_proposal takes the
+-- retention key: a link must not land underneath a deletion evaluation that has
+-- already read the artifact's coverage and bound its record to the digest of it.
+--
+-- WHY THE BACK EDGE CANNOT EXIST. No other writer takes f01:document: at all, so
+-- no other writer can hold 3b while waiting for 3a, and every writer that takes
+-- f01:artifact-retention: takes it FIRST among tier 3 and above. The remaining
+-- tier-3 keys — f01:field: and f01:artifact: — are taken by writers that take no
+-- second tier-3 key. Tier 4 keys are disjoint from each other and no writer takes
+-- two of them. The observed acquisition orders are therefore exactly 1→2, 1→2→3,
+-- 1→2→3→4, 1→3, 1→3→4 and 1→3a→3b→4, which is a strict order with no edge from a
+-- lower tier — or from a later tier-3 key — back to an earlier one. Hence no
 -- cycle, hence no deadlock between any two F01 writers.
+--
+-- A WRITER THAT TAKES BOTH TIER-3 KEYS MUST TAKE THEM IN THAT ORDER. This is the
+-- one place that constraint is written down; a future writer that took the
+-- document key before the retention key would reintroduce the cycle this note
+-- exists to rule out.
 --
 -- ONE CLAIM PER TRANSACTION-TIER-1 KEY. f01_record_proposal writes a derivative
 -- link through the PRIVATE ops.f01_insert_derivative_link rather than by calling
@@ -2647,6 +2820,8 @@ AS $$
 DECLARE
   v_record jsonb;
   v_digest text;
+  v_source jsonb;
+  v_source_content text;
   v_existing ops.f01_derivative_link%ROWTYPE;
   v_outcome text := 'registered';
 BEGIN
@@ -2666,10 +2841,38 @@ BEGIN
   END IF;
   -- The source is LOADED. Provenance pointing at an artifact nobody stored is
   -- not provenance, and naming a digest never brings one into existence.
-  IF ops.f01_stored_artifact(v_record ->> 'source_artifact_digest') IS NULL THEN
+  v_source := ops.f01_stored_artifact(v_record ->> 'source_artifact_digest');
+  IF v_source IS NULL THEN
     RAISE EXCEPTION 'f01_unknown_artifact: a derivative link names a stored artifact'
       USING ERRCODE = '23503';
   END IF;
+
+  -- A DERIVATIVE MAY NOT BE A COPY OF ITS OWN SOURCE, and the comparison is
+  -- against the ARTIFACT'S CONTENT DIGEST — the bytes — read from the row this
+  -- writer just authenticated.
+  --
+  -- WHY IT IS HERE AND NOT IN A CHECK. f01_derivative_not_self on the table
+  -- compares derivative_content_digest with source_artifact_digest, which is the
+  -- artifact's RECORD identity: a real byte-identical copy never trips it, because
+  -- a record digest is taken over source system, account, native identity,
+  -- provenance and observed instant as well as the content. The comparison that
+  -- catches a copy needs the OTHER row's content, and a CHECK constraint cannot
+  -- read another row — PostgreSQL forbids a subquery in one, and a constraint that
+  -- could would be checked against whatever that row said at some later moment
+  -- rather than at the moment the claim was made. So it belongs in the writer,
+  -- where the source has already been loaded and verified, and the structural
+  -- constraint stays exactly as it is for the claim it does cover.
+  v_source_content := v_source -> 'artifact' ->> 'content_digest';
+  IF v_source_content IS NULL THEN
+    RAISE EXCEPTION 'f01_corrupt_stored_record: the stored source artifact carries no content digest'
+      USING ERRCODE = '22000';
+  END IF;
+  IF (v_record ->> 'derivative_content_digest') = v_source_content THEN
+    RAISE EXCEPTION 'f01_derivative_is_its_own_source: % names bytes identical to source artifact % (content %); a copy is the source under a second name, not something derived from it',
+      v_record ->> 'derivative_id', v_record ->> 'source_artifact_digest', v_source_content
+      USING ERRCODE = '23514';
+  END IF;
+
   IF ops.f01_instant(v_record ->> 'produced_at') > now() THEN
     RAISE EXCEPTION 'f01_derivative_produced_after_now: a production nobody has performed'
       USING ERRCODE = '22007';
@@ -2754,12 +2957,25 @@ $$;
  * A LIST, NOT A LITERAL, so the next internal producer kind is covered by adding
  * one element rather than by remembering to repeat a comparison. IMMUTABLE and
  * argument-free: it is policy about this schema's own writers, not about data.
+ *
+ * THE MIRROR OF V5_F01_RESERVED_DERIVATIVE_KINDS, and it carries BOTH names.
+ * 'f01_document_version' is produced by the document writer inside this schema,
+ * in the same transaction that completes the version, for the same reason
+ * 'f01_parsed_proposal' is produced by the proposal writer: its derivative
+ * identity is a value a caller can predict — the (document_id, version_no) fold —
+ * and the identity index is unique per (tenant, kind, id) over an append-only
+ * table with no release path. A pre-registration pointed at another artifact
+ * would make the genuine document write conflict for that version for ever.
+ * The name is listed here even in a database where only the four-argument
+ * document writer is installed: reserving a kind grants nothing and costs
+ * nothing, and a list that only became correct after a later hunk applied would
+ * be a hole for exactly as long as that took.
  */
 CREATE OR REPLACE FUNCTION ops.f01_reserved_derivative_kinds()
 RETURNS text[]
 LANGUAGE sql IMMUTABLE
 SET search_path = pg_catalog, ops, public
-AS $$ SELECT ARRAY['f01_parsed_proposal']::text[] $$;
+AS $$ SELECT ARRAY['f01_parsed_proposal', 'f01_document_version']::text[] $$;
 
 /**
  * The PUBLIC half: one trusted producer workflow registers one derivative.
@@ -2925,6 +3141,33 @@ BEGIN
 END;
 $$;
 
+-- THE FOUR-ARGUMENT FORM ABOVE MUST NOT SURVIVE A RE-APPLY ONTO A DATABASE THAT
+-- ALREADY CARRIES THE SIX-ARGUMENT WRITER. The document-source hunk
+-- (ops/document-derivative-registration.candidate.sql) DROPs this overload and
+-- replaces it with a six-argument form that cannot be called without a
+-- provenance statement. The CREATE OR REPLACE above puts the old one back beside
+-- it, and section 10's grant loop — which iterates over whatever ops.f01_%
+-- functions EXIST rather than over a written list — would then hand EXECUTE on
+-- it to carr_writer and both authority logins. That is a path which completes a
+-- DERIVED document with no provenance edge: exactly the hole the replacement
+-- exists to close, re-opened by applying this file a second time.
+--
+-- SO THE OVERLOAD IS DROPPED HERE, CONDITIONALLY, AND BEFORE ANY GRANT IS MADE.
+-- The condition is the successor's own existence, checked by EXACT signature —
+-- to_regprocedure answers NULL rather than raising for a function that is not
+-- there. Where the document hunk has not been applied, this database holds only
+-- the four-argument core, the condition is false and this block does nothing, so
+-- domain.sql standing alone is unchanged. It grants nobody anything and installs
+-- nothing: it removes a function this file itself just re-created, and only when
+-- the writer that supersedes it is already present.
+DO $document_writer_overload$
+BEGIN
+  IF to_regprocedure('ops.f01_record_document(jsonb,jsonb,jsonb,text,text,text)') IS NOT NULL THEN
+    DROP FUNCTION IF EXISTS ops.f01_record_document(jsonb, text, text, text);
+  END IF;
+END;
+$document_writer_overload$;
+
 -- --- 9.6 record-artifact-preservation-hold ---------------------------------
 
 /**
@@ -3046,6 +3289,8 @@ DECLARE
   v_artifact_digest text;
   v_observed text;
   v_coverage jsonb;
+  v_clock jsonb;
+  v_clock_record jsonb;
   v_row ops.f01_deletion_evaluation%ROWTYPE;
   v_result jsonb;
 BEGIN
@@ -3073,6 +3318,76 @@ BEGIN
        (ops.f01_current_policy() ->> 'retention_registry_digest') THEN
     RAISE EXCEPTION 'f01_stale_retention_policy' USING ERRCODE = '40001';
   END IF;
+  -- THE RETENTION CLOCK IS RE-DERIVED UNDER THE LOCK THIS WRITER ALREADY HOLDS,
+  -- and a trigger that does not match the one the database derives is refused.
+  --
+  -- WHAT THIS CLOSES. The evaluation says which trigger its retention period was
+  -- measured from. Without re-derivation that would be a value travelling in from
+  -- outside — and the one field that decides whether a period has elapsed is
+  -- exactly the field a forged or stale evaluation would move. So the clock is
+  -- computed here from the stored artifact row, the digest of the DATABASE's own
+  -- answer must equal the one the record carries, and the trigger inside the
+  -- record must be — WHOLE, field for field — the trigger just derived.
+  --
+  -- WHOLE, AND NOT A CHOSEN FEW FIELDS. The digest travelling in the record is
+  -- taken over the reader's FULL answer, which is a DIFFERENT VALUE from the
+  -- object the record embeds: the record carries the projection the decision was
+  -- allowed to read. So the digest comparison says nothing whatever about the
+  -- embedded object, and a comparison of a few named fields left the rest —
+  -- `reference`, `provenance`, `verified`, and any key added or dropped — as
+  -- caller text sitting inside a record whose digest checks out. That is a
+  -- provenance claim about where a retention instant came from and whether
+  -- anything vouched for it, readable by every later reader of the stored
+  -- envelope, and it was writable by whoever composed the record. Comparing the
+  -- embedded object AS A WHOLE to the projection derived here closes it, and
+  -- closes it for every field this projection ever gains.
+  --
+  -- AND THE ALIAS IS REFUSED BY NAME. A record whose clock admits it used the
+  -- source's observed instant refuses outright, whatever else it agrees with:
+  -- that is the one substitution the whole mechanism exists to prevent, and it
+  -- must not depend on the digest comparison happening to notice.
+  v_clock := ops.f01_retention_clock(v_artifact_digest);
+  IF v_clock IS NULL THEN
+    RAISE EXCEPTION 'f01_retention_clock_unavailable: no custody instant could be derived for %',
+      v_artifact_digest USING ERRCODE = '22000';
+  END IF;
+  -- The SAME PROJECTION the record layer carries, derived HERE from the answer
+  -- just read: the reader returns more than a record embeds — the artifact digest,
+  -- the source's own observed instant and the integrity note — and those three are
+  -- covered by the digest below rather than by this comparison. `->` throughout,
+  -- never `->>`: the null and boolean fields must stay null and boolean, because a
+  -- record carrying "false" where the reader answers false is a different object.
+  v_clock_record := jsonb_build_object(
+    'kind', v_clock -> 'kind',
+    'event_kind', v_clock -> 'event_kind',
+    'started_at', v_clock -> 'started_at',
+    'reference', v_clock -> 'reference',
+    'provenance', v_clock -> 'provenance',
+    'event_digest', v_clock -> 'event_digest',
+    'verified', v_clock -> 'verified',
+    'source_observed_at_used', v_clock -> 'source_observed_at_used');
+  -- ABSENT IS ITS OWN REFUSAL, and it comes first so a record carrying no trigger
+  -- at all is not reported as one that admitted the alias. Without this, the
+  -- coalesce below reads an absent key as '' and raises the wrong name.
+  IF jsonb_typeof(v_record -> 'retention_clock') IS DISTINCT FROM 'object'
+     OR (v_record ->> 'retention_clock_digest') IS NULL THEN
+    RAISE EXCEPTION 'f01_retention_clock_required: an evaluation names the trigger its retention period was measured from, and the digest of the answer it was taken against'
+      USING ERRCODE = '22023';
+  END IF;
+  IF coalesce(v_record -> 'retention_clock' ->> 'source_observed_at_used', '') <> 'false' THEN
+    RAISE EXCEPTION 'f01_retention_clock_uses_source_observed_at: a retention period never runs from the instant a source says it observed the artifact'
+      USING ERRCODE = '22000';
+  END IF;
+  IF (v_record ->> 'retention_clock_digest') IS DISTINCT FROM ops.f01_digest_jsonb(v_clock)
+     OR (v_record -> 'retention_clock') IS DISTINCT FROM v_clock_record THEN
+    RAISE EXCEPTION 'f01_stale_retention_clock: the evaluation carries a retention trigger (% at %) that is not, field for field, the one the database derives (% at %)',
+      coalesce(v_record -> 'retention_clock' ->> 'kind', 'none'),
+      coalesce(v_record -> 'retention_clock' ->> 'started_at', 'none'),
+      coalesce(v_clock ->> 'kind', 'unreadable'),
+      coalesce(v_clock ->> 'started_at', 'unreadable')
+      USING ERRCODE = '40001';
+  END IF;
+
   -- THE COVERAGE THE EVALUATION WAS TAKEN AGAINST IS RE-DERIVED, exactly like
   -- the hold inventory below it. A derivative registered between the decision
   -- and this write moves the digest, and the evaluation refuses rather than
@@ -3133,6 +3448,10 @@ BEGIN
        FROM jsonb_array_elements(ops.f01_current_policy()->'retention_registry'->'classes') AS c
        WHERE c->>'artifact_class' = v_record->>'artifact_class'), '[]'::jsonb),
     'derivative_coverage', v_coverage,
+    -- The trigger this evaluation's period was measured from, returned beside the
+    -- coverage answer and the hold inventory because it is the same kind of fact:
+    -- what the database held at the moment the decision was recorded.
+    'retention_clock', v_clock,
     'bytes_deleted', false, 'rows_deleted', false, 'external_purge_performed', false,
     'readback', ops.f01_verify_envelope(v_row.envelope, v_row.envelope_digest,
                                         v_row.evaluation_digest, 'stored_deletion_evaluation'),
@@ -3288,6 +3607,14 @@ $$;
 -- is exactly the trusted producer identity the settled decision names.
 -- f01_insert_derivative_link is a PRIVATE helper and joins the claim/settle pair
 -- that nobody may execute at runtime.
+--
+-- THE PRIVATE LIST NAMES ONE FUNCTION THIS FILE DOES NOT CREATE:
+-- f01_insert_document_source_provenance, the document-source seam's inserter. It
+-- arrives with the document hunk, and the loop below iterates over whatever
+-- ops.f01_% functions EXIST when this file runs — so if this file is applied
+-- after that hunk, an unnamed helper would be granted to every runtime role and
+-- the posture readback in section 11 would not notice. Naming it in both places
+-- costs nothing in a database that does not have it yet.
 -- ===========================================================================
 
 DO $grants$
@@ -3322,7 +3649,14 @@ BEGIN
       -- and settle helpers are reached only from inside a SECURITY DEFINER
       -- writer, which executes them as the owner regardless of the caller.
       IF f.proname IN ('f01_claim_idempotency','f01_settle_idempotency',
-        'f01_insert_derivative_link')
+        'f01_insert_derivative_link',
+        -- The document-source seam's private inserter. It is named here even
+        -- though this file does not create it: it is created by the document
+        -- hunk, and if THIS file is applied after that one the loop below would
+        -- otherwise hand it to every runtime role. A name in this list for a
+        -- function that does not exist yet costs nothing; its absence would be a
+        -- hole that opens on a re-apply.
+        'f01_insert_document_source_provenance')
         OR f.proname LIKE 'f01_guard_%' THEN CONTINUE; END IF;
       -- A READ-ONLY PRINCIPAL GETS NO WRITE-SHAPED SURFACE. The seven writers are
       -- obvious. f01_replay_outcome is here because it is a SECURITY DEFINER door
@@ -3400,7 +3734,14 @@ BEGIN
     JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'ops'
      AND (p.proname IN ('f01_claim_idempotency', 'f01_settle_idempotency',
-                        'f01_insert_derivative_link')
+                        'f01_insert_derivative_link',
+                        -- The document-source seam's private inserter, listed for
+                        -- the same reason and in the same breath as the grant
+                        -- loop above: this readback is what turns a mis-edited
+                        -- CONTINUE, or an application order that reached this
+                        -- file last, into a refused install rather than a quiet
+                        -- runtime grant on a writer nobody may call.
+                        'f01_insert_document_source_provenance')
           OR p.proname LIKE 'f01\_guard\_%')
      AND (p.proacl IS NULL
           OR EXISTS (SELECT 1 FROM aclexplode(p.proacl) a

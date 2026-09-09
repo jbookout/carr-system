@@ -49,6 +49,8 @@ import {
   V5_F01_VERSION_STATES,
   V5_F01_FILING_STATES,
   V5_F01_HOLD_STATES,
+  V5_F01_RETENTION_CLOCK_KINDS,
+  V5_F01_DEFAULT_RETENTION_CLOCK_KIND,
   V5_F01_DERIVATIVE_COVERAGE_STATES,
   V5_F01_DERIVATIVE_LINK_SCHEMA_VERSION,
   V5_F01_PARSED_PROPOSAL_DERIVATIVE_KIND,
@@ -1487,10 +1489,35 @@ function coverageOf(overrides = {}) {
   };
 }
 
+// THE RETENTION CLOCK THE PERSISTENCE TAIL LOADS, and it is a different fact from
+// the artifact's `created_at` beside it. `created_at` is the SOURCE's observed
+// instant — identity and provenance, and the window a deletion proof has to sit
+// inside. The clock is the SERVER-STAMPED instant the record layer took custody,
+// which is what the retention period actually runs from. The two are deliberately
+// different values in every fixture below, so a test that measured from the wrong
+// one produces a visibly wrong number of days rather than the right answer by
+// coincidence.
+const CUSTODY = "2026-01-08T00:00:00Z";
+
+function clockOf(overrides = {}) {
+  return {
+    kind: "server_recorded_custody",
+    event_kind: null,
+    started_at: CUSTODY,
+    reference: "ops.f01_corporate_artifact.recorded_at",
+    provenance: "server_stamped_custody",
+    event_digest: null,
+    verified: true,
+    source_observed_at_used: false,
+    ...overrides,
+  };
+}
+
 function subjectOf(overrides = {}) {
   return {
     artifact_class: "executed_lease", artifact_home: "onedrive", artifact_digest: VALUE_A,
     created_at: LONG_AGO,
+    retention_clock: clockOf(),
     holds: [],
     deletion_proof: {
       proof_ref: "proof-synthetic-1", artifact_digest: VALUE_A, proof_digest: D(4),
@@ -1518,6 +1545,9 @@ test("Q129: a compiled retention registry binds home, period, constraints, proof
   assert.deepEqual(lease.governing_constraints, ["brokerage_records_policy"]);
   assert.equal(lease.deletion_proof_required, true);
   assert.deepEqual(lease.surviving_derivatives, ["deal_economics_summary", "lease_abstract"]);
+  // A class that names no clock resolves to custody on the COMPILED entry, so no
+  // evaluation ever has to ask what an absent field meant.
+  assert.deepEqual(lease.retention_clock, { kind: "server_recorded_custody", event_kind: null });
 
   const dup = { ...RETENTION_POLICY, classes: [...RETENTION_POLICY.classes, RETENTION_POLICY.classes[0]] };
   throwsCode(() => compileRetentionRegistry(dup), "duplicate_retention_class");
@@ -1620,7 +1650,10 @@ test("MUTATION KILL (hold): an active hold blocks, and a hold nobody can read bl
 });
 
 test("MUTATION KILL (hold): nothing is purged without its period, constraints, proof and derivatives", () => {
-  const tooSoon = deletion({ created_at: T.early });
+  // THE PERIOD RUNS FROM THE CUSTODY CLOCK, so the case that must refuse is one
+  // whose CLOCK is recent. An earlier revision moved `created_at` here, which
+  // measured the period from the instant a source said it observed the artifact.
+  const tooSoon = deletion({ retention_clock: clockOf({ started_at: T.early }) });
   assert.equal(tooSoon.decision, "refuse");
   assert.equal(tooSoon.reason_id, "retention_period_not_elapsed");
   assert.equal(tooSoon.default_retention_days, 30);
@@ -1669,6 +1702,298 @@ test("MUTATION KILL (hold): nothing is purged without its period, constraints, p
 });
 
 // ===========================================================================
+// WHEN A RETENTION PERIOD STARTS.
+//
+// The accepted rule, in the words it was accepted in: a default retention period
+// starts at the SERVER-STAMPED instant the record layer took custody of the
+// artifact. The source's `observed_at` stays identity and provenance and never
+// becomes the clock — under that name or any other. A class may register an
+// explicit retention-clock EVENT, but only a typed event with its own provenance,
+// and nothing in this slice produces one, so such a class refuses rather than
+// quietly measuring from custody instead.
+//
+// This rule was accepted directly by the user in
+//   native task 01a0869f-fe0d-7493-bda3-ab8b3c0d6683
+//   user turn   01a08825-f388-70a2-b1a0-18ee866edde7
+// and carries no canonical decision id, because none was issued for it. It is
+// named here for what it is, exactly as the registration rule below is.
+// ===========================================================================
+
+test("retention: the period runs from server custody, and a backdated observation cannot shorten it", () => {
+  // THE DEFECT THIS FORECLOSES. Measuring from `created_at` means a source that
+  // reports an old observation — or anything able to write one — shortens the
+  // period, and an artifact backdated far enough arrives already expired. Here the
+  // source claims it observed the lease in 2019; the record layer took custody
+  // eight days before `now`, and the 30-day period has NOT elapsed.
+  const backdated = deletion({
+    created_at: "2019-01-01T00:00:00Z",
+    retention_clock: clockOf({ started_at: T.early }),
+  });
+  assert.equal(backdated.decision, "refuse");
+  assert.equal(backdated.reason_id, "retention_period_not_elapsed");
+  assert.equal(backdated.elapsed_days, 8, "eight days of custody, not seven years of hearsay");
+
+  // ...and the mirror image, which is what makes the first case mean something.
+  // The same artifact with a RECENT source observation and an old custody instant
+  // is deletable: the clock is custody either way, and it moved neither time.
+  const observedYesterday = deletion({ created_at: T.late });
+  assert.equal(observedYesterday.decision, "allow");
+  assert.equal(observedYesterday.deletion_receipt.retention_started_at, CUSTODY);
+
+  // THREE TIMESTAMPS, THREE ROLES, none of them standing in for another.
+  const receipt = deletion().deletion_receipt;
+  assert.equal(receipt.retention_clock.started_at, CUSTODY, "custody starts the period");
+  assert.notEqual(receipt.retention_clock.started_at, LONG_AGO,
+    "the source's observed instant is not the clock");
+  assert.equal(receipt.retention_clock.source_observed_at_used, false);
+  assert.equal(receipt.elapsed_days, deletion().elapsed_days);
+});
+
+test("retention: the trigger actually used is bound into the evaluation and the receipt", () => {
+  const result = deletion();
+  assert.equal(result.decision, "allow");
+  // On the ANSWER, so a caller can see what it was judged against.
+  assert.deepEqual(result.retention_clock, clockOf());
+  assert.equal(result.registered_retention_clock_kind, "server_recorded_custody");
+  assert.ok(Object.isFrozen(result.retention_clock));
+
+  // And in the RECEIPT's own hashed bytes, beside the registry digest — kind,
+  // instant, reference, provenance and (for an event) its digest.
+  const receipt = result.deletion_receipt;
+  assert.equal(receipt.retention_registry_digest, RETENTION.registry_digest);
+  assert.equal(receipt.retention_clock.kind, "server_recorded_custody");
+  assert.equal(receipt.retention_clock.event_kind, null);
+  assert.equal(receipt.retention_clock.reference, "ops.f01_corporate_artifact.recorded_at");
+  assert.equal(receipt.retention_clock.provenance, "server_stamped_custody");
+  assert.equal(receipt.retention_clock.event_digest, null);
+  assert.equal(receipt.retention_clock.verified, true);
+  assert.equal(receipt.default_retention_days, 30);
+
+  // A DIFFERENT TRIGGER IS A DIFFERENT RECEIPT. If the clock were not hashed with
+  // it, an evaluation could be re-told with another start instant and hash the
+  // same — which is the whole reason it travels in the bytes.
+  const moved = deletion({ retention_clock: clockOf({ started_at: "2026-02-01T00:00:00Z" }) });
+  assert.equal(moved.decision, "allow");
+  assert.notEqual(digest(moved.deletion_receipt), digest(receipt));
+
+  // REPLAY IS IMMUTABLE: the same request evaluated twice is byte-identical, so a
+  // second look at a stored decision cannot quietly become a different one.
+  assert.equal(canonicalJson(deletion().deletion_receipt), canonicalJson(receipt));
+  assert.equal(digest(deletion().deletion_receipt), digest(receipt));
+});
+
+test("MUTATION KILL (retention clock): a missing, aliased, unverified or future trigger refuses", () => {
+  // ABSENT. A period that starts nowhere is not a period, and there is no default
+  // to fall back to — falling back to `created_at` is the defect, not the remedy.
+  for (const missing of [undefined, null]) {
+    const result = deletion({ retention_clock: missing });
+    assert.equal(result.decision, "refuse");
+    assert.equal(result.reason_id, "retention_clock_missing");
+    assert.equal(result.deletion_receipt, null);
+  }
+
+  // THE ALIAS, refused by name. This is the exact shape the rule forbids: the
+  // source's observed instant wearing the clock's name.
+  const aliased = deletion({
+    retention_clock: clockOf({ started_at: LONG_AGO, source_observed_at_used: true }),
+  });
+  assert.equal(aliased.decision, "refuse");
+  assert.equal(aliased.reason_id, "retention_clock_uses_source_observed_at");
+  assert.equal(aliased.deletion_receipt, null);
+
+  // UNVERIFIED. A trigger nothing authenticated is not evidence about anything,
+  // and this module cannot make it one.
+  const unverified = deletion({ retention_clock: clockOf({ verified: false }) });
+  assert.equal(unverified.decision, "refuse");
+  assert.equal(unverified.reason_id, "retention_clock_unverified");
+
+  // A CLOCK FROM THE FUTURE describes custody nobody has taken yet.
+  const ahead = deletion({ retention_clock: clockOf({ started_at: T.future }) });
+  assert.equal(ahead.decision, "refuse");
+  assert.equal(ahead.reason_id, "retention_clock_after_now");
+
+  // A CUSTODY CLOCK THAT NAMES AN EVENT is two answers at once, and refuses.
+  const bothKinds = deletion({ retention_clock: clockOf({ event_kind: "lease_terminated" }) });
+  assert.equal(bothKinds.decision, "refuse");
+  assert.equal(bothKinds.reason_id, "retention_clock_kind_mismatch");
+
+  // And an unregistered kind is a contract violation rather than a near miss.
+  for (const kind of ["SERVER_RECORDED_CUSTODY", "custody", "whenever", ""]) {
+    throwsCode(() => deletion({ retention_clock: clockOf({ kind }) }),
+      "unknown_retention_clock_kind", kind);
+  }
+  throwsCode(() => deletion({ retention_clock: { ...clockOf(), extra: 1 } }), "unknown_field");
+  throwsCode(() => deletion({ retention_clock: clockOf({ verified: "true" }) }), "invalid_shape");
+  throwsCode(() => deletion({ retention_clock: clockOf({ started_at: "2026-02-31T00:00:00Z" }) }),
+    "invalid_timestamp");
+  for (const key of ["kind", "started_at", "reference", "provenance", "verified",
+    "source_observed_at_used"]) {
+    throwsCode(() => deletion({ retention_clock: clockOf({ [key]: undefined }) }),
+      "missing_field", key);
+  }
+  assert.deepEqual([...V5_F01_RETENTION_CLOCK_KINDS].sort(),
+    ["explicit_retention_clock_event", "server_recorded_custody"]);
+  assert.equal(V5_F01_DEFAULT_RETENTION_CLOCK_KIND, "server_recorded_custody");
+});
+
+test("MUTATION KILL (retention clock): an explicit event clock fails closed, and a forged event cannot bypass it", () => {
+  // A CLASS MAY NAME AN EVENT, and naming one is the whole of what a class may do:
+  // the event's own producer is somebody else's work and does not exist yet.
+  const eventPolicy = {
+    ...RETENTION_POLICY,
+    classes: RETENTION_POLICY.classes.map(entry => entry.artifact_class === "executed_lease"
+      ? { ...entry, retention_clock: { kind: "explicit_retention_clock_event",
+          event_kind: "lease_terminated" } }
+      : entry),
+  };
+  const eventRegistry = compileRetentionRegistry(eventPolicy);
+  const lease = eventRegistry.classes.find(c => c.artifact_class === "executed_lease");
+  assert.deepEqual(lease.retention_clock,
+    { kind: "explicit_retention_clock_event", event_kind: "lease_terminated" });
+
+  const evaluate = (clock, registry = eventRegistry) => evaluateDeletion({
+    tenant: ORGANIZATION_TENANT_ID, registry,
+    subject: subjectOf(clock === undefined ? {} : { retention_clock: clock }), now: NOW,
+  });
+
+  // THE CUSTODY CLOCK IS NOT THAT EVENT, and the refusal says so by name rather
+  // than measuring from custody because it happens to be the thing available.
+  const custody = evaluate(clockOf());
+  assert.equal(custody.decision, "refuse");
+  assert.equal(custody.reason_id, "retention_clock_event_not_established");
+  assert.equal(custody.registered_retention_clock_kind, "explicit_retention_clock_event");
+  assert.equal(custody.loaded_retention_clock_kind, "server_recorded_custody");
+  assert.equal(custody.deletion_receipt, null);
+
+  // A FORGED EVENT CANNOT BYPASS IT. Nothing in this slice authenticates a
+  // retention-clock event, so an event that says it is verified is a claim about
+  // itself; the flag it cannot set for itself is what refuses, and the ONE field
+  // that would otherwise expire the artifact early is the one it wanted to move.
+  const forged = evaluate({
+    kind: "explicit_retention_clock_event",
+    event_kind: "lease_terminated",
+    started_at: "2019-01-01T00:00:00Z",
+    reference: "synthetic-event-0001",
+    provenance: "synthetic_test_caller",
+    event_digest: D(8),
+    verified: false,
+    source_observed_at_used: false,
+  });
+  assert.equal(forged.decision, "refuse");
+  assert.equal(forged.reason_id, "retention_clock_unverified");
+  assert.equal(forged.deletion_receipt, null);
+
+  // AND AN EVENT OF THE WRONG KIND, OR ONE WITH NOTHING TO HASH IT BY, refuses
+  // too — a trigger that cannot be bound into the receipt is not a trigger the
+  // receipt can be checked against later.
+  const wrongKind = evaluate({
+    kind: "explicit_retention_clock_event", event_kind: "matter_closed",
+    started_at: LONG_AGO, reference: "synthetic-event-0002",
+    provenance: "synthetic_test_producer", event_digest: D(8),
+    verified: true, source_observed_at_used: false,
+  });
+  assert.equal(wrongKind.reason_id, "retention_clock_event_kind_mismatch");
+  assert.equal(wrongKind.registered_retention_clock_event_kind, "lease_terminated");
+
+  const unbound = evaluate({
+    kind: "explicit_retention_clock_event", event_kind: "lease_terminated",
+    started_at: LONG_AGO, reference: "synthetic-event-0003",
+    provenance: "synthetic_test_producer", event_digest: null,
+    verified: true, source_observed_at_used: false,
+  });
+  assert.equal(unbound.reason_id, "retention_clock_event_unbound");
+
+  // THE DEFAULT STILL WORKS, which is the other half of "fail closed honestly":
+  // the class that names no event deletes on custody exactly as before.
+  const draft = evaluateDeletion({
+    tenant: ORGANIZATION_TENANT_ID, registry: eventRegistry,
+    subject: subjectOf({
+      artifact_class: "draft_document", artifact_home: "object_storage",
+      deletion_proof: null, derivatives: [], satisfied_constraints: [],
+    }),
+    now: NOW,
+  });
+  assert.equal(draft.decision, "allow");
+  assert.equal(draft.deletion_receipt.retention_clock.kind, "server_recorded_custody");
+});
+
+test("retention: a class that names no clock defaults to custody, and its stored bytes do not move", () => {
+  // EXISTING REGISTRY INPUTS DEFAULT TO CUSTODY. Every class in the shared test
+  // policy omits `retention_clock`, and every one of them compiles to the default.
+  for (const entry of RETENTION.classes) {
+    assert.deepEqual(entry.retention_clock,
+      { kind: "server_recorded_custody", event_kind: null });
+  }
+
+  // AND THE BYTES A REGISTRY HASHES TO DO NOT MOVE FOR THEM. This is the
+  // compatibility rule rather than a convenience: a registry installed before this
+  // contract named a clock is stored as the exact preimage it hashed to, and a
+  // preimage that now emitted a resolved default for it would stop hashing to the
+  // digest the database recorded — a refusal to READ an already-installed policy,
+  // which is rewriting history by another route.
+  const preimage = retentionRegistryPreimage(RETENTION);
+  for (const entry of preimage.classes) {
+    assert.ok(!Object.prototype.hasOwnProperty.call(entry, "retention_clock"),
+      `${entry.artifact_class} must hash exactly as it did before the clock existed`);
+  }
+  assert.equal(RETENTION.registry_digest, digest(preimage));
+
+  // Stating the default explicitly means the same thing, so it hashes the same.
+  const restated = compileRetentionRegistry({
+    ...RETENTION_POLICY,
+    classes: RETENTION_POLICY.classes.map(entry => ({
+      ...entry, retention_clock: { kind: "server_recorded_custody" },
+    })),
+  });
+  assert.equal(restated.registry_digest, RETENTION.registry_digest);
+
+  // A class that names the EXPLICIT clock means something else, and says so in
+  // the digest rather than hashing like a class that takes the default.
+  const explicit = compileRetentionRegistry({
+    ...RETENTION_POLICY,
+    classes: RETENTION_POLICY.classes.map(entry => entry.artifact_class === "draft_document"
+      ? { ...entry, retention_clock: { kind: "explicit_retention_clock_event",
+          event_kind: "draft_abandoned" } }
+      : entry),
+  });
+  assert.notEqual(explicit.registry_digest, RETENTION.registry_digest);
+  assert.deepEqual(
+    retentionRegistryPreimage(explicit).classes.find(c => c.artifact_class === "draft_document")
+      .retention_clock,
+    { kind: "explicit_retention_clock_event", event_kind: "draft_abandoned" });
+
+  // The two halves of the policy contract: an explicit clock must name its event,
+  // and a default clock must not name one it would never read.
+  throwsCode(() => compileRetentionRegistry({
+    ...RETENTION_POLICY,
+    classes: [{ ...RETENTION_POLICY.classes[0],
+      retention_clock: { kind: "explicit_retention_clock_event" } }],
+  }), "missing_retention_clock_event_kind");
+  throwsCode(() => compileRetentionRegistry({
+    ...RETENTION_POLICY,
+    classes: [{ ...RETENTION_POLICY.classes[0],
+      retention_clock: { kind: "server_recorded_custody", event_kind: "lease_terminated" } }],
+  }), "unused_retention_clock_event_kind");
+  throwsCode(() => compileRetentionRegistry({
+    ...RETENTION_POLICY,
+    classes: [{ ...RETENTION_POLICY.classes[0], retention_clock: { kind: "observed_at" } }],
+  }), "unknown_retention_clock_kind");
+
+  // A STORED REGISTRY THAT PREDATES THE FIELD STILL EVALUATES. This is the shape
+  // the persistence tail rehydrates: the exact stored preimage, with no clock on
+  // any class, rebuilt into the compiled shape and checked by the kernel's own
+  // digest recomputation.
+  const rehydrated = Object.freeze({
+    compiled: true, ...preimage, registry_digest: digest(preimage),
+  });
+  const evaluated = evaluateDeletion({
+    tenant: ORGANIZATION_TENANT_ID, registry: rehydrated, subject: subjectOf(), now: NOW,
+  });
+  assert.equal(evaluated.decision, "allow");
+  assert.equal(evaluated.deletion_receipt.retention_clock.kind, "server_recorded_custody");
+});
+
+// ===========================================================================
 // The bounded derivative-registration rule — a SESSION APPROVAL, not Q129.D1.
 //
 // Q129.D1 settles the per-class retention registry, including which derivative
@@ -1686,7 +2011,17 @@ test("MUTATION KILL (hold): nothing is purged without its period, constraints, p
 // is unknown.
 // ===========================================================================
 
-const SOURCE_ARTIFACT = Object.freeze({ artifact_digest: VALUE_A, created_at: LONG_AGO });
+// THE LOADED SOURCE ARTIFACT CARRIES TWO DIGESTS AND THEY ARE NOT THE SAME FACT.
+// `artifact_digest` is the identity of the stored artifact RECORD — taken over its
+// source system, account, native identity, provenance and observed instant as well
+// as its content — and `content_digest` is the digest of the BYTES that record
+// describes. A byte-identical copy of the source has the second and never the
+// first, which is why comparing a derivative against the first alone let a copy
+// register cleanly as something derived from the thing it copies.
+const SOURCE_BYTES = D(12);
+const SOURCE_ARTIFACT = Object.freeze({
+  artifact_digest: VALUE_A, created_at: LONG_AGO, content_digest: SOURCE_BYTES,
+});
 
 function registrationOf(overrides = {}) {
   return {
@@ -1727,6 +2062,15 @@ test("registration: the reserved internal producer kinds are a list, and the sha
   assert.ok(Object.isFrozen(V5_F01_RESERVED_DERIVATIVE_KINDS));
   assert.ok(V5_F01_RESERVED_DERIVATIVE_KINDS.includes(V5_F01_PARSED_PROPOSAL_DERIVATIVE_KIND),
     "the kind this contract's own proposal producer writes must be reserved");
+  // The second in-contract producer kind: a document version, whose derivative
+  // identity is the (document_id, version_no) fold and is therefore even easier
+  // for a caller to predict than a proposal digest. Written as the LITERAL the
+  // schema mirror uses, not imported from the document module, so the two lists
+  // are compared rather than derived from one another.
+  assert.ok(V5_F01_RESERVED_DERIVATIVE_KINDS.includes("f01_document_version"),
+    "the kind the document producer writes must be reserved too");
+  assert.equal(V5_F01_RESERVED_DERIVATIVE_KINDS.length, 2,
+    "every reserved kind is one an in-contract writer produces; there is no third");
   assert.throws(() => { V5_F01_RESERVED_DERIVATIVE_KINDS.push("anything"); }, TypeError);
 
   // AND THE EVALUATOR MUST NOT REFUSE THEM, which is the half that is easy to get
@@ -1809,6 +2153,115 @@ test("MUTATION KILL (registration): the source artifact is LOADED, never asserte
   } });
   assert.equal(itself.decision, "refuse");
   assert.equal(itself.reason_id, "derivative_is_its_own_source");
+});
+
+test("MUTATION KILL (registration): a byte-identical copy is not a derivative, and the comparison is against the SOURCE'S BYTES", () => {
+  // THE DEFECT THIS FORECLOSES, exactly. The refusal used to compare the
+  // derivative's CONTENT digest with the source's RECORD digest — two values that
+  // are never equal for a copy, because a record digest is taken over identity and
+  // provenance as well as bytes. So "the same bytes cannot masquerade as a
+  // derivative" was a comment describing a comparison nothing made: a producer
+  // could register a verbatim copy of a lease as an abstract of it, and the
+  // provenance edge would say the lease produced itself.
+  const copy = register({ derivative: {
+    derivative_kind: "lease_abstract",
+    derivative_id: "abstract-synthetic-copy-1",
+    content_digest: SOURCE_BYTES,
+  } });
+  assert.equal(copy.decision, "refuse");
+  assert.equal(copy.reason_id, "derivative_is_its_own_source");
+  assert.equal(copy.self_source_comparison, "source_content_digest",
+    "the refusal names the comparison that fired, so one is never read as the other");
+  assert.equal(copy.derivative_link, null);
+  assert.notEqual(SOURCE_BYTES, VALUE_A,
+    "the fixture is only meaningful while the source's bytes and its record identity differ");
+
+  // AND DISTINCT DERIVED BYTES ARE STILL ACCEPTED, which is the half that stops
+  // the rule above from being a refusal of every registration. The answer reports
+  // the digest it compared against rather than leaving a reader to assume one.
+  const derived = register();
+  assert.equal(derived.decision, "allow");
+  assert.equal(derived.source_content_digest, SOURCE_BYTES);
+  assert.equal(derived.source_content_compared, true);
+  assert.equal(derived.derivative_link.derivative_content_digest, VALUE_B);
+
+  // THE RECORD-IDENTITY CLAIM KEEPS ITS OWN REFUSAL. A derivative whose bytes are
+  // the stored artifact ROW's canonical bytes is a different and equally
+  // impossible claim, and it did not stop being one when the real comparison
+  // arrived.
+  const asRecord = register({ derivative: {
+    derivative_kind: "lease_abstract", derivative_id: "abstract-synthetic-copy-2",
+    content_digest: VALUE_A,
+  } });
+  assert.equal(asRecord.reason_id, "derivative_is_its_own_source");
+  assert.equal(asRecord.self_source_comparison, "source_artifact_record_digest");
+
+  // A LOADED ARTIFACT WITH NO CONTENT DIGEST SAYS THE COMPARISON WAS NOT MADE.
+  // This is the shape a caller outside the persistence tail can still produce —
+  // the document seam passes the artifact its own loader returned — and the honest
+  // answer is that this evaluator could not weigh the bytes, never that it did and
+  // they differed. The private SQL inserter re-derives the source's content digest
+  // from the authenticated stored row regardless, so the uncompared case is a
+  // reported gap rather than a way through.
+  const uncompared = register({}, {
+    source_artifact: { artifact_digest: VALUE_A, created_at: LONG_AGO },
+  });
+  assert.equal(uncompared.decision, "allow");
+  assert.equal(uncompared.source_content_digest, null);
+  assert.equal(uncompared.source_content_compared, false);
+  // ...and the record-identity comparison still fires there, because it needs
+  // nothing the caller withheld.
+  assert.equal(register({ derivative: {
+    derivative_kind: "lease_abstract", derivative_id: "abstract-synthetic-copy-3",
+    content_digest: VALUE_A,
+  } }, { source_artifact: { artifact_digest: VALUE_A, created_at: LONG_AGO } }).reason_id,
+  "derivative_is_its_own_source");
+
+  // The loaded content digest is CHECKED, not merely carried.
+  throwsCode(() => register({}, {
+    source_artifact: { ...SOURCE_ARTIFACT, content_digest: "not-a-digest" },
+  }), "invalid_digest");
+  throwsCode(() => register({}, {
+    source_artifact: { ...SOURCE_ARTIFACT, unexpected_field: 1 },
+  }), "unknown_field");
+});
+
+test("registration: the parsed-proposal and document producer shapes stay intact", () => {
+  // THE TWO IN-CONTRACT PRODUCER PATHS, in the exact shape their writers build.
+  // Both name a derivative whose content digest is the digest of the RECORD they
+  // are about to store, so neither can collide with the source's own bytes — and
+  // both must keep working, because the content comparison added above sits on the
+  // same path they use.
+  const proposal = register({
+    derivative: {
+      derivative_kind: V5_F01_PARSED_PROPOSAL_DERIVATIVE_KIND,
+      derivative_id: D(13),
+      content_digest: D(13),
+    },
+    producer: { producer_workflow: "f01_record_parsed_proposal",
+      producer_run_ref: "synthetic-run-0002" },
+    evidence: { evidence_ref: "stored_parsed_proposal", evidence_digest: D(13) },
+  });
+  assert.equal(proposal.decision, "allow");
+  assert.equal(proposal.derivative_link.derivative_kind, V5_F01_PARSED_PROPOSAL_DERIVATIVE_KIND);
+  assert.equal(proposal.source_content_compared, true);
+
+  const documentVersion = register({
+    derivative: {
+      derivative_kind: "f01_document_version",
+      derivative_id: "synthetic-document-0001:1",
+      content_digest: D(14),
+    },
+    producer: { producer_workflow: "synthetic_test_document_producer",
+      producer_run_ref: "synthetic-run-0003" },
+    evidence: { evidence_ref: "stored_document_version", evidence_digest: D(14) },
+  });
+  assert.equal(documentVersion.decision, "allow");
+  assert.equal(documentVersion.derivative_link.derivative_id, "synthetic-document-0001:1");
+  // Both kinds are reserved on the PUBLIC surface and accepted here, which is the
+  // division the store and the SQL writer enforce rather than this evaluator.
+  assert.ok(V5_F01_RESERVED_DERIVATIVE_KINDS.includes(V5_F01_PARSED_PROPOSAL_DERIVATIVE_KIND));
+  assert.ok(V5_F01_RESERVED_DERIVATIVE_KINDS.includes("f01_document_version"));
 });
 
 test("MUTATION KILL (registration): a production must describe something that happened", () => {
@@ -2299,6 +2752,20 @@ test("the domain contract hashes deterministically and the projection accepts no
   assert.equal(preimage.retention.silent_purge_permitted, false);
   assert.equal(
     preimage.retention.surviving_derivatives_are_class_policy_not_instance_inventory, true);
+  // WHEN A RETENTION PERIOD STARTS is in the hashed bytes too, so measuring one
+  // from the source's own timestamp again would move the contract digest rather
+  // than passing as an implementation detail.
+  assert.deepEqual(preimage.retention.retention_clock_kinds, [...V5_F01_RETENTION_CLOCK_KINDS]);
+  assert.equal(preimage.retention.default_retention_clock_kind,
+    V5_F01_DEFAULT_RETENTION_CLOCK_KIND);
+  assert.equal(preimage.retention.retention_starts_at_server_recorded_custody, true);
+  assert.equal(preimage.retention.source_observed_at_starts_retention, false);
+  assert.equal(preimage.retention.unknown_retention_clock_blocks_deletion, true);
+  assert.equal(preimage.retention.caller_may_supply_retention_clock, false);
+  // Said out loud rather than implied by the refusals: no producer for an explicit
+  // retention-clock event exists in this slice, so a class that registers one
+  // cannot reach a deletion at all.
+  assert.equal(preimage.retention.explicit_retention_clock_event_producer_established, false);
   // The settled derivative-registration rule is IN the hashed bytes, so relaxing
   // any half of it moves the contract digest rather than passing unnoticed.
   assert.equal(preimage.derivative_registration.registration_precedes_derivative_completion, true);
@@ -2457,6 +2924,30 @@ test("one positive registry exercises every home and all nine decision obligatio
     "session-approved registration rule: unknown coverage blocks the deletion");
   assert.ok(!Object.prototype.hasOwnProperty.call(proved, "Q129.D2"),
     "no decision id may be invented for the registration rule");
+
+  // AND SO IS THE RETENTION-CLOCK RULE, for the same reason and on the same terms.
+  //
+  // Q129.D1 settles that the registry carries a default retention period per
+  // class. It does not settle WHEN that period starts, and reading "default
+  // retention" as "from the artifact's observed instant" was an implementation
+  // choice rather than settled text. The rule that a period starts at
+  // server-stamped custody was accepted directly by the user in
+  //
+  //   native task 01a0869f-fe0d-7493-bda3-ab8b3c0d6683
+  //   user turn   01a08825-f388-70a2-b1a0-18ee866edde7
+  //
+  // and carries no canonical decision id, because none was issued for it. It is
+  // kept OUT of `proved` so the count above stays the nine, and asserted here so
+  // it is still binding.
+  assert.equal(deletion({ retention_clock: clockOf({ started_at: T.early }) }).reason_id,
+    "retention_period_not_elapsed",
+    "accepted retention-clock rule: the period runs from custody");
+  assert.equal(deletion({ retention_clock: null }).reason_id, "retention_clock_missing",
+    "accepted retention-clock rule: an underivable trigger blocks the deletion");
+  assert.equal(deletion().deletion_receipt.retention_clock.source_observed_at_used, false,
+    "accepted retention-clock rule: the source's observed instant is never the clock");
+  assert.ok(!Object.prototype.hasOwnProperty.call(proved, "Q129.D3"),
+    "no decision id may be invented for the retention-clock rule either");
 });
 
 // ===========================================================================

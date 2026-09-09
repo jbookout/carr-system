@@ -14,8 +14,9 @@
 //   IN CODE — the STRUCTURE the architecture clause settles. The seven
 //   authoritative homes, which fact class lives in which home, the surfaces that
 //   can never be authoritative, and the closed vocabularies for write direction,
-//   version comparison, conflict behaviour, taint, document state, deletion and
-//   derivative-registration coverage. These are identity, not configuration.
+//   version comparison, conflict behaviour, taint, document state, deletion,
+//   derivative-registration coverage and the retention clock. These are identity,
+//   not configuration.
 //
 //   AS TYPED POLICY INPUT — every AUTHORITY ASSIGNMENT. Which source owns which
 //   field, which direction each source may write, how that field's versions
@@ -23,6 +24,13 @@
 //   period is, which derivatives survive a deletion. This module invents none of
 //   them and ships no default for any of them; missing, ambiguous, duplicate or
 //   conflicting policy refuses. The future Neon-backed registry supplies them.
+//
+//   ONE DEFAULT IS STRUCTURE RATHER THAN POLICY, and it is named here so it is not
+//   mistaken for the other kind. WHEN a retention period starts is not a value a
+//   class may choose freely: it starts at the server-stamped instant the record
+//   layer took custody, and a class may name an explicit typed EVENT instead but
+//   may never name the source's own observed timestamp. HOW LONG the period runs
+//   remains entirely policy, and this module still ships no period for anything.
 //
 // TWO KINDS OF NO, following S01 deliberately:
 //   * A POLICY ANSWER is returned — a frozen result whose `decision` is "allow",
@@ -2236,6 +2244,58 @@ export const V5_F01_HOLD_STATES = deepFreeze(["active", "released", "expired", "
 export const V5_F01_DELETION_RECEIPT_SCHEMA_VERSION = "doctorcre-v5-f01-deletion-receipt.v1";
 
 // ---------------------------------------------------------------------------
+// WHEN A RETENTION PERIOD STARTS, and it is not the source's clock.
+//
+// THE RULE, in the words it was accepted in. A default retention period starts at
+// the SERVER-STAMPED INSTANT THE RECORD LAYER TOOK CUSTODY of the artifact — the
+// `recorded_at` of the stored row. A source's `observed_at` stays what it has
+// always been: identity and provenance, the moment the source says it saw the
+// value. It is never the retention clock under another name, because it is the one
+// timestamp a corporate source (or anything that can write to one) chooses, and a
+// backdated one would shorten a retention period nobody agreed to shorten.
+//
+// A CLASS MAY NAME AN EXPLICIT CLOCK, and only one shape of it: a TYPED EVENT WITH
+// ITS OWN PROVENANCE — a lease terminating, a matter closing — identified by an
+// event kind the class registers. What it may never name is the artifact's own
+// `observed_at` wearing an event's name; every clock carries
+// `source_observed_at_used: false` in the bytes the evaluation and the receipt
+// hash, so an implementation that quietly aliased the two would move the digest
+// rather than pass unnoticed.
+//
+// THE TRIGGER ACTUALLY USED IS BOUND, not merely chosen. The kind, the instant it
+// started, the reference it came from, its provenance and — for an event — the
+// event's own digest travel into the deletion evaluation and into the deletion
+// receipt beside the retention registry digest, and the persistence tail's SQL
+// writer re-derives the whole clock under the lock it already takes and refuses a
+// forged or stale one.
+//
+// THERE IS NO TRUSTED EVENT LOOKUP IN THIS SLICE, and this contract does not
+// invent one. Nothing here produces, approves or authenticates a retention-clock
+// event, and a caller-supplied one is not evidence about anything. So a class that
+// registers an explicit event clock CANNOT reach a deletion today: an absent,
+// unknown, mismatched or unverified trigger refuses, by name, every time. The
+// default custody clock works, which is the honest division — the thing that can
+// be established is usable, and the thing that cannot is refused rather than
+// approximated.
+//
+// AN EXISTING REGISTRY THAT NAMES NO CLOCK DEFAULTS TO CUSTODY, and that default
+// is applied when the class is READ rather than by rewriting anything. A stored
+// registry keeps its exact bytes and its exact digest — the preimage below emits
+// `retention_clock` only for a class that names the explicit event clock — so no
+// history is rewritten and no custody is fabricated for a row that never claimed
+// one. What a legacy class gets is the same answer this contract gives to a class
+// that states the default outright, which is the compatibility rule, not a repair.
+// ---------------------------------------------------------------------------
+
+export const V5_F01_RETENTION_CLOCK_KINDS = deepFreeze([
+  "server_recorded_custody",
+  "explicit_retention_clock_event",
+]);
+
+export const V5_F01_DEFAULT_RETENTION_CLOCK_KIND = "server_recorded_custody";
+export const V5_F01_EXPLICIT_RETENTION_CLOCK_KIND = "explicit_retention_clock_event";
+
+// ---------------------------------------------------------------------------
 // The bounded derivative-registration rule.
 //
 // WHOSE RULE THIS IS, stated exactly, because the distinction is load-bearing
@@ -2343,9 +2403,22 @@ export const V5_F01_PARSED_PROPOSAL_DERIVATIVE_KIND = "f01_parsed_proposal";
  * is what the in-contract proposal producer itself calls, so refusing there would
  * break the very path that legitimately writes this kind. The refusal belongs at
  * the public caller surface, which is the only place the distinction exists.
+ *
+ * "f01_document_version" IS THE SECOND MEMBER, and it is here for the same reason
+ * rather than by analogy. A document version's derivative identity is the
+ * (document_id, version_no) fold, which a caller can predict even more easily than
+ * a proposal digest; the identity index in ops is unique per (tenant, kind, id)
+ * over an append-only table with no release path. A pre-registration of
+ * ("f01_document_version", "<some document>:1") against an unrelated artifact
+ * would make the genuine record-document-identity write conflict for that version
+ * for ever, and would leave a provenance edge asserting the document came from an
+ * artifact it did not. The kind is written only by the document producer inside
+ * this contract, in the same transaction that completes the version; the mirror of
+ * this list in ops.f01_reserved_derivative_kinds() carries both names too.
  */
 export const V5_F01_RESERVED_DERIVATIVE_KINDS = deepFreeze([
   V5_F01_PARSED_PROPOSAL_DERIVATIVE_KIND,
+  "f01_document_version",
 ]);
 
 const DERIVATIVE_IDENTITY_KEYS = Object.freeze([
@@ -2356,7 +2429,28 @@ const DERIVATIVE_EVIDENCE_KEYS = Object.freeze(["evidence_ref", "evidence_digest
 const DERIVATIVE_REGISTRATION_KEYS = Object.freeze([
   "source_artifact_digest", "derivative", "producer", "produced_at", "evidence",
 ]);
-const DERIVATIVE_SOURCE_ARTIFACT_KEYS = Object.freeze(["artifact_digest", "created_at"]);
+// THE LOADED SOURCE ARTIFACT, and `content_digest` is the field the self-source
+// comparison actually needs. `artifact_digest` is the digest of the artifact
+// RECORD — its identity in the record layer, over source system, account, native
+// identity, provenance and the rest — while `content_digest` is the digest of the
+// BYTES that artifact describes. Comparing a derivative's content digest with the
+// artifact's record digest answers a question nobody asked: two things that are
+// never equal for any honest derivative AND never equal for a byte-identical copy
+// either, which is the copy the rule exists to refuse.
+//
+// IT IS OPTIONAL RATHER THAN REQUIRED, and the reason is a boundary rather than a
+// convenience. The document seam calls this evaluator with the source artifact the
+// persistence tail loaded, and that call site is outside this phase's write cap;
+// requiring the field here would refuse every document binding until that module
+// changed. So an absent content digest means the comparison COULD NOT BE MADE, and
+// the answer says so in `source_content_compared` instead of implying it passed.
+// The persistence tail supplies it on every path it owns, and the private SQL
+// inserter re-derives it from the authenticated stored artifact regardless, so the
+// uncompared case is a reported gap rather than a way through.
+const DERIVATIVE_SOURCE_ARTIFACT_KEYS = Object.freeze([
+  "artifact_digest", "created_at", "content_digest",
+]);
+const DERIVATIVE_SOURCE_ARTIFACT_REQUIRED = Object.freeze(["artifact_digest", "created_at"]);
 const DERIVATIVE_REQUEST_KEYS = Object.freeze([
   "tenant", "registration", "source_artifact", "now",
 ]);
@@ -2367,13 +2461,87 @@ const DERIVATIVE_COVERAGE_KEYS = Object.freeze([
 const RETENTION_POLICY_KEYS = Object.freeze(["schema_version", "registry_version", "tenant", "classes"]);
 const RETENTION_CLASS_KEYS = Object.freeze([
   "artifact_class", "authoritative_home", "default_retention_days", "governing_constraints",
+  "deletion_proof_required", "surviving_derivatives", "retention_clock",
+]);
+// `retention_clock` is OPTIONAL and every other key is required. Absent means the
+// default custody clock — see the section header — so a registry written before
+// this contract named a clock compiles unchanged and means exactly what it always
+// meant.
+const RETENTION_CLASS_REQUIRED = Object.freeze([
+  "artifact_class", "authoritative_home", "default_retention_days", "governing_constraints",
   "deletion_proof_required", "surviving_derivatives",
 ]);
+const RETENTION_CLOCK_POLICY_KEYS = Object.freeze(["kind", "event_kind"]);
+// The clock the persistence tail LOADS for one artifact: which trigger, when it
+// started, where that instant came from, whose provenance it carries, and whether
+// anything actually verified it.
+const RETENTION_CLOCK_KEYS = Object.freeze([
+  "kind", "event_kind", "started_at", "reference", "provenance", "event_digest",
+  "verified", "source_observed_at_used",
+]);
+const RETENTION_CLOCK_REQUIRED = Object.freeze([
+  "kind", "started_at", "reference", "provenance", "verified", "source_observed_at_used",
+]);
+
+/**
+ * Validate one class's declared retention clock, or return the default.
+ *
+ * A class that names the explicit event clock MUST name the event kind, and a
+ * class that takes the default MUST NOT: an unread event kind is an unenforced
+ * one, and a clock that names an event nobody consults is policy that looks
+ * stricter than it is.
+ */
+function compileRetentionClock(raw, path) {
+  if (raw === undefined || raw === null) {
+    return { kind: V5_F01_DEFAULT_RETENTION_CLOCK_KIND, event_kind: null };
+  }
+  assertObject(raw, path);
+  assertClosedKeys(raw, RETENTION_CLOCK_POLICY_KEYS, path);
+  assertRequiredKeys(raw, ["kind"], path);
+  const kind = assertEnum(raw.kind, V5_F01_RETENTION_CLOCK_KINDS, `${path}.kind`,
+    "unknown_retention_clock_kind");
+  if (kind === V5_F01_EXPLICIT_RETENTION_CLOCK_KIND) {
+    if (raw.event_kind === undefined || raw.event_kind === null) {
+      fail("missing_retention_clock_event_kind",
+        `${path}.event_kind must name the typed event this class's retention starts from; an explicit clock with no event kind names nothing`,
+        { path });
+    }
+    return {
+      kind,
+      event_kind: assertExternalIdent(raw.event_kind, `${path}.event_kind`, { maxLength: 128 }),
+    };
+  }
+  if (raw.event_kind !== undefined && raw.event_kind !== null) {
+    fail("unused_retention_clock_event_kind",
+      `${path}.event_kind is only read for the "${V5_F01_EXPLICIT_RETENTION_CLOCK_KIND}" clock; unused policy is ambiguous policy`,
+      { path, kind });
+  }
+  return { kind, event_kind: null };
+}
+
+/**
+ * The clock one COMPILED-OR-STORED class runs on.
+ *
+ * A stored registry compiled before this contract carries no `retention_clock` at
+ * all, and it gets the default rather than a refusal — that is the compatibility
+ * rule, stated in the section header and applied here at READ time so the stored
+ * bytes and their digest stay exactly as they were. A class that DOES carry one is
+ * re-validated rather than trusted, so an edited stored registry cannot smuggle an
+ * unregistered clock kind into an evaluation.
+ */
+function retentionClockOfClass(entry, path) {
+  return compileRetentionClock(entry.retention_clock ?? null, path);
+}
 const HOLD_KEYS = Object.freeze(["hold_id", "state", "reason", "placed_at", "released_at"]);
 const DELETION_PROOF_KEYS = Object.freeze(["proof_ref", "artifact_digest", "proof_digest", "executed_at"]);
 const DELETION_SUBJECT_KEYS = Object.freeze([
-  "artifact_class", "artifact_home", "artifact_digest", "created_at", "holds",
-  "deletion_proof", "derivative_coverage", "derivatives", "satisfied_constraints",
+  // `created_at` IS THE SOURCE'S OBSERVED INSTANT and stays exactly that: the
+  // artifact's identity and provenance, and the lifetime a deletion proof has to
+  // sit inside. `retention_clock` is the separate, LOADED answer to a different
+  // question — when the retention period started — and the two are never each
+  // other. See the retention-clock section header.
+  "artifact_class", "artifact_home", "artifact_digest", "created_at", "retention_clock",
+  "holds", "deletion_proof", "derivative_coverage", "derivatives", "satisfied_constraints",
 ]);
 const DELETION_REQUEST_KEYS = Object.freeze(["tenant", "registry", "subject", "now"]);
 
@@ -2405,7 +2573,10 @@ function registrationResult(fields) {
  *      one refuses and a loaded one that is not the artifact named refuses.
  *   4. A derivative whose bytes ARE the source's bytes is not a derivative; it is
  *      the artifact under a second name, and registering it would make the source
- *      look like its own provenance.
+ *      look like its own provenance. THE COMPARISON IS AGAINST THE LOADED
+ *      ARTIFACT'S CONTENT DIGEST — the bytes — and separately against its record
+ *      digest, because those are two different claims and only the first one is
+ *      the "same bytes under a second name" this step is named for.
  *   5. Time must describe something that could have happened: a production after
  *      `now` has not happened, and one before the source artifact existed is
  *      about something else.
@@ -2466,6 +2637,12 @@ export function evaluateDerivativeRegistration(request) {
     derivative_id,
     derivative_content_digest,
     producer_workflow,
+    // Filled in once the artifact is LOADED, and reported on every answer from
+    // that point on. `source_content_compared: false` is the honest statement
+    // that this evaluator could not weigh the derivative's bytes against the
+    // source's; it is never the statement that they differ.
+    source_content_digest: null,
+    source_content_compared: false,
     derivative_link: null,
   };
 
@@ -2477,9 +2654,14 @@ export function evaluateDerivativeRegistration(request) {
   }
   const stored = assertObject(request.source_artifact, "request.source_artifact");
   assertClosedKeys(stored, DERIVATIVE_SOURCE_ARTIFACT_KEYS, "request.source_artifact");
-  assertRequiredKeys(stored, DERIVATIVE_SOURCE_ARTIFACT_KEYS, "request.source_artifact");
+  assertRequiredKeys(stored, DERIVATIVE_SOURCE_ARTIFACT_REQUIRED, "request.source_artifact");
   const storedDigest = assertDigestRef(stored.artifact_digest, "request.source_artifact.artifact_digest");
   const createdAt = assertInstant(stored.created_at, "request.source_artifact.created_at");
+  const source_content_digest = stored.content_digest === undefined || stored.content_digest === null
+    ? null
+    : assertDigestRef(stored.content_digest, "request.source_artifact.content_digest");
+  base.source_content_digest = source_content_digest;
+  base.source_content_compared = source_content_digest !== null;
   if (storedDigest !== source_artifact_digest) {
     return registrationResult({
       decision: "refuse", reason_id: "source_artifact_mismatch", ...base,
@@ -2487,10 +2669,30 @@ export function evaluateDerivativeRegistration(request) {
     });
   }
 
-  // Step 4.
+  // Step 4. TWO COMPARISONS, AND THEY ANSWER TWO DIFFERENT QUESTIONS.
+  //
+  //   THE BYTES. A derivative whose content digest is the LOADED ARTIFACT'S
+  //   content digest is a byte-identical copy of the source. That is the case the
+  //   rule is about — the same bytes wearing a derivative's name — and it is the
+  //   comparison an earlier revision did not make: it weighed the derivative's
+  //   content digest against the artifact's RECORD digest, which is never equal
+  //   for a copy, so a copy registered cleanly as its own provenance.
+  //
+  //   THE RECORD. A derivative whose content digest is the artifact's record
+  //   digest claims its bytes are the stored artifact ROW's canonical bytes. That
+  //   is a different and equally impossible claim, so it keeps its refusal rather
+  //   than being dropped when the real comparison arrived. `self_source_comparison`
+  //   says which of the two fired, so one refusal is never read as the other.
+  if (source_content_digest !== null && derivative_content_digest === source_content_digest) {
+    return registrationResult({
+      decision: "refuse", reason_id: "derivative_is_its_own_source", ...base,
+      self_source_comparison: "source_content_digest",
+    });
+  }
   if (derivative_content_digest === source_artifact_digest) {
     return registrationResult({
       decision: "refuse", reason_id: "derivative_is_its_own_source", ...base,
+      self_source_comparison: "source_artifact_record_digest",
     });
   }
 
@@ -2565,19 +2767,76 @@ function assertDerivativeCoverage(value, path) {
   return { state, reason_id, registered_derivative_kinds };
 }
 
+/**
+ * The exact bytes a compiled retention registry hashes to.
+ *
+ * `retention_clock` IS EMITTED ONLY FOR A CLASS THAT NAMES THE EXPLICIT EVENT
+ * CLOCK, and that conditional is the compatibility rule rather than an oversight.
+ * A registry installed before this contract existed hashes to bytes that carry no
+ * clock at all; emitting the resolved default for it would change those bytes,
+ * and the stored registry would stop hashing to the digest the database recorded —
+ * a refusal to READ an already-installed policy, which is rewriting history by
+ * another route. A class that takes the default and a class that omits the field
+ * mean the same thing, so they canonicalize to the same bytes; a class that names
+ * the explicit clock means something else, and says so in the digest.
+ */
+/**
+ * Read one LOADED retention clock, which the caller DERIVED from the stored row
+ * rather than decided.
+ *
+ * A caller cannot select this any more than it can select coverage: the
+ * persistence tail reads the server-stamped custody instant off the artifact row
+ * it already holds, and the SQL writer re-derives the whole answer before the
+ * evaluation is stored. What this function does is refuse to READ a clock that is
+ * not one of the registered shapes, so an unregistered kind, an unreadable instant
+ * or a missing verification flag is a contract violation rather than a value some
+ * later comparison happens to fall through.
+ */
+function assertLoadedRetentionClock(value, path) {
+  assertObject(value, path);
+  assertClosedKeys(value, RETENTION_CLOCK_KEYS, path);
+  assertRequiredKeys(value, RETENTION_CLOCK_REQUIRED, path);
+  return {
+    kind: assertEnum(value.kind, V5_F01_RETENTION_CLOCK_KINDS, `${path}.kind`,
+      "unknown_retention_clock_kind"),
+    event_kind: value.event_kind === undefined || value.event_kind === null
+      ? null
+      : assertExternalIdent(value.event_kind, `${path}.event_kind`, { maxLength: 128 }),
+    started_at: value.started_at,
+    reference: assertExternalIdent(value.reference, `${path}.reference`, { maxLength: 255 }),
+    provenance: assertExternalIdent(value.provenance, `${path}.provenance`, { maxLength: 128 }),
+    event_digest: value.event_digest === undefined || value.event_digest === null
+      ? null
+      : assertDigestRef(value.event_digest, `${path}.event_digest`),
+    verified: assertBoolean(value.verified, `${path}.verified`),
+    // The anti-alias flag, hashed with every evaluation and receipt that carries
+    // this clock. A trigger that admits it is the source's own observed instant
+    // under another name is refused rather than run.
+    source_observed_at_used: assertBoolean(value.source_observed_at_used,
+      `${path}.source_observed_at_used`),
+  };
+}
+
 export function retentionRegistryPreimage(compiled) {
   return {
     schema_version: V5_F01_RETENTION_REGISTRY_SCHEMA_VERSION,
     registry_version: compiled.registry_version,
     tenant: compiled.tenant,
-    classes: compiled.classes.map(entry => ({
-      artifact_class: entry.artifact_class,
-      authoritative_home: entry.authoritative_home,
-      default_retention_days: entry.default_retention_days,
-      governing_constraints: [...entry.governing_constraints],
-      deletion_proof_required: entry.deletion_proof_required,
-      surviving_derivatives: [...entry.surviving_derivatives],
-    })),
+    classes: compiled.classes.map(entry => {
+      const clock = entry.retention_clock ?? null;
+      const explicit = clock !== null && clock.kind === V5_F01_EXPLICIT_RETENTION_CLOCK_KIND;
+      return {
+        artifact_class: entry.artifact_class,
+        authoritative_home: entry.authoritative_home,
+        default_retention_days: entry.default_retention_days,
+        governing_constraints: [...entry.governing_constraints],
+        deletion_proof_required: entry.deletion_proof_required,
+        surviving_derivatives: [...entry.surviving_derivatives],
+        ...(explicit
+          ? { retention_clock: { kind: clock.kind, event_kind: clock.event_kind } }
+          : {}),
+      };
+    }),
   };
 }
 
@@ -2600,7 +2859,7 @@ export function compileRetentionRegistry(policy) {
     const path = `policy.classes[${index}]`;
     assertObject(raw, path);
     assertClosedKeys(raw, RETENTION_CLASS_KEYS, path);
-    assertRequiredKeys(raw, RETENTION_CLASS_KEYS, path);
+    assertRequiredKeys(raw, RETENTION_CLASS_REQUIRED, path);
     const artifact_class = assertExternalIdent(raw.artifact_class, `${path}.artifact_class`,
       { maxLength: 128 });
     if (seen.has(artifact_class)) {
@@ -2629,6 +2888,11 @@ export function compileRetentionRegistry(policy) {
       deletion_proof_required: assertBoolean(raw.deletion_proof_required,
         `${path}.deletion_proof_required`),
       surviving_derivatives: dedupe(raw.surviving_derivatives, "surviving_derivatives"),
+      // Resolved on the compiled entry either way, so an evaluation never has to
+      // ask what an absent field meant. The PREIMAGE above is the half that stays
+      // byte-compatible; this is the half that makes the answer explicit.
+      retention_clock: compileRetentionClock(raw.retention_clock ?? null,
+        `${path}.retention_clock`),
     };
   });
   classes.sort((a, b) => a.artifact_class < b.artifact_class ? -1 : 1);
@@ -2686,18 +2950,24 @@ const MS_PER_DAY = 86400000;
  *   4. Holds: an ACTIVE hold blocks — that is the definite, nameable block. An
  *      UNKNOWN hold state blocks too, because a hold nobody can read is not a
  *      hold nobody placed. Released and expired holds do not block.
- *   5. The default retention period must have elapsed.
- *   6. Every governing constraint the class names must be satisfied.
- *   7. A deletion proof the class REQUIRES must be present, and ANY supplied
+ *   5. THE RETENTION CLOCK. The LOADED trigger must be present, must be the kind
+ *      this class registers, must not be the source's observed instant under
+ *      another name, must be verified, and must name an instant that has
+ *      happened. Absent, unknown, mismatched or unverified each refuse by name.
+ *   6. The default retention period must have elapsed SINCE THAT TRIGGER — the
+ *      server-stamped custody instant by default, never the source's own.
+ *   7. Every governing constraint the class names must be satisfied.
+ *   8. A deletion proof the class REQUIRES must be present, and ANY supplied
  *      proof — required or not — must be about this exact artifact and executed
  *      between the artifact's creation and now.
- *   8. REGISTRATION COVERAGE must be established. Unknown coverage blocks, and
+ *   9. REGISTRATION COVERAGE must be established. Unknown coverage blocks, and
  *      it blocks before any inventory is read, because an inventory drawn from
  *      an incomplete registry is not an inventory.
- *   9. Every observed derivative must be a registered surviving derivative; an
+ *  10. Every observed derivative must be a registered surviving derivative; an
  *      unregistered one blocks rather than vanishing with the artifact.
- *  10. Only then allow, with a deletion receipt preimage naming BOTH what the
- *      class policy says survives and what was actually observed to exist.
+ *  11. Only then allow, with a deletion receipt preimage naming BOTH what the
+ *      class policy says survives and what was actually observed to exist — and
+ *      the exact trigger the retention period was measured from.
  */
 export function evaluateDeletion(request) {
   assertObject(request, "request");
@@ -2747,6 +3017,14 @@ export function evaluateDeletion(request) {
     observed_derivatives: null,
     observed_surviving_derivatives: null,
     derivative_coverage_state: "unknown",
+    // THE TRIGGER THE PERIOD IS MEASURED FROM, reported on every answer once it
+    // has been read, and null before it has. `registered_retention_clock_kind` is
+    // what the CLASS says the clock must be; `retention_clock` is the trigger that
+    // was actually loaded. Keeping them apart is what lets a refusal say whether
+    // the policy or the trigger was the problem.
+    registered_retention_clock_kind: entry
+      ? retentionClockOfClass(entry, "registry.retention_clock").kind : null,
+    retention_clock: null,
     deletion_receipt: null,
   };
   if (entry === undefined) {
@@ -2836,8 +3114,84 @@ export function evaluateDeletion(request) {
     });
   }
 
-  // Step 5.
-  const elapsedDays = Math.floor((now - createdAt) / MS_PER_DAY);
+  // Step 5. THE RETENTION CLOCK, AND WHY IT IS A SEPARATE INPUT.
+  //
+  // `created_at` above is the SOURCE's observed instant. Measuring a retention
+  // period from it means a source that reports an old observation — or anything
+  // able to write one — shortens the period, and an artifact backdated far enough
+  // arrives already expired. So the trigger is LOADED separately: by default the
+  // server-stamped instant the record layer took custody of the row, which no
+  // caller and no source can choose.
+  //
+  // EVERY FAILURE HERE IS A REFUSAL, and each one is named. A trigger nobody
+  // supplied, a trigger of the wrong kind for this class, a class whose explicit
+  // event has no established producer, an event of the wrong kind, an unverified
+  // one, one that claims to be the source's observed instant under another name,
+  // and one dated after `now` — none of them may be rounded down to "start the
+  // clock somewhere sensible".
+  const classClock = retentionClockOfClass(entry, "registry.retention_clock");
+  if (raw.retention_clock === undefined || raw.retention_clock === null) {
+    return deletionResult({ decision: "refuse", reason_id: "retention_clock_missing", ...base });
+  }
+  const clock = assertLoadedRetentionClock(raw.retention_clock, "request.subject.retention_clock");
+  const clockStartedAt = assertInstant(clock.started_at, "request.subject.retention_clock.started_at");
+  base.retention_clock = deepFreeze({ ...clock });
+  if (clock.source_observed_at_used === true) {
+    return deletionResult({
+      decision: "refuse", reason_id: "retention_clock_uses_source_observed_at", ...base,
+    });
+  }
+  if (clock.kind !== classClock.kind) {
+    return deletionResult({
+      decision: "refuse",
+      // A class that registered an explicit event clock and was handed the
+      // default custody one has not been given a WRONG trigger; it has been given
+      // the only trigger this slice can produce, which is not the one its policy
+      // names. Saying so by name is the difference between "your input is
+      // malformed" and "nothing here can establish that event yet".
+      reason_id: classClock.kind === V5_F01_EXPLICIT_RETENTION_CLOCK_KIND
+        ? "retention_clock_event_not_established"
+        : "retention_clock_kind_mismatch",
+      ...base,
+      loaded_retention_clock_kind: clock.kind,
+    });
+  }
+  if (classClock.kind === V5_F01_EXPLICIT_RETENTION_CLOCK_KIND) {
+    if (clock.event_kind !== classClock.event_kind) {
+      return deletionResult({
+        decision: "refuse", reason_id: "retention_clock_event_kind_mismatch", ...base,
+        registered_retention_clock_event_kind: classClock.event_kind,
+        loaded_retention_clock_event_kind: clock.event_kind,
+      });
+    }
+    // The event has to be bindable, not merely named: without its own digest
+    // there is nothing for the evaluation and the receipt to hash it by.
+    if (clock.event_digest === null) {
+      return deletionResult({
+        decision: "refuse", reason_id: "retention_clock_event_unbound", ...base,
+      });
+    }
+  } else if (clock.event_kind !== null) {
+    return deletionResult({
+      decision: "refuse", reason_id: "retention_clock_kind_mismatch", ...base,
+      loaded_retention_clock_event_kind: clock.event_kind,
+    });
+  }
+  // A caller-supplied trigger is not a verified one, and this module has no way to
+  // make it one. Whatever loaded the clock has to say it authenticated it.
+  if (clock.verified !== true) {
+    return deletionResult({
+      decision: "refuse", reason_id: "retention_clock_unverified", ...base,
+    });
+  }
+  if (clockStartedAt > now) {
+    return deletionResult({
+      decision: "refuse", reason_id: "retention_clock_after_now", ...base,
+    });
+  }
+
+  // Step 6. The period runs from the TRIGGER, never from the source's own clock.
+  const elapsedDays = Math.floor((now - clockStartedAt) / MS_PER_DAY);
   if (elapsedDays < entry.default_retention_days) {
     return deletionResult({
       decision: "refuse", reason_id: "retention_period_not_elapsed", ...base,
@@ -2845,7 +3199,7 @@ export function evaluateDeletion(request) {
     });
   }
 
-  // Step 6.
+  // Step 7.
   let satisfied = [];
   if (raw.satisfied_constraints !== undefined && raw.satisfied_constraints !== null) {
     assertArray(raw.satisfied_constraints, "request.subject.satisfied_constraints", { min: 0, max: 64 });
@@ -2861,7 +3215,7 @@ export function evaluateDeletion(request) {
     });
   }
 
-  // Step 7.
+  // Step 8.
   let deletion_proof = null;
   if (raw.deletion_proof !== undefined && raw.deletion_proof !== null) {
     const proof = assertObject(raw.deletion_proof, "request.subject.deletion_proof");
@@ -2918,7 +3272,7 @@ export function evaluateDeletion(request) {
     }
   }
 
-  // Step 8. COVERAGE BEFORE INVENTORY.
+  // Step 9. COVERAGE BEFORE INVENTORY.
   //
   // This is the rule the approved derivative registration added — the session
   // approval named in the section header above, not Q129.D1 — and it sits ahead
@@ -2945,7 +3299,7 @@ export function evaluateDeletion(request) {
     });
   }
 
-  // Step 9.
+  // Step 10.
   //
   // Same rule as the holds: an omitted derivative inventory is not a verified
   // empty one.
@@ -3023,7 +3377,16 @@ export function evaluateDeletion(request) {
       tenant: ORGANIZATION_TENANT_ID,
       artifact_class, artifact_home, artifact_digest,
       retention_registry_digest: registry.registry_digest,
+      // BESIDE THE REGISTRY DIGEST, AND HASHED WITH THE RECEIPT: the exact trigger
+      // this deletion's period was measured from. A receipt that named the period
+      // but not what started it could not be checked against the row it came from,
+      // and the one thing a later reader must be able to establish is that the
+      // clock was custody rather than the source's own observed instant.
+      retention_clock: { ...clock },
       domain_policy_digest: v5F01PolicyDigest(),
+      retention_started_at: clock.started_at,
+      default_retention_days: entry.default_retention_days,
+      elapsed_days: elapsedDays,
       deletion_proof_required: entry.deletion_proof_required,
       deletion_proof_ref: deletion_proof === null ? null : deletion_proof.proof_ref,
       deletion_proof_digest: deletion_proof === null ? null : deletion_proof.proof_digest,
@@ -3136,6 +3499,18 @@ export function v5F01PolicyPreimage() {
       unknown_hold_blocks_deletion: true,
       silent_purge_permitted: false,
       surviving_derivatives_are_class_policy_not_instance_inventory: true,
+      // WHEN A RETENTION PERIOD STARTS, in the hashed bytes, so relaxing it moves
+      // the contract digest rather than passing unnoticed. The default is the
+      // server-stamped custody instant; the source's observed instant never
+      // starts a period, under that name or any other; an unreadable or
+      // unverified trigger blocks the deletion; and no caller supplies one.
+      retention_clock_kinds: [...V5_F01_RETENTION_CLOCK_KINDS],
+      default_retention_clock_kind: V5_F01_DEFAULT_RETENTION_CLOCK_KIND,
+      retention_starts_at_server_recorded_custody: true,
+      source_observed_at_starts_retention: false,
+      unknown_retention_clock_blocks_deletion: true,
+      caller_may_supply_retention_clock: false,
+      explicit_retention_clock_event_producer_established: false,
     },
     derivative_registration: {
       link_schema_version: V5_F01_DERIVATIVE_LINK_SCHEMA_VERSION,
@@ -3226,6 +3601,7 @@ const ALL_ACCEPTED_KEY_SETS = Object.freeze([
   CURRENT_STATE_KEYS, ARTIFACT_KEYS, ADMIT_KEYS, PROPOSAL_KEYS, BINDING_KEYS, PROPOSAL_REQUEST_KEYS,
   NEON_IDENTITY_KEYS, OBJECT_STORAGE_IDENTITY_KEYS, ONEDRIVE_IDENTITY_KEYS, DOCUMENT_KEYS,
   DOCUMENT_REQUEST_KEYS, RETENTION_POLICY_KEYS, RETENTION_CLASS_KEYS, COMPILED_RETENTION_KEYS,
+  RETENTION_CLOCK_POLICY_KEYS, RETENTION_CLOCK_KEYS,
   HOLD_KEYS, DELETION_PROOF_KEYS, DELETION_SUBJECT_KEYS, DELETION_REQUEST_KEYS,
   DERIVATIVE_IDENTITY_KEYS, DERIVATIVE_PRODUCER_KEYS, DERIVATIVE_EVIDENCE_KEYS,
   DERIVATIVE_REGISTRATION_KEYS, DERIVATIVE_SOURCE_ARTIFACT_KEYS, DERIVATIVE_REQUEST_KEYS,
@@ -3281,7 +3657,7 @@ for (const [name, vocabulary] of Object.entries({
   V5_F01_PREPARATION_STATES, V5_F01_DELIVERY_STATES, V5_F01_SIGNATURE_STATES,
   V5_F01_VALIDITY_STATES, V5_F01_VERSION_STATES, V5_F01_FILING_STATES, V5_F01_HOLD_STATES,
   V5_F01_RECORD_KINDS, V5_F01_FACT_CLASSES, V5_F01_NON_AUTHORITATIVE_DISPOSITIONS,
-  V5_F01_DERIVATIVE_COVERAGE_STATES,
+  V5_F01_DERIVATIVE_COVERAGE_STATES, V5_F01_RETENTION_CLOCK_KINDS,
   V5_F01_PARSED_PROPOSAL_DERIVATIVE_KIND: [V5_F01_PARSED_PROPOSAL_DERIVATIVE_KIND],
 })) {
   for (const value of vocabulary) {
@@ -3290,4 +3666,16 @@ for (const [name, vocabulary] of Object.entries({
         `${name} carries "${value}", which is not a lower-case vocabulary slug`, { name, value });
     }
   }
+}
+// The two named retention-clock kinds must be registered, and must be different
+// kinds. A default that named an unregistered value would make every class's
+// resolved clock unreadable; a default equal to the explicit kind would silently
+// give every legacy class an event nobody can produce.
+if (!V5_F01_RETENTION_CLOCK_KINDS.includes(V5_F01_DEFAULT_RETENTION_CLOCK_KIND) ||
+    !V5_F01_RETENTION_CLOCK_KINDS.includes(V5_F01_EXPLICIT_RETENTION_CLOCK_KIND) ||
+    V5_F01_DEFAULT_RETENTION_CLOCK_KIND === V5_F01_EXPLICIT_RETENTION_CLOCK_KIND) {
+  throw new V5F01Error("invalid_retention_clock_vocabulary",
+    "the default and explicit retention-clock kinds must be two registered, distinct kinds",
+    { default_kind: V5_F01_DEFAULT_RETENTION_CLOCK_KIND,
+      explicit_kind: V5_F01_EXPLICIT_RETENTION_CLOCK_KIND });
 }
