@@ -32910,9 +32910,56 @@
   ],
   "current_source_review": {
     "base_version": "v24",
-    "upsert": [],
+    "upsert": [
+      {
+        "ingress_key": "script-entrypoint:mcp-server/continuity-stdio-proxy.mjs",
+        "ingress_kind": "script_entrypoint",
+        "operation": "mcp-server/continuity-stdio-proxy.mjs",
+        "effect_class": "administrative_mutation",
+        "source_locator": "mcp-server/continuity-stdio-proxy.mjs",
+        "schema_digest": "e320ec20e8146db554d4dc36116ca091c315c75e3d10253b9c12b96b20a2ffb2",
+        "handler_digest": "e320ec20e8146db554d4dc36116ca091c315c75e3d10253b9c12b96b20a2ffb2",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "existing_script_specific_credential_boundary",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [],
+        "request_shape": "fixed_script_cli_contract",
+        "idempotency_mode": "script_specific_registered_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "script-entrypoint:ops/config-as-code.py",
+        "ingress_kind": "script_entrypoint",
+        "operation": "ops/config-as-code.py",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/config-as-code.py",
+        "schema_digest": "b0fb47042664cc8fef72e380574d57c616da0bc2620b76dfe977bca1b49d2832",
+        "handler_digest": "b0fb47042664cc8fef72e380574d57c616da0bc2620b76dfe977bca1b49d2832",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "existing_script_specific_credential_boundary",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [],
+        "request_shape": "fixed_script_cli_contract",
+        "idempotency_mode": "script_specific_registered_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      }
+    ],
     "expected_count": 835,
-    "expected_sha256": "d2853ef9371751efec0f5266f10ec994d8b6d241907e25dac3e5e8ad165a4e39",
-    "reason": "No source change is outstanding beyond the frozen v24 frontier. Every entrypoint the V5-F09 tail re-digests is folded into patches[v24] above, so this review carries an empty upsert and restates the frontier it reviews."
+    "expected_sha256": "cf433c9b65cd8718a69d4dfa5552985f4f033f6c17c596a2d5fbbad1af8b71df",
+    "reason": "Reviewed Codex-only MCP connection repair: existing continuity proxy gains explicit --codex mode with unchanged Claude default; existing installer gains scoped Codex credential-adapter installation and verification. No new entrypoints, authority, or historical registry changes."
   }
 }

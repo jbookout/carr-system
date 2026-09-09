@@ -37,7 +37,7 @@ test("Codex continuity stdio proxy keeps the bearer out of config and exposes tw
     });
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
-  const child = spawn(process.execPath, [new URL("../codex-continuity-stdio-proxy.mjs", import.meta.url).pathname], {
+  const child = spawn(process.execPath, [new URL("../continuity-stdio-proxy.mjs", import.meta.url).pathname, "--codex"], {
     env: { ...process.env, CARR_MCP_ENV: tokenFile,
       CARR_MCP_URL: `http://127.0.0.1:${server.address().port}/mcp` },
     stdio: ["pipe", "pipe", "pipe"],
@@ -72,4 +72,46 @@ test("Codex continuity stdio proxy keeps the bearer out of config and exposes tw
   assert.equal(responses[6].error.message, "not_in_codex_continuity_profile");
   assert.deepEqual(seen.map(message => message.id), [0, 1, 3, 4]);
   assert.doesNotMatch(stdout + stderr, /secret-codex|secret upstream|private\/path|mcp-tokens/);
+});
+
+test("Codex installer copies its reviewed checkout and preserves unrelated configuration", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const script = new URL("../../ops/config-as-code.py", import.meta.url).pathname;
+  const proof = execFileSync("python3", ["-c", `
+import copy, importlib.util, json, sys, tempfile
+from pathlib import Path
+from unittest.mock import patch
+spec = importlib.util.spec_from_file_location('config_fixture', sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+m.REPO = '/not-the-reviewed-checkout'
+original = {'unrelated': {'retain': True}, 'mcp_servers': {'carr': {'url': 'https://example.test', 'disabled_tools': ['prior']}}}
+current = copy.deepcopy(original)
+def read():
+    return {'config': copy.deepcopy(current), 'version': 'fixture-version'}
+def write(edits, version):
+    assert version == 'fixture-version'
+    for edit in edits:
+        parts = edit['keyPath'].split('.')
+        node = current
+        for key in parts[:-1]:
+            node = node.setdefault(key, {})
+        node[parts[-1]] = copy.deepcopy(edit['value'])
+    return read()
+m._codex_user_config_layer = read
+m._write_codex_config_edits = write
+with tempfile.TemporaryDirectory() as home, patch.object(Path, 'home', return_value=Path(home)):
+    assert m.cmd_install_codex_continuity_mcp(True) == 0
+    assert m.cmd_install_codex_continuity_mcp(False) == 0
+    installed = Path(home) / '.config/carr/codex-continuity/continuity-stdio-proxy.mjs'
+    reviewed = Path(sys.argv[1]).resolve().parents[1] / 'mcp-server/continuity-stdio-proxy.mjs'
+    assert installed.read_bytes() == reviewed.read_bytes()
+    assert current['unrelated'] == original['unrelated']
+    assert current['mcp_servers']['carr']['url'] == original['mcp_servers']['carr']['url']
+    assert current['mcp_servers']['carr']['disabled_tools'] == ['prior', 'codex-checkpoint', 'codex-read-recovery']
+    server = current['mcp_servers']['carr-codex-continuity']
+    assert server['args'][-1] == '--codex'
+    assert server['tools'] == {name: {'approval_mode': 'approve'} for name in ['codex-checkpoint', 'codex-read-recovery']}
+`, script], { encoding: "utf8" });
+  assert.equal(proof.trim().split("\n").map(JSON.parse).every(row => row.ok), true);
 });
