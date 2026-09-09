@@ -36,6 +36,7 @@ import {
   REGISTRY_V18_VERSION,
   REGISTRY_V19_VERSION,
   REGISTRY_V20_VERSION,
+  REGISTRY_V21_VERSION,
   replaceExactlyOnce,
   renderGeneratedFrontier,
   renderRuntimeProjection,
@@ -55,6 +56,8 @@ import {
   renderIncidentWorkRequestLinkRegistrySql,
   renderContinuityArchiveForwardRegistrySql,
   assertContinuityArchiveV20TrustRoot,
+  renderR06HooksCorrectnessForwardRegistrySql,
+  assertR06HooksCorrectnessV21TrustRoot,
   renderSourceMergeForwardRegistrySql,
   sha256,
   SIEP16_INTEGRATED_DB_CATALOG_BASELINE,
@@ -83,6 +86,8 @@ import {
   INCIDENT_WORK_REQUEST_LINK_PRE_V19_DB_CATALOG_BASELINE,
   CONTINUITY_ARCHIVE_FORWARD_DB_CATALOG_BASELINE,
   CONTINUITY_ARCHIVE_PRE_V20_DB_CATALOG_BASELINE,
+  R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE,
+  R06_HOOKS_CORRECTNESS_PRE_V21_DB_CATALOG_BASELINE,
   SOURCE_MERGE_FORWARD_DB_CATALOG_BASELINE,
   SOURCE_MERGE_PRE_V10_DB_CATALOG_BASELINE,
   SIEP12_DB_CATALOG_BASELINE,
@@ -179,6 +184,10 @@ const generatedV20 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v20.generated.js", import.meta.url), "utf8");
 const v20Migration = fs.readFileSync(
   new URL("../../migrations/0494_codex_continuity_archive_registry.sql", import.meta.url), "utf8");
+const generatedV21 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v21.generated.js", import.meta.url), "utf8");
+const v21Migration = fs.readFileSync(
+  new URL("../../migrations/0495_r06_hooks_correctness_scac_successor.sql", import.meta.url), "utf8");
 const siep18MonitorMigration = fs.readFileSync(
   new URL("../../migrations/0467_siep18_atomic_db_monitor_grants.sql", import.meta.url), "utf8");
 const directRegistryRedefinitions = [
@@ -694,10 +703,11 @@ test("v19 seals the WR69 incident/work-request association and preserves the v18
   assert.match(v19Migration, /registry_version='scac-mutation-registry[.]v19'[^\n]+<>1520/);
   assert.doesNotMatch(v19Migration, /^\s*(begin|commit)\s*;\s*$/im);
   // v19 is the seal this migration CREATES, so it carries every predecessor
-  // tuple through v18 and not its own.
+  // tuple through v18 and neither its own nor any later one.
   for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS)) {
     const tuple = `('${seal.version}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount})`;
-    assert.equal(v19Migration.includes(tuple), seal.version !== REGISTRY_V19_VERSION, seal.version);
+    assert.equal(v19Migration.includes(tuple),
+      Number(seal.version.match(/[.]v(\d+)$/)[1]) < 19, seal.version);
   }
   const domain = renderIncidentWorkRequestLinkDomainSql();
   const preflightAt = v19Migration.indexOf("do $incident_work_request_link_preflight$");
@@ -769,9 +779,13 @@ test("v20 seals the Codex continuity archive frontier and preserves the v19 pred
   assert.doesNotMatch(v20Migration, /create table (?!if not exists ops[.]scac_)/);
   assert.doesNotMatch(v20Migration, /do \$incident_work_request_link_preflight\$/);
   assert.match(v20Migration, /do \$continuity_archive_preflight\$/);
-  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS))
-    assert.ok(v20Migration.includes(
-      `('${seal.version}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount})`), seal.version);
+  // v20 is the seal this migration CREATES, so it carries every predecessor
+  // tuple through v19 and not its own.
+  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS)) {
+    const tuple = `('${seal.version}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount})`;
+    assert.equal(v20Migration.includes(tuple),
+      Number(seal.version.match(/[.]v(\d+)$/)[1]) < 20, seal.version);
+  }
 });
 
 test("the ACTIVE runtime registry is v20, and a stale v19 import fails admission", async () => {
@@ -969,15 +983,263 @@ test("the frontier refuses an unbound trust root before any predecessor work run
   }
 });
 
+test("v21 seals the R06 hooks-correctness frontier and preserves the v20 predecessor", () => {
+  const rows = frozenInventory(REGISTRY_V21_VERSION);
+  assert.equal(rows.length, 828);
+  assert.equal(generatedV21, renderRuntimeProjection(rows, {
+    version: REGISTRY_V21_VERSION,
+    dbCatalogBaseline: R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE,
+  }));
+  assert.equal(v21Migration, renderR06HooksCorrectnessForwardRegistrySql(rows));
+  assert.deepEqual(R06_HOOKS_CORRECTNESS_PRE_V21_DB_CATALOG_BASELINE,
+    CONTINUITY_ARCHIVE_FORWARD_DB_CATALOG_BASELINE);
+  assert.equal(R06_HOOKS_CORRECTNESS_PRE_V21_DB_CATALOG_BASELINE.projection_version,
+    "scac-db-catalog-projection.v20");
+  assert.equal(R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE.projection_version,
+    "scac-db-catalog-projection.v21");
+  // Registry-only again: the successor adds four security-definer functions and
+  // touches no relation, column, role or grant, so every other category is
+  // INHERITED from the v20 receipt rather than restated.
+  assert.equal(R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count, 393);
+  assert.equal(R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE.secdef_execute.count -
+    R06_HOOKS_CORRECTNESS_PRE_V21_DB_CATALOG_BASELINE.secdef_execute.count, 4);
+  assert.notEqual(R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE.secdef_execute.digest,
+    R06_HOOKS_CORRECTNESS_PRE_V21_DB_CATALOG_BASELINE.secdef_execute.digest);
+  for (const category of ["relation_dml", "column_dml", "role_authority", "runtime_dml_grants"])
+    assert.deepEqual(R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE[category],
+      R06_HOOKS_CORRECTNESS_PRE_V21_DB_CATALOG_BASELINE[category], category);
+  assert.equal(sha256(v20Migration), HISTORICAL_REGISTRY_ARTIFACT_SHA256[
+    "migrations/0494_codex_continuity_archive_registry.sql"]);
+  assert.equal(sha256(generatedV20), HISTORICAL_REGISTRY_ARTIFACT_SHA256[
+    "mcp-server/src/scac-mutation-registry.v20.generated.js"]);
+  assert.deepEqual(HISTORICAL_REGISTRY_SEALS.v20, {
+    version: REGISTRY_V20_VERSION,
+    digest: "sha256:45bf7a56d2756337c1b5efdad195f4935259fad6cf5f6a9c081c28592bacfb05",
+    entryCount: 1524,
+    sourceEntryCount: 828,
+  });
+  // The generated v20 runtime carries the seal this successor freezes, so a
+  // re-pinned predecessor cannot slip past as "history".
+  assert.equal(
+    `sha256:${JSON.parse(generatedV20.match(/SCAC_MUTATION_REGISTRY_DIGEST = ("[0-9a-f]{64}")/)[1])}`,
+    HISTORICAL_REGISTRY_SEALS.v20.digest);
+  assert.match(v21Migration,
+    /0494_codex_continuity_archive_registry[.]sql'[\s\S]+510e96efbff3870d87c4efefd6ad5bb1b32c7647cb3f5d306aa2aaead12a4a8e/);
+  assert.match(v21Migration,
+    /alter function ops[.]scac_mutation_catalog_v20_current[(][)] rename to scac_mutation_catalog_v20_live_at_seal/);
+  assert.match(v21Migration, /scac_mutation_registry_v20_seal_available[(][)]/);
+  assert.match(v21Migration, /scac_mutation_registration_v21[(]text,text[)]/);
+  assert.match(v21Migration, /scac_mutation_catalog_v21_current[(][)]/);
+  assert.match(v21Migration, /scac_policy_epoch_snapshot_v20[(][)]/);
+  assert.match(v21Migration, /registry-only mutation registry v21 after R06 hook-correctness evidence routing/);
+  assert.match(v21Migration,
+    new RegExp(`registry_version='scac-mutation-registry[.]v21'[^\\n]+<>${1528}`));
+  assert.doesNotMatch(v21Migration, /^\s*(begin|commit)\s*;\s*$/im);
+  assert.doesNotMatch(v21Migration, /__V20_|__V21_|UNBOUND/);
+  // Registry-only: no domain DDL, no business rows, no new store, no grant change.
+  assert.doesNotMatch(v21Migration, /create table (?!if not exists ops[.]scac_)/);
+  assert.doesNotMatch(v21Migration, /do \$continuity_archive_preflight\$/);
+  assert.match(v21Migration, /do \$r06_hooks_correctness_preflight\$/);
+  // v21 is the seal this migration CREATES, so it carries every predecessor
+  // tuple through v20 and not its own.
+  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS))
+    assert.ok(v21Migration.includes(
+      `('${seal.version}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount})`), seal.version);
+});
+
+test("the v21 frontier re-digests only source, so the ACTIVE v20 import still admits every operation", async () => {
+  // The active import stays v20 in this slice: mcp-server/src/mutation-registry.js
+  // is not part of the R06 tail, so flipping it is a separate, later change. What
+  // this test binds is the condition that makes leaving it at v20 SAFE — and it
+  // fails loudly the moment v21 moves an MCP contract, which is exactly when the
+  // import flip stops being optional.
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V20_VERSION);
+  const v21GeneratedDigest = generatedV21.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
+  const v21GeneratedVersion = generatedV21.match(
+    /^export const SCAC_MUTATION_REGISTRY_VERSION = "([^"]+)";$/m)[1];
+  assert.equal(v21GeneratedVersion, REGISTRY_V21_VERSION);
+  // The v21 projection is genuinely a new seal, not a re-emitted v20.
+  assert.notEqual(`sha256:${v21GeneratedDigest}`, HISTORICAL_REGISTRY_SEALS.v20.digest);
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
+    HISTORICAL_REGISTRY_SEALS.v20.digest.slice("sha256:".length));
+
+  const v20Rows = frozenInventory(REGISTRY_V20_VERSION);
+  const v21Rows = frozenInventory(REGISTRY_V21_VERSION);
+  const byKey = new Map(v20Rows.map(row => [row.ingress_key, row]));
+  const moved = v21Rows.filter(row =>
+    JSON.stringify(byKey.get(row.ingress_key)) !== JSON.stringify(row));
+  // Non-vacuity: v21 really did move rows, and the R06 core paths are among them.
+  assert.equal(v21Rows.length, v20Rows.length);
+  assert.ok(moved.length > 0);
+  for (const locator of ["hooks/hook-meter-run.py", "hooks/hook_meter.py", "ops/config-as-code.py"])
+    assert.ok(moved.some(row => row.source_locator === locator), locator);
+  // ...and none of them is an MCP contract, which is the whole reason the active
+  // v20 import can still admit the live tool surface unchanged.
+  assert.deepEqual(moved.filter(row => row.ingress_kind === "mcp_tool"), []);
+  for (const name of Object.keys(TOOLS)) {
+    const admitted = await assertRegisteredOperation(name, TOOLS[name], {});
+    assert.equal(admitted.ingress_key, `mcp-tool:${name}`);
+    assert.equal(admitted.schema_digest,
+      v21Rows.find(row => row.ingress_key === `mcp-tool:${name}`).schema_digest, name);
+  }
+});
+
+test("a partial or absent v21 predecessor bundle regenerates the same successor", () => {
+  const rows = frozenInventory(REGISTRY_V21_VERSION);
+  const baseline = R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE;
+  const bundle = { migration: v20Migration, runtime: generatedV20 };
+  const supplied = renderR06HooksCorrectnessForwardRegistrySql(rows, baseline, bundle);
+  assert.equal(supplied, v21Migration);
+  assert.equal(renderR06HooksCorrectnessForwardRegistrySql(
+    rows, baseline, { migration: bundle.migration }), supplied);
+  assert.equal(renderR06HooksCorrectnessForwardRegistrySql(
+    rows, baseline, { runtime: bundle.runtime }), supplied);
+  assert.equal(renderR06HooksCorrectnessForwardRegistrySql(rows, baseline), supplied);
+  for (const [half, pathName] of [
+    ["migration", "migrations/0494_codex_continuity_archive_registry.sql"],
+    ["runtime", "mcp-server/src/scac-mutation-registry.v20.generated.js"],
+  ])
+    assert.throws(() => renderR06HooksCorrectnessForwardRegistrySql(rows, baseline,
+      { ...bundle, [half]: `${bundle[half]}\n-- tampered\n` }),
+      new RegExp(`sealed historical SCAC v20 artifact changed: ${pathName.replace(/[/.]/g, "\\$&")}`));
+});
+
+test("the v21 successor refuses a caller-supplied predecessor or wrong projection", () => {
+  const rows = frozenInventory(REGISTRY_V21_VERSION);
+  const baseline = R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE;
+  // The trust root takes no parameters at all, so there is no door through which
+  // a caller could hand it its own expected seal, pin or catalog.
+  assert.equal(assertR06HooksCorrectnessV21TrustRoot.length, 0);
+  assert.doesNotThrow(() => assertR06HooksCorrectnessV21TrustRoot());
+  for (const wrong of [
+    R06_HOOKS_CORRECTNESS_PRE_V21_DB_CATALOG_BASELINE,
+    { ...baseline, projection_version: "scac-db-catalog-projection.v22" },
+    { ...baseline, projection_version: undefined },
+  ])
+    assert.throws(() => renderR06HooksCorrectnessForwardRegistrySql(rows, wrong),
+      /successor v21 catalog baseline is not scac-db-catalog-projection[.]v21/);
+  for (const category of [
+    "secdef_execute", "relation_dml", "column_dml", "role_authority", "runtime_dml_grants",
+  ]) {
+    assert.throws(() => renderR06HooksCorrectnessForwardRegistrySql(rows,
+      { ...baseline, [category]: { count: null, digest: "__V21_UNBOUND__" } }),
+      new RegExp(`successor v21 ${category} receipt is unbound`));
+    assert.throws(() => renderR06HooksCorrectnessForwardRegistrySql(rows,
+      { ...baseline, [category]: { ...baseline[category], digest: "sha256:zz" } }),
+      new RegExp(`successor v21 ${category} receipt is unbound`));
+  }
+});
+
+test("every v21 output path refuses an unbound trust-root limb and writes nothing", () => {
+  // Each case UNBINDS exactly one limb of the committed module and proves the
+  // shared guard fires on both the frontier and the CLI writer. The anchors are
+  // read off the live constants, so a future rebinding cannot leave this test
+  // silently matching nothing.
+  const seal = HISTORICAL_REGISTRY_SEALS.v20;
+  const receipt = R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE.secdef_execute;
+  const unbind = {
+    seal: [
+      `digest: "${seal.digest}", entryCount: ${seal.entryCount}, sourceEntryCount: ${seal.sourceEntryCount}`,
+      'digest: "__V20_SEALED_REGISTRY_DIGEST_UNBOUND__", entryCount: null, sourceEntryCount: null',
+      /R06 hooks correctness v21 predecessor seal is unbound/,
+    ],
+    pin: [
+      `"${HISTORICAL_REGISTRY_ARTIFACT_SHA256["migrations/0494_codex_continuity_archive_registry.sql"]}"`,
+      '"__V20_MIGRATION_SHA256_UNBOUND__"',
+      /R06 hooks correctness v21 predecessor artifact pin is unbound: migrations\/0494/,
+    ],
+    receipt: [
+      `secdef_execute: { count: ${receipt.count}, digest: "${receipt.digest}" }`,
+      'secdef_execute: { count: null, digest: "__V21_SECDEF_EXECUTE_RECEIPT_UNBOUND__" }',
+      /R06 hooks correctness successor v21 secdef_execute receipt is unbound/,
+    ],
+  };
+  const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
+  const source = fs.readFileSync(path.join(repoRoot, "ops/scac-mutation-inventory.mjs"), "utf8");
+  const isolatedRoot = fs.mkdtempSync(path.join(repoRoot, ".tmp.v21-trust-root-"));
+  try {
+    linkOpsTree(repoRoot, isolatedRoot);
+    for (const [limb, [bound, unboundText, refusal]] of Object.entries(unbind)) {
+      const modulePath = path.join(isolatedRoot, `ops/scac-mutation-inventory.${limb}.v21.mjs`);
+      fs.writeFileSync(modulePath,
+        replaceExactlyOnce(source, bound, unboundText, `unbind ${limb}`));
+      const target = path.join(isolatedRoot, `${limb}.v21.generated.js`);
+      assert.throws(() => execFileSync(process.execPath,
+        [modulePath, "--write-runtime-v21", target],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+        error => {
+          assert.match(error.stderr, refusal, limb);
+          return true;
+        }, limb);
+      assert.equal(fs.existsSync(target), false, `${limb}: a refused run must write nothing`);
+      assert.throws(() => execFileSync(process.execPath,
+        [modulePath, "--write-r06-hooks-correctness-registry-migration",
+          path.join(isolatedRoot, `${limb}.0495.sql`)],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+        error => {
+          assert.match(error.stderr, refusal, limb);
+          return true;
+        }, limb);
+      assert.equal(fs.existsSync(path.join(isolatedRoot, `${limb}.0495.sql`)), false, limb);
+    }
+    // ANTI-VACUITY: the same CLI on the committed module renders the committed
+    // artifacts byte for byte, so the refusals above are the guard and not a
+    // broken harness.
+    const boundTarget = path.join(isolatedRoot, "bound.v21.generated.js");
+    execFileSync(process.execPath,
+      [path.join(repoRoot, "ops/scac-mutation-inventory.mjs"), "--write-runtime-v21", boundTarget],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    assert.equal(fs.readFileSync(boundTarget, "utf8"), generatedV21);
+    const boundMigration = path.join(isolatedRoot, "bound.0495.sql");
+    execFileSync(process.execPath,
+      [path.join(repoRoot, "ops/scac-mutation-inventory.mjs"),
+        "--write-r06-hooks-correctness-registry-migration", boundMigration],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    assert.equal(fs.readFileSync(boundMigration, "utf8"), v21Migration);
+  } finally {
+    fs.rmSync(isolatedRoot, { recursive: true, force: true });
+  }
+});
+
+test("the frontier refuses an unbound v20 trust root before any predecessor work runs", async () => {
+  const seal = HISTORICAL_REGISTRY_SEALS.v20;
+  const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
+  const source = fs.readFileSync(path.join(repoRoot, "ops/scac-mutation-inventory.mjs"), "utf8");
+  const isolatedRoot = fs.mkdtempSync(path.join(repoRoot, ".tmp.v21-frontier-guard-"));
+  try {
+    linkOpsTree(repoRoot, isolatedRoot);
+    // Sabotage the FIRST predecessor renderer the cascade reaches. If the guard
+    // ran late we would see the sabotage marker instead of the refusal.
+    const sabotage = [
+      "function renderMigration(rows = fullInventory()) {",
+      'function renderMigration(rows = fullInventory()) {\n  throw new Error("SABOTAGE_PREDECESSOR_WORK_RAN");',
+      "sabotage predecessor",
+    ];
+    const unboundPath = path.join(isolatedRoot, "ops/scac-mutation-inventory.v21-sabotage.mjs");
+    fs.writeFileSync(unboundPath, replaceExactlyOnce(
+      replaceExactlyOnce(source,
+        `digest: "${seal.digest}", entryCount: ${seal.entryCount}, sourceEntryCount: ${seal.sourceEntryCount}`,
+        'digest: "__V20_SEALED_REGISTRY_DIGEST_UNBOUND__", entryCount: null, sourceEntryCount: null',
+        "unbind v20 seal"),
+      ...sabotage));
+    const unbound = await import(unboundPath);
+    assert.throws(() => unbound.renderGeneratedFrontier(),
+      /R06 hooks correctness v21 predecessor seal is unbound/);
+  } finally {
+    fs.rmSync(isolatedRoot, { recursive: true, force: true });
+  }
+});
+
 test("the complete source-only frontier is byte-reproducible from frozen inputs", () => {
   assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
-  assert.equal(migrations.length, 28);
+  assert.equal(migrations.length, 29);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494"]);
-  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 19);
-  assert.equal(paths.length, 47);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495"]);
+  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 20);
+  assert.equal(paths.length, 49);
 });
 
 test("the complete frontier renders when every generated target is absent", () => {
@@ -1013,7 +1275,7 @@ test("the complete frontier renders when every generated target is absent", () =
         GIT_WORK_TREE: isolatedRoot,
       },
     });
-    assert.match(stdout, /\(47 artifacts\)/);
+    assert.match(stdout, /\(49 artifacts\)/);
     for (const [target, expected] of Object.entries(frontier))
       assert.equal(fs.readFileSync(path.join(outputRoot, target), "utf8"), expected, target);
   } finally {
