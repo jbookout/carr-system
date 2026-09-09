@@ -82,6 +82,341 @@ def fetchone_required(row: tuple[Any, ...] | None, context: str) -> tuple[Any, .
     return row
 
 
+def _load_control_plane_cli() -> Any:
+    """Load tools/control-plane.py by path; its filename is not an identifier."""
+    import importlib.util
+    path = REPO / "tools" / "control-plane.py"
+    spec = importlib.util.spec_from_file_location("carr_control_plane_cli", path)
+    if spec is None or spec.loader is None:
+        fail("could not load tools/control-plane.py for its census reader")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _definition_fixture(cur: Any, key: str, *, canary: str = "null") -> None:
+    """Insert one enabled deterministic job definition as the owner."""
+    contract = ('\'{"entrypoint":"fixture"}\'' if canary == "null"
+                else f'\'{{"entrypoint":"fixture","canary":{{"enabled":{canary}}}}}\'')
+    cur.execute(f"""
+        insert into ops.job_definition
+          (key,version,enabled,risk,execution_kind,execution_contract,
+           recurrence,retry_policy,deduplication,completion_contract,legacy_schedule)
+        values (%s,1,true,'green','deterministic',{contract},
+                '{{"cron":"* * * * *","timezone":"UTC"}}',
+                '{{"max_attempts":2,"base_seconds":1,"cap_seconds":2,"timeout_seconds":30,"backoff":"exponential"}}',
+                '{{"key_template":"workflow-truth-fixture"}}',
+                '{{"predicate":"fixture","receipt_kind":"fixture"}}',
+                '{{"status":"enabled"}}')
+    """, (key,))
+
+
+def _accept(cur: Any, key: str, mode: str, ref: str) -> None:
+    cur.execute("""
+        insert into ops.workflow_acceptance
+          (workflow_key,workflow_version,mode,status,receipt_ref,accepted_by)
+        values (%s,1,%s,'accepted',%s,'db-gate-fixture')
+    """, (key, mode, ref))
+
+
+def _job_count(cur: Any, key: str) -> int:
+    cur.execute("select count(*) from ops.job where definition_key=%s", (key,))
+    return int(fetchone_required(cur.fetchone(), f"job count for {key}")[0])
+
+
+def _refused(cur: Any, savepoint: str, sql: str, args: tuple[Any, ...],
+             expected: str, context: str) -> None:
+    """Assert one enqueue is refused for its exact stated reason."""
+    cur.execute(sql_savepoint(savepoint))
+    try:
+        cur.execute(sql, args)
+        fail(f"{context} was admitted")
+    except psycopg.Error as exc:
+        if expected not in str(exc):
+            fail(f"{context} raised the wrong refusal: {exc}")
+        cur.execute(sql_rollback_to(savepoint))
+
+
+def sql_savepoint(name: str) -> Any:
+    return sql.SQL("savepoint {}").format(sql.Identifier(name))
+
+
+def sql_rollback_to(name: str) -> Any:
+    return sql.SQL("rollback to savepoint {}").format(sql.Identifier(name))
+
+
+def workflow_truth_gate(cur: Any) -> None:
+    """V5-F09: prove the projection agrees with the one admission path.
+
+    Everything below runs inside the caller's rolled-back transaction, so this
+    gate keeps working under ops/control-plane-ledger-chaos.py's opt-in staging
+    drill, which is explicitly rollback-only. No fixture is committed and no
+    native scheduler, provider or Work Request is touched.
+    """
+    from lib.control_plane_workflow_truth import workflow_truth  # noqa: E402
+
+    now = "2026-08-15T12:00:00+00:00"
+    slot = "2026-08-15T12:07:00Z"
+
+    # ---- 1. carr_jobs cannot reach ops.job except through ops.enqueue_job ---
+    cur.execute("""select has_table_privilege('carr_jobs','ops.job','insert'),
+                          has_function_privilege('carr_jobs',
+                            'ops.enqueue_job(text,integer,timestamptz,jsonb,text,text)'::regprocedure,
+                            'execute')""")
+    can_insert, can_enqueue = fetchone_required(cur.fetchone(), "jobs admission seam")
+    if can_insert or not can_enqueue:
+        fail("ops.enqueue_job is not the sole carr_jobs insertion seam into ops.job")
+
+    # ---- 2. enabled, no evidence: canary AND live refuse, zero rows ---------
+    # The existing ladder block above proves the refusal messages. This proves
+    # the OTHER half checkable_done asks for: the refusals leave no job behind,
+    # so an enabled definition with no accepted evidence has literally never run.
+    bare = f"db-gate-truth-bare-{uuid.uuid4()}"
+    _definition_fixture(cur, bare)
+    set_local_role(cur, "carr_jobs")
+    _refused(cur, "truth_bare_canary",
+             "select (ops.enqueue_job(%s,1,%s,%s,%s,'canary')).id",
+             (bare, slot, '{"fixture":"no-evidence"}', f"truth-bare-canary-{uuid.uuid4()}"),
+             "no accepted shadow acceptance evidence",
+             "canary enqueue for an enabled definition with no acceptance evidence")
+    _refused(cur, "truth_bare_live",
+             "select (ops.enqueue_job(%s,1,%s,%s,%s,'live')).id",
+             (bare, slot, '{"fixture":"no-evidence"}', f"truth-bare-live-{uuid.uuid4()}"),
+             "no accepted canary acceptance evidence",
+             "live enqueue for an enabled definition with no acceptance evidence")
+    if _job_count(cur, bare) != 0:
+        fail("a refused canary/live enqueue still created a job row")
+
+    # SHADOW IS AN EVIDENCE RUN, NOT OPERATION. Enqueuing and even completing a
+    # shadow job must not unlock live: only an accepted acceptance row does.
+    cur.execute("select (ops.enqueue_job(%s,1,%s,%s,%s,'shadow')).id",
+                (bare, slot, '{"fixture":"shadow-run"}', f"truth-bare-shadow-{uuid.uuid4()}"))
+    if fetchone_required(cur.fetchone(), "shadow evidence run")[0] is None:
+        fail("a shadow evidence run was refused for an enabled definition")
+    _refused(cur, "truth_shadow_run_is_not_evidence",
+             "select (ops.enqueue_job(%s,1,%s,%s,%s,'live')).id",
+             (bare, "2026-08-15T12:08:00Z", '{"fixture":"shadow-ran"}',
+              f"truth-bare-live2-{uuid.uuid4()}"),
+             "no accepted canary acceptance evidence",
+             "live enqueue after an unaccepted shadow RUN")
+
+    # ---- 3. an unregistered definition is refused outright -----------------
+    _refused(cur, "truth_unregistered",
+             "select (ops.enqueue_job(%s,1,%s,%s,%s,'shadow')).id",
+             (f"db-gate-truth-absent-{uuid.uuid4()}", slot, "{}",
+              f"truth-absent-{uuid.uuid4()}"),
+             "is not enabled",
+             "enqueue for a definition that was never admitted")
+    cur.execute("reset role")
+
+    # ---- 4. canonical same-slot delivery: ONE job, conflicting reuse refused -
+    # This is the SAME-WORKFLOW case. It is retry deduplication and nothing more.
+    same = f"db-gate-truth-same-{uuid.uuid4()}"
+    _definition_fixture(cur, same)
+    _accept(cur, same, "shadow", f"fixture:truth-same-shadow-{uuid.uuid4()}")
+    _accept(cur, same, "canary", f"fixture:truth-same-canary-{uuid.uuid4()}")
+    set_local_role(cur, "carr_jobs")
+    cur.execute("select (ops.enqueue_job(%s,1,%s,%s,%s,'live')).id",
+                (same, slot, '{"fixture":"canonical"}', "truth-same-scheduler-a"))
+    first = fetchone_required(cur.fetchone(), "canonical same-slot enqueue")[0]
+    cur.execute("select (ops.enqueue_job(%s,1,%s,%s,%s,'live')).id",
+                (same, slot, '{"fixture":"canonical"}', "truth-same-scheduler-b"))
+    if fetchone_required(cur.fetchone(), "second same-slot delivery")[0] != first:
+        fail("two deliveries of one canonical slot produced two jobs")
+    if _job_count(cur, same) != 1:
+        fail("the canonical same-slot dedup left more than one job row")
+    _refused(cur, "truth_conflicting_reuse",
+             "select (ops.enqueue_job(%s,1,%s,%s,%s,'live')).id",
+             (same, slot, '{"fixture":"changed"}', "truth-same-scheduler-c"),
+             "duplicate delivery conflicts with the canonical scheduled job",
+             "a conflicting duplicate delivery for one canonical slot")
+    cur.execute("reset role")
+
+    # ---- 5. THE DISTINCT-IDENTITY DUPLICATE BOUNDARY -----------------------
+    # THIS IS THE CORRECTION THIS GATE EXISTS TO CARRY, and it is a
+    # CHARACTERIZATION test: it asserts what the database does TODAY, which is
+    # not what the clean start eventually requires.
+    #
+    # Case 4 above proved that ONE workflow identity cannot produce two jobs for
+    # one slot. That is the unique (definition_key,definition_version,
+    # scheduled_for) index doing retry deduplication. It proves NOTHING about
+    # two DISTINCT registered identities that share one duplicate_group: their
+    # definition_key values differ, so no unique index spans them and both
+    # enqueue successfully into executable jobs.
+    #
+    # The assertions below therefore prove the GAP IS REAL rather than claiming
+    # it is closed, and they pin the exact seam phase B must use. If a later
+    # migration closes it, `observed_jobs` becomes 1 and this gate fails loudly
+    # so its author must promote these assertions to the enforced form -- the
+    # gap can be neither silently closed nor silently widened.
+    group = f"db-gate-truth-group-{uuid.uuid4()}"
+    twins = []
+    for side in ("a", "b"):
+        key = f"db-gate-truth-twin-{side}-{uuid.uuid4()}"
+        _definition_fixture(cur, key)
+        _accept(cur, key, "shadow", f"fixture:truth-twin-{side}-shadow-{uuid.uuid4()}")
+        _accept(cur, key, "canary", f"fixture:truth-twin-{side}-canary-{uuid.uuid4()}")
+        cur.execute("""
+            insert into ops.legacy_schedule_surface_registry
+              (workflow_key,workflow_version,surface_id,locator,scheduler_kind,duplicate_group)
+            values (%s,1,%s,%s,%s,%s)
+        """, (key, f"{key}.surface.v1", f"locator:{key}",
+              "launchd" if side == "a" else "claude-code", group))
+        twins.append(key)
+
+    set_local_role(cur, "carr_jobs")
+    for side, key in zip(("a", "b"), twins):
+        cur.execute("select (ops.enqueue_job(%s,1,%s,%s,%s,'live')).id",
+                    (key, slot, '{"fixture":"duplicate-group"}',
+                     f"truth-twin-{side}-{uuid.uuid4()}"))
+        if fetchone_required(cur.fetchone(), f"duplicate-group twin {side} enqueue")[0] is None:
+            fail(f"duplicate-group twin {side} did not enqueue")
+    cur.execute("reset role")
+    observed_jobs = sum(_job_count(cur, key) for key in twins)
+    cur.execute("""select count(*) from ops.legacy_schedule_surface_registry
+                    where duplicate_group=%s""", (group,))
+    group_members = int(fetchone_required(cur.fetchone(), "duplicate group membership")[0])
+    if group_members != 2:
+        fail("the distinct-identity duplicate_group fixture did not register two surfaces")
+    if observed_jobs != 2:
+        fail("EXPECTED PHASE-B CHANGE: ops.enqueue_job now excludes distinct workflow "
+             "identities inside one duplicate_group. That is the held migration landing. "
+             "Promote this characterization assertion to the enforced form (observed_jobs "
+             "== 1) instead of loosening it.")
+
+    # THE EXACT SEAM. Phase B must add the group-scoped exclusion INSIDE this
+    # function -- never a second queue, a trigger on ops.job, or a scheduler-side
+    # check -- so that every enqueue path keeps answering to one ladder.
+    cur.execute("select pg_get_functiondef("
+                "'ops.enqueue_job(text,integer,timestamptz,jsonb,text,text)'::regprocedure)")
+    enqueue_body = str(fetchone_required(cur.fetchone(), "enqueue definition")[0]).lower()
+    for retained in ("duplicate delivery conflicts with the canonical scheduled job",
+                     "no accepted shadow acceptance evidence",
+                     "no accepted canary acceptance evidence"):
+        if retained not in enqueue_body:
+            fail(f"ops.enqueue_job lost its existing guard: {retained}")
+    if "legacy_schedule_surface_registry" in enqueue_body or "duplicate_group" in enqueue_body:
+        fail("EXPECTED PHASE-B CHANGE: ops.enqueue_job now reads the duplicate_group registry. "
+             "Replace this held-seam assertion with the enforced distinct-identity regression.")
+    print("control-plane-db-gate HELD (phase B): ops.enqueue_job does not exclude two distinct "
+          f"registered workflow identities sharing one duplicate_group; {observed_jobs} executable "
+          "jobs were created for one canonical slot. Same-slot idempotency is retry deduplication "
+          "and does not cover this. The bound seam is the group-scoped exclusion inside "
+          "ops.enqueue_job itself.")
+
+    # ---- 6. accepted outcome feedback: today's queue behaviour, pinned ------
+    # ops.current_sourced_work_requests (0245) selects state in
+    # ('captured','triaged','ready') with no accepted-outcome exclusion, so a
+    # ready request whose outcome was accepted still reads as actionable. The
+    # phase-B fix belongs in that function; this gate pins the CURRENT shape so
+    # the change is deliberate and card/history behaviour is not weakened here.
+    cur.execute("select to_regclass('ops.sourced_work_request_outcome_feedback_acceptance_receipt')")
+    if fetchone_required(cur.fetchone(), "outcome acceptance receipt")[0] is None:
+        fail("the accepted-outcome receipt relation the phase-B queue fix must read is missing")
+    cur.execute("select pg_get_functiondef('ops.current_sourced_work_requests(text)'::regprocedure)")
+    queue_body = " ".join(str(fetchone_required(
+        cur.fetchone(), "sourced work request queue")[0]).lower().split())
+    if "w.state in ('captured', 'triaged', 'ready')" not in queue_body:
+        fail("ops.current_sourced_work_requests no longer selects the three actionable states; "
+             "re-pin this assertion against its new shape")
+    # The exact relation name, not the bare word "outcome": this function already
+    # prints 'Record or review outcome evidence' as a human next action, and
+    # matching that string would make the held assertion fire on today's source.
+    if "sourced_work_request_outcome_feedback" in queue_body:
+        fail("EXPECTED PHASE-B CHANGE: ops.current_sourced_work_requests now reads accepted "
+             "outcome feedback. Replace this held assertion with the enforced accepted-outcome "
+             "exclusion regression, keeping card/history lookup unchanged.")
+    print("control-plane-db-gate HELD (phase B): a ready Work Request with accepted outcome "
+          "feedback is still actionable in ops.current_sourced_work_requests; the bound fix "
+          "redefines that function without mutating Work Request state or card history.")
+
+    # ---- 7. the projection never claims an admission the database refuses ---
+    # One adapter, one truth: the census the CLI and Operations health render is
+    # replayed here against the rows this transaction actually created, and its
+    # admissible_modes are checked against what ops.enqueue_job really did.
+    cur.execute("""select key,version,enabled,execution_contract,legacy_disabled_at
+                     from ops.job_definition where key = any(%s)""",
+                ([bare, same] + twins,))
+    definitions = [{"key": key, "version": int(version), "enabled": bool(enabled),
+                    "execution_contract": contract,
+                    "legacy_disabled_at": None if disabled is None else disabled.isoformat()}
+                   for key, version, enabled, contract, disabled in cur.fetchall()]
+    cur.execute("""select workflow_key,workflow_version,mode,status
+                     from ops.workflow_acceptance where workflow_key = any(%s)""",
+                ([bare, same] + twins,))
+    acceptances = [{"workflow_key": key, "workflow_version": int(version),
+                    "mode": mode, "status": status}
+                   for key, version, mode, status in cur.fetchall()]
+    cur.execute("""select workflow_key,workflow_version,surface_id,locator,scheduler_kind,
+                          duplicate_group
+                     from ops.legacy_schedule_surface_registry where workflow_key = any(%s)""",
+                ([bare, same] + twins,))
+    surfaces = [{"workflow_key": key, "workflow_version": int(version),
+                 "surface_id": surface_id, "locator": locator, "scheduler_kind": kind,
+                 "duplicate_group": duplicate_group, "disable_receipt_ref": None,
+                 "observation": None}
+                for key, version, surface_id, locator, kind, duplicate_group in cur.fetchall()]
+    census = workflow_truth(
+        declarations=[{"key": row["key"], "version": row["version"],
+                       "enabled": row["enabled"],
+                       "legacy_schedule": {"provider": "launchd", "status": "enabled"}}
+                      for row in definitions],
+        definitions=definitions, acceptances=acceptances, surfaces=surfaces,
+        completion={}, observation_max_age_seconds=900, now=now)
+    projected = {row["workflow_key"]: row for row in census["rows"]}
+    if "live" in projected[bare]["admissible_modes"] or projected[bare]["operational"]:
+        fail("the projection claimed live admission the database refused")
+    if not projected[bare]["false_operational"]:
+        fail("the projection did not label an enabled definition without evidence false_operational")
+    if "live" not in projected[same]["admissible_modes"]:
+        fail("the projection refused a live admission the database granted")
+    if projected[same]["operational"]:
+        fail("the projection called a workflow operational with no completion evidence")
+    for key in twins:
+        exclusion = projected[key]["duplicate_exclusion"]
+        if exclusion["distinct_identity"] != "unenforced_pending_phase_b":
+            fail("the projection did not report the distinct-identity duplicate_group exclusion "
+                 "as unenforced, which is the one thing the database cannot do today")
+        if exclusion["same_slot_idempotency"] == exclusion["distinct_identity"]:
+            fail("the projection conflated same-slot idempotency with distinct-identity exclusion")
+    if census["summary"]["unenforced_distinct_identity_groups"] != [group]:
+        fail("the census summary did not name the unenforced duplicate_group")
+
+    # ---- 8. the census CLI's real reads, against the real schema -----------
+    # The projection above was fed rows this gate assembled. That proves the
+    # adapter and proves nothing about the SQL `tools/control-plane.py census`
+    # actually runs, which would otherwise meet the schema for the first time in
+    # front of a partner. The reader is cursor-scoped precisely so it can be
+    # exercised here; its Completion Register refusal is savepoint-contained, so
+    # a tenant-less read cannot take this gate's fixtures down with it.
+    cli = _load_control_plane_cli()
+    registry = json.loads(SCHEDULER_REGISTRY_PATH.read_text(encoding="utf-8"))
+    manifest_config = json.loads(WORKFLOW_MANIFEST_PATH.read_text(encoding="utf-8"))
+    inputs = cli.workflow_census_inputs(cur, registry=registry)
+    read_keys = {row["key"] for row in inputs["definitions"]}
+    if not {bare, same}.issubset(read_keys) or not set(twins).issubset(read_keys):
+        fail("the census reader did not return the definitions this transaction created")
+    cur.execute("select 1")
+    if fetchone_required(cur.fetchone(), "transaction still usable after the census read")[0] != 1:
+        fail("the census reader left the caller's transaction aborted")
+    live = cli.workflow_census_projection(inputs, manifest=manifest_config, registry=registry)
+    if live["schema_version"] != census["schema_version"]:
+        fail("the census CLI and this gate disagree about the workflow-truth schema")
+    if len(live["rows"]) != len({(row["workflow_key"], row["workflow_version"])
+                                 for row in live["rows"]}):
+        fail("the census returned more than one row for a workflow identity")
+    expected_source = "unreadable" if inputs["completion"] == cli.UNREADABLE \
+        else "ops.completion_projection"
+    if live["completion_source"] != expected_source:
+        fail("the census misreported where its completion evidence came from")
+    if live["completion_source"] == "unreadable" and not live.get("completion_error"):
+        fail("an unreadable Completion Register was reported without saying why")
+    print("control-plane-db-gate passed: workflow truth agrees with ops.enqueue_job on every "
+          "fixture, the census CLI's own reads run against this schema "
+          f"(completion evidence: {live['completion_source']}), and both held phase-B "
+          "dependencies are reported rather than assumed")
+
+
 def main() -> int:
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
@@ -1361,6 +1696,8 @@ def main() -> int:
             # live authority result.  Positive Joe/Dell identity acceptance
             # requires an externally provisioned real authority-DSN probe;
             # this disposable owner gate does not perform one.
+
+            workflow_truth_gate(cur)
 
     print("control-plane-db-gate passed: admission, leases, idempotency, receipts and owner cutover refusal exercised")
     return 0

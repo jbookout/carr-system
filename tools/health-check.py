@@ -262,6 +262,216 @@ if "--tasks" in sys.argv:
     sys.exit(classify_tasks(sys.argv[_i + 1]))
 
 
+def _workflow_truth_query_python():
+    venv = os.path.join(REPO_ROOT, ".venv/bin/python")
+    return venv if os.path.exists(venv) else sys.executable
+
+
+def _workflow_truth_json(sql, timeout=120):
+    """Run one single-column JSON read through the canonical tap.
+
+    The tap sets ON_ERROR_STOP, so each read that may legitimately refuse gets
+    its own call: a Completion Register read without a server-derived tenant
+    must not abort the workflow rows beside it.
+    """
+    proc = subprocess.run(
+        [_workflow_truth_query_python(),
+         os.path.join(REPO_ROOT, "tools/db-tap.py"), "sql", "/dev/stdin"],
+        input=sql, cwd=REPO_ROOT, text=True, capture_output=True, timeout=timeout,
+        env={k: v for k, v in os.environ.items() if k != "CARR_VAULT"},
+    )
+    if proc.returncode:
+        raise RuntimeError((proc.stderr or "").strip().splitlines()[-1]
+                           if (proc.stderr or "").strip() else "query failed")
+    for line in reversed(proc.stdout.splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            return json.loads(line)
+    raise RuntimeError("no JSON row returned")
+
+
+def _workflow_truth_snapshot():
+    """Project the clean-start workflow census for the Operations surface.
+
+    THIS RENDERS THE SAME PROJECTION THE CONTROL-PLANE CENSUS RENDERS, through
+    the same pure adapter, so the two surfaces cannot drift into two opinions.
+    Reads only; it creates no job, no registry and no effect.
+
+    UNAVAILABLE IS NOT EMPTY. Every failure below returns available=False with
+    the reason, and the caller prints that rather than an empty census. It does
+    NOT join snapshot["errors"], because a machine without a database tap or
+    without a server-derived completion tenant has an ABSENT reading, not a
+    failed pipeline, and rule bd4a6d22 forbids printing a chosen state as a
+    permanent failure.
+    """
+    try:
+        sys.path.insert(0, REPO_ROOT)
+        from lib.control_plane_workflow_truth import UNREADABLE, workflow_truth
+    except Exception as exc:
+        return {"available": False, "reason": f"adapter unavailable ({type(exc).__name__}: {exc})"}
+    try:
+        with open(os.path.join(REPO_ROOT, "ops/config/control-plane-workflows.v1.json"),
+                  encoding="utf-8") as fh:
+            manifest = json.load(fh)
+        with open(os.path.join(REPO_ROOT, "ops/config/control-plane-scheduler-cutover.v1.json"),
+                  encoding="utf-8") as fh:
+            registry = json.load(fh)
+        max_age = int(registry["observation_max_age_seconds"])
+    except Exception as exc:
+        return {"available": False,
+                "reason": f"checked-in registry unreadable ({type(exc).__name__}: {exc})"}
+
+    rows_sql = """select json_build_object(
+      'definitions', coalesce((select json_agg(json_build_object(
+           'key',d.key,'version',d.version,'enabled',d.enabled,
+           'execution_contract',d.execution_contract,'legacy_schedule',d.legacy_schedule,
+           'legacy_disabled_at',d.legacy_disabled_at)
+         order by d.key,d.version) from ops.job_definition d),'[]'::json),
+      'acceptances', coalesce((select json_agg(json_build_object(
+           'workflow_key',a.workflow_key,'workflow_version',a.workflow_version,
+           'mode',a.mode,'status',a.status)
+         order by a.workflow_key,a.workflow_version,a.mode,a.status)
+         from ops.workflow_acceptance a),'[]'::json),
+      'disable_receipts', coalesce((select json_object_agg(r.surface_id,r.receipt_ref)
+         from ops.legacy_schedule_disable_receipt r),'{}'::json),
+      'observations', coalesce((select json_object_agg(o.surface_id, json_build_object(
+           'scheduler_state',o.scheduler_state,'observed_at',o.observed_at))
+         from (select distinct on (surface_id) surface_id,scheduler_state,observed_at
+                 from ops.legacy_schedule_observation_receipt
+                order by surface_id,observed_at desc,id desc) o),'{}'::json)
+    )::text"""
+    try:
+        payload = _workflow_truth_json(rows_sql)
+    except Exception as exc:
+        return {"available": False,
+                "reason": f"control-plane rows unreadable ({type(exc).__name__}: {exc})"}
+
+    # 0431 derives the tenant from a server setting and RAISES without one. A
+    # separate call keeps that refusal from aborting the rows above, and the
+    # refusal is reported as unreadable completion evidence, never as none.
+    completion_sql = """select coalesce((select json_object_agg(p.stable_key, json_build_object(
+        'lifecycle_state',p.lifecycle_state,
+        'first_path', exists(select 1 from ops.completion_current_observation o
+                              where o.subject_id=p.subject_id
+                                and o.observation_kind='workflow_trigger'
+                                and o.authority_class='authoritative'
+                                and o.expires_at>now())))
+      from ops.completion_projection p),'{}'::json)::text"""
+    completion_error = None
+    try:
+        completion = _workflow_truth_json(completion_sql)
+    except Exception as exc:
+        completion = UNREADABLE
+        completion_error = f"{type(exc).__name__}: {exc}"
+
+    surfaces = []
+    for surface in registry.get("surfaces", []):
+        surface_id = str(surface["surface_id"])
+        surfaces.append({
+            "workflow_key": str(surface["workflow_key"]),
+            "workflow_version": int(surface["workflow_version"]),
+            "surface_id": surface_id,
+            "locator": str(surface["locator"]),
+            "scheduler_kind": str(surface["scheduler_kind"]),
+            "duplicate_group": surface.get("duplicate_group"),
+            "disable_receipt_ref": (payload.get("disable_receipts") or {}).get(surface_id),
+            "observation": (payload.get("observations") or {}).get(surface_id),
+        })
+    try:
+        census = workflow_truth(
+            declarations=manifest.get("workflows", []),
+            definitions=payload.get("definitions", []),
+            acceptances=payload.get("acceptances", []),
+            surfaces=surfaces,
+            completion=completion,
+            observation_max_age_seconds=max_age,
+            now=datetime.now(timezone.utc),
+        )
+    except Exception as exc:
+        return {"available": False,
+                "reason": f"workflow truth refused the inputs ({type(exc).__name__}: {exc})"}
+    result = {"available": True, "census": census}
+    if completion_error:
+        result["completion_error"] = completion_error
+    return result
+
+
+def _canonical_workflow_truth(snap):
+    """Print the workflow census and return rc.
+
+    ENABLED IS NOT OPERATIONAL, and this surface says so in three separate
+    columns: how many workflows are merely declared/configured, how many are
+    only eligible for an evidence RUN, and how many are evidence-backed
+    operational. A shadow-eligible workflow is counted in the middle column and
+    never in the last.
+
+    RED ONLY ON CONTRADICTION. A clean start that has not happened yet is a
+    chosen state, so false-operational, duplicate and hold rows are carried on
+    the line with their counts (rule bd4a6d22) instead of turning health red
+    every day. Authoritative evidence that CONTRADICTS ITSELF is a real fault
+    and is the one condition that fails.
+    """
+    workflows = snap.get("workflows")
+    print("Workflow truth — clean-start census over the governed lifecycle")
+    if workflows is None:
+        print("  -- workflow census   NOT IN SNAPSHOT (this reader supplied no census)")
+        return 0
+    if not isinstance(workflows, dict) or not workflows.get("available"):
+        reason = (workflows or {}).get("reason", "unstated") if isinstance(workflows, dict) \
+            else "malformed census section"
+        print(f"  -- workflow census   UNAVAILABLE — {reason}")
+        return 0
+    census = workflows.get("census") or {}
+    rows = census.get("rows") or []
+    summary = census.get("summary") or {}
+    states = summary.get("states") or {}
+    operational = int(states.get("operational", 0))
+    evidence_run_only = sum(int(states.get(name, 0)) for name in
+                            ("enabled_shadow_only", "enabled_canary_eligible"))
+    live_eligible_unproven = int(states.get("enabled_live_eligible", 0))
+    declared_only = sum(int(states.get(name, 0)) for name in
+                        ("unregistered", "declared_disabled", "undeclared"))
+    conflicts = [row for row in rows if row.get("state") == "conflict"]
+    unknown = [row for row in rows if row.get("state") == "unknown"]
+    print(f"  {len(rows)} declared/registered workflow(s): "
+          f"{operational} evidence-backed operational, "
+          f"{live_eligible_unproven} live-admissible without operational evidence, "
+          f"{evidence_run_only} evidence-run eligible only (shadow is not operation), "
+          f"{declared_only} declared/configured but not admitted")
+    if workflows.get("completion_error"):
+        print(f"  -- completion evidence UNREADABLE — {workflows['completion_error']}")
+    for row in conflicts:
+        detail = (f"{row.get('workflow_key')} v{row.get('workflow_version')} "
+                  f"CONFLICTING evidence: {'; '.join(row.get('reasons') or []) or 'unstated'}")
+        print(f"  ⚠︎ {detail}")
+        _canonical_finding("workflow_truth_conflict", detail)
+    if unknown:
+        print(f"  -- UNKNOWN {len(unknown)} workflow(s) whose authoritative input could not be "
+              f"read; held for disposition rather than assumed healthy")
+    carried = []
+    if int(summary.get("false_operational", 0)):
+        carried.append(f"{summary['false_operational']} false-operational "
+                       "(enabled without the acceptance its live tier requires)")
+    if int(summary.get("duplicate_open", 0)):
+        carried.append(f"{summary['duplicate_open']} in an open duplicate scheduler group")
+    holds = int((summary.get("dispositions") or {}).get("hold_for_disposition", 0))
+    if holds:
+        carried.append(f"{holds} held for disposition")
+    if carried:
+        print("  -- CARRIED " + "; ".join(carried) +
+              " — requested dispositions only; a native scheduler still changes "
+              "through ops.disable_legacy_schedule with Joe authority")
+    unenforced = summary.get("unenforced_distinct_identity_groups") or []
+    if unenforced:
+        print("  -- UNENFORCED distinct-identity exclusion for duplicate_group(s) "
+              + ", ".join(unenforced) +
+              " — same-slot idempotency is retry dedup and does not exclude two "
+              "registered identities; bound phase-B ops.enqueue_job work")
+    if conflicts:
+        return 1
+    return 0
+
+
 def _canonical_snapshot():
     """Read canonical database/control-plane evidence, never a Drive render."""
     if CANONICAL_FIXTURE:
@@ -383,6 +593,7 @@ print(json.dumps({"registered": sorted(TARGETS), "rows": rows, "retired": retire
                     })
             snapshot["job_definitions"] = definitions
             snapshot["jobs"] = rows
+        snapshot["workflows"] = _workflow_truth_snapshot()
     if CANONICAL_SECTION == "all":
         # Built from the named constants rather than spelled inline, so the
         # acceptance and the query can never drift apart. Both values are fixed
@@ -732,6 +943,8 @@ def _canonical_health():
             else:
                 print(f"  OK {len(live_jobs)} live job(s), every due window present; "
                       "no terminal failure, stuck state, or unreceipted success")
+        if _canonical_workflow_truth(snap):
+            rc = 1
 
     if CANONICAL_SECTION in ("all", "registry"):
         print("Registry integrity — canonical v_export_leads")
