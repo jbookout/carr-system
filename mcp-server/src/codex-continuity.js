@@ -3,7 +3,7 @@
 // remain on the Codex machine and are read through the local adapter.
 
 import { organizationTenantForActor } from "./identity.js";
-import { canonicalJson } from "./artifact-trust.js";
+import { canonicalJson, digest } from "./artifact-trust.js";
 
 const RUNTIME = "codex";
 const TASK_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
@@ -13,6 +13,8 @@ const CURSOR_LIMIT = 2000;
 const RECOVERY_TURN_LIMIT = 25;
 const MAX_CHECKPOINT_VERSION = Number.MAX_SAFE_INTEGER;
 const UNRESOLVED_REFERENCE_RE = /\{REF[0-9]+\}/i;
+const REVISION_SCHEMA_VERSION = "codex-continuity-revision.v1";
+const REVISION_DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
 
 const STATE_FIELDS = new Set([
   "objective", "acceptance", "latest_corrections", "constraints", "decisions",
@@ -195,6 +197,39 @@ function checkpointVersion(value, ToolError) {
   return normalized;
 }
 
+function recoveryVersion(value, ToolError) {
+  if (value === undefined || value === null) return null;
+  try {
+    return checkpointVersion(value, ToolError);
+  } catch (error) {
+    if (error?.payload?.error === "codex_checkpoint_version_invalid")
+      throw new ToolError({ error: "codex_recovery_version_invalid" });
+    throw error;
+  }
+}
+
+function recoveryExpectedDigest(value, ToolError) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !REVISION_DIGEST_RE.test(value))
+    throw new ToolError({ error: "codex_recovery_expected_digest_invalid" });
+  return value;
+}
+
+function revisionDigest(row, ToolError) {
+  const version = checkpointVersion(row?.checkpoint_version, ToolError);
+  return digest({
+    schema_version: REVISION_SCHEMA_VERSION,
+    checkpoint_id: row.checkpoint_id,
+    checkpoint_version: version,
+    state: row.state,
+    cursor: row.cursor ?? null,
+  });
+}
+
+function revisionArchiveRef(row, version, digestValue) {
+  return `codex-revision:${row.checkpoint_id}:${version}:${digestValue}`;
+}
+
 function checkpointRow(row, ToolError) {
   return { ...row, checkpoint_version: checkpointVersion(row?.checkpoint_version, ToolError) };
 }
@@ -300,15 +335,64 @@ export function codexContinuityTools({ withEnvelope, writeEvent, ToolError, asse
     },
 
     "codex-read-recovery": {
-      description: "Read the current bounded recovery checkpoint for one native Codex task, scoped to the authenticated actor and tenant.",
-      inputSchema: { type: "object", properties: { runtime: { type: "string", enum: [RUNTIME] }, native_task_id: { type: "string" }, project_id: { type: "string" }, cwd: { type: "string" } }, required: ["runtime", "native_task_id", "project_id", "cwd"] },
+      description: "Read the current bounded recovery checkpoint or exactly one historical revision for one native Codex task, scoped to the authenticated actor and tenant.",
+      inputSchema: { type: "object", properties: {
+        runtime: { type: "string", enum: [RUNTIME] }, native_task_id: { type: "string" },
+        project_id: { type: "string" }, cwd: { type: "string" },
+        checkpoint_version: { type: "integer", minimum: 1 },
+        expected_digest: { type: "string", pattern: "^sha256:[0-9a-f]{64}$" },
+      }, required: ["runtime", "native_task_id", "project_id", "cwd"] },
       handler: async (c, actor, args) => { guard(args); requireNativeCodex(actor, ToolError); const key = common(args, ToolError);
+        const requestedVersion = recoveryVersion(args.checkpoint_version, ToolError);
+        const expectedDigest = recoveryExpectedDigest(args.expected_digest, ToolError);
+        if (expectedDigest && requestedVersion === null)
+          throw new ToolError({ error: "codex_recovery_historical_version_required" });
         const tenant = organizationTenantForActor(actor);
         const owner = ownerSlug(actor);
         const bindings = await readTaskBindings(c, tenant, owner, key.nativeTaskId,
           ToolError);
         assertBinding(bindings, key, "codex_recovery_binding_conflict", ToolError);
         const checkpoint = bindings.checkpoint;
+        if (requestedVersion !== null) {
+          if (!checkpoint) return {
+            ok: true, found: false, historical: true, historical_archive: true, archive_ref: null,
+            revision: null, integrity: "not_found",
+          };
+          const historical = await c.query(
+            `select r.id as revision_id,r.checkpoint_id,r.checkpoint_version,r.state,r.cursor,r.created_at
+               from codex_continuity_revision r
+               join codex_continuity_checkpoint c on c.id=r.checkpoint_id
+              where c.id=$1 and c.organization_tenant_id=$2
+                and c.owner_actor_id=(select id from actor where slug=$3)
+                and c.native_task_id=$4 and c.project_id=$5 and c.cwd=$6
+                and r.checkpoint_version=$7
+              limit 1`,
+            [checkpoint.id, tenant, owner, key.nativeTaskId, key.projectId, key.cwd, requestedVersion]);
+          const row = historical.rows[0];
+          if (!row) return {
+            ok: true, found: false, historical: true, historical_archive: true, archive_ref: null,
+            revision: null, integrity: "not_found",
+          };
+          const revisionVersion = checkpointVersion(row.checkpoint_version, ToolError);
+          const actualDigest = revisionDigest(row, ToolError);
+          if (expectedDigest && expectedDigest !== actualDigest)
+            throw new ToolError({ error: "codex_recovery_revision_digest_mismatch",
+              expected_digest: expectedDigest, actual_digest: actualDigest });
+          const archiveRef = revisionArchiveRef(row, revisionVersion, actualDigest);
+          const revision = {
+            revision_id: row.revision_id,
+            checkpoint_id: row.checkpoint_id,
+            checkpoint_version: revisionVersion,
+            state: row.state,
+            cursor: row.cursor ?? null,
+            created_at: row.created_at,
+            digest: actualDigest,
+            archive_ref: archiveRef,
+            integrity: expectedDigest ? "verified" : "computed_unanchored",
+          };
+          return { ok: true, found: true, historical: true, historical_archive: true,
+            archive_ref: archiveRef, revision, integrity: revision.integrity };
+        }
         const highwaterResult = await c.query(
           `select cursor from codex_continuity_event
             where organization_tenant_id=$1 and owner_actor_id=(select id from actor where slug=$2)

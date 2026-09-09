@@ -369,6 +369,31 @@ def run_local_ci(
         if exit_code:
             print("local-db-ci: canonical CI failed", file=sys.stderr)
         else:
+            # The continuity handler suite has a real PostgreSQL branch.  Run it
+            # on this same disposable cluster so its bounded integration proof
+            # cannot become a permanent skip in hosted migration CI.  Neon’s
+            # Pool is intentionally retained as the test default for external
+            # ephemeral databases; raw loopback PostgreSQL needs the pinned pg
+            # driver selected explicitly here.
+            continuity_env = dict(ci_env)
+            continuity_env["CARR_CONTINUITY_EPHEMERAL_DATABASE_URL"] = dsn
+            continuity_env["CARR_CONTINUITY_DATABASE_DRIVER_MODULE"] = "pg"
+            continuity = command_runner.run(
+                ["node", "--test", "mcp-server/test/codex-continuity.test.mjs"],
+                env=continuity_env,
+                cwd=repo,
+                capture=True,
+            )
+            if continuity.returncode:
+                print(
+                    "local-db-ci: Codex continuity real-PostgreSQL integration failed: "
+                    f"{_failure_detail(continuity)}",
+                    file=sys.stderr,
+                )
+                exit_code = continuity.returncode
+            else:
+                print("local-db-ci: Codex continuity real-PostgreSQL integration passed")
+        if exit_code == 0:
             acceptance_script = repo / "ops/atomic-rule-approval-local-pg-acceptance.py"
             if not acceptance_python.is_file() or not os.access(acceptance_python, os.X_OK):
                 print("local-db-ci: repository Python environment is unavailable", file=sys.stderr)
