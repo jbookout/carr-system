@@ -38,6 +38,10 @@ import {
   REGISTRY_V20_VERSION,
   REGISTRY_V21_VERSION,
   REGISTRY_V22_VERSION,
+  REGISTRY_V23_VERSION,
+  R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE,
+  renderR07RepoHygieneJanitorForwardRegistrySql,
+  isDefinitionOnlyLaunchd,
   replaceExactlyOnce,
   renderGeneratedFrontier,
   renderRuntimeProjection,
@@ -58,6 +62,7 @@ import {
   renderContinuityArchiveForwardRegistrySql,
   assertContinuityArchiveV20TrustRoot,
   renderR06HooksCorrectnessForwardRegistrySql,
+  renderDoctorcrePortfolioForwardRegistrySql,
   assertR06HooksCorrectnessV21TrustRoot,
   renderSourceMergeForwardRegistrySql,
   sha256,
@@ -189,8 +194,16 @@ const generatedV21 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v21.generated.js", import.meta.url), "utf8");
 const generatedV22 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v22.generated.js", import.meta.url), "utf8");
+const generatedV23 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v23.generated.js", import.meta.url), "utf8");
 const v21Migration = fs.readFileSync(
   new URL("../../migrations/0495_r06_hooks_correctness_scac_successor.sql", import.meta.url), "utf8");
+const v22Migration = fs.readFileSync(
+  new URL("../../migrations/0496_doctorcre_portfolio_hierarchy_and_scac_successor.sql",
+    import.meta.url), "utf8");
+const v23Migration = fs.readFileSync(
+  new URL("../../migrations/0497_r07_repo_hygiene_janitor_and_scac_successor.sql",
+    import.meta.url), "utf8");
 const siep18MonitorMigration = fs.readFileSync(
   new URL("../../migrations/0467_siep18_atomic_db_monitor_grants.sql", import.meta.url), "utf8");
 const directRegistryRedefinitions = [
@@ -1115,6 +1128,141 @@ test("the v21 frontier re-digested only source, and v22 is what the runtime now 
   }
 });
 
+test("v23 seals the R07 repo-hygiene janitor frontier and preserves the v22 predecessor", () => {
+  const rows = frozenInventory(REGISTRY_V23_VERSION);
+  assert.equal(v23Migration, renderR07RepoHygieneJanitorForwardRegistrySql(rows));
+
+  // v23 is a REGISTRY-ONLY successor. v22 carried the portfolio's domain DDL;
+  // this one adds a tools/ planner and an uninstalled agent definition, so the
+  // migration must create no table and no domain function. Slicing the v22 core
+  // from its header is what leaves that DDL behind, and this is the assertion
+  // that would catch it being dragged forward.
+  assert.doesNotMatch(v23Migration, /ops\.portfolio_(propose|review|accept)_revision/);
+  assert.doesNotMatch(v23Migration, /create table (?!if not exists ops[.]scac_)/);
+  assert.match(v22Migration, /ops\.portfolio_propose_revision/);
+
+  assert.match(v23Migration,
+    /-- SCAC-12: registry-only mutation registry v23 after the R07 repo-hygiene janitor definition\./);
+  assert.match(v23Migration, /scac_mutation_registry_v22_seal_available\(\)/);
+  assert.match(v23Migration, /scac_mutation_catalog_v22_live_at_seal/);
+  assert.match(v23Migration, /scac_mutation_registration_v23\(text,text\)/);
+  assert.match(v23Migration, /scac_mutation_catalog_v23_current\(\)/);
+  assert.match(v23Migration, /scac_policy_epoch_snapshot_v22/);
+  assert.doesNotMatch(v23Migration, /^\s*(begin|commit)\s*;\s*$/im);
+  assert.doesNotMatch(v23Migration, /__V22_|__V23_|UNBOUND|__DOCTORCRE_PORTFOLIO_V22_CATALOG_SUCCESSOR__/);
+  assert.match(v23Migration, /do \$r07_repo_hygiene_janitor_preflight\$/);
+
+  // v23 is the seal this migration CREATES, so it carries every predecessor
+  // seal tuple and none of its own.
+  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS)) {
+    const tuple = `('${seal.version}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount})`;
+    assert.equal(v23Migration.includes(tuple), seal.version !== REGISTRY_V23_VERSION, seal.version);
+  }
+  // Every earlier generated artifact is untouched byte-for-byte.
+  assert.equal(v22Migration, renderDoctorcrePortfolioForwardRegistrySql(
+    frozenInventory(REGISTRY_V22_VERSION)));
+  assert.equal(v21Migration, renderR06HooksCorrectnessForwardRegistrySql(
+    frozenInventory(REGISTRY_V21_VERSION)));
+});
+
+test("the v23 frontier re-digested only source, so the runtime import correctly stays on v22", () => {
+  // THE SELECTOR MOVES WITH VERBS, NOT WITH VERSIONS. R06's v21 left the import
+  // on v20 because it registered none; the portfolio tail moved it to v22
+  // because four verbs would otherwise be refused at the door. R07 registers no
+  // verb either, so the import stays on v22 and this test records that as a
+  // decision rather than an oversight.
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V22_VERSION);
+  const v23GeneratedVersion = generatedV23.match(
+    /^export const SCAC_MUTATION_REGISTRY_VERSION = "([^"]+)";$/m)[1];
+  assert.equal(v23GeneratedVersion, REGISTRY_V23_VERSION);
+  const v23GeneratedDigest = generatedV23.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
+  // A genuinely new seal, not a re-emitted v22.
+  assert.notEqual(`sha256:${v23GeneratedDigest}`, HISTORICAL_REGISTRY_SEALS.v22.digest);
+
+  const v22Rows = frozenInventory(REGISTRY_V22_VERSION);
+  const v23Rows = frozenInventory(REGISTRY_V23_VERSION);
+  const byKey = new Map(v22Rows.map(row => [row.ingress_key, row]));
+  const added = v23Rows.filter(row => !byKey.has(row.ingress_key))
+    .map(row => row.ingress_key).sort();
+  assert.deepEqual(added, [
+    "launchd-workflow:com.carr.repo-hygiene-janitor",
+    "script-entrypoint:tools/repo-hygiene-janitor.py",
+  ]);
+  assert.equal(v23Rows.length, v22Rows.length + 2);
+  // Non-vacuity: the two entrypoints that carry the change really were
+  // re-digested, and NONE of what moved is an MCP contract -- which is exactly
+  // what makes leaving the active import on v22 safe.
+  const moved = v23Rows.filter(row =>
+    byKey.has(row.ingress_key) &&
+    JSON.stringify(byKey.get(row.ingress_key)) !== JSON.stringify(row));
+  for (const locator of ["ops/config-as-code.py", "ops/scac-mutation-inventory.mjs"])
+    assert.ok(moved.some(row => row.source_locator === locator), locator);
+  assert.deepEqual(v23Rows.filter(row => row.ingress_kind === "mcp_tool")
+    .map(row => row.ingress_key).sort(),
+    v22Rows.filter(row => row.ingress_kind === "mcp_tool")
+      .map(row => row.ingress_key).sort());
+  assert.deepEqual(moved.filter(row => row.ingress_kind === "mcp_tool"), []);
+});
+
+test("a partial or absent v22 predecessor bundle regenerates the same successor", () => {
+  const rows = frozenInventory(REGISTRY_V23_VERSION);
+  const baseline = R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE;
+  const bundle = { migration: v22Migration, runtime: generatedV22 };
+  const supplied = renderR07RepoHygieneJanitorForwardRegistrySql(rows, baseline, bundle);
+  assert.equal(supplied, v23Migration);
+  assert.equal(renderR07RepoHygieneJanitorForwardRegistrySql(
+    rows, baseline, { migration: bundle.migration }), supplied);
+  assert.equal(renderR07RepoHygieneJanitorForwardRegistrySql(
+    rows, baseline, { runtime: bundle.runtime }), supplied);
+  assert.equal(renderR07RepoHygieneJanitorForwardRegistrySql(rows, baseline), supplied);
+  for (const [half, pathName] of [
+    ["migration", "migrations/0496_doctorcre_portfolio_hierarchy_and_scac_successor.sql"],
+    ["runtime", "mcp-server/src/scac-mutation-registry.v22.generated.js"],
+  ])
+    assert.throws(() => renderR07RepoHygieneJanitorForwardRegistrySql(rows, baseline,
+      { ...bundle, [half]: `${bundle[half]}\n-- tampered\n` }),
+      new RegExp(`sealed historical SCAC v22 artifact changed: ${pathName.replace(/[/.]/g, "\\$&")}`));
+});
+
+test("a definition-only LaunchAgent is exempt from service closure and refused if it claims one", () => {
+  // The repo-hygiene agent must stay out of ops/config/services.json: it is a
+  // reviewed definition, not a deployment. The exemption is derived from the
+  // artifact -- no trigger and no load-time start means launchd has no moment
+  // to fire it -- so it cannot drift away from what the file actually says.
+  const agent = fs.readFileSync(
+    new URL("../../ops/launchd/com.carr.repo-hygiene-janitor.plist", import.meta.url), "utf8");
+  const plist = parsePlistXml(agent);
+  assert.equal(plist.RunAtLoad, false);
+  assert.ok(isDefinitionOnlyLaunchd(plist));
+  for (const key of ["StartCalendarInterval", "StartInterval", "WatchPaths", "KeepAlive"])
+    assert.equal(plist[key], undefined, key);
+  assert.ok(!JSON.stringify(plist.ProgramArguments).includes("--execute"));
+
+  // Every deployed agent is still held to closure: a plist with a trigger is
+  // not definition-only, so the exemption cannot be reached by accident.
+  assert.equal(isDefinitionOnlyLaunchd({ RunAtLoad: true }), false);
+  assert.equal(isDefinitionOnlyLaunchd({ StartInterval: 60 }), false);
+  assert.equal(isDefinitionOnlyLaunchd({}), true);
+
+  const services = { services: [] };
+  const legacy = { surfaces: [] };
+  const agentPath = "ops/launchd/com.carr.repo-hygiene-janitor.plist";
+  // Exempt: closure passes with no service entry at all.
+  assert.doesNotThrow(() =>
+    validateLaunchdAuthorityCatalogs([agentPath], services, legacy, [agentPath]));
+  // Not exempt: the same path without the exemption still demands a mechanism.
+  assert.throws(() => validateLaunchdAuthorityCatalogs([agentPath], services, legacy, []),
+    /launchd ops\.service catalog closure mismatch missing=/);
+  // THE CONVERSE, which is the half that keeps this from being a hole: a
+  // definition-only agent that DOES claim a deploy mechanism is a contradiction.
+  const claimed = { services: [{ key: "repo-hygiene-janitor", environments: [
+    { environment: "production", deploy_mechanism: agentPath }] }] };
+  assert.throws(() =>
+    validateLaunchdAuthorityCatalogs([agentPath], claimed, legacy, [agentPath]),
+    /definition-only launchd agent claims a deploy mechanism/);
+});
+
 test("a partial or absent v21 predecessor bundle regenerates the same successor", () => {
   const rows = frozenInventory(REGISTRY_V21_VERSION);
   const baseline = R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE;
@@ -1265,11 +1413,11 @@ test("the complete source-only frontier is byte-reproducible from frozen inputs"
   assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
-  assert.equal(migrations.length, 30);
+  assert.equal(migrations.length, 31);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496"]);
-  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 21);
-  assert.equal(paths.length, 51);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497"]);
+  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 22);
+  assert.equal(paths.length, 53);
 });
 
 test("the complete frontier renders when every generated target is absent", () => {
@@ -1402,7 +1550,7 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
   // TRACKED: the inventory enumerates git, so an untracked new gate is
   // invisible to this assertion and the count shifts at `git add`, not at
   // save.
-  assert.equal(rows.length, 544);
+  assert.equal(rows.length, 545);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -1411,7 +1559,7 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
   }
   const scripts = discoverScriptEntrypoints();
   // 534 before this branch; same single new executable gate.
-  assert.equal(scripts.length, 535);
+  assert.equal(scripts.length, 536);
   assert.equal(scripts.some(path => path === "ops/rule-delivery-cutover.py"), true);
   assert.equal(scripts.some(path => path === "ops/control-plane-scheduler-cutover.py"), true);
   assert.equal(scripts.some(path => path === "run.sh"), true);
@@ -1499,7 +1647,7 @@ test("job definitions and live DB capabilities have exact reviewed baselines", (
 
 test("GitHub and launchd workflow entrances bind exact triggers, permissions, and delegates", () => {
   const workflows = workflowDefinitionInventory();
-  assert.equal(workflows.length, 31);
+  assert.equal(workflows.length, 32);
   const github = workflows.filter(row => row.source_locator.startsWith(".github/workflows/"));
   assert.equal(github.length, 7);
   assert.equal(github.every(row => row.ingress_kind === "workflow_entrypoint" &&
@@ -1511,14 +1659,31 @@ test("GitHub and launchd workflow entrances bind exact triggers, permissions, an
   const dbAcceptance = workflows.find(row => row.source_locator === ".github/workflows/db-acceptance.yml");
   assert.equal(dbAcceptance.delegates_to.includes("script:ops/local-pg-ci.py"), true);
   const launchd = workflows.filter(row => row.source_locator.startsWith("ops/launchd/"));
-  assert.equal(launchd.length, 24);
+  assert.equal(launchd.length, 25);
+  // Every agent is fully identified and carries SOME physical authority ref;
+  // only a DEPLOYED agent's is a service environment. Collapsing those two into
+  // one clause is what would let a definition-only agent either slip through
+  // unidentified or be forced to claim a deployment it must not have.
   assert.equal(launchd.every(row => row.launchd_label && row.trigger_contract_digest &&
-    row.program_arguments_digest && row.physical_authority_refs.some(ref => ref.startsWith("ops.service_environment:")) &&
+    row.program_arguments_digest && row.physical_authority_refs.length > 0 &&
     row.classification_authorizing === false), true);
+  const deployedLaunchd = launchd.filter(row =>
+    !row.physical_authority_refs.includes("ops.definition_only_launchd:not_deployed"));
+  assert.equal(deployedLaunchd.length, launchd.length - 1);
+  assert.equal(deployedLaunchd.every(row =>
+    row.physical_authority_refs.some(ref => ref.startsWith("ops.service_environment:"))), true);
   assert.equal(launchd.flatMap(row => row.physical_authority_refs)
     .filter(ref => ref.startsWith("ops.service_environment:")).length, 25);
   assert.equal(launchd.find(row => row.launchd_label === "com.carr.rules-refresh")
     .physical_authority_refs.includes("ops.service_environment:rules-refresh:production"), true);
+  // The definition-only agent carries an explicit non-deployed authority ref in
+  // its OWN namespace. It is a registered row a reviewer can see, and it does
+  // not inflate the deployed-environment total above.
+  assert.deepEqual(launchd.filter(row =>
+    row.physical_authority_refs.includes("ops.definition_only_launchd:not_deployed"))
+    .map(row => row.launchd_label), ["com.carr.repo-hygiene-janitor"]);
+  assert.equal(launchd.find(row => row.launchd_label === "com.carr.repo-hygiene-janitor")
+    .physical_authority_refs.some(ref => ref.startsWith("ops.service_environment:")), false);
   assert.deepEqual(launchd.flatMap(row => row.physical_authority_refs)
     .filter(ref => ref.startsWith("ops.legacy_schedule_launchd_contract:")).sort(), [
       "ops.legacy_schedule_launchd_contract:calendar-fetch-daily.launchd.v1",
@@ -1552,20 +1717,31 @@ test("launchd physical-authority catalogs are bidirectionally closed and source-
     new URL("../../ops/config/services.json", import.meta.url), "utf8"));
   const legacy = JSON.parse(fs.readFileSync(
     new URL("../../ops/config/control-plane-scheduler-cutover.v1.json", import.meta.url), "utf8"));
-  assert.doesNotThrow(() => validateLaunchdAuthorityCatalogs(launchdPaths, services, legacy));
+  // The real caller derives its definition-only set from the artifacts, so this
+  // test does the same rather than hard-coding a name: an agent with no trigger
+  // and no load-time start is exempt from closure, and every other agent is not.
+  const definitionOnly = launchdPaths.filter(path => isDefinitionOnlyLaunchd(
+    parsePlistXml(fs.readFileSync(new URL(`../../${path}`, import.meta.url), "utf8"))));
+  assert.deepEqual(definitionOnly, ["ops/launchd/com.carr.repo-hygiene-janitor.plist"]);
+  assert.doesNotThrow(() =>
+    validateLaunchdAuthorityCatalogs(launchdPaths, services, legacy, definitionOnly));
+  // Without the exemption the same set still refuses, so closure is intact for
+  // every deployed agent and the exemption is doing exactly one thing.
+  assert.throws(() => validateLaunchdAuthorityCatalogs(launchdPaths, services, legacy),
+    /catalog closure mismatch/);
 
   const missingService = structuredClone(services);
   const rules = missingService.services.find(service => service.key === "rules-refresh");
   rules.environments = rules.environments.filter(environment =>
     environment.deploy_mechanism !== "ops/launchd/com.carr.rules-refresh.plist");
-  assert.throws(() => validateLaunchdAuthorityCatalogs(launchdPaths, missingService, legacy),
+  assert.throws(() => validateLaunchdAuthorityCatalogs(launchdPaths, missingService, legacy, definitionOnly),
     /catalog closure mismatch/);
 
   const orphanService = structuredClone(services);
   orphanService.services[0].environments.push({
     environment: "local", deploy_mechanism: "ops/launchd/com.carr.orphan.plist",
   });
-  assert.throws(() => validateLaunchdAuthorityCatalogs(launchdPaths, orphanService, legacy),
+  assert.throws(() => validateLaunchdAuthorityCatalogs(launchdPaths, orphanService, legacy, definitionOnly),
     /orphan=ops\/launchd\/com\.carr\.orphan\.plist/);
 
   const duplicateLegacy = structuredClone(legacy);
@@ -1573,7 +1749,7 @@ test("launchd physical-authority catalogs are bidirectionally closed and source-
     ...duplicateLegacy.surfaces.find(surface => surface.scheduler_kind === "launchd"),
     surface_id: "duplicate.launchd.v1",
   });
-  assert.throws(() => validateLaunchdAuthorityCatalogs(launchdPaths, services, duplicateLegacy),
+  assert.throws(() => validateLaunchdAuthorityCatalogs(launchdPaths, services, duplicateLegacy, definitionOnly),
     /duplicate launchd legacy path/);
 
   const legacySurface = legacy.surfaces.find(surface =>

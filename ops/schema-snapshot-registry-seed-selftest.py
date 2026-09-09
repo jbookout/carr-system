@@ -49,6 +49,9 @@ RUNTIME_V19 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v19.generat
 RUNTIME_V21 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v21.generated.js").read_text(
     encoding="utf-8"
 )
+RUNTIME_V23 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v23.generated.js").read_text(
+    encoding="utf-8"
+)
 RUNTIME_V22 = (ROOT / "mcp-server" / "src" / "scac-mutation-registry.v22.generated.js").read_text(
     encoding="utf-8"
 )
@@ -80,7 +83,7 @@ assert GENERATOR.count("e.entry_digest is distinct from 'sha256:'||encode(public
 assert GENERATOR.count("ops.scac_mutation_registry_seal_valid(historical.registry_version)") >= 2
 for version in range(1, 9):
     assert GENERATOR.count(f"'scac-mutation-registry.v{version}'") >= 2
-assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 22)}
+assert set(FULL_SET_SEALS) == {f"scac-mutation-registry.v{version}" for version in range(1, 23)}
 assert all(len(value) == 71 and value.startswith("sha256:") for value in FULL_SET_SEALS.values())
 assert FULL_SET_SEALS["scac-mutation-registry.v10"] != "sha256:" + "0" * 64
 assert FULL_SET_SEALS["scac-mutation-registry.v20"] == (
@@ -89,6 +92,16 @@ assert FULL_SET_SEALS["scac-mutation-registry.v20"] == (
 assert FULL_SET_SEALS["scac-mutation-registry.v21"] == (
     "sha256:e687f2111d7c31feefde336a90a2413af0969b65bb8c0d43fe16c7d14d1dab91"
 )
+# v22 became readable only once 0497 sealed it. The digest is the exact
+# full-entry-set value authenticated against a real database before the v22
+# frontier was cleaned up, and it is deliberately NOT the v22 registry digest:
+# the entry-set seal hashes the entry digests, the registry digest hashes the
+# projection, and equating them would seal a frontier nobody measured.
+assert FULL_SET_SEALS["scac-mutation-registry.v22"] == (
+    "sha256:c5c01d95676ee51e691c01bb4d90d5e5fde18a2e634089d51974dbcdf8285b51"
+)
+assert (FULL_SET_SEALS["scac-mutation-registry.v22"]
+        != "sha256:5bbe68942f2652523b52c024c07615b1718b59c7de4c0e41524a955566ba5f75")
 assert FULL_SET_SEALS["scac-mutation-registry.v12"] == (
     "sha256:e0cae72f977332f93e02ce7c30f5b00a5438b13500dcc0e3d6d33db2f3685f9d"
 )
@@ -106,12 +119,14 @@ assert "SCAC_EXPECTED_CURRENT_DIGEST" in GENERATOR
 assert "registry_digest='${SCAC_EXPECTED_CURRENT_DIGEST}'" in GENERATOR
 assert "SCAC_EXPECTED_CURRENT_SOURCE_SET" in GENERATOR
 assert "SCAC_EXPECTED_CURRENT_CATALOG" in GENERATOR
-assert "SCAC_CURRENT_NUMBER=22" in GENERATOR
-assert "SCAC_TOTAL_ENTRY_COUNT=32250" in GENERATOR
-assert "SCAC_CURRENT_ENTRY_COUNT=1590" in GENERATOR
-assert "SCAC_CURRENT_SOURCE_COUNT=833" in GENERATOR
-assert "SCAC_FULL_SET_SEAL_COUNT=21" in GENERATOR
-assert "ops.scac_mutation_catalog_v22_current()" in GENERATOR
+assert "SCAC_CURRENT_NUMBER=23" in GENERATOR
+assert "SCAC_TOTAL_ENTRY_COUNT=33846" in GENERATOR
+assert "SCAC_CURRENT_ENTRY_COUNT=1596" in GENERATOR
+assert "SCAC_CURRENT_SOURCE_COUNT=835" in GENERATOR
+assert "SCAC_FULL_SET_SEAL_COUNT=22" in GENERATOR
+assert "ops.scac_mutation_catalog_v23_current()" in GENERATOR
+assert "0497_r07_repo_hygiene_janitor_and_scac_successor.sql" in GENERATOR
+# The predecessor probe stays: the v22 arm still has to be reachable.
 assert "0496_doctorcre_portfolio_hierarchy_and_scac_successor.sql" in GENERATOR
 assert "SCAC_CURRENT_NUMBER=21" in GENERATOR
 assert "SCAC_TOTAL_ENTRY_COUNT=30660" in GENERATOR
@@ -173,7 +188,7 @@ numeric_registry_order = (
     "split_part(registry_version,'.v',2)::integer)"
 )
 assert numeric_registry_order in GENERATOR
-versions = [f"scac-mutation-registry.v{version}" for version in range(1, 23)]
+versions = [f"scac-mutation-registry.v{version}" for version in range(1, 24)]
 assert sorted(versions, key=lambda value: int(value.rsplit("v", 1)[1])) == versions
 assert sorted(versions) != versions
 
@@ -183,21 +198,21 @@ loader_start = GENERATOR.index("SCAC_FULL_SET_SQL=\"$(node -e '\n") + len(
 loader_end = GENERATOR.index("\n  ' \"$SCAC_FULL_SET_SEALS\" \"$SCAC_FULL_SET_SEAL_COUNT\")\"", loader_start)
 loader = GENERATOR[loader_start:loader_end]
 loaded_sql = subprocess.run(
-    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "21"],
+    ["node", "-e", loader, str(ROOT / "ops" / "config" / "scac-registry-full-entry-set-seals.json"), "22"],
     check=True,
     capture_output=True,
     text=True,
 ).stdout
-assert loaded_sql.count("scac-mutation-registry.v") == 21
-assert loaded_sql.count("sha256:") == 21
-assert FULL_SET_SEALS["scac-mutation-registry.v21"] in loaded_sql, (
+assert loaded_sql.count("scac-mutation-registry.v") == 22
+assert loaded_sql.count("sha256:") == 22
+assert FULL_SET_SEALS["scac-mutation-registry.v22"] in loaded_sql, (
     "the newest sealed history must actually reach the SQL the snapshot embeds"
 )
 
 # NEGATIVE HALF. The positive above only shows the loader renders 21 rows; it
 # says nothing about whether a tampered seal file would be caught. These three
 # feed the loader deliberately broken input and require a nonzero exit, so a
-# seal set that lost v21, gained a stray version, or carried a malformed digest
+# seal set that lost v22, gained a stray version, or carried a malformed digest
 # cannot be rendered into a snapshot as if it were sealed history.
 def loader_rejects(seals: dict, count: str) -> bool:
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
@@ -210,13 +225,13 @@ def loader_rejects(seals: dict, count: str) -> bool:
         os.unlink(path)
 
 
-dropped = {k: v for k, v in FULL_SET_SEALS.items() if k != "scac-mutation-registry.v21"}
-assert loader_rejects(dropped, "21"), "a seal file missing v21 must not load"
-assert loader_rejects(dropped, "20"), (
-    "lowering the count must not be a way to hide a missing v21 seal"
+dropped = {k: v for k, v in FULL_SET_SEALS.items() if k != "scac-mutation-registry.v22"}
+assert loader_rejects(dropped, "22"), "a seal file missing v22 must not load"
+assert loader_rejects(dropped, "21"), (
+    "lowering the count must not be a way to hide a missing v22 seal"
 )
-malformed = dict(FULL_SET_SEALS, **{"scac-mutation-registry.v21": "sha256:not-a-digest"})
-assert loader_rejects(malformed, "21"), "a malformed v21 seal must not load"
+malformed = dict(FULL_SET_SEALS, **{"scac-mutation-registry.v22": "sha256:not-a-digest"})
+assert loader_rejects(malformed, "22"), "a malformed v22 seal must not load"
 
 def runtime_seal(source: str, name: str) -> str:
     match = re.search(rf'^export const {name} = "([0-9a-f]{{64}})";$', source, re.MULTILINE)
@@ -224,7 +239,7 @@ def runtime_seal(source: str, name: str) -> str:
     return match.group(1)
 
 
-runtime_seals = {name: runtime_seal(RUNTIME_V22, name) for name in (
+runtime_seals = {name: runtime_seal(RUNTIME_V23, name) for name in (
     "SCAC_MUTATION_REGISTRY_DIGEST",
     "SCAC_MUTATION_SOURCE_CONTRACT_SET_DIGEST",
     "SCAC_MUTATION_DB_CATALOG_BASELINE_DIGEST",

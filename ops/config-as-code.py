@@ -274,6 +274,10 @@ DEFINITION_ONLY: dict[str, str] = {
     # first accepted shadow receipt on record; the wrapper pins --mode shadow,
     # so installing activates evidence production only — legacy schedules keep
     # running until each workflow's replacement is accepted at its own tier.
+    "com.carr.repo-hygiene-janitor.plist":
+        "the repo-hygiene janitor plans branch, worktree and cache cleanup; its "
+        "gate is a separately reviewed live-effect packet, so the definition is "
+        "written down and left uninstalled until that packet is approved",
 }
 
 # A LaunchAgent that invokes this installer cannot unload its own label and
@@ -1342,9 +1346,28 @@ def pairs():
                         None, source))
 
     for f in carr_plists():
+        # A DEFINITION_ONLY agent is deliberately absent from the machine, so it
+        # is not an ordinary tracked pair in either direction. Its absence is the
+        # intended state rather than drift, and a copy that HAS been installed
+        # must not be waved through merely because its body matches the repo —
+        # matching bytes are exactly what an unauthorized install would have.
+        # It is reported separately, by presence, in cmd_check.
+        if f in DEFINITION_ONLY:
+            continue
         out.append((f"launchd {f}", portable(read(os.path.join(LAUNCHD_SRC, f))),
                     launchd_repo_path(f)))
     return out
+
+
+def definition_only_installed_plists():
+    """DEFINITION_ONLY agents that are on the machine and must not be.
+
+    Body equality is deliberately not consulted: the failure being detected is
+    that an agent whose activation gate has not passed exists in LaunchAgents at
+    all, and an install performed from this very repo is the likeliest way for
+    that to happen.
+    """
+    return [f for f in carr_plists() if f in DEFINITION_ONLY]
 
 
 def cmd_check():
@@ -1398,6 +1421,16 @@ def cmd_check():
         (f"scheduled-task {name} (NOT ALLOWED ON SECONDARY)",
          "present on disk; this machine has no approved scope for it")
         for name in secondary_task_violations
+    ]
+    # An agent held as a definition is expected to be absent, so its absence is
+    # silence. Its PRESENCE is the finding, and it is a finding whatever the
+    # body says: an activation that skipped its gate installs the repo's own
+    # bytes, so byte equality is the shape the failure takes rather than
+    # evidence against it.
+    disallowed += [
+        (f"launchd {name} (DEFINITION ONLY, MUST NOT BE INSTALLED)",
+         f"installed in {LAUNCHD_SRC}; {DEFINITION_ONLY[name]}")
+        for name in definition_only_installed_plists()
     ]
     drift = missing + untracked + different + disallowed
     if not drift and not unversioned:

@@ -176,12 +176,12 @@ def main() -> int:
             ).fetchone()
             digest = version[0]
             runtime_version = successor[0] if successor is not None else "scac-mutation-registry.v1"
-            if runtime_version not in {"scac-mutation-registry.v2", "scac-mutation-registry.v3", "scac-mutation-registry.v4", "scac-mutation-registry.v5", "scac-mutation-registry.v6", "scac-mutation-registry.v7", "scac-mutation-registry.v8", "scac-mutation-registry.v9", "scac-mutation-registry.v10", "scac-mutation-registry.v11", "scac-mutation-registry.v12", "scac-mutation-registry.v13", "scac-mutation-registry.v14", "scac-mutation-registry.v15", "scac-mutation-registry.v16", "scac-mutation-registry.v17", "scac-mutation-registry.v18", "scac-mutation-registry.v19", "scac-mutation-registry.v20", "scac-mutation-registry.v21", "scac-mutation-registry.v22"}:
+            if runtime_version not in {"scac-mutation-registry.v2", "scac-mutation-registry.v3", "scac-mutation-registry.v4", "scac-mutation-registry.v5", "scac-mutation-registry.v6", "scac-mutation-registry.v7", "scac-mutation-registry.v8", "scac-mutation-registry.v9", "scac-mutation-registry.v10", "scac-mutation-registry.v11", "scac-mutation-registry.v12", "scac-mutation-registry.v13", "scac-mutation-registry.v14", "scac-mutation-registry.v15", "scac-mutation-registry.v16", "scac-mutation-registry.v17", "scac-mutation-registry.v18", "scac-mutation-registry.v19", "scac-mutation-registry.v20", "scac-mutation-registry.v21", "scac-mutation-registry.v22", "scac-mutation-registry.v23"}:
                 raise RuntimeError(f"unsupported live successor {runtime_version!r}")
             # A successor may only ADD a seal. Whatever version is live, the one
             # immediately below it must still be present AND still validate its
-            # own entry-set seal -- that is what makes v21 sealed HISTORY under
-            # v22 rather than a row the successor quietly rewrote. The allowlist
+            # own entry-set seal -- that is what makes v22 sealed HISTORY under
+            # v23 rather than a row the successor quietly rewrote. The allowlist
             # above stays enumerated so an unreviewed frontier fails closed; this
             # predecessor check is derived from whichever member is live.
             runtime_ordinal = int(runtime_version.rsplit(".v", 1)[1])

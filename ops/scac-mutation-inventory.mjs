@@ -56,6 +56,7 @@ export const REGISTRY_V20_VERSION = "scac-mutation-registry.v20";
 export const REGISTRY_V21_VERSION = "scac-mutation-registry.v21";
 // v22 binds the DoctorCRE v5 portfolio hierarchy after the final v21 seal.
 export const REGISTRY_V22_VERSION = "scac-mutation-registry.v22";
+export const REGISTRY_V23_VERSION = "scac-mutation-registry.v23";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -97,6 +98,7 @@ export const HISTORICAL_REGISTRY_SEALS = Object.freeze({
   v19: Object.freeze({ version: REGISTRY_V19_VERSION, digest: "sha256:19c1c9967bf960a64cefa39c53f6011193180f0c65128a1d8d5987ea6e120841", entryCount: 1520, sourceEntryCount: 828 }),
   v20: Object.freeze({ version: REGISTRY_V20_VERSION, digest: "sha256:45bf7a56d2756337c1b5efdad195f4935259fad6cf5f6a9c081c28592bacfb05", entryCount: 1524, sourceEntryCount: 828 }),
   v21: Object.freeze({ version: REGISTRY_V21_VERSION, digest: "sha256:d9100082d444f090e062a2fb9ac55043d0c9790c2fbd9b68672987e3ed12927b", entryCount: 1528, sourceEntryCount: 828 }),
+  v22: Object.freeze({ version: REGISTRY_V22_VERSION, digest: "sha256:5bbe68942f2652523b52c024c07615b1718b59c7de4c0e41524a955566ba5f75", entryCount: 1590, sourceEntryCount: 833 }),
 });
 export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
   "migrations/0454_siep11_mutation_registry.sql": "7985d42b9b36964b33503f4ff42d332e6bcce085217f06464a9d6abf58126bdd",
@@ -141,6 +143,8 @@ export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
   "mcp-server/src/scac-mutation-registry.v20.generated.js": "dd679c9fa87fb45afe25d8508be462acfa395c532bf235f7fbdc0511b8678371",
   "migrations/0495_r06_hooks_correctness_scac_successor.sql": "97ba2964737373f31d17c089046ddae2337050dcdc278e309cd1a4797e16ad83",
   "mcp-server/src/scac-mutation-registry.v21.generated.js": "ff1088b58871db05d0eeb37e520eaefda35c1756b6b8144f9cd9d595b8e49b61",
+  "migrations/0496_doctorcre_portfolio_hierarchy_and_scac_successor.sql": "b8de4ce8bfa23c5ac06c4a1729456da4cfc301ec6b82e54b336ab072c3d6dca7",
+  "mcp-server/src/scac-mutation-registry.v22.generated.js": "58e37870d1aba7750b841468ef0c4bea76cb75f18ee2a978eb4b3ce567302c20",
 });
 // WR-000068 rebases four Production-applied consumers of the sourced shape
 // columns on the effective receipt-backed lineage. The v18 generator reads the
@@ -408,6 +412,22 @@ export const DOCTORCRE_PORTFOLIO_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
   // every write going through a definer function, and role_authority is
   // unchanged because this change creates no role.
   secdef_execute: { count: 450, digest: "sha256:dbd281eef92b9232e4bdd9bfb35c5884011b9d8f7177ebae919557a4aa25047b" },
+});
+
+export const R07_REPO_HYGIENE_JANITOR_PRE_V23_DB_CATALOG_BASELINE =
+  DOCTORCRE_PORTFOLIO_FORWARD_DB_CATALOG_BASELINE;
+export const R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
+  ...DOCTORCRE_PORTFOLIO_FORWARD_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v23",
+  // Read back from a clean disposable Postgres carrying db/schema.sql and every
+  // migration through this one. This successor is registry-only: the repo
+  // hygiene janitor is a tools/ script and an uninstalled LaunchAgent
+  // definition, so it creates no table, no role and no domain function. The
+  // entire security-definer delta from v22's 450 is the four seal-and-catalog
+  // functions this successor installs for itself, exactly as the v20 and v21
+  // registry-only successors before it. relation_dml, column_dml,
+  // role_authority and runtime_dml_grants are unchanged for the same reason.
+  secdef_execute: { count: 454, digest: "sha256:d4a15c2d2f507d75c4c3c3d8c722d4d09f704fb141c8783ea0a640a721a0af55" },
 });
 
 export const JOB_DEFINITION_BASELINE = Object.freeze({
@@ -839,7 +859,28 @@ export function parsePlistXml(source) {
   return value;
 }
 
-export function validateLaunchdAuthorityCatalogs(launchdPaths, services, legacy) {
+// A LaunchAgent with no trigger and no load-time start cannot run: launchd has
+// no moment at which to fire it. Such a definition is a reviewed artifact rather
+// than a deployed service, so it is exempt from ops.service catalog closure --
+// requiring a deploy_mechanism for it would assert a deployment that must not
+// exist. The exemption is derived from the artifact itself rather than from a
+// list, so it cannot drift out of step with the file it describes, and it is
+// two-directional: a definition-only agent that DOES appear in the service
+// catalog is a contradiction and still refuses below.
+const LAUNCHD_TRIGGER_KEYS = Object.freeze([
+  "StartCalendarInterval", "StartInterval", "WatchPaths", "KeepAlive",
+  "StartOnMount", "QueueDirectories", "Sockets", "MachServices",
+]);
+
+export function isDefinitionOnlyLaunchd(plist) {
+  if (!plist || typeof plist !== "object") return false;
+  if (plist.RunAtLoad === true) return false;
+  return !LAUNCHD_TRIGGER_KEYS.some(key => plist[key] !== undefined);
+}
+
+export function validateLaunchdAuthorityCatalogs(launchdPaths, services, legacy,
+  definitionOnlyPaths = []) {
+  const definitionOnly = new Set(definitionOnlyPaths);
   const reviewedPaths = new Set(launchdPaths);
   if (reviewedPaths.size !== launchdPaths.length) throw new Error("duplicate launchd source path");
   const serviceKeys = new Set();
@@ -864,7 +905,14 @@ export function validateLaunchdAuthorityCatalogs(launchdPaths, services, legacy)
         .sort((left, right) => `${left.service_key}:${left.environment}`.localeCompare(`${right.service_key}:${right.environment}`)));
     }
   }
-  const missingServices = [...reviewedPaths].filter(path => !servicesByPlist.has(path)).sort();
+  for (const path of definitionOnly) {
+    if (!reviewedPaths.has(path))
+      throw new Error(`definition-only launchd path is not a reviewed source: ${path}`);
+    if (servicesByPlist.has(path))
+      throw new Error(`definition-only launchd agent claims a deploy mechanism: ${path}`);
+  }
+  const missingServices = [...reviewedPaths]
+    .filter(path => !servicesByPlist.has(path) && !definitionOnly.has(path)).sort();
   const orphanServices = [...servicesByPlist.keys()].filter(path => !reviewedPaths.has(path)).sort();
   if (missingServices.length || orphanServices.length)
     throw new Error(`launchd ops.service catalog closure mismatch missing=${missingServices.join(",")} orphan=${orphanServices.join(",")}`);
@@ -896,7 +944,10 @@ function launchdAuthorityMaps(launchdPaths) {
   const legacyPath = "ops/config/control-plane-scheduler-cutover.v1.json";
   const services = JSON.parse(readFileSync(resolve(REPO_ROOT, servicesPath), "utf8"));
   const legacy = JSON.parse(readFileSync(resolve(REPO_ROOT, legacyPath), "utf8"));
-  const { servicesByPlist, legacyByPlist } = validateLaunchdAuthorityCatalogs(launchdPaths, services, legacy);
+  const definitionOnlyPaths = launchdPaths.filter(path =>
+    isDefinitionOnlyLaunchd(parsePlistXml(readFileSync(resolve(REPO_ROOT, path), "utf8"))));
+  const { servicesByPlist, legacyByPlist } = validateLaunchdAuthorityCatalogs(
+    launchdPaths, services, legacy, definitionOnlyPaths);
   return {
     servicesByPlist,
     legacyByPlist,
@@ -966,9 +1017,20 @@ export function workflowDefinitionInventory() {
       .filter(key => Object.hasOwn(plist, key)).map(key => [key, plist[key]]));
     const environmentContract = plist.EnvironmentVariables || {};
     const serviceMappings = servicesByPlist.get(source_locator) || [];
-    if (!serviceMappings.length) throw new Error(`launchd workflow lacks ops.service authority mapping: ${source_locator}`);
-    const physicalAuthorityRefs = serviceMappings.map(mapping =>
-      `ops.service_environment:${mapping.service_key}:${mapping.environment}`);
+    const definitionOnly = isDefinitionOnlyLaunchd(plist);
+    // A deployed agent must name the service environment that deploys it. A
+    // definition-only agent has no deployment to name, and is inventoried with
+    // an explicit non-deployed authority ref instead of an absent one, so it is
+    // still a registered row a reviewer can see rather than a silent gap.
+    if (!serviceMappings.length && !definitionOnly)
+      throw new Error(`launchd workflow lacks ops.service authority mapping: ${source_locator}`);
+    // A DISTINCT NAMESPACE, not an ops.service_environment ref: this agent has
+    // no service environment, and borrowing that prefix would have made it
+    // count as one wherever deployed environments are totalled.
+    const physicalAuthorityRefs = definitionOnly
+      ? ["ops.definition_only_launchd:not_deployed"]
+      : serviceMappings.map(mapping =>
+        `ops.service_environment:${mapping.service_key}:${mapping.environment}`);
     const legacySurface = legacyByPlist.get(source_locator);
     if (legacySurface) {
       assertLegacyLaunchdSource(legacySurface, source_locator, plist);
@@ -1035,6 +1097,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V20_VERSION]: "v20",
   [REGISTRY_V21_VERSION]: "v21",
   [REGISTRY_V22_VERSION]: "v22",
+  [REGISTRY_V23_VERSION]: "v23",
 });
 
 function sourceInventoryFixtureDigest(rows) {
@@ -1090,7 +1153,7 @@ export function frozenInventory(version) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V22_VERSION) {
+  version = REGISTRY_V23_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -1128,7 +1191,8 @@ export function registryDigestFor(version, rows = fullInventory(), dbCatalogBase
     REGISTRY_V12_VERSION, REGISTRY_V13_VERSION, REGISTRY_V14_VERSION,
     REGISTRY_V15_VERSION, REGISTRY_V16_VERSION, REGISTRY_V17_VERSION,
     REGISTRY_V18_VERSION, REGISTRY_V19_VERSION, REGISTRY_V20_VERSION,
-    REGISTRY_V21_VERSION, REGISTRY_V22_VERSION].includes(version))
+    REGISTRY_V21_VERSION, REGISTRY_V22_VERSION,
+    REGISTRY_V23_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -7165,6 +7229,290 @@ ${preflightBody}end $doctorcre_portfolio_preflight$;
   return `${predecessorPreflight}${DOCTORCRE_PORTFOLIO_DOMAIN_SQL}${sql}`.replace(/\n+$/, "\n");
 }
 
+// Shared v23 trust root. Every entry path that renders or writes a v23
+// artifact calls this BEFORE doing work, so an unbound template constant can
+// never reach a digest, a projection or a written file.
+const R07_REPO_HYGIENE_JANITOR_V22_MIGRATION_PATH =
+  "migrations/0496_doctorcre_portfolio_hierarchy_and_scac_successor.sql";
+const R07_REPO_HYGIENE_JANITOR_V22_RUNTIME_PATH =
+  "mcp-server/src/scac-mutation-registry.v22.generated.js";
+
+export function assertR07RepoHygieneJanitorV23TrustRoot() {
+  // Strictly stronger than the root it succeeds: the whole v22 chain has to be
+  // bound before a v23 artifact can exist at all.
+  assertDoctorcrePortfolioV22TrustRoot();
+  const { v22: v22Seal } = HISTORICAL_REGISTRY_SEALS;
+  if (v22Seal?.version !== REGISTRY_V22_VERSION ||
+      !CONTINUITY_ARCHIVE_DIGEST_RE.test(v22Seal?.digest ?? "") ||
+      !Number.isInteger(v22Seal?.entryCount) || v22Seal.entryCount < 1 ||
+      !Number.isInteger(v22Seal?.sourceEntryCount) || v22Seal.sourceEntryCount < 1)
+    throw new Error("R07 repo hygiene janitor v23 predecessor seal is unbound");
+  assertR06HooksCorrectnessCatalogBaseline("predecessor v22",
+    R07_REPO_HYGIENE_JANITOR_PRE_V23_DB_CATALOG_BASELINE, "scac-db-catalog-projection.v22");
+  assertR06HooksCorrectnessCatalogBaseline("successor v23",
+    R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE, "scac-db-catalog-projection.v23");
+  for (const path of [
+    R07_REPO_HYGIENE_JANITOR_V22_MIGRATION_PATH, R07_REPO_HYGIENE_JANITOR_V22_RUNTIME_PATH,
+  ]) {
+    if (!CONTINUITY_ARCHIVE_ARTIFACT_SHA_RE.test(
+      HISTORICAL_REGISTRY_ARTIFACT_SHA256[path] ?? ""))
+      throw new Error(`R07 repo hygiene janitor v23 predecessor artifact pin is unbound: ${path}`);
+  }
+}
+
+// Registry-only successor for the R07 repo-hygiene janitor. The source change
+// adds one tools/ planner script and one DELIBERATELY UNINSTALLED LaunchAgent
+// definition, and re-digests the two entrypoints that carry them, so this
+// migration creates no table, no role and no domain function. It only seals the
+// new source inventory and installs the v23 catalog/policy projection after the
+// immutable v22 frontier -- the same shape as the v20 and v21 registry-only
+// successors, and unlike v22, which carried the portfolio's domain DDL.
+export function renderR07RepoHygieneJanitorForwardRegistrySql(rows = fullInventory(),
+  dbCatalogBaseline = R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE,
+  predecessorArtifacts = undefined) {
+  // The predecessor seal, its catalog projection and the sealed v22 artifact
+  // hashes are fixed production constants, asserted by the shared v23 trust
+  // root that every v23 entry path calls. There is deliberately no caller
+  // binding for them: a supplied predecessor artifact is checked AGAINST these
+  // pins, it never supplies its own expected hash.
+  assertR07RepoHygieneJanitorV23TrustRoot();
+  const { v22: v22Seal } = HISTORICAL_REGISTRY_SEALS;
+  const predecessorDbCatalogBaseline = R07_REPO_HYGIENE_JANITOR_PRE_V23_DB_CATALOG_BASELINE;
+  const artifactShaRe = CONTINUITY_ARCHIVE_ARTIFACT_SHA_RE;
+  // A caller-supplied successor baseline is held to the SAME exact-projection
+  // shape as the fixed constant; it can only ever narrow, never widen.
+  assertR06HooksCorrectnessCatalogBaseline("successor v23", dbCatalogBaseline,
+    "scac-db-catalog-projection.v23");
+
+  const v23Digest = registryDigestFor(REGISTRY_V23_VERSION, rows, dbCatalogBaseline);
+  const catalogCount = dbCatalogBaseline.secdef_execute.count +
+    dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
+  const entryCount = rows.length + catalogCount;
+  const v22MigrationPath = R07_REPO_HYGIENE_JANITOR_V22_MIGRATION_PATH;
+  const v22RuntimePath = R07_REPO_HYGIENE_JANITOR_V22_RUNTIME_PATH;
+  const v22Rows = frozenInventory(REGISTRY_V22_VERSION);
+  // A partial predecessor bundle regenerates only the missing half, and it
+  // regenerates it from the canonical prior inputs: the v22 renderer's third
+  // argument is its own v21-shaped predecessor bundle, so this v22-shaped one
+  // is never forwarded into it.
+  const v22Migration = predecessorArtifacts?.migration ??
+    renderDoctorcrePortfolioForwardRegistrySql(v22Rows, predecessorDbCatalogBaseline);
+  const v22Runtime = predecessorArtifacts?.runtime ?? renderRuntimeProjection(v22Rows, {
+    version: REGISTRY_V22_VERSION,
+    dbCatalogBaseline: predecessorDbCatalogBaseline,
+  });
+  for (const [path, source] of [
+    [v22MigrationPath, v22Migration], [v22RuntimePath, v22Runtime],
+  ]) {
+    const expected = HISTORICAL_REGISTRY_ARTIFACT_SHA256[path];
+    if (!artifactShaRe.test(expected ?? ""))
+      throw new Error(`R07 repo hygiene janitor v23 predecessor artifact pin is unbound: ${path}`);
+    const observed = sha256(source);
+    if (observed !== expected)
+      throw new Error(`sealed historical SCAC v22 artifact changed: ${path}: ${observed}`);
+  }
+
+  // Slicing from the header marker is also what drops v22's domain SQL: the
+  // portfolio DDL sits BEFORE this marker, and a registry-only successor must
+  // not re-emit it.
+  const headerMarker =
+    "-- SCAC-12: mutation registry v22 after the DoctorCRE v5 portfolio hierarchy.";
+  const coreStart = v22Migration.indexOf(headerMarker);
+  if (coreStart < 0 || v22Migration.indexOf(headerMarker, coreStart + headerMarker.length) >= 0)
+    throw new Error("sealed SCAC v22 migration has no exact successor core boundary");
+  const v22Core = v22Migration.slice(coreStart);
+  const currentV22Marker = "create or replace function ops.scac_mutation_catalog_v22_current()";
+  const policyMarker =
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v21;";
+  const currentV22Start = v22Core.indexOf(currentV22Marker);
+  const secondCurrentV22 = v22Core.indexOf(
+    currentV22Marker, currentV22Start + currentV22Marker.length);
+  const v21HistoryMarker =
+    "alter function ops.scac_mutation_catalog_v21_current() rename to scac_mutation_catalog_v21_live_at_seal;";
+  const v21HistoryStart = v22Core.indexOf(v21HistoryMarker);
+  const secondV21History = v22Core.indexOf(
+    v21HistoryMarker, v21HistoryStart + v21HistoryMarker.length);
+  const policyStart = v22Core.indexOf(policyMarker);
+  const secondPolicy = v22Core.indexOf(policyMarker, policyStart + policyMarker.length);
+  if (v21HistoryStart < 0 || secondV21History >= 0 || currentV22Start <= v21HistoryStart ||
+      secondCurrentV22 >= 0 || policyStart <= currentV22Start || secondPolicy >= 0)
+    throw new Error("sealed SCAC v22 migration has no exact catalog successor boundary");
+  const installedV21History = v22Core.slice(v21HistoryStart, currentV22Start);
+  const v22Current = v22Core.slice(currentV22Start, policyStart);
+  const v22History =
+`alter function ops.scac_mutation_catalog_v22_current() rename to scac_mutation_catalog_v22_live_at_seal;
+create or replace function ops.scac_mutation_registry_v22_seal_available()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_registry_seal_valid('scac-mutation-registry.v22')
+$fn$;
+create or replace function ops.scac_mutation_catalog_v22_current()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_catalog_v22_live_at_seal()
+$fn$;
+comment on function ops.scac_mutation_registry_v22_seal_available() is 'Exact immutable v22 registry seal; separate from whether the live catalog still equals v22.';
+comment on function ops.scac_mutation_catalog_v22_current() is 'Historical v22 live-catalog validator; expected to become false after the v23 authority surface is installed.';
+
+`;
+  const renderV23Current = baseline => {
+    let current = v22Current
+      .replaceAll("scac_mutation_catalog_v22_current", "scac_mutation_catalog_v23_current")
+      .replaceAll("scac-mutation-registry.v22", "scac-mutation-registry.v23");
+    for (const [category, label] of [
+      ["secdef_execute", "security-definer"],
+      ["relation_dml", "relation"],
+      ["column_dml", "column"],
+    ]) {
+      current = replaceExactlyOnce(current,
+        `if observed_count<>${predecessorDbCatalogBaseline[category].count} or observed_digest<>'${predecessorDbCatalogBaseline[category].digest}' then return false; end if;`,
+        `if observed_count<>${baseline[category].count} or observed_digest<>'${baseline[category].digest}' then return false; end if;`,
+        `R07 repo hygiene janitor v23 ${label} baseline`);
+    }
+    return replaceExactlyOnce(current,
+      `return observed_count=${predecessorDbCatalogBaseline.role_authority.count} and observed_digest='${predecessorDbCatalogBaseline.role_authority.digest}';`,
+      `return observed_count=${baseline.role_authority.count} and observed_digest='${baseline.role_authority.digest}';`,
+      "R07 repo hygiene janitor v23 role-authority baseline");
+  };
+  const v23Current = renderV23Current(dbCatalogBaseline);
+
+  let sql = replaceExactlyOnce(v22Core, v22Current,
+    "__DOCTORCRE_PORTFOLIO_V22_CATALOG_SUCCESSOR__",
+    "R07 repo hygiene janitor v22 current catalog block");
+  sql = replaceExactlyOnce(sql, installedV21History, "",
+    "R07 repo hygiene janitor already-installed v21 catalog history");
+  sql = replaceExactlyOnce(sql, headerMarker,
+    "-- SCAC-12: registry-only mutation registry v23 after the R07 repo-hygiene janitor definition.",
+    "R07 repo hygiene janitor migration header");
+  sql = sql
+    .replaceAll("scac-mutation-registry.v22", "scac-mutation-registry.v23")
+    .replaceAll("_v22", "_v23")
+    .replaceAll(" v22", " v23");
+  sql = replaceExactlyOnce(sql, JSON.stringify(predecessorDbCatalogBaseline),
+    JSON.stringify(dbCatalogBaseline), "R07 repo hygiene janitor v23 catalog projection");
+  sql = replaceExactlyOnce(sql,
+    `'${v22Seal.digest}',${v22Seal.entryCount},${v22Seal.sourceEntryCount},`,
+    `'sha256:${v23Digest}',${entryCount},${rows.length},`,
+    "R07 repo hygiene janitor v23 registry row");
+  sql = replaceExactlyOnce(sql,
+    `ops.scac_mutation_registration_v23('${v22Seal.digest}',`,
+    `ops.scac_mutation_registration_v23('sha256:${v23Digest}',`,
+    "R07 repo hygiene janitor v23 snapshot registry lookup");
+  sql = replaceExactlyOnce(sql,
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v21;",
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v22;",
+    "R07 repo hygiene janitor policy snapshot predecessor");
+  sql = replaceExactlyOnce(sql, "__DOCTORCRE_PORTFOLIO_V22_CATALOG_SUCCESSOR__",
+    `${v22History}${v23Current}`, "R07 repo hygiene janitor v22 catalog history insertion");
+
+  const versionsThrough22 = Array.from({ length: 22 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  const versionsThrough21 = Array.from({ length: 21 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  sql = replaceExactlyOnce(sql,
+    `check (registry_version in (${versionsThrough21},'scac-mutation-registry.v23'))`,
+    `check (registry_version in (${versionsThrough22},'scac-mutation-registry.v23'))`,
+    "R07 repo hygiene janitor registry-version constraint");
+  sql = replaceExactlyOnce(sql,
+    `if p_registry_version not in (${versionsThrough21}) then return false; end if;`,
+    `if p_registry_version not in (${versionsThrough22}) then return false; end if;`,
+    "R07 repo hygiene janitor historical seal allowlist");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v21' then '${HISTORICAL_REGISTRY_SEALS.v21.digest}' end;`,
+    `    when 'scac-mutation-registry.v21' then '${HISTORICAL_REGISTRY_SEALS.v21.digest}'\n    when '${v22Seal.version}' then '${v22Seal.digest}' end;`,
+    "R07 repo hygiene janitor historical digest case");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v21' then '${JSON.stringify(R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE)}'::jsonb end;`,
+    `    when 'scac-mutation-registry.v21' then '${JSON.stringify(R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE)}'::jsonb\n    when '${v22Seal.version}' then '${JSON.stringify(predecessorDbCatalogBaseline)}'::jsonb end;`,
+    "R07 repo hygiene janitor historical catalog case");
+  sql = replaceExactlyOnce(sql,
+    `    ('scac-mutation-registry.v21','${HISTORICAL_REGISTRY_SEALS.v21.digest}',${HISTORICAL_REGISTRY_SEALS.v21.entryCount},${HISTORICAL_REGISTRY_SEALS.v21.sourceEntryCount})\n`,
+    `    ('scac-mutation-registry.v21','${HISTORICAL_REGISTRY_SEALS.v21.digest}',${HISTORICAL_REGISTRY_SEALS.v21.entryCount},${HISTORICAL_REGISTRY_SEALS.v21.sourceEntryCount}),\n    ('${v22Seal.version}','${v22Seal.digest}',${v22Seal.entryCount},${v22Seal.sourceEntryCount})\n`,
+    "R07 repo hygiene janitor historical seal tuple");
+  sql = replaceExactlyOnce(sql,
+    "    ops.scac_mutation_registry_v21_seal_available()) then",
+    "    ops.scac_mutation_registry_v21_seal_available() and\n    ops.scac_mutation_registry_v22_seal_available()) then",
+    "R07 repo hygiene janitor snapshot predecessor seal");
+  sql = replaceExactlyOnce(sql,
+    `or (r.registry_version='scac-mutation-registry.v23' and r.registry_digest='${v22Seal.digest}')`,
+    `or (r.registry_version='scac-mutation-registry.v22' and r.registry_digest='${v22Seal.digest}')\n         or (r.registry_version='scac-mutation-registry.v23' and r.registry_digest='sha256:${v23Digest}')`,
+    "R07 repo hygiene janitor epoch-chain digest cases");
+  sql = replaceExactlyOnce(sql,
+    `  (registry_version='scac-mutation-registry.v23' and registry_digest='${v22Seal.digest}')`,
+    `  (registry_version='scac-mutation-registry.v22' and registry_digest='${v22Seal.digest}') or\n  (registry_version='scac-mutation-registry.v23' and registry_digest='sha256:${v23Digest}')`,
+    "R07 repo hygiene janitor epoch constraint digest cases");
+  sql = replaceExactlyOnce(sql,
+    `'{registry_digest}',to_jsonb('${v22Seal.digest}'::text)`,
+    `'{registry_digest}',to_jsonb('sha256:${v23Digest}'::text)`,
+    "R07 repo hygiene janitor snapshot registry digest");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_mutation_registry_v20_seal_available(),ops.scac_mutation_catalog_v21_live_at_seal(),ops.scac_mutation_catalog_v21_current(),ops.scac_mutation_registry_v21_seal_available(),ops.scac_mutation_catalog_v23_current()",
+    "ops.scac_mutation_registry_v20_seal_available(),ops.scac_mutation_catalog_v21_live_at_seal(),ops.scac_mutation_catalog_v21_current(),ops.scac_mutation_registry_v21_seal_available(),ops.scac_mutation_catalog_v22_live_at_seal(),ops.scac_mutation_catalog_v22_current(),ops.scac_mutation_registry_v22_seal_available(),ops.scac_mutation_catalog_v23_current()",
+    "R07 repo hygiene janitor historical function revoke list");
+  sql = replaceExactlyOnce(sql,
+    // The anchor is the predecessor comment AS IT STANDS AFTER the global
+    // version rename above, which has already bumped "registry v22" to v23.
+    "DoctorCRE portfolio successor snapshot: current policy epochs bind mutation registry v23 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21 epochs remain immutable.",
+    "R07 repo-hygiene janitor successor snapshot: current policy epochs bind mutation registry v23 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22 epochs remain immutable.",
+    "R07 repo hygiene janitor policy snapshot comment");
+  sql = replaceExactlyOnce(sql,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v23')<>${v22Seal.entryCount}`,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v23')<>${entryCount}`,
+    "R07 repo hygiene janitor v23 entry count guard");
+  sql = replaceExactlyOnce(sql,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v21')<>'${HISTORICAL_REGISTRY_SEALS.v21.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v21')<>${HISTORICAL_REGISTRY_SEALS.v21.entryCount} then raise exception 'sealed SCAC mutation registry v21 changed during successor creation'; end if;`,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v22')<>'${v22Seal.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v22')<>${v22Seal.entryCount} then raise exception 'sealed SCAC mutation registry v22 changed during successor creation'; end if;`,
+    "R07 repo hygiene janitor predecessor seal guard");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),ops.scac_policy_epoch_snapshot_v15(),ops.scac_policy_epoch_snapshot_v16(),ops.scac_policy_epoch_snapshot_v17(),ops.scac_policy_epoch_snapshot_v18(),ops.scac_policy_epoch_snapshot_v19(),ops.scac_policy_epoch_snapshot_v20(),ops.scac_policy_epoch_snapshot_v21(),",
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),ops.scac_policy_epoch_snapshot_v15(),ops.scac_policy_epoch_snapshot_v16(),ops.scac_policy_epoch_snapshot_v17(),ops.scac_policy_epoch_snapshot_v18(),ops.scac_policy_epoch_snapshot_v19(),ops.scac_policy_epoch_snapshot_v20(),ops.scac_policy_epoch_snapshot_v21(),ops.scac_policy_epoch_snapshot_v22(),",
+    "R07 repo hygiene janitor historical policy snapshot revoke list");
+
+  const seedStartMarker = "with seed as (select value as contract from jsonb_array_elements(";
+  const seedEndMarker = "::jsonb))\ninsert into ops.scac_mutation_registry_entry";
+  const seedStart = sql.indexOf(seedStartMarker);
+  const secondSeedStart = sql.indexOf(seedStartMarker, seedStart + seedStartMarker.length);
+  const seedEnd = sql.indexOf(seedEndMarker, seedStart + seedStartMarker.length);
+  const secondSeedEnd = sql.indexOf(seedEndMarker, seedEnd + seedEndMarker.length);
+  if (seedStart < 0 || secondSeedStart >= 0 || seedEnd < 0 || secondSeedEnd >= 0)
+    throw new Error("sealed SCAC v22 migration has no exact source-seed boundary");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart + seedStartMarker.length)}${sqlLiteral(seed)}${sql.slice(seedEnd)}`;
+
+  const preflightCurrent = renderV23Current(predecessorDbCatalogBaseline);
+  const preflightBegin = preflightCurrent.indexOf("begin\n");
+  const preflightEnd = preflightCurrent.lastIndexOf("end $fn$;");
+  if (preflightBegin < 0 || preflightEnd <= preflightBegin)
+    throw new Error("generated v23 catalog predicate has no exact preflight body boundary");
+  let preflightBody = preflightCurrent.slice(preflightBegin + "begin\n".length, preflightEnd);
+  preflightBody = preflightBody.replaceAll(
+    "then return false; end if;",
+    "then raise exception 'R07 repo hygiene janitor pre-v23 catalog receipt drifted'; end if;");
+  preflightBody = replaceExactlyOnce(preflightBody,
+    `return observed_count=${predecessorDbCatalogBaseline.role_authority.count} and observed_digest='${predecessorDbCatalogBaseline.role_authority.digest}';`,
+    `if observed_count<>${predecessorDbCatalogBaseline.role_authority.count} or observed_digest<>'${predecessorDbCatalogBaseline.role_authority.digest}' then raise exception 'R07 repo hygiene janitor pre-v23 role-authority receipt drifted'; end if;`,
+    "R07 repo hygiene janitor pre-v23 role receipt");
+  const predecessorHash = sha256(v22Migration);
+  const predecessorPreflight =
+`-- Exact disposable-Postgres post-0496 receipt. Refuse before any v23 function
+-- exists; this registry-only successor changes no domain DDL or business rows.
+do $r07_repo_hygiene_janitor_preflight$
+declare observed_count integer; observed_digest text; grant_snapshot jsonb;
+begin
+  if (select count(*) from public.schema_migrations where filename='0496_doctorcre_portfolio_hierarchy_and_scac_successor.sql')<>1
+     or not exists(select 1 from public.schema_migrations where filename='0496_doctorcre_portfolio_hierarchy_and_scac_successor.sql'
+       and sha256='${predecessorHash}') then
+    raise exception 'R07 repo hygiene janitor pre-v23 migration ledger receipt drifted';
+  end if;
+  grant_snapshot:=ops.scac_runtime_dml_grant_snapshot();
+  if (grant_snapshot->>'entry_count')::integer<>${predecessorDbCatalogBaseline.runtime_dml_grants.count}
+     or grant_snapshot->>'grant_digest'<>'${predecessorDbCatalogBaseline.runtime_dml_grants.digest}' then
+    raise exception 'R07 repo hygiene janitor pre-v23 runtime grant receipt drifted';
+  end if;
+${preflightBody}end $r07_repo_hygiene_janitor_preflight$;
+
+`;
+  return `${predecessorPreflight}${sql}`.replace(/\n+$/, "\n");
+}
+
 
 
 export function renderGeneratedFrontier() {
@@ -7438,9 +7786,22 @@ export function renderGeneratedFrontier() {
         runtime: artifacts["mcp-server/src/scac-mutation-registry.v21.generated.js"],
       });
 
+  const v23Rows = frozenInventory(REGISTRY_V23_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v23.generated.js"] =
+    renderRuntimeProjection(v23Rows, {
+      version: REGISTRY_V23_VERSION,
+      dbCatalogBaseline: R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0497_r07_repo_hygiene_janitor_and_scac_successor.sql"] =
+    renderR07RepoHygieneJanitorForwardRegistrySql(v23Rows,
+      R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE, {
+        migration: artifacts["migrations/0496_doctorcre_portfolio_hierarchy_and_scac_successor.sql"],
+        runtime: artifacts["mcp-server/src/scac-mutation-registry.v22.generated.js"],
+      });
+
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 30 || runtimeCount !== 21 || Object.keys(artifacts).length !== 51)
+  if (migrationCount !== 31 || runtimeCount !== 22 || Object.keys(artifacts).length !== 53)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
@@ -7867,9 +8228,24 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const rows = frozenInventory(REGISTRY_V22_VERSION);
     await writeFile(target, renderDoctorcrePortfolioForwardRegistrySql(rows));
     process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-runtime-v23") {
+    assertR07RepoHygieneJanitorV23TrustRoot();
+    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v23.generated.js");
+    const rows = frozenInventory(REGISTRY_V23_VERSION);
+    await writeFile(target, renderRuntimeProjection(rows, {
+      version: REGISTRY_V23_VERSION,
+      dbCatalogBaseline: R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE,
+    }));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-r07-repo-hygiene-janitor-registry-migration") {
+    const target = resolve(process.argv[3] ||
+      "migrations/0497_r07_repo_hygiene_janitor_and_scac_successor.sql");
+    const rows = frozenInventory(REGISTRY_V23_VERSION);
+    await writeFile(target, renderR07RepoHygieneJanitorForwardRegistrySql(rows));
+    process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools());
-    process.stdout.write(`source inventory matches frozen ${REGISTRY_V22_VERSION} frontier fixture\n`);
+    process.stdout.write(`source inventory matches frozen ${REGISTRY_V23_VERSION} frontier fixture\n`);
   } else if (process.argv[2] === "--check-generated-frontier") {
     const paths = assertGeneratedFrontierMatchesCommitted();
     process.stdout.write(`generated frontier is byte-exact (${paths.length} artifacts)\n`);
