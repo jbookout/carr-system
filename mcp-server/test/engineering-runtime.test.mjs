@@ -19,6 +19,8 @@ import {
   designDepthInputs,
   ENGINEERING_SLICE_PLAN_VERSIONS,
   ENGINEERING_DESIGN_CONTRACT_VERSION,
+  ENGINEERING_DESIGN_DEPTH_PREDICATE_VERSIONS,
+  ENGINEERING_SERVER_EXECUTION_BINDING,
 } from "../src/engineering-runtime.js";
 
 const digest = value => canonicalDigest(value);
@@ -50,7 +52,9 @@ function currentClaimEnvelope(sessionId = "99999999-9999-4999-8999-999999999999"
     schema_version: "execution-envelope.v1", envelope_id: "env:88888888-8888-4888-8888-888888888888", work_request_id: "wr:11111111-1111-4111-8111-111111111111", issued_at: issued, expires_at: expiry,
     agent_session: { id: `session:${sessionId}`, lease_expires_at: expiry },
     request: { job_ref: "job:66666666-6666-4666-8666-666666666666", allowed_actions: [...ENGINEERING_REPOSITORY_ACTIONS] },
-    server_binding: { authority: { read_only: false, capability_profile: "capability:engineering-repository-write" },
+    // environment is part of the documented server execution binding, so the
+    // rehearsal envelope this seam actually issues states it here.
+    server_binding: { authority: { read_only: false, capability_profile: "capability:engineering-repository-write", environment: ENGINEERING_SERVER_EXECUTION_BINDING.environment },
       identity: { agent_principal_id: "agent:codex", runtime_principal: "runtime:codex" }, adapter: { surface: "codex_desktop", adapter_id: "adapter:codex-desktop" } },
   };
 }
@@ -188,12 +192,20 @@ test("server builds a fresh Codex envelope and receipt binding rejects wrong att
   assert.throws(() => validateReceiptBinding({ ...receipt, envelope_digest: `sha256:${"9".repeat(64)}` }, { ...envelope, envelope_digest: receipt.envelope_digest }, { ...slice, plan_digest: plan.plan_digest }, actor, Error));
 });
 
-test("runtime refuses malformed, expired, read-only, and session-lease-mismatched packets before dispatch", () => {
+test("runtime refuses malformed, expired, read-only, wrong-environment and session-lease-mismatched packets before dispatch", () => {
   const envelope = currentClaimEnvelope();
+  assert.equal(envelope.server_binding.authority.environment, ENGINEERING_SERVER_EXECUTION_BINDING.environment,
+    "the rehearsal fixture must carry the environment the server binding documents");
   assert.equal(isCurrentRepositoryWriteEnvelope({ envelope }), true);
+  const authority = envelope.server_binding.authority;
   for (const invalid of [
     { ...envelope, expires_at: "not-a-date" },
-    { ...envelope, server_binding: { ...envelope.server_binding, authority: { ...envelope.server_binding.authority, read_only: true } } },
+    { ...envelope, server_binding: { ...envelope.server_binding, authority: { ...authority, read_only: true } } },
+    // The documented gate includes environment: an envelope naming another one
+    // is not the binding this seam issues, so it may not dispatch as if it were.
+    { ...envelope, server_binding: { ...envelope.server_binding, authority: { ...authority, environment: "production" } } },
+    { ...envelope, server_binding: { ...envelope.server_binding, authority: { ...authority, environment: "staging" } } },
+    { ...envelope, server_binding: { ...envelope.server_binding, authority: { ...authority, environment: undefined } } },
     { ...envelope, agent_session: { ...envelope.agent_session, lease_expires_at: "2000-01-01T00:00:00Z" } },
     { ...envelope, schema_version: "other" },
   ]) assert.equal(isCurrentRepositoryWriteEnvelope({ envelope: invalid }), false);
@@ -1251,8 +1263,16 @@ test("an ungoverned envelope keeps its exact previous shape", () => {
 //
 // These fixtures and case tables are deliberately the same shape as the ones in
 // tools/room-bridge/test_engineering_passport_unit.py.  The server-side and
-// portable validators must accept and refuse exactly the same closed contract,
-// so the two tables are kept identical on purpose.
+// portable validators must accept and refuse exactly the same closed
+// engineering-slice-plan.v2 contract, so the two tables are kept identical on
+// purpose.
+//
+// Parity is claimed for v2, not universally.  Legacy engineering-slice-plan.v1
+// duplicate ordinals and dependency cycles are the one documented divergence:
+// the portable validator has always refused them, and this server validator has
+// always accepted them, so refusing them here now would strand already
+// registered append-only plans on every read path.  The case below states both
+// halves explicitly rather than asserting a parity that does not hold.
 
 const DESIGN_CONTRACT_FIELD_NAMES = [
   "authority", "code_model_decision", "completion", "contract_version", "dependency_rationale",
@@ -1410,6 +1430,13 @@ test("the planned check count is never a classifier input and every check stays 
   const dropped = structuredClone(many);
   dropped.design_contract.tests.planned_check_refs = ["check:extra-0"];
   refusesPlan(v2Plan([dropped]), "tests may not drop a planned check");
+  // The portable table refuses this case too: verification is never optional,
+  // so a slice cannot plan zero checks and take the SHORT template anyway.
+  const emptied = structuredClone(many);
+  emptied.planned_checks = [];
+  assert.throws(() => requirePlan(v2Plan([emptied]), EngineeringToolError),
+    error => error.error === "engineering_slice_checks_invalid",
+    "a slice must plan at least one check");
 });
 
 test("an agent cannot self-label design depth or a bypass", () => {
@@ -1604,6 +1631,178 @@ test("engineering-slice-plan.v1 stays exactly compatible and unknown versions fa
       error => error.error === "engineering_slice_plan_schema_invalid",
       `unknown schema_version ${JSON.stringify(unknown)}`);
   }
+});
+
+// --- V5-F03 review corrections ------------------------------------------------
+//
+// Each case below is a contradiction the accepted contract could previously
+// state and the runtime would then ignore.  The remedy is always a refusal
+// against the binding that already exists; nothing here grants new authority.
+
+test("admission refuses an accepted contract that contradicts the binding it issues", async () => {
+  const contradictions = [
+    ["authority.read_only", row => { row.design_contract.authority.read_only = true; }],
+    ["authority.environment", row => { row.design_contract.authority.environment = "production"; }],
+    ["authority.capability_profile", row => {
+      Object.assign(row.design_contract.authority, {
+        read_only: true, capability_profile: "capability:engineering-read-only",
+      });
+    }],
+    ["routing.adapter_ref", row => { row.design_contract.routing.adapter_ref = "adapter:human-desk"; }],
+    ["routing.executor_class", row => { row.design_contract.routing.executor_class = "attended_human"; }],
+  ];
+  for (const [field, contradict] of contradictions) {
+    const row = v2Slice();
+    contradict(row);
+    const typed = v2Plan([row]);
+    assert.doesNotThrow(() => requirePlan(typed, EngineeringToolError),
+      `${field} is still accepted by the sealed contract itself`);
+    const calls = [];
+    const c = { query: async sql => {
+      calls.push(sql);
+      if (sql.includes("engineering_passport_facts")) return { rows: [{ facts: passportFacts(typed) }] };
+      return { rows: [] };
+    } };
+    await assert.rejects(() => admitEngineeringSlice(c, actor, {
+      idempotency_key: "77777777-7777-4777-8777-777777777777",
+      work_request: source.work.ref, slice_ref: "slice:short",
+    }, EngineeringToolError, async () => {}),
+      error => error.error === "engineering_design_contract_binding_mismatch" && error.field === field,
+      field);
+    assert.equal(calls.some(sql => /pg_advisory_xact_lock|engineering_enqueue_slice_job|insert into ops\.|update ops\./i.test(sql)),
+      false, `${field} must refuse before any lock, job, session or envelope`);
+    // The refusal belongs to admission alone: an already sealed plan stays
+    // readable, because refusing on the read path would strand a closed
+    // passport that nothing can amend.
+    assert.equal(closureProjection(passportFacts(typed), EngineeringToolError).closure_state, "blocked", field);
+  }
+});
+
+test("a v2 slice whose contract matches the issued binding still admits", async () => {
+  const typed = v2Plan([v2Slice()]);
+  assert.equal(typed.slices[0].design_contract.routing.adapter_ref, ENGINEERING_SERVER_EXECUTION_BINDING.adapter_ref);
+  const facts = passportFacts(typed);
+  const envelopeId = "66666666-6666-4666-8666-666666666666";
+  const c = { query: async sql => {
+    if (sql.includes("engineering_passport_facts")) return { rows: [{ facts }] };
+    if (sql.includes("from actor")) return { rows: [{ id: actor.id, slug: actor.slug }] };
+    if (sql.trimStart().startsWith("select id from ops.engineering_slice_plan")) return { rows: [{ id: "12121212-1212-4212-8212-121212121212" }] };
+    if (sql.includes("select id from ops.work_request")) return { rows: [{ id: source.work.id.replace(/^wr:/, "") }] };
+    if (sql.includes("insert into ops.capability_agent_session")) return { rows: [{
+      id: "44444444-4444-4444-8444-444444444444", executor_actor_id: actor.id, state: "claimed",
+      lease_expires_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+    }] };
+    if (sql.includes("capability_agent_session")) return { rows: [] };
+    if (sql.includes("engineering_enqueue_slice_job")) return { rows: [{ id: "55555555-5555-4555-8555-555555555555" }] };
+    if (sql.includes("insert into ops.engineering_execution_envelope")) return { rows: [{ id: envelopeId }] };
+    return { rows: [] };
+  } };
+  const admitted = await admitEngineeringSlice(c, actor, {
+    idempotency_key: "88888888-8888-4888-8888-888888888888",
+    work_request: source.work.ref, slice_ref: "slice:short",
+  }, EngineeringToolError, async () => {});
+  assert.equal(admitted.replayed, false);
+  assert.equal(admitted.envelope_id, envelopeId);
+});
+
+test("an unsupported reviewer class is refused rather than sealed into a plan", () => {
+  const accepted = v2Slice();
+  assert.equal(accepted.design_contract.review.reviewer_class, "independent_agent");
+  assert.doesNotThrow(() => requirePlan(v2Plan([accepted]), EngineeringToolError));
+  for (const unsupported of ["independent_human", "self_review", ""]) {
+    const row = v2Slice();
+    row.design_contract.review.reviewer_class = unsupported;
+    refusesPlan(v2Plan([row]), `reviewer_class ${unsupported}`);
+  }
+});
+
+test("the SHORT predicate is frozen to the contract version that sealed it", () => {
+  assert.deepEqual([...ENGINEERING_DESIGN_DEPTH_PREDICATE_VERSIONS], [ENGINEERING_DESIGN_CONTRACT_VERSION]);
+  const base = v2Slice();
+  assert.equal(classifyDesignDepth(base, EngineeringToolError, ENGINEERING_DESIGN_CONTRACT_VERSION), "short");
+  for (const unknown of ["engineering-design-contract.v2", "", null]) {
+    assert.throws(() => classifyDesignDepth(base, EngineeringToolError, unknown),
+      error => error.error === "engineering_design_depth_predicate_unsupported",
+      `no predicate is frozen for ${JSON.stringify(unknown)}`);
+  }
+  const typed = v2Plan([v2Slice()]);
+  assert.doesNotThrow(() => requirePlan(typed, EngineeringToolError));
+  const successor = structuredClone(typed);
+  successor.slices[0].design_contract.contract_version = "engineering-design-contract.v2";
+  refusesPlan(reseal(successor), "a changed predicate has to ship as an explicit successor contract version");
+});
+
+test("two parallel-safe slices cannot both own one declared resource", () => {
+  assert.throws(() => requirePlan(v2Plan([v2Slice("slice:one", 1), v2Slice("slice:two", 2)]), EngineeringToolError),
+    error => error.error === "engineering_design_parallel_resource_conflict" &&
+      error.resource_ref === "resource:worktree-a" && error.conflicting_slice_ref === "slice:one",
+    "both slices declared one resource while each stated nothing it touches is shared");
+  assert.doesNotThrow(() => requirePlan(v2Plan([
+    v2Slice("slice:one", 1),
+    v2Slice("slice:two", 2, { declared_resource_refs: ["resource:worktree-b"] }),
+  ]), EngineeringToolError), "distinct resources stay parallel");
+  assert.doesNotThrow(() => requirePlan(v2Plan([
+    v2Slice("slice:one", 1),
+    v2Slice("slice:two", 2, { dependency_refs: ["slice:one"] }),
+  ]), EngineeringToolError), "a dependency edge means the two can never run at once");
+  assert.doesNotThrow(() => requirePlan(v2Plan([
+    v2Slice("slice:one", 1),
+    v2Slice("slice:two", 2, { concurrency_posture: "exclusive_resource" }),
+  ]), EngineeringToolError), "declaring the contention is the supported route");
+  assert.doesNotThrow(() => requirePlan(v2Plan([
+    v2Slice("slice:one", 1, { declared_resource_refs: ["resource:worktree-a", "resource:worktree-a"] }),
+  ]), EngineeringToolError), "one slice repeating its own resource is not contention with anyone");
+  const v1 = typedEngineeringPlan([
+    { ...engineeringSlice("slice:one", 1), concurrency_posture: "parallel_safe", declared_resource_refs: ["resource:worktree-a"] },
+    { ...engineeringSlice("slice:two", 2), concurrency_posture: "parallel_safe", declared_resource_refs: ["resource:worktree-a"] },
+  ]);
+  assert.doesNotThrow(() => requirePlan(v1, EngineeringToolError),
+    "engineering-slice-plan.v1 keeps its exact accepted behavior");
+});
+
+test("duplicate ordinals and dependency cycles refuse in v2 while legacy v1 keeps its exact read behavior", () => {
+  // Both refusals are NEW on the server side.  requirePlan re-runs against the
+  // stored append-only plan row on every read path, so enforcing them for v1
+  // would not repair an already registered plan -- it would strand one, leaving
+  // a sealed passport unreadable with nothing able to amend the row.  They
+  // therefore bind engineering-slice-plan.v2 only.  The portable validator has
+  // always refused both for every version; that divergence is confined to
+  // legacy v1 and documented in engineering-runtime.js, not claimed as parity.
+  const duplicateV1 = typedEngineeringPlan([engineeringSlice("slice:one", 1), engineeringSlice("slice:two", 1)]);
+  assert.doesNotThrow(() => requirePlan(duplicateV1, EngineeringToolError),
+    "a pre-existing v1 plan with duplicate ordinals must stay readable");
+  const selfDependentV1 = typedEngineeringPlan([engineeringSlice("slice:one", 1, ["slice:one"])]);
+  assert.doesNotThrow(() => requirePlan(selfDependentV1, EngineeringToolError),
+    "a pre-existing v1 self-dependent plan must stay readable");
+  const cycleV1 = typedEngineeringPlan([
+    engineeringSlice("slice:one", 1, ["slice:two"]), engineeringSlice("slice:two", 2, ["slice:one"]),
+  ]);
+  assert.doesNotThrow(() => requirePlan(cycleV1, EngineeringToolError),
+    "a pre-existing v1 cycle must stay readable, and stays blocked exactly as before");
+  // Read paths keep working on that legacy plan: it projects, and every slice on
+  // the cycle stays blocked, which is the previous behavior unchanged.
+  const legacyProjection = closureProjection(passportFacts(cycleV1), EngineeringToolError);
+  assert.deepEqual(legacyProjection.slices.map(row => row.state), ["blocked", "blocked"]);
+  assert.equal(legacyProjection.closure_state, "blocked");
+
+  const duplicateV2 = v2Plan([
+    v2Slice("slice:one", 1),
+    v2Slice("slice:two", 1, { declared_resource_refs: ["resource:worktree-b"] }),
+  ]);
+  assert.throws(() => requirePlan(duplicateV2, EngineeringToolError),
+    error => error.error === "engineering_slice_ordinal_duplicate" && error.ordinal === 1,
+    "two v2 slices claimed ordinal 1");
+  const selfDependentV2 = v2Plan([v2Slice("slice:one", 1, { dependency_refs: ["slice:one"] })]);
+  assert.throws(() => requirePlan(selfDependentV2, EngineeringToolError),
+    error => error.error === "engineering_slice_dependency_cycle" && error.slice_ref === "slice:one",
+    "a v2 slice cannot depend on itself");
+  const v2Cycle = v2Plan([
+    v2Slice("slice:one", 1, { dependency_refs: ["slice:two"] }),
+    v2Slice("slice:two", 2, { dependency_refs: ["slice:one"] }),
+  ]);
+  assert.throws(() => requirePlan(v2Cycle, EngineeringToolError),
+    error => error.error === "engineering_slice_dependency_cycle",
+    "a two-slice v2 cycle can never satisfy either dependency");
 });
 
 test("a v2 plan still admits and projects through the existing runtime seams", () => {

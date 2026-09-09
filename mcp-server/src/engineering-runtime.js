@@ -82,7 +82,22 @@ function exactAuthorityFree(args, ToolError) {
 // established v1 producer is silently reinterpreted, and this stays the one
 // slice-contract authority rather than a second parallel validator.  The
 // portable tools/room-bridge/engineering_passport.py validator implements the
-// identical predicate; the two must accept and refuse exactly the same inputs.
+// identical predicate for engineering-slice-plan.v2: for v2 the two accept and
+// refuse exactly the same inputs.
+//
+// ONE DELIBERATE LEGACY v1 DIVERGENCE.  The portable validator has always
+// refused duplicate ordinals and dependency cycles for every plan version; this
+// server validator historically accepted both, and plans registered under it are
+// append-only.  requirePlan re-runs against the STORED plan row on every read
+// path (sourcePlan, closureProjection, controllerPlan), so newly refusing those
+// two shapes for v1 would not correct a stored plan -- it would strand one,
+// making an already registered passport unreadable with nothing able to amend
+// the immutable row.  Both new checks are therefore enforced for
+// engineering-slice-plan.v2 only, and a pre-existing v1 plan keeps its exact
+// previous read behavior.  A producer that wants the stricter boundary
+// registers the successor version, which is what the successor version is for.
+// This is a documented divergence, not parity: the two validators are not
+// interchangeable on legacy v1 duplicate ordinals or cycles.
 
 export const ENGINEERING_SLICE_PLAN_VERSIONS = Object.freeze([
   "engineering-slice-plan.v1", "engineering-slice-plan.v2",
@@ -106,6 +121,28 @@ const DESIGN_DEPTH_COUNTED_ARRAYS = Object.freeze([
   "dependency_refs", "declared_resource_refs", "declared_component_refs", "declared_plan_step_refs",
 ]);
 const SHORT_RISK_CLASSES = new Set(["R0", "R1", "R2", "R3"]);
+
+// The accepted Q035.D1 predicate is frozen to the design-contract version that
+// sealed it.  requirePlan re-runs against the STORED append-only plan row on
+// every read path (sourcePlan, closureProjection, controllerPlan), so a
+// predicate that quietly changed underneath an immutable plan would reclassify
+// already sealed work and make its passport unreadable with nothing able to
+// amend the row.  A different boundary therefore ships as an explicit successor
+// contract version with its own entry here, exactly as engineering-slice-plan
+// ships v2 beside v1; the v1 entry below never moves.
+const DESIGN_DEPTH_PREDICATES = Object.freeze({
+  "engineering-design-contract.v1": row =>
+    SHORT_RISK_CLASSES.has(row.risk_class) &&
+    row.concurrency_posture === "parallel_safe" &&
+    row.manual_qa_required === false &&
+    row.release_requirement === "not_required" &&
+    row.dependency_count === 0 &&
+    row.declared_resource_count <= 1 &&
+    row.declared_component_count <= 1 &&
+    row.declared_plan_step_count <= 1,
+});
+export const ENGINEERING_DESIGN_DEPTH_PREDICATE_VERSIONS =
+  Object.freeze(Object.keys(DESIGN_DEPTH_PREDICATES));
 
 // The agent may never hand the classifier its own answer.  The closed field set
 // already refuses unknown keys; this named refusal makes the bypass explicit.
@@ -143,7 +180,13 @@ const SELECTION_BASIS_VALUES = new Set([
 const EXECUTOR_CLASSES = new Set(["deterministic_code", "attended_human", "model_assisted"]);
 const AUTHORITY_ENVIRONMENTS = new Set(["local", "rehearsal", "staging", "production"]);
 const VERIFICATION_LANES = new Set(["unit", "contract", "integration", "manual_qa"]);
-const REVIEWER_CLASSES = new Set(["independent_agent", "independent_human"]);
+// review-engineering-slice is the only reviewer provider this seam has, and it
+// records one independent automation actor's typed fact.  Nothing anywhere
+// checks that a reviewer is a human, so accepting independent_human would seal
+// a requirement into an immutable plan that no code can ever satisfy or refuse.
+// The unsupported class is refused until a human-review provider exists, the
+// same way Claude execution is refused until its launcher exists.
+const REVIEWER_CLASSES = new Set(["independent_agent"]);
 const EVIDENCE_REDACTION_CLASSES = new Set(["metadata_only", "redacted_evidence"]);
 const EVIDENCE_RETENTIONS = new Set(["ephemeral", "material_redacted"]);
 const COMPLETION_VERIFIERS = new Set(["independent_review", "independent_review_and_manual_qa"]);
@@ -212,18 +255,20 @@ export function designDepthInputs(slice, ToolError) {
  * SHORT changes design-template depth only.  It grants no action authority,
  * waives no R0-R6 operating gate, reduces no verification and activates no
  * effect; ordinary attended source delivery still follows real effects.
+ *
+ * The predicate is selected by the slice's own sealed contract_version, so a
+ * stored contract keeps the exact predicate it was accepted under.
  */
-export function classifyDesignDepth(slice, ToolError) {
+export function classifyDesignDepth(slice, ToolError, contractVersion = ENGINEERING_DESIGN_CONTRACT_VERSION) {
   const row = designDepthInputs(slice, ToolError);
-  const short = SHORT_RISK_CLASSES.has(row.risk_class) &&
-    row.concurrency_posture === "parallel_safe" &&
-    row.manual_qa_required === false &&
-    row.release_requirement === "not_required" &&
-    row.dependency_count === 0 &&
-    row.declared_resource_count <= 1 &&
-    row.declared_component_count <= 1 &&
-    row.declared_plan_step_count <= 1;
-  return short ? "short" : "full";
+  const predicate = Object.hasOwn(DESIGN_DEPTH_PREDICATES, contractVersion)
+    ? DESIGN_DEPTH_PREDICATES[contractVersion] : null;
+  if (!predicate)
+    error(ToolError, {
+      error: "engineering_design_depth_predicate_unsupported", slice_ref: slice.slice_ref,
+      contract_version: contractVersion ?? null, supported: [...ENGINEERING_DESIGN_DEPTH_PREDICATE_VERSIONS],
+    });
+  return predicate(row) ? "short" : "full";
 }
 
 function requireSelectionBasis(value, field, sliceRef, ToolError) {
@@ -266,7 +311,7 @@ function requireModelJudgmentSteps(slice, decision, ToolError) {
 
 function requireDesignDepthMaterial(slice, contract, ToolError) {
   const sliceRef = slice.slice_ref;
-  const depth = classifyDesignDepth(slice, ToolError);
+  const depth = classifyDesignDepth(slice, ToolError, contract.contract_version);
   const fail = field => error(ToolError, {
     error: "engineering_design_depth_material_invalid", field, slice_ref: sliceRef, design_depth: depth,
   });
@@ -455,6 +500,93 @@ function requireSeamAuthority(plan, ToolError) {
   }
 }
 
+/**
+ * Refuse a dependency cycle, including a slice that depends on itself.
+ *
+ * The portable validator has always refused cycles
+ * (engineering_passport._assert_acyclic); the server validator did not, so a
+ * plan the two disagreed about could register.  A cycle also makes closure
+ * unreachable by construction: dependenciesSatisfied can never be met for any
+ * slice on the cycle, so the immutable plan would pin them at blocked forever.
+ *
+ * This is a NEW server-side refusal, so requirePlan runs it for
+ * engineering-slice-plan.v2 only.  An append-only v1 plan this validator already
+ * accepted is revalidated on every read; refusing it now would strand it rather
+ * than fix it.  Such a v1 plan keeps its exact previous behavior: readable, and
+ * blocked forever on the cycle, exactly as before.
+ */
+function requireAcyclicDependencies(plan, ToolError) {
+  const graph = new Map(plan.slices.map(row => [row.slice_ref, row.dependency_refs || []]));
+  const visiting = new Set();
+  const visited = new Set();
+  const visit = ref => {
+    if (visiting.has(ref)) error(ToolError, { error: "engineering_slice_dependency_cycle", slice_ref: ref });
+    if (visited.has(ref)) return;
+    visiting.add(ref);
+    for (const dependency of graph.get(ref) || []) visit(dependency);
+    visiting.delete(ref);
+    visited.add(ref);
+  };
+  for (const ref of graph.keys()) visit(ref);
+}
+
+/** Every slice a slice depends on, directly or transitively. */
+function transitiveDependencies(plan) {
+  const direct = new Map(plan.slices.map(row => [row.slice_ref, row.dependency_refs || []]));
+  const resolved = new Map();
+  const visit = (ref, stack) => {
+    if (resolved.has(ref)) return resolved.get(ref);
+    if (stack.has(ref)) return new Set();
+    stack.add(ref);
+    const closure = new Set();
+    for (const dependency of direct.get(ref) || []) {
+      closure.add(dependency);
+      for (const item of visit(dependency, stack)) closure.add(item);
+    }
+    stack.delete(ref);
+    resolved.set(ref, closure);
+    return closure;
+  };
+  for (const ref of direct.keys()) visit(ref, new Set());
+  return resolved;
+}
+
+/**
+ * Refuse two concurrently admissible slices that claim the same declared
+ * resource.
+ *
+ * declared_resource_refs are the mutable resources the envelope binds by
+ * revision under compare_and_swap_required, not free-form references, and a
+ * parallel_safe slice has already had to state isolation.shared_resource_refs
+ * as empty -- "nothing I touch is shared".  Two such slices naming one resource
+ * are therefore two contradictory statements sealed inside one plan, and both
+ * become eligible at once.  A dependency edge between them removes the
+ * contradiction outright, because the dependent slice cannot be admitted until
+ * the other is verified complete, so ordered work is left alone.  Nothing here
+ * restricts a serial or exclusive posture, which is how contention is meant to
+ * be declared, and v1 plans keep their exact previous behavior.
+ */
+function requireParallelResourceIsolation(plan, ToolError) {
+  const ordered = transitiveDependencies(plan);
+  const owners = new Map();
+  for (const slice of plan.slices) {
+    if (slice.concurrency_posture !== "parallel_safe") continue;
+    // declared_resource_refs is not required to be unique, and one slice
+    // repeating its own resource is not contention with anyone.
+    for (const resourceRef of new Set(slice.declared_resource_refs)) {
+      for (const other of owners.get(resourceRef) || []) {
+        if (ordered.get(slice.slice_ref)?.has(other) || ordered.get(other)?.has(slice.slice_ref)) continue;
+        error(ToolError, {
+          error: "engineering_design_parallel_resource_conflict", resource_ref: resourceRef,
+          slice_ref: slice.slice_ref, conflicting_slice_ref: other,
+          resolution: "two parallel-safe slices cannot both own one declared resource; order them with a dependency, or declare the contention with a serial_after_dependencies or exclusive_resource posture",
+        });
+      }
+      owners.set(resourceRef, [...(owners.get(resourceRef) || []), slice.slice_ref]);
+    }
+  }
+}
+
 export function requirePlan(plan, ToolError) {
   if (!plan || typeof plan !== "object" || Array.isArray(plan)) error(ToolError, { error: "engineering_slice_plan_invalid" });
   if (Object.keys(plan).sort().join(",") !== "accepted_plan_revision,plan_digest,schema_version,slices,work_request") error(ToolError, { error: "engineering_slice_plan_unknown_field" });
@@ -478,6 +610,7 @@ export function requirePlan(plan, ToolError) {
   digest(plan.plan_digest, "plan_digest", ToolError);
   if (!Array.isArray(plan.slices) || plan.slices.length < 1) error(ToolError, { error: "engineering_slice_plan_empty" });
   const refs = new Set();
+  const ordinals = new Set();
   for (const slice of plan.slices) {
     const required = ["baseline_evidence_refs", "concurrency_posture", "declared_component_refs", "declared_plan_step_refs", "declared_resource_refs", "definition_of_done", "dependency_refs", "forbidden_change_refs", "manual_qa_required", "objective", "ordinal", "planned_checks", "release_requirement", "risk_class", "scope_boundary", "slice_ref"];
     if (plan.schema_version === SLICE_PLAN_V2) required.push("design_contract");
@@ -489,6 +622,14 @@ export function requirePlan(plan, ToolError) {
     if (!CONCURRENCY_POSTURES.has(slice.concurrency_posture) || !/^R[0-6]$/.test(slice.risk_class) || !RELEASE_REQUIREMENTS.has(slice.release_requirement) || typeof slice.manual_qa_required !== "boolean") error(ToolError, { error: "engineering_slice_enum_invalid", slice_ref: slice.slice_ref });
     if (refs.has(slice.slice_ref)) error(ToolError, { error: "engineering_slice_duplicate", slice_ref: slice.slice_ref });
     refs.add(slice.slice_ref);
+    // The portable validator has always required unique ordinals; without this
+    // the two validators disagreed about the same plan.  Like the cycle check,
+    // this is a new server-side refusal and therefore binds the successor
+    // version only: an append-only v1 plan already accepted with duplicate
+    // ordinals must stay readable on every read path.
+    if (plan.schema_version === SLICE_PLAN_V2 && ordinals.has(slice.ordinal))
+      error(ToolError, { error: "engineering_slice_ordinal_duplicate", slice_ref: slice.slice_ref, ordinal: slice.ordinal });
+    ordinals.add(slice.ordinal);
     if (!Array.isArray(slice.dependency_refs) || slice.dependency_refs.some(ref => !refs.has(ref) && !plan.slices.some(candidate => candidate.slice_ref === ref)))
       error(ToolError, { error: "engineering_slice_dependency_unknown", slice_ref: slice.slice_ref });
     for (const field of ["baseline_evidence_refs", "declared_resource_refs", "declared_component_refs", "declared_plan_step_refs", "forbidden_change_refs", "dependency_refs"])
@@ -500,7 +641,11 @@ export function requirePlan(plan, ToolError) {
     if (!Array.isArray(slice.planned_checks) || slice.planned_checks.length < 1 || slice.planned_checks.some(check => !check || typeof check !== "object" || Object.keys(check).sort().join(",") !== "check_ref,evidence_requirement,failure_condition" || !id(check.check_ref, "planned_checks.check_ref", ToolError) || checkRefs.has(check.check_ref) || !checkRefs.add(check.check_ref) || typeof check.failure_condition !== "string" || !check.failure_condition.trim() || !EVIDENCE_REQUIREMENTS.has(check.evidence_requirement))) error(ToolError, { error: "engineering_slice_checks_invalid", slice_ref: slice.slice_ref });
     if (plan.schema_version === SLICE_PLAN_V2) requireDesignContract(slice, ToolError);
   }
-  if (plan.schema_version === SLICE_PLAN_V2) requireSeamAuthority(plan, ToolError);
+  if (plan.schema_version === SLICE_PLAN_V2) {
+    requireAcyclicDependencies(plan, ToolError);
+    requireSeamAuthority(plan, ToolError);
+    requireParallelResourceIsolation(plan, ToolError);
+  }
   if (canonicalDigest(Object.fromEntries(Object.entries(plan).filter(([key]) => key !== "plan_digest"))) !== plan.plan_digest)
     error(ToolError, { error: "engineering_slice_plan_digest_mismatch" });
   return plan;
@@ -983,16 +1128,77 @@ function isExactEngineeringAdmissionSession(session, sliceRef, executorId) {
     session.source_commit_sha === ENGINEERING_SESSION_SOURCE;
 }
 
+// The exact execution binding this seam issues.  buildCodexEnvelope emits these
+// values, the dispatch gate below re-checks them, and admission compares an
+// accepted v2 design contract against them.  One statement of the actual
+// authority, so the contract and the envelope cannot drift apart silently.
+export const ENGINEERING_SERVER_EXECUTION_BINDING = Object.freeze({
+  environment: "rehearsal",
+  capability_profile: "capability:engineering-repository-write",
+  read_only: false,
+  adapter_ref: "adapter:codex-desktop",
+});
+// Codex is the only executable adapter here and runCodexSlice dispatches to it
+// unconditionally, so an accepted contract routed to an attended human names an
+// executor this seam cannot produce.
+const ADMISSIBLE_EXECUTOR_CLASSES = new Set(["deterministic_code", "model_assisted"]);
+
+/**
+ * Refuse a v2 slice whose accepted contract contradicts the binding admission
+ * is about to issue.
+ *
+ * routing and authority are validated at registration, sealed inside
+ * plan_digest and rendered to operators through the passport, but nothing
+ * downstream ever read them: the envelope's environment, capability profile,
+ * write posture and adapter are server-derived constants.  A slice whose
+ * accepted contract says read-only production work executed by a human was
+ * therefore executed write-enabled in rehearsal by an automation model, with
+ * both statements recorded as true.
+ *
+ * This compares and refuses only.  It never selects an executor, never widens
+ * or reissues an envelope to match a contract, and grants nothing: a contract
+ * that does not describe the existing binding simply cannot be admitted.  The
+ * check is deliberately absent from the read paths, because refusing there
+ * would make an already sealed passport unreadable.
+ */
+function requireServerExecutionBinding(plan, slice, ToolError) {
+  if (plan.schema_version !== SLICE_PLAN_V2) return;
+  const { routing, authority } = slice.design_contract;
+  const fail = (field, declared, issued) => error(ToolError, {
+    error: "engineering_design_contract_binding_mismatch", slice_ref: slice.slice_ref, field,
+    declared_by_contract: declared === undefined ? null : declared, server_binding: issued,
+    resolution: "the accepted design contract must describe the execution binding this server issues; admission refuses rather than reissuing authority to match a contract",
+  });
+  if (!ADMISSIBLE_EXECUTOR_CLASSES.has(routing.executor_class))
+    fail("routing.executor_class", routing.executor_class, [...ADMISSIBLE_EXECUTOR_CLASSES]);
+  if (routing.adapter_ref !== ENGINEERING_SERVER_EXECUTION_BINDING.adapter_ref)
+    fail("routing.adapter_ref", routing.adapter_ref, ENGINEERING_SERVER_EXECUTION_BINDING.adapter_ref);
+  for (const field of ["environment", "capability_profile", "read_only"])
+    if (authority[field] !== ENGINEERING_SERVER_EXECUTION_BINDING[field])
+      fail(`authority.${field}`, authority[field], ENGINEERING_SERVER_EXECUTION_BINDING[field]);
+}
+
+/**
+ * The dispatch-side gate: does this row carry the exact write binding this seam
+ * issues?
+ *
+ * environment is part of that binding, is emitted by buildCodexEnvelope, and is
+ * already compared against an accepted v2 contract at admission
+ * (requireServerExecutionBinding).  Reading every other field of the documented
+ * binding while ignoring this one let an envelope naming a different environment
+ * dispatch as if it were the rehearsal envelope the server actually issues.
+ */
 export function isCurrentRepositoryWriteEnvelope(row) {
   const envelope = row?.envelope;
   return Boolean(envelope && envelope.schema_version === "execution-envelope.v1" &&
     exactFutureInstant(envelope.expires_at) &&
     exactFutureInstant(envelope.agent_session?.lease_expires_at) &&
-    envelope.server_binding?.authority?.read_only === false &&
-    envelope.server_binding?.authority?.capability_profile === "capability:engineering-repository-write" &&
+    envelope.server_binding?.authority?.environment === ENGINEERING_SERVER_EXECUTION_BINDING.environment &&
+    envelope.server_binding?.authority?.read_only === ENGINEERING_SERVER_EXECUTION_BINDING.read_only &&
+    envelope.server_binding?.authority?.capability_profile === ENGINEERING_SERVER_EXECUTION_BINDING.capability_profile &&
     envelope.server_binding?.identity?.agent_principal_id === "agent:codex" &&
     envelope.server_binding?.identity?.runtime_principal === "runtime:codex" &&
-    envelope.server_binding?.adapter?.adapter_id === "adapter:codex-desktop" &&
+    envelope.server_binding?.adapter?.adapter_id === ENGINEERING_SERVER_EXECUTION_BINDING.adapter_ref &&
     JSON.stringify(envelope.request?.allowed_actions) === JSON.stringify(ENGINEERING_REPOSITORY_ACTIONS));
 }
 
@@ -1054,8 +1260,8 @@ export function buildCodexEnvelope({ source, plan, slice, jobId, sessionId, acto
         agent_principal_id: "agent:codex", runtime_principal: "runtime:codex", personal_brain_scope: "brain:shared",
         personal_brain_version: "brain:shared-v1", personal_rule_count: 0, derived_by: "server_identity_resolution", client_mutable: false,
       },
-      authority: { environment: "rehearsal", risk_class: slice.risk_class || "R1", capability_profile: "capability:engineering-repository-write", capability_grant_ref: `grant:engineering-codex-repository-v1:${sessionId}`, read_only: false, derived_by: "server_capability_resolution", client_mutable: false },
-      adapter: { surface: "codex_desktop", adapter_id: "adapter:codex-desktop", adapter_version: "v1", harness_id: "harness:codex", harness_version: "v1", provider_id: "provider:openai", model_id: "model:codex", native_session_ref: `native:codex:${sessionId}`, configuration_fingerprint: canonicalDigest({ adapter: "codex", model: "codex" }) },
+      authority: { environment: ENGINEERING_SERVER_EXECUTION_BINDING.environment, risk_class: slice.risk_class || "R1", capability_profile: ENGINEERING_SERVER_EXECUTION_BINDING.capability_profile, capability_grant_ref: `grant:engineering-codex-repository-v1:${sessionId}`, read_only: ENGINEERING_SERVER_EXECUTION_BINDING.read_only, derived_by: "server_capability_resolution", client_mutable: false },
+      adapter: { surface: "codex_desktop", adapter_id: ENGINEERING_SERVER_EXECUTION_BINDING.adapter_ref, adapter_version: "v1", harness_id: "harness:codex", harness_version: "v1", provider_id: "provider:openai", model_id: "model:codex", native_session_ref: `native:codex:${sessionId}`, configuration_fingerprint: canonicalDigest({ adapter: "codex", model: "codex" }) },
     },
     handoff: replacesEnvelope ? {
       mode: "replacement", replaces_agent_session_id: replacesEnvelope.agent_session.id,
@@ -1218,6 +1424,9 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
   let source = sourceParts(facts.source, ToolError);
   let plan = sourcePlan(facts, source, ToolError);
   let slice = sliceFor(plan, sliceRef, ToolError);
+  // The accepted contract must describe the binding this admission issues; a
+  // contradiction refuses here, before any lock, job, session or envelope.
+  requireServerExecutionBinding(plan, slice, ToolError);
   dependenciesSatisfied(facts, source, plan, slice, ToolError);
   // Portfolio governance is decided by trusted stored source, not by the
   // caller: a slice no accepted portfolio names comes back null and ordinary
@@ -1312,6 +1521,7 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
   source = sourceParts(facts.source, ToolError);
   plan = sourcePlan(facts, source, ToolError);
   slice = sliceFor(plan, sliceRef, ToolError);
+  requireServerExecutionBinding(plan, slice, ToolError);
   dependenciesSatisfied(facts, source, plan, slice, ToolError);
   priorEnvelopes = (facts.envelopes || [])
     .filter(row => row.slice_ref === sliceRef && row.accepted_plan_id === source.plan.record_id)
@@ -1358,6 +1568,7 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
   source = sourceParts(facts.source, ToolError);
   plan = sourcePlan(facts, source, ToolError);
   slice = sliceFor(plan, sliceRef, ToolError);
+  requireServerExecutionBinding(plan, slice, ToolError);
   dependenciesSatisfied(facts, source, plan, slice, ToolError);
 
   if (priorEnvelope) {
