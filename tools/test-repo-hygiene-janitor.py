@@ -246,6 +246,90 @@ def build_repo(root: Path) -> tuple[Path, Path]:
     return work, origin
 
 
+def nonvolatile_fixture_base() -> Path:
+    """A writable base for fixture roots that the production volatile-path law
+    does not refuse.
+
+    THE SUITE'S OWN TEMPORARY DIRECTORY IS AN INPUT TO THE CODE UNDER TEST.
+    On Linux `tempfile.gettempdir()` is /tmp, which the janitor refuses by
+    design, so a positive removal fixture placed there is classified
+    `volatile_private_tmp_path` and kept -- correct production behaviour that
+    silently turned every positive case into a false negative on a hosted
+    runner. macOS never showed it because its default temp root is
+    /var/folders, which is not a refused prefix.
+
+    The fix belongs here, not in the law: the law is right, the fixture was in
+    the wrong place. A cache directory under the user's home is writable on
+    both platforms and is outside every refused prefix. If no candidate
+    qualifies this refuses rather than quietly falling back to /tmp, because a
+    silent fallback is exactly the failure being corrected.
+    """
+    candidates = []
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    if xdg:
+        candidates.append(Path(xdg))
+    candidates.append(Path.home() / ".cache")
+    candidates.append(Path.home())
+    for candidate in candidates:
+        base = candidate / "carr-r07-janitor-fixtures"
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            continue
+        if not os.access(base, os.W_OK):
+            continue
+        if J._is_volatile(base):
+            continue
+        if base == J.CANONICAL_CHECKOUT or J.CANONICAL_CHECKOUT in base.parents:
+            continue
+        return base
+    raise RuntimeError(
+        "no writable non-volatile fixture base found; refusing to place positive "
+        f"removal fixtures under a refused prefix (tried {candidates})")
+
+
+def argv_entry(receipt: Mapping[str, Any], index: int, label: str) -> list | None:
+    """Index a receipt's argv only when there is something to index.
+
+    check() COLLECTS failures rather than raising, so a failed assertion above
+    does not make the line below safe: the first version indexed argv[-1] on a
+    receipt whose argv was legitimately empty, and the IndexError replaced the
+    real reason with a traceback. The whole receipt goes into the failure text,
+    because the reason is the thing a reader actually needs.
+    """
+    argv = receipt.get("argv") or []
+    if len(argv) > abs(index) - (1 if index < 0 else 0):
+        return argv[index]
+    check(False, f"{label}: expected a command in the receipt but argv is {argv!r}; "
+                 f"result={receipt.get('result')!r} reason={receipt.get('reason')!r}")
+    return None
+
+
+def receipt_field(receipt: Mapping[str, Any], key: str, label: str):
+    """Read a field that only a mutation-boundary receipt carries.
+
+    backup refs, posture blocks and the resolved cache path are absent by design
+    on a receipt that was kept or refused. Reading them with [] turns a correct
+    refusal into a KeyError and hides the reason, which is the same defect the
+    argv guard exists for.
+    """
+    if key in receipt:
+        return receipt[key]
+    check(False, f"{label}: receipt carries no {key!r}; result={receipt.get('result')!r} "
+                 f"reason={receipt.get('reason')!r}")
+    return None
+
+
+def expect_result(receipt: Mapping[str, Any], result: str, label: str) -> bool:
+    """Assert a receipt's outcome and report the whole receipt when it differs."""
+    if receipt.get("result") == result:
+        return True
+    check(False, f"{label}: expected result {result!r} but saw "
+                 f"{receipt.get('result')!r} for reason {receipt.get('reason')!r} "
+                 f"(argv={receipt.get('argv')!r})")
+    return False
+
+
 _LOCK_ROOTS = iter(range(1, 1_000_000))
 
 
@@ -325,6 +409,29 @@ def r09_root(root: Path, entrant: dict | None) -> Path:
 
 
 # ── immutable inputs ─────────────────────────────────────────────────────────
+
+
+def test_fixture_root_is_not_a_refused_path(root: Path) -> None:
+    """The positive fixtures must live somewhere the production law allows.
+
+    Without this, an environment whose temporary directory moves under a refused
+    prefix turns every positive removal and prune case into a silent keep, and
+    the suite reports green for the wrong reason. That is precisely what a
+    hosted Linux runner did.
+    """
+    for path in (root, J.real_path(root)):
+        check(not J._is_volatile(path),
+              f"the fixture root must not be a refused volatile path: {path} "
+              f"(refused prefixes are {J.VOLATILE_PREFIXES})")
+    resolved = Path(J.real_path(root))
+    check(resolved != J.CANONICAL_CHECKOUT and J.CANONICAL_CHECKOUT not in resolved.parents,
+          f"the fixture root must be outside the canonical checkout: {resolved}")
+    check(os.access(root, os.W_OK), f"the fixture root must be writable: {root}")
+    # ...and the refused prefixes are still refused, which is what makes the
+    # placement above a fix rather than a way around the law.
+    for prefix in J.VOLATILE_PREFIXES:
+        check(J._is_volatile(f"{prefix}/some-worktree"),
+              f"{prefix} must remain a refused path")
 
 
 def test_immutable_inputs_parse_to_their_known_shape() -> None:
@@ -502,9 +609,12 @@ def test_ancestry_delete_with_verified_backup(root: Path) -> None:
           "the branch is really gone from the fixture")
 
     backup_ref = "refs/backup/r07-janitor/feat-ancestry"
-    check(receipt["backup_ref"] == backup_ref, "receipt names the backup ref")
-    check(receipt["backup_local_readback"] == tip, "local backup readback is the exact tip")
-    check(receipt["backup_remote_readback"] == tip, "remote backup readback is the exact tip")
+    check(receipt_field(receipt, "backup_ref", "ancestry delete") == backup_ref,
+          "receipt names the backup ref")
+    check(receipt_field(receipt, "backup_local_readback", "ancestry delete") == tip,
+          "local backup readback is the exact tip")
+    check(receipt_field(receipt, "backup_remote_readback", "ancestry delete") == tip,
+          "remote backup readback is the exact tip")
     check(git(origin, "rev-parse", "--verify", backup_ref) == tip,
           "the backup really exists on the fixture remote")
 
@@ -582,9 +692,13 @@ def test_squash_delete_requires_exact_recorded_head(root: Path) -> None:
 
     receipt = jan.apply(plan, execute=True)[0]
     check(receipt["result"] == "deleted", f"squash branch deleted (saw {receipt['reason']})")
-    check(receipt["argv"][-1] == ["git", "-C", str(work), "branch", "-D", "feat-squash"],
-          f"forced deletion argv is exact: {receipt['argv'][-1]}")
-    check(receipt["evidence"]["pull_request"]["evidence_id"] == "gh-pr-42", "evidence id recorded")
+    if expect_result(receipt, "deleted", "squash delete"):
+        check(argv_entry(receipt, -1, "squash delete")
+              == ["git", "-C", str(work), "branch", "-D", "feat-squash"],
+              f"forced deletion argv is exact: {receipt['argv'][-1:]!r}")
+    check((receipt.get("evidence") or {}).get("pull_request", {}).get("evidence_id") == "gh-pr-42",
+          f"evidence id recorded (evidence={receipt.get('evidence')!r}, "
+          f"result={receipt.get('result')!r} reason={receipt.get('reason')!r})")
 
     for label, kwargs, expected in [
         ("head is not this tip", {"head_oid": "a" * 40}, "reused_branch_name"),
@@ -853,11 +967,18 @@ def test_worktree_survivor_matrix_and_removal(root: Path) -> None:
     receipt = removing.apply(plan, execute=True, idempotency_prefix="exec")[0]
     check(receipt["result"] == "deleted", f"worktree removed (saw {receipt['reason']})")
     check(not stale.exists(), "the fixture worktree is really gone")
-    check(receipt["argv"][-1] == [*fixture_remove_door(work, trees), str(stale)],
-          f"the governed removal argv is exact: {receipt['argv'][-1]}")
-    for fact in ("registered", "bare", "locked", "dirty", "idle_seconds", "entrant"):
-        check(fact in receipt["fresh_posture"], f"removal receipt carries fresh {fact}")
-        check(fact in receipt["planned_posture"], f"removal receipt carries planned {fact}")
+    if expect_result(receipt, "deleted", "worktree removal"):
+        check(argv_entry(receipt, -1, "worktree removal")
+              == [*fixture_remove_door(work, trees), str(stale)],
+              f"the governed removal argv is exact: {receipt['argv'][-1:]!r}")
+    for label in ("fresh_posture", "planned_posture"):
+        posture = receipt.get(label)
+        if not isinstance(posture, dict):
+            check(False, f"removal receipt carries no {label}; result="
+                         f"{receipt.get('result')!r} reason={receipt.get('reason')!r}")
+            continue
+        for fact in ("registered", "bare", "locked", "dirty", "idle_seconds", "entrant"):
+            check(fact in posture, f"removal receipt carries {label} {fact}")
 
     check(jan.classify_worktree(J.WorktreeCandidate(
         str(entrant_tree), True, dirty=False, idle_seconds=old,
@@ -904,8 +1025,10 @@ def test_worktree_races_between_plan_and_apply(root: Path) -> None:
           f"and the refusal names the entrant (saw {receipt['reason']})")
     check(victim.exists(), "the newly entered worktree still exists")
     check(len(calls) >= 2, f"the entrant reader ran again at the boundary (calls={len(calls)})")
-    check(receipt["fresh_posture"]["entrant"]["state"] == "active",
-          "the receipt records the fresh active entrant")
+    fresh = receipt.get("fresh_posture")
+    check(isinstance(fresh, dict) and fresh.get("entrant", {}).get("state") == "active",
+          f"the receipt records the fresh active entrant (fresh_posture={fresh!r}, "
+          f"result={receipt.get('result')!r} reason={receipt.get('reason')!r})")
 
     # (b) Liveness becomes uncertain after the census.
     victim_b = add_worktree(work, trees, "entrant-uncertain")
@@ -997,12 +1120,16 @@ def test_cache_matrix(root: Path) -> None:
     receipt = jan.apply(plan, execute=True, idempotency_prefix="exec")[0]
     check(receipt["result"] == "deleted" and not cache.exists(), "the fixture cache is pruned")
     check(refetch.calls > before, "the refetch proof was re-evaluated at the mutation boundary")
-    check(receipt["argv"][-1] == [J.CACHE_REMOVE_PROGRAM, "-rf", "--", J.real_path(cache)],
-          f"cache removal argv names the RESOLVED path it acted on: {receipt['argv'][-1]}")
-    check(receipt["resolved_path"] == J.real_path(cache),
+    if expect_result(receipt, "deleted", "cache prune"):
+        check(argv_entry(receipt, -1, "cache prune")
+              == [J.CACHE_REMOVE_PROGRAM, "-rf", "--", J.real_path(cache)],
+              f"cache removal argv names the RESOLVED path it acted on: {receipt['argv'][-1:]!r}")
+    check(receipt_field(receipt, "resolved_path", "cache prune") == J.real_path(cache),
           "the receipt identity matches the actual invocation")
-    check(receipt["evidence"]["refetch_command"] == ["fetch", "--exact", digest],
-          "the receipt says how to re-fetch what it removed")
+    check((receipt.get("evidence") or {}).get("refetch_command") == ["fetch", "--exact", digest],
+          f"the receipt says how to re-fetch what it removed (evidence="
+          f"{receipt.get('evidence')!r}, result={receipt.get('result')!r} "
+          f"reason={receipt.get('reason')!r})")
 
 
 def test_cache_races_between_plan_and_apply(root: Path) -> None:
@@ -1258,7 +1385,7 @@ def test_partial_operation_is_unknown_and_never_retried(root: Path) -> None:
     check(receipt["result"] == "unknown", f"the disagreement is UNKNOWN (saw {receipt['result']})")
     check(receipt["reason"] == "partial_deletion_state_unknown_no_automatic_retry",
           f"and it names no automatic retry (saw {receipt['reason']})")
-    check(receipt["backup_local_readback"] == tip,
+    check(receipt_field(receipt, "backup_local_readback", "partial deletion") == tip,
           "the receipt still carries the backup a human needs to recover from")
     check(git(work, "rev-parse", "--verify", "refs/heads/feat-squash") == tip,
           "the branch is in fact still present")
@@ -1359,9 +1486,10 @@ def test_cli_squash_needs_frozen_evidence_and_executes_only_when_bound(root: Pat
         rows = [json.loads(line) for line in receipts_path.read_text().splitlines() if line]
         deleted = [row for row in rows if row["result"] == "deleted"]
         check(len(deleted) == 1, "one deletion receipt landed on disk")
-        check(deleted[0]["argv"][-1][-2:] == ["branch", "feat-squash"][-2:]
-              or deleted[0]["argv"][-1] == ["git", "-C", str(work), "branch", "-D", "feat-squash"],
-              f"the persisted receipt carries the real argv: {deleted[0]['argv'][-1]}")
+        if deleted and expect_result(deleted[0], "deleted", "persisted CLI receipt"):
+            last = argv_entry(deleted[0], -1, "persisted CLI receipt")
+            check(last == ["git", "-C", str(work), "branch", "-D", "feat-squash"],
+                  f"the persisted receipt carries the real argv: {last!r}")
     finally:
         os.environ.pop("CARR_REPO_HYGIENE_EFFECT_PACKET", None)
         if saved is not None:
@@ -1683,8 +1811,10 @@ def test_cli_defaults_and_parser_shape() -> None:
 
 def main() -> int:
     global TAIL_MANIFEST, REGISTER
-    with tempfile.TemporaryDirectory(prefix="r07-repo-hygiene-janitor-") as temporary:
+    base = nonvolatile_fixture_base()
+    with tempfile.TemporaryDirectory(prefix="r07-repo-hygiene-janitor-", dir=base) as temporary:
         root = Path(temporary)
+        test_fixture_root_is_not_a_refused_path(root)
         TAIL_MANIFEST, REGISTER = write_synthetic_inputs(root / "synthetic-inputs")
         test_immutable_inputs_parse_to_their_known_shape()
         test_tail_is_never_a_deletion_allowlist(root)
