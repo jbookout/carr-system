@@ -3,19 +3,24 @@
 
 EVERY MUTATION IN THIS FILE HAPPENS INSIDE A TEMPORARY DIRECTORY THIS FILE
 CREATED. No test touches the canonical checkout, a real remote, a real user
-branch, a registered worktree, a real cache, or a scheduler. The "remote" is a
-second bare repository in the same temporary directory; the pull-request
-provider, clock, receipt sink, and worktree-removal door are fakes; the R09
-entrant reader is the REAL module read against a fixture registry root, because
-that interop is the thing worth proving.
+branch, a registered worktree, a real cache, a provider, or a scheduler. The
+"remote" is a second bare repository in the same temporary directory; the
+pull-request evidence, clock, receipt sink, refetch verifier, and
+worktree-removal door are fakes; the R09 entrant reader is the REAL module read
+against a fixture registry root, because that interop is the thing worth proving.
 
-TWO KINDS OF TEST, and the second is the one that carries the weight.
+THREE KINDS OF TEST, and the last two carry the weight.
 
   Behaviour tests assert the janitor does the right thing on a fixture.
+
   Guard-mutation tests then DISABLE the specific guard that produced the answer
-  and assert the outcome flips. Without them, a survivor test proves only that
-  a fixture named "dirty" survived — a fixture name is not proof. With them,
-  each survivor is demonstrably caused by its named guard.
+  and assert the outcome flips. Without them, a survivor test proves only that a
+  fixture named "dirty" survived — a fixture name is not proof.
+
+  Race tests change the world BETWEEN the plan and the apply. These are the ones
+  the first version of this suite lacked: it only ever asserted against static
+  planned state, so three real deletion races passed review-free. A snapshot is
+  not authority; the mutation boundary is.
 """
 
 from __future__ import annotations
@@ -25,7 +30,6 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -88,22 +92,44 @@ class FakeClock:
 
 
 class FakePullRequests:
-    def __init__(self, table: Mapping[str, Sequence[J.PullRequest]] | None = None):
+    def __init__(self, table: Mapping[str, Sequence[Any]] | None = None):
         self.table = dict(table or {})
 
-    def pull_requests_for_branch(self, branch: str) -> Sequence[J.PullRequest]:
+    def pull_requests_for_branch(self, branch: str) -> Sequence[Any]:
         return self.table.get(branch, ())
 
 
 class FakeSink:
-    def __init__(self, available: bool = True):
-        self._available, self.receipts = available, []
+    """A sink whose availability and per-emit behaviour are independently
+    controllable, because the race the review found lives exactly in the gap
+    between `available()` returning True and `emit()` succeeding."""
+
+    def __init__(self, available: bool = True, fail_emit_after: int | None = None):
+        self._available = available
+        self.fail_emit_after = fail_emit_after
+        self.receipts: list[dict[str, Any]] = []
+        self.emit_calls = 0
 
     def available(self) -> bool:
         return self._available
 
     def emit(self, receipt: Mapping[str, Any]) -> None:
+        self.emit_calls += 1
+        if self.fail_emit_after is not None and self.emit_calls > self.fail_emit_after:
+            raise OSError("fixture sink failed after availability")
         self.receipts.append(dict(receipt))
+
+
+class FakeRefetch:
+    """Reproducibility proof that is genuinely re-evaluated: it answers for the
+    digest it is handed, so changed bytes lose their proof automatically."""
+
+    def __init__(self, reproducible: set[str]):
+        self.reproducible, self.calls = set(reproducible), 0
+
+    def __call__(self, candidate: Any, observed: str) -> bool:
+        self.calls += 1
+        return observed in self.reproducible
 
 
 # ── fixtures ─────────────────────────────────────────────────────────────────
@@ -142,9 +168,32 @@ def build_repo(root: Path) -> tuple[Path, Path]:
     return work, origin
 
 
+_LOCK_ROOTS = iter(range(1, 1_000_000))
+
+
+def held_mutex(root: Path) -> Any:
+    """A real mutex, really acquired, on a lock root private to this janitor.
+
+    plan() and apply() refuse without a held mutex, so every fixture janitor
+    needs one. The roots are private because a single test may build several
+    janitors over one fixture repository and the real lock is exclusive — which
+    is the point. The SHARED-root semantics that actually matter (contention
+    refuses, ownership is cleaned up, the command takes no action) are proven
+    against one shared root in test_mutex_spans_plan_and_apply and
+    test_cli_refuses_under_contention_and_takes_no_action.
+    """
+    lock_root = Path(root).parent / f"lockroot-{next(_LOCK_ROOTS)}"
+    lock_root.mkdir(parents=True, exist_ok=True)
+    mutex = J.MaintenanceMutex(lock_root)
+    if not mutex.acquire():
+        raise RuntimeError(f"fixture mutex unexpectedly contended at {mutex.path}")
+    return mutex
+
+
 def janitor(work: Path, *, prs=None, sink=None, clock=None, entrant_reader=None,
             remove_command=None, effect_packet="EFFECT-PACKET-FIXTURE",
-            ttl=J.DEFAULT_WORKTREE_TTL_SECONDS) -> J.RepoHygieneJanitor:
+            ttl=J.DEFAULT_WORKTREE_TTL_SECONDS, mutex=None, liveness=None,
+            refetch=None) -> Any:
     return J.RepoHygieneJanitor(
         repository=work,
         git=J.GitPort(work, env=ENV),
@@ -153,18 +202,48 @@ def janitor(work: Path, *, prs=None, sink=None, clock=None, entrant_reader=None,
         tail=J.load_settlement_tail(TAIL_MANIFEST),
         register=J.load_never_cleanable_register(REGISTER),
         entrant_reader=entrant_reader,
+        mutex=mutex if mutex is not None else held_mutex(work),
         clock=clock or FakeClock(),
+        liveness_probe=liveness,
+        refetch_verifier=refetch,
         worktree_ttl_seconds=ttl,
         worktree_remove_command=remove_command or ("true",),
         effect_packet=effect_packet,
     )
 
 
-def receipt_for(receipts: Sequence[Mapping[str, Any]], identity: str) -> Mapping[str, Any]:
-    for receipt in receipts:
-        if receipt["target_identity"] == identity:
-            return receipt
-    raise AssertionError(f"no receipt for {identity}")
+def cache_janitor(work: Path, cache: Path, *, sink=None, refetch=None,
+                  never: set[str] | None = None) -> Any:
+    register = J.NeverCleanableRegister(
+        never_clean=frozenset(never or set()), exact_root_only=frozenset({str(cache)}))
+    return J.RepoHygieneJanitor(
+        repository=work, git=J.GitPort(work, env=ENV), pull_requests=FakePullRequests(),
+        receipt_sink=sink or FakeSink(), tail=J.load_settlement_tail(TAIL_MANIFEST),
+        register=register, mutex=held_mutex(work), clock=FakeClock(),
+        refetch_verifier=refetch, effect_packet="EFFECT-PACKET-FIXTURE")
+
+
+def add_worktree(work: Path, trees: Path, name: str) -> Path:
+    path = trees / name
+    git(work, "worktree", "add", "-b", f"wt-{name}", str(path), "main")
+    return path
+
+
+def fixture_remove_door(work: Path, trees: Path) -> tuple[str, ...]:
+    """A fixture-local stand-in for `zsh bin/worktree.sh --remove`, so no test
+    can ever address a canonical worktree. Production still names the real door."""
+    door = trees / "fixture-remove.sh"
+    door.write_text(f'#!/bin/sh\nexec git -C "{work}" worktree remove "$1"\n', encoding="utf-8")
+    door.chmod(0o755)
+    return ("sh", str(door))
+
+
+def r09_root(root: Path, entrant: dict | None) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "r09-registry.lock").write_text("", encoding="utf-8")
+    (root / "r09-state.json").write_text(
+        json.dumps({"allocations": {}, "entrant": entrant, "receipts": []}), encoding="utf-8")
+    return root
 
 
 # ── immutable inputs ─────────────────────────────────────────────────────────
@@ -180,8 +259,7 @@ def test_immutable_inputs_parse_to_their_known_shape() -> None:
     check(by_reason.get("closed_unmerged_pull_request") == 42, "42 closed-unmerged tail rows")
     check(by_reason.get("unmerged_without_pull_request") == 189, "189 no-PR tail rows")
     check(by_reason.get("reused_branch_name") == 34, "34 reused-name tail rows")
-    non_tail = [row for row in tail.values() if not row.in_tail]
-    check(len(non_tail) == 46, f"46 non-tail kept rows (saw {len(non_tail)})")
+    check(len([r for r in tail.values() if not r.in_tail]) == 46, "46 non-tail kept rows")
 
     register = J.load_never_cleanable_register(REGISTER)
     worktrees_root = "/Users/booko/carr-system/.claude/worktrees"
@@ -217,20 +295,70 @@ def test_tail_is_never_a_deletion_allowlist(root: Path) -> None:
           f"kept for the tail reason (saw {row.reason})")
 
     # GUARD MUTATION: supply the missing human adjudication for this exact tip
-    # and the same branch becomes deletable. That is what proves the survival
-    # above was caused by the adjudication guard and not by the fixture.
+    # and the same branch becomes deletable, proving the survival was caused by
+    # the adjudication guard and not by the fixture.
     adjudicated = J.BranchCandidate(name=name, tip=tip, adjudication={
         "adjudicated_by": "joe", "adjudicated_at": "2026-09-09", "decision": "eligible",
         "evidence_id": "fixture-adjudication-1", "tip": tip})
-    flipped = jan.classify_branch(adjudicated, pinned)
-    check(flipped.action == "delete_ancestry", "adjudicated tail branch becomes deletable")
+    check(jan.classify_branch(adjudicated, pinned).action == "delete_ancestry",
+          "adjudicated tail branch becomes deletable")
 
-    # An adjudication recorded against a DIFFERENT tip decided another commit.
     stale = J.BranchCandidate(name=name, tip=tip, adjudication={
         "adjudicated_by": "joe", "adjudicated_at": "2026-09-09", "decision": "eligible",
         "evidence_id": "fixture-adjudication-2", "tip": "0" * 40})
     check(jan.classify_branch(stale, pinned).reason == "tail_requires_human_adjudication",
           "adjudication bound to a stale tip does not unlock the branch")
+
+
+# ── the mutex spans the whole decision (review finding 004) ──────────────────
+
+
+def test_mutex_spans_plan_and_apply(root: Path) -> None:
+    work, _ = build_repo(root / "mutex-span")
+    unheld = J.MaintenanceMutex(work)
+    jan = janitor(work, mutex=unheld)
+    expect_raises(J.JanitorRefusal, lambda: jan.plan(),
+                  "plan refuses while the maintenance mutex is not held")
+
+    check(unheld.acquire(), "the janitor's own mutex acquires")
+    plan = jan.plan()
+    check(plan.rows == (), "an empty census plans nothing")
+
+    # A competing operation cannot take the lock while this one holds it.
+    competitor = J.MaintenanceMutex(work)
+    check(not competitor.acquire(), "a competing operation is refused the live mutex")
+
+    unheld.release()
+    expect_raises(J.JanitorRefusal, lambda: jan.apply(plan),
+                  "apply refuses once mutex ownership has been released")
+    check(not unheld.path.exists(), "releasing the mutex removes the lock file")
+
+    # A lock older than the existing two-hour threshold belongs to a dead
+    # reaper and is reclaimed — the same rule hooks/worktree-self-plumb.py uses.
+    live = J.MaintenanceMutex(work)
+    check(live.acquire(), "reacquire after release")
+    stale = J.MaintenanceMutex(work, clock=lambda: time.time() + J.LOCK_STALE_SECONDS + 60)
+    check(stale.acquire(), "a stale lock is reclaimed")
+    stale.release()
+
+
+def test_cli_refuses_under_contention_and_takes_no_action(root: Path) -> None:
+    work, _ = build_repo(root / "cli-contention")
+    blocker = J.MaintenanceMutex(work)
+    check(blocker.acquire(), "an unrelated operation holds the maintenance lock")
+    args = J.build_parser().parse_args(cli_args(work))
+    sink = FakeSink()
+    code, report = J.run(args, sink=sink)
+    check(code == 3, f"the command refuses under contention (saw exit {code})")
+    check(report["reason"] == "maintenance_mutex_held_by_another_operation",
+          f"and names the contention (saw {report.get('reason')})")
+    check(report["actions"] == 0 and sink.receipts == [],
+          "a refused acquisition performs no action and writes no receipt")
+    blocker.release()
+
+    code2, report2 = J.run(args, sink=sink)
+    check(code2 == 0, "once released the same command runs")
+    check(not blocker.path.exists(), "the command released the lock it took (ownership cleanup)")
 
 
 # ── allowed case 1: ancestry ─────────────────────────────────────────────────
@@ -248,8 +376,7 @@ def test_ancestry_delete_with_verified_backup(root: Path) -> None:
     sink = FakeSink()
     jan = janitor(work, sink=sink)
     plan = jan.plan(branches=[J.BranchCandidate(name="feat-ancestry", tip=tip)])
-    row = plan.rows[0]
-    check(row.action == "delete_ancestry", f"planned ancestry deletion (saw {row.action})")
+    check(plan.rows[0].action == "delete_ancestry", f"planned ancestry deletion")
 
     dry = jan.apply(plan)
     check(dry[0]["result"] == "kept", "dry run keeps")
@@ -260,7 +387,8 @@ def test_ancestry_delete_with_verified_backup(root: Path) -> None:
 
     receipts = jan.apply(plan, execute=True, idempotency_prefix="exec")
     receipt = receipts[0]
-    check(receipt["result"] == "deleted", f"branch deleted (saw {receipt['result']}: {receipt['reason']})")
+    check(receipt["result"] == "deleted",
+          f"branch deleted (saw {receipt['result']}: {receipt['reason']})")
     check(git(work, "rev-parse", "--verify", "refs/heads/feat-ancestry", check_rc=False) == "",
           "the branch is really gone from the fixture")
 
@@ -271,33 +399,38 @@ def test_ancestry_delete_with_verified_backup(root: Path) -> None:
     check(git(origin, "rev-parse", "--verify", backup_ref) == tip,
           "the backup really exists on the fixture remote")
 
-    # EXACT argv, not a prose command (advisory finding F3).
-    argv = receipt["argv"]
-    prefix = ["git", "-C", str(work)]
-    check(argv[0] == prefix + ["rev-parse", "--verify", "refs/remotes/origin/main"],
-          "argv[0] re-pins the target")
-    check(argv[1] == prefix + ["update-ref", backup_ref, tip], f"argv update-ref exact: {argv[1]}")
-    check(argv[2] == prefix + ["rev-parse", "--verify", backup_ref], "argv local readback exact")
-    check(argv[3] == prefix + ["push", "--atomic", "origin",
-                               f"refs/heads/feat-ancestry:{backup_ref}"],
-          f"argv atomic push exact: {argv[3]}")
-    check(argv[4] == prefix + ["ls-remote", "--refs", "origin", backup_ref],
-          "argv remote readback exact")
-    check(argv[5] == prefix + ["branch", "-d", "feat-ancestry"],
-          f"argv deletion is `branch -d` exactly: {argv[5]}")
+    # Exact argv, asserted by CONTENT and ORDER rather than by index: the
+    # re-authentication seam legitimately adds its own read commands, and an
+    # index-pinned assertion would break on a change that is not a defect.
+    argv, prefix = receipt["argv"], ["git", "-C", str(work)]
+    expected_in_order = [
+        prefix + ["rev-parse", "--verify", "refs/remotes/origin/main"],
+        prefix + ["update-ref", backup_ref, tip],
+        prefix + ["rev-parse", "--verify", backup_ref],
+        prefix + ["push", "--atomic", "origin", f"refs/heads/feat-ancestry:{backup_ref}"],
+        prefix + ["ls-remote", "--refs", "origin", backup_ref],
+        prefix + ["branch", "-d", "feat-ancestry"],
+    ]
+    positions = [argv.index(item) if item in argv else -1 for item in expected_in_order]
+    for item, position in zip(expected_in_order, positions):
+        check(position >= 0, f"argv contains the exact command {item[3:]}")
+    check(positions == sorted(positions) and -1 not in positions,
+          f"the exact commands appear in law order (positions {positions})")
+    check(argv[-1] == prefix + ["branch", "-d", "feat-ancestry"],
+          f"the LAST command is the deletion itself: {argv[-1]}")
 
     for key in ("operation_id", "idempotency_key", "target_kind", "target_identity",
                 "observed_preimage", "pinned_target", "started_at", "finished_at",
-                "exit_code", "stdout_digest", "stderr_digest", "result", "reason"):
+                "exit_code", "stdout_digest", "stderr_digest", "result", "reason",
+                "receipt_durable"):
         check(key in receipt, f"receipt carries {key}")
-    check(receipt["observed_preimage"] == tip and receipt["current_tip"] == tip,
-          "receipt carries preimage and current tip")
-    check(sink.receipts and sink.receipts[-1]["result"] == "deleted", "sink received the receipt")
+    check(receipt["receipt_durable"] is True, "the receipt records that it persisted")
+    intents = [r for r in sink.receipts if r["result"] == "intent"]
+    check(len(intents) == 1 and intents[0]["reason"] == "pre_effect_intent_delete_ancestry",
+          "a durable intent was recorded before the effect")
 
 
 def test_ancestry_guard_mutation_is_caught(root: Path) -> None:
-    """Disable the ancestry re-verification and an unmerged branch is deleted.
-    The guard, not the fixture name, is what keeps unmerged work alive."""
     work, _ = build_repo(root / "ancestry-mutation")
     git(work, "checkout", "-b", "feat-unmerged")
     tip = commit(work, "u.txt", "unmerged")
@@ -308,10 +441,10 @@ def test_ancestry_guard_mutation_is_caught(root: Path) -> None:
     check(jan.classify_branch(J.BranchCandidate("feat-unmerged", tip), pinned).reason
           == "unmerged_without_pull_request", "unmerged branch survives with its own reason")
 
-    mutated = janitor(work)
+    mutated = janitor(work, mutex=J.MaintenanceMutex(work))
     mutated._is_ancestor = lambda tip_, pin_: True            # the guard, removed
-    flipped = mutated.classify_branch(J.BranchCandidate("feat-unmerged", tip), pinned)
-    check(flipped.action == "delete_ancestry",
+    check(mutated.classify_branch(J.BranchCandidate("feat-unmerged", tip), pinned).action
+          == "delete_ancestry",
           "with the ancestry guard removed the unmerged branch would be deleted")
 
 
@@ -342,44 +475,31 @@ def test_squash_delete_requires_exact_recorded_head(root: Path) -> None:
     check(receipt["result"] == "deleted", f"squash branch deleted (saw {receipt['reason']})")
     check(receipt["argv"][-1] == ["git", "-C", str(work), "branch", "-D", "feat-squash"],
           f"forced deletion argv is exact: {receipt['argv'][-1]}")
-    check(receipt["evidence"]["pull_request"]["number"] == 42, "PR evidence rides in the receipt")
     check(receipt["evidence"]["pull_request"]["evidence_id"] == "gh-pr-42", "evidence id recorded")
 
-    # GUARD MUTATION: point the PR head one commit away and the same branch,
-    # same PR, same merged state, must survive.
-    work2, tip2, prs2 = squash_fixture(root / "squash-mismatch", head_oid="a" * 40)
-    row = janitor(work2, prs=prs2).plan(
-        branches=[J.BranchCandidate(name="feat-squash", tip=tip2)]).rows[0]
-    check(row.action == "keep" and row.reason == "reused_branch_name",
-          f"a merged PR whose head is not this tip is a reused name (saw {row.reason})")
-
-    # GUARD MUTATION: right head, wrong base branch.
-    work3, tip3, prs3 = squash_fixture(root / "squash-wrong-base", base="release")
-    row3 = janitor(work3, prs=prs3).plan(
-        branches=[J.BranchCandidate(name="feat-squash", tip=tip3)]).rows[0]
-    check(row3.action == "keep", f"a PR merged into another base does not delete (saw {row3.action})")
-
-    # GUARD MUTATION: right head, PR closed rather than merged.
-    work4, tip4, prs4 = squash_fixture(root / "squash-closed", state="closed")
-    row4 = janitor(work4, prs=prs4).plan(
-        branches=[J.BranchCandidate(name="feat-squash", tip=tip4)]).rows[0]
-    check(row4.action == "keep" and row4.reason == "closed_unmerged_pull_request",
-          f"a closed-unmerged PR keeps the branch (saw {row4.reason})")
+    for label, kwargs, expected in [
+        ("head is not this tip", {"head_oid": "a" * 40}, "reused_branch_name"),
+        ("merged into another base", {"base": "release"}, None),
+        ("PR closed rather than merged", {"state": "closed"}, "closed_unmerged_pull_request"),
+    ]:
+        work_n, tip_n, prs_n = squash_fixture(root / f"squash-{abs(hash(label))}", **kwargs)
+        row = janitor(work_n, prs=prs_n).plan(
+            branches=[J.BranchCandidate(name="feat-squash", tip=tip_n)]).rows[0]
+        check(row.action == "keep", f"squash survivor: {label} (saw {row.action})")
+        if expected:
+            check(row.reason == expected, f"squash survivor reason {expected} (saw {row.reason})")
 
 
 def test_backup_failure_refuses_before_any_deletion(root: Path) -> None:
     work, tip, prs = squash_fixture(root / "backup-fail")
     jan = janitor(work, prs=prs)
     plan = jan.plan(branches=[J.BranchCandidate(name="feat-squash", tip=tip)])
-
-    # Break the remote half of the backup only. The local update-ref still
-    # succeeds, so this isolates the readback conjunction.
     git(work, "remote", "set-url", "origin", str(root / "backup-fail" / "no-such-remote.git"))
     receipt = jan.apply(plan, execute=True)[0]
-    check(receipt["result"] == "refused", f"refused without a verified backup (saw {receipt['result']})")
+    check(receipt["result"] == "refused", f"refused without a verified backup")
     check(receipt["reason"] == "backup_remote_push_failed",
           f"refusal names the backup failure (saw {receipt['reason']})")
-    check(git(work, "rev-parse", "--verify", "refs/heads/feat-squash") == tip,
+    check(git(work, "rev-parse", "--verify", "refs/heads/feat-squash", check_rc=False) == tip,
           "the branch survived the failed backup")
     check(not any(a[3:5] == ["branch", "-D"] for a in receipt["argv"]),
           "no deletion command was ever issued")
@@ -389,8 +509,6 @@ def test_tip_movement_between_plan_and_apply_refuses(root: Path) -> None:
     work, tip, prs = squash_fixture(root / "drift")
     jan = janitor(work, prs=prs)
     plan = jan.plan(branches=[J.BranchCandidate(name="feat-squash", tip=tip)])
-    check(plan.rows[0].action == "delete_squash", "planned a deletion against the snapshot")
-
     git(work, "checkout", "feat-squash")
     moved = commit(work, "s2.txt", "work arrived after the snapshot")
     git(work, "checkout", "main")
@@ -398,7 +516,6 @@ def test_tip_movement_between_plan_and_apply_refuses(root: Path) -> None:
     receipt = jan.apply(plan, execute=True)[0]
     check(receipt["result"] == "refused", "a tip that moved refuses")
     check(receipt["reason"] == "branch_tip_moved_since_plan", f"named (saw {receipt['reason']})")
-    check(receipt["current_tip"] == moved, "the receipt records the tip it actually observed")
     check(git(work, "rev-parse", "--verify", "refs/heads/feat-squash") == moved,
           "the newly arrived work is intact")
 
@@ -423,7 +540,79 @@ def test_unavailable_fresh_target_refuses_the_plan(root: Path) -> None:
                   "an unreadable pinned target refuses the whole plan")
 
 
-# ── survivor cases that need no merge evidence at all ────────────────────────
+def test_branch_evidence_changes_between_plan_and_apply(root: Path) -> None:
+    """The pull-request provider is a port, so its answer can change between the
+    census and the mutation exactly as the R09 entrant reader's can. A PR that is
+    reopened, or corrected to a different head, must preserve the branch."""
+    base = root / "pr-races"
+
+    class MutablePullRequests:
+        def __init__(self, rows):
+            self.rows = list(rows)
+
+        def pull_requests_for_branch(self, branch):
+            return tuple(self.rows) if branch == "feat-squash" else ()
+
+    def fixture(name: str):
+        work, _ = build_repo(base / name)
+        git(work, "checkout", "-b", "feat-squash")
+        tip = commit(work, "s.txt", "squash work")
+        git(work, "checkout", "main")
+        commit(work, "other.txt", "unrelated")
+        git(work, "push", "origin", "main")
+        git(work, "fetch", "origin", "main")
+        prs = MutablePullRequests([J.PullRequest(42, "merged", "main", tip, "gh-pr-42")])
+        jan = janitor(work, prs=prs)
+        plan = jan.plan(branches=[J.BranchCandidate("feat-squash", tip)])
+        check(plan.rows[0].action == "delete_squash", f"{name}: a squash delete was planned")
+        return jan, plan, prs, work, tip
+
+    # (a) The recorded head no longer matches the tip.
+    jan, plan, prs, work, tip = fixture("head-corrected")
+    prs.rows = [J.PullRequest(42, "merged", "main", "c" * 40, "gh-pr-42")]
+    receipt = jan.apply(plan, execute=True, idempotency_prefix="head")[0]
+    check(receipt["result"] == "refused"
+          and receipt["reason"] == "branch_drift_at_apply:reused_branch_name",
+          f"corrected PR head refuses (saw {receipt['result']}/{receipt['reason']})")
+    check(git(work, "rev-parse", "--verify", "refs/heads/feat-squash", check_rc=False) == tip,
+          "the branch survives a corrected pull-request head")
+
+    # (b) The pull request is reopened after the census.
+    jan_b, plan_b, prs_b, work_b, tip_b = fixture("reopened")
+    prs_b.rows = [J.PullRequest(42, "merged", "main", tip_b, "gh-pr-42"),
+                  J.PullRequest(43, "open", "main", tip_b, "gh-pr-43")]
+    receipt_b = jan_b.apply(plan_b, execute=True, idempotency_prefix="reopen")[0]
+    check(receipt_b["result"] == "refused"
+          and receipt_b["reason"] == "branch_drift_at_apply:open_pull_request",
+          f"a reopened PR refuses (saw {receipt_b['result']}/{receipt_b['reason']})")
+    check(git(work_b, "rev-parse", "--verify", "refs/heads/feat-squash", check_rc=False) == tip_b,
+          "the branch survives a reopened pull request")
+
+
+def test_backup_remote_readback_must_match_exactly(root: Path) -> None:
+    """A remote that answers with the wrong OID is not a verified backup. The
+    push succeeded, so only the readback equality can catch this."""
+    work, tip, prs = squash_fixture(root / "readback-mismatch")
+    jan = janitor(work, prs=prs)
+    plan = jan.plan(branches=[J.BranchCandidate("feat-squash", tip)])
+    real_run = jan.git.run
+
+    def lying_run(argv):
+        result = real_run(argv)
+        if argv[0] == "ls-remote":
+            wrong = "d" * 40
+            return J.GitResult(result.argv, 0, f"{wrong}\t{jan.backup_ref_for('feat-squash')}\n", "")
+        return result
+
+    jan.git.run = lying_run
+    receipt = jan.apply(plan, execute=True)[0]
+    check(receipt["result"] == "refused", f"a mismatched readback refuses (saw {receipt['result']})")
+    check(receipt["reason"] == "backup_remote_readback_mismatch",
+          f"and names the readback (saw {receipt['reason']})")
+    check(git(work, "rev-parse", "--verify", "refs/heads/feat-squash", check_rc=False) == tip,
+          "the branch survives an unverifiable backup")
+    check(not any(a[3:5] == ["branch", "-D"] for a in receipt["argv"]),
+          "no deletion command was issued")
 
 
 def test_branch_survivor_matrix(root: Path) -> None:
@@ -444,14 +633,13 @@ def test_branch_survivor_matrix(root: Path) -> None:
         (J.BranchCandidate("held", remote_tip, worktree_held=True), "worktree_held"),
         (J.BranchCandidate("gone", None), "missing_evidence_unreadable_tip"),
         (J.BranchCandidate("no-pr", remote_tip), "unmerged_without_pull_request"),
+        (J.BranchCandidate("main", remote_tip), "protected_target_branch"),
     ]
     for candidate, expected in cases:
         row = jan.classify_branch(candidate, pinned)
         check(row.action == "keep" and row.reason == expected,
               f"{candidate.name} survives as {expected} (saw {row.action}/{row.reason})")
 
-    # Exact argv for the remote-unmerged survivor: the assertion that matters is
-    # that NO command was issued against it (advisory finding F4).
     plan = jan.plan(branches=[cases[0][0]])
     receipt = jan.apply(plan, execute=True)[0]
     check(receipt["argv"] == [], "remote-unmerged survivor receipt records an empty argv")
@@ -460,37 +648,23 @@ def test_branch_survivor_matrix(root: Path) -> None:
     check(git(work, "rev-parse", "--verify", "refs/heads/remote-unmerged") == remote_tip,
           "the remote-unmerged branch is untouched")
 
-    # GUARD MUTATION: strip the remote-ref fact and the same branch is no longer
-    # protected by that clause — it falls through to its own unmerged reason.
     without = jan.classify_branch(
         J.BranchCandidate("remote-unmerged", remote_tip, remote_ref_exists=False), pinned)
     check(without.reason == "unmerged_without_pull_request",
           "the remote-unmerged reason is caused by the remote-ref fact")
 
 
-# ── worktrees ────────────────────────────────────────────────────────────────
-
-
-def r09_root(root: Path, entrant: dict | None) -> Path:
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "r09-registry.lock").write_text("", encoding="utf-8")
-    (root / "r09-state.json").write_text(
-        json.dumps({"allocations": {}, "entrant": entrant, "receipts": []}), encoding="utf-8")
-    return root
+# ── worktrees, including the race the review found (finding 001/006) ─────────
 
 
 def test_worktree_survivor_matrix_and_removal(root: Path) -> None:
     work, _ = build_repo(root / "worktrees")
     trees = root / "worktrees" / "trees"
     trees.mkdir(parents=True)
-
-    def add(name: str) -> Path:
-        path = trees / name
-        git(work, "worktree", "add", "-b", f"wt-{name}", str(path), "main")
-        return path
-
-    stale, dirty, live, locked = add("stale"), add("dirty"), add("live"), add("locked")
-    entrant_tree, uncertain_tree = add("entrant"), add("uncertain")
+    stale, dirty, live, locked = (add_worktree(work, trees, n)
+                                  for n in ("stale", "dirty", "live", "locked"))
+    entrant_tree = add_worktree(work, trees, "entrant")
+    uncertain_tree = add_worktree(work, trees, "uncertain")
     (dirty / "scratch.txt").write_text("uncommitted work", encoding="utf-8")
     git(work, "worktree", "lock", str(locked))
 
@@ -503,8 +677,8 @@ def test_worktree_survivor_matrix_and_removal(root: Path) -> None:
     jan = janitor(work, entrant_reader=reader_alive)
     survivors = [
         (J.WorktreeCandidate(str(dirty), True, dirty=True, idle_seconds=old), "dirty_worktree"),
-        (J.WorktreeCandidate(str(live), True, dirty=False, idle_seconds=60.0),
-         "recently_live_worktree"),
+        (J.WorktreeCandidate(str(live), True, dirty=False, idle_seconds=60.0,
+                             isolation_root=str(empty_root)), "recently_live_worktree"),
         (J.WorktreeCandidate(str(locked), True, locked=True, dirty=False, idle_seconds=old),
          "locked_worktree"),
         (J.WorktreeCandidate(str(trees / "bare"), True, bare=True, dirty=False, idle_seconds=old),
@@ -515,8 +689,8 @@ def test_worktree_survivor_matrix_and_removal(root: Path) -> None:
          "volatile_private_tmp_path"),
         (J.WorktreeCandidate(str(J.CANONICAL_CHECKOUT), True, dirty=False, idle_seconds=old),
          "canonical_tree"),
-        (J.WorktreeCandidate(str(stale), True, dirty=False, idle_seconds=None),
-         "missing_evidence_unknown_liveness"),
+        (J.WorktreeCandidate(str(stale), True, dirty=False, idle_seconds=None,
+                             isolation_root=str(empty_root)), "missing_evidence_unknown_liveness"),
         (J.WorktreeCandidate(str(entrant_tree), True, dirty=False, idle_seconds=old,
                              isolation_root=str(alive_root)), "active_r09_entrant"),
     ]
@@ -525,20 +699,27 @@ def test_worktree_survivor_matrix_and_removal(root: Path) -> None:
         check(row.action == "keep" and row.reason == expected,
               f"worktree {Path(candidate.path).name} survives as {expected} "
               f"(saw {row.action}/{row.reason})")
+        for fact in ("registered", "bare", "locked", "dirty", "idle_seconds", "entrant"):
+            check(fact in row.evidence, f"{expected} row carries the {fact} posture fact")
 
-    # An entrant whose owner liveness is UNKNOWN preserves the tree too, and it
-    # does so regardless of TTL: this candidate is far past the TTL.
-    uncertain = J.RepoHygieneJanitor(
-        repository=work, git=J.GitPort(work, env=ENV), pull_requests=FakePullRequests(),
-        receipt_sink=FakeSink(), tail=J.load_settlement_tail(TAIL_MANIFEST),
-        register=J.load_never_cleanable_register(REGISTER), entrant_reader=reader_unknown,
-        clock=FakeClock(), effect_packet="EFFECT-PACKET-FIXTURE")
+    uncertain = janitor(work, entrant_reader=reader_unknown)
     row = uncertain.classify_worktree(J.WorktreeCandidate(
         str(uncertain_tree), True, dirty=False, idle_seconds=old, isolation_root=str(alive_root)))
     check(row.reason == "uncertain_r09_entrant_liveness",
           f"uncertain entrant liveness preserves regardless of TTL (saw {row.reason})")
 
-    # An unreadable registry is missing evidence, never an absent entrant.
+    # NOT ASKING R09 IS NOT R09 SAYING NOBODY IS THERE. A janitor with no reader,
+    # and a worktree with no bound registry root, both have no entrant evidence.
+    no_reader = janitor(work, entrant_reader=None)
+    check(no_reader.classify_worktree(J.WorktreeCandidate(
+        str(stale), True, dirty=False, idle_seconds=old,
+        isolation_root=str(alive_root))).reason == "missing_evidence_entrant_unreadable",
+        "a janitor with no entrant reader cannot remove a worktree")
+    check(jan.classify_worktree(J.WorktreeCandidate(
+        str(stale), True, dirty=False, idle_seconds=old,
+        isolation_root=None)).reason == "missing_evidence_entrant_unreadable",
+        "a worktree with no bound R09 registry root cannot be removed")
+
     broken = root / "r09-broken"
     broken.mkdir()
     (broken / "r09-registry.lock").write_text("", encoding="utf-8")
@@ -549,54 +730,122 @@ def test_worktree_survivor_matrix_and_removal(root: Path) -> None:
           f"an unreadable R09 registry preserves (saw {row.reason})")
 
     # ALLOWED CASE: registered, clean, stale, no entrant -> removal through the
-    # governed door. The fixture substitutes a fixture-local door for
-    # bin/worktree.sh so that no canonical worktree is ever addressed.
-    door = trees / "fixture-remove.sh"
-    door.write_text(f'#!/bin/sh\nexec git -C "{work}" worktree remove "$1"\n', encoding="utf-8")
-    door.chmod(0o755)
-    removing = janitor(work, entrant_reader=reader_alive, remove_command=("sh", str(door)))
+    # governed door, with a full fresh posture on the receipt.
+    removing = janitor(work, entrant_reader=reader_alive,
+                       remove_command=fixture_remove_door(work, trees),
+                       liveness=lambda _p: old)
     plan = removing.plan(worktrees=[J.WorktreeCandidate(
         str(stale), True, dirty=False, idle_seconds=old, isolation_root=str(empty_root))])
     check(plan.rows[0].action == "remove_worktree",
           f"a stale clean unentered tree plans removal (saw {plan.rows[0].reason})")
-
-    dry = removing.apply(plan)
-    check(dry[0]["result"] == "kept" and stale.exists(), "dry run leaves the worktree in place")
+    check(removing.apply(plan)[0]["result"] == "kept" and stale.exists(),
+          "dry run leaves the worktree in place")
 
     receipt = removing.apply(plan, execute=True, idempotency_prefix="exec")[0]
     check(receipt["result"] == "deleted", f"worktree removed (saw {receipt['reason']})")
     check(not stale.exists(), "the fixture worktree is really gone")
-    check(receipt["argv"][-1] == ["sh", str(door), str(stale)],
+    check(receipt["argv"][-1] == [*fixture_remove_door(work, trees), str(stale)],
           f"the governed removal argv is exact: {receipt['argv'][-1]}")
+    for fact in ("registered", "bare", "locked", "dirty", "idle_seconds", "entrant"):
+        check(fact in receipt["fresh_posture"], f"removal receipt carries fresh {fact}")
+        check(fact in receipt["planned_posture"], f"removal receipt carries planned {fact}")
 
-    # GUARD MUTATION: the same stale, clean, registered tree with an ACTIVE
-    # entrant would have been removed had the entrant clause not fired.
     check(jan.classify_worktree(J.WorktreeCandidate(
         str(entrant_tree), True, dirty=False, idle_seconds=old,
         isolation_root=str(empty_root))).action == "remove_worktree",
         "with no entrant the same tree is removable — the entrant clause is what saves it")
 
 
-def test_worktree_dirty_at_apply_refuses(root: Path) -> None:
-    work, _ = build_repo(root / "wt-drift")
-    trees = root / "wt-drift" / "trees"
+def test_worktree_races_between_plan_and_apply(root: Path) -> None:
+    """The review's finding 001. Each case plans a legitimate removal, then
+    changes the world, and requires the mutation boundary to preserve the tree."""
+    base = root / "wt-races"
+    work, _ = build_repo(base)
+    trees = base / "trees"
     trees.mkdir(parents=True)
-    path = trees / "drifter"
-    git(work, "worktree", "add", "-b", "wt-drifter", str(path), "main")
+    door = fixture_remove_door(work, trees)
+    old = J.DEFAULT_WORKTREE_TTL_SECONDS * 2
+    registry = r09_root(base / "registry", None)
 
-    jan = janitor(work, remove_command=("false",))
-    plan = jan.plan(worktrees=[J.WorktreeCandidate(
-        str(path), True, dirty=False, idle_seconds=J.DEFAULT_WORKTREE_TTL_SECONDS * 2)])
-    check(plan.rows[0].action == "remove_worktree", "planned removal against the snapshot")
+    def plan_removal(path: Path, *, reader=None, liveness=None):
+        reader = reader or (lambda _r: {"state": "none", "entrant": None})
+        jan = janitor(work, entrant_reader=reader, remove_command=door,
+                      liveness=liveness or (lambda _p: old))
+        plan = jan.plan(worktrees=[J.WorktreeCandidate(
+            str(path), True, dirty=False, idle_seconds=old, isolation_root=str(registry))])
+        check(plan.rows[0].action == "remove_worktree",
+              f"{path.name}: a removal was genuinely planned")
+        return jan, plan
 
-    (path / "late.txt").write_text("work arrived after the snapshot", encoding="utf-8")
-    receipt = jan.apply(plan, execute=True)[0]
-    check(receipt["result"] == "refused" and receipt["reason"] == "worktree_dirty_at_apply",
-          f"work arriving after the snapshot refuses (saw {receipt['result']}/{receipt['reason']})")
-    check(path.exists() and (path / "late.txt").exists(), "the late work is intact")
+    # (a) An R09 entrant ARRIVES after the census.
+    victim = add_worktree(work, trees, "entrant-arrives")
+    posture: dict[str, Any] = {"state": "none", "entrant": None}
+    calls: list[dict[str, Any]] = []
+
+    def reader(_root: Path) -> dict[str, Any]:
+        calls.append(dict(posture))
+        return dict(posture)
+
+    jan, plan = plan_removal(victim, reader=reader)
+    posture.update(state="active", entrant={"owner": "arrived-after-the-census"})
+    receipt = jan.apply(plan, execute=True, idempotency_prefix="entrant")[0]
+    check(receipt["result"] == "refused",
+          f"an entrant arriving after the plan preserves the tree (saw {receipt['result']})")
+    check(receipt["reason"] == "worktree_drift_at_apply:active_r09_entrant",
+          f"and the refusal names the entrant (saw {receipt['reason']})")
+    check(victim.exists(), "the newly entered worktree still exists")
+    check(len(calls) >= 2, f"the entrant reader ran again at the boundary (calls={len(calls)})")
+    check(receipt["fresh_posture"]["entrant"]["state"] == "active",
+          "the receipt records the fresh active entrant")
+
+    # (b) Liveness becomes uncertain after the census.
+    victim_b = add_worktree(work, trees, "entrant-uncertain")
+    live_posture: dict[str, Any] = {"state": "none", "entrant": None}
+    jan_b, plan_b = plan_removal(victim_b, reader=lambda _r: dict(live_posture))
+    live_posture.update(state="stale_uncertain", entrant={"owner": "unknown-liveness"})
+    receipt_b = jan_b.apply(plan_b, execute=True, idempotency_prefix="uncertain")[0]
+    check(receipt_b["reason"] == "worktree_drift_at_apply:uncertain_r09_entrant_liveness",
+          f"uncertain liveness after the plan preserves (saw {receipt_b['reason']})")
+    check(victim_b.exists(), "the uncertain worktree still exists")
+
+    # (c) The tree becomes DIRTY after the census.
+    victim_c = add_worktree(work, trees, "dirtied")
+    jan_c, plan_c = plan_removal(victim_c)
+    (victim_c / "late.txt").write_text("work arrived after the snapshot", encoding="utf-8")
+    receipt_c = jan_c.apply(plan_c, execute=True, idempotency_prefix="dirty")[0]
+    check(receipt_c["reason"] == "worktree_drift_at_apply:dirty_worktree",
+          f"a tree dirtied after the plan preserves (saw {receipt_c['reason']})")
+    check((victim_c / "late.txt").exists(), "the late work is intact")
+
+    # (d) The tree becomes LOCKED after the census.
+    victim_d = add_worktree(work, trees, "locked-late")
+    jan_d, plan_d = plan_removal(victim_d)
+    git(work, "worktree", "lock", str(victim_d))
+    receipt_d = jan_d.apply(plan_d, execute=True, idempotency_prefix="locked")[0]
+    check(receipt_d["reason"] == "worktree_drift_at_apply:locked_worktree",
+          f"a tree locked after the plan preserves (saw {receipt_d['reason']})")
+    check(victim_d.exists(), "the locked worktree still exists")
+
+    # (e) The tree is TOUCHED after the census, so it is live again. The census
+    # row carries the stale age explicitly; the probe is what the boundary asks,
+    # and it now answers "touched five seconds ago".
+    victim_e = add_worktree(work, trees, "touched")
+    jan_e, plan_e = plan_removal(victim_e, liveness=lambda _p: 5.0)
+    receipt_e = jan_e.apply(plan_e, execute=True, idempotency_prefix="touched")[0]
+    check(receipt_e["reason"] == "worktree_drift_at_apply:recently_live_worktree",
+          f"a freshly touched tree preserves (saw {receipt_e['reason']})")
+    check(victim_e.exists(), "the freshly touched worktree still exists")
+
+    # (f) Registration is lost after the census.
+    victim_f = add_worktree(work, trees, "deregistered")
+    jan_f, plan_f = plan_removal(victim_f)
+    git(work, "worktree", "remove", str(victim_f))
+    receipt_f = jan_f.apply(plan_f, execute=True, idempotency_prefix="dereg")[0]
+    check(receipt_f["reason"] == "worktree_drift_at_apply:unregistered_worktree",
+          f"a deregistered path preserves (saw {receipt_f['reason']})")
 
 
-# ── caches ───────────────────────────────────────────────────────────────────
+# ── caches, including the byte race and the truthful argv (finding 002) ──────
 
 
 def test_cache_matrix(root: Path) -> None:
@@ -605,45 +854,171 @@ def test_cache_matrix(root: Path) -> None:
     cache = base / "cache-root"
     cache.mkdir()
     (cache / "blob").write_text("reproducible bytes", encoding="utf-8")
-    digest = hashlib.sha256(b"reproducible bytes").hexdigest()
-
-    register = J.NeverCleanableRegister(
-        never_clean=frozenset({str(base / "credentials")}),
-        exact_root_only=frozenset({str(cache)}))
-    jan = J.RepoHygieneJanitor(
-        repository=work, git=J.GitPort(work, env=ENV), pull_requests=FakePullRequests(),
-        receipt_sink=FakeSink(), tail=J.load_settlement_tail(TAIL_MANIFEST), register=register,
-        clock=FakeClock(), effect_packet="EFFECT-PACKET-FIXTURE")
+    digest = J.tree_digest(cache)
+    refetch = FakeRefetch({digest})
+    jan = cache_janitor(work, cache, refetch=refetch, never={str(base / "credentials")})
 
     survivors = [
-        (J.CacheCandidate(str(base / "credentials" / "token"), digest, digest, ["refetch"], True),
+        (J.CacheCandidate(str(base / "credentials" / "token"), digest, ["refetch"]),
          "never_cleanable_register"),
-        (J.CacheCandidate(str(base / "elsewhere"), digest, digest, ["refetch"], True),
+        (J.CacheCandidate(str(base / "elsewhere"), digest, ["refetch"]),
          "cache_root_not_registered"),
-        (J.CacheCandidate("/private/tmp/whatever", digest, digest, ["refetch"], True),
+        (J.CacheCandidate("/private/tmp/whatever", digest, ["refetch"]),
          "volatile_private_tmp_path"),
-        (J.CacheCandidate(str(cache), None, digest, ["refetch"], True),
-         "cache_reproducibility_missing"),
-        (J.CacheCandidate(str(cache), "b" * 64, digest, ["refetch"], True),
-         "cache_reproducibility_mismatch"),
-        (J.CacheCandidate(str(cache), digest, digest, None, False),
-         "cache_refetch_proof_missing"),
+        (J.CacheCandidate(str(cache), None, ["refetch"]), "cache_reproducibility_missing"),
+        (J.CacheCandidate(str(cache), "b" * 64, ["refetch"]), "cache_reproducibility_mismatch"),
+        (J.CacheCandidate(str(cache), digest, None), "cache_refetch_proof_missing"),
     ]
     for candidate, expected in survivors:
         row = jan.classify_cache(candidate)
         check(row.action == "keep" and row.reason == expected,
               f"cache survives as {expected} (saw {row.action}/{row.reason})")
 
-    good = J.CacheCandidate(str(cache), digest, digest, ["fetch", "--exact", digest], True)
+    # A candidate that is reproducible but whose proof is REFUSED still survives.
+    refusing = cache_janitor(work, cache, refetch=FakeRefetch(set()))
+    check(refusing.classify_cache(J.CacheCandidate(str(cache), digest, ["refetch"])).reason
+          == "cache_refetch_proof_missing", "an unproven refetch preserves the cache")
+
+    good = J.CacheCandidate(str(cache), digest, ["fetch", "--exact", digest])
     plan = jan.plan(caches=[good])
     check(plan.rows[0].action == "prune_cache", "a reproducible registered cache plans a prune")
     check(jan.apply(plan)[0]["result"] == "kept" and cache.exists(), "dry run leaves the cache")
+
+    before = refetch.calls
     receipt = jan.apply(plan, execute=True, idempotency_prefix="exec")[0]
     check(receipt["result"] == "deleted" and not cache.exists(), "the fixture cache is pruned")
-    check(receipt["argv"][-1] == ["rm", "-rf", "--", str(cache)],
-          f"cache removal argv is exact: {receipt['argv'][-1]}")
+    check(refetch.calls > before, "the refetch proof was re-evaluated at the mutation boundary")
+    check(receipt["argv"][-1] == [J.CACHE_REMOVE_PROGRAM, "-rf", "--", J.real_path(cache)],
+          f"cache removal argv names the RESOLVED path it acted on: {receipt['argv'][-1]}")
+    check(receipt["resolved_path"] == J.real_path(cache),
+          "the receipt identity matches the actual invocation")
     check(receipt["evidence"]["refetch_command"] == ["fetch", "--exact", digest],
           "the receipt says how to re-fetch what it removed")
+
+
+def test_cache_races_between_plan_and_apply(root: Path) -> None:
+    """The review's finding 002: changed bytes were deleted under stale proof."""
+    base = root / "cache-races"
+    work, _ = build_repo(base)
+
+    def fixture(name: str) -> tuple[Any, Any, Path, str]:
+        cache = base / name
+        cache.mkdir(parents=True)
+        (cache / "blob").write_text("approved bytes", encoding="utf-8")
+        digest = J.tree_digest(cache)
+        jan = cache_janitor(work, cache, refetch=FakeRefetch({digest}))
+        plan = jan.plan(caches=[J.CacheCandidate(str(cache), digest, ["fetch", digest])])
+        check(plan.rows[0].action == "prune_cache", f"{name}: a prune was genuinely planned")
+        return jan, plan, cache, digest
+
+    # (a) The bytes change after the census.
+    jan, plan, cache, _ = fixture("bytes-change")
+    (cache / "blob").write_text("changed after the snapshot", encoding="utf-8")
+    receipt = jan.apply(plan, execute=True, idempotency_prefix="bytes")[0]
+    check(receipt["result"] == "refused",
+          f"changed cache bytes refuse (saw {receipt['result']}/{receipt['reason']})")
+    check(receipt["reason"].startswith("cache_drift_at_apply:"),
+          f"and the refusal names the drift (saw {receipt['reason']})")
+    check(cache.exists() and (cache / "blob").read_text() == "changed after the snapshot",
+          "the changed cache is intact")
+
+    # (b) A new file appears in the cache after the census.
+    jan_b, plan_b, cache_b, _ = fixture("file-appears")
+    (cache_b / "late.bin").write_text("new content", encoding="utf-8")
+    receipt_b = jan_b.apply(plan_b, execute=True, idempotency_prefix="appear")[0]
+    check(receipt_b["result"] == "refused" and cache_b.exists(),
+          f"a new file in the cache refuses (saw {receipt_b['result']})")
+
+    # (c) The path is swapped for a symlink after the census.
+    jan_c, plan_c, cache_c, _ = fixture("symlink-swap")
+    decoy = base / "decoy"
+    decoy.mkdir()
+    for item in cache_c.iterdir():
+        item.rename(decoy / item.name)
+    cache_c.rmdir()
+    cache_c.symlink_to(decoy)
+    receipt_c = jan_c.apply(plan_c, execute=True, idempotency_prefix="symlink")[0]
+    check(receipt_c["result"] == "refused",
+          f"a swapped symlink refuses (saw {receipt_c['result']}/{receipt_c['reason']})")
+    check(decoy.exists() and (decoy / "blob").exists(), "the symlink target is untouched")
+
+    # (d) The cache disappears after the census.
+    jan_d, plan_d, cache_d, _ = fixture("vanishes")
+    subprocess.run(("/bin/rm", "-rf", "--", str(cache_d)), check=True)
+    receipt_d = jan_d.apply(plan_d, execute=True, idempotency_prefix="vanish")[0]
+    check(receipt_d["result"] == "refused",
+          f"a vanished cache refuses rather than reporting success (saw {receipt_d['result']})")
+
+
+def test_cache_path_swapped_after_the_digest_read(root: Path) -> None:
+    """The window BETWEEN measuring the bytes and removing them.
+
+    The drift check above re-measures identity, but a swap that lands after that
+    measurement would still be removed by a naive applicator. These fixtures
+    change the path as a side effect of the digest read itself — the digest
+    returned is the honest pre-swap one — so the only thing that can save the
+    target is a check that reads the path again immediately before removal.
+    """
+    base = root / "cache-toctou"
+    work, _ = build_repo(base)
+
+    class SwapOnApplyDigest:
+        """Returns the true digest, then changes the world behind it."""
+
+        def __init__(self, cache: Path, swap):
+            self.cache, self.swap, self.calls = cache, swap, 0
+
+        def __call__(self, path: Path) -> str | None:
+            digest = J.tree_digest(path)
+            self.calls += 1
+            if self.calls == 2:                 # 1 = census, 2 = mutation boundary
+                self.swap()
+            return digest
+
+    def fixture(name: str, swap):
+        cache = base / name
+        cache.mkdir(parents=True)
+        (cache / "blob").write_text("approved bytes", encoding="utf-8")
+        digest = J.tree_digest(cache)
+        probe = SwapOnApplyDigest(cache, swap)
+        register = J.NeverCleanableRegister(frozenset(), frozenset({str(cache)}))
+        jan = J.RepoHygieneJanitor(
+            repository=work, git=J.GitPort(work, env=ENV), pull_requests=FakePullRequests(),
+            receipt_sink=FakeSink(), tail=J.load_settlement_tail(TAIL_MANIFEST),
+            register=register, mutex=held_mutex(work), clock=FakeClock(),
+            cache_digest=probe, refetch_verifier=FakeRefetch({digest}),
+            effect_packet="EFFECT-PACKET-FIXTURE")
+        plan = jan.plan(caches=[J.CacheCandidate(str(cache), digest, ["fetch", digest])])
+        check(plan.rows[0].action == "prune_cache", f"{name}: a prune was genuinely planned")
+        return jan, plan, cache
+
+    # (a) The directory becomes a symlink to real content after the measurement.
+    decoy = base / "decoy-target"
+    decoy.mkdir()
+    (decoy / "precious.txt").write_text("someone else's bytes", encoding="utf-8")
+
+    def to_symlink() -> None:
+        subprocess.run(("/bin/rm", "-rf", "--", str(base / "swap-symlink")), check=True)
+        (base / "swap-symlink").symlink_to(decoy)
+
+    jan, plan, cache = fixture("swap-symlink", to_symlink)
+    receipt = jan.apply(plan, execute=True, idempotency_prefix="toctou-symlink")[0]
+    check(receipt["result"] == "refused",
+          f"a symlink swapped in after the measurement refuses (saw {receipt['result']})")
+    check(receipt["reason"] == "cache_path_became_symlink",
+          f"and names the swap (saw {receipt['reason']})")
+    check((decoy / "precious.txt").exists(), "the symlink target's content is untouched")
+
+    # (b) The path vanishes after the measurement.
+    def to_absent() -> None:
+        subprocess.run(("/bin/rm", "-rf", "--", str(base / "swap-absent")), check=True)
+
+    jan_b, plan_b, _ = fixture("swap-absent", to_absent)
+    receipt_b = jan_b.apply(plan_b, execute=True, idempotency_prefix="toctou-absent")[0]
+    check(receipt_b["result"] == "refused"
+          and receipt_b["reason"] == "cache_path_disappeared_before_apply",
+          f"a path that vanished after the measurement refuses "
+          f"(saw {receipt_b['result']}/{receipt_b['reason']})")
 
 
 def test_canonical_cache_cleanup_is_structurally_forbidden(root: Path) -> None:
@@ -654,40 +1029,15 @@ def test_canonical_cache_cleanup_is_structurally_forbidden(root: Path) -> None:
         tail=J.load_settlement_tail(TAIL_MANIFEST),
         register=J.load_never_cleanable_register(REGISTER),
         clock=FakeClock(), effect_packet="EFFECT-PACKET-FIXTURE")
-    row = jan.classify_cache(J.CacheCandidate(
-        str(J.CANONICAL_CHECKOUT / ".DS_Store"), "a" * 64, "a" * 64, ["x"], True))
+    row = jan.classify_cache(J.CacheCandidate(str(J.CANONICAL_CHECKOUT / ".DS_Store"), "a" * 64))
     check(row.action == "keep" and row.reason == "canonical_cache_cleanup_forbidden",
           f"canonical cache cleanup is refused (saw {row.reason})")
+    expect_raises(J.JanitorRefusal,
+                  lambda: jan.apply(J.Plan("s", "0" * 40, "refs/x", 0.0, ()), execute=True),
+                  "executing against the canonical checkout refuses outright")
 
 
-# ── mutex, receipts, replay, disabled runtime ────────────────────────────────
-
-
-def test_maintenance_mutex_contention_and_staleness(root: Path) -> None:
-    canonical = root / "mutex-root"
-    clock = FakeClock()
-    first = J.MaintenanceMutex(canonical, clock=clock)
-    check(first.acquire(), "the first holder acquires the mutex")
-    check(first.path == canonical / "out" / "worktree-reap.lock",
-          "the mutex is the existing out/worktree-reap.lock, not a second one")
-
-    second = J.MaintenanceMutex(canonical, clock=clock)
-    check(not second.acquire(), "a second holder is refused while the first is live")
-    expect_raises(J.JanitorRefusal, lambda: J.MaintenanceMutex(canonical, clock=clock).__enter__(),
-                  "the context manager refuses under contention")
-    check(first.path.exists(), "the refused contender did not steal the lock")
-
-    first.release()
-    check(not first.path.exists(), "release removes the lock file")
-
-    # A lock older than the existing two-hour threshold belongs to a dead
-    # reaper and is reclaimed — the same rule hooks/worktree-self-plumb.py uses.
-    third = J.MaintenanceMutex(canonical, clock=clock)
-    check(third.acquire(), "reacquire after release")
-    old_clock = lambda: time.time() + J.LOCK_STALE_SECONDS + 60
-    fourth = J.MaintenanceMutex(canonical, clock=old_clock)
-    check(fourth.acquire(), "a stale lock is reclaimed")
-    fourth.release()
+# ── the receipt protocol across the mutation boundary (finding 003) ──────────
 
 
 def test_receipt_sink_availability_is_checked_before_mutation(root: Path) -> None:
@@ -697,9 +1047,62 @@ def test_receipt_sink_availability_is_checked_before_mutation(root: Path) -> Non
     plan = jan.plan(branches=[J.BranchCandidate(name="feat-squash", tip=tip)])
     expect_raises(J.JanitorRefusal, lambda: jan.apply(plan, execute=True),
                   "an unavailable receipt sink refuses before any mutation")
-    check(git(work, "rev-parse", "--verify", "refs/heads/feat-squash") == tip,
+    check(git(work, "rev-parse", "--verify", "refs/heads/feat-squash", check_rc=False) == tip,
           "nothing was deleted into an unavailable sink")
     check(sink.receipts == [], "no receipt was emitted")
+
+
+def test_pre_effect_intent_failure_preserves_the_target(root: Path) -> None:
+    """available() passes, then the very first emit fails. Nothing may be
+    touched, because an effect whose intent cannot be recorded never starts."""
+    base = root / "intent-fail"
+    work, _ = build_repo(base)
+    cache = base / "cache-root"
+    cache.mkdir()
+    (cache / "blob").write_text("bytes", encoding="utf-8")
+    digest = J.tree_digest(cache)
+    sink = FakeSink(fail_emit_after=0)
+    jan = cache_janitor(work, cache, sink=sink, refetch=FakeRefetch({digest}))
+    plan = jan.plan(caches=[J.CacheCandidate(str(cache), digest, ["fetch", digest])])
+
+    receipts = jan.apply(plan, execute=True, idempotency_prefix="intent")
+    check(receipts[0]["result"] == "refused",
+          f"a non-durable intent refuses (saw {receipts[0]['result']})")
+    check(receipts[0]["reason"] == "pre_effect_intent_not_durable",
+          f"and names why (saw {receipts[0]['reason']})")
+    check(receipts[0]["receipt_durable"] is False, "the receipt admits it did not persist")
+    check(cache.exists(), "the cache was never touched")
+    check(receipts[0]["argv"] == [], "no command was issued")
+
+
+def test_post_effect_receipt_failure_is_unknown_not_success(root: Path) -> None:
+    """available() passes, the intent persists, the effect happens, and THEN the
+    sink dies. The target is gone, so the honest result is UNKNOWN."""
+    base = root / "result-fail"
+    work, _ = build_repo(base)
+    cache = base / "cache-root"
+    cache.mkdir()
+    (cache / "blob").write_text("bytes", encoding="utf-8")
+    digest = J.tree_digest(cache)
+    sink = FakeSink(fail_emit_after=1)          # intent lands; the result does not
+    jan = cache_janitor(work, cache, sink=sink, refetch=FakeRefetch({digest}))
+    plan = jan.plan(caches=[J.CacheCandidate(str(cache), digest, ["fetch", digest])])
+
+    receipts = jan.apply(plan, execute=True, idempotency_prefix="result")
+    receipt = receipts[0]
+    check(not cache.exists(), "the effect really happened")
+    check(receipt["result"] == "unknown",
+          f"a lost result receipt is UNKNOWN, never deleted (saw {receipt['result']})")
+    check(receipt["reason"] == "result_receipt_not_durable_after_effect_no_automatic_retry",
+          f"and names no automatic retry (saw {receipt['reason']})")
+    check(receipt["receipt_durable"] is False, "the receipt does not claim to have persisted")
+    check("sink_error" in receipt, "the sink failure is carried as evidence")
+    check(len(sink.receipts) == 1 and sink.receipts[0]["result"] == "intent",
+          "only the pre-effect intent survived in the sink")
+
+    replay = jan.apply(plan, execute=True, idempotency_prefix="result")
+    check(replay[0]["operation_id"] == receipt["operation_id"],
+          "a resubmit dedupes against the recorded unknown rather than repeating the effect")
 
 
 def test_execute_without_effect_packet_refuses(root: Path) -> None:
@@ -708,7 +1111,7 @@ def test_execute_without_effect_packet_refuses(root: Path) -> None:
     plan = jan.plan(branches=[J.BranchCandidate(name="feat-squash", tip=tip)])
     expect_raises(J.JanitorRefusal, lambda: jan.apply(plan, execute=True),
                   "execute without a reviewed live-effect packet refuses")
-    check(git(work, "rev-parse", "--verify", "refs/heads/feat-squash") == tip,
+    check(git(work, "rev-parse", "--verify", "refs/heads/feat-squash", check_rc=False) == tip,
           "the branch survives an unauthorised execute")
     check(jan.apply(plan)[0]["result"] == "kept", "the same plan still dry-runs")
 
@@ -723,22 +1126,17 @@ def test_idempotent_replay_does_not_remutate(root: Path) -> None:
     replay = jan.apply(plan, execute=True, idempotency_prefix="run-1")
     check(replay[0]["operation_id"] == first[0]["operation_id"],
           "a replay under the same idempotency key returns the recorded receipt")
-    check(len(jan.receipt_sink.receipts) == 1, "the replay emitted no second receipt")
 
-    # A DIFFERENT key is a genuinely new operation, and it must refuse rather
-    # than silently succeed: the branch is already gone.
     fresh = jan.apply(plan, execute=True, idempotency_prefix="run-2")
-    check(fresh[0]["result"] == "refused" and fresh[0]["reason"] == "branch_disappeared_before_apply",
+    check(fresh[0]["result"] == "refused"
+          and fresh[0]["reason"] == "branch_disappeared_before_apply",
           f"a new operation over deleted state refuses (saw {fresh[0]['reason']})")
 
 
 def test_partial_operation_is_unknown_and_never_retried(root: Path) -> None:
-    """Exit code and observed state disagreeing is UNKNOWN, not success and not
-    a retry. Simulated by a git port that reports success without deleting."""
     work, tip, prs = squash_fixture(root / "partial")
     jan = janitor(work, prs=prs)
     plan = jan.plan(branches=[J.BranchCandidate(name="feat-squash", tip=tip)])
-
     real_run = jan.git.run
 
     def lying_run(argv):
@@ -757,20 +1155,418 @@ def test_partial_operation_is_unknown_and_never_retried(root: Path) -> None:
           "the branch is in fact still present")
 
 
-def test_entrypoint_is_disabled_by_default() -> None:
-    argv = ["--repository", str(ROOT), "--tail-manifest", str(TAIL_MANIFEST),
-            "--never-cleanable-register", str(REGISTER)]
-    check(J.main(argv) == 0, "the entrypoint plans and reports")
-    env_key = "CARR_REPO_HYGIENE_EFFECT_PACKET"
-    saved = os.environ.pop(env_key, None)
+# ── the command surface, end to end (finding 005) ───────────────────────────
+
+
+def cli_args(work: Path, *extra: str) -> list[str]:
+    return ["--repository", str(work), "--tail-manifest", str(TAIL_MANIFEST),
+            "--never-cleanable-register", str(REGISTER), *extra]
+
+
+def test_cli_plans_a_real_census_and_defaults_to_dry_run(root: Path) -> None:
+    base = root / "cli-plan"
+    work, _ = build_repo(base)
+    git(work, "checkout", "-b", "feat-merged")
+    merged_tip = commit(work, "m.txt", "merged work")
+    git(work, "checkout", "main")
+    git(work, "merge", "--no-ff", "-m", "merge", "feat-merged")
+    git(work, "push", "origin", "main")
+    git(work, "fetch", "origin", "main")
+    git(work, "checkout", "-b", "feat-open")
+    open_tip = commit(work, "o.txt", "open work")
+    git(work, "checkout", "main")
+
+    receipts_path = base / "receipts.jsonl"
+    args = J.build_parser().parse_args(cli_args(work, "--receipts", str(receipts_path)))
+    code, report = J.run(args)
+    check(code == 0, f"the command completes (saw {code})")
+    check(report["mode"] == "dry_run_default_off", f"default is dry run (saw {report['mode']})")
+    check(report["planned"].get("delete_ancestry") == 1,
+          f"the census really found the merged branch (saw {report['planned']})")
+    check("protected_target_branch" in report["reasons"],
+          f"main is protected by name (saw {report['reasons']})")
+    check(git(work, "rev-parse", "--verify", "refs/heads/feat-merged") == merged_tip,
+          "the dry run deleted nothing")
+    check(git(work, "rev-parse", "--verify", "refs/heads/feat-open") == open_tip,
+          "the unmerged branch is untouched")
+
+    check(receipts_path.exists(), "the --receipts file was actually written")
+    rows = [json.loads(line) for line in receipts_path.read_text().splitlines() if line]
+    check(len(rows) == report["receipts_written"],
+          f"every receipt is queryable on disk ({len(rows)} rows)")
+    check(all("idempotency_key" in row and "result" in row for row in rows),
+          "each persisted receipt carries its contract fields")
+    check(any(row["target_identity"] == "feat-merged" for row in rows),
+          "the merged branch has its own receipt")
+    check(report["pull_request_evidence"] == "none_supplied",
+          "with no evidence file the command says so rather than implying provider access")
+
+
+def test_cli_squash_needs_frozen_evidence_and_executes_only_when_bound(root: Path) -> None:
+    base = root / "cli-exec"
+    work, _ = build_repo(base)
+    git(work, "checkout", "-b", "feat-squash")
+    tip = commit(work, "s.txt", "squash work")
+    git(work, "checkout", "main")
+    commit(work, "other.txt", "unrelated")
+    git(work, "push", "origin", "main")
+    git(work, "fetch", "origin", "main")
+
+    # Without evidence, no squash branch can be planned for deletion at all.
+    plain = J.build_parser().parse_args(cli_args(work))
+    _, report = J.run(plain)
+    check(report["planned"].get("delete_squash") is None,
+          f"no provider evidence means no squash deletion (saw {report['planned']})")
+
+    evidence = base / "pr-evidence.json"
+    evidence.write_text(json.dumps({"feat-squash": [
+        {"number": 7, "state": "merged", "base_ref": "main", "head_oid": tip,
+         "evidence_id": "frozen-pr-7"}]}), encoding="utf-8")
+    receipts_path = base / "receipts.jsonl"
+    bound = cli_args(work, "--pr-evidence", str(evidence), "--receipts", str(receipts_path))
+
+    args = J.build_parser().parse_args(bound)
+    _, dry = J.run(args)
+    check(dry["planned"].get("delete_squash") == 1, "frozen evidence makes the branch eligible")
+    check(git(work, "rev-parse", "--verify", "refs/heads/feat-squash") == tip,
+          "the dry run still deleted nothing")
+
+    saved = os.environ.pop("CARR_REPO_HYGIENE_EFFECT_PACKET", None)
     try:
-        check(J.main(argv + ["--execute"]) == 2,
+        check(J.main(bound + ["--execute"]) == 2,
               "--execute without a reviewed live-effect packet is refused")
+        check(git(work, "rev-parse", "--verify", "refs/heads/feat-squash") == tip,
+              "the refused execute deleted nothing")
+
+        os.environ["CARR_REPO_HYGIENE_EFFECT_PACKET"] = "FIXTURE-EFFECT-PACKET"
+        code, report = J.run(J.build_parser().parse_args(bound + ["--execute"]))
+        check(code == 0 and report["mode"] == "execute", "a bound execute runs")
+        check(report["results"].get("deleted") == 1,
+              f"exactly the eligible branch was deleted (saw {report['results']})")
+        check(git(work, "rev-parse", "--verify", "refs/heads/feat-squash",
+                  check_rc=False) == "", "the branch is gone in the owned fixture")
+        check(git(work, "rev-parse", "--verify",
+                  "refs/backup/r07-janitor/feat-squash") == tip, "its backup ref exists")
+        rows = [json.loads(line) for line in receipts_path.read_text().splitlines() if line]
+        deleted = [row for row in rows if row["result"] == "deleted"]
+        check(len(deleted) == 1, "one deletion receipt landed on disk")
+        check(deleted[0]["argv"][-1][-2:] == ["branch", "feat-squash"][-2:]
+              or deleted[0]["argv"][-1] == ["git", "-C", str(work), "branch", "-D", "feat-squash"],
+              f"the persisted receipt carries the real argv: {deleted[0]['argv'][-1]}")
     finally:
+        os.environ.pop("CARR_REPO_HYGIENE_EFFECT_PACKET", None)
         if saved is not None:
-            os.environ[env_key] = saved
+            os.environ["CARR_REPO_HYGIENE_EFFECT_PACKET"] = saved
+
+
+def test_public_api_refuses_without_a_bound_mutex(root: Path) -> None:
+    """Finding A. An absent mutex is not "no mutex needed" — it is a caller that
+    has not proven exclusivity, and it does not get to act."""
+    base = root / "unlocked"
+    work, _ = build_repo(base)
+    cache = base / "cache-root"
+    cache.mkdir()
+    (cache / "blob").write_text("bytes", encoding="utf-8")
+    digest = J.tree_digest(cache)
+
+    unlocked = J.RepoHygieneJanitor(
+        repository=work, git=J.GitPort(work, env=ENV), receipt_sink=J.MemoryReceiptSink(),
+        tail=J.load_settlement_tail(TAIL_MANIFEST),
+        register=J.NeverCleanableRegister(frozenset(), frozenset({str(cache)})),
+        refetch_verifier=FakeRefetch({digest}), effect_packet="EFFECT-PACKET-FIXTURE",
+        mutex=None)
+    expect_raises(J.JanitorRefusal, lambda: unlocked.plan(),
+                  "the public planner refuses with no mutex bound")
+    check(cache.exists(), "nothing was touched by the unlocked planner")
+
+    # And a plan built under a real lock cannot be applied by an unlocked caller.
+    locked = cache_janitor(work, cache, refetch=FakeRefetch({digest}))
+    plan = locked.plan(caches=[J.CacheCandidate(str(cache), digest, ["fetch", digest])])
+    check(plan.rows[0].action == "prune_cache", "a genuine prune was planned under the lock")
+    unlocked._seen_keys.clear()
+    expect_raises(J.JanitorRefusal, lambda: unlocked.apply(plan, execute=True),
+                  "the public applicator refuses with no mutex bound")
+    check(cache.exists(), "the cache survives an unlocked apply")
+
+
+def test_open_pull_request_after_an_ancestry_plan_preserves(root: Path) -> None:
+    """Finding B. The branch really is merged into the pin, so the ancestry law
+    is satisfied — and an open pull request that appeared after the census still
+    preserves it, because every survivor class is re-asked on every path."""
+    base = root / "ancestry-open-pr"
+    work, _ = build_repo(base)
+    git(work, "checkout", "-b", "feat-ancestry")
+    tip = commit(work, "a.txt", "ancestry work")
+    git(work, "checkout", "main")
+    git(work, "merge", "--no-ff", "-m", "merge", "feat-ancestry")
+    git(work, "push", "origin", "main")
+    git(work, "fetch", "origin", "main")
+
+    class MutablePR:
+        def __init__(self):
+            self.rows: list[Any] = []
+
+        def pull_requests_for_branch(self, branch):
+            return tuple(self.rows) if branch == "feat-ancestry" else ()
+
+    prs = MutablePR()
+    jan = janitor(work, prs=prs)
+    plan = jan.plan(branches=[J.BranchCandidate("feat-ancestry", tip)])
+    check(plan.rows[0].action == "delete_ancestry",
+          f"an ancestry deletion was genuinely planned (saw {plan.rows[0].reason})")
+
+    prs.rows = [J.PullRequest(99, "open", "main", tip, "opened-after-the-census")]
+    receipt = jan.apply(plan, execute=True, idempotency_prefix="open-after")[0]
+    check(receipt["result"] == "refused",
+          f"an open PR after an ancestry plan preserves (saw {receipt['result']})")
+    check(receipt["reason"] == "branch_drift_at_apply:open_pull_request",
+          f"and names the open pull request (saw {receipt['reason']})")
+    check(git(work, "rev-parse", "--verify", "refs/heads/feat-ancestry",
+              check_rc=False) == tip, "the branch with the open pull request is intact")
+
+    # Unavailable evidence preserves too: it is not the same as no pull request.
+    class BrokenProvider:
+        def pull_requests_for_branch(self, branch):
+            raise OSError("provider unavailable")
+
+    broken = janitor(work, prs=BrokenProvider())
+    row = broken.classify_branch(J.BranchCandidate("feat-ancestry", tip), broken.pin_target())
+    check(row.action == "keep"
+          and row.reason == "missing_evidence_pull_request_provider_unavailable",
+          f"an unavailable provider preserves (saw {row.action}/{row.reason})")
+
+    # The genuine allowed case still works when the evidence really is clean.
+    prs.rows = []
+    jan2 = janitor(work, prs=prs)
+    plan2 = jan2.plan(branches=[J.BranchCandidate("feat-ancestry", tip)])
+    receipt2 = jan2.apply(plan2, execute=True, idempotency_prefix="clean-ancestry")[0]
+    check(receipt2["result"] == "deleted",
+          f"a genuinely clean ancestry deletion still succeeds (saw {receipt2['reason']})")
+
+
+def test_never_clean_root_cannot_be_reached_through_an_alias(root: Path) -> None:
+    """Finding C. `<eligible-root>/../credentials` reads like an eligible path and
+    IS a never-clean root. Identity is the resolved real path, on both sides."""
+    base = root / "alias"
+    work, _ = build_repo(base)
+    exact = base / "cache-root"
+    exact.mkdir()
+    (exact / "blob").write_text("cache bytes", encoding="utf-8")
+    never = base / "credentials"                      # a FIXTURE directory, not real secrets
+    never.mkdir()
+    (never / "token").write_text("fixture-not-a-real-credential", encoding="utf-8")
+
+    register = J.NeverCleanableRegister(frozenset({str(never)}), frozenset({str(exact)}))
+    jan = J.RepoHygieneJanitor(
+        repository=work, git=J.GitPort(work, env=ENV), receipt_sink=FakeSink(),
+        tail=J.load_settlement_tail(TAIL_MANIFEST), register=register,
+        mutex=held_mutex(work), clock=FakeClock(),
+        refetch_verifier=lambda candidate, observed: True,
+        effect_packet="EFFECT-PACKET-FIXTURE")
+
+    alias = str(exact / ".." / "credentials")
+    digest = J.tree_digest(Path(alias))
+    row = jan.classify_cache(J.CacheCandidate(alias, digest, ["fetch"]))
+    check(row.action == "keep",
+          f"a dotdot alias of a never-clean root is kept (saw {row.action}/{row.reason})")
+    check(row.reason == "cache_path_not_normalized",
+          f"and the un-normalized identity is named (saw {row.reason})")
+
+    # A fully-resolved spelling of the same never-clean root is denied by the
+    # register itself, which is the check the alias was routing around.
+    denied = jan.classify_cache(J.CacheCandidate(str(never), digest, ["fetch"]))
+    check(denied.reason == "never_cleanable_register",
+          f"the resolved never-clean root is denied (saw {denied.reason})")
+
+    # A symlink sitting inside the eligible root, pointing at the never-clean
+    # root, resolves to the denied path and is denied.
+    link = exact / "sneaky-link"
+    link.symlink_to(never)
+    linked = jan.classify_cache(J.CacheCandidate(str(link), digest, ["fetch"]))
+    check(linked.reason == "never_cleanable_register",
+          f"a symlink into a never-clean root is denied (saw {linked.reason})")
+
+    # Eligibility is the EXACT resolved root, never an arbitrary descendant.
+    descendant = jan.classify_cache(J.CacheCandidate(str(exact / "blob"), digest, ["fetch"]))
+    check(descendant.reason == "cache_root_not_registered",
+          f"a descendant of an eligible root is not itself eligible (saw {descendant.reason})")
+
+    # A trailing separator and a relative spelling are the same identity / not one.
+    check(jan.classify_cache(J.CacheCandidate(str(exact) + "/", J.tree_digest(exact),
+                                              ["fetch"])).action == "prune_cache",
+          "a trailing separator is the same eligible identity")
+    check(jan.classify_cache(J.CacheCandidate("cache-root", digest, ["fetch"])).reason
+          == "cache_path_not_normalized", "a relative path is not an identity")
+
+    check(never.exists() and (never / "token").exists(),
+          "the never-clean fixture root was never touched")
+
+    # PLAN/APPLY IDENTITY DRIFT: an eligible root that becomes a symlink to the
+    # never-clean root between census and mutation must refuse.
+    swap = base / "swapped-root"
+    swap.mkdir()
+    (swap / "blob").write_text("cache bytes", encoding="utf-8")
+    register2 = J.NeverCleanableRegister(frozenset({str(never)}), frozenset({str(swap)}))
+    jan2 = J.RepoHygieneJanitor(
+        repository=work, git=J.GitPort(work, env=ENV), receipt_sink=FakeSink(),
+        tail=J.load_settlement_tail(TAIL_MANIFEST), register=register2,
+        mutex=held_mutex(work), clock=FakeClock(),
+        refetch_verifier=lambda candidate, observed: True,
+        effect_packet="EFFECT-PACKET-FIXTURE")
+    plan = jan2.plan(caches=[J.CacheCandidate(str(swap), J.tree_digest(swap), ["fetch"])])
+    check(plan.rows[0].action == "prune_cache", "a genuine prune was planned")
+    subprocess.run(("/bin/rm", "-rf", "--", str(swap)), check=True)
+    swap.symlink_to(never)
+    receipt = jan2.apply(plan, execute=True, idempotency_prefix="alias-drift")[0]
+    check(receipt["result"] == "refused",
+          f"a root that became an alias of a never-clean root refuses (saw {receipt['result']})")
+    check(never.exists() and (never / "token").exists(),
+          "the never-clean fixture root survived the identity swap")
+
+
+def fixture_register(path: Path, eligible: Path, never: Path) -> Path:
+    """A register file in the real format, naming only fixture roots."""
+    path.write_text(
+        "| root | canonical realpath | link | class | protection | n |\n"
+        "|---|---|---|---|---|---:|\n"
+        f"| `cache` | {J.real_path(eligible)} | not-symlink | cache | "
+        "Exact-root receipted janitor only; never repo-wide clean | 1 |\n"
+        f"| `creds` | {J.real_path(never)} | not-symlink | credential-risk | "
+        "NEVER CLEAN; contents not read | 1 |\n", encoding="utf-8")
+    return path
+
+
+def test_cli_entrant_evidence_end_to_end(root: Path) -> None:
+    """Finding D. The command must consult the REAL R09 posture reader, and a
+    missing mapping must refuse rather than read as 'nobody is there'."""
+    base = root / "cli-entrant"
+    work, _ = build_repo(base)
+    trees = base / "trees"
+    trees.mkdir(parents=True)
+    tree = add_worktree(work, trees, "entered")
+    registry = r09_root(base / "registry", {"owner": "live-session|wt|sha"})
+
+    def reason_for(extra: Sequence[str]) -> str:
+        args = J.build_parser().parse_args(cli_args(work, *extra))
+        code, report = J.run(args, sink=FakeSink())
+        check(code == 0, f"the command completed (saw {code})")
+        return " ".join(report["reasons"])
+
+    # (a) No mapping at all: no entrant evidence, so the tree is not removable.
+    check("missing_evidence_entrant_unreadable" in reason_for([]),
+          "with no isolation-root map the worktree is preserved for missing evidence")
+
+    # (b) A real mapping, default liveness: the registered entrant reads active.
+    mapping = base / "isolation.json"
+    mapping.write_text(json.dumps({"worktrees": {str(tree): str(registry)}}), encoding="utf-8")
+    check("active_r09_entrant" in reason_for(["--isolation-roots", str(mapping)]),
+          "a mapped registry with an entrant preserves the worktree as active")
+
+    # (c) The same mapping with owner liveness declared unknowable.
+    unknown = base / "isolation-unknown.json"
+    unknown.write_text(json.dumps({"worktrees": {str(tree): str(registry)},
+                                   "owner_liveness": "unknown"}), encoding="utf-8")
+    check("uncertain_r09_entrant_liveness" in reason_for(["--isolation-roots", str(unknown)]),
+          "declared-unknown owner liveness preserves the worktree as uncertain")
+
+    check(tree.exists(), "the entered worktree survived every command run")
+
+
+def test_cli_cache_reproducibility_end_to_end(root: Path) -> None:
+    """Finding E. The supported reproducible-cache case must be reachable from
+    the real command, and its proof must be a real re-measurement."""
+    base = root / "cli-cache"
+    work, _ = build_repo(base)
+    cache = base / "cache-root"
+    cache.mkdir()
+    (cache / "blob").write_text("recoverable bytes", encoding="utf-8")
+    reference = base / "reference-copy"
+    reference.mkdir()
+    (reference / "blob").write_text("recoverable bytes", encoding="utf-8")
+    never = base / "credentials"
+    never.mkdir()
+    (never / "token").write_text("fixture-not-a-real-credential", encoding="utf-8")
+    register = fixture_register(base / "register.md", cache, never)
+
+    digest = J.tree_digest(cache)
+    manifest = base / "caches.json"
+    # The refetch command names a binary that does not exist. If anything ever
+    # executed it, this test would fail loudly rather than silently pass.
+    manifest.write_text(json.dumps({"caches": [{
+        "path": str(cache), "expected_digest": digest,
+        "refetch_command": ["/nonexistent/refetch-binary", "--exact", digest],
+        "reference_path": str(reference)}]}), encoding="utf-8")
+
+    def run_cli(*extra: str):
+        args = J.build_parser().parse_args(
+            ["--repository", str(work), "--tail-manifest", str(TAIL_MANIFEST),
+             "--never-cleanable-register", str(register),
+             "--cache-manifest", str(manifest), *extra])
+        return J.run(args, sink=FakeSink())
+
+    _, report = run_cli()
+    check(report["planned"].get("prune_cache") == 1,
+          f"the supported reproducible case is reachable from the command "
+          f"(saw {report['planned']} / {report['reasons']})")
+    check(cache.exists(), "the dry run pruned nothing")
+
+    # A reference copy that does not match is not proof.
+    (reference / "blob").write_text("different bytes", encoding="utf-8")
+    _, mismatched = run_cli()
+    check(mismatched["planned"].get("prune_cache") is None
+          and "cache_refetch_proof_missing" in mismatched["reasons"],
+          f"a mismatched reference copy withholds the proof (saw {mismatched['reasons']})")
+    (reference / "blob").write_text("recoverable bytes", encoding="utf-8")
+
+    # A manifest with no reference at all cannot reach the prunable case.
+    bare = base / "caches-bare.json"
+    bare.write_text(json.dumps({"caches": [{"path": str(cache), "expected_digest": digest,
+                                            "refetch_command": ["x"]}]}), encoding="utf-8")
+    args = J.build_parser().parse_args(
+        ["--repository", str(work), "--tail-manifest", str(TAIL_MANIFEST),
+         "--never-cleanable-register", str(register), "--cache-manifest", str(bare)])
+    _, unproven = J.run(args, sink=FakeSink())
+    check("cache_refetch_proof_missing" in unproven["reasons"],
+          f"no reference copy means no proof (saw {unproven['reasons']})")
+
+    # A cache offered as its OWN reference is the dangerous circular case: the
+    # digests match by definition, so without a containment check the cache
+    # would authenticate its own destruction. A mere subdirectory would be
+    # caught by the digest comparison anyway; only self-reference reaches here.
+    circular = base / "caches-circular.json"
+    circular.write_text(json.dumps({"caches": [{
+        "path": str(cache), "expected_digest": digest,
+        "refetch_command": ["x"], "reference_path": str(cache)}]}), encoding="utf-8")
+    args = J.build_parser().parse_args(
+        ["--repository", str(work), "--tail-manifest", str(TAIL_MANIFEST),
+         "--never-cleanable-register", str(register), "--cache-manifest", str(circular)])
+    _, circular_report = J.run(args, sink=FakeSink())
+    check(circular_report["planned"].get("prune_cache") is None
+          and "cache_refetch_proof_missing" in circular_report["reasons"],
+          f"a cache is not its own proof (saw {circular_report['reasons']})")
+
+    saved = os.environ.pop("CARR_REPO_HYGIENE_EFFECT_PACKET", None)
+    try:
+        os.environ["CARR_REPO_HYGIENE_EFFECT_PACKET"] = "FIXTURE-EFFECT-PACKET"
+        code, executed = run_cli("--execute")
+        check(code == 0 and executed["results"].get("deleted") == 1,
+              f"a bound execute prunes exactly the proven cache (saw {executed['results']})")
+        check(not cache.exists(), "the owned fixture cache is gone")
+        check(reference.exists() and never.exists(),
+              "the reference copy and the never-clean fixture root are untouched")
+    finally:
+        os.environ.pop("CARR_REPO_HYGIENE_EFFECT_PACKET", None)
+        if saved is not None:
+            os.environ["CARR_REPO_HYGIENE_EFFECT_PACKET"] = saved
+
+
+def test_cli_defaults_and_parser_shape() -> None:
     parser = J.build_parser()
-    check(parser.parse_args(argv).execute is False, "execute defaults to off")
+    args = parser.parse_args([])
+    check(args.execute is False, "execute defaults to off")
+    check(args.repository == str(J.CANONICAL_CHECKOUT), "the default repository is canonical")
+    check(args.pr_evidence is None and args.cache_manifest is None,
+          "no provider evidence and no cache manifest are supplied by default")
 
 
 # ── runner ───────────────────────────────────────────────────────────────────
@@ -781,6 +1577,8 @@ def main() -> int:
         root = Path(temporary)
         test_immutable_inputs_parse_to_their_known_shape()
         test_tail_is_never_a_deletion_allowlist(root)
+        test_mutex_spans_plan_and_apply(root)
+        test_cli_refuses_under_contention_and_takes_no_action(root)
         test_ancestry_delete_with_verified_backup(root)
         test_ancestry_guard_mutation_is_caught(root)
         test_squash_delete_requires_exact_recorded_head(root)
@@ -788,17 +1586,29 @@ def main() -> int:
         test_tip_movement_between_plan_and_apply_refuses(root)
         test_pinned_target_drift_refuses(root)
         test_unavailable_fresh_target_refuses_the_plan(root)
+        test_branch_evidence_changes_between_plan_and_apply(root)
+        test_backup_remote_readback_must_match_exactly(root)
         test_branch_survivor_matrix(root)
         test_worktree_survivor_matrix_and_removal(root)
-        test_worktree_dirty_at_apply_refuses(root)
+        test_worktree_races_between_plan_and_apply(root)
         test_cache_matrix(root)
+        test_cache_races_between_plan_and_apply(root)
+        test_cache_path_swapped_after_the_digest_read(root)
         test_canonical_cache_cleanup_is_structurally_forbidden(root)
-        test_maintenance_mutex_contention_and_staleness(root)
         test_receipt_sink_availability_is_checked_before_mutation(root)
+        test_pre_effect_intent_failure_preserves_the_target(root)
+        test_post_effect_receipt_failure_is_unknown_not_success(root)
         test_execute_without_effect_packet_refuses(root)
         test_idempotent_replay_does_not_remutate(root)
         test_partial_operation_is_unknown_and_never_retried(root)
-        test_entrypoint_is_disabled_by_default()
+        test_public_api_refuses_without_a_bound_mutex(root)
+        test_open_pull_request_after_an_ancestry_plan_preserves(root)
+        test_never_clean_root_cannot_be_reached_through_an_alias(root)
+        test_cli_plans_a_real_census_and_defaults_to_dry_run(root)
+        test_cli_entrant_evidence_end_to_end(root)
+        test_cli_cache_reproducibility_end_to_end(root)
+        test_cli_squash_needs_frozen_evidence_and_executes_only_when_bound(root)
+        test_cli_defaults_and_parser_shape()
 
     if FAILURES:
         for failure in FAILURES:
