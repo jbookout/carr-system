@@ -1261,18 +1261,27 @@ test("an ungoverned envelope keeps its exact previous shape", () => {
 
 // --- V5-F03 deep-module execution contract ------------------------------------
 //
-// These fixtures and case tables are deliberately the same shape as the ones in
-// tools/room-bridge/test_engineering_passport_unit.py.  The server-side and
-// portable validators must accept and refuse exactly the same closed
-// engineering-slice-plan.v2 contract, so the two tables are kept identical on
-// purpose.
+// These fixtures and case tables exercise the SERVER validator.  They are the
+// same shape as the ones in tools/room-bridge/test_engineering_passport_unit.py,
+// but that resemblance is no longer what carries the parity claim: two
+// hand-maintained parallel tables drift the moment one side is edited alone,
+// which is exactly what they cannot detect.  Parity is now proven by one shared,
+// versioned corpus -- test/fixtures/f03-design-contract-parity.v1.json, driven
+// through BOTH validators by test/f03-design-contract-parity.test.mjs, which
+// compares the two verdict-for-verdict.  So a case added here does not have to
+// be mirrored by hand over there, and a rule that exists in only one validator
+// is caught by the corpus rather than by two tables agreeing on paper.
 //
-// Parity is claimed for v2, not universally.  Legacy engineering-slice-plan.v1
-// duplicate ordinals and dependency cycles are the one documented divergence:
-// the portable validator has always refused them, and this server validator has
-// always accepted them, so refusing them here now would strand already
-// registered append-only plans on every read path.  The case below states both
-// halves explicitly rather than asserting a parity that does not hold.
+// Parity is claimed for engineering-slice-plan.v2, not universally.  THREE
+// legacy v1 families are the documented divergence -- duplicate ordinals,
+// dependency cycles, and whitespace-padded identifiers.  The portable validator
+// has always refused all three, and this server validator has always accepted
+// them, so refusing them here now would strand already registered append-only
+// plans on every read path; the gate is the declared plan version, so a plan
+// newly registered as v1 keeps that permissive path too (see the header of
+// src/engineering-runtime.js).  The corpus asserts both halves of each
+// divergence exactly, in both languages, and the cases below state the server
+// half rather than asserting a parity that does not hold.
 
 const DESIGN_CONTRACT_FIELD_NAMES = [
   "authority", "code_model_decision", "completion", "contract_version", "dependency_rationale",
@@ -1803,6 +1812,179 @@ test("duplicate ordinals and dependency cycles refuse in v2 while legacy v1 keep
   assert.throws(() => requirePlan(v2Cycle, EngineeringToolError),
     error => error.error === "engineering_slice_dependency_cycle",
     "a two-slice v2 cycle can never satisfy either dependency");
+});
+
+// --- V5-F03 exact identifier admission ----------------------------------------
+//
+// requirePlan matched the closed identifier regex against text()'s TRIMMED copy
+// while every call site discarded that copy and the plan kept, sealed and
+// compared the raw string.  " slice:one " therefore registered here and was
+// refused by tools/room-bridge/engineering_passport.py (_str with
+// identifier=True) and by the SQL validators, all three of which match the raw
+// value.  engineering-slice-plan.v2 now matches the raw value too, with the
+// same regex and the same contract version: a bug correction inside the
+// existing identifier rule, not a new policy or a new version.  A padded
+// identifier is refused, never trimmed into an accepted identity, because
+// rewriting one would silently change the content plan_digest seals.
+//
+// Written from character codes so this file stays printable ASCII: 9 tab,
+// 10 newline, 13 carriage return.
+const TAB = String.fromCharCode(9);
+const NEWLINE = String.fromCharCode(10);
+const RETURN = String.fromCharCode(13);
+const IDENTIFIER_PADDINGS = [
+  [" ", ""], ["", " "], [" ", " "], ["  ", "  "],
+  [TAB, ""], ["", NEWLINE], ["", RETURN], [`${TAB} `, ` ${RETURN}${NEWLINE}`],
+];
+
+test("engineering-slice-plan.v2 admits identifiers exactly as written and refuses padded ones", () => {
+  const wrap = (value, [before, after]) => `${before}${value}${after}`;
+  const paddedFields = [
+    ["work_request.id", (typed, pad) => { typed.work_request.id = wrap(typed.work_request.id, pad); }],
+    ["accepted_plan_revision.id", (typed, pad) => {
+      typed.accepted_plan_revision.id = wrap(typed.accepted_plan_revision.id, pad);
+    }],
+    ["slice_ref", (typed, pad) => { typed.slices[0].slice_ref = wrap(typed.slices[0].slice_ref, pad); }],
+    ["declared_resource_refs", (typed, pad) => {
+      typed.slices[0].declared_resource_refs[0] = wrap(typed.slices[0].declared_resource_refs[0], pad);
+    }],
+    ["declared_component_refs", (typed, pad) => {
+      typed.slices[0].declared_component_refs[0] = wrap(typed.slices[0].declared_component_refs[0], pad);
+    }],
+    ["declared_plan_step_refs", (typed, pad) => {
+      typed.slices[0].declared_plan_step_refs[0] = wrap(typed.slices[0].declared_plan_step_refs[0], pad);
+    }],
+    ["forbidden_change_refs", (typed, pad) => {
+      typed.slices[0].forbidden_change_refs[0] = wrap(typed.slices[0].forbidden_change_refs[0], pad);
+    }],
+    ["planned_checks.check_ref", (typed, pad) => {
+      typed.slices[0].planned_checks[0].check_ref = wrap(typed.slices[0].planned_checks[0].check_ref, pad);
+      typed.slices[0].design_contract.tests.planned_check_refs =
+        typed.slices[0].planned_checks.map(check => check.check_ref);
+    }],
+    ["baseline_evidence_refs.ref", (typed, pad) => {
+      typed.slices[0].baseline_evidence_refs = [{
+        ref: wrap("evidence:baseline", pad), redaction_class: "redacted_evidence",
+        content_digest: `sha256:${"a".repeat(64)}`,
+      }];
+    }],
+  ];
+  for (const [field, mutate] of paddedFields)
+    for (const pad of IDENTIFIER_PADDINGS) {
+      const typed = v2Plan([v2Slice()]);
+      mutate(typed, pad);
+      assert.throws(() => requirePlan(reseal(typed), EngineeringToolError),
+        error => error.error === "engineering_identifier_invalid",
+        `${field} padded with ${JSON.stringify(pad)} was accepted`);
+    }
+  for (const blank of ["   ", TAB, NEWLINE]) {
+    const typed = v2Plan([v2Slice()]);
+    typed.slices[0].slice_ref = blank;
+    assert.throws(() => requirePlan(reseal(typed), EngineeringToolError),
+      error => error.error === "engineering_field_required",
+      "a whitespace-only identifier is a missing field, never an empty accepted identity");
+  }
+  // The nested design-contract facets already matched raw identifiers; these
+  // pin that they still do, so the rule is one rule at every identifier.
+  for (const [facet, mutate] of [
+    ["routing.adapter_ref", row => { row.design_contract.routing.adapter_ref = "adapter:codex-desktop "; }],
+    ["authority.capability_profile", row => {
+      row.design_contract.authority.capability_profile = " capability:engineering-repository-write";
+    }],
+    ["seam_decision.target_seam_ref", row => {
+      row.design_contract.seam_decision.target_seam_ref = `seam:engineering-runtime${TAB}`;
+    }],
+    ["evidence.evidence_refs.ref", row => { row.design_contract.evidence.evidence_refs[0].ref = "evidence:design "; }],
+    ["short_template.template_ref", row => {
+      row.design_contract.short_template.template_ref = "template:short-governed-v1 ";
+    }],
+  ]) {
+    const row = v2Slice();
+    mutate(row);
+    refusesPlan(v2Plan([row]), `padded ${facet}`);
+  }
+  // Nothing narrowed and nothing widened: an exact identifier using the whole
+  // accepted character set is still accepted, and prose keeps its exact
+  // previous whitespace behavior, so the rule never reaches free text.
+  assert.doesNotThrow(() => requirePlan(v2Plan([v2Slice("slice:short.v2_1-a", 1)]), EngineeringToolError),
+    "an exact identifier using the whole accepted character set must stay accepted");
+  const prose = v2Plan([v2Slice("slice:short", 1, { objective: "  Deepen the accepted slice contract  " })]);
+  assert.doesNotThrow(() => requirePlan(prose, EngineeringToolError),
+    "an objective is prose, not an identifier");
+  assert.equal(prose.slices[0].objective, "  Deepen the accepted slice contract  ",
+    "prose must come back exactly as written");
+  // The refusal never rewrites the caller's payload, so no reader can observe a
+  // trimmed identity that was never registered and never sealed.
+  const padded = v2Plan([v2Slice()]);
+  padded.slices[0].slice_ref = " slice:short ";
+  reseal(padded);
+  const before = JSON.stringify(padded);
+  assert.throws(() => requirePlan(padded, EngineeringToolError), EngineeringToolError);
+  assert.equal(JSON.stringify(padded), before, "a refused plan must come back exactly as it was handed in");
+  assert.equal(padded.slices[0].slice_ref, " slice:short ");
+});
+
+test("engineering-slice-plan.v1 keeps its exact previous identifier acceptance", () => {
+  // DOCUMENTED LEGACY DIVERGENCE, asserted rather than equalized.  The portable
+  // and SQL validators have always refused a padded identifier; this server
+  // validator has always accepted one, and requirePlan re-runs against the
+  // stored append-only plan row on every read path, so refusing it for v1 now
+  // would strand an already registered passport instead of repairing it.
+  const legacy = () => typedEngineeringPlan([engineeringSlice("slice:one", 1)]);
+  for (const [field, mutate] of [
+    ["work_request.id", typed => { typed.work_request.id = ` ${typed.work_request.id} `; }],
+    ["accepted_plan_revision.id", typed => {
+      typed.accepted_plan_revision.id = `${typed.accepted_plan_revision.id}${TAB}`;
+    }],
+    ["slice_ref", typed => { typed.slices[0].slice_ref = " slice:one "; }],
+    ["declared_resource_refs", typed => { typed.slices[0].declared_resource_refs = [" resource:one "]; }],
+    ["declared_component_refs", typed => { typed.slices[0].declared_component_refs = [`component:one${NEWLINE}`]; }],
+    ["declared_plan_step_refs", typed => { typed.slices[0].declared_plan_step_refs = [`${RETURN}step:one`]; }],
+    ["forbidden_change_refs", typed => { typed.slices[0].forbidden_change_refs = ["forbidden:one "]; }],
+    ["planned_checks.check_ref", typed => {
+      typed.slices[0].planned_checks[0].check_ref = `${typed.slices[0].planned_checks[0].check_ref} `;
+    }],
+    ["baseline_evidence_refs.ref", typed => {
+      typed.slices[0].baseline_evidence_refs = [{
+        ref: " evidence:one ", redaction_class: "metadata_only", content_digest: `sha256:${"a".repeat(64)}`,
+      }];
+    }],
+  ]) {
+    const typed = legacy();
+    mutate(typed);
+    assert.doesNotThrow(() => requirePlan(reseal(typed), EngineeringToolError),
+      `a pre-existing v1 plan with a padded ${field} must stay readable`);
+  }
+  // A producer that wants the stricter boundary registers the successor
+  // version, which is what the successor version is for.
+  const successor = v2Plan([v2Slice()]);
+  successor.slices[0].slice_ref = " slice:short ";
+  assert.throws(() => requirePlan(reseal(successor), EngineeringToolError),
+    error => error.error === "engineering_identifier_invalid",
+    "the successor version refuses what legacy v1 keeps accepting");
+  // The stored identity comes back exactly as registered, and the read path
+  // still projects it, which is the previous behavior unchanged.
+  const padded = legacy();
+  padded.slices[0].slice_ref = " slice:one ";
+  reseal(padded);
+  assert.equal(requirePlan(padded, EngineeringToolError).slices[0].slice_ref, " slice:one ",
+    "a legacy identity must never be trimmed on the way back out");
+  const projection = closureProjection(passportFacts(padded), EngineeringToolError);
+  assert.equal(projection.slices[0].slice_ref, " slice:one ");
+  assert.equal(projection.slices[0].state, "eligible");
+  assert.equal(projection.closure_state, "blocked");
+  // The legacy divergence is confined to leading and trailing whitespace.
+  const interior = legacy();
+  interior.slices[0].slice_ref = "slice: one";
+  assert.throws(() => requirePlan(reseal(interior), EngineeringToolError),
+    error => error.error === "engineering_identifier_invalid",
+    "interior whitespace was never accepted by either validator, in any version");
+  const dangling = typedEngineeringPlan([
+    engineeringSlice("slice:one", 1), engineeringSlice("slice:two", 2, [" slice:one "]),
+  ]);
+  assert.throws(() => requirePlan(dangling, EngineeringToolError),
+    error => error.error === "engineering_slice_dependency_unknown",
+    "a padded dependency reference names no slice, so legacy v1 refuses it too");
 });
 
 test("a v2 plan still admits and projects through the existing runtime seams", () => {

@@ -50,13 +50,28 @@ function id(value, field, ToolError) {
   if (!ID.test(result)) error(ToolError, { error: "engineering_identifier_invalid", field });
   return result;
 }
+// The same closed ID regex, applied to the value exactly as the producer wrote
+// it.  id() above tests text()'s TRIMMED value and then hands the caller that
+// trimmed copy, but every plan call site discards the return and keeps the raw
+// string, so " slice:one " passed admission and was then sealed, stored and
+// compared under an identity nothing else recognises.  The portable validator
+// (engineering_passport._str(identifier=True)) and the SQL validators have
+// always matched the raw value, so this is the identifier contract already in
+// force at the other boundaries, applied here with the same regex.  A padded
+// identifier is refused, never trimmed into an accepted identity: rewriting it
+// would silently change the sealed plan_digest content.
+function exactId(value, field, ToolError) {
+  if (typeof value !== "string" || !value.trim()) error(ToolError, { error: "engineering_field_required", field });
+  if (!ID.test(value)) error(ToolError, { error: "engineering_identifier_invalid", field });
+  return value;
+}
 function digest(value, field, ToolError) {
   if (typeof value !== "string" || !DIGEST.test(value)) error(ToolError, { error: "engineering_digest_invalid", field });
   return value;
 }
-function evidence(value, field, ToolError) {
+function evidence(value, field, ToolError, identifier = id) {
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join(",") !== "content_digest,redaction_class,ref") error(ToolError, { error: "engineering_evidence_invalid", field });
-  id(value.ref, `${field}.ref`, ToolError);
+  identifier(value.ref, `${field}.ref`, ToolError);
   digest(value.content_digest, `${field}.content_digest`, ToolError);
   if (!["metadata_only", "redacted_evidence"].includes(value.redaction_class)) error(ToolError, { error: "engineering_evidence_invalid", field });
   return value;
@@ -85,19 +100,39 @@ function exactAuthorityFree(args, ToolError) {
 // identical predicate for engineering-slice-plan.v2: for v2 the two accept and
 // refuse exactly the same inputs.
 //
-// ONE DELIBERATE LEGACY v1 DIVERGENCE.  The portable validator has always
-// refused duplicate ordinals and dependency cycles for every plan version; this
-// server validator historically accepted both, and plans registered under it are
-// append-only.  requirePlan re-runs against the STORED plan row on every read
-// path (sourcePlan, closureProjection, controllerPlan), so newly refusing those
-// two shapes for v1 would not correct a stored plan -- it would strand one,
-// making an already registered passport unreadable with nothing able to amend
-// the immutable row.  Both new checks are therefore enforced for
-// engineering-slice-plan.v2 only, and a pre-existing v1 plan keeps its exact
-// previous read behavior.  A producer that wants the stricter boundary
-// registers the successor version, which is what the successor version is for.
-// This is a documented divergence, not parity: the two validators are not
-// interchangeable on legacy v1 duplicate ordinals or cycles.
+// DELIBERATE LEGACY v1 DIVERGENCES.  The portable validator has always refused
+// duplicate ordinals, dependency cycles and whitespace-padded identifiers for
+// every plan version; this server validator historically accepted all three,
+// and plans registered under it are append-only.  requirePlan re-runs against
+// the STORED plan row on every read path (sourcePlan, closureProjection,
+// controllerPlan), so newly refusing those shapes for v1 would not correct a
+// stored plan -- it would strand one, making an already registered passport
+// unreadable with nothing able to amend the immutable row.  All three checks
+// are therefore enforced for engineering-slice-plan.v2 only, and a pre-existing
+// v1 plan keeps its exact previous read behavior.
+//
+// THE GATE IS THE DECLARED PLAN VERSION, NOT THE ROW'S AGE, and that is wider
+// than the stored-read argument alone: a plan REGISTERED as v1 today takes the
+// same permissive path as one stored a month ago.  requirePlan is one predicate
+// over one input and cannot tell a fresh registration from a stored row -- the
+// read paths hand it the stored plan and registration hands it the caller's --
+// so refusing these three shapes for new v1 registrations only would make the
+// same plan registerable and then unreadable, or readable and then
+// unregisterable, depending on which side moved.  Narrowing what a v1 producer
+// may newly register is a policy change with its own producers to migrate and
+// is deliberately OUT OF SCOPE here; nothing below implements it.  A producer
+// that wants the stricter boundary registers the successor version, which is
+// what the successor version is for.  These are documented divergences, not
+// parity: the two validators are not interchangeable on legacy v1 duplicate
+// ordinals, cycles or padded identifiers.
+//
+// EXACT IDENTIFIERS FOR v2.  A v2 plan admits every identifier exactly as the
+// producer wrote it (exactId).  id() validated text()'s trimmed copy while the
+// plan kept the raw string, so " slice:one " registered here yet was refused by
+// the portable and SQL validators, and the identity sealed into plan_digest was
+// not the identity the regex had approved.  The regex itself is unchanged and
+// no new version is introduced; a padded identifier is refused rather than
+// normalised, because rewriting one would silently change sealed content.
 
 export const ENGINEERING_SLICE_PLAN_VERSIONS = Object.freeze([
   "engineering-slice-plan.v1", "engineering-slice-plan.v2",
@@ -597,15 +632,19 @@ export function requirePlan(plan, ToolError) {
       error: "engineering_slice_plan_schema_invalid", schema_version: plan.schema_version ?? null,
       supported: [...ENGINEERING_SLICE_PLAN_VERSIONS],
     });
+  // Successor plans admit identifiers exactly as written; a legacy v1 plan keeps
+  // the trimming acceptance it was registered under, because every read path
+  // revalidates the stored append-only row.  See the divergence note above.
+  const identifier = plan.schema_version === SLICE_PLAN_V2 ? exactId : id;
   const binding = plan.work_request;
   if (!binding || typeof binding !== "object" || Array.isArray(binding) || Object.keys(binding).sort().join(",") !== "canonical_record_digest,id,state_version")
     error(ToolError, { error: "engineering_slice_plan_work_binding_invalid" });
-  id(binding.id, "work_request.id", ToolError); digest(binding.canonical_record_digest, "work_request.canonical_record_digest", ToolError);
+  identifier(binding.id, "work_request.id", ToolError); digest(binding.canonical_record_digest, "work_request.canonical_record_digest", ToolError);
   if (!Number.isInteger(binding.state_version) || binding.state_version < 1) error(ToolError, { error: "engineering_slice_plan_state_version_invalid" });
   const revision = plan.accepted_plan_revision;
   if (!revision || typeof revision !== "object" || Array.isArray(revision) || Object.keys(revision).sort().join(",") !== "digest,id,revision")
     error(ToolError, { error: "engineering_slice_plan_revision_invalid" });
-  id(revision.id, "accepted_plan_revision.id", ToolError); digest(revision.digest, "accepted_plan_revision.digest", ToolError);
+  identifier(revision.id, "accepted_plan_revision.id", ToolError); digest(revision.digest, "accepted_plan_revision.digest", ToolError);
   if (!Number.isInteger(revision.revision) || revision.revision < 1) error(ToolError, { error: "engineering_slice_plan_revision_invalid" });
   digest(plan.plan_digest, "plan_digest", ToolError);
   if (!Array.isArray(plan.slices) || plan.slices.length < 1) error(ToolError, { error: "engineering_slice_plan_empty" });
@@ -617,7 +656,7 @@ export function requirePlan(plan, ToolError) {
     required.sort();
     refuseSelfLabel(slice, "slice", slice?.slice_ref, ToolError);
     if (!slice || typeof slice !== "object" || Array.isArray(slice) || Object.keys(slice).sort().join(",") !== required.join(",")) error(ToolError, { error: "engineering_slice_schema_invalid", slice_ref: slice?.slice_ref });
-    id(slice.slice_ref, "slice_ref", ToolError);
+    identifier(slice.slice_ref, "slice_ref", ToolError);
     if (!Number.isInteger(slice.ordinal) || slice.ordinal < 1 || typeof slice.objective !== "string" || !slice.objective.trim() || typeof slice.definition_of_done !== "string" || !slice.definition_of_done.trim() || typeof slice.scope_boundary !== "string" || !slice.scope_boundary.trim()) error(ToolError, { error: "engineering_slice_fields_invalid", slice_ref: slice.slice_ref });
     if (!CONCURRENCY_POSTURES.has(slice.concurrency_posture) || !/^R[0-6]$/.test(slice.risk_class) || !RELEASE_REQUIREMENTS.has(slice.release_requirement) || typeof slice.manual_qa_required !== "boolean") error(ToolError, { error: "engineering_slice_enum_invalid", slice_ref: slice.slice_ref });
     if (refs.has(slice.slice_ref)) error(ToolError, { error: "engineering_slice_duplicate", slice_ref: slice.slice_ref });
@@ -634,11 +673,11 @@ export function requirePlan(plan, ToolError) {
       error(ToolError, { error: "engineering_slice_dependency_unknown", slice_ref: slice.slice_ref });
     for (const field of ["baseline_evidence_refs", "declared_resource_refs", "declared_component_refs", "declared_plan_step_refs", "forbidden_change_refs", "dependency_refs"])
       if (!Array.isArray(slice[field])) error(ToolError, { error: "engineering_slice_array_invalid", field, slice_ref: slice.slice_ref });
-    for (const [index, item] of slice.baseline_evidence_refs.entries()) evidence(item, `baseline_evidence_refs[${index}]`, ToolError);
+    for (const [index, item] of slice.baseline_evidence_refs.entries()) evidence(item, `baseline_evidence_refs[${index}]`, ToolError, identifier);
     for (const field of ["declared_resource_refs", "declared_component_refs", "declared_plan_step_refs", "forbidden_change_refs", "dependency_refs"])
-      for (const [index, item] of slice[field].entries()) id(item, `${field}[${index}]`, ToolError);
+      for (const [index, item] of slice[field].entries()) identifier(item, `${field}[${index}]`, ToolError);
     const checkRefs = new Set();
-    if (!Array.isArray(slice.planned_checks) || slice.planned_checks.length < 1 || slice.planned_checks.some(check => !check || typeof check !== "object" || Object.keys(check).sort().join(",") !== "check_ref,evidence_requirement,failure_condition" || !id(check.check_ref, "planned_checks.check_ref", ToolError) || checkRefs.has(check.check_ref) || !checkRefs.add(check.check_ref) || typeof check.failure_condition !== "string" || !check.failure_condition.trim() || !EVIDENCE_REQUIREMENTS.has(check.evidence_requirement))) error(ToolError, { error: "engineering_slice_checks_invalid", slice_ref: slice.slice_ref });
+    if (!Array.isArray(slice.planned_checks) || slice.planned_checks.length < 1 || slice.planned_checks.some(check => !check || typeof check !== "object" || Object.keys(check).sort().join(",") !== "check_ref,evidence_requirement,failure_condition" || !identifier(check.check_ref, "planned_checks.check_ref", ToolError) || checkRefs.has(check.check_ref) || !checkRefs.add(check.check_ref) || typeof check.failure_condition !== "string" || !check.failure_condition.trim() || !EVIDENCE_REQUIREMENTS.has(check.evidence_requirement))) error(ToolError, { error: "engineering_slice_checks_invalid", slice_ref: slice.slice_ref });
     if (plan.schema_version === SLICE_PLAN_V2) requireDesignContract(slice, ToolError);
   }
   if (plan.schema_version === SLICE_PLAN_V2) {
