@@ -75,8 +75,8 @@
       .sort((left, right) => left.route_sequence - right.route_sequence);
     if (!points.length) return;
     const { LngLatBounds, Map: MapLibreMap, Marker, NavigationControl, Popup, setWorkerUrl } =
-      await import("/vendor/maplibre-gl-6.1.0/maplibre-gl.mjs");
-    setWorkerUrl("/vendor/maplibre-gl-6.1.0/maplibre-gl-worker.mjs");
+      await import("/vendor/maplibre-gl-6.4.1/maplibre-gl.mjs");
+    setWorkerUrl("/vendor/maplibre-gl-6.4.1/maplibre-gl-worker.mjs");
     const mapSection = document.querySelector("#map-section");
     mapSection.hidden = false;
     if (mapInstance) mapInstance.remove();
