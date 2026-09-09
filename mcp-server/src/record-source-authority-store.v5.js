@@ -44,15 +44,19 @@ import {
 import { V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 import {
   V5_F01_AUTHORITY_INJECTION_FRAGMENTS,
+  V5_F01_DERIVATIVE_LINK_SCHEMA_VERSION,
   V5_F01_DOCUMENT_SCHEMA_VERSION,
   V5_F01_HOLD_STATES,
+  V5_F01_PARSED_PROPOSAL_DERIVATIVE_KIND,
   V5_F01_PROPOSAL_SCHEMA_VERSION,
+  V5_F01_RESERVED_DERIVATIVE_KINDS,
   compileFieldAuthorityRegistry,
   compileRetentionRegistry,
   fieldAuthorityRegistryPreimage,
   retentionRegistryPreimage,
   resolveObservation,
   admitCorporateArtifact,
+  evaluateDerivativeRegistration,
   evaluateParsedProposal,
   projectDocumentIdentity,
   evaluateDeletion,
@@ -76,6 +80,8 @@ export const V5_F01_STORED_HOLD_SCHEMA_VERSION =
   "doctorcre-v5-f01-stored-preservation-hold.v1";
 export const V5_F01_STORED_DELETION_SCHEMA_VERSION =
   "doctorcre-v5-f01-stored-deletion-evaluation.v1";
+export const V5_F01_STORED_DERIVATIVE_LINK_SCHEMA_VERSION =
+  "doctorcre-v5-f01-stored-derivative-source-link.v1";
 
 /** The exact record_kind vocabulary the ops relations enforce. */
 export const V5_F01_STORE_RECORD_KINDS = Object.freeze([
@@ -88,6 +94,7 @@ export const V5_F01_STORE_RECORD_KINDS = Object.freeze([
   "stored_corporate_artifact",
   "stored_parsed_proposal",
   "stored_proposal_link",
+  "stored_derivative_link",
   "stored_document_version",
   "stored_preservation_hold",
   "stored_deletion_evaluation",
@@ -99,6 +106,7 @@ export const V5_F01_OPERATIONS = Object.freeze([
   "record-source-observation",
   "record-corporate-artifact",
   "record-parsed-proposal",
+  "register-derivative-source-link",
   "record-document-identity",
   "record-artifact-preservation-hold",
   "evaluate-artifact-deletion",
@@ -164,6 +172,16 @@ export const V5_F01_DERIVED_ONLY_FIELDS = deepFreeze([
   "document_digest", "proposal_digest", "link_digest", "hold_digest",
   "evaluation_digest", "envelope_digest", "record_digest", "event_seq",
   "last_event_digest", "owner_source", "authoritative_home",
+  // Derived by the server or loaded from the record layer for the derivative
+  // seam. `produced_at` is the server instant of the transaction that registered
+  // the link, `registered_by`/`registered_at` are the derived principal and
+  // instant, `source_created_at` is loaded from the stored artifact, and
+  // `derivative_coverage` is the record layer's own answer about whether the
+  // registered links for an artifact are the whole set — the one value a caller
+  // must never be able to state.
+  "produced_at", "registered_by", "registered_at", "source_created_at",
+  "derivative_coverage", "derivative_coverage_state", "derivative_coverage_digest",
+  "registered_derivative_kinds", "derivatives",
 ]);
 
 function assertNoAccessorsOrHiddenKeys(object, path) {
@@ -269,6 +287,17 @@ const DELETION_SUBJECT_KEYS = Object.freeze([
   "deletion_proof",
 ]);
 
+// The caller-facing registration surface, and it is deliberately FLAT and small.
+// The producing workflow names itself, the derivative it just made, and the
+// immutable evidence of having made it. Everything else — the tenant, the actor,
+// the instant the production is bound to, the source artifact's own creation
+// time, and every coverage question — is derived or loaded, and the derived
+// guard above refuses each of them by name.
+const DERIVATIVE_REGISTRATION_KEYS = Object.freeze([
+  "source_artifact_digest", "derivative_kind", "derivative_id", "derivative_content_digest",
+  "producer_workflow", "producer_run_ref", "evidence_ref", "evidence_digest",
+]);
+
 const READ_SELECTOR_KEYS = Object.freeze([
   "kind", "entity", "field", "artifact_digest", "document_id", "hold_id",
 ]);
@@ -276,6 +305,7 @@ const READ_SELECTOR_KEYS = Object.freeze([
 export const V5_F01_READ_KINDS = Object.freeze([
   "current_policy", "field_state", "field_events", "state_transitions",
   "mutation_receipts", "reconciliation_items", "artifact", "proposal_links",
+  "derivative_links", "derivative_coverage",
   "document", "document_versions", "holds", "hold_history", "deletion_evaluations",
 ]);
 
@@ -305,6 +335,11 @@ const OPERATION_SCHEMAS = deepFreeze({
     write: true, humanOnly: false, authorityOnly: false,
     keys: ["schema_version", "idempotency_key", "proposal"],
     required: ["idempotency_key", "proposal"],
+  },
+  "register-derivative-source-link": {
+    write: true, humanOnly: false, authorityOnly: false,
+    keys: ["schema_version", "idempotency_key", "registration"],
+    required: ["idempotency_key", "registration"],
   },
   "record-document-identity": {
     write: true, humanOnly: false, authorityOnly: false,
@@ -346,6 +381,8 @@ export function v5F01ToolRegistrations() {
       "Persist one immutable source-agnostic artifact identity after privacy, provenance, prior-identity and time validation.",
     "record-parsed-proposal":
       "Persist a reviewable proposal and reversible history-preserving link to a stored artifact; never write a fact.",
+    "register-derivative-source-link":
+      "Bind one derived record to the exact stored artifact it came from, under the authenticated producer identity, before that derivative is complete; provenance only, never an inventory and never a deletion permission.",
     "record-document-identity":
       "Persist and read back one coherent versioned document identity/state record; no byte transfer or send.",
     "record-artifact-preservation-hold":
@@ -359,6 +396,7 @@ export function v5F01ToolRegistrations() {
     "record-source-observation": "recordSourceObservation",
     "record-corporate-artifact": "recordCorporateArtifact",
     "record-parsed-proposal": "recordParsedProposal",
+    "register-derivative-source-link": "registerDerivativeSourceLink",
     "record-document-identity": "recordDocumentIdentity",
     "record-artifact-preservation-hold": "recordArtifactPreservationHold",
     "evaluate-artifact-deletion": "evaluateArtifactDeletion",
@@ -554,8 +592,8 @@ export function storedHoldRecord({
 
 export function storedDeletionEvaluationRecord({
   artifact_class, artifact_home, artifact_digest, decision, reason_id,
-  retention_registry_digest, hold_inventory_digest, deletion_receipt,
-  evaluated_by, evaluated_at,
+  retention_registry_digest, hold_inventory_digest, derivative_coverage_state,
+  derivative_coverage_digest, deletion_receipt, evaluated_by, evaluated_at,
 }) {
   return {
     schema_version: V5_F01_STORED_DELETION_SCHEMA_VERSION,
@@ -564,9 +602,46 @@ export function storedDeletionEvaluationRecord({
     decision, reason_id,
     retention_registry_digest,
     hold_inventory_digest,
+    // The coverage answer the evaluation was taken against, and the digest of
+    // it. The database re-derives the digest at apply time, exactly as it does
+    // for the hold inventory, so a link registered between the decision and the
+    // write refuses instead of being missed.
+    derivative_coverage_state,
+    derivative_coverage_digest,
     deletion_receipt: deletion_receipt ?? null,
     evaluated_by,
     evaluated_at,
+  };
+}
+
+/**
+ * One registered derivative-source link, as the record layer stores it.
+ *
+ * The kernel produced everything about the LINK; this adds only the two values
+ * the server owns — which authenticated producer principal registered it and
+ * when. Neither may be supplied by a caller, and ops.f01_register_derivative_link
+ * re-derives `registered_by` and refuses a record that names anyone else.
+ */
+export function storedDerivativeLinkRecord({ link, registered_by, registered_at }) {
+  return {
+    schema_version: V5_F01_STORED_DERIVATIVE_LINK_SCHEMA_VERSION,
+    derivative_link_schema_version: V5_F01_DERIVATIVE_LINK_SCHEMA_VERSION,
+    tenant: ORGANIZATION_TENANT_ID,
+    source_artifact_digest: link.source_artifact_digest,
+    derivative_kind: link.derivative_kind,
+    derivative_id: link.derivative_id,
+    derivative_content_digest: link.derivative_content_digest,
+    producer_workflow: link.producer_workflow,
+    producer_run_ref: link.producer_run_ref,
+    produced_at: link.produced_at,
+    evidence_ref: link.evidence_ref,
+    evidence_digest: link.evidence_digest,
+    registration_is_provenance: link.registration_is_provenance,
+    is_exhaustive_inventory: link.is_exhaustive_inventory,
+    establishes_coverage: link.establishes_coverage,
+    permits_deletion: link.permits_deletion,
+    registered_by,
+    registered_at,
   };
 }
 
@@ -606,6 +681,49 @@ function projectKeys(source, keys) {
 const KERNEL_CURRENT_STATE_KEYS = Object.freeze([
   "entity", "field", "tenant", "account", "native_identity", "value_digest", "version",
   "owner_source", "observed_at", "event_seq", "last_event_digest",
+]);
+
+/**
+ * Build one derivative-registration request for the kernel out of a flat caller
+ * payload, the LOADED source artifact and the server's own instant.
+ *
+ * Shared by the public registration operation and by the parsed-proposal
+ * producer path below, so the two cannot drift into registering different
+ * things. `produced_at` is the server instant every time: a producer's own clock
+ * is not evidence about when the record layer saw the production, and a caller
+ * that could state it could place a derivative before the artifact it came from.
+ */
+function derivativeRegistrationRequest({ registration, storedArtifact, now }) {
+  return {
+    tenant: ORGANIZATION_TENANT_ID,
+    registration: {
+      source_artifact_digest: registration.source_artifact_digest,
+      derivative: {
+        derivative_kind: registration.derivative_kind,
+        derivative_id: registration.derivative_id,
+        content_digest: registration.derivative_content_digest,
+      },
+      producer: {
+        producer_workflow: registration.producer_workflow,
+        producer_run_ref: registration.producer_run_ref,
+      },
+      produced_at: now,
+      evidence: {
+        evidence_ref: registration.evidence_ref,
+        evidence_digest: registration.evidence_digest,
+      },
+    },
+    source_artifact: storedArtifact === null || storedArtifact === undefined ? null : {
+      artifact_digest: storedArtifact.artifact_digest,
+      created_at: storedArtifact.created_at,
+    },
+    now,
+  };
+}
+
+/** The closed shape the kernel accepts for one loaded coverage answer. */
+const KERNEL_COVERAGE_KEYS = Object.freeze([
+  "state", "reason_id", "registered_derivative_kinds",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -792,8 +910,30 @@ export function createRecordSourceAuthorityStore({ db } = {}) {
         Object.assign(extra, { artifact_digest: record.artifact_digest,
           proposal_digest: outcome.proposal_digest, link_digest: outcome.link_digest,
           supersedes_link_digest: record.supersedes_link_digest ?? null,
+          // The producer half of the approved registration rule: this derived
+          // record did not complete without its source registration, and the
+          // digest of that registration is reported rather than assumed.
+          derivative_link_digest: outcome.derivative_link_digest ?? null,
+          derivative_registration_bound: true,
           becomes_fact: false, advances_state: false, carries_effect_authority: false,
           requires_human_review: true });
+        break;
+      case "register-derivative-source-link":
+        reason = outcome.outcome === "already_registered"
+          ? "derivative_source_link_already_registered"
+          : "derivative_source_link_registered";
+        Object.assign(extra, {
+          link_digest: outcome.link_digest,
+          source_artifact_digest: record.source_artifact_digest,
+          derivative_kind: record.derivative_kind,
+          derivative_id: record.derivative_id,
+          producer_workflow: record.producer_workflow,
+          // Said on every registration answer, because the whole risk here is
+          // that somebody reads a growing link table as a complete one.
+          establishes_coverage: false,
+          is_exhaustive_inventory: false,
+          permits_deletion: false,
+        });
         break;
       case "record-document-identity": {
         const incomplete = record.official_filing_state === "incomplete_official_filing";
@@ -836,7 +976,14 @@ export function createRecordSourceAuthorityStore({ db } = {}) {
         Object.assign(extra, { artifact_class: record.artifact_class,
           artifact_digest: record.artifact_digest, evaluation_digest: outcome.evaluation_digest,
           blocking_holds: blocking.map(h => h.hold_id),
+          // CLASS POLICY, from the installed retention registry. Kept under the
+          // same name it has always had, and kept apart from the instance
+          // observation beside it, because they answer different questions.
           surviving_derivatives: outcome.surviving_derivatives ?? record.deletion_receipt?.surviving_derivatives ?? [],
+          observed_surviving_derivatives:
+            record.deletion_receipt?.observed_surviving_derivatives ?? null,
+          derivative_coverage_state: record.derivative_coverage_state,
+          derivative_coverage_digest: record.derivative_coverage_digest,
           hold_inventory_digest: record.hold_inventory_digest,
           silent_purge: false, purge_without_proof: false, deletion_performed: false });
         break;
@@ -1151,16 +1298,172 @@ export function createRecordSourceAuthorityStore({ db } = {}) {
       const linkEnvelope = storeEnvelope("stored_proposal_link", evaluated.link, {
         ...notFact, reversible: true, history_preserved: true,
       });
+
+      // THE PRODUCER HALF OF THE APPROVED REGISTRATION RULE, and it is bound HERE
+      // rather than left to whoever calls this tool. (That rule is the session
+      // approval the kernel's registration header names; Q129.D1 settles the
+      // retention registry and not this.)
+      //
+      // A parsed proposal is a record DERIVED from a stored corporate artifact,
+      // so this workflow is a producer under that rule: it registers which
+      // original produced the derivative before the derivative is complete,
+      // automatically, with nobody having to remember.
+      // The registration is built from values this module already holds — the
+      // resolved artifact, the proposal's own digest, the server instant and the
+      // authenticated principal — so the caller adds nothing and can withhold
+      // nothing. ops.f01_record_proposal REQUIRES the envelope and writes both
+      // records in one transaction or neither, which is what makes "before the
+      // derivative is considered complete" a property rather than a convention.
+      const proposalDigest = proposalEnvelope.record_digest;
+      const registration = evaluateDerivativeRegistration(derivativeRegistrationRequest({
+        registration: {
+          source_artifact_digest: proposal.artifact_digest,
+          derivative_kind: V5_F01_PARSED_PROPOSAL_DERIVATIVE_KIND,
+          derivative_id: proposalDigest,
+          derivative_content_digest: proposalDigest,
+          producer_workflow: "f01_record_parsed_proposal",
+          producer_run_ref: request.idempotency_key,
+          evidence_ref: "stored_parsed_proposal",
+          evidence_digest: proposalDigest,
+        },
+        storedArtifact,
+        now,
+      }));
+      if (registration.decision !== "allow") {
+        // The derivative could not be bound to its source, so the derivative
+        // does not complete. Nothing is written: a proposal recorded without its
+        // provenance edge is exactly the untracked derivative this rule exists
+        // to stop being created.
+        return result(operation, "refuse", registration.reason_id, {
+          actor_slug: principal.slug,
+          artifact_digest: proposal.artifact_digest,
+          derivative_registration_bound: false,
+          becomes_fact: false, advances_state: false, carries_effect_authority: false,
+          requires_human_review: true,
+          records_written: 0,
+          readback: null,
+        });
+      }
+      const derivativeEnvelope = storeEnvelope("stored_derivative_link",
+        storedDerivativeLinkRecord({
+          link: registration.derivative_link,
+          registered_by: principal.slug,
+          registered_at: now,
+        }), {
+          establishes_coverage: false, is_exhaustive_inventory: false,
+          permits_deletion: false, deletes_nothing: true,
+        });
+
       const row = await one(client,
-        "SELECT ops.f01_record_proposal($1::jsonb, $2::jsonb, $3::text, $4::text) AS outcome",
-        [J(proposalEnvelope), J(linkEnvelope), request.idempotency_key,
+        `SELECT ops.f01_record_proposal($1::jsonb, $2::jsonb, $3::jsonb, $4::text, $5::text)
+                AS outcome`,
+        [J(proposalEnvelope), J(linkEnvelope), J(derivativeEnvelope), request.idempotency_key,
          requestDigest(operation, request, principal)]);
       const outcome = typeof row.outcome === "string" ? JSON.parse(row.outcome) : row.outcome;
       return resultFromOutcome(operation, outcome, principal);
     });
   }
 
-  // -- 6. record-document-identity ------------------------------------------
+  // -- 6. register-derivative-source-link -----------------------------------
+
+  /**
+   * Bind ONE derived record to the exact stored artifact it came from.
+   *
+   * WHO MAY WRITE ONE. The authenticated producer principal, derived from the
+   * transaction context exactly like every other write here and checked against
+   * the handler's own. There is no `trusted: true`, no producer allow-list a
+   * caller can name itself into, and no path by which a reader becomes a
+   * producer: ops.f01_register_derivative_link refuses a read-only principal in
+   * its own body, and the grant loop never gives one EXECUTE on it.
+   *
+   * WHAT ONE MEANS, and it is deliberately narrow. "This derivative came from
+   * that artifact." It does not mean the artifact's derivatives are now known,
+   * it does not make an absent link an absent derivative, and it permits no
+   * deletion of anything. Those claims are refused in the record itself, in the
+   * result, and in the CHECK constraints on the stored row.
+   *
+   * NOR DOES IT MEAN THE DERIVATIVE EXISTS. Nothing here resolves the named
+   * derivative or checks its bytes: the source artifact is LOADED, the derivative
+   * is taken on the producer's word. That residual is safe only while coverage is
+   * unknown, and it is written down at the two other places that would have to
+   * change — the kernel's registration header and ops.f01_derivative_coverage —
+   * as a precondition on ever establishing coverage, not a note about it.
+   *
+   * KINDS THIS CONTRACT PRODUCES ITSELF ARE REFUSED HERE, before any statement
+   * runs. A caller cannot register an `f01_parsed_proposal` link: that kind is
+   * written only by recordParsedProposal, whose derivative identity is a digest a
+   * caller can predict, over an append-only unique identity with no release path.
+   * ops.f01_register_derivative_link refuses the same kind in its own body — the
+   * two are independent, as with every other guard in this seam — but the refusal
+   * a caller should meet is this one, which names the reason instead of raising.
+   */
+  async function registerDerivativeSourceLink(payload, context) {
+    const operation = "register-derivative-source-link";
+    const { principal, payload: request } = begin(operation, payload, context);
+    const registration = assertClosed(request.registration, DERIVATIVE_REGISTRATION_KEYS,
+      DERIVATIVE_REGISTRATION_KEYS, "payload.registration");
+    if (V5_F01_RESERVED_DERIVATIVE_KINDS.includes(registration.derivative_kind)) {
+      return result(operation, "refuse", "reserved_derivative_kind", {
+        actor_slug: principal.slug,
+        source_artifact_digest: registration.source_artifact_digest,
+        derivative_kind: registration.derivative_kind,
+        derivative_id: registration.derivative_id,
+        reserved_derivative_kinds: [...V5_F01_RESERVED_DERIVATIVE_KINDS],
+        establishes_coverage: false, is_exhaustive_inventory: false, permits_deletion: false,
+        records_written: 0,
+        readback: null,
+      });
+    }
+
+    return withTransaction(async client => {
+      const { now } = await openOperation(client, operation, principal);
+      const replay = await replayOutcome(client, operation, request, principal);
+      if (replay !== null) return replay;
+
+      // The source artifact is RESOLVED, not asserted, exactly as it is for a
+      // proposal and a hold. Naming a digest is a lookup; it can never bring an
+      // artifact into existence, and a link to an artifact nobody stored would
+      // be provenance pointing at nothing.
+      const artifactRow = await one(client,
+        "SELECT ops.f01_stored_artifact($1::text) AS artifact",
+        [registration.source_artifact_digest]);
+      const storedArtifact = artifactRow && artifactRow.artifact
+        ? (typeof artifactRow.artifact === "string"
+            ? JSON.parse(artifactRow.artifact) : artifactRow.artifact)
+        : null;
+
+      const evaluated = evaluateDerivativeRegistration(derivativeRegistrationRequest({
+        registration, storedArtifact, now,
+      }));
+      if (evaluated.decision !== "allow") {
+        return result(operation, "refuse", evaluated.reason_id, {
+          actor_slug: principal.slug,
+          source_artifact_digest: registration.source_artifact_digest,
+          derivative_kind: registration.derivative_kind,
+          derivative_id: registration.derivative_id,
+          establishes_coverage: false, is_exhaustive_inventory: false, permits_deletion: false,
+          records_written: 0,
+          readback: null,
+        });
+      }
+
+      const envelope = storeEnvelope("stored_derivative_link", storedDerivativeLinkRecord({
+        link: evaluated.derivative_link,
+        registered_by: principal.slug,
+        registered_at: now,
+      }), {
+        establishes_coverage: false, is_exhaustive_inventory: false,
+        permits_deletion: false, deletes_nothing: true,
+      });
+      const row = await one(client,
+        "SELECT ops.f01_register_derivative_link($1::jsonb, $2::text, $3::text) AS outcome",
+        [J(envelope), request.idempotency_key, requestDigest(operation, request, principal)]);
+      const outcome = typeof row.outcome === "string" ? JSON.parse(row.outcome) : row.outcome;
+      return resultFromOutcome(operation, outcome, principal);
+    });
+  }
+
+  // -- 7. record-document-identity ------------------------------------------
 
   /**
    * ONE REFUSAL IS PERSISTED RATHER THAN DISCARDED, and it is the point of Q125.
@@ -1240,7 +1543,7 @@ export function createRecordSourceAuthorityStore({ db } = {}) {
     });
   }
 
-  // -- 7. record-artifact-preservation-hold ---------------------------------
+  // -- 8. record-artifact-preservation-hold ---------------------------------
 
   async function recordArtifactPreservationHold(payload, context) {
     const operation = "record-artifact-preservation-hold";
@@ -1319,7 +1622,7 @@ export function createRecordSourceAuthorityStore({ db } = {}) {
     });
   }
 
-  // -- 8. evaluate-artifact-deletion ----------------------------------------
+  // -- 9. evaluate-artifact-deletion ----------------------------------------
 
   async function evaluateArtifactDeletion(payload, context) {
     const operation = "evaluate-artifact-deletion";
@@ -1358,6 +1661,22 @@ export function createRecordSourceAuthorityStore({ db } = {}) {
       const holds = typeof holdsRow.holds === "string"
         ? JSON.parse(holdsRow.holds) : holdsRow.holds;
       const holdInventoryDigest = holdsRow.holds_digest;
+
+      // THE COVERAGE ANSWER IS LOADED, exactly like the holds, and for the same
+      // reason: a caller that could describe its own coverage could describe it
+      // as complete. ops.f01_derivative_coverage answers from the registered
+      // links and from what is known about how they got there; in this slice it
+      // answers "unknown" for every artifact, and that is the honest answer
+      // rather than a placeholder. The digest travels into the record and the
+      // database re-derives it, so a link registered between the decision and
+      // the write refuses instead of being missed.
+      const coverageRow = await one(client,
+        `SELECT ops.f01_derivative_coverage($1::text) AS coverage,
+                ops.f01_derivative_coverage_digest($1::text) AS coverage_digest`,
+        [subject.artifact_digest]);
+      const coverage = typeof coverageRow?.coverage === "string"
+        ? JSON.parse(coverageRow.coverage) : coverageRow?.coverage ?? null;
+      const coverageDigest = coverageRow?.coverage_digest ?? null;
       const derivativeRow = await one(client,
         "SELECT ops.f01_stored_derivatives($1::text) AS derivatives", [subject.artifact_digest]);
       const derivatives = typeof derivativeRow?.derivatives === "string"
@@ -1373,6 +1692,7 @@ export function createRecordSourceAuthorityStore({ db } = {}) {
           created_at: storedArtifact.created_at,
           holds,
           deletion_proof: subject.deletion_proof ?? null,
+          derivative_coverage: coverage === null ? null : projectKeys(coverage, KERNEL_COVERAGE_KEYS),
           derivatives,
           satisfied_constraints: subject.satisfied_constraints ?? null,
         },
@@ -1387,6 +1707,8 @@ export function createRecordSourceAuthorityStore({ db } = {}) {
         reason_id: evaluated.reason_id,
         retention_registry_digest: policy.retention_registry_digest,
         hold_inventory_digest: holdInventoryDigest,
+        derivative_coverage_state: coverage?.state ?? "unknown",
+        derivative_coverage_digest: coverageDigest,
         deletion_receipt: evaluated.deletion_receipt,
         evaluated_by: principal.slug,
         evaluated_at: now,
@@ -1413,6 +1735,7 @@ export function createRecordSourceAuthorityStore({ db } = {}) {
     recordSourceObservation,
     recordCorporateArtifact,
     recordParsedProposal,
+    registerDerivativeSourceLink,
     recordDocumentIdentity,
     recordArtifactPreservationHold,
     evaluateArtifactDeletion,

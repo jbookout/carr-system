@@ -854,14 +854,20 @@ def check_helper_prerequisites(psql: Psql, report: Report) -> None:
 
 
 FIXTURE_ROLES = ('carr_reader','carr_writer','carr_authority_joe','carr_authority_dell')
+# f01_insert_derivative_link is private for the same reason the idempotency pair
+# is: it is reached only from inside a SECURITY DEFINER writer, where it runs as
+# the owner whatever the caller is, so no runtime EXECUTE is needed and any
+# runtime EXECUTE is a hole.
 PRIVATE_HELPERS = {'f01_claim_idempotency','f01_settle_idempotency',
+                   'f01_insert_derivative_link',
                    'f01_guard_direct_dml','f01_guard_append_only','f01_guard_no_truncate'}
 WRITER_FUNCTIONS = {'f01_install_policy','f01_apply_observation','f01_record_artifact',
-                    'f01_record_proposal','f01_record_document','f01_record_hold',
+                    'f01_record_proposal','f01_register_derivative_link',
+                    'f01_record_document','f01_record_hold',
                     'f01_record_deletion_evaluation'}
-# THE READER'S EXCLUSION LIST IS NINE NAMES, NOT SEVEN. domain.sql's grant loop
+# THE READER'S EXCLUSION LIST IS TEN NAMES, NOT EIGHT. domain.sql's grant loop
 # skips f01_replay_outcome and f01_require_authority_principal for carr_reader as
-# well as the seven writers, and its own posture readback re-asserts all nine.
+# well as the eight writers, and its own posture readback re-asserts all ten.
 # A gate that expected EXECUTE=True on those two would fail a CORRECT schema
 # before the fixture ever ran, so the expectation is stated once, here, from the
 # grant model the schema actually installs:
@@ -869,6 +875,11 @@ WRITER_FUNCTIONS = {'f01_install_policy','f01_apply_observation','f01_record_art
 #     somebody else's mutation — a write outcome, and none of a reader's business.
 #   * f01_require_authority_principal is an authority probe; the two definer
 #     writers that need it reach it as the owner, so revoking it costs nothing.
+# carr_writer KEEPS f01_register_derivative_link: the ordinary evidence principal
+# is the trusted producer identity, and taking it away would leave the approved
+# registration rule with nobody able to satisfy it. ("Approved" rather than
+# "settled": that rule is a session approval with no canonical decision id, while
+# Q129.D1 settles the retention registry and nothing about registration.)
 READER_FORBIDDEN = WRITER_FUNCTIONS | {'f01_replay_outcome', 'f01_require_authority_principal'}
 WRITER_FORBIDDEN = {'f01_install_policy', 'f01_record_hold', 'f01_require_authority_principal'}
 # Every name the gate reasons about must actually be there. Without this, a
@@ -876,7 +887,22 @@ WRITER_FORBIDDEN = {'f01_install_policy', 'f01_record_hold', 'f01_require_author
 # asserted only to be non-empty, and every EXECUTE expectation below would be
 # vacuously true for the functions that were never created.
 REQUIRED_FUNCTIONS = WRITER_FUNCTIONS | PRIVATE_HELPERS | {
-    'f01_read', 'f01_require_authority_principal', 'f01_replay_outcome'}
+    'f01_read', 'f01_require_authority_principal', 'f01_replay_outcome',
+    # The derivative-registration seam's read surface. Naming them here is what
+    # stops a schema that shipped the table and the writer but not the coverage
+    # answer from passing: without f01_derivative_coverage every deletion
+    # evaluation would fail on a missing function rather than fail closed on an
+    # unknown coverage state, which is a different — and much less honest —
+    # reason to refuse.
+    'f01_derivative_links', 'f01_derivative_coverage', 'f01_derivative_coverage_digest',
+    'f01_stored_derivatives',
+    # The reserved-kind list ops.f01_register_derivative_link refuses against,
+    # named here for the same reason: a schema that shipped the writer without it
+    # would not fail closed, it would fail with "function does not exist" on every
+    # registration — and a schema where somebody replaced the guard with an inline
+    # literal would keep working while quietly losing the one place a second
+    # internal producer kind gets added.
+    'f01_reserved_derivative_kinds'}
 # Tables and partitioned tables are the DML surface. Views, matviews and foreign
 # tables are included in the PRIVILEGE proof because they are the OWNER-RIGHTS
 # BYPASS surface: an auto-updatable or rule-bearing view over an F01 table,
@@ -1037,6 +1063,18 @@ def check_wrong_principal(psql: Psql, report: Report) -> None:
             report.expect(execute_grant_refusal(message, endpoint), 'wrong_principal',
                           f'{role} is refused {endpoint} by the EXECUTE grant despite forged authority',
                           message[:220])
+        if role == 'carr_reader':
+            # A READ-ONLY PRINCIPAL IS NOT A PRODUCER. The registration writer is
+            # the one new write surface, and carr_writer legitimately holds it —
+            # it IS the trusted producer identity — so only the reader is probed
+            # here. Three arguments, not four: this writer takes envelope, key
+            # and request digest.
+            message = rollback_probe(
+                psql, forged + "SELECT ops.f01_register_derivative_link(null,null,null)", role)
+            report.expect(
+                execute_grant_refusal(message, 'f01_register_derivative_link'), 'wrong_principal',
+                'carr_reader is refused f01_register_derivative_link by the EXECUTE grant '
+                'despite forged authority', message[:220])
     for role, actor in (('carr_authority_joe', 'joe'), ('carr_authority_dell', 'dell')):
         # Caller flags must not override authenticated session_user authority.
         attempt = psql.run("SELECT set_config('carr.acting_actor_slug','mallory',false),"

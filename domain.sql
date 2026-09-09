@@ -473,7 +473,7 @@ BEGIN
   -- Every frame naming this guard itself is discounted; what must remain is a
   -- frame naming one of the registered writers.
   IF regexp_replace(v_context, 'PL/pgSQL function (ops\.)?f01_guard_direct_dml\(\)[^\n]*', '', 'g')
-       !~ 'PL/pgSQL function (ops\.)?f01_(install_policy|apply_observation|record_artifact|record_proposal|record_document|record_hold|record_deletion_evaluation|claim_idempotency|settle_idempotency)\('
+       !~ 'PL/pgSQL function (ops\.)?f01_(install_policy|apply_observation|record_artifact|record_proposal|record_document|record_hold|record_deletion_evaluation|register_derivative_link|insert_derivative_link|claim_idempotency|settle_idempotency)\('
   THEN
     RAISE EXCEPTION 'f01_direct_dml_refused: %.% is written only through the registered ops.f01_* writers',
       TG_TABLE_SCHEMA, TG_TABLE_NAME USING ERRCODE = '42501';
@@ -971,6 +971,159 @@ ALTER TABLE ops.f01_proposal_link
   ADD CONSTRAINT f01_link_supersedes_fk
   FOREIGN KEY (supersedes_link_digest) REFERENCES ops.f01_proposal_link (link_digest);
 
+-- --- 5.3.1 registered derivative-source links -------------------------------
+--
+-- WHOSE RULE THIS RELATION SERVES, said once here and referred to below rather
+-- than repeated. Q129.D1 settles the per-class RETENTION REGISTRY and nothing
+-- about provenance registration. The registration rule this table exists for was
+-- approved in native task 01a0869f-fe0d-7493-bda3-ab8b3c0d6683, user turn
+-- 01a08779-6b68-7013-bab1-369cf616254f, and carries no canonical decision id
+-- because none was issued for it. Where the comments below say "the approved
+-- registration rule" they mean that and only that; nothing here is a new settled
+-- decision and nothing downstream should record it as one.
+--
+-- WHAT A ROW HERE IS. One trusted producer workflow's record that it created one
+-- derived record from one stored artifact: when the system makes a lease
+-- abstract, the row says which lease produced it. Nobody types it; the producing
+-- workflow writes it in the same transaction that produces the derivative, which
+-- is what "before the derivative is considered complete" means in practice.
+--
+-- WHAT A ROW HERE IS NOT, and the CHECK below makes it unsayable. It is not an
+-- inventory. The presence of rows tells you what was registered; the ABSENCE of
+-- rows tells you nothing at all, because an unregistered derivative — from a
+-- workflow written before this rule, from a provider, from a copy somebody made
+-- — leaves exactly the same trace as no derivative: none. So every stored link
+-- carries registration_is_provenance = true, is_exhaustive_inventory = false,
+-- establishes_coverage = false and permits_deletion = false inside the bytes it
+-- hashes to, and a row claiming otherwise — or a row SAYING NOTHING EITHER WAY —
+-- cannot be inserted at all.
+--
+-- WHAT A ROW HERE IS ALSO NOT: A CHECKED FACT ABOUT THE DERIVATIVE. Nothing in
+-- this schema loads, or could load, the record named by derivative_id /
+-- derivative_content_digest. The foreign key binds the SOURCE side only, so a
+-- registration is a producer's ATTESTATION that it made something, not the
+-- database's knowledge that the something exists. Today that is harmless in the
+-- one direction it can go — an attested derivative only ever blocks a deletion
+-- harder, and no coverage answer can be established at all — but it stops being
+-- harmless the moment coverage could be established, because an attested-only
+-- link would then flow through ops.f01_stored_derivatives into a deletion
+-- receipt as a named survivor that may never have existed. So it is a standing
+-- precondition on that work rather than a footnote: DO NOT BUILD AN INGRESS
+-- THAT ESTABLISHES COVERAGE UNTIL PRODUCER OUTPUTS ARE INDEPENDENTLY BOUND AND
+-- VERIFIED — the derivative resolvable and its bytes checked against
+-- derivative_content_digest by something other than the registering caller.
+-- Nothing in this file supplies that, and nothing here pretends to.
+--
+-- ONE DERIVATIVE HAS ONE ORIGINAL. The identity index is on (kind, id) rather
+-- than on (source, kind, id): re-registering the same derivative against a
+-- different artifact is not a second provenance edge, it is a rewrite of where
+-- the derivative came from, and it refuses.
+CREATE TABLE IF NOT EXISTS ops.f01_derivative_link (
+  derivative_link_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  tenant            text NOT NULL,
+  envelope          jsonb NOT NULL,
+  envelope_digest   text NOT NULL,
+  link_digest       text NOT NULL,
+  source_artifact_digest text NOT NULL REFERENCES ops.f01_corporate_artifact (artifact_digest),
+  derivative_kind   text NOT NULL,
+  derivative_id     text NOT NULL,
+  derivative_content_digest text NOT NULL,
+  producer_workflow text NOT NULL,
+  producer_run_ref  text NOT NULL,
+  produced_at_text  text NOT NULL,
+  produced_at       timestamptz NOT NULL,
+  evidence_ref      text NOT NULL,
+  evidence_digest   text NOT NULL,
+  -- Nullable for the same reason a hold's is: registering provenance is a
+  -- statement about two records and does not depend on a field-authority
+  -- registry existing.
+  policy_digest     text,
+  actor_slug        text NOT NULL,
+  recorded_at       timestamptz NOT NULL,
+  idempotency_key   text NOT NULL,
+
+  CONSTRAINT f01_derivative_tenant
+    CHECK (tenant = ops.f01_tenant() AND tenant = envelope ->> 'tenant'),
+  CONSTRAINT f01_derivative_kind_envelope
+    CHECK (envelope ->> 'record_kind' = 'stored_derivative_link'),
+  CONSTRAINT f01_derivative_envelope_digest
+    CHECK (envelope_digest = ops.f01_digest_jsonb(envelope)),
+  CONSTRAINT f01_derivative_record_digest
+    CHECK (link_digest = ops.f01_digest_jsonb(envelope -> 'record')
+           AND link_digest = envelope ->> 'record_digest'),
+  CONSTRAINT f01_derivative_binding
+    CHECK (source_artifact_digest = envelope -> 'record' ->> 'source_artifact_digest'
+           AND derivative_kind = envelope -> 'record' ->> 'derivative_kind'
+           AND derivative_id = envelope -> 'record' ->> 'derivative_id'
+           AND derivative_content_digest = envelope -> 'record' ->> 'derivative_content_digest'
+           AND producer_workflow = envelope -> 'record' ->> 'producer_workflow'
+           AND producer_run_ref = envelope -> 'record' ->> 'producer_run_ref'
+           AND produced_at_text = envelope -> 'record' ->> 'produced_at'
+           AND evidence_ref = envelope -> 'record' ->> 'evidence_ref'
+           AND evidence_digest = envelope -> 'record' ->> 'evidence_digest'
+           -- The producer principal is DERIVED by the writer; binding the column
+           -- to the hashed record is what stops a stored link being attributed
+           -- to a producer that did not register it.
+           AND actor_slug = envelope -> 'record' ->> 'registered_by'),
+  CONSTRAINT f01_derivative_digest_shapes
+    CHECK (ops.f01_is_digest_ref(source_artifact_digest)
+           AND ops.f01_is_digest_ref(derivative_content_digest)
+           AND ops.f01_is_digest_ref(evidence_digest)),
+  CONSTRAINT f01_derivative_produced_at_shape
+    CHECK (ops.f01_is_instant_text(produced_at_text)),
+  -- A record whose bytes are the source's bytes is the source under a second
+  -- name, not something derived from it.
+  CONSTRAINT f01_derivative_not_self
+    CHECK (derivative_content_digest <> source_artifact_digest)
+  -- THE FOUR CLAIMS A LINK MAY NEVER MAKE — registration_is_provenance true,
+  -- is_exhaustive_inventory, establishes_coverage and permits_deletion false, on
+  -- the stored row and inside the hashed record both — are enforced by
+  -- f01_derivative_claims_nothing, which is ADDED IMMEDIATELY BELOW rather than
+  -- here. There is exactly one copy of that expression on purpose; see the note.
+);
+
+-- THE ONE COPY OF f01_derivative_claims_nothing, added as an ALTER for the same
+-- reason section 5.6's coverage bound is: CREATE TABLE IF NOT EXISTS leaves an
+-- ALREADY-INSTALLED table untouched, so a constraint written only inside the
+-- CREATE would reach fresh databases and nothing else — which is no constraint at
+-- all on the databases that already hold rows. Writing it in both places would
+-- put two copies of one predicate in one file, and the copy that drifts is always
+-- the one nobody is looking at.
+--
+-- WHAT IT MAKES IMPOSSIBLE. A stored link that claims to be an inventory, to
+-- establish coverage or to permit deletion — and, equally, one that SAYS NOTHING
+-- EITHER WAY. The second half is why coalesce is here: `->>` over an ABSENT key
+-- yields SQL NULL, NULL = 'false' is NULL, and a CHECK fails only on FALSE, so an
+-- earlier form of this refused a record asserting establishes_coverage: true and
+-- ADMITTED one that simply omitted the key — leaving a stored link with no
+-- self-limiting bytes for a later reader to find. '' is neither 'true' nor
+-- 'false', so silence now fails the same conjunct a contrary claim does.
+--
+-- NOT VALID, AND THE COMMENT SAYS WHAT THAT MEANS RATHER THAN IMPLYING MORE. Rows
+-- written before this tightening are NOT re-checked and are NOT retro-verified:
+-- the constraint binds every row inserted from here on, and says nothing about
+-- what is already stored. A validating form would abort the whole apply on the
+-- first pre-existing row that omitted a key — which is precisely the row this
+-- exists to make impossible in future, and precisely the row an operator needs
+-- the schema to still install so they can go and look at it.
+ALTER TABLE ops.f01_derivative_link
+  DROP CONSTRAINT IF EXISTS f01_derivative_claims_nothing;
+ALTER TABLE ops.f01_derivative_link
+  ADD CONSTRAINT f01_derivative_claims_nothing
+  CHECK (coalesce(envelope -> 'record' ->> 'registration_is_provenance', '') = 'true'
+         AND coalesce(envelope -> 'record' ->> 'is_exhaustive_inventory', '') = 'false'
+         AND coalesce(envelope -> 'record' ->> 'establishes_coverage', '') = 'false'
+         AND coalesce(envelope -> 'record' ->> 'permits_deletion', '') = 'false'
+         AND coalesce(envelope ->> 'is_exhaustive_inventory', '') = 'false'
+         AND coalesce(envelope ->> 'establishes_coverage', '') = 'false'
+         AND coalesce(envelope ->> 'permits_deletion', '') = 'false')
+  NOT VALID;
+
+CREATE UNIQUE INDEX IF NOT EXISTS f01_derivative_link_digest_uq
+  ON ops.f01_derivative_link (link_digest);
+CREATE UNIQUE INDEX IF NOT EXISTS f01_derivative_link_identity_uq
+  ON ops.f01_derivative_link (tenant, derivative_kind, derivative_id);
+
 -- --- 5.4 document identity -------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS ops.f01_document_version (
@@ -1190,6 +1343,44 @@ CREATE TABLE IF NOT EXISTS ops.f01_deletion_evaluation (
 CREATE UNIQUE INDEX IF NOT EXISTS f01_deletion_evaluation_digest_uq
   ON ops.f01_deletion_evaluation (evaluation_digest);
 
+-- ADDED AS AN ALTER rather than inside the CREATE TABLE above, because
+-- CREATE TABLE IF NOT EXISTS leaves an already-installed table untouched and a
+-- constraint that only reached fresh databases would be no constraint at all.
+--
+-- WHAT IT MAKES IMPOSSIBLE. An evaluation that does not say which coverage
+-- answer it was taken against, and — the one that matters — an ALLOW recorded
+-- while that answer is anything other than "established". The writer refuses the
+-- same shape earlier and with a better message; this is the version that holds
+-- even if somebody edits the writer.
+--
+-- THE TWO IS NOT NULL CONJUNCTS ARE THE WHOLE POINT OF THE CURRENT SHAPE, and
+-- they lead deliberately. An earlier form opened with `... IN ('unknown',
+-- 'established')` alone: over an ABSENT key `->>` yields SQL NULL, NULL IN (...)
+-- is NULL, ops.f01_is_digest_ref is non-strict over `~` and answers NULL too, and
+-- for decision = 'allow' the last conjunct becomes `false OR NULL` = NULL. A
+-- CHECK fails only on FALSE, so an ALLOW carrying NO coverage fields at all was
+-- accepted by the very constraint written to hold when the writer is edited —
+-- which is exactly the shape an edited or regressed writer produces. FALSE AND
+-- NULL is FALSE, so testing presence first is what makes the rest bind.
+--
+-- NOT VALID, STATED HONESTLY. Rows written before this tightening are NOT
+-- re-checked and are NOT retro-verified; they are unproven, and this constraint
+-- makes no claim about them. It binds every evaluation inserted from here on.
+-- The alternative — a validating ADD CONSTRAINT — would abort the entire apply
+-- on the first pre-existing evaluation that predates the coverage fields, taking
+-- the schema down with it to say something about history that nobody needs said.
+ALTER TABLE ops.f01_deletion_evaluation
+  DROP CONSTRAINT IF EXISTS f01_deletion_coverage_bound;
+ALTER TABLE ops.f01_deletion_evaluation
+  ADD CONSTRAINT f01_deletion_coverage_bound
+  CHECK ((envelope -> 'record' ->> 'derivative_coverage_state') IS NOT NULL
+         AND (envelope -> 'record' ->> 'derivative_coverage_digest') IS NOT NULL
+         AND (envelope -> 'record' ->> 'derivative_coverage_state') IN ('unknown', 'established')
+         AND ops.f01_is_digest_ref(envelope -> 'record' ->> 'derivative_coverage_digest')
+         AND (decision = 'refuse'
+              OR (envelope -> 'record' ->> 'derivative_coverage_state') = 'established'))
+  NOT VALID;
+
 -- --- 5.7 idempotency -------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS ops.f01_idempotency (
@@ -1241,6 +1432,7 @@ BEGIN
       ('f01_corporate_artifact', true),
       ('f01_parsed_proposal', true),
       ('f01_proposal_link', true),
+      ('f01_derivative_link', true),
       ('f01_document_version', true),
       ('f01_document_current', false),
       ('f01_preservation_hold_event', true),
@@ -1517,15 +1709,147 @@ BEGIN
 END;
 $$;
 
--- No artifact-bound derivative evidence ingestion is present in this source
--- slice. Absence must stay unknown, never caller-asserted or verified-empty.
+/**
+ * Every REGISTERED derivative-source link for one artifact, recomputed.
+ *
+ * This is the ingress the approved registration rule added (section 5.3.1 names
+ * the approval): rows written by trusted producer workflows saying which original
+ * produced which derived record. Ordered by (derivative_kind, derivative_id) COLLATE "C" for the same
+ * reason the hold inventory is: this list feeds a digest that is stored and
+ * later re-derived, so its order has to be a property of the bytes rather than
+ * of the cluster's locale.
+ */
+CREATE OR REPLACE FUNCTION ops.f01_derivative_links(p_artifact_digest text)
+RETURNS jsonb LANGUAGE plpgsql STABLE
+SET search_path = pg_catalog, ops, public
+AS $$
+DECLARE
+  r ops.f01_derivative_link%ROWTYPE;
+  v_links jsonb := '[]'::jsonb;
+BEGIN
+  FOR r IN SELECT * FROM ops.f01_derivative_link
+    WHERE tenant = ops.f01_tenant() AND source_artifact_digest = p_artifact_digest
+    ORDER BY derivative_kind COLLATE "C", derivative_id COLLATE "C"
+  LOOP
+    PERFORM ops.f01_verify_envelope(r.envelope, r.envelope_digest, r.link_digest,
+                                    'stored_derivative_link');
+    IF r.derivative_kind IS DISTINCT FROM (r.envelope->'record'->>'derivative_kind')
+      OR r.derivative_id IS DISTINCT FROM (r.envelope->'record'->>'derivative_id')
+      OR r.source_artifact_digest IS DISTINCT FROM (r.envelope->'record'->>'source_artifact_digest')
+      OR r.producer_workflow IS DISTINCT FROM (r.envelope->'record'->>'producer_workflow') THEN
+      RAISE EXCEPTION 'f01_corrupt_stored_record: derivative link columns mismatch'
+        USING ERRCODE = '22000';
+    END IF;
+    v_links := v_links || jsonb_build_array(jsonb_build_object(
+      'link_digest', r.link_digest,
+      'derivative_kind', r.derivative_kind,
+      'derivative_id', r.derivative_id,
+      'derivative_content_digest', r.derivative_content_digest,
+      'producer_workflow', r.producer_workflow,
+      'producer_run_ref', r.producer_run_ref,
+      'produced_at', r.produced_at_text,
+      'evidence_ref', r.evidence_ref,
+      'evidence_digest', r.evidence_digest,
+      'registered_by', r.actor_slug));
+  END LOOP;
+  RETURN v_links;
+END;
+$$;
+
+/**
+ * WHETHER THE REGISTERED LINKS FOR ONE ARTIFACT ARE THE WHOLE SET.
+ *
+ * THIS FUNCTION RETURNS 'unknown' FOR EVERY ARTIFACT, ON PURPOSE, AND SAYING SO
+ * PLAINLY IS THE POINT OF IT. Registered links prove what WAS registered. To
+ * know that they are ALL the derivatives, two further facts would have to be
+ * established, and this slice has an ingress for neither:
+ *
+ *   (a) A CLOSED PRODUCER SET. Which trusted producer workflows may derive from
+ *       this artifact's class at all. Without it, "no other links exist" and "no
+ *       other producer has run yet" are indistinguishable.
+ *   (b) A REGISTERED COMPLETION FROM EVERY ONE OF THEM for this exact artifact,
+ *       so that each named producer has positively said it is finished with it
+ *       rather than merely having written nothing so far.
+ *
+ * Neither may be asserted by a caller, and neither is inferable from row counts:
+ * an empty ops.f01_derivative_link is exactly what an artifact with no
+ * derivatives AND an artifact whose producers never registered anything both
+ * look like. So the honest answer is 'unknown', the honest consequence is that
+ * ops.f01_stored_derivatives below returns NULL and every deletion evaluation
+ * fails closed, and the way to change that answer is to build (a) and (b) — not
+ * to flip a flag here.
+ *
+ *   (c) AND A THIRD, WHICH IS NOT OPTIONAL EITHER. A registered link is its
+ *       producer's attestation that a derivative exists; nothing loads the named
+ *       derivative or checks its bytes against derivative_content_digest, and the
+ *       foreign key binds the source side only. While the state is 'unknown' that
+ *       costs nothing — an attested link only ever blocks a deletion harder. The
+ *       moment 'established' becomes reachable it stops being free, because the
+ *       kinds here flow into ops.f01_stored_derivatives and out into a deletion
+ *       receipt as named survivors. So: coverage may not be established until
+ *       producer outputs are INDEPENDENTLY BOUND AND VERIFIED, by something other
+ *       than the caller that registered them. This is a precondition on that
+ *       work, not a caveat about it.
+ *
+ * The observed links ARE returned alongside, because they are real evidence and
+ * a reader should be able to see them; they are simply not a coverage claim.
+ */
+CREATE OR REPLACE FUNCTION ops.f01_derivative_coverage(p_artifact_digest text)
+RETURNS jsonb LANGUAGE plpgsql STABLE
+SET search_path = pg_catalog, ops, public
+AS $$
+DECLARE
+  v_links jsonb := ops.f01_derivative_links(p_artifact_digest);
+  v_kinds jsonb;
+BEGIN
+  -- COLLATE "C" for the same reason as everywhere else here: this list is inside
+  -- a digest that is stored and later re-derived, so its order must be byte
+  -- order on every cluster rather than the local locale's idea of it.
+  SELECT coalesce(jsonb_agg(to_jsonb(s.kind) ORDER BY s.kind COLLATE "C"), '[]'::jsonb)
+    INTO v_kinds
+    FROM (SELECT DISTINCT e.link ->> 'derivative_kind' AS kind
+            FROM jsonb_array_elements(v_links) AS e(link)) s;
+  RETURN jsonb_build_object(
+    'artifact_digest', p_artifact_digest,
+    'state', 'unknown',
+    'reason_id', 'producer_closure_not_established',
+    'registered_derivative_kinds', v_kinds,
+    'registered_links', v_links,
+    'registered_link_count', jsonb_array_length(v_links),
+    'is_exhaustive_inventory', false,
+    'empty_link_set_means_verified_absence', false,
+    'integrity', 'recomputed_from_committed_rows');
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION ops.f01_derivative_coverage_digest(p_artifact_digest text)
+RETURNS text
+LANGUAGE sql STABLE
+SET search_path = pg_catalog, ops, public
+AS $$ SELECT ops.f01_digest_jsonb(ops.f01_derivative_coverage(p_artifact_digest)) $$;
+
+/**
+ * The derivative inventory a deletion may be judged against, or NULL.
+ *
+ * NULL means UNKNOWN and never "none". The registered kinds are returned only
+ * when coverage is established, which — see above — is nowhere in this slice.
+ * Returning the observed kinds regardless would hand the deletion evaluator a
+ * list that looks exhaustive and is not, which is precisely the substitution the
+ * settled decision forbids.
+ */
 CREATE OR REPLACE FUNCTION ops.f01_stored_derivatives(p_artifact_digest text)
 RETURNS jsonb LANGUAGE plpgsql STABLE
 SET search_path = pg_catalog, ops, public
 AS $$
+DECLARE
+  v_coverage jsonb;
 BEGIN
   PERFORM ops.f01_stored_artifact(p_artifact_digest);
-  RETURN NULL;
+  v_coverage := ops.f01_derivative_coverage(p_artifact_digest);
+  IF (v_coverage ->> 'state') IS DISTINCT FROM 'established' THEN
+    RETURN NULL;
+  END IF;
+  RETURN v_coverage -> 'registered_derivative_kinds';
 END;
 $$;
 
@@ -1555,9 +1879,12 @@ DECLARE
   v_row ops.f01_idempotency%ROWTYPE;
   v_actor text := ops.f01_context_actor_slug();
 BEGIN
+  -- The closed write-operation vocabulary. A new writer MUST be added here or it
+  -- cannot claim, replay or settle a key at all; nothing here is a wildcard.
   IF p_operation IS NULL OR p_operation NOT IN (
     'register-record-source-authority-policy', 'record-source-observation',
-    'record-corporate-artifact', 'record-parsed-proposal', 'record-document-identity',
+    'record-corporate-artifact', 'record-parsed-proposal', 'register-derivative-source-link',
+    'record-document-identity',
     'record-artifact-preservation-hold', 'evaluate-artifact-deletion') THEN
     RAISE EXCEPTION 'f01_unknown_operation' USING ERRCODE = '22023';
   END IF;
@@ -1697,16 +2024,28 @@ $$;
 --           f01:artifact:<identity tuple>         (f01_record_artifact)
 --           f01:document:<tenant>:<document_id>   (f01_record_document)
 --           f01:artifact-retention:<tenant>:<artifact digest>
---                                                 (f01_record_hold AND
---           f01_record_deletion_evaluation — deliberately the SAME key, so a
---           hold cannot be placed or released underneath a deletion evaluation
---           that has already read the inventory it will be bound to)
+--                                                 (f01_record_hold,
+--           f01_record_deletion_evaluation AND f01_register_derivative_link —
+--           deliberately the SAME key for all three, so that neither a hold nor
+--           a derivative registration can land underneath a deletion evaluation
+--           that has already read the inventory and the coverage it will be
+--           bound to. f01_record_proposal takes it too, because it registers a
+--           derivative link of its own)
 --   tier 4  f01:hold:<tenant>:<hold_id>           (f01_record_hold)
+--           f01:derivative:<tenant>:<kind>:<id>   (f01_register_derivative_link
+--                                                  and f01_record_proposal)
 --
 -- Tier 3 keys are mutually disjoint and no writer takes two of them, so the
--- observed acquisition orders are exactly 1→2, 1→2→3, 1→3 and 1→3→4. There is no
--- edge from a lower tier back to a higher one, hence no cycle, hence no deadlock
--- between any two F01 writers.
+-- observed acquisition orders are exactly 1→2, 1→2→3, 1→2→3→4, 1→3 and 1→3→4.
+-- Tier 4 keys are disjoint from each other and no writer takes two of them
+-- either. There is no edge from a lower tier back to a higher one, hence no
+-- cycle, hence no deadlock between any two F01 writers.
+--
+-- ONE CLAIM PER TRANSACTION-TIER-1 KEY. f01_record_proposal writes a derivative
+-- link through the PRIVATE ops.f01_insert_derivative_link rather than by calling
+-- the public writer, precisely so that it does not take a second tier-1 request
+-- lock after a tier-2 policy lock. Its own idempotency key already covers both
+-- records: they are written in one transaction and replayed as one outcome.
 -- ===========================================================================
 
 -- --- 9.1 register-record-source-authority-policy ---------------------------
@@ -2150,8 +2489,28 @@ $$;
 
 -- --- 9.4 record-parsed-proposal --------------------------------------------
 
+/**
+ * Persist one reviewable proposal, its reversible link, AND the derivative-source
+ * registration that binds the proposal to the artifact it was parsed from.
+ *
+ * THE THIRD ENVELOPE IS MANDATORY, and that is the approved producer rule made
+ * structural — the registration rule named in section 5.3.1, not Q129.D1. A parsed proposal is a record DERIVED from a stored artifact, so
+ * this workflow is a producer: it registers which original produced the
+ * derivative in the same transaction, or the derivative is not recorded at all.
+ * A caller cannot skip it by passing NULL — ops.f01_insert_derivative_link
+ * raises f01_derivative_link_required — and cannot forge it, because the link
+ * must name this exact proposal and this exact artifact.
+ *
+ * THE SIGNATURE CHANGED, so the four-argument form is dropped rather than left
+ * beside this one. Two overloads would make the four-argument call ambiguous and
+ * would leave a path that records a proposal with no provenance edge, which is
+ * the whole thing this exists to prevent.
+ */
+DROP FUNCTION IF EXISTS ops.f01_record_proposal(jsonb, jsonb, text, text);
+
 CREATE OR REPLACE FUNCTION ops.f01_record_proposal(
-  p_proposal jsonb, p_link jsonb, p_idempotency_key text, p_request_digest text)
+  p_proposal jsonb, p_link jsonb, p_derivative_link jsonb,
+  p_idempotency_key text, p_request_digest text)
 RETURNS jsonb
 LANGUAGE plpgsql SECURITY DEFINER
 SET search_path = pg_catalog, ops, public
@@ -2161,8 +2520,10 @@ DECLARE
   v_replay jsonb;
   v_proposal jsonb := p_proposal -> 'record';
   v_link jsonb := p_link -> 'record';
+  v_derivative jsonb := p_derivative_link -> 'record';
   v_proposal_digest text;
   v_link_digest text;
+  v_registration jsonb;
   v_result jsonb;
 BEGIN
   v_replay := ops.f01_claim_idempotency('record-parsed-proposal', p_idempotency_key, p_request_digest);
@@ -2195,6 +2556,32 @@ BEGIN
       USING ERRCODE = '23503';
   END IF;
 
+  -- THE PROVENANCE EDGE IS CHECKED BEFORE ANYTHING IS WRITTEN, and it must be
+  -- about THIS proposal and THIS artifact. A link naming some other derivative,
+  -- or some other source, would satisfy "a link was supplied" while registering
+  -- the provenance of something else entirely.
+  IF p_derivative_link IS NULL THEN
+    RAISE EXCEPTION 'f01_derivative_link_required: a parsed proposal is a derived record and completes only with its source registration'
+      USING ERRCODE = '22023';
+  END IF;
+  IF (v_derivative ->> 'source_artifact_digest') IS DISTINCT FROM (v_proposal ->> 'artifact_digest')
+     OR (v_derivative ->> 'derivative_id') IS DISTINCT FROM v_proposal_digest
+     OR (v_derivative ->> 'derivative_content_digest') IS DISTINCT FROM v_proposal_digest
+     OR (v_derivative ->> 'derivative_kind') IS DISTINCT FROM 'f01_parsed_proposal' THEN
+    RAISE EXCEPTION 'f01_derivative_link_not_bound_to_proposal: the registration must name this proposal and its source artifact'
+      USING ERRCODE = '22000';
+  END IF;
+
+  -- Tier 3 then tier 4, exactly as the public registration writer takes them, so
+  -- a derivative cannot be registered underneath a deletion evaluation that has
+  -- already read this artifact's coverage.
+  PERFORM pg_advisory_xact_lock(hashtextextended(
+    'f01:artifact-retention:' || ops.f01_tenant() || ':' ||
+    (v_derivative ->> 'source_artifact_digest'), 0));
+  PERFORM pg_advisory_xact_lock(hashtextextended(
+    'f01:derivative:' || ops.f01_tenant() || ':' ||
+    (v_derivative ->> 'derivative_kind') || ':' || (v_derivative ->> 'derivative_id'), 0));
+
   INSERT INTO ops.f01_parsed_proposal
     (tenant, envelope, envelope_digest, proposal_digest, artifact_digest, source_system,
      source_account, confidence, observed_at_text, observed_at, policy_digest,
@@ -2214,10 +2601,17 @@ BEGIN
           v_link ->> 'supersedes_link_digest', ops.f01_current_policy_digest(),
           v_actor, now(), p_idempotency_key);
 
+  -- Same transaction, same idempotency key: either the proposal and its
+  -- provenance both land, or neither does.
+  v_registration := ops.f01_insert_derivative_link(p_derivative_link, v_actor, p_idempotency_key);
+
   v_result := jsonb_build_object(
     'operation', 'record-parsed-proposal', 'outcome', 'recorded',
     'actor_slug', v_actor,
     'proposal_digest', v_proposal_digest, 'link_digest', v_link_digest,
+    'derivative_link_digest', v_registration ->> 'link_digest',
+    'derivative_registration_bound', true,
+    'derivative_coverage', v_registration -> 'coverage',
     'becomes_fact', false, 'advances_state', false,
     'carries_effect_authority', false, 'requires_human_review', true,
     'readback', (SELECT ops.f01_verify_envelope(envelope, envelope_digest, link_digest,
@@ -2225,6 +2619,221 @@ BEGIN
                    FROM ops.f01_proposal_link WHERE link_digest = v_link_digest),
     'external_effects', false);
   RETURN ops.f01_settle_idempotency('record-parsed-proposal', p_idempotency_key, v_result);
+END;
+$$;
+
+-- --- 9.4.1 register-derivative-source-link ---------------------------------
+
+/**
+ * The PRIVATE half: validate and insert one derivative-source link.
+ *
+ * Private for the same reason the idempotency helpers are. It is reached only
+ * from inside a SECURITY DEFINER writer, where it executes as the owner whatever
+ * the caller is, so no runtime EXECUTE grant is needed and any runtime grant
+ * would be a hole. Two writers use it — the public registration surface and
+ * ops.f01_record_proposal — which is why it exists at all: the alternative was
+ * for the proposal writer to call the public one, take a SECOND tier-1 request
+ * lock after a tier-2 policy lock, and break the acyclic lock order in section 9.
+ *
+ * IT TAKES NO LOCKS ITSELF. Both callers take the tier-3 artifact-retention and
+ * tier-4 derivative locks before calling it, in that order.
+ */
+CREATE OR REPLACE FUNCTION ops.f01_insert_derivative_link(
+  p_envelope jsonb, p_actor text, p_idempotency_key text)
+RETURNS jsonb
+LANGUAGE plpgsql
+SET search_path = pg_catalog, ops, public
+AS $$
+DECLARE
+  v_record jsonb;
+  v_digest text;
+  v_existing ops.f01_derivative_link%ROWTYPE;
+  v_outcome text := 'registered';
+BEGIN
+  IF p_envelope IS NULL THEN
+    RAISE EXCEPTION 'f01_derivative_link_required: a derived record completes only with its source registration'
+      USING ERRCODE = '22023';
+  END IF;
+  v_record := p_envelope -> 'record';
+  v_digest := ops.f01_digest_jsonb(v_record);
+  IF (p_envelope ->> 'record_digest') IS DISTINCT FROM v_digest THEN
+    RAISE EXCEPTION 'f01_derivative_link_digest_mismatch: the link does not hash to its claim'
+      USING ERRCODE = '22000';
+  END IF;
+  IF (v_record ->> 'registered_by') IS DISTINCT FROM p_actor THEN
+    RAISE EXCEPTION 'f01_actor_injection_refused: registered_by is derived, never supplied'
+      USING ERRCODE = '42501';
+  END IF;
+  -- The source is LOADED. Provenance pointing at an artifact nobody stored is
+  -- not provenance, and naming a digest never brings one into existence.
+  IF ops.f01_stored_artifact(v_record ->> 'source_artifact_digest') IS NULL THEN
+    RAISE EXCEPTION 'f01_unknown_artifact: a derivative link names a stored artifact'
+      USING ERRCODE = '23503';
+  END IF;
+  IF ops.f01_instant(v_record ->> 'produced_at') > now() THEN
+    RAISE EXCEPTION 'f01_derivative_produced_after_now: a production nobody has performed'
+      USING ERRCODE = '22007';
+  END IF;
+
+  -- ONE DERIVATIVE, ONE ORIGINAL. A re-registration that agrees on every
+  -- IMMUTABLE field of the provenance edge is the same fact arriving twice and is
+  -- a no-op. One that disagrees on any of them is a rewrite of where a record came
+  -- from, or of who made it, and refuses — the unique index makes the same thing
+  -- true under a concurrent insert rather than merely likely.
+  --
+  -- THE COMPARISON IS THE FIVE FIELDS NAMED BELOW, and the list is the honest one
+  -- rather than "every respect". Source and content digest say WHICH original and
+  -- WHICH bytes; producer_workflow, producer_run_ref and evidence_digest say WHO
+  -- produced it, in which run, against which immutable evidence. An earlier form
+  -- compared only the first two and returned success — handing back the FIRST
+  -- producer's link digest — for a second registration that named a different
+  -- workflow, a different run or different evidence. That is a second, contrary
+  -- provenance claim answered as agreement.
+  --
+  -- TWO FIELDS ARE DELIBERATELY NOT COMPARED, because comparing them would refuse
+  -- honest repeats rather than catch dishonest ones. `produced_at` is the SERVER
+  -- instant of the transaction that registered the link, so it differs on every
+  -- re-registration by construction; `evidence_ref` is an external label whose
+  -- immutable half — evidence_digest — is compared instead. `registered_by` is
+  -- re-derived and column-bound above, so it cannot disagree here without having
+  -- already been refused.
+  SELECT * INTO v_existing FROM ops.f01_derivative_link
+   WHERE tenant = ops.f01_tenant()
+     AND derivative_kind = v_record ->> 'derivative_kind'
+     AND derivative_id = v_record ->> 'derivative_id';
+  IF FOUND THEN
+    IF v_existing.source_artifact_digest IS DISTINCT FROM (v_record ->> 'source_artifact_digest')
+       OR v_existing.derivative_content_digest
+            IS DISTINCT FROM (v_record ->> 'derivative_content_digest')
+       OR v_existing.producer_workflow IS DISTINCT FROM (v_record ->> 'producer_workflow')
+       OR v_existing.producer_run_ref IS DISTINCT FROM (v_record ->> 'producer_run_ref')
+       OR v_existing.evidence_digest IS DISTINCT FROM (v_record ->> 'evidence_digest') THEN
+      RAISE EXCEPTION 'f01_derivative_source_conflict: % already names source %, bytes %, producer %/% and evidence %',
+        v_record ->> 'derivative_id', v_existing.source_artifact_digest,
+        v_existing.derivative_content_digest, v_existing.producer_workflow,
+        v_existing.producer_run_ref, v_existing.evidence_digest
+        USING ERRCODE = '23505';
+    END IF;
+    v_outcome := 'already_registered';
+    v_digest := v_existing.link_digest;
+  ELSE
+    INSERT INTO ops.f01_derivative_link
+      (tenant, envelope, envelope_digest, link_digest, source_artifact_digest,
+       derivative_kind, derivative_id, derivative_content_digest,
+       producer_workflow, producer_run_ref, produced_at_text, produced_at,
+       evidence_ref, evidence_digest, policy_digest, actor_slug, recorded_at, idempotency_key)
+    VALUES (ops.f01_tenant(), p_envelope, ops.f01_digest_jsonb(p_envelope), v_digest,
+            v_record ->> 'source_artifact_digest',
+            v_record ->> 'derivative_kind', v_record ->> 'derivative_id',
+            v_record ->> 'derivative_content_digest',
+            v_record ->> 'producer_workflow', v_record ->> 'producer_run_ref',
+            v_record ->> 'produced_at', ops.f01_instant(v_record ->> 'produced_at'),
+            v_record ->> 'evidence_ref', v_record ->> 'evidence_digest',
+            ops.f01_current_policy_digest(), p_actor, now(), p_idempotency_key);
+  END IF;
+
+  RETURN jsonb_build_object(
+    'outcome', v_outcome,
+    'link_digest', v_digest,
+    -- Returned on every registration, so the answer a caller stores says out
+    -- loud that nothing about coverage moved. The coverage readback beside it is
+    -- the proof rather than the promise: it still reads 'unknown'.
+    'establishes_coverage', false,
+    'is_exhaustive_inventory', false,
+    'permits_deletion', false,
+    'readback', (SELECT ops.f01_verify_envelope(envelope, envelope_digest, link_digest,
+                                                'stored_derivative_link')
+                   FROM ops.f01_derivative_link WHERE link_digest = v_digest),
+    'coverage', ops.f01_derivative_coverage(v_record ->> 'source_artifact_digest'));
+END;
+$$;
+
+/**
+ * The derivative kinds only an in-schema writer may register.
+ *
+ * A LIST, NOT A LITERAL, so the next internal producer kind is covered by adding
+ * one element rather than by remembering to repeat a comparison. IMMUTABLE and
+ * argument-free: it is policy about this schema's own writers, not about data.
+ */
+CREATE OR REPLACE FUNCTION ops.f01_reserved_derivative_kinds()
+RETURNS text[]
+LANGUAGE sql IMMUTABLE
+SET search_path = pg_catalog, ops, public
+AS $$ SELECT ARRAY['f01_parsed_proposal']::text[] $$;
+
+/**
+ * The PUBLIC half: one trusted producer workflow registers one derivative.
+ *
+ * TRUSTED PRODUCER MEANS THE AUTHENTICATED PRINCIPAL, and nothing else. There is
+ * no producer allow-list a caller can name itself into and no `trusted` flag to
+ * set: the identity is the connection's, derived exactly as every other writer
+ * here derives it. A read-only principal is refused by name in the body as well
+ * as by the absent EXECUTE grant, because either alone is a single point of
+ * failure.
+ *
+ * INTERNALLY PRODUCED KINDS ARE RESERVED, and the refusal is here rather than
+ * anywhere later. A kind in ops.f01_reserved_derivative_kinds is written by a
+ * writer inside this schema, which builds the whole link itself; the public
+ * surface exists for producers OUTSIDE it. Without this guard the kinds overlap
+ * in one specific and permanent way: the parsed-proposal derivative identity is
+ * the proposal digest, that digest is computed from caller payload plus the
+ * installed registry digest and is therefore PREDICTABLE by the caller, and the
+ * identity index is unique on (tenant, kind, id) over an append-only table with
+ * no release path. Pre-registering ('f01_parsed_proposal', <predicted digest>)
+ * against some other artifact would make the genuine ops.f01_record_proposal
+ * raise f01_derivative_source_conflict for that proposal for ever, and would
+ * leave a provenance edge asserting it came from an artifact it did not. One
+ * shared carr_writer makes that self-inflicted today; it is refused anyway,
+ * because the shape survives any later split of the writer role.
+ */
+CREATE OR REPLACE FUNCTION ops.f01_register_derivative_link(
+  p_envelope jsonb, p_idempotency_key text, p_request_digest text)
+RETURNS jsonb
+LANGUAGE plpgsql SECURITY DEFINER
+SET search_path = pg_catalog, ops, public
+AS $$
+DECLARE
+  v_actor text := ops.f01_context_actor_slug();
+  v_replay jsonb;
+  v_record jsonb;
+  v_registration jsonb;
+  v_result jsonb;
+BEGIN
+  IF session_user = 'carr_reader' THEN
+    RAISE EXCEPTION 'f01_producer_principal_refused: register-derivative-source-link is written by producer workflows, not by a read-only principal'
+      USING ERRCODE = '42501';
+  END IF;
+  -- BEFORE THE IDEMPOTENCY CLAIM, deliberately, and beside the principal check
+  -- rather than after it. Reading the caller's own payload is not a state read,
+  -- so it does not disturb the replay-before-state ordering above; claiming a key
+  -- for a registration that can never be accepted would burn that key on a
+  -- refusal and make the second attempt fail for a different reason.
+  v_record := p_envelope -> 'record';
+  IF (v_record ->> 'derivative_kind') = ANY (ops.f01_reserved_derivative_kinds()) THEN
+    RAISE EXCEPTION 'f01_reserved_derivative_kind: % is produced by a writer inside this schema and is never registered through the public surface',
+      v_record ->> 'derivative_kind'
+      USING ERRCODE = '42501';
+  END IF;
+  v_replay := ops.f01_claim_idempotency(
+    'register-derivative-source-link', p_idempotency_key, p_request_digest);
+  IF v_replay IS NOT NULL THEN
+    RETURN v_replay;
+  END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtextextended(
+    'f01:artifact-retention:' || ops.f01_tenant() || ':' ||
+    (v_record ->> 'source_artifact_digest'), 0));
+  PERFORM pg_advisory_xact_lock(hashtextextended(
+    'f01:derivative:' || ops.f01_tenant() || ':' ||
+    (v_record ->> 'derivative_kind') || ':' || (v_record ->> 'derivative_id'), 0));
+
+  v_registration := ops.f01_insert_derivative_link(p_envelope, v_actor, p_idempotency_key);
+  v_result := jsonb_build_object(
+    'operation', 'register-derivative-source-link',
+    'actor_slug', v_actor,
+    'external_effects', false) || v_registration;
+  RETURN ops.f01_settle_idempotency(
+    'register-derivative-source-link', p_idempotency_key, v_result);
 END;
 $$;
 
@@ -2436,6 +3045,7 @@ DECLARE
   v_digest text;
   v_artifact_digest text;
   v_observed text;
+  v_coverage jsonb;
   v_row ops.f01_deletion_evaluation%ROWTYPE;
   v_result jsonb;
 BEGIN
@@ -2463,8 +3073,28 @@ BEGIN
        (ops.f01_current_policy() ->> 'retention_registry_digest') THEN
     RAISE EXCEPTION 'f01_stale_retention_policy' USING ERRCODE = '40001';
   END IF;
-  IF v_record ->> 'decision' = 'allow' AND ops.f01_stored_derivatives(v_artifact_digest) IS NULL THEN
-    RAISE EXCEPTION 'f01_derivative_inventory_unavailable' USING ERRCODE = '22000';
+  -- THE COVERAGE THE EVALUATION WAS TAKEN AGAINST IS RE-DERIVED, exactly like
+  -- the hold inventory below it. A derivative registered between the decision
+  -- and this write moves the digest, and the evaluation refuses rather than
+  -- being recorded against a picture of the provenance graph that has changed.
+  v_coverage := ops.f01_derivative_coverage(v_artifact_digest);
+  IF (v_record ->> 'derivative_coverage_digest')
+       IS DISTINCT FROM ops.f01_digest_jsonb(v_coverage)
+     OR (v_record ->> 'derivative_coverage_state') IS DISTINCT FROM (v_coverage ->> 'state') THEN
+    RAISE EXCEPTION 'f01_stale_derivative_coverage: registration moved between decision and apply, or the evaluation states a coverage answer (%) the database does not hold (%)',
+      coalesce(v_record ->> 'derivative_coverage_state', 'none'),
+      coalesce(v_coverage ->> 'state', 'unreadable')
+      USING ERRCODE = '40001';
+  END IF;
+  -- AND AN ALLOW STILL FAILS CLOSED. Unknown coverage means the inventory is
+  -- unavailable, not empty, so no allow can be persisted while it is unknown —
+  -- checked here as well as in the kernel, because either alone is one edit away
+  -- from being the only thing standing between a caller and a purge.
+  IF v_record ->> 'decision' = 'allow'
+     AND ((v_coverage ->> 'state') IS DISTINCT FROM 'established'
+          OR ops.f01_stored_derivatives(v_artifact_digest) IS NULL) THEN
+    RAISE EXCEPTION 'f01_derivative_inventory_unavailable: coverage is %, so absence of derivatives is unknown rather than verified',
+      coalesce(v_coverage ->> 'state', 'unreadable') USING ERRCODE = '22000';
   END IF;
   v_observed := ops.f01_hold_inventory_digest(v_artifact_digest);
   IF v_observed IS DISTINCT FROM p_hold_inventory_digest
@@ -2495,9 +3125,14 @@ BEGIN
     'actor_slug', v_actor, 'evaluation_digest', v_digest,
     'reason_id', v_row.reason_id, 'receipt_digest', v_row.receipt_digest,
     'hold_inventory', ops.f01_hold_inventory(v_artifact_digest),
+    -- CLASS POLICY, read back from the installed retention registry: which
+    -- derivative kinds this class's policy says survive. Reported beside the
+    -- coverage answer, never in place of it, because "the policy allows an
+    -- abstract to survive" and "an abstract exists" are different statements.
     'surviving_derivatives', coalesce((SELECT c->'surviving_derivatives'
        FROM jsonb_array_elements(ops.f01_current_policy()->'retention_registry'->'classes') AS c
        WHERE c->>'artifact_class' = v_record->>'artifact_class'), '[]'::jsonb),
+    'derivative_coverage', v_coverage,
     'bytes_deleted', false, 'rows_deleted', false, 'external_purge_performed', false,
     'readback', ops.f01_verify_envelope(v_row.envelope, v_row.envelope_digest,
                                         v_row.evaluation_digest, 'stored_deletion_evaluation'),
@@ -2571,6 +3206,13 @@ BEGIN
               FROM ops.f01_proposal_link l
              WHERE l.tenant = ops.f01_tenant()
                AND l.artifact_digest = p_selector ->> 'artifact_digest') s;
+  ELSIF p_kind = 'derivative_links' THEN
+    v_body := ops.f01_derivative_links(p_selector ->> 'artifact_digest');
+  ELSIF p_kind = 'derivative_coverage' THEN
+    -- Readable on purpose. An operator who wants to know why a deletion refused
+    -- should be able to see the coverage answer and the registered links behind
+    -- it, and see for themselves that reading them changes nothing.
+    v_body := ops.f01_derivative_coverage(p_selector ->> 'artifact_digest');
   ELSIF p_kind = 'document' THEN
     SELECT ops.f01_verify_envelope(v.envelope, v.envelope_digest, v.document_digest,
                                    'stored_document_version')
@@ -2624,7 +3266,7 @@ $$;
 -- 10. Grants.
 --
 -- NO DIRECT RUNTIME DML, anywhere. The runtime principal receives EXECUTE on the
--- eight operation functions and SELECT on the relations for diagnosis; every
+-- nine operation functions and SELECT on the relations for diagnosis; every
 -- INSERT, UPDATE, DELETE and TRUNCATE arrives through a security-definer writer
 -- or does not arrive at all.
 --
@@ -2633,13 +3275,19 @@ $$;
 -- that already exist and creates none, so the migration is additive and safe to
 -- apply before the parent confirms the exact name.
 --
--- THE READER'S EXCLUSION LIST IS NINE NAMES AND IT IS MIRRORED IN THREE PLACES:
+-- THE READER'S EXCLUSION LIST IS TEN NAMES AND IT IS MIRRORED IN THREE PLACES:
 -- here, in the posture readback in section 11, in the SQL fixture's
 -- least-privilege block, and in the local PostgreSQL gate's READER_FORBIDDEN.
--- The seven writers are the obvious part; f01_replay_outcome and
+-- The eight writers are the obvious part; f01_replay_outcome and
 -- f01_require_authority_principal are the two that a mirror written from the
 -- writer list alone will miss, and a mirror that misses them fails a CORRECT
 -- schema. Anything added to or removed from this list has to move in all four.
+--
+-- f01_register_derivative_link is a WRITER, so the reader is excluded from it
+-- like the rest; carr_writer KEEPS it, because the ordinary evidence principal
+-- is exactly the trusted producer identity the settled decision names.
+-- f01_insert_derivative_link is a PRIVATE helper and joins the claim/settle pair
+-- that nobody may execute at runtime.
 -- ===========================================================================
 
 DO $grants$
@@ -2673,7 +3321,8 @@ BEGIN
       -- Nothing needs it: the guards are reached only as triggers, and the claim
       -- and settle helpers are reached only from inside a SECURITY DEFINER
       -- writer, which executes them as the owner regardless of the caller.
-      IF f.proname IN ('f01_claim_idempotency','f01_settle_idempotency')
+      IF f.proname IN ('f01_claim_idempotency','f01_settle_idempotency',
+        'f01_insert_derivative_link')
         OR f.proname LIKE 'f01_guard_%' THEN CONTINUE; END IF;
       -- A READ-ONLY PRINCIPAL GETS NO WRITE-SHAPED SURFACE. The seven writers are
       -- obvious. f01_replay_outcome is here because it is a SECURITY DEFINER door
@@ -2683,7 +3332,8 @@ BEGIN
       -- writers that genuinely need it call it as the owner rather than as the
       -- caller, so revoking it costs nothing.
       IF r='carr_reader' AND f.proname IN ('f01_install_policy','f01_apply_observation',
-        'f01_record_artifact','f01_record_proposal','f01_record_document','f01_record_hold',
+        'f01_record_artifact','f01_record_proposal','f01_register_derivative_link',
+        'f01_record_document','f01_record_hold',
         'f01_record_deletion_evaluation','f01_replay_outcome',
         'f01_require_authority_principal') THEN CONTINUE; END IF;
       IF r='carr_writer' AND f.proname IN ('f01_install_policy','f01_record_hold',
@@ -2749,7 +3399,8 @@ BEGIN
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'ops'
-     AND (p.proname IN ('f01_claim_idempotency', 'f01_settle_idempotency')
+     AND (p.proname IN ('f01_claim_idempotency', 'f01_settle_idempotency',
+                        'f01_insert_derivative_link')
           OR p.proname LIKE 'f01\_guard\_%')
      AND (p.proacl IS NULL
           OR EXISTS (SELECT 1 FROM aclexplode(p.proacl) a
@@ -2819,6 +3470,7 @@ BEGIN
       ('carr_reader', 'f01_apply_observation'),
       ('carr_reader', 'f01_record_artifact'),
       ('carr_reader', 'f01_record_proposal'),
+      ('carr_reader', 'f01_register_derivative_link'),
       ('carr_reader', 'f01_record_document'),
       ('carr_reader', 'f01_record_hold'),
       ('carr_reader', 'f01_record_deletion_evaluation'),

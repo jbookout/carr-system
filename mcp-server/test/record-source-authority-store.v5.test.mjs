@@ -30,6 +30,8 @@ import {
   V5_F01_FIELD_REGISTRY_SCHEMA_VERSION,
   V5_F01_RETENTION_REGISTRY_SCHEMA_VERSION,
   V5_F01_PROPOSAL_SCHEMA_VERSION,
+  V5_F01_PARSED_PROPOSAL_DERIVATIVE_KIND,
+  V5_F01_RESERVED_DERIVATIVE_KINDS,
   compileFieldAuthorityRegistry,
   compileRetentionRegistry,
   fieldAuthorityRegistryPreimage,
@@ -157,6 +159,33 @@ const AGENT = Object.freeze({
 });
 const ctx = actor => ({ actor });
 
+// --- derivative-registration coverage --------------------------------------
+//
+// WHAT THE REAL DATABASE ANSWERS TODAY is the unknown one, for every artifact:
+// ops.f01_derivative_coverage has no way to establish a closed producer set, and
+// this suite does not pretend otherwise. The established shape below exists so
+// the store's PLUMBING can be proved — that it loads the answer, passes it to
+// the kernel unchanged, and binds the digest of it into the record — without
+// which the whole coverage path would be untested on the accept side. Which of
+// the two a fixture uses is always stated at the call site.
+
+const UNKNOWN_COVERAGE = Object.freeze({
+  state: "unknown",
+  reason_id: "producer_closure_not_established",
+  registered_derivative_kinds: [],
+  registered_link_count: 0,
+  is_exhaustive_inventory: false,
+  empty_link_set_means_verified_absence: false,
+});
+
+const ESTABLISHED_COVERAGE = Object.freeze({
+  state: "established",
+  reason_id: "synthetic_test_closure_verified",
+  registered_derivative_kinds: ["synthetic_test_abstract"],
+  registered_link_count: 1,
+  is_exhaustive_inventory: false,
+});
+
 // --- the scripted fake handle ---------------------------------------------
 
 class FakeDb {
@@ -190,6 +219,13 @@ class FakeDb {
       if (this.script.replayError) throw this.script.replayError;
       return { rows: [{ outcome: this.script.replay_outcome ?? null }] };
     }
+    if (text.includes("ops.f01_derivative_coverage(")) {
+      return { rows: [{
+        coverage: this.script.coverage ?? UNKNOWN_COVERAGE,
+        coverage_digest: this.script.coverage_digest
+          ?? digest(this.script.coverage ?? UNKNOWN_COVERAGE),
+      }] };
+    }
     if (text.includes("ops.f01_stored_derivatives(")) {
       return { rows: [{ derivatives: this.script.stored_derivatives ?? null }] };
     }
@@ -221,8 +257,8 @@ class FakeDb {
       return { rows: [{ body: this.script.read_body ?? { body: null } }] };
     }
     for (const fn of ["f01_install_policy", "f01_apply_observation", "f01_record_artifact",
-      "f01_record_proposal", "f01_record_document", "f01_record_hold",
-      "f01_record_deletion_evaluation"]) {
+      "f01_record_proposal", "f01_register_derivative_link", "f01_record_document",
+      "f01_record_hold", "f01_record_deletion_evaluation"]) {
       if (text.includes(`ops.${fn}(`)) {
         this.lastWrite = { fn, params };
         if (this.script.writeError) throw this.script.writeError;
@@ -249,7 +285,19 @@ class FakeDb {
               readback: { artifact: rec } }); break;
           case "f01_record_proposal":
             Object.assign(outcome, { operation: "record-parsed-proposal", proposal_digest: env.record_digest,
-              link_digest: envelope(1).record_digest, readback: verified(envelope(1)) }); break;
+              link_digest: envelope(1).record_digest,
+              // The third envelope is the producer registration the writer
+              // REQUIRES; a fake that ignored it would let a regression through.
+              derivative_link_digest: envelope(2).record_digest,
+              derivative_registration_bound: true,
+              readback: verified(envelope(1)) }); break;
+          case "f01_register_derivative_link":
+            Object.assign(outcome, { operation: "register-derivative-source-link",
+              outcome: "registered", link_digest: env.record_digest,
+              establishes_coverage: false, is_exhaustive_inventory: false,
+              permits_deletion: false,
+              coverage: this.script.coverage ?? UNKNOWN_COVERAGE,
+              readback: verified(env) }); break;
           case "f01_record_document":
             Object.assign(outcome, { operation: "record-document-identity", document_digest: env.record_digest,
               official_filing_state: rec.official_filing_state, readback: verified(env) }); break;
@@ -305,7 +353,7 @@ async function refuses(promise, code) {
 // The registration seam.
 // ===========================================================================
 
-test("the eight named operations are exactly the proposed tool surface", () => {
+test("the nine named operations are exactly the proposed tool surface", () => {
   assert.deepEqual([...V5_F01_OPERATIONS].sort(), [
     "evaluate-artifact-deletion",
     "read-record-source-authority",
@@ -314,10 +362,11 @@ test("the eight named operations are exactly the proposed tool surface", () => {
     "record-document-identity",
     "record-parsed-proposal",
     "record-source-observation",
+    "register-derivative-source-link",
     "register-record-source-authority-policy",
   ]);
   const registrations = v5F01ToolRegistrations();
-  assert.equal(registrations.length, 8);
+  assert.equal(registrations.length, 9);
   for (const entry of registrations) {
     assert.ok(V5_F01_OPERATIONS.includes(entry.name));
     assert.ok(entry.role.length > 40, entry.name);
@@ -853,6 +902,52 @@ test("a proposal is stored as reviewable and never as a fact", async () => {
   assert.equal(linkEnvelope.record.history_preserved, true);
   assert.notEqual(proposalEnvelope.record_digest, linkEnvelope.record_digest,
     "the proposal and its link are two records, not one");
+
+  // THE PRODUCER RULE, BOUND AUTOMATICALLY. A parsed proposal is derived from a
+  // stored artifact, so the third envelope registers which original produced it
+  // — built here from values the store already holds, with the caller supplying
+  // nothing and able to withhold nothing.
+  const derivativeEnvelope = db.json(2);
+  assert.equal(derivativeEnvelope.record_kind, "stored_derivative_link");
+  assert.equal(derivativeEnvelope.record.source_artifact_digest, PROPOSAL.artifact_digest);
+  assert.equal(derivativeEnvelope.record.derivative_kind, "f01_parsed_proposal");
+  assert.equal(derivativeEnvelope.record.derivative_id, proposalEnvelope.record_digest,
+    "the derivative identity is the proposal's own digest");
+  assert.equal(derivativeEnvelope.record.derivative_content_digest,
+    proposalEnvelope.record_digest);
+  assert.equal(derivativeEnvelope.record.producer_workflow, "f01_record_parsed_proposal");
+  assert.equal(derivativeEnvelope.record.producer_run_ref, "syn-proposal-0001");
+  assert.equal(derivativeEnvelope.record.produced_at, SERVER_NOW, "produced_at is the server's");
+  assert.equal(derivativeEnvelope.record.registered_by, "joe");
+  assert.equal(derivativeEnvelope.record_digest, digest(derivativeEnvelope.record));
+  // Registering provenance establishes nothing and permits nothing, and the
+  // stored record says so in the bytes it hashes to.
+  assert.equal(derivativeEnvelope.record.establishes_coverage, false);
+  assert.equal(derivativeEnvelope.record.is_exhaustive_inventory, false);
+  assert.equal(derivativeEnvelope.record.permits_deletion, false);
+  assert.equal(derivativeEnvelope.establishes_coverage, false);
+  assert.equal(answer.derivative_registration_bound, true);
+  assert.equal(answer.derivative_link_digest, derivativeEnvelope.record_digest);
+  // The idempotency key travels to the writer AFTER the three envelopes.
+  assert.equal(db.param(3), "syn-proposal-0001");
+});
+
+test("a proposal whose source registration cannot be bound writes nothing at all", async () => {
+  // The stored artifact is loaded and its creation instant is real evidence: an
+  // artifact recorded AFTER the server's own instant would make the derivative
+  // precede its source, and a proposal recorded without a provenance edge is
+  // exactly the untracked derivative the settled rule exists to prevent.
+  const { db, store } = storeWith(policyScript({
+    stored_artifact: { artifact_digest: D(21), artifact: {}, created_at: "2026-10-01T00:00:00Z" },
+  }));
+  const answer = await store.recordParsedProposal({
+    idempotency_key: "syn-proposal-noprov-0001", proposal: PROPOSAL,
+  }, ctx(JOE));
+  assert.equal(answer.decision, "refuse");
+  assert.equal(answer.reason_id, "production_precedes_source_artifact");
+  assert.equal(answer.derivative_registration_bound, false);
+  assert.equal(answer.records_written, 0);
+  assert.equal(db.lastWrite, undefined, "neither the proposal nor its link reached the database");
 });
 
 test("a proposal naming an artifact the database does not hold refuses", async () => {
@@ -873,6 +968,190 @@ test("a proposal that reaches past review into effect refuses by name", async ()
     idempotency_key: "syn-proposal-0003",
     proposal: { ...PROPOSAL, apply_immediately: true },
   }, ctx(JOE)), "unknown_field");
+});
+
+// ===========================================================================
+// register-derivative-source-link.
+// ===========================================================================
+
+const REGISTRATION = Object.freeze({
+  source_artifact_digest: D(21),
+  derivative_kind: "synthetic_test_abstract",
+  derivative_id: "synthetic-abstract-0001",
+  derivative_content_digest: D(22),
+  producer_workflow: "synthetic_test_producer",
+  producer_run_ref: "synthetic-run-0001",
+  evidence_ref: "synthetic-evidence-0040",
+  evidence_digest: D(23),
+});
+
+function registrationScript(extra = {}) {
+  return {
+    stored_artifact: { artifact_digest: D(21), artifact: {}, created_at: T.early },
+    ...extra,
+  };
+}
+
+test("a producer registers one derivative against the artifact it came from", async () => {
+  const { db, store } = storeWith(registrationScript());
+  const answer = await store.registerDerivativeSourceLink({
+    idempotency_key: "syn-derivative-0001", registration: REGISTRATION,
+  }, ctx(JOE));
+  assert.equal(answer.decision, "allow");
+  assert.equal(answer.reason_id, "derivative_source_link_registered");
+  assert.equal(answer.source_artifact_digest, D(21));
+  assert.equal(answer.derivative_kind, "synthetic_test_abstract");
+  assert.equal(answer.derivative_id, "synthetic-abstract-0001");
+  assert.equal(answer.producer_workflow, "synthetic_test_producer");
+  // WHAT A REGISTRATION IS NOT, said on the answer as well as in the record.
+  assert.equal(answer.establishes_coverage, false);
+  assert.equal(answer.is_exhaustive_inventory, false);
+  assert.equal(answer.permits_deletion, false);
+  assert.equal(answer.bytes_deleted, false);
+  assert.equal(answer.effects.creates_effect, false);
+  assert.equal(answer.provider_calls, 0);
+
+  const envelope = db.json(0);
+  assert.equal(envelope.record_kind, "stored_derivative_link");
+  assert.equal(envelope.record_digest, digest(envelope.record));
+  assert.equal(envelope.record.registered_by, "joe", "the producer principal is derived");
+  assert.equal(envelope.record.registered_at, SERVER_NOW);
+  assert.equal(envelope.record.produced_at, SERVER_NOW,
+    "produced_at is the server's instant, not a producer's clock");
+  assert.equal(envelope.record.registration_is_provenance, true);
+  assert.equal(envelope.record.is_exhaustive_inventory, false);
+  assert.equal(envelope.record.establishes_coverage, false);
+  assert.equal(envelope.record.permits_deletion, false);
+  assert.equal(db.param(1), "syn-derivative-0001");
+});
+
+test("a registration against an artifact the database does not hold refuses", async () => {
+  const { db, store } = storeWith(registrationScript({ stored_artifact: null }));
+  const answer = await store.registerDerivativeSourceLink({
+    idempotency_key: "syn-derivative-unknown-0001", registration: REGISTRATION,
+  }, ctx(JOE));
+  assert.equal(answer.decision, "refuse");
+  assert.equal(answer.reason_id, "unknown_source_artifact");
+  assert.equal(answer.records_written, 0);
+  assert.equal(db.lastWrite, undefined, "naming a digest cannot conjure an artifact");
+});
+
+test("a registration that would predate or duplicate its source refuses", async () => {
+  const late = storeWith(registrationScript({
+    stored_artifact: { artifact_digest: D(21), artifact: {}, created_at: "2026-10-01T00:00:00Z" },
+  }));
+  const early = await late.store.registerDerivativeSourceLink({
+    idempotency_key: "syn-derivative-early-0001", registration: REGISTRATION,
+  }, ctx(JOE));
+  assert.equal(early.decision, "refuse");
+  assert.equal(early.reason_id, "production_precedes_source_artifact");
+  assert.equal(late.db.lastWrite, undefined);
+
+  const self = storeWith(registrationScript());
+  const answer = await self.store.registerDerivativeSourceLink({
+    idempotency_key: "syn-derivative-self-0001",
+    registration: { ...REGISTRATION, derivative_content_digest: D(21) },
+  }, ctx(JOE));
+  assert.equal(answer.decision, "refuse");
+  assert.equal(answer.reason_id, "derivative_is_its_own_source");
+  assert.equal(self.db.lastWrite, undefined);
+});
+
+test("a caller may not register a kind this contract produces itself", async () => {
+  // THE DENIAL SHAPE THIS CLOSES, and it is permanent rather than noisy. A parsed
+  // proposal's derivative identity IS the proposal digest, computed from caller
+  // payload plus the installed registry digest — so a caller can predict it. The
+  // stored identity is unique per (tenant, kind, id) on an append-only table with
+  // no release path, so a pre-registered ("f01_parsed_proposal", <predicted id>)
+  // pointed at some other artifact would make the genuine proposal write conflict
+  // for ever, and would leave a provenance edge asserting the proposal came from
+  // an artifact it did not.
+  const { db, store } = storeWith(registrationScript());
+  const answer = await store.registerDerivativeSourceLink({
+    idempotency_key: "syn-derivative-reserved-0001",
+    registration: {
+      ...REGISTRATION,
+      derivative_kind: V5_F01_PARSED_PROPOSAL_DERIVATIVE_KIND,
+      derivative_id: D(24),
+      derivative_content_digest: D(24),
+    },
+  }, ctx(JOE));
+  assert.equal(answer.decision, "refuse");
+  assert.equal(answer.reason_id, "reserved_derivative_kind");
+  assert.equal(answer.derivative_kind, V5_F01_PARSED_PROPOSAL_DERIVATIVE_KIND);
+  assert.deepEqual(answer.reserved_derivative_kinds, [...V5_F01_RESERVED_DERIVATIVE_KINDS]);
+  assert.equal(answer.records_written, 0);
+  assert.equal(answer.establishes_coverage, false);
+  // BEFORE ANY STATEMENT RUNS, not merely before the writer: a refusal that
+  // opened a transaction and claimed an idempotency key would burn the key on a
+  // registration that can never be accepted.
+  assert.equal(db.calls.length, 0, "a reserved kind is refused before the transaction");
+
+  // AND THE PATH THAT LEGITIMATELY WRITES THE KIND IS UNTOUCHED. The proposal
+  // producer builds its own link and reaches ops.f01_record_proposal, not this
+  // surface, so reserving the kind here closes the caller route without closing
+  // the producer route.
+  const producer = storeWith(policyScript({
+    stored_artifact: { artifact_digest: D(21), artifact: {}, created_at: T.early },
+  }));
+  const recorded = await producer.store.recordParsedProposal({
+    idempotency_key: "syn-proposal-reserved-0001", proposal: PROPOSAL,
+  }, ctx(JOE));
+  assert.equal(recorded.decision, "allow");
+  assert.equal(producer.db.json(2).record.derivative_kind,
+    V5_F01_PARSED_PROPOSAL_DERIVATIVE_KIND);
+});
+
+test("MUTATION KILL (registration): no caller field can forge trust, time or coverage", async () => {
+  const { db, store } = storeWith(registrationScript());
+  const call = extra => store.registerDerivativeSourceLink({
+    idempotency_key: "syn-derivative-forge-0001",
+    registration: { ...REGISTRATION, ...extra },
+  }, ctx(JOE));
+
+  // THE PRODUCER IS THE AUTHENTICATED PRINCIPAL. There is no trusted flag, no
+  // producer identity to claim, and no coverage to declare.
+  await refuses(call({ registered_by: "joe" }), "caller_derived_field_refused");
+  await refuses(call({ registered_at: SERVER_NOW }), "caller_derived_field_refused");
+  await refuses(call({ produced_at: T.mid }), "caller_derived_field_refused");
+  await refuses(call({ derivative_coverage: ESTABLISHED_COVERAGE }),
+    "caller_derived_field_refused");
+  await refuses(call({ derivative_coverage_state: "established" }),
+    "caller_derived_field_refused");
+  await refuses(call({ registered_derivative_kinds: ["synthetic_test_abstract"] }),
+    "caller_derived_field_refused");
+  await refuses(call({ tenant: ORGANIZATION_TENANT_ID }), "caller_derived_field_refused");
+  await refuses(call({ trusted_caller: true }), "caller_authority_field_refused");
+  await refuses(call({ authorized_by: "joe" }), "caller_authority_field_refused");
+  await refuses(call({ establishes_coverage: true }), "unknown_field");
+  await refuses(call({ permits_deletion: true }), "unknown_field");
+  assert.equal(db.lastWrite, undefined, "not one forgery reached the database");
+
+  // Every field of the registration is required: a partial provenance edge is
+  // not a provenance edge.
+  for (const key of Object.keys(REGISTRATION)) {
+    await refuses(store.registerDerivativeSourceLink({
+      idempotency_key: "syn-derivative-partial-0001",
+      registration: Object.fromEntries(
+        Object.entries(REGISTRATION).filter(([name]) => name !== key)),
+    }, ctx(JOE)), "missing_field");
+  }
+});
+
+test("the registration operation is an ordinary write, not an authority surface", () => {
+  const schema = v5F01StoreOperationSchemas()["register-derivative-source-link"];
+  assert.equal(schema.write, true);
+  // Producers are workflows. Requiring a human here would mean Joe or Dell had
+  // to approve every abstract the system makes, which is the exact opposite of
+  // the settled decision.
+  assert.equal(schema.humanOnly, false);
+  assert.equal(schema.authorityOnly, false);
+  assert.ok(schema.required.includes("idempotency_key"));
+  const registration = v5F01ToolRegistrations()
+    .find(entry => entry.name === "register-derivative-source-link");
+  assert.equal(registration.handler, "registerDerivativeSourceLink");
+  assert.equal(registration.accepted, false);
+  assert.equal(registration.registered_in_scac, false);
 });
 
 // ===========================================================================
@@ -1103,17 +1382,29 @@ const DELETION_SUBJECT = Object.freeze({
   },
 });
 
-function deletionScript(holds) {
+/**
+ * The scripted database for one deletion evaluation.
+ *
+ * `coverage` defaults to the UNKNOWN answer, because that is what the real
+ * ops.f01_derivative_coverage returns for every artifact today. A fixture that
+ * wants the accept side has to say so, and says why.
+ */
+function deletionScript(holds, coverage = UNKNOWN_COVERAGE, stored_derivatives = null) {
   return policyScript({
     stored_artifact: { artifact_digest: D(51), artifact: {}, created_at: T.early },
     holds, holds_digest: digest(holds),
-    stored_derivatives: ["synthetic_test_abstract"],
+    coverage, stored_derivatives,
     outcome: { outcome: "allow" },
   });
 }
 
 test("a permitted deletion persists an evaluation and performs no deletion", async () => {
-  const { db, store } = storeWith(deletionScript([]));
+  // ESTABLISHED COVERAGE IS SCRIPTED HERE AND NOWHERE IN THE REAL SCHEMA. This
+  // proves the store loads the coverage answer, hands it to the kernel and binds
+  // its digest into the record; it is not a claim that any database can answer
+  // "established" today, and the SQL fixture asserts the opposite.
+  const { db, store } = storeWith(
+    deletionScript([], ESTABLISHED_COVERAGE, ["synthetic_test_abstract"]));
   const answer = await store.evaluateArtifactDeletion({
     idempotency_key: "syn-deletion-allow-0001", subject: DELETION_SUBJECT,
   }, ctx(JOE));
@@ -1129,9 +1420,56 @@ test("a permitted deletion persists an evaluation and performs no deletion", asy
   assert.equal(envelope.bytes_deleted, false);
   assert.equal(envelope.external_purge_performed, false);
   assert.ok(envelope.record.deletion_receipt, "an allow carries a receipt");
+  // CLASS POLICY and INSTANCE OBSERVATION, stored under different names.
   assert.deepEqual(envelope.record.deletion_receipt.surviving_derivatives,
     ["synthetic_test_abstract"]);
+  assert.deepEqual(envelope.record.deletion_receipt.observed_surviving_derivatives,
+    ["synthetic_test_abstract"]);
+  assert.equal(envelope.record.derivative_coverage_state, "established");
+  assert.equal(envelope.record.derivative_coverage_digest, digest(ESTABLISHED_COVERAGE),
+    "the loaded coverage digest is bound into the record the database re-derives");
   assert.equal(db.param(1), digest([]), "the loaded hold-inventory digest travels as a CAS operand");
+
+  // The kernel's coverage shape is CLOSED, and the loader's answer carries more
+  // fields than it accepts. The store projects rather than forwarding, so a
+  // richer readback cannot break the evaluation.
+  const loadCall = db.calls.find(c => c.text.includes("ops.f01_derivative_coverage("));
+  assert.deepEqual(loadCall.params, [D(51)]);
+});
+
+test("unknown registration coverage blocks the deletion the store would otherwise allow", async () => {
+  // Identical to the case above in every respect except the coverage answer —
+  // the same clean subject, no holds, the same proof — so the refusal is
+  // attributable to coverage and to nothing else. This is the answer the real
+  // ops.f01_derivative_coverage gives for every artifact today.
+  const { db, store } = storeWith(deletionScript([]));
+  const answer = await store.evaluateArtifactDeletion({
+    idempotency_key: "syn-deletion-coverage-0001", subject: DELETION_SUBJECT,
+  }, ctx(JOE));
+  assert.equal(answer.decision, "refuse");
+  assert.equal(answer.reason_id, "derivative_coverage_unknown");
+  assert.equal(answer.derivative_coverage_state, "unknown");
+  assert.equal(db.json(0).record.deletion_receipt, null, "a refusal carries no receipt");
+  assert.equal(db.json(0).record.derivative_coverage_state, "unknown");
+  assert.equal(db.json(0).record.derivative_coverage_digest, digest(UNKNOWN_COVERAGE));
+
+  // Registered links do not change the answer. A partial registry is still a
+  // registry nobody can vouch for, and the store never reads rows as coverage.
+  const withLinks = storeWith(deletionScript([], {
+    ...UNKNOWN_COVERAGE, registered_derivative_kinds: ["synthetic_test_abstract"],
+    registered_link_count: 1,
+  }, null));
+  const second = await withLinks.store.evaluateArtifactDeletion({
+    idempotency_key: "syn-deletion-coverage-0002", subject: DELETION_SUBJECT,
+  }, ctx(JOE));
+  assert.equal(second.decision, "refuse");
+  assert.equal(second.reason_id, "derivative_coverage_unknown");
+
+  // And a caller cannot supply the answer itself.
+  await refuses(store.evaluateArtifactDeletion({
+    idempotency_key: "syn-deletion-coverage-0003",
+    subject: { ...DELETION_SUBJECT, derivative_coverage: ESTABLISHED_COVERAGE },
+  }, ctx(JOE)), "caller_derived_field_refused");
 });
 
 test("holds are LOADED and an active one blocks; a caller cannot supply its own", async () => {
@@ -1168,10 +1506,11 @@ test("an unknown hold state blocks exactly as hard as an active one", async () =
 });
 
 test("an omitted derivative inventory refuses rather than reading as verified-empty", async () => {
-  const { store } = storeWith({ ...deletionScript([]), stored_derivatives: null });
-  const withoutDerivatives = DELETION_SUBJECT;
+  // Established coverage and NO inventory: coverage is not the only fail-closed
+  // gate, and an unavailable list is still not an empty one.
+  const { store } = storeWith(deletionScript([], ESTABLISHED_COVERAGE, null));
   const answer = await store.evaluateArtifactDeletion({
-    idempotency_key: "syn-deletion-derivatives-0001", subject: withoutDerivatives,
+    idempotency_key: "syn-deletion-derivatives-0001", subject: DELETION_SUBJECT,
   }, ctx(JOE));
   assert.equal(answer.decision, "refuse");
   assert.equal(answer.reason_id, "derivative_inventory_missing");
@@ -1277,7 +1616,8 @@ test("an unregistered record kind cannot be enveloped", () => {
     assert.equal(error.code, "unknown_record_kind");
     return true;
   });
-  assert.equal(V5_F01_STORE_RECORD_KINDS.length, 12);
+  assert.equal(V5_F01_STORE_RECORD_KINDS.length, 13);
+  assert.ok(V5_F01_STORE_RECORD_KINDS.includes("stored_derivative_link"));
 });
 
 // The bytes below are the JS side of the byte-for-byte comparison the SQL
@@ -1352,12 +1692,12 @@ test("replay returns persisted observation decision before reading changed state
   assert.equal(db.calls.some(c => /f01_current_(policy|field_state)/.test(c.text)), false);
 });
 
-test("caller derivative inventory refuses before database work", async () => {
+test("caller derivative inventory refuses by name before database work", async () => {
   const { db, store } = storeWith();
   await refuses(store.evaluateArtifactDeletion({
     idempotency_key: "syn-forged-derivatives",
     subject: { ...DELETION_SUBJECT, derivatives: ["synthetic_test_abstract"] },
-  }, ctx(JOE)), "unknown_field");
+  }, ctx(JOE)), "caller_derived_field_refused");
   assert.equal(db.calls.length, 0);
 });
 
@@ -1373,6 +1713,9 @@ const REPLAY_CASES = [
   ["recordParsedProposal", { proposal: PROPOSAL }, policyScript({
     stored_artifact: { artifact_digest: D(21), artifact: {}, created_at: T.early },
   })],
+  ["registerDerivativeSourceLink", { registration: REGISTRATION }, {
+    stored_artifact: { artifact_digest: D(21), artifact: {}, created_at: T.early },
+  }],
   ["recordDocumentIdentity", { document: DOCUMENT }, {}],
   ["recordArtifactPreservationHold", { hold: {
     hold_id: "synthetic-replay-hold", artifact_digest: D(41), state: "active",

@@ -34,9 +34,9 @@
 --   (the gate's --fixture-role,  ALTER TABLE halves), 15, 17
 --    or the owner if none)
 --   carr_authority_joe           4 (policy), 9 (holds), 3.5.2
---   carr_writer                  5-8 (evidence, proposals, documents), 10
---                                (deletion), 13 (idempotency), 14 (the read
---                                halves), 16, 3.5.3
+--   carr_writer                  5-8 (evidence, proposals, derivative-source
+--                                registrations, documents), 10 (deletion), 13
+--                                (idempotency), 14 (the read halves), 16, 3.5.3
 --   carr_reader                  3.5.4
 --
 -- Sections 11 and 12 run as the OWNER on purpose: a principal with no DML grant
@@ -349,8 +349,13 @@ SELECT pg_temp.f01_assert(
 -- CAN be checked, exactly and now, is that the COLLATE "C" did not go missing.
 SELECT pg_temp.f01_assert(
   pg_get_functiondef('ops.f01_canonical_json(jsonb)'::regprocedure) LIKE '%COLLATE "C"%'
-  AND pg_get_functiondef('ops.f01_hold_inventory(text)'::regprocedure) LIKE '%COLLATE "C"%',
-  'canonical', 'the canonical key order and the hold inventory order are pinned to C collation');
+  AND pg_get_functiondef('ops.f01_hold_inventory(text)'::regprocedure) LIKE '%COLLATE "C"%'
+  -- The derivative link list and the kind list inside the coverage answer feed
+  -- ops.f01_derivative_coverage_digest, which a deletion evaluation is bound to
+  -- and the writer re-derives. Same rule, same reason.
+  AND pg_get_functiondef('ops.f01_derivative_links(text)'::regprocedure) LIKE '%COLLATE "C"%'
+  AND pg_get_functiondef('ops.f01_derivative_coverage(text)'::regprocedure) LIKE '%COLLATE "C"%',
+  'canonical', 'every digest-bearing ordering is pinned to C collation');
 
 -- 2.1 THE EXPONENT BOUNDARIES ARE REPRODUCED, NOT REFUSED.
 --
@@ -650,6 +655,8 @@ BEGIN
       ('carr_reader', 'f01_apply_observation'),
       ('carr_reader', 'f01_record_artifact'),
       ('carr_reader', 'f01_record_proposal'),
+      -- A read-only principal is not a producer workflow.
+      ('carr_reader', 'f01_register_derivative_link'),
       ('carr_reader', 'f01_record_document'),
       ('carr_reader', 'f01_record_hold'),
       ('carr_reader', 'f01_record_deletion_evaluation'),
@@ -665,6 +672,9 @@ BEGIN
       ('carr_reader', 'f01_settle_idempotency'),
       ('carr_writer', 'f01_settle_idempotency'),
       ('carr_authority_joe', 'f01_settle_idempotency'),
+      ('carr_reader', 'f01_insert_derivative_link'),
+      ('carr_writer', 'f01_insert_derivative_link'),
+      ('carr_authority_joe', 'f01_insert_derivative_link'),
       ('carr_authority_joe', 'f01_guard_direct_dml'),
       ('carr_writer', 'f01_guard_append_only')
     ) AS t(role_name, fn)
@@ -693,6 +703,12 @@ BEGIN
   PERFORM pg_temp.f01_assert(
     has_function_privilege('carr_writer', 'ops.f01_apply_observation(text,text,text,text,text,jsonb,jsonb,jsonb,jsonb,jsonb,text,text,jsonb)', 'EXECUTE')
     AND has_function_privilege('carr_writer', 'ops.f01_replay_outcome(text,text,text)', 'EXECUTE')
+    -- The ordinary evidence principal IS the trusted producer identity, so it
+    -- keeps the registration surface. Without this the approved registration rule
+    -- would have nobody able to satisfy it, and "registration is automatic" would
+    -- quietly become "registration never happens".
+    AND has_function_privilege('carr_writer',
+      'ops.f01_register_derivative_link(jsonb,text,text)', 'EXECUTE')
     AND has_function_privilege('carr_authority_joe', 'ops.f01_install_policy(jsonb,text,text,text)', 'EXECUTE')
     AND has_function_privilege('carr_authority_joe', 'ops.f01_record_hold(jsonb,text,text,text)', 'EXECUTE')
     AND has_function_privilege('carr_reader', 'ops.f01_read(text,jsonb)', 'EXECUTE'),
@@ -1279,6 +1295,44 @@ RETURNS jsonb LANGUAGE sql IMMUTABLE AS $$
     'registry_digest', 'sha256:' || repeat('e', 64));
 $$;
 
+/**
+ * One registered derivative-source link, shaped exactly as the Node store shapes
+ * one. `registered_by` is the DERIVED actor: ops.f01_insert_derivative_link
+ * refuses a record naming anybody else, and 7.6 proves it.
+ */
+CREATE FUNCTION pg_temp.f01_derivative_link_record(
+  p_source text, p_kind text, p_id text, p_content text,
+  p_workflow text, p_run text, p_evidence_ref text, p_evidence_digest text,
+  p_registered_by text DEFAULT NULL)
+RETURNS jsonb LANGUAGE sql STABLE AS $$
+  SELECT jsonb_build_object(
+    'schema_version', 'doctorcre-v5-f01-stored-derivative-source-link.v1',
+    'derivative_link_schema_version', 'doctorcre-v5-f01-derivative-source-link.v1',
+    'tenant', 'carr-internal',
+    'source_artifact_digest', p_source,
+    'derivative_kind', p_kind,
+    'derivative_id', p_id,
+    'derivative_content_digest', p_content,
+    'producer_workflow', p_workflow,
+    'producer_run_ref', p_run,
+    'produced_at', ops.f01_now_text(),
+    'evidence_ref', p_evidence_ref,
+    'evidence_digest', p_evidence_digest,
+    'registration_is_provenance', true,
+    'is_exhaustive_inventory', false,
+    'establishes_coverage', false,
+    'permits_deletion', false,
+    'registered_by', coalesce(p_registered_by, pg_temp.f01_actor()),
+    'registered_at', ops.f01_now_text());
+$$;
+
+CREATE FUNCTION pg_temp.f01_derivative_envelope(p_record jsonb) RETURNS jsonb
+LANGUAGE sql STABLE AS $$
+  SELECT pg_temp.f01_envelope('stored_derivative_link', p_record,
+    '{"establishes_coverage":false,"is_exhaustive_inventory":false,'
+    '"permits_deletion":false,"deletes_nothing":true}'::jsonb);
+$$;
+
 CREATE FUNCTION pg_temp.f01_record_proposal_pair(p_supersedes text, p_key text,
                                                  p_confidence numeric DEFAULT 0.75)
 RETURNS jsonb LANGUAGE plpgsql AS $$
@@ -1289,11 +1343,24 @@ DECLARE
     'schema_version', 'doctorcre-v5-f01-parsed-proposal.v1') || (v_link - 'schema_version');
   v_notfact jsonb := '{"becomes_fact":false,"advances_state":false,'
                      '"carries_effect_authority":false,"requires_human_review":true}'::jsonb;
+  v_proposal_envelope jsonb := pg_temp.f01_envelope('stored_parsed_proposal', v_proposal,
+                                                    v_notfact);
+  v_proposal_digest text := v_proposal_envelope ->> 'record_digest';
 BEGIN
+  -- THE THIRD ENVELOPE IS NOT OPTIONAL. A parsed proposal is a record derived
+  -- from a stored artifact, so the producing workflow registers which original
+  -- produced it in the same call. The store builds this envelope itself from
+  -- values it already holds; nothing here is a caller decision, and 7.4 proves
+  -- the write refuses without it.
   RETURN ops.f01_record_proposal(
-    pg_temp.f01_envelope('stored_parsed_proposal', v_proposal, v_notfact),
+    v_proposal_envelope,
     pg_temp.f01_envelope('stored_proposal_link', v_link,
       v_notfact || '{"reversible":true,"history_preserved":true}'::jsonb),
+    pg_temp.f01_derivative_envelope(pg_temp.f01_derivative_link_record(
+      pg_temp.f01_recall('artifact_1'), 'f01_parsed_proposal',
+      v_proposal_digest, v_proposal_digest,
+      'f01_record_parsed_proposal', p_key,
+      'stored_parsed_proposal', v_proposal_digest)),
     p_key, ops.f01_digest_jsonb(jsonb_build_object('key', p_key)));
 END;
 $$;
@@ -1341,7 +1408,9 @@ SELECT pg_temp.f01_expect_refusal(
     pg_temp.f01_recall('link_1')),
   'f01_proposal_link_supersedes_uq', 'proposal', 'a forked supersede chain refuses');
 
--- 7.3 a proposal naming an artifact nobody stored refuses.
+-- 7.3 a proposal naming an artifact nobody stored refuses. Its derivative
+-- registration is well formed and names the same absent artifact, so the
+-- refusal is about the artifact and not about the third envelope.
 SELECT pg_temp.f01_expect_refusal(
   $$SELECT ops.f01_record_proposal(
       pg_temp.f01_envelope('stored_parsed_proposal',
@@ -1353,8 +1422,416 @@ SELECT pg_temp.f01_expect_refusal(
         pg_temp.f01_link_record('sha256:' || repeat('cc', 32), null),
         '{"becomes_fact":false,"advances_state":false,"carries_effect_authority":false,'
         '"requires_human_review":true,"reversible":true,"history_preserved":true}'::jsonb),
+      pg_temp.f01_derivative_envelope(pg_temp.f01_derivative_link_record(
+        'sha256:' || repeat('cc', 32), 'f01_parsed_proposal',
+        'sha256:' || repeat('ca', 32), 'sha256:' || repeat('ca', 32),
+        'f01_record_parsed_proposal', 'syn-pg-proposal-unknown-0001',
+        'stored_parsed_proposal', 'sha256:' || repeat('ca', 32))),
       'syn-pg-proposal-unknown-0001', ops.f01_digest_jsonb('{"k":"pu"}'::jsonb))$$,
   'f01_unknown_artifact', 'proposal', 'a proposal cannot assert an artifact into existence');
+
+-- ===========================================================================
+-- 7.4 THE PRODUCER RULE: a derived record does not complete without its source
+--     registration.  (carr_writer)
+--
+-- This is the APPROVED REGISTRATION RULE made structural — the session approval
+-- domain.sql section 5.3.1 names, not Q129.D1, which settles the retention
+-- registry and nothing about provenance registration. A parsed proposal is
+-- derived from a stored artifact, so ops.f01_record_proposal REQUIRES the
+-- registration envelope and writes both records in one transaction or neither. A
+-- caller cannot omit it, and cannot satisfy it with a link about something else.
+-- ===========================================================================
+
+DO $proposal_producer_binding$
+DECLARE
+  v_link jsonb := pg_temp.f01_link_record(pg_temp.f01_recall('artifact_1'), null, 0.6);
+  v_proposal jsonb := jsonb_build_object(
+    'schema_version', 'doctorcre-v5-f01-parsed-proposal.v1') || (v_link - 'schema_version');
+  v_notfact jsonb := '{"becomes_fact":false,"advances_state":false,'
+                     '"carries_effect_authority":false,"requires_human_review":true}'::jsonb;
+  v_proposal_envelope jsonb := pg_temp.f01_envelope('stored_parsed_proposal', v_proposal,
+                                                    v_notfact);
+  v_link_envelope jsonb := pg_temp.f01_envelope('stored_proposal_link', v_link,
+    v_notfact || '{"reversible":true,"history_preserved":true}'::jsonb);
+  v_digest text := v_proposal_envelope ->> 'record_digest';
+  v_proposals bigint := (SELECT count(*) FROM ops.f01_parsed_proposal);
+  v_links bigint := (SELECT count(*) FROM ops.f01_derivative_link);
+BEGIN
+  -- No registration at all.
+  PERFORM pg_temp.f01_expect_refusal(
+    format($$SELECT ops.f01_record_proposal(%L::jsonb, %L::jsonb, null,
+        'syn-pg-proposal-noderiv-0001', ops.f01_digest_jsonb('{"k":"nd"}'::jsonb))$$,
+      v_proposal_envelope::text, v_link_envelope::text),
+    'f01_derivative_link_required', 'derivative',
+    'a parsed proposal cannot be recorded without registering its source');
+
+  -- A registration about a DIFFERENT derivative. "Some link was supplied" is not
+  -- the rule; the rule is that THIS derived record names THIS original.
+  PERFORM pg_temp.f01_expect_refusal(
+    format($$SELECT ops.f01_record_proposal(%L::jsonb, %L::jsonb, %L::jsonb,
+        'syn-pg-proposal-wrongderiv-0001', ops.f01_digest_jsonb('{"k":"wd"}'::jsonb))$$,
+      v_proposal_envelope::text, v_link_envelope::text,
+      pg_temp.f01_derivative_envelope(pg_temp.f01_derivative_link_record(
+        pg_temp.f01_recall('artifact_1'), 'f01_parsed_proposal',
+        'sha256:' || repeat('7a', 32), 'sha256:' || repeat('7a', 32),
+        'f01_record_parsed_proposal', 'syn-pg-proposal-wrongderiv-0001',
+        'stored_parsed_proposal', 'sha256:' || repeat('7a', 32)))::text),
+    'f01_derivative_link_not_bound_to_proposal', 'derivative',
+    'a registration about another derivative does not satisfy this one');
+
+  -- A registration naming a DIFFERENT source artifact is refused on the same
+  -- clause: provenance that points somewhere else is not this record's.
+  PERFORM pg_temp.f01_expect_refusal(
+    format($$SELECT ops.f01_record_proposal(%L::jsonb, %L::jsonb, %L::jsonb,
+        'syn-pg-proposal-wrongsource-0001', ops.f01_digest_jsonb('{"k":"ws"}'::jsonb))$$,
+      v_proposal_envelope::text, v_link_envelope::text,
+      pg_temp.f01_derivative_envelope(pg_temp.f01_derivative_link_record(
+        'sha256:' || repeat('cc', 32), 'f01_parsed_proposal', v_digest, v_digest,
+        'f01_record_parsed_proposal', 'syn-pg-proposal-wrongsource-0001',
+        'stored_parsed_proposal', v_digest))::text),
+    'f01_derivative_link_not_bound_to_proposal', 'derivative',
+    'a registration naming another source does not satisfy this one');
+
+  -- NOTHING PARTIAL LANDED. Three refusals, no proposal, no link.
+  PERFORM pg_temp.f01_assert(
+    (SELECT count(*) FROM ops.f01_parsed_proposal) = v_proposals
+    AND (SELECT count(*) FROM ops.f01_derivative_link) = v_links,
+    'derivative', 'a refused producer binding writes neither the derivative nor its link');
+END;
+$proposal_producer_binding$;
+
+-- 7.5 The successful path already ran in section 7: assert what it registered.
+DO $proposal_registered_provenance$
+DECLARE
+  v_row ops.f01_derivative_link%ROWTYPE;
+  v_coverage jsonb;
+BEGIN
+  PERFORM pg_temp.f01_assert(
+    (SELECT count(*) FROM ops.f01_derivative_link
+      WHERE source_artifact_digest = pg_temp.f01_recall('artifact_1')
+        AND producer_workflow = 'f01_record_parsed_proposal') = 2,
+    'derivative', 'both recorded proposals registered their source automatically');
+
+  SELECT * INTO v_row FROM ops.f01_derivative_link
+   WHERE derivative_id = (SELECT proposal_digest FROM ops.f01_parsed_proposal
+                           ORDER BY proposal_id LIMIT 1);
+  PERFORM pg_temp.f01_assert(FOUND, 'derivative',
+    'the registration names the proposal digest as the derivative identity');
+  PERFORM pg_temp.f01_assert_eq(v_row.source_artifact_digest,
+    pg_temp.f01_recall('artifact_1'),
+    'derivative', 'the registration names the artifact the proposal was parsed from');
+  PERFORM pg_temp.f01_assert_eq(v_row.actor_slug, pg_temp.f01_actor(),
+    'derivative', 'the producer principal is the derived actor, not a supplied one');
+  PERFORM pg_temp.f01_assert(
+    (v_row.envelope -> 'record' ->> 'registration_is_provenance') = 'true'
+    AND (v_row.envelope -> 'record' ->> 'is_exhaustive_inventory') = 'false'
+    AND (v_row.envelope -> 'record' ->> 'establishes_coverage') = 'false'
+    AND (v_row.envelope -> 'record' ->> 'permits_deletion') = 'false',
+    'derivative', 'a stored link says in its own hashed bytes what it is not');
+
+  -- AND REGISTERING DID NOT MAKE COVERAGE KNOWN. This is the assertion the whole
+  -- section exists for: rows appeared, and the answer to "are these all of
+  -- them?" is still no better than it was.
+  v_coverage := ops.f01_derivative_coverage(pg_temp.f01_recall('artifact_1'));
+  PERFORM pg_temp.f01_assert_eq(v_coverage ->> 'state', 'unknown',
+    'derivative', 'registered links do not establish coverage');
+  PERFORM pg_temp.f01_assert_eq(v_coverage ->> 'reason_id', 'producer_closure_not_established',
+    'derivative', 'the coverage answer names what is missing rather than shrugging');
+  PERFORM pg_temp.f01_assert((v_coverage ->> 'registered_link_count')::int = 2
+    AND (v_coverage ->> 'is_exhaustive_inventory') = 'false'
+    AND (v_coverage ->> 'empty_link_set_means_verified_absence') = 'false',
+    'derivative', 'the observed links are reported, and reported as not exhaustive');
+  PERFORM pg_temp.f01_assert(
+    ops.f01_stored_derivatives(pg_temp.f01_recall('artifact_1')) IS NULL,
+    'derivative', 'the deletion inventory stays UNKNOWN while coverage is unknown');
+END;
+$proposal_registered_provenance$;
+
+-- ===========================================================================
+-- 7.6 register-derivative-source-link, on its own.  (carr_writer)
+--
+-- The public surface a future producer workflow uses. Everything below is about
+-- what one registration may and may not say.
+-- ===========================================================================
+
+-- Back to the applying identity to define the helper: a pg_temp function created
+-- under a switched authorization would be owned by whichever principal happened
+-- to be current and would need CREATE on the session temp schema.
+RESET SESSION AUTHORIZATION;
+
+/**
+ * One registration through the public surface.
+ *
+ * p_run DEFAULTS TO THE IDEMPOTENCY KEY, which is the ordinary case, but it is a
+ * separate parameter because the two are separate facts and 7.6.1 needs to move
+ * one without the other. producer_run_ref is part of the provenance claim — WHICH
+ * RUN made this derivative — while the idempotency key is about this request.
+ * A real producer supplies them independently.
+ */
+CREATE FUNCTION pg_temp.f01_register_derivative(p_kind text, p_id text, p_content text,
+                                                p_key text, p_source text DEFAULT NULL,
+                                                p_registered_by text DEFAULT NULL,
+                                                p_run text DEFAULT NULL)
+RETURNS jsonb LANGUAGE plpgsql AS $$
+BEGIN
+  RETURN ops.f01_register_derivative_link(
+    pg_temp.f01_derivative_envelope(pg_temp.f01_derivative_link_record(
+      coalesce(p_source, pg_temp.f01_recall('artifact_1')), p_kind, p_id, p_content,
+      'synthetic_test_producer', coalesce(p_run, p_key),
+      'synthetic-evidence-0040', 'sha256:' || repeat('61', 32), p_registered_by)),
+    p_key, ops.f01_digest_jsonb(jsonb_build_object('key', p_key)));
+END;
+$$;
+
+SET SESSION AUTHORIZATION carr_writer;
+
+DO $register_derivative$
+DECLARE
+  v_result jsonb;
+  v_artifacts bigint := (SELECT count(*) FROM ops.f01_corporate_artifact);
+BEGIN
+  v_result := pg_temp.f01_register_derivative(
+    'synthetic_test_abstract', 'synthetic-abstract-0001',
+    'sha256:' || repeat('62', 32), 'syn-pg-deriv-0001');
+  PERFORM pg_temp.f01_remember('derivative_1', v_result ->> 'link_digest');
+  PERFORM pg_temp.f01_assert_eq(v_result ->> 'outcome', 'registered',
+    'derivative', 'a trusted producer registers one derivative against its source');
+  PERFORM pg_temp.f01_assert((v_result ->> 'establishes_coverage') = 'false'
+    AND (v_result ->> 'is_exhaustive_inventory') = 'false'
+    AND (v_result ->> 'permits_deletion') = 'false'
+    AND (v_result ->> 'external_effects') = 'false',
+    'derivative', 'the answer says registration establishes nothing and permits nothing');
+  PERFORM pg_temp.f01_assert_eq(v_result -> 'coverage' ->> 'state', 'unknown',
+    'derivative', 'the coverage readback beside the answer is the proof, not the promise');
+  PERFORM pg_temp.f01_assert_eq(v_result -> 'readback' ->> 'integrity',
+    'recomputed_from_committed_row', 'derivative', 'the readback is recomputed');
+  PERFORM pg_temp.f01_assert(
+    (SELECT count(*) FROM ops.f01_corporate_artifact) = v_artifacts,
+    'derivative', 'registering provenance changes no artifact');
+
+  -- IDEMPOTENT: the same registration replays to the same stored answer.
+  v_result := pg_temp.f01_register_derivative(
+    'synthetic_test_abstract', 'synthetic-abstract-0001',
+    'sha256:' || repeat('62', 32), 'syn-pg-deriv-0001');
+  PERFORM pg_temp.f01_assert_eq(v_result ->> 'link_digest',
+    pg_temp.f01_recall('derivative_1'),
+    'derivative', 'an exact replay returns the stored registration');
+  PERFORM pg_temp.f01_assert(
+    (SELECT count(*) FROM ops.f01_derivative_link
+      WHERE derivative_id = 'synthetic-abstract-0001') = 1,
+    'derivative', 'a replay writes no second link');
+END;
+$register_derivative$;
+
+-- 7.6.1 ONE DERIVATIVE, ONE ORIGINAL. Re-registering the same derivative
+-- against a different source is a rewrite of where a record came from.
+SELECT pg_temp.f01_expect_refusal(
+  format($$SELECT pg_temp.f01_register_derivative('synthetic_test_abstract',
+      'synthetic-abstract-0001', 'sha256:' || repeat('62', 32),
+      'syn-pg-deriv-repoint-0001', %L)$$,
+    (SELECT artifact_digest FROM ops.f01_corporate_artifact
+      WHERE artifact_digest <> pg_temp.f01_recall('artifact_1') LIMIT 1)),
+  'f01_derivative_source_conflict', 'derivative',
+  'a derivative may not be repointed at a second original');
+
+-- ...and the same identity claiming different bytes is refused on the same rule.
+SELECT pg_temp.f01_expect_refusal(
+  $$SELECT pg_temp.f01_register_derivative('synthetic_test_abstract',
+      'synthetic-abstract-0001', 'sha256:' || repeat('63', 32),
+      'syn-pg-deriv-rebyte-0001')$$,
+  'f01_derivative_source_conflict', 'derivative',
+  'one derivative identity may not name two sets of bytes');
+
+-- 7.6.1.1 AND SO IS A SECOND, CONTRARY PROVENANCE CLAIM ABOUT THE SAME BYTES.
+-- Source and content agree here; the PRODUCER RUN does not. An earlier revision
+-- compared only source and bytes and answered this with success, handing back the
+-- FIRST producer's link digest — so a second run's claim about where a derivative
+-- came from was reported as agreement with a claim it contradicted.
+SELECT pg_temp.f01_expect_refusal(
+  $$SELECT pg_temp.f01_register_derivative('synthetic_test_abstract',
+      'synthetic-abstract-0001', 'sha256:' || repeat('62', 32),
+      'syn-pg-deriv-rerun-0001', null, null, 'synthetic-run-9999')$$,
+  'f01_derivative_source_conflict', 'derivative',
+  'a second registration naming a different producer run refuses');
+
+-- ...AND THE POSITIVE HALF, which is what stops the rule above from being a
+-- blanket refusal of every repeat. A genuinely identical claim — same source,
+-- same bytes, same workflow, same run, same evidence — arriving under a NEW
+-- idempotency key is the same fact twice, and is a no-op that returns the
+-- original link rather than a second row.
+DO $register_derivative_same_fact_twice$
+DECLARE
+  v_result jsonb;
+BEGIN
+  v_result := pg_temp.f01_register_derivative(
+    'synthetic_test_abstract', 'synthetic-abstract-0001',
+    'sha256:' || repeat('62', 32), 'syn-pg-deriv-samefact-0001', null, null,
+    'syn-pg-deriv-0001');
+  PERFORM pg_temp.f01_assert_eq(v_result ->> 'outcome', 'already_registered',
+    'derivative', 'an identical claim under a new key is the same fact arriving twice');
+  PERFORM pg_temp.f01_assert_eq(v_result ->> 'link_digest',
+    pg_temp.f01_recall('derivative_1'),
+    'derivative', 'and it returns the original link rather than a new one');
+  PERFORM pg_temp.f01_assert(
+    (SELECT count(*) FROM ops.f01_derivative_link
+      WHERE derivative_id = 'synthetic-abstract-0001') = 1,
+    'derivative', 'the same fact twice writes no second row');
+END;
+$register_derivative_same_fact_twice$;
+
+-- 7.6.2 The producer principal is DERIVED. A record naming somebody else is
+-- refused before the row is written, exactly as installed_by is for a policy.
+SELECT pg_temp.f01_expect_refusal(
+  $$SELECT pg_temp.f01_register_derivative('synthetic_test_abstract',
+      'synthetic-abstract-0002', 'sha256:' || repeat('64', 32),
+      'syn-pg-deriv-actor-0001', null, 'somebody-else')$$,
+  'f01_actor_injection_refused', 'derivative',
+  'registered_by cannot be supplied');
+
+-- 7.6.3 Provenance must point at something. A link to an artifact nobody stored
+-- refuses, and naming a digest never brings one into existence.
+SELECT pg_temp.f01_expect_refusal(
+  $$SELECT pg_temp.f01_register_derivative('synthetic_test_abstract',
+      'synthetic-abstract-0003', 'sha256:' || repeat('65', 32),
+      'syn-pg-deriv-unknown-0001', 'sha256:' || repeat('ce', 32))$$,
+  'f01_unknown_artifact', 'derivative',
+  'a derivative link must name a stored artifact');
+
+-- 7.6.4 A derivative whose bytes ARE the source's bytes is the source under a
+-- second name. The structural constraint refuses it whatever the writer does.
+SELECT pg_temp.f01_expect_refusal(
+  format($$SELECT pg_temp.f01_register_derivative('synthetic_test_abstract',
+      'synthetic-abstract-0004', %L, 'syn-pg-deriv-self-0001')$$,
+    pg_temp.f01_recall('artifact_1')),
+  'f01_derivative_not_self', 'derivative',
+  'a record cannot be registered as derived from itself');
+
+-- 7.6.5 A LINK MAY NOT CLAIM TO ESTABLISH COVERAGE. This is the forgery that
+-- would matter: a stored row asserting the registry is complete would be a
+-- caller-written permission to delete. The CHECK refuses it on the row.
+SELECT pg_temp.f01_expect_refusal(
+  $$SELECT ops.f01_register_derivative_link(
+      pg_temp.f01_envelope('stored_derivative_link',
+        pg_temp.f01_derivative_link_record(
+          pg_temp.f01_recall('artifact_1'), 'synthetic_test_abstract',
+          'synthetic-abstract-0005', 'sha256:' || repeat('66', 32),
+          'synthetic_test_producer', 'syn-pg-deriv-forged-0001',
+          'synthetic-evidence-0041', 'sha256:' || repeat('67', 32))
+          || '{"establishes_coverage":true,"is_exhaustive_inventory":true,'
+             '"permits_deletion":true}'::jsonb),
+        '{"establishes_coverage":false,"is_exhaustive_inventory":false,'
+        '"permits_deletion":false,"deletes_nothing":true}'::jsonb),
+      'syn-pg-deriv-forged-0001', ops.f01_digest_jsonb('{"k":"df"}'::jsonb))$$,
+  'f01_derivative_claims_nothing', 'derivative',
+  'a link claiming to establish coverage cannot be stored at all');
+
+-- ...and the same claim made on the ENVELOPE rather than inside the record is
+-- refused by the same constraint, so neither half is a way round the other.
+SELECT pg_temp.f01_expect_refusal(
+  $$SELECT ops.f01_register_derivative_link(
+      pg_temp.f01_envelope('stored_derivative_link',
+        pg_temp.f01_derivative_link_record(
+          pg_temp.f01_recall('artifact_1'), 'synthetic_test_abstract',
+          'synthetic-abstract-0006', 'sha256:' || repeat('68', 32),
+          'synthetic_test_producer', 'syn-pg-deriv-forged-0002',
+          'synthetic-evidence-0042', 'sha256:' || repeat('69', 32)),
+        '{"establishes_coverage":true,"is_exhaustive_inventory":false,'
+        '"permits_deletion":false,"deletes_nothing":true}'::jsonb),
+      'syn-pg-deriv-forged-0002', ops.f01_digest_jsonb('{"k":"df2"}'::jsonb))$$,
+  'f01_derivative_claims_nothing', 'derivative',
+  'an envelope claiming to establish coverage cannot be stored either');
+
+-- 7.6.5.1 AND SILENCE IS REFUSED EXACTLY LIKE A CONTRARY CLAIM. This is the
+-- half the constraint used to miss: `->>` over an ABSENT key is SQL NULL, and a
+-- CHECK fails only on FALSE, so a record that simply OMITTED the four claims was
+-- stored — a link carrying no self-limiting bytes at all, which is precisely
+-- what a later reader would have to find in order to know what the row is not.
+SELECT pg_temp.f01_expect_refusal(
+  $$SELECT ops.f01_register_derivative_link(
+      pg_temp.f01_derivative_envelope(
+        pg_temp.f01_derivative_link_record(
+          pg_temp.f01_recall('artifact_1'), 'synthetic_test_abstract',
+          'synthetic-abstract-0010', 'sha256:' || repeat('6d', 32),
+          'synthetic_test_producer', 'syn-pg-deriv-silent-0001',
+          'synthetic-evidence-0044', 'sha256:' || repeat('6e', 32))
+          - 'registration_is_provenance' - 'is_exhaustive_inventory'
+          - 'establishes_coverage' - 'permits_deletion'),
+      'syn-pg-deriv-silent-0001', ops.f01_digest_jsonb('{"k":"ds"}'::jsonb))$$,
+  'f01_derivative_claims_nothing', 'derivative',
+  'a link that says nothing about what it is not cannot be stored either');
+
+-- ...and the same omission on the ENVELOPE. f01_envelope's default extras are
+-- empty, so this builds the exact shape a writer would produce if somebody
+-- deleted the three flags from it.
+SELECT pg_temp.f01_expect_refusal(
+  $$SELECT ops.f01_register_derivative_link(
+      pg_temp.f01_envelope('stored_derivative_link',
+        pg_temp.f01_derivative_link_record(
+          pg_temp.f01_recall('artifact_1'), 'synthetic_test_abstract',
+          'synthetic-abstract-0011', 'sha256:' || repeat('6f', 32),
+          'synthetic_test_producer', 'syn-pg-deriv-silent-0002',
+          'synthetic-evidence-0045', 'sha256:' || repeat('70', 32))),
+      'syn-pg-deriv-silent-0002', ops.f01_digest_jsonb('{"k":"ds2"}'::jsonb))$$,
+  'f01_derivative_claims_nothing', 'derivative',
+  'an envelope that omits the three flags cannot be stored either');
+
+-- Nothing partial landed from either omission.
+SELECT pg_temp.f01_assert(
+  NOT EXISTS (SELECT 1 FROM ops.f01_derivative_link
+               WHERE derivative_id IN ('synthetic-abstract-0010', 'synthetic-abstract-0011')),
+  'derivative', 'a refused claim-shape writes no row');
+
+-- 7.6.5.2 A KIND THIS SCHEMA PRODUCES ITSELF IS NOT REGISTRABLE FROM OUTSIDE.
+--
+-- WHY THIS IS A REFUSAL AND NOT A TIDINESS RULE. A parsed proposal's derivative
+-- identity IS the proposal digest, and that digest is computed from caller
+-- payload plus the installed registry digest, so a caller can PREDICT it. The
+-- identity index is unique on (tenant, kind, id) over an append-only table with
+-- no release path, so one pre-registration pointed at a different artifact would
+-- make the genuine ops.f01_record_proposal raise f01_derivative_source_conflict
+-- for that proposal permanently, and would leave a stored provenance edge
+-- claiming the proposal came from an artifact it did not.
+SELECT pg_temp.f01_expect_refusal(
+  $$SELECT pg_temp.f01_register_derivative('f01_parsed_proposal',
+      'synthetic-proposal-squat-0001', 'sha256:' || repeat('71', 32),
+      'syn-pg-deriv-reserved-0001')$$,
+  'f01_reserved_derivative_kind', 'derivative',
+  'the public surface refuses a kind produced by a writer inside this schema');
+
+-- The refusal is about the KIND, not about that one literal: it is read from the
+-- schema's own list, and the in-schema producer path that legitimately writes the
+-- kind is untouched — section 7.5 already proved two such links exist.
+SELECT pg_temp.f01_assert(
+  'f01_parsed_proposal' = ANY (ops.f01_reserved_derivative_kinds())
+  AND (SELECT count(*) FROM ops.f01_derivative_link
+        WHERE derivative_kind = 'f01_parsed_proposal') = 2,
+  'derivative',
+  'reserving the kind closes the caller route without closing the producer route');
+
+-- 7.6.6 A forged link digest refuses, like every other record here.
+SELECT pg_temp.f01_expect_refusal(
+  $$SELECT ops.f01_register_derivative_link(
+      pg_temp.f01_derivative_envelope(pg_temp.f01_derivative_link_record(
+        pg_temp.f01_recall('artifact_1'), 'synthetic_test_abstract',
+        'synthetic-abstract-0007', 'sha256:' || repeat('6a', 32),
+        'synthetic_test_producer', 'syn-pg-deriv-digest-0001',
+        'synthetic-evidence-0043', 'sha256:' || repeat('6b', 32)))
+        || jsonb_build_object('record_digest', 'sha256:' || repeat('d', 64)),
+      'syn-pg-deriv-digest-0001', ops.f01_digest_jsonb('{"k":"dd"}'::jsonb))$$,
+  'f01_derivative_link_digest_mismatch', 'derivative',
+  'a link that lies about its own bytes refuses');
+
+-- 7.6.7 AND A READ-ONLY PRINCIPAL IS NOT A PRODUCER, in the function body as
+-- well as in the grant. The grant refuses first for carr_reader — 3.5.5 proves
+-- that — so this exercises the body check through a principal that can reach it.
+RESET SESSION AUTHORIZATION;
+
+SELECT pg_temp.f01_assert(
+  NOT has_function_privilege('carr_reader',
+    'ops.f01_register_derivative_link(jsonb,text,text)', 'EXECUTE'),
+  'derivative', 'the reader cannot reach the registration surface at all');
+
+SET SESSION AUTHORIZATION carr_writer;
 
 -- ===========================================================================
 -- 8. Document identity — five axes, three homes.  (carr_writer)
@@ -1710,19 +2187,26 @@ SELECT pg_temp.f01_expect_refusal(
 -- ===========================================================================
 -- 10. Deletion evaluation. NOTHING IS DELETED.  (carr_writer)
 --
--- READ 10.1 BEFORE CHANGING ANYTHING HERE. In this source slice there is no
--- ingress for artifact-bound derivative evidence, so ops.f01_stored_derivatives
--- returns NULL — UNKNOWN, which is not the same as none — and every `allow`
--- decision fails closed. That makes the positive allow path, and the two
--- assertions that used to hang off it, unreachable rather than merely untested.
--- They are re-expressed below through the decisions that ARE reachable, and the
--- one genuinely unreachable constraint is asserted structurally instead of being
--- quietly dropped.
+-- READ 10.1 BEFORE CHANGING ANYTHING HERE. Section 7.6 registers real
+-- derivative-source links, so the ingress now EXISTS — and every `allow`
+-- decision still fails closed, which is the point. Registered links say what was
+-- registered; ops.f01_derivative_coverage still answers 'unknown' to "are these
+-- all of them?", ops.f01_stored_derivatives therefore still returns NULL, and an
+-- allow is refused rather than taken on an inventory nobody can vouch for.
+-- Rows appearing in ops.f01_derivative_link is exactly the change that would
+-- tempt somebody to read absence as verified absence; 10.1 is what stops it.
+--
+-- The positive allow path stays unreachable through a tool path, so the two
+-- assertions that used to hang off it are re-expressed through the decisions
+-- that ARE reachable, and the genuinely unreachable constraints are asserted
+-- structurally instead of being quietly dropped.
 -- ===========================================================================
 
 RESET SESSION AUTHORIZATION;
 
-CREATE FUNCTION pg_temp.f01_deletion_record(p_decision text, p_reason text, p_receipt jsonb)
+CREATE FUNCTION pg_temp.f01_deletion_record(p_decision text, p_reason text, p_receipt jsonb,
+                                            p_coverage_state text DEFAULT NULL,
+                                            p_coverage_digest text DEFAULT NULL)
 RETURNS jsonb LANGUAGE sql STABLE AS $$
   SELECT jsonb_build_object(
     'schema_version', 'doctorcre-v5-f01-stored-deletion-evaluation.v1',
@@ -1734,6 +2218,13 @@ RETURNS jsonb LANGUAGE sql STABLE AS $$
     'reason_id', p_reason,
     'retention_registry_digest', ops.f01_digest_jsonb(pg_temp.f01_retention_registry(2)),
     'hold_inventory_digest', ops.f01_hold_inventory_digest(pg_temp.f01_recall('artifact_1')),
+    -- The coverage answer this evaluation was taken against. Both halves are
+    -- LOADED by default, exactly as the store loads them; the parameters exist
+    -- so 10.4 can offer a stale or forged one and watch it refuse.
+    'derivative_coverage_state', coalesce(p_coverage_state,
+      ops.f01_derivative_coverage(pg_temp.f01_recall('artifact_1')) ->> 'state'),
+    'derivative_coverage_digest', coalesce(p_coverage_digest,
+      ops.f01_derivative_coverage_digest(pg_temp.f01_recall('artifact_1'))),
     'deletion_receipt', p_receipt,
     'evaluated_by', pg_temp.f01_actor(),
     'evaluated_at', ops.f01_now_text());
@@ -1741,12 +2232,15 @@ $$;
 
 CREATE FUNCTION pg_temp.f01_evaluate_deletion(p_decision text, p_reason text,
                                               p_receipt jsonb, p_key text,
-                                              p_inventory text DEFAULT NULL)
+                                              p_inventory text DEFAULT NULL,
+                                              p_coverage_state text DEFAULT NULL,
+                                              p_coverage_digest text DEFAULT NULL)
 RETURNS jsonb LANGUAGE plpgsql AS $$
 BEGIN
   RETURN ops.f01_record_deletion_evaluation(
     pg_temp.f01_envelope('stored_deletion_evaluation',
-      pg_temp.f01_deletion_record(p_decision, p_reason, p_receipt),
+      pg_temp.f01_deletion_record(p_decision, p_reason, p_receipt,
+                                  p_coverage_state, p_coverage_digest),
       '{"silent_purge":false,"purge_without_proof":false,"bytes_deleted":false,'
       '"rows_deleted":false,"external_purge_performed":false}'::jsonb),
     coalesce(p_inventory, ops.f01_hold_inventory_digest(pg_temp.f01_recall('artifact_1'))),
@@ -1776,10 +2270,20 @@ BEGIN
     (SELECT count(*) FROM ops.f01_corporate_artifact) = v_artifacts,
     'deletion', 'evaluating a deletion deletes nothing');
   -- The surviving derivatives named by the retention class are reported back
-  -- from the INSTALLED registry, not from anything the caller said.
+  -- from the INSTALLED registry, not from anything the caller said. This is
+  -- CLASS POLICY — which kinds survive if the artifact goes — and it is reported
+  -- beside the coverage answer rather than in place of it.
   PERFORM pg_temp.f01_assert_eq(v_result -> 'surviving_derivatives' ->> 0,
     'synthetic_test_abstract',
     'deletion', 'surviving derivatives come from the installed retention class');
+  -- ...and the INSTANCE OBSERVATION is a different field with a different
+  -- answer. A registered abstract exists; whether it is the only derivative is
+  -- still unknown, and the evaluation says so instead of implying otherwise.
+  PERFORM pg_temp.f01_assert_eq(v_result -> 'derivative_coverage' ->> 'state', 'unknown',
+    'deletion', 'the evaluation reports the coverage answer it was taken against');
+  PERFORM pg_temp.f01_assert(
+    (v_result -> 'derivative_coverage' ->> 'registered_link_count')::int >= 1,
+    'deletion', 'registered links are visible in the evaluation and are not a coverage claim');
 END;
 $deletion$;
 
@@ -1843,7 +2347,39 @@ SELECT pg_temp.f01_expect_refusal(
   'f01_stale_retention_policy', 'deletion',
   'an evaluation against a superseded retention registry refuses');
 
--- 10.3 THE ONE CONSTRAINT THIS FIXTURE CANNOT REACH, stated plainly rather than
+-- 10.2.1 A COVERAGE ANSWER THAT HAS MOVED REFUSES, on the same principle as the
+-- hold inventory: an evaluation is bound to the picture of the world it was
+-- taken against, and a derivative registered in between is exactly the change
+-- that would make a stale evaluation wrong.
+SELECT pg_temp.f01_expect_refusal(
+  format($$SELECT pg_temp.f01_evaluate_deletion('refuse',
+      'unknown_hold_state_blocks_deletion', null, 'syn-pg-deletion-stalecov-0001',
+      null, 'unknown', %L)$$,
+    'sha256:' || repeat('7b', 32)),
+  'f01_stale_derivative_coverage', 'deletion',
+  'an evaluation bound to a coverage digest the database does not hold refuses');
+
+-- And a record CLAIMING established coverage refuses too, because the writer
+-- re-derives the state rather than reading the caller's copy of it. This is the
+-- forgery that would matter most: 'established' is the one word that unblocks a
+-- deletion, and no caller may write it.
+SELECT pg_temp.f01_expect_refusal(
+  $$SELECT pg_temp.f01_evaluate_deletion('refuse',
+      'unknown_hold_state_blocks_deletion', null, 'syn-pg-deletion-forgedcov-0001',
+      null, 'established')$$,
+  'f01_stale_derivative_coverage', 'deletion',
+  'a caller cannot declare coverage established');
+
+-- 10.2.2 THE STORED-STATE HALF. No evaluation anywhere claims established
+-- coverage, and no allow exists, however many links have been registered.
+SELECT pg_temp.f01_assert(
+  NOT EXISTS (SELECT 1 FROM ops.f01_deletion_evaluation
+               WHERE envelope -> 'record' ->> 'derivative_coverage_state'
+                     IS DISTINCT FROM 'unknown'),
+  'deletion', 'every persisted evaluation was taken against unknown coverage');
+
+-- 10.3 THE CONSTRAINTS THIS FIXTURE CANNOT REACH BEHAVIOURALLY, stated plainly
+-- rather than
 -- dropped. f01_deletion_receipt_only_on_allow forbids an allow with no receipt
 -- and a refusal with one. Neither shape can be driven through a tool path today:
 -- every allow stops at 10.1 before the INSERT, and the direct-DML guard forbids
@@ -1861,7 +2397,57 @@ SELECT pg_temp.f01_assert(
       AND c.conname = 'f01_deletion_receipt_only_on_allow'
       AND c.contype = 'c'),
   'deletion', 'the receipt-only-on-allow constraint is installed and binds both directions',
-  'unreachable behaviourally until artifact-bound derivative ingress exists');
+  'unreachable behaviourally until derivative-registration coverage can be established');
+
+-- The second one, added with the derivative seam: no evaluation may be stored
+-- without saying which coverage answer it was taken against, and no ALLOW may be
+-- stored while that answer is anything but 'established'. The writer refuses the
+-- same shape earlier and with a clearer message, so this can only be reached by
+-- editing the writer — which is precisely when it needs to still be true.
+--
+-- THE `IS NOT NULL` HALF IS ASSERTED SEPARATELY AND ON PURPOSE. Naming the two
+-- keys and the word 'established' was satisfied by a constraint that had a hole
+-- in exactly the case that matters: over an ABSENT key `->>` is NULL, NULL IN
+-- (...) is NULL, the digest-shape test is non-strict and answers NULL too, and
+-- for an allow the last conjunct becomes `false OR NULL` — so the whole
+-- expression was NULL and a CHECK, which fails only on FALSE, admitted an ALLOW
+-- carrying no coverage fields at all. A presence test in front of each key is
+-- what turns that NULL into a FALSE, and its absence is what this line catches.
+SELECT pg_temp.f01_assert(
+  (SELECT pg_get_constraintdef(c.oid) ~ 'derivative_coverage_state'
+      AND pg_get_constraintdef(c.oid) ~ 'derivative_coverage_digest'
+      AND pg_get_constraintdef(c.oid) ~ '''established'''
+      -- Written to survive PostgreSQL's deparsing rather than to match one
+      -- rendering of it: the key literal, whatever cast and closing parens the
+      -- server chose to print, then the presence test.
+      AND pg_get_constraintdef(c.oid) ~ 'derivative_coverage_state''[^)]*\)+ IS NOT NULL'
+      AND pg_get_constraintdef(c.oid) ~ 'derivative_coverage_digest''[^)]*\)+ IS NOT NULL'
+     FROM pg_constraint c
+    WHERE c.conrelid = 'ops.f01_deletion_evaluation'::regclass
+      AND c.conname = 'f01_deletion_coverage_bound'
+      AND c.contype = 'c'),
+  'deletion',
+  'the coverage-bound constraint is installed, refuses an ABSENT coverage answer, and forbids an allow under unknown coverage',
+  'unreachable behaviourally while every coverage answer is unknown');
+
+-- AND WHAT THAT CONSTRAINT DOES NOT SAY, recorded rather than left to be assumed
+-- from its presence. Both tightened constraints are added NOT VALID, so rows
+-- written before the tightening are UNPROVEN: they were never re-checked, and
+-- convalidated = false is the catalog saying exactly that. This asserts the
+-- honest reading rather than the comfortable one — every row inserted from here
+-- on is bound, and history is not retro-verified. In this fixture's own database
+-- the tables are created empty by the same run, so nothing unproven exists here;
+-- the assertion is about what the schema CLAIMS, which travels to databases where
+-- that is not true.
+SELECT pg_temp.f01_assert(
+  (SELECT count(*) FROM pg_constraint c
+    WHERE c.conrelid IN ('ops.f01_deletion_evaluation'::regclass,
+                         'ops.f01_derivative_link'::regclass)
+      AND c.conname IN ('f01_deletion_coverage_bound', 'f01_derivative_claims_nothing')
+      AND c.contype = 'c') = 2,
+  'deletion',
+  'both tightened coverage/claim constraints are installed under the names the schema states',
+  'added NOT VALID: binding on every new row, and making no claim about rows written before');
 
 -- ===========================================================================
 -- 11. Append-only, no silent overwrite, no truncate.
@@ -1884,8 +2470,8 @@ BEGIN
   FOREACH v_table IN ARRAY ARRAY[
     'f01_policy_version', 'f01_field_event', 'f01_state_transition', 'f01_mutation_receipt',
     'f01_reconciliation_item', 'f01_corporate_artifact', 'f01_parsed_proposal',
-    'f01_proposal_link', 'f01_document_version', 'f01_preservation_hold_event',
-    'f01_deletion_evaluation']
+    'f01_proposal_link', 'f01_derivative_link', 'f01_document_version',
+    'f01_preservation_hold_event', 'f01_deletion_evaluation']
   LOOP
     PERFORM pg_temp.f01_expect_refusal(
       format('UPDATE ops.%I SET tenant = tenant', v_table),
@@ -1930,8 +2516,9 @@ BEGIN
     'f01_policy_version', 'f01_policy_current', 'f01_field_state', 'f01_field_event',
     'f01_state_transition', 'f01_mutation_receipt', 'f01_reconciliation_item',
     'f01_corporate_artifact', 'f01_parsed_proposal', 'f01_proposal_link',
-    'f01_document_version', 'f01_document_current', 'f01_preservation_hold_event',
-    'f01_preservation_hold_current', 'f01_deletion_evaluation', 'f01_idempotency']
+    'f01_derivative_link', 'f01_document_version', 'f01_document_current',
+    'f01_preservation_hold_event', 'f01_preservation_hold_current',
+    'f01_deletion_evaluation', 'f01_idempotency']
   LOOP
     PERFORM pg_temp.f01_expect_refusal(
       format('INSERT INTO ops.%I DEFAULT VALUES', v_table),
@@ -1993,7 +2580,13 @@ BEGIN
     FROM pg_proc p
     JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'ops'
-     AND (p.proname IN ('f01_claim_idempotency', 'f01_settle_idempotency')
+     AND (p.proname IN ('f01_claim_idempotency', 'f01_settle_idempotency',
+                        -- The registration seam's private half, listed here for
+                        -- the same reason the other two are: it is reached only
+                        -- from inside a definer writer, where it runs as the
+                        -- owner, so any runtime EXECUTE on it is a hole rather
+                        -- than a convenience. 3.5.5 asserts the same per role.
+                        'f01_insert_derivative_link')
           OR p.proname LIKE 'f01\_guard\_%')
      AND (p.proacl IS NULL
           OR EXISTS (SELECT 1 FROM aclexplode(p.proacl) a

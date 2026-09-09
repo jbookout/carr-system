@@ -219,14 +219,18 @@ class BoundaryTests(unittest.TestCase):
 # --------------------------------------------------------------------------
 
 SQL_MODEL_PRIVATE_HELPERS = {
-    'f01_claim_idempotency', 'f01_settle_idempotency',
+    'f01_claim_idempotency', 'f01_settle_idempotency', 'f01_insert_derivative_link',
     'f01_guard_direct_dml', 'f01_guard_append_only', 'f01_guard_no_truncate'}
 SQL_MODEL_WRITERS = {
     'f01_install_policy', 'f01_apply_observation', 'f01_record_artifact',
-    'f01_record_proposal', 'f01_record_document', 'f01_record_hold',
-    'f01_record_deletion_evaluation'}
-# NINE names for carr_reader: the seven writers, plus the definer replay door and
-# the authority probe.
+    'f01_record_proposal', 'f01_register_derivative_link', 'f01_record_document',
+    'f01_record_hold', 'f01_record_deletion_evaluation'}
+# TEN names for carr_reader: the eight writers, plus the definer replay door and
+# the authority probe. carr_writer is NOT excluded from the registration writer:
+# the ordinary evidence principal is the trusted producer identity the APPROVED
+# derivative-registration rule names — a session approval, not one of the nine
+# settled decisions — and excluding it would leave that rule with nobody able to
+# satisfy it.
 SQL_MODEL_READER_EXCLUDED = SQL_MODEL_WRITERS | {
     'f01_replay_outcome', 'f01_require_authority_principal'}
 SQL_MODEL_WRITER_EXCLUDED = {
@@ -237,7 +241,16 @@ SQL_MODEL_WRITER_EXCLUDED = {
 SQL_MODEL_FUNCTIONS = sorted(
     SQL_MODEL_PRIVATE_HELPERS | SQL_MODEL_WRITERS | {
         'f01_read', 'f01_replay_outcome', 'f01_require_authority_principal',
-        'f01_principal', 'f01_current_field_state', 'f01_canonical_json'})
+        'f01_principal', 'f01_current_field_state', 'f01_canonical_json',
+        'f01_derivative_links', 'f01_derivative_coverage',
+        'f01_derivative_coverage_digest', 'f01_stored_derivatives',
+        # The reserved-kind list the public registration writer refuses against.
+        # It is an ORDINARY function on purpose: an IMMUTABLE constant naming
+        # which derivative kinds an in-schema writer owns. It confers nothing, so
+        # the grant loop treats it like any other read helper and every principal
+        # keeps EXECUTE on it — which is what the cross-product test below then
+        # holds both models to.
+        'f01_reserved_derivative_kinds'})
 
 
 def sql_model_execute(role, name):
@@ -333,7 +346,10 @@ class FalsePassTests(unittest.TestCase):
         report = gate.Report()
         with patch.object(gate,'rollback_probe',return_value='ERROR:  42501: permission denied for schema ops',create=True):
             gate.check_wrong_principal(FakePsql(),report)
-        self.assertEqual(report.failures,4)
+        # Two endpoints for each of carr_reader and carr_writer, plus the
+        # reader-only registration-writer probe. A schema-level denial is not a
+        # proof about any of the five.
+        self.assertEqual(report.failures,5)
 
     def test_authority_probe_survives_empty_output(self):
         """A zero exit with no rows is a failed probe, not an IndexError."""
@@ -342,7 +358,8 @@ class FalsePassTests(unittest.TestCase):
             def run(self, sql, user=None):
                 return SimpleNamespace(returncode=0,stdout='',stderr='')
         def refuse(psql,statement,role):
-            endpoint='f01_record_hold' if 'f01_record_hold' in statement else 'f01_install_policy'
+            endpoint = next(name for name in ('f01_record_hold','f01_register_derivative_link',
+                                              'f01_install_policy') if name in statement)
             return f'ERROR:  42501: permission denied for function ops.{endpoint}'
         report = gate.Report()
         with patch.object(gate,'rollback_probe',refuse,create=True):
@@ -440,6 +457,65 @@ class FalsePassTests(unittest.TestCase):
                 failures=[row for row in report.rows if row[0]==gate.FAIL]
                 self.assertTrue(any(f'carr_reader expected EXECUTE=False on ops.{name}' in row[2]
                                     for row in failures),failures)
+
+    def test_the_producer_writer_is_reader_forbidden_and_writer_allowed(self):
+        """The derivative-registration seam's one new write surface. A reader is
+        not a producer; the ordinary evidence writer IS the producer identity the
+        approved registration rule names, so taking EXECUTE away from it would
+        leave that rule with nobody able to satisfy it."""
+        self.assertIn('f01_register_derivative_link',gate.WRITER_FUNCTIONS)
+        self.assertIn('f01_register_derivative_link',gate.READER_FORBIDDEN)
+        self.assertNotIn('f01_register_derivative_link',gate.WRITER_FORBIDDEN)
+        self.assertIn('f01_insert_derivative_link',gate.PRIVATE_HELPERS)
+        report=gate.Report()
+        gate.check_grants(GrantCatalog(),report)
+        rows={row[2]:row[0] for row in report.rows}
+        self.assertEqual(
+            rows['carr_reader expected EXECUTE=False on ops.f01_register_derivative_link(text)'],
+            gate.PASS,report.rows)
+        self.assertEqual(
+            rows['carr_writer expected EXECUTE=True on ops.f01_register_derivative_link(text)'],
+            gate.PASS,report.rows)
+        # And the private half is reachable by nobody at runtime, like the
+        # idempotency helpers it sits beside.
+        for role in gate.FIXTURE_ROLES:
+            self.assertEqual(
+                rows[f'{role} expected EXECUTE=False on ops.f01_insert_derivative_link(text)'],
+                gate.PASS,report.rows)
+
+    def test_the_coverage_read_surface_is_contracted_rather_than_optional(self):
+        """A schema shipping the link table and the writer but no coverage answer
+        would make every deletion fail on a missing function instead of failing
+        closed on unknown coverage. Those are different reasons to refuse, and
+        only one of them is the settled rule."""
+        for name in ('f01_derivative_links','f01_derivative_coverage',
+                     'f01_derivative_coverage_digest','f01_stored_derivatives'):
+            self.assertIn(name,gate.REQUIRED_FUNCTIONS)
+            present=[fn for fn in GrantCatalog.ALL_FUNCTIONS if fn!=name]
+            report=gate.Report()
+            gate.check_grants(GrantCatalog(functions=present),report)
+            self.assertTrue(any(row[0]==gate.FAIL and name in row[3] for row in report.rows),
+                            report.rows)
+
+    def test_the_reserved_kind_list_is_contracted_and_confers_nothing(self):
+        """The public registration writer refuses an in-schema producer kind by
+        reading ops.f01_reserved_derivative_kinds(). A schema without it does not
+        fail closed — every registration dies on a missing function instead — so
+        it is contracted rather than assumed. It is also an ordinary readable
+        constant: it grants nothing, so no principal is excluded from it, and a
+        model that quietly treated it as a write surface would fail here."""
+        name = 'f01_reserved_derivative_kinds'
+        self.assertIn(name, gate.REQUIRED_FUNCTIONS)
+        self.assertNotIn(name, gate.PRIVATE_HELPERS)
+        self.assertNotIn(name, gate.READER_FORBIDDEN)
+        self.assertNotIn(name, gate.WRITER_FORBIDDEN)
+        for role in gate.FIXTURE_ROLES:
+            self.assertTrue(sql_model_execute(role, name))
+        present = [fn for fn in GrantCatalog.ALL_FUNCTIONS if fn != name]
+        report = gate.Report()
+        gate.check_grants(GrantCatalog(functions=present), report)
+        self.assertTrue(any(row[0] == gate.FAIL and name in row[3] for row in report.rows),
+                        report.rows)
 
     def test_the_gate_and_the_schema_agree_on_every_role_function_pair(self):
         """One assertion over the whole cross product, so a future edit to either

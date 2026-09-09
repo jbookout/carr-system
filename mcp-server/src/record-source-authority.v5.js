@@ -14,8 +14,8 @@
 //   IN CODE — the STRUCTURE the architecture clause settles. The seven
 //   authoritative homes, which fact class lives in which home, the surfaces that
 //   can never be authoritative, and the closed vocabularies for write direction,
-//   version comparison, conflict behaviour, taint, document state and deletion.
-//   These are identity, not configuration.
+//   version comparison, conflict behaviour, taint, document state, deletion and
+//   derivative-registration coverage. These are identity, not configuration.
 //
 //   AS TYPED POLICY INPUT — every AUTHORITY ASSIGNMENT. Which source owns which
 //   field, which direction each source may write, how that field's versions
@@ -2235,6 +2235,135 @@ export function projectDocumentIdentity(request) {
 export const V5_F01_HOLD_STATES = deepFreeze(["active", "released", "expired", "unknown"]);
 export const V5_F01_DELETION_RECEIPT_SCHEMA_VERSION = "doctorcre-v5-f01-deletion-receipt.v1";
 
+// ---------------------------------------------------------------------------
+// The bounded derivative-registration rule.
+//
+// WHOSE RULE THIS IS, stated exactly, because the distinction is load-bearing
+// and an earlier revision of this header blurred it. Q129.D1 settles the
+// RETENTION REGISTRY: per artifact class, a home, a period, governing
+// constraints, whether a deletion proof is required, and which derivative kinds
+// survive. It says nothing about registering provenance for derived records.
+//
+// The registration rule below is NOT Q129.D1 and carries no canonical decision
+// id, because none has been issued for it. It is a session approval, and the
+// only honest citation is the session itself:
+//
+//   native task 01a0869f-fe0d-7493-bda3-ab8b3c0d6683
+//   user turn   01a08779-6b68-7013-bab1-369cf616254f
+//
+// Nothing here should be read as a new settled decision, and nothing downstream
+// should treat those two identifiers as one. They are a provenance reference for
+// an approved addition, not an acceptance and not an entry in the nine.
+//
+// THE APPROVED RULE, in the words it was approved in: every workflow that
+// creates a derived record registers a link to the original artifact BEFORE the
+// derivative is considered complete; only trusted producer workflows write those
+// links; and deletion is blocked whenever registration coverage is unknown.
+// Existing and externally created derivatives stay coverage-unknown until
+// somebody establishes otherwise, so an empty link table never means "safe to
+// delete". The rule fills a missing retention behaviour; it authorizes deleting
+// nothing.
+//
+// A LINK IS PROVENANCE, NOT AN INVENTORY, and the distinction is the whole of
+// the fail-closed story. Registering "this abstract came from that lease" says
+// something true about ONE derivative. It says nothing whatever about whether
+// some other derivative exists that nobody registered — from a workflow written
+// before this rule, from a provider, from a person with a copy. So every link
+// this module emits carries `is_exhaustive_inventory: false` and
+// `establishes_coverage: false` in its own hashed bytes, and the deletion
+// evaluator refuses on coverage BEFORE it ever looks at an inventory.
+//
+// COVERAGE IS AN INPUT, NEVER A CALLER CLAIM. evaluateDeletion takes a
+// `derivative_coverage` object that the persistence tail derives from the
+// database, and refuses unless its state is exactly "established". This module
+// ships no way to reach that state and invents none: the two facts that would
+// establish it — a closed set of producer workflows that may derive from an
+// artifact class, and a registered completion from every one of them for this
+// artifact — have no ingress in this slice. Until they do, the honest answer is
+// "unknown", and the honest consequence is that deletion refuses.
+//
+// CLASS POLICY IS NOT INSTANCE OBSERVATION. `surviving_derivatives` on a
+// retention class is Q129 policy about WHICH KINDS survive a deletion of that
+// class. It is not an assertion that every instance of the class has one of
+// each. See the accounting note in evaluateDeletion step 8.
+//
+// THE ONE RESIDUAL ASSUMPTION, named rather than left for a reader to find. A
+// registration is an ATTESTATION THAT A DERIVATIVE EXISTS, not a verified fact
+// that it does. Nothing in this module or in the record layer resolves
+// `derivative_id`, and nothing checks bytes against `derivative_content_digest`;
+// the source artifact is loaded, the derivative is taken on the producer's word.
+// Under unknown coverage that is safe in the only direction it can move — an
+// attested derivative blocks a deletion, never permits one — and no path here
+// can reach `established`. It would stop being safe the moment coverage could be
+// established, because attested-only kinds would then travel into a deletion
+// receipt as `observed_surviving_derivatives`: a receipt naming survivors that
+// may never have existed. Hence the standing precondition, which is a
+// requirement on future work and not a caveat about it: DO NOT BUILD AN INGRESS
+// THAT ESTABLISHES COVERAGE until producer outputs are independently bound and
+// verified by something other than the caller registering them. No proof of that
+// exists today and none is implied anywhere in this file.
+// ---------------------------------------------------------------------------
+
+export const V5_F01_DERIVATIVE_LINK_SCHEMA_VERSION =
+  "doctorcre-v5-f01-derivative-source-link.v1";
+
+/**
+ * The two honest answers about whether the registered links for one artifact are
+ * the whole set. There is deliberately no third value: "probably", "assumed" and
+ * "none found" are all "unknown" wearing a more confident hat.
+ */
+export const V5_F01_DERIVATIVE_COVERAGE_STATES = deepFreeze(["unknown", "established"]);
+
+/**
+ * The derivative kind this module's own parsed-proposal path produces.
+ *
+ * Named as a constant rather than accepted from a caller, because the producer
+ * that registers it is a workflow inside this contract and the kind it produces
+ * is part of that workflow's identity, not a label the caller may choose.
+ */
+export const V5_F01_PARSED_PROPOSAL_DERIVATIVE_KIND = "f01_parsed_proposal";
+
+/**
+ * The derivative kinds an in-contract producer owns, which the PUBLIC
+ * registration surface must refuse.
+ *
+ * A LIST, so the next internal producer kind is covered by adding an element
+ * rather than by remembering to repeat a comparison somewhere.
+ *
+ * WHY REFUSING THESE MATTERS, and it is not tidiness. A parsed proposal's
+ * derivative identity IS its proposal digest, and that digest is computed from
+ * caller payload plus the installed registry digest — so a caller can predict it.
+ * The stored identity index is unique per (tenant, kind, id) over an append-only
+ * table with no release path, so pre-registering the predicted identity against
+ * some other artifact would make the genuine proposal write conflict for ever,
+ * and would leave a provenance edge asserting that proposal came from an artifact
+ * it did not.
+ *
+ * THE SHARED EVALUATOR STILL ACCEPTS THEM, on purpose. evaluateDerivativeRegistration
+ * is what the in-contract proposal producer itself calls, so refusing there would
+ * break the very path that legitimately writes this kind. The refusal belongs at
+ * the public caller surface, which is the only place the distinction exists.
+ */
+export const V5_F01_RESERVED_DERIVATIVE_KINDS = deepFreeze([
+  V5_F01_PARSED_PROPOSAL_DERIVATIVE_KIND,
+]);
+
+const DERIVATIVE_IDENTITY_KEYS = Object.freeze([
+  "derivative_kind", "derivative_id", "content_digest",
+]);
+const DERIVATIVE_PRODUCER_KEYS = Object.freeze(["producer_workflow", "producer_run_ref"]);
+const DERIVATIVE_EVIDENCE_KEYS = Object.freeze(["evidence_ref", "evidence_digest"]);
+const DERIVATIVE_REGISTRATION_KEYS = Object.freeze([
+  "source_artifact_digest", "derivative", "producer", "produced_at", "evidence",
+]);
+const DERIVATIVE_SOURCE_ARTIFACT_KEYS = Object.freeze(["artifact_digest", "created_at"]);
+const DERIVATIVE_REQUEST_KEYS = Object.freeze([
+  "tenant", "registration", "source_artifact", "now",
+]);
+const DERIVATIVE_COVERAGE_KEYS = Object.freeze([
+  "state", "reason_id", "registered_derivative_kinds",
+]);
+
 const RETENTION_POLICY_KEYS = Object.freeze(["schema_version", "registry_version", "tenant", "classes"]);
 const RETENTION_CLASS_KEYS = Object.freeze([
   "artifact_class", "authoritative_home", "default_retention_days", "governing_constraints",
@@ -2244,9 +2373,197 @@ const HOLD_KEYS = Object.freeze(["hold_id", "state", "reason", "placed_at", "rel
 const DELETION_PROOF_KEYS = Object.freeze(["proof_ref", "artifact_digest", "proof_digest", "executed_at"]);
 const DELETION_SUBJECT_KEYS = Object.freeze([
   "artifact_class", "artifact_home", "artifact_digest", "created_at", "holds",
-  "deletion_proof", "derivatives", "satisfied_constraints",
+  "deletion_proof", "derivative_coverage", "derivatives", "satisfied_constraints",
 ]);
 const DELETION_REQUEST_KEYS = Object.freeze(["tenant", "registry", "subject", "now"]);
+
+function registrationResult(fields) {
+  return deepFreeze({
+    ...fields,
+    // Stated in every answer, positive or negative: registering a link records
+    // where a derivative came from and does nothing else. It does not make the
+    // link set complete, does not make an absence verified, and permits no
+    // deletion of anything.
+    establishes_coverage: false,
+    is_exhaustive_inventory: false,
+    permits_deletion: false,
+    effects: V5_NO_EFFECTS,
+  });
+}
+
+/**
+ * Validate one trusted producer's registration of one derived record against the
+ * original artifact it was derived from.
+ *
+ * ORDERED, so a second reader reaches the same answer from the transcript:
+ *   1. The request must be readable, closed and carry the one server-held tenant.
+ *   2. Every identity is checked, not merely typed: the source artifact digest,
+ *      the derivative's kind, id and content digest, the producing workflow and
+ *      its run reference, and the immutable evidence the production left behind.
+ *   3. THE SOURCE ARTIFACT IS LOADED, never asserted. A caller that names a
+ *      digest cannot bring an artifact into existence by naming it, so an absent
+ *      one refuses and a loaded one that is not the artifact named refuses.
+ *   4. A derivative whose bytes ARE the source's bytes is not a derivative; it is
+ *      the artifact under a second name, and registering it would make the source
+ *      look like its own provenance.
+ *   5. Time must describe something that could have happened: a production after
+ *      `now` has not happened, and one before the source artifact existed is
+ *      about something else.
+ *   6. Only then allow, returning the exact link preimage the record layer
+ *      stores — which says in its own hashed bytes that it is provenance, that it
+ *      is not an inventory, and that it establishes no coverage.
+ *
+ * WHAT THIS FUNCTION CANNOT DO, and does not pretend to. It cannot decide that a
+ * producer is trusted: trust is the authenticated principal the persistence tail
+ * derives from its own transaction context, and no field here confers it.
+ */
+export function evaluateDerivativeRegistration(request) {
+  assertObject(request, "request");
+  assertClosedKeys(request, DERIVATIVE_REQUEST_KEYS, "request");
+  assertRequiredKeys(request, ["tenant", "registration", "now"], "request");
+  assertTenant(request.tenant, "request.tenant");
+  const now = assertInstant(request.now, "request.now");
+
+  const raw = assertObject(request.registration, "request.registration");
+  assertClosedKeys(raw, DERIVATIVE_REGISTRATION_KEYS, "request.registration");
+  assertRequiredKeys(raw, DERIVATIVE_REGISTRATION_KEYS, "request.registration");
+
+  const source_artifact_digest = assertDigestRef(raw.source_artifact_digest,
+    "request.registration.source_artifact_digest");
+
+  const identity = assertObject(raw.derivative, "request.registration.derivative");
+  assertClosedKeys(identity, DERIVATIVE_IDENTITY_KEYS, "request.registration.derivative");
+  assertRequiredKeys(identity, DERIVATIVE_IDENTITY_KEYS, "request.registration.derivative");
+  const derivative_kind = assertExternalIdent(identity.derivative_kind,
+    "request.registration.derivative.derivative_kind", { maxLength: 128 });
+  const derivative_id = assertExternalIdent(identity.derivative_id,
+    "request.registration.derivative.derivative_id", { maxLength: 255 });
+  const derivative_content_digest = assertDigestRef(identity.content_digest,
+    "request.registration.derivative.content_digest");
+
+  const producer = assertObject(raw.producer, "request.registration.producer");
+  assertClosedKeys(producer, DERIVATIVE_PRODUCER_KEYS, "request.registration.producer");
+  assertRequiredKeys(producer, DERIVATIVE_PRODUCER_KEYS, "request.registration.producer");
+  const producer_workflow = assertExternalIdent(producer.producer_workflow,
+    "request.registration.producer.producer_workflow", { maxLength: 128 });
+  const producer_run_ref = assertExternalIdent(producer.producer_run_ref,
+    "request.registration.producer.producer_run_ref", { maxLength: 255 });
+
+  const evidence = assertObject(raw.evidence, "request.registration.evidence");
+  assertClosedKeys(evidence, DERIVATIVE_EVIDENCE_KEYS, "request.registration.evidence");
+  assertRequiredKeys(evidence, DERIVATIVE_EVIDENCE_KEYS, "request.registration.evidence");
+  const evidence_ref = assertExternalIdent(evidence.evidence_ref,
+    "request.registration.evidence.evidence_ref", { maxLength: 255 });
+  const evidence_digest = assertDigestRef(evidence.evidence_digest,
+    "request.registration.evidence.evidence_digest");
+
+  const producedAt = assertInstant(raw.produced_at, "request.registration.produced_at");
+
+  const base = {
+    tenant: ORGANIZATION_TENANT_ID,
+    source_artifact_digest,
+    derivative_kind,
+    derivative_id,
+    derivative_content_digest,
+    producer_workflow,
+    derivative_link: null,
+  };
+
+  // Step 3.
+  if (request.source_artifact === undefined || request.source_artifact === null) {
+    return registrationResult({
+      decision: "refuse", reason_id: "unknown_source_artifact", ...base,
+    });
+  }
+  const stored = assertObject(request.source_artifact, "request.source_artifact");
+  assertClosedKeys(stored, DERIVATIVE_SOURCE_ARTIFACT_KEYS, "request.source_artifact");
+  assertRequiredKeys(stored, DERIVATIVE_SOURCE_ARTIFACT_KEYS, "request.source_artifact");
+  const storedDigest = assertDigestRef(stored.artifact_digest, "request.source_artifact.artifact_digest");
+  const createdAt = assertInstant(stored.created_at, "request.source_artifact.created_at");
+  if (storedDigest !== source_artifact_digest) {
+    return registrationResult({
+      decision: "refuse", reason_id: "source_artifact_mismatch", ...base,
+      loaded_artifact_digest: storedDigest,
+    });
+  }
+
+  // Step 4.
+  if (derivative_content_digest === source_artifact_digest) {
+    return registrationResult({
+      decision: "refuse", reason_id: "derivative_is_its_own_source", ...base,
+    });
+  }
+
+  // Step 5.
+  if (producedAt > now) {
+    return registrationResult({
+      decision: "refuse", reason_id: "production_after_now", ...base,
+      produced_at: raw.produced_at,
+    });
+  }
+  if (producedAt < createdAt) {
+    return registrationResult({
+      decision: "refuse", reason_id: "production_precedes_source_artifact", ...base,
+      produced_at: raw.produced_at, source_created_at: stored.created_at,
+    });
+  }
+
+  return registrationResult({
+    decision: "allow", reason_id: "derivative_source_link_registered", ...base,
+    derivative_link: deepFreeze({
+      schema_version: V5_F01_DERIVATIVE_LINK_SCHEMA_VERSION,
+      tenant: ORGANIZATION_TENANT_ID,
+      source_artifact_digest,
+      derivative_kind,
+      derivative_id,
+      derivative_content_digest,
+      producer_workflow,
+      producer_run_ref,
+      produced_at: raw.produced_at,
+      evidence_ref,
+      evidence_digest,
+      // The four claims the row makes about itself, hashed with it, so a stored
+      // link can never be read back as something stronger than it is.
+      registration_is_provenance: true,
+      is_exhaustive_inventory: false,
+      establishes_coverage: false,
+      permits_deletion: false,
+    }),
+  });
+}
+
+/**
+ * Read one derivative-coverage answer, which the caller LOADED rather than
+ * decided. An absent one is not "established"; it is a question nobody asked.
+ */
+function assertDerivativeCoverage(value, path) {
+  assertObject(value, path);
+  assertClosedKeys(value, DERIVATIVE_COVERAGE_KEYS, path);
+  assertRequiredKeys(value, ["state"], path);
+  const state = assertEnum(value.state, V5_F01_DERIVATIVE_COVERAGE_STATES,
+    `${path}.state`, "unknown_derivative_coverage_state");
+  const reason_id = value.reason_id === undefined || value.reason_id === null
+    ? null
+    : assertExternalIdent(value.reason_id, `${path}.reason_id`, { maxLength: 128 });
+  let registered_derivative_kinds = null;
+  if (value.registered_derivative_kinds !== undefined &&
+      value.registered_derivative_kinds !== null) {
+    assertArray(value.registered_derivative_kinds, `${path}.registered_derivative_kinds`,
+      { min: 0, max: 256 });
+    const seen = new Set();
+    registered_derivative_kinds = value.registered_derivative_kinds.map((item, i) => {
+      const kind = assertExternalIdent(item, `${path}.registered_derivative_kinds[${i}]`,
+        { maxLength: 128 });
+      if (seen.has(kind)) {
+        fail("duplicate_registered_derivative_kind",
+          `${path}.registered_derivative_kinds repeats "${kind}"`, { path, derivative_kind: kind });
+      }
+      seen.add(kind);
+      return kind;
+    }).sort();
+  }
+  return { state, reason_id, registered_derivative_kinds };
+}
 
 export function retentionRegistryPreimage(compiled) {
   return {
@@ -2374,9 +2691,13 @@ const MS_PER_DAY = 86400000;
  *   7. A deletion proof the class REQUIRES must be present, and ANY supplied
  *      proof — required or not — must be about this exact artifact and executed
  *      between the artifact's creation and now.
- *   8. Every declared derivative must be a registered surviving derivative; an
+ *   8. REGISTRATION COVERAGE must be established. Unknown coverage blocks, and
+ *      it blocks before any inventory is read, because an inventory drawn from
+ *      an incomplete registry is not an inventory.
+ *   9. Every observed derivative must be a registered surviving derivative; an
  *      unregistered one blocks rather than vanishing with the artifact.
- *   9. Only then allow, with a deletion receipt preimage naming what survives.
+ *  10. Only then allow, with a deletion receipt preimage naming BOTH what the
+ *      class policy says survives and what was actually observed to exist.
  */
 export function evaluateDeletion(request) {
   assertObject(request, "request");
@@ -2404,7 +2725,28 @@ export function evaluateDeletion(request) {
     artifact_class, artifact_home, artifact_digest,
     retention_registry_digest: registry.registry_digest,
     authoritative_home: entry ? entry.authoritative_home : null,
+    // CLASS POLICY. Which derivative KINDS this class's policy says survive a
+    // deletion. Reported on every answer because it is what the registry says,
+    // and kept separate from the instance observation below because they are
+    // different facts and conflating them is how a policy allowance turns into a
+    // claim that something exists.
     surviving_derivatives: entry ? [...entry.surviving_derivatives] : [],
+    // INSTANCE OBSERVATION, in two fields that answer two different questions.
+    //
+    //   observed_derivatives            what was actually observed for THIS
+    //                                   artifact, whatever it turned out to be.
+    //   observed_surviving_derivatives  the same list, named as survivors, and
+    //                                   filled ONLY where every observed kind is
+    //                                   one the class policy says survives.
+    //
+    // Both start null, because "nothing was reported" and "nothing was found" are
+    // different answers and only one of them may ever reach a receipt. A refusal
+    // for an unregistered kind fills the first and leaves the second null: the
+    // kind that caused the refusal is by definition not a survivor, so a list
+    // containing it must not be called one.
+    observed_derivatives: null,
+    observed_surviving_derivatives: null,
+    derivative_coverage_state: "unknown",
     deletion_receipt: null,
   };
   if (entry === undefined) {
@@ -2576,15 +2918,42 @@ export function evaluateDeletion(request) {
     }
   }
 
-  // Step 8.
+  // Step 8. COVERAGE BEFORE INVENTORY.
+  //
+  // This is the rule the approved derivative registration added — the session
+  // approval named in the section header above, not Q129.D1 — and it sits ahead
+  // of the inventory deliberately. Reading a list of registered
+  // derivatives tells you what was registered; it tells you nothing about what
+  // was never registered, and "we found nothing" is the exact shape a missing
+  // producer integration takes. So an absent coverage answer refuses, and a
+  // coverage answer that is anything other than "established" refuses, naming
+  // the reason the loader gave rather than inventing one.
+  //
+  // The caller cannot talk its way past this: `derivative_coverage` is derived
+  // from the record layer by the persistence tail, and a `state` outside the
+  // registered vocabulary throws rather than being read as a near-miss.
+  if (raw.derivative_coverage === undefined || raw.derivative_coverage === null) {
+    return deletionResult({ decision: "refuse", reason_id: "derivative_coverage_missing", ...base });
+  }
+  const coverage = assertDerivativeCoverage(raw.derivative_coverage, "request.subject.derivative_coverage");
+  if (coverage.state !== "established") {
+    return deletionResult({
+      decision: "refuse", reason_id: "derivative_coverage_unknown", ...base,
+      derivative_coverage_state: coverage.state,
+      derivative_coverage_reason_id: coverage.reason_id,
+      registered_derivative_kinds: coverage.registered_derivative_kinds,
+    });
+  }
+
+  // Step 9.
   //
   // Same rule as the holds: an omitted derivative inventory is not a verified
-  // empty one. And the accounting runs BOTH ways — no unregistered derivative
-  // may ride through, and every derivative the policy says survives must be
-  // present and observed. Without the second half a receipt could name survivors
-  // nobody had looked for, which is a claim about the world made from silence.
+  // empty one.
   if (raw.derivatives === undefined || raw.derivatives === null) {
-    return deletionResult({ decision: "refuse", reason_id: "derivative_inventory_missing", ...base });
+    return deletionResult({
+      decision: "refuse", reason_id: "derivative_inventory_missing", ...base,
+      derivative_coverage_state: coverage.state,
+    });
   }
   assertArray(raw.derivatives, "request.subject.derivatives", { min: 0, max: 64 });
   const derivativeSeen = new Set();
@@ -2601,22 +2970,54 @@ export function evaluateDeletion(request) {
   if (unregistered.length > 0) {
     return deletionResult({
       decision: "refuse", reason_id: "unregistered_derivative_blocks_deletion", ...base,
+      derivative_coverage_state: coverage.state,
+      // `observed_derivatives`, NOT `observed_surviving_derivatives`, and the
+      // difference is the whole point of the correction this section carries. On
+      // this path at least one observed kind is by definition NOT a survivor —
+      // that is why the deletion refuses — so calling the list "surviving" would
+      // be the one place a label lied about what was observed. The allow path
+      // below may use the longer name, because the check just above it
+      // guarantees every observed kind is class-permitted there.
+      observed_derivatives: [...derivatives].sort(),
       unregistered_derivatives: unregistered,
     });
   }
-  const unaccounted = entry.surviving_derivatives.filter(d => !derivativeSeen.has(d));
-  if (unaccounted.length > 0) {
-    return deletionResult({
-      decision: "refuse", reason_id: "surviving_derivative_unaccounted", ...base,
-      unaccounted_derivatives: unaccounted,
-    });
-  }
+
+  // THE ACCOUNTING RUNS ONE WAY, AND THIS IS THE CORRECTION Q129 ASKS FOR.
+  //
+  // An earlier revision also refused when a kind the class POLICY lists as
+  // surviving was absent from the observed inventory — reason_id
+  // surviving_derivative_unaccounted. That rule reads a class-level allowance as
+  // an instance-level existence claim, and Q129 does not say that: the registry
+  // "defines ... surviving derivatives separately for every artifact class",
+  // which settles WHICH KINDS survive when the artifact goes, not that every
+  // lease has an abstract AND an economics summary. With real registration
+  // ingress the rule is actively wrong — an instance that legitimately produced
+  // one of the two permitted kinds could never be deleted, no matter how
+  // complete its coverage — and it would push a caller towards padding the
+  // inventory to get past it, which is the opposite of the property wanted.
+  //
+  // What the old rule was protecting against is real, and is kept: the receipt
+  // must not name survivors nobody looked for. That is now handled by SAYING
+  // WHICH IS WHICH. `surviving_derivatives` is the class policy, verbatim from
+  // the registry; `observed_surviving_derivatives` is what was actually
+  // registered for this artifact under established coverage. A reader can tell
+  // the two apart, so neither can be mistaken for the other.
+  const observed = [...derivatives].sort();
 
   return deletionResult({
     decision: "allow", reason_id: "deletion_permitted", ...base,
     default_retention_days: entry.default_retention_days,
     elapsed_days: elapsedDays,
     deletion_proof_required: entry.deletion_proof_required,
+    derivative_coverage_state: coverage.state,
+    // Both names carry the same list HERE and only here, because the check above
+    // has just established that every observed kind is one the class policy says
+    // survives. That is what makes the longer name true on this path and false on
+    // the refusal path above.
+    observed_derivatives: observed,
+    observed_surviving_derivatives: observed,
+    registered_derivative_kinds: coverage.registered_derivative_kinds,
     deletion_receipt: deepFreeze({
       schema_version: V5_F01_DELETION_RECEIPT_SCHEMA_VERSION,
       tenant: ORGANIZATION_TENANT_ID,
@@ -2626,7 +3027,11 @@ export function evaluateDeletion(request) {
       deletion_proof_required: entry.deletion_proof_required,
       deletion_proof_ref: deletion_proof === null ? null : deletion_proof.proof_ref,
       deletion_proof_digest: deletion_proof === null ? null : deletion_proof.proof_digest,
+      // Policy and observation, named apart and both hashed into the receipt.
       surviving_derivatives: [...entry.surviving_derivatives],
+      surviving_derivatives_are_class_policy: true,
+      observed_surviving_derivatives: observed,
+      derivative_coverage_state: coverage.state,
       released_holds: holds.map(h => h.hold_id).sort(),
       actor: null,
       actor_derived_by: "authenticated_handler_context",
@@ -2730,6 +3135,24 @@ export function v5F01PolicyPreimage() {
       periods_constraints_and_derivatives_are_policy_input: true,
       unknown_hold_blocks_deletion: true,
       silent_purge_permitted: false,
+      surviving_derivatives_are_class_policy_not_instance_inventory: true,
+    },
+    derivative_registration: {
+      link_schema_version: V5_F01_DERIVATIVE_LINK_SCHEMA_VERSION,
+      coverage_states: [...V5_F01_DERIVATIVE_COVERAGE_STATES],
+      // The APPROVED REGISTRATION RULE — the session approval named in the
+      // section header, not a tenth settled decision — carried in the hashed
+      // bytes so relaxing any of it moves the contract digest rather than
+      // passing unnoticed. It is a property of this contract, and deliberately
+      // NOT an entry in `decisions` above: that list is the nine, and adding a
+      // tenth id here would be inventing one.
+      registration_precedes_derivative_completion: true,
+      only_trusted_producer_workflows_register_links: true,
+      links_are_provenance_not_exhaustive_inventory: true,
+      empty_link_set_means_verified_absence: false,
+      unknown_coverage_blocks_deletion: true,
+      caller_may_assert_coverage: false,
+      registration_authorizes_deletion: false,
     },
     caller_authority: {
       injection_fragments: [...V5_F01_AUTHORITY_INJECTION_FRAGMENTS].sort(),
@@ -2804,6 +3227,9 @@ const ALL_ACCEPTED_KEY_SETS = Object.freeze([
   NEON_IDENTITY_KEYS, OBJECT_STORAGE_IDENTITY_KEYS, ONEDRIVE_IDENTITY_KEYS, DOCUMENT_KEYS,
   DOCUMENT_REQUEST_KEYS, RETENTION_POLICY_KEYS, RETENTION_CLASS_KEYS, COMPILED_RETENTION_KEYS,
   HOLD_KEYS, DELETION_PROOF_KEYS, DELETION_SUBJECT_KEYS, DELETION_REQUEST_KEYS,
+  DERIVATIVE_IDENTITY_KEYS, DERIVATIVE_PRODUCER_KEYS, DERIVATIVE_EVIDENCE_KEYS,
+  DERIVATIVE_REGISTRATION_KEYS, DERIVATIVE_SOURCE_ARTIFACT_KEYS, DERIVATIVE_REQUEST_KEYS,
+  DERIVATIVE_COVERAGE_KEYS,
   ["expected_policy_digest"],
 ]);
 
@@ -2855,6 +3281,8 @@ for (const [name, vocabulary] of Object.entries({
   V5_F01_PREPARATION_STATES, V5_F01_DELIVERY_STATES, V5_F01_SIGNATURE_STATES,
   V5_F01_VALIDITY_STATES, V5_F01_VERSION_STATES, V5_F01_FILING_STATES, V5_F01_HOLD_STATES,
   V5_F01_RECORD_KINDS, V5_F01_FACT_CLASSES, V5_F01_NON_AUTHORITATIVE_DISPOSITIONS,
+  V5_F01_DERIVATIVE_COVERAGE_STATES,
+  V5_F01_PARSED_PROPOSAL_DERIVATIVE_KIND: [V5_F01_PARSED_PROPOSAL_DERIVATIVE_KIND],
 })) {
   for (const value of vocabulary) {
     if (!VOCAB_SLUG.test(value)) {
