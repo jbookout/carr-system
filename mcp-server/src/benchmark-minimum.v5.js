@@ -57,13 +57,51 @@
 //     authenticated projection to carry the Gate Zero outcome as an
 //     authenticated fact — an outcome digest and an observed instant — and it
 //     enforces the one ordering the catalog does settle: every member, and the
-//     benchmark acceptance in particular, must be observed strictly after it.
+//     benchmark acceptance in particular, must be observed STRICTLY after it.
+//     r7 is silent on the boundary instant itself, so the exclusive reading is
+//     stated here rather than left to differ between the two paths: a member
+//     observed AT the Gate Zero instant is refused exactly as an acceptance
+//     recorded at that instant is.
 //   * consumer-gate-receipt.v1 declares twenty-one required fields, no
 //     `schema_version` among them, and additional_properties false — so an
 //     r7-exact receipt carries no schema_version and one that does is refused
 //     here. The M01 clock kernel REQUIRES that field on the same receipt. The
 //     divergence is real; `journeyOneClockMinimumReceiptView` below is the
 //     explicit adapter, and reconciling the two shapes is integration work.
+//     That field set is only ONE of THREE M01 divergences; all three are named
+//     under THE M01 SEAM below rather than left as a single sentence.
+//
+// THE M01 SEAM, in full. journey-one-clock.v5.js consumes what this module
+// proposes, and its domains are narrower than r7's in three places. A00 stays on
+// the r7-exact side of all three — r7's accepted values are preserved and no new
+// global cap is invented here — and the seam is where the mismatch is made
+// visible, never where evidence is quietly repaired:
+//
+//   1. FIELD SET. M01's MINIMUM is the twenty-one r7 fields plus schema_version.
+//      `journeyOneClockMinimumReceiptView` adds that field and nothing else.
+//   2. REFERENCE DOMAIN. M01 caps every `safe:` and `session:` reference at 300
+//      characters. r7 declares minLength 1 and NO maximum, so this file declares
+//      none either: an r7-legal evidence_ref longer than 300 characters is
+//      admissible evidence HERE and is refused by M01. The view therefore
+//      REJECTS such a receipt with `m01_incompatible_evidence_ref` (or
+//      `m01_incompatible_session_ref`) rather than truncating it — a truncated
+//      reference is a different reference, and shortening evidence to fit a
+//      consumer is the one repair this seam must never perform.
+//   3. TIMESTAMP DOMAIN. `ISO_INSTANT` here accepts 1..9 fractional-second
+//      digits, as r7's date-time does; M01's stamp accepts 1..3. The proposed
+//      receipt is safe in practice only because `iso()` emits exactly three, so
+//      the view rejects a wider instant with `m01_incompatible_timestamp` rather
+//      than rounding it.
+//
+// A FOURTH, SEPARATE MISMATCH, which the view does not and must not touch: the
+// accepted manifest's `deadline_contract` carries the pause budget in DAYS and
+// M01's projection field `benchmark.deadline_contract` is compared against the
+// HOURS variant. The module-load reconciliation below keeps the two from
+// drifting; it does NOT convert between them, and nothing in this file converts
+// a manifest deadline_contract into an M01 projection deadline_contract. Doing
+// that automatically would make a unit assumption on the caller's behalf, which
+// is precisely what carrying two unit conventions exists to prevent. Building
+// the M01 projection is integration work, named below.
 //   * `outlier_rule` is free text (5..300 chars). No engine can execute a
 //     sentence, so this file BINDS it (a measurement set must quote the accepted
 //     rule byte-for-byte) and BOUNDS it (exclusions may never take a cell below
@@ -81,6 +119,20 @@
 //     projection this file consumes.
 //   * Recording a verified partner's exact-hash benchmark acceptance into the
 //     four-field envelope. This file verifies such an envelope; it cannot make one.
+//   * Bounding the PROPOSED receipt's own TTL against the DOWNSTREAM ISSUER's
+//     policy. `binding.minimum_receipt_ttl_ms` is validated here only as a
+//     positive integer, because r7 supplies no constraint on it at all — not an
+//     absolute maximum, and not any relation to `maximum_member_receipt_ttl_ms`,
+//     which is a policy over CONSUMED evidence and not over what this join
+//     proposes. Inventing either would be a second TTL authority. The real bound
+//     is the issuer's: M01 refuses a minimum receipt whose window exceeds its own
+//     `binding.maximum_receipt_ttl_ms`, so the issuance adapter must propose a
+//     TTL its own policy admits. This file states that obligation and declines
+//     to guess its value.
+//   * Reconciling the three M01 divergences named under THE M01 SEAM above, and
+//     building M01's `benchmark.deadline_contract` projection field in the HOURS
+//     convention from the manifest's DAYS one. No code here performs that
+//     conversion.
 
 import { digest } from "./artifact-trust.js";
 import { ORGANIZATION_TENANT_ID, isKnownPartner } from "./identity.js";
@@ -346,6 +398,17 @@ const EVIDENCE_REF = /^safe:[a-z0-9][a-z0-9:_./-]*$/;
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
 const ISO_INSTANT = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|[+-]\d{2}:\d{2})$/;
 
+/**
+ * journey-one-clock.v5.js's NARROWER domains, restated here for one purpose: so
+ * `journeyOneClockMinimumReceiptView` can refuse a receipt M01 could not read,
+ * at the seam, with a code that names the seam. They are NOT applied to r7
+ * evidence anywhere else in this file — see THE M01 SEAM in the header for why
+ * an r7-legal value that M01 refuses is a reconciliation problem and not a
+ * reason to cap what r7 leaves uncapped.
+ */
+const M01_REFERENCE = /^[a-zA-Z0-9:._/-]{3,300}$/;
+const M01_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
+
 export class BenchmarkMinimumError extends Error {
   constructor(code, detail) {
     super(code);
@@ -508,6 +571,26 @@ if (BENCHMARK_DEADLINE_CONTRACT.maximum_external_blocker_pause_days * 24 !==
   throw new BenchmarkMinimumError("deadline_contract_drift", { field: "maximum_external_blocker_pause" });
 }
 
+// The benchmark member's registry entry against this module's own constants.
+// This is a LOAD-TIME INVARIANT over two frozen tables, not a check on evidence:
+// benchmark-manifest.v1 carries no producer_role, oracle_ref or combiner for a
+// validator to compare a receipt against, so the same comparison inside the join
+// could never fire and would read like an evidence check that isn't one.
+{
+  const entry = MEMBER_BY_STEP.get(BENCHMARK_STEP_REF);
+  for (const [field, expected] of [
+    ["gate_id", BENCHMARK_GATE_ID],
+    ["producer_role", BENCHMARK_PRODUCER_ROLE],
+    ["oracle_ref", BENCHMARK_ORACLE_REF],
+    ["combiner", BENCHMARK_COMBINER],
+    ["output_schema_ref", BENCHMARK_MANIFEST_SCHEMA],
+  ]) {
+    if (!entry || entry[field] !== expected) {
+      throw new BenchmarkMinimumError("benchmark_member_registry_drift", { field, expected });
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // benchmark-manifest.v1 — the closed payload.
 // ---------------------------------------------------------------------------
@@ -518,12 +601,27 @@ if (BENCHMARK_DEADLINE_CONTRACT.maximum_external_blocker_pause_days * 24 !==
  * exactly 10000 basis points, and the fixed SLO, cost and clock constants equal
  * to this schema's. Throws on the first violation with a stable code.
  *
- * THREE UNIQUENESS RULES ARE DERIVED, NOT COPIED, and are marked as such:
- * workload_mix, browsers and evaluator_identities carry no uniqueItems in r7,
- * but the pass_rule requires every matrix cell to be exercised and each of the
- * first two indexes a cell dimension. A repeated workload_id or browser triple
- * makes "which weight applies to this cell" unanswerable rather than merely
- * redundant, and a repeated evaluator seat is one evaluator counted twice.
+ * FOUR UNIQUENESS RULES ARE DERIVED, NOT COPIED, and are marked as such:
+ * workload_mix, browsers, evaluator_identities and request_size_distribution
+ * carry no uniqueItems in r7. Each rule over-constrains an r7 silence, so each
+ * one is stated with the reason a reviewer would need in order to disagree with
+ * it, rather than enforced quietly:
+ *
+ *   workload_mix, browsers — the pass_rule requires every matrix cell to be
+ *     exercised and both of these index a cell dimension. A repeated workload_id
+ *     or browser triple makes "which weight applies to this cell" unanswerable
+ *     rather than merely redundant.
+ *   evaluator_identities — a repeated evaluator seat is one evaluator counted
+ *     twice, which inflates apparent independent review.
+ *   request_size_distribution — this is the one derived rule that is NOT about
+ *     the cell matrix, and it is the file's most over-constraining decision, so
+ *     it is named as such. The list is a distribution WITHIN a cell: a mapping
+ *     from percentile to bytes. Two entries for the same percentile make "how
+ *     many bytes at p50" unanswerable, so a repeat is a malformed distribution
+ *     rather than a redundant one. The consequence is stated plainly: a manifest
+ *     a verified partner accepted with a repeated percentile IS denied here even
+ *     though r7 would admit it, and the remedy is to change this rule, not to
+ *     work around it.
  */
 export function validateBenchmarkPayload(payload) {
   assertJsonSafe(payload, "payload");
@@ -977,7 +1075,11 @@ function validateConsumerGateMember(receipt, member, context) {
   const observed = stamp(receipt.observed_at, `${path}.observed_at`);
   const expires = stamp(receipt.ttl_expires_at, `${path}.ttl_expires_at`);
   if (observed > now) fail("member_receipt_observed_after_reference", path);
-  if (observed < gateZeroMs) fail("member_observed_before_gate_zero", path);
+  // STRICTLY after Gate Zero, on the same reading validateBenchmarkMember uses
+  // for the acceptance instant. Evidence observed AT the Gate Zero instant did
+  // not follow it, and one boundary convention across both paths is what keeps
+  // the header's sentence and this code the same claim.
+  if (observed <= gateZeroMs) fail("member_observed_before_gate_zero", path);
   if (expires <= observed) fail("member_receipt_window_invalid", path);
   if (expires - observed > binding.maximum_member_receipt_ttl_ms) fail("member_receipt_ttl_policy_exceeded", path);
   if (expires <= now) fail("member_receipt_not_current", path);
@@ -990,7 +1092,14 @@ function validateConsumerGateMember(receipt, member, context) {
   });
 }
 
-function validateBenchmarkMember(manifest, member, context) {
+/**
+ * The benchmark member takes no registry entry: benchmark-manifest.v1 carries no
+ * producer_role, oracle_ref or combiner, so there is nothing on the receipt to
+ * compare one against. That the registry entry itself matches this module's
+ * benchmark constants is asserted once at module load, where it is a real
+ * invariant over two frozen tables rather than a comparison that cannot fail.
+ */
+function validateBenchmarkMember(manifest, context) {
   const { binding, now, gateZeroMs, path } = context;
   const { payload_digest, accepted_at_ms } = validateBenchmarkManifest(manifest);
 
@@ -1010,7 +1119,6 @@ function validateBenchmarkMember(manifest, member, context) {
   // Gate Zero precedes verified-partner benchmark acceptance. Acceptance at or
   // before the Gate Zero outcome is the excluded case, not a boundary nicety.
   if (accepted_at_ms <= gateZeroMs) fail("benchmark_accepted_before_gate_zero", path);
-  if (member.producer_role !== BENCHMARK_PRODUCER_ROLE) fail("member_role_mismatch", path);
 
   return freeze({
     observed_at_ms: accepted_at_ms,
@@ -1032,6 +1140,17 @@ function joinCore(snapshot, negativeAdmission) {
 
   const binding = snapshot.binding;
   closed(binding, BINDING_FIELDS, "snapshot.binding");
+  // TWO TTL POLICIES, ONE DIRECTION EACH, and no invented relation between them.
+  // `maximum_member_receipt_ttl_ms` bounds the CONSUMED evidence below and is
+  // enforced per member. `minimum_receipt_ttl_ms` sizes the window this join
+  // PROPOSES, and r7 constrains it in no way at all — not absolutely, and not
+  // against the member policy, which governs a different set of receipts. So it
+  // is validated as a positive integer and nothing more. The bound that really
+  // applies is the DOWNSTREAM ISSUER's: M01 refuses a minimum receipt whose
+  // window exceeds its own binding.maximum_receipt_ttl_ms, so an issuance adapter
+  // must supply a value its own policy admits. Asserting a global minimum-vs-
+  // member relation here would be this file inventing a TTL authority r7 did not
+  // give it, so the obligation is named in the header instead of guessed at.
   for (const field of BINDING_FIELDS) {
     if (field.endsWith("_ttl_ms")) assertInteger(binding[field], 1, `snapshot.binding.${field}`);
     else assertDigest(binding[field], `snapshot.binding.${field}`);
@@ -1076,7 +1195,7 @@ function joinCore(snapshot, negativeAdmission) {
     seenReceipts.add(receiptDigest);
     const memberContext = { binding, now, gateZeroMs, path: `${path}.receipt` };
     results.set(entry.step_ref, member.output_schema_ref === BENCHMARK_MANIFEST_SCHEMA
-      ? validateBenchmarkMember(entry.receipt, member, memberContext)
+      ? validateBenchmarkMember(entry.receipt, memberContext)
       : validateConsumerGateMember(entry.receipt, member, memberContext));
   });
   const missing = MINIMUM_REQUIRED_MEMBERS.filter(m => !seenSteps.has(m.step_ref)).map(m => m.step_ref);
@@ -1098,11 +1217,18 @@ function joinCore(snapshot, negativeAdmission) {
       if (sameSeat(context[field], reviewer)) fail("minimum_producer_not_independent", { field });
     }
   }
-  const producerActors = new Set();
+  // Distinctness is over SEATS, on this file's one definition of a seat: two
+  // producers collide when they share EITHER the actor or the session. Comparing
+  // actor ids alone would admit the exact case the paragraph above forbids —
+  // two ids on one session is one seat wearing two roles, and every other
+  // independence test in this file already reads it that way.
+  const memberProducers = [];
   for (const [step, result] of results) {
     if (step === BENCHMARK_STEP_REF) continue;
-    if (producerActors.has(result.producer_identity.actor_id)) fail("member_producers_not_distinct", { step });
-    producerActors.add(result.producer_identity.actor_id);
+    for (const seen of memberProducers) {
+      if (sameSeat(seen, result.producer_identity)) fail("member_producers_not_distinct", { step });
+    }
+    memberProducers.push(result.producer_identity);
   }
   for (const seat of [context.subject_maker_identity, context.producer_identity, context.evaluator_identity, ...reviewers]) {
     if (sameSeat(benchmark.accepted_by_identity, seat)) fail("benchmark_authority_not_independent");
@@ -1127,6 +1253,9 @@ function joinCore(snapshot, negativeAdmission) {
     evidence_ref: context.evidence_ref,
     fixture_set_digest: context.fixture_set_digest,
     observed_at: iso(now),
+    // The proposed window, exactly as the projection supplied it. Whether this
+    // TTL is acceptable is the ISSUER's question, not this join's: see the
+    // binding validation above.
     ttl_expires_at: iso(now + binding.minimum_receipt_ttl_ms),
     status: "pass",
     comparator: context.comparator,
@@ -1316,9 +1445,22 @@ const REQUIRED_DENIALS = Object.freeze([
   ["missing_required_member", s => { s.members = s.members.filter(m => m.step_ref !== BENCHMARK_STEP_REF); }],
   ["unknown_member_step", s => { s.members.push({ step_ref: "step:portfolio-constitution-semantic-review-receipt", receipt: copy(memberOf(s, PHI_STEP).receipt) }); }],
   ["duplicate_member_step", s => { s.members.push(copy(memberOf(s, PHI_STEP))); }],
+  // A REPLAYED receipt: one member's evidence re-presented under another step.
+  // r7's denial_rule names this case verbatim, so the set that earns
+  // negative_admission_result has to exercise it rather than assert it.
+  ["duplicate_member_receipt", s => { memberOf(s, SECRETS_STEP).receipt = copy(memberOf(s, PHI_STEP).receipt); }],
   ["member_receipt_not_current", s => { memberOf(s, PHI_STEP).receipt.ttl_expires_at = "2026-01-03T12:00:00.000Z"; }],
+  // An OVERLONG window — long enough that the currentness check below would have
+  // passed it. The policy check is what refuses it, and it is the other denial
+  // category r7's denial_rule names.
+  ["member_receipt_ttl_policy_exceeded", s => { memberOf(s, PHI_STEP).receipt.ttl_expires_at = iso(Date.parse(SELF_CHECK_OBSERVED_AT) + 400 * DAY_MS); }],
+  ["member_receipt_window_invalid", s => { memberOf(s, PHI_STEP).receipt.ttl_expires_at = SELF_CHECK_OBSERVED_AT; }],
   ["member_receipt_observed_after_reference", s => { memberOf(s, PHI_STEP).receipt.observed_at = "2026-01-05T00:00:00.000Z"; }],
   ["member_observed_before_gate_zero", s => { memberOf(s, PHI_STEP).receipt.observed_at = "2025-12-31T00:00:00.000Z"; }],
+  // The BOUNDARY instant itself: "strictly after Gate Zero" is exclusive for a
+  // member exactly as it is for the acceptance, so the equal case is a denial
+  // and not an admission.
+  ["member_observed_before_gate_zero", s => { memberOf(s, PHI_STEP).receipt.observed_at = SELF_CHECK_GATE_ZERO_AT; }],
   ["member_binding_mismatch", s => { memberOf(s, PHI_STEP).receipt.candidate_digest = selfCheckDigest("other-candidate"); }],
   ["member_scope_mismatch", s => { memberOf(s, PHI_STEP).receipt.evidence_scope = "production"; }],
   ["member_scope_mismatch", s => { memberOf(s, PHI_STEP).receipt.subject_environment = "production"; }],
@@ -1327,6 +1469,11 @@ const REQUIRED_DENIALS = Object.freeze([
   ["member_not_passing", s => { memberOf(s, PHI_STEP).receipt.status = "fail"; }],
   ["member_self_attestation", s => { memberOf(s, PHI_STEP).receipt.producer_identity = copy(memberOf(s, PHI_STEP).receipt.subject_maker_identity); }],
   ["member_producers_not_distinct", s => { memberOf(s, SECRETS_STEP).receipt.producer_identity = copy(memberOf(s, PHI_STEP).receipt.producer_identity); }],
+  // The SAME SEAT under two actor ids. Distinctness is over seats, so a shared
+  // session is a collision even when the ids differ; a set that only ever
+  // exercised the identical-identity case would leave the weaker comparison
+  // looking proved.
+  ["member_producers_not_distinct", s => { memberOf(s, SECRETS_STEP).receipt.producer_identity.session_ref = memberOf(s, PHI_STEP).receipt.producer_identity.session_ref; }],
   ["closed_shape", s => { delete memberOf(s, PHI_STEP).receipt.comparator; }],
   ["closed_shape", s => { memberOf(s, PHI_STEP).receipt.obligation_decision_ids = ["Q012.D2"]; }],
   ["closed_shape", s => { delete memberOf(s, BENCHMARK_STEP_REF).receipt.outlier_rule; }],
@@ -1410,6 +1557,13 @@ export function createFoundationAssuranceMinimumGate({ authenticateEvidence } = 
   return Object.freeze({
     evaluate(envelope) {
       assertJsonSafe(envelope, "envelope");
+      // A PLAIN JSON OBJECT, before anything is hashed. artifact-trust.js hashes
+      // a top-level string as its own raw bytes, so the string `{"a":1}` and the
+      // object {a:1} would canonicalize to one envelope_digest — the exact
+      // "two values canonicalize identically" collision assertJsonSafe exists to
+      // prevent, which it cannot catch because a top-level string is JSON-safe.
+      // The binding below is only as strong as the injectivity of this digest.
+      if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) fail("invalid_object", "envelope");
       const input = freeze(copy(envelope));
       const verified = authenticateEvidence(input);
       assertJsonSafe(verified, "verification");
@@ -1421,13 +1575,49 @@ export function createFoundationAssuranceMinimumGate({ authenticateEvidence } = 
 }
 
 /**
- * The M01 seam. r7's consumer-gate-receipt.v1 is closed and declares no
- * schema_version field; journey-one-clock.v5.js requires one on the same
- * receipt. This adapter states the divergence in one place instead of loosening
- * either schema, and it is the only shape in this file that is not r7-exact.
- * Reconciling the two contracts remains integration work.
+ * The M01 seam, and the only shape in this file that is not r7-exact. It adapts
+ * the FIELD SET — r7's consumer-gate-receipt.v1 is closed and declares no
+ * schema_version; journey-one-clock.v5.js requires one on the same receipt — and
+ * it CHECKS, without adapting, the two VALUE DOMAINS where M01 is narrower than
+ * r7. All three divergences are enumerated under THE M01 SEAM in the header.
+ *
+ * A domain mismatch REFUSES here with a code that names the seam. It is never
+ * repaired: truncating a reference to 300 characters produces a different
+ * reference, and rounding an instant to milliseconds produces a different
+ * instant, so either "fix" would hand M01 evidence that no producer issued. A
+ * receipt this function refuses is still valid r7 evidence — the refusal says
+ * M01 cannot read it, not that it is malformed.
+ *
+ * It converts no deadline contract. The manifest's deadline_contract is in DAYS
+ * and M01's projection field is compared against the HOURS variant; building
+ * that projection is integration work and is not done implicitly here.
  */
 export function journeyOneClockMinimumReceiptView(receipt) {
+  // Before closed(), because a non-enumerable or accessor property would slip
+  // past the closed key count and then be dropped silently by copy().
+  assertJsonSafe(receipt, "receipt");
   closed(receipt, CONSUMER_GATE_RECEIPT_FIELDS, "receipt");
+
+  const withinM01 = (value, pattern) => typeof value === "string" && pattern.test(value);
+
+  if (!withinM01(receipt.evidence_ref, M01_REFERENCE)) {
+    fail("m01_incompatible_evidence_ref", { path: "receipt.evidence_ref", m01_maximum_length: 300 });
+  }
+  // A session_ref admitted here is already within M01's length domain by
+  // construction (SESSION_REF caps it at 208 characters), so this is a
+  // belt-and-braces assertion at the seam rather than a live divergence. It is
+  // written out so a later widening of either pattern surfaces here.
+  for (const field of ["subject_maker_identity", "producer_identity", "evaluator_identity"]) {
+    const seat = receipt[field];
+    if (!seat || typeof seat !== "object" || !withinM01(seat.session_ref, M01_REFERENCE)) {
+      fail("m01_incompatible_session_ref", { path: `receipt.${field}.session_ref`, m01_maximum_length: 300 });
+    }
+  }
+  for (const field of ["observed_at", "ttl_expires_at"]) {
+    if (!withinM01(receipt[field], M01_INSTANT)) {
+      fail("m01_incompatible_timestamp", { path: `receipt.${field}`, m01_maximum_fractional_digits: 3 });
+    }
+  }
+
   return freeze({ schema_version: CONSUMER_GATE_RECEIPT_SCHEMA, ...copy(receipt) });
 }

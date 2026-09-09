@@ -929,3 +929,206 @@ test("the M01 receipt view is the only place the two receipt shapes are reconcil
     receipt_producer_step_ref: PHI };
   refuse(s, "closed_shape");
 });
+
+// --- the denial set earns the field it writes -------------------------------
+
+test("the denial set exercises both categories r7's denial_rule names, by their exact codes", () => {
+  const proof = foundationAssuranceMinimumNegativeAdmission();
+  for (const code of [
+    // The replayed receipt and the over-long window: the two categories r7
+    // names verbatim and the set previously asserted without exercising.
+    "duplicate_member_receipt", "member_receipt_ttl_policy_exceeded",
+    "member_receipt_window_invalid", "member_observed_before_gate_zero",
+    "member_producers_not_distinct",
+  ]) {
+    assert.ok(proof.observed_codes.includes(code), code);
+  }
+  assert.ok(proof.case_count >= 37, `expected the widened denial set, saw ${proof.case_count}`);
+});
+
+test("a member receipt replayed under a second step is a replay, not a second pass", () => {
+  const s = snapshot();
+  at(s, SECRETS).receipt = copy(at(s, PHI).receipt);
+  refuse(s, "duplicate_member_receipt");
+  // Byte-identical evidence under the SAME step is caught one check earlier, as
+  // a duplicate step; the replay code exists for the cross-step case above.
+  const sameStep = snapshot();
+  sameStep.members.push(copy(at(sameStep, PHI)));
+  refuse(sameStep, "duplicate_member_step");
+});
+
+test("an over-long member window denies on policy even while it is still current", () => {
+  const s = snapshot();
+  const expires = Date.parse(OBSERVED_AT) + 400 * DAY;
+  at(s, PHI).receipt.ttl_expires_at = iso(expires);
+  // Still current as of the reference instant: it is the policy that refuses it,
+  // not currentness, which is why the two codes are distinct.
+  assert.ok(expires > Date.parse(AS_OF));
+  assert.ok(expires - Date.parse(OBSERVED_AT) > snapshot().binding.maximum_member_receipt_ttl_ms);
+  refuse(s, "member_receipt_ttl_policy_exceeded");
+});
+
+// --- one definition of a seat, everywhere -----------------------------------
+
+test("two member producers sharing one session are one seat whatever their actor ids", () => {
+  const s = snapshot();
+  const phiProducer = at(s, PHI).receipt.producer_identity;
+  const secretsProducer = at(s, SECRETS).receipt.producer_identity;
+  assert.notEqual(secretsProducer.actor_id, phiProducer.actor_id);
+  secretsProducer.session_ref = phiProducer.session_ref;
+  refuse(s, "member_producers_not_distinct");
+  // The converse holds too: one actor id under two sessions is still one actor.
+  const actor = snapshot();
+  at(actor, SECRETS).receipt.producer_identity.actor_id = at(actor, PHI).receipt.producer_identity.actor_id;
+  refuse(actor, "member_producers_not_distinct");
+  // Genuinely distinct seats stay admissible; this is a distinctness rule, not a
+  // prohibition on producers resembling one another.
+  const distinct = snapshot();
+  at(distinct, SECRETS).receipt.producer_identity = I("producer-second-seat");
+  assert.equal(run(distinct).admissible, true);
+});
+
+// --- the Gate Zero boundary is one convention, not two ----------------------
+
+test("a member observed AT the Gate Zero instant is refused exactly as one observed before it", () => {
+  const exactly = snapshot();
+  at(exactly, PHI).receipt.observed_at = GATE_ZERO_AT;
+  at(exactly, PHI).receipt.ttl_expires_at = iso(Date.parse(GATE_ZERO_AT) + 20 * DAY);
+  refuse(exactly, "member_observed_before_gate_zero");
+  // One millisecond after it is admitted, so the rule is exclusive rather than
+  // merely strict-looking.
+  const after = snapshot();
+  const observed = Date.parse(GATE_ZERO_AT) + 1;
+  at(after, PHI).receipt.observed_at = iso(observed);
+  at(after, PHI).receipt.ttl_expires_at = iso(observed + 20 * DAY);
+  assert.equal(run(after).admissible, true);
+  // And it is the SAME convention the benchmark acceptance is read under, which
+  // is what the header claims for both.
+  const acceptedAtGateZero = snapshot();
+  at(acceptedAtGateZero, BENCHMARK_STEP_REF).receipt = manifest(payload(), { acceptedAt: GATE_ZERO_AT });
+  refuse(acceptedAtGateZero, "benchmark_accepted_before_gate_zero");
+});
+
+// --- the benchmark member carries no role to compare ------------------------
+
+test("the benchmark member's role is a load-time registry invariant, not an evidence check", () => {
+  const entry = MINIMUM_REQUIRED_MEMBERS.find(m => m.step_ref === BENCHMARK_STEP_REF);
+  assert.equal(entry.producer_role, "verified_partner_benchmark_authority");
+  assert.equal(entry.output_schema_ref, BENCHMARK_MANIFEST_SCHEMA);
+  // benchmark-manifest.v1 declares no producer_role at all, so there is nothing
+  // on the accepted manifest for a validator to compare the entry against: one
+  // supplied is refused as an open shape, never matched.
+  assert.ok(!BENCHMARK_MANIFEST_FIELDS.includes("producer_role"));
+  const s = snapshot();
+  at(s, BENCHMARK_STEP_REF).receipt.producer_role = "verified_partner_benchmark_authority";
+  refuse(s, "closed_shape");
+  // member_role_mismatch stays reachable from the receipts that do carry it.
+  const role = snapshot();
+  at(role, PHI).receipt.producer_role = "independent_secret_boundary_oracle";
+  refuse(role, "member_role_mismatch");
+});
+
+// --- the envelope digest must be injective ----------------------------------
+
+test("an envelope that is not a plain JSON object is refused before anything is hashed", () => {
+  // The collision this refusal exists to prevent: a top-level string is hashed
+  // as its own bytes, which are exactly the canonical bytes of the object.
+  const asObject = { synthetic_evidence_ref: "a00-test-collision" };
+  const asString = '{"synthetic_evidence_ref":"a00-test-collision"}';
+  assert.equal(digest(asString), digest(asObject), "the two shapes do share a digest");
+  const gate = createFoundationAssuranceMinimumGate({
+    authenticateEvidence: envelope => ({ envelope_digest: digest(envelope), snapshot: snapshot() }),
+  });
+  for (const notAnObject of [asString, ["a00-test-collision"], null, 7, true]) {
+    refuseCall(() => gate.evaluate(notAnObject), "invalid_object");
+  }
+  // The object form still evaluates, so this closes a shape rather than a path.
+  assert.equal(gate.evaluate(asObject).admissible, true);
+});
+
+// --- the M01 seam refuses what it cannot adapt ------------------------------
+
+test("the M01 receipt view refuses a hidden property instead of dropping it in the copy", () => {
+  const proposed = run(snapshot()).proposed_receipt;
+  const smuggled = { ...copy(proposed) };
+  Object.defineProperty(smuggled, "shadow", { value: "unhashed", enumerable: false });
+  refuseCall(() => journeyOneClockMinimumReceiptView(smuggled), "hidden_key");
+  const accessor = { ...copy(proposed) };
+  Object.defineProperty(accessor, "status", { get: () => "pass", enumerable: true, configurable: true });
+  refuseCall(() => journeyOneClockMinimumReceiptView(accessor), "hidden_key");
+});
+
+test("the M01 seam rejects a reference or instant M01 cannot read, and shortens neither", () => {
+  const long = `safe:a00-test:${"e".repeat(400)}`;
+  assert.ok(long.length > 300);
+  // r7 declares minLength 1 and no maximum on evidence_ref, so this file invents
+  // no cap: the long reference is admissible evidence HERE...
+  const s = snapshot();
+  s.minimum_receipt_context.evidence_ref = long;
+  const admitted = run(s);
+  assert.equal(admitted.admissible, true);
+  assert.equal(admitted.proposed_receipt.evidence_ref, long, "evidence is carried whole");
+  // ...and the seam is where M01's 300-character domain refuses it, by name and
+  // without truncating it into a different reference.
+  refuseCall(() => journeyOneClockMinimumReceiptView(admitted.proposed_receipt),
+    "m01_incompatible_evidence_ref");
+
+  // r7's date-time admits up to nine fractional digits; M01's stamp reads three.
+  const proposed = run(snapshot()).proposed_receipt;
+  refuseCall(() => journeyOneClockMinimumReceiptView({ ...copy(proposed), observed_at: "2026-02-04T00:00:00.123456789Z" }),
+    "m01_incompatible_timestamp");
+  refuseCall(() => journeyOneClockMinimumReceiptView({ ...copy(proposed), ttl_expires_at: "2026-02-11T00:00:00.1234Z" }),
+    "m01_incompatible_timestamp");
+  refuseCall(() => journeyOneClockMinimumReceiptView({
+    ...copy(proposed),
+    producer_identity: { ...copy(proposed.producer_identity), session_ref: `session:${"s".repeat(400)}` },
+  }), "m01_incompatible_session_ref");
+
+  // The receipt this join actually proposes is inside every M01 domain, which is
+  // why the divergence is a seam to reconcile and not a live defect.
+  const view = journeyOneClockMinimumReceiptView(proposed);
+  assert.equal(view.schema_version, "consumer-gate-receipt.v1");
+  assert.equal(view.evidence_ref, proposed.evidence_ref);
+  assert.equal(view.observed_at, proposed.observed_at);
+});
+
+test("the seam adapts a receipt's field set and converts no deadline contract", () => {
+  const view = journeyOneClockMinimumReceiptView(run(snapshot()).proposed_receipt);
+  assert.deepEqual(Object.keys(view).sort(), [...CONSUMER_GATE_RECEIPT_FIELDS, "schema_version"].sort());
+  assert.ok(!Object.hasOwn(view, "deadline_contract"));
+  // Days here, hours there: reconciled at module load, never silently converted
+  // for a caller. Neither contract carries the other's unit.
+  assert.equal(BENCHMARK_DEADLINE_CONTRACT.maximum_external_blocker_pause_days, 5);
+  assert.equal(JOURNEY_ONE_DEADLINE_CONTRACT.maximum_external_blocker_pause_hours, 120);
+  assert.ok(!Object.hasOwn(BENCHMARK_DEADLINE_CONTRACT, "maximum_external_blocker_pause_hours"));
+  assert.ok(!Object.hasOwn(JOURNEY_ONE_DEADLINE_CONTRACT, "maximum_external_blocker_pause_days"));
+});
+
+// --- the two derived rules that over-constrain an r7 silence ----------------
+
+test("the derived percentile uniqueness rule reaches an accepted manifest inside the join", () => {
+  const p = payload();
+  p.request_size_distribution = [{ percentile: 50, bytes: 1 }, { percentile: 50, bytes: 2 }];
+  const s = snapshot();
+  s.binding.benchmark_manifest_digest = digest([BENCHMARK_PAYLOAD_DOMAIN_TAG, p]);
+  at(s, BENCHMARK_STEP_REF).receipt = manifest(p);
+  // Stated rather than silent: r7 declares no uniqueItems here, so a manifest a
+  // partner accepted with a repeated percentile IS denied by this file.
+  refuse(s, "benchmark_duplicate_request_size_percentile");
+});
+
+// --- the proposed TTL is the projection's, bounded by the issuer ------------
+
+test("the proposed receipt's TTL is the projection's own, under no invented global rule", () => {
+  const s = snapshot();
+  // Deliberately longer than the policy bounding CONSUMED member receipts. r7
+  // states no relation between the two, so this file states none either; the
+  // bound that applies is the downstream issuer's and is named in the header.
+  s.binding.minimum_receipt_ttl_ms = 60 * DAY;
+  assert.ok(s.binding.minimum_receipt_ttl_ms > s.binding.maximum_member_receipt_ttl_ms);
+  const result = run(s);
+  assert.equal(result.proposed_receipt.ttl_expires_at, iso(Date.parse(AS_OF) + 60 * DAY));
+  assert.equal(result.issued, false);
+  assert.equal(result.persisted, false);
+  assert.equal(result.durable_receipt_issuance_required, true);
+});
