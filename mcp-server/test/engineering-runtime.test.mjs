@@ -15,6 +15,10 @@ import {
   resolveSourceMergeAuthority,
   engineeringRuntimeTools,
   portfolioAncestorBinding,
+  classifyDesignDepth,
+  designDepthInputs,
+  ENGINEERING_SLICE_PLAN_VERSIONS,
+  ENGINEERING_DESIGN_CONTRACT_VERSION,
 } from "../src/engineering-runtime.js";
 
 const digest = value => canonicalDigest(value);
@@ -1241,4 +1245,380 @@ test("an ungoverned envelope keeps its exact previous shape", () => {
     expiresAt: "2099-01-01T00:00:00Z", portfolioBinding: GOVERNED_BINDING });
   assert.equal(governed.portfolio_binding.portfolio_ref, "WR-000062");
   assert.notEqual(JSON.stringify(governed), JSON.stringify(ungoverned));
+});
+
+// --- V5-F03 deep-module execution contract ------------------------------------
+//
+// These fixtures and case tables are deliberately the same shape as the ones in
+// tools/room-bridge/test_engineering_passport_unit.py.  The server-side and
+// portable validators must accept and refuse exactly the same closed contract,
+// so the two tables are kept identical on purpose.
+
+const DESIGN_CONTRACT_FIELD_NAMES = [
+  "authority", "code_model_decision", "completion", "contract_version", "dependency_rationale",
+  "deployment", "evidence", "failure", "full_design_refs", "isolation", "rationale", "review",
+  "routing", "seam_decision", "short_template", "tests",
+];
+const RESERVED_CODE_RESPONSIBILITIES = [
+  "execution", "identity", "idempotency", "permissions", "policy", "state", "validation",
+];
+
+function modelStep(overrides = {}) {
+  return {
+    step_ref: "step:synthetic-read", responsibility_class: "classification",
+    input_contract_ref: "contract:step-input", output_contract_ref: "contract:step-output",
+    rationale: "the candidate label is genuinely uncertain and code would reduce quality",
+    selection_basis: ["typed_uncertainty", "quality_gain"], ...overrides,
+  };
+}
+
+function designContract(row) {
+  const depth = classifyDesignDepth(row, EngineeringToolError);
+  const redaction = row.planned_checks.some(check => check.evidence_requirement === "redacted_evidence_required")
+    ? "redacted_evidence" : "metadata_only";
+  return {
+    contract_version: ENGINEERING_DESIGN_CONTRACT_VERSION,
+    rationale: "the closed validator owns this behavior end to end",
+    dependency_rationale: "no accepted predecessor slice is required",
+    code_model_decision: {
+      rationale: "stable enforceable behavior stays deterministic code",
+      selection_basis: ["capability_gain", "quality_gain"],
+      model_judgment_steps: [],
+    },
+    routing: { executor_class: "deterministic_code", adapter_ref: "adapter:codex-desktop", fresh_session_required: true },
+    authority: { capability_profile: "capability:engineering-repository-write", read_only: false, environment: "rehearsal" },
+    isolation: { worktree_required: true, branch_required: true, shared_resource_refs: [] },
+    tests: {
+      planned_check_refs: row.planned_checks.map(check => check.check_ref),
+      verification_lanes: row.manual_qa_required ? ["contract", "manual_qa"] : ["contract"],
+    },
+    review: { independent_review_required: true, reviewer_class: "independent_agent" },
+    failure: { failure_modes: [{
+      failure_ref: "failure:contract-drift", detection: "the closed validator refuses the plan",
+      compensation: "revise the accepted plan revision before admission",
+    }] },
+    evidence: {
+      redaction_class: redaction, retention: "material_redacted",
+      evidence_refs: [{ ref: "evidence:design", redaction_class: redaction, content_digest: `sha256:${"a".repeat(64)}` }],
+    },
+    deployment: {
+      release_requirement: row.release_requirement,
+      rollback_ref: row.release_requirement === "required" ? "release:rollback-plan" : null,
+      confirmation_required: !["R0", "R1"].includes(row.risk_class),
+    },
+    completion: {
+      completion_predicate: "every accepted planned check passes under independent review",
+      verified_by: row.manual_qa_required ? "independent_review_and_manual_qa" : "independent_review",
+    },
+    seam_decision: {
+      mode: "extend", target_seam_ref: "seam:engineering-runtime",
+      measurement: { basis: "complexity_reduction", note: "extending the proven validator is smaller than a new module" },
+      new_module_justification: null, replaced_seam_refs: [], residual_authority_refs: [],
+    },
+    full_design_refs: depth === "short" ? null : {
+      design_interview_ref: "interview:v5-f03", authority_envelope_ref: "envelope:v5-f03",
+      failure_model_ref: "failure-model:v5-f03", fixture_refs: ["fixture:v5-f03-boundary"],
+      oracle_ref: "oracle:doctorcre-v5:Q035.D1",
+    },
+    short_template: depth === "full" ? null : {
+      template_ref: "template:short-governed-v1",
+      objective_summary: "one bounded parallel-safe change with no dependencies",
+      verification_ref: "verification:short-governed-v1",
+    },
+  };
+}
+
+function v2Slice(sliceRef = "slice:short", ordinal = 1, overrides = {}) {
+  const row = {
+    slice_ref: sliceRef, ordinal, objective: "Deepen the accepted slice contract",
+    definition_of_done: "Both validators agree on one closed contract",
+    dependency_refs: [], declared_resource_refs: ["resource:worktree-a"],
+    declared_component_refs: ["component:execution-fabric"], declared_plan_step_refs: ["step:synthetic-read"],
+    baseline_evidence_refs: [], planned_checks: [{
+      check_ref: "check:contract", failure_condition: "an unknown field is accepted",
+      evidence_requirement: "redacted_evidence_required",
+    }],
+    scope_boundary: "the two existing slice-plan validators", forbidden_change_refs: ["forbidden:new-authority"],
+    concurrency_posture: "parallel_safe", manual_qa_required: false,
+    risk_class: "R1", release_requirement: "not_required", ...overrides,
+  };
+  row.design_contract = designContract(row);
+  return row;
+}
+
+function withoutDigest(typedPlan) {
+  return Object.fromEntries(Object.entries(typedPlan).filter(([key]) => key !== "plan_digest"));
+}
+
+function reseal(typedPlan) {
+  typedPlan.plan_digest = canonicalDigest(withoutDigest(typedPlan));
+  return typedPlan;
+}
+
+function v2Plan(slices) {
+  return reseal({
+    schema_version: "engineering-slice-plan.v2",
+    work_request: { id: source.work.id, state_version: 3, canonical_record_digest: source.work.canonical_record_digest },
+    accepted_plan_revision: { id: source.plan.plan_ref, revision: 2, digest: source.plan.digest },
+    slices, plan_digest: null,
+  });
+}
+
+function refusesPlan(typedPlan, note) {
+  assert.throws(() => requirePlan(typedPlan, EngineeringToolError), EngineeringToolError,
+    `plan should have refused: ${note}`);
+}
+
+test("the design depth classifier matches the approved SHORT predicate exactly", () => {
+  const base = v2Slice();
+  assert.equal(classifyDesignDepth(base, EngineeringToolError), "short");
+  for (const [field, value] of [
+    ["concurrency_posture", "serial_after_dependencies"],
+    ["concurrency_posture", "exclusive_resource"],
+    ["manual_qa_required", true],
+    ["release_requirement", "required"],
+    ["dependency_refs", ["slice:other"]],
+    ["declared_resource_refs", ["resource:a", "resource:b"]],
+    ["declared_component_refs", ["component:a", "component:b"]],
+    ["declared_plan_step_refs", ["step:a", "step:b"]],
+  ]) {
+    assert.equal(classifyDesignDepth({ ...base, [field]: value }, EngineeringToolError), "full",
+      `${field}=${JSON.stringify(value)} must take the full path`);
+  }
+  for (const risk of ["R0", "R1", "R2", "R3"])
+    assert.equal(classifyDesignDepth({ ...base, risk_class: risk }, EngineeringToolError), "short", risk);
+  for (const risk of ["R4", "R5", "R6"])
+    assert.equal(classifyDesignDepth({ ...base, risk_class: risk }, EngineeringToolError), "full", risk);
+  assert.equal(classifyDesignDepth({
+    ...base, declared_resource_refs: [], declared_component_refs: [], declared_plan_step_refs: [],
+  }, EngineeringToolError), "short");
+});
+
+test("the planned check count is never a classifier input and every check stays mandatory", () => {
+  const base = v2Slice();
+  const inputs = designDepthInputs(base, EngineeringToolError);
+  assert.ok(!JSON.stringify(inputs).includes("planned_check"));
+  const many = structuredClone(base);
+  many.planned_checks = [0, 1, 2, 3].map(index => ({
+    check_ref: `check:extra-${index}`, failure_condition: "verification is missing",
+    evidence_requirement: "redacted_evidence_required",
+  }));
+  assert.deepEqual(designDepthInputs(many, EngineeringToolError), inputs);
+  assert.equal(classifyDesignDepth(many, EngineeringToolError), "short");
+  many.design_contract = designContract(many);
+  assert.doesNotThrow(() => requirePlan(v2Plan([structuredClone(many)]), EngineeringToolError));
+  const dropped = structuredClone(many);
+  dropped.design_contract.tests.planned_check_refs = ["check:extra-0"];
+  refusesPlan(v2Plan([dropped]), "tests may not drop a planned check");
+});
+
+test("an agent cannot self-label design depth or a bypass", () => {
+  for (const label of ["design_depth", "simple", "complexity", "classifier_override", "bypass"]) {
+    const row = v2Slice();
+    row[label] = "short";
+    assert.throws(() => classifyDesignDepth(row, EngineeringToolError),
+      error => error.error === "engineering_design_depth_self_label_forbidden",
+      `the classifier consumed a self-label: ${label}`);
+    refusesPlan(v2Plan([row]), `slice self-label ${label}`);
+    const contracted = v2Slice();
+    contracted.design_contract[label] = "short";
+    refusesPlan(v2Plan([contracted]), `contract self-label ${label}`);
+  }
+});
+
+test("every Q046 design contract field is bound and changes the canonical digest", () => {
+  const typed = v2Plan([v2Slice()]);
+  assert.equal(requirePlan(typed, EngineeringToolError).plan_digest, typed.plan_digest);
+  for (const field of DESIGN_CONTRACT_FIELD_NAMES) {
+    const missing = structuredClone(typed);
+    delete missing.slices[0].design_contract[field];
+    refusesPlan(reseal(missing), `missing ${field}`);
+  }
+  const extra = structuredClone(typed);
+  extra.slices[0].design_contract.extra_field = "x";
+  refusesPlan(reseal(extra), "unknown design contract field");
+  const stale = structuredClone(typed);
+  stale.slices[0].design_contract.rationale = "a different rationale";
+  assert.notEqual(canonicalDigest(withoutDigest(stale)), typed.plan_digest);
+  refusesPlan(stale, "stale digest after a design contract change");
+  for (const [facet, key, value] of [
+    ["routing", "fresh_session_required", false],
+    ["authority", "capability_profile", "capability:read-only"],
+    ["isolation", "worktree_required", false],
+    ["review", "independent_review_required", false],
+    ["evidence", "redaction_class", "metadata_only"],
+    ["deployment", "release_requirement", "required"],
+    ["completion", "verified_by", "independent_review_and_manual_qa"],
+  ]) {
+    const row = structuredClone(typed);
+    row.slices[0].design_contract[facet][key] = value;
+    refusesPlan(reseal(row), `${facet}.${key}=${value}`);
+  }
+  const emptyFailure = structuredClone(typed);
+  emptyFailure.slices[0].design_contract.failure.failure_modes = [];
+  refusesPlan(reseal(emptyFailure), "a slice must model at least one failure mode");
+});
+
+test("reserved deterministic responsibilities refuse model judgment", () => {
+  for (const reserved of RESERVED_CODE_RESPONSIBILITIES) {
+    const row = v2Slice();
+    row.design_contract.routing.executor_class = "model_assisted";
+    row.design_contract.code_model_decision.model_judgment_steps = [modelStep({ responsibility_class: reserved })];
+    assert.throws(() => requirePlan(v2Plan([row]), EngineeringToolError),
+      error => error.error === "engineering_design_model_step_reserved_responsibility" &&
+        error.responsibility_class === reserved,
+      `model judgment claimed ${reserved}`);
+  }
+});
+
+test("a typed model step needs contracts, rationale and more than cost", () => {
+  const accepted = v2Slice();
+  accepted.design_contract.routing.executor_class = "model_assisted";
+  accepted.design_contract.code_model_decision.model_judgment_steps = [modelStep()];
+  assert.doesNotThrow(() => requirePlan(v2Plan([structuredClone(accepted)]), EngineeringToolError));
+  for (const override of [
+    { input_contract_ref: "" }, { output_contract_ref: "" }, { rationale: "  " },
+    { selection_basis: ["cost"] }, { selection_basis: [] }, { selection_basis: ["invented"] },
+    { step_ref: "step:never-declared" }, { responsibility_class: "vibes" },
+  ]) {
+    const row = v2Slice();
+    row.design_contract.routing.executor_class = "model_assisted";
+    row.design_contract.code_model_decision.model_judgment_steps = [modelStep(override)];
+    refusesPlan(v2Plan([row]), `model step ${JSON.stringify(override)}`);
+  }
+  const deterministic = v2Slice();
+  deterministic.design_contract.code_model_decision.model_judgment_steps = [modelStep()];
+  refusesPlan(v2Plan([deterministic]), "a deterministic_code route cannot carry model judgment");
+  const unstaffed = v2Slice();
+  unstaffed.design_contract.routing.executor_class = "model_assisted";
+  refusesPlan(v2Plan([unstaffed]), "a model_assisted route needs a typed model step");
+  const costOnly = v2Slice();
+  costOnly.design_contract.code_model_decision.selection_basis = ["cost"];
+  assert.throws(() => requirePlan(v2Plan([costOnly]), EngineeringToolError),
+    error => error.error === "engineering_design_cost_only_selection",
+    "cost alone selected the code/model choice");
+  const measured = v2Slice();
+  measured.design_contract.code_model_decision.selection_basis = ["cost", "capability_gain"];
+  assert.doesNotThrow(() => requirePlan(v2Plan([measured]), EngineeringToolError));
+});
+
+test("full depth requires the whole design envelope and short work stays governed", () => {
+  const short = v2Slice();
+  assert.doesNotThrow(() => requirePlan(v2Plan([structuredClone(short)]), EngineeringToolError));
+  const complexRow = v2Slice("slice:short", 1, { risk_class: "R4" });
+  assert.equal(classifyDesignDepth(complexRow, EngineeringToolError), "full");
+  assert.doesNotThrow(() => requirePlan(v2Plan([structuredClone(complexRow)]), EngineeringToolError));
+  const smuggled = structuredClone(complexRow);
+  smuggled.design_contract.full_design_refs = null;
+  smuggled.design_contract.short_template = structuredClone(short.design_contract.short_template);
+  refusesPlan(v2Plan([smuggled]), "high-risk work took the shorter template");
+  for (const field of ["design_interview_ref", "authority_envelope_ref", "failure_model_ref", "oracle_ref"]) {
+    const row = structuredClone(complexRow);
+    row.design_contract.full_design_refs[field] = "";
+    refusesPlan(v2Plan([row]), `full_design_refs ${field}`);
+  }
+  const noFixtures = structuredClone(complexRow);
+  noFixtures.design_contract.full_design_refs.fixture_refs = [];
+  refusesPlan(v2Plan([noFixtures]), "full depth requires fixtures");
+  const overreaching = structuredClone(short);
+  overreaching.design_contract.full_design_refs = structuredClone(complexRow.design_contract.full_design_refs);
+  refusesPlan(v2Plan([overreaching]), "the SHORT shape is exact");
+  for (const field of ["review", "failure", "evidence", "deployment", "completion", "seam_decision", "tests"]) {
+    const row = structuredClone(short);
+    delete row.design_contract[field];
+    refusesPlan(v2Plan([row]), `SHORT dropped ${field}`);
+  }
+  const ungoverned = structuredClone(short);
+  ungoverned.design_contract.review.independent_review_required = false;
+  refusesPlan(v2Plan([ungoverned]), "SHORT waived independent review");
+  const material = v2Slice("slice:short", 1, { risk_class: "R3" });
+  assert.equal(classifyDesignDepth(material, EngineeringToolError), "short");
+  const unconfirmed = structuredClone(material);
+  unconfirmed.design_contract.deployment.confirmation_required = false;
+  refusesPlan(v2Plan([unconfirmed]), "R3 dropped its explicit confirmation gate");
+});
+
+test("seam decisions refuse duplicate authority and half-replacement", () => {
+  assert.doesNotThrow(() => requirePlan(v2Plan([v2Slice()]), EngineeringToolError));
+  const unjustified = v2Slice();
+  Object.assign(unjustified.design_contract.seam_decision, { mode: "new_module", new_module_justification: null });
+  refusesPlan(v2Plan([unjustified]), "a new module needs a real seam");
+  const invented = v2Slice();
+  Object.assign(invented.design_contract.seam_decision, { mode: "new_module", new_module_justification: "convenience" });
+  refusesPlan(v2Plan([invented]), "convenience is not an accepted module justification");
+  const justified = v2Slice();
+  Object.assign(justified.design_contract.seam_decision, { mode: "new_module", new_module_justification: "lifecycle" });
+  assert.doesNotThrow(() => requirePlan(v2Plan([justified]), EngineeringToolError));
+  const unmeasured = v2Slice();
+  unmeasured.design_contract.seam_decision.measurement = { basis: "gut_feel", note: "it felt simpler" };
+  refusesPlan(v2Plan([unmeasured]), "reuse/extend/replace must be measured");
+  const half = v2Slice();
+  Object.assign(half.design_contract.seam_decision, {
+    mode: "replace", replaced_seam_refs: ["seam:legacy"], residual_authority_refs: ["seam:legacy-residual"],
+  });
+  assert.throws(() => requirePlan(v2Plan([half]), EngineeringToolError),
+    error => error.error === "engineering_design_seam_half_replacement",
+    "a replacement that leaves residual authority is a half-fix");
+  const itself = v2Slice();
+  Object.assign(itself.design_contract.seam_decision, {
+    mode: "replace", replaced_seam_refs: ["seam:engineering-runtime"],
+  });
+  refusesPlan(v2Plan([itself]), "a seam cannot replace itself");
+  const first = v2Slice("slice:one", 1);
+  Object.assign(first.design_contract.seam_decision, {
+    mode: "new_module", target_seam_ref: "seam:new-authority", new_module_justification: "authority",
+  });
+  const second = v2Slice("slice:two", 2);
+  Object.assign(second.design_contract.seam_decision, {
+    mode: "replace", target_seam_ref: "seam:new-authority", replaced_seam_refs: ["seam:old-authority"],
+  });
+  assert.throws(() => requirePlan(v2Plan([first, second]), EngineeringToolError),
+    error => error.error === "engineering_design_seam_duplicate_authority" &&
+      error.seam_ref === "seam:new-authority",
+    "two slices claimed one seam");
+  const retiring = v2Slice("slice:one", 1);
+  Object.assign(retiring.design_contract.seam_decision, {
+    mode: "replace", target_seam_ref: "seam:successor", replaced_seam_refs: ["seam:engineering-runtime"],
+  });
+  assert.throws(() => requirePlan(v2Plan([retiring, v2Slice("slice:two", 2)]), EngineeringToolError),
+    error => error.error === "engineering_design_seam_half_replacement",
+    "one slice extended a seam another retires");
+});
+
+test("engineering-slice-plan.v1 stays exactly compatible and unknown versions fail explicitly", () => {
+  assert.deepEqual([...ENGINEERING_SLICE_PLAN_VERSIONS],
+    ["engineering-slice-plan.v1", "engineering-slice-plan.v2"]);
+  const v1 = controllerPlan();
+  assert.equal(requirePlan(v1, EngineeringToolError).schema_version, "engineering-slice-plan.v1");
+  const smuggled = structuredClone(v1);
+  smuggled.slices[0].design_contract = designContract(smuggled.slices[0]);
+  refusesPlan(reseal(smuggled), "v1 remains closed against the successor field");
+  const typed = v2Plan([v2Slice()]);
+  const downgraded = structuredClone(typed);
+  downgraded.schema_version = "engineering-slice-plan.v1";
+  refusesPlan(reseal(downgraded), "a v2 slice is not silently reinterpreted as v1");
+  for (const unknown of ["engineering-slice-plan.v3", "engineering-slice-plan", "", null]) {
+    const row = structuredClone(typed);
+    row.schema_version = unknown;
+    assert.throws(() => requirePlan(reseal(row), EngineeringToolError),
+      error => error.error === "engineering_slice_plan_schema_invalid",
+      `unknown schema_version ${JSON.stringify(unknown)}`);
+  }
+});
+
+test("a v2 plan still admits and projects through the existing runtime seams", () => {
+  const typed = v2Plan([v2Slice()]);
+  const accepted = requirePlan(typed, EngineeringToolError);
+  const envelope = buildCodexEnvelope({
+    source, plan: accepted, slice: accepted.slices[0],
+    jobId: "44444444-4444-4444-8444-444444444444", sessionId: "55555555-5555-4555-8555-555555555555",
+    actor, envelopeId: "66666666-6666-4666-8666-666666666666", expiresAt: "2099-01-01T00:00:00Z",
+  });
+  assert.ok(!JSON.stringify(envelope).includes("design_contract"),
+    "the design contract governs admission, not the execution envelope");
+  assert.deepEqual(envelope.request.declared_expectations.plan_step_refs, ["step:synthetic-read"]);
+  const projection = closureProjection(passportFacts(accepted), EngineeringToolError);
+  assert.equal(projection.slice_plan.schema_version, "engineering-slice-plan.v2");
+  assert.equal(projection.slices[0].state, "eligible");
+  assert.equal(projection.closure_state, "blocked");
 });

@@ -250,6 +250,335 @@ def test_duplicate_planned_check_refs_refuse_every_producer_path():
     except ep.EngineeringContractError: pass
 
 
+# --- V5-F03 deep-module execution contract ------------------------------------
+#
+# These fixtures are deliberately the same shape as the ones in
+# mcp-server/test/engineering-runtime.test.mjs.  The two validators must accept
+# and refuse exactly the same closed contract, so the case tables below are kept
+# identical on purpose.
+
+
+def reseal(plan: dict) -> dict:
+    plan["plan_digest"] = contract.canonical_digest({k: v for k, v in plan.items() if k != "plan_digest"})
+    return plan
+
+
+def model_step(**overrides) -> dict:
+    step = {
+        "step_ref": "step:synthetic-read", "responsibility_class": "classification",
+        "input_contract_ref": "contract:step-input", "output_contract_ref": "contract:step-output",
+        "rationale": "the candidate label is genuinely uncertain and code would reduce quality",
+        "selection_basis": ["typed_uncertainty", "quality_gain"],
+    }
+    step.update(overrides)
+    return step
+
+
+def design_contract(row: dict) -> dict:
+    depth = ep.classify_design_depth(row)
+    redaction = "redacted_evidence" if any(
+        check["evidence_requirement"] == "redacted_evidence_required" for check in row["planned_checks"]
+    ) else "metadata_only"
+    return {
+        "contract_version": ep.DESIGN_CONTRACT_VERSION,
+        "rationale": "the closed validator owns this behavior end to end",
+        "dependency_rationale": "no accepted predecessor slice is required",
+        "code_model_decision": {
+            "rationale": "stable enforceable behavior stays deterministic code",
+            "selection_basis": ["capability_gain", "quality_gain"],
+            "model_judgment_steps": [],
+        },
+        "routing": {"executor_class": "deterministic_code", "adapter_ref": "adapter:codex-desktop", "fresh_session_required": True},
+        "authority": {"capability_profile": "capability:engineering-repository-write", "read_only": False, "environment": "rehearsal"},
+        "isolation": {"worktree_required": True, "branch_required": True, "shared_resource_refs": []},
+        "tests": {
+            "planned_check_refs": [check["check_ref"] for check in row["planned_checks"]],
+            "verification_lanes": ["contract"] + (["manual_qa"] if row["manual_qa_required"] else []),
+        },
+        "review": {"independent_review_required": True, "reviewer_class": "independent_agent"},
+        "failure": {"failure_modes": [{
+            "failure_ref": "failure:contract-drift", "detection": "the closed validator refuses the plan",
+            "compensation": "revise the accepted plan revision before admission",
+        }]},
+        "evidence": {
+            "redaction_class": redaction, "retention": "material_redacted",
+            "evidence_refs": [{"ref": "evidence:design", "redaction_class": redaction, "content_digest": digest("a")}],
+        },
+        "deployment": {
+            "release_requirement": row["release_requirement"],
+            "rollback_ref": "release:rollback-plan" if row["release_requirement"] == "required" else None,
+            "confirmation_required": row["risk_class"] not in {"R0", "R1"},
+        },
+        "completion": {
+            "completion_predicate": "every accepted planned check passes under independent review",
+            "verified_by": "independent_review_and_manual_qa" if row["manual_qa_required"] else "independent_review",
+        },
+        "seam_decision": {
+            "mode": "extend", "target_seam_ref": "seam:engineering-runtime",
+            "measurement": {"basis": "complexity_reduction", "note": "extending the proven validator is smaller than a new module"},
+            "new_module_justification": None, "replaced_seam_refs": [], "residual_authority_refs": [],
+        },
+        "full_design_refs": None if depth == "short" else {
+            "design_interview_ref": "interview:v5-f03", "authority_envelope_ref": "envelope:v5-f03",
+            "failure_model_ref": "failure-model:v5-f03", "fixture_refs": ["fixture:v5-f03-boundary"],
+            "oracle_ref": "oracle:doctorcre-v5:Q035.D1",
+        },
+        "short_template": None if depth == "full" else {
+            "template_ref": "template:short-governed-v1",
+            "objective_summary": "one bounded parallel-safe change with no dependencies",
+            "verification_ref": "verification:short-governed-v1",
+        },
+    }
+
+
+def v2_slice(slice_ref: str = "slice:short", ordinal: int = 1, *, design: dict | None = None, **overrides) -> dict:
+    row = {
+        "slice_ref": slice_ref, "ordinal": ordinal, "objective": "Deepen the accepted slice contract",
+        "definition_of_done": "Both validators agree on one closed contract",
+        "dependency_refs": [], "declared_resource_refs": ["resource:worktree-a"],
+        "declared_component_refs": ["component:execution-fabric"], "declared_plan_step_refs": ["step:synthetic-read"],
+        "baseline_evidence_refs": [evidence("evidence:baseline")],
+        "planned_checks": [{"check_ref": "check:contract", "failure_condition": "an unknown field is accepted", "evidence_requirement": "redacted_evidence_required"}],
+        "scope_boundary": "the two existing slice-plan validators", "forbidden_change_refs": ["forbidden:new-authority"],
+        "concurrency_posture": "parallel_safe", "manual_qa_required": False,
+        "risk_class": "R1", "release_requirement": "not_required",
+    }
+    row.update(overrides)
+    row["design_contract"] = copy.deepcopy(design) if design is not None else design_contract(row)
+    return row
+
+
+def v2_plan(slices: list[dict]) -> dict:
+    value = {
+        "schema_version": "engineering-slice-plan.v2",
+        "work_request": {"id": "wr-synthetic-read-only", "state_version": 1, "canonical_record_digest": digest("c")},
+        "accepted_plan_revision": {"id": "plan-synthetic-read", "revision": 1, "digest": digest("a")},
+        "slices": slices,
+    }
+    return reseal(value)
+
+
+def refuses(plan: dict, note: str = "") -> None:
+    try:
+        ep.validate_engineering_slice_plan(plan)
+    except ep.EngineeringContractError:
+        return
+    raise AssertionError(f"plan should have refused: {note}")
+
+
+def test_design_depth_classifier_matches_the_approved_short_predicate():
+    base = v2_slice()
+    assert ep.classify_design_depth(base) == "short"
+    for field, value in (
+        ("concurrency_posture", "serial_after_dependencies"),
+        ("concurrency_posture", "exclusive_resource"),
+        ("manual_qa_required", True),
+        ("release_requirement", "required"),
+        ("dependency_refs", ["slice:other"]),
+        ("declared_resource_refs", ["resource:a", "resource:b"]),
+        ("declared_component_refs", ["component:a", "component:b"]),
+        ("declared_plan_step_refs", ["step:a", "step:b"]),
+    ):
+        row = copy.deepcopy(base); row[field] = value
+        assert ep.classify_design_depth(row) == "full", f"{field}={value}"
+    for risk in ("R0", "R1", "R2", "R3"):
+        row = copy.deepcopy(base); row["risk_class"] = risk
+        assert ep.classify_design_depth(row) == "short", risk
+    for risk in ("R4", "R5", "R6"):
+        row = copy.deepcopy(base); row["risk_class"] = risk
+        assert ep.classify_design_depth(row) == "full", risk
+    # At most one declared resource, component and plan step still qualifies.
+    row = copy.deepcopy(base); row["declared_resource_refs"] = []; row["declared_component_refs"] = []
+    row["declared_plan_step_refs"] = []
+    assert ep.classify_design_depth(row) == "short"
+
+
+def test_planned_check_count_is_never_a_classifier_input():
+    base = v2_slice()
+    inputs = ep.design_depth_inputs(base)
+    assert "planned_check" not in json.dumps(inputs)
+    many = copy.deepcopy(base)
+    many["planned_checks"] = [
+        {"check_ref": f"check:extra-{index}", "failure_condition": "verification is missing",
+         "evidence_requirement": "redacted_evidence_required"} for index in range(4)
+    ]
+    assert ep.design_depth_inputs(many) == inputs
+    assert ep.classify_design_depth(many) == "short"
+    # Every declared check stays mandatory even on the SHORT path.
+    many["design_contract"] = design_contract(many)
+    ep.validate_engineering_slice_plan(v2_plan([copy.deepcopy(many)]))
+    dropped = copy.deepcopy(many); dropped["design_contract"]["tests"]["planned_check_refs"] = ["check:extra-0"]
+    refuses(v2_plan([dropped]), "tests may not drop a planned check")
+    emptied = copy.deepcopy(many); emptied["planned_checks"] = []
+    refuses(v2_plan([emptied]), "a slice must plan at least one check")
+
+
+def test_agent_cannot_self_label_design_depth_or_a_bypass():
+    for label in ("design_depth", "simple", "complexity", "classifier_override", "bypass"):
+        row = v2_slice(); row[label] = "short"
+        try:
+            ep.classify_design_depth(row)
+            raise AssertionError(f"classifier consumed a self-label: {label}")
+        except ep.EngineeringContractError:
+            pass
+        refuses(v2_plan([row]), f"slice self-label {label}")
+        contracted = v2_slice(); contracted["design_contract"][label] = "short"
+        refuses(v2_plan([contracted]), f"contract self-label {label}")
+
+
+def test_every_design_contract_field_is_bound_and_changes_the_canonical_digest():
+    plan = v2_plan([v2_slice()])
+    assert ep.validate_engineering_slice_plan(plan)["plan_digest"] == plan["plan_digest"]
+    for field in sorted(ep.DESIGN_CONTRACT_FIELDS):
+        missing = copy.deepcopy(plan); del missing["slices"][0]["design_contract"][field]
+        refuses(reseal(missing), f"missing {field}")
+    extra = copy.deepcopy(plan); extra["slices"][0]["design_contract"]["extra_field"] = "x"
+    refuses(reseal(extra), "unknown design contract field")
+    stale = copy.deepcopy(plan); stale["slices"][0]["design_contract"]["rationale"] = "a different rationale"
+    assert contract.canonical_digest({k: v for k, v in stale.items() if k != "plan_digest"}) != plan["plan_digest"]
+    refuses(stale, "stale digest after a design contract change")
+    for path, value in (
+        (("routing", "fresh_session_required"), False),
+        (("authority", "capability_profile"), "capability:read-only"),
+        (("isolation", "worktree_required"), False),
+        (("review", "independent_review_required"), False),
+        (("evidence", "redaction_class"), "metadata_only"),
+        (("deployment", "release_requirement"), "required"),
+        (("completion", "verified_by"), "independent_review_and_manual_qa"),
+    ):
+        row = copy.deepcopy(plan); row["slices"][0]["design_contract"][path[0]][path[1]] = value
+        refuses(reseal(row), f"{path[0]}.{path[1]}={value}")
+    empty_failure = copy.deepcopy(plan); empty_failure["slices"][0]["design_contract"]["failure"]["failure_modes"] = []
+    refuses(reseal(empty_failure), "a slice must model at least one failure mode")
+
+
+def test_reserved_deterministic_responsibilities_refuse_model_judgment():
+    for reserved in sorted(ep.RESERVED_CODE_RESPONSIBILITIES):
+        row = v2_slice()
+        row["design_contract"]["routing"]["executor_class"] = "model_assisted"
+        row["design_contract"]["code_model_decision"]["model_judgment_steps"] = [model_step(responsibility_class=reserved)]
+        refuses(v2_plan([row]), f"model judgment claimed {reserved}")
+
+
+def test_model_step_requires_typed_contracts_rationale_and_more_than_cost():
+    accepted = v2_slice()
+    accepted["design_contract"]["routing"]["executor_class"] = "model_assisted"
+    accepted["design_contract"]["code_model_decision"]["model_judgment_steps"] = [model_step()]
+    ep.validate_engineering_slice_plan(v2_plan([copy.deepcopy(accepted)]))
+    for override in (
+        {"input_contract_ref": ""}, {"output_contract_ref": ""}, {"rationale": "  "},
+        {"selection_basis": ["cost"]}, {"selection_basis": []}, {"selection_basis": ["invented"]},
+        {"step_ref": "step:never-declared"}, {"responsibility_class": "vibes"},
+    ):
+        row = v2_slice()
+        row["design_contract"]["routing"]["executor_class"] = "model_assisted"
+        row["design_contract"]["code_model_decision"]["model_judgment_steps"] = [model_step(**override)]
+        refuses(v2_plan([row]), f"model step {override}")
+    # Routing and the declared seams must agree in both directions.
+    deterministic = v2_slice()
+    deterministic["design_contract"]["code_model_decision"]["model_judgment_steps"] = [model_step()]
+    refuses(v2_plan([deterministic]), "a deterministic_code route cannot carry model judgment")
+    unstaffed = v2_slice(); unstaffed["design_contract"]["routing"]["executor_class"] = "model_assisted"
+    refuses(v2_plan([unstaffed]), "a model_assisted route needs a typed model step")
+    # Q029.D1: price alone never selects model work; a capability reason may.
+    cost_only = v2_slice(); cost_only["design_contract"]["code_model_decision"]["selection_basis"] = ["cost"]
+    refuses(v2_plan([cost_only]), "cost alone selected the code/model choice")
+    measured = v2_slice(); measured["design_contract"]["code_model_decision"]["selection_basis"] = ["cost", "capability_gain"]
+    ep.validate_engineering_slice_plan(v2_plan([measured]))
+
+
+def test_full_depth_requires_the_full_envelope_and_short_stays_governed():
+    short = v2_slice()
+    ep.validate_engineering_slice_plan(v2_plan([copy.deepcopy(short)]))
+    complex_row = v2_slice(risk_class="R4")
+    assert ep.classify_design_depth(complex_row) == "full"
+    ep.validate_engineering_slice_plan(v2_plan([copy.deepcopy(complex_row)]))
+    smuggled = copy.deepcopy(complex_row)
+    smuggled["design_contract"]["full_design_refs"] = None
+    smuggled["design_contract"]["short_template"] = copy.deepcopy(short["design_contract"]["short_template"])
+    refuses(v2_plan([smuggled]), "high-risk work took the shorter template")
+    for field in ("design_interview_ref", "authority_envelope_ref", "failure_model_ref", "oracle_ref"):
+        row = copy.deepcopy(complex_row); row["design_contract"]["full_design_refs"][field] = ""
+        refuses(v2_plan([row]), f"full_design_refs {field}")
+    no_fixtures = copy.deepcopy(complex_row); no_fixtures["design_contract"]["full_design_refs"]["fixture_refs"] = []
+    refuses(v2_plan([no_fixtures]), "full depth requires fixtures")
+    overreaching = copy.deepcopy(short)
+    overreaching["design_contract"]["full_design_refs"] = copy.deepcopy(complex_row["design_contract"]["full_design_refs"])
+    refuses(v2_plan([overreaching]), "the SHORT shape is exact")
+    # SHORT is a shorter template, not a bypass: every other facet stays required.
+    for field in ("review", "failure", "evidence", "deployment", "completion", "seam_decision", "tests"):
+        row = copy.deepcopy(short); del row["design_contract"][field]
+        refuses(v2_plan([row]), f"SHORT dropped {field}")
+    ungoverned = copy.deepcopy(short); ungoverned["design_contract"]["review"]["independent_review_required"] = False
+    refuses(v2_plan([ungoverned]), "SHORT waived independent review")
+    # R2/R3 keep their canonical confirmation gate even when SHORT applies.
+    material = v2_slice(risk_class="R3")
+    assert ep.classify_design_depth(material) == "short"
+    unconfirmed = copy.deepcopy(material); unconfirmed["design_contract"]["deployment"]["confirmation_required"] = False
+    refuses(v2_plan([unconfirmed]), "R3 dropped its explicit confirmation gate")
+
+
+def test_seam_decisions_refuse_duplicate_authority_and_half_replacement():
+    ep.validate_engineering_slice_plan(v2_plan([v2_slice()]))
+    unjustified = v2_slice()
+    unjustified["design_contract"]["seam_decision"].update({"mode": "new_module", "new_module_justification": None})
+    refuses(v2_plan([unjustified]), "a new module needs a real seam")
+    invented = v2_slice()
+    invented["design_contract"]["seam_decision"].update({"mode": "new_module", "new_module_justification": "convenience"})
+    refuses(v2_plan([invented]), "convenience is not an accepted module justification")
+    justified = v2_slice()
+    justified["design_contract"]["seam_decision"].update({"mode": "new_module", "new_module_justification": "lifecycle"})
+    ep.validate_engineering_slice_plan(v2_plan([justified]))
+    unmeasured = v2_slice()
+    unmeasured["design_contract"]["seam_decision"]["measurement"] = {"basis": "gut_feel", "note": "it felt simpler"}
+    refuses(v2_plan([unmeasured]), "reuse/extend/replace must be measured")
+    half = v2_slice()
+    half["design_contract"]["seam_decision"].update({
+        "mode": "replace", "replaced_seam_refs": ["seam:legacy"], "residual_authority_refs": ["seam:legacy-residual"]})
+    refuses(v2_plan([half]), "a replacement that leaves residual authority is a half-fix")
+    itself = v2_slice()
+    itself["design_contract"]["seam_decision"].update({
+        "mode": "replace", "replaced_seam_refs": ["seam:engineering-runtime"]})
+    refuses(v2_plan([itself]), "a seam cannot replace itself")
+    first = v2_slice("slice:one", 1)
+    first["design_contract"]["seam_decision"].update({
+        "mode": "new_module", "target_seam_ref": "seam:new-authority", "new_module_justification": "authority"})
+    second = v2_slice("slice:two", 2)
+    second["design_contract"]["seam_decision"].update({
+        "mode": "replace", "target_seam_ref": "seam:new-authority", "replaced_seam_refs": ["seam:old-authority"]})
+    refuses(v2_plan([first, second]), "two slices claimed one seam")
+    retiring = v2_slice("slice:one", 1)
+    retiring["design_contract"]["seam_decision"].update({
+        "mode": "replace", "target_seam_ref": "seam:successor", "replaced_seam_refs": ["seam:engineering-runtime"]})
+    extending = v2_slice("slice:two", 2)
+    refuses(v2_plan([retiring, extending]), "one slice extended a seam another retires")
+
+
+def test_v1_stays_exactly_compatible_and_unknown_versions_fail_explicitly():
+    v1 = plan_fixture()
+    assert ep.validate_engineering_slice_plan(v1)["schema_version"] == "engineering-slice-plan.v1"
+    smuggled = copy.deepcopy(v1)
+    smuggled["slices"][0]["design_contract"] = design_contract(smuggled["slices"][0])
+    refuses(reseal(smuggled), "v1 remains closed against the successor field")
+    v2 = v2_plan([v2_slice()])
+    downgraded = copy.deepcopy(v2); downgraded["schema_version"] = "engineering-slice-plan.v1"
+    refuses(reseal(downgraded), "a v2 slice is not silently reinterpreted as v1")
+    for unknown in ("engineering-slice-plan.v3", "engineering-slice-plan", "", None):
+        row = copy.deepcopy(v2); row["schema_version"] = unknown
+        refuses(reseal(row), f"unknown schema_version {unknown!r}")
+    assert ep.ENGINEERING_SLICE_PLAN_VERSIONS == ("engineering-slice-plan.v1", "engineering-slice-plan.v2")
+
+
+def test_v2_plan_projects_through_the_existing_packet_and_passport_seams():
+    plan = v2_plan([v2_slice()])
+    packet = ep.build_engineering_slice_packet(ENVELOPE, plan, "slice:short")
+    assert "design_contract" not in packet
+    assert ep.validate_engineering_slice_packet(packet, plan, ENVELOPE)["packet_digest"] == packet["packet_digest"]
+    row = receipt(plan, "slice:short")
+    ep.validate_engineering_slice_receipt(row, plan, ENVELOPE)
+    passport = ep.project_engineering_passport(plan, [row], execution_envelopes=[ENVELOPE])
+    assert ep.validate_engineering_passport(passport)["closure_state"] == "blocked"
+
 
 if __name__ == "__main__":
     tests = [value for name, value in globals().items() if name.startswith("test_")]

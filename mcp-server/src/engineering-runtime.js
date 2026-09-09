@@ -73,12 +73,398 @@ function exactAuthorityFree(args, ToolError) {
   if (found.length) error(ToolError, { error: "caller_authority_selector_forbidden", fields: found });
 }
 
+// --- V5-F03 deep-module execution contract -----------------------------------
+//
+// engineering-slice-plan.v1 keeps its exact accepted shape, refusals and
+// canonical digest.  The Q046.D1 machine-readable slice contract, the
+// Q016.D1/Q029.D1 code-versus-model bindings and the Q035.D1 design-depth
+// classifier arrive as the explicit successor engineering-slice-plan.v2 so no
+// established v1 producer is silently reinterpreted, and this stays the one
+// slice-contract authority rather than a second parallel validator.  The
+// portable tools/room-bridge/engineering_passport.py validator implements the
+// identical predicate; the two must accept and refuse exactly the same inputs.
+
+export const ENGINEERING_SLICE_PLAN_VERSIONS = Object.freeze([
+  "engineering-slice-plan.v1", "engineering-slice-plan.v2",
+]);
+const SLICE_PLAN_V2 = "engineering-slice-plan.v2";
+export const ENGINEERING_DESIGN_CONTRACT_VERSION = "engineering-design-contract.v1";
+
+const CONCURRENCY_POSTURES = new Set(["parallel_safe", "serial_after_dependencies", "exclusive_resource"]);
+const RELEASE_REQUIREMENTS = new Set(["required", "not_required"]);
+const EVIDENCE_REQUIREMENTS = new Set(["redacted_evidence_required", "metadata_only_sufficient"]);
+
+// Q035.D1 classifier inputs.  planned_checks is deliberately absent: every
+// declared check stays mandatory and adding verification can never move a slice
+// from SHORT to FULL.  Free text is never parsed, because interpreting prose
+// would recreate model judgment and an unaccepted taxonomy.
+const DESIGN_DEPTH_INPUT_FIELDS = Object.freeze([
+  "risk_class", "concurrency_posture", "manual_qa_required", "release_requirement",
+  "dependency_refs", "declared_resource_refs", "declared_component_refs", "declared_plan_step_refs",
+]);
+const DESIGN_DEPTH_COUNTED_ARRAYS = Object.freeze([
+  "dependency_refs", "declared_resource_refs", "declared_component_refs", "declared_plan_step_refs",
+]);
+const SHORT_RISK_CLASSES = new Set(["R0", "R1", "R2", "R3"]);
+
+// The agent may never hand the classifier its own answer.  The closed field set
+// already refuses unknown keys; this named refusal makes the bypass explicit.
+const SELF_LABEL_FIELDS = new Set([
+  "design_depth", "depth", "template", "template_kind", "complexity", "complexity_class",
+  "simple", "is_simple", "classification", "classifier_override", "bypass",
+]);
+
+const DESIGN_CONTRACT_FIELDS = Object.freeze([
+  "authority", "code_model_decision", "completion", "contract_version", "dependency_rationale",
+  "deployment", "evidence", "failure", "full_design_refs", "isolation", "rationale", "review",
+  "routing", "seam_decision", "short_template", "tests",
+]);
+const MODEL_STEP_FIELDS = Object.freeze([
+  "input_contract_ref", "output_contract_ref", "rationale", "responsibility_class",
+  "selection_basis", "step_ref",
+]);
+const FULL_DESIGN_REF_FIELDS = Object.freeze([
+  "authority_envelope_ref", "design_interview_ref", "failure_model_ref", "fixture_refs", "oracle_ref",
+]);
+const SHORT_TEMPLATE_FIELDS = Object.freeze(["objective_summary", "template_ref", "verification_ref"]);
+
+// Q016.D1: deterministic code owns these outright; a model judgment step that
+// claims one of them is refused rather than reviewed.
+const RESERVED_CODE_RESPONSIBILITIES = new Set([
+  "identity", "policy", "permissions", "state", "validation", "idempotency", "execution",
+]);
+const TYPED_UNCERTAINTY_CLASSES = new Set([
+  "classification", "extraction", "summarization", "ranking", "drafting", "disambiguation",
+]);
+// Q029.D1: cost may appear alongside a capability reason but never alone.
+const SELECTION_BASIS_VALUES = new Set([
+  "typed_uncertainty", "capability_gain", "quality_gain", "adaptability_gain", "cost",
+]);
+const EXECUTOR_CLASSES = new Set(["deterministic_code", "attended_human", "model_assisted"]);
+const AUTHORITY_ENVIRONMENTS = new Set(["local", "rehearsal", "staging", "production"]);
+const VERIFICATION_LANES = new Set(["unit", "contract", "integration", "manual_qa"]);
+const REVIEWER_CLASSES = new Set(["independent_agent", "independent_human"]);
+const EVIDENCE_REDACTION_CLASSES = new Set(["metadata_only", "redacted_evidence"]);
+const EVIDENCE_RETENTIONS = new Set(["ephemeral", "material_redacted"]);
+const COMPLETION_VERIFIERS = new Set(["independent_review", "independent_review_and_manual_qa"]);
+// Q063.D1 / Q122.D1: extend a proven deep module, or replace it cleanly; a new
+// module needs a real seam and no plan may create two owners for one seam.
+const SEAM_MODES = new Set(["reuse", "extend", "replace", "new_module"]);
+const NEW_MODULE_JUSTIFICATIONS = new Set(["authority", "lifecycle", "failure_isolation", "multi_adapter"]);
+const MEASUREMENT_BASES = new Set([
+  "complexity_reduction", "defect_rate", "coverage", "latency", "operator_effort",
+]);
+
+function isIdentifierArray(value) {
+  return Array.isArray(value) && value.every(item => typeof item === "string" && ID.test(item));
+}
+
+function refuseSelfLabel(value, field, sliceRef, ToolError) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const found = Object.keys(value).filter(key => SELF_LABEL_FIELDS.has(key)).sort();
+  if (found.length)
+    error(ToolError, { error: "engineering_design_depth_self_label_forbidden", field, slice_ref: sliceRef, fields: found });
+}
+
+/**
+ * Return the exact bound Q035.D1 classifier inputs for one accepted slice.
+ *
+ * Cardinality is the only thing read from the counted closed arrays, and the
+ * planned check count is never returned, so extra verification can never be
+ * penalised by the classifier.
+ */
+export function designDepthInputs(slice, ToolError) {
+  if (!slice || typeof slice !== "object" || Array.isArray(slice))
+    error(ToolError, { error: "engineering_design_depth_input_invalid" });
+  refuseSelfLabel(slice, "slice", slice.slice_ref, ToolError);
+  for (const field of DESIGN_DEPTH_INPUT_FIELDS)
+    if (!Object.hasOwn(slice, field))
+      error(ToolError, { error: "engineering_design_depth_input_missing", field, slice_ref: slice.slice_ref });
+  if (!/^R[0-6]$/.test(slice.risk_class) || !CONCURRENCY_POSTURES.has(slice.concurrency_posture) ||
+      typeof slice.manual_qa_required !== "boolean" || !RELEASE_REQUIREMENTS.has(slice.release_requirement))
+    error(ToolError, { error: "engineering_design_depth_input_invalid", slice_ref: slice.slice_ref });
+  const counts = {};
+  for (const field of DESIGN_DEPTH_COUNTED_ARRAYS) {
+    if (!isIdentifierArray(slice[field]))
+      error(ToolError, { error: "engineering_design_depth_input_invalid", field, slice_ref: slice.slice_ref });
+    counts[field] = slice[field].length;
+  }
+  return Object.freeze({
+    risk_class: slice.risk_class,
+    concurrency_posture: slice.concurrency_posture,
+    manual_qa_required: slice.manual_qa_required,
+    release_requirement: slice.release_requirement,
+    dependency_count: counts.dependency_refs,
+    declared_resource_count: counts.declared_resource_refs,
+    declared_component_count: counts.declared_component_refs,
+    declared_plan_step_count: counts.declared_plan_step_refs,
+  });
+}
+
+/**
+ * The deterministic Q035.D1 design-depth classifier.
+ *
+ * SHORT requires every accepted condition: R0-R3, parallel-safe, no manual QA,
+ * no release requirement, zero dependencies, and at most one declared resource,
+ * component and plan step.  Every other valid combination is FULL, and an
+ * invalid slice never reaches this function at all.
+ *
+ * SHORT changes design-template depth only.  It grants no action authority,
+ * waives no R0-R6 operating gate, reduces no verification and activates no
+ * effect; ordinary attended source delivery still follows real effects.
+ */
+export function classifyDesignDepth(slice, ToolError) {
+  const row = designDepthInputs(slice, ToolError);
+  const short = SHORT_RISK_CLASSES.has(row.risk_class) &&
+    row.concurrency_posture === "parallel_safe" &&
+    row.manual_qa_required === false &&
+    row.release_requirement === "not_required" &&
+    row.dependency_count === 0 &&
+    row.declared_resource_count <= 1 &&
+    row.declared_component_count <= 1 &&
+    row.declared_plan_step_count <= 1;
+  return short ? "short" : "full";
+}
+
+function requireSelectionBasis(value, field, sliceRef, ToolError) {
+  const fail = reason => error(ToolError, { error: reason, field, slice_ref: sliceRef });
+  if (!Array.isArray(value) || !value.length || value.some(item => typeof item !== "string") ||
+      new Set(value).size !== value.length || value.some(item => !SELECTION_BASIS_VALUES.has(item)))
+    fail("engineering_design_contract_field_invalid");
+  if (value.length === 1 && value[0] === "cost") fail("engineering_design_cost_only_selection");
+  return value;
+}
+
+function requireModelJudgmentSteps(slice, decision, ToolError) {
+  const sliceRef = slice.slice_ref;
+  const fail = (reason, field) => error(ToolError, { error: reason, field, slice_ref: sliceRef });
+  const steps = decision.model_judgment_steps;
+  if (!Array.isArray(steps)) fail("engineering_design_contract_field_invalid", "code_model_decision.model_judgment_steps");
+  const seen = new Set();
+  for (const step of steps) {
+    if (!exactObject(step, MODEL_STEP_FIELDS)) fail("engineering_design_model_step_invalid", "model_judgment_steps");
+    if (typeof step.step_ref !== "string" || !ID.test(step.step_ref) || seen.has(step.step_ref) ||
+        !slice.declared_plan_step_refs.includes(step.step_ref))
+      fail("engineering_design_model_step_invalid", "model_judgment_steps.step_ref");
+    seen.add(step.step_ref);
+    if (RESERVED_CODE_RESPONSIBILITIES.has(step.responsibility_class))
+      error(ToolError, {
+        error: "engineering_design_model_step_reserved_responsibility", slice_ref: sliceRef,
+        field: "model_judgment_steps.responsibility_class", responsibility_class: step.responsibility_class,
+        resolution: "deterministic code owns identity, policy, permissions, state, validation, idempotency and execution",
+      });
+    if (!TYPED_UNCERTAINTY_CLASSES.has(step.responsibility_class))
+      fail("engineering_design_model_step_invalid", "model_judgment_steps.responsibility_class");
+    for (const field of ["input_contract_ref", "output_contract_ref"])
+      if (typeof step[field] !== "string" || !ID.test(step[field]))
+        fail("engineering_design_model_step_invalid", `model_judgment_steps.${field}`);
+    if (!nonEmptyText(step.rationale)) fail("engineering_design_model_step_invalid", "model_judgment_steps.rationale");
+    requireSelectionBasis(step.selection_basis, "model_judgment_steps.selection_basis", sliceRef, ToolError);
+  }
+  return steps;
+}
+
+function requireDesignDepthMaterial(slice, contract, ToolError) {
+  const sliceRef = slice.slice_ref;
+  const depth = classifyDesignDepth(slice, ToolError);
+  const fail = field => error(ToolError, {
+    error: "engineering_design_depth_material_invalid", field, slice_ref: sliceRef, design_depth: depth,
+  });
+  if (depth === "full") {
+    if (contract.short_template !== null) fail("short_template");
+    const refs = contract.full_design_refs;
+    if (!exactObject(refs, FULL_DESIGN_REF_FIELDS)) fail("full_design_refs");
+    for (const field of ["design_interview_ref", "authority_envelope_ref", "failure_model_ref", "oracle_ref"])
+      if (typeof refs[field] !== "string" || !ID.test(refs[field])) fail(`full_design_refs.${field}`);
+    if (!isUniqueIdentifierArray(refs.fixture_refs) || !refs.fixture_refs.length) fail("full_design_refs.fixture_refs");
+    return depth;
+  }
+  if (contract.full_design_refs !== null) fail("full_design_refs");
+  const template = contract.short_template;
+  if (!exactObject(template, SHORT_TEMPLATE_FIELDS)) fail("short_template");
+  for (const field of ["template_ref", "verification_ref"])
+    if (typeof template[field] !== "string" || !ID.test(template[field])) fail(`short_template.${field}`);
+  if (!nonEmptyText(template.objective_summary)) fail("short_template.objective_summary");
+  return depth;
+}
+
+/** Validate the closed Q046.D1 slice contract for one accepted v2 slice. */
+function requireDesignContract(slice, ToolError) {
+  const sliceRef = slice.slice_ref;
+  const contract = slice.design_contract;
+  const fail = (reason, field) => error(ToolError, { error: reason, field, slice_ref: sliceRef });
+  const bad = field => fail("engineering_design_contract_field_invalid", field);
+  refuseSelfLabel(contract, "design_contract", sliceRef, ToolError);
+  if (!exactObject(contract, DESIGN_CONTRACT_FIELDS)) fail("engineering_design_contract_invalid", "design_contract");
+  if (contract.contract_version !== ENGINEERING_DESIGN_CONTRACT_VERSION)
+    fail("engineering_design_contract_version_invalid", "contract_version");
+  for (const field of ["rationale", "dependency_rationale"]) if (!nonEmptyText(contract[field])) bad(field);
+
+  const decision = contract.code_model_decision;
+  if (!exactObject(decision, ["model_judgment_steps", "rationale", "selection_basis"])) bad("code_model_decision");
+  if (!nonEmptyText(decision.rationale)) bad("code_model_decision.rationale");
+  requireSelectionBasis(decision.selection_basis, "code_model_decision.selection_basis", sliceRef, ToolError);
+  const steps = requireModelJudgmentSteps(slice, decision, ToolError);
+
+  const routing = contract.routing;
+  if (!exactObject(routing, ["adapter_ref", "executor_class", "fresh_session_required"])) bad("routing");
+  if (!EXECUTOR_CLASSES.has(routing.executor_class)) bad("routing.executor_class");
+  if (typeof routing.adapter_ref !== "string" || !ID.test(routing.adapter_ref)) bad("routing.adapter_ref");
+  if (routing.fresh_session_required !== true) bad("routing.fresh_session_required");
+  if (routing.executor_class === "deterministic_code" && steps.length) bad("routing.executor_class");
+  if (routing.executor_class === "model_assisted" && !steps.length) bad("routing.executor_class");
+
+  const authority = contract.authority;
+  if (!exactObject(authority, ["capability_profile", "environment", "read_only"])) bad("authority");
+  if (typeof authority.capability_profile !== "string" || !ID.test(authority.capability_profile)) bad("authority.capability_profile");
+  if (typeof authority.read_only !== "boolean") bad("authority.read_only");
+  if (!AUTHORITY_ENVIRONMENTS.has(authority.environment)) bad("authority.environment");
+  if (!authority.read_only && authority.capability_profile !== "capability:engineering-repository-write")
+    bad("authority.capability_profile");
+
+  const isolation = contract.isolation;
+  if (!exactObject(isolation, ["branch_required", "shared_resource_refs", "worktree_required"])) bad("isolation");
+  if (isolation.worktree_required !== true || isolation.branch_required !== true) bad("isolation.worktree_required");
+  if (!isUniqueIdentifierArray(isolation.shared_resource_refs)) bad("isolation.shared_resource_refs");
+  if (isolation.shared_resource_refs.some(ref => !slice.declared_resource_refs.includes(ref)))
+    bad("isolation.shared_resource_refs");
+  if (isolation.shared_resource_refs.length && slice.concurrency_posture === "parallel_safe")
+    bad("isolation.shared_resource_refs");
+
+  const tests = contract.tests;
+  if (!exactObject(tests, ["planned_check_refs", "verification_lanes"])) bad("tests");
+  const plannedRefs = slice.planned_checks.map(check => check.check_ref);
+  if (!isUniqueIdentifierArray(tests.planned_check_refs) ||
+      tests.planned_check_refs.join(",") !== plannedRefs.join(",")) bad("tests.planned_check_refs");
+  if (!Array.isArray(tests.verification_lanes) || !tests.verification_lanes.length ||
+      new Set(tests.verification_lanes).size !== tests.verification_lanes.length ||
+      tests.verification_lanes.some(lane => !VERIFICATION_LANES.has(lane))) bad("tests.verification_lanes");
+  if (tests.verification_lanes.includes("manual_qa") !== slice.manual_qa_required) bad("tests.verification_lanes");
+
+  const review = contract.review;
+  if (!exactObject(review, ["independent_review_required", "reviewer_class"])) bad("review");
+  if (review.independent_review_required !== true) bad("review.independent_review_required");
+  if (!REVIEWER_CLASSES.has(review.reviewer_class)) bad("review.reviewer_class");
+
+  const failure = contract.failure;
+  if (!exactObject(failure, ["failure_modes"])) bad("failure");
+  if (!Array.isArray(failure.failure_modes) || !failure.failure_modes.length) bad("failure.failure_modes");
+  const failureRefs = new Set();
+  for (const mode of failure.failure_modes) {
+    if (!exactObject(mode, ["compensation", "detection", "failure_ref"])) bad("failure.failure_modes");
+    if (typeof mode.failure_ref !== "string" || !ID.test(mode.failure_ref) || failureRefs.has(mode.failure_ref))
+      bad("failure.failure_modes.failure_ref");
+    failureRefs.add(mode.failure_ref);
+    for (const field of ["detection", "compensation"])
+      if (!nonEmptyText(mode[field])) bad(`failure.failure_modes.${field}`);
+  }
+
+  const evidenceFacet = contract.evidence;
+  if (!exactObject(evidenceFacet, ["evidence_refs", "redaction_class", "retention"])) bad("evidence");
+  if (!EVIDENCE_REDACTION_CLASSES.has(evidenceFacet.redaction_class)) bad("evidence.redaction_class");
+  if (!EVIDENCE_RETENTIONS.has(evidenceFacet.retention)) bad("evidence.retention");
+  if (!isTypedEvidenceArray(evidenceFacet.evidence_refs)) bad("evidence.evidence_refs");
+  if (evidenceFacet.evidence_refs.some(item => item.redaction_class !== evidenceFacet.redaction_class))
+    bad("evidence.evidence_refs");
+  if (slice.planned_checks.some(check => check.evidence_requirement === "redacted_evidence_required") &&
+      evidenceFacet.redaction_class !== "redacted_evidence") bad("evidence.redaction_class");
+
+  const deployment = contract.deployment;
+  if (!exactObject(deployment, ["confirmation_required", "release_requirement", "rollback_ref"])) bad("deployment");
+  if (deployment.release_requirement !== slice.release_requirement) bad("deployment.release_requirement");
+  if (deployment.release_requirement === "required"
+    ? (typeof deployment.rollback_ref !== "string" || !ID.test(deployment.rollback_ref))
+    : (deployment.rollback_ref !== null && (typeof deployment.rollback_ref !== "string" || !ID.test(deployment.rollback_ref))))
+    bad("deployment.rollback_ref");
+  if (typeof deployment.confirmation_required !== "boolean") bad("deployment.confirmation_required");
+  if (!["R0", "R1"].includes(slice.risk_class) && deployment.confirmation_required !== true)
+    bad("deployment.confirmation_required");
+
+  const completion = contract.completion;
+  if (!exactObject(completion, ["completion_predicate", "verified_by"])) bad("completion");
+  if (!nonEmptyText(completion.completion_predicate)) bad("completion.completion_predicate");
+  if (!COMPLETION_VERIFIERS.has(completion.verified_by)) bad("completion.verified_by");
+  if (completion.verified_by !== (slice.manual_qa_required ? "independent_review_and_manual_qa" : "independent_review"))
+    bad("completion.verified_by");
+
+  const seam = contract.seam_decision;
+  if (!exactObject(seam, [
+    "measurement", "mode", "new_module_justification", "replaced_seam_refs",
+    "residual_authority_refs", "target_seam_ref",
+  ])) fail("engineering_design_seam_invalid", "seam_decision");
+  if (!SEAM_MODES.has(seam.mode)) fail("engineering_design_seam_invalid", "seam_decision.mode");
+  if (typeof seam.target_seam_ref !== "string" || !ID.test(seam.target_seam_ref))
+    fail("engineering_design_seam_invalid", "seam_decision.target_seam_ref");
+  if (!exactObject(seam.measurement, ["basis", "note"]) || !MEASUREMENT_BASES.has(seam.measurement.basis) ||
+      !nonEmptyText(seam.measurement.note)) fail("engineering_design_seam_invalid", "seam_decision.measurement");
+  if (!isUniqueIdentifierArray(seam.replaced_seam_refs)) fail("engineering_design_seam_invalid", "seam_decision.replaced_seam_refs");
+  if (!isUniqueIdentifierArray(seam.residual_authority_refs)) fail("engineering_design_seam_invalid", "seam_decision.residual_authority_refs");
+  if (seam.mode === "new_module") {
+    if (!NEW_MODULE_JUSTIFICATIONS.has(seam.new_module_justification))
+      error(ToolError, {
+        error: "engineering_design_seam_invalid", slice_ref: sliceRef, field: "seam_decision.new_module_justification",
+        resolution: "create a module only for a real authority, lifecycle, failure-isolation or multi-adapter seam",
+      });
+  } else if (seam.new_module_justification !== null) {
+    fail("engineering_design_seam_invalid", "seam_decision.new_module_justification");
+  }
+  if (seam.mode === "replace") {
+    if (!seam.replaced_seam_refs.length || seam.replaced_seam_refs.includes(seam.target_seam_ref))
+      fail("engineering_design_seam_invalid", "seam_decision.replaced_seam_refs");
+    if (seam.residual_authority_refs.length)
+      fail("engineering_design_seam_half_replacement", "seam_decision.residual_authority_refs");
+  } else {
+    if (seam.replaced_seam_refs.length) fail("engineering_design_seam_invalid", "seam_decision.replaced_seam_refs");
+    if (seam.residual_authority_refs.length)
+      fail("engineering_design_seam_duplicate_authority", "seam_decision.residual_authority_refs");
+  }
+
+  return requireDesignDepthMaterial(slice, contract, ToolError);
+}
+
+/** Refuse duplicate seam authority and half-replacement across one plan. */
+function requireSeamAuthority(plan, ToolError) {
+  const owners = new Map();
+  const retired = new Map();
+  for (const slice of plan.slices) {
+    const seam = slice.design_contract.seam_decision;
+    if (["new_module", "replace"].includes(seam.mode)) {
+      if (owners.has(seam.target_seam_ref))
+        error(ToolError, {
+          error: "engineering_design_seam_duplicate_authority", seam_ref: seam.target_seam_ref,
+          slice_ref: slice.slice_ref, owning_slice_ref: owners.get(seam.target_seam_ref),
+        });
+      owners.set(seam.target_seam_ref, slice.slice_ref);
+    }
+    for (const seamRef of seam.replaced_seam_refs) {
+      if (retired.has(seamRef))
+        error(ToolError, {
+          error: "engineering_design_seam_duplicate_authority", seam_ref: seamRef,
+          slice_ref: slice.slice_ref, owning_slice_ref: retired.get(seamRef),
+        });
+      retired.set(seamRef, slice.slice_ref);
+    }
+  }
+  for (const slice of plan.slices) {
+    const seam = slice.design_contract.seam_decision;
+    if (["reuse", "extend"].includes(seam.mode) && retired.has(seam.target_seam_ref))
+      error(ToolError, {
+        error: "engineering_design_seam_half_replacement", seam_ref: seam.target_seam_ref,
+        slice_ref: slice.slice_ref, retiring_slice_ref: retired.get(seam.target_seam_ref),
+      });
+  }
+}
+
 export function requirePlan(plan, ToolError) {
   if (!plan || typeof plan !== "object" || Array.isArray(plan)) error(ToolError, { error: "engineering_slice_plan_invalid" });
   if (Object.keys(plan).sort().join(",") !== "accepted_plan_revision,plan_digest,schema_version,slices,work_request") error(ToolError, { error: "engineering_slice_plan_unknown_field" });
   for (const key of ["schema_version", "work_request", "accepted_plan_revision", "plan_digest", "slices"])
     if (!(key in plan)) error(ToolError, { error: "engineering_slice_plan_missing_field", field: key });
-  if (plan.schema_version !== "engineering-slice-plan.v1") error(ToolError, { error: "engineering_slice_plan_schema_invalid" });
+  if (!ENGINEERING_SLICE_PLAN_VERSIONS.includes(plan.schema_version))
+    error(ToolError, {
+      error: "engineering_slice_plan_schema_invalid", schema_version: plan.schema_version ?? null,
+      supported: [...ENGINEERING_SLICE_PLAN_VERSIONS],
+    });
   const binding = plan.work_request;
   if (!binding || typeof binding !== "object" || Array.isArray(binding) || Object.keys(binding).sort().join(",") !== "canonical_record_digest,id,state_version")
     error(ToolError, { error: "engineering_slice_plan_work_binding_invalid" });
@@ -94,10 +480,13 @@ export function requirePlan(plan, ToolError) {
   const refs = new Set();
   for (const slice of plan.slices) {
     const required = ["baseline_evidence_refs", "concurrency_posture", "declared_component_refs", "declared_plan_step_refs", "declared_resource_refs", "definition_of_done", "dependency_refs", "forbidden_change_refs", "manual_qa_required", "objective", "ordinal", "planned_checks", "release_requirement", "risk_class", "scope_boundary", "slice_ref"];
+    if (plan.schema_version === SLICE_PLAN_V2) required.push("design_contract");
+    required.sort();
+    refuseSelfLabel(slice, "slice", slice?.slice_ref, ToolError);
     if (!slice || typeof slice !== "object" || Array.isArray(slice) || Object.keys(slice).sort().join(",") !== required.join(",")) error(ToolError, { error: "engineering_slice_schema_invalid", slice_ref: slice?.slice_ref });
     id(slice.slice_ref, "slice_ref", ToolError);
     if (!Number.isInteger(slice.ordinal) || slice.ordinal < 1 || typeof slice.objective !== "string" || !slice.objective.trim() || typeof slice.definition_of_done !== "string" || !slice.definition_of_done.trim() || typeof slice.scope_boundary !== "string" || !slice.scope_boundary.trim()) error(ToolError, { error: "engineering_slice_fields_invalid", slice_ref: slice.slice_ref });
-    if (!["parallel_safe", "serial_after_dependencies", "exclusive_resource"].includes(slice.concurrency_posture) || !/^R[0-6]$/.test(slice.risk_class) || !["required", "not_required"].includes(slice.release_requirement) || typeof slice.manual_qa_required !== "boolean") error(ToolError, { error: "engineering_slice_enum_invalid", slice_ref: slice.slice_ref });
+    if (!CONCURRENCY_POSTURES.has(slice.concurrency_posture) || !/^R[0-6]$/.test(slice.risk_class) || !RELEASE_REQUIREMENTS.has(slice.release_requirement) || typeof slice.manual_qa_required !== "boolean") error(ToolError, { error: "engineering_slice_enum_invalid", slice_ref: slice.slice_ref });
     if (refs.has(slice.slice_ref)) error(ToolError, { error: "engineering_slice_duplicate", slice_ref: slice.slice_ref });
     refs.add(slice.slice_ref);
     if (!Array.isArray(slice.dependency_refs) || slice.dependency_refs.some(ref => !refs.has(ref) && !plan.slices.some(candidate => candidate.slice_ref === ref)))
@@ -108,8 +497,10 @@ export function requirePlan(plan, ToolError) {
     for (const field of ["declared_resource_refs", "declared_component_refs", "declared_plan_step_refs", "forbidden_change_refs", "dependency_refs"])
       for (const [index, item] of slice[field].entries()) id(item, `${field}[${index}]`, ToolError);
     const checkRefs = new Set();
-    if (!Array.isArray(slice.planned_checks) || slice.planned_checks.length < 1 || slice.planned_checks.some(check => !check || typeof check !== "object" || Object.keys(check).sort().join(",") !== "check_ref,evidence_requirement,failure_condition" || !id(check.check_ref, "planned_checks.check_ref", ToolError) || checkRefs.has(check.check_ref) || !checkRefs.add(check.check_ref) || typeof check.failure_condition !== "string" || !check.failure_condition.trim() || !["redacted_evidence_required", "metadata_only_sufficient"].includes(check.evidence_requirement))) error(ToolError, { error: "engineering_slice_checks_invalid", slice_ref: slice.slice_ref });
+    if (!Array.isArray(slice.planned_checks) || slice.planned_checks.length < 1 || slice.planned_checks.some(check => !check || typeof check !== "object" || Object.keys(check).sort().join(",") !== "check_ref,evidence_requirement,failure_condition" || !id(check.check_ref, "planned_checks.check_ref", ToolError) || checkRefs.has(check.check_ref) || !checkRefs.add(check.check_ref) || typeof check.failure_condition !== "string" || !check.failure_condition.trim() || !EVIDENCE_REQUIREMENTS.has(check.evidence_requirement))) error(ToolError, { error: "engineering_slice_checks_invalid", slice_ref: slice.slice_ref });
+    if (plan.schema_version === SLICE_PLAN_V2) requireDesignContract(slice, ToolError);
   }
+  if (plan.schema_version === SLICE_PLAN_V2) requireSeamAuthority(plan, ToolError);
   if (canonicalDigest(Object.fromEntries(Object.entries(plan).filter(([key]) => key !== "plan_digest"))) !== plan.plan_digest)
     error(ToolError, { error: "engineering_slice_plan_digest_mismatch" });
   return plan;
