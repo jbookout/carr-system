@@ -732,6 +732,12 @@ class CodexHookTests(AdapterCase):
         self.assertIn("at most one corrective compression pass", context)
         self.assertIn("Reference manifest: copy valid refs byte-for-byte", context)
         self.assertIn("Every live correction/decision ref remains directly in state", context)
+        self.assertIn("Reference archive protocol", context)
+        self.assertIn("historical:true", context)
+        self.assertIn("expected_digest", context)
+        self.assertIn("archive_ref `codex-revision:<checkpoint UUID>:<version>:sha256:<64hex>`", context)
+        self.assertIn("Archive only completed/superseded history", context)
+        self.assertIn("if unavailable, retain them", context)
 
     def test_repair_directive_keeps_current_approval_refs_within_bound(self):
         self.native_rollout(compacted_row(1, "window-initial", "window-current"))
