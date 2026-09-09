@@ -461,12 +461,12 @@ def _canonical_workflow_truth(snap):
         print("  -- CARRIED " + "; ".join(carried) +
               " — requested dispositions only; a native scheduler still changes "
               "through ops.disable_legacy_schedule with Joe authority")
-    unenforced = summary.get("unenforced_distinct_identity_groups") or []
-    if unenforced:
-        print("  -- UNENFORCED distinct-identity exclusion for duplicate_group(s) "
-              + ", ".join(unenforced) +
-              " — same-slot idempotency is retry dedup and does not exclude two "
-              "registered identities; bound phase-B ops.enqueue_job work")
+    excluded = summary.get("distinct_identity_excluded_groups") or []
+    if excluded:
+        print("  -- ENFORCED distinct-identity exclusion for duplicate_group(s) "
+              + ", ".join(excluded) +
+              " — ops.enqueue_job admits one identity per canonical slot in a group "
+              "and refuses the rest, including concurrent callers")
     if conflicts:
         return 1
     return 0

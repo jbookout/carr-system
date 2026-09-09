@@ -32868,13 +32868,51 @@
           "classification_authorizing": false
         }
       ]
+    },
+    {
+      "version": "v24",
+      "remove": [],
+      "upsert": [],
+      "row_replacements": {
+        "script-entrypoint:bin/schema-snapshot.sh": {
+          "schema_digest": "71ed5fd4fc56bf3889cfb1b87ade2aade223753f222dda55eeedbd60267d47d3",
+          "handler_digest": "71ed5fd4fc56bf3889cfb1b87ade2aade223753f222dda55eeedbd60267d47d3"
+        },
+        "script-entrypoint:ops/control-plane-db-gate.py": {
+          "schema_digest": "d36fff47c51cf914c286e7ab727bd29d3dad3140e228e2081c875b2e820063c5",
+          "handler_digest": "d36fff47c51cf914c286e7ab727bd29d3dad3140e228e2081c875b2e820063c5"
+        },
+        "script-entrypoint:ops/scac-mutation-inventory.mjs": {
+          "schema_digest": "88f171e5c385081af11fdb859f84541935cc21b81f74c6c9835095226853b339",
+          "handler_digest": "88f171e5c385081af11fdb859f84541935cc21b81f74c6c9835095226853b339"
+        },
+        "script-entrypoint:ops/siep11-mutation-registry-local-pg-gate.py": {
+          "schema_digest": "aef9051abf5d6aac86bd89377ce0eebab0b134ead3bea39c3f7ba1db32008b8e",
+          "handler_digest": "aef9051abf5d6aac86bd89377ce0eebab0b134ead3bea39c3f7ba1db32008b8e"
+        },
+        "script-entrypoint:ops/siep18-reference-monitor-local-pg-gate.py": {
+          "schema_digest": "8d48efba4996612559877998cce0803ed2497f64efa6ef69b6bb5c2e47a2cbb9",
+          "handler_digest": "8d48efba4996612559877998cce0803ed2497f64efa6ef69b6bb5c2e47a2cbb9"
+        },
+        "script-entrypoint:tools/control-plane.py": {
+          "schema_digest": "0ea1ec5332b380a8bb7ccf15c5f480d0dac3d7129b71e79ba0bc93912c8de585",
+          "handler_digest": "0ea1ec5332b380a8bb7ccf15c5f480d0dac3d7129b71e79ba0bc93912c8de585"
+        },
+        "script-entrypoint:tools/health-check.py": {
+          "schema_digest": "407ec1f4d999fb59de2d535509eee8e204bc4f468c310dc4b2df19dd13acb3a8",
+          "handler_digest": "407ec1f4d999fb59de2d535509eee8e204bc4f468c310dc4b2df19dd13acb3a8"
+        }
+      },
+      "expected_count": 835,
+      "expected_sha256": "d717395781090876d6ea7f562707f1dc0c0fd159c031e98d73e7b3e6e5e98018",
+      "reason": "V5-F09 workflow truth: the seven inventoried entrypoints this slice re-digests."
     }
   ],
   "current_source_review": {
-    "base_version": "v23",
-    "reason": "No source change is outstanding beyond the frozen v23 frontier. Every row the R07 repo-hygiene janitor tail moved is folded into patches[v23] above, so this review carries an empty upsert and restates the frontier it reviews.",
+    "base_version": "v24",
+    "upsert": [],
     "expected_count": 835,
-    "expected_sha256": "04aac30b872afa38243a48f37c6c7f29ad40d7eb2594b8bbe6ec58ef83edf718",
-    "upsert": []
+    "expected_sha256": "d717395781090876d6ea7f562707f1dc0c0fd159c031e98d73e7b3e6e5e98018",
+    "reason": "No source change is outstanding beyond the frozen v24 frontier. Every entrypoint the V5-F09 tail re-digests is folded into patches[v24] above, so this review carries an empty upsert and restates the frontier it reviews."
   }
 }

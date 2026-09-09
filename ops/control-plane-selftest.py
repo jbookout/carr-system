@@ -207,11 +207,13 @@ def workflow_truth_checks(manifest) -> None:
         observation_max_age_seconds=MAX_AGE, now=NOW)
     twins = {row["workflow_key"]: row for row in two_identities["rows"]}
     check("two DISTINCT registered identities in one duplicate_group are reported as an "
-          "exclusion the queue does not enforce today",
-          all(twins[key]["duplicate_exclusion"]["distinct_identity"] == "unenforced_pending_phase_b"
+          "exclusion ops.enqueue_job now enforces",
+          all(twins[key]["duplicate_exclusion"]["distinct_identity"]
+              == "enforced_by_ops_enqueue_job_group_exclusion"
               for key in ("twin-a", "twin-b"))
-          and two_identities["summary"]["unenforced_distinct_identity_groups"] == ["twins.legacy"])
-    check("the distinct-identity case is never described as covered by same-slot idempotency",
+          and two_identities["summary"]["distinct_identity_excluded_groups"] == ["twins.legacy"])
+    check("the two duplicate mechanisms stay separately named, so a later reader cannot "
+          "read same-slot retry dedup as the group exclusion or the reverse",
           all(twins[key]["duplicate_exclusion"]["same_slot_idempotency"]
               == "enforced_by_ops_enqueue_job"
               and twins[key]["duplicate_exclusion"]["distinct_identity"]

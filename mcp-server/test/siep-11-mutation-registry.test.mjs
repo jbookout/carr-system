@@ -39,6 +39,8 @@ import {
   REGISTRY_V21_VERSION,
   REGISTRY_V22_VERSION,
   REGISTRY_V23_VERSION,
+  REGISTRY_V24_VERSION,
+  renderV5F09WorkflowTruthForwardRegistrySql,
   R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE,
   renderR07RepoHygieneJanitorForwardRegistrySql,
   isDefinitionOnlyLaunchd,
@@ -200,6 +202,9 @@ const v21Migration = fs.readFileSync(
   new URL("../../migrations/0495_r06_hooks_correctness_scac_successor.sql", import.meta.url), "utf8");
 const v22Migration = fs.readFileSync(
   new URL("../../migrations/0496_doctorcre_portfolio_hierarchy_and_scac_successor.sql",
+    import.meta.url), "utf8");
+const v24Migration = fs.readFileSync(
+  new URL("../../migrations/0498_f09_workflow_truth_and_scac_successor.sql",
     import.meta.url), "utf8");
 const v23Migration = fs.readFileSync(
   new URL("../../migrations/0497_r07_repo_hygiene_janitor_and_scac_successor.sql",
@@ -1065,7 +1070,7 @@ test("v21 seals the R06 hooks-correctness frontier and preserves the v20 predece
   // tuple through v20 and not its own. v22 is a LATER seal and is likewise
   // absent, which is why the set is filtered rather than taken whole.
   for (const [key, seal] of Object.entries(HISTORICAL_REGISTRY_SEALS)) {
-    if (key === "v21" || key === "v22") continue;
+    if (key === "v21" || key === "v22" || key === "v23") continue;
     assert.ok(v21Migration.includes(
       `('${seal.version}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount})`), seal.version);
   }
@@ -1125,6 +1130,49 @@ test("the v21 frontier re-digested only source, and v22 is what the runtime now 
     assert.equal(admitted.ingress_key, `mcp-tool:${name}`);
     assert.equal(admitted.schema_digest,
       v22Rows.find(row => row.ingress_key === `mcp-tool:${name}`).schema_digest, name);
+  }
+});
+
+test("v24 seals the V5-F09 workflow-truth frontier and preserves the v23 predecessor", () => {
+  const rows = frozenInventory(REGISTRY_V24_VERSION);
+  assert.equal(v24Migration, renderV5F09WorkflowTruthForwardRegistrySql(rows));
+
+  // v24 is NOT registry-only: it replaces two existing definer functions in
+  // place, which is exactly why it owes a registry successor. It still creates
+  // no table and no NEW domain function, so the predecessor's domain DDL must
+  // not be dragged forward by the core slice.
+  assert.doesNotMatch(v24Migration, /create table (?!if not exists ops[.]scac_)/);
+  assert.match(v24Migration, /create or replace function ops\.enqueue_job\(/);
+  assert.match(v24Migration, /create or replace function ops\.current_sourced_work_requests\(/);
+
+  // THE ENFORCEMENT THIS SLICE EXISTS FOR. Two distinct registered workflow
+  // identities in one duplicate_group cannot both become executable at one
+  // canonical slot, and the exclusion lives inside the ONE admission function.
+  assert.match(v24Migration, /pg_advisory_xact_lock/);
+  assert.match(v24Migration, /legacy_schedule_surface_registry/);
+  assert.match(v24Migration, /duplicate_group % already has an executable job/);
+  // The pre-existing fences survive verbatim.
+  assert.match(v24Migration, /no accepted shadow acceptance evidence/);
+  assert.match(v24Migration, /no accepted canary acceptance evidence/);
+  assert.match(v24Migration, /duplicate delivery conflicts with the canonical scheduled job/);
+  // Accepted outcome removes actionability only.
+  assert.match(v24Migration, /sourced_work_request_outcome_feedback_acceptance_receipt/);
+
+  assert.match(v24Migration,
+    /-- SCAC-12: mutation registry v24 after the V5-F09 workflow truth enforcement\./);
+  assert.match(v24Migration, /scac_mutation_registry_v23_seal_available\(\)/);
+  assert.match(v24Migration, /scac_mutation_catalog_v23_live_at_seal/);
+  assert.match(v24Migration, /scac_mutation_catalog_v24_current\(\)/);
+  assert.match(v24Migration, /scac_policy_epoch_snapshot_v23/);
+  assert.doesNotMatch(v24Migration, /^\s*(begin|commit)\s*;\s*$/im);
+  assert.doesNotMatch(v24Migration, /__V23_|__V24_|UNBOUND/);
+  assert.match(v24Migration, /do \$v5_f09_workflow_truth_preflight\$/);
+
+  // v24 is the seal this migration CREATES, so it carries every predecessor
+  // seal tuple and none of its own.
+  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS)) {
+    const tuple = `('${seal.version}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount})`;
+    assert.equal(v24Migration.includes(tuple), seal.version !== REGISTRY_V24_VERSION, seal.version);
   }
 });
 
@@ -1413,11 +1461,11 @@ test("the complete source-only frontier is byte-reproducible from frozen inputs"
   assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
-  assert.equal(migrations.length, 31);
+  assert.equal(migrations.length, 32);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497"]);
-  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 22);
-  assert.equal(paths.length, 53);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496", "0497", "0498"]);
+  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 23);
+  assert.equal(paths.length, 55);
 });
 
 test("the complete frontier renders when every generated target is absent", () => {

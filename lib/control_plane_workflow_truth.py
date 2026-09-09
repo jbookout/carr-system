@@ -40,11 +40,14 @@ It does NOT prevent two DISTINCT registered workflow identities that share one
 definition keys differ and no unique index spans the group.  Both cases are
 modelled separately in ``duplicate_exclusion`` and must never be conflated:
 
-    same_slot_idempotency  -- enforced today, inside ops.enqueue_job
-    distinct_identity      -- NOT enforced today; the group-scoped exclusion is
-                              bound phase-B migration work that must land inside
-                              the existing ops.enqueue_job lifecycle, never a
-                              second queue.
+    same_slot_idempotency  -- the unique canonical-slot index, inside ops.enqueue_job
+    distinct_identity      -- the group-scoped exclusion migration 0498 added to
+                              that SAME function: an advisory transaction lock on
+                              the exact duplicate_group and canonical slot, then a
+                              refusal when another identity in the group already
+                              holds an executable job for it. Concurrent callers
+                              serialize on the lock, so the loser observes the
+                              winner's committed row instead of racing it.
 """
 from __future__ import annotations
 
@@ -395,10 +398,10 @@ def workflow_truth_row(
     if duplicate_group is None:
         distinct_identity = "not_applicable_no_group"
     elif len(identities) > 1:
-        distinct_identity = "unenforced_pending_phase_b"
+        distinct_identity = "enforced_by_ops_enqueue_job_group_exclusion"
         reasons.append(
             f"duplicate_group {duplicate_group} spans {len(identities)} registered workflow "
-            "identities; ops.enqueue_job's same-slot idempotency cannot exclude them")
+            "identities; ops.enqueue_job excludes all but one of them per canonical slot")
     else:
         distinct_identity = "not_applicable_single_identity"
     duplicate_exclusion = {
@@ -631,10 +634,10 @@ def workflow_truth(
                          for name in DISPOSITIONS},
         "false_operational": sum(1 for row in rows if row["false_operational"]),
         "duplicate_open": sum(1 for row in rows if row["duplicate_open"]),
-        "unenforced_distinct_identity_groups": sorted({
+        "distinct_identity_excluded_groups": sorted({
             row["duplicate_group"] for row in rows
-            if row["duplicate_exclusion"]["distinct_identity"] == "unenforced_pending_phase_b"
-            and row["duplicate_group"]}),
+            if row["duplicate_exclusion"]["distinct_identity"]
+            == "enforced_by_ops_enqueue_job_group_exclusion" and row["duplicate_group"]}),
     }
     return {
         "schema_version": SCHEMA_VERSION,
