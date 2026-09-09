@@ -52,6 +52,8 @@ export const REGISTRY_V18_VERSION = "scac-mutation-registry.v18";
 export const REGISTRY_V19_VERSION = "scac-mutation-registry.v19";
 // v20 binds the continuity archive successor after the final v19 seal.
 export const REGISTRY_V20_VERSION = "scac-mutation-registry.v20";
+// v21 binds the R06 hooks-correctness re-digest after the final v20 seal.
+export const REGISTRY_V21_VERSION = "scac-mutation-registry.v21";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -91,6 +93,7 @@ export const HISTORICAL_REGISTRY_SEALS = Object.freeze({
   v17: Object.freeze({ version: REGISTRY_V17_VERSION, digest: "sha256:5aab15679a2d26207210bde3e16be265301b9c69816e08dc90b2f2e8a48c7db2", entryCount: 1509, sourceEntryCount: 827 }),
   v18: Object.freeze({ version: REGISTRY_V18_VERSION, digest: "sha256:680d42c68be736fe3f227019e3a4afd3e0aad53ed63d115db1fbb0467ea884c8", entryCount: 1515, sourceEntryCount: 827 }),
   v19: Object.freeze({ version: REGISTRY_V19_VERSION, digest: "sha256:19c1c9967bf960a64cefa39c53f6011193180f0c65128a1d8d5987ea6e120841", entryCount: 1520, sourceEntryCount: 828 }),
+  v20: Object.freeze({ version: REGISTRY_V20_VERSION, digest: "sha256:45bf7a56d2756337c1b5efdad195f4935259fad6cf5f6a9c081c28592bacfb05", entryCount: 1524, sourceEntryCount: 828 }),
 });
 export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
   "migrations/0454_siep11_mutation_registry.sql": "7985d42b9b36964b33503f4ff42d332e6bcce085217f06464a9d6abf58126bdd",
@@ -131,6 +134,8 @@ export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
   "mcp-server/src/scac-mutation-registry.v18.generated.js": "980da606f08812d7f256427ca2f64a0209b8652cef834b4cf69de7a6f2afc59f",
   "migrations/0493_incident_work_request_link_scac_successor.sql": "0c7ba65bde7d0479cfec28c89d01f2721940c6be23a7ec9ad6c2f27e4f39ef3f",
   "mcp-server/src/scac-mutation-registry.v19.generated.js": "cd5c11d4caa792533ca46bdaf7ac1e3b698d633ea80c470a90c50192a1119dc9",
+  "migrations/0494_codex_continuity_archive_registry.sql": "510e96efbff3870d87c4efefd6ad5bb1b32c7647cb3f5d306aa2aaead12a4a8e",
+  "mcp-server/src/scac-mutation-registry.v20.generated.js": "dd679c9fa87fb45afe25d8508be462acfa395c532bf235f7fbdc0511b8678371",
 });
 // WR-000068 rebases four Production-applied consumers of the sourced shape
 // columns on the effective receipt-backed lineage. The v18 generator reads the
@@ -372,6 +377,16 @@ export const CONTINUITY_ARCHIVE_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
   // four v19/v20 seal-and-catalog functions this registry-only successor adds
   // are the entire delta from the v19 receipt.
   secdef_execute: { count: 389, digest: "sha256:570bebcdfb87098b8b71ca59ed7e9a2fb5849099d6e3ba10cb99c934421aceb7" },
+});
+export const R06_HOOKS_CORRECTNESS_PRE_V21_DB_CATALOG_BASELINE =
+  CONTINUITY_ARCHIVE_FORWARD_DB_CATALOG_BASELINE;
+export const R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
+  ...R06_HOOKS_CORRECTNESS_PRE_V21_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v21",
+  // Filled from the complete disposable-Postgres 0495 successor readback: the
+  // four v20/v21 seal-and-catalog functions this registry-only successor adds
+  // are the entire delta from the v20 receipt.
+  secdef_execute: { count: 393, digest: "sha256:6889d02e1c7e8eda58e8e91cdb61da685f307153696448832b27b8cf3a0e2bb7" },
 });
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
@@ -996,6 +1011,7 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V18_VERSION]: "v18",
   [REGISTRY_V19_VERSION]: "v19",
   [REGISTRY_V20_VERSION]: "v20",
+  [REGISTRY_V21_VERSION]: "v21",
 });
 
 function sourceInventoryFixtureDigest(rows) {
@@ -1051,7 +1067,7 @@ export function frozenInventory(version) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V20_VERSION) {
+  version = REGISTRY_V21_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -1088,7 +1104,8 @@ export function registryDigestFor(version, rows = fullInventory(), dbCatalogBase
     REGISTRY_V9_VERSION, REGISTRY_V10_VERSION, REGISTRY_V11_VERSION,
     REGISTRY_V12_VERSION, REGISTRY_V13_VERSION, REGISTRY_V14_VERSION,
     REGISTRY_V15_VERSION, REGISTRY_V16_VERSION, REGISTRY_V17_VERSION,
-    REGISTRY_V18_VERSION, REGISTRY_V19_VERSION, REGISTRY_V20_VERSION].includes(version))
+    REGISTRY_V18_VERSION, REGISTRY_V19_VERSION, REGISTRY_V20_VERSION,
+    REGISTRY_V21_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -5348,10 +5365,310 @@ ${preflightBody}end $continuity_archive_preflight$;
 }
 
 
-export function renderGeneratedFrontier() {
-  // Refuse before the expensive v2-v19 predecessor cascade: this frontier ends
-  // in v20 artifacts, and every input to the guard is a fixed module constant.
+// Shared v21 trust root. Every entry path that renders or writes a v21
+// artifact calls this BEFORE doing work, so an unbound template constant can
+// never reach a digest, a projection or a written file. It reads only fixed
+// module constants: there is deliberately no parameter through which a caller
+// could supply its own expected seal, pin or baseline.
+const R06_HOOKS_CORRECTNESS_V20_MIGRATION_PATH =
+  "migrations/0494_codex_continuity_archive_registry.sql";
+const R06_HOOKS_CORRECTNESS_V20_RUNTIME_PATH =
+  "mcp-server/src/scac-mutation-registry.v20.generated.js";
+
+function assertR06HooksCorrectnessCatalogBaseline(label, baseline, projectionVersion) {
+  if (!baseline || baseline.projection_version !== projectionVersion)
+    throw new Error(
+      `R06 hooks correctness ${label} catalog baseline is not ${projectionVersion}`);
+  for (const category of [
+    "secdef_execute", "relation_dml", "column_dml", "role_authority", "runtime_dml_grants",
+  ]) {
+    const receipt = baseline[category];
+    if (!Number.isInteger(receipt?.count) || receipt.count < 0 ||
+        !CONTINUITY_ARCHIVE_DIGEST_RE.test(receipt?.digest ?? ""))
+      throw new Error(`R06 hooks correctness ${label} ${category} receipt is unbound`);
+  }
+}
+
+export function assertR06HooksCorrectnessV21TrustRoot() {
+  // Strictly stronger than the root it succeeds: the entire v20 chain has to
+  // be bound before a v21 artifact can exist at all, so an unbound v19 limb
+  // still refuses here.
   assertContinuityArchiveV20TrustRoot();
+  const { v20: v20Seal } = HISTORICAL_REGISTRY_SEALS;
+  if (v20Seal?.version !== REGISTRY_V20_VERSION ||
+      !CONTINUITY_ARCHIVE_DIGEST_RE.test(v20Seal?.digest ?? "") ||
+      !Number.isInteger(v20Seal?.entryCount) || v20Seal.entryCount < 1 ||
+      !Number.isInteger(v20Seal?.sourceEntryCount) || v20Seal.sourceEntryCount < 1)
+    throw new Error("R06 hooks correctness v21 predecessor seal is unbound");
+  // The chain is exact in both directions: v20 is the only accepted predecessor
+  // projection and v21 the only accepted successor, so the predecessor catalog
+  // can never be handed back as the successor.
+  assertR06HooksCorrectnessCatalogBaseline("predecessor v20",
+    R06_HOOKS_CORRECTNESS_PRE_V21_DB_CATALOG_BASELINE, "scac-db-catalog-projection.v20");
+  assertR06HooksCorrectnessCatalogBaseline("successor v21",
+    R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE, "scac-db-catalog-projection.v21");
+  for (const path of [
+    R06_HOOKS_CORRECTNESS_V20_MIGRATION_PATH, R06_HOOKS_CORRECTNESS_V20_RUNTIME_PATH,
+  ]) {
+    if (!CONTINUITY_ARCHIVE_ARTIFACT_SHA_RE.test(
+      HISTORICAL_REGISTRY_ARTIFACT_SHA256[path] ?? ""))
+      throw new Error(`R06 hooks correctness v21 predecessor artifact pin is unbound: ${path}`);
+  }
+}
+
+// Registry-only successor for the R06 hooks-correctness contract. The source
+// change re-digests hook and ops entrypoints that were already registered and
+// adds no ingress, so this migration carries no domain DDL and no business
+// rows; it only seals the new source inventory and installs the v21
+// catalog/policy projection after the immutable v20 frontier.
+export function renderR06HooksCorrectnessForwardRegistrySql(rows = fullInventory(),
+  dbCatalogBaseline = R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE,
+  predecessorArtifacts = undefined) {
+  // The predecessor seal, its catalog projection and the sealed v20 artifact
+  // hashes are fixed production constants, asserted by the shared v21 trust
+  // root that every v21 entry path calls. There is deliberately no caller
+  // binding for them: a supplied predecessor artifact is checked AGAINST these
+  // pins, it never supplies its own expected hash.
+  assertR06HooksCorrectnessV21TrustRoot();
+  const { v20: v20Seal } = HISTORICAL_REGISTRY_SEALS;
+  const predecessorDbCatalogBaseline = R06_HOOKS_CORRECTNESS_PRE_V21_DB_CATALOG_BASELINE;
+  const artifactShaRe = CONTINUITY_ARCHIVE_ARTIFACT_SHA_RE;
+  // A caller-supplied successor baseline is held to the SAME exact-projection
+  // shape as the fixed constant; it can only ever narrow, never widen.
+  assertR06HooksCorrectnessCatalogBaseline("successor v21", dbCatalogBaseline,
+    "scac-db-catalog-projection.v21");
+
+  const v21Digest = registryDigestFor(REGISTRY_V21_VERSION, rows, dbCatalogBaseline);
+  const catalogCount = dbCatalogBaseline.secdef_execute.count +
+    dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
+  const entryCount = rows.length + catalogCount;
+  const v20MigrationPath = R06_HOOKS_CORRECTNESS_V20_MIGRATION_PATH;
+  const v20RuntimePath = R06_HOOKS_CORRECTNESS_V20_RUNTIME_PATH;
+  const v20Rows = frozenInventory(REGISTRY_V20_VERSION);
+  // A partial predecessor bundle regenerates only the missing half, and it
+  // regenerates it from the canonical prior inputs: the v20 renderer's third
+  // argument is its own v19-shaped predecessor bundle, so this v20-shaped one
+  // is never forwarded into it.
+  const v20Migration = predecessorArtifacts?.migration ??
+    renderContinuityArchiveForwardRegistrySql(v20Rows, predecessorDbCatalogBaseline);
+  const v20Runtime = predecessorArtifacts?.runtime ?? renderRuntimeProjection(v20Rows, {
+    version: REGISTRY_V20_VERSION,
+    dbCatalogBaseline: predecessorDbCatalogBaseline,
+  });
+  for (const [path, source] of [
+    [v20MigrationPath, v20Migration], [v20RuntimePath, v20Runtime],
+  ]) {
+    const expected = HISTORICAL_REGISTRY_ARTIFACT_SHA256[path];
+    if (!artifactShaRe.test(expected ?? ""))
+      throw new Error(`R06 hooks correctness v21 predecessor artifact pin is unbound: ${path}`);
+    const observed = sha256(source);
+    if (observed !== expected)
+      throw new Error(`sealed historical SCAC v20 artifact changed: ${path}: ${observed}`);
+  }
+
+  const headerMarker =
+    "-- SCAC-12: registry-only mutation registry v20 after Codex continuity archive recovery.";
+  const coreStart = v20Migration.indexOf(headerMarker);
+  if (coreStart < 0 || v20Migration.indexOf(headerMarker, coreStart + headerMarker.length) >= 0)
+    throw new Error("sealed SCAC v20 migration has no exact successor core boundary");
+  const v20Core = v20Migration.slice(coreStart);
+  const currentV20Marker = "create or replace function ops.scac_mutation_catalog_v20_current()";
+  const policyMarker =
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v19;";
+  const currentV20Start = v20Core.indexOf(currentV20Marker);
+  const secondCurrentV20 = v20Core.indexOf(
+    currentV20Marker, currentV20Start + currentV20Marker.length);
+  const v19HistoryMarker =
+    "alter function ops.scac_mutation_catalog_v19_current() rename to scac_mutation_catalog_v19_live_at_seal;";
+  const v19HistoryStart = v20Core.indexOf(v19HistoryMarker);
+  const secondV19History = v20Core.indexOf(
+    v19HistoryMarker, v19HistoryStart + v19HistoryMarker.length);
+  const policyStart = v20Core.indexOf(policyMarker);
+  const secondPolicy = v20Core.indexOf(policyMarker, policyStart + policyMarker.length);
+  if (v19HistoryStart < 0 || secondV19History >= 0 || currentV20Start <= v19HistoryStart ||
+      secondCurrentV20 >= 0 || policyStart <= currentV20Start || secondPolicy >= 0)
+    throw new Error("sealed SCAC v20 migration has no exact catalog successor boundary");
+  const installedV19History = v20Core.slice(v19HistoryStart, currentV20Start);
+  const v20Current = v20Core.slice(currentV20Start, policyStart);
+  const v20History =
+`alter function ops.scac_mutation_catalog_v20_current() rename to scac_mutation_catalog_v20_live_at_seal;
+create or replace function ops.scac_mutation_registry_v20_seal_available()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_registry_seal_valid('scac-mutation-registry.v20')
+$fn$;
+create or replace function ops.scac_mutation_catalog_v20_current()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_catalog_v20_live_at_seal()
+$fn$;
+comment on function ops.scac_mutation_registry_v20_seal_available() is 'Exact immutable v20 registry seal; separate from whether the live catalog still equals v20.';
+comment on function ops.scac_mutation_catalog_v20_current() is 'Historical v20 live-catalog validator; expected to become false after the v21 authority surface is installed.';
+
+`;
+  const renderV21Current = baseline => {
+    let current = v20Current
+      .replaceAll("scac_mutation_catalog_v20_current", "scac_mutation_catalog_v21_current")
+      .replaceAll("scac-mutation-registry.v20", "scac-mutation-registry.v21");
+    for (const [category, label] of [
+      ["secdef_execute", "security-definer"],
+      ["relation_dml", "relation"],
+      ["column_dml", "column"],
+    ]) {
+      current = replaceExactlyOnce(current,
+        `if observed_count<>${predecessorDbCatalogBaseline[category].count} or observed_digest<>'${predecessorDbCatalogBaseline[category].digest}' then return false; end if;`,
+        `if observed_count<>${baseline[category].count} or observed_digest<>'${baseline[category].digest}' then return false; end if;`,
+        `R06 hooks correctness v21 ${label} baseline`);
+    }
+    return replaceExactlyOnce(current,
+      `return observed_count=${predecessorDbCatalogBaseline.role_authority.count} and observed_digest='${predecessorDbCatalogBaseline.role_authority.digest}';`,
+      `return observed_count=${baseline.role_authority.count} and observed_digest='${baseline.role_authority.digest}';`,
+      "R06 hooks correctness v21 role-authority baseline");
+  };
+  const v21Current = renderV21Current(dbCatalogBaseline);
+
+  let sql = replaceExactlyOnce(v20Core, v20Current,
+    "__CONTINUITY_ARCHIVE_V20_CATALOG_SUCCESSOR__",
+    "R06 hooks correctness v20 current catalog block");
+  sql = replaceExactlyOnce(sql, installedV19History, "",
+    "R06 hooks correctness already-installed v19 catalog history");
+  sql = replaceExactlyOnce(sql, headerMarker,
+    "-- SCAC-12: registry-only mutation registry v21 after R06 hook-correctness evidence routing.",
+    "R06 hooks correctness migration header");
+  sql = sql
+    .replaceAll("scac-mutation-registry.v20", "scac-mutation-registry.v21")
+    .replaceAll("_v20", "_v21")
+    .replaceAll(" v20", " v21");
+  sql = replaceExactlyOnce(sql, JSON.stringify(predecessorDbCatalogBaseline),
+    JSON.stringify(dbCatalogBaseline), "R06 hooks correctness v21 catalog projection");
+  sql = replaceExactlyOnce(sql,
+    `'${v20Seal.digest}',${v20Seal.entryCount},${v20Seal.sourceEntryCount},`,
+    `'sha256:${v21Digest}',${entryCount},${rows.length},`,
+    "R06 hooks correctness v21 registry row");
+  sql = replaceExactlyOnce(sql,
+    `ops.scac_mutation_registration_v21('${v20Seal.digest}',`,
+    `ops.scac_mutation_registration_v21('sha256:${v21Digest}',`,
+    "R06 hooks correctness v21 snapshot registry lookup");
+  sql = replaceExactlyOnce(sql,
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v19;",
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v20;",
+    "R06 hooks correctness policy snapshot predecessor");
+  sql = replaceExactlyOnce(sql, "__CONTINUITY_ARCHIVE_V20_CATALOG_SUCCESSOR__",
+    `${v20History}${v21Current}`, "R06 hooks correctness v20 catalog history insertion");
+
+  const versionsThrough20 = Array.from({ length: 20 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  const versionsThrough19 = Array.from({ length: 19 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  sql = replaceExactlyOnce(sql,
+    `check (registry_version in (${versionsThrough19},'scac-mutation-registry.v21'))`,
+    `check (registry_version in (${versionsThrough20},'scac-mutation-registry.v21'))`,
+    "R06 hooks correctness registry-version constraint");
+  sql = replaceExactlyOnce(sql,
+    `if p_registry_version not in (${versionsThrough19}) then return false; end if;`,
+    `if p_registry_version not in (${versionsThrough20}) then return false; end if;`,
+    "R06 hooks correctness historical seal allowlist");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v19' then '${HISTORICAL_REGISTRY_SEALS.v19.digest}' end;`,
+    `    when 'scac-mutation-registry.v19' then '${HISTORICAL_REGISTRY_SEALS.v19.digest}'\n    when '${v20Seal.version}' then '${v20Seal.digest}' end;`,
+    "R06 hooks correctness historical digest case");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v19' then '${JSON.stringify(INCIDENT_WORK_REQUEST_LINK_FORWARD_DB_CATALOG_BASELINE)}'::jsonb end;`,
+    `    when 'scac-mutation-registry.v19' then '${JSON.stringify(INCIDENT_WORK_REQUEST_LINK_FORWARD_DB_CATALOG_BASELINE)}'::jsonb\n    when '${v20Seal.version}' then '${JSON.stringify(predecessorDbCatalogBaseline)}'::jsonb end;`,
+    "R06 hooks correctness historical catalog case");
+  sql = replaceExactlyOnce(sql,
+    `    ('scac-mutation-registry.v19','${HISTORICAL_REGISTRY_SEALS.v19.digest}',${HISTORICAL_REGISTRY_SEALS.v19.entryCount},${HISTORICAL_REGISTRY_SEALS.v19.sourceEntryCount})\n`,
+    `    ('scac-mutation-registry.v19','${HISTORICAL_REGISTRY_SEALS.v19.digest}',${HISTORICAL_REGISTRY_SEALS.v19.entryCount},${HISTORICAL_REGISTRY_SEALS.v19.sourceEntryCount}),\n    ('${v20Seal.version}','${v20Seal.digest}',${v20Seal.entryCount},${v20Seal.sourceEntryCount})\n`,
+    "R06 hooks correctness historical seal tuple");
+  sql = replaceExactlyOnce(sql,
+    "    ops.scac_mutation_registry_v19_seal_available()) then",
+    "    ops.scac_mutation_registry_v19_seal_available() and\n    ops.scac_mutation_registry_v20_seal_available()) then",
+    "R06 hooks correctness snapshot predecessor seal");
+  sql = replaceExactlyOnce(sql,
+    `or (r.registry_version='scac-mutation-registry.v21' and r.registry_digest='${v20Seal.digest}')`,
+    `or (r.registry_version='scac-mutation-registry.v20' and r.registry_digest='${v20Seal.digest}')\n         or (r.registry_version='scac-mutation-registry.v21' and r.registry_digest='sha256:${v21Digest}')`,
+    "R06 hooks correctness epoch-chain digest cases");
+  sql = replaceExactlyOnce(sql,
+    `  (registry_version='scac-mutation-registry.v21' and registry_digest='${v20Seal.digest}')`,
+    `  (registry_version='scac-mutation-registry.v20' and registry_digest='${v20Seal.digest}') or\n  (registry_version='scac-mutation-registry.v21' and registry_digest='sha256:${v21Digest}')`,
+    "R06 hooks correctness epoch constraint digest cases");
+  sql = replaceExactlyOnce(sql,
+    `'{registry_digest}',to_jsonb('${v20Seal.digest}'::text)`,
+    `'{registry_digest}',to_jsonb('sha256:${v21Digest}'::text)`,
+    "R06 hooks correctness snapshot registry digest");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_mutation_registry_v18_seal_available(),ops.scac_mutation_catalog_v19_live_at_seal(),ops.scac_mutation_catalog_v19_current(),ops.scac_mutation_registry_v19_seal_available(),ops.scac_mutation_catalog_v21_current()",
+    "ops.scac_mutation_registry_v18_seal_available(),ops.scac_mutation_catalog_v19_live_at_seal(),ops.scac_mutation_catalog_v19_current(),ops.scac_mutation_registry_v19_seal_available(),ops.scac_mutation_catalog_v20_live_at_seal(),ops.scac_mutation_catalog_v20_current(),ops.scac_mutation_registry_v20_seal_available(),ops.scac_mutation_catalog_v21_current()",
+    "R06 hooks correctness historical function revoke list");
+  sql = replaceExactlyOnce(sql,
+    "Continuity archive successor snapshot: current policy epochs bind mutation registry v21 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19 epochs remain immutable.",
+    "R06 hooks-correctness successor snapshot: current policy epochs bind mutation registry v21 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20 epochs remain immutable.",
+    "R06 hooks correctness policy snapshot comment");
+  sql = replaceExactlyOnce(sql,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v21')<>${v20Seal.entryCount}`,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v21')<>${entryCount}`,
+    "R06 hooks correctness v21 entry count guard");
+  sql = replaceExactlyOnce(sql,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v19')<>'${HISTORICAL_REGISTRY_SEALS.v19.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v19')<>${HISTORICAL_REGISTRY_SEALS.v19.entryCount} then raise exception 'sealed SCAC mutation registry v19 changed during successor creation'; end if;`,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v20')<>'${v20Seal.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v20')<>${v20Seal.entryCount} then raise exception 'sealed SCAC mutation registry v20 changed during successor creation'; end if;`,
+    "R06 hooks correctness predecessor seal guard");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),ops.scac_policy_epoch_snapshot_v15(),ops.scac_policy_epoch_snapshot_v16(),ops.scac_policy_epoch_snapshot_v17(),ops.scac_policy_epoch_snapshot_v18(),ops.scac_policy_epoch_snapshot_v19(),",
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),ops.scac_policy_epoch_snapshot_v15(),ops.scac_policy_epoch_snapshot_v16(),ops.scac_policy_epoch_snapshot_v17(),ops.scac_policy_epoch_snapshot_v18(),ops.scac_policy_epoch_snapshot_v19(),ops.scac_policy_epoch_snapshot_v20(),",
+    "R06 hooks correctness historical policy snapshot revoke list");
+
+  const seedStartMarker = "with seed as (select value as contract from jsonb_array_elements(";
+  const seedEndMarker = "::jsonb))\ninsert into ops.scac_mutation_registry_entry";
+  const seedStart = sql.indexOf(seedStartMarker);
+  const secondSeedStart = sql.indexOf(seedStartMarker, seedStart + seedStartMarker.length);
+  const seedEnd = sql.indexOf(seedEndMarker, seedStart + seedStartMarker.length);
+  const secondSeedEnd = sql.indexOf(seedEndMarker, seedEnd + seedEndMarker.length);
+  if (seedStart < 0 || secondSeedStart >= 0 || seedEnd < 0 || secondSeedEnd >= 0)
+    throw new Error("sealed SCAC v20 migration has no exact source-seed boundary");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart + seedStartMarker.length)}${sqlLiteral(seed)}${sql.slice(seedEnd)}`;
+
+  const preflightCurrent = renderV21Current(predecessorDbCatalogBaseline);
+  const preflightBegin = preflightCurrent.indexOf("begin\n");
+  const preflightEnd = preflightCurrent.lastIndexOf("end $fn$;");
+  if (preflightBegin < 0 || preflightEnd <= preflightBegin)
+    throw new Error("generated v21 catalog predicate has no exact preflight body boundary");
+  let preflightBody = preflightCurrent.slice(preflightBegin + "begin\n".length, preflightEnd);
+  preflightBody = preflightBody.replaceAll(
+    "then return false; end if;",
+    "then raise exception 'R06 hooks correctness pre-v21 catalog receipt drifted'; end if;");
+  preflightBody = replaceExactlyOnce(preflightBody,
+    `return observed_count=${predecessorDbCatalogBaseline.role_authority.count} and observed_digest='${predecessorDbCatalogBaseline.role_authority.digest}';`,
+    `if observed_count<>${predecessorDbCatalogBaseline.role_authority.count} or observed_digest<>'${predecessorDbCatalogBaseline.role_authority.digest}' then raise exception 'R06 hooks correctness pre-v21 role-authority receipt drifted'; end if;`,
+    "R06 hooks correctness pre-v21 role receipt");
+  const predecessorHash = sha256(v20Migration);
+  const predecessorPreflight =
+`-- Exact disposable-Postgres post-0494 receipt. Refuse before any v21 function
+-- exists; this registry-only successor changes no domain DDL or business rows.
+do $r06_hooks_correctness_preflight$
+declare observed_count integer; observed_digest text; grant_snapshot jsonb;
+begin
+  if (select count(*) from public.schema_migrations where filename='0494_codex_continuity_archive_registry.sql')<>1
+     or not exists(select 1 from public.schema_migrations where filename='0494_codex_continuity_archive_registry.sql'
+       and sha256='${predecessorHash}') then
+    raise exception 'R06 hooks correctness pre-v21 migration ledger receipt drifted';
+  end if;
+  grant_snapshot:=ops.scac_runtime_dml_grant_snapshot();
+  if (grant_snapshot->>'entry_count')::integer<>${predecessorDbCatalogBaseline.runtime_dml_grants.count}
+     or grant_snapshot->>'grant_digest'<>'${predecessorDbCatalogBaseline.runtime_dml_grants.digest}' then
+    raise exception 'R06 hooks correctness pre-v21 runtime grant receipt drifted';
+  end if;
+${preflightBody}end $r06_hooks_correctness_preflight$;
+
+`;
+  return `${predecessorPreflight}${sql}`.replace(/\n+$/, "\n");
+}
+
+
+export function renderGeneratedFrontier() {
+  // Refuse before the expensive v2-v20 predecessor cascade: this frontier ends
+  // in v21 artifacts, and every input to the guard is a fixed module constant.
+  // The v21 root re-asserts the whole v20 chain, so an unbound v19 limb still
+  // refuses here before any predecessor renderer runs.
+  assertR06HooksCorrectnessV21TrustRoot();
   const v2Rows = frozenInventory(REGISTRY_V2_VERSION);
   const artifacts = {};
   artifacts["migrations/0454_siep11_mutation_registry.sql"] = renderMigration(v2Rows);
@@ -5591,9 +5908,22 @@ export function renderGeneratedFrontier() {
         runtime: artifacts["mcp-server/src/scac-mutation-registry.v19.generated.js"],
       });
 
+  const v21Rows = frozenInventory(REGISTRY_V21_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v21.generated.js"] =
+    renderRuntimeProjection(v21Rows, {
+      version: REGISTRY_V21_VERSION,
+      dbCatalogBaseline: R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0495_r06_hooks_correctness_scac_successor.sql"] =
+    renderR06HooksCorrectnessForwardRegistrySql(v21Rows,
+      R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE, {
+        migration: artifacts["migrations/0494_codex_continuity_archive_registry.sql"],
+        runtime: artifacts["mcp-server/src/scac-mutation-registry.v20.generated.js"],
+      });
+
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 28 || runtimeCount !== 19 || Object.keys(artifacts).length !== 47)
+  if (migrationCount !== 29 || runtimeCount !== 20 || Object.keys(artifacts).length !== 49)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
@@ -5991,9 +6321,23 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const rows = frozenInventory(REGISTRY_V20_VERSION);
     await writeFile(target, renderContinuityArchiveForwardRegistrySql(rows));
     process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-runtime-v21") {
+    assertR06HooksCorrectnessV21TrustRoot();
+    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v21.generated.js");
+    const rows = frozenInventory(REGISTRY_V21_VERSION);
+    await writeFile(target, renderRuntimeProjection(rows, {
+      version: REGISTRY_V21_VERSION,
+      dbCatalogBaseline: R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE,
+    }));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-r06-hooks-correctness-registry-migration") {
+    const target = resolve(process.argv[3] || "migrations/0495_r06_hooks_correctness_scac_successor.sql");
+    const rows = frozenInventory(REGISTRY_V21_VERSION);
+    await writeFile(target, renderR06HooksCorrectnessForwardRegistrySql(rows));
+    process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools());
-    process.stdout.write("source inventory matches frozen v20 frontier fixture\n");
+    process.stdout.write("source inventory matches frozen v21 frontier fixture\n");
   } else if (process.argv[2] === "--check-generated-frontier") {
     const paths = assertGeneratedFrontierMatchesCommitted();
     process.stdout.write(`generated frontier is byte-exact (${paths.length} artifacts)\n`);
