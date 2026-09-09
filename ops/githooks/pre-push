@@ -108,9 +108,12 @@ done || exit 1
 # on one contended Mac, times the eleven implementation sessions pushing from it.
 #
 # The council's second chair was explicit that this is a COST TRADE and not a
-# defect finding: the old design was right for its date. What it costs today is
-# minutes per push (the gates class alone is 204 seconds, 252 selftest suites)
-# and what it buys, post-Pro, is catching hosted-CI failures slightly earlier.
+# defect finding: the old design was right for its date. What it costs is minutes
+# per push, dominated by the gates class, and what it buys, post-Pro, is catching
+# hosted-CI failures slightly earlier. (This line used to quote a fixed second
+# count for that class. It was measured once and never again, drifted badly, and
+# was still being cited as justification -- so the number is gone rather than
+# refreshed. ops/ci.sh prints the real one on every run.)
 #
 # So the split is now:
 #   * HOSTED keeps the full strict ten-class suite, unchanged, as the gate on
@@ -118,6 +121,27 @@ done || exit 1
 #   * LOCAL keeps the floor -- the classes that are cheap AND whose failure is
 #     dramatically more expensive to discover later. See check_pushfloor() in
 #     ops/ci.sh for why each member is in it.
+#
+# THE FLOOR IS A SMOKE PATH, TARGETING ABOUT A MINUTE (F4, 2026-09-08). Every
+# check on it is scoped to the pushed diff, so what a push pays for is the
+# selftests of the gates it actually touched. That is a target, not a guarantee:
+# a push that touches several gates pays for several suites, and a slow paired
+# selftest is still slow.
+#
+# What was removed is the one UNBOUNDED item -- check_pushfloor() used to fall
+# back to running the entire gates class whenever the push touched a gate with
+# no paired selftest. The gate is still detected and named; the class runs
+# hosted, where it is the required check that blocks the merge.
+#
+# Nothing is skipped and no timeout is involved. ops/ci.sh prints the floor's
+# own wall-clock on every run, so the cost stays visible rather than remembered
+# -- which is how the stale price above went unnoticed in the first place.
+#
+# WHY A BOUND IS WORTH MORE THAN THE EXTRA COVERAGE. The realistic failure of
+# this hook is not that it misses something; it is that a session facing a
+# six-minute wait reaches for --no-verify, which disables the WHOLE file --
+# owner check, secret scan and all. A floor that always returns quickly is a
+# floor that keeps running.
 #
 # IT STILL CALLS ops/ci.sh AND DEFINES NO CHECKS OF ITS OWN (rule a8c55a47).
 # That is why the subset is expressed as `--only <classes>` rather than as a

@@ -942,25 +942,25 @@ check_pushfloor() {
                "a new mechanism must name the doctrine section explaining it (open loop 504 — knowledge ships with the mechanism)."; }
     fi
 
-    # ...but never when the full gates class is ALREADY going to run in this
-    # invocation. Hosted CI runs every class, so the fallback there would simply
-    # run the 252 suites twice. It is a substitute for the class, not a second
-    # copy of it.
+    # A TOUCHED GATE WITH NO PAIRED SELFTEST IS NAMED, NOT PAID FOR LOCALLY.
+    #
+    # This branch used to run the WHOLE gates class here. That is a class-scale
+    # suite on the push path, and the floor is the only thing between a session
+    # and --no-verify, which disables this hook entirely — so an expensive floor
+    # costs the cheap checks above it too.
+    #
+    # Nothing stopped being checked: `gates` is a REQUIRED status check on main
+    # (ops/ci.sh --strict), so the class still runs hosted on this exact push
+    # before anything merges. Only the payment moved. Name the gate, name the
+    # command for anyone who wants the class now, and name the durable fix.
+    #
+    # Silent when the class is already selected: hosted runs every class, so the
+    # note would only advise running something already running.
     if [ -n "$unclassified" ] && [ -n "$ONLY" ] && ! selected gates; then
-      # THE DELIBERATE EXPENSE. Codex's chair asked for this by name: when the
-      # gate impact cannot be classified, fall back to the full gates class
-      # locally rather than assume it is fine. It costs ~222s and it fires only
-      # on a gate with no paired selftest, which is itself worth fixing.
-      printf '        \033[33mfull gates\033[0m — no paired selftest for:%s — running the whole class rather than guessing\n' \
+      ran="$ran gates-deferred"
+      printf '        \033[33mdeferred\033[0m   gates — no paired selftest for:%s — the full class runs hosted (required check on main)\n' \
         "$unclassified" >&2
-      ran="$ran full-gates-fallback"
-      check_gates
-      if [ -n "$FAILED_CLASSES" ]; then
-        case " $FAILED_CLASSES " in
-          *" gates "*) floor_fail gates-fallback \
-            "give each gate a paired ops/<gate>-selftest.py so this push does not have to run all 252 suites." ;;
-        esac
-      fi
+      printf '                   run it locally now: ops/ci.sh --only gates · durable fix: add ops/<gate>-selftest.py\n' >&2
     fi
   fi
 
