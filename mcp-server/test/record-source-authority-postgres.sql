@@ -78,7 +78,13 @@
 --     requires the two to be the same login, and nothing here grants either of
 --     them anything,
 --   * carr_reader, carr_writer, carr_authority_joe and carr_authority_dell exist,
---   * domain.sql has been applied,
+--   * domain.sql has been applied, AND THEN the document-source hunk
+--     (ops/document-derivative-registration.candidate.sql, or the successor
+--     migration carrying it) has been applied on top of it. That order is not a
+--     preference: the hunk forward-replaces ops.f01_record_document with the
+--     six-argument form this fixture calls, and domain.sql applied AFTER it is a
+--     hard stop inside the hunk's own posture readback. Section 0 blocks on both,
+--     by name,
 --   * THE CANONICAL AUTHORITY BOUNDARY IS ALREADY IN PLACE. That is
 --     0161_control_plane_authority_boundary.sql, and it — not this fixture and
 --     not domain.sql — is what defines ops.authority_actor_slug() as a SECURITY
@@ -109,6 +115,20 @@ BEGIN
 
   IF to_regnamespace('ops') IS NULL OR to_regprocedure('ops.f01_read(text,jsonb)') IS NULL THEN
     RAISE EXCEPTION 'F01 FIXTURE BLOCKED: the F01 domain schema is not installed in this database (ops.f01_read is absent). Apply domain.sql first.';
+  END IF;
+
+  -- THE DOCUMENT-SOURCE HUNK MUST ALREADY BE APPLIED, and this blocks rather
+  -- than adapting. The persistence tail completes every document version with a
+  -- provenance statement through the SIX-argument ops.f01_record_document, so a
+  -- database carrying only the four-argument writer is not the schema this
+  -- fixture describes. Section 8 would fail on "function does not exist" three
+  -- hundred statements from here; this says what to apply instead.
+  IF to_regprocedure('ops.f01_record_document(jsonb,jsonb,jsonb,text,text,text)') IS NULL THEN
+    RAISE EXCEPTION 'F01 FIXTURE BLOCKED: the six-argument ops.f01_record_document is absent. Apply domain.sql and then ops/document-derivative-registration.candidate.sql (or the successor migration carrying it), in that order.';
+  END IF;
+  IF to_regclass('ops.f01_document_source_provenance') IS NULL
+     OR to_regprocedure('ops.f01_document_version_source(text,integer)') IS NULL THEN
+    RAISE EXCEPTION 'F01 FIXTURE BLOCKED: the document-source relation or its reader is absent; the document half of the derivative-registration rule is not installed here.';
   END IF;
 
   FOREACH r IN ARRAY ARRAY['carr_reader','carr_writer','carr_authority_joe','carr_authority_dell'] LOOP
@@ -675,6 +695,15 @@ BEGIN
       ('carr_reader', 'f01_insert_derivative_link'),
       ('carr_writer', 'f01_insert_derivative_link'),
       ('carr_authority_joe', 'f01_insert_derivative_link'),
+      -- The document-source seam's private inserter, on the same terms. It is
+      -- reached only from inside ops.f01_record_document, where it runs as the
+      -- owner, so nobody needs EXECUTE and any EXECUTE is a hole. All four
+      -- principals are named because a helper granted to the AUTHORITY logins
+      -- would be just as reachable as one granted to the writer.
+      ('carr_reader', 'f01_insert_document_source_provenance'),
+      ('carr_writer', 'f01_insert_document_source_provenance'),
+      ('carr_authority_joe', 'f01_insert_document_source_provenance'),
+      ('carr_authority_dell', 'f01_insert_document_source_provenance'),
       ('carr_authority_joe', 'f01_guard_direct_dml'),
       ('carr_writer', 'f01_guard_append_only')
     ) AS t(role_name, fn)
@@ -711,7 +740,20 @@ BEGIN
       'ops.f01_register_derivative_link(jsonb,text,text)', 'EXECUTE')
     AND has_function_privilege('carr_authority_joe', 'ops.f01_install_policy(jsonb,text,text,text)', 'EXECUTE')
     AND has_function_privilege('carr_authority_joe', 'ops.f01_record_hold(jsonb,text,text,text)', 'EXECUTE')
-    AND has_function_privilege('carr_reader', 'ops.f01_read(text,jsonb)', 'EXECUTE'),
+    AND has_function_privilege('carr_reader', 'ops.f01_read(text,jsonb)', 'EXECUTE')
+    -- The document producer keeps the six-argument writer, and the reader keeps
+    -- both document-source reads. A read-only principal is not a producer, and
+    -- section 8.6 proves the writer half of that; this is the positive half, so a
+    -- grant loop that quietly granted NOTHING fails here too.
+    AND has_function_privilege('carr_writer',
+      'ops.f01_record_document(jsonb,jsonb,jsonb,text,text,text)', 'EXECUTE')
+    AND NOT has_function_privilege('carr_reader',
+      'ops.f01_record_document(jsonb,jsonb,jsonb,text,text,text)', 'EXECUTE')
+    AND has_function_privilege('carr_reader',
+      'ops.f01_document_version_source(text,integer)', 'EXECUTE')
+    AND has_function_privilege('carr_reader',
+      'ops.f01_document_source_history(text)', 'EXECUTE')
+    AND has_table_privilege('carr_reader', 'ops.f01_document_source_provenance', 'SELECT'),
     'principal', 'each principal retains exactly the surface its job needs');
 END;
 $least_privilege$;
@@ -1654,6 +1696,64 @@ SELECT pg_temp.f01_expect_refusal(
   'f01_derivative_source_conflict', 'derivative',
   'a second registration naming a different producer run refuses');
 
+-- ...and the other two IMMUTABLE halves of the same comparison, one case each,
+-- because "the five fields are compared" is a claim about five fields and an
+-- assertion about one of them proves nothing about the rest. A different
+-- producing WORKFLOW is a different claim about who made the derivative; a
+-- different EVIDENCE DIGEST is a different claim about what the production left
+-- behind. Both are contrary provenance, and both must refuse rather than be
+-- answered with the first producer's link digest.
+SELECT pg_temp.f01_expect_refusal(
+  $$SELECT ops.f01_register_derivative_link(
+      pg_temp.f01_derivative_envelope(pg_temp.f01_derivative_link_record(
+        pg_temp.f01_recall('artifact_1'), 'synthetic_test_abstract',
+        'synthetic-abstract-0001', 'sha256:' || repeat('62', 32),
+        'synthetic_other_producer', 'syn-pg-deriv-0001',
+        'synthetic-evidence-0040', 'sha256:' || repeat('61', 32))),
+      'syn-pg-deriv-reworkflow-0001', ops.f01_digest_jsonb('{"k":"drw"}'::jsonb))$$,
+  'f01_derivative_source_conflict', 'derivative',
+  'a second registration naming a different producer workflow refuses');
+
+SELECT pg_temp.f01_expect_refusal(
+  $$SELECT ops.f01_register_derivative_link(
+      pg_temp.f01_derivative_envelope(pg_temp.f01_derivative_link_record(
+        pg_temp.f01_recall('artifact_1'), 'synthetic_test_abstract',
+        'synthetic-abstract-0001', 'sha256:' || repeat('62', 32),
+        'synthetic_test_producer', 'syn-pg-deriv-0001',
+        'synthetic-evidence-0040', 'sha256:' || repeat('6c', 32))),
+      'syn-pg-deriv-reevidence-0001', ops.f01_digest_jsonb('{"k":"dre"}'::jsonb))$$,
+  'f01_derivative_source_conflict', 'derivative',
+  'a second registration naming different immutable evidence refuses');
+
+-- AND THE FIELD THAT IS DELIBERATELY NOT COMPARED STILL IS NOT. `evidence_ref`
+-- is an external LABEL whose immutable half — evidence_digest — is compared
+-- instead, so the same fact arriving under a re-labelled reference is a no-op
+-- rather than a refusal. Asserting this is what stops the two cases above from
+-- being read as "any difference refuses", which would make honest repeats
+-- unrecordable.
+DO $register_derivative_relabelled_evidence$
+DECLARE
+  v_result jsonb;
+BEGIN
+  v_result := ops.f01_register_derivative_link(
+    pg_temp.f01_derivative_envelope(pg_temp.f01_derivative_link_record(
+      pg_temp.f01_recall('artifact_1'), 'synthetic_test_abstract',
+      'synthetic-abstract-0001', 'sha256:' || repeat('62', 32),
+      'synthetic_test_producer', 'syn-pg-deriv-0001',
+      'synthetic-evidence-0040-relabelled', 'sha256:' || repeat('61', 32))),
+    'syn-pg-deriv-relabel-0001', ops.f01_digest_jsonb('{"k":"drl"}'::jsonb));
+  PERFORM pg_temp.f01_assert_eq(v_result ->> 'outcome', 'already_registered',
+    'derivative', 'a re-labelled evidence reference is the same fact, not a new claim');
+  PERFORM pg_temp.f01_assert_eq(v_result ->> 'link_digest',
+    pg_temp.f01_recall('derivative_1'),
+    'derivative', 'and it returns the original link rather than a second one');
+  PERFORM pg_temp.f01_assert(
+    (SELECT count(*) FROM ops.f01_derivative_link
+      WHERE derivative_id = 'synthetic-abstract-0001') = 1,
+    'derivative', 'no second row was written for the same derivative identity');
+END;
+$register_derivative_relabelled_evidence$;
+
 -- ...AND THE POSITIVE HALF, which is what stops the rule above from being a
 -- blanket refusal of every repeat. A genuinely identical claim — same source,
 -- same bytes, same workflow, same run, same evidence — arriving under a NEW
@@ -1697,14 +1797,60 @@ SELECT pg_temp.f01_expect_refusal(
   'f01_unknown_artifact', 'derivative',
   'a derivative link must name a stored artifact');
 
--- 7.6.4 A derivative whose bytes ARE the source's bytes is the source under a
--- second name. The structural constraint refuses it whatever the writer does.
+-- 7.6.4 A DERIVATIVE MAY NOT BE ITS OWN SOURCE, and there are TWO claims that
+-- shape can take. They are asserted separately because they are refused by two
+-- different mechanisms, and because conflating them is exactly the mistake that
+-- left the real one unenforced.
+--
+--   THE RECORD IDENTITY. A link whose derivative_content_digest is the artifact's
+--   RECORD digest claims its bytes are the stored artifact row's canonical bytes.
+--   The structural constraint f01_derivative_not_self refuses that, whatever the
+--   writer does.
 SELECT pg_temp.f01_expect_refusal(
   format($$SELECT pg_temp.f01_register_derivative('synthetic_test_abstract',
       'synthetic-abstract-0004', %L, 'syn-pg-deriv-self-0001')$$,
     pg_temp.f01_recall('artifact_1')),
   'f01_derivative_not_self', 'derivative',
-  'a record cannot be registered as derived from itself');
+  'a record cannot be registered as claiming the artifact record''s own bytes');
+
+--   THE BYTES. A link whose derivative_content_digest is the artifact's CONTENT
+--   digest is a verbatim copy of the source registered as something derived from
+--   it. The constraint above never catches this — a record digest is taken over
+--   source system, account, native identity, provenance and observed instant as
+--   well as the content, so a copy's content digest and the artifact's record
+--   digest are never equal — and a CHECK cannot reach the other row to compare
+--   them. The private inserter loads the source it has already authenticated and
+--   refuses by name.
+SELECT pg_temp.f01_expect_refusal(
+  $$SELECT pg_temp.f01_register_derivative('synthetic_test_abstract',
+      'synthetic-abstract-0012', 'sha256:' || repeat('11', 32),
+      'syn-pg-deriv-selfbytes-0001')$$,
+  'f01_derivative_is_its_own_source', 'derivative',
+  'a byte-identical copy of the source is not a derivative of it');
+
+-- ...and the two are genuinely different values, so neither assertion above is
+-- passing for the other one's reason.
+SELECT pg_temp.f01_assert(
+  (SELECT content_digest = 'sha256:' || repeat('11', 32)
+      AND artifact_digest <> content_digest
+     FROM ops.f01_corporate_artifact
+    WHERE artifact_digest = pg_temp.f01_recall('artifact_1')),
+  'derivative',
+  'the artifact''s record identity and its content digest are different values');
+
+-- AND DISTINCT DERIVED BYTES ARE STILL REGISTRABLE, which is what stops the rule
+-- above from being a refusal of every registration against this artifact.
+DO $register_derivative_distinct_bytes$
+DECLARE
+  v_result jsonb;
+BEGIN
+  v_result := pg_temp.f01_register_derivative(
+    'synthetic_test_abstract', 'synthetic-abstract-0013',
+    'sha256:' || repeat('73', 32), 'syn-pg-deriv-distinct-0001');
+  PERFORM pg_temp.f01_assert_eq(v_result ->> 'outcome', 'registered',
+    'derivative', 'bytes that are not the source''s bytes register normally');
+END;
+$register_derivative_distinct_bytes$;
 
 -- 7.6.5 A LINK MAY NOT CLAIM TO ESTABLISH COVERAGE. This is the forgery that
 -- would matter: a stored row asserting the registry is complete would be a
@@ -1808,6 +1954,28 @@ SELECT pg_temp.f01_assert(
   'derivative',
   'reserving the kind closes the caller route without closing the producer route');
 
+-- 7.6.5.3 THE SECOND RESERVED KIND, on exactly the same terms. A document
+-- version's derivative identity is the (document_id, version_no) fold, which a
+-- caller can predict outright; the identity index is unique per (tenant, kind,
+-- id) over an append-only table with no release path, so one pre-registration
+-- pointed at another artifact would make the genuine document write conflict for
+-- that version for ever. The kind is written only by ops.f01_record_document, in
+-- the transaction that completes the version, through the PRIVATE inserter —
+-- which is why reserving it here closes the caller route without closing that
+-- one.
+SELECT pg_temp.f01_expect_refusal(
+  $$SELECT pg_temp.f01_register_derivative('f01_document_version',
+      'synthetic-document-squat-0001:1', 'sha256:' || repeat('72', 32),
+      'syn-pg-deriv-reserved-0002')$$,
+  'f01_reserved_derivative_kind', 'derivative',
+  'the public surface refuses the document kind an in-schema writer produces');
+
+SELECT pg_temp.f01_assert(
+  'f01_document_version' = ANY (ops.f01_reserved_derivative_kinds())
+  AND cardinality(ops.f01_reserved_derivative_kinds()) = 2,
+  'derivative',
+  'the reserved list is the two kinds in-schema writers produce, and mirrors the kernel');
+
 -- 7.6.6 A forged link digest refuses, like every other record here.
 SELECT pg_temp.f01_expect_refusal(
   $$SELECT ops.f01_register_derivative_link(
@@ -1834,7 +2002,21 @@ SELECT pg_temp.f01_assert(
 SET SESSION AUTHORIZATION carr_writer;
 
 -- ===========================================================================
--- 8. Document identity — five axes, three homes.  (carr_writer)
+-- 8. Document identity — five axes, three homes, and one statement about where
+--    each version came from.  (carr_writer)
+--
+-- EVERY WRITE HERE CARRIES A PROVENANCE STATEMENT, because the six-argument
+-- ops.f01_record_document cannot be called without one. That is the settled
+-- producer rule made structural for documents: a version completes with a
+-- statement of its origin, or it does not complete. The versions below declare
+-- original_first_party — they are synthetic documents authored by this fixture,
+-- and saying anything else would be a fixture inventing provenance it does not
+-- have. The DERIVED path, its link row and its repointing refusals belong to
+-- mcp-server/test/document-derivative-registration-postgres.sql, which exercises
+-- them against its own artifact; what this section adds is the half that must
+-- hold for every document: the statement is mandatory, it is bound to THIS
+-- version and its exact bytes, and a derived declaration without its link
+-- refuses.
 -- ===========================================================================
 
 RESET SESSION AUTHORIZATION;
@@ -1875,6 +2057,94 @@ RETURNS jsonb LANGUAGE sql STABLE AS $$
     'recorded_at', ops.f01_now_text());
 $$;
 
+/**
+ * One document version's provenance statement, shaped exactly as the Node
+ * storedDocumentSourceProvenanceRecord() shapes one.
+ *
+ * The derived and non-derived halves are built by the SAME function on purpose:
+ * the fields that must be null in one case and present in the other are visible
+ * side by side, so a fixture filling in the wrong half is obvious rather than
+ * subtle. `recorded_by` is the DERIVED actor —
+ * ops.f01_insert_document_source_provenance refuses a record naming anybody else.
+ */
+CREATE FUNCTION pg_temp.f01_document_source_record(
+  p_document_id text, p_version integer, p_document_digest text, p_state text,
+  p_source text DEFAULT NULL, p_link_digest text DEFAULT NULL,
+  p_workflow text DEFAULT NULL, p_run text DEFAULT NULL, p_basis text DEFAULT NULL)
+RETURNS jsonb LANGUAGE sql STABLE AS $$
+  SELECT jsonb_build_object(
+    'schema_version', 'doctorcre-v5-f01-stored-document-source-provenance.v1',
+    'document_source_schema_version', 'doctorcre-v5-f01-document-source-provenance.v1',
+    'document_identity_schema_version', 'doctorcre-v5-f01-document-identity.v1',
+    'tenant', 'carr-internal',
+    'document_id', p_document_id,
+    'version_no', p_version,
+    'document_digest', p_document_digest,
+    'provenance_state', p_state,
+    'source_artifact_digest', p_source,
+    'derivative_link_schema_version',
+      CASE WHEN p_link_digest IS NULL THEN NULL
+           ELSE 'doctorcre-v5-f01-derivative-source-link.v1' END,
+    'derivative_link_digest', p_link_digest,
+    'derivative_kind',
+      CASE WHEN p_state = 'derived_from_stored_artifact' THEN 'f01_document_version' END,
+    'derivative_id',
+      CASE WHEN p_state = 'derived_from_stored_artifact'
+           THEN p_document_id || ':' || p_version::text END,
+    'producer_workflow', p_workflow,
+    'producer_run_ref', p_run,
+    'basis_statement', p_basis,
+    -- The six claims a statement makes about itself, hashed with it.
+    'registration_is_provenance', true,
+    'source_artifact_inferred_from_document_bytes', false,
+    'source_artifact_inferred_from_onedrive_identity', false,
+    'is_exhaustive_inventory', false,
+    'establishes_coverage', false,
+    'permits_deletion', false,
+    'recorded_by', pg_temp.f01_actor(),
+    'recorded_at', ops.f01_now_text());
+$$;
+
+CREATE FUNCTION pg_temp.f01_document_source_envelope(p_record jsonb) RETURNS jsonb
+LANGUAGE sql STABLE AS $$
+  SELECT pg_temp.f01_envelope('stored_document_source_provenance', p_record,
+    '{"establishes_coverage":false,"is_exhaustive_inventory":false,'
+    '"permits_deletion":false,"deletes_nothing":true}'::jsonb);
+$$;
+
+/**
+ * One document version and its statement, written the way the store writes them.
+ *
+ * THE DOCUMENT RECORD IS BUILT ONCE and its digest is what the statement names,
+ * because the writer refuses a statement that does not name this version's exact
+ * stored bytes. Building it twice would work today — ops.f01_now_text() is stable
+ * within a transaction — and would break the moment anything about it stopped
+ * being.
+ */
+CREATE FUNCTION pg_temp.f01_write_document(
+  p_version integer, p_prior text, p_signature text, p_filing text, p_official text,
+  p_key text,
+  p_state text DEFAULT 'original_first_party',
+  p_basis text DEFAULT 'synthetic test fixture: authored in this record layer',
+  p_content text DEFAULT NULL)
+RETURNS jsonb LANGUAGE plpgsql AS $$
+DECLARE
+  v_document jsonb := pg_temp.f01_document_record(p_version, p_prior, p_signature,
+                                                  p_filing, p_official, p_content);
+  v_digest text := ops.f01_digest_jsonb(v_document);
+BEGIN
+  RETURN ops.f01_record_document(
+    pg_temp.f01_envelope('stored_document_version', v_document,
+      '{"object_storage_success_implies_official_filing":false,'
+      '"neon_success_implies_official_filing":false}'::jsonb),
+    pg_temp.f01_document_source_envelope(
+      pg_temp.f01_document_source_record('synthetic-document-0001', p_version, v_digest,
+                                         p_state, NULL, NULL, NULL, NULL, p_basis)),
+    NULL,
+    p_prior, p_key, ops.f01_digest_jsonb(jsonb_build_object('key', p_key)));
+END;
+$$;
+
 SET SESSION AUTHORIZATION carr_writer;
 
 DO $document$
@@ -1882,39 +2152,35 @@ DECLARE
   v_result jsonb;
 BEGIN
   -- Version 1: unsigned draft, no official copy required yet.
-  v_result := ops.f01_record_document(
-    pg_temp.f01_envelope('stored_document_version',
-      pg_temp.f01_document_record(1, null, 'unsigned', null, 'not_required'),
-      '{"object_storage_success_implies_official_filing":false,'
-      '"neon_success_implies_official_filing":false}'::jsonb),
-    null, 'syn-pg-document-0001', ops.f01_digest_jsonb('{"k":"doc-1"}'::jsonb));
+  v_result := pg_temp.f01_write_document(1, null, 'unsigned', null, 'not_required',
+                                         'syn-pg-document-0001');
   PERFORM pg_temp.f01_remember('document_v1', v_result ->> 'document_digest');
   PERFORM pg_temp.f01_assert_eq(v_result ->> 'official_filing_state', 'not_required',
     'document', 'an unsigned draft needs no official copy');
+  PERFORM pg_temp.f01_assert_eq(v_result ->> 'provenance_state', 'original_first_party',
+    'document', 'the version completes with a statement about where it came from');
+  PERFORM pg_temp.f01_assert((v_result ->> 'derivative_registration_bound') = 'false'
+    AND (v_result ->> 'derivative_link_digest') IS NULL,
+    'document', 'an original registers no derivative link, because it has no source');
+  -- Said on every answer: a growing set of registered documents is not a picture
+  -- of what was derived, and an absent statement is not an absent source.
+  PERFORM pg_temp.f01_assert((v_result ->> 'establishes_coverage') = 'false'
+    AND (v_result ->> 'is_exhaustive_inventory') = 'false'
+    AND (v_result ->> 'permits_deletion') = 'false'
+    AND (v_result ->> 'absent_statement_means_no_source') = 'false',
+    'document', 'completing a document claims no coverage, no inventory and no deletion');
 
   -- Version 2: fully executed with NO filed copy — visibly incomplete, stored.
-  v_result := ops.f01_record_document(
-    pg_temp.f01_envelope('stored_document_version',
-      pg_temp.f01_document_record(2, pg_temp.f01_recall('document_v1'),
-                                  'fully_executed', 'pending', 'incomplete_official_filing'),
-      '{"object_storage_success_implies_official_filing":false,'
-      '"neon_success_implies_official_filing":false}'::jsonb),
-    pg_temp.f01_recall('document_v1'), 'syn-pg-document-0002',
-    ops.f01_digest_jsonb('{"k":"doc-2"}'::jsonb));
+  v_result := pg_temp.f01_write_document(2, pg_temp.f01_recall('document_v1'),
+    'fully_executed', 'pending', 'incomplete_official_filing', 'syn-pg-document-0002');
   PERFORM pg_temp.f01_remember('document_v2', v_result ->> 'document_digest');
   PERFORM pg_temp.f01_assert_eq(v_result ->> 'official_filing_state',
     'incomplete_official_filing',
     'document', 'full execution without a filed copy is VISIBLY incomplete');
 
   -- Version 3: the official copy is filed, and only now is filing complete.
-  v_result := ops.f01_record_document(
-    pg_temp.f01_envelope('stored_document_version',
-      pg_temp.f01_document_record(3, pg_temp.f01_recall('document_v2'),
-                                  'fully_executed', 'filed', 'filed'),
-      '{"object_storage_success_implies_official_filing":false,'
-      '"neon_success_implies_official_filing":false}'::jsonb),
-    pg_temp.f01_recall('document_v2'), 'syn-pg-document-0003',
-    ops.f01_digest_jsonb('{"k":"doc-3"}'::jsonb));
+  v_result := pg_temp.f01_write_document(3, pg_temp.f01_recall('document_v2'),
+    'fully_executed', 'filed', 'filed', 'syn-pg-document-0003');
   PERFORM pg_temp.f01_remember('document_v3', v_result ->> 'document_digest');
   PERFORM pg_temp.f01_assert_eq(v_result ->> 'official_filing_state', 'filed',
     'document', 'a filed OneDrive copy completes the official filing');
@@ -1922,28 +2188,123 @@ BEGIN
     (SELECT count(*) FROM ops.f01_document_version) = 3
     AND (SELECT count(*) FROM ops.f01_document_current) = 1,
     'document', 'every version is retained and exactly one is current');
+  -- ONE STATEMENT PER VERSION, and no link row anywhere: three originals
+  -- registered nothing, which is exactly what an original should register.
+  PERFORM pg_temp.f01_assert(
+    (SELECT count(*) FROM ops.f01_document_source_provenance
+      WHERE document_id = 'synthetic-document-0001') = 3
+    AND (SELECT count(*) FROM ops.f01_document_source_provenance
+          WHERE document_id = 'synthetic-document-0001'
+            AND derivative_link_digest IS NOT NULL) = 0,
+    'document', 'each version carries exactly one statement and no original registered a link');
 END;
 $document$;
+
+-- 8.0.1 THE STATEMENT READS BACK, and NULL means "no statement" rather than "no
+-- source". This is the distinction the whole seam exists for: before this row
+-- existed, a document with no link was indistinguishable from a document nobody
+-- registered, one written before the rule, and one that genuinely has no
+-- corporate original.
+DO $document_source_readback$
+DECLARE
+  v_statement jsonb := ops.f01_document_version_source('synthetic-document-0001', 3);
+BEGIN
+  PERFORM pg_temp.f01_assert_eq(v_statement ->> 'provenance_state', 'original_first_party',
+    'document', 'the statement for version 3 reads back');
+  PERFORM pg_temp.f01_assert_eq(v_statement ->> 'document_digest',
+    pg_temp.f01_recall('document_v3'),
+    'document', 'and names the exact bytes that version was stored as');
+  PERFORM pg_temp.f01_assert((v_statement ->> 'source_artifact_digest') IS NULL
+    AND (v_statement ->> 'derivative_link_digest') IS NULL,
+    'document', 'an original names no source artifact and no link');
+  PERFORM pg_temp.f01_assert_eq(v_statement ->> 'integrity', 'recomputed_from_committed_row',
+    'document', 'the statement readback is recomputed rather than trusted');
+  PERFORM pg_temp.f01_assert_eq(v_statement ->> 'absent_statement_means_no_source', 'false',
+    'document', 'an absent statement is never read as an absent source');
+  PERFORM pg_temp.f01_assert(
+    ops.f01_document_version_source('synthetic-document-0001', 99) IS NULL,
+    'document', 'a version nobody recorded has no statement, and no default is invented');
+  PERFORM pg_temp.f01_assert(
+    jsonb_array_length(ops.f01_document_source_history('synthetic-document-0001')) = 3,
+    'document', 'the history holds exactly the three statements made');
+END;
+$document_source_readback$;
+
+-- 8.0.2 NO STATEMENT, NO VERSION. Passing NULL is not a way around the rule, and
+-- the refusal happens before anything is written.
+DO $document_requires_provenance$
+DECLARE
+  v_versions bigint := (SELECT count(*) FROM ops.f01_document_version);
+BEGIN
+  PERFORM pg_temp.f01_expect_refusal(
+    format($$SELECT ops.f01_record_document(
+        pg_temp.f01_envelope('stored_document_version',
+          pg_temp.f01_document_record(4, %L, 'fully_executed', 'filed', 'filed')),
+        NULL, NULL, %L, 'syn-pg-document-noprov-0001',
+        ops.f01_digest_jsonb('{"k":"doc-np"}'::jsonb))$$,
+      pg_temp.f01_recall('document_v3'), pg_temp.f01_recall('document_v3')),
+    'f01_document_provenance_required', 'document',
+    'a document version cannot complete with no statement about its origin');
+
+  -- A statement about a DIFFERENT version does not satisfy this one. "Some
+  -- statement was supplied" is not the rule; the rule is that THIS version says
+  -- where IT came from.
+  PERFORM pg_temp.f01_expect_refusal(
+    format($$SELECT ops.f01_record_document(
+        pg_temp.f01_envelope('stored_document_version',
+          pg_temp.f01_document_record(4, %L, 'fully_executed', 'filed', 'filed')),
+        pg_temp.f01_document_source_envelope(
+          pg_temp.f01_document_source_record('synthetic-document-0001', 2,
+            %L, 'original_first_party', NULL, NULL, NULL, NULL,
+            'synthetic test fixture: authored in this record layer')),
+        NULL, %L, 'syn-pg-document-wrongver-0001',
+        ops.f01_digest_jsonb('{"k":"doc-wv"}'::jsonb))$$,
+      pg_temp.f01_recall('document_v3'), pg_temp.f01_recall('document_v2'),
+      pg_temp.f01_recall('document_v3')),
+    'f01_document_provenance_not_bound_to_document', 'document',
+    'a statement about another version does not complete this one');
+
+  -- AND A DERIVED DECLARATION WITHOUT ITS LINK REFUSES. This is the producer rule
+  -- itself: a version that says it came from a stored artifact completes only
+  -- with the ops.f01_derivative_link row that says which one.
+  PERFORM pg_temp.f01_expect_refusal(
+    format($$SELECT ops.f01_record_document(
+        pg_temp.f01_envelope('stored_document_version',
+          pg_temp.f01_document_record(4, %L, 'fully_executed', 'filed', 'filed')),
+        pg_temp.f01_document_source_envelope(
+          pg_temp.f01_document_source_record('synthetic-document-0001', 4,
+            ops.f01_digest_jsonb(pg_temp.f01_document_record(4, %L, 'fully_executed',
+                                                             'filed', 'filed')),
+            'derived_from_stored_artifact', %L, 'sha256:' || repeat('7c', 32),
+            'synthetic_test_document_producer', 'syn-pg-document-derived-0001', NULL)),
+        NULL, %L, 'syn-pg-document-nolink-0001',
+        ops.f01_digest_jsonb('{"k":"doc-nl"}'::jsonb))$$,
+      pg_temp.f01_recall('document_v3'), pg_temp.f01_recall('document_v3'),
+      pg_temp.f01_recall('artifact_1'), pg_temp.f01_recall('document_v3')),
+    'f01_derivative_link_required', 'document',
+    'a derived document version completes only with its source registration');
+
+  PERFORM pg_temp.f01_assert(
+    (SELECT count(*) FROM ops.f01_document_version) = v_versions,
+    'document', 'not one refused document write landed a version');
+END;
+$document_requires_provenance$;
 
 -- 8.1 A FULLY EXECUTED DOCUMENT CANNOT CLAIM A COMPLETE FILING WITHOUT ONE.
 -- The one inference Q125 forbids is refused by a structural constraint, not by
 -- a handler's good manners.
 SELECT pg_temp.f01_expect_refusal(
-  format($$SELECT ops.f01_record_document(
-      pg_temp.f01_envelope('stored_document_version',
-        pg_temp.f01_document_record(4, %L, 'fully_executed', 'pending', 'filed')),
-      %L, 'syn-pg-document-liar-0001', ops.f01_digest_jsonb('{"k":"doc-4"}'::jsonb))$$,
-    pg_temp.f01_recall('document_v3'), pg_temp.f01_recall('document_v3')),
+  format($$SELECT pg_temp.f01_write_document(4, %L, 'fully_executed', 'pending', 'filed',
+      'syn-pg-document-liar-0001')$$,
+    pg_temp.f01_recall('document_v3')),
   'f01_document_official_filing', 'document',
   'a pending OneDrive copy cannot be recorded as filed');
 
 -- 8.2 a stale document CAS refuses.
 SELECT pg_temp.f01_expect_refusal(
-  format($$SELECT ops.f01_record_document(
-      pg_temp.f01_envelope('stored_document_version',
-        pg_temp.f01_document_record(4, %L, 'fully_executed', 'filed', 'filed')),
-      %L, 'syn-pg-document-stale-0001', ops.f01_digest_jsonb('{"k":"doc-5"}'::jsonb))$$,
-    pg_temp.f01_recall('document_v1'), pg_temp.f01_recall('document_v1')),
+  format($$SELECT pg_temp.f01_write_document(4, %L, 'fully_executed', 'filed', 'filed',
+      'syn-pg-document-stale-0001')$$,
+    pg_temp.f01_recall('document_v1')),
   'f01_stale_document_digest', 'document', 'a stale document CAS refuses');
 
 -- 8.3 readback reproduces every stored field and recomputes the digest.
@@ -1990,6 +2351,7 @@ $doc_readback$;
 DO $replay_precedes_cas$
 DECLARE
   v_versions bigint := (SELECT count(*) FROM ops.f01_document_version);
+  v_statements bigint := (SELECT count(*) FROM ops.f01_document_source_provenance);
   v_replay jsonb;
 BEGIN
   PERFORM pg_temp.f01_assert_eq(
@@ -1998,14 +2360,8 @@ BEGIN
     pg_temp.f01_recall('document_v3'),
     'replay', 'version 3 is current before the stale replay');
 
-  v_replay := ops.f01_record_document(
-    pg_temp.f01_envelope('stored_document_version',
-      pg_temp.f01_document_record(2, pg_temp.f01_recall('document_v1'),
-                                  'fully_executed', 'pending', 'incomplete_official_filing'),
-      '{"object_storage_success_implies_official_filing":false,'
-      '"neon_success_implies_official_filing":false}'::jsonb),
-    pg_temp.f01_recall('document_v1'), 'syn-pg-document-0002',
-    ops.f01_digest_jsonb('{"k":"doc-2"}'::jsonb));
+  v_replay := pg_temp.f01_write_document(2, pg_temp.f01_recall('document_v1'),
+    'fully_executed', 'pending', 'incomplete_official_filing', 'syn-pg-document-0002');
 
   PERFORM pg_temp.f01_assert_eq(v_replay ->> 'document_digest',
     pg_temp.f01_recall('document_v2'),
@@ -2021,6 +2377,14 @@ BEGIN
       WHERE document_id = 'synthetic-document-0001'),
     pg_temp.f01_recall('document_v3'),
     'replay', 'the replay did not drag the current pointer backwards');
+  -- ...and it wrote no second STATEMENT either. The version, its statement and —
+  -- where there is one — its link are one transaction and one settled outcome, so
+  -- a replay that duplicated any of the three would be a replay that wrote.
+  PERFORM pg_temp.f01_assert(
+    (SELECT count(*) FROM ops.f01_document_source_provenance) = v_statements,
+    'replay', 'the replay wrote no second provenance statement');
+  PERFORM pg_temp.f01_assert_eq(v_replay ->> 'provenance_state', 'original_first_party',
+    'replay', 'the replayed answer carries the ORIGINAL statement, not a recomputed one');
 END;
 $replay_precedes_cas$;
 
@@ -2031,10 +2395,38 @@ SELECT pg_temp.f01_expect_refusal(
       pg_temp.f01_envelope('stored_document_version',
         pg_temp.f01_document_record(2, %L, 'fully_executed', 'pending',
                                     'incomplete_official_filing')),
-      %L, 'syn-pg-document-0002', ops.f01_digest_jsonb('{"k":"doc-2-altered"}'::jsonb))$$,
-    pg_temp.f01_recall('document_v1'), pg_temp.f01_recall('document_v1')),
+      pg_temp.f01_document_source_envelope(
+        pg_temp.f01_document_source_record('synthetic-document-0001', 2,
+          ops.f01_digest_jsonb(pg_temp.f01_document_record(2, %L, 'fully_executed',
+            'pending', 'incomplete_official_filing')),
+          'original_first_party', NULL, NULL, NULL, NULL,
+          'synthetic test fixture: authored in this record layer')),
+      NULL, %L, 'syn-pg-document-0002',
+      ops.f01_digest_jsonb('{"k":"doc-2-altered"}'::jsonb))$$,
+    pg_temp.f01_recall('document_v1'), pg_temp.f01_recall('document_v1'),
+    pg_temp.f01_recall('document_v1')),
   'f01_idempotency_payload_mismatch', 'replay',
   'the replay door still binds one key to one payload');
+
+-- 8.6 A READ-ONLY PRINCIPAL IS NOT A PRODUCER, and completing a document version
+-- is now producer work: it registers a derivative whenever the version declares
+-- one. The grant refuses first — 3.5.5 asserts that per role — and the writer's
+-- own body refuses a carr_reader session as well, because either alone is a
+-- single point of failure. The grant is what is checkable from here without
+-- depending on a server error message.
+SELECT pg_temp.f01_assert(
+  NOT has_function_privilege('carr_reader',
+    'ops.f01_record_document(jsonb,jsonb,jsonb,text,text,text)', 'EXECUTE')
+  AND has_function_privilege('carr_writer',
+    'ops.f01_record_document(jsonb,jsonb,jsonb,text,text,text)', 'EXECUTE'),
+  'document', 'the reader cannot complete a document version and the producer can');
+
+-- ...and the four-argument door is GONE rather than shadowed. An overload would
+-- leave a path that completes a document with no statement about its origin,
+-- which is the whole thing the six-argument form exists to prevent.
+SELECT pg_temp.f01_assert(
+  to_regprocedure('ops.f01_record_document(jsonb,text,text,text)') IS NULL,
+  'document', 'the four-argument ops.f01_record_document no longer exists');
 
 -- ===========================================================================
 -- 9. Preservation holds.
@@ -2204,9 +2596,39 @@ SELECT pg_temp.f01_expect_refusal(
 
 RESET SESSION AUTHORIZATION;
 
+/**
+ * The eight fields the Node store projects out of ops.f01_retention_clock, in the
+ * shape a stored evaluation carries them.
+ *
+ * PROJECTED RATHER THAN FORWARDED, exactly as the store projects the coverage
+ * answer: the reader returns more than the record holds — the artifact digest, the
+ * source's own observed instant and the integrity note — and the DIGEST beside it
+ * in the record is taken over the reader's FULL answer, which is what
+ * ops.f01_record_deletion_evaluation re-derives.
+ *
+ * `->` and not `->>` for the booleans and the nullable fields: `->>` would render
+ * them as text, and an evaluation carrying "true" where the store writes true is a
+ * different record with a different digest.
+ */
+CREATE FUNCTION pg_temp.f01_projected_clock(p_artifact_digest text)
+RETURNS jsonb LANGUAGE sql STABLE AS $$
+  SELECT jsonb_build_object(
+    'kind', c ->> 'kind',
+    'event_kind', c -> 'event_kind',
+    'started_at', c ->> 'started_at',
+    'reference', c ->> 'reference',
+    'provenance', c ->> 'provenance',
+    'event_digest', c -> 'event_digest',
+    'verified', c -> 'verified',
+    'source_observed_at_used', c -> 'source_observed_at_used')
+  FROM (SELECT ops.f01_retention_clock(p_artifact_digest) AS c) s;
+$$;
+
 CREATE FUNCTION pg_temp.f01_deletion_record(p_decision text, p_reason text, p_receipt jsonb,
                                             p_coverage_state text DEFAULT NULL,
-                                            p_coverage_digest text DEFAULT NULL)
+                                            p_coverage_digest text DEFAULT NULL,
+                                            p_clock jsonb DEFAULT NULL,
+                                            p_clock_digest text DEFAULT NULL)
 RETURNS jsonb LANGUAGE sql STABLE AS $$
   SELECT jsonb_build_object(
     'schema_version', 'doctorcre-v5-f01-stored-deletion-evaluation.v1',
@@ -2225,6 +2647,13 @@ RETURNS jsonb LANGUAGE sql STABLE AS $$
       ops.f01_derivative_coverage(pg_temp.f01_recall('artifact_1')) ->> 'state'),
     'derivative_coverage_digest', coalesce(p_coverage_digest,
       ops.f01_derivative_coverage_digest(pg_temp.f01_recall('artifact_1'))),
+    -- THE TRIGGER THE PERIOD WAS MEASURED FROM. Both halves are LOADED by default,
+    -- exactly as the store loads them; the parameters exist so 10.5 can offer a
+    -- forged or stale trigger and watch the writer refuse it.
+    'retention_clock', coalesce(p_clock,
+      pg_temp.f01_projected_clock(pg_temp.f01_recall('artifact_1'))),
+    'retention_clock_digest', coalesce(p_clock_digest,
+      ops.f01_retention_clock_digest(pg_temp.f01_recall('artifact_1'))),
     'deletion_receipt', p_receipt,
     'evaluated_by', pg_temp.f01_actor(),
     'evaluated_at', ops.f01_now_text());
@@ -2234,13 +2663,16 @@ CREATE FUNCTION pg_temp.f01_evaluate_deletion(p_decision text, p_reason text,
                                               p_receipt jsonb, p_key text,
                                               p_inventory text DEFAULT NULL,
                                               p_coverage_state text DEFAULT NULL,
-                                              p_coverage_digest text DEFAULT NULL)
+                                              p_coverage_digest text DEFAULT NULL,
+                                              p_clock jsonb DEFAULT NULL,
+                                              p_clock_digest text DEFAULT NULL)
 RETURNS jsonb LANGUAGE plpgsql AS $$
 BEGIN
   RETURN ops.f01_record_deletion_evaluation(
     pg_temp.f01_envelope('stored_deletion_evaluation',
       pg_temp.f01_deletion_record(p_decision, p_reason, p_receipt,
-                                  p_coverage_state, p_coverage_digest),
+                                  p_coverage_state, p_coverage_digest,
+                                  p_clock, p_clock_digest),
       '{"silent_purge":false,"purge_without_proof":false,"bytes_deleted":false,'
       '"rows_deleted":false,"external_purge_performed":false}'::jsonb),
     coalesce(p_inventory, ops.f01_hold_inventory_digest(pg_temp.f01_recall('artifact_1'))),
@@ -2378,6 +2810,260 @@ SELECT pg_temp.f01_assert(
                      IS DISTINCT FROM 'unknown'),
   'deletion', 'every persisted evaluation was taken against unknown coverage');
 
+-- ===========================================================================
+-- 10.2.3 WHEN THE RETENTION PERIOD STARTED, derived and re-derived.
+--
+-- The accepted rule: a default retention period starts at the SERVER-STAMPED
+-- instant this record layer took custody of the artifact. The instant its SOURCE
+-- says it observed the artifact is identity and provenance, and is never the
+-- clock — under that name or any other. What is checkable HERE, against a real
+-- database, is the half a pure suite cannot reach: that the clock is derived from
+-- the stored row, that the writer re-derives it under the lock it already holds,
+-- and that a forged or stale trigger refuses.
+-- ===========================================================================
+
+DO $retention_clock$
+DECLARE
+  v_clock jsonb := ops.f01_retention_clock(pg_temp.f01_recall('artifact_1'));
+  v_row ops.f01_corporate_artifact%ROWTYPE;
+BEGIN
+  SELECT * INTO v_row FROM ops.f01_corporate_artifact
+   WHERE artifact_digest = pg_temp.f01_recall('artifact_1');
+
+  PERFORM pg_temp.f01_assert_eq(v_clock ->> 'kind', 'server_recorded_custody',
+    'retention', 'the clock this slice derives is custody, and only custody');
+  PERFORM pg_temp.f01_assert_eq(v_clock ->> 'started_at',
+    ops.f01_instant_text(v_row.recorded_at),
+    'retention', 'the period starts at the server-stamped instant on the stored row');
+  PERFORM pg_temp.f01_assert_eq(v_clock ->> 'reference',
+    'ops.f01_corporate_artifact.recorded_at',
+    'retention', 'the clock names where its instant came from');
+  PERFORM pg_temp.f01_assert_eq(v_clock ->> 'provenance', 'server_stamped_custody',
+    'retention', 'and whose provenance it carries');
+  PERFORM pg_temp.f01_assert_eq(v_clock ->> 'verified', 'true',
+    'retention', 'the server''s own stamp on its own row is verified by construction');
+
+  -- THE ANTI-ALIAS STATEMENT, both halves. The source's instant is reported, and
+  -- reported as NOT the thing the period runs from — and the two are genuinely
+  -- different values here, so the assertion is not passing by coincidence.
+  PERFORM pg_temp.f01_assert_eq(v_clock ->> 'source_observed_at_used', 'false',
+    'retention', 'a retention period never runs from the source''s observed instant');
+  PERFORM pg_temp.f01_assert_eq(v_clock ->> 'source_observed_at', v_row.observed_at_text,
+    'retention', 'the source''s own instant is reported beside the clock, not in place of it');
+  PERFORM pg_temp.f01_assert(
+    (v_clock ->> 'started_at') IS DISTINCT FROM v_row.observed_at_text,
+    'retention', 'custody and observation are different instants in this fixture',
+    v_row.observed_at_text || ' observed, ' || (v_clock ->> 'started_at') || ' recorded');
+
+  -- AND NO EVENT CLOCK EXISTS. Nothing in this schema produces, approves or
+  -- authenticates a retention-clock event, so every clock it can derive is
+  -- custody and every explicit-event class fails closed in the kernel.
+  PERFORM pg_temp.f01_assert((v_clock ->> 'event_kind') IS NULL
+    AND (v_clock ->> 'event_digest') IS NULL,
+    'retention', 'no retention-clock event is produced anywhere in this slice');
+
+  -- An artifact nobody stored has no clock, and no default is invented for it.
+  PERFORM pg_temp.f01_assert(
+    ops.f01_retention_clock('sha256:' || repeat('cf', 32)) IS NULL,
+    'retention', 'a period that would start from nothing is not a period');
+END;
+$retention_clock$;
+
+-- 10.2.3.1 THE WRITER RE-DERIVES THE TRIGGER, and a forged one refuses. This is
+-- the assertion that matters most in the section: `started_at` is the single field
+-- that decides whether a period has elapsed, so it is the field a forged
+-- evaluation would move.
+SELECT pg_temp.f01_expect_refusal(
+  format($$SELECT pg_temp.f01_evaluate_deletion('refuse',
+      'unknown_hold_state_blocks_deletion', null, 'syn-pg-deletion-forgedclock-0001',
+      null, null, null, %L::jsonb)$$,
+    (pg_temp.f01_projected_clock(pg_temp.f01_recall('artifact_1'))
+       || '{"started_at":"2019-01-01T00:00:00.000Z"}'::jsonb)::text),
+  'f01_stale_retention_clock', 'retention',
+  'an evaluation naming a start instant the database does not hold refuses');
+
+-- A forged KIND is refused on the same clause: 'explicit_retention_clock_event' is
+-- the word that would move a period to an event nobody produced.
+SELECT pg_temp.f01_expect_refusal(
+  format($$SELECT pg_temp.f01_evaluate_deletion('refuse',
+      'unknown_hold_state_blocks_deletion', null, 'syn-pg-deletion-forgedkind-0001',
+      null, null, null, %L::jsonb)$$,
+    (pg_temp.f01_projected_clock(pg_temp.f01_recall('artifact_1'))
+       || jsonb_build_object('kind', 'explicit_retention_clock_event',
+                             'event_kind', 'lease_terminated',
+                             'event_digest', 'sha256:' || repeat('7d', 32)))::text),
+  'f01_stale_retention_clock', 'retention',
+  'a caller cannot declare that an explicit retention-clock event started the period');
+
+-- A STALE DIGEST refuses too, exactly as a stale hold inventory or a stale
+-- coverage answer does: the record must be bound to the answer the database holds.
+SELECT pg_temp.f01_expect_refusal(
+  format($$SELECT pg_temp.f01_evaluate_deletion('refuse',
+      'unknown_hold_state_blocks_deletion', null, 'syn-pg-deletion-staleclock-0001',
+      null, null, null, null, %L)$$,
+    'sha256:' || repeat('7e', 32)),
+  'f01_stale_retention_clock', 'retention',
+  'an evaluation bound to a retention-clock digest the database does not hold refuses');
+
+-- AND THE ALIAS IS REFUSED BY ITS OWN NAME, before the digest comparison, so the
+-- one substitution the rule exists to prevent does not depend on a digest happening
+-- to notice it.
+SELECT pg_temp.f01_expect_refusal(
+  format($$SELECT pg_temp.f01_evaluate_deletion('refuse',
+      'unknown_hold_state_blocks_deletion', null, 'syn-pg-deletion-aliasclock-0001',
+      null, null, null, %L::jsonb)$$,
+    (pg_temp.f01_projected_clock(pg_temp.f01_recall('artifact_1'))
+       || '{"source_observed_at_used":true}'::jsonb)::text),
+  'f01_retention_clock_uses_source_observed_at', 'retention',
+  'an evaluation whose trigger admits it is the source''s observed instant refuses');
+
+-- ===========================================================================
+-- 10.2.3.2 THE EMBEDDED TRIGGER IS BOUND WHOLE, and the digest beside it cannot
+-- stand in for that.
+--
+-- WHY THIS SECTION EXISTS AT ALL. It is tempting to read 10.2.3.1 and conclude
+-- that the digest catches everything — that any change to the embedded trigger
+-- must move `retention_clock_digest` and be caught there. It does not, and the
+-- reason is structural rather than subtle: the digest is taken over the reader's
+-- FULL answer (which also carries the artifact digest, the source's observed
+-- instant and the integrity note), while the record embeds the eight-field
+-- PROJECTION the decision was allowed to read. They are two different values.
+-- Nothing the caller does to the embedded object changes the digest sitting
+-- beside it, because that digest was never taken over the embedded object.
+--
+-- So the first block below proves the premise before the refusals lean on it:
+-- a record whose embedded trigger has been tampered with still carries the REAL,
+-- unmoved server clock digest. Every refusal after it is therefore a refusal the
+-- digest comparison could not have produced.
+-- ===========================================================================
+
+DO $clock_bound_whole$
+DECLARE
+  v_real jsonb := pg_temp.f01_projected_clock(pg_temp.f01_recall('artifact_1'));
+  v_forged jsonb := v_real || '{"provenance":"source_asserted_custody"}'::jsonb;
+  v_record jsonb := pg_temp.f01_deletion_record(
+    'refuse', 'unknown_hold_state_blocks_deletion', null, null, null, v_forged);
+BEGIN
+  -- The premise, stated as an equality rather than asserted in a comment: the
+  -- digest the tampered record carries IS the digest of the database's own answer.
+  PERFORM pg_temp.f01_assert_eq(v_record ->> 'retention_clock_digest',
+    ops.f01_retention_clock_digest(pg_temp.f01_recall('artifact_1')),
+    'retention', 'tampering with the embedded trigger does not move the clock digest beside it');
+  -- ...and the object it carries is genuinely not the derived one, so the fixture
+  -- is not passing because the forgery failed to apply.
+  PERFORM pg_temp.f01_assert((v_record -> 'retention_clock') IS DISTINCT FROM v_real,
+    'retention', 'and the embedded trigger really has been altered',
+    (v_record -> 'retention_clock' ->> 'provenance'));
+  -- The one thing the digest DOES still bind: the reader's full answer, which is
+  -- a different object from the projection the record embeds.
+  PERFORM pg_temp.f01_assert(
+    ops.f01_retention_clock(pg_temp.f01_recall('artifact_1')) IS DISTINCT FROM v_real,
+    'retention', 'the digested full answer is not the object the record embeds');
+END;
+$clock_bound_whole$;
+
+-- PROVENANCE. The forgery the digest cannot see: the timing is untouched, the
+-- kind is untouched, the digest is the real one — and the stored envelope would
+-- have said this period was measured from an instant a source asserted. Every
+-- later reader of that envelope reads the record, not the digest.
+SELECT pg_temp.f01_expect_refusal(
+  format($$SELECT pg_temp.f01_evaluate_deletion('refuse',
+      'unknown_hold_state_blocks_deletion', null, 'syn-pg-deletion-clockprov-0001',
+      null, null, null, %L::jsonb)$$,
+    (pg_temp.f01_projected_clock(pg_temp.f01_recall('artifact_1'))
+       || '{"provenance":"source_asserted_custody"}'::jsonb)::text),
+  'f01_stale_retention_clock', 'retention',
+  'a trigger claiming a provenance the database does not hold refuses, real digest and all');
+
+-- REFERENCE. Same shape, and it is the field that says WHERE the instant was read
+-- from. A record naming the artifact's observed_at column as its source, while
+-- carrying the custody instant and the real digest, is the alias written down.
+SELECT pg_temp.f01_expect_refusal(
+  format($$SELECT pg_temp.f01_evaluate_deletion('refuse',
+      'unknown_hold_state_blocks_deletion', null, 'syn-pg-deletion-clockref-0001',
+      null, null, null, %L::jsonb)$$,
+    (pg_temp.f01_projected_clock(pg_temp.f01_recall('artifact_1'))
+       || '{"reference":"ops.f01_corporate_artifact.observed_at_text"}'::jsonb)::text),
+  'f01_stale_retention_clock', 'retention',
+  'a trigger naming a reference the database does not hold refuses');
+
+-- VERIFIED, and it is bound in BOTH directions. Understating it is refused here
+-- because a stored evaluation is a statement about what the DATABASE answered,
+-- not about what the caller was willing to claim. The direction that will matter
+-- is the other one — the day an explicit event clock exists, `verified` is the
+-- flag that says something authenticated it — and a writer that ignored the field
+-- would be a writer that let a caller supply that flag.
+SELECT pg_temp.f01_expect_refusal(
+  format($$SELECT pg_temp.f01_evaluate_deletion('refuse',
+      'unknown_hold_state_blocks_deletion', null, 'syn-pg-deletion-clockver-0001',
+      null, null, null, %L::jsonb)$$,
+    (pg_temp.f01_projected_clock(pg_temp.f01_recall('artifact_1'))
+       || '{"verified":false}'::jsonb)::text),
+  'f01_stale_retention_clock', 'retention',
+  'a trigger restating the database''s verification flag refuses');
+
+-- AN EXTRA FIELD IS A FORGERY TOO, because the shape is closed. A caller that can
+-- add a key can add an integrity note nobody computed, sitting inside a record
+-- whose digest checks out and whose eight known fields all agree.
+SELECT pg_temp.f01_expect_refusal(
+  format($$SELECT pg_temp.f01_evaluate_deletion('refuse',
+      'unknown_hold_state_blocks_deletion', null, 'syn-pg-deletion-clockextra-0001',
+      null, null, null, %L::jsonb)$$,
+    (pg_temp.f01_projected_clock(pg_temp.f01_recall('artifact_1'))
+       || '{"integrity":"asserted_by_caller"}'::jsonb)::text),
+  'f01_stale_retention_clock', 'retention',
+  'a trigger carrying a field the projection does not hold refuses');
+
+-- AND A MISSING FIELD IS THE SAME FORGERY FROM THE OTHER SIDE. Dropping a field is
+-- how a record stops saying something, and a comparison of a few named fields
+-- would never have noticed the rest going quiet.
+SELECT pg_temp.f01_expect_refusal(
+  format($$SELECT pg_temp.f01_evaluate_deletion('refuse',
+      'unknown_hold_state_blocks_deletion', null, 'syn-pg-deletion-clockmissing-0001',
+      null, null, null, %L::jsonb)$$,
+    (pg_temp.f01_projected_clock(pg_temp.f01_recall('artifact_1')) - 'verified')::text),
+  'f01_stale_retention_clock', 'retention',
+  'a trigger that has dropped a field the projection holds refuses');
+
+-- THE OTHER HALF OF THE SAME BINDING, so this section cannot pass by refusing
+-- everything: the UNALTERED projection is still accepted, on the same writer, in
+-- the same session, one statement later. Default custody is not weakened by any
+-- of the above.
+DO $clock_unaltered_accepted$
+DECLARE
+  v_result jsonb;
+BEGIN
+  v_result := pg_temp.f01_evaluate_deletion('refuse', 'unknown_hold_state_blocks_deletion',
+    null, 'syn-pg-deletion-clockwhole-0001');
+  PERFORM pg_temp.f01_assert_eq(v_result ->> 'outcome', 'refuse',
+    'retention', 'the unaltered derived trigger is still accepted, field for field');
+  PERFORM pg_temp.f01_assert_eq(v_result -> 'retention_clock' ->> 'kind',
+    'server_recorded_custody',
+    'retention', 'and the evaluation is still measured from server-stamped custody');
+END;
+$clock_unaltered_accepted$;
+
+-- THE STORED-STATE HALF. Every persisted evaluation names a custody trigger, and
+-- not one of them claims the source's observed instant started the period.
+SELECT pg_temp.f01_assert(
+  NOT EXISTS (SELECT 1 FROM ops.f01_deletion_evaluation
+               WHERE envelope -> 'record' -> 'retention_clock' ->> 'kind'
+                     IS DISTINCT FROM 'server_recorded_custody'
+                  OR coalesce(envelope -> 'record' -> 'retention_clock'
+                                ->> 'source_observed_at_used', '') <> 'false'),
+  'retention', 'every persisted evaluation was measured from server-stamped custody');
+
+-- ...and the whole-object half of the same statement, which is the one a
+-- field-by-field comparison could not make: every stored trigger IS the projection
+-- the database derives for that artifact, not merely one that agrees about kind
+-- and timing. Nothing is deleted in this fixture, so every artifact named by a
+-- stored evaluation is still there to re-derive a clock from.
+SELECT pg_temp.f01_assert(
+  NOT EXISTS (SELECT 1 FROM ops.f01_deletion_evaluation e
+               WHERE e.envelope -> 'record' -> 'retention_clock'
+                     IS DISTINCT FROM pg_temp.f01_projected_clock(e.artifact_digest)),
+  'retention', 'every persisted trigger is the derived one whole, field for field');
+
 -- 10.3 THE CONSTRAINTS THIS FIXTURE CANNOT REACH BEHAVIOURALLY, stated plainly
 -- rather than
 -- dropped. f01_deletion_receipt_only_on_allow forbids an allow with no receipt
@@ -2430,6 +3116,33 @@ SELECT pg_temp.f01_assert(
   'the coverage-bound constraint is installed, refuses an ABSENT coverage answer, and forbids an allow under unknown coverage',
   'unreachable behaviourally while every coverage answer is unknown');
 
+-- The third one, added with the retention clock: no evaluation may be stored
+-- without saying which trigger its period was measured from, that trigger must be
+-- one of the two registered kinds, its start instant must be readable, and it must
+-- not admit that it is the source's observed instant. The writer refuses each of
+-- those earlier and with a clearer message, so this is the version that holds if
+-- somebody edits the writer — which is exactly when a period measured from a value
+-- a source can backdate would come back.
+--
+-- THE PRESENCE TESTS ARE ASSERTED SEPARATELY, for the reason the coverage
+-- constraint above spells out: over an ABSENT key `->>` is NULL, the instant test
+-- is non-strict and answers NULL too, and a CHECK fails only on FALSE — so a
+-- constraint written without them would admit a record carrying no clock at all.
+SELECT pg_temp.f01_assert(
+  (SELECT pg_get_constraintdef(c.oid) ~ 'retention_clock_digest'
+      AND pg_get_constraintdef(c.oid) ~ 'server_recorded_custody'
+      AND pg_get_constraintdef(c.oid) ~ 'explicit_retention_clock_event'
+      AND pg_get_constraintdef(c.oid) ~ 'source_observed_at_used'
+      AND pg_get_constraintdef(c.oid) ~ 'retention_clock_digest''[^)]*\)+ IS NOT NULL'
+      AND pg_get_constraintdef(c.oid) ~ 'started_at''[^)]*\)+ IS NOT NULL'
+     FROM pg_constraint c
+    WHERE c.conrelid = 'ops.f01_deletion_evaluation'::regclass
+      AND c.conname = 'f01_deletion_retention_clock_bound'
+      AND c.contype = 'c'),
+  'retention',
+  'the retention-clock constraint is installed, refuses an ABSENT trigger, and forbids the source-observed alias',
+  'the writer refuses the same shapes earlier and with better messages');
+
 -- AND WHAT THAT CONSTRAINT DOES NOT SAY, recorded rather than left to be assumed
 -- from its presence. Both tightened constraints are added NOT VALID, so rows
 -- written before the tightening are UNPROVEN: they were never re-checked, and
@@ -2448,6 +3161,29 @@ SELECT pg_temp.f01_assert(
   'deletion',
   'both tightened coverage/claim constraints are installed under the names the schema states',
   'added NOT VALID: binding on every new row, and making no claim about rows written before');
+
+-- ...AND THE CATALOG SAYS THE UNPROVEN PART OUT LOUD. convalidated = false is
+-- PostgreSQL recording that these constraints were never checked against the rows
+-- that already existed. Asserting the flag — rather than only the constraint's
+-- presence — is what keeps the comfortable reading ("it is installed, so
+-- everything satisfies it") from quietly replacing the honest one ("it binds
+-- every row inserted from here on, and history is unproven").
+--
+-- THIS IS AN ASSERTION ABOUT THE SCHEMA, NOT ABOUT THIS DATABASE. Here the tables
+-- were created empty by the same run, so nothing unproven exists; the flag
+-- travels to databases where that is not true, which is exactly where somebody
+-- would otherwise read a validated guarantee into it. A later, deliberate
+-- VALIDATE CONSTRAINT would flip these to true and fail here, which is the right
+-- moment to re-read the two comments in domain.sql that explain why they are not
+-- validated on install.
+SELECT pg_temp.f01_assert(
+  (SELECT count(*) FROM pg_constraint c
+    WHERE c.conrelid IN ('ops.f01_deletion_evaluation'::regclass,
+                         'ops.f01_derivative_link'::regclass)
+      AND c.conname IN ('f01_deletion_coverage_bound', 'f01_derivative_claims_nothing')
+      AND c.contype = 'c' AND c.convalidated = false) = 2,
+  'deletion',
+  'both tightened constraints are recorded NOT VALID, so no rows written before them are claimed as proven');
 
 -- ===========================================================================
 -- 11. Append-only, no silent overwrite, no truncate.
@@ -2471,6 +3207,10 @@ BEGIN
     'f01_policy_version', 'f01_field_event', 'f01_state_transition', 'f01_mutation_receipt',
     'f01_reconciliation_item', 'f01_corporate_artifact', 'f01_parsed_proposal',
     'f01_proposal_link', 'f01_derivative_link', 'f01_document_version',
+    -- A statement about one version is made once. A later version gets its own
+    -- row; the earlier one is never edited to say something different about what
+    -- already happened.
+    'f01_document_source_provenance',
     'f01_preservation_hold_event', 'f01_deletion_evaluation']
   LOOP
     PERFORM pg_temp.f01_expect_refusal(
@@ -2517,6 +3257,7 @@ BEGIN
     'f01_state_transition', 'f01_mutation_receipt', 'f01_reconciliation_item',
     'f01_corporate_artifact', 'f01_parsed_proposal', 'f01_proposal_link',
     'f01_derivative_link', 'f01_document_version', 'f01_document_current',
+    'f01_document_source_provenance',
     'f01_preservation_hold_event', 'f01_preservation_hold_current',
     'f01_deletion_evaluation', 'f01_idempotency']
   LOOP
@@ -2586,7 +3327,15 @@ BEGIN
                         -- from inside a definer writer, where it runs as the
                         -- owner, so any runtime EXECUTE on it is a hole rather
                         -- than a convenience. 3.5.5 asserts the same per role.
-                        'f01_insert_derivative_link')
+                        'f01_insert_derivative_link',
+                        -- The document-source seam's inserter, on the same terms.
+                        -- This one also catches the wrong APPLICATION ORDER:
+                        -- domain.sql's grant loop iterates over the functions
+                        -- that exist when it runs, so a re-apply after the
+                        -- document hunk is the case where an unnamed helper gets
+                        -- handed out. domain.sql names it too; this is the
+                        -- readback that would notice if it stopped.
+                        'f01_insert_document_source_provenance')
           OR p.proname LIKE 'f01\_guard\_%')
      AND (p.proacl IS NULL
           OR EXISTS (SELECT 1 FROM aclexplode(p.proacl) a
@@ -2661,11 +3410,9 @@ SELECT pg_temp.f01_expect_refusal(
 
 -- 13.2 the same key across two DIFFERENT operations refuses.
 SELECT pg_temp.f01_expect_refusal(
-  format($$SELECT ops.f01_record_document(
-      pg_temp.f01_envelope('stored_document_version',
-        pg_temp.f01_document_record(4, %L, 'fully_executed', 'filed', 'filed')),
-      %L, 'syn-pg-idem-0001', ops.f01_digest_jsonb('{"k":"idem"}'::jsonb))$$,
-    pg_temp.f01_recall('document_v3'), pg_temp.f01_recall('document_v3')),
+  format($$SELECT pg_temp.f01_write_document(4, %L, 'fully_executed', 'filed', 'filed',
+      'syn-pg-idem-0001')$$,
+    pg_temp.f01_recall('document_v3')),
   'f01_idempotency', 'idempotency', 'one key may not bind two operations');
 
 -- 13.3 an empty idempotency key refuses.

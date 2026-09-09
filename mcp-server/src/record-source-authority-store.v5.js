@@ -28,6 +28,27 @@
 // transaction context, and every write here first verifies that the database's
 // answer matches the handler's authenticated one, refusing when they differ.
 //
+// WHICH SCHEMA THIS MODULE REQUIRES, said plainly because it is now more than
+// domain.sql. recordDocumentIdentity below calls the SIX-argument
+// ops.f01_record_document and passes a provenance statement on every write, and
+// it reads ops.f01_document_version_source. Both arrive with the document-source
+// hunk (ops/document-derivative-registration.candidate.sql), applied AFTER
+// domain.sql in the same database. Against a database carrying only the
+// four-argument writer every document write fails on a missing function; the
+// local gate names the missing functions up front rather than letting that
+// surface later, and this module does not degrade to the old writer, because a
+// path that completes a document with no statement about its origin is the exact
+// thing the producer rule exists to remove.
+//
+// evaluateArtifactDeletion additionally reads ops.f01_retention_clock and
+// ops.f01_retention_clock_digest, which arrive WITH domain.sql. They are what make
+// a retention period start at the server-stamped instant the record layer took
+// custody of an artifact rather than at the instant its source says it observed
+// it; against a database carrying the older domain schema the deletion path fails
+// on a missing function, and this module does not fall back to the source's
+// timestamp, because measuring retention from a value a source can backdate is
+// the defect the clock exists to remove.
+//
 // WHAT THIS MODULE STILL IS NOT. It registers nothing: v5F01ToolRegistrations()
 // below is a DESCRIPTION the parent may register from, and this file does not
 // touch tools.js, mcp.js, the mutation registry or any generated catalog. It
@@ -63,6 +84,24 @@ import {
   v5F01DecisionSubsetDigest,
   v5F01PolicyDigest,
 } from "./record-source-authority.v5.js";
+// THE DOCUMENT HALF OF THE DERIVATIVE-REGISTRATION RULE, imported rather than
+// reimplemented. This module and document-derivative-registration.v5.js import
+// each other: that module needs this one's envelope contract and record
+// builders, and recordDocumentIdentity below needs its binding decision and its
+// composer. The cycle is deliberate and is kept SAFE IN ONE DIRECTION ONLY by
+// the other module having no module-scope read of anything exported here — every
+// use of V5_F01_DERIVED_ONLY_FIELDS and V5_F01_STORE_RECORD_KINDS over there
+// happens inside a function body or inside its exported assertion, never while
+// its body is evaluating. Were that not true, importing THIS module first would
+// evaluate that one against uninitialized bindings and throw a ReferenceError
+// before a single test ran, which is why both import orders are asserted in the
+// suite rather than assumed.
+import {
+  V5_F01_DOCUMENT_PROVENANCE_STATES,
+  assertDocumentSourceDeclaration,
+  composeDocumentSourceEnvelopes,
+  evaluateDocumentSourceBinding,
+} from "./document-derivative-registration.v5.js";
 
 export const V5_F01_STORE_SCHEMA_VERSION =
   "doctorcre-v5-f01-record-source-authority-store.v1";
@@ -96,6 +135,11 @@ export const V5_F01_STORE_RECORD_KINDS = Object.freeze([
   "stored_proposal_link",
   "stored_derivative_link",
   "stored_document_version",
+  // One document version's statement about where that version came from. It is a
+  // record in its own right rather than a field on the version, because "derived
+  // from that artifact", "authored here" and "nobody knows" are three different
+  // facts and an ABSENT link says none of them.
+  "stored_document_source_provenance",
   "stored_preservation_hold",
   "stored_deletion_evaluation",
 ]);
@@ -182,6 +226,18 @@ export const V5_F01_DERIVED_ONLY_FIELDS = deepFreeze([
   "produced_at", "registered_by", "registered_at", "source_created_at",
   "derivative_coverage", "derivative_coverage_state", "derivative_coverage_digest",
   "registered_derivative_kinds", "derivatives",
+  // THE RETENTION CLOCK AND THE CUSTODY INSTANT IT COMES FROM. A caller that
+  // could state either would be choosing when its own artifact's retention
+  // period started — which is the whole reason the period is measured from a
+  // server stamp rather than from the source's observed instant. Both are read
+  // off the stored row instead, and `source_content_digest` joins them because it
+  // is the loaded artifact's own bytes, never a caller's description of them.
+  "retention_clock", "retention_clock_digest", "custody", "source_content_digest",
+  // The two the document seam adds. `provenance_digest` is the digest of a record
+  // this module builds, and `derivative_link_digest` is the digest of the link it
+  // registers; a caller that could state either would be naming the bytes its own
+  // write is checked against. Both are read back from the database instead.
+  "provenance_digest", "derivative_link_digest",
 ]);
 
 function assertNoAccessorsOrHiddenKeys(object, path) {
@@ -341,10 +397,18 @@ const OPERATION_SCHEMAS = deepFreeze({
     keys: ["schema_version", "idempotency_key", "registration"],
     required: ["idempotency_key", "registration"],
   },
+  // `source` IS REQUIRED, and requiring it knowingly breaks the contract this
+  // operation shipped with. A document version recorded with no statement about
+  // where it came from is exactly the untracked derivative the producer rule
+  // exists to prevent, and an absent statement has never meant "no source" — it
+  // means nobody said. There is no default: a caller that does not know states
+  // legacy_provenance_unknown and says on what basis, which is a different record
+  // from "authored here" and reads as one.
   "record-document-identity": {
     write: true, humanOnly: false, authorityOnly: false,
-    keys: ["schema_version", "idempotency_key", "document", "expected_prior_document_digest"],
-    required: ["idempotency_key", "document"],
+    keys: ["schema_version", "idempotency_key", "document", "source",
+      "expected_prior_document_digest"],
+    required: ["idempotency_key", "document", "source"],
   },
   "record-artifact-preservation-hold": {
     write: true, humanOnly: true, authorityOnly: true,
@@ -384,7 +448,7 @@ export function v5F01ToolRegistrations() {
     "register-derivative-source-link":
       "Bind one derived record to the exact stored artifact it came from, under the authenticated producer identity, before that derivative is complete; provenance only, never an inventory and never a deletion permission.",
     "record-document-identity":
-      "Persist and read back one coherent versioned document identity/state record; no byte transfer or send.",
+      "Persist and read back one coherent versioned document identity/state record together with the required statement of where that version came from, registering its source link when it is derived; no byte transfer or send.",
     "record-artifact-preservation-hold":
       "Append a hold or release state for one stored artifact; never delete the artifact.",
     "evaluate-artifact-deletion":
@@ -593,7 +657,8 @@ export function storedHoldRecord({
 export function storedDeletionEvaluationRecord({
   artifact_class, artifact_home, artifact_digest, decision, reason_id,
   retention_registry_digest, hold_inventory_digest, derivative_coverage_state,
-  derivative_coverage_digest, deletion_receipt, evaluated_by, evaluated_at,
+  derivative_coverage_digest, retention_clock, retention_clock_digest,
+  deletion_receipt, evaluated_by, evaluated_at,
 }) {
   return {
     schema_version: V5_F01_STORED_DELETION_SCHEMA_VERSION,
@@ -601,6 +666,14 @@ export function storedDeletionEvaluationRecord({
     artifact_class, artifact_home, artifact_digest,
     decision, reason_id,
     retention_registry_digest,
+    // THE TRIGGER THE PERIOD WAS MEASURED FROM, beside the registry digest and on
+    // the same terms as the hold inventory and the coverage answer: the projected
+    // clock travels in the record, and the digest of the database's own full
+    // answer travels beside it so ops.f01_record_deletion_evaluation can
+    // re-derive it under the lock it already holds and refuse a forged or stale
+    // one. Neither is a caller value; both are read off the stored artifact row.
+    retention_clock: retention_clock ?? null,
+    retention_clock_digest: retention_clock_digest ?? null,
     hold_inventory_digest,
     // The coverage answer the evaluation was taken against, and the digest of
     // it. The database re-derives the digest at apply time, exactly as it does
@@ -693,6 +766,83 @@ const KERNEL_CURRENT_STATE_KEYS = Object.freeze([
  * is not evidence about when the record layer saw the production, and a caller
  * that could state it could place a derivative before the artifact it came from.
  */
+/**
+ * Project one row from ops.f01_stored_artifact down to the closed shape the
+ * kernel accepts for a LOADED source artifact.
+ *
+ * THE CONTENT DIGEST IS THE POINT OF THIS FUNCTION. `artifact_digest` identifies
+ * the stored artifact RECORD; `content_digest` is the digest of the bytes that
+ * record describes, and it is the one the kernel needs to refuse a byte-identical
+ * copy registered as a derivative of the thing it copies.
+ *
+ * A STORED ARTIFACT WITHOUT ONE IS REFUSED, NOT WORKED AROUND. ops.f01_corporate_artifact
+ * carries content_digest NOT NULL and CHECK-bound to the hashed record, so a row
+ * that reaches here without one is a row the readback should never have produced.
+ * Treating that as "the comparison could not be made, carry on" would make the
+ * one guard that stops a self-registration optional exactly when the database is
+ * already saying something is wrong, so it fails closed like every other corrupt
+ * stored record in this module.
+ */
+function loadedSourceArtifact(stored) {
+  if (stored === null || stored === undefined) return null;
+  const content_digest = isPlainObject(stored.artifact) ? stored.artifact.content_digest : undefined;
+  if (typeof content_digest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(content_digest)) {
+    fail("corrupt_stored_artifact",
+      "the stored source artifact carries no readable content digest; it is refused, not repaired",
+      { artifact_digest: typeof stored.artifact_digest === "string" ? stored.artifact_digest : null });
+  }
+  return {
+    artifact_digest: stored.artifact_digest,
+    created_at: stored.created_at,
+    content_digest,
+  };
+}
+
+/**
+ * One reason per stored provenance state, and no default.
+ *
+ * A MAP RATHER THAN AN OBJECT LITERAL, because the lookup key arrives from a
+ * database readback: `{}["constructor"]` answers with something truthy, and a
+ * reason derived from an inherited property would be a reason nobody wrote. A Map
+ * has no prototype chain to fall through.
+ *
+ * THE THREE STATES ARE CHECKED AGAINST THE VOCABULARY, INSIDE THIS FUNCTION. The
+ * document module and this one import each other, so reading its exported
+ * vocabulary at module scope would be a temporal-dead-zone ReferenceError
+ * whenever that module is the entry point. Reading it here — when a document
+ * outcome is actually being projected — keeps the two lists from drifting without
+ * reintroducing the cycle hazard the seam is built to avoid.
+ */
+const DOCUMENT_PROVENANCE_REASONS = new Map([
+  ["derived_from_stored_artifact", "document_source_binding_registered"],
+  ["original_first_party", "document_declared_original_no_source_artifact"],
+  ["legacy_provenance_unknown", "document_declared_legacy_provenance_unknown"],
+]);
+
+function documentProvenanceReason(provenance_state, operation) {
+  for (const state of V5_F01_DOCUMENT_PROVENANCE_STATES) {
+    if (!DOCUMENT_PROVENANCE_REASONS.has(state)) {
+      fail("invalid_stored_outcome",
+        `the stored provenance state "${state}" has no reason on this surface; the vocabulary and the reasons have drifted`,
+        { operation, provenance_state: state });
+    }
+  }
+  const reason = typeof provenance_state === "string"
+    ? DOCUMENT_PROVENANCE_REASONS.get(provenance_state)
+    : undefined;
+  if (reason === undefined) {
+    // FAIL CLOSED. The six-argument writer returns the state it committed on
+    // every document write, so an absent or unregistered one is a database that
+    // did not write what this module asked it to — not a document to report as
+    // recorded under a reason invented here.
+    fail("invalid_stored_outcome",
+      "the committed document write named no registered provenance state; a version's origin is never inferred",
+      { operation, provenance_state: typeof provenance_state === "string" ? provenance_state : null,
+        registered: [...V5_F01_DOCUMENT_PROVENANCE_STATES] });
+  }
+  return reason;
+}
+
 function derivativeRegistrationRequest({ registration, storedArtifact, now }) {
   return {
     tenant: ORGANIZATION_TENANT_ID,
@@ -713,10 +863,10 @@ function derivativeRegistrationRequest({ registration, storedArtifact, now }) {
         evidence_digest: registration.evidence_digest,
       },
     },
-    source_artifact: storedArtifact === null || storedArtifact === undefined ? null : {
-      artifact_digest: storedArtifact.artifact_digest,
-      created_at: storedArtifact.created_at,
-    },
+    // LOADED, and now carrying the artifact's own CONTENT digest as well as its
+    // record digest, so the kernel compares the derivative's bytes with the
+    // source's bytes rather than with the identity of the row that describes them.
+    source_artifact: loadedSourceArtifact(storedArtifact),
     now,
   };
 }
@@ -724,6 +874,36 @@ function derivativeRegistrationRequest({ registration, storedArtifact, now }) {
 /** The closed shape the kernel accepts for one loaded coverage answer. */
 const KERNEL_COVERAGE_KEYS = Object.freeze([
   "state", "reason_id", "registered_derivative_kinds",
+]);
+
+/**
+ * The closed shape the kernel accepts for one LOADED retention clock.
+ *
+ * ops.f01_retention_clock returns more than this — the artifact digest, the
+ * source's own observed instant, and the integrity note — so the answer is
+ * PROJECTED rather than forwarded, exactly as the coverage answer is. The digest
+ * that travels beside it in the stored record is taken over the DATABASE's full
+ * answer, which is what the writer re-derives; the projection is only what the
+ * decision is allowed to read.
+ */
+const KERNEL_RETENTION_CLOCK_KEYS = Object.freeze([
+  "kind", "event_kind", "started_at", "reference", "provenance", "event_digest",
+  "verified", "source_observed_at_used",
+]);
+
+/**
+ * The closed shape the document-source binding accepts for one LOADED prior
+ * provenance statement.
+ *
+ * ops.f01_document_version_source returns more than this — the envelope, its
+ * digest and the self-limiting claims — so the row is PROJECTED rather than
+ * forwarded, exactly as the coverage answer is. A richer readback must not be
+ * able to break the decision, and a decision must not be able to read a field
+ * nobody meant it to.
+ */
+const DOCUMENT_PRIOR_PROVENANCE_KEYS = Object.freeze([
+  "document_id", "version_no", "document_digest", "provenance_state",
+  "source_artifact_digest", "derivative_link_digest",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -938,7 +1118,26 @@ export function createRecordSourceAuthorityStore({ db } = {}) {
       case "record-document-identity": {
         const incomplete = record.official_filing_state === "incomplete_official_filing";
         decision = incomplete ? "refuse" : "allow";
-        reason = incomplete ? "incomplete_official_filing" : "document_identity_and_states_coherent";
+        // THE ANSWER NAMES WHICH OF THE THREE ORIGINS WAS RECORDED, and it takes
+        // that from the COMMITTED write rather than from what this module decided
+        // a moment earlier — the same rule every other field on this answer
+        // follows, and the reason a replay reports what landed instead of what a
+        // fresh evaluation would say now.
+        //
+        // WHY NOT ONE REASON FOR EVERY ALLOWED DOCUMENT. Because "this version was
+        // derived from that artifact", "this version was authored here" and
+        // "nobody knows where this version came from" are three different facts,
+        // and the whole point of making the statement mandatory was that an
+        // absent link stops standing in for all three. A single
+        // document_identity_and_states_coherent collapsed them again at the last
+        // step: the record layer stored the distinction and the answer threw it
+        // away, so a caller recording a truthful legacy import read back the same
+        // reason as one claiming first-party authorship. The document's own
+        // coherence is still reported — it is what `decision: "allow"` and
+        // `official_filing_state` say — and it is no longer the only thing said.
+        reason = incomplete
+          ? "incomplete_official_filing"
+          : documentProvenanceReason(outcome.provenance_state, operation);
         Object.assign(extra, { document_id: record.neon_identity.document_id,
           document_digest: outcome.document_digest,
           prior_document_digest: record.prior_document_digest ?? null,
@@ -946,7 +1145,24 @@ export function createRecordSourceAuthorityStore({ db } = {}) {
           official_copy_required: record.signature_state === "fully_executed",
           official_copy_filing_state: record.onedrive_identity?.filing_state ?? "absent",
           object_storage_success_implies_official_filing: false,
-          neon_success_implies_official_filing: false });
+          neon_success_implies_official_filing: false,
+          // THE PROVENANCE HALF, REPORTED FROM THE COMMITTED WRITE rather than
+          // from what this module decided a moment earlier. The database wrote
+          // the statement, and — for a derived version — the link, in the same
+          // transaction as the version; these are its answers about what landed.
+          provenance_state: outcome.provenance_state ?? null,
+          provenance_digest: outcome.provenance_digest ?? null,
+          derivative_link_digest: outcome.derivative_link_digest ?? null,
+          derivative_registration_bound: outcome.derivative_registration_bound === true,
+          provenance_readback: outcome.provenance_readback ?? null,
+          // Said on every document answer for the same reason it is said on every
+          // registration answer: a growing set of registered documents is not a
+          // complete picture of what was derived from an artifact, and an absent
+          // statement is not an absent source.
+          establishes_coverage: false,
+          is_exhaustive_inventory: false,
+          permits_deletion: false,
+          absent_statement_means_no_source: false });
         break;
       }
       case "record-artifact-preservation-hold":
@@ -984,6 +1200,11 @@ export function createRecordSourceAuthorityStore({ db } = {}) {
             record.deletion_receipt?.observed_surviving_derivatives ?? null,
           derivative_coverage_state: record.derivative_coverage_state,
           derivative_coverage_digest: record.derivative_coverage_digest,
+          // Reported from the COMMITTED evaluation, so a replay says which
+          // trigger the stored decision was measured from rather than which one
+          // the database would derive now.
+          retention_clock: record.retention_clock ?? null,
+          retention_clock_digest: record.retention_clock_digest ?? null,
           hold_inventory_digest: record.hold_inventory_digest,
           silent_purge: false, purge_without_proof: false, deletion_performed: false });
         break;
@@ -1476,12 +1697,32 @@ export function createRecordSourceAuthorityStore({ db } = {}) {
    * state axes, a sealed-bytes digest mismatch, a filed copy whose digest
    * disagrees with Neon — writes nothing, because those describe a document
    * nobody can coherently record at all.
+   *
+   * AND ONE STATEMENT IS NOW MANDATORY. Every version carries a declaration of
+   * where it came from, and a DERIVED one carries its ops.f01_derivative_link
+   * row as well — written by ops.f01_record_document in the same transaction as
+   * the version, or the version does not complete. That is the settled producer
+   * rule made structural for documents, exactly as ops.f01_record_proposal makes
+   * it structural for parsed proposals.
+   *
+   * WHAT THIS FUNCTION SUPPLIES AND WHAT IT REFUSES TO. The producing workflow
+   * names WHICH of the three provenance answers is true and, in the derived case,
+   * which stored artifact and which producing run. Everything else is derived or
+   * LOADED here: the principal, the instant, the source artifact's own identity
+   * and creation time, the prior statement for this exact version, the document's
+   * own digest and the evidence reference. A caller supplies none of them and can
+   * withhold none of them.
    */
   async function recordDocumentIdentity(payload, context) {
     const operation = "record-document-identity";
     const { principal, payload: request } = begin(operation, payload, context);
     const document = assertClosed(request.document, DOCUMENT_KEYS,
       ["document_class", "neon_identity"], "payload.document");
+    // SHAPE ONLY, and before any statement runs: an unreadable declaration is a
+    // contract violation rather than a policy question, and knowing which of the
+    // three states was declared is what decides whether a source artifact has to
+    // be loaded at all. Every semantic question stays with the binding below.
+    const declaration = assertDocumentSourceDeclaration(request.source);
 
     const projected = projectDocumentIdentity({ tenant: ORGANIZATION_TENANT_ID, document });
     const filingIncomplete = projected.decision === "refuse" &&
@@ -1503,6 +1744,7 @@ export function createRecordSourceAuthorityStore({ db } = {}) {
       const replay = await replayOutcome(client, operation, request, principal);
       if (replay !== null) return replay;
       const documentId = projected.neon_identity.document_id;
+      const versionNo = projected.neon_identity.version_no;
       const priorRow = await one(client,
         "SELECT ops.f01_read('document'::text, $1::jsonb) AS body", [J({ document_id: documentId })]);
       const priorBody = typeof priorRow.body === "string" ? JSON.parse(priorRow.body) : priorRow.body;
@@ -1514,29 +1756,86 @@ export function createRecordSourceAuthorityStore({ db } = {}) {
           { stored: priorDigest, expected: expectedPrior });
       }
 
-      const record = storedDocumentRecord({
-        document_class: projected.document_class,
-        neon_identity: projected.neon_identity,
-        object_storage_identity: projected.object_storage_identity,
-        onedrive_identity: projected.onedrive_identity,
-        preparation_state: projected.preparation_state,
-        delivery_state: projected.delivery_state,
-        signature_state: projected.signature_state,
-        validity_state: projected.validity_state,
-        version_state: projected.version_state,
-        official_filing_state: filingIncomplete
-          ? "incomplete_official_filing" : projected.official_filing_state,
+      // THE PRIOR STATEMENT FOR THIS EXACT VERSION IS LOADED, never accepted. It
+      // is read for (document_id, version_no) rather than for the document,
+      // because a statement is about ONE version: a second registration of the
+      // same version naming a different origin is a rewrite of where that version
+      // came from, and only the row for that version can show it. NULL means "no
+      // statement", never "no source".
+      const provenanceRow = await one(client,
+        "SELECT ops.f01_document_version_source($1::text, $2::integer) AS provenance",
+        [documentId, versionNo]);
+      const storedProvenance = provenanceRow && provenanceRow.provenance
+        ? (typeof provenanceRow.provenance === "string"
+            ? JSON.parse(provenanceRow.provenance) : provenanceRow.provenance)
+        : null;
+
+      // THE SOURCE ARTIFACT IS LOADED, never asserted, and only where one is
+      // claimed. Naming a digest is a lookup; it cannot bring an artifact into
+      // existence, and the identity handed to the kernel is the STORED artifact's
+      // own — its digest and its creation instant — rather than the caller's
+      // description of it.
+      let storedArtifact = null;
+      if (declaration.provenance_state === "derived_from_stored_artifact") {
+        const artifactRow = await one(client,
+          "SELECT ops.f01_stored_artifact($1::text) AS artifact",
+          [declaration.source_artifact_digest]);
+        const loaded = artifactRow && artifactRow.artifact
+          ? (typeof artifactRow.artifact === "string"
+              ? JSON.parse(artifactRow.artifact) : artifactRow.artifact)
+          : null;
+        // The SAME projection every other producer path uses, so the document
+        // seam's binding is judged against the artifact's own content digest
+        // rather than against its record digest alone.
+        storedArtifact = loadedSourceArtifact(loaded);
+      }
+
+      const binding = evaluateDocumentSourceBinding({
+        tenant: ORGANIZATION_TENANT_ID,
+        document,
+        source: request.source,
+        source_artifact: storedArtifact,
+        prior_provenance: storedProvenance === null
+          ? null : projectKeys(storedProvenance, DOCUMENT_PRIOR_PROVENANCE_KEYS),
         prior_document_digest: expectedPrior,
         recorded_by: principal.slug,
-        recorded_at: now,
+        now,
       });
-      const envelope = storeEnvelope("stored_document_version", record, {
-        object_storage_success_implies_official_filing: false,
-        neon_success_implies_official_filing: false,
-      });
+      if (binding.decision !== "allow") {
+        // The version does not complete, so nothing is written: a document
+        // recorded without its provenance edge is exactly the untracked
+        // derivative this rule exists to stop being created.
+        return result(operation, "refuse", binding.reason_id, {
+          actor_slug: principal.slug,
+          document_id: binding.document_id,
+          version_no: binding.version_no,
+          provenance_state: binding.provenance_state,
+          violated_constraint: binding.violated_constraint ?? null,
+          offending_field: binding.offending_field ?? null,
+          official_filing_state: binding.official_filing_state,
+          derivative_registration_bound: false,
+          object_storage_success_implies_official_filing: false,
+          neon_success_implies_official_filing: false,
+          establishes_coverage: false,
+          is_exhaustive_inventory: false,
+          permits_deletion: false,
+          absent_statement_means_no_source: false,
+          records_written: 0,
+          readback: null,
+        });
+      }
+
+      // TWO OR THREE ENVELOPES, NEVER A CHOICE OF ONE. The composer builds the
+      // document version, the provenance statement and — only when the version is
+      // derived — the link, from the same binding, so the digests they name each
+      // other by are the digests the database recomputes.
+      const composed = composeDocumentSourceEnvelopes(binding);
       const row = await one(client,
-        "SELECT ops.f01_record_document($1::jsonb, $2::text, $3::text, $4::text) AS outcome",
-        [J(envelope), expectedPrior, request.idempotency_key,
+        `SELECT ops.f01_record_document($1::jsonb, $2::jsonb, $3::jsonb, $4::text,
+                                        $5::text, $6::text) AS outcome`,
+        [J(composed.document_envelope), J(composed.provenance_envelope),
+         composed.derivative_envelope === null ? null : J(composed.derivative_envelope),
+         expectedPrior, request.idempotency_key,
          requestDigest(operation, request, principal)]);
       const outcome = typeof row.outcome === "string" ? JSON.parse(row.outcome) : row.outcome;
       return resultFromOutcome(operation, outcome, principal);
@@ -1682,6 +1981,25 @@ export function createRecordSourceAuthorityStore({ db } = {}) {
       const derivatives = typeof derivativeRow?.derivatives === "string"
         ? JSON.parse(derivativeRow.derivatives) : derivativeRow?.derivatives ?? null;
 
+      // THE RETENTION CLOCK IS LOADED, on exactly the terms the holds and the
+      // coverage answer are, and for the same reason: a caller that could state
+      // when its artifact's retention period started could state that it started
+      // long enough ago. ops.f01_retention_clock reads the SERVER-STAMPED custody
+      // instant off the stored row — never the source's observed_at, which stays
+      // the artifact's identity and provenance and is passed below under its own
+      // name. The digest travels into the record and the writer re-derives it
+      // under the retention lock, so a forged or stale trigger refuses instead of
+      // being recorded.
+      const clockRow = await one(client,
+        `SELECT ops.f01_retention_clock($1::text) AS clock,
+                ops.f01_retention_clock_digest($1::text) AS clock_digest`,
+        [subject.artifact_digest]);
+      const loadedClock = typeof clockRow?.clock === "string"
+        ? JSON.parse(clockRow.clock) : clockRow?.clock ?? null;
+      const retentionClock = loadedClock === null
+        ? null : projectKeys(loadedClock, KERNEL_RETENTION_CLOCK_KEYS);
+      const retentionClockDigest = clockRow?.clock_digest ?? null;
+
       const evaluated = evaluateDeletion({
         tenant: ORGANIZATION_TENANT_ID,
         registry: policy.compiled_retention_registry,
@@ -1689,7 +2007,11 @@ export function createRecordSourceAuthorityStore({ db } = {}) {
           artifact_class: subject.artifact_class,
           artifact_home: subject.artifact_home,
           artifact_digest: subject.artifact_digest,
+          // The SOURCE's observed instant, under its own name and doing its own
+          // job: the artifact's identity and the lifetime a deletion proof has to
+          // sit inside. It is not the retention clock and never was.
           created_at: storedArtifact.created_at,
+          retention_clock: retentionClock,
           holds,
           deletion_proof: subject.deletion_proof ?? null,
           derivative_coverage: coverage === null ? null : projectKeys(coverage, KERNEL_COVERAGE_KEYS),
@@ -1709,6 +2031,8 @@ export function createRecordSourceAuthorityStore({ db } = {}) {
         hold_inventory_digest: holdInventoryDigest,
         derivative_coverage_state: coverage?.state ?? "unknown",
         derivative_coverage_digest: coverageDigest,
+        retention_clock: retentionClock,
+        retention_clock_digest: retentionClockDigest,
         deletion_receipt: evaluated.deletion_receipt,
         evaluated_by: principal.slug,
         evaluated_at: now,
