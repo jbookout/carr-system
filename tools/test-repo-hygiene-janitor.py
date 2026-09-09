@@ -57,8 +57,86 @@ def _load(name: str, relative: str):
 J = _load("repo_hygiene_janitor", "tools/repo-hygiene-janitor.py")
 R09 = _load("worktree_runtime_isolation", "tools/room-bridge/worktree_runtime_isolation.py")
 
-TAIL_MANIFEST = ROOT / "out" / "repo-hygiene-program" / "settlement-manifest-branches.txt"
-REGISTER = ROOT / "out" / "repo-hygiene-program" / "never-cleanable-register.md"
+# THE SUITE OWNS ITS OWN INPUTS. R03's settlement tail and the never-cleanable
+# register are OPERATIONAL evidence: they live under out/, they are deliberately
+# absent from a clean checkout, and they must never be committed. A test that
+# read them passed here and failed on a hosted runner for the only reason it
+# could -- the files were not there.
+#
+# What this suite actually needs is the PARSER CONTRACT, not the operational
+# rows, so it writes its own small manifest and register in the same grammar and
+# asserts against those. The real evidence keeps its separate, already-reviewed
+# bindings; fixture data is test input and is not a replacement for it.
+TAIL_MANIFEST: Path
+REGISTER: Path
+
+
+def write_synthetic_inputs(root: Path) -> tuple[Path, Path]:
+    """A settlement tail and never-cleanable register in the exact grammar the
+    production parser reads, with a deliberately small, known shape.
+
+    The rows below are invented. The GRAMMAR is not: the marker vocabulary, the
+    forty-hex tip, the whitespace shape and the register's five-cell table row
+    are copied from what the parser accepts, which is what makes a pass here
+    mean the parser still reads the real files the same way.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    def tip(seed: int) -> str:
+        return hashlib.sha256(f"synthetic-tip-{seed}".encode()).hexdigest()[:40]
+
+    rows = []
+    for index, name in enumerate(SYNTHETIC_TAIL["closed_unmerged_pull_request"]):
+        rows.append(f"# KEEP-CLOSED-UNMERGED  {tip(index)}  {name}")
+    for index, name in enumerate(SYNTHETIC_TAIL["unmerged_without_pull_request"]):
+        rows.append(f"# KEEP-NO-PR  {tip(100 + index)}  {name}")
+    for index, name in enumerate(SYNTHETIC_TAIL["reused_branch_name"]):
+        rows.append(f"# RETAIN  {tip(200 + index)}  {name}  |  merged PR head differs")
+    for index, name in enumerate(SYNTHETIC_NON_TAIL["worktree_held"]):
+        rows.append(f"# KEEP-WORKTREE  {tip(300 + index)}  {name}")
+    for index, name in enumerate(SYNTHETIC_NON_TAIL["open_pull_request"]):
+        rows.append(f"# KEEP-OPEN-PR  {tip(400 + index)}  {name}")
+    for index, name in enumerate(SYNTHETIC_NON_TAIL["assurance_held"]):
+        rows.append(f"# HOLD  {tip(500 + index)}  {name}")
+
+    # Lines the grammar must IGNORE, mixed in so a parser that got sloppy about
+    # any of them would change the counts asserted below.
+    noise = [
+        "# Synthetic settlement manifest -- fixture input, not operational evidence.",
+        "#",
+        f"# KEEP-NO-PR  {tip(1)[:20]}  short-sha-must-be-ignored",
+        f"# UNKNOWN-MARKER  {tip(2)}  unknown-marker-must-be-ignored",
+        f"KEEP-NO-PR  {tip(3)}  missing-comment-prefix-must-be-ignored",
+        "",
+    ]
+    manifest = root / "settlement-manifest-branches.txt"
+    manifest.write_text("\n".join(noise + rows) + "\n", encoding="utf-8")
+
+    register = root / "never-cleanable-register.md"
+    register.write_text(
+        "| root | canonical realpath | link | class | protection | n |\n"
+        "|---|---|---|---|---|---:|\n"
+        f"| `worktrees` | {SYNTHETIC_NEVER_CLEAN} | not-symlink | worktree | "
+        "NEVER CLEAN; a session's uncommitted work lives here | 1 |\n"
+        f"| `cache` | {SYNTHETIC_EXACT_ROOT} | not-symlink | cache | "
+        "Exact-root receipted janitor only; never repo-wide clean | 1 |\n"
+        "| not-a-row | relative/path | ignored | ignored | ignored | 0 |\n",
+        encoding="utf-8")
+    return manifest, register
+
+
+SYNTHETIC_TAIL = {
+    "closed_unmerged_pull_request": ["fixture-closed-a", "fixture-closed-b", "fixture-closed-c"],
+    "unmerged_without_pull_request": ["fixture-nopr-a", "fixture-nopr-b",
+                                      "fixture-nopr-c", "fixture-nopr-d"],
+    "reused_branch_name": ["fixture-reused-a", "fixture-reused-b"],
+}
+SYNTHETIC_NON_TAIL = {
+    "worktree_held": ["fixture-held-a", "fixture-held-b"],
+    "open_pull_request": ["fixture-open-a"],
+    "assurance_held": ["fixture-assurance-a"],
+}
+SYNTHETIC_NEVER_CLEAN = "/fixture-root/never-clean-worktrees"
+SYNTHETIC_EXACT_ROOT = "/fixture-root/eligible-cache"
 
 FAILURES: list[str] = []
 
@@ -250,22 +328,51 @@ def r09_root(root: Path, entrant: dict | None) -> Path:
 
 
 def test_immutable_inputs_parse_to_their_known_shape() -> None:
+    """The parser contract, over rows this suite wrote.
+
+    THE MARKER DECIDES WHICH SIDE OF THE TAIL A ROW IS ON, and that split is the
+    load-bearing fact: three markers are the human-adjudication tail, three are
+    kept for other reasons and are not. Reading the operational file to check
+    this proved nothing the grammar does not already say, and it made the suite
+    unrunnable anywhere the file is absent.
+    """
     tail = J.load_settlement_tail(TAIL_MANIFEST)
     in_tail = [row for row in tail.values() if row.in_tail]
-    check(len(in_tail) == 265, f"tail is exactly 265 rows (saw {len(in_tail)})")
+    expected_tail = sum(len(names) for names in SYNTHETIC_TAIL.values())
+    check(len(in_tail) == expected_tail, f"tail rows (saw {len(in_tail)})")
     by_reason: dict[str, int] = {}
     for row in in_tail:
         by_reason[row.reason] = by_reason.get(row.reason, 0) + 1
-    check(by_reason.get("closed_unmerged_pull_request") == 42, "42 closed-unmerged tail rows")
-    check(by_reason.get("unmerged_without_pull_request") == 189, "189 no-PR tail rows")
-    check(by_reason.get("reused_branch_name") == 34, "34 reused-name tail rows")
-    check(len([r for r in tail.values() if not r.in_tail]) == 46, "46 non-tail kept rows")
+    for reason, names in SYNTHETIC_TAIL.items():
+        check(by_reason.get(reason) == len(names),
+              f"{reason}: {len(names)} tail rows (saw {by_reason.get(reason)})")
+    non_tail = [row for row in tail.values() if not row.in_tail]
+    check(len(non_tail) == sum(len(n) for n in SYNTHETIC_NON_TAIL.values()),
+          f"non-tail kept rows (saw {len(non_tail)})")
+    for reason, names in SYNTHETIC_NON_TAIL.items():
+        check(sorted(r.name for r in non_tail if r.reason == reason) == sorted(names), reason)
+    # Every parsed tip is a full forty-hex object id, and the ignored lines above
+    # really were ignored rather than parsed into something.
+    check(all(len(row.tip) == 40 and all(c in "0123456789abcdef" for c in row.tip)
+              for row in tail.values()), "every parsed tip is a 40-hex object id")
+    for ignored in ("short-sha-must-be-ignored", "unknown-marker-must-be-ignored",
+                    "missing-comment-prefix-must-be-ignored"):
+        check(ignored not in tail, f"the grammar ignores {ignored}")
+
+    # A manifest with no parsable row is missing evidence, never an empty tail.
+    empty = TAIL_MANIFEST.parent / "empty-manifest.txt"
+    empty.write_text("# nothing parsable here\n", encoding="utf-8")
+    expect_raises(J.JanitorRefusal, lambda: J.load_settlement_tail(empty),
+                  "a manifest with no parsable row refuses")
 
     register = J.load_never_cleanable_register(REGISTER)
-    worktrees_root = "/Users/booko/carr-system/.claude/worktrees"
-    check(worktrees_root in register.never_clean, "worktree root is NEVER CLEAN")
-    check(register.verdict(worktrees_root + "/anything") == "never_cleanable_register",
+    check(SYNTHETIC_NEVER_CLEAN in register.never_clean, "the NEVER CLEAN root parsed")
+    check(SYNTHETIC_EXACT_ROOT in register.exact_root_only, "the eligible root parsed")
+    check(register.verdict(SYNTHETIC_NEVER_CLEAN + "/anything") == "never_cleanable_register",
           "a path under a NEVER CLEAN root is denied")
+    check(register.verdict(SYNTHETIC_EXACT_ROOT) is None, "the exact eligible root is allowed")
+    check(register.verdict(SYNTHETIC_EXACT_ROOT + "/child") == "cache_root_not_registered",
+          "a descendant of an eligible root is not itself eligible")
     check(register.verdict("/somewhere/unregistered") == "cache_root_not_registered",
           "an unregistered cache root is denied")
 
@@ -277,6 +384,8 @@ def test_tail_is_never_a_deletion_allowlist(root: Path) -> None:
     tail = J.load_settlement_tail(TAIL_MANIFEST)
     name = next(n for n, row in tail.items()
                 if row.in_tail and "/" not in n and row.reason == "unmerged_without_pull_request")
+    check(name in SYNTHETIC_TAIL["unmerged_without_pull_request"],
+          "the branch under test really is a tail row")
 
     git(work, "checkout", "-b", name)
     tip = commit(work, "tail.txt", "tail work")
@@ -1573,8 +1682,10 @@ def test_cli_defaults_and_parser_shape() -> None:
 
 
 def main() -> int:
+    global TAIL_MANIFEST, REGISTER
     with tempfile.TemporaryDirectory(prefix="r07-repo-hygiene-janitor-") as temporary:
         root = Path(temporary)
+        TAIL_MANIFEST, REGISTER = write_synthetic_inputs(root / "synthetic-inputs")
         test_immutable_inputs_parse_to_their_known_shape()
         test_tail_is_never_a_deletion_allowlist(root)
         test_mutex_spans_plan_and_apply(root)
