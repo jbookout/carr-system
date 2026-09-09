@@ -1,24 +1,16 @@
-// DoctorCRE v5 slice V5-S00, source increment 1 of 2: the typed portfolio
-// hierarchy as PURE DETERMINISTIC SOURCE. There is no database here, no verb
-// registration, no migration and no registry entry, and that is the point —
-// every serialized surface in this repo (the migration-number frontier, the
-// SCAC mutation registry and its seals, the shared source-inventory fixture,
-// the tools.js command contract) is deliberately untouched so this increment
-// collides with nothing else in flight. Persistence and the read verb follow in
-// a separately collision-checked increment; THIS FILE IS NOT ALL OF V5-S00.
+// DoctorCRE v5 slice V5-S00, source increment 1: the typed portfolio hierarchy
+// as pure deterministic source. No database, no verb, no migration, no registry
+// entry — persistence and the read verb are a separate increment.
 //
-// WHAT IT DOES: validates a closed typed portfolio revision — exactly 21 master
-// milestone nodes, exactly four immutable child-program references, an acyclic
-// closed edge set — and derives one deterministic revision digest over a
-// versioned closed preimage. WHAT IT CANNOT DO, by construction: create a job,
-// a capability, an execution envelope, an admission, a schedule, an acceptance
-// or a J1 clock. A revision that so much as carries a field named like one of
-// those is refused rather than ignored, because the whole authority argument for
-// this substrate is that a portfolio is inert until a human accepts its exact
-// hash through a separate path.
+// Validates one portfolio revision against a closed contract (21 master
+// milestone nodes, four immutable child-program references, an acyclic parent
+// hierarchy and an acyclic dependency DAG) and derives one deterministic digest
+// over a versioned closed preimage. Canonicalization and hashing come from
+// artifact-trust.js; this file does not reimplement either.
 //
-// The digest utility is imported from artifact-trust.js and is NOT reimplemented
-// here: one canonicalization in the repo, not two that can drift.
+// A revision carrying an executable-effect field is refused, not ignored: the
+// authority argument for this substrate is that a portfolio is inert until a
+// human accepts its exact hash through a separate path.
 
 import { canonicalJson, digest } from "./artifact-trust.js";
 
@@ -26,9 +18,8 @@ export const PORTFOLIO_REVISION_SCHEMA_VERSION = "doctorcre-v5-portfolio-revisio
 export const MASTER_NODE_COUNT = 21;
 export const CHILD_PROGRAM_COUNT = 4;
 
-// The four child programs are IMMUTABLE IDENTITY, not configuration. They come
-// from the accepted r7 design identity; a rename is a different portfolio, so a
-// renamed or reordered set is refused rather than accepted as an edit.
+// Immutable identity from the accepted r7 design, not configuration: a rename
+// or reorder is a different portfolio.
 export const CHILD_PROGRAM_REFS = Object.freeze([
   "foundation-and-control-plane",
   "assurance-fabric",
@@ -44,12 +35,6 @@ const REVISION_KEYS = Object.freeze([
   "child_program_refs", "nodes", "edges",
 ]);
 
-// Required node identity, then the typed metadata slots later persistence needs.
-// The metadata is OPTIONAL and no default is invented: the authenticated source
-// states node identity and dependency only, so a value is bound when a reviewed
-// source states one and is absent otherwise. Absent is the only way to say "not
-// stated" — an explicit null is refused, so absent and null can never collide
-// into two preimages that mean the same thing.
 const NODE_REQUIRED_KEYS = Object.freeze(["node_ref", "node_kind", "ordinal", "parent_ref"]);
 const NODE_OPTIONAL_KEYS = Object.freeze([
   "authority_class", "effect_class", "data_class",
@@ -58,10 +43,15 @@ const NODE_OPTIONAL_KEYS = Object.freeze([
 ]);
 const NODE_KEYS = Object.freeze([...NODE_REQUIRED_KEYS, ...NODE_OPTIONAL_KEYS]);
 const EDGE_KEYS = Object.freeze(["from_node_ref", "to_node_ref"]);
+const MODEL_FLOOR_KEYS = Object.freeze(["provider", "model", "version", "effort"]);
 
-// Field names that would mean this inert record had reached into execution.
-// Matched on the normalized key at every depth, so a nested payload cannot
-// smuggle one in under a wrapper object.
+// Optional metadata is never invented, but a present value must be well formed:
+// an unvalidated slot is hashed into the acceptance digest as-is.
+const CLASS_TOKEN = /^[a-z][a-z0-9_]{1,63}$/;
+const MAX_BUDGET_CEILING = 1e12;
+
+// Field names meaning this inert record reached into execution. Matched on the
+// normalized key at every depth, so a wrapper object cannot smuggle one in.
 const EFFECT_KEY_FRAGMENTS = Object.freeze([
   "ops_job", "job_id", "job_ref", "jobs",
   "capability", "envelope", "admission", "admit",
@@ -71,9 +61,7 @@ const EFFECT_KEY_FRAGMENTS = Object.freeze([
 ]);
 
 const SHA256_REF = /^sha256:[0-9a-f]{64}$/;
-// Refs carry both the lower-case step namespace ("step:gate-zero-read-only-
-// outcome") and the upper-case Work Request namespace ("WR-000062"), so the
-// pattern is case-tolerant on purpose.
+// Refs span the lower-case step namespace and the upper-case Work Request one.
 const REF = /^[A-Za-z0-9][A-Za-z0-9:._-]{2,199}$/;
 
 export class PortfolioValidationError extends Error {
@@ -90,34 +78,72 @@ function refuse(code, message, detail) {
 }
 
 function isPlainObject(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
 }
 
-// JSON-safe means: it survives canonicalJson and comes back meaning the same
-// thing. undefined, NaN, Infinity, bigint, functions, symbols and Date all fail
-// that test — JSON.stringify either drops them or throws or silently coerces —
-// so they are refused before they can reach the hash.
-function assertJsonSafe(value, path) {
+/** Locale-independent code-unit ordering. localeCompare varies by ICU build. */
+function compareCodeUnits(a, b) {
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
+}
+
+// JSON-safe means canonicalJson round-trips it with its meaning intact. Beyond
+// the obvious unhashable types this rejects the shapes that would silently hash
+// a DIFFERENT payload than the caller holds: a cycle (canonicalJson would
+// recurse forever), a sparse array (holes serialize as null), and symbol,
+// accessor or non-enumerable properties (Object.keys skips them, so two objects
+// that differ would hash identically).
+function assertJsonSafe(value, path, stack = new Set()) {
   if (value === undefined) refuse("unsupported_value", `undefined is not hashable at ${path}`, { path });
   if (value === null) return;
-  const t = typeof value;
-  if (t === "string" || t === "boolean") return;
-  if (t === "number") {
+  const type = typeof value;
+  if (type === "string" || type === "boolean") return;
+  if (type === "number") {
     if (!Number.isFinite(value)) refuse("unsupported_value", `non-finite number at ${path}`, { path });
     return;
   }
-  if (t === "bigint" || t === "function" || t === "symbol") {
-    refuse("unsupported_value", `${t} is not hashable at ${path}`, { path });
+  if (type === "bigint" || type === "function" || type === "symbol") {
+    refuse("unsupported_value", `${type} is not hashable at ${path}`, { path });
   }
-  if (Array.isArray(value)) {
-    value.forEach((item, i) => assertJsonSafe(item, `${path}[${i}]`));
-    return;
+  if (stack.has(value)) {
+    refuse("cyclic_input", `object graph is cyclic at ${path}; it cannot be canonicalized`, { path });
   }
-  if (!isPlainObject(value)) {
-    refuse("unsupported_value", `only plain JSON objects are hashable at ${path}`, { path });
+  const isArray = Array.isArray(value);
+  if (!isArray && !isPlainObject(value)) {
+    refuse("unsupported_value", `only plain JSON objects and arrays are hashable at ${path}`, { path });
   }
-  for (const key of Object.keys(value)) assertJsonSafe(value[key], `${path}.${key}`);
+  if (Object.getOwnPropertySymbols(value).length > 0) {
+    refuse("unsupported_value", `symbol-keyed property at ${path} would be dropped by canonicalization`, { path });
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  for (const [key, descriptor] of Object.entries(descriptors)) {
+    if (isArray && key === "length") continue;
+    if (descriptor.get !== undefined || descriptor.set !== undefined) {
+      refuse("unsupported_value", `accessor property "${key}" at ${path} is not a stable value`, { path, key });
+    }
+    if (!descriptor.enumerable) {
+      refuse("unsupported_value", `non-enumerable property "${key}" at ${path} would be dropped by canonicalization`,
+        { path, key });
+    }
+  }
+  stack.add(value);
+  if (isArray) {
+    for (let i = 0; i < value.length; i += 1) {
+      if (!Object.prototype.hasOwnProperty.call(value, i)) {
+        refuse("unsupported_value", `sparse array hole at ${path}[${i}] would serialize as null`, { path, index: i });
+      }
+      assertJsonSafe(value[i], `${path}[${i}]`, stack);
+    }
+    const indexCount = Object.keys(descriptors).filter(key => key !== "length").length;
+    if (indexCount !== value.length) {
+      refuse("unsupported_value", `array at ${path} carries non-index own properties`, { path });
+    }
+  } else {
+    for (const key of Object.keys(value)) assertJsonSafe(value[key], `${path}.${key}`, stack);
+  }
+  stack.delete(value);
 }
 
 function assertNoEffectPayload(value, path) {
@@ -153,6 +179,56 @@ function assertRef(value, path) {
   }
 }
 
+function assertClassToken(value, path) {
+  if (typeof value !== "string" || !CLASS_TOKEN.test(value)) {
+    refuse("invalid_metadata", `${path} must be a lower-case classification token`, { path, value });
+  }
+}
+
+/** Type and range checks for the optional typed metadata slots. */
+function validateNodeMetadata(node, path) {
+  for (const key of ["authority_class", "effect_class", "data_class"]) {
+    if (key in node) assertClassToken(node[key], `${path}.${key}`);
+  }
+  if ("budget_identity" in node) {
+    if (typeof node.budget_identity !== "string" || node.budget_identity.length === 0) {
+      refuse("invalid_metadata", `${path}.budget_identity must be a non-empty string`, { path: `${path}.budget_identity` });
+    }
+  }
+  if ("budget_ceiling" in node) {
+    const ceiling = node.budget_ceiling;
+    if (typeof ceiling !== "number" || !Number.isFinite(ceiling) || ceiling < 0 || ceiling > MAX_BUDGET_CEILING) {
+      refuse("invalid_metadata",
+        `${path}.budget_ceiling must be a finite number between 0 and ${MAX_BUDGET_CEILING}`,
+        { path: `${path}.budget_ceiling`, value: ceiling });
+    }
+  }
+  if ("recovery_ref" in node) assertRef(node.recovery_ref, `${path}.recovery_ref`);
+  if ("terminal_predicate" in node) {
+    if (typeof node.terminal_predicate !== "string" || node.terminal_predicate.length === 0) {
+      refuse("invalid_metadata", `${path}.terminal_predicate must be a non-empty string`,
+        { path: `${path}.terminal_predicate` });
+    }
+  }
+  if ("model_floor" in node) {
+    const floor = node.model_floor;
+    const floorPath = `${path}.model_floor`;
+    if (!isPlainObject(floor)) {
+      refuse("invalid_metadata", `${floorPath} must be an object`, { path: floorPath });
+    }
+    assertClosedKeys(floor, MODEL_FLOOR_KEYS, floorPath);
+    for (const key of MODEL_FLOOR_KEYS) {
+      if (!(key in floor)) {
+        refuse("invalid_metadata", `${floorPath}.${key} is required once a model floor is stated`,
+          { path: `${floorPath}.${key}` });
+      }
+      if (typeof floor[key] !== "string" || floor[key].length === 0) {
+        refuse("invalid_metadata", `${floorPath}.${key} must be a non-empty string`, { path: `${floorPath}.${key}` });
+      }
+    }
+  }
+}
+
 function validateSourceDigests(source, path) {
   if (!isPlainObject(source)) refuse("invalid_shape", `${path} must be an object`, { path });
   assertClosedKeys(source, SOURCE_DIGEST_KEYS, path);
@@ -178,11 +254,11 @@ function validateNodes(nodes) {
     for (const key of NODE_REQUIRED_KEYS) {
       if (!(key in node)) refuse("missing_field", `${path}.${key} is required`, { path: `${path}.${key}` });
     }
+    // Absent is the only way to write "not stated": an explicit null would give
+    // "not stated" two distinct preimages.
     for (const key of NODE_OPTIONAL_KEYS) {
       if (key in node && node[key] === null) {
-        refuse("unsupported_value",
-          `${path}.${key} may be absent or stated, never null — absent is how "not stated" is written`,
-          { path: `${path}.${key}` });
+        refuse("unsupported_value", `${path}.${key} may be absent or stated, never null`, { path: `${path}.${key}` });
       }
     }
     assertRef(node.node_ref, `${path}.node_ref`);
@@ -199,6 +275,7 @@ function validateNodes(nodes) {
       refuse("duplicate_node", `node_ref "${node.node_ref}" appears at ordinal ${seen.get(node.node_ref)} and ${node.ordinal}`,
         { node_ref: node.node_ref });
     }
+    validateNodeMetadata(node, path);
     seen.set(node.node_ref, node.ordinal);
   });
   return seen;
@@ -226,16 +303,81 @@ function validateEdges(edges, knownNodes) {
     if (edge.from_node_ref === edge.to_node_ref) {
       refuse("cycle", `${path} is a self-edge on "${edge.from_node_ref}"`, { cycle: [edge.from_node_ref] });
     }
-    const key = `${edge.from_node_ref} ${edge.to_node_ref}`;
+    const key = `${edge.from_node_ref} ${edge.to_node_ref}`;
     if (seen.has(key)) refuse("duplicate_edge", `${path} repeats an edge already declared`, { path });
     seen.add(key);
   });
 }
 
-// Kahn's algorithm. An edge means from_node_ref must complete before
-// to_node_ref, so the returned order lists prerequisites first. On failure the
-// remaining nodes ARE the cycle, and they are reported: "not acyclic" without
-// naming the members is a message nobody can act on.
+/**
+ * The parent hierarchy is a separate structure from the dependency DAG and
+ * needs its own cycle check: a self-parent or a parent loop leaves every node
+ * closure-valid while belonging to no portfolio.
+ */
+function validateParentHierarchy(nodes, knownNodes, portfolioRef) {
+  const parentOf = new Map(nodes.map(node => [node.node_ref, node.parent_ref]));
+  for (const node of nodes) {
+    if (node.parent_ref === node.node_ref) {
+      refuse("parent_cycle", `node "${node.node_ref}" is its own parent`, { cycle: [node.node_ref] });
+    }
+    if (node.parent_ref !== portfolioRef && !knownNodes.has(node.parent_ref)) {
+      refuse("dangling_edge",
+        `node "${node.node_ref}" names parent "${node.parent_ref}", which is neither the portfolio nor a node in this revision`,
+        { node_ref: node.node_ref, parent_ref: node.parent_ref });
+    }
+    const walked = [node.node_ref];
+    const seen = new Set(walked);
+    let current = node.parent_ref;
+    while (current !== portfolioRef) {
+      if (seen.has(current)) {
+        const start = walked.indexOf(current);
+        refuse("parent_cycle",
+          `the parent hierarchy loops: ${walked.slice(start).concat(current).join(" -> ")}`,
+          { cycle: walked.slice(start) });
+      }
+      seen.add(current);
+      walked.push(current);
+      current = parentOf.get(current);
+    }
+  }
+}
+
+/**
+ * One actual cycle from the dependency graph, by depth-first search over the
+ * grey stack. Reported instead of Kahn's residual set, which also contains
+ * nodes merely downstream of a cycle and would name innocent nodes as members.
+ */
+function findDependencyCycle(nodes, outgoing) {
+  const WHITE = 0, GREY = 1, BLACK = 2;
+  const colour = new Map(nodes.map(node => [node.node_ref, WHITE]));
+  const stack = [];
+
+  const visit = ref => {
+    colour.set(ref, GREY);
+    stack.push(ref);
+    for (const next of outgoing.get(ref)) {
+      const state = colour.get(next);
+      if (state === GREY) return stack.slice(stack.indexOf(next));
+      if (state === WHITE) {
+        const found = visit(next);
+        if (found) return found;
+      }
+    }
+    stack.pop();
+    colour.set(ref, BLACK);
+    return null;
+  };
+
+  for (const node of nodes) {
+    if (colour.get(node.node_ref) === WHITE) {
+      const found = visit(node.node_ref);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/** Kahn's algorithm; an edge means from_node_ref precedes to_node_ref. */
 function topologicalOrder(nodes, edges) {
   const indegree = new Map(nodes.map(node => [node.node_ref, 0]));
   const outgoing = new Map(nodes.map(node => [node.node_ref, []]));
@@ -255,8 +397,12 @@ function topologicalOrder(nodes, edges) {
     }
   }
   if (order.length !== nodes.length) {
-    const cycle = nodes.map(node => node.node_ref).filter(ref => !order.includes(ref));
-    refuse("cycle", `the dependency graph is not acyclic; ${cycle.length} node(s) remain in a cycle`, { cycle });
+    const ordered = new Set(order);
+    const blocked = nodes.map(node => node.node_ref).filter(ref => !ordered.has(ref));
+    const cycle = findDependencyCycle(nodes, outgoing) ?? [];
+    refuse("cycle",
+      `the dependency graph is not acyclic; cycle: ${cycle.join(" -> ")}`,
+      { cycle, blocked_nodes: blocked });
   }
   return order;
 }
@@ -277,7 +423,8 @@ function validateChildProgramRefs(refs) {
     if (seen.has(ref)) refuse("duplicate_child", `child-program reference "${ref}" is repeated`, { child_ref: ref });
     seen.add(ref);
     if (ref !== CHILD_PROGRAM_REFS[index]) {
-      refuse("child_identity", `child-program reference ${index} must be "${CHILD_PROGRAM_REFS[index]}", saw "${ref}"; the four children are immutable identity, not configuration`,
+      refuse("child_identity",
+        `child-program reference ${index} must be "${CHILD_PROGRAM_REFS[index]}", saw "${ref}"`,
         { index, expected: CHILD_PROGRAM_REFS[index], actual: ref });
     }
   });
@@ -285,8 +432,8 @@ function validateChildProgramRefs(refs) {
 
 /**
  * Validate one portfolio revision against the closed contract and return a
- * frozen structural view. Throws PortfolioValidationError with a stable `code`
- * on any refusal. Performs no I/O and mutates nothing.
+ * frozen structural view. Throws PortfolioValidationError with a stable `code`.
+ * Performs no I/O and mutates nothing.
  */
 export function validatePortfolioRevision(revision) {
   if (!isPlainObject(revision)) refuse("invalid_shape", "revision must be an object", { path: "revision" });
@@ -308,13 +455,12 @@ export function validatePortfolioRevision(revision) {
   validateSourceDigests(revision.source_digests, "revision.source_digests");
   validateChildProgramRefs(revision.child_program_refs);
   const knownNodes = validateNodes(revision.nodes);
-  validateEdges(revision.edges, knownNodes);
-  for (const node of revision.nodes) {
-    if (node.parent_ref !== revision.portfolio_ref && !knownNodes.has(node.parent_ref)) {
-      refuse("dangling_edge", `node "${node.node_ref}" names parent "${node.parent_ref}", which is neither the portfolio nor a node in this revision`,
-        { node_ref: node.node_ref, parent_ref: node.parent_ref });
-    }
+  if (knownNodes.has(revision.portfolio_ref)) {
+    refuse("invalid_ref", `revision.portfolio_ref "${revision.portfolio_ref}" is also a master node`,
+      { portfolio_ref: revision.portfolio_ref });
   }
+  validateEdges(revision.edges, knownNodes);
+  validateParentHierarchy(revision.nodes, knownNodes, revision.portfolio_ref);
   const order = topologicalOrder(revision.nodes, revision.edges);
   return Object.freeze({
     portfolio_ref: revision.portfolio_ref,
@@ -331,16 +477,12 @@ export function validatePortfolioRevision(revision) {
 /**
  * The versioned closed preimage the revision digest is taken over.
  *
- * ORDERING IS DECLARED, NOT INCIDENTAL. `nodes` and `child_program_refs` are
- * ORDERED sets whose order carries meaning (node ordinal, child identity slot),
- * so their array order is preserved exactly. `edges` is an UNORDERED set, so it
- * is sorted here — that is the one and only place this file reorders anything,
- * and it is what makes the digest independent of how a caller happened to list
- * its edges.
- *
- * NOTHING SITUATIONAL IS BOUND: no timestamp, no maker, no reviewer, no
- * acceptance fact. Two callers describing the same portfolio at different times
- * must reach the same digest, or an exact-hash acceptance means nothing.
+ * Ordering is declared, not incidental: `nodes` and `child_program_refs` are
+ * ordered sets whose order carries meaning, so their order is preserved;
+ * `edges` is an unordered set and is sorted here by code unit, which is the one
+ * place this file reorders anything. Nothing situational is bound — no
+ * timestamp, maker, reviewer or acceptance fact — so two callers describing the
+ * same portfolio reach the same digest.
  */
 export function portfolioRevisionPreimage(revision) {
   validatePortfolioRevision(revision);
@@ -358,9 +500,8 @@ export function portfolioRevisionPreimage(revision) {
   });
   const edges = revision.edges
     .map(edge => ({ from_node_ref: edge.from_node_ref, to_node_ref: edge.to_node_ref }))
-    .sort((a, b) => (a.from_node_ref === b.from_node_ref
-      ? a.to_node_ref.localeCompare(b.to_node_ref)
-      : a.from_node_ref.localeCompare(b.from_node_ref)));
+    .sort((a, b) => compareCodeUnits(a.from_node_ref, b.from_node_ref)
+      || compareCodeUnits(a.to_node_ref, b.to_node_ref));
   return {
     schema_version: PORTFOLIO_REVISION_SCHEMA_VERSION,
     revision_version: revision.revision_version,
@@ -382,7 +523,7 @@ export function portfolioRevisionDigest(revision) {
   return digest(portfolioRevisionPreimage(revision));
 }
 
-/** The exact canonical bytes hashed, exposed so a reviewer can check the hash by hand. */
+/** The exact canonical bytes hashed, so a reviewer can check the digest by hand. */
 export function portfolioRevisionCanonicalBytes(revision) {
   return canonicalJson(portfolioRevisionPreimage(revision));
 }
@@ -390,12 +531,11 @@ export function portfolioRevisionCanonicalBytes(revision) {
 /**
  * The zero-effect readback projection.
  *
- * `expected_digest` is the stale-hash guard: a caller that believed it was
- * looking at one revision and is handed another is refused rather than shown
- * the new one under the old name. `maker_actor`/`reviewer_actor` enforce the
- * separation the accepted contract requires — one actor cannot both propose and
- * independently review. Neither check is stored by anything here; this function
- * persists nothing and can produce no effect, which is what `effects` reports.
+ * `expected_digest` is the stale-hash guard: a caller that believed it held one
+ * revision is refused rather than shown another under the old name.
+ * `maker_actor`/`reviewer_actor` enforce the separation the accepted contract
+ * requires. Neither is persisted; this function produces no effect, which is
+ * what `effects` reports.
  */
 export function portfolioReadback(revision, options = {}) {
   if (!isPlainObject(options)) refuse("invalid_shape", "options must be an object", { path: "options" });
@@ -445,9 +585,8 @@ export function portfolioReadback(revision, options = {}) {
     topological_order: view.topological_order,
     unresolved_dependencies: Object.freeze([]),
     accepted: false,
-    // This source increment is inert on purpose. Nothing below can be anything
-    // but zero until the persistence increment lands, and even then acceptance
-    // is a separate human exact-hash act.
+    // Inert by construction: nothing here can produce an effect, and acceptance
+    // remains a separate human exact-hash act.
     effects: Object.freeze({
       creates_effect: false,
       jobs: 0,

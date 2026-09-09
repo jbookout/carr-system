@@ -316,3 +316,189 @@ test("a wrong schema version, revision version, ordinal or node kind refuses", (
     draft.source_digests.design = "403d8c7ae90c12415d2df26b13b0425003273e82f1d2f9d1cd7ecb72c03dcd64";
   }))), "invalid_source_digest");
 });
+
+// --- review corrections: parent hierarchy is its own structure ---------------
+// The dependency DAG check alone accepted a self-parent and a parent loop: both
+// leave every node closure-valid while belonging to no portfolio.
+
+test("a self-parent refuses", () => {
+  assert.equal(refusalCode(() => validatePortfolioRevision(revision(draft => {
+    draft.nodes[0].parent_ref = draft.nodes[0].node_ref;
+  }))), "parent_cycle");
+});
+
+test("a two-node parent cycle refuses even though the dependency DAG is intact", () => {
+  const draft = revision(d => {
+    d.nodes[0].parent_ref = d.nodes[1].node_ref;
+    d.nodes[1].parent_ref = d.nodes[0].node_ref;
+  });
+  let detail;
+  try {
+    validatePortfolioRevision(draft);
+    assert.fail("expected a parent-hierarchy refusal");
+  } catch (error) {
+    assert.equal(error.code, "parent_cycle");
+    detail = error.detail;
+  }
+  assert.deepEqual([...detail.cycle].sort(),
+    [FIXTURE.revision.nodes[0].node_ref, FIXTURE.revision.nodes[1].node_ref].sort());
+});
+
+test("a three-node parent cycle refuses", () => {
+  assert.equal(refusalCode(() => validatePortfolioRevision(revision(draft => {
+    draft.nodes[2].parent_ref = draft.nodes[3].node_ref;
+    draft.nodes[3].parent_ref = draft.nodes[4].node_ref;
+    draft.nodes[4].parent_ref = draft.nodes[2].node_ref;
+  }))), "parent_cycle");
+});
+
+test("a legitimate nested parent chain still validates", () => {
+  // node 1 parented to node 0, node 0 still parented to the portfolio: a real
+  // hierarchy, not a loop. The fix must not refuse this.
+  const view = validatePortfolioRevision(revision(draft => {
+    draft.nodes[1].parent_ref = draft.nodes[0].node_ref;
+  }));
+  assert.equal(view.node_count, MASTER_NODE_COUNT);
+});
+
+test("a portfolio_ref that collides with a node ref refuses", () => {
+  assert.equal(refusalCode(() => validatePortfolioRevision(revision(draft => {
+    draft.portfolio_ref = draft.nodes[0].node_ref;
+  }))), "invalid_ref");
+});
+
+// --- review corrections: stated metadata must be well formed -----------------
+// budget_ceiling = {nonsense: anything} was accepted and hashed into the
+// acceptance digest as-is.
+
+test("a malformed budget ceiling refuses instead of being hashed", () => {
+  for (const value of [{ nonsense: "anything" }, "12", -1, 1e13, true, []]) {
+    assert.equal(refusalCode(() => validatePortfolioRevision(revision(draft => {
+      draft.nodes[0].budget_ceiling = value;
+    }))), "invalid_metadata", `budget_ceiling ${JSON.stringify(value)} must refuse`);
+  }
+  const view = validatePortfolioRevision(revision(draft => { draft.nodes[0].budget_ceiling = 0; }));
+  assert.equal(view.node_count, MASTER_NODE_COUNT);
+});
+
+test("classification slots take a lower-case token and nothing else", () => {
+  for (const key of ["authority_class", "effect_class", "data_class"]) {
+    for (const value of ["", "Not A Token", "UPPER", 7, { kind: "x" }]) {
+      assert.equal(refusalCode(() => validatePortfolioRevision(revision(draft => {
+        draft.nodes[0][key] = value;
+      }))), "invalid_metadata", `${key}=${JSON.stringify(value)} must refuse`);
+    }
+  }
+  assert.ok(validatePortfolioRevision(revision(draft => { draft.nodes[0].effect_class = "no_effect"; })));
+});
+
+test("budget identity, recovery ref and terminal predicate reject malformed values", () => {
+  assert.equal(refusalCode(() => validatePortfolioRevision(revision(draft => {
+    draft.nodes[0].budget_identity = "";
+  }))), "invalid_metadata");
+  assert.equal(refusalCode(() => validatePortfolioRevision(revision(draft => {
+    draft.nodes[0].recovery_ref = "no spaces allowed";
+  }))), "invalid_ref");
+  assert.equal(refusalCode(() => validatePortfolioRevision(revision(draft => {
+    draft.nodes[0].terminal_predicate = "";
+  }))), "invalid_metadata");
+  assert.ok(validatePortfolioRevision(revision(draft => {
+    draft.nodes[0].budget_identity = "portfolio-budget";
+    draft.nodes[0].recovery_ref = "recovery:portfolio-rollback";
+    draft.nodes[0].terminal_predicate = "accepted_outcome_present";
+  })));
+});
+
+test("a stated model floor is a closed nested shape", () => {
+  const complete = { provider: "anthropic", model: "opus", version: "5", effort: "high" };
+  assert.ok(validatePortfolioRevision(revision(draft => { draft.nodes[0].model_floor = complete; })));
+  assert.equal(refusalCode(() => validatePortfolioRevision(revision(draft => {
+    draft.nodes[0].model_floor = { ...complete, tier: "premium" };
+  }))), "unknown_field");
+  assert.equal(refusalCode(() => validatePortfolioRevision(revision(draft => {
+    const partial = { ...complete }; delete partial.effort;
+    draft.nodes[0].model_floor = partial;
+  }))), "invalid_metadata");
+  assert.equal(refusalCode(() => validatePortfolioRevision(revision(draft => {
+    draft.nodes[0].model_floor = { ...complete, version: 5 };
+  }))), "invalid_metadata");
+  assert.equal(refusalCode(() => validatePortfolioRevision(revision(draft => {
+    draft.nodes[0].model_floor = "opus";
+  }))), "invalid_metadata");
+});
+
+// --- review corrections: canonical ordering and JSON safety ------------------
+
+test("edges are ordered by code unit, not by locale collation", () => {
+  const preimage = portfolioRevisionPreimage(revision());
+  const byCodeUnit = [...preimage.edges].sort((a, b) => {
+    if (a.from_node_ref !== b.from_node_ref) return a.from_node_ref < b.from_node_ref ? -1 : 1;
+    if (a.to_node_ref === b.to_node_ref) return 0;
+    return a.to_node_ref < b.to_node_ref ? -1 : 1;
+  });
+  assert.deepEqual(preimage.edges, byCodeUnit);
+  // Code-unit and locale collation disagree on case: "B" precedes "a" by code
+  // unit and follows it under most locales. The acceptance digest must not
+  // depend on which ICU build is loaded.
+  assert.ok("B" < "a");
+  assert.notEqual("B".localeCompare("a") < 0, "B" < "a");
+});
+
+test("a cyclic object graph refuses instead of recursing", () => {
+  const draft = JSON.parse(JSON.stringify(FIXTURE.revision));
+  const loop = { note: "self" };
+  loop.loop = loop;
+  draft.nodes[0].recovery_ref = loop;
+  assert.equal(refusalCode(() => validatePortfolioRevision(draft)), "cyclic_input");
+});
+
+test("a sparse array hole refuses rather than hashing null", () => {
+  const draft = JSON.parse(JSON.stringify(FIXTURE.revision));
+  delete draft.nodes[5];
+  assert.equal(refusalCode(() => validatePortfolioRevision(draft)), "unsupported_value");
+});
+
+test("symbol, accessor and non-enumerable properties refuse rather than being dropped", () => {
+  const withSymbol = JSON.parse(JSON.stringify(FIXTURE.revision));
+  withSymbol.nodes[0][Symbol("hidden")] = "dropped by Object.keys";
+  assert.equal(refusalCode(() => validatePortfolioRevision(withSymbol)), "unsupported_value");
+
+  const withAccessor = JSON.parse(JSON.stringify(FIXTURE.revision));
+  Object.defineProperty(withAccessor.nodes[0], "effect_class", {
+    get: () => "no_effect", enumerable: true, configurable: true,
+  });
+  assert.equal(refusalCode(() => validatePortfolioRevision(withAccessor)), "unsupported_value");
+
+  const withHidden = JSON.parse(JSON.stringify(FIXTURE.revision));
+  Object.defineProperty(withHidden.nodes[0], "effect_class", {
+    value: "no_effect", enumerable: false, configurable: true, writable: true,
+  });
+  assert.equal(refusalCode(() => validatePortfolioRevision(withHidden)), "unsupported_value");
+});
+
+test("a dependency cycle names its actual members, not innocent downstream nodes", () => {
+  let detail;
+  try {
+    validatePortfolioRevision(revision(draft => {
+      // Close a loop between two early nodes. Everything downstream of them is
+      // also left unordered, but only these two are cycle members.
+      draft.edges.push({
+        from_node_ref: "step:wr48-frontier-flowing-production-outcome",
+        to_node_ref: "step:portfolio-constitution-accepted",
+      });
+    }));
+    assert.fail("expected a cycle refusal");
+  } catch (error) {
+    assert.equal(error.code, "cycle");
+    detail = error.detail;
+  }
+  assert.deepEqual([...detail.cycle].sort(), [
+    "step:portfolio-constitution-accepted",
+    "step:wr48-frontier-flowing-production-outcome",
+  ]);
+  // The blocked set is reported separately and is strictly larger: every later
+  // milestone is unordered too, and none of them is in the cycle.
+  assert.ok(detail.blocked_nodes.length > detail.cycle.length);
+  assert.ok(detail.blocked_nodes.includes("step:final-portfolio-outcome-reconciliation"));
+  assert.ok(!detail.cycle.includes("step:final-portfolio-outcome-reconciliation"));
+});
