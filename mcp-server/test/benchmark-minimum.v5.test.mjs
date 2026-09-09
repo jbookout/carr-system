@@ -1,0 +1,931 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { digest } from "../src/artifact-trust.js";
+import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
+import { JOURNEY_ONE_DEADLINE_CONTRACT } from "../src/journey-one-clock.v5.js";
+import {
+  BENCHMARK_ACCEPTANCE_ENVELOPE_FIELDS, BENCHMARK_CACHE_STATES, BENCHMARK_COST_VARIANCE_THRESHOLDS,
+  BENCHMARK_DEADLINE_CONTRACT, BENCHMARK_MANIFEST_FIELDS, BENCHMARK_MANIFEST_SCHEMA,
+  BENCHMARK_METRICS, BENCHMARK_PAYLOAD_DOMAIN_TAG, BENCHMARK_PAYLOAD_FIELDS,
+  BENCHMARK_SLO_THRESHOLDS, BENCHMARK_STEP_REF, CONSUMER_GATE_RECEIPT_FIELDS,
+  FOUNDATION_ASSURANCE_MINIMUM_PROJECTION, GATE_ZERO_STEP_REF, MINIMUM_GATE_ID,
+  MINIMUM_ORACLE_REF, MINIMUM_PRODUCER_ROLE, MINIMUM_REQUIRED_MEMBERS, MINIMUM_STEP_REF,
+  P95_AGGREGATION_METHOD, WORKLOAD_WEIGHT_TOTAL_BASIS_POINTS,
+  benchmarkPayloadDigest, benchmarkPayloadOf, benchmarkRequiredCells,
+  createFoundationAssuranceMinimumGate, evaluateBenchmarkAdmissibility,
+  evaluateBenchmarkWorkloadCoverage, foundationAssuranceMinimumNegativeAdmission,
+  journeyOneClockMinimumReceiptView, nearestRankP95, validateBenchmarkManifest,
+  validateBenchmarkPayload,
+} from "../src/benchmark-minimum.v5.js";
+
+// --- fixtures ---------------------------------------------------------------
+
+const D = n => `sha256:${String(n).padStart(2, "0").repeat(32)}`;
+const I = actor => ({
+  actor_id: actor,
+  session_ref: `session:a00-test-${actor}`,
+  authority_class: actor === "joe" || actor === "dell" ? "verified_partner" : "synthetic_oracle",
+});
+const copy = x => JSON.parse(JSON.stringify(x));
+const iso = ms => new Date(ms).toISOString();
+const DAY = 86400000;
+
+const GATE_ZERO_AT = "2026-02-01T00:00:00.000Z";
+const ACCEPTED_AT = "2026-02-02T00:00:00.000Z";
+const OBSERVED_AT = "2026-02-03T00:00:00.000Z";
+const AS_OF = "2026-02-04T00:00:00.000Z";
+
+function payload() {
+  return {
+    subject_digest: D(1), candidate_digest: D(2), policy_digest: D(3),
+    capacity_profiles: ["baseline", "peak"],
+    workload_mix: [
+      { workload_id: "search", weight_basis_points: 6000, operation_mix_digest: D(10) },
+      { workload_id: "detail", weight_basis_points: 4000, operation_mix_digest: D(11) },
+    ],
+    request_size_distribution: [{ percentile: 50, bytes: 2048 }, { percentile: 95, bytes: 16384 }],
+    concurrency_levels: [1, 8],
+    arrival_patterns: ["steady"],
+    routes: ["/deals"],
+    browsers: [{ name: "chrome", version: "141", build: "141.0.1" }],
+    runtime_versions: ["node-24"],
+    device_profiles: ["macbook-pro-m3"],
+    hardware_profiles: ["m3-16gb"],
+    network_profiles: ["broadband"],
+    cache_states: ["cold", "warm"],
+    samples_per_cell: 20,
+    warmup_runs: 2,
+    p95_aggregation_method: P95_AGGREGATION_METHOD,
+    outlier_rule: "discard samples above five times the cell median",
+    acknowledgement_endpoints: ["/commands/ack"],
+    evaluator_identities: [I("bench-evaluator")],
+    comparator_versions: ["comparator-1.4.0"],
+    slo_thresholds: { ...BENCHMARK_SLO_THRESHOLDS },
+    cost_expectation_matrix_digest: D(12),
+    cost_variance_thresholds: { ...BENCHMARK_COST_VARIANCE_THRESHOLDS },
+    deadline_contract: copy(BENCHMARK_DEADLINE_CONTRACT),
+  };
+}
+
+function manifest(body = payload(), { acceptedAt = ACCEPTED_AT, acceptor = I("joe") } = {}) {
+  return {
+    ...copy(body),
+    benchmark_manifest_digest: digest([BENCHMARK_PAYLOAD_DOMAIN_TAG, body]),
+    accepted_by_identity: acceptor,
+    accepted_at: acceptedAt,
+    status: "accepted",
+  };
+}
+
+/** One well-formed measurement set covering exactly the required matrix. */
+function measurements(body = payload(), { valueFor = () => 100 } = {}) {
+  return {
+    schema_version: "doctorcre-v5-benchmark-measurement-set.v1",
+    benchmark_payload_digest: benchmarkPayloadDigest(body),
+    outlier_rule: body.outlier_rule,
+    p95_aggregation_method: body.p95_aggregation_method,
+    cells: benchmarkRequiredCells(body).map(cell => ({
+      cell: copy(cell),
+      warmup_samples: Array.from({ length: body.warmup_runs }, () => 999),
+      samples: Array.from({ length: body.samples_per_cell }, () => valueFor(cell)),
+      excluded_sample_indexes: [],
+    })),
+  };
+}
+
+function member(spec, overrides = {}) {
+  if (spec.output_schema_ref === BENCHMARK_MANIFEST_SCHEMA) {
+    return { step_ref: spec.step_ref, receipt: manifest() };
+  }
+  return {
+    step_ref: spec.step_ref,
+    receipt: {
+      gate_id: spec.gate_id,
+      receipt_producer_step_ref: spec.step_ref,
+      subject_digest: D(1), candidate_digest: D(2), policy_digest: D(3),
+      environment_manifest_digest: D(4),
+      subject_environment: spec.subject_environment,
+      evidence_scope: spec.evidence_scope,
+      subject_maker_identity: I("builder"),
+      producer_identity: I(`producer-${spec.gate_id}`),
+      evaluator_identity: I(`evaluator-${spec.gate_id}`),
+      producer_role: spec.producer_role,
+      independent_oracle_ref: spec.oracle_ref,
+      oracle_version: spec.oracle_version,
+      evidence_ref: `safe:a00-test:${spec.gate_id}`,
+      fixture_set_digest: D(5),
+      observed_at: OBSERVED_AT,
+      ttl_expires_at: iso(Date.parse(OBSERVED_AT) + 7 * DAY),
+      status: "pass",
+      comparator: "exact closed-contract comparator",
+      negative_admission_result: "all_required_denials_observed",
+      ...overrides,
+    },
+  };
+}
+
+function snapshot() {
+  return {
+    schema_version: FOUNDATION_ASSURANCE_MINIMUM_PROJECTION,
+    tenant: ORGANIZATION_TENANT_ID,
+    as_of: AS_OF,
+    binding: {
+      subject_digest: D(1), candidate_digest: D(2), policy_digest: D(3),
+      minimum_environment_manifest_digest: D(4),
+      benchmark_manifest_digest: benchmarkPayloadDigest(payload()),
+      maximum_member_receipt_ttl_ms: 30 * DAY,
+      minimum_receipt_ttl_ms: 7 * DAY,
+    },
+    gate_zero: { step_ref: GATE_ZERO_STEP_REF, outcome_digest: D(6), observed_at: GATE_ZERO_AT },
+    members: MINIMUM_REQUIRED_MEMBERS.map(spec => member(spec)),
+    minimum_receipt_context: {
+      subject_maker_identity: I("builder"),
+      producer_identity: I("minimum-oracle"),
+      evaluator_identity: I("minimum-evaluator"),
+      evidence_ref: "safe:a00-test:minimum-join",
+      fixture_set_digest: D(5),
+      comparator: "exact closed minimum join comparator",
+    },
+  };
+}
+
+const at = (s, step) => s.members.find(m => m.step_ref === step);
+const PHI = "step:global-no-phi-boundary-independent-receipt";
+const SECRETS = "step:global-secrets-boundary-independent-receipt";
+
+/**
+ * Test-only authenticating capability. The evidence map is installed by trusted
+ * test code; no JSON flag can cause an unknown envelope to acquire a projection.
+ */
+function harness() {
+  const evidence = new Map();
+  let serial = 0;
+  const gate = createFoundationAssuranceMinimumGate({
+    authenticateEvidence(envelope) {
+      const found = evidence.get(digest(envelope));
+      if (!found) throw new Error("synthetic-authentication-refused");
+      return { envelope_digest: digest(envelope), snapshot: copy(found) };
+    },
+  });
+  return {
+    gate,
+    evaluate(projection) {
+      const envelope = { synthetic_evidence_ref: `a00-test-${++serial}` };
+      evidence.set(digest(envelope), copy(projection));
+      return gate.evaluate(envelope);
+    },
+  };
+}
+const run = projection => harness().evaluate(projection);
+const refuse = (projection, code) => assert.throws(() => run(projection), e => e.code === code, code);
+const refuseCall = (fn, code) => assert.throws(fn, e => e.code === code, code);
+
+// --- the closed benchmark manifest -----------------------------------------
+
+test("the manifest is exactly thirty closed fields split into payload and envelope", () => {
+  assert.equal(BENCHMARK_MANIFEST_FIELDS.length, 30);
+  assert.deepEqual([...BENCHMARK_ACCEPTANCE_ENVELOPE_FIELDS].sort(),
+    ["accepted_at", "accepted_by_identity", "benchmark_manifest_digest", "status"]);
+  assert.equal(BENCHMARK_PAYLOAD_FIELDS.length, 26);
+  for (const field of BENCHMARK_ACCEPTANCE_ENVELOPE_FIELDS) {
+    assert.ok(!BENCHMARK_PAYLOAD_FIELDS.includes(field), `${field} must not be hashed into its own digest`);
+  }
+  assert.deepEqual(Object.keys(manifest()).sort(), [...BENCHMARK_MANIFEST_FIELDS].sort());
+});
+
+test("every missing manifest field refuses, one at a time", () => {
+  for (const field of BENCHMARK_MANIFEST_FIELDS) {
+    const m = manifest();
+    delete m[field];
+    assert.throws(() => validateBenchmarkManifest(m), e => e.code === "closed_shape", `missing ${field}`);
+  }
+});
+
+test("an extra manifest field refuses rather than being ignored", () => {
+  refuseCall(() => validateBenchmarkManifest({ ...manifest(), rebaseline_note: "approved verbally" }), "closed_shape");
+  refuseCall(() => validateBenchmarkManifest({ ...manifest(), obligation_decision_ids: ["Q008.D1"] }), "closed_shape");
+});
+
+test("a decision id is never evidence: it cannot ride on a manifest or a member receipt", () => {
+  refuseCall(() => validateBenchmarkManifest({ ...manifest(), decision_ids: ["Q012.D1"] }), "closed_shape");
+  const s = snapshot();
+  at(s, PHI).receipt.obligation_decision_ids = ["Q033.D1"];
+  refuse(s, "closed_shape");
+});
+
+test("workload weights must total exactly ten thousand basis points", () => {
+  const p = payload();
+  p.workload_mix[1].weight_basis_points = 3999;
+  refuseCall(() => validateBenchmarkPayload(p), "benchmark_weight_total_mismatch");
+  const over = payload();
+  over.workload_mix[1].weight_basis_points = 4001;
+  refuseCall(() => validateBenchmarkPayload(over), "benchmark_weight_total_mismatch");
+  assert.equal(payload().workload_mix.reduce((n, w) => n + w.weight_basis_points, 0),
+    WORKLOAD_WEIGHT_TOTAL_BASIS_POINTS);
+});
+
+test("a single workload may hold the whole weight but a zero-weight one may not exist", () => {
+  const whole = payload();
+  whole.workload_mix = [{ workload_id: "only", weight_basis_points: 10000, operation_mix_digest: D(10) }];
+  assert.ok(validateBenchmarkPayload(whole));
+  const zero = payload();
+  zero.workload_mix = [{ workload_id: "a", weight_basis_points: 10000, operation_mix_digest: D(10) },
+    { workload_id: "b", weight_basis_points: 0, operation_mix_digest: D(11) }];
+  refuseCall(() => validateBenchmarkPayload(zero), "invalid_integer");
+});
+
+test("the fixed SLO, cost and clock constants are identity, not configuration", () => {
+  for (const [field, mutate] of [
+    ["slo_thresholds", p => { p.slo_thresholds.warm_core_navigation_p95_ms = 2500; }],
+    ["slo_thresholds", p => { p.slo_thresholds.cold_lcp_p95_ms = 4500; }],
+    ["slo_thresholds", p => { p.slo_thresholds.command_acknowledgement_p95_ms = 350; }],
+    ["cost_variance_thresholds", p => { p.cost_variance_thresholds.warn_basis_points = 12000; }],
+    ["cost_variance_thresholds", p => { p.cost_variance_thresholds.mandatory_replan_basis_points = 25000; }],
+    ["deadline_contract", p => { p.deadline_contract.calendar_days = 45; }],
+    ["deadline_contract", p => { p.deadline_contract.clock_origin_gate_id = "portfolio-constitution-accepted"; }],
+    ["deadline_contract", p => { p.deadline_contract.reset_policy = "reset_on_replan"; }],
+    ["deadline_contract", p => { p.deadline_contract.maximum_external_blocker_pause_days = 30; }],
+    ["deadline_contract", p => { p.deadline_contract.kernel_obligation_decision_ids = ["Q002.D1"]; }],
+  ]) {
+    const p = payload();
+    mutate(p);
+    assert.throws(() => validateBenchmarkPayload(p), e => e.code === "benchmark_constant_mismatch", field);
+  }
+  const method = payload();
+  method.p95_aggregation_method = "mean-of-cells";
+  refuseCall(() => validateBenchmarkPayload(method), "benchmark_constant_mismatch");
+});
+
+test("a missing or extra nested constant field refuses as a closed shape", () => {
+  const dropped = payload();
+  delete dropped.slo_thresholds.cold_lcp_p95_ms;
+  refuseCall(() => validateBenchmarkPayload(dropped), "closed_shape");
+  const added = payload();
+  added.deadline_contract.grace_days = 5;
+  refuseCall(() => validateBenchmarkPayload(added), "closed_shape");
+  const nestedWorkload = payload();
+  nestedWorkload.workload_mix[0].note = "primary";
+  refuseCall(() => validateBenchmarkPayload(nestedWorkload), "closed_shape");
+  const nestedBrowser = payload();
+  delete nestedBrowser.browsers[0].build;
+  refuseCall(() => validateBenchmarkPayload(nestedBrowser), "closed_shape");
+});
+
+test("wildcard, unversioned and under-sampled manifests refuse", () => {
+  const emptyRoute = payload();
+  emptyRoute.routes = [""];
+  refuseCall(() => validateBenchmarkPayload(emptyRoute), "invalid_list_item");
+  const noComparator = payload();
+  noComparator.comparator_versions = [];
+  refuseCall(() => validateBenchmarkPayload(noComparator), "invalid_list");
+  const thin = payload();
+  thin.samples_per_cell = 19;
+  refuseCall(() => validateBenchmarkPayload(thin), "invalid_integer");
+  const noWarmup = payload();
+  noWarmup.warmup_runs = 0;
+  refuseCall(() => validateBenchmarkPayload(noWarmup), "invalid_integer");
+  const oneCache = payload();
+  oneCache.cache_states = ["warm"];
+  refuseCall(() => validateBenchmarkPayload(oneCache), "invalid_list");
+  const unknownCache = payload();
+  unknownCache.cache_states = ["cold", "lukewarm"];
+  refuseCall(() => validateBenchmarkPayload(unknownCache), "benchmark_unknown_cache_state");
+  assert.deepEqual([...BENCHMARK_CACHE_STATES], ["cold", "warm"]);
+});
+
+test("duplicate dimension members refuse because a cell could not resolve one weight", () => {
+  const workload = payload();
+  workload.workload_mix = [
+    { workload_id: "search", weight_basis_points: 5000, operation_mix_digest: D(10) },
+    { workload_id: "search", weight_basis_points: 5000, operation_mix_digest: D(11) },
+  ];
+  refuseCall(() => validateBenchmarkPayload(workload), "benchmark_duplicate_workload_id");
+  const browser = payload();
+  browser.browsers = [browser.browsers[0], copy(browser.browsers[0])];
+  refuseCall(() => validateBenchmarkPayload(browser), "benchmark_duplicate_browser");
+  const routes = payload();
+  routes.routes = ["/deals", "/deals"];
+  refuseCall(() => validateBenchmarkPayload(routes), "duplicate_list_item");
+  const evaluators = payload();
+  evaluators.evaluator_identities = [I("bench-evaluator"), I("bench-evaluator")];
+  refuseCall(() => validateBenchmarkPayload(evaluators), "benchmark_duplicate_evaluator_identity");
+  const percentiles = payload();
+  percentiles.request_size_distribution = [{ percentile: 50, bytes: 1 }, { percentile: 50, bytes: 2 }];
+  refuseCall(() => validateBenchmarkPayload(percentiles), "benchmark_duplicate_request_size_percentile");
+});
+
+test("the payload digest omits the acceptance envelope and is stable across key order", () => {
+  const body = payload();
+  const expected = digest([BENCHMARK_PAYLOAD_DOMAIN_TAG, body]);
+  assert.equal(benchmarkPayloadDigest(body), expected);
+  const shuffled = Object.fromEntries(Object.keys(body).reverse().map(k => [k, body[k]]));
+  assert.equal(benchmarkPayloadDigest(shuffled), expected);
+  const m = manifest(body);
+  assert.equal(m.benchmark_manifest_digest, expected);
+  assert.deepEqual(benchmarkPayloadOf(m), body);
+  // Re-accepting the same payload with a different acceptor or instant does not
+  // move the digest: the envelope is authenticated separately, never hashed in.
+  assert.equal(manifest(body, { acceptor: I("dell"), acceptedAt: "2026-03-09T00:00:00.000Z" })
+    .benchmark_manifest_digest, expected);
+});
+
+test("a mutated payload under a recorded digest refuses as a wrong digest", () => {
+  const m = manifest();
+  m.routes = ["/deals", "/prospecting"];
+  refuseCall(() => validateBenchmarkManifest(m), "benchmark_manifest_digest_mismatch");
+  const forged = manifest();
+  forged.benchmark_manifest_digest = D(99);
+  refuseCall(() => validateBenchmarkManifest(forged), "benchmark_manifest_digest_mismatch");
+});
+
+test("acceptance requires a verified partner and the one permitted status", () => {
+  refuseCall(() => validateBenchmarkManifest(manifest(payload(), { acceptor: I("codex") })), "verified_partner_required");
+  const claimed = manifest();
+  claimed.accepted_by_identity = { actor_id: "codex", session_ref: "session:a00-test-codex", authority_class: "verified_partner" };
+  refuseCall(() => validateBenchmarkManifest(claimed), "verified_partner_required");
+  const pretend = manifest();
+  pretend.status = "pass";
+  refuseCall(() => validateBenchmarkManifest(pretend), "benchmark_status_not_accepted");
+  assert.ok(validateBenchmarkManifest(manifest(payload(), { acceptor: I("dell") })));
+});
+
+test("no caller boolean can stand in for a verified human acceptance", () => {
+  const m = manifest();
+  m.accepted_by_identity.authority_class = "sponsored_agent";
+  refuseCall(() => validateBenchmarkManifest(m), "verified_partner_required");
+  refuseCall(() => validateBenchmarkManifest({ ...manifest(), verified_human: true }), "closed_shape");
+});
+
+// --- admissibility is a proposal, never an acceptance -----------------------
+
+test("benchmark admissibility proposes a digest and accepts nothing", () => {
+  const body = payload();
+  const result = evaluateBenchmarkAdmissibility({ payload: body });
+  assert.equal(result.schema_admissible, true);
+  assert.equal(result.proposed_benchmark_manifest_digest, benchmarkPayloadDigest(body));
+  assert.equal(result.accepted, false);
+  assert.equal(result.acceptance_recorded_here, false);
+  assert.equal(result.durable_acceptance_required, true);
+  assert.equal(result.acceptance_required_from_producer_role, "verified_partner_benchmark_authority");
+  assert.equal(result.acceptance_required_after_step_ref, GATE_ZERO_STEP_REF);
+  assert.equal(result.authority_granted, false);
+  assert.equal(result.effects.acceptances, 0);
+  assert.equal(result.effects.creates_effect, false);
+  assert.equal(result.workload_coverage, null);
+  assert.equal(result.workload_coverage_evaluated, false);
+  assert.ok(Object.isFrozen(result));
+});
+
+// --- the workload matrix and the nearest-rank p95 rule ----------------------
+
+test("nearest-rank p95 is the one-based ceiling(0.95 * n) observation", () => {
+  assert.equal(nearestRankP95(Array.from({ length: 20 }, (_, i) => i + 1)), 19);
+  assert.equal(nearestRankP95(Array.from({ length: 100 }, (_, i) => i + 1)), 95);
+  assert.equal(nearestRankP95(Array.from({ length: 40 }, (_, i) => i + 1)), 38);
+  assert.equal(nearestRankP95([5, 1, 3]), 5);
+  // Order of presentation cannot change the answer.
+  assert.equal(nearestRankP95([9, 2, 7, 4, 1]), 9);
+});
+
+test("the required matrix is the declared cross product and every cell must be measured", () => {
+  const body = payload();
+  const cells = benchmarkRequiredCells(body);
+  // 2 capacity x 2 workloads x 2 concurrency x 1 arrival x 1 browser x 1 runtime
+  // x 1 device x 1 hardware x 1 network = 8 environment cells, crossed with
+  // 1 warm route + 1 cold route + 1 endpoint over both cache states.
+  assert.equal(cells.length, 8 * (1 + 1 + 2));
+  assert.equal(new Set(cells.map(c => digest(c))).size, cells.length);
+  for (const metric of Object.keys(BENCHMARK_METRICS)) {
+    assert.ok(cells.some(c => c.metric === metric), metric);
+  }
+  const result = evaluateBenchmarkWorkloadCoverage({ payload: body, measurements: measurements(body) });
+  assert.equal(result.coverage_complete, true);
+  assert.equal(result.required_cell_count, cells.length);
+  assert.equal(result.measured_cell_count, cells.length);
+  assert.equal(result.all_required_cells_meet_slo, true);
+  assert.equal(result.weights_applied_to_thresholds, false);
+});
+
+test("a missing, unrequired or duplicated cell denies coverage", () => {
+  const body = payload();
+  const short = measurements(body);
+  short.cells.pop();
+  refuseCall(() => evaluateBenchmarkWorkloadCoverage({ payload: body, measurements: short }),
+    "benchmark_matrix_coverage_incomplete");
+  const extra = measurements(body);
+  extra.cells.push({ ...copy(extra.cells[0]), cell: { ...copy(extra.cells[0].cell), capacity_profile: "unlisted" } });
+  refuseCall(() => evaluateBenchmarkWorkloadCoverage({ payload: body, measurements: extra }),
+    "benchmark_unrequired_cell");
+  const twice = measurements(body);
+  twice.cells.push(copy(twice.cells[0]));
+  refuseCall(() => evaluateBenchmarkWorkloadCoverage({ payload: body, measurements: twice }),
+    "benchmark_duplicate_cell");
+});
+
+test("each metric is measured against its own fixed SLO", () => {
+  const body = payload();
+  for (const [metric, threshold] of [
+    ["core_navigation_ms", BENCHMARK_SLO_THRESHOLDS.warm_core_navigation_p95_ms],
+    ["lcp_ms", BENCHMARK_SLO_THRESHOLDS.cold_lcp_p95_ms],
+    ["command_acknowledgement_ms", BENCHMARK_SLO_THRESHOLDS.command_acknowledgement_p95_ms],
+  ]) {
+    const met = measurements(body, { valueFor: cell => (cell.metric === metric ? threshold : 10) });
+    assert.equal(evaluateBenchmarkWorkloadCoverage({ payload: body, measurements: met })
+      .all_required_cells_meet_slo, true, `${metric} exactly at threshold passes`);
+    const missed = measurements(body, { valueFor: cell => (cell.metric === metric ? threshold + 1 : 10) });
+    assert.throws(() => evaluateBenchmarkWorkloadCoverage({ payload: body, measurements: missed }),
+      e => e.code === "benchmark_slo_not_met" && e.detail.failing_cells[0].slo_key === BENCHMARK_METRICS[metric].slo_key,
+      metric);
+  }
+});
+
+test("a low workload weight never relaxes a cell's threshold", () => {
+  const body = payload();
+  body.workload_mix = [
+    { workload_id: "search", weight_basis_points: 9999, operation_mix_digest: D(10) },
+    { workload_id: "rare", weight_basis_points: 1, operation_mix_digest: D(11) },
+  ];
+  const met = measurements(body, {
+    valueFor: cell => (cell.workload_id === "rare" && cell.metric === "command_acknowledgement_ms" ? 301 : 10),
+  });
+  refuseCall(() => evaluateBenchmarkWorkloadCoverage({ payload: body, measurements: met }), "benchmark_slo_not_met");
+});
+
+test("warmup runs must be exercised and excluded, and exclusions cannot shrink a cell below its floor", () => {
+  const body = payload();
+  const noWarmup = measurements(body);
+  noWarmup.cells[0].warmup_samples = [];
+  refuseCall(() => evaluateBenchmarkWorkloadCoverage({ payload: body, measurements: noWarmup }),
+    "benchmark_warmup_run_count_mismatch");
+  // A warmup observation is never a sample: a slow warmup cannot fail a cell.
+  const slowWarmup = measurements(body);
+  slowWarmup.cells.forEach(c => { c.warmup_samples = c.warmup_samples.map(() => 60000); });
+  assert.equal(evaluateBenchmarkWorkloadCoverage({ payload: body, measurements: slowWarmup })
+    .all_required_cells_meet_slo, true);
+  const thin = measurements(body);
+  thin.cells[0].excluded_sample_indexes = [0];
+  refuseCall(() => evaluateBenchmarkWorkloadCoverage({ payload: body, measurements: thin }),
+    "benchmark_sample_floor_not_met");
+  // With headroom above the floor an exclusion is permitted, and it excludes:
+  // twenty-two samples put the nearest-rank index on the twenty-first, so the
+  // two outliers decide the cell unless they are actually removed.
+  const wide = measurements(body, { valueFor: () => 10 });
+  wide.cells.forEach(c => {
+    c.samples = [...c.samples, 9000, 9000];
+    c.excluded_sample_indexes = [c.samples.length - 2, c.samples.length - 1];
+  });
+  assert.equal(evaluateBenchmarkWorkloadCoverage({ payload: body, measurements: wide })
+    .all_required_cells_meet_slo, true);
+  const unexcluded = measurements(body, { valueFor: () => 10 });
+  unexcluded.cells.forEach(c => { c.samples = [...c.samples, 9000, 9000]; });
+  refuseCall(() => evaluateBenchmarkWorkloadCoverage({ payload: body, measurements: unexcluded }),
+    "benchmark_slo_not_met");
+});
+
+test("a measurement set must quote the accepted payload, rule and method exactly", () => {
+  const body = payload();
+  const wrongPayload = measurements(body);
+  wrongPayload.benchmark_payload_digest = D(98);
+  refuseCall(() => evaluateBenchmarkWorkloadCoverage({ payload: body, measurements: wrongPayload }),
+    "measurement_payload_binding_mismatch");
+  const wrongRule = measurements(body);
+  wrongRule.outlier_rule = "discard whatever looks wrong";
+  refuseCall(() => evaluateBenchmarkWorkloadCoverage({ payload: body, measurements: wrongRule }),
+    "measurement_outlier_rule_mismatch");
+  const wrongMethod = measurements(body);
+  wrongMethod.p95_aggregation_method = "mean";
+  refuseCall(() => evaluateBenchmarkWorkloadCoverage({ payload: body, measurements: wrongMethod }),
+    "measurement_p95_method_mismatch");
+  const openSet = measurements(body);
+  openSet.note = "rerun of the third pass";
+  refuseCall(() => evaluateBenchmarkWorkloadCoverage({ payload: body, measurements: openSet }), "closed_shape");
+});
+
+test("admissibility carries the coverage verdict when measurements are supplied", () => {
+  const body = payload();
+  const result = evaluateBenchmarkAdmissibility({ payload: body, measurements: measurements(body) });
+  assert.equal(result.workload_coverage_evaluated, true);
+  assert.equal(result.workload_coverage.coverage_complete, true);
+  assert.equal(result.accepted, false);
+  refuseCall(() => evaluateBenchmarkAdmissibility({
+    payload: body,
+    measurements: measurements(body, { valueFor: () => 99999 }),
+  }), "benchmark_slo_not_met");
+});
+
+// --- the Foundation/Assurance minimum join ----------------------------------
+
+test("the join consumes exactly the eight declared gates and Gate Zero", () => {
+  assert.equal(MINIMUM_REQUIRED_MEMBERS.length, 8);
+  assert.deepEqual(MINIMUM_REQUIRED_MEMBERS.map(m => m.gate_id).sort(), [
+    "assurance-fabric-child-accepted", "benchmark-contract-accepted",
+    "foundation-control-plane-child-accepted", "global-execution-contract-accepted",
+    "global-phi-boundary-accepted", "global-prompt-injection-boundary-accepted",
+    "global-secrets-boundary-accepted", "global-source-authority-accepted",
+  ]);
+  const result = run(snapshot());
+  assert.equal(result.admissible, true);
+  assert.deepEqual(result.satisfied_gate_ids, MINIMUM_REQUIRED_MEMBERS.map(m => m.gate_id).sort());
+  assert.equal(result.gate_zero_outcome_digest, D(6));
+  assert.equal(result.gate_id, MINIMUM_GATE_ID);
+  assert.equal(result.producer_step_ref, MINIMUM_STEP_REF);
+  assert.equal(result.combiner, "all_current_independent_pass");
+  assert.deepEqual(result.obligation_decision_ids, ["Q012.D2"]);
+});
+
+test("a valid join proposes a receipt and issues nothing", () => {
+  const result = run(snapshot());
+  assert.deepEqual(Object.keys(result.proposed_receipt).sort(), [...CONSUMER_GATE_RECEIPT_FIELDS].sort());
+  assert.equal(result.proposed_receipt.gate_id, MINIMUM_GATE_ID);
+  assert.equal(result.proposed_receipt.receipt_producer_step_ref, MINIMUM_STEP_REF);
+  assert.equal(result.proposed_receipt.producer_role, MINIMUM_PRODUCER_ROLE);
+  assert.equal(result.proposed_receipt.independent_oracle_ref, MINIMUM_ORACLE_REF);
+  assert.equal(result.proposed_receipt.oracle_version, "1.0.0");
+  assert.equal(result.proposed_receipt.subject_environment, "candidate");
+  assert.equal(result.proposed_receipt.evidence_scope, "candidate-and-test");
+  assert.equal(result.proposed_receipt.status, "pass");
+  assert.equal(result.proposed_receipt.observed_at, AS_OF);
+  assert.equal(result.proposed_receipt.ttl_expires_at, iso(Date.parse(AS_OF) + 7 * DAY));
+  assert.equal(result.proposed_receipt.negative_admission_result, "all_required_denials_observed");
+
+  assert.equal(result.receipt_state, "proposed_not_issued");
+  assert.equal(result.issued, false);
+  assert.equal(result.persisted, false);
+  assert.equal(result.durable_receipt_issuance_required, true);
+  assert.equal(result.proposed_receipt_reference_digest, digest(result.proposed_receipt));
+  assert.ok(Object.isFrozen(result) && Object.isFrozen(result.proposed_receipt));
+});
+
+test("source construction cannot start the clock, accept the benchmark or claim any effect", () => {
+  const result = run(snapshot());
+  assert.equal(result.clock_started, false);
+  assert.equal(result.journey_one_clock_origin_available, false);
+  assert.equal(result.journey_one_clock_origin_gate_id, MINIMUM_GATE_ID);
+  assert.equal(result.benchmark_accepted_here, false);
+  assert.equal(result.product_activation_authorized, false);
+  assert.equal(result.authority_granted, false);
+  assert.deepEqual({ ...result.effects }, {
+    creates_effect: false, database_writes: 0, network_calls: 0, provider_actions: 0,
+    notifications: 0, schedules: 0, deployments: 0, activations: 0, acceptances: 0,
+  });
+  // Two evaluations of the same projection are byte-identical: nothing accrued.
+  assert.equal(digest(run(snapshot())), digest(result));
+});
+
+test("the join is unreachable without an installed authenticating dependency", () => {
+  refuseCall(() => createFoundationAssuranceMinimumGate(), "authenticated_verifier_required");
+  refuseCall(() => createFoundationAssuranceMinimumGate({}), "authenticated_verifier_required");
+  refuseCall(() => createFoundationAssuranceMinimumGate({ authenticateEvidence: true }), "authenticated_verifier_required");
+  // A projection is not reachable by asserting one in the request.
+  const gate = createFoundationAssuranceMinimumGate({ authenticateEvidence: () => { throw new Error("refused"); } });
+  assert.throws(() => gate.evaluate({ snapshot: snapshot() }), /refused/);
+});
+
+test("authentication must bind to the exact envelope bytes supplied", () => {
+  const gate = createFoundationAssuranceMinimumGate({
+    authenticateEvidence: () => ({ envelope_digest: D(97), snapshot: snapshot() }),
+  });
+  refuseCall(() => gate.evaluate({ synthetic_evidence_ref: "a00-test-unbound" }), "verification_binding_mismatch");
+  const open = createFoundationAssuranceMinimumGate({
+    authenticateEvidence: envelope => ({ envelope_digest: digest(envelope), snapshot: snapshot(), trusted: true }),
+  });
+  refuseCall(() => open.evaluate({ synthetic_evidence_ref: "a00-test-open" }), "closed_shape");
+});
+
+// --- missing, extra, duplicate and unrequired members -----------------------
+
+test("a missing member denies, whichever member it is", () => {
+  for (const spec of MINIMUM_REQUIRED_MEMBERS) {
+    const s = snapshot();
+    s.members = s.members.filter(m => m.step_ref !== spec.step_ref);
+    assert.throws(() => run(s), e => e.code === "missing_required_member" &&
+      e.detail.missing.includes(spec.step_ref), spec.step_ref);
+  }
+});
+
+test("an unrequired producer step is a claim about this gate, not spare evidence", () => {
+  const s = snapshot();
+  s.members.push({
+    step_ref: "step:journey-one-contract-binding-receipt",
+    receipt: copy(at(s, PHI).receipt),
+  });
+  refuse(s, "unknown_member_step");
+});
+
+test("a duplicated member, receipt or gate denies the join", () => {
+  const duplicateStep = snapshot();
+  duplicateStep.members.push(copy(at(duplicateStep, PHI)));
+  refuse(duplicateStep, "duplicate_member_step");
+  const twoGates = snapshot();
+  at(twoGates, SECRETS).receipt.gate_id = "global-phi-boundary-accepted";
+  refuse(twoGates, "member_gate_mismatch");
+  const empty = snapshot();
+  empty.members = [];
+  refuse(empty, "missing_required_member");
+});
+
+// --- currentness, binding, scope and provenance -----------------------------
+
+test("a stale, future or over-long member receipt denies", () => {
+  const stale = snapshot();
+  at(stale, PHI).receipt.ttl_expires_at = "2026-02-03T06:00:00.000Z";
+  refuse(stale, "member_receipt_not_current");
+  const future = snapshot();
+  at(future, PHI).receipt.observed_at = "2026-02-05T00:00:00.000Z";
+  refuse(future, "member_receipt_observed_after_reference");
+  const overlong = snapshot();
+  at(overlong, PHI).receipt.ttl_expires_at = iso(Date.parse(OBSERVED_AT) + 400 * DAY);
+  refuse(overlong, "member_receipt_ttl_policy_exceeded");
+  const inverted = snapshot();
+  at(inverted, PHI).receipt.ttl_expires_at = OBSERVED_AT;
+  refuse(inverted, "member_receipt_window_invalid");
+  const unreadable = snapshot();
+  at(unreadable, PHI).receipt.observed_at = "2026-02-31T00:00:00.000Z";
+  refuse(unreadable, "invalid_timestamp");
+});
+
+test("every common digest must match the bound subject, candidate, policy and environment", () => {
+  for (const field of ["subject_digest", "candidate_digest", "policy_digest", "environment_manifest_digest"]) {
+    const s = snapshot();
+    at(s, PHI).receipt[field] = D(77);
+    assert.throws(() => run(s), e => e.code === "member_binding_mismatch" && e.detail.field === field, field);
+  }
+  const malformed = snapshot();
+  at(malformed, PHI).receipt.policy_digest = "sha256:not-a-digest";
+  refuse(malformed, "invalid_digest");
+});
+
+test("a valid enum from another scope or environment is substitution, not evidence", () => {
+  const scope = snapshot();
+  at(scope, PHI).receipt.evidence_scope = "production";
+  refuse(scope, "member_scope_mismatch");
+  const environment = snapshot();
+  at(environment, PHI).receipt.subject_environment = "staging";
+  refuse(environment, "member_scope_mismatch");
+  const unregistered = snapshot();
+  at(unregistered, PHI).receipt.evidence_scope = "candidate-and-vibes";
+  refuse(unregistered, "member_scope_unregistered");
+});
+
+test("producer role, oracle and step provenance are matched against the registry entry", () => {
+  const role = snapshot();
+  at(role, PHI).receipt.producer_role = "independent_secret_boundary_oracle";
+  refuse(role, "member_role_mismatch");
+  const invented = snapshot();
+  at(invented, PHI).receipt.producer_role = "independent_benchmark_reviewer";
+  refuse(invented, "member_role_unregistered");
+  const oracle = snapshot();
+  at(oracle, PHI).receipt.independent_oracle_ref = "oracle:gate-producer:global-secrets";
+  refuse(oracle, "member_oracle_mismatch");
+  const version = snapshot();
+  at(version, PHI).receipt.oracle_version = "1.0.1";
+  refuse(version, "member_oracle_mismatch");
+  const step = snapshot();
+  at(step, PHI).receipt.receipt_producer_step_ref = "step:global-secrets-boundary-independent-receipt";
+  refuse(step, "member_step_mismatch");
+});
+
+test("a non-passing, unknown or quarantined member denies, and so does a missing denial set", () => {
+  for (const status of ["fail", "unknown", "stale", "quarantined"]) {
+    const s = snapshot();
+    at(s, PHI).receipt.status = status;
+    assert.throws(() => run(s), e => e.code === "member_not_passing", status);
+  }
+  const invented = snapshot();
+  at(invented, PHI).receipt.status = "passed-with-notes";
+  refuse(invented, "member_status_unregistered");
+  const noDenials = snapshot();
+  at(noDenials, PHI).receipt.negative_admission_result = "not_evaluated";
+  refuse(noDenials, "member_negative_admission_missing");
+});
+
+test("a contract-presence receipt with no comparator or evidence pointer denies", () => {
+  const short = snapshot();
+  at(short, PHI).receipt.comparator = "eq";
+  refuse(short, "invalid_text");
+  const unsafe = snapshot();
+  at(unsafe, PHI).receipt.evidence_ref = "https://example.invalid/evidence";
+  refuse(unsafe, "invalid_evidence_ref");
+});
+
+// --- independence -----------------------------------------------------------
+
+test("a member that reviews its own maker is self-attested", () => {
+  for (const seat of ["producer_identity", "evaluator_identity"]) {
+    const s = snapshot();
+    at(s, PHI).receipt[seat] = copy(at(s, PHI).receipt.subject_maker_identity);
+    assert.throws(() => run(s), e => e.code === "member_self_attestation" && e.detail.field === seat, seat);
+  }
+  // Sharing only the session is still one seat.
+  const session = snapshot();
+  at(session, PHI).receipt.producer_identity.session_ref = at(session, PHI).receipt.subject_maker_identity.session_ref;
+  refuse(session, "member_self_attestation");
+});
+
+test("two consumed gates may not be produced by one seat wearing two roles", () => {
+  const s = snapshot();
+  at(s, SECRETS).receipt.producer_identity = copy(at(s, PHI).receipt.producer_identity);
+  refuse(s, "member_producers_not_distinct");
+});
+
+test("the minimum oracle may not have produced or evaluated the evidence it consumes", () => {
+  const producer = snapshot();
+  producer.minimum_receipt_context.producer_identity = copy(at(producer, PHI).receipt.producer_identity);
+  refuse(producer, "minimum_producer_not_independent");
+  const evaluator = snapshot();
+  evaluator.minimum_receipt_context.evaluator_identity = copy(at(evaluator, PHI).receipt.evaluator_identity);
+  refuse(evaluator, "minimum_producer_not_independent");
+  const maker = snapshot();
+  maker.minimum_receipt_context.producer_identity = copy(maker.minimum_receipt_context.subject_maker_identity);
+  refuse(maker, "minimum_self_attestation");
+});
+
+test("the human benchmark authority is distinct from the builder, the reviewers and the oracle", () => {
+  const acceptor = I("joe");
+  for (const install of [
+    s => { s.minimum_receipt_context.subject_maker_identity = copy(acceptor); },
+    s => { s.minimum_receipt_context.producer_identity = copy(acceptor); },
+    s => { s.minimum_receipt_context.evaluator_identity = copy(acceptor); },
+    s => { at(s, PHI).receipt.producer_identity = copy(acceptor); },
+    s => { at(s, PHI).receipt.evaluator_identity = copy(acceptor); },
+  ]) {
+    const s = snapshot();
+    install(s);
+    assert.throws(() => run(s), e => e.code === "benchmark_authority_not_independent");
+  }
+  // Either verified partner may hold the benchmark authority: independence is
+  // per seat, not a prohibition on a partner appearing in the record.
+  const other = snapshot();
+  at(other, BENCHMARK_STEP_REF).receipt = manifest(payload(), { acceptor: I("dell") });
+  assert.equal(run(other).admissible, true);
+});
+
+// --- the benchmark member inside the join -----------------------------------
+
+test("the join binds the one exact accepted manifest digest", () => {
+  const replacement = payload();
+  replacement.routes = ["/deals", "/prospecting"];
+  const s = snapshot();
+  at(s, BENCHMARK_STEP_REF).receipt = manifest(replacement);
+  refuse(s, "benchmark_acceptance_mismatched");
+  const forged = snapshot();
+  at(forged, BENCHMARK_STEP_REF).receipt.capacity_profiles = ["baseline"];
+  refuse(forged, "benchmark_manifest_digest_mismatch");
+});
+
+test("the benchmark subject binding must match the join's own", () => {
+  const other = payload();
+  other.candidate_digest = D(66);
+  const s = snapshot();
+  s.binding.benchmark_manifest_digest = benchmarkPayloadDigest(other);
+  at(s, BENCHMARK_STEP_REF).receipt = manifest(other);
+  assert.throws(() => run(s), e => e.code === "benchmark_binding_mismatch" && e.detail.field === "candidate_digest");
+});
+
+test("benchmark acceptance before or at Gate Zero is refused, and after it is admitted", () => {
+  const before = snapshot();
+  at(before, BENCHMARK_STEP_REF).receipt = manifest(payload(), { acceptedAt: "2026-01-31T00:00:00.000Z" });
+  refuse(before, "benchmark_accepted_before_gate_zero");
+  const exactly = snapshot();
+  at(exactly, BENCHMARK_STEP_REF).receipt = manifest(payload(), { acceptedAt: GATE_ZERO_AT });
+  refuse(exactly, "benchmark_accepted_before_gate_zero");
+  const after = snapshot();
+  at(after, BENCHMARK_STEP_REF).receipt = manifest(payload(), { acceptedAt: "2026-02-01T00:00:00.001Z" });
+  assert.equal(run(after).admissible, true);
+  const ahead = snapshot();
+  at(ahead, BENCHMARK_STEP_REF).receipt = manifest(payload(), { acceptedAt: "2026-02-05T00:00:00.000Z" });
+  refuse(ahead, "benchmark_accepted_after_reference");
+});
+
+test("every member must be observed after the Gate Zero outcome", () => {
+  const early = snapshot();
+  at(early, PHI).receipt.observed_at = "2026-01-20T00:00:00.000Z";
+  at(early, PHI).receipt.ttl_expires_at = iso(Date.parse("2026-01-20T00:00:00.000Z") + 20 * DAY);
+  refuse(early, "member_observed_before_gate_zero");
+});
+
+test("Gate Zero itself must be present, correctly named and not in the future", () => {
+  const future = snapshot();
+  future.gate_zero.observed_at = "2026-02-05T00:00:00.000Z";
+  refuse(future, "gate_zero_observed_after_reference");
+  const wrongStep = snapshot();
+  wrongStep.gate_zero.step_ref = MINIMUM_STEP_REF;
+  refuse(wrongStep, "wrong_gate_zero_step");
+  const unbound = snapshot();
+  unbound.gate_zero.outcome_digest = "gate-zero-passed";
+  refuse(unbound, "invalid_digest");
+  const asserted = snapshot();
+  delete asserted.gate_zero.outcome_digest;
+  asserted.gate_zero.passed = true;
+  refuse(asserted, "closed_shape");
+});
+
+// --- projection and canonicalization discipline -----------------------------
+
+test("the projection is closed and tenant-bound", () => {
+  const wrongTenant = snapshot();
+  wrongTenant.tenant = "carr-external";
+  refuse(wrongTenant, "wrong_tenant");
+  const wrongSchema = snapshot();
+  wrongSchema.schema_version = "doctorcre-v5-journey-one-clock-projection.v1";
+  refuse(wrongSchema, "wrong_projection");
+  const open = snapshot();
+  open.approved_by_reviewer = true;
+  refuse(open, "closed_shape");
+  const openBinding = snapshot();
+  openBinding.binding.skip_ttl = true;
+  refuse(openBinding, "closed_shape");
+  const badTtl = snapshot();
+  badTtl.binding.minimum_receipt_ttl_ms = 0;
+  refuse(badTtl, "invalid_integer");
+});
+
+// These are asserted against the pure validators rather than through the
+// authenticated gate on purpose: JSON.stringify is what a projection survives,
+// and it silently repairs a hole, a non-finite number and a non-enumerable
+// property. The shapes have to be refused where they can still exist.
+test("values that would canonicalize ambiguously are refused before they are hashed", () => {
+  const surrogate = payload();
+  surrogate.outlier_rule = "discard a lone \uD800 surrogate";
+  refuseCall(() => validateBenchmarkPayload(surrogate), "invalid_unicode");
+  const nonFinite = payload();
+  nonFinite.samples_per_cell = Number.POSITIVE_INFINITY;
+  refuseCall(() => validateBenchmarkPayload(nonFinite), "non_finite_number");
+  const sparse = payload();
+  sparse.routes.length += 1;
+  refuseCall(() => validateBenchmarkPayload(sparse), "sparse_array");
+  const hidden = payload();
+  Object.defineProperty(hidden, "shadow", { value: "unhashed", enumerable: false });
+  refuseCall(() => validateBenchmarkPayload(hidden), "hidden_key");
+  const accessor = payload();
+  Object.defineProperty(accessor, "routes", { get: () => ["/deals"], enumerable: true, configurable: true });
+  refuseCall(() => validateBenchmarkPayload(accessor), "hidden_key");
+  // A lone surrogate still refuses inside an authenticated projection, because
+  // that one does survive the round trip.
+  const s = snapshot();
+  at(s, PHI).receipt.comparator = "lone \uD800 surrogate comparator";
+  refuse(s, "invalid_unicode");
+});
+
+test("identities are closed three-field records with a well-formed session reference", () => {
+  const open = snapshot();
+  at(open, PHI).receipt.producer_identity.email = "someone@example.invalid";
+  refuse(open, "closed_shape");
+  const bareSession = snapshot();
+  at(bareSession, PHI).receipt.producer_identity.session_ref = "producer-1";
+  refuse(bareSession, "invalid_identity");
+  const shortSession = snapshot();
+  at(shortSession, PHI).receipt.producer_identity.session_ref = "session:x";
+  refuse(shortSession, "invalid_identity");
+  const empty = snapshot();
+  at(empty, PHI).receipt.producer_identity.actor_id = "";
+  refuse(empty, "invalid_identity");
+});
+
+// --- negative admission, proved rather than asserted ------------------------
+
+test("the negative admission result is earned by re-deriving every required denial", () => {
+  const proof = foundationAssuranceMinimumNegativeAdmission();
+  assert.equal(proof.result, "all_required_denials_observed");
+  assert.ok(proof.case_count >= 30, `expected a substantive denial set, saw ${proof.case_count}`);
+  for (const code of [
+    "missing_required_member", "unknown_member_step", "duplicate_member_step",
+    "member_receipt_not_current", "member_binding_mismatch", "member_scope_mismatch",
+    "member_self_attestation", "member_producers_not_distinct", "benchmark_authority_not_independent",
+    "benchmark_manifest_digest_mismatch", "benchmark_acceptance_mismatched",
+    "benchmark_accepted_before_gate_zero", "benchmark_weight_total_mismatch",
+    "benchmark_constant_mismatch", "closed_shape",
+  ]) {
+    assert.ok(proof.observed_codes.includes(code), code);
+  }
+  assert.equal(run(snapshot()).negative_admission.result, "all_required_denials_observed");
+  assert.equal(foundationAssuranceMinimumNegativeAdmission(), proof, "memoized, not re-derived per call");
+});
+
+// --- reuse of the M01 deadline contract -------------------------------------
+
+test("the manifest deadline contract and the M01 kernel contract are one contract", () => {
+  for (const field of Object.keys(BENCHMARK_DEADLINE_CONTRACT)) {
+    if (field === "maximum_external_blocker_pause_days") continue;
+    assert.deepEqual(BENCHMARK_DEADLINE_CONTRACT[field], JOURNEY_ONE_DEADLINE_CONTRACT[field], field);
+  }
+  assert.equal(BENCHMARK_DEADLINE_CONTRACT.maximum_external_blocker_pause_days * 24,
+    JOURNEY_ONE_DEADLINE_CONTRACT.maximum_external_blocker_pause_hours);
+  assert.equal(BENCHMARK_DEADLINE_CONTRACT.clock_origin_gate_id, MINIMUM_GATE_ID);
+  assert.equal(BENCHMARK_DEADLINE_CONTRACT.clock_terminus_gate_id, "journey-one-kernel-production-accepted");
+});
+
+test("the M01 receipt view is the only place the two receipt shapes are reconciled", () => {
+  const proposed = run(snapshot()).proposed_receipt;
+  // r7's consumer-gate-receipt.v1 is closed and declares no schema_version.
+  assert.ok(!Object.hasOwn(proposed, "schema_version"));
+  const view = journeyOneClockMinimumReceiptView(proposed);
+  assert.equal(view.schema_version, "consumer-gate-receipt.v1");
+  assert.equal(Object.keys(view).length, CONSUMER_GATE_RECEIPT_FIELDS.length + 1);
+  // And the adapted shape is not admissible evidence here, which is the whole
+  // point of stating the divergence instead of loosening either schema.
+  const s = snapshot();
+  at(s, PHI).receipt = { ...view, gate_id: "global-phi-boundary-accepted",
+    receipt_producer_step_ref: PHI };
+  refuse(s, "closed_shape");
+});
