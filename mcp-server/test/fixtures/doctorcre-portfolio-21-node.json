@@ -1,0 +1,296 @@
+{
+  "schema_version": "doctorcre-v5-portfolio-fixture.v1",
+  "fixture_status": "TEST_DATA_ONLY__NEVER_DOCTRINE__CANONICAL_SOURCE_IS_THE_RECORD_LAYER",
+  "canonical_source": {
+    "catalog_section": "5882b0cd-16f4-4896-b567-eb0fca6554f7@1",
+    "node_identity_pointer": "doctorcre-v5 r7 constitution #/master_plan/dependency_dag",
+    "node_identity_constitution_file_sha256": "sha256:403d8c7ae90c12415d2df26b13b0425003273e82f1d2f9d1cd7ecb72c03dcd64",
+    "node_ordinal_pointer": "out/v5-build-clearance/r08/v5-full-implementation-slice-catalog.reviewed.v4.json#/portfolio_milestones_21",
+    "node_ordinal_artifact_sha256": "sha256:79e467125a0b5300e51f1f779b8eed2406f17cf1b085a18df96b0ad6a399fa6f",
+    "child_program_pointer": "out/v5-build-clearance/r08/wr62-portfolio-hierarchy-bootstrap-preparation.v1.json#/accepted_design_identity/child_programs",
+    "generated_by": "mcp-server/test/fixtures generation from the two pointers above; no node was authored by hand"
+  },
+  "revision": {
+    "schema_version": "doctorcre-v5-portfolio-revision.v1",
+    "revision_version": 1,
+    "portfolio_ref": "WR-000062",
+    "source_digests": {
+      "design": "sha256:9bbdc2f5124fc3939c883e572f5c9077b347804b030f313e60756c28dfab07a6",
+      "constitution": "sha256:925f501cc155fd48f320ea7a7cf66cc5d4a90738838a93a3506010199c6ad505",
+      "requirements": "sha256:51e0a89442fda95e537738e8321f9301af8ef48cf79d5ddb979c63421e8990ec",
+      "integration": "sha256:efd15770da5db52b3d21c4e829db03fafa70b354e01b3c46ff5db15f57dfcdff"
+    },
+    "child_program_refs": [
+      "foundation-and-control-plane",
+      "assurance-fabric",
+      "product-journeys",
+      "rollout-and-retirement"
+    ],
+    "nodes": [
+      {
+        "node_ref": "step:portfolio-constitution-accepted",
+        "node_kind": "milestone",
+        "ordinal": 1,
+        "parent_ref": "WR-000062"
+      },
+      {
+        "node_ref": "step:wr48-frontier-flowing-production-outcome",
+        "node_kind": "milestone",
+        "ordinal": 2,
+        "parent_ref": "WR-000062"
+      },
+      {
+        "node_ref": "step:wr46-dissolution-outcome",
+        "node_kind": "milestone",
+        "ordinal": 3,
+        "parent_ref": "WR-000062"
+      },
+      {
+        "node_ref": "step:wr40-repository-outcome",
+        "node_kind": "milestone",
+        "ordinal": 4,
+        "parent_ref": "WR-000062"
+      },
+      {
+        "node_ref": "step:wr54-backup-recovery-outcome",
+        "node_kind": "milestone",
+        "ordinal": 5,
+        "parent_ref": "WR-000062"
+      },
+      {
+        "node_ref": "step:scheduler-active-receipt",
+        "node_kind": "milestone",
+        "ordinal": 6,
+        "parent_ref": "WR-000062"
+      },
+      {
+        "node_ref": "step:gate-zero-read-only-outcome",
+        "node_kind": "milestone",
+        "ordinal": 7,
+        "parent_ref": "WR-000062"
+      },
+      {
+        "node_ref": "step:foundation-assurance-minimum-receipt",
+        "node_kind": "milestone",
+        "ordinal": 8,
+        "parent_ref": "WR-000062"
+      },
+      {
+        "node_ref": "step:j1-kernel-production-outcome",
+        "node_kind": "milestone",
+        "ordinal": 9,
+        "parent_ref": "WR-000062"
+      },
+      {
+        "node_ref": "step:j1-core-production-outcome",
+        "node_kind": "milestone",
+        "ordinal": 10,
+        "parent_ref": "WR-000062"
+      },
+      {
+        "node_ref": "step:j1-pilot-and-dell-beta-outcome",
+        "node_kind": "milestone",
+        "ordinal": 11,
+        "parent_ref": "WR-000062"
+      },
+      {
+        "node_ref": "step:representative-workflow-production-outcome",
+        "node_kind": "milestone",
+        "ordinal": 12,
+        "parent_ref": "WR-000062"
+      },
+      {
+        "node_ref": "step:journey-two-production-outcome",
+        "node_kind": "milestone",
+        "ordinal": 13,
+        "parent_ref": "WR-000062"
+      },
+      {
+        "node_ref": "step:journey-three-production-outcome",
+        "node_kind": "milestone",
+        "ordinal": 14,
+        "parent_ref": "WR-000062"
+      },
+      {
+        "node_ref": "step:foundation-control-plane-child-outcome",
+        "node_kind": "milestone",
+        "ordinal": 15,
+        "parent_ref": "WR-000062"
+      },
+      {
+        "node_ref": "step:assurance-fabric-child-outcome",
+        "node_kind": "milestone",
+        "ordinal": 16,
+        "parent_ref": "WR-000062"
+      },
+      {
+        "node_ref": "step:successor-controls-outcome",
+        "node_kind": "milestone",
+        "ordinal": 17,
+        "parent_ref": "WR-000062"
+      },
+      {
+        "node_ref": "step:rollout-readiness-child-outcome",
+        "node_kind": "milestone",
+        "ordinal": 18,
+        "parent_ref": "WR-000062"
+      },
+      {
+        "node_ref": "step:final-pre-retirement-integration-adjudication",
+        "node_kind": "milestone",
+        "ordinal": 19,
+        "parent_ref": "WR-000062"
+      },
+      {
+        "node_ref": "step:legacy-retirement-receipt",
+        "node_kind": "milestone",
+        "ordinal": 20,
+        "parent_ref": "WR-000062"
+      },
+      {
+        "node_ref": "step:final-portfolio-outcome-reconciliation",
+        "node_kind": "milestone",
+        "ordinal": 21,
+        "parent_ref": "WR-000062"
+      }
+    ],
+    "edges": [
+      {
+        "from_node_ref": "step:assurance-fabric-child-outcome",
+        "to_node_ref": "step:rollout-readiness-child-outcome"
+      },
+      {
+        "from_node_ref": "step:assurance-fabric-child-outcome",
+        "to_node_ref": "step:successor-controls-outcome"
+      },
+      {
+        "from_node_ref": "step:final-pre-retirement-integration-adjudication",
+        "to_node_ref": "step:legacy-retirement-receipt"
+      },
+      {
+        "from_node_ref": "step:foundation-assurance-minimum-receipt",
+        "to_node_ref": "step:foundation-control-plane-child-outcome"
+      },
+      {
+        "from_node_ref": "step:foundation-assurance-minimum-receipt",
+        "to_node_ref": "step:j1-kernel-production-outcome"
+      },
+      {
+        "from_node_ref": "step:foundation-control-plane-child-outcome",
+        "to_node_ref": "step:assurance-fabric-child-outcome"
+      },
+      {
+        "from_node_ref": "step:foundation-control-plane-child-outcome",
+        "to_node_ref": "step:rollout-readiness-child-outcome"
+      },
+      {
+        "from_node_ref": "step:foundation-control-plane-child-outcome",
+        "to_node_ref": "step:successor-controls-outcome"
+      },
+      {
+        "from_node_ref": "step:gate-zero-read-only-outcome",
+        "to_node_ref": "step:foundation-assurance-minimum-receipt"
+      },
+      {
+        "from_node_ref": "step:j1-core-production-outcome",
+        "to_node_ref": "step:j1-pilot-and-dell-beta-outcome"
+      },
+      {
+        "from_node_ref": "step:j1-core-production-outcome",
+        "to_node_ref": "step:journey-two-production-outcome"
+      },
+      {
+        "from_node_ref": "step:j1-kernel-production-outcome",
+        "to_node_ref": "step:j1-core-production-outcome"
+      },
+      {
+        "from_node_ref": "step:j1-pilot-and-dell-beta-outcome",
+        "to_node_ref": "step:rollout-readiness-child-outcome"
+      },
+      {
+        "from_node_ref": "step:journey-three-production-outcome",
+        "to_node_ref": "step:assurance-fabric-child-outcome"
+      },
+      {
+        "from_node_ref": "step:journey-three-production-outcome",
+        "to_node_ref": "step:representative-workflow-production-outcome"
+      },
+      {
+        "from_node_ref": "step:journey-three-production-outcome",
+        "to_node_ref": "step:rollout-readiness-child-outcome"
+      },
+      {
+        "from_node_ref": "step:journey-two-production-outcome",
+        "to_node_ref": "step:assurance-fabric-child-outcome"
+      },
+      {
+        "from_node_ref": "step:journey-two-production-outcome",
+        "to_node_ref": "step:journey-three-production-outcome"
+      },
+      {
+        "from_node_ref": "step:journey-two-production-outcome",
+        "to_node_ref": "step:rollout-readiness-child-outcome"
+      },
+      {
+        "from_node_ref": "step:legacy-retirement-receipt",
+        "to_node_ref": "step:final-portfolio-outcome-reconciliation"
+      },
+      {
+        "from_node_ref": "step:portfolio-constitution-accepted",
+        "to_node_ref": "step:scheduler-active-receipt"
+      },
+      {
+        "from_node_ref": "step:portfolio-constitution-accepted",
+        "to_node_ref": "step:wr40-repository-outcome"
+      },
+      {
+        "from_node_ref": "step:portfolio-constitution-accepted",
+        "to_node_ref": "step:wr48-frontier-flowing-production-outcome"
+      },
+      {
+        "from_node_ref": "step:portfolio-constitution-accepted",
+        "to_node_ref": "step:wr54-backup-recovery-outcome"
+      },
+      {
+        "from_node_ref": "step:representative-workflow-production-outcome",
+        "to_node_ref": "step:assurance-fabric-child-outcome"
+      },
+      {
+        "from_node_ref": "step:representative-workflow-production-outcome",
+        "to_node_ref": "step:foundation-control-plane-child-outcome"
+      },
+      {
+        "from_node_ref": "step:representative-workflow-production-outcome",
+        "to_node_ref": "step:rollout-readiness-child-outcome"
+      },
+      {
+        "from_node_ref": "step:rollout-readiness-child-outcome",
+        "to_node_ref": "step:final-pre-retirement-integration-adjudication"
+      },
+      {
+        "from_node_ref": "step:scheduler-active-receipt",
+        "to_node_ref": "step:gate-zero-read-only-outcome"
+      },
+      {
+        "from_node_ref": "step:successor-controls-outcome",
+        "to_node_ref": "step:rollout-readiness-child-outcome"
+      },
+      {
+        "from_node_ref": "step:wr40-repository-outcome",
+        "to_node_ref": "step:gate-zero-read-only-outcome"
+      },
+      {
+        "from_node_ref": "step:wr46-dissolution-outcome",
+        "to_node_ref": "step:gate-zero-read-only-outcome"
+      },
+      {
+        "from_node_ref": "step:wr48-frontier-flowing-production-outcome",
+        "to_node_ref": "step:wr46-dissolution-outcome"
+      },
+      {
+        "from_node_ref": "step:wr54-backup-recovery-outcome",
+        "to_node_ref": "step:gate-zero-read-only-outcome"
+      }
+    ]
+  }
+}
