@@ -85,9 +85,9 @@ claude = open(os.path.join(repo, "CLAUDE.md"), encoding="utf-8").read()
 if "Production stops at 0454" in claude:
     failures.append("Claude boot instructions retain a stale migration frontier")
 for required in (
-        "read the current canonical migration and applicable release state",
-        "Historical migration and Work Request references are provenance",
-        "does not itself authorize a production migration",
+        "current canonical migration/release state",
+        "Dated incidents/WRs are history",
+        "grants no live authority",
 ):
     if required not in " ".join(claude.split()):
         failures.append(f"Claude current-state boot guidance is missing: {required}")
