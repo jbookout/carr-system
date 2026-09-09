@@ -10,7 +10,7 @@ import tempfile
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOKS = os.path.join(REPO, "hooks")
-failures = []
+failures: list[str] = []
 
 
 def check(label, condition, detail=""):
@@ -33,8 +33,21 @@ def git(*args):
 
 def main():
     meter = load("r06_hook_meter", os.path.join(HOOKS, "hook_meter.py"))
+    runner = load("r06_hook_meter_run", os.path.join(HOOKS, "hook-meter-run.py"))
     common = git("rev-parse", "--path-format=absolute", "--git-common-dir")
     canonical = os.path.dirname(common)
+
+    check("duplicate top-level cwd is ambiguous",
+          runner._top_level_cwd(b'{"cwd":"/first","cwd":"/second"}') is None)
+    malformed = [
+        b'{"cwd":"/first"} trailing',
+        b'{"cwd":"/first"}{"tool_name":"Bash"}',
+        b'{"tool_name":"Bash"}{"cwd":"/second"}',
+    ]
+    check("content after the root object is malformed",
+          all(runner._top_level_cwd(payload) is None for payload in malformed))
+    check("trailing whitespace after the root object remains valid",
+          runner._top_level_cwd(b'{"cwd":"/first"} \t\r\n') == "/first")
 
     prior = os.environ.pop(meter.INVOCATION_REPO_ENV, None)
     try:

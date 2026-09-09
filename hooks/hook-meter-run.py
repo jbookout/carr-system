@@ -207,11 +207,13 @@ def _top_level_cwd(raw):
     unusual escapes fall back to no context, which makes hook_meter use canonical.
     """
     try:
-        depth = 0
+        stack = []
         in_string = False
         escaped = False
         start = None
         tokens = []
+        root_started = False
+        root_closed = False
         for index, byte in enumerate(raw):
             if in_string:
                 if escaped:
@@ -221,18 +223,37 @@ def _top_level_cwd(raw):
                 elif byte == 0x22:
                     token = raw[start:index]
                     in_string = False
-                    if depth == 1:
+                    if len(stack) == 1:
                         tokens.append((index, token))
+                continue
+            if not root_started:
+                if byte in b" \t\r\n":
+                    continue
+                if byte != 0x7B:
+                    return None
+                root_started = True
+                stack.append(0x7D)
                 continue
             if byte == 0x22:
                 in_string = True
                 start = index + 1
-            elif byte in (0x7B, 0x5B):
-                depth += 1
+            elif byte == 0x7B:
+                stack.append(0x7D)
+            elif byte == 0x5B:
+                stack.append(0x5D)
             elif byte in (0x7D, 0x5D):
-                depth -= 1
-            if depth < 0:
-                return None
+                if not stack or stack[-1] != byte:
+                    return None
+                stack.pop()
+                if not stack:
+                    root_closed = True
+                    if raw[index + 1:].strip():
+                        return None
+                    break
+        if in_string or not root_started or not root_closed:
+            return None
+        cwd = None
+        cwd_count = 0
         for end, token in tokens:
             if token != b"cwd":
                 continue
@@ -241,6 +262,9 @@ def _top_level_cwd(raw):
                 pos += 1
             if pos >= len(raw) or raw[pos] != 0x3A:
                 continue
+            cwd_count += 1
+            if cwd_count > 1:
+                return None
             pos += 1
             while pos < len(raw) and raw[pos] in b" \t\r\n":
                 pos += 1
@@ -252,9 +276,12 @@ def _top_level_cwd(raw):
                 if raw[pos] == 0x5C:
                     return None
                 if raw[pos] == 0x22:
-                    return raw[value_start:pos].decode("utf-8", "strict")
+                    cwd = raw[value_start:pos].decode("utf-8", "strict")
+                    break
                 pos += 1
-            return None
+            else:
+                return None
+        return cwd
     except Exception:
         pass
     return None
