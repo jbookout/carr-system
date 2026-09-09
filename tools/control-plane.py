@@ -7,6 +7,8 @@ Commands:
   schedule [--at ISO]      idempotently enqueue workflows due at an exact minute
   run-once [--worker NAME] claim and execute one ledger job
   metrics                  print aggregate job state/cost JSON
+  census                   read-only workflow truth census (one closed state and
+                           one disposition per workflow; enqueues nothing)
 
 Routine ledger commands require CARR_DB_JOBS_URL and verify their database
 identity as carr_jobs (or an explicitly provisioned jobs identity).  ``sync``
@@ -51,6 +53,7 @@ from lib.control_plane_runtime_collectors import RuntimeCanonicalEvidenceCollect
 from lib.control_plane_scheduler_cutover import (CutoverRefusal, scheduler_launchd_rows,
                                                   scheduler_provider_rows,
                                                   scheduler_surface_rows)  # noqa: E402
+from lib.control_plane_workflow_truth import UNREADABLE, workflow_truth  # noqa: E402
 from lib.secret_redaction import redacted_tail, sensitive_env_values  # noqa: E402
 
 MANIFEST_PATH = REPO / "ops" / "config" / "control-plane-workflows.v1.json"
@@ -1510,6 +1513,146 @@ def metrics() -> dict[str, Any]:
             "budget_refusals":budget_refusals}
 
 
+def workflow_census() -> dict[str, Any]:
+    """Read-only clean-start workflow census (V5-F09).
+
+    Every input is an EXISTING authoritative surface read through the routine
+    read-only jobs connection, and the classification itself is the pure adapter
+    in ``lib.control_plane_workflow_truth``.  This command creates no registry,
+    no queue, no job and no effect; it enqueues nothing and writes nothing.
+
+    Read grants used are exactly the ones the runtime already holds:
+    ``ops.job_definition`` and ``ops.workflow_acceptance`` (0149),
+    ``ops.legacy_schedule_observation_receipt`` (0180),
+    ``ops.legacy_schedule_disable_receipt`` (0176) and
+    ``ops.completion_projection`` (0431).  The scheduler SURFACE inventory comes
+    from the checked-in registry file that ``sync`` projects into the database --
+    the same file ``ops/control-plane-db-gate.py`` compares the table against --
+    because ``ops.legacy_schedule_surface_registry`` carries no carr_jobs grant
+    and this census must not ask for a new one.
+
+    The Completion Register is tenant-scoped through a server-derived GUC
+    (``ops.completion_runtime_tenant``).  When that tenant is not set the read
+    RAISES, and this reports completion evidence as UNREADABLE rather than as an
+    empty result -- unavailable is never rewritten as absent.
+    """
+    manifest = load_manifest()
+    registry = load_scheduler_cutover_registry()
+    with connect(read_only=True) as conn, conn.cursor() as cur:
+        inputs = workflow_census_inputs(cur, registry=registry)
+    return workflow_census_projection(inputs, manifest=manifest, registry=registry)
+
+
+def workflow_census_inputs(cur: Any, *, registry: dict[str, Any]) -> dict[str, Any]:
+    """Read every authoritative row the census projects, through one cursor.
+
+    SEPARATE FROM THE CONNECTION ON PURPOSE.  The connect wrapper above is
+    trivial; these reads are the part that can be wrong, so they are reachable
+    by ``ops/control-plane-db-gate.py`` and are exercised there against the real
+    schema rather than first meeting it in production.
+
+    SAVEPOINT, NEVER ROLLBACK.  The Completion Register read legitimately raises
+    without a server-derived tenant.  Undoing that with a transaction-wide
+    rollback would be correct for a standalone read-only connection and would
+    destroy a caller's fixtures anywhere else, so the refusal is contained in
+    its own savepoint and the register is reported UNREADABLE -- never rewritten
+    as an empty result.
+    """
+    cur.execute("""select key,version,enabled,execution_contract,legacy_schedule,
+                          legacy_disabled_at
+                     from ops.job_definition order by key,version""")
+    definitions = [
+        {"key": key, "version": int(version), "enabled": bool(enabled),
+         "execution_contract": execution_contract, "legacy_schedule": legacy_schedule,
+         "legacy_disabled_at": None if disabled_at is None else disabled_at.isoformat()}
+        for key, version, enabled, execution_contract, legacy_schedule, disabled_at
+        in cur.fetchall()]
+    cur.execute("""select workflow_key,workflow_version,mode,status
+                     from ops.workflow_acceptance
+                    order by workflow_key,workflow_version,mode,status""")
+    acceptances = [{"workflow_key": key, "workflow_version": int(version),
+                    "mode": mode, "status": status}
+                   for key, version, mode, status in cur.fetchall()]
+    cur.execute("select surface_id,receipt_ref from ops.legacy_schedule_disable_receipt")
+    disable_receipts = {surface_id: receipt_ref for surface_id, receipt_ref in cur.fetchall()}
+    # distinct on: the newest observation per surface is the only one that can be
+    # current; older receipts stay immutable and unread here.
+    cur.execute("""select distinct on (surface_id)
+                          surface_id,scheduler_state,observed_at
+                     from ops.legacy_schedule_observation_receipt
+                    order by surface_id,observed_at desc,id desc""")
+    observations = {surface_id: {"scheduler_state": state,
+                                 "observed_at": observed_at.isoformat()}
+                    for surface_id, state, observed_at in cur.fetchall()}
+    completion_error: str | None = None
+    cur.execute("savepoint workflow_census_completion")
+    try:
+        cur.execute("""select stable_key,lifecycle_state,
+                              exists(select 1 from ops.completion_current_observation o
+                                      where o.subject_id=p.subject_id
+                                        and o.observation_kind='workflow_trigger'
+                                        and o.authority_class='authoritative'
+                                        and o.expires_at>now()) as first_path
+                         from ops.completion_projection p""")
+        completion: Any = {stable_key: {"lifecycle_state": lifecycle_state,
+                                        "first_path": bool(first_path)}
+                           for stable_key, lifecycle_state, first_path in cur.fetchall()}
+    except psycopg_errors() as exc:
+        cur.execute("rollback to savepoint workflow_census_completion")
+        completion = UNREADABLE
+        completion_error = f"{type(exc).__name__}: {exc}".strip()
+    else:
+        cur.execute("release savepoint workflow_census_completion")
+
+    surfaces = []
+    for surface in registry["surfaces"]:
+        surface_id = str(surface["surface_id"])
+        surfaces.append({
+            "workflow_key": str(surface["workflow_key"]),
+            "workflow_version": int(surface["workflow_version"]),
+            "surface_id": surface_id,
+            "locator": str(surface["locator"]),
+            "scheduler_kind": str(surface["scheduler_kind"]),
+            "duplicate_group": surface.get("duplicate_group"),
+            "disable_receipt_ref": disable_receipts.get(surface_id),
+            "observation": observations.get(surface_id),
+        })
+    return {"definitions": definitions, "acceptances": acceptances, "surfaces": surfaces,
+            "completion": completion, "completion_error": completion_error}
+
+
+def workflow_census_projection(inputs: dict[str, Any], *, manifest: dict[str, Any],
+                               registry: dict[str, Any]) -> dict[str, Any]:
+    """Classify read rows through the one pure adapter both surfaces share."""
+    max_age = registry.get("observation_max_age_seconds")
+    if not isinstance(max_age, int) or max_age <= 0:
+        raise SystemExit("scheduler cutover registry has no usable observation_max_age_seconds")
+    completion = inputs["completion"]
+    census = workflow_truth(
+        declarations=manifest["workflows"],
+        definitions=inputs["definitions"],
+        acceptances=inputs["acceptances"],
+        surfaces=inputs["surfaces"],
+        completion=completion,
+        observation_max_age_seconds=max_age,
+        now=datetime.now(timezone.utc),
+    )
+    census["completion_source"] = ("ops.completion_projection" if completion is not UNREADABLE
+                                   else "unreadable")
+    if inputs["completion_error"]:
+        census["completion_error"] = inputs["completion_error"]
+    return census
+
+
+def psycopg_errors() -> tuple[type[BaseException], ...]:
+    """The psycopg error base, resolved lazily so importers need no driver."""
+    try:
+        import psycopg
+    except ImportError:  # pragma: no cover - connect() already refused
+        return (Exception,)
+    return (psycopg.Error,)
+
+
 def inspect_job(job_id: str) -> dict[str, Any]:
     """Read back state, attempts and immutable receipts for one ledger job."""
     with connect() as conn, conn.cursor() as cur:
@@ -1563,6 +1706,7 @@ def main() -> int:
     run = sub.add_parser("run-once")
     run.add_argument("--worker", default=f"local:{os.getpid()}")
     sub.add_parser("metrics")
+    sub.add_parser("census")
     inspect_parser=sub.add_parser("inspect")
     inspect_parser.add_argument("--job-id",required=True)
     tick_parser=sub.add_parser("tick")
@@ -1575,6 +1719,7 @@ def main() -> int:
     elif args.command == "schedule": result = enqueue_due(manifest,parse_instant(args.at),args.mode)
     elif args.command == "run-once": result = run_once(manifest,args.worker)
     elif args.command=="metrics": result = metrics()
+    elif args.command=="census": result = workflow_census()
     elif args.command=="inspect": result = inspect_job(args.job_id)
     else: result=tick(manifest,args.max_jobs,args.mode)
     print(json.dumps(result,sort_keys=True,default=str))
