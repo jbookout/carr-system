@@ -430,6 +430,130 @@ function dependenciesSatisfied(facts, source, plan, slice, ToolError) {
   return true;
 }
 
+/**
+ * The portfolio ancestor and predecessor check.
+ *
+ * WHETHER THIS APPLIES IS NOT THE CALLER'S TO SAY. The route is decided by
+ * trusted stored source: ops.portfolio_descendant_binding verifies every current
+ * accepted revision BEFORE it looks a node up, raises when one fails integrity,
+ * and answers governed=false only when every accepted portfolio is intact and
+ * none of them names this slice. There is deliberately no argument that turns
+ * the check off.
+ *
+ * THE CHILD'S PLAN MUST BE THE PLAN BEING ADMITTED. A child carries the accepted
+ * source binding that governs it. If that is not the exact accepted plan this
+ * admission is running under, the ancestor does not authorize this work -- it
+ * authorizes different work that happens to share a name. An earlier draft
+ * returned the binding unchanged in that case, so a child bound to one accepted
+ * plan silently governed admission under another.
+ *
+ * PREDECESSORS ARE CHECKED AGAINST THEIR OWN BINDING. Each predecessor carries
+ * the child and accepted plan that govern IT. Proof is consumed only from that
+ * exact plan: a passed receipt for a same-named slice under a different plan is
+ * not proof of this predecessor, and treating it as proof is how a cross-plan
+ * name collision becomes an admission.
+ *
+ * This slice deliberately builds NO portfolio outcome-receipt system: the
+ * catalog excludes future outcome receipts and product execution from S00. So a
+ * governed node whose predecessors have no existing, validly bound Engineering
+ * proof is not admissible until that provider exists, and it refuses before any
+ * job, session or envelope is written rather than admitting with a false flag.
+ */
+export async function portfolioAncestorBinding(c, facts, source, plan, sliceRef, ToolError) {
+  const binding = (await c.query(
+    "select ops.portfolio_descendant_binding($1::text) as binding", [sliceRef],
+  )).rows[0]?.binding;
+  if (!binding || binding.governed !== true) return null;
+
+  // The ancestor must be complete before it can govern anything. Every field
+  // below is inside the accepted digest, so a binding missing one is a binding
+  // the partner never accepted.
+  for (const field of ["portfolio_ref", "portfolio_revision_id", "accepted_digest",
+    "child_ref", "child_version", "child_digest", "authority_class", "effect_class",
+    "data_class", "budget_identity", "budget_ceiling", "model_floor", "recovery_ref",
+    "terminal_predicate"]) {
+    if (binding[field] === undefined || binding[field] === null) {
+      error(ToolError, {
+        error: "engineering_portfolio_ancestor_incomplete",
+        slice_ref: sliceRef, missing_field: field,
+      });
+    }
+  }
+
+  const admittedPlanRef = source?.plan?.plan_ref ?? null;
+  if (binding.child_accepted_plan_ref !== admittedPlanRef) {
+    error(ToolError, {
+      error: "engineering_portfolio_child_plan_mismatch",
+      slice_ref: sliceRef,
+      portfolio_ref: binding.portfolio_ref,
+      child_ref: binding.child_ref,
+      child_accepted_plan_ref: binding.child_accepted_plan_ref,
+      admitted_plan_ref: admittedPlanRef,
+      resolution: "the accepted child must be bound to the exact accepted plan this admission runs under; an unbound or differently bound child authorizes no admission",
+    });
+  }
+
+  const predecessors = binding.predecessors || [];
+  const verified = [];
+  const unmet = [];
+  for (const predecessor of predecessors) {
+    const nodeRef = predecessor?.node_ref;
+    // Proof may only come from the predecessor's OWN accepted plan. When that is
+    // a different plan than the one being admitted, this transaction's facts
+    // cannot speak to it at all, so it is unmet rather than assumed.
+    if (!nodeRef || predecessor.accepted_plan_ref !== admittedPlanRef) {
+      unmet.push({ node_ref: nodeRef ?? null, reason: "predecessor_plan_not_admitted",
+        accepted_plan_ref: predecessor?.accepted_plan_ref ?? null });
+      continue;
+    }
+    let review = null;
+    let receipt = null;
+    try {
+      receipt = latestReceiptForSlice(facts, source, plan, nodeRef, ToolError);
+      review = receipt && exactPassedReviewForReceipt(facts, source, receipt, nodeRef);
+    } catch {
+      review = null;
+    }
+    if (review) verified.push({ node_ref: nodeRef, child_ref: predecessor.child_ref,
+      accepted_plan_ref: predecessor.accepted_plan_ref, attempt_id: receipt.attempt_id });
+    else unmet.push({ node_ref: nodeRef, reason: "no_passed_independent_proof",
+      accepted_plan_ref: predecessor.accepted_plan_ref });
+  }
+  if (unmet.length) {
+    error(ToolError, {
+      error: "engineering_portfolio_predecessor_proof_missing",
+      slice_ref: sliceRef,
+      portfolio_ref: binding.portfolio_ref,
+      child_ref: binding.child_ref,
+      unmet_predecessors: unmet,
+      resolution: "an accepted-source predecessor is admissible only against an existing passed independent Engineering proof bound to that predecessor's own accepted plan; this slice builds no portfolio outcome-receipt provider",
+    });
+  }
+
+  return Object.freeze({
+    portfolio_ref: binding.portfolio_ref,
+    portfolio_revision_id: binding.portfolio_revision_id,
+    accepted_digest: binding.accepted_digest,
+    child_ref: binding.child_ref,
+    child_version: binding.child_version,
+    child_digest: binding.child_digest,
+    child_accepted_plan_ref: binding.child_accepted_plan_ref,
+    node_ref: binding.node_ref,
+    authority_class: binding.authority_class,
+    effect_class: binding.effect_class,
+    data_class: binding.data_class,
+    budget_identity: binding.budget_identity,
+    budget_ceiling: binding.budget_ceiling,
+    model_floor: binding.model_floor,
+    recovery_ref: binding.recovery_ref,
+    terminal_predicate: binding.terminal_predicate,
+    predecessors: Object.freeze(predecessors.map(item => Object.freeze({ ...item }))),
+    // Reaching here means every predecessor was consumed from a passed
+    // independent proof bound to its own accepted plan.
+    verified_predecessors: Object.freeze(verified),
+  });
+}
+
 function nowIso() { return new Date().toISOString().replace(/\.\d{3}Z$/, "Z"); }
 
 function exactFutureInstant(value) {
@@ -498,7 +622,7 @@ function isDispatchableCurrentEnvelope(row, agentSessionLeaseExpiresAt) {
     envelope.agent_session.id === `session:${row?.agent_session_id}`;
 }
 
-export function buildCodexEnvelope({ source, plan, slice, jobId, sessionId, actor, envelopeId = globalThis.crypto.randomUUID(), expiresAt = null, replacesEnvelope = null }) {
+export function buildCodexEnvelope({ source, plan, slice, jobId, sessionId, actor, envelopeId = globalThis.crypto.randomUUID(), expiresAt = null, replacesEnvelope = null, portfolioBinding = null }) {
   const issue = nowIso();
   const expiry = expiresAt || new Date(Date.parse(issue) + 30 * 60 * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
   const resources = slice.declared_resource_refs || [];
@@ -516,6 +640,10 @@ export function buildCodexEnvelope({ source, plan, slice, jobId, sessionId, acto
       compare_and_swap_required: true,
     },
     phase_binding: { phase_id: `phase:${slice.slice_ref}`, session_affinity: "fresh_native_session_required", switch_conditions: ["verified_checkpoint", "phase_boundary"], native_session_transfer: "semantic_state_only" },
+    // Present ONLY for a slice the accepted portfolio governs. An ungoverned
+    // envelope keeps its exact previous shape and therefore its exact previous
+    // digest, so ordinary attended source work is unaffected byte for byte.
+    ...(portfolioBinding ? { portfolio_binding: portfolioBinding } : {}),
     evaluation_context: {
       experiment_arm: "audited_state_routed_executors", auditor_mode: "diverse_read_only_auditor",
       evaluation_kernel_ref: "kernel:engineering-passport-v1", workflow_rubric_digest: plan.plan_digest,
@@ -700,6 +828,10 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
   let plan = sourcePlan(facts, source, ToolError);
   let slice = sliceFor(plan, sliceRef, ToolError);
   dependenciesSatisfied(facts, source, plan, slice, ToolError);
+  // Portfolio governance is decided by trusted stored source, not by the
+  // caller: a slice no accepted portfolio names comes back null and ordinary
+  // attended source work is unaffected.
+  const portfolioBinding = await portfolioAncestorBinding(c, facts, source, plan, sliceRef, ToolError);
   const locatorSourceDigest = canonicalDigest(facts.source);
   let priorEnvelopes = (facts.envelopes || [])
     .filter(row => row.slice_ref === sliceRef && row.accepted_plan_id === source.plan.record_id)
@@ -861,7 +993,7 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
   if (!job) error(ToolError, { error: "engineering_job_admission_failed" });
   const expiry = session.lease_expires_at ? new Date(session.lease_expires_at).toISOString().replace(/\.\d{3}Z$/, "Z") : sessionExpiry;
   const envelopeId = globalThis.crypto.randomUUID();
-  const envelope = buildCodexEnvelope({ source, plan, slice, jobId: job.id, sessionId: session.id, actor, envelopeId, expiresAt: expiry,
+  const envelope = buildCodexEnvelope({ source, plan, slice, jobId: job.id, sessionId: session.id, actor, envelopeId, expiresAt: expiry, portfolioBinding,
     replacesEnvelope: priorEnvelope?.envelope || null });
   const envelopeDigest = canonicalDigest(envelope);
   const inserted = await c.query(

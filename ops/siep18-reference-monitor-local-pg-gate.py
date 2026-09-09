@@ -21,18 +21,38 @@ from gate_runtime_role import grant_settable_runtime_roles, rollback_only_connec
 
 REPO = Path(__file__).resolve().parents[1]
 
-# 0495 installs v21 as the live frontier and demotes v20 to sealed history.
-# Both are pinned: an unreviewed frontier, or a v20 row the successor rewrote
+# 0496 installs v22 as the live frontier and demotes v21 to sealed history.
+# Both are pinned: an unreviewed frontier, or a v21 row the successor rewrote
 # instead of sealing, has to fail this gate closed.
-LIVE_REGISTRY_VERSION = "scac-mutation-registry.v21"
-LIVE_REGISTRY_ORDINAL = 21
-SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v20"
+#
+# The per-version function names below are DERIVED from these two ordinals
+# rather than spelled out again. Every prior advance of this gate had to hand-
+# edit a dozen scattered `v20`/`v21` literals, and a literal missed there is a
+# check that silently keeps interrogating the superseded frontier.
+LIVE_REGISTRY_VERSION = "scac-mutation-registry.v22"
+LIVE_REGISTRY_ORDINAL = 22
+SEALED_PREDECESSOR_VERSION = "scac-mutation-registry.v21"
+SEALED_PREDECESSOR_ORDINAL = LIVE_REGISTRY_ORDINAL - 1
 SEALED_PREDECESSOR_DIGEST = (
-    "sha256:45bf7a56d2756337c1b5efdad195f4935259fad6cf5f6a9c081c28592bacfb05"
+    "sha256:d9100082d444f090e062a2fb9ac55043d0c9790c2fbd9b68672987e3ed12927b"
 )
-SEALED_PREDECESSOR_ENTRY_COUNTS = (1524, 828)
-SEALED_PREDECESSOR_MIGRATION = "migrations/0494_codex_continuity_archive_registry.sql"
-LIVE_REGISTRY_MIGRATION = "migrations/0495_r06_hooks_correctness_scac_successor.sql"
+SEALED_PREDECESSOR_ENTRY_COUNTS = (1528, 828)
+SEALED_PREDECESSOR_MIGRATION = "migrations/0495_r06_hooks_correctness_scac_successor.sql"
+LIVE_REGISTRY_MIGRATION = (
+    "migrations/0496_doctorcre_portfolio_hierarchy_and_scac_successor.sql"
+)
+
+LIVE_CATALOG_CURRENT_FN = f"ops.scac_mutation_catalog_v{LIVE_REGISTRY_ORDINAL}_current()"
+LIVE_REGISTRATION_FN = f"ops.scac_mutation_registration_v{LIVE_REGISTRY_ORDINAL}"
+PREDECESSOR_CATALOG_CURRENT_FN = (
+    f"ops.scac_mutation_catalog_v{SEALED_PREDECESSOR_ORDINAL}_current()"
+)
+PREDECESSOR_SEAL_AVAILABLE_FN = (
+    f"ops.scac_mutation_registry_v{SEALED_PREDECESSOR_ORDINAL}_seal_available()"
+)
+PREDECESSOR_LIVE_AT_SEAL_NAME = (
+    f"scac_mutation_catalog_v{SEALED_PREDECESSOR_ORDINAL}_live_at_seal"
+)
 
 EXPECTED_GRANT_COUNT = 307
 EXPECTED_GRANT_DIGEST = (
@@ -1038,7 +1058,7 @@ def main() -> int:
                     f"{SEALED_PREDECESSOR_VERSION} digest, so no new seal was created"
                 )
             if cur.execute(
-                "select ops.scac_mutation_registry_v20_seal_available()"
+                f"select {PREDECESSOR_SEAL_AVAILABLE_FN}"
             ).fetchone()[0] is not True:
                 raise RuntimeError(
                     f"sealed {SEALED_PREDECESSOR_VERSION} no longer validates its entry set"
@@ -1133,7 +1153,7 @@ def main() -> int:
                 raise RuntimeError(f"reference monitor did not become exactly current: {state!r}")
 
             lookup = cur.execute(
-                "select ops.scac_mutation_registration_v21(%s,'mcp-tool:standing-context')",
+                f"select {LIVE_REGISTRATION_FN}(%s,'mcp-tool:standing-context')",
                 (registry[0],),
             ).fetchone()[0]
             if lookup.get("registered") is not True or \
@@ -1146,7 +1166,7 @@ def main() -> int:
             # FALSE against a live v21 catalog. That is the positive proof that
             # 0495 actually moved the authority surface rather than renaming it.
             if cur.execute(
-                "select ops.scac_mutation_catalog_v20_current()"
+                f"select {PREDECESSOR_CATALOG_CURRENT_FN}"
             ).fetchone()[0] is not False:
                 raise RuntimeError(
                     "the superseded v20 catalog check still reports current against a "
@@ -1170,12 +1190,12 @@ def main() -> int:
             # (an existing pg_* role) and the plain rolsuper path (a role this test
             # creates and marks superuser itself, since no platform role in a local
             # database is guaranteed to carry rolsuper).
-            if cur.execute("select ops.scac_mutation_catalog_v21_current()").fetchone()[0] is not True:
+            if cur.execute(f"select {LIVE_CATALOG_CURRENT_FN}").fetchone()[0] is not True:
                 raise RuntimeError("v21 catalog not current before escalation mutation")
             cur.execute("savepoint escalation_mutation")
             cur.execute("create role carr_siep18_escalation_probe")
             cur.execute("grant pg_write_all_data to carr_siep18_escalation_probe")
-            if cur.execute("select ops.scac_mutation_catalog_v21_current()").fetchone()[0] is not False:
+            if cur.execute(f"select {LIVE_CATALOG_CURRENT_FN}").fetchone()[0] is not False:
                 raise RuntimeError(
                     "escalation guard did not trip on a carr_ role granted pg_write_all_data"
                 )
@@ -1186,7 +1206,7 @@ def main() -> int:
             # of an ACTUAL superuser role -- not a neon_*/pg_* NAMED bundle -- must
             # also fail the live current-check closed, with no exception for any
             # carr_ role including the one named in the now-removed carve-out.
-            if cur.execute("select ops.scac_mutation_catalog_v21_current()").fetchone()[0] is not True:
+            if cur.execute(f"select {LIVE_CATALOG_CURRENT_FN}").fetchone()[0] is not True:
                 raise RuntimeError("v21 catalog not current before superuser-bundle mutation")
             cur.execute("savepoint superuser_bundle_mutation")
             cur.execute("create role carr_siep18_superuser_bundle_probe")
@@ -1194,7 +1214,7 @@ def main() -> int:
             cur.execute(
                 "grant siep18_gate_synthetic_superuser to carr_siep18_superuser_bundle_probe"
             )
-            if cur.execute("select ops.scac_mutation_catalog_v21_current()").fetchone()[0] is not False:
+            if cur.execute(f"select {LIVE_CATALOG_CURRENT_FN}").fetchone()[0] is not False:
                 raise RuntimeError(
                     "escalation guard did not trip on a carr_ role granted an actual "
                     "superuser role (rolsuper path, distinct from the neon_/pg_ "
@@ -1230,7 +1250,8 @@ def main() -> int:
             v20_migration_sql = (
                 REPO / SEALED_PREDECESSOR_MIGRATION
             ).read_text(encoding="utf-8")
-            committed_v20_body = function_body(current_function_sql(v20_migration_sql, 20))
+            committed_v20_body = function_body(
+                current_function_sql(v20_migration_sql, SEALED_PREDECESSOR_ORDINAL))
 
             # Prove the canonical migration class installed the committed
             # catalog functions before this gate mutates anything. Historical
@@ -1238,14 +1259,21 @@ def main() -> int:
             # wrappers, while the full catalog validators that remain installed
             # under `*_live_at_seal` plus the live frontier must all carry the
             # narrowed census.
-            installed_catalog_functions = cur.execute(
-                """select p.proname, pg_get_functiondef(p.oid), p.prosrc
-                     from pg_proc p
-                     join pg_namespace n on n.oid=p.pronamespace
-                    where n.nspname='ops'
-                      and p.proname~'^scac_mutation_catalog_v([2-9]|1[0-9]|2[01])_(current|live_at_seal)$'
-                    order by p.proname"""
-            ).fetchall()
+            # The ordinal ceiling is applied in Python rather than hand-written
+            # into the pattern: an alternation like `2[01]` silently stops
+            # matching the frontier the moment it advances, which is exactly how
+            # this check went stale at v21.
+            installed_catalog_functions = [
+                row for row in cur.execute(
+                    """select p.proname, pg_get_functiondef(p.oid), p.prosrc
+                         from pg_proc p
+                         join pg_namespace n on n.oid=p.pronamespace
+                        where n.nspname='ops'
+                          and p.proname~'^scac_mutation_catalog_v[0-9]+_(current|live_at_seal)$'
+                        order by p.proname"""
+                ).fetchall()
+                if 2 <= int(row[0].split("_v")[1].split("_")[0]) <= LIVE_REGISTRY_ORDINAL
+            ]
             installed_names = {row[0] for row in installed_catalog_functions}
             expected_current_names = {
                 f"scac_mutation_catalog_v{version}_current"
@@ -1284,12 +1312,12 @@ def main() -> int:
             # the frontier half below binds v21 to the committed 0495 definition.
             installed_v20_seal = next(
                 (row for row in installed_catalog_functions
-                 if row[0] == "scac_mutation_catalog_v20_live_at_seal"), None,
+                 if row[0] == PREDECESSOR_LIVE_AT_SEAL_NAME), None,
             )
             if installed_v20_seal is None or installed_v20_seal[2].strip() != committed_v20_body:
                 raise RuntimeError(
-                    "installed ops.scac_mutation_catalog_v20_live_at_seal() body does not "
-                    "match the committed 0494 migration definition"
+                    f"installed ops.{PREDECESSOR_LIVE_AT_SEAL_NAME}() body does not match "
+                    f"the committed {SEALED_PREDECESSOR_MIGRATION} definition"
                 )
             installed_v21 = next(
                 row for row in installed_catalog_functions
@@ -1316,7 +1344,7 @@ def main() -> int:
             cur.execute("savepoint census_scope_mutation")
             cur.execute(widened_v21_current)
             active_widened_definition = cur.execute(
-                "select pg_get_functiondef('ops.scac_mutation_catalog_v21_current()'::regprocedure)"
+                f"select pg_get_functiondef('{LIVE_CATALOG_CURRENT_FN}'::regprocedure)"
             ).fetchone()[0]
             if UNNARROWED_ROLE_AUTHORITY_SCOPE not in active_widened_definition or \
                NARROWED_ROLE_AUTHORITY_SCOPE in active_widened_definition:
@@ -1340,13 +1368,13 @@ def main() -> int:
             cur.execute("rollback to savepoint census_scope_mutation")
             cur.execute("release savepoint census_scope_mutation")
             restored_v21_definition = cur.execute(
-                "select pg_get_functiondef('ops.scac_mutation_catalog_v21_current()'::regprocedure)"
+                f"select pg_get_functiondef('{LIVE_CATALOG_CURRENT_FN}'::regprocedure)"
             ).fetchone()[0]
             if restored_v21_definition != installed_v21_definition:
                 raise RuntimeError(
                     "rollback did not restore the committed v21 current-check definition"
                 )
-            if cur.execute("select ops.scac_mutation_catalog_v21_current()").fetchone()[0] is not True:
+            if cur.execute(f"select {LIVE_CATALOG_CURRENT_FN}").fetchone()[0] is not True:
                 raise RuntimeError("v21 catalog current-check did not re-arm after the census-scope rollback")
 
             cur.execute("savepoint grant_drift")
@@ -1378,8 +1406,9 @@ def main() -> int:
     except Exception as exc:  # noqa: BLE001 - gate reports the exact refusal
         return fail(str(exc))
     print(
-        "siep18-reference-monitor-local-pg-gate passed: exact v21 grant seal over a "
-        "revalidated sealed v20 predecessor, "
+        f"siep18-reference-monitor-local-pg-gate passed: exact "
+        f"v{LIVE_REGISTRY_ORDINAL} grant seal over a revalidated sealed "
+        f"v{SEALED_PREDECESSOR_ORDINAL} predecessor, "
         "complete guards, drift refusal, unsupported-view refusal, and "
         f"WR-000068 sourced shape forward correction {json.dumps(wr68, sort_keys=True)}; "
         f"WR-000069 incident/work-request evidence {json.dumps(wr69, sort_keys=True)}"

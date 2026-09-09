@@ -12,6 +12,7 @@ import { investigationTools } from "./investigation.js";
 import { capabilityProgramTools } from "./capability-program.js";
 import { workShapeTools } from "./work-shape.js";
 import { workRequestIntakeTools } from "./work-request-intake.js";
+import { workPortfolioTools } from "./work-portfolio.js";
 import { leaseTermComparisonTools } from "./lease-term-comparison.js";
 import { partnerRoomTools } from "./partner-room.js";
 import { agentProfileTools } from "./agent-profiles.js";
@@ -7560,6 +7561,7 @@ const TOOL_REGISTRATION_SOURCE = Object.freeze({
   "claude-continuity": "mcp-server/src/claude-continuity.js",
   "incident": "mcp-server/src/incident.js",
   "engineering-runtime": "mcp-server/src/engineering-runtime.js",
+  "work-portfolio": "mcp-server/src/work-portfolio.js",
   "tour-rights-projection": "mcp-server/src/tour-rights-projection.js",
   "tour-property-jurisdiction": "mcp-server/src/tour-property-jurisdiction.js",
   "tour-domain": "mcp-server/src/tour-domain.js",
@@ -8555,6 +8557,7 @@ registerTools(workShapeTools({ withEnvelope, writeEvent, ToolError }), "work-sha
 
 // Program 6: sourced additive capture and a safe card only. No lifecycle verbs.
 registerTools(workRequestIntakeTools({ withEnvelope, writeEvent, ToolError }), "work-request-intake");
+registerTools(workPortfolioTools({ withEnvelope, writeEvent, ToolError }), "work-portfolio");
 
 // Pure workbook-derived lease economics. No database, model, or write path.
 registerTools(leaseTermComparisonTools({ ToolError }), "lease-term-comparison");

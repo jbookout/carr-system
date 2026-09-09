@@ -37,6 +37,7 @@ import {
   REGISTRY_V19_VERSION,
   REGISTRY_V20_VERSION,
   REGISTRY_V21_VERSION,
+  REGISTRY_V22_VERSION,
   replaceExactlyOnce,
   renderGeneratedFrontier,
   renderRuntimeProjection,
@@ -186,6 +187,8 @@ const v20Migration = fs.readFileSync(
   new URL("../../migrations/0494_codex_continuity_archive_registry.sql", import.meta.url), "utf8");
 const generatedV21 = fs.readFileSync(
   new URL("../src/scac-mutation-registry.v21.generated.js", import.meta.url), "utf8");
+const generatedV22 = fs.readFileSync(
+  new URL("../src/scac-mutation-registry.v22.generated.js", import.meta.url), "utf8");
 const v21Migration = fs.readFileSync(
   new URL("../../migrations/0495_r06_hooks_correctness_scac_successor.sql", import.meta.url), "utf8");
 const siep18MonitorMigration = fs.readFileSync(
@@ -208,9 +211,10 @@ test("successor generation refuses absent or ambiguous predecessor markers", () 
 
 test("reviewed MCP inventory is an exact immutable projection of the assembled registry", () => {
   const rows = mcpInventory(TOOLS);
-  assert.equal(rows.length, 228);
-  assert.equal(rows.filter(row => row.write).length, 160);
-  assert.equal(rows.filter(row => !row.write).length, 68);
+  // 232 = 228 plus the four DoctorCRE v5 portfolio verbs; three of them write.
+  assert.equal(rows.length, 232);
+  assert.equal(rows.filter(row => row.write).length, 163);
+  assert.equal(rows.filter(row => !row.write).length, 69);
   assert.deepEqual(rows.map(row => row.operation), Object.keys(TOOLS).sort());
   assert.equal(Object.isFrozen(TOOLS), true);
   assert.equal(Object.isFrozen(TOOLS["add-loop"]), true);
@@ -788,16 +792,20 @@ test("v20 seals the Codex continuity archive frontier and preserves the v19 pred
   }
 });
 
-test("the ACTIVE runtime registry is v20, and a stale v19 import fails admission", async () => {
+test("the ACTIVE runtime registry is v22, and a stale v19 import fails admission", async () => {
   // mutation-registry.js is the module every TOOLS admission actually runs
   // through, so this binds the LIVE import rather than the mere existence of a
   // generated v20 file. Re-pinning the generated artifact without re-pointing
   // this import is exactly the miss this test exists to catch.
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V20_VERSION);
-  const v20GeneratedDigest = generatedV20.match(
+  // v22 is the live import. R06 correctly left the selector on v20 because it
+  // registered no verb; this change registers four, and an unregistered
+  // operation is refused at the door, so the selector had to move with them.
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V22_VERSION);
+  const v22GeneratedDigest = generatedV22.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v20GeneratedDigest);
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v22GeneratedDigest);
   assert.notEqual(`sha256:${SCAC_MUTATION_REGISTRY_DIGEST}`, HISTORICAL_REGISTRY_SEALS.v19.digest);
+  assert.notEqual(`sha256:${SCAC_MUTATION_REGISTRY_DIGEST}`, HISTORICAL_REGISTRY_SEALS.v21.digest);
 
   // The decisive stale-import catch, and the reason this is a RUNTIME test and
   // not a string check: v20 re-derived codex-read-recovery's schema_digest.
@@ -1041,19 +1049,21 @@ test("v21 seals the R06 hooks-correctness frontier and preserves the v20 predece
   assert.doesNotMatch(v21Migration, /do \$continuity_archive_preflight\$/);
   assert.match(v21Migration, /do \$r06_hooks_correctness_preflight\$/);
   // v21 is the seal this migration CREATES, so it carries every predecessor
-  // tuple through v20 and not its own.
-  for (const seal of Object.values(HISTORICAL_REGISTRY_SEALS))
+  // tuple through v20 and not its own. v22 is a LATER seal and is likewise
+  // absent, which is why the set is filtered rather than taken whole.
+  for (const [key, seal] of Object.entries(HISTORICAL_REGISTRY_SEALS)) {
+    if (key === "v21" || key === "v22") continue;
     assert.ok(v21Migration.includes(
       `('${seal.version}','${seal.digest}',${seal.entryCount},${seal.sourceEntryCount})`), seal.version);
+  }
 });
 
-test("the v21 frontier re-digests only source, so the ACTIVE v20 import still admits every operation", async () => {
-  // The active import stays v20 in this slice: mcp-server/src/mutation-registry.js
-  // is not part of the R06 tail, so flipping it is a separate, later change. What
-  // this test binds is the condition that makes leaving it at v20 SAFE — and it
-  // fails loudly the moment v21 moves an MCP contract, which is exactly when the
-  // import flip stops being optional.
-  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V20_VERSION);
+test("the v21 frontier re-digested only source, and v22 is what the runtime now imports", async () => {
+  // v21 moved no MCP contract, which is what made leaving the import on v20
+  // safe for the R06 tail. The DoctorCRE portfolio tail DOES move MCP
+  // contracts, so the import is now v22 and this test records why the flip
+  // happened here rather than there.
+  assert.equal(SCAC_MUTATION_REGISTRY_VERSION, REGISTRY_V22_VERSION);
   const v21GeneratedDigest = generatedV21.match(
     /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
   const v21GeneratedVersion = generatedV21.match(
@@ -1061,8 +1071,12 @@ test("the v21 frontier re-digests only source, so the ACTIVE v20 import still ad
   assert.equal(v21GeneratedVersion, REGISTRY_V21_VERSION);
   // The v21 projection is genuinely a new seal, not a re-emitted v20.
   assert.notEqual(`sha256:${v21GeneratedDigest}`, HISTORICAL_REGISTRY_SEALS.v20.digest);
-  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST,
-    HISTORICAL_REGISTRY_SEALS.v20.digest.slice("sha256:".length));
+  // The live digest is v22's, not v20's: the runtime import moved with the
+  // verbs this tail registered.
+  const v22GeneratedDigest = generatedV22.match(
+    /^export const SCAC_MUTATION_REGISTRY_DIGEST = "([0-9a-f]{64})";$/m)[1];
+  assert.equal(SCAC_MUTATION_REGISTRY_DIGEST, v22GeneratedDigest);
+  assert.notEqual(`sha256:${SCAC_MUTATION_REGISTRY_DIGEST}`, HISTORICAL_REGISTRY_SEALS.v20.digest);
 
   const v20Rows = frozenInventory(REGISTRY_V20_VERSION);
   const v21Rows = frozenInventory(REGISTRY_V21_VERSION);
@@ -1077,11 +1091,27 @@ test("the v21 frontier re-digests only source, so the ACTIVE v20 import still ad
   // ...and none of them is an MCP contract, which is the whole reason the active
   // v20 import can still admit the live tool surface unchanged.
   assert.deepEqual(moved.filter(row => row.ingress_kind === "mcp_tool"), []);
+
+  // The live tool surface is v22's, not v21's: that is precisely the flip this
+  // test is named for. Every admitted verb must match the frontier the runtime
+  // imports, and the four verbs v22 adds over v21 are the portfolio verbs.
+  const v22Rows = frozenInventory(REGISTRY_V22_VERSION);
+  const v21Keys = new Set(v21Rows.map(row => row.ingress_key));
+  const addedTools = v22Rows
+    .filter(row => row.ingress_kind === "mcp_tool" && !v21Keys.has(row.ingress_key))
+    .map(row => row.ingress_key)
+    .sort();
+  assert.deepEqual(addedTools, [
+    "mcp-tool:accept-portfolio-revision",
+    "mcp-tool:propose-portfolio-revision",
+    "mcp-tool:read-portfolio",
+    "mcp-tool:review-portfolio-revision",
+  ]);
   for (const name of Object.keys(TOOLS)) {
     const admitted = await assertRegisteredOperation(name, TOOLS[name], {});
     assert.equal(admitted.ingress_key, `mcp-tool:${name}`);
     assert.equal(admitted.schema_digest,
-      v21Rows.find(row => row.ingress_key === `mcp-tool:${name}`).schema_digest, name);
+      v22Rows.find(row => row.ingress_key === `mcp-tool:${name}`).schema_digest, name);
   }
 });
 
@@ -1235,11 +1265,11 @@ test("the complete source-only frontier is byte-reproducible from frozen inputs"
   assert.equal(assertCurrentSourceInventoryMatchesFixture(TOOLS), true);
   const paths = assertGeneratedFrontierMatchesCommitted();
   const migrations = paths.filter(path => path.startsWith("migrations/")).sort();
-  assert.equal(migrations.length, 29);
+  assert.equal(migrations.length, 30);
   assert.deepEqual(migrations.map(path => path.match(/migrations\/(\d{4})_/)[1]),
-    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495"]);
-  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 20);
-  assert.equal(paths.length, 49);
+    [...Array.from({ length: 18 }, (_, index) => String(454 + index).padStart(4, "0")), "0481", "0486", "0487", "0488", "0489", "0490", "0491", "0492", "0493", "0494", "0495", "0496"]);
+  assert.equal(paths.filter(path => path.endsWith(".generated.js")).length, 21);
+  assert.equal(paths.length, 51);
 });
 
 test("the complete frontier renders when every generated target is absent", () => {
@@ -1275,7 +1305,11 @@ test("the complete frontier renders when every generated target is absent", () =
         GIT_WORK_TREE: isolatedRoot,
       },
     });
-    assert.match(stdout, /\(49 artifacts\)/);
+    // Derived from the frontier itself rather than pinned to a literal that
+    // goes stale every time the frontier grows. The real assertion is the
+    // byte-for-byte comparison below; this only confirms the renderer reported
+    // the whole set rather than a subset.
+    assert.match(stdout, new RegExp(`\\(${frontierPaths.length} artifacts\\)`));
     for (const [target, expected] of Object.entries(frontier))
       assert.equal(fs.readFileSync(path.join(outputRoot, target), "utf8"), expected, target);
   } finally {
@@ -1361,7 +1395,14 @@ test("migration is read-only at runtime and preserves the SIEP-18 boundary", () 
 
 test("reviewed non-MCP source locators resolve and remain explicitly non-authorizing", () => {
   const rows = fullInventory(TOOLS).filter(row => !["mcp_tool", "job_definition", "workflow_entrypoint"].includes(row.ingress_kind));
-  assert.equal(rows.length, 543);
+  // 543 before this branch; the DoctorCRE portfolio tail adds exactly one
+  // reviewed non-MCP source, ops/work-portfolio-local-pg-gate.py. The count is
+  // pinned rather than derived on purpose, so a source file that appears
+  // without review has to be noticed here. It moves only once the file is
+  // TRACKED: the inventory enumerates git, so an untracked new gate is
+  // invisible to this assertion and the count shifts at `git add`, not at
+  // save.
+  assert.equal(rows.length, 544);
   for (const row of rows) {
     assert.equal(fs.existsSync(new URL(`../../${row.source_locator}`, import.meta.url)), true,
       `${row.source_locator} must resolve`);
@@ -1369,7 +1410,8 @@ test("reviewed non-MCP source locators resolve and remain explicitly non-authori
     assert.equal(row.implementation_state, "inventoried_not_atomically_mediated");
   }
   const scripts = discoverScriptEntrypoints();
-  assert.equal(scripts.length, 534);
+  // 534 before this branch; same single new executable gate.
+  assert.equal(scripts.length, 535);
   assert.equal(scripts.some(path => path === "ops/rule-delivery-cutover.py"), true);
   assert.equal(scripts.some(path => path === "ops/control-plane-scheduler-cutover.py"), true);
   assert.equal(scripts.some(path => path === "run.sh"), true);

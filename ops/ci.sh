@@ -1097,6 +1097,9 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
 
   # Tour Operations carries database-owned rights, identity, route, digest,
   # ACL, and append-only invariants that cannot be proved by text-shape tests.
+  # The DoctorCRE v5 portfolio proof joins the same loop for the same reason:
+  # its digest recomputation, append-only guards and post-acceptance freeze are
+  # database behaviour, and a regex over the migration would prove none of it.
   # Run every slice's transaction-scoped acceptance proof on the same
   # disposable database after pending migrations apply. Each proof rolls back
   # every fixture row and must be independently green.
@@ -1106,7 +1109,8 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     mcp-server/test/tour-operations-slice2-postgres.sql \
     mcp-server/test/tour-property-identity-jurisdiction-postgres.sql \
     mcp-server/test/tour-domain-route-cheat-sheet-postgres.sql \
-    mcp-server/test/tour-delivery-data-plane-postgres.sql; do
+    mcp-server/test/tour-delivery-data-plane-postgres.sql \
+    mcp-server/test/work-portfolio-postgres.sql; do
     [ -f "$tour_pg_proof" ] || continue
     tour_pg_log="$LOGDIR/$(basename "$tour_pg_proof" .sql).log"
     if ! run_quiet "$tour_pg_log" \
