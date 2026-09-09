@@ -28748,9 +28748,9 @@
     },
     {
       "version": "v21",
-      "reason": "R06 hooks-correctness frontier, bound to the actual worktree source. Thirty-three rows are re-digested at their current state and no ingress is added or removed. Four are the R06 tail itself: hooks/hook-meter-run.py and hooks/hook_meter.py resolve Git and Claude hook evidence to the registered invocation worktree and add the redacted pre-overwrite fake-sink seam, ops/config-as-code.py carries the matching drift ownership, and ops/scac-mutation-inventory.mjs is the v21 generator that renders this frontier; each moves its schema_digest and handler_digest together while every authority, effect, principal, request, delegate and admission field is unchanged. ops/r06-hook-correctness-selftest.py is a selftest and is deliberately not a registered entrypoint, so the R06 delta adds no ingress. The remaining twenty-nine arrive from the released v20-frontier review this patch now freezes: github-workflow:backup-nightly.yml (three-mode gate plus two optional workflow_dispatch proof inputs) moves schema_digest, handler_digest and trigger_contract_digest while its permissions_contract_digest and delegate set stay byte-identical; script-entrypoint:ops/backup-workflow-status.py moves schema_digest and handler_digest only; registering the backup-nightly-cloud service in ops/config/services.json propagates a new physical_authority_catalog_digests.services value to all twenty-four launchd-workflow rows, because that field is the sha256 of the services catalog itself and not a change of authority on any launchd ingress; and hooks/worktree-self-plumb.py, ops/ci.sh and ops/githooks/pre-push move only their source digests. No new ingress, no successor, no delegate or permission expansion. Frozen v1-v20 inventories and the entry-set seal remain unchanged.",
+      "reason": "R06 hooks-correctness frontier, bound to the actual worktree source. Thirty-six rows are re-digested at their current state and no ingress is added or removed. Seven are the R06 tail itself: hooks/hook-meter-run.py and hooks/hook_meter.py resolve Git and Claude hook evidence to the registered invocation worktree and add the redacted pre-overwrite fake-sink seam, ops/config-as-code.py carries the matching drift ownership, ops/scac-mutation-inventory.mjs is the v21 generator that renders this frontier, and ops/siep11-mutation-registry-local-pg-gate.py and ops/siep18-reference-monitor-local-pg-gate.py are the two local-PG acceptance gates taught to accept v21 as the live frontier while proving v20 remains sealed history, and bin/schema-snapshot.sh gains the 0495 ledger probe and its v21 applied-frontier arm; each moves its schema_digest and handler_digest together while every authority, effect, principal, request, delegate and admission field is unchanged. ops/r06-hook-correctness-selftest.py is a selftest and is deliberately not a registered entrypoint, so the R06 delta adds no ingress. The remaining twenty-nine arrive from the released v20-frontier review this patch now freezes: github-workflow:backup-nightly.yml (three-mode gate plus two optional workflow_dispatch proof inputs) moves schema_digest, handler_digest and trigger_contract_digest while its permissions_contract_digest and delegate set stay byte-identical; script-entrypoint:ops/backup-workflow-status.py moves schema_digest and handler_digest only; registering the backup-nightly-cloud service in ops/config/services.json propagates a new physical_authority_catalog_digests.services value to all twenty-four launchd-workflow rows, because that field is the sha256 of the services catalog itself and not a change of authority on any launchd ingress; and hooks/worktree-self-plumb.py, ops/ci.sh and ops/githooks/pre-push move only their source digests. No new ingress, no successor, no delegate or permission expansion. Frozen v1-v20 inventories and the entry-set seal remain unchanged.",
       "expected_count": 828,
-      "expected_sha256": "222546d9b7ead391cb0494f0c4f7efebae477a0c18d78770e8e552d3f2a82c00",
+      "expected_sha256": "7c3d61cad63a7c17f0889e39bdf6cb6d7305bd58e4fdd12f75ea78ff7dd37ed3",
       "remove": [],
       "row_replacements": {},
       "source_digest_replacements": {},
@@ -29707,6 +29707,29 @@
           "classification_authorizing": false
         },
         {
+          "ingress_key": "script-entrypoint:bin/schema-snapshot.sh",
+          "ingress_kind": "script_entrypoint",
+          "operation": "bin/schema-snapshot.sh",
+          "effect_class": "administrative_mutation",
+          "source_locator": "bin/schema-snapshot.sh",
+          "schema_digest": "09e3fffae3e261eda19bf1c367c3ec457f166f2003f0d4ef4924884a57e9c4c6",
+          "handler_digest": "09e3fffae3e261eda19bf1c367c3ec457f166f2003f0d4ef4924884a57e9c4c6",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
           "ingress_key": "script-entrypoint:hooks/hook_meter.py",
           "ingress_kind": "script_entrypoint",
           "operation": "hooks/hook_meter.py",
@@ -29889,6 +29912,52 @@
           "owner_package": "11",
           "implementation_state": "inventoried_not_atomically_mediated",
           "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:ops/siep11-mutation-registry-local-pg-gate.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "ops/siep11-mutation-registry-local-pg-gate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "ops/siep11-mutation-registry-local-pg-gate.py",
+          "schema_digest": "b36e3fb6e67436f2738f6a87ce4ac286e1065d0746e004e438fa29d806a3649b",
+          "handler_digest": "b36e3fb6e67436f2738f6a87ce4ac286e1065d0746e004e438fa29d806a3649b",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
+        },
+        {
+          "ingress_key": "script-entrypoint:ops/siep18-reference-monitor-local-pg-gate.py",
+          "ingress_kind": "script_entrypoint",
+          "operation": "ops/siep18-reference-monitor-local-pg-gate.py",
+          "effect_class": "administrative_mutation",
+          "source_locator": "ops/siep18-reference-monitor-local-pg-gate.py",
+          "schema_digest": "1aa9c8d80bcc855690b8fc8991bec1831b049d3af40629030c137a503f562d9c",
+          "handler_digest": "1aa9c8d80bcc855690b8fc8991bec1831b049d3af40629030c137a503f562d9c",
+          "write": true,
+          "human_only": false,
+          "authority_only": true,
+          "principal_mode": "existing_script_specific_credential_boundary",
+          "mutation_kind": "scac.mutation.admin",
+          "target_surface": "scac.surface.runtime",
+          "delegates_to": [],
+          "request_shape": "fixed_script_cli_contract",
+          "idempotency_mode": "script_specific_registered_current_control",
+          "rollback_class": "forward_fix_only",
+          "admission_class": "registered_inventory_only",
+          "owner_package": "11",
+          "implementation_state": "inventoried_not_atomically_mediated",
+          "classification_authorizing": false
         }
       ]
     }
@@ -29897,7 +29966,7 @@
     "base_version": "v21",
     "reason": "No source change is outstanding beyond the frozen v21 frontier. Every row the R06 hooks-correctness tail and the released v20-frontier review moved is folded into patches[v21] above, so this review carries an empty upsert and restates the v21 count and digest unchanged.",
     "expected_count": 828,
-    "expected_sha256": "222546d9b7ead391cb0494f0c4f7efebae477a0c18d78770e8e552d3f2a82c00",
+    "expected_sha256": "7c3d61cad63a7c17f0889e39bdf6cb6d7305bd58e4fdd12f75ea78ff7dd37ed3",
     "upsert": []
   }
 }
