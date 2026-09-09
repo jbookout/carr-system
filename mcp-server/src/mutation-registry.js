@@ -4,7 +4,12 @@ import {
   SCAC_MUTATION_REGISTRY_DIGEST,
   SCAC_MUTATION_REGISTRY_VERSION,
   SCAC_MUTATION_RUNTIME_PROJECTION_AUTHORIZING,
-} from "./scac-mutation-registry.v20.generated.js";
+// v22 is the runtime selector. R06's v21 re-digested existing non-MCP sources
+// and correctly left the selector on v20, because it registered no new verb.
+// This change does: the four portfolio verbs are unknown to v20 and v21, and an
+// unregistered operation is refused at the door, so the runtime has to read the
+// registry that knows them.
+} from "./scac-mutation-registry.v22.generated.js";
 
 export { SCAC_MUTATION_REGISTRY_DIGEST, SCAC_MUTATION_REGISTRY_VERSION };
 

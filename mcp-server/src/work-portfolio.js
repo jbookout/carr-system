@@ -1,16 +1,26 @@
-// DoctorCRE v5 slice V5-S00, source increment 1: the typed portfolio hierarchy
-// as pure deterministic source. No database, no verb, no migration, no registry
-// entry — persistence and the read verb are a separate increment.
+// DoctorCRE v5 slice V5-S00: the typed portfolio hierarchy.
 //
 // Validates one portfolio revision against a closed contract (21 master
 // milestone nodes, four immutable child-program references, an acyclic parent
-// hierarchy and an acyclic dependency DAG) and derives one deterministic digest
-// over a versioned closed preimage. Canonicalization and hashing come from
+// hierarchy and an acyclic dependency DAG) and derives its digests over
+// versioned closed preimages. Canonicalization and hashing come from
 // artifact-trust.js; this file does not reimplement either.
+//
+// TWO DIGESTS. The GRAPH digest covers the settled shape. The ACCEPTED digest
+// covers the graph PLUS every child binding — identity, ordinal, version, the
+// child's own content digest and its applicable accepted source. Those decide
+// what a descendant inherits, so acceptance binds the accepted digest; a hash
+// that omitted them would let the governing facts move under an unchanged
+// signature. The child hashes only its own content, so neither hash is
+// recursive.
 //
 // A revision carrying an executable-effect field is refused, not ignored: the
 // authority argument for this substrate is that a portfolio is inert until a
 // human accepts its exact hash through a separate path.
+//
+// The persistence and verb layers live here too, but every write goes through a
+// database function that derives its own actor: no verb in this file takes an
+// actor, a partner or a tenant.
 
 import { canonicalJson, digest } from "./artifact-trust.js";
 
@@ -528,6 +538,216 @@ export function portfolioRevisionCanonicalBytes(revision) {
   return canonicalJson(portfolioRevisionPreimage(revision));
 }
 
+export const PORTFOLIO_CHILD_SCHEMA_VERSION = "doctorcre-v5-portfolio-child.v1";
+// The hash a partner accepts. Distinct from the graph schema version above
+// because it covers strictly more: the graph AND every child binding.
+export const PORTFOLIO_ACCEPTED_SCHEMA_VERSION = "doctorcre-v5-portfolio-accepted-revision.v1";
+
+/**
+ * The child preimage: one child program's own immutable identity, version and
+ * ordered membership.
+ *
+ * A child is not an unversioned string. It carries its own version and its own
+ * hash over its own content: which nodes it governs, and which accepted source
+ * binding applies to it.
+ *
+ * THE HASH IS NOT RECURSIVE. A child hashes only content it owns. The parent
+ * then hashes the complete child BINDINGS -- identity, ordinal, version, the
+ * child digest and the accepted source reference -- so nothing that governs a
+ * descendant sits outside the hash a partner accepts, and neither side needs
+ * the other's digest to compute its own.
+ */
+export function portfolioChildPreimage({ child_ref, child_version, member_node_refs, accepted_plan_ref }) {
+  if (!CHILD_PROGRAM_REFS.includes(child_ref)) {
+    refuse("child_identity", `"${child_ref}" is not one of the four child programs`, { child_ref });
+  }
+  if (!Number.isInteger(child_version) || child_version < 1) {
+    refuse("invalid_revision_version", "child_version must be an integer of at least 1", { child_version });
+  }
+  if (!Array.isArray(member_node_refs) || member_node_refs.length === 0) {
+    refuse("invalid_shape", `child "${child_ref}" must name at least one member node`, { child_ref });
+  }
+  const seen = new Set();
+  for (const ref of member_node_refs) {
+    assertRef(ref, `member_node_refs of ${child_ref}`);
+    if (seen.has(ref)) refuse("duplicate_node", `child "${child_ref}" repeats member "${ref}"`, { child_ref, ref });
+    seen.add(ref);
+  }
+  // Absent means "no accepted source binding applies yet" and is written as an
+  // explicit null, so a child that gains one later hashes differently.
+  if (accepted_plan_ref !== null && accepted_plan_ref !== undefined) {
+    assertRef(accepted_plan_ref, `accepted_plan_ref of ${child_ref}`);
+  }
+  return {
+    schema_version: PORTFOLIO_CHILD_SCHEMA_VERSION,
+    child_ref,
+    child_version,
+    member_node_refs: [...member_node_refs].sort(compareCodeUnits),
+    accepted_plan_ref: accepted_plan_ref ?? null,
+  };
+}
+
+/** The deterministic `sha256:` digest of one child program's own content. */
+export function portfolioChildDigest(child) {
+  return digest(portfolioChildPreimage(child));
+}
+
+/**
+ * The ACCEPTED preimage: the graph plus every child binding.
+ *
+ * This is the hash a partner accepts, and it is deliberately not the graph
+ * hash. The graph preimage answers "is this the settled 21-node shape"; it says
+ * nothing about which child governs which node, what version that child is, or
+ * which accepted source binding applies. Those three decide what a descendant
+ * inherits, so a hash that omitted them would let the governing facts change
+ * under an unchanged signature.
+ *
+ * The graph preimage itself is embedded unchanged, so the pure graph contract
+ * keeps its own schema version and its own meaning.
+ */
+export function portfolioAcceptedPreimage(revision, childBindings) {
+  const graph = portfolioRevisionPreimage(revision);
+  if (!Array.isArray(childBindings) || childBindings.length !== CHILD_PROGRAM_COUNT) {
+    refuse("child_count",
+      `an accepted preimage binds exactly ${CHILD_PROGRAM_COUNT} children, saw ${childBindings?.length}`,
+      { expected: CHILD_PROGRAM_COUNT, actual: childBindings?.length });
+  }
+  const bindings = childBindings.map((binding, index) => {
+    if (!isPlainObject(binding)) {
+      refuse("invalid_shape", `child_bindings[${index}] must be an object`, { index });
+    }
+    assertClosedKeys(binding,
+      ["child_ref", "child_ordinal", "child_version", "child_digest", "accepted_plan_ref"],
+      `child_bindings[${index}]`);
+    if (binding.child_ordinal !== index || binding.child_ref !== CHILD_PROGRAM_REFS[index]) {
+      refuse("child_identity",
+        `child_bindings[${index}] must be "${CHILD_PROGRAM_REFS[index]}" at ordinal ${index}`,
+        { index, expected: CHILD_PROGRAM_REFS[index], actual: binding.child_ref });
+    }
+    if (typeof binding.child_digest !== "string" || !SHA256_REF.test(binding.child_digest)) {
+      refuse("invalid_source_digest", `child_bindings[${index}].child_digest must be a sha256: reference`,
+        { index });
+    }
+    if (!Number.isInteger(binding.child_version) || binding.child_version < 1) {
+      refuse("invalid_revision_version", `child_bindings[${index}].child_version must be an integer of at least 1`,
+        { index });
+    }
+    if (binding.accepted_plan_ref !== null) assertRef(binding.accepted_plan_ref, `child_bindings[${index}].accepted_plan_ref`);
+    return {
+      child_ref: binding.child_ref,
+      child_ordinal: binding.child_ordinal,
+      child_version: binding.child_version,
+      child_digest: binding.child_digest,
+      accepted_plan_ref: binding.accepted_plan_ref,
+    };
+  });
+  return {
+    schema_version: PORTFOLIO_ACCEPTED_SCHEMA_VERSION,
+    graph,
+    child_bindings: bindings,
+  };
+}
+
+/** The deterministic `sha256:` digest a partner accepts. */
+export function portfolioAcceptedDigest(revision, childBindings) {
+  return digest(portfolioAcceptedPreimage(revision, childBindings));
+}
+
+/** The exact canonical bytes of the accepted preimage, for hand-checking. */
+export function portfolioAcceptedCanonicalBytes(revision, childBindings) {
+  return canonicalJson(portfolioAcceptedPreimage(revision, childBindings));
+}
+
+/**
+ * Persistence demands strictly more than the pure contract: every typed
+ * metadata slot must be present, every node must name the child program that
+ * governs it, and every child must state its own version and accepted source
+ * binding.
+ *
+ * The pure module leaves metadata optional because the authenticated source
+ * states node identity and dependency only. That is the right shape for
+ * validating a graph. It is the wrong shape for storing one: a node whose
+ * authority class, budget ceiling or model floor is absent cannot be governed
+ * by them later, so absence is refused at the persistence boundary rather than
+ * defaulted to something nobody chose.
+ *
+ * `childInputs` carries each child's own `child_version` and its
+ * `accepted_plan_ref`. Versions are real and per-child: a child that changes
+ * membership or source binding advances its own version, and the parent's
+ * accepted digest moves with it.
+ */
+export function validatePortfolioRevisionForPersistence(revision, nodeChildRefs, childInputs = {}) {
+  const view = validatePortfolioRevision(revision);
+  if (!isPlainObject(nodeChildRefs)) {
+    refuse("invalid_shape", "nodeChildRefs must be an object mapping node_ref to child_ref",
+      { path: "nodeChildRefs" });
+  }
+  if (!isPlainObject(childInputs)) {
+    refuse("invalid_shape", "childInputs must be an object keyed by child_ref", { path: "childInputs" });
+  }
+  assertClosedKeys(childInputs, [...CHILD_PROGRAM_REFS], "childInputs");
+  const members = new Map(CHILD_PROGRAM_REFS.map(ref => [ref, []]));
+  for (const node of revision.nodes) {
+    const path = `revision.nodes[${node.ordinal - 1}]`;
+    for (const key of NODE_OPTIONAL_KEYS) {
+      if (!(key in node)) {
+        refuse("incomplete_metadata",
+          `${path}.${key} is required to persist a node; the pure contract allows it to be absent, storage does not`,
+          { path: `${path}.${key}`, node_ref: node.node_ref, missing: key });
+      }
+    }
+    const childRef = nodeChildRefs[node.node_ref];
+    if (!CHILD_PROGRAM_REFS.includes(childRef)) {
+      refuse("child_identity",
+        `node "${node.node_ref}" must name one of the four child programs, saw ${JSON.stringify(childRef)}`,
+        { node_ref: node.node_ref, child_ref: childRef });
+    }
+    members.get(childRef).push(node.node_ref);
+  }
+  const unknown = Object.keys(nodeChildRefs).filter(ref =>
+    !revision.nodes.some(node => node.node_ref === ref));
+  if (unknown.length > 0) {
+    refuse("dangling_edge", `nodeChildRefs names ${unknown.length} node(s) not in this revision`,
+      { node_refs: unknown });
+  }
+  const children = CHILD_PROGRAM_REFS.map((child_ref, index) => {
+    const member_node_refs = members.get(child_ref);
+    if (member_node_refs.length === 0) {
+      refuse("child_identity", `child "${child_ref}" governs no node in this revision`, { child_ref });
+    }
+    const supplied = childInputs[child_ref];
+    if (supplied !== undefined && !isPlainObject(supplied)) {
+      refuse("invalid_shape", `childInputs.${child_ref} must be an object`, { child_ref });
+    }
+    if (supplied) assertClosedKeys(supplied, ["child_version", "accepted_plan_ref"], `childInputs.${child_ref}`);
+    const child = {
+      child_ref,
+      child_version: supplied?.child_version ?? 1,
+      member_node_refs,
+      accepted_plan_ref: supplied?.accepted_plan_ref ?? null,
+    };
+    const preimage = portfolioChildPreimage(child);
+    return {
+      child_ref,
+      child_ordinal: index,
+      child_version: preimage.child_version,
+      child_digest: portfolioChildDigest(child),
+      accepted_plan_ref: preimage.accepted_plan_ref,
+      member_node_refs: preimage.member_node_refs,
+    };
+  });
+  const childBindings = children.map(({ child_ref, child_ordinal, child_version, child_digest, accepted_plan_ref }) =>
+    ({ child_ref, child_ordinal, child_version, child_digest, accepted_plan_ref }));
+  return Object.freeze({
+    ...view,
+    graph_digest: portfolioRevisionDigest(revision),
+    accepted_digest: portfolioAcceptedDigest(revision, childBindings),
+    children: Object.freeze(children),
+    child_bindings: Object.freeze(childBindings),
+    node_child_refs: Object.freeze({ ...nodeChildRefs }),
+  });
+}
+
 /**
  * The zero-effect readback projection.
  *
@@ -598,4 +818,146 @@ export function portfolioReadback(revision, options = {}) {
       deployments: 0,
     }),
   });
+}
+
+/**
+ * The four portfolio verbs.
+ *
+ * No verb takes an actor, a partner or a tenant: proposal and review derive
+ * their author from the writer context the server established, and acceptance
+ * runs on the per-partner authority connection whose session_user the database
+ * reads. A caller can name a digest, and the database will only ever compare it
+ * against one recomputed from the stored rows.
+ */
+export function workPortfolioTools({ withEnvelope, writeEvent, ToolError }) {
+  const digestSchema = { type: "string", pattern: "^sha256:[0-9a-f]{64}$" };
+  const refuse2 = (error, detail) => { throw new ToolError({ error, ...detail }); };
+
+  return {
+    "read-portfolio": {
+      write: false,
+      description: "Read one DoctorCRE v5 portfolio: its current revision, the digest recomputed from the stored rows, structural validity, every child binding with its own version and accepted source, the reviews recorded against it, and whether a partner has accepted it. Exposes only content inside the accepted digest, and reports the zero executable effect the record carries.",
+      inputSchema: {
+        type: "object", additionalProperties: false,
+        properties: { portfolio_ref: { type: "string" } }, required: ["portfolio_ref"],
+      },
+      handler: async (c, _actor, args) => {
+        const row = (await c.query("select ops.portfolio_readback($1::text) as readback",
+          [args.portfolio_ref])).rows[0]?.readback;
+        if (!row) refuse2("portfolio_readback_unavailable", { portfolio_ref: args.portfolio_ref });
+        return { ok: true, ...row };
+      },
+    },
+
+    "propose-portfolio-revision": {
+      write: true,
+      description: "Propose one inert DoctorCRE v5 portfolio revision: the 21 master milestones with complete typed metadata, the four child programs with their own versions and applicable accepted source bindings, and the dependency edges. The proposal creates no job, execution envelope, capability session, schedule, deployment or clock. Its proposer is the authenticated writer, never a field in this payload, and both supplied digests are compared against digests recomputed from the stored rows before the transaction may commit.",
+      inputSchema: {
+        type: "object", additionalProperties: false,
+        properties: {
+          idempotency_key: { type: "string" },
+          portfolio_ref: { type: "string" },
+          revision_version: { type: "integer", minimum: 1 },
+          source_digests: { type: "object" },
+          graph_digest: digestSchema,
+          accepted_digest: digestSchema,
+          children: { type: "array", minItems: 4, maxItems: 4 },
+          nodes: { type: "array", minItems: 21, maxItems: 21 },
+          edges: { type: "array" },
+        },
+        required: ["idempotency_key", "portfolio_ref", "revision_version", "source_digests",
+          "graph_digest", "accepted_digest", "children", "nodes", "edges"],
+      },
+      handler: async (c, actor, args) => withEnvelope(c, actor, "propose-portfolio-revision", args, async () => {
+        // Validated in the module first so a malformed revision is refused with
+        // a named clause rather than a database constraint message.
+        const nodeChildRefs = Object.fromEntries(args.nodes.map(node => [node.node_ref, node.child_ref]));
+        const childInputs = Object.fromEntries(args.children.map(child =>
+          [child.child_ref, { child_version: child.child_version,
+            accepted_plan_ref: child.accepted_plan_ref ?? null }]));
+        const view = validatePortfolioRevisionForPersistence(
+          { schema_version: PORTFOLIO_REVISION_SCHEMA_VERSION, revision_version: args.revision_version,
+            portfolio_ref: args.portfolio_ref, source_digests: args.source_digests,
+            child_program_refs: [...CHILD_PROGRAM_REFS],
+            nodes: args.nodes.map(({ child_ref, ...node }) => node), edges: args.edges },
+          nodeChildRefs, childInputs);
+        if (view.graph_digest !== args.graph_digest) {
+          refuse2("portfolio_graph_digest_mismatch",
+            { expected: view.graph_digest, supplied: args.graph_digest });
+        }
+        if (view.accepted_digest !== args.accepted_digest) {
+          refuse2("portfolio_accepted_digest_mismatch",
+            { expected: view.accepted_digest, supplied: args.accepted_digest });
+        }
+        const revisionId = (await c.query(
+          `select ops.portfolio_propose_revision($1::text,$2::integer,$3::uuid,$4::jsonb,
+             $5::text,$6::text,$7::jsonb,$8::jsonb,$9::jsonb) as id`,
+          [args.portfolio_ref, args.revision_version, args.idempotency_key,
+            JSON.stringify(args.source_digests), args.graph_digest, args.accepted_digest,
+            JSON.stringify(view.child_bindings), JSON.stringify(args.nodes),
+            JSON.stringify(args.edges)])).rows[0].id;
+        await writeEvent(c, { subject_type: "portfolio", subject_id: revisionId,
+          verb: "propose-portfolio-revision",
+          payload: { portfolio_ref: args.portfolio_ref, revision_version: args.revision_version,
+            accepted_digest: args.accepted_digest } });
+        return { ok: true, revision_id: revisionId, portfolio_ref: args.portfolio_ref,
+          graph_digest: view.graph_digest, accepted_digest: view.accepted_digest,
+          child_bindings: view.child_bindings, accepted: false,
+          effects: { creates_effect: false, jobs: 0, capabilities: 0, execution_envelopes: 0,
+            admissions: 0, schedules: 0, deployments: 0 } };
+      }),
+    },
+
+    "review-portfolio-revision": {
+      write: true,
+      description: "Record one independent review of an exact DoctorCRE v5 portfolio accepted digest. The reviewer is the authenticated writer and is never a field in this payload. A review naming a digest the revision no longer has is refused, and a proposer cannot pass their own revision, so a passing review can never be carried onto different bytes or onto the proposer's own work.",
+      inputSchema: {
+        type: "object", additionalProperties: false,
+        properties: {
+          idempotency_key: { type: "string" }, revision_id: { type: "string" },
+          reviewed_digest: digestSchema, verdict: { type: "string", enum: ["pass", "fail"] },
+          review_summary: { type: "string" },
+        },
+        required: ["idempotency_key", "revision_id", "reviewed_digest", "verdict", "review_summary"],
+      },
+      handler: async (c, actor, args) => withEnvelope(c, actor, "review-portfolio-revision", args, async () => {
+        const reviewId = (await c.query(
+          `select ops.portfolio_review_revision($1::uuid,$2::uuid,$3::text,$4::text,$5::text) as id`,
+          [args.revision_id, args.idempotency_key, args.reviewed_digest, args.verdict,
+            args.review_summary])).rows[0].id;
+        await writeEvent(c, { subject_type: "portfolio", subject_id: args.revision_id,
+          verb: "review-portfolio-revision",
+          payload: { verdict: args.verdict, reviewed_digest: args.reviewed_digest } });
+        return { ok: true, review_id: reviewId, verdict: args.verdict,
+          reviewed_digest: args.reviewed_digest,
+          effects: { creates_effect: false, jobs: 0, capabilities: 0, execution_envelopes: 0,
+            admissions: 0, schedules: 0, deployments: 0 } };
+      }),
+    },
+
+    "accept-portfolio-revision": {
+      write: true, humanOnly: true, authorityOnly: true,
+      description: "HUMAN-ONLY: accept one exact DoctorCRE v5 portfolio accepted digest. The acceptor is derived from the authenticated partner authority session and is never a field in this payload; a writer connection cannot reach this verb at all. Acceptance requires a fresh passing independent review on the same bytes and three distinct identities: the proposer, the reviewer and the acceptor. It makes that revision the current accepted ancestor and creates no job, envelope, capability, schedule, deployment or clock.",
+      inputSchema: {
+        type: "object", additionalProperties: false,
+        properties: {
+          idempotency_key: { type: "string" }, revision_id: { type: "string" },
+          accepted_digest: digestSchema, review_id: { type: "string" },
+        },
+        required: ["idempotency_key", "revision_id", "accepted_digest", "review_id"],
+      },
+      handler: async (c, actor, args) => withEnvelope(c, actor, "accept-portfolio-revision", args, async () => {
+        const receiptId = (await c.query(
+          `select ops.portfolio_accept_revision($1::uuid,$2::uuid,$3::text,$4::uuid) as id`,
+          [args.revision_id, args.idempotency_key, args.accepted_digest, args.review_id])).rows[0].id;
+        await writeEvent(c, { subject_type: "portfolio", subject_id: args.revision_id,
+          verb: "accept-portfolio-revision",
+          payload: { accepted_digest: args.accepted_digest } });
+        return { ok: true, receipt_id: receiptId, accepted_digest: args.accepted_digest,
+          accepted: true,
+          effects: { creates_effect: false, jobs: 0, capabilities: 0, execution_envelopes: 0,
+            admissions: 0, schedules: 0, deployments: 0 } };
+      }),
+    },
+  };
 }

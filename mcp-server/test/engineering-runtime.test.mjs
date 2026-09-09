@@ -14,6 +14,7 @@ import {
   recordEngineeringReview,
   resolveSourceMergeAuthority,
   engineeringRuntimeTools,
+  portfolioAncestorBinding,
 } from "../src/engineering-runtime.js";
 
 const digest = value => canonicalDigest(value);
@@ -1065,4 +1066,179 @@ test("review admission refuses lineage, independence, evidence, deviation, and n
     );
     assert.equal(writes.length, 0, `${label} must leave no immutable reviewer row`);
   }
+});
+
+
+// --- portfolio ancestor binding at the existing admission -------------------
+// Governance is decided by trusted stored source. There is no caller argument
+// that turns it on or off, so these tests drive the stored answer instead.
+
+/** The runtime calls `new ToolError(payload)`, so the test's error class has to
+ *  keep the payload rather than stringify it into a message. */
+class BindingToolError extends Error {
+  constructor(payload) { super(payload?.error || "tool_error"); Object.assign(this, payload); }
+}
+
+/** A stub connection returning one exact ops.portfolio_descendant_binding row. */
+function bindingConnection(binding) {
+  return { query: async () => ({ rows: [{ binding }] }) };
+}
+
+const GOVERNED_BINDING = Object.freeze({
+  governed: true,
+  portfolio_ref: "WR-000062",
+  portfolio_revision_id: "11111111-1111-4111-8111-111111111111",
+  accepted_digest: `sha256:${"a".repeat(64)}`,
+  child_ref: "foundation-and-control-plane",
+  child_version: 1,
+  child_digest: `sha256:${"b".repeat(64)}`,
+  node_ref: "step:j1-kernel-production-outcome",
+  authority_class: "synthetic_authority",
+  effect_class: "synthetic_no_effect",
+  data_class: "synthetic_record_layer",
+  budget_identity: "synthetic:budget-9",
+  budget_ceiling: 9000,
+  model_floor: { provider: "synthetic", model: "synthetic", version: "1", effort: "high" },
+  recovery_ref: "recovery:synthetic-9",
+  terminal_predicate: "synthetic accepted outcome present",
+  // The current admitted plan in this fixture. A child bound to anything else
+  // authorizes different work that merely shares a name.
+  child_accepted_plan_ref: source.plan.plan_ref,
+  predecessors: [{ node_ref: "step:foundation-assurance-minimum-receipt",
+    child_ref: "foundation-and-control-plane",
+    accepted_plan_ref: source.plan.plan_ref }],
+});
+
+test("ordinary attended source work is not portfolio-governed", async () => {
+  const connection = bindingConnection({ governed: false });
+  assert.equal(await portfolioAncestorBinding(connection, {}, source, plan, "slice:ordinary-work",
+    BindingToolError), null);
+});
+
+test("a governed slice with no predecessors binds its accepted ancestor", async () => {
+  const binding = await portfolioAncestorBinding(
+    bindingConnection({ ...GOVERNED_BINDING, predecessors: [] }), {}, source, plan,
+    "step:j1-kernel-production-outcome", BindingToolError);
+  assert.equal(binding.portfolio_ref, "WR-000062");
+  assert.equal(binding.child_ref, "foundation-and-control-plane");
+  assert.equal(binding.child_version, 1);
+  assert.equal(binding.child_digest, GOVERNED_BINDING.child_digest);
+  assert.equal(binding.child_accepted_plan_ref, source.plan.plan_ref);
+  assert.deepEqual(binding.predecessors, []);
+  assert.deepEqual(binding.verified_predecessors, []);
+});
+
+test("a child bound to a DIFFERENT accepted plan refuses admission", () => {
+  // Root reproduced this exactly: a child bound to PLAN-accepted-child-v1 while
+  // the admitted source plan was PLAN-different-current-v1 previously returned
+  // the binding unchanged, so one accepted plan silently governed another's work.
+  return assert.rejects(
+    () => portfolioAncestorBinding(bindingConnection({
+      ...GOVERNED_BINDING, predecessors: [],
+      child_accepted_plan_ref: "PLAN-different-current-v1",
+    }), {}, source, plan, "step:j1-kernel-production-outcome", BindingToolError),
+    error => {
+      assert.equal(error.error, "engineering_portfolio_child_plan_mismatch");
+      assert.equal(error.child_accepted_plan_ref, "PLAN-different-current-v1");
+      assert.equal(error.admitted_plan_ref, source.plan.plan_ref);
+      return true;
+    });
+});
+
+test("a child with NO accepted plan binding refuses admission", () => {
+  // A proposal may describe a child whose source binding is not accepted yet.
+  // That child may exist; it may not admit anything.
+  return assert.rejects(
+    () => portfolioAncestorBinding(bindingConnection({
+      ...GOVERNED_BINDING, predecessors: [], child_accepted_plan_ref: null,
+    }), {}, source, plan, "step:j1-kernel-production-outcome", BindingToolError),
+    error => {
+      assert.equal(error.error, "engineering_portfolio_child_plan_mismatch");
+      assert.equal(error.child_accepted_plan_ref, null);
+      return true;
+    });
+});
+
+test("a predecessor bound to another plan is unmet, not satisfied by a same-named proof", () => {
+  // The decisive cross-plan case: the predecessor's own accepted plan is not the
+  // plan being admitted, so this transaction's facts cannot speak to it at all.
+  // Matching on the node name alone would let one plan's proof admit another's.
+  return assert.rejects(
+    () => portfolioAncestorBinding(bindingConnection({
+      ...GOVERNED_BINDING,
+      predecessors: [{ node_ref: "step:foundation-assurance-minimum-receipt",
+        child_ref: "assurance-fabric", accepted_plan_ref: "PLAN-some-other-plan-v1" }],
+    }), {}, source, plan, "step:j1-kernel-production-outcome", BindingToolError),
+    error => {
+      assert.equal(error.error, "engineering_portfolio_predecessor_proof_missing");
+      assert.equal(error.unmet_predecessors[0].reason, "predecessor_plan_not_admitted");
+      assert.equal(error.unmet_predecessors[0].accepted_plan_ref, "PLAN-some-other-plan-v1");
+      return true;
+    });
+});
+
+test("a declared predecessor with no independent proof REFUSES admission", async () => {
+  // The accepted portfolio names a predecessor. Nothing maps it to a passed
+  // Engineering proof, so admission refuses rather than admitting the work and
+  // calling the obligation satisfied in the same breath.
+  await assert.rejects(
+    () => portfolioAncestorBinding(bindingConnection(GOVERNED_BINDING), {}, source, plan,
+      "step:j1-kernel-production-outcome", BindingToolError),
+    error => {
+      assert.equal(error.error, "engineering_portfolio_predecessor_proof_missing");
+      assert.equal(error.unmet_predecessors[0].node_ref, "step:foundation-assurance-minimum-receipt");
+      assert.equal(error.unmet_predecessors[0].reason, "no_passed_independent_proof");
+      return true;
+    });
+});
+
+test("the predecessor refusal happens before any job, session or envelope write", async () => {
+  // Every statement this connection sees is recorded. A refusal that had
+  // already written something would show the write here.
+  const statements = [];
+  const connection = { query: async (sql) => {
+    statements.push(sql);
+    return { rows: [{ binding: GOVERNED_BINDING }] };
+  } };
+  await assert.rejects(() => portfolioAncestorBinding(connection, {}, source, plan,
+    "step:j1-kernel-production-outcome", BindingToolError));
+  assert.equal(statements.length, 1, "only the read-only binding lookup may run");
+  assert.match(statements[0], /portfolio_descendant_binding/);
+  for (const forbidden of [/insert\s+into/i, /update\s+/i, /ops\.job/i,
+    /engineering_execution_envelope/i, /capability_agent_session/i]) {
+    assert.ok(!forbidden.test(statements[0]), `no write may precede the refusal: ${forbidden}`);
+  }
+});
+
+test("an incomplete accepted ancestor refuses rather than admitting", async () => {
+  for (const field of ["accepted_digest", "child_digest", "child_version",
+    "authority_class", "budget_ceiling", "model_floor", "terminal_predicate"]) {
+    const partial = { ...GOVERNED_BINDING, predecessors: [] };
+    delete partial[field];
+    await assert.rejects(
+      () => portfolioAncestorBinding(bindingConnection(partial), {}, source, plan, "step:x",
+        BindingToolError),
+      error => {
+        assert.equal(error.error, "engineering_portfolio_ancestor_incomplete");
+        assert.equal(error.missing_field, field);
+        return true;
+      },
+      `a binding missing ${field} must refuse`);
+  }
+});
+
+test("an ungoverned envelope keeps its exact previous shape", () => {
+  const ungoverned = buildCodexEnvelope({ source, plan, slice, jobId: "44444444-4444-4444-8444-444444444444",
+    sessionId: "55555555-5555-4555-8555-555555555555", actor,
+    envelopeId: "66666666-6666-4666-8666-666666666666",
+    expiresAt: "2099-01-01T00:00:00Z" });
+  assert.ok(!("portfolio_binding" in ungoverned),
+    "an ungoverned envelope must not gain a field, or every existing digest moves");
+
+  const governed = buildCodexEnvelope({ source, plan, slice, jobId: "44444444-4444-4444-8444-444444444444",
+    sessionId: "55555555-5555-4555-8555-555555555555", actor,
+    envelopeId: "66666666-6666-4666-8666-666666666666",
+    expiresAt: "2099-01-01T00:00:00Z", portfolioBinding: GOVERNED_BINDING });
+  assert.equal(governed.portfolio_binding.portfolio_ref, "WR-000062");
+  assert.notEqual(JSON.stringify(governed), JSON.stringify(ungoverned));
 });

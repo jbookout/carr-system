@@ -25,7 +25,15 @@ import {
   portfolioRevisionDigest,
   portfolioRevisionPreimage,
   validatePortfolioRevision,
+  PORTFOLIO_ACCEPTED_SCHEMA_VERSION,
+  portfolioAcceptedCanonicalBytes,
+  portfolioAcceptedPreimage,
+  portfolioChildDigest,
+  validatePortfolioRevisionForPersistence,
 } from "../src/work-portfolio.js";
+// The same hash the module uses, so the recorded bytes can be re-hashed here
+// independently of the module's own digest helpers.
+import { digest } from "../src/artifact-trust.js";
 
 const FIXTURE_PATH = fileURLToPath(new URL("./fixtures/doctorcre-portfolio-21-node.json", import.meta.url));
 const FIXTURE = JSON.parse(readFileSync(FIXTURE_PATH, "utf8"));
@@ -501,4 +509,252 @@ test("a dependency cycle names its actual members, not innocent downstream nodes
   assert.ok(detail.blocked_nodes.length > detail.cycle.length);
   assert.ok(detail.blocked_nodes.includes("step:final-portfolio-outcome-reconciliation"));
   assert.ok(!detail.cycle.includes("step:final-portfolio-outcome-reconciliation"));
+});
+
+// --- persistence contract: complete metadata and the accepted digest ---------
+// The pure graph contract above is unchanged. What follows covers the stricter
+// shape storage requires, and the digest a partner actually accepts.
+
+/** The graph plus the explicitly synthetic metadata persistence requires. */
+function persistable(mutate) {
+  const draft = revision();
+  const nodeChildRefs = {};
+  for (const node of draft.nodes) {
+    // SYNTHETIC. The real node budgets and model floors do not exist in any
+    // authenticated source; inventing them would be worse than leaving them
+    // absent, so the fixture says so in the value itself.
+    node.authority_class = "synthetic_authority";
+    node.effect_class = "synthetic_no_effect";
+    node.data_class = "synthetic_record_layer";
+    node.budget_identity = `synthetic:budget-${node.ordinal}`;
+    node.budget_ceiling = node.ordinal === 3 ? 12.5 : (node.ordinal === 5 ? 0.0001 : node.ordinal * 1000);
+    node.model_floor = { provider: "synthetic", model: "synthetic", version: "1", effort: "high" };
+    node.recovery_ref = `recovery:synthetic-${node.ordinal}`;
+    node.terminal_predicate = "synthetic accepted outcome present";
+    nodeChildRefs[node.node_ref] = CHILD_PROGRAM_REFS[(node.ordinal - 1) % 4];
+  }
+  const childInputs = {};
+  if (mutate) mutate(draft, nodeChildRefs, childInputs);
+  return { draft, nodeChildRefs, childInputs };
+}
+
+function persist({ draft, nodeChildRefs, childInputs }) {
+  return validatePortfolioRevisionForPersistence(draft, nodeChildRefs, childInputs);
+}
+
+test("persistence requires every typed metadata slot the pure contract leaves optional", () => {
+  assert.ok(persist(persistable()));
+  for (const key of ["authority_class", "effect_class", "data_class", "budget_identity",
+    "budget_ceiling", "model_floor", "recovery_ref", "terminal_predicate"]) {
+    assert.equal(refusalCode(() => persist(persistable(draft => { delete draft.nodes[0][key]; }))),
+      "incomplete_metadata", `missing ${key} must refuse at the persistence boundary`);
+  }
+});
+
+test("every node must name one of the four child programs", () => {
+  assert.equal(refusalCode(() => persist(persistable((draft, ncr) => {
+    ncr[draft.nodes[0].node_ref] = "a-fifth-program";
+  }))), "child_identity");
+  assert.equal(refusalCode(() => persist(persistable((draft, ncr) => {
+    delete ncr[draft.nodes[0].node_ref];
+  }))), "child_identity");
+  assert.equal(refusalCode(() => persist(persistable((draft, ncr) => {
+    ncr["step:not-in-this-revision"] = CHILD_PROGRAM_REFS[0];
+  }))), "dangling_edge");
+});
+
+test("a child that governs no node refuses", () => {
+  assert.equal(refusalCode(() => persist(persistable((draft, ncr) => {
+    for (const node of draft.nodes) ncr[node.node_ref] = CHILD_PROGRAM_REFS[0];
+  }))), "child_identity");
+});
+
+test("the accepted digest binds strictly more than the graph digest", () => {
+  const base = persist(persistable());
+  assert.match(base.graph_digest, /^sha256:[0-9a-f]{64}$/);
+  assert.match(base.accepted_digest, /^sha256:[0-9a-f]{64}$/);
+  assert.notEqual(base.accepted_digest, base.graph_digest);
+
+  // Each of the three governing facts moves the accepted digest and leaves the
+  // graph digest alone. That difference is the whole reason acceptance binds
+  // the accepted digest: a hash that omitted these would let what a descendant
+  // inherits change under an unchanged signature.
+  const childVersion = persist(persistable((draft, ncr, ci) => { ci["assurance-fabric"] = { child_version: 2 }; }));
+  const sourceBinding = persist(persistable((draft, ncr, ci) => {
+    ci["product-journeys"] = { accepted_plan_ref: "PLAN-22ff72ae82c5-v2" };
+  }));
+  const membership = persist(persistable((draft, ncr) => {
+    ncr[draft.nodes[0].node_ref] = CHILD_PROGRAM_REFS[1];
+  }));
+  const moved = new Set([base.accepted_digest]);
+  for (const [label, view] of [["child_version", childVersion],
+    ["accepted_plan_ref", sourceBinding], ["membership", membership]]) {
+    assert.equal(view.graph_digest, base.graph_digest, `${label} must not move the graph digest`);
+    assert.notEqual(view.accepted_digest, base.accepted_digest, `${label} must move the accepted digest`);
+    assert.ok(!moved.has(view.accepted_digest), `${label} must not collide with another change`);
+    moved.add(view.accepted_digest);
+  }
+});
+
+test("child versions are real and per-child, not hardcoded", () => {
+  const base = persist(persistable());
+  assert.deepEqual(base.child_bindings.map(b => b.child_version), [1, 1, 1, 1]);
+  const bumped = persist(persistable((draft, ncr, ci) => {
+    ci["foundation-and-control-plane"] = { child_version: 7 };
+    ci["rollout-and-retirement"] = { child_version: 3 };
+  }));
+  assert.deepEqual(bumped.child_bindings.map(b => b.child_version), [7, 1, 1, 3]);
+  assert.notEqual(bumped.accepted_digest, base.accepted_digest);
+  assert.equal(refusalCode(() => persist(persistable((d, n, ci) => {
+    ci["assurance-fabric"] = { child_version: 0 };
+  }))), "invalid_revision_version");
+});
+
+test("a child hashes its own content and the parent hashes the bindings", () => {
+  const base = persist(persistable());
+  for (const binding of base.child_bindings) {
+    const child = base.children.find(c => c.child_ref === binding.child_ref);
+    // The child digest is exactly the hash of the child's own content, so the
+    // parent can bind it without either hash depending on the other.
+    assert.equal(binding.child_digest, portfolioChildDigest({
+      child_ref: child.child_ref, child_version: child.child_version,
+      member_node_refs: child.member_node_refs, accepted_plan_ref: child.accepted_plan_ref,
+    }));
+  }
+  const preimage = portfolioAcceptedPreimage(persistable().draft, base.child_bindings);
+  assert.deepEqual(Object.keys(preimage).sort(), ["child_bindings", "graph", "schema_version"]);
+  assert.equal(preimage.schema_version, PORTFOLIO_ACCEPTED_SCHEMA_VERSION);
+  assert.equal(preimage.graph.schema_version, PORTFOLIO_REVISION_SCHEMA_VERSION);
+  for (const binding of preimage.child_bindings) {
+    assert.deepEqual(Object.keys(binding).sort(),
+      ["accepted_plan_ref", "child_digest", "child_ordinal", "child_ref", "child_version"]);
+  }
+});
+
+test("a substituted child digest, version or ordinal refuses in the accepted preimage", () => {
+  const base = persist(persistable());
+  const swap = mutate => {
+    const bindings = JSON.parse(JSON.stringify(base.child_bindings));
+    mutate(bindings);
+    return () => portfolioAcceptedPreimage(persistable().draft, bindings);
+  };
+  assert.equal(refusalCode(swap(b => { b[1].child_ref = "product-journeys"; })), "child_identity");
+  assert.equal(refusalCode(swap(b => { b[0].child_ordinal = 2; })), "child_identity");
+  assert.equal(refusalCode(swap(b => { b[0].child_digest = "not-a-digest"; })), "invalid_source_digest");
+  assert.equal(refusalCode(swap(b => { b[0].child_version = 0; })), "invalid_revision_version");
+  assert.equal(refusalCode(swap(b => { b.pop(); })), "child_count");
+  assert.equal(refusalCode(swap(b => { b[0].extra = "smuggled"; })), "unknown_field");
+});
+
+test("an absent source binding is an explicit null and gaining one changes the hash", () => {
+  const none = portfolioChildDigest({
+    child_ref: "assurance-fabric", child_version: 1,
+    member_node_refs: ["step:a-node"], accepted_plan_ref: null,
+  });
+  const omitted = portfolioChildDigest({
+    child_ref: "assurance-fabric", child_version: 1, member_node_refs: ["step:a-node"],
+  });
+  assert.equal(none, omitted, "absent and explicit null must mean the same thing");
+  const bound = portfolioChildDigest({
+    child_ref: "assurance-fabric", child_version: 1,
+    member_node_refs: ["step:a-node"], accepted_plan_ref: "PLAN-22ff72ae82c5-v2",
+  });
+  assert.notEqual(bound, none, "gaining a source binding must change the child hash");
+});
+
+test("the whole finite JavaScript budget domain is carried, magnitudes included", () => {
+  // An earlier draft refused 1e-7 and 1.5e-7 because PostgreSQL spells them
+  // differently. That was magnitude narrowing dressed up as a representation
+  // rule: 1e-7 is a value this contract accepts, so the canonicalizer has to
+  // render it, not the domain shrink to avoid it. These are the exact cases the
+  // numeric-parity finding named, plus the subnormal boundary.
+  const carried = [0, 1e-7, 1.5e-7, 1e-6, 1e-5, 12.5, 1e12,
+    1, 0.0001, 3.141592653589793, 5e-324];
+  const digests = new Set();
+  for (const ceiling of carried) {
+    const view = persist(persistable(draft => { draft.nodes[0].budget_ceiling = ceiling; }));
+    assert.match(view.accepted_digest, /^sha256:[0-9a-f]{64}$/, `${ceiling} must be carried`);
+    digests.add(view.accepted_digest);
+  }
+  assert.equal(digests.size, carried.length, "each distinct ceiling must hash distinctly");
+
+  // Out of the declared range still refuses; that is a domain bound, not a
+  // spelling preference.
+  assert.equal(refusalCode(() => persist(persistable(draft => {
+    draft.nodes[0].budget_ceiling = 1e13;
+  }))), "invalid_metadata");
+  assert.equal(refusalCode(() => persist(persistable(draft => {
+    draft.nodes[0].budget_ceiling = -1;
+  }))), "invalid_metadata");
+});
+
+test("the module renders budget numbers the way the database must match", () => {
+  // The canonical bytes are the contract the PostgreSQL canonicalizer is held
+  // to, so the exact spellings are asserted here rather than left implicit.
+  for (const [ceiling, spelling] of [[0, "0"], [1e-7, "1e-7"], [1.5e-7, "1.5e-7"],
+    [1e-6, "0.000001"], [1e-5, "0.00001"], [12.5, "12.5"], [1e12, "1000000000000"]]) {
+    const bytes = portfolioRevisionCanonicalBytes(revision(draft => {
+      draft.nodes[0].budget_ceiling = ceiling;
+    }));
+    assert.ok(bytes.includes(`"budget_ceiling":${spelling}`),
+      `${ceiling} must canonicalize as ${spelling}`);
+  }
+});
+
+test("the cross-layer fixture is exactly what this module produces", () => {
+  // The PostgreSQL gate asserts that the database reproduces
+  // cross_layer.js_expected for cross_layer's payload. That proof is only worth
+  // anything while js_expected really is THIS module's output, so it is
+  // re-derived here from the same inputs and compared field by field. If the
+  // canonicalizer, the child preimage or the accepted preimage ever changes,
+  // this test fails before the database gate can be quietly satisfied by a
+  // fixture that drifted to match it.
+  const cross = FIXTURE.cross_layer;
+  assert.ok(cross, "the fixture must carry a cross_layer block");
+
+  const persisted = revision(draft => {
+    for (const node of draft.nodes) Object.assign(node, cross.node_metadata[node.node_ref]);
+  });
+  const view = validatePortfolioRevisionForPersistence(
+    persisted, cross.node_child_refs, cross.child_inputs);
+
+  assert.equal(portfolioRevisionCanonicalBytes(persisted), cross.js_expected.graph_canonical_bytes);
+  assert.equal(view.graph_digest, cross.js_expected.graph_digest);
+  assert.equal(portfolioAcceptedCanonicalBytes(persisted, view.child_bindings),
+    cross.js_expected.accepted_canonical_bytes);
+  assert.equal(view.accepted_digest, cross.js_expected.accepted_digest);
+  assert.deepEqual(view.child_bindings.map(b => ({ ...b })), cross.js_expected.child_bindings);
+  assert.deepEqual(
+    Object.fromEntries(view.children.map(c => [c.child_ref, c.member_node_refs])),
+    cross.js_expected.child_member_node_refs);
+
+  // Both digests must be recomputable from the recorded bytes alone, so a
+  // reviewer can check either one by hand without running this module.
+  assert.equal(digest(JSON.parse(cross.js_expected.graph_canonical_bytes)),
+    cross.js_expected.graph_digest);
+  assert.equal(digest(JSON.parse(cross.js_expected.accepted_canonical_bytes)),
+    cross.js_expected.accepted_digest);
+});
+
+test("the cross-layer payload spans the whole accepted numeric domain", () => {
+  // A parity proof over one spelling proves one spelling. These are the vectors
+  // the independent review named, plus the neighbours that make a special-cased
+  // renderer fail: 1e-6 sits exactly at the JavaScript exponent threshold and
+  // 1e-4 at the PostgreSQL float8 text threshold, so the two layers disagree
+  // about how to spell them unless the canonicalizer is doing real work.
+  const spellings = FIXTURE.cross_layer.js_expected.budget_ceiling_canonical_text;
+  const carried = Object.values(spellings);
+  assert.equal(carried.length, MASTER_NODE_COUNT);
+  assert.equal(new Set(carried).size, MASTER_NODE_COUNT,
+    "every node must render distinctly, or a collision could hide a mismatch");
+  for (const required of ["5e-324", "1e-7", "0.000001", "12.5", "3.141592653589793",
+    "1000000000000"]) {
+    assert.ok(carried.includes(required), `the payload must carry ${required}`);
+  }
+  // Each recorded spelling is the one the canonical bytes actually contain.
+  const bytes = FIXTURE.cross_layer.js_expected.graph_canonical_bytes;
+  for (const spelling of carried) {
+    assert.ok(bytes.includes(`"budget_ceiling":${spelling}`),
+      `the canonical bytes must spell a budget as ${spelling}`);
+  }
 });

@@ -221,6 +221,9 @@ WRITE_ACTION_EXACT = {
     "review-deal",
     "review-engineering-slice",  # independent typed review is a persisted verdict;
                                    # other review-* actions include non-mutating reads
+    "review-portfolio-revision",  # the portfolio's independent review is a persisted
+                                    # pass/fail row the acceptance guard then reads, so it
+                                    # is a write for the same reason review-deal is
     "observe-memory",  # evidence-backed candidate write; exact because observe-* reads may exist
     "correct-memory",  # immutable successor write; exact transition
     "forget-memory",   # reversible suppression write; exact transition
