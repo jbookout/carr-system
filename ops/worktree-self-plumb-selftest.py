@@ -58,6 +58,7 @@ for required in (
         "52880de2-ab90-4673-b046-b74f900aa2de@2",
         "179be4b8-2fe0-418d-9503-52d1e33921d3@3",
         "80e6d24c-6b49-4765-80c3-e05c1025ba38",
+        "fetch the current section by its stable section ID",
         "an ordinary pull request",
         "Unattended dispatch remains disabled",
 ):
@@ -80,6 +81,16 @@ with contextlib.redirect_stdout(buf):
     emitted = mod.emit_delivery_policy(repo)
 if not emitted or buf.getvalue().strip() != policy:
     failures.append("SessionStart policy emission must equal the AGENTS.md block")
+claude = open(os.path.join(repo, "CLAUDE.md"), encoding="utf-8").read()
+if "Production stops at 0454" in claude:
+    failures.append("Claude boot instructions retain a stale migration frontier")
+for required in (
+        "read the current canonical migration and applicable release state",
+        "Historical migration and Work Request references are provenance",
+        "does not itself authorize a production migration",
+):
+    if required not in " ".join(claude.split()):
+        failures.append(f"Claude current-state boot guidance is missing: {required}")
 
 
 def git(*args: str, cwd: str) -> str:

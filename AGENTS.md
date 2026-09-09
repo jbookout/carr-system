@@ -40,6 +40,9 @@ The full current text is STORE doctrine
 `engineering-workflow-sop#00-scope-and-provenance`, section
 `52880de2-ab90-4673-b046-b74f900aa2de@2`, content hash
 `738549d556e0b238ada4ec28afc51e27d361640b3141e9cddf20ca7e652ee27d`.
+That version and hash record the approved policy's provenance. At runtime,
+fetch the current section by its stable section ID; do not use this observed
+snapshot as a current-version gate.
 
 - Continue the next unfinished DoctorCRE product task attended; preserve
   completed audits and reviews. The unattended engineering controller is not

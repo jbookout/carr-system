@@ -39,8 +39,16 @@ no credential (the receipted break-glass close stays a human's call) and it is
 not `call-verb` — never reach for that generic passthrough to get at a verb
 the classifier declined; that is working around a denial rather than filing it.
 
-## Parked migration lane
-Production stops at 0454; CI green is not applied. Urgent rows: WR-000046 break-glass law, doctrine frontier-finding-program. Activation: WR-000048.
+## Current migration and release state
+
+Do not infer the current production migration or release frontier from a static
+number or a historical incident in this file. Before reporting that state or
+treating it as a blocker, read the current canonical migration and applicable
+release state through the repository's current readback paths and the record
+layer. Historical migration and Work Request references are provenance, not
+current blockers. A source merge or green CI does not itself authorize a
+production migration, release, destructive action, or unattended activation;
+keep the applicable approval and verification boundaries.
 
 ## Map work has one mandatory front door
 
