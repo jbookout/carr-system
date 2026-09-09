@@ -15,7 +15,7 @@ import time
 import uuid
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import psycopg
 from psycopg import sql
@@ -72,7 +72,7 @@ REQUIRED_FUNCTIONS = [
 ]
 
 
-def fail(message: str) -> None:
+def fail(message: str) -> NoReturn:
     print(f"control-plane-db-gate FAILED: {message}", file=sys.stderr)
     raise SystemExit(1)
 
@@ -215,7 +215,7 @@ def workflow_truth_race_gate(dsn: str) -> None:
                     # no append-only row behind to clean up.
                     cur.execute("select (ops.enqueue_job(%s,1,%s,%s,%s,'shadow')).id",
                                 (key, slot, '{"fixture":"race"}', f"race-{name}-{uuid.uuid4()}"))
-                    job = cur.fetchone()[0]
+                    job = fetchone_required(cur.fetchone(), "concurrent enqueue result")[0]
                     time.sleep(0.25)
                     conn.commit()
                     outcome[name] = ("committed", str(job))
