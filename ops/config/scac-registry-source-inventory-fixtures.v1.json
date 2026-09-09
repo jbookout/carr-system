@@ -28749,9 +28749,9 @@
   ],
   "current_source_review": {
     "base_version": "v20",
-    "reason": "WR54 controlled-failure seam at the v20 frontier. Two existing ingresses changed source and none was added: github-workflow:backup-nightly.yml (three-mode gate plus two optional workflow_dispatch proof inputs) moves schema_digest, handler_digest and trigger_contract_digest while its permissions_contract_digest and delegate set stay byte-identical; and script-entrypoint:ops/backup-workflow-status.py (validate-controlled-failure and controlled-failure commands) moves schema_digest and handler_digest only. Registering the backup-nightly-cloud service in ops/config/services.json additionally propagates a new physical_authority_catalog_digests.services value to every launchd-workflow row, because that field is the sha256 of the services catalog itself; that propagation is a catalog-baseline consequence, not a change of authority on any launchd ingress. No new ingress, no successor, no delegate or permission expansion. Frozen v1-v20 inventories and the entry-set seal are unchanged.",
+    "reason": "WR54 controlled-failure seam at the v20 frontier. Two existing ingresses changed source and none was added: github-workflow:backup-nightly.yml (three-mode gate plus two optional workflow_dispatch proof inputs) moves schema_digest, handler_digest and trigger_contract_digest while its permissions_contract_digest and delegate set stay byte-identical; and script-entrypoint:ops/backup-workflow-status.py (validate-controlled-failure and controlled-failure commands) moves schema_digest and handler_digest only. Registering the backup-nightly-cloud service in ops/config/services.json additionally propagates a new physical_authority_catalog_digests.services value to every launchd-workflow row, because that field is the sha256 of the services catalog itself; that propagation is a catalog-baseline consequence, not a change of authority on any launchd ingress. No new ingress, no successor, no delegate or permission expansion. Frozen v1-v20 inventories and the entry-set seal are unchanged. Product-first coding-session boot delivery additionally changes the existing script-entrypoint:hooks/worktree-self-plumb.py source digest only, moving its schema_digest and handler_digest together while every authority, effect, principal, request, delegate and admission field remains unchanged. No ingress or authority is added; frozen v1-v20 inventories and the entry-set seal remain unchanged.",
     "expected_count": 828,
-    "expected_sha256": "1e0379fd13ec5a791c926e194c3b903964bb987d0a644e312ed68fbffda209f5",
+    "expected_sha256": "4624795ab0949423387127a9440277e4d1ef19c914a39b57ae940567f78fa22d",
     "upsert": [
       {
         "ingress_key": "github-workflow:backup-nightly.yml",
@@ -29700,6 +29700,29 @@
           "services": "sha256:541ab200fdbb590e2a311b9db0051f47289c9b22f9497b3fe3d13aa6cd6baeaa",
           "legacy_schedule_launchd": "sha256:4c35c823ba16ec7a31fc1afd96f6a2c2e19a59fa7cde0399756db736074c84a8"
         },
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
+        "ingress_key": "script-entrypoint:hooks/worktree-self-plumb.py",
+        "ingress_kind": "script_entrypoint",
+        "operation": "hooks/worktree-self-plumb.py",
+        "effect_class": "administrative_mutation",
+        "source_locator": "hooks/worktree-self-plumb.py",
+        "schema_digest": "af7caf4a230f3d3903cb411e51b6e8a717a6d15a18e78d16229441cd249b5020",
+        "handler_digest": "af7caf4a230f3d3903cb411e51b6e8a717a6d15a18e78d16229441cd249b5020",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "existing_script_specific_credential_boundary",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [],
+        "request_shape": "fixed_script_cli_contract",
+        "idempotency_mode": "script_specific_registered_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
         "owner_package": "11",
         "implementation_state": "inventoried_not_atomically_mediated",
         "classification_authorizing": false

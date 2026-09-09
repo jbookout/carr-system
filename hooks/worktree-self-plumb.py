@@ -127,6 +127,40 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # bin/worktree.sh's link(), never duplicated here (rule a8c55a47).
 PLUMB_LINKS = (".venv", "out", os.path.join("mcp-server", "node_modules"))
 
+# One canonical source for the active operating policy. Codex reads
+# AGENTS.md directly; Claude Code receives this exact block from its existing
+# carr-system SessionStart hook. Keeping the prose in AGENTS.md and extracting
+# it here prevents two boot copies from drifting while both look authoritative.
+POLICY_START = "<!-- carr-product-first-policy:start -->"
+POLICY_END = "<!-- carr-product-first-policy:end -->"
+
+
+def delivery_policy_brief(repo):
+    """Return the active AGENTS policy block, or empty on any mismatch.
+
+    This is advisory boot delivery. It grants no mutation, production,
+    destructive-action, or unattended authority, and it never blocks startup.
+    """
+    try:
+        text = open(os.path.join(repo, "AGENTS.md"), encoding="utf-8").read()
+        if text.count(POLICY_START) != 1 or text.count(POLICY_END) != 1:
+            return ""
+        start = text.index(POLICY_START) + len(POLICY_START)
+        end = text.index(POLICY_END, start)
+        body = text[start:end].strip()
+        return body if body else ""
+    except Exception:
+        return ""
+
+
+def emit_delivery_policy(repo):
+    """Emit the advisory policy for a SessionStart hook when it is present."""
+    policy = delivery_policy_brief(repo)
+    if not policy:
+        return False
+    print(policy)
+    return True
+
 # ── orphan reaper thresholds — the 2026-08-18 sweep's proven rules ─────────
 REAP_MIN_IDLE_S = 6 * 3600     # index younger than this = possibly-live session
 REAP_LOCK_STALE_S = 2 * 3600   # a lock older than this belongs to a dead reaper
@@ -517,6 +551,8 @@ def main():
 
         toplevel = os.path.realpath(toplevel)
         canon = canonical_root(REPO)
+
+        emit_delivery_policy(toplevel)
 
         if toplevel != canon:
             # If this hook fired at all, cwd is under a worktree that carries

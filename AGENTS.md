@@ -31,6 +31,42 @@ boot path until his 2026-08-21 cutoff plus an emergency fallback for everyone
 else, and they are only as fresh as the last hourly export. A silent fallback
 is worse than a loud failure.
 
+## Active product-first delivery policy
+
+<!-- carr-product-first-policy:start -->
+Decision `019146bd-15fb-4f5e-8849-ed63911469e0` is the canonical record for
+this policy and remains in force until a later decision supersedes it.
+The full current text is STORE doctrine
+`engineering-workflow-sop#00-scope-and-provenance`, section
+`52880de2-ab90-4673-b046-b74f900aa2de@2`, content hash
+`738549d556e0b238ada4ec28afc51e27d361640b3141e9cddf20ca7e652ee27d`.
+That version and hash record the approved policy's provenance. At runtime,
+fetch the current section by its stable section ID; do not use this observed
+snapshot as a current-version gate.
+
+- Continue the next unfinished DoctorCRE product task attended; preserve
+  completed audits and reviews. The unattended engineering controller is not
+  its prerequisite. Unattended dispatch remains disabled.
+- Do not put a new Work Request ahead of product work unless it names the
+  product task it blocks and Joe agrees. Existing substrate work may finish but
+  may not spawn child Work Requests. Backlog a substrate follow-up with the
+  product task it blocks; do not build it in-session under the older general
+  follow-up rule. Active follow-up rule
+  `179be4b8-2fe0-418d-9503-52d1e33921d3@3`, amendment
+  `80e6d24c-6b49-4765-80c3-e05c1025ba38`, carries this scoped exception.
+- Use the light path when a change has no production migration, Worker release,
+  deletion, credential change, or unattended run: isolated branch, relevant
+  local verification, an ordinary pull request, hosted CI as the merge gate,
+  merge, and delivery verification. It needs no Work Request, Work Shape, plan
+  hash, cross-family review, or outcome feedback. Any named production effect
+  uses the existing heavy path.
+
+Reuse verified evidence while its relevant source or contract remains
+unchanged. A blocker must name the concrete missing fact, authority, or external
+dependency. Run independent authorized work in parallel isolated worktrees.
+Existing production and destructive-action safeguards remain in force.
+<!-- carr-product-first-policy:end -->
+
 ## This repo is the ONLY code home
 
 `jbookout/carr-system`. The record layer, the MCP server, every migration and all
