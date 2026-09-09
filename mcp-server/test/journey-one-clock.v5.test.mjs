@@ -142,6 +142,8 @@ test("a structurally wrong minimum refuses the projection even beside an admissi
 });
 
 test("two minimums sharing an observed_at pick a digest-ordered origin, not an array-ordered one", () => {
+  // Both were admitted at the same instant as well, so the admission-ordered
+  // selector reaches its tie-break and answers on the receipt digest alone.
   const one = minimum(), two = { ...minimum(), evidence_ref: "safe:synthetic:min-evidence-two" };
   const expected = [digest(one), digest(two)].sort()[0];
   const forward = snapshot(), reverse = snapshot();
@@ -149,6 +151,34 @@ test("two minimums sharing an observed_at pick a digest-ordered origin, not an a
   reverse.minimum_history = [{ admitted_at: ORIGIN, receipt: two }, { admitted_at: ORIGIN, receipt: one }];
   assert.equal(run(forward).state.origin_receipt_digest, expected);
   assert.equal(run(reverse).state.origin_receipt_digest, expected);
+});
+
+test("a later admission of an earlier observation appends instead of rebasing the origin", () => {
+  // The origin receipt passed at 15:00 and was admitted at that same instant.
+  const p = snapshot("2026-09-09T16:00:00.000Z");
+  const before = run(p);
+  assert.equal(before.state.origin_at, ORIGIN);
+  // This one was observed an hour EARLIER but only reached the authoritative
+  // inventory the next morning, still inside its own TTL. It is fully
+  // admissible and an authoritative inventory cannot shed it, so selecting the
+  // origin by observed_at would rebase — and then permanently brick — a clock
+  // that was already running. Selection is by admission; the selected receipt's
+  // observed_at is still the fixed origin.
+  const earlier = { admitted_at: "2026-09-10T10:00:00.000Z", receipt: minimum("2026-09-09T14:00:00.000Z") };
+  p.history = before.state; p.as_of = "2026-09-10T12:00:00.000Z";
+  p.minimum_history.push(copy(earlier));
+  const after = run(p);
+  assert.equal(after.state.origin_at, ORIGIN);
+  assert.equal(after.state.origin_receipt_digest, digest(minimum()));
+  assert.equal(after.state.base_deadline_at, "2026-10-09T15:00:00.000Z");
+  assert.equal(after.state.due_at, "2026-10-09T15:00:00.000Z");
+  assert.deepEqual(after.state.events, before.state.events);
+  // Read fresh, the same two admissions choose the same origin.
+  const fresh = snapshot("2026-09-10T12:00:00.000Z");
+  fresh.minimum_history.push(copy(earlier));
+  const clean = run(fresh);
+  assert.equal(clean.state.origin_at, ORIGIN);
+  assert.equal(clean.state.origin_receipt_digest, digest(minimum()));
 });
 
 test("missing minimum and duplicates refuse", () => {
@@ -226,6 +256,37 @@ test("a replacement benchmark manifest needs an exact partner amendment and neve
   refuse(ahead, "benchmark_accepted_in_the_future");
 });
 
+test("a recorded amendment cannot be silently rolled back to the origin manifest", () => {
+  const p = snapshot("2026-09-10T15:00:00.000Z");
+  p.history = run(p).state;
+  p.benchmark.manifest_digest = D(9);
+  p.benchmark.accepted_at = "2026-09-10T12:00:00.000Z";
+  p.amendments = [amend(p.history.origin_receipt_digest, "2026-09-10T13:00:00.000Z", { manifest: D(9) })];
+  const amended = run(p);
+  assert.equal(amended.state.current_benchmark_manifest_digest, D(9));
+  assert.equal(amended.benchmark_amended, true);
+  // Reverting to the originating manifest is a replacement of the CURRENT one,
+  // and the amendment that authorized D(9) is not evidence for un-amending it.
+  // The pre-origin acceptance the fresh path relies on is presented here too, so
+  // the only thing missing is the authorization.
+  const rollback = copy(p);
+  rollback.history = amended.state; rollback.as_of = "2026-09-11T15:00:00.000Z";
+  rollback.benchmark.manifest_digest = D(8);
+  rollback.benchmark.accepted_at = iso(Date.parse(ORIGIN) - HOUR);
+  refuse(rollback, "unamended_benchmark_replacement");
+  // A second exact partner amendment naming D(8) authorizes the return.
+  const authorized = copy(rollback);
+  authorized.amendments.push(amend(amended.state.origin_receipt_digest, "2026-09-11T13:00:00.000Z", { name: "revert", manifest: D(8) }));
+  const reverted = run(authorized);
+  assert.equal(reverted.state.current_benchmark_manifest_digest, D(8));
+  assert.equal(reverted.state.origin_benchmark_manifest_digest, D(8));
+  assert.equal(reverted.benchmark_amended, false);
+  assert.equal(reverted.state.events.filter(e => e.type === "amendment_recorded").length, 2);
+  // Presenting the current manifest again needs no further amendment.
+  const unchanged = copy(p); unchanged.history = amended.state; unchanged.as_of = "2026-09-11T15:00:00.000Z";
+  assert.equal(run(unchanged).state.current_benchmark_manifest_digest, D(9));
+});
+
 test("an exact partner amendment appends metadata without resetting origin or deadline", () => {
   const p = snapshot("2026-09-10T15:00:00.000Z"); const before = run(p);
   p.amendments = [amend(before.state.origin_receipt_digest, p.as_of)]; p.history = before.state;
@@ -284,6 +345,34 @@ test("kernel receipt exact schema, identities, currentness, scope and digests ar
   for (const [key, value, code] of cases) { const p = snapshot(); p.completion = completed(ORIGIN); p.completion.receipts[0][key] = value; refuse(p, code); }
   const lapsed = snapshot("2026-09-11T15:00:00.000Z");
   lapsed.completion = completed(ORIGIN); refuse(lapsed, "receipt_not_current");
+});
+
+test("a recorded completion survives its receipt lapsing and stops being currently usable", () => {
+  const p = snapshot("2026-10-01T15:00:00.000Z"); p.completion = completed(p.as_of);
+  const done = run(p);
+  assert.equal(done.state.status, "completed_on_time"); assert.equal(done.completion_currently_usable, true);
+  // The SAME honest inventory, read two days later: the terminus receipt is no
+  // longer current, but the completion it evidenced is already a recorded fact.
+  // Reading the truthful record must not be worse than withholding it.
+  p.history = done.state; p.as_of = "2026-10-03T15:00:00.000Z";
+  const lapsed = run(p);
+  assert.equal(lapsed.state.status, "completed_on_time");
+  assert.equal(lapsed.state.completion_receipt_digest, done.state.completion_receipt_digest);
+  assert.equal(lapsed.state.completion_observed_at, done.state.completion_observed_at);
+  assert.equal(lapsed.deadline_success, true);
+  assert.equal(lapsed.completion_currently_usable, false);
+  assert.deepEqual(lapsed.state.events, done.state.events);
+  // A completion this clock never recorded still refuses when it is not current,
+  // and a lapsed receipt that is not the recorded one refuses as well.
+  const fresh = snapshot("2026-10-03T15:00:00.000Z");
+  fresh.completion = completed("2026-10-01T15:00:00.000Z");
+  refuse(fresh, "receipt_not_current");
+  const other = copy(p); other.completion = completed("2026-10-01T16:00:00.000Z");
+  refuse(other, "receipt_not_current");
+  // Currentness is the only refusal softened, and only for the exact recorded
+  // receipt. Every other defect stays fatal in an authoritative inventory.
+  const broken = copy(p); broken.completion.receipts[0].status = "stale";
+  refuse(broken, "nonpassing_receipt");
 });
 
 // --- pauses: actual elapsed hours, capped, approved in advance --------------
@@ -361,6 +450,50 @@ test("later report of an earlier pass cannot erase an already recorded miss", ()
   const p = snapshot("2026-10-09T15:00:00.001Z"); p.history = run(p).state;
   p.completion = completed("2026-10-09T15:00:00.000Z");
   const r = run(p); assert.equal(r.state.status, "completed_late"); assert.equal(r.deadline_success, false);
+});
+
+test("a late reported pause recomputes due_at without un-missing an immutable miss", () => {
+  const p = snapshot("2026-10-09T15:00:00.001Z");
+  const missed = run(p);
+  assert.equal(missed.state.miss_at, "2026-10-09T15:00:00.000Z");
+  assert.equal(missed.state.status, "missed");
+  // A blocker pause approved a week before the deadline, reported an hour after
+  // the miss was recorded. Its actual elapsed hours are credited, so the CURRENT
+  // deadline moves past the recorded miss instant. The miss is a historical fact
+  // about an instant that passed with no completion: it is not recomputed, not
+  // erased, and does not become on time. Both facts stay in the record.
+  p.history = missed.state; p.as_of = "2026-10-09T16:00:00.000Z";
+  p.pauses = [pause(p, "2026-10-01T14:00:00.000Z", "2026-10-05T14:00:00.000Z", "late-report", "dell", "2026-10-01T13:00:00.000Z")];
+  const after = run(p);
+  assert.equal(after.state.paused_ms, 96 * HOUR);
+  assert.equal(after.state.due_at, "2026-10-13T15:00:00.000Z");
+  assert.equal(after.state.miss_at, missed.state.miss_at);
+  assert.equal(Date.parse(after.state.due_at) > Date.parse(after.state.miss_at), true);
+  assert.equal(after.state.status, "missed");
+  assert.equal(after.replan_required, true);
+  assert.equal(after.deadline_success, false);
+  assert.deepEqual(after.state.events.slice(0, missed.state.events.length), missed.state.events);
+  // That divergence is readable again: the miss stays bound to its own event,
+  // never to the recomputed deadline.
+  p.history = after.state; p.as_of = "2026-10-09T17:00:00.000Z";
+  const again = run(p);
+  assert.equal(again.state.miss_at, missed.state.miss_at);
+  assert.equal(again.state.due_at, after.state.due_at);
+  assert.equal(again.state.status, "missed");
+});
+
+test("a miss instant a history's own event does not attest refuses", () => {
+  const p = snapshot("2026-10-10T15:00:00.000Z");
+  const missed = copy(run(p).state);
+  assert.equal(missed.miss_at, "2026-10-09T15:00:00.000Z");
+  assert.equal(missed.events.at(-1).type, "deadline_missed");
+  assert.equal(missed.events.at(-1).at, missed.miss_at);
+  assert.equal(missed.events.at(-1).evidence_digest,
+    digest(["deadline_missed", missed.miss_at, missed.origin_receipt_digest]));
+  for (const forged of ["2027-01-01T00:00:00.000Z", "2026-10-09T14:59:59.999Z"]) {
+    p.history = reseal({ ...copy(missed), miss_at: forged });
+    refuse(p, "erased_miss_history");
+  }
 });
 
 test("a second, different terminus receipt cannot replace a recorded completion", () => {
@@ -441,6 +574,22 @@ test("JSON verification flags cannot authenticate a snapshot", () => {
   assert.throws(() => clock.evaluate({}), e => e.code === "invalid_object");
   const wrong = createJourneyOneClock({ verifySnapshot: () => ({ envelope_digest: D(99), snapshot: snapshot() }) });
   assert.throws(() => wrong.evaluate({}), e => e.code === "verification_binding_mismatch");
+});
+
+test("a custom array prototype cannot smuggle a value past validation", () => {
+  // copy() is JSON.stringify, which honours an inherited toJSON, so an array
+  // with an exotic prototype could hand back a value no clause ever validated —
+  // here the exact "__proto__" key the hidden-key clause exists to refuse.
+  const exotic = () => {
+    const arr = [];
+    Object.setPrototypeOf(arr, { toJSON: () => JSON.parse('{"__proto__":{"polluted":true}}') });
+    return arr;
+  };
+  assert.throws(() => harness().clock.evaluate({ minimum_history: exotic() }), e => e.code === "invalid_object");
+  const clock = createJourneyOneClock({ verifySnapshot: envelope => ({ envelope_digest: digest(envelope), snapshot: { pauses: exotic() } }) });
+  assert.throws(() => clock.evaluate({}), e => e.code === "invalid_object");
+  // An ordinary array is untouched by the check.
+  assert.equal(run(snapshot()).state.status, "running");
 });
 
 test("closed projections, hidden fields, mutation and side effects remain bounded", () => {

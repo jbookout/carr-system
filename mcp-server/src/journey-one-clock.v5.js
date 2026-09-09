@@ -12,6 +12,13 @@
 //     Returning a history does not claim it was persisted; the caller owns the
 //     durable append, which is why every result carries
 //     durable_history_write_required.
+//   * ANTI-ROLLBACK LIVES IN THAT ADAPTER, not here. readHistory below proves a
+//     history is internally consistent and self-bound; every digest in it is
+//     computable by whoever supplies it, so an OLDER GENUINE history replays
+//     unless the durable store compare-and-swaps on the exact prior
+//     history_digest and refuses a write whose prior does not match the stored
+//     one. Sticky miss_at, the recorded amendment set and
+//     origin_benchmark_manifest_digest are each defended by that CAS alone.
 //   * The terminus accepts exactly one rollout-component-receipt.v1 and checks
 //     `all_current_exact_distinct_pass` as an exact contract string rather than
 //     re-implementing it, so "distinct" does no work at arity one.
@@ -82,7 +89,12 @@ function json(value, path = "input") {
   }
   if (typeof value === "number" && Number.isFinite(value)) return;
   if (typeof value !== "object" || value === null) fail("not_json", path);
-  if (!Array.isArray(value) && ![Object.prototype, null].includes(Object.getPrototypeOf(value))) fail("invalid_object", path);
+  // Arrays are checked against Array.prototype for the same reason objects are
+  // checked against Object.prototype: copy() is JSON.stringify, which honours an
+  // inherited toJSON, so an exotic prototype could hand back a value no clause
+  // here ever read. Unreachable from wire JSON, like every other clause.
+  const proto = Object.getPrototypeOf(value);
+  if (Array.isArray(value) ? proto !== Array.prototype : ![Object.prototype, null].includes(proto)) fail("invalid_object", path);
   if (Object.getOwnPropertySymbols(value).length) fail("hidden_key", path);
   for (const key of Object.getOwnPropertyNames(value)) {
     if (Array.isArray(value) && key === "length") continue;
@@ -137,6 +149,17 @@ export function chicagoThirtyDayDeadline(origin) {
     due_at: candidates.length === 1 ? iso(candidates[0]) : null,
     reason_id: candidates.length === 0 ? "nonexistent_chicago_wall_time" : candidates.length > 1 ? "ambiguous_chicago_wall_time" : "same_chicago_wall_time_after_30_dates" });
 }
+/**
+ * `actor_id` is an identity.js actor SLUG — the exact strings isKnownPartner is
+ * keyed on, e.g. "joe" — never an email, display name or record id.
+ * `authority_class` is NOT a self-asserted string either: the trusted verifier
+ * must set it from identity.js's authorizationClassForActor over the LIVE
+ * actor, exactly as global-boundaries.v5.js derives it, and must never read it
+ * back out of a stored record. A pure kernel cannot derive either field from
+ * {actor_id, session_ref, authority_class}, so the partner test below is only
+ * ever as strong as that seam: a projection that copies a stored class string
+ * turns this check into the caller boolean the header forbids.
+ */
 function identity(value, partner = false) {
   closed(value, IDENTITY, "identity"); ref(value.session_ref, "session:");
   if (typeof value.actor_id !== "string" || !value.actor_id || typeof value.authority_class !== "string" || !value.authority_class) fail("invalid_identity");
@@ -238,7 +261,14 @@ function readHistory(history, now) {
   }
   if (history.events[0].type !== "clock_started" || history.events[0].evidence_digest !== history.origin_receipt_digest ||
       stamp(history.events[0].at) !== origin) fail("corrupt_history");
-  if ((history.miss_at !== null) !== history.events.some(e => e.type === "deadline_missed")) fail("erased_miss_history");
+  // A miss instant is bound to its own event exactly, as a completion is: a
+  // history may not echo a miss_at that its recorded event does not attest.
+  // The binding is against miss_at and not due_at on purpose — due_at is
+  // recomputed every evaluation, miss_at is the historical fact.
+  const recordedMiss = history.events.filter(e => e.type === "deadline_missed");
+  if ((history.miss_at !== null) !== (recordedMiss.length > 0)) fail("erased_miss_history");
+  if (history.miss_at !== null && (recordedMiss.length !== 1 || recordedMiss[0].at !== history.miss_at ||
+      recordedMiss[0].evidence_digest !== digest(["deadline_missed", history.miss_at, history.origin_receipt_digest]))) fail("erased_miss_history");
   const recordedCompletion = history.events.find(e => e.type === "completion_observed") ?? null;
   if ((history.completion_receipt_digest !== null) !== (recordedCompletion !== null)) fail("erased_completion_history");
   if (recordedCompletion && (recordedCompletion.evidence_digest !== history.completion_receipt_digest ||
@@ -268,10 +298,21 @@ export function createJourneyOneClock({ verifySnapshot } = {}) {
     same(benchmark.deadline_contract, JOURNEY_ONE_DEADLINE_CONTRACT, "wrong_deadline_contract");
     for (const k of ["subject_digest", "candidate_digest", "policy_digest"]) if (benchmark[k] !== b[k]) fail("benchmark_binding_mismatch");
 
-    // ORIGIN. The first admissible current passing minimum, by its own
-    // observed_at — not by inventory order, and not by whether its TTL has since
-    // lapsed. Ties break on the receipt digest so two receipts sharing an
-    // observed_at cannot make the answer depend on array order.
+    // ORIGIN. The FIRST current passing minimum that made Journey 1 admissible,
+    // selected by the instant it was ADMITTED to the authoritative ledger and
+    // then read for its own observed_at — not by inventory order, and not by
+    // whether its TTL has since lapsed.
+    // Admission order, not observation order, is what makes the origin
+    // structurally immutable. An append-only inventory can only ever gain LATER
+    // admissions, so a receipt observed earlier but admitted later — produced
+    // yesterday afternoon, admitted this morning inside its TTL — is an ordinary
+    // fact that appends honestly. Selecting on observed_at instead would let
+    // that ordinary admission rebase a running clock, which is not a repairable
+    // state: the inventory is authoritative and cannot shed it, and an amendment
+    // preserves the origin by definition, so every later evaluation would refuse
+    // and the deadline being tracked would become unreadable rather than wrong.
+    // Ties break on the receipt digest so two receipts sharing an admitted_at
+    // cannot make the answer depend on array order.
     if (!Array.isArray(p.minimum_history) || !p.minimum_history.length) fail("origin_unavailable");
     let first = null, inadmissible = 0; const seen = new Set();
     for (const admission of p.minimum_history) {
@@ -286,8 +327,8 @@ export function createJourneyOneClock({ verifySnapshot } = {}) {
         if (e instanceof JourneyOneClockError && INADMISSIBLE.has(e.code)) { inadmissible += 1; continue; }
         throw e;
       }
-      if (!first || observed < first.observed ||
-          (observed === first.observed && receiptDigest < first.receiptDigest)) first = { observed, receiptDigest };
+      if (!first || admitted < first.admitted ||
+          (admitted === first.admitted && receiptDigest < first.receiptDigest)) first = { observed, admitted, receiptDigest };
     }
     if (!first) fail("origin_unavailable", { inadmissible_admissions: inadmissible });
 
@@ -330,12 +371,20 @@ export function createJourneyOneClock({ verifySnapshot } = {}) {
     // future-dated acceptance is also at-or-after the origin; testing lateness
     // first would report the weaker refusal and leave the future-dated case
     // unreachable there. A replacement reaches the future check on its own.
+    // Replacing the CURRENT manifest is what needs the amendment, and returning
+    // to the originating manifest after a recorded amendment is a replacement
+    // too. A partner-signed amendment is evidence for the change it names, never
+    // evidence for un-making it, so a rollback needs its own exact amendment
+    // naming the manifest it returns to. Without that, a caller could silently
+    // revert a signed amendment with no counter-evidence at all, and the result
+    // would carry an amendment_recorded event naming a manifest it simultaneously
+    // reported as not current.
     const originManifest = old ? old.origin_benchmark_manifest_digest : benchmark.manifest_digest;
+    const currentManifest = old ? old.current_benchmark_manifest_digest : benchmark.manifest_digest;
     const acceptedAt = stamp(benchmark.accepted_at);
     if (acceptedAt > now) fail("benchmark_accepted_in_the_future");
-    if (benchmark.manifest_digest === originManifest) {
-      if (acceptedAt >= first.observed) fail("benchmark_not_accepted_before_origin");
-    } else if (!amendedManifests.has(benchmark.manifest_digest)) fail("unamended_benchmark_replacement");
+    if (benchmark.manifest_digest === originManifest && acceptedAt >= first.observed) fail("benchmark_not_accepted_before_origin");
+    if (benchmark.manifest_digest !== currentManifest && !amendedManifests.has(benchmark.manifest_digest)) fail("unamended_benchmark_replacement");
     state.current_benchmark_manifest_digest = benchmark.manifest_digest;
 
     const intervals = [], pauseIds = new Set();
@@ -369,10 +418,27 @@ export function createJourneyOneClock({ verifySnapshot } = {}) {
       if (p.completion.gate_id !== JOURNEY_ONE_DEADLINE_CONTRACT.clock_terminus_gate_id || p.completion.combiner !== "all_current_exact_distinct_pass") fail("wrong_terminus_gate");
       same(p.completion.obligation_decision_ids, JOURNEY_ONE_DEADLINE_CONTRACT.kernel_obligation_decision_ids, "wrong_kernel_obligations");
       if (!Array.isArray(p.completion.receipts) || p.completion.receipts.length !== 1) fail("missing_or_duplicate_kernel_receipt");
-      const r = p.completion.receipts[0], observed = receipt(r, true, b, now);
-      if (observed < first.observed) fail("completion_before_origin");
-      completion = { observed, receiptDigest: digest(r) };
-      if (state.completion_receipt_digest !== null && state.completion_receipt_digest !== completion.receiptDigest) fail("completion_history_replacement");
+      const r = p.completion.receipts[0], receiptDigest = digest(r);
+      // A completion this clock already recorded is a historical fact, and the
+      // truthful inventory keeps carrying its terminus receipt after the TTL
+      // lapses. Reading that honest inventory must not make the recorded
+      // completion unreadable — the alternative is a verifier forced to withhold
+      // evidence it holds, which is the opposite of the completeness this file
+      // demands of pauses and amendments. The fact survives; only its current
+      // usability lapses, exactly as it does for a lapsed minimum. A receipt this
+      // clock never recorded still refuses when it is not current, and every
+      // other refusal stays fatal.
+      let observed = null;
+      try { observed = receipt(r, true, b, now); }
+      catch (e) {
+        if (!(state.completion_receipt_digest === receiptDigest &&
+            e instanceof JourneyOneClockError && e.code === "receipt_not_current")) throw e;
+      }
+      if (observed !== null) {
+        if (observed < first.observed) fail("completion_before_origin");
+        completion = { observed, receiptDigest };
+      }
+      if (state.completion_receipt_digest !== null && state.completion_receipt_digest !== receiptDigest) fail("completion_history_replacement");
     }
     // Completion is a FACT and is recorded whether or not the deadline resolved.
     // Only the on-time judgement depends on a resolvable deadline.
@@ -397,6 +463,17 @@ export function createJourneyOneClock({ verifySnapshot } = {}) {
         if (start <= baseMs + pauseMs) pauseMs = Math.min(CAP, pauseMs + end - start);
       }
       state.paused_ms = pauseMs; state.due_at = iso(baseMs + pauseMs);
+      // miss_at and due_at answer two different questions and are allowed to
+      // disagree. due_at is the CURRENT deadline, recomputed from the whole
+      // inventory every evaluation; miss_at is the HISTORICAL fact that a
+      // deadline once passed with no completion, and it is written once. A pause
+      // legitimately approved before the deadline but reported after the miss
+      // credits its actual elapsed hours, so due_at can move PAST an existing
+      // miss_at. That does not erase or reinterpret the miss: a settled miss is
+      // immutable, a later pass is completed_late and never retroactively on
+      // time, and replan stays required. Both facts stay readable in the record
+      // rather than one being invented away, and this kernel adds no new refusal
+      // for the ordinary late report that produced them.
       if (state.miss_at === null && stop > baseMs + pauseMs) {
         state.miss_at = state.due_at;
         pending.push(["deadline_missed", stamp(state.miss_at), digest(["deadline_missed", state.due_at, state.origin_receipt_digest])]);
