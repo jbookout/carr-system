@@ -50,13 +50,28 @@ function id(value, field, ToolError) {
   if (!ID.test(result)) error(ToolError, { error: "engineering_identifier_invalid", field });
   return result;
 }
+// The same closed ID regex, applied to the value exactly as the producer wrote
+// it.  id() above tests text()'s TRIMMED value and then hands the caller that
+// trimmed copy, but every plan call site discards the return and keeps the raw
+// string, so " slice:one " passed admission and was then sealed, stored and
+// compared under an identity nothing else recognises.  The portable validator
+// (engineering_passport._str(identifier=True)) and the SQL validators have
+// always matched the raw value, so this is the identifier contract already in
+// force at the other boundaries, applied here with the same regex.  A padded
+// identifier is refused, never trimmed into an accepted identity: rewriting it
+// would silently change the sealed plan_digest content.
+function exactId(value, field, ToolError) {
+  if (typeof value !== "string" || !value.trim()) error(ToolError, { error: "engineering_field_required", field });
+  if (!ID.test(value)) error(ToolError, { error: "engineering_identifier_invalid", field });
+  return value;
+}
 function digest(value, field, ToolError) {
   if (typeof value !== "string" || !DIGEST.test(value)) error(ToolError, { error: "engineering_digest_invalid", field });
   return value;
 }
-function evidence(value, field, ToolError) {
+function evidence(value, field, ToolError, identifier = id) {
   if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).sort().join(",") !== "content_digest,redaction_class,ref") error(ToolError, { error: "engineering_evidence_invalid", field });
-  id(value.ref, `${field}.ref`, ToolError);
+  identifier(value.ref, `${field}.ref`, ToolError);
   digest(value.content_digest, `${field}.content_digest`, ToolError);
   if (!["metadata_only", "redacted_evidence"].includes(value.redaction_class)) error(ToolError, { error: "engineering_evidence_invalid", field });
   return value;
@@ -73,42 +88,602 @@ function exactAuthorityFree(args, ToolError) {
   if (found.length) error(ToolError, { error: "caller_authority_selector_forbidden", fields: found });
 }
 
+// --- V5-F03 deep-module execution contract -----------------------------------
+//
+// engineering-slice-plan.v1 keeps its exact accepted shape, refusals and
+// canonical digest.  The Q046.D1 machine-readable slice contract, the
+// Q016.D1/Q029.D1 code-versus-model bindings and the Q035.D1 design-depth
+// classifier arrive as the explicit successor engineering-slice-plan.v2 so no
+// established v1 producer is silently reinterpreted, and this stays the one
+// slice-contract authority rather than a second parallel validator.  The
+// portable tools/room-bridge/engineering_passport.py validator implements the
+// identical predicate for engineering-slice-plan.v2: for v2 the two accept and
+// refuse exactly the same inputs.
+//
+// DELIBERATE LEGACY v1 DIVERGENCES.  The portable validator has always refused
+// duplicate ordinals, dependency cycles and whitespace-padded identifiers for
+// every plan version; this server validator historically accepted all three,
+// and plans registered under it are append-only.  requirePlan re-runs against
+// the STORED plan row on every read path (sourcePlan, closureProjection,
+// controllerPlan), so newly refusing those shapes for v1 would not correct a
+// stored plan -- it would strand one, making an already registered passport
+// unreadable with nothing able to amend the immutable row.  All three checks
+// are therefore enforced for engineering-slice-plan.v2 only, and a pre-existing
+// v1 plan keeps its exact previous read behavior.
+//
+// THE GATE IS THE DECLARED PLAN VERSION, NOT THE ROW'S AGE, and that is wider
+// than the stored-read argument alone: a plan REGISTERED as v1 today takes the
+// same permissive path as one stored a month ago.  requirePlan is one predicate
+// over one input and cannot tell a fresh registration from a stored row -- the
+// read paths hand it the stored plan and registration hands it the caller's --
+// so refusing these three shapes for new v1 registrations only would make the
+// same plan registerable and then unreadable, or readable and then
+// unregisterable, depending on which side moved.  Narrowing what a v1 producer
+// may newly register is a policy change with its own producers to migrate and
+// is deliberately OUT OF SCOPE here; nothing below implements it.  A producer
+// that wants the stricter boundary registers the successor version, which is
+// what the successor version is for.  These are documented divergences, not
+// parity: the two validators are not interchangeable on legacy v1 duplicate
+// ordinals, cycles or padded identifiers.
+//
+// EXACT IDENTIFIERS FOR v2.  A v2 plan admits every identifier exactly as the
+// producer wrote it (exactId).  id() validated text()'s trimmed copy while the
+// plan kept the raw string, so " slice:one " registered here yet was refused by
+// the portable and SQL validators, and the identity sealed into plan_digest was
+// not the identity the regex had approved.  The regex itself is unchanged and
+// no new version is introduced; a padded identifier is refused rather than
+// normalised, because rewriting one would silently change sealed content.
+
+export const ENGINEERING_SLICE_PLAN_VERSIONS = Object.freeze([
+  "engineering-slice-plan.v1", "engineering-slice-plan.v2",
+]);
+const SLICE_PLAN_V2 = "engineering-slice-plan.v2";
+export const ENGINEERING_DESIGN_CONTRACT_VERSION = "engineering-design-contract.v1";
+
+const CONCURRENCY_POSTURES = new Set(["parallel_safe", "serial_after_dependencies", "exclusive_resource"]);
+const RELEASE_REQUIREMENTS = new Set(["required", "not_required"]);
+const EVIDENCE_REQUIREMENTS = new Set(["redacted_evidence_required", "metadata_only_sufficient"]);
+
+// Q035.D1 classifier inputs.  planned_checks is deliberately absent: every
+// declared check stays mandatory and adding verification can never move a slice
+// from SHORT to FULL.  Free text is never parsed, because interpreting prose
+// would recreate model judgment and an unaccepted taxonomy.
+const DESIGN_DEPTH_INPUT_FIELDS = Object.freeze([
+  "risk_class", "concurrency_posture", "manual_qa_required", "release_requirement",
+  "dependency_refs", "declared_resource_refs", "declared_component_refs", "declared_plan_step_refs",
+]);
+const DESIGN_DEPTH_COUNTED_ARRAYS = Object.freeze([
+  "dependency_refs", "declared_resource_refs", "declared_component_refs", "declared_plan_step_refs",
+]);
+const SHORT_RISK_CLASSES = new Set(["R0", "R1", "R2", "R3"]);
+
+// The accepted Q035.D1 predicate is frozen to the design-contract version that
+// sealed it.  requirePlan re-runs against the STORED append-only plan row on
+// every read path (sourcePlan, closureProjection, controllerPlan), so a
+// predicate that quietly changed underneath an immutable plan would reclassify
+// already sealed work and make its passport unreadable with nothing able to
+// amend the row.  A different boundary therefore ships as an explicit successor
+// contract version with its own entry here, exactly as engineering-slice-plan
+// ships v2 beside v1; the v1 entry below never moves.
+const DESIGN_DEPTH_PREDICATES = Object.freeze({
+  "engineering-design-contract.v1": row =>
+    SHORT_RISK_CLASSES.has(row.risk_class) &&
+    row.concurrency_posture === "parallel_safe" &&
+    row.manual_qa_required === false &&
+    row.release_requirement === "not_required" &&
+    row.dependency_count === 0 &&
+    row.declared_resource_count <= 1 &&
+    row.declared_component_count <= 1 &&
+    row.declared_plan_step_count <= 1,
+});
+export const ENGINEERING_DESIGN_DEPTH_PREDICATE_VERSIONS =
+  Object.freeze(Object.keys(DESIGN_DEPTH_PREDICATES));
+
+// The agent may never hand the classifier its own answer.  The closed field set
+// already refuses unknown keys; this named refusal makes the bypass explicit.
+const SELF_LABEL_FIELDS = new Set([
+  "design_depth", "depth", "template", "template_kind", "complexity", "complexity_class",
+  "simple", "is_simple", "classification", "classifier_override", "bypass",
+]);
+
+const DESIGN_CONTRACT_FIELDS = Object.freeze([
+  "authority", "code_model_decision", "completion", "contract_version", "dependency_rationale",
+  "deployment", "evidence", "failure", "full_design_refs", "isolation", "rationale", "review",
+  "routing", "seam_decision", "short_template", "tests",
+]);
+const MODEL_STEP_FIELDS = Object.freeze([
+  "input_contract_ref", "output_contract_ref", "rationale", "responsibility_class",
+  "selection_basis", "step_ref",
+]);
+const FULL_DESIGN_REF_FIELDS = Object.freeze([
+  "authority_envelope_ref", "design_interview_ref", "failure_model_ref", "fixture_refs", "oracle_ref",
+]);
+const SHORT_TEMPLATE_FIELDS = Object.freeze(["objective_summary", "template_ref", "verification_ref"]);
+
+// Q016.D1: deterministic code owns these outright; a model judgment step that
+// claims one of them is refused rather than reviewed.
+const RESERVED_CODE_RESPONSIBILITIES = new Set([
+  "identity", "policy", "permissions", "state", "validation", "idempotency", "execution",
+]);
+const TYPED_UNCERTAINTY_CLASSES = new Set([
+  "classification", "extraction", "summarization", "ranking", "drafting", "disambiguation",
+]);
+// Q029.D1: cost may appear alongside a capability reason but never alone.
+const SELECTION_BASIS_VALUES = new Set([
+  "typed_uncertainty", "capability_gain", "quality_gain", "adaptability_gain", "cost",
+]);
+const EXECUTOR_CLASSES = new Set(["deterministic_code", "attended_human", "model_assisted"]);
+const AUTHORITY_ENVIRONMENTS = new Set(["local", "rehearsal", "staging", "production"]);
+const VERIFICATION_LANES = new Set(["unit", "contract", "integration", "manual_qa"]);
+// review-engineering-slice is the only reviewer provider this seam has, and it
+// records one independent automation actor's typed fact.  Nothing anywhere
+// checks that a reviewer is a human, so accepting independent_human would seal
+// a requirement into an immutable plan that no code can ever satisfy or refuse.
+// The unsupported class is refused until a human-review provider exists, the
+// same way Claude execution is refused until its launcher exists.
+const REVIEWER_CLASSES = new Set(["independent_agent"]);
+const EVIDENCE_REDACTION_CLASSES = new Set(["metadata_only", "redacted_evidence"]);
+const EVIDENCE_RETENTIONS = new Set(["ephemeral", "material_redacted"]);
+const COMPLETION_VERIFIERS = new Set(["independent_review", "independent_review_and_manual_qa"]);
+// Q063.D1 / Q122.D1: extend a proven deep module, or replace it cleanly; a new
+// module needs a real seam and no plan may create two owners for one seam.
+const SEAM_MODES = new Set(["reuse", "extend", "replace", "new_module"]);
+const NEW_MODULE_JUSTIFICATIONS = new Set(["authority", "lifecycle", "failure_isolation", "multi_adapter"]);
+const MEASUREMENT_BASES = new Set([
+  "complexity_reduction", "defect_rate", "coverage", "latency", "operator_effort",
+]);
+
+function isIdentifierArray(value) {
+  return Array.isArray(value) && value.every(item => typeof item === "string" && ID.test(item));
+}
+
+function refuseSelfLabel(value, field, sliceRef, ToolError) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const found = Object.keys(value).filter(key => SELF_LABEL_FIELDS.has(key)).sort();
+  if (found.length)
+    error(ToolError, { error: "engineering_design_depth_self_label_forbidden", field, slice_ref: sliceRef, fields: found });
+}
+
+/**
+ * Return the exact bound Q035.D1 classifier inputs for one accepted slice.
+ *
+ * Cardinality is the only thing read from the counted closed arrays, and the
+ * planned check count is never returned, so extra verification can never be
+ * penalised by the classifier.
+ */
+export function designDepthInputs(slice, ToolError) {
+  if (!slice || typeof slice !== "object" || Array.isArray(slice))
+    error(ToolError, { error: "engineering_design_depth_input_invalid" });
+  refuseSelfLabel(slice, "slice", slice.slice_ref, ToolError);
+  for (const field of DESIGN_DEPTH_INPUT_FIELDS)
+    if (!Object.hasOwn(slice, field))
+      error(ToolError, { error: "engineering_design_depth_input_missing", field, slice_ref: slice.slice_ref });
+  if (!/^R[0-6]$/.test(slice.risk_class) || !CONCURRENCY_POSTURES.has(slice.concurrency_posture) ||
+      typeof slice.manual_qa_required !== "boolean" || !RELEASE_REQUIREMENTS.has(slice.release_requirement))
+    error(ToolError, { error: "engineering_design_depth_input_invalid", slice_ref: slice.slice_ref });
+  const counts = {};
+  for (const field of DESIGN_DEPTH_COUNTED_ARRAYS) {
+    if (!isIdentifierArray(slice[field]))
+      error(ToolError, { error: "engineering_design_depth_input_invalid", field, slice_ref: slice.slice_ref });
+    counts[field] = slice[field].length;
+  }
+  return Object.freeze({
+    risk_class: slice.risk_class,
+    concurrency_posture: slice.concurrency_posture,
+    manual_qa_required: slice.manual_qa_required,
+    release_requirement: slice.release_requirement,
+    dependency_count: counts.dependency_refs,
+    declared_resource_count: counts.declared_resource_refs,
+    declared_component_count: counts.declared_component_refs,
+    declared_plan_step_count: counts.declared_plan_step_refs,
+  });
+}
+
+/**
+ * The deterministic Q035.D1 design-depth classifier.
+ *
+ * SHORT requires every accepted condition: R0-R3, parallel-safe, no manual QA,
+ * no release requirement, zero dependencies, and at most one declared resource,
+ * component and plan step.  Every other valid combination is FULL, and an
+ * invalid slice never reaches this function at all.
+ *
+ * SHORT changes design-template depth only.  It grants no action authority,
+ * waives no R0-R6 operating gate, reduces no verification and activates no
+ * effect; ordinary attended source delivery still follows real effects.
+ *
+ * The predicate is selected by the slice's own sealed contract_version, so a
+ * stored contract keeps the exact predicate it was accepted under.
+ */
+export function classifyDesignDepth(slice, ToolError, contractVersion = ENGINEERING_DESIGN_CONTRACT_VERSION) {
+  const row = designDepthInputs(slice, ToolError);
+  const predicate = Object.hasOwn(DESIGN_DEPTH_PREDICATES, contractVersion)
+    ? DESIGN_DEPTH_PREDICATES[contractVersion] : null;
+  if (!predicate)
+    error(ToolError, {
+      error: "engineering_design_depth_predicate_unsupported", slice_ref: slice.slice_ref,
+      contract_version: contractVersion ?? null, supported: [...ENGINEERING_DESIGN_DEPTH_PREDICATE_VERSIONS],
+    });
+  return predicate(row) ? "short" : "full";
+}
+
+function requireSelectionBasis(value, field, sliceRef, ToolError) {
+  const fail = reason => error(ToolError, { error: reason, field, slice_ref: sliceRef });
+  if (!Array.isArray(value) || !value.length || value.some(item => typeof item !== "string") ||
+      new Set(value).size !== value.length || value.some(item => !SELECTION_BASIS_VALUES.has(item)))
+    fail("engineering_design_contract_field_invalid");
+  if (value.length === 1 && value[0] === "cost") fail("engineering_design_cost_only_selection");
+  return value;
+}
+
+function requireModelJudgmentSteps(slice, decision, ToolError) {
+  const sliceRef = slice.slice_ref;
+  const fail = (reason, field) => error(ToolError, { error: reason, field, slice_ref: sliceRef });
+  const steps = decision.model_judgment_steps;
+  if (!Array.isArray(steps)) fail("engineering_design_contract_field_invalid", "code_model_decision.model_judgment_steps");
+  const seen = new Set();
+  for (const step of steps) {
+    if (!exactObject(step, MODEL_STEP_FIELDS)) fail("engineering_design_model_step_invalid", "model_judgment_steps");
+    if (typeof step.step_ref !== "string" || !ID.test(step.step_ref) || seen.has(step.step_ref) ||
+        !slice.declared_plan_step_refs.includes(step.step_ref))
+      fail("engineering_design_model_step_invalid", "model_judgment_steps.step_ref");
+    seen.add(step.step_ref);
+    if (RESERVED_CODE_RESPONSIBILITIES.has(step.responsibility_class))
+      error(ToolError, {
+        error: "engineering_design_model_step_reserved_responsibility", slice_ref: sliceRef,
+        field: "model_judgment_steps.responsibility_class", responsibility_class: step.responsibility_class,
+        resolution: "deterministic code owns identity, policy, permissions, state, validation, idempotency and execution",
+      });
+    if (!TYPED_UNCERTAINTY_CLASSES.has(step.responsibility_class))
+      fail("engineering_design_model_step_invalid", "model_judgment_steps.responsibility_class");
+    for (const field of ["input_contract_ref", "output_contract_ref"])
+      if (typeof step[field] !== "string" || !ID.test(step[field]))
+        fail("engineering_design_model_step_invalid", `model_judgment_steps.${field}`);
+    if (!nonEmptyText(step.rationale)) fail("engineering_design_model_step_invalid", "model_judgment_steps.rationale");
+    requireSelectionBasis(step.selection_basis, "model_judgment_steps.selection_basis", sliceRef, ToolError);
+  }
+  return steps;
+}
+
+function requireDesignDepthMaterial(slice, contract, ToolError) {
+  const sliceRef = slice.slice_ref;
+  const depth = classifyDesignDepth(slice, ToolError, contract.contract_version);
+  const fail = field => error(ToolError, {
+    error: "engineering_design_depth_material_invalid", field, slice_ref: sliceRef, design_depth: depth,
+  });
+  if (depth === "full") {
+    if (contract.short_template !== null) fail("short_template");
+    const refs = contract.full_design_refs;
+    if (!exactObject(refs, FULL_DESIGN_REF_FIELDS)) fail("full_design_refs");
+    for (const field of ["design_interview_ref", "authority_envelope_ref", "failure_model_ref", "oracle_ref"])
+      if (typeof refs[field] !== "string" || !ID.test(refs[field])) fail(`full_design_refs.${field}`);
+    if (!isUniqueIdentifierArray(refs.fixture_refs) || !refs.fixture_refs.length) fail("full_design_refs.fixture_refs");
+    return depth;
+  }
+  if (contract.full_design_refs !== null) fail("full_design_refs");
+  const template = contract.short_template;
+  if (!exactObject(template, SHORT_TEMPLATE_FIELDS)) fail("short_template");
+  for (const field of ["template_ref", "verification_ref"])
+    if (typeof template[field] !== "string" || !ID.test(template[field])) fail(`short_template.${field}`);
+  if (!nonEmptyText(template.objective_summary)) fail("short_template.objective_summary");
+  return depth;
+}
+
+/** Validate the closed Q046.D1 slice contract for one accepted v2 slice. */
+function requireDesignContract(slice, ToolError) {
+  const sliceRef = slice.slice_ref;
+  const contract = slice.design_contract;
+  const fail = (reason, field) => error(ToolError, { error: reason, field, slice_ref: sliceRef });
+  const bad = field => fail("engineering_design_contract_field_invalid", field);
+  refuseSelfLabel(contract, "design_contract", sliceRef, ToolError);
+  if (!exactObject(contract, DESIGN_CONTRACT_FIELDS)) fail("engineering_design_contract_invalid", "design_contract");
+  if (contract.contract_version !== ENGINEERING_DESIGN_CONTRACT_VERSION)
+    fail("engineering_design_contract_version_invalid", "contract_version");
+  for (const field of ["rationale", "dependency_rationale"]) if (!nonEmptyText(contract[field])) bad(field);
+
+  const decision = contract.code_model_decision;
+  if (!exactObject(decision, ["model_judgment_steps", "rationale", "selection_basis"])) bad("code_model_decision");
+  if (!nonEmptyText(decision.rationale)) bad("code_model_decision.rationale");
+  requireSelectionBasis(decision.selection_basis, "code_model_decision.selection_basis", sliceRef, ToolError);
+  const steps = requireModelJudgmentSteps(slice, decision, ToolError);
+
+  const routing = contract.routing;
+  if (!exactObject(routing, ["adapter_ref", "executor_class", "fresh_session_required"])) bad("routing");
+  if (!EXECUTOR_CLASSES.has(routing.executor_class)) bad("routing.executor_class");
+  if (typeof routing.adapter_ref !== "string" || !ID.test(routing.adapter_ref)) bad("routing.adapter_ref");
+  if (routing.fresh_session_required !== true) bad("routing.fresh_session_required");
+  if (routing.executor_class === "deterministic_code" && steps.length) bad("routing.executor_class");
+  if (routing.executor_class === "model_assisted" && !steps.length) bad("routing.executor_class");
+
+  const authority = contract.authority;
+  if (!exactObject(authority, ["capability_profile", "environment", "read_only"])) bad("authority");
+  if (typeof authority.capability_profile !== "string" || !ID.test(authority.capability_profile)) bad("authority.capability_profile");
+  if (typeof authority.read_only !== "boolean") bad("authority.read_only");
+  if (!AUTHORITY_ENVIRONMENTS.has(authority.environment)) bad("authority.environment");
+  if (!authority.read_only && authority.capability_profile !== "capability:engineering-repository-write")
+    bad("authority.capability_profile");
+
+  const isolation = contract.isolation;
+  if (!exactObject(isolation, ["branch_required", "shared_resource_refs", "worktree_required"])) bad("isolation");
+  if (isolation.worktree_required !== true || isolation.branch_required !== true) bad("isolation.worktree_required");
+  if (!isUniqueIdentifierArray(isolation.shared_resource_refs)) bad("isolation.shared_resource_refs");
+  if (isolation.shared_resource_refs.some(ref => !slice.declared_resource_refs.includes(ref)))
+    bad("isolation.shared_resource_refs");
+  if (isolation.shared_resource_refs.length && slice.concurrency_posture === "parallel_safe")
+    bad("isolation.shared_resource_refs");
+
+  const tests = contract.tests;
+  if (!exactObject(tests, ["planned_check_refs", "verification_lanes"])) bad("tests");
+  const plannedRefs = slice.planned_checks.map(check => check.check_ref);
+  if (!isUniqueIdentifierArray(tests.planned_check_refs) ||
+      tests.planned_check_refs.join(",") !== plannedRefs.join(",")) bad("tests.planned_check_refs");
+  if (!Array.isArray(tests.verification_lanes) || !tests.verification_lanes.length ||
+      new Set(tests.verification_lanes).size !== tests.verification_lanes.length ||
+      tests.verification_lanes.some(lane => !VERIFICATION_LANES.has(lane))) bad("tests.verification_lanes");
+  if (tests.verification_lanes.includes("manual_qa") !== slice.manual_qa_required) bad("tests.verification_lanes");
+
+  const review = contract.review;
+  if (!exactObject(review, ["independent_review_required", "reviewer_class"])) bad("review");
+  if (review.independent_review_required !== true) bad("review.independent_review_required");
+  if (!REVIEWER_CLASSES.has(review.reviewer_class)) bad("review.reviewer_class");
+
+  const failure = contract.failure;
+  if (!exactObject(failure, ["failure_modes"])) bad("failure");
+  if (!Array.isArray(failure.failure_modes) || !failure.failure_modes.length) bad("failure.failure_modes");
+  const failureRefs = new Set();
+  for (const mode of failure.failure_modes) {
+    if (!exactObject(mode, ["compensation", "detection", "failure_ref"])) bad("failure.failure_modes");
+    if (typeof mode.failure_ref !== "string" || !ID.test(mode.failure_ref) || failureRefs.has(mode.failure_ref))
+      bad("failure.failure_modes.failure_ref");
+    failureRefs.add(mode.failure_ref);
+    for (const field of ["detection", "compensation"])
+      if (!nonEmptyText(mode[field])) bad(`failure.failure_modes.${field}`);
+  }
+
+  const evidenceFacet = contract.evidence;
+  if (!exactObject(evidenceFacet, ["evidence_refs", "redaction_class", "retention"])) bad("evidence");
+  if (!EVIDENCE_REDACTION_CLASSES.has(evidenceFacet.redaction_class)) bad("evidence.redaction_class");
+  if (!EVIDENCE_RETENTIONS.has(evidenceFacet.retention)) bad("evidence.retention");
+  if (!isTypedEvidenceArray(evidenceFacet.evidence_refs)) bad("evidence.evidence_refs");
+  if (evidenceFacet.evidence_refs.some(item => item.redaction_class !== evidenceFacet.redaction_class))
+    bad("evidence.evidence_refs");
+  if (slice.planned_checks.some(check => check.evidence_requirement === "redacted_evidence_required") &&
+      evidenceFacet.redaction_class !== "redacted_evidence") bad("evidence.redaction_class");
+
+  const deployment = contract.deployment;
+  if (!exactObject(deployment, ["confirmation_required", "release_requirement", "rollback_ref"])) bad("deployment");
+  if (deployment.release_requirement !== slice.release_requirement) bad("deployment.release_requirement");
+  if (deployment.release_requirement === "required"
+    ? (typeof deployment.rollback_ref !== "string" || !ID.test(deployment.rollback_ref))
+    : (deployment.rollback_ref !== null && (typeof deployment.rollback_ref !== "string" || !ID.test(deployment.rollback_ref))))
+    bad("deployment.rollback_ref");
+  if (typeof deployment.confirmation_required !== "boolean") bad("deployment.confirmation_required");
+  if (!["R0", "R1"].includes(slice.risk_class) && deployment.confirmation_required !== true)
+    bad("deployment.confirmation_required");
+
+  const completion = contract.completion;
+  if (!exactObject(completion, ["completion_predicate", "verified_by"])) bad("completion");
+  if (!nonEmptyText(completion.completion_predicate)) bad("completion.completion_predicate");
+  if (!COMPLETION_VERIFIERS.has(completion.verified_by)) bad("completion.verified_by");
+  if (completion.verified_by !== (slice.manual_qa_required ? "independent_review_and_manual_qa" : "independent_review"))
+    bad("completion.verified_by");
+
+  const seam = contract.seam_decision;
+  if (!exactObject(seam, [
+    "measurement", "mode", "new_module_justification", "replaced_seam_refs",
+    "residual_authority_refs", "target_seam_ref",
+  ])) fail("engineering_design_seam_invalid", "seam_decision");
+  if (!SEAM_MODES.has(seam.mode)) fail("engineering_design_seam_invalid", "seam_decision.mode");
+  if (typeof seam.target_seam_ref !== "string" || !ID.test(seam.target_seam_ref))
+    fail("engineering_design_seam_invalid", "seam_decision.target_seam_ref");
+  if (!exactObject(seam.measurement, ["basis", "note"]) || !MEASUREMENT_BASES.has(seam.measurement.basis) ||
+      !nonEmptyText(seam.measurement.note)) fail("engineering_design_seam_invalid", "seam_decision.measurement");
+  if (!isUniqueIdentifierArray(seam.replaced_seam_refs)) fail("engineering_design_seam_invalid", "seam_decision.replaced_seam_refs");
+  if (!isUniqueIdentifierArray(seam.residual_authority_refs)) fail("engineering_design_seam_invalid", "seam_decision.residual_authority_refs");
+  if (seam.mode === "new_module") {
+    if (!NEW_MODULE_JUSTIFICATIONS.has(seam.new_module_justification))
+      error(ToolError, {
+        error: "engineering_design_seam_invalid", slice_ref: sliceRef, field: "seam_decision.new_module_justification",
+        resolution: "create a module only for a real authority, lifecycle, failure-isolation or multi-adapter seam",
+      });
+  } else if (seam.new_module_justification !== null) {
+    fail("engineering_design_seam_invalid", "seam_decision.new_module_justification");
+  }
+  if (seam.mode === "replace") {
+    if (!seam.replaced_seam_refs.length || seam.replaced_seam_refs.includes(seam.target_seam_ref))
+      fail("engineering_design_seam_invalid", "seam_decision.replaced_seam_refs");
+    if (seam.residual_authority_refs.length)
+      fail("engineering_design_seam_half_replacement", "seam_decision.residual_authority_refs");
+  } else {
+    if (seam.replaced_seam_refs.length) fail("engineering_design_seam_invalid", "seam_decision.replaced_seam_refs");
+    if (seam.residual_authority_refs.length)
+      fail("engineering_design_seam_duplicate_authority", "seam_decision.residual_authority_refs");
+  }
+
+  return requireDesignDepthMaterial(slice, contract, ToolError);
+}
+
+/** Refuse duplicate seam authority and half-replacement across one plan. */
+function requireSeamAuthority(plan, ToolError) {
+  const owners = new Map();
+  const retired = new Map();
+  for (const slice of plan.slices) {
+    const seam = slice.design_contract.seam_decision;
+    if (["new_module", "replace"].includes(seam.mode)) {
+      if (owners.has(seam.target_seam_ref))
+        error(ToolError, {
+          error: "engineering_design_seam_duplicate_authority", seam_ref: seam.target_seam_ref,
+          slice_ref: slice.slice_ref, owning_slice_ref: owners.get(seam.target_seam_ref),
+        });
+      owners.set(seam.target_seam_ref, slice.slice_ref);
+    }
+    for (const seamRef of seam.replaced_seam_refs) {
+      if (retired.has(seamRef))
+        error(ToolError, {
+          error: "engineering_design_seam_duplicate_authority", seam_ref: seamRef,
+          slice_ref: slice.slice_ref, owning_slice_ref: retired.get(seamRef),
+        });
+      retired.set(seamRef, slice.slice_ref);
+    }
+  }
+  for (const slice of plan.slices) {
+    const seam = slice.design_contract.seam_decision;
+    if (["reuse", "extend"].includes(seam.mode) && retired.has(seam.target_seam_ref))
+      error(ToolError, {
+        error: "engineering_design_seam_half_replacement", seam_ref: seam.target_seam_ref,
+        slice_ref: slice.slice_ref, retiring_slice_ref: retired.get(seam.target_seam_ref),
+      });
+  }
+}
+
+/**
+ * Refuse a dependency cycle, including a slice that depends on itself.
+ *
+ * The portable validator has always refused cycles
+ * (engineering_passport._assert_acyclic); the server validator did not, so a
+ * plan the two disagreed about could register.  A cycle also makes closure
+ * unreachable by construction: dependenciesSatisfied can never be met for any
+ * slice on the cycle, so the immutable plan would pin them at blocked forever.
+ *
+ * This is a NEW server-side refusal, so requirePlan runs it for
+ * engineering-slice-plan.v2 only.  An append-only v1 plan this validator already
+ * accepted is revalidated on every read; refusing it now would strand it rather
+ * than fix it.  Such a v1 plan keeps its exact previous behavior: readable, and
+ * blocked forever on the cycle, exactly as before.
+ */
+function requireAcyclicDependencies(plan, ToolError) {
+  const graph = new Map(plan.slices.map(row => [row.slice_ref, row.dependency_refs || []]));
+  const visiting = new Set();
+  const visited = new Set();
+  const visit = ref => {
+    if (visiting.has(ref)) error(ToolError, { error: "engineering_slice_dependency_cycle", slice_ref: ref });
+    if (visited.has(ref)) return;
+    visiting.add(ref);
+    for (const dependency of graph.get(ref) || []) visit(dependency);
+    visiting.delete(ref);
+    visited.add(ref);
+  };
+  for (const ref of graph.keys()) visit(ref);
+}
+
+/** Every slice a slice depends on, directly or transitively. */
+function transitiveDependencies(plan) {
+  const direct = new Map(plan.slices.map(row => [row.slice_ref, row.dependency_refs || []]));
+  const resolved = new Map();
+  const visit = (ref, stack) => {
+    if (resolved.has(ref)) return resolved.get(ref);
+    if (stack.has(ref)) return new Set();
+    stack.add(ref);
+    const closure = new Set();
+    for (const dependency of direct.get(ref) || []) {
+      closure.add(dependency);
+      for (const item of visit(dependency, stack)) closure.add(item);
+    }
+    stack.delete(ref);
+    resolved.set(ref, closure);
+    return closure;
+  };
+  for (const ref of direct.keys()) visit(ref, new Set());
+  return resolved;
+}
+
+/**
+ * Refuse two concurrently admissible slices that claim the same declared
+ * resource.
+ *
+ * declared_resource_refs are the mutable resources the envelope binds by
+ * revision under compare_and_swap_required, not free-form references, and a
+ * parallel_safe slice has already had to state isolation.shared_resource_refs
+ * as empty -- "nothing I touch is shared".  Two such slices naming one resource
+ * are therefore two contradictory statements sealed inside one plan, and both
+ * become eligible at once.  A dependency edge between them removes the
+ * contradiction outright, because the dependent slice cannot be admitted until
+ * the other is verified complete, so ordered work is left alone.  Nothing here
+ * restricts a serial or exclusive posture, which is how contention is meant to
+ * be declared, and v1 plans keep their exact previous behavior.
+ */
+function requireParallelResourceIsolation(plan, ToolError) {
+  const ordered = transitiveDependencies(plan);
+  const owners = new Map();
+  for (const slice of plan.slices) {
+    if (slice.concurrency_posture !== "parallel_safe") continue;
+    // declared_resource_refs is not required to be unique, and one slice
+    // repeating its own resource is not contention with anyone.
+    for (const resourceRef of new Set(slice.declared_resource_refs)) {
+      for (const other of owners.get(resourceRef) || []) {
+        if (ordered.get(slice.slice_ref)?.has(other) || ordered.get(other)?.has(slice.slice_ref)) continue;
+        error(ToolError, {
+          error: "engineering_design_parallel_resource_conflict", resource_ref: resourceRef,
+          slice_ref: slice.slice_ref, conflicting_slice_ref: other,
+          resolution: "two parallel-safe slices cannot both own one declared resource; order them with a dependency, or declare the contention with a serial_after_dependencies or exclusive_resource posture",
+        });
+      }
+      owners.set(resourceRef, [...(owners.get(resourceRef) || []), slice.slice_ref]);
+    }
+  }
+}
+
 export function requirePlan(plan, ToolError) {
   if (!plan || typeof plan !== "object" || Array.isArray(plan)) error(ToolError, { error: "engineering_slice_plan_invalid" });
   if (Object.keys(plan).sort().join(",") !== "accepted_plan_revision,plan_digest,schema_version,slices,work_request") error(ToolError, { error: "engineering_slice_plan_unknown_field" });
   for (const key of ["schema_version", "work_request", "accepted_plan_revision", "plan_digest", "slices"])
     if (!(key in plan)) error(ToolError, { error: "engineering_slice_plan_missing_field", field: key });
-  if (plan.schema_version !== "engineering-slice-plan.v1") error(ToolError, { error: "engineering_slice_plan_schema_invalid" });
+  if (!ENGINEERING_SLICE_PLAN_VERSIONS.includes(plan.schema_version))
+    error(ToolError, {
+      error: "engineering_slice_plan_schema_invalid", schema_version: plan.schema_version ?? null,
+      supported: [...ENGINEERING_SLICE_PLAN_VERSIONS],
+    });
+  // Successor plans admit identifiers exactly as written; a legacy v1 plan keeps
+  // the trimming acceptance it was registered under, because every read path
+  // revalidates the stored append-only row.  See the divergence note above.
+  const identifier = plan.schema_version === SLICE_PLAN_V2 ? exactId : id;
   const binding = plan.work_request;
   if (!binding || typeof binding !== "object" || Array.isArray(binding) || Object.keys(binding).sort().join(",") !== "canonical_record_digest,id,state_version")
     error(ToolError, { error: "engineering_slice_plan_work_binding_invalid" });
-  id(binding.id, "work_request.id", ToolError); digest(binding.canonical_record_digest, "work_request.canonical_record_digest", ToolError);
+  identifier(binding.id, "work_request.id", ToolError); digest(binding.canonical_record_digest, "work_request.canonical_record_digest", ToolError);
   if (!Number.isInteger(binding.state_version) || binding.state_version < 1) error(ToolError, { error: "engineering_slice_plan_state_version_invalid" });
   const revision = plan.accepted_plan_revision;
   if (!revision || typeof revision !== "object" || Array.isArray(revision) || Object.keys(revision).sort().join(",") !== "digest,id,revision")
     error(ToolError, { error: "engineering_slice_plan_revision_invalid" });
-  id(revision.id, "accepted_plan_revision.id", ToolError); digest(revision.digest, "accepted_plan_revision.digest", ToolError);
+  identifier(revision.id, "accepted_plan_revision.id", ToolError); digest(revision.digest, "accepted_plan_revision.digest", ToolError);
   if (!Number.isInteger(revision.revision) || revision.revision < 1) error(ToolError, { error: "engineering_slice_plan_revision_invalid" });
   digest(plan.plan_digest, "plan_digest", ToolError);
   if (!Array.isArray(plan.slices) || plan.slices.length < 1) error(ToolError, { error: "engineering_slice_plan_empty" });
   const refs = new Set();
+  const ordinals = new Set();
   for (const slice of plan.slices) {
     const required = ["baseline_evidence_refs", "concurrency_posture", "declared_component_refs", "declared_plan_step_refs", "declared_resource_refs", "definition_of_done", "dependency_refs", "forbidden_change_refs", "manual_qa_required", "objective", "ordinal", "planned_checks", "release_requirement", "risk_class", "scope_boundary", "slice_ref"];
+    if (plan.schema_version === SLICE_PLAN_V2) required.push("design_contract");
+    required.sort();
+    refuseSelfLabel(slice, "slice", slice?.slice_ref, ToolError);
     if (!slice || typeof slice !== "object" || Array.isArray(slice) || Object.keys(slice).sort().join(",") !== required.join(",")) error(ToolError, { error: "engineering_slice_schema_invalid", slice_ref: slice?.slice_ref });
-    id(slice.slice_ref, "slice_ref", ToolError);
+    identifier(slice.slice_ref, "slice_ref", ToolError);
     if (!Number.isInteger(slice.ordinal) || slice.ordinal < 1 || typeof slice.objective !== "string" || !slice.objective.trim() || typeof slice.definition_of_done !== "string" || !slice.definition_of_done.trim() || typeof slice.scope_boundary !== "string" || !slice.scope_boundary.trim()) error(ToolError, { error: "engineering_slice_fields_invalid", slice_ref: slice.slice_ref });
-    if (!["parallel_safe", "serial_after_dependencies", "exclusive_resource"].includes(slice.concurrency_posture) || !/^R[0-6]$/.test(slice.risk_class) || !["required", "not_required"].includes(slice.release_requirement) || typeof slice.manual_qa_required !== "boolean") error(ToolError, { error: "engineering_slice_enum_invalid", slice_ref: slice.slice_ref });
+    if (!CONCURRENCY_POSTURES.has(slice.concurrency_posture) || !/^R[0-6]$/.test(slice.risk_class) || !RELEASE_REQUIREMENTS.has(slice.release_requirement) || typeof slice.manual_qa_required !== "boolean") error(ToolError, { error: "engineering_slice_enum_invalid", slice_ref: slice.slice_ref });
     if (refs.has(slice.slice_ref)) error(ToolError, { error: "engineering_slice_duplicate", slice_ref: slice.slice_ref });
     refs.add(slice.slice_ref);
+    // The portable validator has always required unique ordinals; without this
+    // the two validators disagreed about the same plan.  Like the cycle check,
+    // this is a new server-side refusal and therefore binds the successor
+    // version only: an append-only v1 plan already accepted with duplicate
+    // ordinals must stay readable on every read path.
+    if (plan.schema_version === SLICE_PLAN_V2 && ordinals.has(slice.ordinal))
+      error(ToolError, { error: "engineering_slice_ordinal_duplicate", slice_ref: slice.slice_ref, ordinal: slice.ordinal });
+    ordinals.add(slice.ordinal);
     if (!Array.isArray(slice.dependency_refs) || slice.dependency_refs.some(ref => !refs.has(ref) && !plan.slices.some(candidate => candidate.slice_ref === ref)))
       error(ToolError, { error: "engineering_slice_dependency_unknown", slice_ref: slice.slice_ref });
     for (const field of ["baseline_evidence_refs", "declared_resource_refs", "declared_component_refs", "declared_plan_step_refs", "forbidden_change_refs", "dependency_refs"])
       if (!Array.isArray(slice[field])) error(ToolError, { error: "engineering_slice_array_invalid", field, slice_ref: slice.slice_ref });
-    for (const [index, item] of slice.baseline_evidence_refs.entries()) evidence(item, `baseline_evidence_refs[${index}]`, ToolError);
+    for (const [index, item] of slice.baseline_evidence_refs.entries()) evidence(item, `baseline_evidence_refs[${index}]`, ToolError, identifier);
     for (const field of ["declared_resource_refs", "declared_component_refs", "declared_plan_step_refs", "forbidden_change_refs", "dependency_refs"])
-      for (const [index, item] of slice[field].entries()) id(item, `${field}[${index}]`, ToolError);
+      for (const [index, item] of slice[field].entries()) identifier(item, `${field}[${index}]`, ToolError);
     const checkRefs = new Set();
-    if (!Array.isArray(slice.planned_checks) || slice.planned_checks.length < 1 || slice.planned_checks.some(check => !check || typeof check !== "object" || Object.keys(check).sort().join(",") !== "check_ref,evidence_requirement,failure_condition" || !id(check.check_ref, "planned_checks.check_ref", ToolError) || checkRefs.has(check.check_ref) || !checkRefs.add(check.check_ref) || typeof check.failure_condition !== "string" || !check.failure_condition.trim() || !["redacted_evidence_required", "metadata_only_sufficient"].includes(check.evidence_requirement))) error(ToolError, { error: "engineering_slice_checks_invalid", slice_ref: slice.slice_ref });
+    if (!Array.isArray(slice.planned_checks) || slice.planned_checks.length < 1 || slice.planned_checks.some(check => !check || typeof check !== "object" || Object.keys(check).sort().join(",") !== "check_ref,evidence_requirement,failure_condition" || !identifier(check.check_ref, "planned_checks.check_ref", ToolError) || checkRefs.has(check.check_ref) || !checkRefs.add(check.check_ref) || typeof check.failure_condition !== "string" || !check.failure_condition.trim() || !EVIDENCE_REQUIREMENTS.has(check.evidence_requirement))) error(ToolError, { error: "engineering_slice_checks_invalid", slice_ref: slice.slice_ref });
+    if (plan.schema_version === SLICE_PLAN_V2) requireDesignContract(slice, ToolError);
+  }
+  if (plan.schema_version === SLICE_PLAN_V2) {
+    requireAcyclicDependencies(plan, ToolError);
+    requireSeamAuthority(plan, ToolError);
+    requireParallelResourceIsolation(plan, ToolError);
   }
   if (canonicalDigest(Object.fromEntries(Object.entries(plan).filter(([key]) => key !== "plan_digest"))) !== plan.plan_digest)
     error(ToolError, { error: "engineering_slice_plan_digest_mismatch" });
@@ -592,16 +1167,77 @@ function isExactEngineeringAdmissionSession(session, sliceRef, executorId) {
     session.source_commit_sha === ENGINEERING_SESSION_SOURCE;
 }
 
+// The exact execution binding this seam issues.  buildCodexEnvelope emits these
+// values, the dispatch gate below re-checks them, and admission compares an
+// accepted v2 design contract against them.  One statement of the actual
+// authority, so the contract and the envelope cannot drift apart silently.
+export const ENGINEERING_SERVER_EXECUTION_BINDING = Object.freeze({
+  environment: "rehearsal",
+  capability_profile: "capability:engineering-repository-write",
+  read_only: false,
+  adapter_ref: "adapter:codex-desktop",
+});
+// Codex is the only executable adapter here and runCodexSlice dispatches to it
+// unconditionally, so an accepted contract routed to an attended human names an
+// executor this seam cannot produce.
+const ADMISSIBLE_EXECUTOR_CLASSES = new Set(["deterministic_code", "model_assisted"]);
+
+/**
+ * Refuse a v2 slice whose accepted contract contradicts the binding admission
+ * is about to issue.
+ *
+ * routing and authority are validated at registration, sealed inside
+ * plan_digest and rendered to operators through the passport, but nothing
+ * downstream ever read them: the envelope's environment, capability profile,
+ * write posture and adapter are server-derived constants.  A slice whose
+ * accepted contract says read-only production work executed by a human was
+ * therefore executed write-enabled in rehearsal by an automation model, with
+ * both statements recorded as true.
+ *
+ * This compares and refuses only.  It never selects an executor, never widens
+ * or reissues an envelope to match a contract, and grants nothing: a contract
+ * that does not describe the existing binding simply cannot be admitted.  The
+ * check is deliberately absent from the read paths, because refusing there
+ * would make an already sealed passport unreadable.
+ */
+function requireServerExecutionBinding(plan, slice, ToolError) {
+  if (plan.schema_version !== SLICE_PLAN_V2) return;
+  const { routing, authority } = slice.design_contract;
+  const fail = (field, declared, issued) => error(ToolError, {
+    error: "engineering_design_contract_binding_mismatch", slice_ref: slice.slice_ref, field,
+    declared_by_contract: declared === undefined ? null : declared, server_binding: issued,
+    resolution: "the accepted design contract must describe the execution binding this server issues; admission refuses rather than reissuing authority to match a contract",
+  });
+  if (!ADMISSIBLE_EXECUTOR_CLASSES.has(routing.executor_class))
+    fail("routing.executor_class", routing.executor_class, [...ADMISSIBLE_EXECUTOR_CLASSES]);
+  if (routing.adapter_ref !== ENGINEERING_SERVER_EXECUTION_BINDING.adapter_ref)
+    fail("routing.adapter_ref", routing.adapter_ref, ENGINEERING_SERVER_EXECUTION_BINDING.adapter_ref);
+  for (const field of ["environment", "capability_profile", "read_only"])
+    if (authority[field] !== ENGINEERING_SERVER_EXECUTION_BINDING[field])
+      fail(`authority.${field}`, authority[field], ENGINEERING_SERVER_EXECUTION_BINDING[field]);
+}
+
+/**
+ * The dispatch-side gate: does this row carry the exact write binding this seam
+ * issues?
+ *
+ * environment is part of that binding, is emitted by buildCodexEnvelope, and is
+ * already compared against an accepted v2 contract at admission
+ * (requireServerExecutionBinding).  Reading every other field of the documented
+ * binding while ignoring this one let an envelope naming a different environment
+ * dispatch as if it were the rehearsal envelope the server actually issues.
+ */
 export function isCurrentRepositoryWriteEnvelope(row) {
   const envelope = row?.envelope;
   return Boolean(envelope && envelope.schema_version === "execution-envelope.v1" &&
     exactFutureInstant(envelope.expires_at) &&
     exactFutureInstant(envelope.agent_session?.lease_expires_at) &&
-    envelope.server_binding?.authority?.read_only === false &&
-    envelope.server_binding?.authority?.capability_profile === "capability:engineering-repository-write" &&
+    envelope.server_binding?.authority?.environment === ENGINEERING_SERVER_EXECUTION_BINDING.environment &&
+    envelope.server_binding?.authority?.read_only === ENGINEERING_SERVER_EXECUTION_BINDING.read_only &&
+    envelope.server_binding?.authority?.capability_profile === ENGINEERING_SERVER_EXECUTION_BINDING.capability_profile &&
     envelope.server_binding?.identity?.agent_principal_id === "agent:codex" &&
     envelope.server_binding?.identity?.runtime_principal === "runtime:codex" &&
-    envelope.server_binding?.adapter?.adapter_id === "adapter:codex-desktop" &&
+    envelope.server_binding?.adapter?.adapter_id === ENGINEERING_SERVER_EXECUTION_BINDING.adapter_ref &&
     JSON.stringify(envelope.request?.allowed_actions) === JSON.stringify(ENGINEERING_REPOSITORY_ACTIONS));
 }
 
@@ -663,8 +1299,8 @@ export function buildCodexEnvelope({ source, plan, slice, jobId, sessionId, acto
         agent_principal_id: "agent:codex", runtime_principal: "runtime:codex", personal_brain_scope: "brain:shared",
         personal_brain_version: "brain:shared-v1", personal_rule_count: 0, derived_by: "server_identity_resolution", client_mutable: false,
       },
-      authority: { environment: "rehearsal", risk_class: slice.risk_class || "R1", capability_profile: "capability:engineering-repository-write", capability_grant_ref: `grant:engineering-codex-repository-v1:${sessionId}`, read_only: false, derived_by: "server_capability_resolution", client_mutable: false },
-      adapter: { surface: "codex_desktop", adapter_id: "adapter:codex-desktop", adapter_version: "v1", harness_id: "harness:codex", harness_version: "v1", provider_id: "provider:openai", model_id: "model:codex", native_session_ref: `native:codex:${sessionId}`, configuration_fingerprint: canonicalDigest({ adapter: "codex", model: "codex" }) },
+      authority: { environment: ENGINEERING_SERVER_EXECUTION_BINDING.environment, risk_class: slice.risk_class || "R1", capability_profile: ENGINEERING_SERVER_EXECUTION_BINDING.capability_profile, capability_grant_ref: `grant:engineering-codex-repository-v1:${sessionId}`, read_only: ENGINEERING_SERVER_EXECUTION_BINDING.read_only, derived_by: "server_capability_resolution", client_mutable: false },
+      adapter: { surface: "codex_desktop", adapter_id: ENGINEERING_SERVER_EXECUTION_BINDING.adapter_ref, adapter_version: "v1", harness_id: "harness:codex", harness_version: "v1", provider_id: "provider:openai", model_id: "model:codex", native_session_ref: `native:codex:${sessionId}`, configuration_fingerprint: canonicalDigest({ adapter: "codex", model: "codex" }) },
     },
     handoff: replacesEnvelope ? {
       mode: "replacement", replaces_agent_session_id: replacesEnvelope.agent_session.id,
@@ -827,6 +1463,9 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
   let source = sourceParts(facts.source, ToolError);
   let plan = sourcePlan(facts, source, ToolError);
   let slice = sliceFor(plan, sliceRef, ToolError);
+  // The accepted contract must describe the binding this admission issues; a
+  // contradiction refuses here, before any lock, job, session or envelope.
+  requireServerExecutionBinding(plan, slice, ToolError);
   dependenciesSatisfied(facts, source, plan, slice, ToolError);
   // Portfolio governance is decided by trusted stored source, not by the
   // caller: a slice no accepted portfolio names comes back null and ordinary
@@ -921,6 +1560,7 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
   source = sourceParts(facts.source, ToolError);
   plan = sourcePlan(facts, source, ToolError);
   slice = sliceFor(plan, sliceRef, ToolError);
+  requireServerExecutionBinding(plan, slice, ToolError);
   dependenciesSatisfied(facts, source, plan, slice, ToolError);
   priorEnvelopes = (facts.envelopes || [])
     .filter(row => row.slice_ref === sliceRef && row.accepted_plan_id === source.plan.record_id)
@@ -967,6 +1607,7 @@ export async function admitEngineeringSlice(c, actor, args, ToolError, writeEven
   source = sourceParts(facts.source, ToolError);
   plan = sourcePlan(facts, source, ToolError);
   slice = sliceFor(plan, sliceRef, ToolError);
+  requireServerExecutionBinding(plan, slice, ToolError);
   dependenciesSatisfied(facts, source, plan, slice, ToolError);
 
   if (priorEnvelope) {

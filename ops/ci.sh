@@ -265,11 +265,28 @@ inherited_abort() {  # inherited_abort <check-name> <cmd...> -- never returns if
 }
 
 # ---------------------------------------------------------------- unit
+# F03_PARITY_REQUIRE_PYTHON=1, ON THE mcp-server SUITE ONLY. The V5-F03
+# cross-language parity suite (mcp-server/test/f03-design-contract-parity.test.mjs)
+# drives the portable Python validator over the same corpus as the server one,
+# and every one of its cross-language cases SKIPS when no Python 3.9+ interpreter
+# can be found. Unset, that is a skip inside a suite whose runner reports pass, so
+# it never reaches this file's SKIPPED accounting and --strict cannot see it: a
+# runner that lost its interpreter would keep printing a green unit class while
+# the half of the parity claim that compares the two validators stopped running.
+# SKIPPED IS NOT PASSED, per the header. The variable is the suite's own
+# documented escape from that — set, a missing interpreter FAILS instead of
+# skipping, which is correct here because CI has Python by construction.
+# Deliberately scoped to this one command: control-room's and workspace's
+# environment, every other class, and the semantics of every test on a machine
+# that HAS Python are all unchanged.
 check_unit() {
   local failed_pkgs=""
   for pkg in mcp-server control-room workspace; do
     [ -f "$pkg/package.json" ] || continue
-    if ! run_quiet "$LOGDIR/unit-$pkg.log" npm --prefix "$pkg" test; then
+    local unit_env=""
+    [ "$pkg" = "mcp-server" ] && unit_env="F03_PARITY_REQUIRE_PYTHON=1"
+    # shellcheck disable=SC2086  # one deliberate assignment, or nothing at all
+    if ! run_quiet "$LOGDIR/unit-$pkg.log" env $unit_env npm --prefix "$pkg" test; then
       failed_pkgs="$failed_pkgs $pkg"
       echo "--- $pkg ---" >&2
       tail -25 "$LOGDIR/unit-$pkg.log" >&2
