@@ -635,6 +635,34 @@ test("a receipt the kernel could not READ is refused at admission, not stored", 
     thrown => thrown.name === "JourneyOneClockError" && thrown.code === "invalid_comparator");
 });
 
+test("the comparator bound is UTF-16 code units, and the accepted domain is preserved", async () => {
+  // U+1D11E: one codepoint, TWO UTF-16 code units. It is what makes the two
+  // possible rulers give different answers, in BOTH directions -- which is why
+  // the accepted half is asserted here and not only the refused half.
+  const astral = "\u{1D11E}";
+  assert.equal(astral.length, 2);
+  assert.equal([...astral].length, 1);
+
+  for (const [comparator, units] of [[astral.repeat(150), 300], [astral.repeat(3), 6],
+    ["c".repeat(300), 300], ["exact", 5]]) {
+    assert.equal(comparator.length, units);
+    const accepted = newStore();
+    const row = await admit(accepted.store, { ...minimum(), comparator }, null);
+    assert.equal(row.admission_ordinal, 0, `${units} units should be admitted`);
+    // And the real kernel agrees it is readable.
+    const { result } = await evaluateStored(accepted.store);
+    assert.equal(result.state.status, "running");
+  }
+
+  for (const [comparator, units] of [[astral.repeat(151), 302], [astral.repeat(2), 4],
+    ["c".repeat(301), 301], ["four", 4]]) {
+    assert.equal(comparator.length, units);
+    const error = await refusal(admit(newStore().store, { ...minimum(), comparator }, null));
+    assert.equal(error.code, "minimum_receipt_invalid_comparator", `${units} units`);
+    assert.equal(error.detail.length, units);
+  }
+});
+
 test("seat INDEPENDENCE is not re-judged here, and the rail says so rather than implying it", async () => {
   // Shape is checked; the relationship between seats is not. It is fatal in the
   // kernel like the rest, so it is disclosed instead of silently absent.
@@ -1065,6 +1093,45 @@ test("digest ordering is pinned to byte order in both SQL homes", () => {
   assert.ok(ordering.length >= 2,
     `both the guard and the readback pin COLLATE "C"; found ${ordering.length}`);
   assert.ok(PROOF_SQL.includes('collate "C"'));
+});
+
+test("the SQL shape guard reads jsonb TYPES, not the text `->>` renders them as", () => {
+  // REGRESSION for a BOTH-homes invariant that admitted on one side what it
+  // refused on the other: `->>` renders the number 12345 as '12345', so a bare
+  // regex or length judged values the JavaScript home refuses outright.
+  for (const field of ["evidence_ref", "fixture_set_digest", "comparator"]) {
+    assert.ok(CANDIDATE_SQL.includes(
+      `jsonb_typeof(new.receipt -> '${field}') is distinct from 'string'`),
+      `${field} must be type-checked before its value is read`);
+  }
+  assert.ok(CANDIDATE_SQL.includes(
+    "jsonb_typeof(new.receipt -> v_field -> v_seat_field) is distinct from 'string'"),
+    "each identity seat field must be type-checked");
+  assert.ok(CANDIDATE_SQL.includes("jsonb_typeof(new.receipt -> v_field) is distinct from 'object'"));
+  // IS DISTINCT FROM, not <>: a missing key yields NULL and `if NULL` does not
+  // fire, which would fail open on exactly the absent field.
+  // (The receipt column itself is NOT NULL, so its own typeof test may use <>;
+  //  every FIELD test reached through -> must not.)
+  assert.equal(/jsonb_typeof\(new\.receipt ->[^)]*\) <> /.test(CANDIDATE_SQL), false);
+});
+
+test("the SQL comparator bound counts UTF-16 code units, through the one shared counter", () => {
+  // char_length() counts CODEPOINTS and differs from the kernel's ruler in both
+  // directions: 151 astral characters pass a codepoint bound the kernel refuses,
+  // and 3 astral characters fail a codepoint floor the kernel accepts.
+  assert.ok(CANDIDATE_SQL.includes(
+    "ops.benchmark_utf16_length(new.receipt ->> 'comparator') < 5"));
+  assert.ok(CANDIDATE_SQL.includes(
+    "ops.benchmark_utf16_length(new.receipt ->> 'comparator') > 300"));
+  assert.equal(/length\(coalesce\(new\.receipt ->> 'comparator'/.test(CANDIDATE_SQL), false);
+  // The counter is a declared prerequisite, not a rail-local second copy.
+  assert.equal(/create or replace function ops\.j1_minimum_utf16/.test(CANDIDATE_SQL), false);
+  assert.ok(CANDIDATE_SQL.includes("ops/benchmark-acceptance.candidate.sql"));
+  assert.ok(PROOF_SQL.includes("benchmark_utf16_length"),
+    "the fixture must skip rather than fail when the shared counter is absent");
+  // And the fixture proves both halves of the domain, not only the refusals.
+  assert.ok(PROOF_SQL.includes("chr(119070)"));
+  assert.ok(PROOF_SQL.includes("ACCEPTED DOMAIN:"));
 });
 
 test("the SQL readback answers in the module's own readback schema", () => {

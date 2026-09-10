@@ -64,7 +64,11 @@
 //     accepted TTL policy; an observation instant AFTER the server admission
 //     instant; and the SHAPE facts A00's seam validator leaves open — the
 //     `safe:` and `session:` prefixes, the three-field identity seats, the
-//     fixture-set digest format and the comparator bounds.
+//     fixture-set digest format and the comparator bounds. TYPE AND UNIT ARE
+//     PART OF THOSE FACTS: each field must be a JSON string, not a number
+//     rendered as one, and the comparator's 5-to-300 bound is counted in UTF-16
+//     code units, which is what the kernel counts and what the record layer's
+//     mirror of these clauses counts too.
 //   * INADMISSIBLE-class facts are STORED. A failed attempt and a receipt whose
 //     window later lapses are both real history. This rail has no filter and no
 //     discard path: nothing is dropped, and the kernel decides what may be an
@@ -239,7 +243,7 @@ export const JOURNEY_ONE_MINIMUM_ADMISSION_INVARIANTS = Object.freeze([
   Object.freeze({ id: "j1_minimum_receipt_producer_bound", enforced_in: BOTH,
     statement: "An admitted row is a consumer-gate-receipt.v1 for gate foundation-assurance-minimum-accepted from step:foundation-assurance-minimum-receipt, with that step's declared role, oracle, oracle version, evidence scope and subject environment. Any other producer is refused rather than stored: the kernel refuses it fatally, and an append-only inventory cannot shed such a row." }),
   Object.freeze({ id: "j1_minimum_receipt_readable_by_kernel", enforced_in: BOTH,
-    statement: "An admitted row is one the kernel can still READ: safe:/session: prefixes, the three-field identity seats, a sha256 fixture-set digest and a 5-to-300 comparator. Each is fatal in the kernel rather than skipped, so one admitted row would make every later evaluation of this inventory throw and an append-only inventory could not shed it. It is SHAPE only -- no seat independence is judged and no authority class is derived, because those belong to the join that proposes a receipt and to the kernel." }),
+    statement: "An admitted row is one the kernel can still READ: safe:/session: prefixes, identity seats that are objects of exactly the three declared names each holding a non-empty STRING, a sha256 fixture-set digest, and a comparator that is a STRING of 5 to 300 UTF-16 CODE UNITS. Type and unit are part of the rule and are counted the same way in both homes -- the record layer reads jsonb types rather than the text `->>` renders a number as, and counts through the one shared UTF-16 counter rather than codepoints, which differ on text above U+FFFF in both directions. Each fact is fatal in the kernel rather than skipped, so one admitted row would make every later evaluation of this inventory throw and an append-only inventory could not shed it. It is SHAPE only -- no seat independence is judged and no authority class is derived, because those belong to the join that proposes a receipt and to the kernel." }),
   Object.freeze({ id: "j1_minimum_receipt_binds_accepted_scope", enforced_in: BOTH,
     statement: "The receipt's subject, candidate and policy digests are the accepted scope's and its environment manifest digest is the sealed accepted one. They are read from those accepted source bindings and never from the receipt being judged." }),
   Object.freeze({ id: "j1_minimum_receipt_window_within_accepted_policy", enforced_in: BOTH,
@@ -491,6 +495,13 @@ export function journeyOneMinimumAdmissionView({ receipt, scope, policy }) {
   // not seat authority: no independence is judged here and no authority class is
   // derived. Seat independence stays with A00's join and the kernel, disclosed
   // in JOURNEY_ONE_MINIMUM_INPUT_STORE_CANNOT_PROVE rather than re-implemented.
+  //
+  // TYPE AND UNIT ARE PART OF EACH RULE, and the record layer's mirror of these
+  // clauses has to read them the same way: `typeof x !== "string"` there is
+  // jsonb_typeof rather than `->>`, which renders a number as text and would
+  // admit the numeric comparator 12345; and `.length` here is UTF-16 CODE UNITS,
+  // which is neither codepoints nor bytes and differs from codepoints in BOTH
+  // directions above U+FFFF.
   if (!view.evidence_ref.startsWith("safe:")) {
     refuse("minimum_receipt_invalid_reference",
       "receipt.evidence_ref is a safe: reference; the kernel refuses another prefix fatally",
@@ -1381,7 +1392,8 @@ export function journeyOneClockMinimumInputStoreIntegrationRequirements() {
       "The durable journal asserts that its statements share one transaction, reading txid_current() after the lock and again before the append: under autocommit the advisory lock is already released and the admission instant is no longer one reading, so it refuses with nothing written.",
       "Update, delete and truncate are refused by TWO triggers per relation. A row-level trigger never sees TRUNCATE, and TRUNCATE cannot be revoked from the table owner, so the statement-level trigger is what makes the claim true rather than the grant.",
       "The scope derivation is the clock rail's own journeyOneClockScopeBinding: one domain tag, one preimage, and the human label is provenance rather than identity.",
-      "ops/journey-one-clock-input-store.candidate.sql is candidate source: it has not been applied as a numbered migration and has never been executed. It depends on ops.j1_clock_scope_digest from the clock rail's candidate SQL rather than deriving a second scope key.",
+      "ops/journey-one-clock-input-store.candidate.sql is candidate source: it has not been applied as a numbered migration and has never been executed. It depends on ops.j1_clock_scope_digest from the clock rail's candidate SQL rather than deriving a second scope key, and on ops.benchmark_utf16_length from the benchmark-acceptance rail's rather than defining a second UTF-16 counter -- both are candidate source too, so neither can be applied after this one.",
+      "The record layer reads jsonb TYPES, not the text `->>` renders a number, boolean or null as: a numeric comparator or actor_id passes a bare regex or length while the kernel refuses it outright, and a BOTH-homes invariant that admits on one side what it refuses on the other is not one invariant.",
     ],
     clock_scope_and_policy_required_for_writes: true,
     input_authority: JOURNEY_ONE_MINIMUM_INPUT_AUTHORITY_REQUIREMENT,

@@ -21,6 +21,15 @@
 --   * ops.portfolio_canonical_json(jsonb) from migration 0496 -- the ONE
 --     canonicalizer, already reconciled against artifact-trust.js's canonicalJson.
 --   * ops.portfolio_writer_actor_id() -- the ONE server-established writer.
+--   * ops.benchmark_utf16_length(text) from ops/benchmark-acceptance.candidate.sql
+--     -- the ONE home of "the length JavaScript String#length would report".
+--     Its name is historical, like ops.portfolio_writer_actor_id()'s; its
+--     contract is general. The comparator bound this rail enforces is stated by
+--     the kernel in UTF-16 code units, and char_length() counts CODEPOINTS,
+--     which differs on text above U+FFFF in both directions -- so a rail-local
+--     copy would be a second counter that agrees today and drifts after one
+--     edit. That file is also candidate source and has never been applied, so
+--     this one cannot be applied before it either.
 --   * public.digest(bytea, text) from pgcrypto, and public.actor.
 -- Every object created below is namespaced `ops.j1_minimum_*`. Nothing outside
 -- that prefix is created, altered or dropped.
@@ -105,8 +114,10 @@
 --
 -- ---------------------------------------------------------------------------
 -- WHAT REMAINS INTEGRATION WORK, named rather than implied:
---   * Applying this file, and ops/journey-one-clock-store.candidate.sql before
---     it, as numbered migrations.
+--   * Applying this file, and ops/journey-one-clock-store.candidate.sql and
+--     ops/benchmark-acceptance.candidate.sql before it, as numbered migrations.
+--     This file reuses one scope derivation and one UTF-16 counter from those
+--     two rather than defining second copies, so their order is load-bearing.
 --   * The ISSUANCE ADAPTER. benchmark-minimum.v5.js proposes a minimum receipt
 --     and marks it proposed_not_issued; nothing issues one, so no genuine
 --     artifact can reach this rail and no clock has been started.
@@ -705,7 +716,8 @@ as $$
 declare
   v_inventory ops.j1_minimum_inventory%rowtype;
   v_head ops.j1_minimum_admission%rowtype;
-  v_field text; v_keys integer; v_observed timestamptz; v_expires timestamptz; v_admitted timestamptz;
+  v_field text; v_seat_field text; v_keys integer;
+  v_observed timestamptz; v_expires timestamptz; v_admitted timestamptz;
 begin
   select * into v_inventory from ops.j1_minimum_inventory where id = new.inventory_id;
   if not found then
@@ -758,32 +770,71 @@ begin
   -- the seats is judged here and no authority class is derived: that belongs to
   -- the join that PROPOSES a receipt, which is the only seat holding the live
   -- identities, and it is disclosed in ops.j1_minimum_record_layer_cannot_prove().
+  -- TYPE FIRST, THEN VALUE, AND THE TYPE TEST IS NULL-AWARE.
+  --
+  -- `->>` RENDERS a jsonb number, boolean or null as text, so a regex or a
+  -- length applied to it silently judges a value the JavaScript home refuses
+  -- outright: the numeric comparator 12345 becomes '12345' and passes a bare
+  -- length test, and a numeric actor_id becomes a non-empty string. That is a
+  -- BOTH-homes invariant admitting on one side what it refuses on the other, so
+  -- every field below is type-checked against jsonb_typeof before its value is
+  -- read. IS DISTINCT FROM is the null-aware form: an absent key yields NULL,
+  -- and `if NULL then` does not fire, which would fail open on exactly the
+  -- missing field.
+  --
   -- The bounds are the KERNEL'S, counted the kernel's way: its ref() tests the
   -- prefix and then the WHOLE string against [A-Za-z0-9:._/-]{3,300}, so the
   -- five-character prefix leaves 295 and the eight-character one leaves 292.
-  if coalesce(new.receipt ->> 'evidence_ref', '') !~ '^safe:[A-Za-z0-9:._/-]{0,295}$' then
-    raise exception '[j1_minimum_receipt_readable_by_kernel] receipt.evidence_ref is a safe: reference the kernel can read';
+  if jsonb_typeof(new.receipt -> 'evidence_ref') is distinct from 'string'
+     or coalesce(new.receipt ->> 'evidence_ref', '') !~ '^safe:[A-Za-z0-9:._/-]{0,295}$' then
+    raise exception '[j1_minimum_receipt_readable_by_kernel] receipt.evidence_ref is a json string holding a safe: reference the kernel can read';
   end if;
-  if coalesce(new.receipt ->> 'fixture_set_digest', '') !~ '^sha256:[0-9a-f]{64}$' then
-    raise exception '[j1_minimum_receipt_readable_by_kernel] receipt.fixture_set_digest is a sha256 reference';
+  if jsonb_typeof(new.receipt -> 'fixture_set_digest') is distinct from 'string'
+     or coalesce(new.receipt ->> 'fixture_set_digest', '') !~ '^sha256:[0-9a-f]{64}$' then
+    raise exception '[j1_minimum_receipt_readable_by_kernel] receipt.fixture_set_digest is a json string holding a sha256 reference';
   end if;
-  -- CODEPOINTS HERE, UTF-16 CODE UNITS IN THE MODULE, and the two differ only
-  -- for text above U+FFFF. The kernel counts the JavaScript way and is the
-  -- binding one; this is the coarser of the two bounds and is stated rather than
-  -- implied, because a second exact counter would be a second home for the rule.
-  if length(coalesce(new.receipt ->> 'comparator', '')) < 5
-     or length(new.receipt ->> 'comparator') > 300 then
-    raise exception '[j1_minimum_receipt_readable_by_kernel] receipt.comparator is between 5 and 300 characters';
+  -- UTF-16 CODE UNITS, WHICH IS WHAT THE KERNEL COUNTS. char_length() counts
+  -- CODEPOINTS, and the two differ on text above U+FFFF in BOTH directions: 151
+  -- astral characters are 151 codepoints and 302 UTF-16 units, so a codepoint
+  -- test admits a comparator the kernel refuses; three astral characters are 3
+  -- codepoints and 6 UTF-16 units, so a codepoint test refuses one the kernel
+  -- ACCEPTS. Narrowing the accepted domain is as wrong as widening it, so the
+  -- count is exact rather than approximated in either direction.
+  -- ops.benchmark_utf16_length() is the ONE home of that count -- its name is
+  -- historical, its contract is "the length JavaScript String#length would
+  -- report" -- and a rail-local copy would be a second counter that agrees today.
+  -- The type test in front of it also keeps its STRICT null from failing open.
+  if jsonb_typeof(new.receipt -> 'comparator') is distinct from 'string'
+     or ops.benchmark_utf16_length(new.receipt ->> 'comparator') < 5
+     or ops.benchmark_utf16_length(new.receipt ->> 'comparator') > 300 then
+    raise exception '[j1_minimum_receipt_readable_by_kernel] receipt.comparator is a json string of between 5 and 300 UTF-16 code units';
   end if;
+  -- THE SEATS. Written as nested statements rather than one OR chain because
+  -- jsonb_object_keys ERRORS on a non-object and SQL does not promise to
+  -- short-circuit an OR: the type test has to have already run.
   foreach v_field in array array[
     'evaluator_identity', 'producer_identity', 'subject_maker_identity'
   ] loop
-    if jsonb_typeof(new.receipt -> v_field) <> 'object'
-       or (select count(*) from jsonb_object_keys(new.receipt -> v_field)) <> 3
-       or coalesce(new.receipt -> v_field ->> 'actor_id', '') = ''
-       or coalesce(new.receipt -> v_field ->> 'authority_class', '') = ''
-       or coalesce(new.receipt -> v_field ->> 'session_ref', '') !~ '^session:[A-Za-z0-9:._/-]{0,292}$' then
-      raise exception '[j1_minimum_receipt_readable_by_kernel] receipt.% is an authenticated-receipt-identity.v1 seat: exactly its three declared fields, each non-empty, with a session: reference',
+    if jsonb_typeof(new.receipt -> v_field) is distinct from 'object' then
+      raise exception '[j1_minimum_receipt_readable_by_kernel] receipt.% is a json object seat', v_field;
+    end if;
+    if (select count(*) from jsonb_object_keys(new.receipt -> v_field)) <> 3 then
+      raise exception '[j1_minimum_receipt_readable_by_kernel] receipt.% carries exactly the three declared fields of an authenticated-receipt-identity.v1 seat',
+        v_field;
+    end if;
+    -- Three names AND three string types: a seat with three keys under other
+    -- names fails here rather than on the count, because a missing name yields
+    -- NULL from jsonb_typeof and IS DISTINCT FROM refuses it.
+    foreach v_seat_field in array array['actor_id', 'authority_class', 'session_ref'] loop
+      if jsonb_typeof(new.receipt -> v_field -> v_seat_field) is distinct from 'string' then
+        raise exception '[j1_minimum_receipt_readable_by_kernel] receipt.%.% is a json string', v_field, v_seat_field;
+      end if;
+      if (new.receipt -> v_field ->> v_seat_field) = '' then
+        raise exception '[j1_minimum_receipt_readable_by_kernel] receipt.%.% is a non-empty string', v_field, v_seat_field;
+      end if;
+    end loop;
+    if (new.receipt -> v_field ->> 'session_ref') !~ '^session:[A-Za-z0-9:._/-]{0,292}$' then
+      raise exception '[j1_minimum_receipt_readable_by_kernel] receipt.%.session_ref is a session: reference the kernel can read',
         v_field;
     end if;
   end loop;

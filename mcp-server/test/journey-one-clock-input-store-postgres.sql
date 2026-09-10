@@ -32,6 +32,10 @@
 --     defining a second one, so that file must be applied first.
 --   * ops.portfolio_canonical_json and ops.portfolio_writer_actor_id must exist
 --     (migration 0496).
+--   * ops.benchmark_utf16_length must exist. The comparator bound is stated by
+--     the kernel in UTF-16 code units and this rail reuses that ONE counter
+--     rather than defining a second, so ops/benchmark-acceptance.candidate.sql
+--     must be applied first. It is also candidate source and unapplied.
 --   * One active actor must already exist for the writer context. THIS FILE
 --     CREATES NO ROLE AND NO ACTOR: minting either would manufacture the
 --     identity the rail exists to derive.
@@ -71,9 +75,19 @@
 --     could prefer it to a row already stored in that group. It is refused.
 --   * THE FATAL SHAPE FACTS A00's seam validator leaves open are refused: a
 --     wrong `safe:`/`session:` prefix, a malformed fixture-set digest, an
---     out-of-bounds comparator, and an identity seat with a fourth key or an
---     empty field. Each is a well-formed twenty-one-field receipt from the right
---     producer that the kernel would refuse fatally.
+--     out-of-bounds comparator, and an identity seat with a fourth key, a wrong
+--     name or an empty field. Each is a well-formed twenty-one-field receipt
+--     from the right producer that the kernel would refuse fatally.
+--   * TYPE PARITY, WHICH `->>` QUIETLY BREAKS. A numeric, null or object
+--     comparator, and a numeric or null actor_id, authority_class or
+--     session_ref, are each refused -- `->>` renders them as text, so a bare
+--     regex or length would judge a value the JavaScript home refuses outright.
+--   * THE COMPARATOR BOUND IS COUNTED IN UTF-16 CODE UNITS, BOTH WAYS. 151
+--     astral characters are 151 codepoints and 302 units and are REFUSED; 150
+--     are exactly 300 units and are ADMITTED; 3 are 3 codepoints -- below a
+--     codepoint floor of 5 -- and 6 units, and are ADMITTED. The accepted half
+--     is admitted for real, because narrowing the accepted domain would be as
+--     wrong as widening it.
 --   * NOTHING IS DISCARDED. A non-passing receipt is STORED and read back: the
 --     kernel calls it an ordinary fact of the ledger and this rail has no filter.
 --   * A readback whose rows are out of the selection order refuses rather than
@@ -149,7 +163,15 @@ declare
   v_d2              jsonb;
   v_d3              jsonb;
 
+  v_third_key       text;
+  v_accepted_long   jsonb;
+  v_accepted_short  jsonb;
+
   v_tenant          constant text := 'carr-internal';
+  -- U+1D11E MUSICAL SYMBOL G CLEF: one codepoint, TWO UTF-16 code units. It is
+  -- what makes the comparator bound's two possible rulers give different
+  -- answers, in both directions.
+  v_astral          constant text := chr(119070);
   v_environment     constant text := 'sha256:' || repeat('44', 32);
   v_fixtures        constant text := 'sha256:' || repeat('55', 32);
   v_ttl_policy      constant bigint := 172800000;  -- 48 hours
@@ -160,7 +182,9 @@ declare
   v_key2            constant uuid := '00000000-0000-4000-8000-00000000d003';
   v_key3            constant uuid := '00000000-0000-4000-8000-00000000d004';
   v_key4            constant uuid := '00000000-0000-4000-8000-00000000d005';
-  v_key_x           constant uuid := '00000000-0000-4000-8000-00000000d006';
+  v_key5            constant uuid := '00000000-0000-4000-8000-00000000d006';
+  v_key6            constant uuid := '00000000-0000-4000-8000-00000000d007';
+  v_key_x           constant uuid := '00000000-0000-4000-8000-00000000d008';
 
   -- THE AUTHORITATIVE SCOPE, composed by this file exactly as a trusted
   -- integration would compose a real one. It is synthetic: nothing here proves
@@ -182,6 +206,11 @@ declare
   v_scope_second    constant jsonb := v_scope || jsonb_build_object(
                       'benchmark_subject_digest', 'sha256:' || repeat('97', 32),
                       'scope_ref', 'safe:clock-scope:postgres-proof-minimum-inputs-second');
+  -- A THIRD accepted scope, so the ACCEPTED comparator boundary can be admitted
+  -- for real without disturbing the ordering of the inventories above.
+  v_scope_third     constant jsonb := v_scope || jsonb_build_object(
+                      'benchmark_subject_digest', 'sha256:' || repeat('98', 32),
+                      'scope_ref', 'safe:clock-scope:postgres-proof-minimum-inputs-third');
 begin
   -- --- prerequisites -------------------------------------------------------
   if not exists (select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
@@ -199,6 +228,11 @@ begin
      or not exists (select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
                      where n.nspname = 'ops' and p.proname = 'portfolio_writer_actor_id') then
     raise notice 'SKIPPED: migration 0496 is absent; this rail reuses its canonicalizer and writer context rather than restating them.';
+    return;
+  end if;
+  if not exists (select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+                  where n.nspname = 'ops' and p.proname = 'benchmark_utf16_length') then
+    raise notice 'SKIPPED: ops.benchmark_utf16_length is absent; the comparator bound is stated in UTF-16 code units and this rail reuses that ONE counter rather than defining a second. ops/benchmark-acceptance.candidate.sql has not been applied here yet.';
     return;
   end if;
   select slug into v_actor from public.actor where active order by slug collate "C" limit 1;
@@ -451,27 +485,78 @@ begin
   -- valid-shaped twenty-one-field receipt from the right producer that the
   -- KERNEL refuses fatally, so one stored row would make every later evaluation
   -- of this inventory throw and the inventory could not shed it.
+  -- THE TWO COUNTERS DIFFER, AND THE FIXTURE SHOWS IT RATHER THAN ASSUMING IT.
+  -- One astral character is one codepoint and two UTF-16 code units, which is
+  -- why char_length() is the wrong ruler for a bound the kernel states in units.
+  if char_length(repeat(v_astral, 150)) <> 150
+     or ops.benchmark_utf16_length(repeat(v_astral, 150)) <> 300 then
+    raise exception 'FIXTURE: the astral character is not astral here, so the counting cases discriminate nothing';
+  end if;
+
   foreach v_field in array array[
-    'evidence_ref', 'fixture_set_digest', 'comparator',
-    'identity_extra_key', 'identity_empty_actor', 'identity_bad_session_prefix'
+    'evidence_ref', 'evidence_ref_numeric', 'fixture_set_digest', 'fixture_set_digest_numeric',
+    'comparator_short', 'comparator_numeric', 'comparator_null', 'comparator_object',
+    'comparator_astral_over', 'comparator_ascii_over',
+    'identity_extra_key', 'identity_empty_actor', 'identity_bad_session_prefix',
+    'identity_actor_numeric', 'identity_authority_class_numeric',
+    'identity_session_ref_numeric', 'identity_actor_null', 'identity_wrong_names'
   ] loop
     v_variant := case v_field
       when 'evidence_ref' then v_receipt || jsonb_build_object(
         'evidence_ref', 'notsafe:postgres-proof:wrong-prefix')
+      -- `->>` renders 12345 as '12345', so a bare regex or length judges a value
+      -- the JavaScript home refuses outright. These are the type parity cases.
+      when 'evidence_ref_numeric' then v_receipt || jsonb_build_object('evidence_ref', 12345)
       when 'fixture_set_digest' then v_receipt || jsonb_build_object(
         'fixture_set_digest', 'not-a-digest', 'evidence_ref', 'safe:postgres-proof:bad-fixture')
-      when 'comparator' then v_receipt || jsonb_build_object(
+      when 'fixture_set_digest_numeric' then v_receipt || jsonb_build_object(
+        'fixture_set_digest', 12345, 'evidence_ref', 'safe:postgres-proof:numeric-fixture')
+      when 'comparator_short' then v_receipt || jsonb_build_object(
         'comparator', 'x', 'evidence_ref', 'safe:postgres-proof:short-comparator')
+      when 'comparator_numeric' then v_receipt || jsonb_build_object(
+        'comparator', 12345, 'evidence_ref', 'safe:postgres-proof:numeric-comparator')
+      when 'comparator_null' then v_receipt || jsonb_build_object(
+        'comparator', null::text, 'evidence_ref', 'safe:postgres-proof:null-comparator')
+      when 'comparator_object' then v_receipt || jsonb_build_object(
+        'comparator', jsonb_build_object('text', 'an exact comparator'),
+        'evidence_ref', 'safe:postgres-proof:object-comparator')
+      -- 151 astral characters: 151 CODEPOINTS and 302 UTF-16 units. A codepoint
+      -- bound admits it; the kernel refuses it.
+      when 'comparator_astral_over' then v_receipt || jsonb_build_object(
+        'comparator', repeat(v_astral, 151),
+        'evidence_ref', 'safe:postgres-proof:astral-over-comparator')
+      when 'comparator_ascii_over' then v_receipt || jsonb_build_object(
+        'comparator', repeat('c', 301),
+        'evidence_ref', 'safe:postgres-proof:ascii-over-comparator')
       when 'identity_extra_key' then v_receipt || jsonb_build_object(
         'producer_identity', (v_receipt -> 'producer_identity') || jsonb_build_object('display_name', 'x'),
         'evidence_ref', 'safe:postgres-proof:seat-extra-key')
       when 'identity_empty_actor' then v_receipt || jsonb_build_object(
         'producer_identity', (v_receipt -> 'producer_identity') || jsonb_build_object('actor_id', ''),
         'evidence_ref', 'safe:postgres-proof:seat-empty-actor')
-      else v_receipt || jsonb_build_object(
+      when 'identity_bad_session_prefix' then v_receipt || jsonb_build_object(
         'producer_identity', (v_receipt -> 'producer_identity')
           || jsonb_build_object('session_ref', 'notsession:postgres-proof'),
         'evidence_ref', 'safe:postgres-proof:seat-bad-session')
+      when 'identity_actor_numeric' then v_receipt || jsonb_build_object(
+        'producer_identity', (v_receipt -> 'producer_identity') || jsonb_build_object('actor_id', 7),
+        'evidence_ref', 'safe:postgres-proof:seat-numeric-actor')
+      when 'identity_authority_class_numeric' then v_receipt || jsonb_build_object(
+        'producer_identity', (v_receipt -> 'producer_identity') || jsonb_build_object('authority_class', 7),
+        'evidence_ref', 'safe:postgres-proof:seat-numeric-class')
+      when 'identity_session_ref_numeric' then v_receipt || jsonb_build_object(
+        'producer_identity', (v_receipt -> 'producer_identity') || jsonb_build_object('session_ref', 7),
+        'evidence_ref', 'safe:postgres-proof:seat-numeric-session')
+      when 'identity_actor_null' then v_receipt || jsonb_build_object(
+        'producer_identity', (v_receipt -> 'producer_identity') || jsonb_build_object('actor_id', null::text),
+        'evidence_ref', 'safe:postgres-proof:seat-null-actor')
+      -- THREE KEYS, WRONG NAMES. The count passes; the required-name type tests
+      -- are what refuse it, which is why both checks exist.
+      else v_receipt || jsonb_build_object(
+        'producer_identity', jsonb_build_object(
+          'actor_id', 'proof-producer', 'authority_class', 'synthetic_oracle',
+          'session_reference', 'session:postgres-proof-producer'),
+        'evidence_ref', 'safe:postgres-proof:seat-wrong-names')
     end;
     begin
       perform ops.j1_minimum_append_admission(v_scope_key, v_tenant, v_key_x,
@@ -644,6 +729,46 @@ begin
   exception when others then
     if sqlerrm not like '%j1_minimum_first_origin_never_replaced%' then raise; end if;
   end;
+
+  -- --- THE ACCEPTED COMPARATOR DOMAIN, ADMITTED FOR REAL ---------------------
+  -- A bound is only right if it accepts what the kernel accepts. Both of these
+  -- are refused by a CODEPOINT ruler and accepted by the kernel's UTF-16 one, so
+  -- they are the half of the parity that a negative-only fixture would miss:
+  --   * 150 astral characters -- 150 codepoints, exactly 300 UTF-16 units, the
+  --     upper boundary itself;
+  --   * 3 astral characters -- 3 codepoints, which a codepoint floor of 5 would
+  --     REFUSE, and 6 UTF-16 units, which the kernel accepts.
+  -- Narrowing the accepted domain would be as wrong as widening it.
+  v_third_key := ops.j1_minimum_open_inventory(
+    v_scope_third, v_ttl_policy, v_environment) ->> 'clock_scope_key';
+  v_accepted_long := v_receipt || jsonb_build_object(
+    'subject_digest', v_scope_third ->> 'benchmark_subject_digest',
+    'comparator', repeat(v_astral, 150),
+    'evidence_ref', 'safe:postgres-proof:astral-boundary-300');
+  v_accepted_short := v_receipt || jsonb_build_object(
+    'subject_digest', v_scope_third ->> 'benchmark_subject_digest',
+    'comparator', repeat(v_astral, 3),
+    'evidence_ref', 'safe:postgres-proof:astral-boundary-6');
+  if ops.benchmark_utf16_length(v_accepted_long ->> 'comparator') <> 300
+     or ops.benchmark_utf16_length(v_accepted_short ->> 'comparator') <> 6
+     or char_length(v_accepted_short ->> 'comparator') >= 5 then
+    raise exception 'FIXTURE: the accepted comparator boundary cases do not straddle the two rulers, so they prove nothing';
+  end if;
+  -- Admitted in digest order, because one transaction is one admission instant.
+  v_candidates := jsonb_build_array(v_accepted_long, v_accepted_short);
+  select jsonb_agg(t.r order by ops.j1_minimum_receipt_digest(t.r) collate "C")
+    into v_sorted from jsonb_array_elements(v_candidates) as t(r);
+  v_result := ops.j1_minimum_append_admission(v_third_key, v_tenant, v_key5,
+    null, v_at, ops.j1_minimum_receipt_digest(v_sorted -> 0), v_sorted -> 0, v_provenance);
+  v_result := ops.j1_minimum_append_admission(v_third_key, v_tenant, v_key6,
+    v_result ->> 'admission_digest', v_at, ops.j1_minimum_receipt_digest(v_sorted -> 1),
+    v_sorted -> 1, v_provenance);
+  if (v_result ->> 'admission_ordinal')::integer <> 1 then
+    raise exception 'ACCEPTED DOMAIN: an astral comparator inside the kernel''s bound was not admitted';
+  end if;
+  if (ops.j1_minimum_history(v_third_key) ->> 'admission_count')::integer <> 2 then
+    raise exception 'ACCEPTED DOMAIN: the admitted astral-comparator receipts did not read back';
+  end if;
 
   -- --- APPEND-ONLY -----------------------------------------------------------
   -- THE UPDATED COLUMN MUST EXIST ON BOTH RELATIONS, AND THAT IS ASSERTED FIRST.
