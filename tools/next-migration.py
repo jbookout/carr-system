@@ -46,6 +46,7 @@ import subprocess
 import sys
 
 from migration_number_contract import (
+    APPROVED_INTERSTITIAL_COLLISIONS,
     FROZEN_COLLISIONS,
     MigrationNumberError,
     collision_report,
@@ -146,15 +147,22 @@ def _repairs_exact_origin_collision(
     """Admit only this self-expiring 0298 memory migration repair state."""
     remote = set(remote_names)
     current = set(current_names)
+    registered_slots = FROZEN_COLLISIONS | APPROVED_INTERSTITIAL_COLLISIONS
     unregistered = {
         slot: names for slot, names in collision_report(remote_names).items()
-        if slot not in FROZEN_COLLISIONS
+        if slot not in registered_slots
     }
     frozen = {
         slot: names for slot, names in collision_report(remote_names).items()
         if slot in FROZEN_COLLISIONS
     }
     if frozen != FROZEN_COLLISIONS:
+        return False
+    approved = {
+        slot: names for slot, names in collision_report(remote_names).items()
+        if slot in APPROVED_INTERSTITIAL_COLLISIONS
+    }
+    if approved and approved != APPROVED_INTERSTITIAL_COLLISIONS:
         return False
     if unregistered != TRANSIENT_ORIGIN_COLLISION:
         return False
@@ -189,7 +197,14 @@ def main():
               "local trees and may collide with something already merged.", file=sys.stderr)
     else:
         try:
-            validate_migration_names(remote_names, require_frozen=True)
+            validate_migration_names(
+                remote_names,
+                require_frozen=True,
+                # The merged tree may still be the approved pair's predecessor:
+                # it has 0494 but not its reviewed 0494a companion. A checked
+                # worktree never gets this allowance.
+                allow_approved_interstitial_base=True,
+            )
         except MigrationNumberError as exc:
             try:
                 validate_migration_names(current_names, require_frozen=True)
@@ -293,10 +308,15 @@ def main():
 
     frozen = collision_report(remote_names)
     if frozen:
-        print("\n  frozen numeric collisions on origin/main — full filenames are distinct")
+        print("\n  registered numeric collisions on origin/main — full filenames are distinct")
         print("  ledger identities; never rename, delete, edit, or add to these sets:")
         for slot, names in frozen.items():
-            print(f"    {slot}: {', '.join(names)}")
+            label = (
+                "approved interstitial"
+                if slot in APPROVED_INTERSTITIAL_COLLISIONS
+                else "historical frozen"
+            )
+            print(f"    {slot} ({label}): {', '.join(names)}")
 
     # A number absent from origin/main is the dangerous case. It may be genuinely
     # uncommitted, or committed on a branch that has not merged — the distinction

@@ -39,6 +39,21 @@ function fakeSql(responses) {
   };
 }
 
+test("buildRelease pins highest migration to C collation", async () => {
+  let schemaQuery = "";
+  const sql = async (strings) => {
+    const query = strings.join(" ");
+    if (query.includes("v_schema_ledger")) {
+      schemaQuery = query;
+      return [{ applied_count: 2, highest_applied_migration: "0494a_reference.sql" }];
+    }
+    if (query.includes("doctrine_meta")) return [{ generation: 1 }];
+    throw new Error(`unmocked query: ${query}`);
+  };
+  await buildRelease({ env: { GIT_SHA: "a".repeat(40) }, sql, verbCount: 1, now: FIXED_NOW });
+  assert.match(schemaQuery, /max\(filename collate "C"\) collate "default"/);
+});
+
 test("buildRelease: full shape when everything is reachable and stamped", async () => {
   const sql = fakeSql([
     ["v_schema_ledger", [{ applied_count: 101, highest_applied_migration: "0099_thing.sql" }]],

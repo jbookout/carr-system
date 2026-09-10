@@ -4,11 +4,15 @@
 
 import { organizationTenantForActor } from "./identity.js";
 import { canonicalJson, digest } from "./artifact-trust.js";
+import {
+  CONTINUITY_STORAGE_CONTRACT, REFERENCE_MANIFEST_LIMIT, SEMANTIC_STATE_LIMIT, hydrateReferenceManifest,
+  referenceManifestSummary, splitReferenceManifest,
+} from "../continuity-reference-manifest.mjs";
 
 const RUNTIME = "codex";
 const TASK_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 const TEXT_LIMIT = 4000;
-const STATE_LIMIT = 24000;
+const STATE_LIMIT = SEMANTIC_STATE_LIMIT;
 const CURSOR_LIMIT = 2000;
 const RECOVERY_TURN_LIMIT = 25;
 const MAX_CHECKPOINT_VERSION = Number.MAX_SAFE_INTEGER;
@@ -62,7 +66,12 @@ const stateSchema = {
   }, required: ["objective", "next_action"],
 };
 
-function validateStateShape(value, ToolError) {
+function validateStateShape(value, ToolError, allowUnresolvedReferences = false) {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new ToolError({ error: "codex_continuity_json_invalid", field: "state" });
+  const unknown = Object.keys(value).filter(key => !STATE_FIELDS.has(key)).sort();
+  if (unknown.length)
+    throw new ToolError({ error: "codex_checkpoint_field_unknown", fields: unknown });
   if (typeof value.objective !== "string" || !value.objective.trim() || value.objective.length > TEXT_LIMIT ||
       typeof value.next_action !== "string" || !value.next_action.trim() || value.next_action.length > TEXT_LIMIT)
     throw new ToolError({ error: "codex_checkpoint_required_field_invalid", fields: ["objective", "next_action"] });
@@ -99,7 +108,7 @@ function validateStateShape(value, ToolError) {
       });
     });
   }
-  if (referenceIssues.length)
+  if (!allowUnresolvedReferences && referenceIssues.length)
     throw new ToolError({ error: "codex_checkpoint_reference_invalid",
       paths: referenceIssues.slice(0, 25),
       hint: "replace unresolved {REF<number>} tokens from canonical evidence before writing" });
@@ -221,9 +230,64 @@ function revisionDigest(row, ToolError) {
     schema_version: REVISION_SCHEMA_VERSION,
     checkpoint_id: row.checkpoint_id,
     checkpoint_version: version,
-    state: row.state,
+    state: hydrateState(row, ToolError),
     cursor: row.cursor ?? null,
   });
+}
+
+function manifestError(error, ToolError) {
+  if (error?.code === "codex_reference_manifest_invalid")
+    throw new ToolError({ error: "codex_reference_manifest_invalid", reason: error.message });
+  throw error;
+}
+
+function hydrateState(row, ToolError) {
+  try {
+    const state = hydrateReferenceManifest(row?.state, row?.reference_manifest);
+    validateStateShape(state, ToolError, true);
+    return state;
+  } catch (error) {
+    manifestError(error, ToolError);
+  }
+}
+
+function packedState(logicalState, ToolError) {
+  try {
+    validateStateShape(logicalState, ToolError);
+    const packed = splitReferenceManifest(logicalState);
+    if (packed.semantic_state_bytes > STATE_LIMIT)
+      throw new ToolError({ error: "codex_continuity_payload_too_large", field: "state",
+        max_bytes: STATE_LIMIT, stored_bytes: packed.semantic_state_bytes });
+    if (packed.reference_manifest_bytes > REFERENCE_MANIFEST_LIMIT)
+      throw new ToolError({ error: "codex_reference_manifest_too_large",
+        max_bytes: REFERENCE_MANIFEST_LIMIT, stored_bytes: packed.reference_manifest_bytes,
+        reference_count: packed.reference_count });
+    return packed;
+  } catch (error) {
+    manifestError(error, ToolError);
+  }
+}
+
+function manifestSummary(row, ToolError) {
+  try {
+    return referenceManifestSummary(row?.state, row?.reference_manifest);
+  } catch (error) {
+    manifestError(error, ToolError);
+  }
+}
+
+function storageContract() {
+  return { ...CONTINUITY_STORAGE_CONTRACT };
+}
+
+function checkpointOutput(row, ToolError) {
+  const checkpoint = checkpointRow(row, ToolError);
+  if (!Object.hasOwn(checkpoint, "state")) return checkpoint;
+  const state = hydrateState(checkpoint, ToolError);
+  const summary = manifestSummary(checkpoint, ToolError);
+  const { reference_manifest, ...withoutManifest } = checkpoint;
+  return { ...withoutManifest, state, reference_manifest_summary: summary,
+    storage_contract: storageContract() };
 }
 
 function revisionArchiveRef(row, version, digestValue) {
@@ -250,7 +314,7 @@ async function lockTask(c, tenant, owner, nativeTaskId) {
 async function readTaskBindings(c, tenant, owner, nativeTaskId, ToolError,
   checkpointForUpdate = false) {
   const checkpoint = await c.query(
-    `select id,native_task_id,project_id,cwd,checkpoint_version${checkpointForUpdate ? "" : ",state,cursor,updated_at"}
+    `select id,native_task_id,project_id,cwd,checkpoint_version${checkpointForUpdate ? "" : ",state,cursor,reference_manifest,updated_at"}
        from codex_continuity_checkpoint
       where organization_tenant_id=$1 and owner_actor_id=(select id from actor where slug=$2)
         and native_task_id=$3${checkpointForUpdate ? " for update" : ""}`,
@@ -285,7 +349,9 @@ export function codexContinuityTools({ withEnvelope, writeEvent, ToolError, asse
       }, required: ["idempotency_key", "runtime", "native_task_id", "project_id", "cwd", "expected_version", "state"] },
       handler: async (c, actor, args) => { guard(args); requireNativeCodex(actor, ToolError); const key = common(args, ToolError);
         const expected = expectedVersion(args.expected_version, ToolError);
-        const state = boundedJson(args.state, "state", ToolError, STATE_LIMIT);
+        const packed = packedState(args.state, ToolError);
+        const state = packed.state;
+        const referenceManifest = packed.reference_manifest;
         const cur = cursor(args.cursor, ToolError);
         return withEnvelope(c, actor, "codex-checkpoint", args, async () => {
           const tenant = organizationTenantForActor(actor);
@@ -300,10 +366,10 @@ export function codexContinuityTools({ withEnvelope, writeEvent, ToolError, asse
             if (expected !== 0) throw new ToolError({ error: "codex_checkpoint_version_conflict", current_version: 0 });
             const inserted = await c.query(
               `insert into codex_continuity_checkpoint
-                (organization_tenant_id,owner_actor_id,native_task_id,project_id,cwd,state,cursor)
-               values ($1,(select id from actor where slug=$2),$3,$4,$5,$6::jsonb,$7::jsonb)
-               returning id, native_task_id, project_id, cwd, state, cursor, checkpoint_version, updated_at`,
-              [tenant, owner, key.nativeTaskId, key.projectId, key.cwd, JSON.stringify(state), dbCursor(cur)]);
+                (organization_tenant_id,owner_actor_id,native_task_id,project_id,cwd,state,cursor,reference_manifest)
+               values ($1,(select id from actor where slug=$2),$3,$4,$5,$6::jsonb,$7::jsonb,$8::jsonb)
+               returning id, native_task_id, project_id, cwd, state, cursor, reference_manifest, checkpoint_version, updated_at`,
+              [tenant, owner, key.nativeTaskId, key.projectId, key.cwd, JSON.stringify(state), dbCursor(cur), JSON.stringify(referenceManifest)]);
             row = checkpointRow(inserted.rows[0], ToolError);
           } else {
             const current = existing.checkpoint_version;
@@ -313,23 +379,24 @@ export function codexContinuityTools({ withEnvelope, writeEvent, ToolError, asse
               throw new ToolError({ error: "codex_checkpoint_version_exhausted",
                 current_version: current });
             const updated = await c.query(
-              `update codex_continuity_checkpoint set state=$4::jsonb,cursor=$5::jsonb,
+              `update codex_continuity_checkpoint set state=$4::jsonb,cursor=$5::jsonb,reference_manifest=$6::jsonb,
                  checkpoint_version=checkpoint_version+1,updated_at=now()
-               where id=$1 and organization_tenant_id=$2 and owner_actor_id=(select id from actor where slug=$3) and checkpoint_version=$6
-               returning id, native_task_id, project_id, cwd, state, cursor, checkpoint_version, updated_at`,
-              [existing.id, tenant, owner, JSON.stringify(state), dbCursor(cur), expected]);
+               where id=$1 and organization_tenant_id=$2 and owner_actor_id=(select id from actor where slug=$3) and checkpoint_version=$7
+               returning id, native_task_id, project_id, cwd, state, cursor, reference_manifest, checkpoint_version, updated_at`,
+              [existing.id, tenant, owner, JSON.stringify(state), dbCursor(cur), JSON.stringify(referenceManifest), expected]);
             if (!updated.rows.length)
               throw new ToolError({ error: "codex_checkpoint_version_conflict", current_version: expected + 1 });
             row = checkpointRow(updated.rows[0], ToolError);
           }
           await c.query(
             `insert into codex_continuity_revision
-              (checkpoint_id,checkpoint_version,state,cursor,created_by_actor_id)
-             values ($1,$2,$3::jsonb,$4::jsonb,$5)`,
-            [row.id, row.checkpoint_version, JSON.stringify(state), dbCursor(cur), actor.id]);
+              (checkpoint_id,checkpoint_version,state,cursor,reference_manifest,created_by_actor_id)
+             values ($1,$2,$3::jsonb,$4::jsonb,$5::jsonb,$6)`,
+            [row.id, row.checkpoint_version, JSON.stringify(state), dbCursor(cur), JSON.stringify(referenceManifest), actor.id]);
           await writeEvent(c, actor, "codex-checkpoint", "codex_continuity_checkpoint", row.id,
             { field: "checkpoint_version", new: { version: row.checkpoint_version }, idempotency_key: args.idempotency_key });
-          return { ok: true, checkpoint: row };
+          return { ok: true, checkpoint: checkpointOutput(row, ToolError),
+            storage_contract: storageContract() };
         });
       },
     },
@@ -356,10 +423,10 @@ export function codexContinuityTools({ withEnvelope, writeEvent, ToolError, asse
         if (requestedVersion !== null) {
           if (!checkpoint) return {
             ok: true, found: false, historical: true, historical_archive: true, archive_ref: null,
-            revision: null, integrity: "not_found",
+            revision: null, integrity: "not_found", storage_contract: storageContract(),
           };
           const historical = await c.query(
-            `select r.id as revision_id,r.checkpoint_id,r.checkpoint_version,r.state,r.cursor,r.created_at
+            `select r.id as revision_id,r.checkpoint_id,r.checkpoint_version,r.state,r.cursor,r.reference_manifest,r.created_at
                from codex_continuity_revision r
                join codex_continuity_checkpoint c on c.id=r.checkpoint_id
               where c.id=$1 and c.organization_tenant_id=$2
@@ -371,7 +438,7 @@ export function codexContinuityTools({ withEnvelope, writeEvent, ToolError, asse
           const row = historical.rows[0];
           if (!row) return {
             ok: true, found: false, historical: true, historical_archive: true, archive_ref: null,
-            revision: null, integrity: "not_found",
+            revision: null, integrity: "not_found", storage_contract: storageContract(),
           };
           const revisionVersion = checkpointVersion(row.checkpoint_version, ToolError);
           const actualDigest = revisionDigest(row, ToolError);
@@ -383,15 +450,17 @@ export function codexContinuityTools({ withEnvelope, writeEvent, ToolError, asse
             revision_id: row.revision_id,
             checkpoint_id: row.checkpoint_id,
             checkpoint_version: revisionVersion,
-            state: row.state,
+            state: hydrateState(row, ToolError),
             cursor: row.cursor ?? null,
+            reference_manifest_summary: manifestSummary(row, ToolError),
             created_at: row.created_at,
             digest: actualDigest,
             archive_ref: archiveRef,
             integrity: expectedDigest ? "verified" : "computed_unanchored",
           };
           return { ok: true, found: true, historical: true, historical_archive: true,
-            archive_ref: archiveRef, revision, integrity: revision.integrity };
+            archive_ref: archiveRef, revision, integrity: revision.integrity,
+            storage_contract: storageContract() };
         }
         const highwaterResult = await c.query(
           `select cursor from codex_continuity_event
@@ -428,11 +497,12 @@ export function codexContinuityTools({ withEnvelope, writeEvent, ToolError, asse
         return {
           ok: true,
           found: Boolean(checkpoint),
-          checkpoint: checkpoint || null,
+          checkpoint: checkpoint ? checkpointOutput(checkpoint, ToolError) : null,
           source_highwater: highwaterResult.rows[0]?.cursor || checkpoint?.cursor || null,
           unincorporated_user_turns: recovery.turns || [],
           unincorporated_user_turns_omitted: Number(recovery.omitted || 0),
           source_coverage: recovery.coverage_known === true ? "known" : "unknown",
+          storage_contract: storageContract(),
         };
       },
     },

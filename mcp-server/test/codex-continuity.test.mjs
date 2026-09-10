@@ -1,8 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import { codexContinuityTools } from "../src/codex-continuity.js";
 import { TOOLS } from "../src/tools.js";
+import { digest } from "../src/artifact-trust.js";
+import { splitReferenceManifest, storedJsonBytes } from "../continuity-reference-manifest.mjs";
 import { agentActorForToken, actorFromProps, continuityActorForTokenMaps } from "../src/identity.js";
 
 class TestToolError extends Error {
@@ -12,6 +15,17 @@ const actor = { id: "actor-codex", slug: "codex", human: false, native_agent_ver
   sponsoring_human_slug: "joe", via: "oauth-google", continuity_surface: "codex" };
 const key = "00000000-0000-4000-8000-000000000001";
 const state = { objective: "keep working", next_action: "verify result", progress: [{ text: "started", refs: [] }] };
+
+function validStateAt(bytes) {
+  const value = {
+    objective: "x".repeat(4000), next_action: "continue",
+    constraints: Array.from({ length: 6 }, (_item, index) => ({ text: index < 5 ? "x".repeat(3900) : "" })),
+  };
+  value.constraints[5].text = "x".repeat(bytes - storedJsonBytes(value));
+  assert.ok(value.constraints[5].text.length <= 4000);
+  assert.equal(storedJsonBytes(value), bytes);
+  return value;
+}
 
 function tools() {
   return codexContinuityTools({
@@ -52,6 +66,17 @@ test("checkpoint normalizes the database bigint version and uses it in the revis
   assert.equal(events[0][5].new.version, 1);
 });
 
+test("checkpoint rejects a valid 24KB-plus-one semantic state before database access", async () => {
+  const oversized = validStateAt(24_001);
+  await assert.rejects(() => tools()["codex-checkpoint"].handler({ query: async () => {
+    throw new Error("oversized semantic state must not query");
+  } }, actor, {
+    idempotency_key: key, runtime: "codex", native_task_id: "task-over-budget", project_id: "p", cwd: "/repo",
+    expected_version: 0, state: oversized,
+  }), error => error.payload?.error === "codex_continuity_payload_too_large" &&
+    error.payload?.stored_bytes === 24_001);
+});
+
 test("checkpoint replay confirms an accepted write without repeating its effects", async () => {
   const effects = [];
   let version = 0;
@@ -69,7 +94,8 @@ test("checkpoint replay confirms an accepted write without repeating its effects
       effects.push("checkpoint");
       version = 1;
       return { rows: [{ id: "cp-replay", native_task_id: "task-replay", project_id: "p",
-        cwd: "/repo", state: params[5], cursor: JSON.parse(params[6]), checkpoint_version: "1" }] };
+        cwd: "/repo", state: JSON.parse(params[5]), cursor: JSON.parse(params[6]),
+        reference_manifest: JSON.parse(params[7]), checkpoint_version: "1" }] };
     }
     if (sql.startsWith("insert into codex_continuity_revision")) {
       effects.push("revision");
@@ -123,6 +149,100 @@ test("checkpoint replay confirms an accepted write without repeating its effects
   assert.deepEqual(effects, ["checkpoint", "revision"]);
 });
 
+test("local v12 capture saves physically and reads back the full logical state", { skip: !fs.existsSync("/tmp/codex-capacity-live-v12.json") }, async () => {
+  const capturedState = JSON.parse(fs.readFileSync("/tmp/codex-capacity-live-v12.json", "utf8"));
+  capturedState.progress.push({ text: "x".repeat(450) });
+  assert.ok(storedJsonBytes(capturedState) > 24_000,
+    "the v12 reproduction must exceed the former single 24KB state budget");
+  const expectedState = structuredClone(capturedState);
+  let stored;
+  const client = { query: async (sql, params = []) => {
+    if (sql.startsWith("select pg_advisory")) return { rows: [] };
+    if (sql.startsWith("select id,native_task_id,project_id")) return { rows: stored ? [stored] : [] };
+    if (sql.startsWith("select project_id,cwd from codex_continuity_event")) return { rows: [] };
+    if (sql.startsWith("insert into codex_continuity_checkpoint")) {
+      stored = { id: "cp-local-v12", native_task_id: params[2], project_id: params[3], cwd: params[4],
+        state: JSON.parse(params[5]), cursor: params[6] === null ? null : JSON.parse(params[6]),
+        reference_manifest: JSON.parse(params[7]), checkpoint_version: "1" };
+      return { rows: [stored] };
+    }
+    if (sql.startsWith("insert into codex_continuity_revision")) return { rows: [] };
+    if (sql.startsWith("select cursor from codex_continuity_event")) return { rows: [] };
+    if (sql.includes("with prompts as")) return { rows: [{ turns: [], omitted: 0, coverage_known: true }] };
+    throw new Error(`unexpected SQL: ${sql}`);
+  } };
+  const args = { idempotency_key: "00000000-0000-4000-8000-000000000099", runtime: "codex",
+    native_task_id: "task-local-v12", project_id: "p", cwd: "/repo", expected_version: 0,
+    state: capturedState, cursor: { source_window_id: "window-v12", source_window_number: 12 } };
+  const saved = await tools()["codex-checkpoint"].handler(client, actor, args);
+  assert.ok(storedJsonBytes(stored.state) <= 24_000);
+  assert.ok(storedJsonBytes(stored.reference_manifest) <= 128_000);
+  assert.notStrictEqual(stored.state, capturedState);
+  assert.deepEqual(saved.checkpoint.state, expectedState);
+  capturedState.objective = "mutation after save must not affect recovery";
+  const recovered = await tools()["codex-read-recovery"].handler(client, actor, {
+    runtime: "codex", native_task_id: args.native_task_id, project_id: args.project_id, cwd: args.cwd,
+  });
+  assert.deepEqual(recovered.checkpoint.state, expectedState);
+  assert.equal(recovered.checkpoint.reference_manifest_summary.reference_count, 143);
+});
+
+test("1000 refs save and recover exactly through current and historical handlers", async () => {
+  const refs = Array.from({ length: 1000 }, (_item, index) =>
+    `current:${String(index).padStart(4, "0")}:${"x".repeat(90)}`);
+  const logical = {
+    objective: "retain every current reference",
+    latest_corrections: [{ text: "current evidence", refs }],
+    progress: [{ text: "x".repeat(3567) }, { text: "x".repeat(3567) },
+      { text: "x".repeat(3566) }],
+    next_action: "read each exact reference",
+  };
+  let stored;
+  let revision;
+  const client = { query: async (sql, params = []) => {
+    if (sql.startsWith("select pg_advisory")) return { rows: [] };
+    if (sql.startsWith("select id,native_task_id,project_id")) return { rows: stored ? [stored] : [] };
+    if (sql.startsWith("select project_id,cwd from codex_continuity_event")) return { rows: [] };
+    if (sql.startsWith("insert into codex_continuity_checkpoint")) {
+      stored = { id: "cp-1000", native_task_id: params[2], project_id: params[3], cwd: params[4],
+        state: JSON.parse(params[5]), cursor: params[6] === null ? null : JSON.parse(params[6]),
+        reference_manifest: JSON.parse(params[7]), checkpoint_version: "1" };
+      return { rows: [stored] };
+    }
+    if (sql.startsWith("insert into codex_continuity_revision")) {
+      revision = { revision_id: "rev-1000", checkpoint_id: params[0], checkpoint_version: params[1],
+        state: JSON.parse(params[2]), cursor: params[3] === null ? null : JSON.parse(params[3]),
+        reference_manifest: JSON.parse(params[4]), created_at: "2026-09-10T00:00:00Z" };
+      return { rows: [] };
+    }
+    if (sql.includes("from codex_continuity_revision r")) return { rows: [revision] };
+    if (sql.startsWith("select cursor from codex_continuity_event")) return { rows: [] };
+    if (sql.includes("with prompts as")) return { rows: [{ turns: [], omitted: 0, coverage_known: true }] };
+    throw new Error(`unexpected SQL: ${sql}`);
+  } };
+  const args = { idempotency_key: "00000000-0000-4000-8000-000000000100", runtime: "codex",
+    native_task_id: "task-1000", project_id: "p", cwd: "/repo", expected_version: 0,
+    state: logical, cursor: { source_window_id: "window-1000", source_window_number: 1 } };
+  const saved = await tools()["codex-checkpoint"].handler(client, actor, args);
+  assert.ok(storedJsonBytes(stored.state) <= 24_000);
+  assert.ok(storedJsonBytes(stored.reference_manifest) <= 128_000);
+  assert.deepEqual(saved.checkpoint.state, logical);
+  const current = await tools()["codex-read-recovery"].handler(client, actor, {
+    runtime: "codex", native_task_id: args.native_task_id, project_id: args.project_id, cwd: args.cwd,
+  });
+  assert.deepEqual(current.checkpoint.state, logical);
+  assert.equal(current.checkpoint.reference_manifest_summary.reference_count, 1000);
+  const historical = await tools()["codex-read-recovery"].handler(client, actor, {
+    runtime: "codex", native_task_id: args.native_task_id, project_id: args.project_id, cwd: args.cwd,
+    checkpoint_version: 1,
+  });
+  assert.deepEqual(historical.revision.state, logical);
+  assert.equal(historical.revision.digest, digest({
+    schema_version: "codex-continuity-revision.v1", checkpoint_id: "cp-1000",
+    checkpoint_version: 1, state: logical, cursor: args.cursor,
+  }));
+});
+
 test("production checkpoint handler replays through the real envelope and rejects changed or stale retries", async () => {
   const calls = [];
   const toolCalls = new Map();
@@ -141,6 +261,7 @@ test("production checkpoint handler replays through the real envelope and reject
       checkpoint = {
         id: "cp-production-envelope", native_task_id: params[2], project_id: params[3], cwd: params[4],
         state: JSON.parse(params[5]), cursor: params[6] === null ? null : JSON.parse(params[6]),
+        reference_manifest: JSON.parse(params[7]),
         checkpoint_version: "1", updated_at: "2026-09-08T12:00:00Z",
       };
       return { rows: [checkpoint] };
@@ -209,6 +330,7 @@ test("recovery scopes owner through actor slug lookup, never a raw slug-to-uuid 
 
 test("historical recovery returns one explicitly archived revision with an anchorable pointer", async () => {
   const historicalState = { ...state, next_action: "historical next action" };
+  const physicalRevision = splitReferenceManifest(historicalState);
   const statements = [];
   const client = { query: async (sql, params) => {
     statements.push({ sql, params });
@@ -219,7 +341,8 @@ test("historical recovery returns one explicitly archived revision with an ancho
     if (sql.startsWith("select project_id,cwd from codex_continuity_event")) return { rows: [] };
     if (sql.includes("from codex_continuity_revision r")) return { rows: [{
       revision_id: "rev-history", checkpoint_id: "cp-history", checkpoint_version: "6",
-      state: historicalState, cursor: { source_window_number: 2 },
+      state: physicalRevision.state, reference_manifest: physicalRevision.reference_manifest,
+      cursor: { source_window_number: 2 },
       created_at: "2026-09-05T12:00:00Z", native_task_id: "task-history",
       project_id: "p", cwd: "/repo",
     }] };
@@ -236,6 +359,11 @@ test("historical recovery returns one explicitly archived revision with an ancho
   assert.equal(out.revision.revision_id, "rev-history");
   assert.equal(out.revision.checkpoint_version, 6);
   assert.deepEqual(out.revision.state, historicalState);
+  assert.equal(out.revision.reference_manifest_summary.manifest_present, true);
+  assert.equal(out.revision.digest, digest({
+    schema_version: "codex-continuity-revision.v1", checkpoint_id: "cp-history",
+    checkpoint_version: 6, state: historicalState, cursor: { source_window_number: 2 },
+  }), "physical storage must digest the hydrated logical revision");
   assert.equal(out.revision.integrity, "computed_unanchored");
   assert.match(out.archive_ref, /^codex-revision:cp-history:6:sha256:[0-9a-f]{64}$/);
   assert.equal(out.revision.archive_ref, out.archive_ref);
@@ -273,6 +401,10 @@ test("historical recovery verifies an expected digest and rejects a mismatch", a
     runtime: "codex", native_task_id: "task-verify", project_id: "p", cwd: "/repo",
     checkpoint_version: 3,
   });
+  assert.equal(first.revision.digest, digest({
+    schema_version: "codex-continuity-revision.v1", checkpoint_id: "cp-verify",
+    checkpoint_version: 3, state: historicalState, cursor: { source_window_number: 1 },
+  }), "an empty legacy manifest must preserve the original revision digest");
   const verified = await tools()["codex-read-recovery"].handler(client, actor, {
     runtime: "codex", native_task_id: "task-verify", project_id: "p", cwd: "/repo",
     checkpoint_version: 3, expected_digest: first.revision.digest,
@@ -282,6 +414,45 @@ test("historical recovery verifies an expected digest and rejects a mismatch", a
     runtime: "codex", native_task_id: "task-verify", project_id: "p", cwd: "/repo",
     checkpoint_version: 3, expected_digest: "sha256:" + "0".repeat(64),
   }), error => error.payload?.error === "codex_recovery_revision_digest_mismatch");
+});
+
+test("legacy unresolved placeholders remain readable for repair but cannot be written", async () => {
+  const legacy = {
+    objective: "repair legacy evidence", latest_corrections: [{ text: "repair this", refs: ["legacy:{REF1}"] }],
+    next_action: "replace the unresolved reference",
+  };
+  const client = { query: async sql => {
+    if (sql.startsWith("select id,native_task_id,project_id")) return { rows: [{
+      id: "cp-placeholder", native_task_id: "task-placeholder", project_id: "p", cwd: "/repo",
+      state: legacy, cursor: null, checkpoint_version: "2",
+    }] };
+    if (sql.startsWith("select project_id,cwd from codex_continuity_event")) return { rows: [] };
+    if (sql.includes("from codex_continuity_revision r")) return { rows: [{
+      revision_id: "rev-placeholder", checkpoint_id: "cp-placeholder", checkpoint_version: "1",
+      state: legacy, cursor: null, created_at: "2026-09-05T12:00:00Z",
+    }] };
+    if (sql.startsWith("select cursor from codex_continuity_event")) return { rows: [] };
+    if (sql.includes("with prompts as")) return { rows: [{ turns: [], omitted: 0, coverage_known: true }] };
+    throw new Error(`unexpected SQL: ${sql}`);
+  } };
+  const current = await tools()["codex-read-recovery"].handler(client, actor, {
+    runtime: "codex", native_task_id: "task-placeholder", project_id: "p", cwd: "/repo",
+  });
+  assert.deepEqual(current.checkpoint.state, legacy);
+  const historical = await tools()["codex-read-recovery"].handler(client, actor, {
+    runtime: "codex", native_task_id: "task-placeholder", project_id: "p", cwd: "/repo", checkpoint_version: 1,
+  });
+  assert.deepEqual(historical.revision.state, legacy);
+  assert.equal(historical.revision.digest, digest({
+    schema_version: "codex-continuity-revision.v1", checkpoint_id: "cp-placeholder",
+    checkpoint_version: 1, state: legacy, cursor: null,
+  }));
+  await assert.rejects(() => tools()["codex-checkpoint"].handler({ query: async () => {
+    throw new Error("invalid placeholder must not reach the database");
+  } }, actor, {
+    idempotency_key: key, runtime: "codex", native_task_id: "task-placeholder", project_id: "p", cwd: "/repo",
+    expected_version: 0, state: legacy,
+  }), error => error.payload?.error === "codex_checkpoint_reference_invalid");
 });
 
 test("historical recovery rejects unsafe or incomplete archive selectors before database use", async () => {
@@ -321,6 +492,10 @@ test("historical recovery reports a bounded not-found result for an absent revis
   assert.deepEqual(out, {
     ok: true, found: false, historical: true, historical_archive: true,
     archive_ref: null, revision: null, integrity: "not_found",
+    storage_contract: {
+      version: "codex-continuity-storage.v2", semantic_state_max_bytes: 24000,
+      reference_manifest_max_bytes: 128000, recovery_state: "full_logical_state",
+    },
   });
   assert.equal(statements.filter(statement => statement.sql.includes("from codex_continuity_revision r")).length, 1);
 });
@@ -361,8 +536,8 @@ test("ten repeated recovery cycles preserve correction and next action in one bo
   const client = { query: async (sql, params) => {
     if (sql.startsWith("select pg_advisory")) return { rows: [] };
     if (sql.startsWith("select id,native_task_id,project_id")) return version ? { rows: [{ id: "cp-1", project_id: "p", cwd: "/repo", checkpoint_version: String(version) }] } : { rows: [] };
-    if (sql.startsWith("insert into codex_continuity_checkpoint")) { version = 1; return { rows: [{ id: "cp-1", native_task_id: "task-1", project_id: "p", cwd: "/repo", state: params[5], checkpoint_version: String(version) }] }; }
-    if (sql.startsWith("update codex_continuity_checkpoint")) { version += 1; return { rows: [{ id: "cp-1", native_task_id: "task-1", project_id: "p", cwd: "/repo", state: params[3], checkpoint_version: String(version) }] }; }
+    if (sql.startsWith("insert into codex_continuity_checkpoint")) { version = 1; return { rows: [{ id: "cp-1", native_task_id: "task-1", project_id: "p", cwd: "/repo", state: JSON.parse(params[5]), reference_manifest: JSON.parse(params[7]), checkpoint_version: String(version) }] }; }
+    if (sql.startsWith("update codex_continuity_checkpoint")) { version += 1; return { rows: [{ id: "cp-1", native_task_id: "task-1", project_id: "p", cwd: "/repo", state: JSON.parse(params[3]), reference_manifest: JSON.parse(params[5]), checkpoint_version: String(version) }] }; }
     return { rows: [] };
   } };
   const verb = tools()["codex-checkpoint"];

@@ -9,6 +9,10 @@ import test from "node:test";
 test("Claude continuity stdio proxy keeps the bearer out of config and exposes three verbs", async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "carr-continuity-proxy-"));
   const tokenFile = path.join(temp, "mcp-tokens.env");
+  const proxy = path.join(temp, "continuity-stdio-proxy.mjs");
+  fs.copyFileSync(new URL("../continuity-stdio-proxy.mjs", import.meta.url), proxy);
+  fs.copyFileSync(new URL("../local-client-auth.mjs", import.meta.url),
+    path.join(temp, "local-client-auth.mjs"));
   fs.writeFileSync(tokenFile, "CARR_CLAUDE_CONTINUITY_MCP_TOKEN=secret-claude\n", { mode: 0o600 });
   const seen = [];
   const server = http.createServer((request, response) => {
@@ -37,7 +41,7 @@ test("Claude continuity stdio proxy keeps the bearer out of config and exposes t
     });
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
-  const child = spawn(process.execPath, [new URL("../continuity-stdio-proxy.mjs", import.meta.url).pathname], {
+  const child = spawn(process.execPath, [proxy], {
     env: { ...process.env, CARR_MCP_ENV: tokenFile,
       CARR_MCP_URL: `http://127.0.0.1:${server.address().port}/mcp` },
     stdio: ["pipe", "pipe", "pipe"],
