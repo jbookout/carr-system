@@ -42,8 +42,9 @@
 // than reporting a generic unknown field.
 //
 // WHICH SCHEMA THIS MODULE REQUIRES, said plainly. It calls ops.j102_* from
-// ops/cre-lifecycle.candidate.sql, which is an UNNUMBERED CANDIDATE and is not
-// applied anywhere by this slice. It also calls four functions that arrive with
+// ops/cre-lifecycle.candidate.sql — including ops.j102_initialize_subject, the
+// separate narrow writer the three initialization operations use — which is an
+// UNNUMBERED CANDIDATE and is not applied anywhere by this slice. It also calls four functions that arrive with
 // domain.sql — ops.f01_principal, ops.f01_now_text, ops.f01_read and
 // ops.f01_stored_artifact — and it calls them rather than restating them,
 // because the authenticated principal, the server clock and the document and
@@ -58,18 +59,25 @@
 // the missing fact named. They are not stubbed, defaulted, or satisfied from a
 // caller field, and landing a producer for one does not silently open the other.
 //
-// SIX CAPABILITIES ARE NOT WIRED, AND THE LIST IS IN THE CODE. See
-// V5_J102_UNWIRED_CAPABILITIES below. Journey 1 cannot be BOOTSTRAPPED through
-// this store OR through the SQL writer beneath it: no operation creates a
-// prospect relationship, an assignment or a property negotiation, the SQL writer
-// refuses to create the primary subject of a transition rather than pretending
-// that a seed with no prerequisites is a bootstrap, and so the transitions that
-// require one refuse `subject_not_found` and this module claims no end-to-end
-// run and no executed positive walk at any layer. Q103's visible
-// reconciliation and its ownership/freshness projection are likewise not
-// connected — the kernel evaluates both and nothing here calls either. Those are
-// named as remaining source gaps, not worked around, not stubbed, and not
-// counted as done anywhere in this file.
+// THE THREE INITIALIZATION OPERATIONS ARE WIRED, AND THEY ARE NOT A BYPASS.
+// `initialize-prospect-relationship`, `initialize-assignment` and
+// `initialize-property-negotiation` create the FIRST row of a chain — the one
+// thing no transition may do, because a transition's own prerequisites need a
+// committed row to be checked against. They run through their own writer
+// (ops.j102_initialize_subject) against their own admission map, they create only
+// the earliest declared state of their kind, and ops.j102_apply_transition still
+// refuses a proposed primary subject by name. Every transition prerequisite,
+// every evidence contract and every subject binding is exactly as it was.
+//
+// TWO CAPABILITIES REMAIN UNWIRED, AND THE LIST IS IN THE CODE. See
+// V5_J102_UNWIRED_CAPABILITIES below. Q103's visible reconciliation and its
+// ownership/freshness projection are not connected — the kernel evaluates both
+// and nothing here calls either. They are named as remaining source gaps, not
+// worked around, not stubbed, and not counted as done anywhere in this file.
+// Nothing in this module claims an executed end-to-end run: what landed is
+// source, and the positive walk it makes possible is exercised in the Node suite
+// against a scripted handle and written into the SQL fixture, which remains
+// unexecuted.
 //
 // WHAT THIS MODULE IS NOT. It registers nothing: v5J102ToolRegistrations() below
 // is a DESCRIPTION the parent may register from, and this file does not touch
@@ -92,13 +100,16 @@ import {
   V5_J102_EVIDENCE_INTEGRITY,
   V5_J102_EVIDENCE_LOADER,
   V5_J102_EVIDENCE_KINDS,
+  V5_J102_INITIALIZATION_IDS,
   V5_J102_PARTNER_AUTHORED_RECORD_KINDS,
   V5_J102_SUBJECT_KINDS,
   V5_J102_TRANSITION_IDS,
+  evaluateLifecycleInitialization,
   evaluateLifecycleTransition,
   projectSalesforceReference,
   v5J102DecisionSubsetDigest,
   v5J102EvidenceContract,
+  v5J102InitializationContract,
   v5J102PolicyDigest,
   v5J102TransitionContract,
 } from "./cre-lifecycle.v5.js";
@@ -135,6 +146,14 @@ export const V5_J102_OPERATIONS = Object.freeze([
   "read-cre-lifecycle",
   "record-lifecycle-fact",
   "record-evidence-subject-link",
+  // The three initialization operations. Each creates the FIRST row of a chain
+  // and advances nothing: a prospect relationship, an assignment under an already
+  // active engagement held by a client, and a property negotiation under an
+  // assignment that is still open. Every transition below still requires its own
+  // evidence and its own prerequisites afterwards.
+  "initialize-prospect-relationship",
+  "initialize-assignment",
+  "initialize-property-negotiation",
   "record-representation-agreement",
   "open-cre-assignment",
   "record-loi-submission",
@@ -196,36 +215,21 @@ export const V5_J102_ABSENT_EVIDENCE_READERS = Object.freeze({
  *
  * The absent-reader registry above covers evidence this layer cannot READ. This
  * one covers behaviour this layer does not CONNECT, and it exists because the
- * absence is invisible from the kernel suite: the kernel's end-to-end test
- * constructs a relationship, an assignment and a property negotiation directly,
- * so nothing there notices that no shipped operation ever creates one.
+ * absence is invisible from the kernel suite: the kernel evaluates a concurrent
+ * edit and an ownership projection perfectly well, and nothing there notices that
+ * no shipped operation ever calls either.
  *
  * NOTHING BELOW IS A PLAN, A SCHEDULE OR A PROMISE. Each entry names one exact
- * missing producer or caller and who would have to own it. None of them is
- * worked around anywhere in this module: `runTransition` refuses
- * `subject_not_found` for an absent primary subject and does not create it, and
- * no reconciliation item or ownership projection is written or exposed by any
- * code path that ships here.
+ * missing producer or caller and who would have to own it. Neither is worked
+ * around anywhere in this module: no reconciliation item and no ownership
+ * projection is written or exposed by any code path that ships here.
+ *
+ * THE THREE INITIALIZATION ENTRIES THAT USED TO SIT HERE ARE GONE BECAUSE THEY
+ * WERE BUILT, not because the standard moved — see
+ * V5_J102_WIRED_INITIALIZATION_CAPABILITIES below, which records what landed and
+ * what deliberately did not.
  */
 export const V5_J102_UNWIRED_CAPABILITIES = Object.freeze([
-  Object.freeze({
-    capability: "relationship_prospect_initialization",
-    missing_fact: "an operation that creates a relationship subject in the prospect state",
-    why: "Q069/Q077 start Journey 1 at a prospect, and `record-representation-agreement` promotes an EXISTING relationship to client. No operation in V5_J102_OPERATIONS creates the prospect row, so the first step of the journey cannot be taken through this store.",
-    produced_by: "not_produced_by_this_slice",
-  }),
-  Object.freeze({
-    capability: "assignment_initialization",
-    missing_fact: "an operation that creates an assignment subject under an active engagement",
-    why: "`open-cre-assignment` moves an EXISTING assignment into research or search and refuses subject_not_found otherwise. Only `record-representation-agreement` and `commit-winning-property` create subjects at all, and they create an engagement and a deal.",
-    produced_by: "not_produced_by_this_slice",
-  }),
-  Object.freeze({
-    capability: "property_negotiation_initialization",
-    missing_fact: "an operation that creates a property_negotiation subject in the loi_drafted state",
-    why: "`record-loi-submission` requires a negotiation already at loi_drafted or loi_countered. Nothing here drafts one, so Q095's multiple concurrent LOIs cannot be started through this store.",
-    produced_by: "not_produced_by_this_slice",
-  }),
   Object.freeze({
     capability: "reconciliation_runtime_integration",
     missing_fact: "a caller that evaluates a concurrent edit and writes the resulting reconciliation item",
@@ -238,33 +242,99 @@ export const V5_J102_UNWIRED_CAPABILITIES = Object.freeze([
     why: "The kernel's projectOwnershipAndFreshness is pure and has no caller here, and `read-cre-lifecycle` exposes no kind that returns it. Q103's 'expose ownership, freshness, and active automation' is unmet at the record layer.",
     produced_by: "not_produced_by_this_slice",
   }),
-  // THE MISSING BOOTSTRAP IS NOW MISSING EVERYWHERE, which is what closes it as a
-  // hole and leaves it open as a gap.
-  //
-  // An earlier correction let ops.j102_apply_transition CREATE the primary
-  // subject on a null compare-and-swap operand, and called that a bootstrap. It
-  // was not one: a created primary has no committed row, so the transition's
-  // prerequisites, its instrument kind and every prior-state condition had
-  // nothing to be checked against, and a direct caller could seed a deal already
-  // executed or an assignment already committed. Reporting
-  // `prerequisites_checked: false` on that path was an honest description of a
-  // bypass rather than a refusal of one.
-  //
-  // The SQL writer now REFUSES to create the primary subject
-  // (`j102_primary_subject_creation_refused`), and admits creation only for the
-  // two coupled subjects the kernel itself creates — the engagement of
-  // establish-client-and-engagement and the pending deal of
-  // commit-winning-property — in their exact declared shape. The consequence is
-  // stated rather than worked around: with the three initialization gaps above,
-  // NOTHING in this slice creates a relationship, an assignment or a property
-  // negotiation, so no lifecycle transition can be walked end to end anywhere —
-  // not through this store, not through a direct SQL call, and not in the SQL
-  // fixture, which says so where it would otherwise have shown a positive walk.
+]);
+
+/**
+ * THE INITIALIZATION GAP IS CLOSED, AND CLOSED NARROWLY — recorded here because
+ * the three entries this registry used to carry, and the fourth that said the
+ * rail had no bootstrap at any layer, are gone from it and a reader comparing two
+ * revisions should see WHY rather than that they disappeared.
+ *
+ * WHAT LANDED: three initialization operations, each with its own admission in
+ * this store and its own writer in the candidate SQL
+ * (ops.j102_initialize_subject), each creating the earliest declared state of one
+ * subject kind under a parent chain re-checked under the writer's own lock.
+ *
+ * WHAT DID NOT: ops.j102_apply_transition still REFUSES to create the primary
+ * subject of a transition (`j102_primary_subject_creation_refused`), and the
+ * initialization writer is a different function with a different map — it can
+ * create only the three kinds below, only in their fixed initial state, and it
+ * performs no transition. The null-operand path through the transition writer is
+ * not reopened, and every transition prerequisite remains mandatory.
+ */
+export const V5_J102_WIRED_INITIALIZATION_CAPABILITIES = Object.freeze([
   Object.freeze({
-    capability: "lifecycle_rail_has_no_bootstrap_at_any_layer",
-    missing_fact: "any writer, in this store or in SQL, that creates the FIRST lifecycle subject of a chain",
-    why: "ops.j102_apply_transition refuses a proposed primary subject with a null compare-and-swap operand, because a created primary makes the transition's own prerequisites vacuous. Creation is admitted only for the coupled engagement and the coupled pending deal the kernel creates, each of which requires an already-committed primary. Nothing seeds the first relationship, assignment or negotiation, so mcp-server/test/cre-lifecycle-postgres.sql executes no positive transition walk and claims none; its behavioural groups prove refusals, and the walks are named as blocked on this fact.",
-    produced_by: "not_produced_by_this_slice",
+    capability: "relationship_prospect_initialization",
+    operation: "initialize-prospect-relationship",
+    creates_subject_kind: "relationship",
+    initial_state: "prospect",
+    requires_evidence: false,
+    why: "Q069/Q077 start Journey 1 at a prospect, and pursuing a party is not a fact a document establishes. The row it writes says only that this relationship is a prospect holding no engagements; `record-representation-agreement` is still the only door to client status and still requires an active signed representation agreement.",
+  }),
+  Object.freeze({
+    capability: "assignment_initialization",
+    operation: "initialize-assignment",
+    creates_subject_kind: "assignment",
+    initial_state: "research",
+    requires_evidence: false,
+    why: "Q079's several mandates per client. The assignment is created under an ACTIVE engagement held by a relationship that is already a CLIENT, both re-read under the writer's lock, at the earliest declared phase. `open-cre-assignment` remains the only way to reach `search` and the only producer of an assignment_opened event, so the mandate record stays load-bearing for both — but it is NOT the only way past `research`: record-loi-submission admits a research assignment and writes `negotiation`, so a created shell can reach negotiation with no mandate ever written. Whether a mandate must precede an LOI is an OWNER QUESTION, unsettled by all thirteen decisions and deliberately not encoded here.",
+  }),
+  Object.freeze({
+    capability: "property_negotiation_initialization",
+    operation: "initialize-property-negotiation",
+    creates_subject_kind: "property_negotiation",
+    initial_state: "loi_drafted",
+    requires_evidence: false,
+    why: "Q095's concurrent LOIs. The negotiation is created under an assignment that is still open — a committed or concluded one refuses, on the same bound the kernel already applies to a fresh LOI — and `record-loi-submission` still requires the delivered LOI document bound to that negotiation.",
+  }),
+]);
+
+/**
+ * THE QUESTIONS THIS SLICE DOES NOT ANSWER, kept in code beside the answers so
+ * that "nobody decided this" cannot decay into "somebody must have".
+ *
+ * NONE OF THESE IS A POLICY. Each names a decision the thirteen accepted
+ * decisions leave open, what the rail does TODAY in the absence of an answer, and
+ * — where there is one — the exact narrow change that would encode each answer.
+ * The behaviour they describe is deliberately NOT changed pending an owner
+ * ruling: encoding one on an author's or a reviewer's reading is the failure this
+ * registry exists to make visible.
+ *
+ * The last entry is a different kind of thing and says so: an implementation
+ * assumption that is live, defensible and unratified.
+ */
+export const V5_J102_OPEN_OWNER_QUESTIONS = Object.freeze([
+  Object.freeze({
+    question: "must an assignment be OPENED on a mandate record before an LOI may be drafted or submitted under it?",
+    status: "unsettled_pending_owner_ruling",
+    today: "No. `initialize-assignment` creates the row at `research`, `initialize-property-negotiation` admits an assignment in research, search or negotiation, and `record-loi-submission` admits the same three and writes `negotiation`. So an assignment can reach `negotiation` through an LOI with no mandate record ever written and no `assignment_opened` event in its history. `open-assignment` remains the only way to reach `search` and the only producer of that event.",
+    why_unsettled: "Q072.D1 maps search initiation TO research or search; it states no ordering obligation, and no other accepted decision names one. Q080.D1 gives the assignment its phases and is silent on what may reach them.",
+    narrow_change_if_the_answer_is_yes: "drop `research` from initialize-property-negotiation's admitted parent phases in the kernel contract and in the SQL admission map. It would also stop a research-scope assignment from ever holding a draft, which is a real cost and part of the decision.",
+    encoded_without_a_ruling: false,
+  }),
+  Object.freeze({
+    question: "what links a J102 relationship to a CARR party or contact record?",
+    status: "unsettled_pending_owner_ruling",
+    today: "Nothing. The relationship shape is closed at subject_kind / subject_id / relationship_state / active_engagement_count, `initialize-prospect-relationship` declares no identifiers beyond the id, and the `relationship_initialized` event carries only the state. The relationship id is therefore the de facto party key, and nothing in the rail detects two prospect rows for one medical group.",
+    why_unsettled: "Q083.D1 settles Salesforce opportunities as external corporate references and is implemented. No accepted decision settles a party or contact key on the subject itself.",
+    narrow_change_if_the_answer_is_yes: "a declared party reference on the relationship shape, which widens a closed subject schema and moves the policy digest — not a change to make without the ruling.",
+    encoded_without_a_ruling: false,
+  }),
+  Object.freeze({
+    question: "may one assignment hold two property negotiations against the SAME property?",
+    status: "unsettled_pending_owner_ruling",
+    today: "Yes, unconstrained. Q095's single-target constraint binds `selected_property_id` and `active_lease_draft_target_id`, which duplicate drafts do not disturb, and no index or check forbids them.",
+    why_unsettled: "Q095.D1 settles concurrent LOIs and the single winning property. It is silent on two negotiations against one property.",
+    narrow_change_if_the_answer_is_yes: "a unique index on (tenant, assignment, property) for property_negotiation rows, plus a kernel refusal so the answer is not only structural.",
+    encoded_without_a_ruling: false,
+  }),
+  Object.freeze({
+    question: "may a SPONSORED AGENT create a prospect, an assignment shell or an LOI draft?",
+    status: "implementation_assumption_live_and_unratified",
+    today: "Yes. All three initializations admit verified_partner and sponsored_agent, derived from the rule that the class which may ADVANCE a subject may create it: establish-client-and-engagement, open-assignment and record-loi-submission all admit both. The partner-only acts — commitment, closing, cancellation, correction, and the evidence to subject association — are untouched.",
+    why_unsettled: "No accepted decision names an actor class at all; the verified_partner / sponsored_agent vocabulary is this rail's. Q082.D1 settles only that transitions declare their permitted actors.",
+    residual_to_weigh: "`initialize-prospect-relationship` has no parent, no evidence and no rate bound, so an authenticated sponsored agent can create prospect rows limited only by id uniqueness.",
+    encoded_without_a_ruling: true,
   }),
 ]);
 
@@ -636,6 +706,23 @@ export const V5_J102_LINKABLE_EVIDENCE_SOURCES =
 const TRANSITION_PAYLOAD_KEYS = Object.freeze([
   "schema_version", "idempotency_key", "subject_ref", "related_refs", "evidence_refs", "declared",
 ]);
+// THE INITIALIZATION PAYLOAD, AND THE THREE KEYS IT DOES NOT HAVE.
+//
+// No `subject_ref`, because the subject does not exist yet and the id it will
+// have is a DECLARED identifier rather than a reference to something. No
+// `evidence_refs`, because no evidence in this rail can bind to a subject that
+// does not exist — a caller naming one gets `unknown_field` rather than a
+// refusal, since there is no evidence question to answer. And no state, phase or
+// axis of any kind: the created shape is fixed by the kernel's initialization
+// contract, and the derived-field guard refuses every lifecycle axis by name.
+//
+// `related_refs` carries the PARENT, as a subject reference with its own optional
+// compare-and-swap digest, so an assignment is created under the exact engagement
+// the caller decided against and a parent that moved refuses.
+const INITIALIZATION_PAYLOAD_KEYS = Object.freeze([
+  "schema_version", "idempotency_key", "related_refs", "declared",
+]);
+const INITIALIZATION_DECLARED_KEYS = Object.freeze(["new_subject_id", "property_id"]);
 const RELATED_REF_KEYS = Object.freeze([
   "relationship", "engagement", "assignment", "property_negotiation", "deal",
 ]);
@@ -755,6 +842,31 @@ const OPERATION_SCHEMAS = deepFreeze({
     write: true, humanOnly: false, authorityOnly: true, transition: null,
     keys: LINK_KEYS, required: ["idempotency_key", "link"],
   },
+  // THE THREE INITIALIZATIONS. Each creates one subject and performs no
+  // transition, which is why `transition` is null on all three and
+  // `initialization` names the kernel contract instead. None is authorityOnly:
+  // creating an empty prospect, an assignment shell under a client's active
+  // engagement, or an LOI draft carries no evidence-bound fact, and the class
+  // that may ADVANCE each of them is the class that may create it. The kernel
+  // holds the same two classes on each contract and the SQL map restates them, so
+  // an agent that reached the writer directly is admitted no wider.
+  "initialize-prospect-relationship": {
+    write: true, humanOnly: false, authorityOnly: false, transition: null,
+    initialization: "initialize-prospect-relationship", subject_kind: "relationship",
+    keys: INITIALIZATION_PAYLOAD_KEYS, required: ["idempotency_key", "declared"],
+  },
+  "initialize-assignment": {
+    write: true, humanOnly: false, authorityOnly: false, transition: null,
+    initialization: "initialize-assignment", subject_kind: "assignment",
+    keys: INITIALIZATION_PAYLOAD_KEYS,
+    required: ["idempotency_key", "declared", "related_refs"],
+  },
+  "initialize-property-negotiation": {
+    write: true, humanOnly: false, authorityOnly: false, transition: null,
+    initialization: "initialize-property-negotiation", subject_kind: "property_negotiation",
+    keys: INITIALIZATION_PAYLOAD_KEYS,
+    required: ["idempotency_key", "declared", "related_refs"],
+  },
   "record-representation-agreement": {
     write: true, humanOnly: false, authorityOnly: false,
     transition: "establish-client-and-engagement",
@@ -846,6 +958,12 @@ export function v5J102ToolRegistrations() {
       "Append one authenticated first-party business record, bound to the exact subject it is about, so a later transition has server-held evidence; advances no lifecycle state.",
     "record-evidence-subject-link":
       "Append one partner-authored association between an exact F01 document version or corporate artifact and one lifecycle subject; advances no lifecycle state and creates no document.",
+    "initialize-prospect-relationship":
+      "Create one relationship in the PROSPECT state. It is not a Client: an active signed representation agreement is still what creates client status.",
+    "initialize-assignment":
+      "Create one Assignment under an already ACTIVE Engagement held by a CLIENT, in the earliest research phase. It reaches no search and appends no assignment_opened event: open-cre-assignment on a mandate record is the only producer of either. It does not by itself force a mandate before an LOI — record-loi-submission admits a research assignment — and that ordering is an unsettled owner question.",
+    "initialize-property-negotiation":
+      "Create one property negotiation under an Assignment that is still open (research, search or negotiation), as an LOI DRAFT. It submits nothing, requires no mandate, and creates no Deal.",
     "record-representation-agreement":
       "Establish Client status and the active Engagement together from an active signed representation agreement, atomically or not at all.",
     "open-cre-assignment":
@@ -875,6 +993,9 @@ export function v5J102ToolRegistrations() {
     "read-cre-lifecycle": "readCreLifecycle",
     "record-lifecycle-fact": "recordLifecycleFact",
     "record-evidence-subject-link": "recordEvidenceSubjectLink",
+    "initialize-prospect-relationship": "initializeProspectRelationship",
+    "initialize-assignment": "initializeAssignment",
+    "initialize-property-negotiation": "initializePropertyNegotiation",
     "record-representation-agreement": "recordRepresentationAgreement",
     "open-cre-assignment": "openCreAssignment",
     "record-loi-submission": "recordLoiSubmission",
@@ -950,8 +1071,49 @@ const CREATED_COUPLED_SUBJECTS = Object.freeze({
   "commit-winning-property": Object.freeze(["deal"]),
 });
 
+/**
+ * WHICH OPERATION CREATES A SUBJECT OF EACH KIND, derived rather than restated:
+ * the three initialization schemas above name three kinds, and the two coupled
+ * creations name the other two. This is what lets a capability description say
+ * "this operation needs an assignment, and THIS is where one comes from" instead
+ * of reporting a prerequisite with no answer beside it.
+ */
+function creatingOperationFor(subject_kind) {
+  for (const name of V5_J102_OPERATIONS) {
+    const schema = OPERATION_SCHEMAS[name];
+    if (schema.initialization !== undefined &&
+        v5J102InitializationContract(schema.initialization).subject_kind === subject_kind) {
+      return name;
+    }
+  }
+  for (const [transition_id, kinds] of Object.entries(CREATED_COUPLED_SUBJECTS)) {
+    if (!kinds.includes(subject_kind)) continue;
+    const name = V5_J102_OPERATIONS.find(op => OPERATION_SCHEMAS[op].transition === transition_id);
+    if (name !== undefined) return name;
+  }
+  return null;
+}
+
 function primarySubjectPrerequisite(operation) {
   const schema = OPERATION_SCHEMAS[operation];
+  if (schema.initialization !== undefined) {
+    const contract = v5J102InitializationContract(schema.initialization);
+    return {
+      // An initialization CREATES its subject, so it requires no existing one —
+      // and that is the one place in this module where that is true. It is stated
+      // beside the parent it DOES require, so the pair cannot be read as "this
+      // operation requires nothing".
+      requires_existing_primary_subject: false,
+      creates_primary_subject_kind: contract.subject_kind,
+      creates_coupled_subject_kinds: [],
+      requires_existing_parent_subject_kind: contract.parent_subject_kind,
+      parent_subject_created_by_operation:
+        contract.parent_subject_kind === null
+          ? null : creatingOperationFor(contract.parent_subject_kind),
+      required_context_subject_kinds: contract.required_context.map(rule => rule.subject),
+      performs_transition: false,
+    };
+  }
   if (schema.transition === null) {
     return { requires_existing_primary_subject: false, creates_coupled_subject_kinds: [] };
   }
@@ -961,13 +1123,17 @@ function primarySubjectPrerequisite(operation) {
       ? [...new Set(Object.values(V5_J102_AXIS_TRANSITIONS))].sort()
       : [schema.transition];
   const created = [...new Set(transitions.flatMap(id => CREATED_COUPLED_SUBJECTS[id] ?? []))].sort();
+  const primary_subject_kind = v5J102TransitionContract(transitions[0]).subject_kind;
   return {
     requires_existing_primary_subject: true,
-    primary_subject_kind: v5J102TransitionContract(transitions[0]).subject_kind,
+    primary_subject_kind,
     creates_coupled_subject_kinds: created,
-    // Named on the description itself, because "this operation cannot be reached
-    // at all today" is the first thing a reader of a capability list needs.
-    primary_subject_created_by_operation: null,
+    // Named on the description itself, because "where does a subject of this kind
+    // come from" is the first thing a reader of a capability list needs. It read
+    // `null` while nothing created one; it now names the operation that does, and
+    // a kind with no creating operation would report null again rather than
+    // implying one exists.
+    primary_subject_created_by_operation: creatingOperationFor(primary_subject_kind),
   };
 }
 
@@ -1409,7 +1575,54 @@ export function createCreLifecycleStore({ db } = {}) {
       committed_at: outcome.committed_at ?? null,
       readback: outcome.readback ?? null,
     };
-    if (OPERATION_SCHEMAS[operation].transition !== null) {
+    if (OPERATION_SCHEMAS[operation].initialization !== undefined) {
+      Object.assign(extra, {
+        initialization_id: outcome.initialization_id,
+        created_subject_kind: outcome.created_subject_kind ?? null,
+        created_subject_id: outcome.created_subject_id ?? null,
+        subject_digests: outcome.subject_digests ?? null,
+        event_digests: outcome.event_digests ?? null,
+        decision_refs: outcome.decision_refs ?? [],
+        decision_refs_source: outcome.decision_refs_source ?? null,
+        caller_reported_reason_id: outcome.caller_reported_reason_id ?? null,
+        caller_reported_reason_id_scope: outcome.caller_reported_reason_id_scope ?? null,
+        admission_policy_id: outcome.admission_policy_id ?? null,
+        actor_authorization_class: outcome.actor_authorization_class ?? null,
+        // WHAT THE DATABASE ENFORCED, read off the stored outcome rather than
+        // asserted here: the created row is exactly the shape the initialization
+        // contract fixes, every parent it runs under was locked, unmoved and met
+        // its declared conditions, and the subject did not already exist.
+        //
+        // AND WHICH PARENTS THOSE WERE. The two booleans are unconditional trues
+        // in the writer, so on a PARENTLESS creation they describe the empty set —
+        // a prospect receipt would otherwise read as though a chain had been
+        // walked. `context_subjects_consulted` is the checkable half: `[]` for a
+        // prospect, the engagement and relationship keys for an assignment, the
+        // assignment key for a negotiation. It is READ OFF the stored outcome,
+        // never re-derived here, so a replay reports what the write consulted.
+        creation_shape_enforced: outcome.creation_shape_enforced === true,
+        required_context_enforced: outcome.required_context_enforced === true,
+        parent_subjects_locked_and_unmoved:
+          outcome.parent_subjects_locked_and_unmoved === true,
+        context_subjects_consulted: outcome.context_subjects_consulted ?? [],
+        context_subjects_consulted_count:
+          outcome.context_subjects_consulted_count ?? null,
+        subject_created: outcome.subject_created === true,
+        // THE ANTI-BYPASS STATEMENT, on every initialization receipt. This writer
+        // performs no transition, so it checked no transition prerequisite and
+        // skipped none: the transitions that follow still require theirs.
+        transition_applied: false,
+        transition_prerequisites_bypassed: false,
+        advances_lifecycle_state: false,
+        evidence_required: false,
+        evidence_supplied: 0,
+        request_digest_scope: outcome.request_digest_scope ?? null,
+        committed_content_digest: outcome.committed_content_digest ?? null,
+        committed_content_digest_source: outcome.committed_content_digest_source ?? null,
+        partial_application: false,
+        free_form_stage_update: false,
+      });
+    } else if (OPERATION_SCHEMAS[operation].transition !== null) {
       Object.assign(extra, {
         transition_id: outcome.transition_id,
         subject_digests: outcome.subject_digests ?? null,
@@ -2138,10 +2351,188 @@ export function createCreLifecycleStore({ db } = {}) {
       // WHO authored it; a refusal that hid either would be unactionable.
       "bound_subject_kind", "bound_subject_id", "bound_by", "required_subject_kind",
       "required_author_class", "evidence_author_class", "evidence_author",
-      "active_lease_draft_target_id", "relationship_id", "engagement_id"]) {
+      "active_lease_draft_target_id", "relationship_id", "engagement_id",
+      // The initialization refusals name the condition that failed, the context
+      // link that did not hold, and the identifier that was missing or unread.
+      "unmet_field", "missing_declared_identifier", "unexpected_declared_identifier",
+      "expected_id", "loaded_id"]) {
       if (evaluated[key] !== undefined) detail[key] = evaluated[key];
     }
     return deepFreeze(detail);
+  }
+
+  // -- the shared initialization path ----------------------------------------
+
+  /**
+   * Every initialization runs through here, so there is ONE place that loads the
+   * parent chain, judges, envelopes and creates — and one place a reviewer has to
+   * read to know what any of the three initialization operations does.
+   *
+   * ORDERED, and the order is load-bearing:
+   *   1. Authenticate, validate the closed payload, claim authority.
+   *   2. Open the transaction, derive actor and instant from the SERVER.
+   *   3. REPLAY FIRST, before any state read, exactly as a transition does.
+   *   4. Load every parent named in `related_refs`, with its compare-and-swap
+   *      digest. A parent that moved refuses here rather than being created
+   *      under.
+   *   5. Refuse an id that is already taken, so a caller learns that the row it
+   *      names exists rather than receiving a serialization failure.
+   *   6. Run the KERNEL. It decides whether the parent chain admits this
+   *      creation and what the created row must be; nothing here second-guesses
+   *      it and nothing here composes a state of its own.
+   *   7. Hand the one subject envelope and the one event envelope to
+   *      ops.j102_initialize_subject with the parents' compare-and-swap digests
+   *      and an EXPLICIT NULL for the created key. The writer re-takes the same
+   *      locks, re-checks the parents, holds the row to the contract's fixed
+   *      shape, and writes the subject and its history together or neither.
+   *
+   * IT PERFORMS NO TRANSITION AND REACHES NO TRANSITION WRITER.
+   * ops.j102_apply_transition is not called from this path, and its refusal to
+   * create a primary subject is untouched.
+   */
+  async function runInitialization(operation, payload, context) {
+    const schema = OPERATION_SCHEMAS[operation];
+    const contract = v5J102InitializationContract(schema.initialization);
+    const { principal, payload: request } = begin(operation, payload, context);
+
+    const rawDeclared = assertClosed(request.declared, INITIALIZATION_DECLARED_KEYS,
+      ["new_subject_id"], "payload.declared");
+    const declared = {};
+    for (const key of INITIALIZATION_DECLARED_KEYS) {
+      if (rawDeclared[key] === undefined || rawDeclared[key] === null) continue;
+      declared[key] = assertIdent(rawDeclared[key], `payload.declared.${key}`);
+    }
+
+    const relatedRefs = {};
+    if (request.related_refs !== undefined && request.related_refs !== null) {
+      const raw = assertClosed(request.related_refs, RELATED_REF_KEYS, [], "payload.related_refs");
+      for (const key of RELATED_REF_KEYS) {
+        if (raw[key] === undefined || raw[key] === null) continue;
+        relatedRefs[key] = assertSubjectRef(raw[key], `payload.related_refs.${key}`, key);
+      }
+    }
+    // THE PARENT CHAIN IS NAMED IN FULL OR NOT AT ALL. Every subject the kernel's
+    // contract requires must be supplied, because a chain link the caller simply
+    // omits is a prerequisite nobody checks — which is how an assignment ends up
+    // under a lapsed engagement or a prospect. A related subject the contract does
+    // NOT read is refused for the mirror reason: it would be locked, compared and
+    // never consulted, which reads as a check that happened.
+    const required_related = contract.required_context.map(rule => rule.subject);
+    for (const key of required_related) {
+      if (relatedRefs[key] === undefined) {
+        fail("missing_field",
+          `payload.related_refs.${key} is required; ${operation} runs under a ${key} and checks it`,
+          { path: `payload.related_refs.${key}`, operation,
+            required_related_subject_kinds: required_related });
+      }
+    }
+    for (const key of Object.keys(relatedRefs)) {
+      if (!required_related.includes(key)) {
+        fail("unexpected_related_subject",
+          `${operation} reads ${required_related.length === 0 ? "no related subject" : required_related.join(", ")}, and this request names a ${key}`,
+          { path: `payload.related_refs.${key}`, operation,
+            required_related_subject_kinds: required_related });
+      }
+    }
+
+    return withTransaction(async client => {
+      const { now } = await openOperation(client, operation, principal);
+      const replay = await replayOutcome(client, operation, request, principal);
+      if (replay !== null) return replay;
+
+      const related = {};
+      const expectedStateDigests = {};
+      for (const [key, ref] of Object.entries(relatedRefs)) {
+        const loaded = await loadSubject(client, ref.subject_kind, ref.subject_id);
+        if (loaded.state === null) {
+          return result(operation, "refuse", "related_subject_not_found", {
+            actor_slug: principal.slug, related_kind: key, related_id: ref.subject_id,
+            records_written: 0, readback: null,
+          });
+        }
+        if (ref.expected_state_digest !== null && ref.expected_state_digest !== loaded.state_digest) {
+          return result(operation, "refuse", "stale_related_subject_digest", {
+            actor_slug: principal.slug, related_kind: key, related_id: ref.subject_id,
+            stored_state_digest: loaded.state_digest,
+            expected_state_digest: ref.expected_state_digest,
+            records_written: 0, readback: null,
+          });
+        }
+        related[key] = loaded.state;
+        expectedStateDigests[`${ref.subject_kind}:${ref.subject_id}`] = loaded.state_digest;
+      }
+
+      // THE ID MUST BE FREE. The writer's explicit-null operand is what actually
+      // enforces this, under the lock, so two concurrent creations of one id
+      // serialize and the loser refuses; this read is what turns that into a
+      // named answer instead of a serialization failure.
+      const existing = await loadSubject(client, contract.subject_kind, declared.new_subject_id);
+      if (existing.state !== null) {
+        return result(operation, "refuse", "subject_already_exists", {
+          actor_slug: principal.slug,
+          subject_kind: contract.subject_kind, subject_id: declared.new_subject_id,
+          stored_state_digest: existing.state_digest,
+          overwrote_existing_subject: false,
+          records_written: 0, readback: null,
+        });
+      }
+
+      const evaluated = evaluateLifecycleInitialization({
+        tenant: ORGANIZATION_TENANT_ID,
+        initialization_id: schema.initialization,
+        related,
+        declared,
+        actor: principal,
+        now,
+      });
+      if (evaluated.decision !== "allow") {
+        return result(operation, evaluated.decision, evaluated.reason_id, {
+          actor_slug: principal.slug,
+          initialization_id: schema.initialization,
+          subject_kind: contract.subject_kind, subject_id: declared.new_subject_id,
+          refusal_detail: refusalDetail(evaluated),
+          records_written: 0, readback: null,
+        });
+      }
+
+      const created = evaluated.created_state;
+      // AN EXPLICIT JSON NULL, which the writer reads as "this subject must be
+      // ABSENT" rather than as "no opinion" — the same operand a coupled creation
+      // carries through the transition writer, and for the same reason.
+      expectedStateDigests[`${created.subject_kind}:${created.subject_id}`] = null;
+
+      const subjectEnvelope = storeEnvelope("stored_lifecycle_subject", storedSubjectRecord({
+        subject: created,
+        // The row's own provenance is the INITIALIZATION that created it, never a
+        // transition. A reader of ops.j102_subject can therefore tell a created
+        // row from an advanced one without consulting the history.
+        transition_id: schema.initialization,
+        prior_state_digest: null,
+        updated_by: principal.slug,
+        updated_at: now,
+      }), { alone_sufficient: false });
+      // AN EMPTY EVIDENCE CITATION, and it is a positive statement rather than an
+      // omission: this act rests on no evidence because no evidence in this rail
+      // can bind to a subject that does not exist yet. The relation admits an
+      // empty array for exactly the three initialization ids and for nothing else,
+      // so a TRANSITION still cannot append a history row citing nothing.
+      const eventEnvelope = storeEnvelope("stored_lifecycle_event", storedEventRecord({
+        event: evaluated.events[0],
+        transition_id: schema.initialization,
+        evidence_references: [],
+        recorded_by: principal.slug,
+        recorded_at: now,
+      }), { append_only: true });
+
+      const row = await one(client,
+        `SELECT ops.j102_initialize_subject($1::text, $2::jsonb, $3::jsonb, $4::jsonb,
+                                            $5::text, $6::text, $7::jsonb) AS outcome`,
+        [schema.initialization, J(expectedStateDigests), J(subjectEnvelope), J(eventEnvelope),
+         request.idempotency_key, requestDigest(operation, request, principal),
+         J({ operation, reason_id: evaluated.reason_id,
+             decision_refs: evaluated.decision_refs })]);
+      return resultFromOutcome(operation, parse(row.outcome), principal);
+    });
   }
 
   // -- 1. read-cre-lifecycle -------------------------------------------------
@@ -2399,6 +2790,15 @@ export function createCreLifecycleStore({ db } = {}) {
     });
   }
 
+  // -- 2c. the three initialization operations -------------------------------
+
+  const initializeProspectRelationship = (payload, context) =>
+    runInitialization("initialize-prospect-relationship", payload, context);
+  const initializeAssignment = (payload, context) =>
+    runInitialization("initialize-assignment", payload, context);
+  const initializePropertyNegotiation = (payload, context) =>
+    runInitialization("initialize-property-negotiation", payload, context);
+
   // -- 3..13. the transition operations -------------------------------------
 
   const recordRepresentationAgreement = (payload, context) =>
@@ -2592,6 +2992,9 @@ export function createCreLifecycleStore({ db } = {}) {
     readCreLifecycle,
     recordLifecycleFact,
     recordEvidenceSubjectLink,
+    initializeProspectRelationship,
+    initializeAssignment,
+    initializePropertyNegotiation,
     recordRepresentationAgreement,
     openCreAssignment,
     recordLoiSubmission,
@@ -2626,6 +3029,48 @@ for (const name of V5_J102_OPERATIONS) {
     throw new V5J102StoreError("contract_self_check_failed",
       `${name} names unregistered subject kind "${schema.subject_kind}"`);
   }
+  if (schema.initialization !== undefined) {
+    if (!V5_J102_INITIALIZATION_IDS.includes(schema.initialization)) {
+      throw new V5J102StoreError("contract_self_check_failed",
+        `${name} names unregistered initialization "${schema.initialization}"`);
+    }
+    // AN OPERATION IS ONE DOOR OR THE OTHER, NEVER BOTH. An operation that both
+    // initialized a subject and performed a transition would be the null-operand
+    // bypass reassembled out of two halves that are each individually correct.
+    if (schema.transition !== null) {
+      throw new V5J102StoreError("contract_self_check_failed",
+        `${name} both initializes a subject and performs a transition; the two doors stay separate`);
+    }
+    if (schema.subject_kind !==
+        v5J102InitializationContract(schema.initialization).subject_kind) {
+      throw new V5J102StoreError("contract_self_check_failed",
+        `${name} claims to create a ${schema.subject_kind} and its initialization creates a ` +
+        `${v5J102InitializationContract(schema.initialization).subject_kind}`);
+    }
+  }
+}
+
+// Every registered initialization has exactly one operation, so a contract the
+// kernel declares cannot sit unreachable and two operations cannot both claim to
+// be the door to one creation.
+for (const initialization_id of V5_J102_INITIALIZATION_IDS) {
+  const operations = V5_J102_OPERATIONS
+    .filter(name => OPERATION_SCHEMAS[name].initialization === initialization_id);
+  if (operations.length !== 1) {
+    throw new V5J102StoreError("contract_self_check_failed",
+      `${initialization_id} is performed by ${operations.length} operations; it is performed by exactly one`);
+  }
+}
+
+// The wired-initialization registry has to keep describing what actually shipped.
+for (const entry of V5_J102_WIRED_INITIALIZATION_CAPABILITIES) {
+  const schema = OPERATION_SCHEMAS[entry.operation];
+  if (schema === undefined || schema.initialization === undefined ||
+      v5J102InitializationContract(schema.initialization).subject_kind !==
+        entry.creates_subject_kind) {
+    throw new V5J102StoreError("contract_self_check_failed",
+      `the wired-initialization registry claims ${entry.operation} creates a ${entry.creates_subject_kind}, and the operation table does not agree`);
+  }
 }
 
 for (const [axis, transition] of Object.entries(AXIS_TRANSITIONS)) {
@@ -2636,6 +3081,29 @@ for (const [axis, transition] of Object.entries(AXIS_TRANSITIONS)) {
   if (!V5_J102_TRANSITION_IDS.includes(transition)) {
     throw new V5J102StoreError("contract_self_check_failed",
       `the axis dispatch names unregistered transition "${transition}"`);
+  }
+}
+
+// The open-question registry has to stay a list of QUESTIONS rather than a list
+// of answers: every entry names what the rail does today and why nobody has
+// ruled, and exactly one of them may say it is already encoded — the actor-class
+// assumption, which is live and labelled as an assumption rather than a ruling.
+for (const entry of V5_J102_OPEN_OWNER_QUESTIONS) {
+  for (const key of ["question", "status", "today", "why_unsettled"]) {
+    if (typeof entry[key] !== "string" || entry[key].length === 0) {
+      throw new V5J102StoreError("contract_self_check_failed",
+        `the open-question registry entry "${entry.question}" does not state its ${key}`);
+    }
+  }
+  if (typeof entry.encoded_without_a_ruling !== "boolean") {
+    throw new V5J102StoreError("contract_self_check_failed",
+      `the open-question registry entry "${entry.question}" does not say whether it is already encoded`);
+  }
+  if (entry.encoded_without_a_ruling &&
+      entry.status !== "implementation_assumption_live_and_unratified") {
+    throw new V5J102StoreError("contract_self_check_failed",
+      `"${entry.question}" is encoded and is not labelled an unratified assumption; ` +
+      "an unsettled question that has been encoded is a policy invented on somebody's reading");
   }
 }
 
