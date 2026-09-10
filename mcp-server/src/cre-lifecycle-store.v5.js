@@ -19,8 +19,20 @@
 //               and builds the envelopes.
 //   DATABASE    Enforces. Recomputes every digest from committed bytes, refuses
 //               a stale subject digest, RE-READS the exact evidence under the
-//               lock it already holds, refuses direct DML, and returns the
-//               readback.
+//               lock it already holds and binds it to the subject the transition
+//               advances, admits the transition against its own transcription of
+//               the kernel's actor, subject and field contracts, refuses direct
+//               DML, and returns the readback.
+//
+// WHY THE DATABASE RESTATES SOME OF THE KERNEL'S CONTRACT AT ALL. Everything this
+// module checks it checks in JavaScript, and ops.j102_apply_transition is granted
+// to carr_writer as well as carr_authority — so `authorityOnly` here and
+// `permitted_actor_classes` in the kernel are controls on THIS caller and on
+// nothing else. ops.j102_admission_policy() in the candidate SQL therefore
+// carries the same contracts, and the parity tests in this slice's suite assert
+// the two are equal contract by contract. That is a transcription with a
+// comparison, not a second opinion: nothing in the SQL map decides anything the
+// kernel does not already decide, and the day it drifts the suite fails.
 //
 // A CALLER SUPPLIES REFERENCES, NEVER FACTS. Every write operation below takes
 // ids, digests and a small closed set of declared choices. It cannot supply a
@@ -46,11 +58,14 @@
 // the missing fact named. They are not stubbed, defaulted, or satisfied from a
 // caller field, and landing a producer for one does not silently open the other.
 //
-// FIVE CAPABILITIES ARE NOT WIRED, AND THE LIST IS IN THE CODE. See
+// SIX CAPABILITIES ARE NOT WIRED, AND THE LIST IS IN THE CODE. See
 // V5_J102_UNWIRED_CAPABILITIES below. Journey 1 cannot be BOOTSTRAPPED through
-// this store: no operation creates a prospect relationship, an assignment or a
-// property negotiation, so the transitions that require one refuse
-// `subject_not_found` and this module claims no end-to-end run. Q103's visible
+// this store OR through the SQL writer beneath it: no operation creates a
+// prospect relationship, an assignment or a property negotiation, the SQL writer
+// refuses to create the primary subject of a transition rather than pretending
+// that a seed with no prerequisites is a bootstrap, and so the transitions that
+// require one refuse `subject_not_found` and this module claims no end-to-end
+// run and no executed positive walk at any layer. Q103's visible
 // reconciliation and its ownership/freshness projection are likewise not
 // connected — the kernel evaluates both and nothing here calls either. Those are
 // named as remaining source gaps, not worked around, not stubbed, and not
@@ -85,6 +100,7 @@ import {
   v5J102DecisionSubsetDigest,
   v5J102EvidenceContract,
   v5J102PolicyDigest,
+  v5J102TransitionContract,
 } from "./cre-lifecycle.v5.js";
 
 export const V5_J102_STORE_SCHEMA_VERSION =
@@ -220,6 +236,34 @@ export const V5_J102_UNWIRED_CAPABILITIES = Object.freeze([
     capability: "ownership_and_freshness_exposure",
     missing_fact: "a read kind that returns the kernel's ownership, freshness and active-automation projection",
     why: "The kernel's projectOwnershipAndFreshness is pure and has no caller here, and `read-cre-lifecycle` exposes no kind that returns it. Q103's 'expose ownership, freshness, and active automation' is unmet at the record layer.",
+    produced_by: "not_produced_by_this_slice",
+  }),
+  // THE MISSING BOOTSTRAP IS NOW MISSING EVERYWHERE, which is what closes it as a
+  // hole and leaves it open as a gap.
+  //
+  // An earlier correction let ops.j102_apply_transition CREATE the primary
+  // subject on a null compare-and-swap operand, and called that a bootstrap. It
+  // was not one: a created primary has no committed row, so the transition's
+  // prerequisites, its instrument kind and every prior-state condition had
+  // nothing to be checked against, and a direct caller could seed a deal already
+  // executed or an assignment already committed. Reporting
+  // `prerequisites_checked: false` on that path was an honest description of a
+  // bypass rather than a refusal of one.
+  //
+  // The SQL writer now REFUSES to create the primary subject
+  // (`j102_primary_subject_creation_refused`), and admits creation only for the
+  // two coupled subjects the kernel itself creates — the engagement of
+  // establish-client-and-engagement and the pending deal of
+  // commit-winning-property — in their exact declared shape. The consequence is
+  // stated rather than worked around: with the three initialization gaps above,
+  // NOTHING in this slice creates a relationship, an assignment or a property
+  // negotiation, so no lifecycle transition can be walked end to end anywhere —
+  // not through this store, not through a direct SQL call, and not in the SQL
+  // fixture, which says so where it would otherwise have shown a positive walk.
+  Object.freeze({
+    capability: "lifecycle_rail_has_no_bootstrap_at_any_layer",
+    missing_fact: "any writer, in this store or in SQL, that creates the FIRST lifecycle subject of a chain",
+    why: "ops.j102_apply_transition refuses a proposed primary subject with a null compare-and-swap operand, because a created primary makes the transition's own prerequisites vacuous. Creation is admitted only for the coupled engagement and the coupled pending deal the kernel creates, each of which requires an already-committed primary. Nothing seeds the first relationship, assignment or negotiation, so mcp-server/test/cre-lifecycle-postgres.sql executes no positive transition walk and claims none; its behavioural groups prove refusals, and the walks are named as blocked on this fact.",
     produced_by: "not_produced_by_this_slice",
   }),
 ]);
@@ -655,12 +699,33 @@ export const V5_J102_READ_KINDS = Object.freeze([
  * among the four orthogonal axes from a declared axis name that is validated
  * against the registry.
  */
-const AXIS_TRANSITIONS = Object.freeze({
+/**
+ * EXPORTED, because the SQL admission map has to be checked against it.
+ *
+ * `ops.j102_admission_policy()` restates which operation may perform which
+ * transition so that a direct caller holding the writer's EXECUTE grant cannot
+ * name a partner-only transition beside a routine operation. For the two
+ * DISPATCHING operations the answer is not a single transition, and the SQL map
+ * has to know both halves. Exporting these two tables — rather than letting the
+ * parity test hard-code them — is what keeps the SQL restatement a transcription
+ * of this file rather than a second opinion about it.
+ */
+export const V5_J102_AXIS_TRANSITIONS = Object.freeze({
   commission_agreement_state: "record-commission-agreement",
   invoice_state: "record-invoice-issued",
   payment_state: "record-payment",
   completion_state: "record-completion",
 });
+
+/** Q094's split: the transition `record-deal-execution` runs, by stored instrument. */
+export const V5_J102_INSTRUMENT_TRANSITIONS = Object.freeze({
+  lease: "record-lease-execution",
+  renewal: "record-lease-execution",
+  amendment: "record-lease-execution",
+  purchase: "record-purchase-contract-execution",
+});
+
+const AXIS_TRANSITIONS = V5_J102_AXIS_TRANSITIONS;
 
 const OPERATION_SCHEMAS = deepFreeze({
   "read-cre-lifecycle": {
@@ -832,6 +897,29 @@ export function v5J102ToolRegistrations() {
     handler: handlers[name],
     input_keys: [...OPERATION_SCHEMAS[name].keys],
     required_keys: [...OPERATION_SCHEMAS[name].required],
+    // M-a. THE PREREQUISITE THAT IS NOT `authorityOnly`, AND IS AS BINDING.
+    //
+    // `authorityOnly: false` used to be the whole of what this description said
+    // about who could complete an operation, and for the document- and
+    // artifact-backed transitions it stopped being true when BLOCK-2 landed. Their
+    // evidence now requires a stored evidence -> subject association, and
+    // `record-evidence-subject-link` is authorityOnly — so a sponsored agent can
+    // START one of these and cannot finish it unless a verified partner has
+    // already written the association for that exact document VERSION.
+    //
+    // The version half is the sharp edge and is stated rather than left to be
+    // discovered: an association is pinned to (ref, version_no, content_digest),
+    // so a lease that gains a version at signature is not the document that was
+    // associated, and it needs a NEW partner-written association AFTER signing.
+    // For `record-deal-execution` that means the ordinary path cannot be completed
+    // by an agent alone even in principle.
+    //
+    // NOTHING NEW IS APPROVED HERE and no writer class is widened. This is a
+    // DESCRIPTION of a prerequisite that already binds, derived from the kernel's
+    // own evidence contracts, so `capabilities()` stops reporting an authority
+    // requirement that is not the operative one.
+    ...associationPrerequisite(name),
+    ...primarySubjectPrerequisite(name),
     // The parent still owes all four of these; naming them keeps the seam honest
     // rather than implying this module closed them.
     registered_in_scac: false,
@@ -839,6 +927,93 @@ export function v5J102ToolRegistrations() {
     migration_bound: false,
     accepted: false,
   })));
+}
+
+/**
+ * THE SUBJECT AN OPERATION CANNOT CREATE, said per operation.
+ *
+ * Every write operation here advances a subject that MUST ALREADY EXIST: the
+ * handler refuses `subject_not_found`, and ops.j102_apply_transition now refuses
+ * a proposed primary subject with a null compare-and-swap operand rather than
+ * seeding one with vacuous prerequisites. The only subjects created anywhere are
+ * the two the kernel's own evaluator creates — the engagement named by
+ * `declared.new_subject_id` in establish-client-and-engagement, and the pending
+ * deal named by `declared.new_deal_id` in commit-winning-property — and both are
+ * COUPLED subjects of a transition whose primary was loaded.
+ *
+ * The pair below is asserted behaviourally in the suite: the kernel is run and
+ * its proposed_state is checked for exactly these kinds appearing where no input
+ * subject did, so this description cannot drift from the evaluator.
+ */
+const CREATED_COUPLED_SUBJECTS = Object.freeze({
+  "establish-client-and-engagement": Object.freeze(["engagement"]),
+  "commit-winning-property": Object.freeze(["deal"]),
+});
+
+function primarySubjectPrerequisite(operation) {
+  const schema = OPERATION_SCHEMAS[operation];
+  if (schema.transition === null) {
+    return { requires_existing_primary_subject: false, creates_coupled_subject_kinds: [] };
+  }
+  const transitions = schema.transition === "dispatch_on_instrument_kind"
+    ? [...new Set(Object.values(V5_J102_INSTRUMENT_TRANSITIONS))].sort()
+    : schema.transition === "dispatch_on_declared_axis"
+      ? [...new Set(Object.values(V5_J102_AXIS_TRANSITIONS))].sort()
+      : [schema.transition];
+  const created = [...new Set(transitions.flatMap(id => CREATED_COUPLED_SUBJECTS[id] ?? []))].sort();
+  return {
+    requires_existing_primary_subject: true,
+    primary_subject_kind: v5J102TransitionContract(transitions[0]).subject_kind,
+    creates_coupled_subject_kinds: created,
+    // Named on the description itself, because "this operation cannot be reached
+    // at all today" is the first thing a reader of a capability list needs.
+    primary_subject_created_by_operation: null,
+  };
+}
+
+/**
+ * Which evidence kinds an operation's transition can rest on, and which of those
+ * need a partner-written association first. Derived from the kernel's exported
+ * contracts — this function states no requirement the kernel does not already
+ * impose.
+ */
+function associationPrerequisite(operation) {
+  const schema = OPERATION_SCHEMAS[operation];
+  if (schema.transition === null) {
+    return {
+      required_evidence_alternatives: null,
+      requires_partner_written_evidence_association: false,
+      association_required_evidence_kinds: [],
+      association_prerequisite: null,
+    };
+  }
+  const transitions = schema.transition === "dispatch_on_instrument_kind"
+    ? [...new Set(Object.values(V5_J102_INSTRUMENT_TRANSITIONS))].sort()
+    : schema.transition === "dispatch_on_declared_axis"
+      ? [...new Set(Object.values(V5_J102_AXIS_TRANSITIONS))].sort()
+      : [schema.transition];
+  const alternatives = transitions.flatMap(id =>
+    v5J102TransitionContract(id).required_evidence_alternatives);
+  const kinds = [...new Set(alternatives.flat())].sort();
+  // Only document and artifact evidence binds through the stored association; a
+  // first-party record carries its own typed binding and needs none.
+  const associated = kinds.filter(kind => {
+    const source = v5J102EvidenceContract(kind).source;
+    return source === "f01_document" || source === "f01_corporate_artifact";
+  });
+  return {
+    dispatched_transitions: transitions,
+    required_evidence_alternatives: alternatives.map(set => [...set]),
+    requires_partner_written_evidence_association: associated.length > 0,
+    association_required_evidence_kinds: associated,
+    association_prerequisite: associated.length === 0 ? null : {
+      written_by_operation: "record-evidence-subject-link",
+      written_by_authorization_class: "verified_partner",
+      pinned_on: ["evidence_ref", "version_no", "content_digest", "subject"],
+      must_precede_this_operation: true,
+      why: `${operation} rests on ${associated.join(", ")}, which binds to its subject through a stored evidence-subject association rather than through the document itself. The association is written only by record-evidence-subject-link, which is authorityOnly, and it is pinned to one exact document version — so a document that gains a version needs a NEW partner-written association before this operation can use it.`,
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1131,10 +1306,27 @@ export function createCreLifecycleStore({ db } = {}) {
   }
 
   function requestDigest(operation, payload, principal) {
-    // The idempotency key is bound to the OPERATION, the exact payload and the
-    // actor. A replay of the same bytes returns the same record; the same key
-    // over different bytes refuses rather than substituting one write for
-    // another.
+    // M-b. WHAT THIS DIGEST IS, AND WHAT IT IS NOT.
+    //
+    // IT IS: this caller's own digest of this caller's own intent — the
+    // operation, the actor and the exact validated payload — bound to the
+    // idempotency key so that a replay of the same bytes returns the same record
+    // and the same key over different bytes refuses rather than substituting one
+    // write for another. That property holds for any caller that computes it
+    // honestly, including this one.
+    //
+    // IT IS NOT A PROOF TO THE DATABASE. The payload never crosses the wire, so
+    // ops.j102_apply_transition cannot recompute this and does not claim to: it
+    // shape-checks the digest and binds it to the key, and its receipt now says
+    // exactly that (`request_digest_scope`). A DIRECT caller therefore
+    // self-asserts its own idempotency binding; the worst case is replay
+    // confusion for that caller, not an escalation, because nothing downstream
+    // reads this digest as evidence of anything.
+    //
+    // WHAT THE DATABASE DOES VOUCH FOR is a different digest and is recomputed
+    // rather than supplied: `committed_content_digest` in the receipt, taken from
+    // the state digests and event digests that actually landed. The two are
+    // reported separately and neither is described as the other.
     return digest({
       schema_version: V5_J102_STORE_SCHEMA_VERSION,
       operation,
@@ -1207,6 +1399,42 @@ export function createCreLifecycleStore({ db } = {}) {
         coupled_facts_committed: outcome.coupled_facts_committed ?? [],
         evidence_rechecked_under_lock: outcome.evidence_rechecked_under_lock === true,
         evidence_bound_under_lock: outcome.evidence_bound_under_lock === true,
+        // BLOCK-2's receipt half, reported rather than asserted here: WHICH
+        // subject the database bound every evidence pin to, and whether the
+        // binding was to that exact subject rather than merely to something in
+        // the lock set. Read off the stored outcome, never re-derived, so a
+        // replay reports what the write actually enforced.
+        evidence_bound_to_primary_subject:
+          outcome.evidence_bound_to_primary_subject === true,
+        primary_subject_kind: outcome.primary_subject_kind ?? null,
+        primary_subject_id: outcome.primary_subject_id ?? null,
+        // BLOCK-1's receipt half: which admission map admitted it, and which
+        // class the database's own derived principal held while it did.
+        admission_policy_id: outcome.admission_policy_id ?? null,
+        actor_authorization_class: outcome.actor_authorization_class ?? null,
+        // The primary subject was LOADED, and the transition's prerequisites were
+        // therefore checked against a committed row. Both are read off the stored
+        // outcome rather than asserted here: the database refuses to create a
+        // primary subject at all now, so a receipt that said otherwise would be a
+        // receipt from a writer this module does not recognise.
+        primary_subject_loaded: outcome.primary_subject_loaded === true,
+        primary_subject_created: outcome.primary_subject_created === true,
+        prerequisites_checked: outcome.prerequisites_checked === true,
+        // WHAT THE DATABASE ENFORCED ABOUT THE RESULT, not about the request:
+        // every field it wrote landed on the exact value the transition contract
+        // computes from the committed prior state and the re-read evidence, the
+        // whole coupled subject set was present, and the appended history is
+        // exactly the event set this transition produces.
+        transition_effects_enforced: outcome.transition_effects_enforced === true,
+        required_subject_set_enforced: outcome.required_subject_set_enforced === true,
+        required_event_set_enforced: outcome.required_event_set_enforced === true,
+        created_subject_kinds: outcome.created_subject_kinds ?? [],
+        // M-b, carried through: the caller's intent digest and the database's
+        // recomputation of what landed are DIFFERENT claims and are reported as
+        // two fields, not conflated into one word.
+        request_digest_scope: outcome.request_digest_scope ?? null,
+        committed_content_digest: outcome.committed_content_digest ?? null,
+        committed_content_digest_source: outcome.committed_content_digest_source ?? null,
         // Said on every applied transition, because it is what Q082 buys: the
         // whole coupled set landed, or none of it did.
         partial_application: false,
@@ -2144,9 +2372,16 @@ export function createCreLifecycleStore({ db } = {}) {
    */
   const recordDealExecution = (payload, context) =>
     runTransition("record-deal-execution", payload, context, {
-      chooseTransition: ({ subject }) => subject.instrument_kind === "purchase"
-        ? "record-purchase-contract-execution"
-        : "record-lease-execution",
+      // hasOwnProperty, and read from the exported table rather than an inline
+      // ternary, so the SQL admission map has ONE place to be checked against.
+      // A deal whose stored instrument kind is not in the table determines no
+      // transition and refuses, rather than falling back to the lease semantics.
+      chooseTransition: ({ subject }) =>
+        (typeof subject.instrument_kind === "string" &&
+         Object.prototype.hasOwnProperty.call(V5_J102_INSTRUMENT_TRANSITIONS,
+           subject.instrument_kind))
+          ? V5_J102_INSTRUMENT_TRANSITIONS[subject.instrument_kind]
+          : null,
     });
 
   const recordDealAxis = (payload, context) =>

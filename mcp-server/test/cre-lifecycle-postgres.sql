@@ -16,6 +16,48 @@
 -- and reason below is unmistakably test data. Nothing here is a claim about a
 -- real CARR client or a real transaction, and nothing here is a proposal of one.
 --
+-- ===========================================================================
+-- THE PREREQUISITE THIS FIXTURE CANNOT SATISFY, STATED FIRST BECAUSE IT
+-- DETERMINES WHAT EVERY GROUP BELOW CAN AND CANNOT PROVE.
+--
+-- `j102_fixture_bootstrap_absent`: NOTHING IN THIS SLICE CREATES THE FIRST
+-- LIFECYCLE SUBJECT.
+--
+--   * No operation in the store creates a prospect relationship, an assignment
+--     or a property negotiation (V5_J102_UNWIRED_CAPABILITIES names all three).
+--   * ops.j102_apply_transition REFUSES to create the primary subject of a
+--     transition -- `j102_primary_subject_creation_refused` -- because a created
+--     primary has no committed row for the transition's own prerequisites,
+--     instrument kind and prior-state conditions to be checked against. An
+--     earlier revision of this fixture opened an assignment that way and called
+--     it a positive walk; it was a bypass with a bootstrap's name on it, and the
+--     receipt's `prerequisites_checked: false` was an honest description of a
+--     check that never ran.
+--   * The only creations the writer admits are the two COUPLED subjects the
+--     kernel itself creates -- the engagement of establish-client-and-engagement
+--     and the pending deal of commit-winning-property -- and both require a
+--     primary subject that is already committed.
+--   * This file CREATES NO ROLE, and it cannot seed a row directly either: every
+--     J102 relation carries ops.j102_guard_direct_dml, which requires the write
+--     to arrive through a registered ops.j102_* writer and refuses a raw INSERT
+--     from this DO block regardless of who owns the table. B7 below proves that
+--     refusal rather than working around it.
+--
+-- THE CONSEQUENCE, NAMED RATHER THAN WORKED AROUND: this fixture executes NO
+-- POSITIVE TRANSITION WALK and claims none. It does not open an assignment,
+-- commit a property, create a deal, close one or cancel one, and no group below
+-- should be read as evidence that any of those work end to end. What it does
+-- prove is the refusals -- and the refusals are the reason the file exists,
+-- because every one of them is reachable only by a direct caller holding the
+-- carr_writer EXECUTE grant, which is exactly the position the store and the
+-- kernel cannot police.
+--
+-- WHAT WOULD LIFT IT: one writer that creates a relationship, an assignment or a
+-- property negotiation from evidence, owned by whoever owns Journey 1's entry
+-- point. That is a source gap in the slice, not a defect in this file, and it is
+-- not invented here as a seed verb.
+-- ===========================================================================
+--
 -- WHAT THIS FIXTURE PROVES THAT THE NODE SUITE CANNOT. The Node tests run
 -- against a scripted fake handle, which can prove which statements the store
 -- issues, in what order, and with which parameters -- and nothing at all about
@@ -33,39 +75,66 @@
 --       partner-only record kinds cannot be stored with any other author class,
 --       and the evidence->subject association relation exists with its pin-exact
 --       unique index
---   B1  a whole coupled transition applies -- two CREATED subjects and their
---       history in one transaction
---   B2  a stale compare-and-swap operand refuses with a serialization failure
---   B3  the evidence recheck refuses when the exact pin has moved, and
---       existence alone does not satisfy it
---   B4  ATOMICITY: a transition whose second envelope is bad leaves NEITHER
---       subject behind, not the first one and half the second
---   B5  an idempotent replay returns the committed outcome and appends no
---       second event; the same key over a different payload refuses
+--   S5  BLOCK-1 and both root corrections structurally: the three partner-only
+--       transitions are partner-only in the database's own admission map, the
+--       map carries an exact target and an exact event set for every transition,
+--       and the writer really does consult all of it. Runs in every session,
+--       including one with no principal.
+--   S6  the admission map declares NO transition that creates its own primary
+--       subject, which is `j102_fixture_bootstrap_absent` read off the installed
+--       policy rather than off this file's prose
+--   B5  an idempotent replay returns the committed outcome, and the same key
+--       over a different payload refuses (proved on the first-party record
+--       writer, which is the one writer this fixture can drive to a success)
 --   B6  the append-only relations refuse UPDATE and DELETE for real
 --   B7  direct DML outside a registered writer refuses for real
---   B8  a second pending Deal on one Assignment refuses at the index
 --   B9  a closing_settlement record with no actual closing date cannot be
 --       stored at all (Q094 structurally)
 --   B10 the private approval reader raises, so no approval can be manufactured
 --       one layer down either
---   B11 BLOCK-1: a CREATION whose id is already taken refuses under the lock
---       instead of upserting the existing row away
---   B12 BLOCK-1: a proposed subject with NO compare-and-swap operand refuses,
---       so omitting the map is not a way back to the old overwrite
---   B13 BLOCK-1: an envelope whose prior_state_digest disagrees with its
---       operand refuses rather than writing a history that describes a version
---       nothing checked
---   B14 BLOCK-2: the recheck refuses evidence bound to a DIFFERENT subject, and
---       refuses a manifest item that names no binding at all
---   B15 H4: a caller-chosen updated_at or recorded_at refuses; the instant is
---       the database transaction time
 --   B16 H5: whichever half this session can prove -- a sponsored agent cannot
 --       author a closing_settlement, or a partner-authored one carries its
 --       author class on the row
 --
--- THREE PREREQUISITES, checked before anything is attempted, each SKIPPING with
--- a notice rather than failing -- the same shape work-portfolio-postgres.sql and
+-- AND THE TEN ADVERSARIAL GROUPS, which are the reason this revision exists.
+-- Every one of them is a DIRECT call on ops.j102_apply_transition, holding
+-- nothing more than the carr_writer EXECUTE grant. Every one of them SUCCEEDED
+-- against some earlier revision of the writer:
+--
+--   P0  the missing bootstrap, named and asserted against the installed policy.
+--   A1  BLOCKER-2's reproducer INCLUDING the obvious fix's defeat -- the wrong
+--       subject's evidence, with that subject added to the lock set so that a
+--       membership check would pass.
+--   A2  the primary-creation masquerade: a transition proposing to CREATE the
+--       subject it claims to advance, which is how the previous revision was
+--       seeded and which is now refused by name.
+--   A3  Diagnostics naming a weaker operation to obtain a stronger transition,
+--       and a transition that does not exist at all.
+--   A4  The direct carr_writer bypass of a partner-only transition, behavioural
+--       wherever this session is a sponsored agent.
+--   A5  HIGH-1 and the event set in full: an event lying about its own bytes, an
+--       event claiming a different transition, an event for an unrelated
+--       subject, an EMPTY event array, an EXTRA event, and a plausible WRONG
+--       KIND on a correctly bound subject.
+--   A6  An empty manifest, an unregistered evidence kind, and real evidence
+--       presented from the wrong source.
+--   A7  An unrelated proposed subject, and two subjects of one kind.
+--   A8  A coupled subject proposed as a CREATION by a transition that only ever
+--       updates it.
+--   A9  A coupled write sent as a SUBSET: the primary subject alone, with the
+--       coupled subject the same transition must move left out.
+--   A10 The whole coupled set present, and the EVENT set short by one.
+--   U1  The target-value rewrites -- a permitted field carrying an unpermitted
+--       value, a deleted field, a counter set to an arbitrary number, a cleared
+--       reference kept. These are checked against the COMMITTED row, so they are
+--       UNREACHABLE while `j102_fixture_bootstrap_absent` holds: the call
+--       refuses earlier, at the compare-and-swap, for want of a row. The group
+--       runs anyway, asserts that the call REFUSES, and reports which refusal it
+--       got -- so the day a bootstrap lands, the group starts proving the thing
+--       it is aimed at instead of silently passing.
+--
+-- TWO PREREQUISITES, checked before anything is attempted, each SKIPPING with a
+-- notice rather than failing -- the same shape work-portfolio-postgres.sql and
 -- benchmark-acceptance-postgres.sql use:
 --   * ops/cre-lifecycle.candidate.sql must have been applied here.
 --   * domain.sql must have been applied here (the J102 rail calls its tenant,
@@ -79,6 +148,11 @@
 --     principal and run either way.
 --
 -- WHAT THIS FILE DOES NOT PROVE, named rather than implied:
+--   * ANY positive lifecycle transition. See `j102_fixture_bootstrap_absent`
+--     above. Every behavioural group below is a refusal or a first-party record
+--     write.
+--   * The exact-target and prior-condition checks (U1). They compare against a
+--     committed row, and no committed row can exist here.
 --   * That ops.f01_digest_jsonb and artifact-trust.js's digest() agree on the
 --     same record. Both sides are asserted to hash the canonical JSON, and the
 --     SQL side reuses F01's canonicaliser, which domain.sql already reconciles
@@ -91,13 +165,9 @@
 --     itself; the ordering is argued in that function's own comment and would
 --     need a two-session harness to demonstrate.
 --   * That two CONCURRENT creations of the same subject id resolve to one winner
---     and one refusal. B11 proves the sequential half -- a creation whose id is
---     already taken refuses under the lock rather than upserting -- and the
---     concurrent half rests on the argument that both sessions take the same
---     tier-2 advisory lock on that key before either reads, so the loser's null
---     operand meets the winner's committed row. One session cannot contend with
---     itself, so this too would need a two-session harness. It is named here
---     rather than implied by B11's success.
+--     and one refusal. Both sessions take the same tier-2 advisory lock on that
+--     key before either reads, so the loser's null operand meets the winner's
+--     committed row -- but one session cannot contend with itself.
 --   * Anything about a real client, a real deal or a real Salesforce record.
 
 \set ON_ERROR_STOP on
@@ -110,7 +180,7 @@ declare
   v_class            text;
   v_now              text;
   v_behavioural      boolean := false;
-  v_err              text;
+  v_partner          boolean := false;
   v_role             text;
   v_predicate        text;
   v_count            bigint;
@@ -118,50 +188,73 @@ declare
   v_replay           jsonb;
   v_fact             jsonb;
   v_fact_digest      text;
-  v_deal             jsonb;
-  v_deal_digest      text;
-  v_events_before    bigint;
-  v_events_after     bigint;
+  v_fact2_digest     text;
+  v_policy           jsonb;
+  v_transition       text;
+  v_rec              jsonb;
+  v_rec2             jsonb;
+  v_evt              jsonb;
+  v_evt2             jsonb;
+  v_subjects         jsonb;
+  v_events           jsonb;
+  v_manifest         jsonb;
+  v_manifest_wrong   jsonb;
+  v_refusal          text;
 
   v_tenant           constant text := 'carr-internal';
   v_placeholder      constant text := 'sha256:' || repeat('0', 64);
+  v_lie              constant text := 'sha256:' || repeat('3', 64);
+  v_env_schema       constant text := 'doctorcre-v5-j102-stored-record-envelope.v1';
+  v_subject_schema   constant text := 'doctorcre-v5-j102-stored-lifecycle-subject.v1';
+  v_event_schema     constant text := 'doctorcre-v5-j102-stored-lifecycle-event.v1';
+  v_fact_schema      constant text := 'doctorcre-v5-j102-stored-first-party-record.v1';
+  v_ev_schema        constant text := 'doctorcre-v5-j102-lifecycle-event.v1';
   v_assignment_id    constant text := 'j102-fixture-assignment-1';
   v_assignment_id_2  constant text := 'j102-fixture-assignment-2';
+  v_engagement_id    constant text := 'j102-fixture-engagement-1';
+  v_negotiation_id   constant text := 'j102-fixture-negotiation-1';
+  v_property_id      constant text := 'j102-fixture-property-1';
   v_deal_id          constant text := 'j102-fixture-deal-1';
-  v_deal_id_2        constant text := 'j102-fixture-deal-2';
+  -- The unrelated deal an adversarial event names. Nothing ever creates it, and
+  -- the whole point of A5 is that naming it must not create it either.
+  v_deal_id_c        constant text := 'j102-fixture-deal-c';
   v_fact_id          constant text := 'j102-fixture-fact-1';
-  v_learn            constant text := 'j102-fixture-learn-rollback';
+  v_fact_id_2        constant text := 'j102-fixture-fact-2';
 
-  -- One synthetic Assignment, in the exact shape the kernel projects when a
-  -- commitment lands: committed, with its selected property and its pending deal.
+  -- One synthetic Assignment in the shape `open-assignment` would leave it. It is
+  -- never committed to the database -- nothing can commit it -- and exists here so
+  -- the adversarial payloads are otherwise well formed.
   v_assignment_state constant jsonb := jsonb_build_object(
     'subject_kind', 'assignment',
     'subject_id', v_assignment_id,
-    'engagement_id', 'j102-fixture-engagement-1',
+    'engagement_id', v_engagement_id,
+    'assignment_phase', 'search',
+    'open_negotiation_count', 2,
+    'selected_property_id', null,
+    'active_lease_draft_target_id', null,
+    'pending_deal_id', null,
+    'multi_target_exception_ref', null);
+
+  -- The SAME assignment as a commitment would leave it: committed, with a
+  -- selected property and a pending deal. U1 proposes this from a routine
+  -- `open-assignment` call, which is the masquerade the target check exists for.
+  v_assignment_committed constant jsonb := jsonb_build_object(
+    'subject_kind', 'assignment',
+    'subject_id', v_assignment_id,
+    'engagement_id', v_engagement_id,
     'assignment_phase', 'committed',
     'open_negotiation_count', 2,
-    'selected_property_id', 'j102-fixture-property-1',
-    'active_lease_draft_target_id', 'j102-fixture-property-1',
+    'selected_property_id', v_property_id,
+    'active_lease_draft_target_id', v_property_id,
     'pending_deal_id', v_deal_id,
     'multi_target_exception_ref', null);
 
-  -- One synthetic pending Deal, in the exact shape the kernel projects.
-  v_deal_state       constant jsonb := jsonb_build_object(
-    'subject_kind', 'deal',
-    'subject_id', v_deal_id,
+  v_negotiation_state constant jsonb := jsonb_build_object(
+    'subject_kind', 'property_negotiation',
+    'subject_id', v_negotiation_id,
     'assignment_id', v_assignment_id,
-    'property_id', 'j102-fixture-property-1',
-    'instrument_kind', 'lease',
-    'deal_state', 'pending',
-    'execution_state', 'unexecuted',
-    'diligence_state', 'not_applicable',
-    'closing_state', 'not_reached',
-    'commission_agreement_state', 'absent',
-    'invoice_state', 'not_invoiced',
-    'payment_state', 'unpaid',
-    'completion_state', 'open',
-    'cancellation_reason', null,
-    'closing_date', null);
+    'property_id', v_property_id,
+    'negotiation_state', 'loi_submitted');
 begin
   -- === prerequisites =======================================================
   if to_regprocedure('ops.j102_apply_transition(text,jsonb,jsonb,jsonb,jsonb,text,text,jsonb)') is null then
@@ -182,6 +275,7 @@ begin
     v_class := ops.f01_principal() ->> 'authorization_class';
     v_now := ops.f01_now_text();
     v_behavioural := true;
+    v_partner := v_class = 'verified_partner';
   exception when others then
     raise notice 'PARTIAL: session_user % is not an admitted J102 principal; the structural groups run and the behavioural groups are skipped. No role is created here.',
       session_user;
@@ -248,6 +342,14 @@ begin
     end if;
     if has_function_privilege(v_role, 'ops.j102_typed_approval(text,text)', 'EXECUTE') then
       raise exception 'S2: % can execute the private approval reader; a callable stub is the first step toward a configurable one',
+        v_role;
+    end if;
+    -- The effect interpreter is the writer's own; a callable one confers nothing
+    -- and is still a surface.
+    if to_regprocedure('ops.j102_expected_value(jsonb,jsonb,jsonb,jsonb,jsonb,jsonb)') is not null
+       and has_function_privilege(v_role,
+             'ops.j102_expected_value(jsonb,jsonb,jsonb,jsonb,jsonb,jsonb)', 'EXECUTE') then
+      raise exception 'S2: % can execute the transition-effect interpreter, which is private to the writer',
         v_role;
     end if;
     -- The correction writer reaches the AUTHORITY bundle only.
@@ -339,6 +441,99 @@ begin
     raise exception 'M3: the correction writer still names a role literal; authority has one derivation, ops.f01_principal()';
   end if;
 
+  -- === S5: the admission map exists, is complete, and the writer consults it ==
+  --
+  -- This group needs no principal and runs in every session, which matters: a
+  -- session running AS a verified partner cannot demonstrate the agent refusal
+  -- behaviourally, and this is what covers that direction there.
+  if to_regprocedure('ops.j102_admission_policy()') is null then
+    raise exception 'S5: the SQL admission map is absent, so the transition writer has nothing to admit against and every transition is performable by any grant holder';
+  end if;
+  v_policy := ops.j102_admission_policy();
+  foreach v_role in array array[
+    'commit-winning-property', 'record-deal-closing', 'cancel-pending-deal'
+  ] loop
+    if (v_policy -> 'transitions' -> v_role -> 'permitted_actor_classes')
+         is distinct from '["verified_partner"]'::jsonb then
+      raise exception 'S5: % is not partner-only in the SQL admission map, so a sponsored agent holding the carr_writer EXECUTE grant could perform it on a direct call',
+        v_role;
+    end if;
+  end loop;
+  -- ROOT BLOCKER 2, structurally: every transition declares a subject rule set
+  -- with an EXACT target for every field it moves, and an EXACT event set. A map
+  -- that named the fields without naming the values would admit
+  -- `assignment_phase: "committed"` from a routine open-assignment call.
+  for v_transition in select * from jsonb_object_keys(v_policy -> 'transitions') loop
+    if jsonb_typeof(v_policy -> 'transitions' -> v_transition -> 'subjects') is distinct from 'object' then
+      raise exception 'S5: % declares which fields it may move and not what it must move them TO', v_transition;
+    end if;
+    if jsonb_typeof(v_policy -> 'transitions' -> v_transition -> 'events') is distinct from 'array'
+       or jsonb_array_length(v_policy -> 'transitions' -> v_transition -> 'events') < 1 then
+      raise exception 'S5: % declares no event set, so a call could append any history it liked', v_transition;
+    end if;
+    for v_role in select * from jsonb_object_keys(
+      v_policy -> 'transitions' -> v_transition -> 'subjects') loop
+      if (v_policy -> 'transitions' -> v_transition -> 'subjects' -> v_role ->> 'mode') = 'update'
+         and jsonb_typeof(v_policy -> 'transitions' -> v_transition -> 'subjects' -> v_role -> 'effects')
+               is distinct from 'object' then
+        raise exception 'S5: % may write a % and declares no resulting value for any of its fields',
+          v_transition, v_role;
+      end if;
+    end loop;
+  end loop;
+  -- The map is worth nothing if the writer does not consult it. These are the
+  -- exact call sites, asserted from the installed definition rather than from the
+  -- file on disk.
+  v_predicate := pg_get_functiondef(
+    to_regprocedure('ops.j102_apply_transition(text,jsonb,jsonb,jsonb,jsonb,text,text,jsonb)'));
+  foreach v_role in array array[
+    'ops.j102_admission_policy()', 'ops.f01_principal()', 'ops.j102_expected_value(',
+    'j102_actor_class_not_permitted', 'j102_operation_transition_mismatch',
+    'j102_unknown_transition', 'j102_field_not_movable_by_transition',
+    'j102_subject_kind_not_written_by_transition', 'j102_coupled_subject_not_in_chain',
+    'j102_prerequisite_not_met', 'j102_event_subject_not_advanced',
+    'j102_event_digest_mismatch',
+    -- ROOT BLOCKER 1
+    'j102_primary_subject_creation_refused', 'j102_subject_creation_not_permitted',
+    'j102_primary_subject_not_found',
+    -- ROOT BLOCKER 2
+    'j102_required_subject_not_proposed', 'j102_prior_condition_not_met',
+    'j102_transition_effect_not_canonical', 'j102_transition_effect_missing',
+    'j102_created_subject_shape_mismatch', 'j102_created_subject_field_not_canonical',
+    'j102_event_set_mismatch', 'j102_event_missing_or_wrong',
+    'j102_event_not_produced_by_transition'
+  ] loop
+    if position(v_role in v_predicate) = 0 then
+      raise exception 'S5: the transition writer does not carry %; the admission map exists and is not consulted', v_role;
+    end if;
+  end loop;
+  -- BLOCK-2: the recheck is handed the primary subject rather than left to check
+  -- a caller-supplied manifest against itself.
+  if to_regprocedure('ops.j102_recheck_evidence(jsonb,text,text,text)') is null then
+    raise exception 'S5: the evidence recheck does not take the primary subject, so a manifest bound to another subject cannot be caught';
+  end if;
+  if to_regprocedure('ops.j102_recheck_evidence(jsonb)') is not null then
+    raise exception 'S5: the single-argument recheck still exists; it establishes "the evidence was exact" without being told which subject it was exact FOR';
+  end if;
+
+  -- === S6: the map creates no primary subject -- j102_fixture_bootstrap_absent ==
+  --
+  -- Read off the installed policy rather than asserted in prose. If any
+  -- transition ever declares its PRIMARY subject creatable, the bypass this
+  -- correction removed is back, and the positive walks this fixture no longer
+  -- executes would become possible again for the wrong reason.
+  for v_transition in select * from jsonb_object_keys(v_policy -> 'transitions') loop
+    v_role := v_policy -> 'transitions' -> v_transition ->> 'subject_kind';
+    if (v_policy -> 'transitions' -> v_transition -> 'subjects' -> v_role ->> 'mode')
+         is distinct from 'update' then
+      raise exception 'S6: % declares its primary % creatable; a created primary has no committed row for its own prerequisites to be checked against',
+        v_transition, v_role;
+    end if;
+  end loop;
+  if (v_policy ->> 'subject_creation') is distinct from 'coupled_only_never_the_primary_subject' then
+    raise exception 'S6: the admission map does not declare that creation is coupled-only';
+  end if;
+
   -- === B9 and B10 need no principal ========================================
   -- The closing-date constraint is structural: a closing_settlement row with no
   -- actual date cannot exist, so no closing transition can ever find one.
@@ -387,44 +582,41 @@ begin
   end if;
 
   if not v_behavioural then
-    raise notice 'STRUCTURAL GROUPS PASSED (S1, S2, S3, S4, B9, B10, M3, Q081). Behavioural groups skipped: no admitted principal.';
+    raise notice 'STRUCTURAL GROUPS PASSED (S1, S2, S3, S4, S5, S6, B9, B10, M3, Q081). Behavioural groups skipped: no admitted principal.';
     return;
   end if;
 
   -- ========================================================================
   -- BEHAVIOURAL GROUPS. Everything below runs as the derived actor and rolls
   -- back with the transaction.
+  --
+  -- NONE OF THEM IS A POSITIVE TRANSITION WALK. See
+  -- `j102_fixture_bootstrap_absent` at the head of this file: no lifecycle
+  -- subject can be created here, so every ops.j102_apply_transition call below
+  -- is an adversarial one and every one of them must REFUSE.
   -- ========================================================================
 
-  -- One synthetic first-party record, so the transition below has something
-  -- real to be judged against and something real to re-read under the lock.
+  -- Two synthetic first-party records. These CAN be written -- the record layer
+  -- is seedable even though the lifecycle rail is not, deliberately, because a
+  -- record binds itself to a subject id and advances nothing on its own -- and
+  -- they give the adversarial groups an AUTHENTIC record about the WRONG subject
+  -- to present, which is the only shape that tests a binding at all.
   --
-  -- IT NAMES THE SUBJECT IT IS ABOUT. `assignment_mandate` is used rather than
-  -- one of the four partner-only kinds precisely so this seed runs whichever
-  -- admitted class the session holds; B16 below proves the partner-only half
-  -- separately, in whichever direction this session can actually demonstrate.
+  -- `assignment_mandate` is used rather than one of the four partner-only kinds
+  -- precisely so these seeds run whichever admitted class the session holds.
+  v_rec := jsonb_build_object(
+    'schema_version', v_fact_schema, 'tenant', v_tenant,
+    'record_kind', 'assignment_mandate', 'record_id', v_fact_id,
+    'subject_kind', 'assignment', 'subject_id', v_assignment_id,
+    'reason', null, 'detail', 'synthetic fixture mandate',
+    'closing_date', null, 'supporting_document_id', null,
+    'recorded_by', v_actor, 'recorded_by_authorization_class', v_class,
+    'recorded_at', v_now, 'advances_lifecycle_state', false);
   v_result := ops.j102_record_first_party_fact(
-    (select jsonb_build_object(
-       'schema_version', 'doctorcre-v5-j102-stored-record-envelope.v1',
-       'record_kind', 'stored_first_party_record',
-       'tenant', v_tenant,
-       'record', r,
-       'record_digest', ops.f01_digest_jsonb(r),
-       'domain_policy_digest', v_placeholder,
-       'decision_subset_digest', v_placeholder)
-       from (select jsonb_build_object(
-         'schema_version', 'doctorcre-v5-j102-stored-first-party-record.v1',
-         'tenant', v_tenant,
-         'record_kind', 'assignment_mandate',
-         'record_id', v_fact_id,
-         'subject_kind', 'assignment',
-         'subject_id', v_assignment_id,
-         'reason', null, 'detail', 'synthetic fixture mandate',
-         'closing_date', null, 'supporting_document_id', null,
-         'recorded_by', v_actor,
-         'recorded_by_authorization_class', v_class,
-         'recorded_at', v_now,
-         'advances_lifecycle_state', false) as r) s),
+    jsonb_build_object(
+      'schema_version', v_env_schema, 'record_kind', 'stored_first_party_record',
+      'tenant', v_tenant, 'record', v_rec, 'record_digest', ops.f01_digest_jsonb(v_rec),
+      'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
     'j102-fixture-key-fact', v_placeholder);
   if (v_result ->> 'advances_lifecycle_state') <> 'false' then
     raise exception 'a first-party record must advance no lifecycle state';
@@ -442,538 +634,754 @@ begin
   end if;
   v_fact_digest := v_fact ->> 'record_digest';
 
-  -- === B1: a whole coupled transition applies, state and history together ===
-  --
-  -- TWO CREATIONS IN ONE CALL, and BOTH carry an EXPLICIT NULL operand. That is
-  -- BLOCK-1's shape: a creation is a request that the subject be ABSENT, said in
-  -- the compare-and-swap map, rather than a subject the map simply never
-  -- mentions. The old empty map meant "check nothing", and the writer duly
-  -- checked nothing.
-  select count(*) into v_events_before from ops.j102_subject_event where tenant = v_tenant;
-  v_result := ops.j102_apply_transition(
-    'commit-winning-property',
+  -- The SECOND mandate: identical in every way except the assignment it is
+  -- about. Authentic, unmoved, correctly pinned, and about somebody else.
+  v_rec := jsonb_build_object(
+    'schema_version', v_fact_schema, 'tenant', v_tenant,
+    'record_kind', 'assignment_mandate', 'record_id', v_fact_id_2,
+    'subject_kind', 'assignment', 'subject_id', v_assignment_id_2,
+    'reason', null, 'detail', 'synthetic fixture mandate for the other assignment',
+    'closing_date', null, 'supporting_document_id', null,
+    'recorded_by', v_actor, 'recorded_by_authorization_class', v_class,
+    'recorded_at', v_now, 'advances_lifecycle_state', false);
+  perform ops.j102_record_first_party_fact(
     jsonb_build_object(
-      'assignment:' || v_assignment_id, null,
-      'deal:' || v_deal_id, null),
-    jsonb_build_array(
-      (select jsonb_build_object(
-         'schema_version', 'doctorcre-v5-j102-stored-record-envelope.v1',
-         'record_kind', 'stored_lifecycle_subject', 'tenant', v_tenant,
-         'record', r, 'record_digest', ops.f01_digest_jsonb(r),
-         'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)
-         from (select jsonb_build_object(
-           'schema_version', 'doctorcre-v5-j102-stored-lifecycle-subject.v1',
-           'tenant', v_tenant, 'subject_kind', 'assignment', 'subject_id', v_assignment_id,
-           'state', v_assignment_state,
-           'established_by_transition', 'commit-winning-property',
-           'prior_state_digest', null,
-           'updated_by', v_actor, 'updated_at', v_now) as r) s),
-      (select jsonb_build_object(
-         'schema_version', 'doctorcre-v5-j102-stored-record-envelope.v1',
-         'record_kind', 'stored_lifecycle_subject', 'tenant', v_tenant,
-         'record', r, 'record_digest', ops.f01_digest_jsonb(r),
-         'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)
-         from (select jsonb_build_object(
-           'schema_version', 'doctorcre-v5-j102-stored-lifecycle-subject.v1',
-           'tenant', v_tenant, 'subject_kind', 'deal', 'subject_id', v_deal_id,
-           'state', v_deal_state,
-           'established_by_transition', 'commit-winning-property',
-           'prior_state_digest', null,
-           'updated_by', v_actor, 'updated_at', v_now) as r) s)),
-    jsonb_build_array((select jsonb_build_object(
-       'schema_version', 'doctorcre-v5-j102-stored-record-envelope.v1',
-       'record_kind', 'stored_lifecycle_event', 'tenant', v_tenant,
-       'record', r, 'record_digest', ops.f01_digest_jsonb(r),
-       'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)
-       from (select jsonb_build_object(
-         'schema_version', 'doctorcre-v5-j102-stored-lifecycle-event.v1',
-         'tenant', v_tenant,
-         'event', jsonb_build_object(
-           'schema_version', 'doctorcre-v5-j102-lifecycle-event.v1',
-           'event_kind', 'pending_deal_created',
-           'subject_kind', 'deal', 'subject_id', v_deal_id),
-         'transition_id', 'commit-winning-property',
-         'evidence_references', jsonb_build_array(jsonb_build_object(
-           'evidence_kind', 'search_initiation',
-           'source', 'first_party_record', 'reference', v_fact_id)),
-         'recorded_by', v_actor, 'recorded_at', v_now) as r) s)),
-    jsonb_build_array(jsonb_build_object(
+      'schema_version', v_env_schema, 'record_kind', 'stored_first_party_record',
+      'tenant', v_tenant, 'record', v_rec, 'record_digest', ops.f01_digest_jsonb(v_rec),
+      'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+    'j102-fixture-key-fact-2', v_placeholder);
+  v_fact2_digest := ops.j102_first_party_record('assignment_mandate', v_fact_id_2)
+                      ->> 'record_digest';
+
+  -- The manifest the adversarial groups reuse: the RIGHT mandate for assignment
+  -- 1, correctly pinned and correctly bound.
+  v_manifest := jsonb_build_array(jsonb_build_object(
+    'evidence_kind', 'search_initiation', 'source', 'first_party_record',
+    'reader', 'ops.j102_first_party_record',
+    'selector', jsonb_build_object('record_kind', 'assignment_mandate',
+                                   'record_id', v_fact_id),
+    'expected_record_digest', v_fact_digest,
+    'binding', jsonb_build_object('subject_kind', 'assignment',
+                                  'subject_id', v_assignment_id)));
+  -- And the same manifest for the OTHER assignment's mandate: equally authentic,
+  -- equally unmoved, about somebody else.
+  v_manifest_wrong := jsonb_build_array(jsonb_build_object(
+    'evidence_kind', 'search_initiation', 'source', 'first_party_record',
+    'reader', 'ops.j102_first_party_record',
+    'selector', jsonb_build_object('record_kind', 'assignment_mandate',
+                                   'record_id', v_fact_id_2),
+    'expected_record_digest', v_fact2_digest,
+    'binding', jsonb_build_object('subject_kind', 'assignment',
+                                  'subject_id', v_assignment_id_2)));
+
+  -- The subject and event envelopes an `open-assignment` call would carry. The
+  -- operand below is a PLACEHOLDER digest rather than a real one, because no
+  -- assignment row exists to have a real one -- which is itself
+  -- `j102_fixture_bootstrap_absent` showing through.
+  v_rec := jsonb_build_object(
+    'schema_version', v_subject_schema, 'tenant', v_tenant,
+    'subject_kind', 'assignment', 'subject_id', v_assignment_id,
+    'state', v_assignment_state,
+    'established_by_transition', 'open-assignment',
+    'prior_state_digest', v_placeholder,
+    'updated_by', v_actor, 'updated_at', v_now);
+  v_evt := jsonb_build_object(
+    'schema_version', v_event_schema, 'tenant', v_tenant,
+    'event', jsonb_build_object('schema_version', v_ev_schema,
+      'event_kind', 'assignment_opened',
+      'subject_kind', 'assignment', 'subject_id', v_assignment_id),
+    'transition_id', 'open-assignment',
+    'evidence_references', jsonb_build_array(jsonb_build_object(
       'evidence_kind', 'search_initiation', 'source', 'first_party_record',
-      'reader', 'ops.j102_first_party_record',
-      'selector', jsonb_build_object('record_kind', 'assignment_mandate',
-                                     'record_id', v_fact_id),
-      'expected_record_digest', v_fact_digest,
-      -- The binding the recheck re-asserts under the lock, against the record's
-      -- OWN stored columns rather than against this manifest.
-      'binding', jsonb_build_object('subject_kind', 'assignment',
-                                    'subject_id', v_assignment_id))),
-    'j102-fixture-key-commit', v_placeholder,
-    jsonb_build_object('operation', 'commit-winning-property',
-      'reason_id', 'selection_and_commitment_create_pending_deal',
-      'coupled_facts', jsonb_build_array('deal.deal_state'),
-      'decision_refs', jsonb_build_array('Q078.D1')));
+      'reference', v_fact_id)),
+    'recorded_by', v_actor, 'recorded_at', v_now);
+  v_subjects := jsonb_build_array(jsonb_build_object(
+    'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_subject',
+    'tenant', v_tenant, 'record', v_rec, 'record_digest', ops.f01_digest_jsonb(v_rec),
+    'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder));
+  v_events := jsonb_build_array(jsonb_build_object(
+    'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_event',
+    'tenant', v_tenant, 'record', v_evt, 'record_digest', ops.f01_digest_jsonb(v_evt),
+    'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder));
 
-  if (v_result ->> 'evidence_rechecked_under_lock') <> 'true'
-     or (v_result ->> 'evidence_bound_under_lock') <> 'true' then
-    raise exception 'B1: the transition did not report re-reading and re-binding its evidence under the lock';
-  end if;
-  -- H4's receipt: the committed instant is the DATABASE's, not the caller's.
-  if (v_result ->> 'committed_at') is null then
-    raise exception 'B1: the writer returned no committed instant';
-  end if;
-  if ops.j102_subject('assignment', v_assignment_id) is null then
-    raise exception 'B1: the created assignment did not land beside the deal';
-  end if;
-  v_deal := ops.j102_subject('deal', v_deal_id);
-  if v_deal is null or (v_deal -> 'state' ->> 'deal_state') <> 'pending' then
-    raise exception 'B1: the pending deal did not land';
-  end if;
-  v_deal_digest := v_deal ->> 'state_digest';
-  select count(*) into v_events_after from ops.j102_subject_event where tenant = v_tenant;
-  if v_events_after <> v_events_before + 1 then
-    raise exception 'B1: current state and history did not land together (% events, expected %)',
-      v_events_after, v_events_before + 1;
-  end if;
-  -- The readback verifies rather than trusts: j102_subject recomputes the state
-  -- digest from the committed bytes, so this equality is a recomputation.
-  if v_deal_digest <> ops.f01_digest_jsonb(v_deal_state) then
-    raise exception 'B1: the readback digest is not the digest of the stored state';
+  -- === P0: the missing bootstrap, behaviourally ==============================
+  --
+  -- The one call that would seed a lifecycle subject, made exactly as the
+  -- previous revision of this fixture made it: a well-formed `open-assignment`
+  -- with correct evidence, a correct event, and an explicit NULL compare-and-swap
+  -- operand meaning "this subject must be absent". That is a creation of the
+  -- transition's own primary subject, and it is refused by name.
+  begin
+    v_rec2 := jsonb_set(v_rec, '{prior_state_digest}', 'null'::jsonb);
+    perform ops.j102_apply_transition(
+      'open-assignment',
+      jsonb_build_object('assignment:' || v_assignment_id, null),
+      jsonb_build_array(jsonb_build_object(
+        'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_subject',
+        'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+        'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)),
+      v_events, v_manifest,
+      'j102-fixture-key-p0', v_placeholder,
+      jsonb_build_object('operation', 'open-cre-assignment',
+        'reason_id', 'search_initiation_opens_assignment',
+        'coupled_facts', jsonb_build_array('assignment.assignment_phase'),
+        'decision_refs', jsonb_build_array('Q080.D1')));
+    raise exception 'P0: a transition CREATED the primary subject it claims to advance; the prerequisites it declares had no committed row to be checked against';
+  exception when insufficient_privilege then
+    if sqlerrm !~ 'j102_primary_subject_creation_refused' then raise; end if;
+  end;
+  raise notice 'P0: j102_fixture_bootstrap_absent. No lifecycle subject exists or can be created here, so NO POSITIVE TRANSITION WALK RUNS IN THIS FILE and none is claimed. Every group below is a refusal. Lifting this needs one writer that creates a relationship, an assignment or a property negotiation from evidence.';
+
+  -- ========================================================================
+  -- ADVERSARIAL GROUPS A1-A10. Every one of them is a DIRECT call, which is the
+  -- threat model: everything below would have been refused by the store and by
+  -- the kernel, and every one of them reached a durable row against some earlier
+  -- revision of this writer. All ten run whichever admitted class this session
+  -- holds, except A4, which is behavioural only for a sponsored agent.
+  -- ========================================================================
+
+  -- === A1: the wrong subject, WITH the extra compare-and-swap key included ====
+  --
+  -- THE REVIEW'S BLOCKER-2 REPRODUCER, in the form that defeats the obvious fix.
+  -- Requiring the manifest's binding to be a MEMBER of the lock set is not enough,
+  -- because the caller supplies the lock set: it simply adds the other subject to
+  -- the map, with a true operand, and goes on proposing this one. The record is
+  -- authentic, unmoved and correctly pinned; what is wrong is that it is about
+  -- assignment 2 and this call advances assignment 1.
+  begin
+    perform ops.j102_apply_transition(
+      'open-assignment',
+      -- The extra key is HERE, and a membership check would find the binding in it.
+      jsonb_build_object(
+        'assignment:' || v_assignment_id, v_placeholder,
+        'assignment:' || v_assignment_id_2, null),
+      v_subjects, v_events, v_manifest_wrong,
+      'j102-fixture-key-a1', v_placeholder,
+      jsonb_build_object('operation', 'open-cre-assignment', 'reason_id', 'x',
+        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
+    raise exception 'A1: evidence about another subject advanced this one, with the lock set covering it';
+  exception when insufficient_privilege then
+    if sqlerrm !~ 'j102_evidence_not_bound_to_primary_subject' then raise; end if;
+  end;
+
+  -- === A2: the primary-creation masquerade, one transition over ==============
+  --
+  -- P0 proved it for `open-assignment`. This proves the refusal is a property of
+  -- the MAP rather than of one transition: `record-loi-submission` advances a
+  -- property negotiation, and a caller proposing to create that negotiation is
+  -- proposing a lifecycle subject nothing in this rail creates.
+  begin
+    v_rec2 := jsonb_build_object(
+      'schema_version', v_subject_schema, 'tenant', v_tenant,
+      'subject_kind', 'property_negotiation', 'subject_id', v_negotiation_id,
+      'state', v_negotiation_state,
+      'established_by_transition', 'record-loi-submission',
+      'prior_state_digest', null,
+      'updated_by', v_actor, 'updated_at', v_now);
+    perform ops.j102_apply_transition(
+      'record-loi-submission',
+      jsonb_build_object(
+        'property_negotiation:' || v_negotiation_id, null,
+        'assignment:' || v_assignment_id, v_placeholder),
+      jsonb_build_array(jsonb_build_object(
+        'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_subject',
+        'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+        'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)),
+      v_events, v_manifest,
+      'j102-fixture-key-a2', v_placeholder,
+      jsonb_build_object('operation', 'record-loi-submission', 'reason_id', 'x',
+        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
+    raise exception 'A2: a transition created the property negotiation it claims to advance';
+  exception when insufficient_privilege then
+    if sqlerrm !~ 'j102_primary_subject_creation_refused' then raise; end if;
+  end;
+
+  -- === A3: the diagnostics cannot choose a weaker operation ==================
+  --
+  -- `record-deal-axis` is the routine, agent-permitted operation. Naming it beside
+  -- a partner-only transition is how a gate keyed on the OPERATION would be
+  -- satisfied while the transition performed was something else entirely. The
+  -- pairing is checked before the idempotency key is claimed, so this attempt does
+  -- not even burn a key.
+  begin
+    perform ops.j102_apply_transition(
+      'record-deal-closing',
+      jsonb_build_object('deal:' || v_deal_id, v_placeholder),
+      v_subjects, v_events, v_manifest,
+      'j102-fixture-key-a3', v_placeholder,
+      jsonb_build_object('operation', 'record-deal-axis', 'reason_id', 'x',
+        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
+    raise exception 'A3: a routine operation performed a partner-only transition';
+  exception when invalid_parameter_value then
+    if sqlerrm !~ 'j102_operation_transition_mismatch' then raise; end if;
+  end;
+
+  -- And a transition that is in no contract at all: p_transition_id used to be an
+  -- unchecked string that reached the event table and the receipt.
+  begin
+    perform ops.j102_apply_transition(
+      'set-the-phase',
+      jsonb_build_object('assignment:' || v_assignment_id, v_placeholder),
+      v_subjects, v_events, v_manifest,
+      'j102-fixture-key-a3b', v_placeholder,
+      jsonb_build_object('operation', 'open-cre-assignment', 'reason_id', 'x',
+        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
+    raise exception 'A3: a transition that does not exist was performed and recorded';
+  exception when invalid_parameter_value then
+    if sqlerrm !~ 'j102_unknown_transition' then raise; end if;
+  end;
+
+  -- === A4: the direct carr_writer bypass of a partner-only transition =========
+  --
+  -- BLOCK-1's whole point. The EXECUTE grant on the transition writer reaches
+  -- carr_writer, which always resolves to a sponsored agent, and the three
+  -- partner-only transitions used to be reachable from there because the writer
+  -- never asked the actor's CLASS. Behavioural only in an agent session; S5 covers
+  -- the same fact structurally in a partner session.
+  if not v_partner then
+    begin
+      perform ops.j102_apply_transition(
+        'cancel-pending-deal',
+        jsonb_build_object('deal:' || v_deal_id, v_placeholder),
+        v_subjects, v_events, v_manifest,
+        'j102-fixture-key-a4', v_placeholder,
+        jsonb_build_object('operation', 'cancel-pending-deal', 'reason_id', 'x',
+          'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
+      raise exception 'A4: a sponsored agent performed a partner-only transition on a direct call';
+    exception when insufficient_privilege then
+      if sqlerrm !~ 'j102_actor_class_not_permitted' then raise; end if;
+    end;
+  else
+    raise notice 'A4 behavioural half skipped: this session holds verified_partner, so the agent refusal cannot be demonstrated from here. S5 asserts the same admission map structurally.';
   end if;
 
-  -- === B5: replay returns the committed outcome and appends no second event ==
-  v_replay := ops.j102_replay_outcome('commit-winning-property', 'j102-fixture-key-commit',
-    v_placeholder);
-  if v_replay is null or (v_replay ->> 'reason_id') <> 'selection_and_commitment_create_pending_deal' then
-    raise exception 'B5: the settled key did not replay its stored outcome';
-  end if;
-  select count(*) into v_count from ops.j102_subject_event where tenant = v_tenant;
-  if v_count <> v_events_after then
-    raise exception 'B5: a replay appended history';
+  -- === A5: the event lies, and the event SET ==================================
+  --
+  -- Five separate attempts, because "at least one event" -- which is all the
+  -- writer used to require -- catches none of them.
+
+  -- (a) an event that does not hash to its own claim. The insert RECOMPUTES both
+  -- digests, so the table's CHECK constraints were trivially satisfied while the
+  -- envelope's own record_digest said something else inside the hashed bytes.
+  begin
+    perform ops.j102_apply_transition(
+      'open-assignment',
+      jsonb_build_object('assignment:' || v_assignment_id, v_placeholder),
+      v_subjects,
+      jsonb_build_array(jsonb_build_object(
+        'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_event',
+        'tenant', v_tenant, 'record', v_evt, 'record_digest', v_lie,
+        'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)),
+      v_manifest,
+      'j102-fixture-key-a5a', v_placeholder,
+      jsonb_build_object('operation', 'open-cre-assignment', 'reason_id', 'x',
+        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
+    raise exception 'A5: an event whose bytes contradict its own digest claim was appended';
+  exception when data_exception then
+    if sqlerrm !~ 'j102_event_digest_mismatch' then raise; end if;
+  end;
+
+  -- (b) an event for an UNRELATED deal, riding along with a legitimate call. It
+  -- used to land in history, be returned by j102_read, and describe a subject
+  -- whose current state never moved.
+  begin
+    v_evt2 := jsonb_build_object(
+      'schema_version', v_event_schema, 'tenant', v_tenant,
+      'event', jsonb_build_object('schema_version', v_ev_schema,
+        'event_kind', 'deal_closed',
+        'subject_kind', 'deal', 'subject_id', v_deal_id_c),
+      'transition_id', 'open-assignment', 'evidence_references', '[]'::jsonb,
+      'recorded_by', v_actor, 'recorded_at', v_now);
+    perform ops.j102_apply_transition(
+      'open-assignment',
+      jsonb_build_object('assignment:' || v_assignment_id, v_placeholder),
+      v_subjects,
+      v_events || jsonb_build_array(jsonb_build_object(
+        'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_event',
+        'tenant', v_tenant, 'record', v_evt2, 'record_digest', ops.f01_digest_jsonb(v_evt2),
+        'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)),
+      v_manifest,
+      'j102-fixture-key-a5b', v_placeholder,
+      jsonb_build_object('operation', 'open-cre-assignment', 'reason_id', 'x',
+        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
+    raise exception 'A5: history was written for a deal this transition never advanced';
+  exception when invalid_parameter_value then
+    if sqlerrm !~ 'j102_event_set_mismatch' then raise; end if;
+  end;
+
+  -- (c) an event claiming a DIFFERENT transition than the one being applied.
+  begin
+    v_evt2 := jsonb_build_object(
+      'schema_version', v_event_schema, 'tenant', v_tenant,
+      'event', jsonb_build_object('schema_version', v_ev_schema,
+        'event_kind', 'assignment_opened',
+        'subject_kind', 'assignment', 'subject_id', v_assignment_id),
+      'transition_id', 'commit-winning-property', 'evidence_references', '[]'::jsonb,
+      'recorded_by', v_actor, 'recorded_at', v_now);
+    perform ops.j102_apply_transition(
+      'open-assignment',
+      jsonb_build_object('assignment:' || v_assignment_id, v_placeholder),
+      v_subjects,
+      jsonb_build_array(jsonb_build_object(
+        'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_event',
+        'tenant', v_tenant, 'record', v_evt2, 'record_digest', ops.f01_digest_jsonb(v_evt2),
+        'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)),
+      v_manifest,
+      'j102-fixture-key-a5c', v_placeholder,
+      jsonb_build_object('operation', 'open-cre-assignment', 'reason_id', 'x',
+        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
+    raise exception 'A5: history named a transition that did not run';
+  exception when invalid_parameter_value then
+    if sqlerrm !~ 'j102_event_transition_mismatch' then raise; end if;
+  end;
+
+  -- (d) NO EVENTS AT ALL: a state change nobody can audit afterwards.
+  begin
+    perform ops.j102_apply_transition(
+      'open-assignment',
+      jsonb_build_object('assignment:' || v_assignment_id, v_placeholder),
+      v_subjects, '[]'::jsonb, v_manifest,
+      'j102-fixture-key-a5d', v_placeholder,
+      jsonb_build_object('operation', 'open-cre-assignment', 'reason_id', 'x',
+        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
+    raise exception 'A5: a transition applied with no history at all';
+  exception when invalid_parameter_value then
+    if sqlerrm !~ 'j102_no_event_envelopes' and sqlerrm !~ 'j102_event_set_mismatch' then raise; end if;
+  end;
+
+  -- (e) A PLAUSIBLE WRONG KIND on a correctly bound subject -- the residual the
+  -- previous correction acknowledged and left open. The subject is one this call
+  -- advances, the transition is the one being applied, the bytes hash to their
+  -- claim; only the KIND is a lie, and a reader searching history by kind is
+  -- exactly who it lies to.
+  begin
+    v_evt2 := jsonb_build_object(
+      'schema_version', v_event_schema, 'tenant', v_tenant,
+      'event', jsonb_build_object('schema_version', v_ev_schema,
+        'event_kind', 'assignment_committed',
+        'subject_kind', 'assignment', 'subject_id', v_assignment_id),
+      'transition_id', 'open-assignment', 'evidence_references', '[]'::jsonb,
+      'recorded_by', v_actor, 'recorded_at', v_now);
+    perform ops.j102_apply_transition(
+      'open-assignment',
+      jsonb_build_object('assignment:' || v_assignment_id, v_placeholder),
+      v_subjects,
+      jsonb_build_array(jsonb_build_object(
+        'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_event',
+        'tenant', v_tenant, 'record', v_evt2, 'record_digest', ops.f01_digest_jsonb(v_evt2),
+        'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)),
+      v_manifest,
+      'j102-fixture-key-a5e', v_placeholder,
+      jsonb_build_object('operation', 'open-cre-assignment', 'reason_id', 'x',
+        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
+    raise exception 'A5: an assignment_committed event was appended by an open-assignment call';
+  exception when invalid_parameter_value then
+    if sqlerrm !~ 'j102_event_missing_or_wrong' then raise; end if;
+  end;
+
+  -- === A6: empty, unknown, and wrong-source evidence ==========================
+  begin
+    perform ops.j102_apply_transition(
+      'open-assignment',
+      jsonb_build_object('assignment:' || v_assignment_id, v_placeholder),
+      v_subjects, v_events, '[]'::jsonb,
+      'j102-fixture-key-a6a', v_placeholder,
+      jsonb_build_object('operation', 'open-cre-assignment', 'reason_id', 'x',
+        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
+    raise exception 'A6: a transition applied with no evidence to re-read';
+  exception when invalid_parameter_value then
+    if sqlerrm !~ 'j102_evidence_recheck_required' then raise; end if;
+  end;
+
+  begin
+    perform ops.j102_apply_transition(
+      'open-assignment',
+      jsonb_build_object('assignment:' || v_assignment_id, v_placeholder),
+      v_subjects, v_events,
+      jsonb_build_array(jsonb_build_object(
+        'evidence_kind', 'a_convincing_email', 'source', 'first_party_record',
+        'reader', 'ops.j102_first_party_record',
+        'selector', jsonb_build_object('record_kind', 'assignment_mandate',
+                                       'record_id', v_fact_id),
+        'expected_record_digest', v_fact_digest,
+        'binding', jsonb_build_object('subject_kind', 'assignment',
+                                      'subject_id', v_assignment_id))),
+      'j102-fixture-key-a6b', v_placeholder,
+      jsonb_build_object('operation', 'open-cre-assignment', 'reason_id', 'x',
+        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
+    raise exception 'A6: an evidence kind no contract admits was accepted';
+  exception when invalid_parameter_value then
+    if sqlerrm !~ 'j102_unknown_evidence_kind' then raise; end if;
+  end;
+
+  -- Real evidence, presented from the wrong SOURCE. A first-party record
+  -- announced as a document takes the document branch, which never re-reads the
+  -- record's own typed binding.
+  begin
+    perform ops.j102_apply_transition(
+      'open-assignment',
+      jsonb_build_object('assignment:' || v_assignment_id, v_placeholder),
+      v_subjects, v_events,
+      jsonb_build_array(jsonb_build_object(
+        'evidence_kind', 'search_initiation', 'source', 'f01_document',
+        'reader', 'ops.f01_read.document',
+        'selector', jsonb_build_object('document_id', v_fact_id),
+        'expected_version_no', '1', 'expected_content_digest', v_fact_digest,
+        'expected_link_digest', v_placeholder,
+        'binding', jsonb_build_object('subject_kind', 'assignment',
+                                      'subject_id', v_assignment_id))),
+      'j102-fixture-key-a6c', v_placeholder,
+      jsonb_build_object('operation', 'open-cre-assignment', 'reason_id', 'x',
+        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
+    raise exception 'A6: a first-party record was re-read as a document, skipping its own binding';
+  exception when invalid_parameter_value then
+    if sqlerrm !~ 'j102_evidence_source_mismatch' then raise; end if;
+  end;
+
+  -- === A7: the unrelated proposed subject, and the duplicate kind =============
+  --
+  -- An allowed operation carrying a second subject beside its real one: a new
+  -- updated_by and updated_at on a client who had nothing to do with it at best,
+  -- an arbitrary state change at worst.
+  begin
+    v_rec2 := jsonb_build_object(
+      'schema_version', v_subject_schema, 'tenant', v_tenant,
+      'subject_kind', 'deal', 'subject_id', v_deal_id_c,
+      'state', jsonb_build_object(
+        'subject_kind', 'deal', 'subject_id', v_deal_id_c,
+        'assignment_id', v_assignment_id, 'property_id', v_property_id,
+        'instrument_kind', 'lease', 'deal_state', 'closed',
+        'execution_state', 'executed', 'diligence_state', 'not_applicable',
+        'closing_state', 'closed', 'commission_agreement_state', 'absent',
+        'invoice_state', 'not_invoiced', 'payment_state', 'unpaid',
+        'completion_state', 'open', 'cancellation_reason', null,
+        'closing_date', v_now),
+      'established_by_transition', 'open-assignment',
+      'prior_state_digest', null,
+      'updated_by', v_actor, 'updated_at', v_now);
+    perform ops.j102_apply_transition(
+      'open-assignment',
+      jsonb_build_object(
+        'assignment:' || v_assignment_id, v_placeholder,
+        'deal:' || v_deal_id_c, null),
+      v_subjects || jsonb_build_array(jsonb_build_object(
+        'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_subject',
+        'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+        'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)),
+      v_events, v_manifest,
+      'j102-fixture-key-a7a', v_placeholder,
+      jsonb_build_object('operation', 'open-cre-assignment', 'reason_id', 'x',
+        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
+    raise exception 'A7: an open-assignment call wrote a closed deal beside its assignment';
+  exception when invalid_parameter_value then
+    if sqlerrm !~ 'j102_subject_kind_not_written_by_transition' then raise; end if;
+  end;
+
+  -- Two subjects of one kind: which one is the primary the evidence must bind to?
+  begin
+    v_rec2 := jsonb_build_object(
+      'schema_version', v_subject_schema, 'tenant', v_tenant,
+      'subject_kind', 'assignment', 'subject_id', v_assignment_id_2,
+      'state', v_assignment_state || jsonb_build_object('subject_id', v_assignment_id_2),
+      'established_by_transition', 'open-assignment',
+      'prior_state_digest', v_placeholder,
+      'updated_by', v_actor, 'updated_at', v_now);
+    perform ops.j102_apply_transition(
+      'open-assignment',
+      jsonb_build_object(
+        'assignment:' || v_assignment_id, v_placeholder,
+        'assignment:' || v_assignment_id_2, v_placeholder),
+      v_subjects || jsonb_build_array(jsonb_build_object(
+        'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_subject',
+        'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+        'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)),
+      v_events, v_manifest,
+      'j102-fixture-key-a7b', v_placeholder,
+      jsonb_build_object('operation', 'open-cre-assignment', 'reason_id', 'x',
+        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
+    raise exception 'A7: one transition advanced two assignments at once';
+  exception when invalid_parameter_value then
+    if sqlerrm !~ 'j102_duplicate_proposed_subject_kind' then raise; end if;
+  end;
+
+  -- === A8: a coupled subject proposed as a CREATION ===========================
+  --
+  -- `record-loi-submission` writes the negotiation AND the assignment it belongs
+  -- to, and it UPDATES both. A caller proposing to create the assignment beside a
+  -- genuine negotiation is asking for a row nothing in this rail creates, on the
+  -- strength of a transition that never creates one.
+  begin
+    v_rec2 := jsonb_build_object(
+      'schema_version', v_subject_schema, 'tenant', v_tenant,
+      'subject_kind', 'assignment', 'subject_id', v_assignment_id,
+      'state', v_assignment_state,
+      'established_by_transition', 'record-loi-submission',
+      'prior_state_digest', null,
+      'updated_by', v_actor, 'updated_at', v_now);
+    perform ops.j102_apply_transition(
+      'record-loi-submission',
+      jsonb_build_object(
+        'property_negotiation:' || v_negotiation_id, v_placeholder,
+        'assignment:' || v_assignment_id, null),
+      jsonb_build_array(
+        jsonb_build_object(
+          'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_subject',
+          'tenant', v_tenant,
+          'record', jsonb_build_object(
+            'schema_version', v_subject_schema, 'tenant', v_tenant,
+            'subject_kind', 'property_negotiation', 'subject_id', v_negotiation_id,
+            'state', v_negotiation_state,
+            'established_by_transition', 'record-loi-submission',
+            'prior_state_digest', v_placeholder,
+            'updated_by', v_actor, 'updated_at', v_now),
+          'record_digest', ops.f01_digest_jsonb(jsonb_build_object(
+            'schema_version', v_subject_schema, 'tenant', v_tenant,
+            'subject_kind', 'property_negotiation', 'subject_id', v_negotiation_id,
+            'state', v_negotiation_state,
+            'established_by_transition', 'record-loi-submission',
+            'prior_state_digest', v_placeholder,
+            'updated_by', v_actor, 'updated_at', v_now)),
+          'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+        jsonb_build_object(
+          'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_subject',
+          'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+          'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)),
+      v_events, v_manifest,
+      'j102-fixture-key-a8', v_placeholder,
+      jsonb_build_object('operation', 'record-loi-submission', 'reason_id', 'x',
+        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
+    raise exception 'A8: a transition that only updates an assignment created one';
+  exception when insufficient_privilege then
+    if sqlerrm !~ 'j102_subject_creation_not_permitted' then raise; end if;
+  end;
+
+  -- === A9: the coupled write, sent as a subset ================================
+  --
+  -- Q082: coupled facts land together or refuse together. `record-loi-submission`
+  -- moves the negotiation to loi_submitted AND moves its assignment to
+  -- negotiation; a call carrying only the negotiation leaves an assignment that
+  -- does not know one of its negotiations was submitted. `writes` admitted this,
+  -- because a subset of a permitted set is still a subset.
+  begin
+    perform ops.j102_apply_transition(
+      'record-loi-submission',
+      jsonb_build_object('property_negotiation:' || v_negotiation_id, v_placeholder),
+      jsonb_build_array(jsonb_build_object(
+        'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_subject',
+        'tenant', v_tenant,
+        'record', jsonb_build_object(
+          'schema_version', v_subject_schema, 'tenant', v_tenant,
+          'subject_kind', 'property_negotiation', 'subject_id', v_negotiation_id,
+          'state', v_negotiation_state,
+          'established_by_transition', 'record-loi-submission',
+          'prior_state_digest', v_placeholder,
+          'updated_by', v_actor, 'updated_at', v_now),
+        'record_digest', ops.f01_digest_jsonb(jsonb_build_object(
+          'schema_version', v_subject_schema, 'tenant', v_tenant,
+          'subject_kind', 'property_negotiation', 'subject_id', v_negotiation_id,
+          'state', v_negotiation_state,
+          'established_by_transition', 'record-loi-submission',
+          'prior_state_digest', v_placeholder,
+          'updated_by', v_actor, 'updated_at', v_now)),
+        'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)),
+      v_events, v_manifest,
+      'j102-fixture-key-a9', v_placeholder,
+      jsonb_build_object('operation', 'record-loi-submission', 'reason_id', 'x',
+        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
+    raise exception 'A9: half of a coupled write landed without the other half';
+  exception when invalid_parameter_value then
+    if sqlerrm !~ 'j102_required_subject_not_proposed' then raise; end if;
+  end;
+
+  -- === A10: the whole subject set, and an event set short by one ==============
+  --
+  -- The mirror of A9 on the history side, using the same transition: both
+  -- subjects are present and the single event `record-loi-submission` appends is
+  -- replaced by an event for the OTHER subject it writes. The subject check
+  -- passes, the "event names a subject this call advances" check passes, and only
+  -- the exact event set refuses it.
+  begin
+    v_evt2 := jsonb_build_object(
+      'schema_version', v_event_schema, 'tenant', v_tenant,
+      'event', jsonb_build_object('schema_version', v_ev_schema,
+        'event_kind', 'assignment_opened',
+        'subject_kind', 'assignment', 'subject_id', v_assignment_id),
+      'transition_id', 'record-loi-submission', 'evidence_references', '[]'::jsonb,
+      'recorded_by', v_actor, 'recorded_at', v_now);
+    perform ops.j102_apply_transition(
+      'record-loi-submission',
+      jsonb_build_object(
+        'property_negotiation:' || v_negotiation_id, v_placeholder,
+        'assignment:' || v_assignment_id, v_placeholder),
+      jsonb_build_array(
+        jsonb_build_object(
+          'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_subject',
+          'tenant', v_tenant,
+          'record', jsonb_build_object(
+            'schema_version', v_subject_schema, 'tenant', v_tenant,
+            'subject_kind', 'property_negotiation', 'subject_id', v_negotiation_id,
+            'state', v_negotiation_state,
+            'established_by_transition', 'record-loi-submission',
+            'prior_state_digest', v_placeholder,
+            'updated_by', v_actor, 'updated_at', v_now),
+          'record_digest', ops.f01_digest_jsonb(jsonb_build_object(
+            'schema_version', v_subject_schema, 'tenant', v_tenant,
+            'subject_kind', 'property_negotiation', 'subject_id', v_negotiation_id,
+            'state', v_negotiation_state,
+            'established_by_transition', 'record-loi-submission',
+            'prior_state_digest', v_placeholder,
+            'updated_by', v_actor, 'updated_at', v_now)),
+          'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+        v_subjects -> 0),
+      jsonb_build_array(jsonb_build_object(
+        'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_event',
+        'tenant', v_tenant, 'record', v_evt2, 'record_digest', ops.f01_digest_jsonb(v_evt2),
+        'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)),
+      v_manifest,
+      'j102-fixture-key-a10', v_placeholder,
+      jsonb_build_object('operation', 'record-loi-submission', 'reason_id', 'x',
+        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
+    raise exception 'A10: a transition appended an event it does not produce, in place of the one it does';
+  exception when invalid_parameter_value then
+    if sqlerrm !~ 'j102_event_missing_or_wrong' then raise; end if;
+  end;
+
+  -- ========================================================================
+  -- === U1: the target-value rewrites, and why they are UNPROVEN here =========
+  --
+  -- These are the payloads the second root correction exists for: a permitted
+  -- field carrying a value the kernel would never produce. They are decided
+  -- against the COMMITTED row -- that is the whole point of them -- and no
+  -- committed row can exist in this file, so the writer refuses them EARLIER,
+  -- at the compare-and-swap, for want of a subject.
+  --
+  -- The group still runs, because a refusal is still a refusal and because the
+  -- day a bootstrap lands these attempts start proving the thing they are aimed
+  -- at. What it does NOT do is claim the target check fired: it reports the
+  -- refusal it actually got.
+  -- ========================================================================
+  v_refusal := null;
+  begin
+    v_rec2 := jsonb_build_object(
+      'schema_version', v_subject_schema, 'tenant', v_tenant,
+      'subject_kind', 'assignment', 'subject_id', v_assignment_id,
+      -- A ROUTINE OPEN-ASSIGNMENT CALL, PROPOSING A COMMITMENT: the phase, the
+      -- selected property, the lease-draft target and a pending deal id, none of
+      -- which any evidence in this manifest establishes.
+      'state', v_assignment_committed,
+      'established_by_transition', 'open-assignment',
+      'prior_state_digest', v_placeholder,
+      'updated_by', v_actor, 'updated_at', v_now);
+    perform ops.j102_apply_transition(
+      'open-assignment',
+      jsonb_build_object('assignment:' || v_assignment_id, v_placeholder),
+      jsonb_build_array(jsonb_build_object(
+        'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_subject',
+        'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+        'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)),
+      v_events, v_manifest,
+      'j102-fixture-key-u1a', v_placeholder,
+      jsonb_build_object('operation', 'open-cre-assignment', 'reason_id', 'x',
+        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
+    raise exception 'U1: a routine open-assignment call committed an assignment to a property and a pending deal';
+  exception when others then
+    v_refusal := sqlerrm;
+    if sqlerrm !~ 'j102_transition_effect_not_canonical'
+       and sqlerrm !~ 'j102_field_not_movable_by_transition'
+       and sqlerrm !~ 'j102_stale_subject_digest'
+       and sqlerrm !~ 'j102_primary_subject_not_found' then
+      raise;
+    end if;
+  end;
+  if v_refusal ~ 'j102_stale_subject_digest' or v_refusal ~ 'j102_primary_subject_not_found' then
+    raise notice 'U1 UNPROVEN (j102_fixture_bootstrap_absent): the masquerade refused, but at the compare-and-swap for want of a committed assignment rather than at the target check it is aimed at. Observed: %',
+      v_refusal;
+  else
+    raise notice 'U1 PROVED at the target check: %', v_refusal;
   end if;
 
+  -- The same shape, one field wide: a permitted field DELETED rather than moved.
+  v_refusal := null;
+  begin
+    v_rec2 := jsonb_build_object(
+      'schema_version', v_subject_schema, 'tenant', v_tenant,
+      'subject_kind', 'assignment', 'subject_id', v_assignment_id,
+      'state', v_assignment_state - 'assignment_phase',
+      'established_by_transition', 'open-assignment',
+      'prior_state_digest', v_placeholder,
+      'updated_by', v_actor, 'updated_at', v_now);
+    perform ops.j102_apply_transition(
+      'open-assignment',
+      jsonb_build_object('assignment:' || v_assignment_id, v_placeholder),
+      jsonb_build_array(jsonb_build_object(
+        'schema_version', v_env_schema, 'record_kind', 'stored_lifecycle_subject',
+        'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+        'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)),
+      v_events, v_manifest,
+      'j102-fixture-key-u1b', v_placeholder,
+      jsonb_build_object('operation', 'open-cre-assignment', 'reason_id', 'x',
+        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
+    raise exception 'U1: an assignment was written with no phase at all';
+  exception when others then
+    v_refusal := sqlerrm;
+    if sqlerrm !~ 'j102_transition_effect_missing'
+       and sqlerrm !~ 'j102_field_not_movable_by_transition'
+       and sqlerrm !~ 'j102_stale_subject_digest'
+       and sqlerrm !~ 'j102_primary_subject_not_found' then
+      raise;
+    end if;
+  end;
+  if v_refusal ~ 'j102_stale_subject_digest' or v_refusal ~ 'j102_primary_subject_not_found' then
+    raise notice 'U1 (deleted field) UNPROVEN (j102_fixture_bootstrap_absent): refused at the compare-and-swap. Observed: %',
+      v_refusal;
+  end if;
+
+  -- === B5: an idempotent replay, on the one writer this file can drive ========
+  --
+  -- The transition writer cannot reach a success here, so the replay property is
+  -- proved where it CAN be: the first-party record writer settled a key above,
+  -- and the same key must return the same stored outcome rather than writing a
+  -- second row.
+  -- The SECOND mandate's own record, rebuilt here rather than reused from a
+  -- variable the adversarial groups have since overwritten.
+  v_rec2 := jsonb_build_object(
+    'schema_version', v_fact_schema, 'tenant', v_tenant,
+    'record_kind', 'assignment_mandate', 'record_id', v_fact_id_2,
+    'subject_kind', 'assignment', 'subject_id', v_assignment_id_2,
+    'reason', null, 'detail', 'synthetic fixture mandate for the other assignment',
+    'closing_date', null, 'supporting_document_id', null,
+    'recorded_by', v_actor, 'recorded_by_authorization_class', v_class,
+    'recorded_at', v_now, 'advances_lifecycle_state', false);
+  v_replay := ops.j102_record_first_party_fact(
+    jsonb_build_object(
+      'schema_version', v_env_schema, 'record_kind', 'stored_first_party_record',
+      'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+      'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+    'j102-fixture-key-fact-2', v_placeholder);
+  if v_replay is null or (v_replay ->> 'record_id') <> v_fact_id_2 then
+    raise exception 'B5: the settled key did not replay its stored outcome: %', v_replay;
+  end if;
+  select count(*) into v_count from ops.j102_first_party_record where tenant = v_tenant;
+  if v_count <> 2 then
+    raise exception 'B5: a replay appended a second row (% rows)', v_count;
+  end if;
   -- The same key over a DIFFERENT payload is a substitution attempt.
   begin
-    perform ops.j102_replay_outcome('commit-winning-property', 'j102-fixture-key-commit',
-      'sha256:' || repeat('9', 64));
+    perform ops.j102_record_first_party_fact(
+      jsonb_build_object(
+        'schema_version', v_env_schema, 'record_kind', 'stored_first_party_record',
+        'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+        'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+      'j102-fixture-key-fact-2', 'sha256:' || repeat('9', 64));
     raise exception 'B5: a different payload replayed under the same key';
   exception when unique_violation then
     if sqlerrm !~ 'j102_idempotency_payload_mismatch' then raise; end if;
   end;
 
-  -- === B2: a stale compare-and-swap operand refuses ========================
-  begin
-    perform ops.j102_apply_transition(
-      'record-lease-execution',
-      jsonb_build_object('deal:' || v_deal_id, 'sha256:' || repeat('7', 64)),
-      jsonb_build_array((select jsonb_build_object(
-         'schema_version', 'doctorcre-v5-j102-stored-record-envelope.v1',
-         'record_kind', 'stored_lifecycle_subject', 'tenant', v_tenant,
-         'record', r, 'record_digest', ops.f01_digest_jsonb(r),
-         'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)
-         from (select jsonb_build_object(
-           'schema_version', 'doctorcre-v5-j102-stored-lifecycle-subject.v1',
-           'tenant', v_tenant, 'subject_kind', 'deal', 'subject_id', v_deal_id,
-           'state', jsonb_set(v_deal_state, '{execution_state}', '"executed"'),
-           'established_by_transition', 'record-lease-execution',
-           -- The envelope declares the SAME operand the map carries, because the
-           -- writer refuses a pair that disagrees (B13). What is stale here is
-           -- the operand itself, which is the point of B2.
-           'prior_state_digest', 'sha256:' || repeat('7', 64),
-           'updated_by', v_actor, 'updated_at', v_now) as r) s)),
-      jsonb_build_array((select jsonb_build_object(
-         'schema_version', 'doctorcre-v5-j102-stored-record-envelope.v1',
-         'record_kind', 'stored_lifecycle_event', 'tenant', v_tenant,
-         'record', r, 'record_digest', ops.f01_digest_jsonb(r),
-         'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)
-         from (select jsonb_build_object(
-           'schema_version', 'doctorcre-v5-j102-stored-lifecycle-event.v1',
-           'tenant', v_tenant,
-           'event', jsonb_build_object(
-             'schema_version', 'doctorcre-v5-j102-lifecycle-event.v1',
-             'event_kind', 'lease_executed', 'subject_kind', 'deal', 'subject_id', v_deal_id),
-           'transition_id', 'record-lease-execution',
-           'evidence_references', '[]'::jsonb,
-           'recorded_by', v_actor, 'recorded_at', v_now) as r) s)),
-      jsonb_build_array(jsonb_build_object(
-        'evidence_kind', 'search_initiation', 'source', 'first_party_record',
-        'reader', 'ops.j102_first_party_record',
-        'selector', jsonb_build_object('record_kind', 'assignment_mandate',
-                                       'record_id', v_fact_id),
-        'expected_record_digest', v_fact_digest,
-        'binding', jsonb_build_object('subject_kind', 'assignment',
-                                      'subject_id', v_assignment_id))),
-      'j102-fixture-key-stale', v_placeholder,
-      jsonb_build_object('operation', 'record-deal-execution', 'reason_id', 'x',
-        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
-    raise exception 'B2: a stale compare-and-swap operand was applied';
-  exception when serialization_failure then
-    if sqlerrm !~ 'j102_stale_subject_digest' then raise; end if;
-  end;
-  -- And the deal did not move.
-  if (ops.j102_subject('deal', v_deal_id) -> 'state' ->> 'execution_state') <> 'unexecuted' then
-    raise exception 'B2: the refused transition changed state anyway';
-  end if;
-
-  -- === B3: the evidence recheck refuses a pin that moved ===================
-  -- EXISTENCE IS NOT THE CHECK. The record still exists; the manifest names a
-  -- digest it does not carry, which is the shape of a record rewritten between
-  -- the decision and the write.
-  begin
-    perform ops.j102_recheck_evidence(jsonb_build_array(jsonb_build_object(
-      'evidence_kind', 'search_initiation', 'source', 'first_party_record',
-      'reader', 'ops.j102_first_party_record',
-      'selector', jsonb_build_object('record_kind', 'assignment_mandate',
-                                     'record_id', v_fact_id),
-      'expected_record_digest', 'sha256:' || repeat('5', 64),
-      'binding', jsonb_build_object('subject_kind', 'assignment',
-                                    'subject_id', v_assignment_id))));
-    raise exception 'B3: a moved evidence pin satisfied the recheck';
-  exception when serialization_failure then
-    if sqlerrm !~ 'j102_evidence_moved' then raise; end if;
-  when insufficient_privilege then
-    raise notice 'B3: the recheck is not executable from this session; it is private to the transition writer.';
-  end;
-
-  -- === B14: the recheck refuses evidence bound to a DIFFERENT subject =======
-  -- THE RECORD IS AUTHENTIC, UNMOVED AND CORRECTLY PINNED. Every check that
-  -- existed before BLOCK-2 passes on it. What refuses is that it is a mandate
-  -- about assignment 1 and this manifest would advance assignment 2 — which is
-  -- the shape of one closing settlement closing somebody else's deal.
-  begin
-    perform ops.j102_recheck_evidence(jsonb_build_array(jsonb_build_object(
-      'evidence_kind', 'search_initiation', 'source', 'first_party_record',
-      'reader', 'ops.j102_first_party_record',
-      'selector', jsonb_build_object('record_kind', 'assignment_mandate',
-                                     'record_id', v_fact_id),
-      'expected_record_digest', v_fact_digest,
-      'binding', jsonb_build_object('subject_kind', 'assignment',
-                                    'subject_id', v_assignment_id_2))));
-    raise exception 'B14: evidence bound to another subject satisfied the recheck';
-  exception when serialization_failure then
-    if sqlerrm !~ 'j102_evidence_unbound' then raise; end if;
-  when insufficient_privilege then
-    null;  -- already noticed above
-  end;
-
-  -- A manifest item that names NO binding is a decision nobody can re-check.
-  begin
-    perform ops.j102_recheck_evidence(jsonb_build_array(jsonb_build_object(
-      'evidence_kind', 'search_initiation', 'source', 'first_party_record',
-      'reader', 'ops.j102_first_party_record',
-      'selector', jsonb_build_object('record_kind', 'assignment_mandate',
-                                     'record_id', v_fact_id),
-      'expected_record_digest', v_fact_digest)));
-    raise exception 'B14: an unbound manifest item was accepted';
-  exception when invalid_parameter_value then
-    if sqlerrm !~ 'j102_evidence_binding_required' then raise; end if;
-  when insufficient_privilege then
-    null;  -- already noticed above
-  end;
-
-  -- An empty manifest is refused outright: a transition never applies without
-  -- re-reading something.
-  begin
-    perform ops.j102_recheck_evidence('[]'::jsonb);
-    raise exception 'B3: an empty evidence manifest was accepted';
-  exception when invalid_parameter_value then
-    if sqlerrm !~ 'j102_evidence_recheck_required' then raise; end if;
-  when insufficient_privilege then
-    null;  -- already noticed above
-  end;
-
-  -- === B4: ATOMICITY — a bad second envelope leaves NEITHER subject =========
-  begin
-    perform ops.j102_apply_transition(
-      'commit-winning-property',
-      jsonb_build_object(
-        'assignment:' || v_assignment_id_2, null,
-        'deal:' || v_deal_id_2, null),
-      jsonb_build_array(
-        -- The first envelope is perfectly good.
-        (select jsonb_build_object(
-           'schema_version', 'doctorcre-v5-j102-stored-record-envelope.v1',
-           'record_kind', 'stored_lifecycle_subject', 'tenant', v_tenant,
-           'record', r, 'record_digest', ops.f01_digest_jsonb(r),
-           'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)
-           from (select jsonb_build_object(
-             'schema_version', 'doctorcre-v5-j102-stored-lifecycle-subject.v1',
-             'tenant', v_tenant, 'subject_kind', 'assignment',
-             'subject_id', v_assignment_id_2,
-             'state', jsonb_build_object(
-               'subject_kind', 'assignment', 'subject_id', v_assignment_id_2,
-               'engagement_id', 'j102-fixture-engagement-1',
-               'assignment_phase', 'committed', 'open_negotiation_count', 2,
-               'selected_property_id', 'j102-fixture-property-2',
-               'active_lease_draft_target_id', 'j102-fixture-property-2',
-               'pending_deal_id', v_deal_id_2, 'multi_target_exception_ref', null),
-             'established_by_transition', 'commit-winning-property',
-             'prior_state_digest', null,
-             'updated_by', v_actor, 'updated_at', v_now) as r) s),
-        -- The second LIES about its own bytes.
-        (select jsonb_build_object(
-           'schema_version', 'doctorcre-v5-j102-stored-record-envelope.v1',
-           'record_kind', 'stored_lifecycle_subject', 'tenant', v_tenant,
-           'record', r, 'record_digest', 'sha256:' || repeat('3', 64),
-           'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)
-           from (select jsonb_build_object(
-             'schema_version', 'doctorcre-v5-j102-stored-lifecycle-subject.v1',
-             'tenant', v_tenant, 'subject_kind', 'deal', 'subject_id', v_deal_id_2,
-             'state', v_deal_state || jsonb_build_object('subject_id', v_deal_id_2),
-             'established_by_transition', 'commit-winning-property',
-             'prior_state_digest', null,
-             'updated_by', v_actor, 'updated_at', v_now) as r) s)),
-      jsonb_build_array((select jsonb_build_object(
-         'schema_version', 'doctorcre-v5-j102-stored-record-envelope.v1',
-         'record_kind', 'stored_lifecycle_event', 'tenant', v_tenant,
-         'record', r, 'record_digest', ops.f01_digest_jsonb(r),
-         'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)
-         from (select jsonb_build_object(
-           'schema_version', 'doctorcre-v5-j102-stored-lifecycle-event.v1',
-           'tenant', v_tenant,
-           'event', jsonb_build_object(
-             'schema_version', 'doctorcre-v5-j102-lifecycle-event.v1',
-             'event_kind', 'assignment_committed', 'subject_kind', 'assignment',
-             'subject_id', v_assignment_id_2),
-           'transition_id', 'commit-winning-property',
-           'evidence_references', '[]'::jsonb,
-           'recorded_by', v_actor, 'recorded_at', v_now) as r) s)),
-      jsonb_build_array(jsonb_build_object(
-        'evidence_kind', 'search_initiation', 'source', 'first_party_record',
-        'reader', 'ops.j102_first_party_record',
-        'selector', jsonb_build_object('record_kind', 'assignment_mandate',
-                                       'record_id', v_fact_id),
-        'expected_record_digest', v_fact_digest,
-        'binding', jsonb_build_object('subject_kind', 'assignment',
-                                      'subject_id', v_assignment_id))),
-      'j102-fixture-key-atomic', v_placeholder,
-      jsonb_build_object('operation', 'commit-winning-property', 'reason_id', 'x',
-        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
-    raise exception 'B4: an envelope that lied about its own bytes was stored';
-  exception when data_exception then
-    if sqlerrm !~ 'j102_subject_digest_mismatch' then raise; end if;
-  end;
-  -- THE ASSERTION THAT MATTERS: the GOOD first envelope did not land either.
-  if ops.j102_subject('assignment', v_assignment_id_2) is not null then
-    raise exception 'B4: a coupled transition applied partially — the first subject survived a failed second';
-  end if;
-  if ops.j102_subject('deal', v_deal_id_2) is not null then
-    raise exception 'B4: the bad subject landed';
-  end if;
-
-  -- === B11: a CREATION whose id is already taken refuses ====================
-  -- BLOCK-1's reproducer, run against the fix. The deal from B1 exists; this
-  -- call proposes a FRESH deal under a different assignment with the SAME id and
-  -- an explicit null operand, which is exactly what a caller naming an existing
-  -- id as its new_deal_id produces. The null operand means "must be absent", the
-  -- row is present, and the swap refuses instead of upserting the closed deal
-  -- away and leaving its events behind.
-  begin
-    perform ops.j102_apply_transition(
-      'commit-winning-property',
-      jsonb_build_object('deal:' || v_deal_id, null),
-      jsonb_build_array((select jsonb_build_object(
-         'schema_version', 'doctorcre-v5-j102-stored-record-envelope.v1',
-         'record_kind', 'stored_lifecycle_subject', 'tenant', v_tenant,
-         'record', r, 'record_digest', ops.f01_digest_jsonb(r),
-         'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)
-         from (select jsonb_build_object(
-           'schema_version', 'doctorcre-v5-j102-stored-lifecycle-subject.v1',
-           'tenant', v_tenant, 'subject_kind', 'deal', 'subject_id', v_deal_id,
-           'state', v_deal_state || jsonb_build_object('assignment_id', v_assignment_id_2),
-           'established_by_transition', 'commit-winning-property',
-           'prior_state_digest', null,
-           'updated_by', v_actor, 'updated_at', v_now) as r) s)),
-      jsonb_build_array((select jsonb_build_object(
-         'schema_version', 'doctorcre-v5-j102-stored-record-envelope.v1',
-         'record_kind', 'stored_lifecycle_event', 'tenant', v_tenant,
-         'record', r, 'record_digest', ops.f01_digest_jsonb(r),
-         'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)
-         from (select jsonb_build_object(
-           'schema_version', 'doctorcre-v5-j102-stored-lifecycle-event.v1',
-           'tenant', v_tenant,
-           'event', jsonb_build_object(
-             'schema_version', 'doctorcre-v5-j102-lifecycle-event.v1',
-             'event_kind', 'pending_deal_created', 'subject_kind', 'deal',
-             'subject_id', v_deal_id),
-           'transition_id', 'commit-winning-property',
-           'evidence_references', '[]'::jsonb,
-           'recorded_by', v_actor, 'recorded_at', v_now) as r) s)),
-      jsonb_build_array(jsonb_build_object(
-        'evidence_kind', 'search_initiation', 'source', 'first_party_record',
-        'reader', 'ops.j102_first_party_record',
-        'selector', jsonb_build_object('record_kind', 'assignment_mandate',
-                                       'record_id', v_fact_id),
-        'expected_record_digest', v_fact_digest,
-        'binding', jsonb_build_object('subject_kind', 'assignment',
-                                      'subject_id', v_assignment_id))),
-      'j102-fixture-key-collide', v_placeholder,
-      jsonb_build_object('operation', 'commit-winning-property', 'reason_id', 'x',
-        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
-    raise exception 'B11: a creation overwrote an existing subject';
-  exception when serialization_failure then
-    if sqlerrm !~ 'j102_stale_subject_digest' then raise; end if;
-  end;
-  -- AND THE EXISTING DEAL IS UNCHANGED: still under its own assignment.
-  if (ops.j102_subject('deal', v_deal_id) -> 'state' ->> 'assignment_id') <> v_assignment_id then
-    raise exception 'B11: the refused creation re-parented the existing deal anyway';
-  end if;
-
-  -- === B12: a proposed subject with NO operand refuses ======================
-  -- Omitting the key is not a way back to the old behaviour. The writer iterates
-  -- the UNION of the map and the proposed subjects, and an unnamed subject is a
-  -- request it cannot check rather than one it waves through.
-  begin
-    perform ops.j102_apply_transition(
-      'commit-winning-property', '{}'::jsonb,
-      jsonb_build_array((select jsonb_build_object(
-         'schema_version', 'doctorcre-v5-j102-stored-record-envelope.v1',
-         'record_kind', 'stored_lifecycle_subject', 'tenant', v_tenant,
-         'record', r, 'record_digest', ops.f01_digest_jsonb(r),
-         'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)
-         from (select jsonb_build_object(
-           'schema_version', 'doctorcre-v5-j102-stored-lifecycle-subject.v1',
-           'tenant', v_tenant, 'subject_kind', 'deal', 'subject_id', v_deal_id,
-           'state', v_deal_state,
-           'established_by_transition', 'commit-winning-property',
-           'prior_state_digest', null,
-           'updated_by', v_actor, 'updated_at', v_now) as r) s)),
-      jsonb_build_array((select jsonb_build_object(
-         'schema_version', 'doctorcre-v5-j102-stored-record-envelope.v1',
-         'record_kind', 'stored_lifecycle_event', 'tenant', v_tenant,
-         'record', r, 'record_digest', ops.f01_digest_jsonb(r),
-         'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)
-         from (select jsonb_build_object(
-           'schema_version', 'doctorcre-v5-j102-stored-lifecycle-event.v1',
-           'tenant', v_tenant,
-           'event', jsonb_build_object(
-             'schema_version', 'doctorcre-v5-j102-lifecycle-event.v1',
-             'event_kind', 'pending_deal_created', 'subject_kind', 'deal',
-             'subject_id', v_deal_id),
-           'transition_id', 'commit-winning-property',
-           'evidence_references', '[]'::jsonb,
-           'recorded_by', v_actor, 'recorded_at', v_now) as r) s)),
-      jsonb_build_array(jsonb_build_object(
-        'evidence_kind', 'search_initiation', 'source', 'first_party_record',
-        'reader', 'ops.j102_first_party_record',
-        'selector', jsonb_build_object('record_kind', 'assignment_mandate',
-                                       'record_id', v_fact_id),
-        'expected_record_digest', v_fact_digest,
-        'binding', jsonb_build_object('subject_kind', 'assignment',
-                                      'subject_id', v_assignment_id))),
-      'j102-fixture-key-nomap', v_placeholder,
-      jsonb_build_object('operation', 'commit-winning-property', 'reason_id', 'x',
-        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
-    raise exception 'B12: a subject was written with no compare-and-swap operand';
-  exception when invalid_parameter_value then
-    if sqlerrm !~ 'j102_expected_state_digest_missing' then raise; end if;
-  end;
-
-  -- === B13: envelope and operand must be the same claim =====================
-  begin
-    perform ops.j102_apply_transition(
-      'record-lease-execution',
-      jsonb_build_object('deal:' || v_deal_id, v_deal_digest),
-      jsonb_build_array((select jsonb_build_object(
-         'schema_version', 'doctorcre-v5-j102-stored-record-envelope.v1',
-         'record_kind', 'stored_lifecycle_subject', 'tenant', v_tenant,
-         'record', r, 'record_digest', ops.f01_digest_jsonb(r),
-         'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)
-         from (select jsonb_build_object(
-           'schema_version', 'doctorcre-v5-j102-stored-lifecycle-subject.v1',
-           'tenant', v_tenant, 'subject_kind', 'deal', 'subject_id', v_deal_id,
-           'state', jsonb_set(v_deal_state, '{execution_state}', '"executed"'),
-           'established_by_transition', 'record-lease-execution',
-           -- The history would say this rested on no prior version at all.
-           'prior_state_digest', null,
-           'updated_by', v_actor, 'updated_at', v_now) as r) s)),
-      jsonb_build_array((select jsonb_build_object(
-         'schema_version', 'doctorcre-v5-j102-stored-record-envelope.v1',
-         'record_kind', 'stored_lifecycle_event', 'tenant', v_tenant,
-         'record', r, 'record_digest', ops.f01_digest_jsonb(r),
-         'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)
-         from (select jsonb_build_object(
-           'schema_version', 'doctorcre-v5-j102-stored-lifecycle-event.v1',
-           'tenant', v_tenant,
-           'event', jsonb_build_object(
-             'schema_version', 'doctorcre-v5-j102-lifecycle-event.v1',
-             'event_kind', 'lease_executed', 'subject_kind', 'deal',
-             'subject_id', v_deal_id),
-           'transition_id', 'record-lease-execution',
-           'evidence_references', '[]'::jsonb,
-           'recorded_by', v_actor, 'recorded_at', v_now) as r) s)),
-      jsonb_build_array(jsonb_build_object(
-        'evidence_kind', 'search_initiation', 'source', 'first_party_record',
-        'reader', 'ops.j102_first_party_record',
-        'selector', jsonb_build_object('record_kind', 'assignment_mandate',
-                                       'record_id', v_fact_id),
-        'expected_record_digest', v_fact_digest,
-        'binding', jsonb_build_object('subject_kind', 'assignment',
-                                      'subject_id', v_assignment_id))),
-      'j102-fixture-key-priormismatch', v_placeholder,
-      jsonb_build_object('operation', 'record-deal-execution', 'reason_id', 'x',
-        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
-    raise exception 'B13: an envelope disagreeing with its own operand was applied';
-  exception when invalid_parameter_value then
-    if sqlerrm !~ 'j102_prior_state_digest_mismatch' then raise; end if;
-  end;
-
-  -- === B15: the instant is the database's ==================================
-  -- H4. Anything holding the writer's execute grant could previously backdate
-  -- lifecycle state, because updated_at was taken from the envelope and stored
-  -- unexamined. A caller-chosen instant refuses now.
-  begin
-    perform ops.j102_apply_transition(
-      'record-lease-execution',
-      jsonb_build_object('deal:' || v_deal_id, v_deal_digest),
-      jsonb_build_array((select jsonb_build_object(
-         'schema_version', 'doctorcre-v5-j102-stored-record-envelope.v1',
-         'record_kind', 'stored_lifecycle_subject', 'tenant', v_tenant,
-         'record', r, 'record_digest', ops.f01_digest_jsonb(r),
-         'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)
-         from (select jsonb_build_object(
-           'schema_version', 'doctorcre-v5-j102-stored-lifecycle-subject.v1',
-           'tenant', v_tenant, 'subject_kind', 'deal', 'subject_id', v_deal_id,
-           'state', jsonb_set(v_deal_state, '{execution_state}', '"executed"'),
-           'established_by_transition', 'record-lease-execution',
-           'prior_state_digest', v_deal_digest,
-           'updated_by', v_actor,
-           -- A year before this transaction, and previously stored as written.
-           'updated_at', '2020-01-01T00:00:00.000Z') as r) s)),
-      jsonb_build_array((select jsonb_build_object(
-         'schema_version', 'doctorcre-v5-j102-stored-record-envelope.v1',
-         'record_kind', 'stored_lifecycle_event', 'tenant', v_tenant,
-         'record', r, 'record_digest', ops.f01_digest_jsonb(r),
-         'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)
-         from (select jsonb_build_object(
-           'schema_version', 'doctorcre-v5-j102-stored-lifecycle-event.v1',
-           'tenant', v_tenant,
-           'event', jsonb_build_object(
-             'schema_version', 'doctorcre-v5-j102-lifecycle-event.v1',
-             'event_kind', 'lease_executed', 'subject_kind', 'deal',
-             'subject_id', v_deal_id),
-           'transition_id', 'record-lease-execution',
-           'evidence_references', '[]'::jsonb,
-           'recorded_by', v_actor, 'recorded_at', v_now) as r) s)),
-      jsonb_build_array(jsonb_build_object(
-        'evidence_kind', 'search_initiation', 'source', 'first_party_record',
-        'reader', 'ops.j102_first_party_record',
-        'selector', jsonb_build_object('record_kind', 'assignment_mandate',
-                                       'record_id', v_fact_id),
-        'expected_record_digest', v_fact_digest,
-        'binding', jsonb_build_object('subject_kind', 'assignment',
-                                      'subject_id', v_assignment_id))),
-      'j102-fixture-key-backdate', v_placeholder,
-      jsonb_build_object('operation', 'record-deal-execution', 'reason_id', 'x',
-        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
-    raise exception 'B15: a caller-chosen updated_at was stored';
-  exception when insufficient_privilege then
-    if sqlerrm !~ 'j102_clock_injection_refused' then raise; end if;
-  end;
-
   -- === B6: the append-only relations refuse UPDATE and DELETE for real ======
   begin
-    update ops.j102_subject_event set event_kind = 'tampered' where tenant = v_tenant;
-    raise exception 'B6: lifecycle history accepted an UPDATE';
+    update ops.j102_first_party_record set record_id = 'tampered' where tenant = v_tenant;
+    raise exception 'B6: a first-party business record accepted an UPDATE';
   exception when insufficient_privilege then
     if sqlerrm !~ 'j102_append_only_violation' and sqlerrm !~ 'permission denied' then raise; end if;
   end;
@@ -985,12 +1393,19 @@ begin
   end;
 
   -- === B7: direct DML outside a registered writer refuses ==================
+  --
+  -- AND THIS IS ALSO WHY THIS FIXTURE CANNOT SEED A SUBJECT. The guard reads the
+  -- PL/pgSQL call stack and requires a registered ops.j102_* writer frame, so a
+  -- raw INSERT from this DO block is refused whoever owns the table. Seeding
+  -- around it would need either a new writer -- which is the missing bootstrap,
+  -- and inventing one here would be inventing the capability the slice does not
+  -- have -- or disabling the guard, which is the thing being tested.
   begin
     insert into ops.j102_subject_current
       (tenant, subject_kind, subject_id, envelope, envelope_digest, state_digest,
        parent_id, deal_state, updated_by, updated_at)
-    values (v_tenant, 'deal', 'j102-fixture-smuggled', '{}'::jsonb, v_placeholder,
-            v_placeholder, null, 'pending', v_actor, now());
+    values (v_tenant, 'assignment', v_assignment_id, '{}'::jsonb, v_placeholder,
+            v_placeholder, null, null, v_actor, now());
     raise exception 'B7: a raw INSERT reached current state';
   exception when insufficient_privilege then
     if sqlerrm !~ 'j102_direct_dml_refused' and sqlerrm !~ 'permission denied' then raise; end if;
@@ -999,60 +1414,9 @@ begin
     -- is the row landing.
     null;
   end;
-  if exists (select 1 from ops.j102_subject_current
-              where tenant = v_tenant and subject_id = 'j102-fixture-smuggled') then
+  if exists (select 1 from ops.j102_subject_current where tenant = v_tenant) then
     raise exception 'B7: the smuggled row landed';
   end if;
-
-  -- === B8: a second pending Deal on one Assignment refuses at the index =====
-  -- Written through the registered writer, exactly as a racing commitment would
-  -- be. The index is what makes Q078/Q095 structural rather than advisory.
-  begin
-    perform ops.j102_apply_transition(
-      'commit-winning-property',
-      jsonb_build_object('deal:' || v_deal_id_2, null),
-      jsonb_build_array((select jsonb_build_object(
-         'schema_version', 'doctorcre-v5-j102-stored-record-envelope.v1',
-         'record_kind', 'stored_lifecycle_subject', 'tenant', v_tenant,
-         'record', r, 'record_digest', ops.f01_digest_jsonb(r),
-         'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)
-         from (select jsonb_build_object(
-           'schema_version', 'doctorcre-v5-j102-stored-lifecycle-subject.v1',
-           'tenant', v_tenant, 'subject_kind', 'deal', 'subject_id', v_deal_id_2,
-           'state', v_deal_state || jsonb_build_object('subject_id', v_deal_id_2),
-           'established_by_transition', 'commit-winning-property',
-           'prior_state_digest', null,
-           'updated_by', v_actor, 'updated_at', v_now) as r) s)),
-      jsonb_build_array((select jsonb_build_object(
-         'schema_version', 'doctorcre-v5-j102-stored-record-envelope.v1',
-         'record_kind', 'stored_lifecycle_event', 'tenant', v_tenant,
-         'record', r, 'record_digest', ops.f01_digest_jsonb(r),
-         'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)
-         from (select jsonb_build_object(
-           'schema_version', 'doctorcre-v5-j102-stored-lifecycle-event.v1',
-           'tenant', v_tenant,
-           'event', jsonb_build_object(
-             'schema_version', 'doctorcre-v5-j102-lifecycle-event.v1',
-             'event_kind', 'pending_deal_created', 'subject_kind', 'deal',
-             'subject_id', v_deal_id_2),
-           'transition_id', 'commit-winning-property',
-           'evidence_references', '[]'::jsonb,
-           'recorded_by', v_actor, 'recorded_at', v_now) as r) s)),
-      jsonb_build_array(jsonb_build_object(
-        'evidence_kind', 'search_initiation', 'source', 'first_party_record',
-        'reader', 'ops.j102_first_party_record',
-        'selector', jsonb_build_object('record_kind', 'assignment_mandate',
-                                       'record_id', v_fact_id),
-        'expected_record_digest', v_fact_digest,
-        'binding', jsonb_build_object('subject_kind', 'assignment',
-                                      'subject_id', v_assignment_id))),
-      'j102-fixture-key-second-deal', v_placeholder,
-      jsonb_build_object('operation', 'commit-winning-property', 'reason_id', 'x',
-        'coupled_facts', '[]'::jsonb, 'decision_refs', '[]'::jsonb));
-    raise exception 'B8: a second pending Deal landed on one Assignment';
-  exception when unique_violation then
-    null;  -- the index refused it, which is the point
-  end;
 
   -- === B9 / B16 behaviourally: the closing settlement, both of its guards =====
   --
@@ -1066,12 +1430,12 @@ begin
     begin
       perform ops.j102_record_first_party_fact(
         (select jsonb_build_object(
-           'schema_version', 'doctorcre-v5-j102-stored-record-envelope.v1',
+           'schema_version', v_env_schema,
            'record_kind', 'stored_first_party_record', 'tenant', v_tenant,
            'record', r, 'record_digest', ops.f01_digest_jsonb(r),
            'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)
            from (select jsonb_build_object(
-             'schema_version', 'doctorcre-v5-j102-stored-first-party-record.v1',
+             'schema_version', v_fact_schema,
              'tenant', v_tenant, 'record_kind', 'closing_settlement',
              'record_id', 'j102-fixture-agent-closing',
              'subject_kind', 'deal', 'subject_id', v_deal_id,
@@ -1090,12 +1454,12 @@ begin
     begin
       perform ops.j102_record_first_party_fact(
         (select jsonb_build_object(
-           'schema_version', 'doctorcre-v5-j102-stored-record-envelope.v1',
+           'schema_version', v_env_schema,
            'record_kind', 'stored_first_party_record', 'tenant', v_tenant,
            'record', r, 'record_digest', ops.f01_digest_jsonb(r),
            'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)
            from (select jsonb_build_object(
-             'schema_version', 'doctorcre-v5-j102-stored-first-party-record.v1',
+             'schema_version', v_fact_schema,
              'tenant', v_tenant, 'record_kind', 'closing_settlement',
              'record_id', 'j102-fixture-dateless-closing',
              'subject_kind', 'deal', 'subject_id', v_deal_id,
@@ -1113,12 +1477,12 @@ begin
     -- derived from the principal rather than supplied.
     perform ops.j102_record_first_party_fact(
       (select jsonb_build_object(
-         'schema_version', 'doctorcre-v5-j102-stored-record-envelope.v1',
+         'schema_version', v_env_schema,
          'record_kind', 'stored_first_party_record', 'tenant', v_tenant,
          'record', r, 'record_digest', ops.f01_digest_jsonb(r),
          'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder)
          from (select jsonb_build_object(
-           'schema_version', 'doctorcre-v5-j102-stored-first-party-record.v1',
+           'schema_version', v_fact_schema,
            'tenant', v_tenant, 'record_kind', 'closing_settlement',
            'record_id', 'j102-fixture-partner-closing',
            'subject_kind', 'deal', 'subject_id', v_deal_id,
@@ -1139,14 +1503,23 @@ begin
   -- === the fixture leaves nothing behind ===================================
   -- Asserted BEFORE the rollback, so a writer that somehow escaped the
   -- transaction would be visible here rather than assumed away by the rollback.
-  select count(*) into v_count from ops.j102_subject_current
-   where tenant = v_tenant and subject_id like 'j102-fixture-%';
-  if v_count <> 2 then
-    raise exception 'the fixture left % lifecycle subjects behind, expected exactly the one assignment and the one pending deal B1 created',
+  --
+  -- NO LIFECYCLE SUBJECT AND NO EVENT, and that is now an exact number rather
+  -- than a count of what the positive walks left: nothing here can create a
+  -- subject, and every adversarial group above must have refused whole. A single
+  -- row in either relation means one of them half-landed.
+  select count(*) into v_count from ops.j102_subject_current where tenant = v_tenant;
+  if v_count <> 0 then
+    raise exception 'the fixture left % lifecycle subjects behind; every group above is a refusal and none of them may write a row',
+      v_count;
+  end if;
+  select count(*) into v_count from ops.j102_subject_event where tenant = v_tenant;
+  if v_count <> 0 then
+    raise exception 'the fixture left % lifecycle events behind; a refused transition wrote history',
       v_count;
   end if;
 
-  raise notice 'ALL GROUPS PASSED (S1-S4, B1-B16, M3, Q081). Every fixture row is about to roll back.';
+  raise notice 'ALL RUNNABLE GROUPS PASSED (S1-S6, P0, A1-A10, U1 as far as it can go, B5, B6, B7, B9, B10, B16, M3, Q081). NO POSITIVE TRANSITION WALK RAN: j102_fixture_bootstrap_absent. Every fixture row is about to roll back.';
 end
 $proof$;
 
