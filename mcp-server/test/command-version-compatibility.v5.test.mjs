@@ -31,6 +31,7 @@ import {
   V5_VERSION_AXES,
   V5_TRUSTED_POLICY_EPOCH_SOURCES,
   V5_POLICY_OBSERVATION_SEAM,
+  V5_UNKNOWN_ENVIRONMENT_SENTINEL,
   normalizeClientVersionDeclaration,
   deploymentVersionReportFromRelease,
   evaluateCommandVersionCompatibility,
@@ -494,6 +495,27 @@ test("policy evidence naming another worker version observes nothing", async () 
     /observation deployment_ref "cf-version-old" is not this deployment's deployment_ref "cf-version-abc"/);
 });
 
+test("policy evidence naming NO tenant observes nothing — the payload has no tenant to fall back on", async () => {
+  for (const observation of [
+    trustedPolicyObservation({ tenant: null }),
+    // The same absence, written as an omission rather than a null.
+    {
+      source: V5_TRUSTED_POLICY_EPOCH_SOURCES[0], status: policyStatus(),
+      environment: "production", deployment_ref: WORKER_VERSION_ID,
+    },
+  ]) {
+    const { deployment, result } = await compare({ observation });
+
+    assert.equal(result.decision, "refuse");
+    assert.equal(result.reason_id, "deployment_axis_unobservable");
+    assert.deepEqual(result.blocking_axes, ["policy"]);
+    assert.match(result.axis_states.policy.deployment.reason, /names no tenant/);
+    // Unbound is not the same as agreeing with whatever the client declared.
+    assert.equal(deployment.tenant, null, "the release tenant stays visibly unknown");
+    assert.notEqual(result.decision, "allow");
+  }
+});
+
 // --- normalized reports are revalidated, not recognized by their marker -----
 
 test("an honest JSON round-trip of a normalized report still compares the same", async () => {
@@ -514,6 +536,63 @@ test("a tampered epoch_state cannot ride an observed policy axis into an allow",
 
   assert.throws(
     () => evaluateCommandVersionCompatibility({ client, deployment: tampered }),
+    boundaryError("unnormalized_report"),
+  );
+});
+
+test("a normalized report cannot report an epoch whose evidence names no tenant", async () => {
+  const client = matchingClient();
+  const deployment = deploymentVersionReportFromRelease(await release(),
+    { policy_observation: trustedPolicyObservation() });
+  const tampered = JSON.parse(JSON.stringify(deployment));
+  tampered.axes.policy.evidence_scope.tenant = null; // state stays "observed"
+
+  assert.throws(
+    () => evaluateCommandVersionCompatibility({ client, deployment: tampered }),
+    boundaryError("unnormalized_report"),
+  );
+});
+
+test(`"${V5_UNKNOWN_ENVIRONMENT_SENTINEL}" never counts as a known environment, on any surface`, async () => {
+  // A client cannot declare the absence of an environment as an environment.
+  assert.throws(
+    () => normalizeClientVersionDeclaration({
+      tenant: "carr-internal", environment: V5_UNKNOWN_ENVIRONMENT_SENTINEL,
+      axes: { code: { digest: GIT_SHA } },
+    }),
+    boundaryError("unknown_environment_sentinel"),
+  );
+
+  // The adapter normalizes the payload's sentinel to a visibly unknown environment.
+  const unlabelled = deploymentVersionReportFromRelease(
+    await release({ env: { CARR_ENV: undefined } }), { policy_observation: trustedPolicyObservation() });
+  assert.equal(unlabelled.environment, null);
+  assert.match(unlabelled.environment_reason, /never assumed to be production/);
+
+  // And a report handed straight to the evaluator cannot smuggle it back in —
+  // including two sides that would otherwise "agree" on being unknown.
+  const client = matchingClient();
+  const deployment = deploymentVersionReportFromRelease(await release(),
+    { policy_observation: trustedPolicyObservation() });
+  for (const tamper of [
+    report => { report.environment = V5_UNKNOWN_ENVIRONMENT_SENTINEL; },
+    report => {
+      report.environment = V5_UNKNOWN_ENVIRONMENT_SENTINEL;
+      report.environment_reason = "CARR_ENV not set on this Worker";
+    },
+    report => { report.axes.policy.evidence_scope.environment = V5_UNKNOWN_ENVIRONMENT_SENTINEL; },
+  ]) {
+    const report = JSON.parse(JSON.stringify(deployment));
+    tamper(report);
+    assert.throws(
+      () => evaluateCommandVersionCompatibility({ client, deployment: report }),
+      boundaryError("unnormalized_report"),
+    );
+  }
+  const clientCopy = JSON.parse(JSON.stringify(client));
+  clientCopy.environment = V5_UNKNOWN_ENVIRONMENT_SENTINEL;
+  assert.throws(
+    () => evaluateCommandVersionCompatibility({ client: clientCopy, deployment }),
     boundaryError("unnormalized_report"),
   );
 });

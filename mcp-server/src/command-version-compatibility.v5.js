@@ -26,9 +26,10 @@
 // unless a trusted policy-epoch observation is supplied beside the payload, and
 // its state is read through policy-epoch.js's own normalizer rather than a second
 // implementation of those semantics. That observation must BIND every dimension
-// the payload reports, and the scope it names travels with the axis, so an epoch
-// report about another tenant — a dimension /release cannot report at all — is
-// compared rather than silently dropped.
+// the payload reports AND name its tenant — the one dimension /release cannot
+// report, which is why the evidence has to supply it — and the scope it names
+// travels with the axis, so an epoch belonging to another tenant is compared
+// against the client rather than silently dropped.
 //
 // WHAT THIS IS NOT. Not authentication, not admission, not dispatch. Every
 // result carries authenticated:false, authorizes_command_dispatch:false and
@@ -61,6 +62,14 @@ export const V5_TRUSTED_POLICY_EPOCH_SOURCES = Object.freeze([
 
 /** Where a deployment-side policy-epoch observation would come from. Not built here. */
 export const V5_POLICY_OBSERVATION_SEAM = "step:v5-f07-gateway-policy-epoch-observation";
+
+/**
+ * release.js's word for a deployment that never declared what it is. It is a
+ * statement of absence, so it never names an environment ANYWHERE here — not in
+ * a payload, a client declaration, a policy evidence scope, or a hand-built
+ * report. Two sides both saying "unknown" are not in the same environment.
+ */
+export const V5_UNKNOWN_ENVIRONMENT_SENTINEL = "unknown";
 
 export const V5_COMMAND_VERSION_REASON_IDS = Object.freeze([
   "all_four_axes_known_and_matched",
@@ -179,6 +188,12 @@ export function normalizeClientVersionDeclaration(declaration) {
   assertObject(declaration, "declaration");
   assertClosedKeys(declaration, CLIENT_KEYS, "declaration");
   assertRequiredKeys(declaration, ["axes", "environment", "tenant"], "declaration");
+  if (declaration.environment === V5_UNKNOWN_ENVIRONMENT_SENTINEL) {
+    fail("unknown_environment_sentinel",
+      `declaration.environment must name an environment; "${V5_UNKNOWN_ENVIRONMENT_SENTINEL}" is the word for`
+      + " a deployment that never declared one, and two of them are not the same environment",
+      { path: "declaration.environment" });
+  }
   const axesInput = assertObject(declaration.axes, "declaration.axes");
   for (const key of Object.keys(axesInput)) {
     if (!V5_VERSION_AXES.includes(key)) {
@@ -289,9 +304,12 @@ function commandContractAxisFromRelease(release) {
  * with nothing here and would otherwise disappear. The comparison checks it
  * against the client's own expectations.
  *
- * AND IT MUST BIND WHAT THIS DEPLOYMENT DOES REPORT. An epoch report that names
- * no environment or worker version, when the payload names both, has not
- * established that it describes this deployment — it observes nothing.
+ * AND IT MUST BIND WHAT THIS DEPLOYMENT DOES REPORT, PLUS THE TENANT IT DOES NOT.
+ * An epoch report that names no environment or worker version, when the payload
+ * names both, has not established that it describes this deployment. And one that
+ * names no tenant is bound to no tenant at all — there is no payload field to
+ * fall back on — so it cannot be evidence about the tenant being asked about.
+ * Either way it observes nothing.
  *
  * Contents are read by policy-epoch.js's own normalizer, so a malformed status
  * surfaces PolicyEpochRefusal unchanged rather than being reinterpreted here.
@@ -315,12 +333,25 @@ function policyAxisFromObservation(observation, scope) {
       `policy-epoch observation source ${JSON.stringify(observation.source)} is not a trusted epoch source`,
       evidenceScope);
   }
+  if (evidenceScope.environment === V5_UNKNOWN_ENVIRONMENT_SENTINEL) {
+    return policyUnobservable(
+      `policy-epoch observation environment is "${V5_UNKNOWN_ENVIRONMENT_SENTINEL}", which names no environment`,
+      evidenceScope);
+  }
   for (const field of EVIDENCE_SCOPE_KEYS) {
     const declared = evidenceScope[field];
     if (declared !== null && scope[field] !== null && declared !== scope[field]) {
       return policyUnobservable(
         `policy-epoch observation ${field} "${declared}" is not this deployment's ${field} "${scope[field]}"`,
         evidenceScope);
+    }
+    // The tenant is required even though the payload can never report one — that
+    // is exactly why. An epoch report naming no tenant is not bound to any, so it
+    // cannot be the tenant the client is asking about; it observes nothing.
+    if (declared === null && field === "tenant") {
+      return policyUnobservable(
+        "policy-epoch observation names no tenant, and the release payload cannot report one, "
+        + "so nothing binds this epoch to a tenant", evidenceScope);
     }
     if (declared === null && scope[field] !== null) {
       return policyUnobservable(
@@ -356,7 +387,7 @@ export function deploymentVersionReportFromRelease(release, options = {}) {
   // preserved as such: an environment nobody declared is not an environment.
   const environmentValue = release.env && typeof release.env === "object" ? release.env.value : null;
   const environment = typeof environmentValue === "string" && environmentValue.length > 0
-    && environmentValue !== "unknown" ? environmentValue : null;
+    && environmentValue !== V5_UNKNOWN_ENVIRONMENT_SENTINEL ? environmentValue : null;
   const environmentReason = environment
     ? null
     : (release.env && typeof release.env.reason === "string" && release.env.reason
@@ -419,6 +450,15 @@ function reportDigest(value, path) {
   return value;
 }
 
+/** The unlabelled sentinel is never a known environment, however it arrives. */
+function assertNotUnknownEnvironment(value, path) {
+  if (value === V5_UNKNOWN_ENVIRONMENT_SENTINEL) {
+    badReport(path, `${path} is "${V5_UNKNOWN_ENVIRONMENT_SENTINEL}", which is the absence of an environment`
+      + " and must be normalized to null with a reason, never counted as a known one");
+  }
+  return value;
+}
+
 /** Exactly these keys, no more and no fewer, at every level of a report. */
 function assertReportShape(value, keys, path) {
   if (!isPlainObject(value)) badReport(path, `${path} must be a plain object`);
@@ -439,6 +479,7 @@ function assertNormalizedClientDeclaration(value, path) {
   }
   reportString(value.tenant, `${path}.tenant`);
   reportString(value.environment, `${path}.environment`);
+  assertNotUnknownEnvironment(value.environment, `${path}.environment`);
   reportString(value.deployment_ref, `${path}.deployment_ref`, { nullable: true });
   assertReportShape(value.axes, V5_VERSION_AXES, `${path}.axes`);
   for (const axis of V5_VERSION_AXES) {
@@ -468,6 +509,7 @@ function assertNormalizedDeploymentObservation(value, path) {
   }
   reportString(value.tenant, `${path}.tenant`, { nullable: true });
   reportString(value.environment, `${path}.environment`, { nullable: true });
+  assertNotUnknownEnvironment(value.environment, `${path}.environment`);
   reportString(value.deployment_ref, `${path}.deployment_ref`, { nullable: true });
   // An environment is either known, or unknown WITH the payload's reason. A
   // missing or emptied reason must not read as a known environment.
@@ -529,7 +571,11 @@ function assertPolicyEvidenceScope(report, path) {
   for (const field of EVIDENCE_SCOPE_KEYS) {
     reportString(scope[field], `${at}.${field}`, { nullable: true });
   }
+  assertNotUnknownEnvironment(scope.environment, `${at}.environment`);
   if (policy.state === "unobservable") return;
+  // The tenant the payload cannot report: evidence that reports an epoch must
+  // name one, or nothing binds that epoch to the tenant being asked about.
+  reportString(scope.tenant, `${at}.tenant`);
   for (const field of EVIDENCE_SCOPE_KEYS) {
     if (report[field] !== null && scope[field] !== report[field]) {
       badReport(`${at}.${field}`, `${at}.${field} does not bind this deployment's ${field}`);
@@ -699,6 +745,8 @@ export function v5CommandVersionPolicyPreimage() {
     all_axes_required: true,
     caller_may_select_axes: false,
     policy_evidence_must_bind_reported_scope: true,
+    policy_evidence_must_name_tenant: true,
+    unknown_environment_sentinel_counts_as_known: false,
     reports_revalidated_at_comparison: true,
     matching: "exact",
     accepts_commit_distance: false,
