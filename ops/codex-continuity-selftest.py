@@ -447,14 +447,14 @@ class CodexHookTests(AdapterCase):
             "401", "Auth required", "codex_native_principal_required", "codex_continuity_owner_required",
             "codex-checkpoint and codex-read-recovery", "identical request", "same JSON",
             "server principal gate still applies",
-            "never generic or unscoped authentication", "hard server cap is 24,000 UTF-8 bytes",
-            "single <=18,000-byte JSON budget", "2,000-byte working reserve",
-            "preflight its exact serialized UTF-8 size",
+            "never generic or unscoped authentication", "hard cap 24,000",
+            "<=18,000-byte JSON budget", "2,000-byte reserve",
+            "preflight stored JSON UTF-8 size including comma/colon separator spaces",
             "20,000 preferred", "write any complete valid <=24,000 state once",
-            "never withhold for target alone",
+            "not a gate",
             "Preserve the semantics", "not its wording or item count",
-            "Collapse related completed-work, evidence, artifact, and receipt items",
-            "resolved blockers", "externally meaningful receipt identifier",
+            "Collapse completed, duplicate, superseded, resolved, finalized work",
+            "receipt identifier",
             "codex_continuity_payload_too_large", "same fixed binding and idempotency key",
             "do not issue further oversize retries",
             "Continuity verified: checkpoint v<version> · window <source_window_number>.",
@@ -625,11 +625,16 @@ class CodexHookTests(AdapterCase):
                            "refs": ["native-user-turn:{REF2}"]}],
             "next_action": "repair references before accepting the checkpoint",
         }
-        env, _ = self.install_fake_record_call(self.checkpoint(state=state, cursor={
+        response = self.checkpoint(state=state, cursor={
             "byte_offset": 1, "source_digest": "0" * 64,
             "source_window_id": window_id("window-current"),
             "source_window_number": 1,
-        }))
+        })
+        response["storage_contract"] = {
+            "version": "codex-continuity-storage.v2", "semantic_state_max_bytes": 24000,
+            "reference_manifest_max_bytes": 128000, "recovery_state": "full_logical_state",
+        }
+        env, _ = self.install_fake_record_call(response)
 
         context = json.loads(self.run_hook(
             self.hook_payload(source="resume"), env).stdout)[
@@ -649,11 +654,16 @@ class CodexHookTests(AdapterCase):
                                      "refs": ["user:valid"]}],
             "next_action": "repair the unresolved placeholder",
         }
-        env, _ = self.install_fake_record_call(self.checkpoint(state=state, cursor={
+        response = self.checkpoint(state=state, cursor={
             "byte_offset": 1, "source_digest": "0" * 64,
             "source_window_id": window_id("window-current"),
             "source_window_number": 1,
-        }))
+        })
+        response["storage_contract"] = {
+            "version": "codex-continuity-storage.v2", "semantic_state_max_bytes": 24000,
+            "reference_manifest_max_bytes": 128000, "recovery_state": "full_logical_state",
+        }
+        env, _ = self.install_fake_record_call(response)
 
         context = json.loads(self.run_hook(self.hook_payload(
             "UserPromptSubmit", turn_id="turn-placeholder"), env).stdout)[
@@ -697,11 +707,16 @@ class CodexHookTests(AdapterCase):
             }],
             "next_action": "continue without repairing valid references",
         }
-        env, _ = self.install_fake_record_call(self.checkpoint(state=state, cursor={
+        response = self.checkpoint(state=state, cursor={
             "byte_offset": 1, "source_digest": "0" * 64,
             "source_window_id": window_id("window-current"),
             "source_window_number": 1,
-        }))
+        })
+        response["storage_contract"] = {
+            "version": "codex-continuity-storage.v2", "semantic_state_max_bytes": 24000,
+            "reference_manifest_max_bytes": 128000, "recovery_state": "full_logical_state",
+        }
+        env, _ = self.install_fake_record_call(response)
 
         context = json.loads(self.run_hook(
             self.hook_payload(source="resume"), env).stdout)[
@@ -711,33 +726,81 @@ class CodexHookTests(AdapterCase):
 
     def test_repair_directive_requires_one_pass_size_plan(self):
         self.native_rollout(compacted_row(1, "window-initial", "window-current"))
+        refs = (
+            [f"approval:current:{index}:live-contract" for index in range(32)]
+            + ["decision:uncertain:requires-review"]
+            + [f"receipt:completed:{index}:delivery-evidence" for index in range(68)]
+            + ["receipt:completed:{REF1}:delivery-evidence"])
         state = {
             "objective": "keep the active task",
-            "constraints": [{"text": "z" * 3000} for _ in range(7)],
-            "latest_corrections": [{"text": "repair this reference",
-                                    "refs": ["legacy:{REF1}"]}],
+            "latest_corrections": [
+                {"text": "current correction", "refs": ["approval:current:0:live-contract"]}
+                for _ in range(4)
+            ] + [{"text": "mixed reference manifest with readable words", "refs": refs}],
+            "progress": [{"text": "completed delivery detail"}],
+            "receipts": [{"text": "completed receipt detail"}],
+            "artifacts": [{"text": "filler"} for _ in range(6)],
             "next_action": "normalize once before writing",
         }
-        env, _ = self.install_fake_record_call(self.checkpoint(state=state, cursor={
+        base_bytes = len(json.dumps(
+            state, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+        remaining = 23473 - base_bytes
+        for artifact in state["artifacts"]:
+            addition = min(3900 - len(artifact["text"]), remaining)
+            artifact["text"] += "z" * addition
+            remaining -= addition
+        self.assertEqual(remaining, 0)
+        state_bytes = len(json.dumps(
+            state, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+        self.assertEqual(state_bytes, 23473)
+        self.assertEqual(len(refs), 102)
+        self.assertLessEqual(state_bytes, 24000)
+        response = self.checkpoint(state=state, cursor={
             "byte_offset": 1, "source_digest": "0" * 64,
             "source_window_id": window_id("window-current"),
             "source_window_number": 1,
-        }))
+        })
+        response["storage_contract"] = {
+            "version": "codex-continuity-storage.v2", "semantic_state_max_bytes": 24000,
+            "reference_manifest_max_bytes": 128000, "recovery_state": "full_logical_state",
+        }
+        env, _ = self.install_fake_record_call(response)
         context = json.loads(self.run_hook(
             self.hook_payload(source="resume"), env).stdout)[
                 "hookSpecificOutput"]["additionalContext"]
         self.assertIn("one semantic compression pass", context)
-        self.assertIn("single <=18,000-byte JSON budget", context)
-        self.assertIn("2,000-byte working reserve", context)
-        self.assertIn("at most one corrective compression pass", context)
+        self.assertIn("<=18,000-byte JSON budget", context)
+        self.assertIn("JSON budget for semantic state", context)
+        self.assertIn("2,000-byte reserve", context)
+        self.assertIn("at most one corrective pass", context)
         self.assertIn("Reference manifest: copy valid refs byte-for-byte", context)
-        self.assertIn("Every live correction/decision ref remains directly in state", context)
-        self.assertIn("Reference archive protocol", context)
+        self.assertIn("Keep current/uncertain refs direct", context)
+        self.assertIn("Before compression, classify refs/evidence", context)
+        self.assertLess(context.index("Before compression, classify refs/evidence"),
+                        context.index("After classification/archive, one semantic compression pass"))
+        self.assertIn("not field, age, or size", context)
+        self.assertIn("completed/superseded", context)
+        self.assertIn("archive only completed/superseded progress/receipts/artifacts/refs", context)
+        self.assertIn("Reuse pointer", context)
+        self.assertIn("Keep readable word boundaries; never strip spaces/alter refs", context)
+        self.assertIn("stored JSON UTF-8 size including comma/colon separator spaces", context)
+        self.assertIn("excluding the separate 128,000-byte reference manifest", context)
+        self.assertIn("report semantic bytes, manifest bytes, and ref count", context)
+        self.assertIn("storage bytes/ref count/what cannot archive", context)
         self.assertIn("historical:true", context)
         self.assertIn("expected_digest", context)
         self.assertIn("archive_ref `codex-revision:<checkpoint UUID>:<version>:sha256:<64hex>`", context)
-        self.assertIn("Archive only completed/superseded history", context)
-        self.assertIn("if unavailable, retain them", context)
+        self.assertIn("archive only completed/superseded", context)
+        self.assertIn("Failure: retain and report", context)
+        self.assertIn("The full replacement state requires nonempty objective and next_action", context)
+        self.assertIn("CARR_MCP_CLIENT_PROFILE=codex-continuity", context)
+        self.assertIn("codex_native_principal_required", context)
+        self.assertIn("If its version differs from expected_version", context)
+        self.assertIn("codex_checkpoint_version_conflict", context)
+        self.assertIn("same fixed binding and idempotency key", context)
+        directive = context.split("\n\nCARR Codex recovery checkpoint.", 1)[0]
+        self.assertLessEqual(len(directive.encode("utf-8")), 6000)
+        self.assertLessEqual(len(context.encode("utf-8")), 12000)
 
     def test_repair_directive_keeps_current_approval_refs_within_bound(self):
         self.native_rollout(compacted_row(1, "window-initial", "window-current"))
@@ -749,19 +812,100 @@ class CodexHookTests(AdapterCase):
                                     "refs": ["legacy:{REF1}"]}],
             "next_action": "preserve approval while repairing",
         }
-        env, _ = self.install_fake_record_call(self.checkpoint(state=state, cursor={
+        response = self.checkpoint(state=state, cursor={
             "byte_offset": 1, "source_digest": "0" * 64,
             "source_window_id": window_id("window-current"),
             "source_window_number": 1,
-        }))
+        })
+        response["storage_contract"] = {
+            "version": "codex-continuity-storage.v2", "semantic_state_max_bytes": 24000,
+            "reference_manifest_max_bytes": 128000, "recovery_state": "full_logical_state",
+        }
+        env, _ = self.install_fake_record_call(response)
         context = json.loads(self.run_hook(
             self.hook_payload(source="resume"), env).stdout)[
                 "hookSpecificOutput"]["additionalContext"]
         directive = context.split("\n\nCARR Codex recovery checkpoint.", 1)[0]
         self.assertIn("COMPACTION CHECKPOINT REPAIR", directive)
-        self.assertIn("current approval text/refs stay directly in state wherever stored",
+        self.assertIn("current approval text/refs stay directly in state",
                       directive)
+        self.assertIn("Current/uncertain correction/decision refs stay direct", directive)
+        self.assertIn("direct in the full logical state", directive)
+        self.assertIn("Keep readable word boundaries", directive)
+        self.assertIn("CARR_MCP_CLIENT_PROFILE=codex-continuity", directive)
+        self.assertIn("same fixed binding and idempotency key", directive)
         self.assertLessEqual(len(directive.encode("utf-8")), 6000)
+
+    def test_v2_reference_manifest_keeps_large_logical_refs_bounded(self):
+        self.native_rollout(compacted_row(1, "window-initial", "window-current"))
+        refs = [f"current:{index:04d}:" + "x" * 90 for index in range(1000)]
+        state = {
+            "objective": "preserve all current references",
+            "latest_corrections": [{"text": "current evidence", "refs": refs}],
+            "progress": [{"text": "x" * 3900}, {"text": "x" * 3900},
+                         {"text": "x" * 2800}],
+            "next_action": "read back exact current references",
+        }
+        response = self.checkpoint(state=state, cursor={
+            "byte_offset": 1, "source_digest": "0" * 64,
+            "source_window_id": window_id("window-current"),
+            "source_window_number": 1,
+        })
+        response["checkpoint"].update({
+            "storage_contract": {
+                "version": "codex-continuity-storage.v2",
+                "semantic_state_max_bytes": 24000,
+                "reference_manifest_max_bytes": 128000,
+                "recovery_state": "full_logical_state",
+            },
+            "reference_manifest_summary": {
+                "manifest_present": True,
+                "reference_count": 1000,
+                "stored_state_bytes": 11000,
+                "stored_reference_manifest_bytes": 110000,
+                "planned_semantic_state_bytes": 11000,
+                "planned_reference_manifest_bytes": 110000,
+            },
+        })
+        self.assertTrue(load_hook_module()._complete_checkpoint_state(response["checkpoint"]))
+        env, _ = self.install_fake_record_call(response)
+        context = json.loads(self.run_hook(
+            self.hook_payload(source="resume"), env).stdout)[
+                "hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("COMPACTION CHECKPOINT REPAIR", context)
+        self.assertLessEqual(len(context.encode("utf-8")), 12000)
+
+    def test_storage_contract_gates_reference_manifest_repair_budget(self):
+        self.native_rollout(compacted_row(1, "window-initial", "window-current"))
+        state = {
+            "objective": "repair the unresolved reference",
+            "latest_corrections": [{"text": "repair", "refs": ["legacy:{REF1}"]}],
+            "next_action": "write the repaired checkpoint",
+        }
+        cursor = {"byte_offset": 1, "source_digest": "0" * 64,
+                  "source_window_id": window_id("window-current"),
+                  "source_window_number": 1}
+        legacy, _ = self.install_fake_record_call(self.checkpoint(state=state, cursor=cursor))
+        legacy_context = json.loads(self.run_hook(self.hook_payload(source="resume"), legacy).stdout)[
+            "hookSpecificOutput"]["additionalContext"]
+        self.assertNotIn("excluding the separate 128,000-byte reference manifest", legacy_context)
+
+        capable_response = self.checkpoint(state=state, cursor=cursor)
+        capable_response["storage_contract"] = {
+            "version": "codex-continuity-storage.v2", "semantic_state_max_bytes": 24000,
+            "reference_manifest_max_bytes": 128000, "recovery_state": "full_logical_state",
+        }
+        capable, _ = self.install_fake_record_call(capable_response)
+        capable_context = json.loads(self.run_hook(self.hook_payload(source="resume"), capable).stdout)[
+            "hookSpecificOutput"]["additionalContext"]
+        self.assertIn("excluding the separate 128,000-byte reference manifest", capable_context)
+
+        missing = {"ok": True, "found": False, "checkpoint": None,
+                   "storage_contract": capable_response["storage_contract"]}
+        missing_env, _ = self.install_fake_record_call(missing)
+        missing_context = json.loads(self.run_hook(self.hook_payload(source="resume"), missing_env).stdout)[
+            "hookSpecificOutput"]["additionalContext"]
+        self.assertIn("excluding the separate 128,000-byte reference manifest", missing_context)
 
     def test_exact_window_target_excess_is_healthy_until_next_compaction(self):
         self.native_rollout(compacted_row(1, "window-initial", "window-current"))

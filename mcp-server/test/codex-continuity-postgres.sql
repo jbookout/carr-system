@@ -1,6 +1,9 @@
 \set ON_ERROR_STOP on
 begin;
 
+-- Apply the exact interstitial migration before exercising the handlers.
+\ir ../../migrations/0494a_codex_continuity_reference_manifest.sql
+
 insert into actor (id,slug,kind,display_name) values
  ('b1900000-0000-4000-8000-000000000001','codex-continuity-proof','automation','Continuity proof');
 
@@ -19,6 +22,26 @@ insert into codex_continuity_event
  (organization_tenant_id,owner_actor_id,native_task_id,project_id,cwd,event_type,idempotency_key)
 values ('continuity-proof','b1900000-0000-4000-8000-000000000001',
  'native-proof','repo-proof','/proof','pre_compact','proof-event');
+
+do $$
+declare denied boolean:=false;
+begin
+  if (select reference_manifest from codex_continuity_checkpoint
+       where id='b1900000-0000-4000-8000-000000000002') <> '{}'::jsonb then
+    raise exception 'legacy checkpoint did not retain the empty manifest default';
+  end if;
+  begin
+    insert into codex_continuity_checkpoint
+      (id,organization_tenant_id,owner_actor_id,native_task_id,project_id,cwd,state,reference_manifest)
+    values
+      ('b1900000-0000-4000-8000-000000000004','continuity-proof',
+       'b1900000-0000-4000-8000-000000000001','native-manifest-over-cap','repo-proof','/proof',
+       '{"objective":"bounded","next_action":"reject excess manifest"}',
+       jsonb_build_object('version',1,'entries',jsonb_build_array(repeat('x',128000))));
+  exception when check_violation then denied:=true;
+  end;
+  if not denied then raise exception 'reference manifest exceeded its 128KB cap'; end if;
+end $$;
 
 do $$
 declare changed integer; denied boolean;
