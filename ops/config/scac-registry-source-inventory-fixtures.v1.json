@@ -33119,6 +33119,29 @@
         "classification_authorizing": false
       },
       {
+        "ingress_key": "script-entrypoint:ops/codex-continuity-hook.py",
+        "ingress_kind": "script_entrypoint",
+        "operation": "ops/codex-continuity-hook.py",
+        "effect_class": "administrative_mutation",
+        "source_locator": "ops/codex-continuity-hook.py",
+        "schema_digest": "1d96d48fe02b5294a78efd58a12cbfba504f00b4a76e19dbfdf26fe9ed14cfd9",
+        "handler_digest": "1d96d48fe02b5294a78efd58a12cbfba504f00b4a76e19dbfdf26fe9ed14cfd9",
+        "write": true,
+        "human_only": false,
+        "authority_only": true,
+        "principal_mode": "existing_script_specific_credential_boundary",
+        "mutation_kind": "scac.mutation.admin",
+        "target_surface": "scac.surface.runtime",
+        "delegates_to": [],
+        "request_shape": "fixed_script_cli_contract",
+        "idempotency_mode": "script_specific_registered_current_control",
+        "rollback_class": "forward_fix_only",
+        "admission_class": "registered_inventory_only",
+        "owner_package": "11",
+        "implementation_state": "inventoried_not_atomically_mediated",
+        "classification_authorizing": false
+      },
+      {
         "ingress_key": "script-entrypoint:ops/config-as-code.py",
         "ingress_kind": "script_entrypoint",
         "operation": "ops/config-as-code.py",
@@ -33143,7 +33166,7 @@
       }
     ],
     "expected_count": 835,
-    "expected_sha256": "2a29ff2e35bc06e299db633ce4d013440b625e3a491994c48fe5a72369062aaf",
-    "reason": "F03 changes seven existing engineering-runtime source digests only. No ingress, schema, authority classification, frozen frontier, historical seal, or held v25 security-patch content changes. Also reviewed: explicit Codex mode in the existing continuity adapter and scoped installer; unchanged Claude default and no new entrypoints or execution authority."
+    "expected_sha256": "8d98a5d5a875159f4f4f4489919321dcf4b3b053159cc4cd0d1ed10f5f9b8722",
+    "reason": "F03 changes seven existing engineering-runtime source digests only. No ingress, schema, authority classification, frozen frontier, historical seal, or held v25 security-patch content changes. Also reviewed: explicit Codex mode in the existing continuity adapter and scoped installer; unchanged Claude default and no new entrypoints or execution authority. Codex continuity hook classifies and verifies historical archives before bounded semantic compression; existing ingress only."
   }
 }
