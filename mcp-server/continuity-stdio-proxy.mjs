@@ -11,6 +11,9 @@ import { selectLocalClientCredential, tokenFileSecurityIssue } from "./local-cli
 
 // Codex is opt-in; the existing Claude invocation and three-tool contract stay intact.
 const CODEX = process.argv.includes("--codex");
+const { REFERENCE_MANIFEST_LIMIT, SEMANTIC_STATE_LIMIT, splitReferenceManifest } = CODEX
+  ? await import("./continuity-reference-manifest.mjs")
+  : {};
 const PROFILE = CODEX ? "codex-continuity" : "claude-continuity";
 const ALLOWED = new Set(CODEX ? ["codex-checkpoint", "codex-read-recovery"] :
   ["claude-checkpoint", "claude-read-recovery", "claude-record-event"]);
@@ -33,21 +36,28 @@ function credential() {
   return selected.token;
 }
 
-// PostgreSQL jsonb::text includes spaces after separators. Checkpoint fields
-// contain strings, arrays and objects; key ordering does not change their size.
-function storedStateJson(value) {
-  if (Array.isArray(value)) return `[${value.map(storedStateJson).join(", ")}]`;
-  if (value && typeof value === "object")
-    return `{${Object.entries(value).map(([key, item]) => `${JSON.stringify(key)}: ${storedStateJson(item)}`).join(", ")}}`;
-  return JSON.stringify(value);
+function checkpointPreflight(state) {
+  try {
+    const packed = splitReferenceManifest(state);
+    if (packed.semantic_state_bytes > SEMANTIC_STATE_LIMIT)
+      return "codex_continuity_payload_too_large";
+    if (packed.reference_manifest_bytes > REFERENCE_MANIFEST_LIMIT)
+      return "codex_reference_manifest_too_large";
+  } catch {
+    // The Worker validates the complete input contract. This proxy only shares
+    // the physical byte budget so it cannot create a divergent client schema.
+  }
+  return null;
 }
 
 async function forward(message, token) {
   if (message.method === "tools/call" && !ALLOWED.has(message.params?.name))
     return { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: CODEX ? "not_in_codex_continuity_profile" : "not_in_claude_continuity_profile" } };
-  if (CODEX && message.method === "tools/call" && message.params?.name === "codex-checkpoint" &&
-      Buffer.byteLength(storedStateJson(message.params.arguments?.state ?? {}), "utf8") > 24_000)
-    return { jsonrpc: "2.0", id: message.id, error: { code: -32602, message: "codex_continuity_payload_too_large" } };
+  if (CODEX && message.method === "tools/call" && message.params?.name === "codex-checkpoint") {
+    const rejection = checkpointPreflight(message.params.arguments?.state ?? {});
+    if (rejection)
+      return { jsonrpc: "2.0", id: message.id, error: { code: -32602, message: rejection } };
+  }
   const response = await fetch(URL, {
     method: "POST",
     ...(CODEX ? { signal: AbortSignal.timeout(30_000) } : {}),

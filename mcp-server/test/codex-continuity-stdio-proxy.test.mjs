@@ -50,6 +50,12 @@ test("Codex continuity stdio proxy keeps the bearer out of config and exposes tw
   assert.equal(Buffer.byteLength(JSON.stringify(storageCliffState)), 23998);
   // Four colons and two commas add six storage bytes; this copy is exactly 24KB.
   const storageLimitState = { ...storageCliffState, objective: storageCliffState.objective.slice(4) };
+  const referenceCapacityState = {
+    objective: "retain full logical refs", next_action: "verify physical budget",
+    latest_corrections: [{ text: "current evidence", refs: Array.from({ length: 1000 }, (_value, index) =>
+      `ref:${index}:${"x".repeat(90)}`) }],
+    progress: [{ text: "x".repeat(10_700) }],
+  };
   child.stdin.end([
     { jsonrpc: "2.0", id: 0, method: "initialize", params: {} },
     { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
@@ -60,6 +66,7 @@ test("Codex continuity stdio proxy keeps the bearer out of config and exposes tw
     { jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "claude-checkpoint", arguments: {} } },
     { jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "codex-checkpoint", arguments: { state: storageCliffState } } },
     { jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "codex-checkpoint", arguments: { state: storageLimitState } } },
+    { jsonrpc: "2.0", id: 9, method: "tools/call", params: { name: "codex-checkpoint", arguments: { state: referenceCapacityState } } },
   ].map(value => JSON.stringify(value)).join("\n") + "\n" + "not-json\n" + "x".repeat(2_000_001) + "\n");
   const code = await new Promise(resolve => child.on("close", resolve));
   server.close();
@@ -79,7 +86,8 @@ test("Codex continuity stdio proxy keeps the bearer out of config and exposes tw
   assert.equal(responses[6].error.message, "not_in_codex_continuity_profile");
   assert.equal(responses[7].error.message, "codex_continuity_payload_too_large");
   assert.equal(responses[8].result.content[0].text, "ok");
-  assert.deepEqual(seen.map(message => message.id), [0, 1, 3, 4, 8]);
+  assert.equal(responses[9].result.content[0].text, "ok");
+  assert.deepEqual(seen.map(message => message.id), [0, 1, 3, 4, 8, 9]);
   assert.doesNotMatch(stdout + stderr, /secret-codex|secret upstream|private\/path|mcp-tokens/);
 });
 
@@ -115,6 +123,9 @@ with tempfile.TemporaryDirectory() as home, patch.object(Path, 'home', return_va
     installed = Path(home) / '.config/carr/codex-continuity/continuity-stdio-proxy.mjs'
     reviewed = Path(sys.argv[1]).resolve().parents[1] / 'mcp-server/continuity-stdio-proxy.mjs'
     assert installed.read_bytes() == reviewed.read_bytes()
+    installed_manifest = Path(home) / '.config/carr/codex-continuity/continuity-reference-manifest.mjs'
+    reviewed_manifest = Path(sys.argv[1]).resolve().parents[1] / 'mcp-server/continuity-reference-manifest.mjs'
+    assert installed_manifest.read_bytes() == reviewed_manifest.read_bytes()
     assert current['unrelated'] == original['unrelated']
     assert current['mcp_servers']['carr']['url'] == original['mcp_servers']['carr']['url']
     assert current['mcp_servers']['carr']['disabled_tools'] == ['prior', 'codex-checkpoint', 'codex-read-recovery']

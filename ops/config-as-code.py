@@ -1155,7 +1155,8 @@ def cmd_install_codex_continuity_mcp(apply=False):
     DEST = Path.home() / '.config/carr/codex-continuity'
     SERVER = 'carr-codex-continuity'
     TOOLS = ['codex-checkpoint', 'codex-read-recovery']
-    FILES = ['continuity-stdio-proxy.mjs', 'local-client-auth.mjs']
+    FILES = ['continuity-stdio-proxy.mjs', 'continuity-reference-manifest.mjs',
+             'local-client-auth.mjs']
     node = shutil.which('node')
     if not node:
         raise RuntimeError('Node runtime unavailable')
