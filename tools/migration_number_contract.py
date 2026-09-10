@@ -1,8 +1,9 @@
 """Shared migration-slot policy for the allocator, runner, and CI.
 
 Migration identity in PostgreSQL is the full filename. Numeric slots are still
-globally allocated so concurrent work cannot create ambiguous history. The
-already-merged exceptions are frozen here by their exact filename sets.
+globally allocated so concurrent work cannot create ambiguous history. Historical
+exceptions remain frozen here by their exact filename sets. A separately named,
+approved interstitial pair is kept out of that historical register.
 """
 from __future__ import annotations
 
@@ -47,6 +48,20 @@ FROZEN_COLLISIONS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# Approved by codex-compaction-continuity-design
+# ef786b17-b695-4d0d-8d15-604e0b02ef24@6,
+# sha256:341ccee0fb477acbca0a6a9015fe8405e81560f77d50f839cdbb29b4c7f1a936.
+# This is a reviewed forward release pair, not historical migration history.
+# Its lettered member may appear only with the exact base member. The allocator
+# admits origin/main's predecessor state (the base member alone) only while the
+# pair is awaiting its approved merge; every checked worktree must carry both.
+APPROVED_INTERSTITIAL_COLLISIONS: dict[str, tuple[str, ...]] = {
+    "0494": (
+        "0494_codex_continuity_archive_registry.sql",
+        "0494a_codex_continuity_reference_manifest.sql",
+    ),
+}
+
 # These twelve filenames were applied to isolated Control Plane staging before
 # that branch was renumbered. They are absent from the repository by design;
 # their mapped forward migrations are idempotent convergence files and must
@@ -88,34 +103,58 @@ def collision_report(names: Iterable[str]) -> dict[str, tuple[str, ...]]:
 def validate_migration_names(
     names: Iterable[str], *, require_frozen: bool = False,
     allow_frozen_subset: bool = False,
+    allow_approved_interstitial_base: bool = False,
 ) -> None:
-    """Allow only exact historical collisions; optionally require all of them."""
+    """Allow exact historical collisions and the approved interstitial pair."""
     materialized = tuple(names)
     for name in materialized:
         match = SLOT_RE.match(name)
-        if match and match.group(1) in FROZEN_COLLISIONS:
-            known_names = FROZEN_COLLISIONS[match.group(1)]
+        if not match:
+            continue
+        slot = match.group(1)
+        known_names = FROZEN_COLLISIONS.get(slot)
+        label = "frozen"
+        if known_names is None:
+            known_names = APPROVED_INTERSTITIAL_COLLISIONS.get(slot)
+            label = "approved interstitial"
+        if known_names is not None:
             if name not in known_names:
                 raise MigrationNumberError(
-                    f"frozen collision {match.group(1)} changed: "
+                    f"{label} collision {slot} changed: "
                     f"unexpected filename {name}"
                 )
     for slot, slot_names in collision_report(materialized).items():
         registered_names = FROZEN_COLLISIONS.get(slot)
+        label = "frozen"
+        if registered_names is None:
+            registered_names = APPROVED_INTERSTITIAL_COLLISIONS.get(slot)
+            label = "approved interstitial"
         if registered_names is None:
             raise MigrationNumberError(
                 f"unregistered collision {slot}: {', '.join(slot_names)}; "
                 "allocate a new migration number"
             )
         if slot_names != registered_names and not (
-            allow_frozen_subset and set(slot_names).issubset(registered_names)
+            allow_frozen_subset
+            and label == "frozen"
+            and set(slot_names).issubset(registered_names)
         ):
             raise MigrationNumberError(
-                f"frozen collision {slot} changed: expected {', '.join(registered_names)}; "
+                f"{label} collision {slot} changed: expected {', '.join(registered_names)}; "
                 f"found {', '.join(slot_names)}"
             )
+    present_names = set(materialized)
+    for slot, interstitial in APPROVED_INTERSTITIAL_COLLISIONS.items():
+        present = tuple(name for name in interstitial if name in present_names)
+        if present and present != interstitial and not (
+            allow_approved_interstitial_base and present == interstitial[:1]
+        ):
+            raise MigrationNumberError(
+                f"approved interstitial collision {slot} changed: "
+                f"expected {', '.join(interstitial)}; "
+                f"found {', '.join(present)}"
+            )
     if require_frozen:
-        present_names = set(materialized)
         for slot, frozen in FROZEN_COLLISIONS.items():
             present = tuple(name for name in frozen if name in present_names)
             if present != frozen:

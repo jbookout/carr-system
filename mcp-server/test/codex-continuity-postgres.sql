@@ -1,8 +1,7 @@
 \set ON_ERROR_STOP on
 begin;
 
--- Apply the exact interstitial migration before exercising the handlers.
-\ir ../../migrations/0494a_codex_continuity_reference_manifest.sql
+-- The disposable migration lane applies the schema before this handler fixture.
 
 insert into actor (id,slug,kind,display_name) values
  ('b1900000-0000-4000-8000-000000000001','codex-continuity-proof','automation','Continuity proof');

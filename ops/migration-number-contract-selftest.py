@@ -16,6 +16,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "tools"))
 
 from migration_number_contract import (  # noqa: E402
+    APPROVED_INTERSTITIAL_COLLISIONS,
     FROZEN_COLLISIONS,
     LEGACY_APPLIED_ALIASES,
     MigrationNumberError,
@@ -36,6 +37,10 @@ FROZEN_0169 = (
     "0169_control_plane_canary_fencing.sql",
     "0169_hermes_pilot_actor.sql",
     "0169_program5_release_binding.sql",
+)
+APPROVED_0494 = (
+    "0494_codex_continuity_archive_registry.sql",
+    "0494a_codex_continuity_reference_manifest.sql",
 )
 EXPECTED_LEGACY_ALIASES = {
     "0134_control_plane_admission.sql": "0148_control_plane_admission.sql",
@@ -62,14 +67,47 @@ def refuses(names: tuple[str, ...], expected: str) -> None:
         raise AssertionError(f"expected migration-number refusal containing {expected!r}")
 
 
+def allocator_refuses_interstitial(
+    actual: tuple[str, ...], names: tuple[str, ...], expected: str,
+) -> None:
+    """Exercise the allocator's own-worktree rejection for an incomplete pair."""
+    remote_names = [name for name in actual if name != APPROVED_0494[1]]
+    with tempfile.TemporaryDirectory(prefix="migration-number-contract-0494-") as tmp:
+        migration_dir = Path(tmp) / "migrations"
+        migration_dir.mkdir()
+        for name in names:
+            (migration_dir / name).touch()
+        original_run = next_migration.run
+        original_worktree_paths = next_migration.worktree_paths
+        original_repo = next_migration.REPO
+        try:
+            next_migration.run = lambda args, cwd=None: (
+                "\n".join(f"migrations/{name}" for name in remote_names)
+                if args[:3] == ["git", "ls-tree", "--name-only"] else ""
+            )
+            next_migration.worktree_paths = lambda: [tmp]
+            next_migration.REPO = tmp
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                rc = next_migration.main()
+        finally:
+            next_migration.run = original_run
+            next_migration.worktree_paths = original_worktree_paths
+            next_migration.REPO = original_repo
+        assert rc == 1, (rc, stdout.getvalue(), stderr.getvalue())
+        assert expected in stderr.getvalue(), stderr.getvalue()
+
+
 def main() -> int:
     actual = tuple(path.name for path in (REPO / "migrations").glob("*.sql"))
     expected_next = max(next_migration.numbers_from_names(actual)) + 1
     validate_migration_names(actual, require_frozen=True)
 
     report = collision_report(actual)
-    assert report == FROZEN_COLLISIONS, report
+    assert FROZEN_COLLISIONS | APPROVED_INTERSTITIAL_COLLISIONS == report, report
     assert report["0169"] == FROZEN_0169
+    assert report["0494"] == APPROVED_0494
+    assert APPROVED_INTERSTITIAL_COLLISIONS == {"0494": APPROVED_0494}
     assert LEGACY_APPLIED_ALIASES == EXPECTED_LEGACY_ALIASES
 
     refuses(("0171_alpha.sql", "0171_beta.sql"), "unregistered collision 0171")
@@ -77,6 +115,21 @@ def main() -> int:
     refuses(FROZEN_0169[:2], "frozen collision 0169 changed")
     refuses(FROZEN_0169 + ("0169_fourth.sql",), "frozen collision 0169 changed")
     refuses(FROZEN_0169 + ("0169a_escape.sql",), "frozen collision 0169 changed")
+    refuses((APPROVED_0494[1],), "approved interstitial collision 0494 changed")
+    refuses(
+        APPROVED_0494 + ("0494b_codex_continuity_unapproved.sql",),
+        "approved interstitial collision 0494 changed",
+    )
+    allocator_refuses_interstitial(
+        actual,
+        tuple(name for name in actual if name != APPROVED_0494[0]),
+        "approved interstitial collision 0494 changed",
+    )
+    allocator_refuses_interstitial(
+        actual,
+        actual + ("0494b_codex_continuity_unapproved.sql",),
+        "approved interstitial collision 0494 changed",
+    )
     missing_frozen = tuple(name for name in actual if name != "0074_deal_city_lane.sql")
     try:
         validate_migration_names(missing_frozen, require_frozen=True)
@@ -245,8 +298,8 @@ def main() -> int:
         capture_output=True,
         check=True,
     ).stdout
-    assert "frozen numeric collisions on origin/main" in allocation, allocation
-    assert "0169: " + ", ".join(FROZEN_0169) in allocation, allocation
+    assert "registered numeric collisions on origin/main" in allocation, allocation
+    assert "0169 (historical frozen): " + ", ".join(FROZEN_0169) in allocation, allocation
 
     # The only permitted remote-collision repair is the current 0298 incident:
     # preserve the partner-room migration, replace only the memory migration
