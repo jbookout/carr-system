@@ -848,6 +848,187 @@ test("Q068 a derived record with no declared parent is refused, not labelled cle
     "untrusted_parsed");
 });
 
+// ---- Q068, the third lineage state: upstream that nobody established
+
+test("Q068 an unestablished upstream is carried as its own state, never as primary", () => {
+  const unknown = records();
+  unknown[1].derived_kind = "unknown_upstream";     // r-email, origin "email"
+
+  const lineage = compileTaintLineage(unknown);
+  const byId = Object.fromEntries(lineage.entries.map(e => [e.record_id, e]));
+  assert.equal(byId["r-email"].upstream_lineage_known, false);
+  assert.equal(byId["r-email"].derived_kind, "unknown_upstream");
+  // It is external, so it is untrusted_external by the ordinary rule. The new
+  // state changes no taint class and lowers nothing.
+  assert.equal(byId["r-email"].taint_class, "untrusted_external");
+  assert.equal(byId["r-email"].tainted, true);
+  assert.deepEqual(lineage.unknown_lineage_record_ids, ["r-email"]);
+  // Every other record still answers the question, and answers it "known".
+  assert.equal(byId["r-deal"].upstream_lineage_known, true);
+  // And a summary of it still inherits the taint two generations out.
+  assert.equal(byId["r-email-summary"].taint_class, "untrusted_parsed");
+  assert.equal(byId["r-email-vector"].taint_class, "untrusted_parsed");
+
+  // A clean manifest reports the question as not arising, rather than omitting it.
+  assert.deepEqual(assemble().unknown_lineage_records, []);
+  assert.equal(assemble().uncertainty.unknown_lineage_record_count, 0);
+});
+
+test("Q068 an unestablished upstream blocks the write and survives into the manifest", () => {
+  const unknown = records();
+  unknown[1].derived_kind = "unknown_upstream";
+
+  const explore = assemble({ records: unknown, mode: "read_only_exploration" });
+  assert.equal(explore.decision, "allow");
+  assert.equal(explore.reason_id, "read_only_exploration_under_uncertainty");
+  assert.equal(explore.read_only_exploration_permitted, true);
+  // The manifest's OWN write gate, not a wrapper's opinion of it.
+  assert.equal(explore.consequential_action_permitted, false);
+  assert.equal(explore[explore.write_gate_field], false);
+  assert.ok(explore.blocking_reasons.includes("record_upstream_lineage_unknown"));
+  assert.deepEqual(explore.unknown_lineage_records, ["r-email"]);
+  assert.equal(explore.unknown_lineage_blocks_consequential_action, true);
+  assert.equal(explore.uncertainty.marker, true);
+  assert.equal(explore.uncertainty.unknown_lineage_record_count, 1);
+  // It survives onto the projected record and onto its lineage entry.
+  assert.equal(explore.records.find(r => r.record_id === "r-email").upstream_lineage_known,
+    false);
+  assert.equal(explore.taint_lineage.find(e => e.record_id === "r-email").upstream_lineage_known,
+    false);
+
+  // The same input as a consequential proposal refuses and names the reason.
+  const write = assemble({ records: unknown });
+  assert.equal(write.decision, "refuse");
+  assert.equal(write.reason_id, "record_upstream_lineage_unknown");
+  assert.equal(write.consequential_action_permitted, false);
+});
+
+test("Q068 dropping an unknown-lineage record for tokens does not clear its block", () => {
+  const unknown = records();
+  unknown[1].derived_kind = "unknown_upstream";
+  const full = assemble({ records: unknown, mode: "read_only_exploration" });
+  const emailTokens = full.records.find(r => r.record_id === "r-email").estimated_tokens;
+
+  const tight = assemble({ records: unknown, mode: "read_only_exploration",
+    budget: { token_budget: full.budget.estimated_tokens_total - emailTokens } });
+  assert.equal(tight.records.find(r => r.record_id === "r-email").included, false);
+  // Measured from the records the manifest COMPILED, so omitting the evidence
+  // cannot buy back the permission its lineage cost.
+  assert.deepEqual(tight.unknown_lineage_records, ["r-email"]);
+  assert.equal(tight.consequential_action_permitted, false);
+  assert.ok(tight.blocking_reasons.includes("record_upstream_lineage_unknown"));
+});
+
+test("Q068 an unestablished upstream cannot be laundered into clean or authoritative", () => {
+  // 1. NOT FIRST-PARTY. record_layer is the origin the state exists to stop
+  //    being claimed, so it refuses by name.
+  const clean = records();
+  clean[1].derived_kind = "unknown_upstream";
+  clean[1].origin = "record_layer";
+  assert.equal(code(() => compileTaintLineage(clean)),
+    "unknown_lineage_requires_external_origin");
+  assert.equal(code(() => assemble({ records: clean })),
+    "unknown_lineage_requires_external_origin");
+
+  // 2. NOT AUTHORITY-BEARING. Refused at compile time, before the taint
+  //    violation that would also have caught it, so the reason names the attempt.
+  for (const record_kind of ["rule", "authority_grant", "decision"]) {
+    const authority = records();
+    authority[1].derived_kind = "unknown_upstream";
+    authority[1].record_kind = record_kind;
+    assert.equal(code(() => compileTaintLineage(authority)),
+      "unknown_lineage_cannot_bear_authority", record_kind);
+  }
+
+  // 3. NO EXEMPTION FROM THE SUMMARY/EMBEDDING PARENT REQUIREMENT. A record kind
+  //    that names a derivation must still declare that derivation, which still
+  //    requires a parent. Saying "upstream unknown" instead is refused.
+  for (const record_kind of ["summary", "embedding"]) {
+    const derived = records();
+    derived[2].record_kind = record_kind;
+    derived[2].origin = "email";
+    derived[2].derived_kind = "unknown_upstream";
+    derived[2].derived_from = [];
+    assert.equal(code(() => compileTaintLineage(derived)),
+      "derived_kind_inconsistent_with_record_kind", record_kind);
+  }
+
+  // 4. THE PARENT RULES ARE UNCHANGED. An unknown-lineage record may still name
+  //    parents — "these, and whether there are others nobody established" — and
+  //    every one of them is still checked exactly as before.
+  const unknownWithParent = () => {
+    const set = records();
+    set[2].record_kind = "note";   // a kind that asserts no derivation of its own
+    set[2].origin = "email";       // external, as the state requires
+    set[2].derived_kind = "unknown_upstream";
+    return set;
+  };
+  const kept = compileTaintLineage(unknownWithParent()).entries
+    .find(e => e.record_id === "r-email-summary");
+  assert.deepEqual(kept.derived_from, ["r-email"]);
+  assert.equal(kept.upstream_lineage_known, false);
+  assert.equal(kept.taint_class, "untrusted_external");
+
+  const dangling = unknownWithParent();
+  dangling[2].derived_from = ["r-ghost"];
+  assert.equal(code(() => compileTaintLineage(dangling)), "taint_lineage_dangling_parent");
+
+  const cyclic = unknownWithParent();
+  cyclic[2].derived_from = ["r-email-vector"];
+  assert.equal(code(() => compileTaintLineage(cyclic)), "taint_lineage_cycle");
+
+  // 5. And `primary` still means what it said: derived from nothing.
+  const primaryWithParents = records();
+  primaryWithParents[1].derived_from = ["r-deal"];
+  assert.equal(code(() => compileTaintLineage(primaryWithParents)), "primary_record_with_lineage");
+});
+
+test("Q068 the changed manifest and lineage bodies are versioned, not slipped in", () => {
+  // The bodies gained fields, so the SAME input hashes differently than it did
+  // under v1. The version says so rather than leaving a consumer to discover it
+  // from a digest that moved under an unchanged format string.
+  assert.equal(V5_F05_MANIFEST_SCHEMA_VERSION, "doctorcre-v5-f05-context-manifest.v2");
+  assert.equal(V5_F05_LINEAGE_SCHEMA_VERSION, "doctorcre-v5-f05-taint-lineage.v2");
+  const manifest = assemble();
+  assert.equal(manifest.schema_version, V5_F05_MANIFEST_SCHEMA_VERSION);
+  assert.equal(manifest.manifest_version, 2);
+  // The fields that made it v2, present on every manifest and every lineage.
+  assert.ok(Object.prototype.hasOwnProperty.call(manifest, "unknown_lineage_records"));
+  assert.equal(manifest.unknown_lineage_blocks_consequential_action, true);
+  assert.ok(manifest.records.every(
+    r => Object.prototype.hasOwnProperty.call(r, "upstream_lineage_known")));
+  assert.ok(Object.prototype.hasOwnProperty.call(
+    manifest.uncertainty, "unknown_lineage_record_count"));
+  const lineage = compileTaintLineage(records());
+  assert.equal(lineage.schema_version, V5_F05_LINEAGE_SCHEMA_VERSION);
+  assert.ok(Object.prototype.hasOwnProperty.call(lineage, "unknown_lineage_record_ids"));
+  assert.ok(lineage.entries.every(
+    e => Object.prototype.hasOwnProperty.call(e, "upstream_lineage_known")));
+
+  // The three formats that did NOT change keep their versions.
+  assert.equal(V5_F05_FROZEN_INPUT_SCHEMA_VERSION,
+    "doctorcre-v5-f05-frozen-assembly-input.v1");
+
+  // A request that still says v1 is refused rather than read under v2 rules.
+  const stale = { ...request(), schema_version: "doctorcre-v5-f05-context-manifest.v1" };
+  assert.equal(code(() => assembleContextManifest(freezeAssemblyInput(stale))),
+    "unknown_schema_version");
+});
+
+test("Q068 the contract states the price of the unknown lineage state", () => {
+  const preimage = v5F05ContextContractPreimage();
+  assert.ok(preimage.derived_kinds.includes("unknown_upstream"));
+  assert.equal(preimage.unknown_upstream_lineage_representable, true);
+  assert.equal(preimage.unknown_upstream_lineage_requires_external_origin, true);
+  assert.equal(preimage.unknown_upstream_lineage_may_bear_authority, false);
+  assert.equal(preimage.unknown_upstream_lineage_exempts_summary_or_embedding_parent, false);
+  assert.equal(preimage.unknown_upstream_lineage_blocks_consequential_action, true);
+  assert.equal(preimage.unknown_upstream_lineage_permits_marked_read_only_exploration, true);
+  // The older claim is unqualified and stays true: a DERIVED record still needs
+  // a declared parent, because unknown_upstream is not one of the derived kinds.
+  assert.equal(preimage.derived_record_requires_declared_parent, true);
+});
+
 test("Q068 a rule's text is bound to a first-party record this manifest carries", () => {
   // The rule path was not taint-checked at all: RULE_KEYS had no provenance
   // slot, so text sourced from an email could be compiled into a universe and
