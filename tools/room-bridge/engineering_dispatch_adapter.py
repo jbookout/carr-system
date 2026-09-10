@@ -127,6 +127,27 @@ RUNBOOK_CHUNK_CHARS = 4000
 ENGINEERING_SOURCE_HELPER_PATH = HERE / "engineering_source_projection.js"
 ENGINEERING_SOURCE_HELPER_SHA256 = "3cd0cd7f1ef18940dd5232bd3a72611618b0137b398e86ffc974777bc64294a4"
 ENGINEERING_SOURCE_HELPER_BYTE_LENGTH = 17068
+def _engineering_source_helper_interpreter() -> str:
+    """Resolve the interpreter the reader command runs under, on any checkout.
+
+    The dedicated desk runs on Joe's machine, where the repository venv always
+    exists, and that interpreter stays the first choice.  It cannot be the ONLY
+    choice: a hosted runner installs requirements.lock into setup-python and
+    never builds a repository venv, and Dell's machine has no venv before its
+    migration runs.  ops/ci.sh already resolves exactly this pair for the same
+    reason.  Pinning the venv unconditionally made the shipped reader command
+    exit 127 everywhere the venv is absent -- a real portability break that a
+    Mac could never see.  sys.executable keeps the fallback an absolute path,
+    which is what the child's exec_command needs when PATH is minimal.
+    """
+    venv = REPO / ".venv" / "bin" / "python"
+    if os.access(venv, os.X_OK):
+        return str(venv)
+    if sys.executable and os.access(sys.executable, os.X_OK):
+        return sys.executable
+    return "python3"
+
+
 def _engineering_source_helper_read_command(path: Path) -> str:
     reader = (
         "import hashlib,json,pathlib;"
@@ -135,7 +156,7 @@ def _engineering_source_helper_read_command(path: Path) -> str:
         '"byte_length":len(b),"sha256":hashlib.sha256(b).hexdigest(),'
         '"code":b.decode("utf-8")},separators=(",",":")))'
     )
-    return f"{shlex.quote(str(REPO / '.venv/bin/python'))} -c {shlex.quote(reader)}"
+    return f"{shlex.quote(_engineering_source_helper_interpreter())} -c {shlex.quote(reader)}"
 
 
 ENGINEERING_SOURCE_HELPER_READ_COMMAND = _engineering_source_helper_read_command(
