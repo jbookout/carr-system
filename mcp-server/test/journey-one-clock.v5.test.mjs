@@ -4,7 +4,8 @@ import { canonicalJson, digest } from "../src/artifact-trust.js";
 import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
 import { DEADLINE_GAP_SHIFTED, DEADLINE_OVERLAP_ORIGIN_OFFSET, DEADLINE_PLAIN,
   JOURNEY_ONE_CLOCK_PROJECTION, JOURNEY_ONE_CLOCK_SCHEMA, JOURNEY_ONE_DEADLINE_CONTRACT,
-  createJourneyOneClock, chicagoThirtyDayDeadline } from "../src/journey-one-clock.v5.js";
+  createJourneyOneClock, chicagoThirtyDayDeadline,
+  readJourneyOneClockHistory } from "../src/journey-one-clock.v5.js";
 
 const D = n => `sha256:${String(n).padStart(2, "0").repeat(32)}`;
 const I = actor => ({ actor_id: actor, session_ref: `session:synthetic-${actor}`, authority_class: actor === "joe" || actor === "dell" ? "verified_partner" : "synthetic_oracle" });
@@ -1151,6 +1152,90 @@ test("a previously recorded amendment cannot vanish from a later inventory", () 
   p.history = run(p).state; p.as_of = "2026-09-11T15:00:00.000Z";
   const omitted = copy(p); omitted.amendments = []; refuse(omitted, "erased_approval_history");
   assert.equal(run(p).state.events.filter(e => e.type === "amendment_recorded").length, 1);
+});
+
+// --- the exported history reader -------------------------------------------
+// It exists so a durable store can ask THIS kernel whether a stored history is
+// still readable, instead of owning a second, weaker validator of its own.
+
+test("the exported history reader answers with a defensive frozen snapshot and touches nothing", () => {
+  const p = snapshot("2026-09-19T15:00:00.000Z");
+  p.pauses = [pause(p, "2026-09-10T15:00:00.000Z", "2026-09-11T03:00:00.000Z")];
+  const state = copy(run(p).state);
+  const before = copy(state);
+
+  const read = readJourneyOneClockHistory(state, state.evaluated_at);
+  assert.deepEqual(read, before, "a readable history comes back exactly as it went in");
+  assert.deepEqual(state, before, "and the caller's own object was never written to");
+  assert.notEqual(read, state, "the answer is a copy, not the caller's object");
+  assert.equal(Object.isFrozen(read), true);
+  assert.equal(Object.isFrozen(read.events), true);
+  assert.equal(Object.isFrozen(read.events[0]), true);
+  assert.equal(Object.isFrozen(read.pause_intervals[0]), true);
+  assert.throws(() => { read.status = "completed_on_time"; }, TypeError,
+    "a reader cannot edit the thing it was just told is well formed");
+  assert.equal(readJourneyOneClockHistory(null, ORIGIN), null, "no history is not a malformed history");
+});
+
+test("the history reader takes an explicit instant and never reaches for a live clock", () => {
+  const state = copy(run(snapshot()).state);
+  // NO DEFAULT. A validator that quietly read the system clock would make one
+  // stored history readable or unreadable depending on when it was asked.
+  for (const bad of [undefined, null, Date.parse(ORIGIN), new Date(ORIGIN), "2026-09-09", "now", ""]) {
+    assert.throws(() => readJourneyOneClockHistory(state, bad), e => e.code === "invalid_timestamp");
+  }
+  assert.throws(() => readJourneyOneClockHistory(state, "2026-09-09T14:59:59.000Z"),
+    e => e.code === "history_time_reversed");
+  assert.equal(readJourneyOneClockHistory(state, "2026-09-09T15:00:00.000Z").status, "running");
+});
+
+test("the history reader refuses exactly what evaluate refuses, by the same names", () => {
+  const p = snapshot("2026-10-10T15:00:00.000Z");
+  const missed = copy(run(p).state);
+  assert.equal(missed.status, "missed");
+  const at = missed.evaluated_at;
+  const unsealed = copy(missed); unsealed.due_at = "2026-10-11T15:00:00.000Z";
+  for (const [history, code] of [
+    [reseal({ ...copy(missed), schema_version: "doctorcre-v5-journey-one-clock.v1" }), "legacy_history_migration_required"],
+    [unsealed, "corrupt_history"],
+    [reseal({ ...copy(missed), paused_ms: 121 * HOUR }), "corrupt_history"],
+    [reseal({ ...copy(missed), status: "on_time" }), "corrupt_history"],
+    [reseal({ ...copy(missed), miss_at: null }), "erased_miss_history"],
+    [reseal({ ...copy(missed), events: missed.events.slice(0, 1) }), "erased_miss_history"],
+    [reseal({ ...copy(missed), status: "completed_on_time" }), "deadline_success_claimed_after_recorded_miss"],
+  ]) {
+    assert.throws(() => readJourneyOneClockHistory(copy(history), at),
+      e => e.code === code, `the reader should refuse ${code}`);
+    // THE SAME HISTORY THROUGH THE WHOLE KERNEL, refused under the same name.
+    // That is the comparison that makes the export "the kernel's own read"
+    // rather than a second validator that happens to agree today.
+    refuse({ ...snapshot("2026-10-10T15:00:00.000Z"), history: copy(history) }, code);
+  }
+});
+
+test("the history reader refuses a value no two clauses could read the same way", () => {
+  const state = copy(run(snapshot()).state);
+  const at = state.evaluated_at;
+  const withGetter = { ...state };
+  Object.defineProperty(withGetter, "status", { get: () => "running", enumerable: true, configurable: true });
+  assert.throws(() => readJourneyOneClockHistory(withGetter, at), e => e.code === "hidden_key");
+  const exotic = { ...state, events: Object.setPrototypeOf([], { toJSON: () => copy(state.events) }) };
+  assert.throws(() => readJourneyOneClockHistory(exotic, at), e => e.code === "invalid_object");
+  for (const bad of [7, "history", true, []]) {
+    assert.throws(() => readJourneyOneClockHistory(bad, at), e => e.code === "invalid_object");
+  }
+});
+
+test("a pass from the history reader is not an anti-rollback claim", () => {
+  // The kernel header says an OLDER GENUINE history replays unless a durable
+  // store compare-and-swaps on the exact prior digest. This proves the export
+  // did not quietly become that defence: both histories are perfectly readable.
+  const first = copy(run(snapshot()).state);
+  const later = copy(run({ ...snapshot("2026-09-14T15:00:00.000Z"), history: copy(first) }).state);
+  assert.notEqual(first.history_digest, later.history_digest);
+  for (const history of [first, later]) {
+    assert.equal(readJourneyOneClockHistory(history, later.evaluated_at).origin_at, first.origin_at);
+  }
 });
 
 // --- shape, time and effect boundaries -------------------------------------

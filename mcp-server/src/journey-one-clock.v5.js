@@ -25,6 +25,11 @@
 //     nothing more: an older genuine history that never carried the seal still
 //     replays unless the external store refuses the write, and this file
 //     fabricates no protection it cannot provide.
+//     readHistory is exported NARROWLY as readJourneyOneClockHistory so that
+//     adapter can ask this kernel — rather than a second, weaker validator of
+//     its own — whether a stored history is still readable. That export adds no
+//     clause and softens none, and a pass from it is not an anti-rollback
+//     claim: see the note on the function itself.
 //   * The terminus accepts exactly one rollout-component-receipt.v1 and checks
 //     `all_current_exact_distinct_pass` as an exact contract string rather than
 //     re-implementing it, so "distinct" does no work at arity one.
@@ -458,6 +463,56 @@ function readHistory(history, now) {
   if (recordedCompletion && (recordedCompletion.evidence_digest !== history.completion_receipt_digest ||
       recordedCompletion.at !== history.completion_observed_at)) fail("erased_completion_history");
   return copy(history);
+}
+/**
+ * READ ONE HISTORY ON ITS OWN, ON EXACTLY THE TERMS evaluate() READS IT.
+ *
+ * A durable store has to know whether the thing it is about to file — or the
+ * thing it just read back off a disk — is a history this kernel can still read.
+ * Before this export the only way to ask was to build a whole authenticated
+ * projection and call evaluate(), so a store either owned a second, weaker
+ * validator of its own or asked nothing at all. This is that question, asked
+ * directly. It is a NARROW READ-ONLY SEAM and nothing else:
+ *
+ *   * It is the SAME FUNCTION. readHistory stays private and this wrapper adds
+ *     no clause, drops none, and softens none. The v1 refusal by name, the
+ *     recomputed history_digest, the closed shape, the instant grammar, the
+ *     completion-seal pairing, the sticky miss and its event binding, the event
+ *     chain and the one Q008.D1 contradiction are all exactly what evaluate()
+ *     applies to the history it was handed.
+ *   * IT DECIDES NOTHING. It computes no deadline, selects no origin, judges no
+ *     receipt, admits nothing and returns no verdict — a history is not a clock
+ *     evaluation. It reports readability and hands back a frozen copy.
+ *   * IT PROVES NOTHING ABOUT ROLLBACK. An OLDER GENUINE history passes here
+ *     perfectly, exactly as the header says: every digest in a history is
+ *     computable by whoever supplies it. Anti-rollback remains the durable
+ *     store's exact-prior compare-and-swap and is not weakened, replaced or
+ *     implied by a pass here.
+ *   * `now` IS EXPLICIT AND IS NEVER DEFAULTED. No live clock is read anywhere
+ *     in this file, and a validator that quietly reached for the system clock
+ *     would make one stored history readable or unreadable depending on when it
+ *     was asked. It takes the kernel's own instant grammar — the same strings
+ *     `as_of` is written in — and a caller that has only a stored history
+ *     passes that history's own `evaluated_at`, which asks the self-consistent
+ *     question "was this readable at the instant it was computed".
+ *
+ * The input is JSON-checked and SNAPSHOTTED before a clause reads it, on the
+ * same terms a verified projection is, because the read walks the value more
+ * than once and copy() honours an inherited toJSON: a getter or an exotic
+ * prototype could otherwise hand two clauses two different answers. The result
+ * is a deep-frozen copy, so a reader cannot mutate the thing it was just told
+ * is well formed. evaluate() deliberately keeps calling the private readHistory
+ * instead of this: the state it gets back is the object it then appends to, and
+ * a frozen one could not be advanced.
+ *
+ * @param {object|null} history a doctorcre-v5-journey-one-clock.v2 state, or null
+ * @param {string} now the instant to read it as of, in the kernel's grammar
+ * @returns {object|null} a frozen copy of the history, or null when it was null
+ */
+export function readJourneyOneClockHistory(history, now) {
+  const at = stamp(now);
+  json(history, "history");
+  return freeze(readHistory(history === null ? null : copy(history), at));
 }
 /** Dependency installation is trusted server code, never a caller tool argument. */
 export function createJourneyOneClock({ verifySnapshot } = {}) {
