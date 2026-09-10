@@ -110,15 +110,23 @@
 // names a clock READS that binding and refuses, so a new origin for one
 // authoritative scope meets a refusal instead of a fresh clock.
 //
-// ITS LIMITS, STATED WITH IT. The record layer cannot derive the scope from a
-// stored history, because doctorcre-v5-journey-one-clock.v2 carries no subject,
-// candidate or policy digest — the kernel returns the state and nothing about
-// the binding it validated against. So this rail COMPARES a binding it was
-// handed; it does not verify it. If the trusted integration derives the scope
-// from values that move whenever a caller's projection moves, this defence
-// moves with them. The precise, minimal fix is named in
-// JOURNEY_ONE_CLOCK_INPUT_AUTHORITY_REQUIREMENT as a read-only kernel
-// projection-binding extension, and no policy is invented here in its place.
+// THE LABEL IS NOT PART OF IT. `scope_ref` is a name for humans: it is stored,
+// read back and sealed once, and it is NOT in the key's preimage. It used to be,
+// while every comment said it carried no authority — so one accepted scope
+// spelled two ways produced two keys, and "one scope, one clock" silently meant
+// "one label, one clock". A relabelled store could then start a second clock for
+// one program with a fresh origin. The preimage is now the six identity fields
+// (JOURNEY_ONE_CLOCK_SCOPE_IDENTITY_FIELDS) and the domain tag is versioned to
+// v2 because the published key changed.
+//
+// ITS LIMITS, STATED WITH IT. Through createJourneyOneClockRecorder the scope is
+// now checked against the kernel's own `verified_binding` for the computation
+// being stored, so a store whose scope is not the one the kernel judged refuses
+// before any journal call. Through a DIRECT store.record() call — and through a
+// direct SQL writer — the binding is still COMPARED, not verified: the stored
+// v2 state carries no subject, candidate or policy digest, so there is nothing
+// on that path to check it against. That remaining boundary is deliberate and is
+// carried on every readback in JOURNEY_ONE_CLOCK_STORE_CANNOT_PROVE.
 //
 // CANNOT: that the origin receipt was a genuine current passing
 // foundation-assurance-minimum receipt; that the pauses were approved by a real
@@ -196,12 +204,19 @@
 //     deliberately NOT added to any tool index by this slice.
 //   * Running mcp-server/test/journey-one-clock-store-postgres.sql against a
 //     database. It has never been executed here.
-//   * DERIVING the authoritative clock scope from the computation being stored
-//     rather than comparing a binding the integration supplies. That needs a
-//     read-only projection-binding extension to journey-one-clock.v5.js, stated
-//     exactly in JOURNEY_ONE_CLOCK_INPUT_AUTHORITY_REQUIREMENT
-//     .read_only_kernel_projection_extension_required. It is named there rather
-//     than worked around here, and no scope policy is invented in its place.
+//   * Carrying the scope check onto the DIRECT record path. The kernel's
+//     read-only projection-binding extension has landed — evaluate() returns
+//     `verified_binding` beside the state — and createJourneyOneClockRecorder
+//     compares it against the store's authoritative scope before any journal
+//     call. A caller of store.record() supplies only a STATE, which carries none
+//     of those three digests, so that path is unchanged and is still a trusted
+//     seat. Closing it needs the stored state to carry the binding, which would
+//     change every history_digest, and is not done here.
+//   * Re-deriving any ALREADY PUBLISHED scope key under the v2 domain tag. There
+//     is nothing to re-derive: the candidate SQL has never been applied and no
+//     clock has been started. If that ever stops being true, moving a stored key
+//     is an explicit migration owned by whoever owns the durable store, exactly
+//     as a v1 history is.
 
 import { digest } from "./artifact-trust.js";
 import { ORGANIZATION_TENANT_ID, authorizationClassForActor, isKnownActor } from "./identity.js";
@@ -209,6 +224,7 @@ import { V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 import { assertNoSelfAssertedAuthority } from "./benchmark-acceptance-store.v5.js";
 import {
   JOURNEY_ONE_CLOCK_LEGACY_SCHEMAS, JOURNEY_ONE_CLOCK_PROJECTION, JOURNEY_ONE_CLOCK_SCHEMA,
+  JOURNEY_ONE_CLOCK_VERIFIED_BINDING, JOURNEY_ONE_CLOCK_VERIFIED_BINDING_FIELDS,
   JOURNEY_ONE_DEADLINE_CONTRACT, readJourneyOneClockHistory,
 } from "./journey-one-clock.v5.js";
 
@@ -254,18 +270,50 @@ export const JOURNEY_ONE_CLOCK_IDENTITY_FIELDS = Object.freeze([
  * thing a reset would present, so an identity built only from the origin cannot
  * refuse a reset. The scope is stable ACROSS origins, which is what makes "this
  * program already has a running clock" a question the record layer can answer.
+ *
+ * v2, AND THE VERSION IS THE HONEST PART OF THE FIX. v1 hashed all seven
+ * declared fields INCLUDING `scope_ref`, while every comment beside it said that
+ * field is a human label with no authority. Those two statements cannot both be
+ * true: with the label inside the preimage, one accepted scope relabelled
+ * `safe:clock-scope:a` and `safe:clock-scope:b` produced TWO keys, and a caller
+ * holding a relabelled store could create a second clock for one program with a
+ * fresh origin — the exact evasion the scope exists to refuse. The preimage is
+ * now the six IDENTITY fields below and the label is carried as provenance
+ * beside the key. That changes the published key for every scope, so the tag is
+ * versioned rather than silently redefined. Nothing is rewritten by it: the
+ * candidate SQL has never been applied, no clock has been started, and no
+ * migration or backfill is proposed here.
  */
-export const JOURNEY_ONE_CLOCK_SCOPE_DOMAIN_TAG = "doctorcre:j1-clock-scope:v1";
+export const JOURNEY_ONE_CLOCK_SCOPE_DOMAIN_TAG = "doctorcre:j1-clock-scope:v2";
 
 /**
- * The exact fields one authoritative clock scope is derived from, C-sorted.
+ * The declared shape of an accepted scope binding as it is SUPPLIED, C-sorted:
+ * the six identity fields plus the human label. All seven are required — a
+ * binding with no label would leave the record unable to say WHICH accepted
+ * scope a reader is looking at — and exactly seven are accepted.
+ */
+export const JOURNEY_ONE_CLOCK_SCOPE_FIELDS = Object.freeze([
+  "benchmark_candidate_digest", "benchmark_policy_digest", "benchmark_subject_digest",
+  "clock_origin_gate_id", "clock_terminus_gate_id", "scope_ref", "tenant",
+]);
+
+/**
+ * The exact fields one authoritative clock scope's KEY is derived from, C-sorted.
+ * This is JOURNEY_ONE_CLOCK_SCOPE_FIELDS MINUS `scope_ref`.
  *
  * NOT NEW DATA, AND NOT SELF-ASSERTED DATA. Every field is one the accepted
  * contracts already carry: the three digests are the trusted projection's own
  * `binding` — the ones journey-one-clock.v5.js forces the accepted benchmark
- * AND every receipt it reads to match — and the two gate ids are
- * JOURNEY_ONE_DEADLINE_CONTRACT's own, checked below against that constant
- * rather than believed. `scope_ref` is a name for humans and selects nothing.
+ * AND every receipt it reads to match, and now returns beside the state as
+ * `verified_binding` — and the two gate ids are JOURNEY_ONE_DEADLINE_CONTRACT's
+ * own, checked below against that constant rather than believed.
+ *
+ * THE LABEL IS NOT IDENTITY, and its absence here is the whole point. A name a
+ * human chose is not a fact about which program a clock belongs to, and hashing
+ * it made "one scope, one clock" hold over labels rather than over scopes. It is
+ * still stored, still read back, and still refused when it changes for a scope
+ * already bound (`j1_clock_scope_label_is_not_identity`) — provenance that
+ * cannot become authority.
  *
  * WHY THE THREE DIGESTS ARE THE STABLE PART. For one clock the kernel already
  * pins them: a later evaluation must present the SAME origin receipt, and that
@@ -273,14 +321,14 @@ export const JOURNEY_ONE_CLOCK_SCOPE_DOMAIN_TAG = "doctorcre:j1-clock-scope:v1";
  * a clock cannot change them. A second origin for the same accepted scope
  * therefore lands on the SAME scope key and meets the existing binding.
  *
- * WHAT THIS RAIL CANNOT DO WITH THEM: check them against the stored history.
- * The v2 state carries none of the three. They are compared to the binding this
- * store was constructed with and to nothing else.
+ * WHAT THIS RAIL STILL CANNOT DO WITH THEM: check them against a stored HISTORY.
+ * The v2 state carries none of the three. Through the trusted recorder they are
+ * now compared against the kernel's own `verified_binding` for the computation
+ * being stored; through a direct store.record() call, or a direct SQL writer,
+ * the binding is compared to the store's construction-time scope and no further.
  */
-export const JOURNEY_ONE_CLOCK_SCOPE_FIELDS = Object.freeze([
-  "benchmark_candidate_digest", "benchmark_policy_digest", "benchmark_subject_digest",
-  "clock_origin_gate_id", "clock_terminus_gate_id", "scope_ref", "tenant",
-]);
+export const JOURNEY_ONE_CLOCK_SCOPE_IDENTITY_FIELDS = Object.freeze(
+  JOURNEY_ONE_CLOCK_SCOPE_FIELDS.filter(field => field !== "scope_ref"));
 
 /**
  * The twenty-one fields of doctorcre-v5-journey-one-clock.v2, in the kernel's
@@ -364,6 +412,8 @@ export const JOURNEY_ONE_CLOCK_APPEND_INVARIANTS = Object.freeze([
     statement: "One authoritative clock scope holds at most one clock. A creation whose presented origin derives a new key, for a scope that already names a clock, reads that binding and is refused; a new origin is never a way around the compare-and-swap of the clock that scope already has." }),
   Object.freeze({ id: "j1_clock_scope_sealed_at_creation", enforced_in: BOTH,
     statement: "The authoritative scope a clock was bound to at creation is the scope every later revision of it is written under. A revision presenting another scope is refused rather than rebinding the clock to it." }),
+  Object.freeze({ id: "j1_clock_scope_label_is_not_identity", enforced_in: BOTH,
+    statement: "A scope's human label is provenance and never identity: it is excluded from the scope key, so one accepted scope under two names is one scope and cannot hold two clocks; and it is recorded once, so a second label presented for a bound scope is refused rather than silently kept or silently replaced." }),
   Object.freeze({ id: "j1_clock_tenant_bound", enforced_in: BOTH,
     statement: "A revision is stored under the tenant its identity was derived with, and a read for another tenant refuses rather than serving another tenant's clock." }),
   Object.freeze({ id: "j1_clock_content_rebuilds_to_its_digest", enforced_in: BOTH,
@@ -409,7 +459,7 @@ export const JOURNEY_ONE_CLOCK_STORE_CANNOT_PROVE = Object.freeze([
   "that the terminus receipt was admitted under the accepted per-receipt TTL policy against the accepted kernel scope",
   "that the projection the kernel read was authentic: the verifier is trusted server code and this record layer never sees it",
   "that a revision written by a direct holder of the writer bundle is a kernel computation rather than that writer's assertion; both are trusted writers and nothing recorded here tells them apart",
-  "that the authoritative scope a clock is bound to is the accepted scope of the projection the kernel actually read: doctorcre-v5-journey-one-clock.v2 carries no subject, candidate or policy digest, so this rail compares the binding the trusted integration constructed it with and never derives one from a stored history",
+  "that the authoritative scope a STORED revision is bound to is the accepted scope of the projection the kernel actually read. Through createJourneyOneClockRecorder the kernel's own verified_binding for that computation is compared against the store's scope before anything is written; through a direct store.record() call or a direct SQL writer it is not, because doctorcre-v5-journey-one-clock.v2 carries no subject, candidate or policy digest and this rail never derives one from a stored history",
   "anything about deadline SUCCESS. A stored status is a recorded computation, never an acceptance of a deadline by this record layer",
 ]);
 
@@ -578,11 +628,17 @@ export function journeyOneClockKeyForState(state, tenant = ORGANIZATION_TENANT_I
  * COMPARED AGAINST JOURNEY_ONE_DEADLINE_CONTRACT rather than believed — a scope
  * naming some other gate is not a Journey 1 clock scope and is refused by name.
  *
- * WHAT IS NOT AND CANNOT BE CHECKED HERE: that these three digests are the ones
- * the verifier accepted for the projection the kernel read. The v2 state carries
- * none of them, so there is nothing on this side to compare against. This is a
- * TRUSTED BINDING, it is bound to a store object by trusted construction rather
- * than accepted per request, and the limit is carried on every readback in
+ * THE KEY IS DERIVED FROM THE SIX IDENTITY FIELDS AND NOT FROM THE LABEL, so
+ * two spellings of one accepted scope are one scope. The label travels beside
+ * the key as `clock_scope_ref`, and the whole supplied object travels as
+ * `scope`, so a reader still sees which accepted scope was named.
+ *
+ * WHAT IS NOT CHECKED HERE: that these three digests are the ones the verifier
+ * accepted for the projection the kernel read. This function is handed a
+ * binding; it is the trusted RECORDER that compares it against the kernel's own
+ * verified_binding for the computation being stored. Through a direct
+ * store.record() call the binding is trusted because the seat that constructed
+ * it is trusted, and that limit is carried on every readback in
  * JOURNEY_ONE_CLOCK_STORE_CANNOT_PROVE instead of being left for a reader to
  * discover.
  */
@@ -616,15 +672,22 @@ export function journeyOneClockScopeBinding(scope) {
   }
   const fields = deepFreeze(Object.fromEntries(
     JOURNEY_ONE_CLOCK_SCOPE_FIELDS.map(field => [field, scope[field]])));
+  // THE PREIMAGE IS THE SIX IDENTITY FIELDS. `scope_ref` is deliberately absent:
+  // a label inside the hash makes one accepted scope addressable under as many
+  // keys as a caller has names for it, which is a one-clock-per-LABEL rule
+  // wearing the name of a one-clock-per-scope rule.
+  const identity = deepFreeze(Object.fromEntries(
+    JOURNEY_ONE_CLOCK_SCOPE_IDENTITY_FIELDS.map(field => [field, scope[field]])));
   return deepFreeze({
-    clock_scope_key: digest([JOURNEY_ONE_CLOCK_SCOPE_DOMAIN_TAG, fields]),
+    clock_scope_key: digest([JOURNEY_ONE_CLOCK_SCOPE_DOMAIN_TAG, identity]),
     clock_scope_ref: scope.scope_ref,
     tenant: scope.tenant,
     scope: fields,
+    scope_identity: identity,
   });
 }
 
-/** The scope key alone: sha256 over the canonical [domain_tag, scope fields]. */
+/** The scope key alone: sha256 over the canonical [domain_tag, identity fields]. */
 export function journeyOneClockScopeKey(scope) {
   return journeyOneClockScopeBinding(scope).clock_scope_key;
 }
@@ -1058,6 +1121,17 @@ export function createEphemeralJourneyOneClockJournal({ now = Date.now } = {}) {
           { invariant: "j1_clock_scope_sealed_at_creation", clock_key,
             bound_clock_scope_key: existing.clock_scope_key, supplied_clock_scope_key: clock_scope_key });
       }
+      // THE LABEL IS SEALED AT BINDING. It is not identity — the key above
+      // ignores it, which is what makes a relabelled scope the SAME scope — and
+      // precisely because it is not identity, the record must not quietly hold
+      // two names for one scope or silently overwrite the one it was bound
+      // under. Renaming an accepted scope is an explicit external act.
+      if (bound && bound.clock_scope_ref !== clock_scope_ref) {
+        refuse("clock_scope_label_changed",
+          "this authoritative scope was bound under another label; the label is provenance, is recorded once, and is never rewritten by a later write",
+          { invariant: "j1_clock_scope_label_is_not_identity", clock_scope_key,
+            bound_clock_scope_ref: bound.clock_scope_ref, supplied_clock_scope_ref: clock_scope_ref });
+      }
       const row = bound ?? deepFreeze({ clock_key, clock_scope_key, clock_scope_ref, tenant,
         bound_at: new Date(now()).toISOString() });
       byScopeKey.set(clock_scope_key, row);
@@ -1297,10 +1371,16 @@ export function createJourneyOneClockStore({
   return Object.freeze({
     writer,
     journal_is_durable: journal.durable === true,
-    /** The authoritative scope this store writes for, or null. Zero effect. */
+    /**
+     * The authoritative scope this store writes for, or null. Zero effect.
+     * `scope_identity` is the six-field preimage the key is derived from, and
+     * `scope` is the whole supplied binding including its human label: the two
+     * are separate here for the same reason they are separate in the hash.
+     */
     clock_scope: scope === null ? null : deepFreeze({
       clock_scope_key: scope.clock_scope_key, clock_scope_ref: scope.clock_scope_ref,
-      tenant: scope.tenant, scope: copy(scope.scope) }),
+      tenant: scope.tenant, scope: copy(scope.scope),
+      scope_identity: copy(scope.scope_identity) }),
 
     /**
      * Which clock this store's authoritative scope already holds, or null.
@@ -1577,6 +1657,93 @@ export function createJourneyOneClockStore({
 // ---------------------------------------------------------------------------
 
 /**
+ * THE KERNEL'S OWN ANSWER ABOUT WHICH ACCEPTED SCOPE A COMPUTATION WAS JUDGED
+ * UNDER, read off the result and compared against the scope the store was
+ * constructed for. Returns the scope key derived from the kernel's answer.
+ *
+ * WHY THIS IS NOT A SECOND AUTHORITY. It derives nothing new: it hands the
+ * kernel's `verified_binding` to the SAME journeyOneClockScopeBinding every
+ * other caller uses, so there is one derivation, one domain tag and one
+ * preimage. The label comes from the store's own binding because a label is not
+ * identity and never enters the key — feeding it in keeps the shape complete
+ * without letting it affect the comparison, which is decided entirely by the six
+ * facts the kernel enforced.
+ *
+ * MISSING OR MALFORMED REFUSES, WITH NO BYPASS. A kernel that returned no
+ * binding, a binding of another schema, or a binding whose fields are not the
+ * declared closed set is not a computation this seat can file: the alternative
+ * is writing a revision under a scope nothing checked, which is the state this
+ * requirement existed to end. Every field is read exactly ONCE into a local
+ * snapshot before it is validated, so an exotic accessor cannot answer the
+ * validation and the derivation differently.
+ *
+ * WHAT IT STILL DOES NOT PROVE: that the projection the kernel read was
+ * authentic. The verifier remains trusted server code; this compares two
+ * trusted-seat statements about the same computation and catches the case where
+ * they disagree.
+ */
+function assertVerifiedBindingMatchesScope(result, installed) {
+  const raw = result?.verified_binding;
+  if (raw === undefined || raw === null) {
+    refuse("clock_verified_binding_unavailable",
+      "this kernel returned no verified_binding beside its state, so the scope this revision would be written under could not be checked against the computation being stored; recording is refused rather than filed under an unchecked scope",
+      { invariant: "j1_clock_scope_binds_one_clock",
+        expected_schema_version: JOURNEY_ONE_CLOCK_VERIFIED_BINDING });
+  }
+  if (!isPlainObject(raw)) {
+    refuse("clock_verified_binding_malformed", "verified_binding must be an object",
+      { invariant: "j1_clock_scope_binds_one_clock", path: "verified_binding" });
+  }
+  const keys = Object.keys(raw);
+  if (keys.length !== JOURNEY_ONE_CLOCK_VERIFIED_BINDING_FIELDS.length ||
+      JOURNEY_ONE_CLOCK_VERIFIED_BINDING_FIELDS.some(field => !Object.hasOwn(raw, field))) {
+    refuse("clock_verified_binding_malformed",
+      "verified_binding must carry exactly the kernel's declared fields",
+      { invariant: "j1_clock_scope_binds_one_clock",
+        expected: [...JOURNEY_ONE_CLOCK_VERIFIED_BINDING_FIELDS], actual: [...keys].sort() });
+  }
+  // Read once, then validate the snapshot rather than the source.
+  const seen = Object.fromEntries(
+    JOURNEY_ONE_CLOCK_VERIFIED_BINDING_FIELDS.map(field => [field, raw[field]]));
+  if (seen.schema_version !== JOURNEY_ONE_CLOCK_VERIFIED_BINDING) {
+    refuse("clock_verified_binding_malformed",
+      `verified_binding.schema_version must be ${JOURNEY_ONE_CLOCK_VERIFIED_BINDING}`,
+      { invariant: "j1_clock_scope_binds_one_clock", actual: seen.schema_version });
+  }
+  for (const field of ["subject_digest", "candidate_digest", "policy_digest"]) {
+    if (typeof seen[field] !== "string" || !SHA256_REF.test(seen[field])) {
+      refuse("clock_verified_binding_malformed",
+        `verified_binding.${field} must be a sha256: reference`,
+        { invariant: "j1_clock_scope_binds_one_clock", path: `verified_binding.${field}` });
+    }
+  }
+  // Derived through the ONE scope derivation, which is also what checks the two
+  // gate ids against JOURNEY_ONE_DEADLINE_CONTRACT and the tenant against this
+  // rail's, and refuses each by its own name.
+  const derived = journeyOneClockScopeBinding({
+    benchmark_candidate_digest: seen.candidate_digest,
+    benchmark_policy_digest: seen.policy_digest,
+    benchmark_subject_digest: seen.subject_digest,
+    clock_origin_gate_id: seen.clock_origin_gate_id,
+    clock_terminus_gate_id: seen.clock_terminus_gate_id,
+    scope_ref: installed.clock_scope_ref,
+    tenant: seen.tenant,
+  });
+  if (derived.clock_scope_key !== installed.clock_scope_key) {
+    refuse("clock_scope_not_the_verified_binding",
+      "this store writes for one authoritative clock scope, and the kernel verified this computation under a different one. A revision is never filed under a scope the computation was not judged against",
+      { invariant: "j1_clock_scope_binds_one_clock",
+        store_clock_scope_key: installed.clock_scope_key,
+        verified_clock_scope_key: derived.clock_scope_key,
+        differing_fields: JOURNEY_ONE_CLOCK_SCOPE_IDENTITY_FIELDS.filter(field =>
+          installed.scope_identity?.[field] !== derived.scope_identity[field]),
+        store_scope_identity: copy(installed.scope_identity ?? null),
+        verified_scope_identity: copy(derived.scope_identity) });
+  }
+  return derived.clock_scope_key;
+}
+
+/**
  * Evaluate one envelope with an ALREADY-CONSTRUCTED kernel and persist the
  * result as the next revision of its own clock.
  *
@@ -1591,6 +1758,14 @@ export function createJourneyOneClockStore({
  * It records a computation with accurately scoped provenance and independently
  * rebuilt content, which is exactly what the header says a trusted writer may
  * do and no more.
+ *
+ * THE SCOPE IS CHECKED HERE, AND THIS IS THE ONLY SEAT THAT CAN. The kernel
+ * returns `verified_binding` beside its state; the store carries the
+ * authoritative scope it was constructed for. This function is the one place
+ * both are in hand, so it compares them BEFORE the store is called at all — no
+ * journal read, no compare-and-swap, no row. A store with no scope cannot be
+ * recorded through at all, and that refuses at CONSTRUCTION rather than on the
+ * first write.
  */
 export function createJourneyOneClockRecorder({ clock, store, verifier_ref } = {}) {
   if (!clock || typeof clock.evaluate !== "function") {
@@ -1601,6 +1776,13 @@ export function createJourneyOneClockRecorder({ clock, store, verifier_ref } = {
   if (!store || typeof store.record !== "function" || typeof store.read !== "function") {
     refuse("invalid_shape", "a recorder needs a clock store", { path: "store" });
   }
+  const installed = store.clock_scope ?? null;
+  if (!isPlainObject(installed) || typeof installed.clock_scope_key !== "string" ||
+      typeof installed.clock_scope_ref !== "string") {
+    refuse("clock_scope_binding_required",
+      "a recorder writes, and every write is filed under the authoritative clock scope its store was constructed for; a store without one cannot be recorded through, because the kernel's verified binding would have nothing to be checked against",
+      { invariant: "j1_clock_scope_binds_one_clock", path: "store.clock_scope" });
+  }
   return Object.freeze({
     async evaluateAndRecord({ envelope, expected_prior_history_digest, idempotency_key, clock_ref = null } = {}) {
       // The kernel runs FIRST and on its own terms. If it refuses, nothing is
@@ -1608,6 +1790,10 @@ export function createJourneyOneClockRecorder({ clock, store, verifier_ref } = {
       // `origin_reset_or_rebase` from the kernel should see that code, not a
       // second vocabulary for the same fact.
       const result = clock.evaluate(envelope);
+      // AND THE SCOPE IT WAS JUDGED UNDER IS THE SCOPE IT IS FILED UNDER. This
+      // runs before store.record(), so a mismatch, a missing binding or a
+      // malformed one refuses with no journal call and no row written.
+      const clock_scope_key = assertVerifiedBindingMatchesScope(result, installed);
       const recorded = await store.record({
         state: copy(result.state), expected_prior_history_digest, idempotency_key,
         claimed_history_digest: result.state.history_digest, clock_ref, verifier_ref,
@@ -1618,6 +1804,11 @@ export function createJourneyOneClockRecorder({ clock, store, verifier_ref } = {
         clock_key: recorded.clock_key,
         revision_ordinal: recorded.revision_ordinal,
         history_digest: recorded.history_digest,
+        // The scope this revision was filed under, and the fact that it is the
+        // one the kernel verified this computation against — reported rather
+        // than assumed, because the check is what makes it true.
+        clock_scope_key,
+        clock_scope_matches_verified_binding: true,
         expected_prior_history_digest: recorded.expected_prior_history_digest ?? null,
         recorded_at: recorded.recorded_at,
         replayed: recorded.replayed === true,
@@ -1666,21 +1857,38 @@ export const JOURNEY_ONE_CLOCK_INPUT_AUTHORITY_REQUIREMENT = deepFreeze({
     "Have that same reader return the authoritative clock scope it read the projection under, and hand it to createJourneyOneClockStore({ clock_scope }). It is a construction-time trusted binding on purpose; a scope taken from a request would let one caller present a new origin AND a new scope and create a second clock for one program.",
   ],
   /**
-   * THE ONE PLACE THIS RECORD LAYER IS ASKING FOR SOMETHING IT CANNOT BUILD.
-   * Stated as an exact, read-only requirement rather than filled in with a
-   * policy invented here: no scope is derived from a stored history, and no
-   * caller-supplied value is promoted into one.
+   * THE ONE THING THIS RECORD LAYER ASKED ANOTHER FILE FOR, AND WHAT LANDED.
+   * The scope is now derived from the computation being stored on the trusted
+   * recorder path. Nothing else about the missing public authority changed, and
+   * the entries above are unaltered.
    */
   read_only_kernel_projection_extension_required: {
-    resolved: false,
-    why: "doctorcre-v5-journey-one-clock.v2 is the whole of what createJourneyOneClock().evaluate() returns about a clock, and it carries no subject_digest, candidate_digest or policy_digest -- the three the kernel validates the accepted benchmark and every receipt against. So this rail cannot DERIVE a clock's authoritative scope from the computation it is storing; it can only compare the binding it was constructed with.",
-    exact_requirement: "A read-only projection-binding projection from journey-one-clock.v5.js: the trusted binding {subject_digest, candidate_digest, policy_digest} the kernel already read and enforced, returned beside the state (or exposed by a narrow export taking the verified projection) so a store can derive the scope key from the same facts the kernel judged. Read-only, decides nothing, and adds no field to the hashed state -- adding one would change every history_digest and rebase every stored clock.",
-    what_it_would_change_here: "journeyOneClockScopeBinding would be derived from the kernel's own answer per revision and compared against the store's binding, so a scope that did not match the projection the kernel actually read would refuse. Until then the binding is trusted because the seat that supplies it is trusted, and that is stated in record_layer_cannot_prove rather than implied.",
+    resolved: true,
+    exact_requirement: "A read-only projection-binding projection from journey-one-clock.v5.js: the trusted binding {subject_digest, candidate_digest, policy_digest} the kernel already read and enforced, returned beside the state so a store can derive the scope key from the same facts the kernel judged. Read-only, decides nothing, and adds no field to the hashed state -- adding one would change every history_digest and rebase every stored clock.",
+    what_landed: "createJourneyOneClock().evaluate() returns verified_binding beside the state: {schema_version, tenant, subject_digest, candidate_digest, policy_digest, clock_origin_gate_id, clock_terminus_gate_id}, deep-frozen with the rest of the result. Every value was already enforced by that evaluation -- the three digests against the accepted benchmark and against every receipt read, the gate ids by the exact deadline-contract comparison. createJourneyOneClockRecorder derives the authoritative scope key from it through the same journeyOneClockScopeBinding every other caller uses and refuses when it is not the scope the store was constructed for, BEFORE any journal read or write. A missing or malformed binding refuses too; there is no bypass and no option.",
+    hashed_state_unchanged: "doctorcre-v5-journey-one-clock.v2 gained no field. The state, its schema version and every history_digest are exactly what they were, which is why no stored clock is rebased and no migration is proposed.",
+    still_not_proved: [
+      "that the projection the kernel read was authentic: verifySnapshot remains trusted server code, and this compares two trusted-seat statements about one computation rather than authenticating either",
+      "anything at all about a direct store.record() call or a direct SQL writer: those are handed a STATE, which carries none of the three digests, so on those paths the store's scope is still compared and never verified",
+      "that the scope key this module derives equals the one ops.j1_clock_scope_digest derives: both hash the canonical [domain tag, the same six identity fields], and the SQL has never been executed",
+    ],
     explicitly_not_done_instead: [
+      "adding the binding to the hashed state, which would change every history_digest and rebase every stored clock",
       "deriving a scope from the stored history's origin fields, which would make the scope move with the origin and defend nothing",
-      "accepting a scope as a request field",
+      "accepting a scope, or a verified binding, as a request field",
       "inventing a fixed one-clock-per-tenant rule, which is a policy nobody accepted",
     ],
+  },
+  /**
+   * A SEPARATE, ALREADY-EXPLOITABLE DEFECT IN THE SCOPE KEY, fixed beside the
+   * extension above because they are one seam: a scope identity that a caller
+   * could move by renaming is not an identity at all.
+   */
+  scope_label_excluded_from_identity: {
+    resolved: true,
+    defect: "journeyOneClockScopeBinding hashed all seven declared fields, including scope_ref, while its own contract said scope_ref is a human label carrying no authority. One accepted scope -- identical tenant, benchmark subject, candidate and policy digests and gate ids -- produced DIFFERENT keys under safe:clock-scope:a and safe:clock-scope:b, so a relabelled store could present a fresh origin and create a second clock for one program: exactly the evasion the scope exists to refuse.",
+    fix: "The key's preimage is JOURNEY_ONE_CLOCK_SCOPE_IDENTITY_FIELDS -- the six identity fields, scope_ref excluded -- in both this module and ops/journey-one-clock-store.candidate.sql, under a domain tag versioned to doctorcre:j1-clock-scope:v2 because the published key changed. The label is still supplied, still required, still stored and still read back; it is sealed at binding, so a second label for a bound scope is refused by name (j1_clock_scope_label_is_not_identity) rather than kept or overwritten.",
+    nothing_was_rewritten: "The candidate SQL has never been applied and no clock has been started, so no stored key changed, no data was migrated and no backfill is proposed. If a key had ever been published durably, moving it would be an explicit migration owned by whoever owns the store.",
   },
   explicitly_refused: [
     "a caller envelope carrying { verified: true } or any self-hashed attestation",
@@ -1729,7 +1937,8 @@ export function journeyOneClockStoreIntegrationRequirements() {
     storage_notes: [
       "Identity derivation, row decomposition, whole-content reconstruction, digest recomputation, exact-prior compare-and-swap, idempotency binding, the append-only diff and the deterministic readback are implemented and exercised in-process.",
       "One history's whole shape and semantics are read by the kernel's own readJourneyOneClockHistory, called on every write and on every readback. This rail owns no second history validator; it owns the pairwise diff against the head on disk, which the kernel structurally cannot see.",
-      "A clock's derived key defends against a caller RENAMING a clock and against nothing else: a caller presenting a different origin derives a different key, whose creation meets no compare-and-swap. The authoritative clock scope is what refuses that, and it is a construction-time trusted binding this record layer compares rather than verifies.",
+      "A clock's derived key defends against a caller RENAMING a clock and against nothing else: a caller presenting a different origin derives a different key, whose creation meets no compare-and-swap. The authoritative clock scope is what refuses that. It is a construction-time trusted binding, checked against the kernel's own verified_binding on the recorder path and compared without being verified on a direct record() call.",
+      "The scope key is derived from six identity fields and never from scope_ref: a scope's human label is provenance, so one accepted scope under two names is one scope and cannot hold two clocks. The label is sealed at binding and a changed one is refused by name.",
       "The durable journal binds ops/journey-one-clock-store.candidate.sql, which is candidate source: it has not been applied as a numbered migration and has never been executed.",
     ],
     clock_scope_binding_required_for_writes: true,
@@ -1740,7 +1949,8 @@ export function journeyOneClockStoreIntegrationRequirements() {
     ],
     trusted_integration_contract: {
       entry_point: "createJourneyOneClockRecorder({ clock, store, verifier_ref })",
-      requires: "a kernel built by createJourneyOneClock({ verifySnapshot }), which only trusted server code can construct",
+      requires: "a kernel built by createJourneyOneClock({ verifySnapshot }), which only trusted server code can construct, and a store constructed with the authoritative clock scope it writes for",
+      checks_before_any_write: "the kernel's verified_binding for this computation derives the authoritative scope key, and a scope that is not the store's refuses -- as does a missing or malformed binding -- before any journal read, compare-and-swap or row",
       records: "a kernel computation with accurately scoped provenance and independently rebuilt content",
       does_not_record: "an acceptance, a receipt, a verification, or any claim of deadline success",
     },

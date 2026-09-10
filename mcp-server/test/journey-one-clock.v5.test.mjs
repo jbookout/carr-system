@@ -4,6 +4,7 @@ import { canonicalJson, digest } from "../src/artifact-trust.js";
 import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
 import { DEADLINE_GAP_SHIFTED, DEADLINE_OVERLAP_ORIGIN_OFFSET, DEADLINE_PLAIN,
   JOURNEY_ONE_CLOCK_PROJECTION, JOURNEY_ONE_CLOCK_SCHEMA, JOURNEY_ONE_DEADLINE_CONTRACT,
+  JOURNEY_ONE_CLOCK_VERIFIED_BINDING, JOURNEY_ONE_CLOCK_VERIFIED_BINDING_FIELDS,
   createJourneyOneClock, chicagoThirtyDayDeadline,
   readJourneyOneClockHistory } from "../src/journey-one-clock.v5.js";
 
@@ -1285,6 +1286,67 @@ test("a custom array prototype cannot smuggle a value past validation", () => {
   assert.throws(() => clock.evaluate({}), e => e.code === "invalid_object");
   // An ordinary array is untouched by the check.
   assert.equal(run(snapshot()).state.status, "running");
+});
+
+// --- the verified binding, beside the state ---------------------------------
+
+test("the verified binding travels beside the state and never inside it", () => {
+  const result = run(snapshot());
+  const binding = result.verified_binding;
+  // Exactly the declared closed field set, and the kernel's own values.
+  assert.deepEqual(Object.keys(binding).sort(), [...JOURNEY_ONE_CLOCK_VERIFIED_BINDING_FIELDS]);
+  assert.equal(binding.schema_version, JOURNEY_ONE_CLOCK_VERIFIED_BINDING);
+  assert.equal(binding.tenant, ORGANIZATION_TENANT_ID);
+  assert.equal(binding.subject_digest, D(1));
+  assert.equal(binding.candidate_digest, D(2));
+  assert.equal(binding.policy_digest, D(3));
+  assert.equal(binding.clock_origin_gate_id, JOURNEY_ONE_DEADLINE_CONTRACT.clock_origin_gate_id);
+  assert.equal(binding.clock_terminus_gate_id, JOURNEY_ONE_DEADLINE_CONTRACT.clock_terminus_gate_id);
+
+  // THE HASHED STATE IS UNTOUCHED. Not one of those fields is in it, the state
+  // is still the twenty-one the schema declares, and history_digest is still
+  // exactly the hash of the state minus itself. A field added here would have
+  // rebased every stored clock.
+  assert.equal(Object.keys(result.state).length, 21);
+  for (const field of [...JOURNEY_ONE_CLOCK_VERIFIED_BINDING_FIELDS, "verified_binding"]) {
+    if (field === "schema_version") continue;
+    assert.ok(!Object.hasOwn(result.state, field), `${field} must not be in the hashed state`);
+  }
+  const { history_digest, ...body } = result.state;
+  assert.equal(digest(body), history_digest);
+  assert.equal(result.state.schema_version, JOURNEY_ONE_CLOCK_SCHEMA);
+  // And the same projection evaluated again produces the same history digest:
+  // the binding is not in the preimage, so it cannot move it.
+  assert.equal(run(snapshot()).state.history_digest, history_digest);
+
+  // READ-ONLY, and frozen with the rest of the result.
+  assert.equal(Object.isFrozen(binding), true);
+  assert.throws(() => { binding.subject_digest = D(99); }, TypeError);
+  assert.throws(() => { delete binding.policy_digest; }, TypeError);
+  assert.throws(() => { result.verified_binding = { subject_digest: D(99) }; }, TypeError);
+  assert.equal(binding.subject_digest, D(1));
+});
+
+test("the verified binding can only report values this evaluation actually enforced", () => {
+  // The three digests are the binding EVERY receipt and the accepted benchmark
+  // had to match, so a projection whose parts disagree never produces a result
+  // to read a binding off at all.
+  const benchmark = snapshot(); benchmark.benchmark.subject_digest = D(31);
+  refuse(benchmark, "benchmark_binding_mismatch");
+  const receipt = snapshot(); receipt.minimum_history[0].receipt.policy_digest = D(32);
+  refuse(receipt, "receipt_binding_mismatch");
+  // Moved consistently, the binding moves with them — it is read from the
+  // projection the verifier authenticated, not from a constant.
+  const moved = snapshot();
+  for (const target of [moved.binding, moved.benchmark, moved.minimum_history[0].receipt]) {
+    target.subject_digest = D(31);
+  }
+  assert.equal(run(moved).verified_binding.subject_digest, D(31));
+  // The gate ids come from the accepted deadline contract, which the benchmark
+  // is compared against exactly; a benchmark carrying another contract refuses.
+  const contract = snapshot();
+  contract.benchmark.deadline_contract.clock_terminus_gate_id = "some-other-gate-accepted";
+  refuse(contract, "wrong_deadline_contract");
 });
 
 test("closed projections, hidden fields, mutation and side effects remain bounded", () => {

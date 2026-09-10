@@ -27,6 +27,11 @@ import {
   DEADLINE_PLAIN, JOURNEY_ONE_CLOCK_PROJECTION, JOURNEY_ONE_DEADLINE_CONTRACT,
   chicagoThirtyDayDeadline, createJourneyOneClock,
 } from "../src/journey-one-clock.v5.js";
+import {
+  createEphemeralJourneyOneClockJournal, createJourneyOneClockRecorder,
+  createJourneyOneClockStore, journeyOneClockHistoryDigest, journeyOneClockKeyForState,
+  journeyOneClockScopeKey,
+} from "../src/journey-one-clock-store.v5.js";
 
 const D = n => `sha256:${String(n).padStart(2, "0").repeat(32)}`;
 const I = actor => ({
@@ -270,6 +275,195 @@ function seam() {
   const view = journeyOneClockMinimumReceiptView(join.proposed_receipt);
   return { join, view, result: evaluateOnce(clockProjection(join, view)) };
 }
+
+// --- the record layer, on the same one artifact ------------------------------
+//
+// The two modules above are pure. This third seam is the durable one: the clock
+// the join started, evaluated by a REAL kernel and filed by the REAL store
+// through its trusted recorder, into a non-durable reference journal. Nothing
+// here is authenticated and nothing is persisted beyond the process; what is
+// exercised is that the scope a revision is filed under is the scope the kernel
+// verified THIS artifact's projection against.
+
+/** A kernel whose envelopes can be handed out one at a time, for the recorder. */
+function clockHarness() {
+  const evidence = new Map(); let serial = 0;
+  const clock = createJourneyOneClock({
+    verifySnapshot(envelope) {
+      const found = evidence.get(digest(envelope));
+      if (!found) throw new Error("synthetic-authentication-refused");
+      return { envelope_digest: digest(envelope), snapshot: copy(found) };
+    },
+  });
+  return { clock, envelopeFor(projection) {
+    const envelope = { synthetic_receipt_ref: `j1-seam-record-${++serial}` };
+    evidence.set(digest(envelope), copy(projection));
+    return envelope;
+  } };
+}
+
+const STORE_ACTOR = { slug: "claude", human: false, sponsoring_human_slug: "joe" };
+const VERIFIER_REF = "safe:verifier:j1-seam-trusted-projection-verifier";
+/**
+ * The accepted scope this seam's clock belongs to, composed exactly as a trusted
+ * integration would: the projection's own three binding digests and the two gate
+ * ids the deadline contract names. `scope_ref` is a label and is not hashed.
+ */
+const SEAM_SCOPE = Object.freeze({
+  benchmark_candidate_digest: D(2),
+  benchmark_policy_digest: D(3),
+  benchmark_subject_digest: D(1),
+  clock_origin_gate_id: JOURNEY_ONE_DEADLINE_CONTRACT.clock_origin_gate_id,
+  clock_terminus_gate_id: JOURNEY_ONE_DEADLINE_CONTRACT.clock_terminus_gate_id,
+  scope_ref: "safe:clock-scope:j1-seam",
+  tenant: ORGANIZATION_TENANT_ID,
+});
+let seamKeySerial = 0;
+const uuid = () =>
+  `00000000-0000-4000-8000-${(++seamKeySerial).toString(16).padStart(12, "0")}`;
+
+function recordingSeam(scope = SEAM_SCOPE) {
+  const journal = createEphemeralJourneyOneClockJournal();
+  const kernel = clockHarness();
+  const store = createJourneyOneClockStore({ journal, actor: STORE_ACTOR, clock_scope: scope });
+  return { journal, kernel, store,
+    recorder: createJourneyOneClockRecorder({ clock: kernel.clock, store, verifier_ref: VERIFIER_REF }) };
+}
+
+test("the clock the join started is stored under the scope the kernel verified this artifact against", async () => {
+  const { join, view } = seam();
+  const projection = clockProjection(join, view);
+  const expected = evaluateOnce(copy(projection));
+  const { kernel, store, recorder } = recordingSeam();
+
+  const recorded = await recorder.evaluateAndRecord({
+    envelope: kernel.envelopeFor(projection), expected_prior_history_digest: null,
+    idempotency_key: uuid(), clock_ref: "J1-SEAM" });
+
+  // The clock is addressed by the origin A00 published, and filed under the
+  // scope derived from the binding the kernel enforced over that same artifact.
+  assert.equal(recorded.clock_key, journeyOneClockKeyForState(expected.state));
+  assert.equal(recorded.clock_scope_key, journeyOneClockScopeKey(SEAM_SCOPE));
+  assert.equal(recorded.clock_scope_matches_verified_binding, true);
+  assert.equal(expected.verified_binding.subject_digest, D(1));
+  assert.equal(expected.verified_binding.candidate_digest, D(2));
+  assert.equal(expected.verified_binding.policy_digest, D(3));
+  assert.equal(expected.verified_binding.tenant, ORGANIZATION_TENANT_ID);
+
+  // THE STORED HISTORY IS THE KERNEL'S, DIGEST FOR DIGEST. The binding rides
+  // outside the hashed state, so storing it changed nothing about the history.
+  assert.equal(recorded.history_digest, expected.state.history_digest);
+  const readback = await store.read(recorded.clock_key);
+  assert.deepEqual(readback.history, copy(expected.state));
+  assert.equal(journeyOneClockHistoryDigest(readback.history), expected.state.history_digest);
+  assert.equal(readback.history.origin_receipt_digest, join.proposed_receipt_reference_digest);
+  assert.equal(readback.history.origin_at, AS_OF);
+  assert.equal(readback.clock_scope_ref, SEAM_SCOPE.scope_ref);
+  // And storing it accepts nothing.
+  assert.equal(recorded.deadline_accepted_by_record_layer, false);
+  assert.equal(recorded.kernel_verdict.deadline_success, false);
+  assert.equal(recorded.effects.acceptances, 0);
+  assert.equal(recorded.effects.clock_started, false);
+});
+
+test("the terminus receipt appends onto the stored clock, and the CAS is exact", async () => {
+  const { join, view } = seam();
+  const { kernel, store, recorder } = recordingSeam();
+  const first = await recorder.evaluateAndRecord({
+    envelope: kernel.envelopeFor(clockProjection(join, view)),
+    expected_prior_history_digest: null, idempotency_key: uuid() });
+
+  // AN EXACT REPLAY IS NOT A SECOND WRITE.
+  const shared = uuid();
+  const advanced = clockProjection(join, view);
+  const observedAt = iso(Date.parse(AS_OF) + 20 * DAY);
+  advanced.as_of = observedAt;
+  advanced.history = copy((await store.read(first.clock_key)).history);
+  advanced.completion = {
+    gate_id: "journey-one-kernel-production-accepted",
+    combiner: "all_current_exact_distinct_pass",
+    obligation_decision_ids: ["Q002.D1", "Q014.D1", "Q123.D1"],
+    receipts: [terminusReceipt(observedAt)],
+  };
+  const done = await recorder.evaluateAndRecord({ envelope: kernel.envelopeFor(advanced),
+    expected_prior_history_digest: first.history_digest, idempotency_key: shared });
+  assert.equal(done.revision_ordinal, 1);
+  assert.equal(done.kernel_verdict.status, "completed_on_time");
+  const replay = await recorder.evaluateAndRecord({ envelope: kernel.envelopeFor(advanced),
+    expected_prior_history_digest: first.history_digest, idempotency_key: shared });
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.history_digest, done.history_digest);
+
+  // A STALE PRIOR IS REFUSED, and the head is untouched by the attempt.
+  await assert.rejects(recorder.evaluateAndRecord({ envelope: kernel.envelopeFor(advanced),
+    expected_prior_history_digest: first.history_digest, idempotency_key: uuid() }),
+    error => error.code === "clock_stale_prior_history_digest");
+  const readback = await store.read(first.clock_key);
+  assert.equal(readback.revision_count, 2);
+  assert.equal(readback.history_digest, done.history_digest);
+  assert.equal(readback.history.completion_observed_at, observedAt);
+});
+
+test("a store for another accepted scope cannot file this artifact, and files nothing", async () => {
+  const { join, view } = seam();
+  const projection = clockProjection(join, view);
+  const expectedKey = journeyOneClockKeyForState(evaluateOnce(copy(projection)).state);
+
+  // Each of the three binding digests, moved one at a time on the STORE's side.
+  for (const field of ["benchmark_subject_digest", "benchmark_candidate_digest",
+    "benchmark_policy_digest"]) {
+    const { kernel, store, journal } = recordingSeam({ ...SEAM_SCOPE, [field]: D(50) });
+    const recorder = createJourneyOneClockRecorder({
+      clock: kernel.clock, store, verifier_ref: VERIFIER_REF });
+    await assert.rejects(recorder.evaluateAndRecord({
+      envelope: kernel.envelopeFor(projection), expected_prior_history_digest: null,
+      idempotency_key: uuid() }), error => {
+      assert.equal(error.code, "clock_scope_not_the_verified_binding");
+      assert.deepEqual(error.detail.differing_fields, [field]);
+      return true;
+    });
+    assert.equal(await journal.readClock(expectedKey), null, "nothing was written for it");
+    assert.equal((await store.read(expectedKey)).exists, false);
+  }
+});
+
+test("relabelling this artifact's accepted scope opens no second clock for it", async () => {
+  const { join, view } = seam();
+  const { journal, kernel, store, recorder } = recordingSeam();
+  const first = await recorder.evaluateAndRecord({
+    envelope: kernel.envelopeFor(clockProjection(join, view)),
+    expected_prior_history_digest: null, idempotency_key: uuid() });
+
+  // The same accepted scope under a different human name is the SAME scope, so
+  // a second admitted minimum presented under it meets the clock that scope
+  // already holds instead of starting a fresh one.
+  const renamed = createJourneyOneClockStore({ journal, actor: STORE_ACTOR,
+    clock_scope: { ...SEAM_SCOPE, scope_ref: "safe:clock-scope:j1-seam-renamed" } });
+  assert.equal(renamed.clock_scope.clock_scope_key, store.clock_scope.clock_scope_key);
+  // A SECOND ADMITTED MINIMUM, joined an hour later: a genuinely different
+  // origin, and therefore a clock key this journal has never seen, so the
+  // compare-and-swap has nothing to refuse it with.
+  const laterAt = iso(Date.parse(AS_OF) + HOUR);
+  const laterProjection = minimumProjection();
+  laterProjection.as_of = laterAt;
+  const secondJoin = joinOnce(laterProjection);
+  const secondView = journeyOneClockMinimumReceiptView(secondJoin.proposed_receipt);
+  const secondProjection = clockProjection(secondJoin, secondView,
+    { asOf: iso(Date.parse(laterAt) + HOUR), admittedAt: laterAt });
+  const rebased = evaluateOnce(copy(secondProjection)).state;
+  assert.equal(rebased.origin_at, laterAt);
+  assert.notEqual(journeyOneClockKeyForState(rebased), first.clock_key);
+
+  const other = clockHarness();
+  const otherRecorder = createJourneyOneClockRecorder({
+    clock: other.clock, store: renamed, verifier_ref: VERIFIER_REF });
+  await assert.rejects(otherRecorder.evaluateAndRecord({
+    envelope: other.envelopeFor(secondProjection),
+    expected_prior_history_digest: null, idempotency_key: uuid() }),
+    error => error.code === "clock_scope_already_bound");
+  assert.equal(await journal.readClock(journeyOneClockKeyForState(rebased)), null);
+  assert.equal((await store.read(first.clock_key)).revision_count, 1);
+});
 
 // --- one receipt, one shape -------------------------------------------------
 
