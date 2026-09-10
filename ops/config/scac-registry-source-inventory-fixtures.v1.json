@@ -32910,9 +32910,9 @@
   ],
   "current_source_review": {
     "base_version": "v24",
-    "reason": "Codex continuity reference-manifest capacity hotfix, approved 0494/0494a interstitial pair, and 0494a rollback/readback optional-letter compatibility repair: regenerate the existing v24 overlay from the release candidate source. Existing ingresses only; no ingress is added or removed. J101 canonical board field-base and own write receipt source changes; only existing tools.js source digests advance, no ingress or authority change.",
+    "reason": "Codex continuity reference-manifest capacity hotfix, approved 0494/0494a interstitial pair, and 0494a rollback/readback optional-letter compatibility repair: regenerate the existing v24 overlay from the release candidate source. Existing ingresses only; no ingress is added or removed. J101 canonical board field-base and own write receipt source changes; only existing tools.js source digests advance, no ingress or authority change. Test-collector reach repair (2026-09-10): ops/ci.sh gains three collection globs so the tools/room-bridge unit suites are actually run at a merge gate, and its source digest advances accordingly. Content only — the entrypoint COUNT is unchanged at 835, because discoverScriptEntrypoints derives entries from tracked files and isScriptEntrypoint excludes every test- and selftest-named path, so collecting more test files inside an existing class adds no ingress. (Correction to the sentence above: the loop gained TWO glob patterns, not three.) Correction round (2026-09-10): ops/ci.sh's gates_name_the_move hint narrows its *-selftest.py case to suites whose hooks/<base>.py is on disk, so a failing suite with no gate is no longer told to co-change one; the source digest advances again for that edit alone. Content only, count still 835 — the change is inside an existing entrypoint's body and touches no ingress, no authority and no principal mode. No ingress added or removed, no authority change.",
     "expected_count": 835,
-    "expected_sha256": "c6205b14cf51a8e8e0f5a35b9ffecc83d493d0c4be89e78d0f5651a5fa5cf941",
+    "expected_sha256": "c29ca89481f3f556aff29a798d4258149c1358f76ba5b3fb0d61a4160f06e454",
     "upsert": [
       {
         "ingress_key": "mcp-tool:accept-workflow",
@@ -35470,8 +35470,8 @@
         "operation": "ops/ci.sh",
         "effect_class": "administrative_mutation",
         "source_locator": "ops/ci.sh",
-        "schema_digest": "a0c593b90cb7ad8c11a800f21104884778b0b2323654846c8d3251e73122f087",
-        "handler_digest": "a0c593b90cb7ad8c11a800f21104884778b0b2323654846c8d3251e73122f087",
+        "schema_digest": "8e11e00771dc57ff76e3fd8cd94d28f93354f45eaf9d061539007fc3658057d4",
+        "handler_digest": "8e11e00771dc57ff76e3fd8cd94d28f93354f45eaf9d061539007fc3658057d4",
         "write": true,
         "human_only": false,
         "authority_only": true,
