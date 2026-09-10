@@ -11,6 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildRelease } from "../src/release.js";
+import { mutationManifestIdentity } from "../src/mutation-registry.js";
 
 const FIXED_NOW = () => new Date("2026-08-13T21:00:00.000Z");
 const SCHEMA_LEDGER_SHA256 = "sha256:" + "7".repeat(64);
@@ -316,6 +317,56 @@ test("buildRelease: env is the ONLY field that separates the environments — th
   assert.notDeepEqual(prod.env, stage.env);
   assert.equal(prod.env.value, "production");
   assert.equal(stage.env.value, "staging");
+});
+
+// --- command-contract identity (V5-F07, Q058) ------------------------------
+// The command-contract axis a caller needs for a compatibility test. It is the
+// SAME identity the runtime dispatches against (mutation-registry.js), read
+// here rather than restated, so /release cannot report a command contract this
+// deploy is not running.
+
+test("buildRelease: reports the shipped command-contract identity, not a second registry", async () => {
+  const sql = fakeSql([
+    ["v_schema_ledger", [{ applied_count: 120, highest_applied_migration: "0114_x.sql" }]],
+    ["doctrine_meta", [{ generation: 359 }]],
+  ]);
+  const out = await buildRelease({
+    env: { GIT_SHA: "a".repeat(40), CARR_ENV: "production" }, sql, verbCount: 105, now: FIXED_NOW,
+  });
+
+  assert.deepEqual(out.command_contract, mutationManifestIdentity());
+  assert.match(out.command_contract.registry_version, /^scac-mutation-registry\.v[1-9]\d*$/);
+  assert.match(out.command_contract.registry_digest, /^[0-9a-f]{64}$/);
+});
+
+test("buildRelease: command_contract is code identity — identical across environments", async () => {
+  const identicalSql = () => fakeSql([
+    ["v_schema_ledger", [{ applied_count: 120, highest_applied_migration: "0114_x.sql" }]],
+    ["doctrine_meta", [{ generation: 359 }]],
+  ]);
+  const sha = "b".repeat(40);
+  const prod = await buildRelease({
+    env: { GIT_SHA: sha, CARR_ENV: "production" }, sql: identicalSql(), verbCount: 105, now: FIXED_NOW,
+  });
+  const stage = await buildRelease({
+    env: { GIT_SHA: sha, CARR_ENV: "staging" }, sql: identicalSql(), verbCount: 105, now: FIXED_NOW,
+  });
+
+  // Same reasoning as the incident test above: env stays the only field that
+  // separates the environments, so nobody reads this one as an identity either.
+  assert.deepEqual(prod.command_contract, stage.command_contract);
+});
+
+test("buildRelease: command_contract has no database dependency and survives an outage", async () => {
+  const sql = fakeSql([
+    ["v_schema_ledger", new Error("connection terminated unexpectedly")],
+    ["doctrine_meta", new Error("connection terminated unexpectedly")],
+  ]);
+  const out = await buildRelease({ env: { GIT_SHA: "c".repeat(40) }, sql, verbCount: 105, now: FIXED_NOW });
+
+  assert.equal(out.ok, true);
+  assert.deepEqual(out.command_contract, mutationManifestIdentity());
+  assert.match(out.schema.reason, /database unreachable/);
 });
 
 test("buildRelease: response is JSON-safe (no undefined, no function, round-trips clean)", async () => {

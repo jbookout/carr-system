@@ -11,7 +11,7 @@
 // node --test can exercise the actual payload-building logic with a fake
 // env and a fake `sql` tag function — no live database, no deploy required.
 //
-// SIX FIELDS, EACH HONEST ON ITS OWN:
+// THE FIELDS, EACH HONEST ON ITS OWN:
 //   verb_count          — Object.keys(TOOLS).length, computed from the code
 //                          bundled INTO THIS DEPLOY. Never a written marker
 //                          (mcp-server/.last-deployed-verb-count is exactly
@@ -49,6 +49,16 @@
 //                          repaired 2026-07-31). So this field reports what
 //                          the TRACKING TABLE CLAIMS, and says so in its own
 //                          `note`, every time.
+//   command_contract      — the SCAC mutation registry identity this deploy is
+//                          actually running, from mutation-registry.js's own
+//                          mutationManifestIdentity() — the same identity
+//                          tools.js binds into every write's request_hash, read
+//                          here rather than reimplemented, so there is no second
+//                          registry. It is a code-identity field: a digest of a
+//                          checked-in generated file, not an environment
+//                          discriminator and not a secret. Q058 needs a
+//                          command-contract version to compare and this payload
+//                          is the only place a caller could read one.
 //   doctrine_generation   — same query doctrine.js's standing-context verb
 //                          already runs (`select generation from
 //                          doctrine_meta where id = 1`), reused rather than
@@ -62,6 +72,7 @@
 // absent value must be visibly absent, per the honesty requirement this was
 // built against.
 
+import { mutationManifestIdentity } from "./mutation-registry.js";
 import { program6ActionPosture } from "./program6-feature-flag.js";
 import { workspaceCommandCenterPosture } from "./workspace-feature-flag.js";
 
@@ -176,6 +187,11 @@ export async function buildRelease({ env, sql, verbCount, now = () => new Date()
           + "records a past drift where schema_migrations fell behind migrations already "
           + "applied to production",
     },
+    // Read from the registry the runtime itself dispatches against, so this can
+    // no more lie about the shipped command contract than verb_count can about
+    // the shipped verbs. Additive: every existing consumer reads this payload
+    // field by field.
+    command_contract: mutationManifestIdentity(),
     doctrine_generation: doctrineGeneration,
     // This is intentionally a public boolean posture, not a secret value. The
     // checked-in Wrangler configuration is fingerprinted in each release plan,
