@@ -18,6 +18,10 @@ import { redeemProgram6BrowserChallenge } from "./program6-browser-challenge.js"
 import { program6ActionsEnabled } from "./program6-feature-flag.js";
 import { workspaceCommandCenterEnabled } from "./workspace-feature-flag.js";
 import { COMMAND_CENTER_PATH } from "./workspace-command-center.js";
+import {
+  BUSINESS_ASSET_PATH, CLIENTS_ROUTE, VENDORS_ROUTE,
+  createWorkspaceBusinessReader, isBusinessApiPath,
+} from "./workspace-business-read.js";
 import { isTourInternalRequest } from "./tour-internal-web.js";
 
 export const DEALROOM_ASSET_DIRECTORY = "../dealroom"; // mirrors wrangler.toml [assets]
@@ -65,13 +69,40 @@ const PUBLIC_SHELL = new Map([
 const DEALROOM_HOST_PATTERN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const DEALROOM_EXACT_PATHS = new Set([
   "/", "/index.html", "/deals", "/leads", "/leads.html", "/workspace", "/workspace.html", "/system-work.html", "/room.html", "/queue.html",
+  CLIENTS_ROUTE, VENDORS_ROUTE, BUSINESS_ASSET_PATH,
   "/manifest.webmanifest", "/sw.js", "/offline.html", "/tours",
 ]);
+// Clients and Vendors are two views of one authenticated business asset. The
+// route, not the file name, is the address a partner keeps, so the .html path
+// itself is a redirect below rather than a second bookmarkable surface.
 const DEALROOM_ROUTE_ASSETS = new Map([
   ["/deals", "/index.html"],
   ["/leads", "/leads.html"],
   ["/workspace", "/workspace.html"],
+  [CLIENTS_ROUTE, BUSINESS_ASSET_PATH],
+  [VENDORS_ROUTE, BUSINESS_ASSET_PATH],
 ]);
+const BUSINESS_VIEW_PATHS = new Set([CLIENTS_ROUTE, VENDORS_ROUTE]);
+// One typed refusal per read-model failure class, so the browser can tell a bad
+// filter from a refused audience from an unavailable database.
+const BUSINESS_ERROR_STATUS = {
+  QUERY_INVALID: 400,
+  AUTHORIZATION_REFUSED: 403,
+  TENANT_SCOPE_REFUSED: 404,
+  RECORD_NOT_FOUND: 404,
+  VIEWER_OWNER_UNKNOWN: 409,
+  FRESHNESS_UNKNOWN: 409,
+  DEPENDENCY_UNAVAILABLE: 503,
+  // A read the deployment has not been given access to is unavailable, not
+  // broken: 503 like the other dependency answers, and it says which CLASS of
+  // access is missing so an operator is not left guessing.
+  DEPENDENCY_NOT_PROVISIONED: 503,
+  INTERNAL_ERROR: 500,
+};
+// The only classes an unprovisioned read may name. Anything else answers with a
+// bare code, so no driver message, statement text or schema name can reach a
+// browser through this door.
+const BUSINESS_DEPENDENCY_CLASSES = new Set(["read_access", "read_source", "read_credential"]);
 const DEALROOM_PATH_PREFIXES = ["/auth/", "/api/system-work/", "/api/room/", "/api/tours/", "/tours/", COMMAND_CENTER_API_PREFIX, "/css/", "/js/", "/data/", "/icons/"];
 const LEGACY_BROWSER_REDIRECT_PATHS = new Set([
   "/", "/index.html", "/deals", "/leads", "/leads.html", "/workspace", "/workspace.html",
@@ -672,6 +703,43 @@ async function commandCenterResponse(request, env, session, dependencies) {
   }
 }
 
+/**
+ * GET /api/v1/business/{clients,vendors}[/<uuid>] — the Journey 1 business read.
+ *
+ * The route holds no query knowledge of its own: the read model parses,
+ * bounds and refuses the query so the list, the total and the filter semantics
+ * keep exactly ONE definition. The actor comes from the verified session and is
+ * never taken from the URL.
+ */
+async function businessResponse(request, env, session, dependencies) {
+  if (!workspaceCommandCenterEnabled(env)) return json({ error: "not_found" }, 404);
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: { allow: "GET, HEAD, OPTIONS", "cache-control": "no-store" } });
+  }
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return new Response(JSON.stringify({ error: "METHOD_NOT_ALLOWED" }), {
+      status: 405, headers: { ...JSON_HEADERS, allow: "GET, HEAD, OPTIONS" },
+    });
+  }
+  if (typeof dependencies.businessReader !== "function") return json({ error: "DEPENDENCY_UNAVAILABLE" }, 503);
+  try {
+    const payload = await dependencies.businessReader(env, session.actor, request, env.CORRELATION_ID);
+    if (request.method === "HEAD") return new Response(null, { status: 200, headers: JSON_HEADERS });
+    return json(payload);
+  } catch (error) {
+    const code = Object.prototype.hasOwnProperty.call(BUSINESS_ERROR_STATUS, error?.code) ? error.code : "INTERNAL_ERROR";
+    // Only a malformed query says which parameter was wrong, and only an
+    // unprovisioned read says which class of access is missing. Neither says
+    // anything about the record, the tenant, the schema or the statement.
+    const body = { error: code };
+    if (code === "QUERY_INVALID" && error?.detail) body.detail = error.detail;
+    if (code === "DEPENDENCY_NOT_PROVISIONED" && BUSINESS_DEPENDENCY_CLASSES.has(error?.detail?.dependency)) {
+      body.dependency = error.detail.dependency;
+    }
+    return json(body, BUSINESS_ERROR_STATUS[code]);
+  }
+}
+
 async function bundleAsset(env, request) {
   const url = new URL(request.url);
   const requested = url.pathname === "/" ? "/index.html" : (DEALROOM_ROUTE_ASSETS.get(url.pathname) || url.pathname);
@@ -696,6 +764,10 @@ export function createDealroomHandler(overrides = {}) {
     slugForEmailFn: slugForEmail,
     propsForSlugFn: propsForSlug,
     actorFromPropsFn: actorFromProps,
+    // The business read ships with its own production adapter so the Clients
+    // and Vendors views work wherever this handler is mounted; a test replaces
+    // the whole reader rather than reaching past it to a database.
+    businessReader: createWorkspaceBusinessReader(),
     now: () => Date.now(),
     ...overrides,
   };
@@ -732,9 +804,17 @@ async function handleRequest(request, env, ctx, dependencies) {
       if (url.pathname === "/auth/reauth" && request.method === "GET") return startReauth(request, env, dependencies);
       // The first prototype's workspace API was intentionally retired. Keep
       // it a quiet 404 so stale browser bundles cannot reach a second read.
-      if (url.pathname.startsWith("/api/v1/") && url.pathname !== COMMAND_CENTER_PATH) return json({ error: "not_found" }, 404);
-      if (url.pathname === COMMAND_CENTER_PATH && !workspaceCommandCenterEnabled(env)) return json({ error: "not_found" }, 404);
+      // The business read is the ONLY addition to that surface, and it is
+      // admitted by an exact path parser rather than a prefix.
+      if (url.pathname.startsWith("/api/v1/") && url.pathname !== COMMAND_CENTER_PATH &&
+          !isBusinessApiPath(url.pathname)) return json({ error: "not_found" }, 404);
+      // Home, Clients and Vendors are one workspace surface and share its flag.
+      if ((url.pathname === COMMAND_CENTER_PATH || isBusinessApiPath(url.pathname) ||
+           BUSINESS_VIEW_PATHS.has(url.pathname) || url.pathname === BUSINESS_ASSET_PATH) &&
+          !workspaceCommandCenterEnabled(env)) return json({ error: "not_found" }, 404);
       if (url.pathname === "/workspace" || url.pathname === "/workspace.html") return redirect(`${origin}/`);
+      // /clients and /vendors are the addresses; the asset file is not a second one.
+      if (url.pathname === BUSINESS_ASSET_PATH) return redirect(`${origin}${CLIENTS_ROUTE}`);
 
       if (url.pathname === "/auth/signout") {
         if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405);
@@ -749,7 +829,7 @@ async function handleRequest(request, env, ctx, dependencies) {
 
       const session = await sessionFor(request, env, dependencies);
       if (!session) {
-        if (url.pathname === COMMAND_CENTER_PATH) {
+        if (url.pathname === COMMAND_CENTER_PATH || isBusinessApiPath(url.pathname)) {
           return json({ error: "AUTHENTICATION_REQUIRED" }, 401);
         }
         if (url.pathname === "/mcp" || url.pathname === "/pipeline/changes" ||
@@ -788,6 +868,8 @@ async function handleRequest(request, env, ctx, dependencies) {
       else if (url.pathname === "/pipeline/changes") response = await dependencies.pipelineHandler(request, env, ctx, session.actor);
       else if (url.pathname === COMMAND_CENTER_PATH) {
         response = await commandCenterResponse(request, env, session, dependencies);
+      } else if (isBusinessApiPath(url.pathname)) {
+        response = await businessResponse(request, env, session, dependencies);
       } else if (url.pathname.startsWith("/api/v1/")) {
         response = json({ error: "not_found" }, 404);
       } else if (url.pathname === "/" && workspaceCommandCenterEnabled(env)) {
