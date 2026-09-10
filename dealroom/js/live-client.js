@@ -32,8 +32,22 @@ export function createLiveClient(opts = {}) {
       }),
     });
     if (!res.ok) {
+      // The status is the only thing that says whether this request was DECIDED
+      // or merely unanswered, and throwing it away made every failure look the
+      // same to a caller. A 401 or 403 is a decision taken before the verb ever
+      // ran: the change was not saved, and inviting a retry would be wrong. A
+      // 5xx, a proxy's 502, a gateway timeout is the path failing around a
+      // request that may well have been applied. Callers need to tell those apart.
+      //
+      // The BODY does not go into the message. A 500's body is a server stack
+      // written for whoever maintains the verb — it is not a statement about this
+      // deal, and this page prints `error.message` at partners. It travels on the
+      // error for the console and for a bug report, and no surface renders it.
       const body = await res.text().catch(() => '');
-      throw new Error(`live ${verb} -> ${res.status} ${body.slice(0, 200)}`);
+      const error = new Error(`live ${verb} -> HTTP ${res.status}`);
+      error.status = res.status;
+      error.body = body.slice(0, 500);
+      throw error;
     }
     const envelope = await res.json();
     if (envelope.error) throw new Error(`live ${verb} rpc error: ${envelope.error.message}`);
@@ -91,6 +105,11 @@ export function createLiveClient(opts = {}) {
     mode: /** @type {const} */ ('live'),
     get selfActor() { return selfActor; },
 
+    // Each deal carries `field_base` — the latest committed event id and time for
+    // every editable cell, read in the same statement as the values it belongs
+    // to. It passes through untouched: it is the record layer's own identity for
+    // an event, in the record layer's own field vocabulary, and translating or
+    // rebuilding it would be inventing one.
     async getBoard(options = {}) {
       const board = await rpc('deal-room-board', {
         workspace: options.workspace || 'all',
@@ -209,6 +228,10 @@ export function createLiveClient(opts = {}) {
       if (args.field === 'phase' && UI_TO_PHASE[args.value]) {
         args = { ...args, value: UI_TO_PHASE[args.value] };
       }
+      // `event_id` / `event_recorded_at` ride through on the ok answer: the
+      // record's own identity for the event this write committed, which is what
+      // lets the board advance that cell's base without waiting a poll for the
+      // feed to say the same thing. Nothing is derived here.
       const res = await write('patch-deal-field', args);
       if (res?.ok === false && res.conflict) {
         const c = res.conflict;

@@ -114,7 +114,11 @@ test("app.js no longer copies any field value out of a change event", async () =
   // What the feed still does, all of it exercised by deal-change-receipts.test.mjs.
   assert.match(pollOnce, /state\.presence = result\.presence \|\| \[\];/);
   assert.match(pollOnce, /state\.captureSessions = result\.capture_sessions \|\| \[\];/);
-  assert.match(pollOnce, /state\.fieldBase\.set\(/);
+  // The feed still names each cell's base — through the one function that also
+  // takes a write's answer, so neither source can drag a base backwards.
+  assert.match(pollOnce, /noteCellBase\(cellKey\(event\.subject_id, event\.field\), event\)/);
+  assert.equal((app.match(/state\.fieldBase\.set\(/g) || []).length, 1,
+    "and exactly one place writes that map");
   assert.match(pollOnce, /ingestChangeEvents\(state\.receipts, batch,/);
   assert.match(pollOnce, /batchTouchesBoard\(batch\)\) state\.boardSync\.requestRefresh\('change-feed'\)/,
     "news asks for an authoritative read instead of applying itself");
@@ -469,6 +473,29 @@ test("a snapshot issued before a confirmed write cannot put the old value back",
 // Regression, independent review's blocking defect 1: an open review agenda
 // captured row OBJECTS, and snapshot replacement left it rendering the values
 // they had when it started — permanently, from the first refresh onward.
+test("a snapshot's per-cell bases reach the app untouched, even under a held value", async () => {
+  // The board read now carries `field_base` — each editable cell's latest
+  // committed event — beside the values. The coordinator must pass it through: it
+  // is not a value, no hold applies to it, and the app's own forward-only rule is
+  // what decides whether an older one is taken. This is the pairing the write path
+  // depends on: a HELD value on a row whose base is the older one the read saw.
+  const open = deferred();
+  const h = harness({ boardReads: [() => open.promise] });
+  const base = { phase: { id: "e5", recorded_at: "2026-09-10T14:00:00.000000+00:00" } };
+
+  const inFlight = h.sync.refreshBoard({ reason: "background" });
+  await settle();
+  h.sync.noteLocalWrite("d1", { phase: "Closing" });
+  open.resolve(board([deal({ phase: "Research", field_base: base })]));
+  await inFlight;
+
+  const shown = h.dealById("d1");
+  assert.equal(shown.phase, "Closing", "the confirmed value still stands over the older read");
+  assert.deepEqual(shown.field_base, base, "and the read's bases arrive exactly as the server sent them");
+  assert.deepEqual(h.last().meta.held_fields, ["d1|phase"],
+    "the hold is on the value; the base is not a value and is not held");
+});
+
 test("a row captured before a snapshot resolves to current values by id, in the captured order", async () => {
   const h = harness({
     boardReads: [
@@ -849,6 +876,134 @@ test("app.js holds a confirmed write and asks for a fresh read rather than await
     assert.match(section, /confirmLocalWrite\(dealId, \{/, `${name} must hold what it just put on screen`);
     assert.doesNotMatch(section, /await loadHome\(\)/, `${name} must not block on a whole reload`);
   }
+});
+
+// Placement only. What these writes DO under a lost answer, a double click, a
+// refusal and a partner conflict is executed in field-write-reconciliation.test.mjs
+// (the model) and dealroom.test.js (the model against the real verb).
+test("app.js sends one cell change under one key, and never mints a second one per attempt", async () => {
+  const app = await file("dealroom/js/app.js");
+  assert.match(app, /from '\.\/field-write-reconciliation\.mjs'/);
+  assert.match(app, /fieldWrites: createFieldWriteState\(\)/,
+    "the retained request per cell sits beside fieldBase, as bookkeeping");
+  assert.doesNotMatch(app, /function performFieldWrite|function beginFieldWrite/,
+    "the reconciliation rule has one home, and app.js is not a second copy of it");
+
+  const send = app.slice(app.indexOf("function sendCellWrite"), app.indexOf("function cellSubject"));
+  assert.match(send, /const cell = cellKey\(dealId, field\);/);
+  assert.match(send, /base: state\.fieldBase\.get\(cell\)\?\.id \|\| null/,
+    "the base is still the cell's last seen event, and only for a NEW operation");
+  assert.match(send, /newKey: uuidv4/);
+  assert.match(send, /patch: \(request\) => state\.client\.patchDealField\(request\)/,
+    "the verb the Deal Room already uses, with the request the model built");
+
+  for (const [name, end] of [
+    ["async function patchField", "async function patchOperatingState"],
+    ["async function patchOperatingState", "function openForm"],
+  ]) {
+    const section = app.slice(app.indexOf(name), app.indexOf(end));
+    assert.match(section, /await sendCellWrite\(/, `${name} goes through the one write path`);
+    assert.doesNotMatch(section, /uuidv4\(\)/, `${name} must not mint a key per attempt`);
+    assert.doesNotMatch(section, /idempotency_key/, `${name} must not build the request itself`);
+    assert.match(section, /result\.status !== 'ok'/,
+      `${name} must not treat an unanswered write as a saved one`);
+  }
+
+  // No optimistic value, no timer, no blind re-send: a retry is a person's act.
+  const patchField = app.slice(app.indexOf("async function patchField"), app.indexOf("async function patchOperatingState"));
+  assert.ok(patchField.indexOf("await sendCellWrite(") < patchField.indexOf("confirmLocalWrite("),
+    "nothing is applied to the board before the server answers");
+  assert.equal((app.match(/retryCellWrite\(/g) || []).length, 2,
+    "the definition and the one control that calls it");
+  assert.doesNotMatch(app, /set(Timeout|Interval)\([^)]*(retry|sendCellWrite|patchField)/i,
+    "no timer re-sends a write nobody asked to re-send");
+
+  // The unconfirmed write is on the row, not only in a toast that fades.
+  const rowHtml = app.slice(app.indexOf("function rowHtml"), app.indexOf("function applyPresence"));
+  assert.match(rowHtml, /unresolvedFieldWrites\(state\.fieldWrites, deal\.id\)/);
+  assert.match(rowHtml, /data-retry-write="\$\{esc\(entry\.cell\)\}"/, "the control names the cell it re-sends");
+  assert.match(rowHtml, /aria-label="[^"]*was not confirmed/, "and says so to a screen reader");
+  assert.match(app, /const retryWrite = event\.target\.closest\('\[data-retry-write\]'\);\s*if \(retryWrite\) \{ await retryCellWrite\(retryWrite\.dataset\.retryWrite, retryWrite\); return; \}/);
+  const retry = app.slice(app.indexOf("async function retryCellWrite"), app.indexOf("async function patchField"));
+  assert.match(retry, /const \{ deal, field, value \} = entry\.request;/,
+    "the retry is the retained request, not a fresh reading of the board");
+
+  // A park that did not land keeps the dialog, the reason and the note.
+  const park = app.slice(app.indexOf("function parkDealForm"), app.indexOf("function marketAgentForm"));
+  assert.match(park, /\{ surface:'inline' \}/, "the reason is shown on the form, not over it in a toast");
+  assert.match(park, /if \(result\.status !== 'ok'\) throw new Error\(result\.message/,
+    "only a parked record closes the form");
+});
+
+// Placement for the two review corrections. The behaviour — an answer that
+// arrives after the feed moved, for an ordinary cell and for operating state —
+// is executed in field-write-reconciliation.test.mjs and, against the real verb,
+// in dealroom.test.js.
+test("app.js answers a modal inside the modal, and never paints a replayed answer over newer state", async () => {
+  const app = await file("dealroom/js/app.js");
+
+  // 1. A control pressed inside #dealDialog is answered inside #dealDialog: a
+  // showModal() dialog is in the top layer, so the toast is behind its backdrop.
+  const notice = app.slice(app.indexOf("function showDealDialogNotice"), app.indexOf("/**\n * Say what happened to a change"));
+  assert.match(notice, /if \(!dialog\?\.open\) return false;/, "and degrades to the ordinary surface when none is open");
+  assert.match(notice, /\$\('\.deal-content', dialog\)/, "placed in the dialog's own content, above the fold");
+  assert.match(notice, /notice\.setAttribute\('role', 'alert'\)/);
+  assert.match(notice, /data-retry-write="\$\{esc\(retryCell\)\}"/,
+    "the same deliberate retry the row carries, reachable without dismissing the dialog");
+  assert.match(notice, /\.focus\(\{ preventScroll: true \}\)/, "the keyboard lands on the answer");
+  assert.match(notice, /esc\(message\)/, "and the sentence is escaped like every other rendered string");
+
+  const surface = app.slice(app.indexOf("function writeSurfaceFor"), app.indexOf("/**\n * Put the answer where"));
+  assert.match(surface, /dialog\?\.open && dialog\.contains\(trigger\) \? 'dialog' : 'toast'/,
+    "the surface is decided by where the control actually is");
+  assert.match(app, /await patchOperatingState\(dealId, \{ state:'active' \}, \{ surface:writeSurfaceFor\(operating\) \}\)/,
+    "Restore from the deal dialog reports into the deal dialog");
+  assert.match(app, /await retryCellWrite\(retryWrite\.dataset\.retryWrite, retryWrite\); return; \}/,
+    "and a retry is answered on the surface it was pressed from");
+  const retry = app.slice(app.indexOf("async function retryCellWrite"), app.indexOf("async function patchField"));
+  assert.match(retry, /const options = \{ surface: writeSurfaceFor\(trigger\) \};/);
+
+  // 2. An accepted answer the feed has moved past is reported, not applied.
+  const send = app.slice(app.indexOf("function sendCellWrite"), app.indexOf("/** The cell, named"));
+  assert.match(send, /baseNow: \(\) => state\.fieldBase\.get\(cell\)\?\.id \|\| null/,
+    "the cell's base is read again when the answer lands, not remembered from the way out");
+  // The other half of the same rule: an accepted answer names the event it
+  // committed, and that becomes the base for the next write to this cell.
+  assert.match(send, /if \(result\.status === 'ok' && !result\.superseded && result\.event_id\) \{\s*noteCellBase\(cell, \{ id: result\.event_id, recorded_at: result\.event_recorded_at \}\);/,
+    "a replayed answer about an older operation can never reset the base");
+  // And the third source of a base, which is what closes the cold first write:
+  // the authoritative read itself, seeded through the same forward-only rule.
+  const snapshot = app.slice(app.indexOf("function applyBoardSnapshot"), app.indexOf("async function pollOnce"));
+  assert.match(snapshot, /for \(const \[field, seen\] of Object\.entries\(deal\.field_base \|\| \{\}\)\) \{\s*noteCellBase\(cellKey\(deal\.id, field\), seen\);/,
+    "every editable cell's base comes from the same read as its value");
+  assert.doesNotMatch(snapshot, /state\.fieldBase\.set\(/,
+    "and it goes through the rule, not around it: a read already open when a write "
+    + "was confirmed carries that cell's OLDER base");
+
+  const note = app.slice(app.indexOf("function noteCellBase"), app.indexOf("/** The cell, named"));
+  assert.match(note, /nextCellBase\(state\.fieldBase\.get\(cell\) \|\| null, seen\)/,
+    "one ordering rule, imported, for both sources");
+  assert.match(note, /const seen = \{ id: event\.id, recorded_at: event\.recorded_at \?\? null \};/,
+    "and a base is an identity and a time, never a value out of an event");
+  assert.doesNotMatch(app, /function nextCellBase/, "and it has one home");
+  const reconcile = app.slice(app.indexOf("function reconcileNewerState"), app.indexOf("async function retryCellWrite"));
+  assert.doesNotMatch(reconcile, /confirmLocalWrite|noteLocalWrite/,
+    "the request's value is not written to the row and not held against the next snapshot");
+  assert.match(reconcile, /state\.boardSync\.requestRefresh\('after-write'\)/,
+    "the authoritative read decides what the cell holds");
+  for (const [name, end] of [
+    ["async function patchField", "async function patchOperatingState"],
+    ["async function patchOperatingState", "function openForm"],
+  ]) {
+    const section = app.slice(app.indexOf(name), app.indexOf(end));
+    assert.ok(section.indexOf("result.superseded") < section.indexOf("confirmLocalWrite("),
+      `${name} must decide about newer state before it applies anything`);
+    assert.match(section, /reconcileNewerState\(/);
+  }
+  assert.equal((app.match(/reconcileNewerState\(/g) || []).length, 3,
+    "the definition and the two write paths");
+  assert.equal((app.match(/noteLocalWrite\(/g) || []).length, 1,
+    "still exactly one place that holds a value");
 });
 
 test("app.js is honest in the badge and refuses to show an empty board it never read", async () => {
