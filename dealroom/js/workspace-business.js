@@ -66,6 +66,13 @@ const dom = {
   navVendors: document.querySelector("#navVendors"),
 };
 
+// The phone bar is the only navigation a reader has under 767px, and on these two
+// pages it marked nothing at all: no current tab in markup and none in script,
+// while Home's bar has carried aria-current="page" since it shipped. These links
+// have no ids, so they are addressed the way a reader addresses them — by where
+// they go.
+const phoneNavLinks = [...document.querySelectorAll(".mobile-nav a[href]")];
+
 const scopeButtons = dom.scopeSwitch ? [...dom.scopeSwitch.querySelectorAll("[data-scope]")] : [];
 
 // One place holds what this view believes. Every renderer reads it, and the
@@ -222,8 +229,34 @@ function renderControls({ syncSearch = false } = {}) {
       ? "Showing the ones recorded as yours. Team is the usual view."
       : "Showing everyone's. Switch to My work for the ones recorded as yours.";
   }
-  if (dom.navClients) dom.navClients.setAttribute("aria-current", dataset === "clients" ? "page" : "false");
-  if (dom.navVendors) dom.navVendors.setAttribute("aria-current", dataset === "vendors" ? "page" : "false");
+  markCurrentPage(dataset);
+}
+
+/**
+ * The current page is ANNOUNCED and SHOWN, on both navigations.
+ *
+ * aria-current alone was announced and invisible: `.primary-nav a.active` is the
+ * only rule in workspace.css that paints a current tab, and nothing ever added the
+ * class, so /clients and /vendors highlighted no tab for anyone reading with their
+ * eyes. Both marks are now set together, from the same one dataset, so they cannot
+ * disagree about which page this is.
+ *
+ * The phone bar takes aria-current only, exactly matching Home's bar. There is no
+ * `.mobile-nav a.active` rule in the stylesheet, and adding a class that paints
+ * nothing would be a second silent mark of the kind this function exists to end.
+ */
+function markCurrentPage(dataset) {
+  const current = DATASET_ROUTE[dataset] || null;
+  for (const [link, route] of [[dom.navClients, DATASET_ROUTE.clients], [dom.navVendors, DATASET_ROUTE.vendors]]) {
+    if (!link) continue;
+    const here = route === current;
+    link.setAttribute("aria-current", here ? "page" : "false");
+    link.classList.toggle("active", here);
+  }
+  for (const link of phoneNavLinks) {
+    if (link.getAttribute("href") === current) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  }
 }
 
 function renderChips() {

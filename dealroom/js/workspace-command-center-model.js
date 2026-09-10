@@ -48,6 +48,25 @@ function exactKeys(value, keys) {
   return value && Object.keys(value).sort().join(",") === keys.slice().sort().join(",");
 }
 
+/**
+ * `this_week` and `recent_calls` are named in the exact-key contract and NO producer
+ * fills either: mcp-server/src/workspace-command-center.js emits [] for both. They
+ * were checked with `Array.isArray` alone, which let a future producer put any shape
+ * at all into either while both this validator and the page stayed silent — a dead
+ * field with an open door.
+ *
+ * There is no honest element shape to declare instead of the door. A `this_week` row
+ * would have to carry a Deal Room destination, and the board has no URL form for a
+ * week or a deadline list — this suite's own "Home only links to Deal Room filters
+ * the board already honors" test pins that. A `recent_calls` row would be a Calls
+ * affordance, and Calls is inert in this release. So the declared shape is the shape
+ * the data actually has: EMPTY. A producer that fills either is refused here and has
+ * to come back and declare the element together with the renderer that shows it.
+ */
+function emptyContractList(value) {
+  return Array.isArray(value) && value.length === 0;
+}
+
 export function sourceIsFresh(source, now = () => Date.now()) {
   return sourceValid(source, ALL_SOURCES) && source.freshness === "fresh" && Date.parse(source.valid_until) > now();
 }
@@ -91,7 +110,7 @@ export function validWorkspacePayload(payload) {
   const [team, mine] = payload.metrics;
   if (mine.active_deals > team.active_deals || mine.flagged_deals > team.flagged_deals) return false;
   if (!needsValid(payload)) return false;
-  if (!Array.isArray(payload.this_week) || !Array.isArray(payload.recent_calls)) return false;
+  if (!emptyContractList(payload.this_week) || !emptyContractList(payload.recent_calls)) return false;
   if (!Array.isArray(payload.doc_at_work) || payload.doc_at_work.length !== 1 || !payload.doc_at_work.every((item) => (exactKeys(item, ["state"]) && item.state === "unavailable") || (exactKeys(item, ["kind", "count", "source"]) && item.kind === "active_nonhuman_work" && count(item.count) && cardSourceValid(item.source)))) return false;
   if (!Array.isArray(payload.recent_activity) || payload.recent_activity.length !== 1 || !payload.recent_activity.every((item) => (exactKeys(item, ["state"]) && item.state === "unavailable") || (exactKeys(item, ["kind", "count", "observed_at", "source"]) && item.kind === "changed_work" && count(item.count) && iso(item.observed_at) && cardSourceValid(item.source)))) return false;
   return true;

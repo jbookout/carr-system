@@ -103,6 +103,12 @@ export async function readCommandCenterSummary({ client, actor, tenant = organiz
   return {
     viewer: actor.slug,
     needs_you_now: needs,
+    // this_week and recent_calls are in the exact-key contract and carry nothing.
+    // They are DECLARED empty, not left empty pending a query: the browser
+    // validator (dealroom/js/workspace-command-center-model.js, emptyContractList)
+    // refuses a non-empty value for either, so a later producer cannot quietly fill
+    // one with an unvalidated shape that no renderer would ever show. Filling either
+    // means declaring its element shape and its renderer in the same change.
     this_week: [],
     metrics: [
       { scope: "team", active_deals: teamActive, flagged_deals: teamFlagged, active_destination: TEAM_ACTIVE_DESTINATION, flagged_destination: TEAM_FLAGGED_DESTINATION, source: dealSource },
