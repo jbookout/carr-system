@@ -36,6 +36,7 @@ import {
   createEphemeralJourneyOneMinimumAdmissionJournal, createJourneyOneClockMinimumInputStore,
   createJourneyOneClockProjectionComposer, journeyOneMinimumBenchmarkAcceptedSources,
 } from "../src/journey-one-clock-input-store.v5.js";
+import { createJourneyOneClockRuntime } from "../src/journey-one-clock-runtime.v5.js";
 
 const D = n => `sha256:${String(n).padStart(2, "0").repeat(32)}`;
 const I = actor => ({
@@ -687,8 +688,13 @@ function seamPause(originDigest, startsAt, endsAt, id = "one") {
 async function admittedSeam({ projection = minimumProjection(),
   scope = SEAM_SCOPE, admittedAt = CLOCK_AS_OF, acceptedManifest = manifest() } = {}) {
   const join = joinOnce(projection);
+  // The record layer's own instant, held in one settable place so a test can
+  // move it FORWARD and admit a later receipt into this same inventory. It is
+  // still the journal's clock and never a caller field: the store reads it, and
+  // nothing in an admission argument can name it.
+  const admissionClock = { at: admittedAt };
   const journal = createEphemeralJourneyOneMinimumAdmissionJournal(
-    { now: () => Date.parse(admittedAt) });
+    { now: () => Date.parse(admissionClock.at) });
   const inputs = createJourneyOneClockMinimumInputStore({ journal, actor: STORE_ACTOR,
     clock_scope: scope, accepted_minimum_policy: MINIMUM_POLICY });
   const admitted = await inputs.admit({
@@ -707,7 +713,7 @@ async function admittedSeam({ projection = minimumProjection(),
     completion: null,
     completion_expectation: { artifact_digest: KERNEL_ARTIFACT, fixture_set_digest: KERNEL_FIXTURES },
     pauses: [], amendments: [], history: null, ...args }));
-  return { join, inputs, admitted, composer, compose };
+  return { join, inputs, admitted, composer, compose, admissionClock };
 }
 
 test("the artifact A00 proposes keeps one identity through the inventory the kernel reads", async () => {
@@ -1006,4 +1012,566 @@ test("a projection composed for one accepted scope cannot be filed by a store bo
     assert.equal(error.detail.invariant, "j1_minimum_receipt_binds_accepted_scope");
     return true;
   });
+});
+
+// --- the loop, in one seat --------------------------------------------------
+//
+// Everything above joins the three rails BY HAND, which is how they were joined
+// everywhere: the composer, the kernel and the store met only inside a test, and
+// the two facts that make an advance coherent — which history was evaluated and
+// which head it appends onto — were two independent arguments on two rails.
+// journey-one-clock-runtime.v5.js is the seat that joins them, and these tests
+// are about what that seat adds rather than about any rail on its own.
+
+function runtimeSeam({ composer, kernel, store, present = null } = {}) {
+  return createJourneyOneClockRuntime({
+    composer, clock: kernel.clock, clock_store: store,
+    present_projection: present ?? (projection => kernel.envelopeFor(projection)),
+    verifier_ref: VERIFIER_REF,
+  });
+}
+/** Every declared advance field, stated once; a test overrides what it is about. */
+const advanceArgs = (over = {}) => ({
+  as_of: CLOCK_AS_OF, pauses: [], amendments: [], completion: null,
+  completion_expectation: { artifact_digest: KERNEL_ARTIFACT, fixture_set_digest: KERNEL_FIXTURES },
+  clock_ref: null, idempotency_key: uuid(), ...over,
+});
+
+test("the runtime advances one clock, deriving the composed history AND the append prior from one read", async () => {
+  const { join, inputs, admitted, composer } = await admittedSeam();
+  const { kernel, store } = recordingSeam();
+  const runtime = runtimeSeam({ composer, kernel, store });
+  assert.equal(runtime.clock_scope_key, journeyOneClockScopeKey(SEAM_SCOPE));
+
+  // 1. THE CREATION. The scope holds no clock, so the composition is made
+  //    against a null history and the append names an explicit null prior —
+  //    both derived from the same read, neither supplied.
+  const started = await runtime.advance(advanceArgs());
+  assert.equal(started.created_clock, true);
+  assert.equal(started.expected_prior_history_digest, null);
+  assert.equal(started.composed_from.prior_history_digest, null);
+  assert.equal(started.composed_from.head_admission_digest, admitted.admission_digest);
+  assert.equal(started.composed_from.admission_count, 1);
+  assert.equal(started.kernel_verdict.status, "running");
+  assert.equal(started.kernel_verdict.deadline_success, false);
+  // AND THE COMPUTATION IS BOUND TO THE INVENTORY THIS RECORD LAYER READ.
+  assert.equal(started.composition_binding.bound, true);
+  assert.equal(started.composition_binding.origin_receipt_digest,
+    join.proposed_receipt_reference_digest);
+  assert.equal(started.composition_binding.head_admission_digest, admitted.admission_digest);
+  // AND IT IS THE COMPOSED PROJECTION, EXACTLY: the kernel's digest of the
+  // snapshot its verifier resolved is the digest of what this rail composed.
+  assert.equal(started.composition_binding.proof_fact, "projection_identity");
+  assert.match(started.composition_binding.authenticated_projection_digest,
+    /^sha256:[0-9a-f]{64}$/);
+  assert.equal(started.composition_binding.authenticated_projection_digest,
+    started.composition_binding.composed_projection_digest);
+  // A bound loop is not an authenticated one, and the result says so itself.
+  assert.equal(started.composition_binding.authenticated_here, false);
+  assert.equal(started.authenticated_projection_verified_here, false);
+  assert.equal(started.deadline_accepted_by_record_layer, false);
+  assert.equal(started.durable_history_write_required, false);
+  assert.equal(started.effects.clock_started, false);
+  assert.ok(started.cannot_prove.some(l => l.includes("was authentic")));
+
+  // 2. THE ADVANCE. A partner-approved pause, and the prior is the head this
+  //    rail just read rather than anything the caller named.
+  const origin = join.proposed_receipt_reference_digest;
+  const pauseStart = iso(Date.parse(AS_OF) + 2 * DAY);
+  const pause = seamPause(origin, pauseStart, iso(Date.parse(pauseStart) + 12 * HOUR));
+  const paused = await runtime.advance(advanceArgs({
+    as_of: iso(Date.parse(AS_OF) + 3 * DAY), pauses: [pause] }));
+  assert.equal(paused.created_clock, false);
+  assert.equal(paused.expected_prior_history_digest, started.history_digest);
+  assert.equal(paused.composed_from.prior_history_digest, started.history_digest);
+  assert.equal(paused.composed_from.prior_revision_ordinal, 0);
+  assert.equal(paused.clock_key, started.clock_key);
+  assert.equal(paused.kernel_verdict.status, "running");
+
+  // THE STORED CLOCK IS THE ONE THE INVENTORY STARTED, and the accepted pause
+  // budget is the contract's own.
+  const head = await store.read(started.clock_key);
+  assert.equal(head.revision_count, 2);
+  assert.equal(head.history_digest, paused.history_digest);
+  assert.equal(head.history.origin_receipt_digest, origin);
+  assert.equal(head.history.origin_at, AS_OF);
+  assert.equal(head.history.base_deadline_at, chicagoThirtyDayDeadline(AS_OF).due_at);
+  assert.equal(head.history.paused_ms, 12 * HOUR);
+  assert.ok(head.history.paused_ms <= PAUSE_CAP_MS);
+  // AND THE INPUT INVENTORY NEVER MOVED. This seat reads it and never writes it.
+  const after = await inputs.read();
+  assert.equal(after.head_admission_digest, admitted.admission_digest);
+  assert.equal(after.admission_count, 1);
+});
+
+test("a miss and a late completion through the runtime keep the miss and the replan", async () => {
+  const { join, composer } = await admittedSeam();
+  const { kernel, store } = recordingSeam();
+  const runtime = runtimeSeam({ composer, kernel, store });
+  const origin = join.proposed_receipt_reference_digest;
+
+  const started = await runtime.advance(advanceArgs());
+  const missedAt = iso(Date.parse(AS_OF) + 40 * DAY);
+  const missed = await runtime.advance(advanceArgs({ as_of: missedAt }));
+  assert.equal(missed.kernel_verdict.status, "missed");
+  assert.equal(missed.kernel_verdict.replan_required, true);
+  assert.equal(missed.kernel_verdict.missing_evidence_miss_recorded, true);
+  const missAt = (await store.read(started.clock_key)).history.miss_at;
+  assert.equal(missAt, chicagoThirtyDayDeadline(AS_OF).due_at);
+
+  const lateAt = iso(Date.parse(AS_OF) + 41 * DAY);
+  const late = await runtime.advance(advanceArgs({ as_of: lateAt,
+    completion: { gate_id: "journey-one-kernel-production-accepted",
+      combiner: "all_current_exact_distinct_pass",
+      obligation_decision_ids: [...JOURNEY_ONE_DEADLINE_CONTRACT.kernel_obligation_decision_ids],
+      receipts: [terminusReceipt(lateAt)] } }));
+  assert.equal(late.kernel_verdict.status, "completed_late");
+  assert.equal(late.kernel_verdict.deadline_success, false);
+  assert.equal(late.kernel_verdict.replan_required, true);
+  assert.equal(late.kernel_verdict.completion_observed_within_deadline, false);
+
+  // THE ORIGIN, THE MISS AND THE ELAPSED HISTORY ALL SURVIVED THE LOOP.
+  const final = await store.read(started.clock_key);
+  assert.equal(final.revision_count, 3);
+  assert.equal(final.history.origin_receipt_digest, origin);
+  assert.equal(final.history.origin_at, AS_OF);
+  assert.equal(final.history.miss_at, missAt);
+  assert.equal(final.history.completion_observed_at, lateAt);
+  assert.equal(final.deadline_accepted_by_record_layer, false);
+});
+
+test("a computation the presentation did not make from THIS inventory is never filed", async () => {
+  // The case the whole binding exists for. Two inventories for ONE accepted
+  // scope: the composition is read from the first, and the presentation hands
+  // the verifier the SECOND one's projection. Every existing check passes —
+  // the three binding digests are the same accepted scope's, so the kernel's
+  // verified_binding derives the store's own scope key and the recorder is
+  // satisfied — and the revision that would be filed carries an origin this
+  // record layer never admitted for this scope.
+  const { admitted, composer } = await admittedSeam();
+  const elsewhere = minimumProjection();
+  elsewhere.as_of = iso(Date.parse(AS_OF) + 30 * 60 * 1000);
+  const other = await admittedSeam({ projection: elsewhere });
+  assert.notEqual(other.admitted.receipt_digest, admitted.receipt_digest,
+    "the second inventory must actually hold a different artifact");
+  const otherComposed = await other.compose({ as_of: CLOCK_AS_OF });
+
+  const { kernel, store, journal } = recordingSeam();
+  const runtime = runtimeSeam({ composer, kernel, store,
+    present: () => kernel.envelopeFor(copy(otherComposed.projection)) });
+
+  await assert.rejects(runtime.advance(advanceArgs()), error => {
+    assert.equal(error.name, "JourneyOneClockRuntimeError");
+    assert.equal(error.code, "clock_computation_origin_not_in_composed_inventory");
+    assert.equal(error.detail.fact, "origin_admission");
+    assert.equal(error.detail.matching_admissions, 0);
+    assert.equal(error.detail.origin_receipt_digest, other.admitted.receipt_digest);
+    assert.deepEqual(error.detail.composed_receipt_digests, [admitted.receipt_digest]);
+    assert.equal(error.detail.head_admission_digest, admitted.admission_digest);
+    return true;
+  });
+
+  // NOTHING WAS WRITTEN, for either clock, and the scope still holds none.
+  assert.equal((await store.readClockKeyForScope()).clock_key, null);
+  const wouldHaveBeen = journeyOneClockKeyForState(
+    evaluateOnce(copy(otherComposed.projection)).state);
+  assert.equal(await journal.readClock(wouldHaveBeen), null);
+});
+
+// --- the adversarial half: two VALID projections for one accepted scope ------
+//
+// The seven named field checks read the accepted SCOPE and a few parts of the
+// state, and every projection built for one program shares the scope. These
+// tests present, through the REAL kernel and the REAL composer, a second valid
+// snapshot that agrees on every one of those named facts and is a different
+// clock. Each must be refused BEFORE store.record is called.
+
+/** A store whose calls are recorded, so "before any write" is a fact, not a hope. */
+function watchedStore(store) {
+  const calls = [];
+  const wrap = name => async (...args) => { calls.push(name); return store[name](...args); };
+  return { calls, store: { clock_scope: store.clock_scope, writer: store.writer,
+    readClockKeyForScope: wrap("readClockKeyForScope"),
+    readRecordedRevisionForKey: wrap("readRecordedRevisionForKey"),
+    read: wrap("read"), record: wrap("record") } };
+}
+function terminusCompletion(at) {
+  return { gate_id: "journey-one-kernel-production-accepted",
+    combiner: "all_current_exact_distinct_pass",
+    obligation_decision_ids: [...JOURNEY_ONE_DEADLINE_CONTRACT.kernel_obligation_decision_ids],
+    receipts: [terminusReceipt(at)] };
+}
+/** The seven named facts, computed off two real kernel results for comparison. */
+function namedFactsAgree(a, b) {
+  return a.verified_binding.tenant === b.verified_binding.tenant &&
+    ["subject_digest", "candidate_digest", "policy_digest"].every(
+      f => a.verified_binding[f] === b.verified_binding[f]) &&
+    Date.parse(a.state.evaluated_at) === Date.parse(b.state.evaluated_at) &&
+    a.state.current_benchmark_manifest_digest === b.state.current_benchmark_manifest_digest &&
+    a.state.origin_receipt_ttl_policy_ms === b.state.origin_receipt_ttl_policy_ms &&
+    a.state.origin_receipt_digest === b.state.origin_receipt_digest &&
+    Date.parse(a.state.origin_at) === Date.parse(b.state.origin_at) &&
+    JSON.stringify(a.state.pause_intervals) === JSON.stringify(b.state.pause_intervals);
+}
+
+test("a valid projection carrying a COMPLETION the record layer never composed is refused before any write", async () => {
+  // The severe case. The composed projection has completion null; the trusted
+  // presentation resolves a projection identical to it except that it carries a
+  // real, current, r7-exact terminus receipt. Every named check agrees — same
+  // tenant, scope digests, as_of, manifest, sealed TTL policy, origin admission
+  // and empty pauses — and the second one COMPLETES the clock.
+  const { compose, composer } = await admittedSeam();
+  const composed = await compose({ as_of: CLOCK_AS_OF });
+  const judged = await compose({ as_of: CLOCK_AS_OF, completion: terminusCompletion(CLOCK_AS_OF) });
+
+  const running = evaluateOnce(copy(composed.projection));
+  const completedRun = evaluateOnce(copy(judged.projection));
+  assert.equal(running.state.status, "running");
+  assert.equal(completedRun.state.status, "completed_on_time",
+    "the substituted projection must really complete the clock, or this proves nothing");
+  assert.equal(namedFactsAgree(running, completedRun), true,
+    "every named field check must agree, or the proof is not what is doing the work");
+  assert.notEqual(running.verified_binding.authenticated_projection_digest,
+    completedRun.verified_binding.authenticated_projection_digest);
+
+  const { kernel, store, journal } = recordingSeam();
+  const watched = watchedStore(store);
+  const runtime = runtimeSeam({ composer, kernel, store: watched.store,
+    present: () => kernel.envelopeFor(copy(judged.projection)) });
+  await assert.rejects(runtime.advance(advanceArgs()), error => {
+    assert.equal(error.name, "JourneyOneClockRuntimeError");
+    assert.equal(error.code, "clock_computation_projection_digest_mismatch");
+    assert.equal(error.detail.fact, "projection_identity");
+    assert.equal(error.detail.composed_projection_digest, digest(composed.projection));
+    assert.equal(error.detail.authenticated_projection_digest, digest(judged.projection));
+    return true;
+  });
+  // BEFORE store.record, and nothing exists for either clock. The request read
+  // comes first — no revision for this key — and then the head.
+  assert.deepEqual(watched.calls, ["readRecordedRevisionForKey", "readClockKeyForScope"]);
+  assert.equal(await journal.readClock(journeyOneClockKeyForState(completedRun.state)), null);
+  assert.equal((await store.readClockKeyForScope()).clock_key, null);
+});
+
+test("two pauses with one id and one end but different STARTS are not one projection", async () => {
+  // The case no other rail can catch. The pause_intervals check compares
+  // pause_id and ends_at, which are identical here; the credited hours and the
+  // deadline are not. The head's event chain is a prefix of both, so the store's
+  // append-only diff would have accepted either one.
+  const { join, compose, composer } = await admittedSeam();
+  const { kernel, store, journal } = recordingSeam();
+  const origin = join.proposed_receipt_reference_digest;
+  const runtime = runtimeSeam({ composer, kernel, store });
+  const started = await runtime.advance(advanceArgs());
+  const head = copy((await store.read(started.clock_key)).history);
+
+  const at = iso(Date.parse(AS_OF) + 3 * DAY);
+  const endsAt = iso(Date.parse(AS_OF) + 2 * DAY + 12 * HOUR);
+  const early = seamPause(origin, iso(Date.parse(AS_OF) + 2 * DAY), endsAt);
+  const late = seamPause(origin, iso(Date.parse(AS_OF) + 2 * DAY + 6 * HOUR), endsAt);
+  assert.equal(early.pause_id, late.pause_id);
+  assert.equal(early.ends_at, late.ends_at);
+  assert.notEqual(early.starts_at, late.starts_at);
+
+  const composedEarly = await compose({ as_of: at, pauses: [early], history: head });
+  const judgedLate = await compose({ as_of: at, pauses: [late], history: head });
+  const runEarly = evaluateOnce(copy(composedEarly.projection));
+  const runLate = evaluateOnce(copy(judgedLate.projection));
+  assert.deepEqual(runEarly.state.pause_intervals, runLate.state.pause_intervals);
+  assert.equal(namedFactsAgree(runEarly, runLate), true);
+  assert.equal(runEarly.state.paused_ms, 12 * HOUR);
+  assert.equal(runLate.state.paused_ms, 6 * HOUR);
+  assert.notEqual(runEarly.state.due_at, runLate.state.due_at);
+
+  const watched = watchedStore(store);
+  const substituted = runtimeSeam({ composer, kernel, store: watched.store,
+    present: () => kernel.envelopeFor(copy(judgedLate.projection)) });
+  await assert.rejects(substituted.advance(advanceArgs({ as_of: at, pauses: [early] })), error => {
+    assert.equal(error.code, "clock_computation_projection_digest_mismatch");
+    assert.equal(error.detail.authenticated_projection_digest, digest(judgedLate.projection));
+    return true;
+  });
+  assert.ok(!watched.calls.includes("record"), "refused before the store was asked to write");
+  const after = await store.read(started.clock_key);
+  assert.equal(after.revision_count, 1);
+  assert.equal(after.history.paused_ms, 0);
+  assert.equal(await journal.readClock(started.clock_key) !== null, true);
+});
+
+test("a computation against a different HISTORY is refused here, not later in the append diff", async () => {
+  const { join, compose, composer } = await admittedSeam();
+  const { kernel, store } = recordingSeam();
+  const runtime = runtimeSeam({ composer, kernel, store });
+  const started = await runtime.advance(advanceArgs());
+  const head = copy((await store.read(started.clock_key)).history);
+
+  const at = iso(Date.parse(AS_OF) + 3 * DAY);
+  const pause = seamPause(join.proposed_receipt_reference_digest,
+    iso(Date.parse(AS_OF) + 2 * DAY), iso(Date.parse(AS_OF) + 2 * DAY + 6 * HOUR));
+  const composedOnHead = await compose({ as_of: at, pauses: [pause], history: head });
+  const judgedFromNothing = await compose({ as_of: at, pauses: [pause], history: null });
+  const onHead = evaluateOnce(copy(composedOnHead.projection));
+  const fromNothing = evaluateOnce(copy(judgedFromNothing.projection));
+  assert.equal(namedFactsAgree(onHead, fromNothing), true,
+    "the two differ only in the history they were computed against");
+  assert.notEqual(onHead.state.history_digest, fromNothing.state.history_digest);
+
+  const watched = watchedStore(store);
+  const substituted = runtimeSeam({ composer, kernel, store: watched.store,
+    present: () => kernel.envelopeFor(copy(judgedFromNothing.projection)) });
+  await assert.rejects(substituted.advance(advanceArgs({ as_of: at, pauses: [pause] })),
+    error => {
+      assert.equal(error.code, "clock_computation_projection_digest_mismatch");
+      return true;
+    });
+  assert.ok(!watched.calls.includes("record"));
+
+  // WHAT WOULD HAVE HAPPENED WITHOUT THIS SEAT, shown rather than asserted: the
+  // store's own append-only diff catches THIS one, later and under a different
+  // name. It is exactly the two cases above that it cannot catch.
+  await assert.rejects(store.record({ state: copy(fromNothing.state),
+    expected_prior_history_digest: started.history_digest, idempotency_key: uuid(),
+    claimed_history_digest: null, clock_ref: null, verifier_ref: VERIFIER_REF }));
+  assert.equal((await store.read(started.clock_key)).revision_count, 1);
+});
+
+// --- the retry half: a lost response is not a second request -----------------
+//
+// Deriving the prior from the head is what makes an advance correct and what
+// used to make it non-idempotent: after a write lands and its response is lost,
+// the head has moved, so a re-sent request computed a different revision and met
+// `clock_idempotency_key_reused`. These drive the real rails end to end.
+
+/** A second writing seat over the SAME journal: another actor, same scope. */
+const OTHER_ACTOR = { slug: "codex", human: false, sponsoring_human_slug: "joe" };
+
+test("a lost response on a CREATION replays, and appends nothing", async () => {
+  const { composer } = await admittedSeam();
+  const { kernel, store, journal } = recordingSeam();
+  const runtime = runtimeSeam({ composer, kernel, store });
+  const request = advanceArgs();
+
+  const first = await runtime.advance(request);
+  assert.equal(first.created_clock, true);
+  assert.equal(first.appended, true);
+  assert.equal(first.replayed, false);
+  assert.equal(first.replayed_recorded_request, false);
+  assert.equal(first.composed_from.prior_source, "current_scope_head");
+  assert.equal(first.effects.database_writes, 1);
+  assert.equal(first.effects.history_appended, true);
+
+  // The caller never saw that receipt and re-sends the identical request.
+  const again = await runtime.advance({ ...request });
+  assert.equal(again.replayed, true);
+  assert.equal(again.appended, false);
+  assert.equal(again.replayed_recorded_request, true);
+  assert.equal(again.composed_from.prior_source, "recorded_request_prior");
+  assert.equal(again.created_clock, true, "the revision it names was the creation");
+  // The SAME revision, not a new one that merely looks alike.
+  assert.equal(again.clock_key, first.clock_key);
+  assert.equal(again.history_digest, first.history_digest);
+  assert.equal(again.revision_ordinal, first.revision_ordinal);
+  assert.equal(again.expected_prior_history_digest, null);
+  assert.equal(again.recorded_at, first.recorded_at);
+  assert.equal(again.kernel_verdict.status, first.kernel_verdict.status);
+  // TRUTHFUL EFFECTS: this call wrote nothing and says so.
+  assert.equal(again.effects.database_writes, 0);
+  assert.equal(again.effects.history_appended, false);
+  // AND ZERO NEW APPEND, read off the record layer rather than off the receipt.
+  const readback = await store.read(first.clock_key);
+  assert.equal(readback.revision_count, 1);
+  assert.equal((await journal.readRevisions(first.clock_key)).length, 1);
+});
+
+test("a lost response on a LATER revision replays against the prior it was written under", async () => {
+  // The case the head-derived prior could never serve: by the time the retry
+  // arrives the head IS the revision this key wrote, so composing against the
+  // head would compute a third revision and compare it to the second.
+  const { join, composer } = await admittedSeam();
+  const { kernel, store } = recordingSeam();
+  const runtime = runtimeSeam({ composer, kernel, store });
+  const started = await runtime.advance(advanceArgs());
+
+  const at = iso(Date.parse(AS_OF) + 3 * DAY);
+  const pause = seamPause(join.proposed_receipt_reference_digest,
+    iso(Date.parse(AS_OF) + 2 * DAY), iso(Date.parse(AS_OF) + 2 * DAY + 12 * HOUR));
+  const request = advanceArgs({ as_of: at, pauses: [pause] });
+  const second = await runtime.advance(request);
+  assert.equal(second.appended, true);
+  assert.equal(second.revision_ordinal, 1);
+  assert.equal(second.expected_prior_history_digest, started.history_digest);
+
+  const again = await runtime.advance({ ...request });
+  assert.equal(again.replayed, true);
+  assert.equal(again.appended, false);
+  assert.equal(again.created_clock, false);
+  assert.equal(again.revision_ordinal, 1);
+  assert.equal(again.history_digest, second.history_digest);
+  // THE PRIOR IS THE ORIGINAL ONE, not the head the retry actually found.
+  assert.equal(again.expected_prior_history_digest, started.history_digest);
+  assert.equal(again.composed_from.prior_history_digest, started.history_digest);
+  assert.notEqual(started.history_digest, second.history_digest);
+  const readback = await store.read(started.clock_key);
+  assert.equal(readback.revision_count, 2);
+  assert.equal(readback.history_digest, second.history_digest);
+  assert.equal(readback.history.paused_ms, 12 * HOUR);
+});
+
+test("one key with a changed intent is refused, and the stored revision is not handed back", async () => {
+  const { join, composer } = await admittedSeam();
+  const { kernel, store } = recordingSeam();
+  const runtime = runtimeSeam({ composer, kernel, store });
+  const started = await runtime.advance(advanceArgs());
+  const at = iso(Date.parse(AS_OF) + 3 * DAY);
+  const pause = seamPause(join.proposed_receipt_reference_digest,
+    iso(Date.parse(AS_OF) + 2 * DAY), iso(Date.parse(AS_OF) + 2 * DAY + 12 * HOUR));
+  const request = advanceArgs({ as_of: at, pauses: [pause] });
+  const second = await runtime.advance(request);
+
+  // Same key, a different instant: a second request wearing the first one's key.
+  for (const changed of [
+    { ...request, as_of: iso(Date.parse(AS_OF) + 4 * DAY) },
+    { ...request, pauses: [seamPause(join.proposed_receipt_reference_digest,
+      iso(Date.parse(AS_OF) + 2 * DAY), iso(Date.parse(AS_OF) + 2 * DAY + 6 * HOUR))] },
+    { ...request, pauses: [] },
+  ]) {
+    await assert.rejects(runtime.advance(changed), error => {
+      assert.equal(error.code, "clock_idempotency_key_reused");
+      assert.equal(error.detail.invariant, "j1_clock_idempotency_key_binds_its_payload");
+      assert.equal(error.detail.recorded.history_digest, second.history_digest);
+      assert.notEqual(error.detail.recomputed.history_digest, second.history_digest);
+      // Re-computed against the ORIGINAL prior, which is what makes the
+      // comparison about intent rather than about where the head has got to.
+      assert.equal(error.detail.recomputed.expected_prior_history_digest,
+        started.history_digest);
+      return true;
+    });
+  }
+  assert.equal((await store.read(started.clock_key)).revision_count, 2);
+});
+
+test("a retry blocked by a LATER admission keeps the recorded revision and appends nothing", async () => {
+  // Replay works by re-composing, so it needs the inventory to still admit that
+  // composition. A receipt admitted after the request landed, at an instant
+  // after the request's own as_of, is the case where it cannot — and the whole
+  // point is that the caller must not read that as "my request failed".
+  const seam = await admittedSeam();
+  const { kernel, store } = recordingSeam();
+  const runtime = runtimeSeam({ composer: seam.composer, kernel, store });
+  const request = advanceArgs();
+  const landed = await runtime.advance(request);
+  assert.equal(landed.appended, true);
+
+  // A second, genuinely later admission into the SAME inventory.
+  const later = minimumProjection();
+  later.as_of = iso(Date.parse(AS_OF) + 3 * HOUR);
+  const second = joinOnce(later);
+  seam.admissionClock.at = iso(Date.parse(CLOCK_AS_OF) + 6 * HOUR);
+  const admitted = await seam.inputs.admit({
+    receipt: copy(second.proposed_receipt),
+    expected_prior_admission_digest: seam.admitted.admission_digest,
+    idempotency_key: uuid(),
+    claimed_receipt_digest: second.proposed_receipt_reference_digest,
+    source_ref: "safe:a00:second-proposed-minimum-receipt",
+  });
+  assert.equal(admitted.admitted_at, seam.admissionClock.at);
+  assert.equal((await seam.inputs.read()).admission_count, 2);
+  assert.ok(Date.parse(admitted.admitted_at) > Date.parse(request.as_of),
+    "the new admission must actually postdate the request, or this proves nothing");
+
+  // THE RETRY CANNOT BE RE-COMPOSED — and says so without ever implying the
+  // write did not land.
+  await assert.rejects(runtime.advance({ ...request }), error => {
+    assert.equal(error.name, "JourneyOneClockRuntimeError");
+    assert.equal(error.code, "clock_runtime_recorded_request_not_recomputable");
+    assert.equal(error.detail.request_landed, true);
+    assert.equal(error.detail.appended, false);
+    assert.equal(error.detail.recorded_clock_key, landed.clock_key);
+    assert.equal(error.detail.recorded_history_digest, landed.history_digest);
+    assert.equal(error.detail.recorded_revision_ordinal, landed.revision_ordinal);
+    assert.equal(error.detail.cause_code, "projection_as_of_precedes_admission");
+    assert.ok(error.message.includes("ALREADY LANDED"));
+    return true;
+  });
+
+  // NOTHING WAS APPENDED, and the recorded revision is still readable — the
+  // outcome is recoverable by reading, not by re-writing.
+  const readback = await store.read(landed.clock_key);
+  assert.equal(readback.revision_count, 1);
+  assert.equal(readback.history_digest, landed.history_digest);
+  const stillRecorded = await store.readRecordedRevisionForKey(request.idempotency_key);
+  assert.equal(stillRecorded.exists, true);
+  assert.equal(stillRecorded.history_digest, landed.history_digest);
+  assert.equal(stillRecorded.revision_ordinal, landed.revision_ordinal);
+  assert.equal(stillRecorded.prior_revision_ordinal, null, "it was the creation");
+});
+
+test("a recorded request is never replayed to another writing seat", async () => {
+  const { composer } = await admittedSeam();
+  const { kernel, journal } = recordingSeam();
+  const mine = createJourneyOneClockStore({ journal, actor: STORE_ACTOR, clock_scope: SEAM_SCOPE });
+  const theirs = createJourneyOneClockStore({ journal, actor: OTHER_ACTOR, clock_scope: SEAM_SCOPE });
+  const request = advanceArgs();
+  const first = await runtimeSeam({ composer, kernel, store: mine }).advance(request);
+  assert.equal(first.appended, true);
+
+  const otherSeat = runtimeSeam({ composer, kernel, store: theirs });
+  await assert.rejects(otherSeat.advance({ ...request }), error => {
+    assert.equal(error.name, "JourneyOneClockRuntimeError");
+    assert.equal(error.code, "clock_runtime_replay_actor_mismatch");
+    assert.equal(error.detail.recorded_written_by_actor_id, STORE_ACTOR.slug);
+    assert.equal(error.detail.advancing_as_actor_id, OTHER_ACTOR.slug);
+    return true;
+  });
+  assert.equal((await mine.read(first.clock_key)).revision_count, 1);
+});
+
+test("a head that moves under two concurrent advances refuses one, and its key stays free", async () => {
+  const { join, composer } = await admittedSeam();
+  const { kernel, store } = recordingSeam();
+  const runtime = runtimeSeam({ composer, kernel, store });
+  const started = await runtime.advance(advanceArgs());
+
+  // Two advances against ONE head. Both read it, both compose against it, and
+  // the store's compare-and-swap decides — the retry read above changes nothing
+  // about that, because neither key has written anything yet.
+  const at = iso(Date.parse(AS_OF) + 3 * DAY);
+  const pause = seamPause(join.proposed_receipt_reference_digest,
+    iso(Date.parse(AS_OF) + 2 * DAY), iso(Date.parse(AS_OF) + 2 * DAY + 12 * HOUR));
+  const requests = [
+    advanceArgs({ as_of: at, pauses: [pause] }),
+    advanceArgs({ as_of: iso(Date.parse(AS_OF) + 4 * DAY) }),
+  ];
+  const settled = await Promise.allSettled(requests.map(request => runtime.advance(request)));
+  const rejectedIndex = settled.findIndex(s => s.status === "rejected");
+  assert.equal(settled.filter(s => s.status === "fulfilled").length, 1,
+    "exactly one of two concurrent appends lands");
+  assert.notEqual(rejectedIndex, -1);
+  assert.equal(settled[rejectedIndex].reason.code, "clock_stale_prior_history_digest");
+  assert.equal((await store.read(started.clock_key)).revision_count, 2);
+
+  // THE REFUSED CALL WROTE NOTHING, so its key is not spent — which is what
+  // makes re-sending it an ordinary attempt against the new head rather than a
+  // replay of something that never happened.
+  const spent = await store.readRecordedRevisionForKey(requests[rejectedIndex].idempotency_key);
+  assert.equal(spent.exists, false);
+  const landed = await store.readRecordedRevisionForKey(
+    requests[rejectedIndex === 0 ? 1 : 0].idempotency_key);
+  assert.equal(landed.exists, true);
+  assert.equal(landed.revision_ordinal, 1);
+  assert.equal(landed.expected_prior_history_digest, started.history_digest);
+});
+
+test("a composer and a store bound to different accepted scopes refuse before anything is read", async () => {
+  const { composer } = await admittedSeam();
+  for (const field of ["benchmark_subject_digest", "benchmark_candidate_digest",
+    "benchmark_policy_digest"]) {
+    const { kernel, store } = recordingSeam({ ...SEAM_SCOPE, [field]: D(50) });
+    assert.throws(() => runtimeSeam({ composer, kernel, store }), error => {
+      assert.equal(error.code, "clock_runtime_scope_disagreement");
+      assert.equal(error.detail.invariant, "j1_clock_scope_binds_one_clock");
+      assert.equal(error.detail.composer_clock_scope_key, journeyOneClockScopeKey(SEAM_SCOPE));
+      return true;
+    });
+  }
 });

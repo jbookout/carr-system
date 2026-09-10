@@ -1349,6 +1349,79 @@ test("the verified binding can only report values this evaluation actually enfor
   refuse(contract, "wrong_deadline_contract");
 });
 
+test("the binding names WHICH projection was judged, and the accepted scope alone cannot", () => {
+  // TWO VALID SNAPSHOTS FOR ONE ACCEPTED SCOPE. Same tenant, same subject,
+  // candidate and policy digests, same gate ids, same as_of, same benchmark
+  // manifest, same TTL policy, same origin admission and the same (empty)
+  // pauses — and one records a COMPLETED clock while the other records a
+  // running one. Every value the v1 binding exposed is identical across them,
+  // which is exactly why a consumer holding its own projection could not tell
+  // from that binding which of the two it was looking at.
+  const running = snapshot();
+  const done = snapshot(); done.completion = completed(ORIGIN);
+  const a = run(running), b = run(done);
+
+  for (const field of ["tenant", "subject_digest", "candidate_digest", "policy_digest",
+    "clock_origin_gate_id", "clock_terminus_gate_id"]) {
+    assert.equal(a.verified_binding[field], b.verified_binding[field],
+      `${field} cannot distinguish two valid snapshots of one accepted scope`);
+  }
+  assert.equal(a.state.status, "running");
+  assert.equal(b.state.status, "completed_on_time");
+  assert.notEqual(a.state.history_digest, b.state.history_digest);
+
+  // THE ONE FIELD THAT DOES DISTINGUISH THEM, and a consumer can recompute it
+  // from the projection it holds rather than being asked to believe it.
+  assert.notEqual(a.verified_binding.authenticated_projection_digest,
+    b.verified_binding.authenticated_projection_digest);
+  assert.equal(a.verified_binding.authenticated_projection_digest, digest(running));
+  assert.equal(b.verified_binding.authenticated_projection_digest, digest(done));
+  assert.match(a.verified_binding.authenticated_projection_digest, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(a.verified_binding.schema_version,
+    "doctorcre-v5-journey-one-clock-verified-binding.v2");
+});
+
+test("the projection digest is canonical, deterministic, and outside the hashed state", () => {
+  const p = snapshot();
+  const first = run(p), second = run(copy(p));
+  // Deterministic: the same projection judged twice reports one digest.
+  assert.equal(first.verified_binding.authenticated_projection_digest,
+    second.verified_binding.authenticated_projection_digest);
+
+  // CANONICAL, so a snapshot rebuilt in another key order is the same
+  // projection rather than a different one. digest() sorts keys; a consumer
+  // comparing this against its own composition must be able to rely on that.
+  const reordered = { history: p.history, amendments: p.amendments, pauses: p.pauses,
+    completion_expectation: p.completion_expectation, completion: p.completion,
+    minimum_history: p.minimum_history, benchmark: p.benchmark, binding: p.binding,
+    as_of: p.as_of, tenant: p.tenant, schema_version: p.schema_version };
+  assert.notDeepEqual(Object.keys(reordered), Object.keys(p), "the fixture must actually reorder");
+  assert.equal(run(reordered).verified_binding.authenticated_projection_digest,
+    first.verified_binding.authenticated_projection_digest);
+
+  // NOT IN THE HASHED STATE. The state is still twenty-one fields, its digest is
+  // still the hash of itself minus history_digest, and adding this field rebased
+  // nothing: a projection input has no business in a clock's whole history.
+  assert.equal(Object.keys(first.state).length, 21);
+  assert.ok(!Object.hasOwn(first.state, "authenticated_projection_digest"));
+  const { history_digest, ...body } = first.state;
+  assert.equal(digest(body), history_digest);
+
+  // A DIFFERENT PAUSE START, SAME ID AND SAME END: the state's pause_intervals
+  // mirror only the id and the end, so those two are identical while the credited
+  // hours and the deadline are not. The digest is what separates them.
+  const early = snapshot(iso(Date.parse(ORIGIN) + 3 * HOUR));
+  early.pauses = [pause(early, iso(Date.parse(ORIGIN) + HOUR), iso(Date.parse(ORIGIN) + 2 * HOUR))];
+  const late = copy(early);
+  late.pauses = [pause(late, iso(Date.parse(ORIGIN) + 90 * 60000), iso(Date.parse(ORIGIN) + 2 * HOUR))];
+  const runEarly = run(early), runLate = run(late);
+  assert.deepEqual(runEarly.state.pause_intervals, runLate.state.pause_intervals);
+  assert.notEqual(runEarly.state.paused_ms, runLate.state.paused_ms);
+  assert.notEqual(runEarly.state.due_at, runLate.state.due_at);
+  assert.notEqual(runEarly.verified_binding.authenticated_projection_digest,
+    runLate.verified_binding.authenticated_projection_digest);
+});
+
 test("closed projections, hidden fields, mutation and side effects remain bounded", () => {
   const p = snapshot(); p.reset = true; refuse(p, "closed_shape");
   const q = snapshot(); q.minimum_history[0].receipt.authorized = true; refuse(q, "closed_shape");
