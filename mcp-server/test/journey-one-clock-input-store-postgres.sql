@@ -813,6 +813,19 @@ begin
   -- the intended and natural mode (has_table_privilege reports true for an owner
   -- without an explicit grant), so this is a SKIP with a notice and not a
   -- failure: the fixture says what it could not test instead of claiming it.
+  --
+  -- THE COLUMN PRECHECK IS STRUCTURAL AND IS NOT GATED ON THE ROLE. Reading
+  -- information_schema.columns needs no privilege on the relation, so a run that
+  -- has to SKIP the attempts below still asserts that the column those attempts
+  -- name exists on both relations.
+  foreach v_relation in array array['j1_minimum_inventory', 'j1_minimum_admission'] loop
+    if not exists (select 1 from information_schema.columns
+                    where table_schema = 'ops' and table_name = v_relation
+                      and column_name = 'minimum_receipt_ttl_policy_ms') then
+      raise exception 'FIXTURE: ops.% has no minimum_receipt_ttl_policy_ms column, so this negative would fail at parse instead of reaching the append-only trigger',
+        v_relation;
+    end if;
+  end loop;
   if not (has_table_privilege(current_user, 'ops.j1_minimum_inventory', 'UPDATE')
       and has_table_privilege(current_user, 'ops.j1_minimum_inventory', 'DELETE')
       and has_table_privilege(current_user, 'ops.j1_minimum_inventory', 'TRUNCATE')
@@ -823,12 +836,6 @@ begin
       current_user;
   else
   foreach v_relation in array array['j1_minimum_inventory', 'j1_minimum_admission'] loop
-    if not exists (select 1 from information_schema.columns
-                    where table_schema = 'ops' and table_name = v_relation
-                      and column_name = 'minimum_receipt_ttl_policy_ms') then
-      raise exception 'FIXTURE: ops.% has no minimum_receipt_ttl_policy_ms column, so this negative would fail at parse instead of reaching the append-only trigger',
-        v_relation;
-    end if;
     begin
       execute format(
         'update ops.%I set minimum_receipt_ttl_policy_ms = minimum_receipt_ttl_policy_ms + 1 where true',
