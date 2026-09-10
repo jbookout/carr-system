@@ -43,6 +43,18 @@
 //   evidence record must carry server provenance, and a caller-supplied
 //   "signed: true" is refused by name rather than read.
 //
+// THE TWO DOORS, AND WHY THE SECOND ONE IS NARROW. A TRANSITION advances a
+// subject that already exists, against its committed row. An INITIALIZATION
+// creates the first row of a chain — a prospect relationship, an assignment under
+// an already active engagement, a property negotiation under a still-open
+// assignment — and it is a SEPARATE, deliberately narrow admission rather than a
+// transition with its prerequisites switched off. It creates the earliest
+// declared state of its kind and nothing later, it carries no evidence because no
+// evidence in this rail can bind to a subject that does not yet exist, and it
+// weakens no transition: the client status, the opened assignment, the submitted
+// LOI and the pending Deal all still require their own evidence afterwards. See
+// the INITIALIZATION section below for the whole of it.
+//
 // TWO KINDS OF NO, following S01 and F01 deliberately:
 //   * A POLICY ANSWER is returned — a frozen result whose `decision` is "allow",
 //     "refuse" or "reconcile", with a stable `reason_id`. A refusal is an answer
@@ -72,7 +84,10 @@ import { V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 export { V5_NO_EFFECTS };
 
 export const V5_J102_SCHEMA_VERSION = "doctorcre-v5-cre-lifecycle.v1";
-export const V5_J102_POLICY_VERSION = 1;
+// 2 rather than 1: the policy preimage below gained the initialization contracts,
+// so its digest is a different identity for a different contract. The version is
+// moved with the bytes rather than left to be inferred from them.
+export const V5_J102_POLICY_VERSION = 2;
 
 export const V5_J102_SUBJECT_SCHEMA_VERSION = "doctorcre-v5-j102-lifecycle-subject.v1";
 export const V5_J102_EVIDENCE_SCHEMA_VERSION = "doctorcre-v5-j102-lifecycle-evidence.v1";
@@ -2280,6 +2295,420 @@ function axisResult(base, t, subject, axis, value, reason_id, event_kind, item) 
 }
 
 // ---------------------------------------------------------------------------
+// INITIALIZATION — the first row of a chain, and the ONE act in this slice that
+// cannot be evidence-bound.
+//
+// WHY IT IS A SEPARATE EVALUATOR AND NOT A TRANSITION. A transition ADVANCES a
+// subject: its `from` axes, its instrument kind and its prior conditions are all
+// statements about a committed row. A transition that created its own primary
+// subject would have nothing to check them against, and that is exactly the
+// bypass the writer refuses by name (`j102_primary_subject_creation_refused`).
+// So creation is not folded back into the transition table. It is its own narrow
+// admission with its own vocabulary, and NOTHING BELOW WEAKENS A TRANSITION: the
+// state an initialization produces is the EARLIEST declared state of its kind, so
+// every existing prerequisite still has to be satisfied afterwards by the
+// evidence-bound transition that follows.
+//
+// WHY THERE IS NO EVIDENCE HERE, stated plainly because it is the one place a
+// reader should expect some. Every evidence kind in this slice BINDS TO A SUBJECT
+// (`binds_subject_kind`), a first-party record carries that binding in its own
+// typed columns, and `record-lifecycle-fact` refuses `bound_subject_not_found`
+// for a subject that does not exist. An assignment mandate about assignment A
+// therefore cannot be written until assignment A exists, and cannot be the
+// evidence for creating it. The ordering is a fact about the rail, not a gap that
+// was skipped, and the honest consequence is that an initialization rests on:
+//
+//   * the SERVER-DERIVED actor and its authorization class,
+//   * the tenant,
+//   * the PARENT CHAIN, loaded and re-checked under the writer's own lock — an
+//     assignment only under an ACTIVE engagement held by a relationship that is
+//     already a CLIENT (Q077), a negotiation only under an assignment that is
+//     still open (Q095),
+//   * a state shape that is FIXED, carries no lifecycle claim, and is refused if
+//     the caller names any part of it.
+//
+// WHAT AN INITIALIZATION IS NOT. It is not a Client (a prospect relationship is
+// `prospect`, and only a signed effective ETL or an approved equivalent moves
+// it), not a Deal (Q078: only selection AND commitment create one), not an
+// OPENED Assignment (`open-assignment` on a mandate record is the only way to
+// reach `search` and the only producer of an `assignment_opened` event), not an
+// LOI (a negotiation is created at `loi_drafted`, and `record-loi-submission`
+// still requires the delivered document), and never a Tour.
+//
+// AND ONE THING IT DOES NOT PREVENT, said here rather than left to be found: a
+// created assignment can reach `negotiation` through `record-loi-submission`
+// without any mandate record ever being written, because that transition admits
+// research, search and negotiation alike. Nothing in the thirteen settles
+// whether a mandate must come first; see the note on initialize-assignment.
+// ---------------------------------------------------------------------------
+
+export const V5_J102_INITIALIZATION_SCHEMA_VERSION =
+  "doctorcre-v5-j102-lifecycle-initialization.v1";
+
+const INITIALIZATIONS = deepFreeze({
+  // Q069 / Q077 / Q079. Journey 1 starts at a party we are pursuing, and pursuing
+  // somebody is not a claim about the world that any document could evidence.
+  // The row it creates says two things and nothing else: this relationship is a
+  // PROSPECT, and it holds no engagements.
+  "initialize-prospect-relationship": {
+    subject_kind: "relationship",
+    decision_refs: ["Q069.D1", "Q077.D1", "Q079.D1"],
+    permitted_actor_classes: ["verified_partner", "sponsored_agent"],
+    parent: null,
+    required_context: [],
+    declared_identifiers: [],
+    initial_state: { relationship_state: "prospect", active_engagement_count: 0 },
+    event_kind: "relationship_initialized",
+    event_detail_fields: ["relationship_state"],
+    reason_id: "prospect_relationship_initialized",
+  },
+  // Q077 / Q079 / Q080. One client may hold several mandates, so an assignment is
+  // created UNDER an engagement rather than being the engagement. The client gate
+  // is the whole of the admission here: an assignment cannot be started for a
+  // prospect, or under an engagement that has expired or been terminated.
+  //
+  // HOW MUCH OF THAT GATE IS LIVE TODAY, because "cannot be started for a
+  // prospect" is doing more work than "expired or terminated" is. The prospect
+  // half is a live discriminator: `initialize-prospect-relationship` creates
+  // relationships at `prospect` and only the ETL moves them, so an assignment
+  // before signature really is refused. The lapsed half is DEFENCE IN DEPTH
+  // rather than a live path: no shipped transition writes `expired`,
+  // `terminated`, `client_paused` or `client_ended` at all, so those states are
+  // reachable only through a receipted correction. The condition is kept because
+  // the day a producer lands it must already be enforced — but it is not
+  // currently exercised by any door, and the SQL fixture says so by name rather
+  // than leaving a reader to assume it is covered.
+  //
+  // IT IS CREATED AT `research`, THE EARLIEST DECLARED PHASE, and that is a
+  // deliberate narrowing rather than a convenience: creating the row at anything
+  // later would let a caller reach a phase on no evidence at all.
+  //
+  // WHAT THAT DOES AND DOES NOT BUY, stated exactly, because the obvious reading
+  // is wrong. `open-assignment` is still the ONLY way to reach `search` and the
+  // ONLY producer of an `assignment_opened` event, so the mandate record remains
+  // load-bearing for both. It is NOT the only way past `research`:
+  // `record-loi-submission` admits an assignment in research, search OR
+  // negotiation and writes `negotiation`, so a created assignment can reach
+  // `negotiation` through an LOI without any mandate record ever being written.
+  // A CREATED SHELL AND AN ASSIGNMENT OPENED ON A MANDATE ARE THEREFORE BOTH
+  // `research`, and only `established_by_transition` on the row and the event
+  // history tell them apart — not the phase axis a consumer reads.
+  //
+  // WHETHER A MANDATE SHOULD BE REQUIRED BEFORE AN LOI IS AN OWNER QUESTION AND
+  // IS NOT ANSWERED HERE. None of the thirteen settles an ordering obligation:
+  // Q072.D1 maps search initiation TO research or search and says nothing about
+  // what else may reach them. The narrow change if the owner wants it is to drop
+  // `research` from initialize-property-negotiation's admitted phases below,
+  // which would force open-assignment first — and would also stop a
+  // research-scope assignment from ever holding a draft, which is why it is not
+  // encoded on a reviewer's or an author's say-so.
+  "initialize-assignment": {
+    subject_kind: "assignment",
+    decision_refs: ["Q072.D1", "Q077.D1", "Q079.D1", "Q080.D1"],
+    permitted_actor_classes: ["verified_partner", "sponsored_agent"],
+    parent: { kind: "engagement", field: "engagement_id" },
+    required_context: [
+      {
+        subject: "engagement",
+        conditions: [{ field: "engagement_state", equals: "active" }],
+        absent_reason_id: "engagement_not_loaded",
+        unmet_reason_id: "engagement_not_active",
+      },
+      {
+        subject: "relationship",
+        chained_from: { subject: "engagement", field: "relationship_id" },
+        conditions: [{ field: "relationship_state", equals: "client" }],
+        absent_reason_id: "relationship_not_loaded",
+        unmet_reason_id: "client_status_required",
+        chain_reason_id: "relationship_not_in_verified_chain",
+      },
+    ],
+    declared_identifiers: [],
+    initial_state: {
+      assignment_phase: "research", open_negotiation_count: 0,
+      selected_property_id: null, active_lease_draft_target_id: null,
+      pending_deal_id: null, multi_target_exception_ref: null,
+    },
+    event_kind: "assignment_initialized",
+    event_detail_fields: ["engagement_id", "assignment_phase"],
+    reason_id: "assignment_initialized_under_active_engagement",
+  },
+  // Q095. "we always submit multiple LOIs if we can" — so a negotiation is a
+  // child of the assignment and several may exist at once. It is created at
+  // `loi_drafted`, which is what `record-loi-submission` requires and is the one
+  // negotiation state that asserts nothing about a counterparty.
+  //
+  // THE ASSIGNMENT MUST STILL BE OPEN. Once the winner is selected the assignment
+  // is `committed`, and the kernel already refuses a fresh LOI there
+  // (`assignment_already_committed`). Creating a draft under a committed or
+  // concluded assignment would be creating a row that could never be submitted,
+  // so the same bound is applied at creation — transcribed from that refusal
+  // rather than invented beside it.
+  "initialize-property-negotiation": {
+    subject_kind: "property_negotiation",
+    decision_refs: ["Q080.D1", "Q095.D1"],
+    permitted_actor_classes: ["verified_partner", "sponsored_agent"],
+    parent: { kind: "assignment", field: "assignment_id" },
+    required_context: [
+      {
+        subject: "assignment",
+        conditions: [{ field: "assignment_phase", in: ["research", "search", "negotiation"] }],
+        absent_reason_id: "assignment_not_loaded",
+        unmet_reason_id: "assignment_phase_not_open",
+        // Q095's own words for the case a reader will meet most often.
+        unmet_reason_overrides: [
+          { field: "assignment_phase", observed: "committed",
+            reason_id: "assignment_already_committed" },
+        ],
+      },
+    ],
+    declared_identifiers: ["property_id"],
+    initial_state: { negotiation_state: "loi_drafted" },
+    event_kind: "property_negotiation_initialized",
+    event_detail_fields: ["assignment_id", "property_id", "negotiation_state"],
+    reason_id: "property_negotiation_initialized_under_assignment",
+  },
+});
+
+export const V5_J102_INITIALIZATION_IDS = deepFreeze(Object.keys(INITIALIZATIONS).sort());
+
+/** Which initialization creates each subject kind, or null for the coupled ones. */
+export const V5_J102_INITIALIZED_SUBJECT_KINDS = deepFreeze(
+  V5_J102_INITIALIZATION_IDS.map(id => INITIALIZATIONS[id].subject_kind).sort());
+
+/** The full declared contract for one initialization, for callers and for review. */
+export function v5J102InitializationContract(initialization_id) {
+  assertEnum(initialization_id, V5_J102_INITIALIZATION_IDS,
+    "initialization_id", "unknown_initialization");
+  const c = INITIALIZATIONS[initialization_id];
+  return deepFreeze({
+    schema_version: V5_J102_INITIALIZATION_SCHEMA_VERSION,
+    initialization_id,
+    subject_kind: c.subject_kind,
+    decision_refs: [...c.decision_refs],
+    permitted_actor_classes: [...c.permitted_actor_classes],
+    parent_subject_kind: c.parent === null ? null : c.parent.kind,
+    parent_reference_field: c.parent === null ? null : c.parent.field,
+    declared_identifiers: [...c.declared_identifiers],
+    required_context: c.required_context.map(rule => ({
+      subject: rule.subject,
+      chained_from: rule.chained_from === undefined ? null : { ...rule.chained_from },
+      conditions: rule.conditions.map(condition => ({ ...condition })),
+    })),
+    initial_state: { ...c.initial_state },
+    event_kind: c.event_kind,
+    event_detail_fields: [...c.event_detail_fields],
+    reason_id: c.reason_id,
+    // The five negatives that keep an initialization from being read as a
+    // transition, and the one that keeps it from being read as a bypass.
+    requires_evidence: false,
+    advances_lifecycle_state: false,
+    establishes_client_status: false,
+    creates_deal: false,
+    creates_or_activates_tour: false,
+    transition_prerequisites_bypassed: false,
+  });
+}
+
+const INITIALIZATION_REQUEST_KEYS = Object.freeze([
+  "tenant", "initialization_id", "related", "declared", "actor", "now",
+]);
+// `new_subject_id` names the row being created; `property_id` is the one further
+// identifier a negotiation needs and nothing can derive. THERE IS NO EVIDENCE KEY
+// AND NO STATE KEY: a request naming one is an unknown field, and a request
+// naming a phase, a state or an approval is refused by the two guards before that.
+const INITIALIZATION_DECLARED_KEYS = Object.freeze(["new_subject_id", "property_id"]);
+
+function initializationResult(fields) {
+  return deepFreeze({
+    schema_version: V5_J102_SCHEMA_VERSION,
+    tenant: ORGANIZATION_TENANT_ID,
+    ...fields,
+    // An initialization creates the FIRST state of a subject; it advances none,
+    // and every prerequisite of every transition remains to be satisfied.
+    advances_lifecycle_state: false,
+    transition_prerequisites_bypassed: false,
+    free_form_stage_update: false,
+    model_output_used_as_evidence: false,
+    creates_or_activates_tour: false,
+    effects: V5_NO_EFFECTS,
+  });
+}
+
+/**
+ * Evaluate ONE typed initialization against LOADED parent state.
+ *
+ * ORDERED, so a second reader reaches the same answer from the transcript:
+ *   1. The request must be readable, closed, tenant-bound and carry a
+ *      server-derived actor. There is no evidence parameter to supply.
+ *   2. The initialization must be registered. There is no default.
+ *   3. The actor's authorization class must be permitted.
+ *   4. The declared identifiers must be present and well formed. They are
+ *      IDENTIFIERS — which row this is, and which property it concerns — never
+ *      facts about any of them.
+ *   5. The parent must be LOADED, must be the parent this initialization runs
+ *      under, and every declared context condition must hold of it. The chained
+ *      context (an engagement's relationship) is verified rather than assumed.
+ *   6. The created state is assembled from the FIXED initial state plus the
+ *      parent reference plus the declared identifiers, and is then validated as a
+ *      subject of its kind — so a shape that is not a legal subject cannot be
+ *      proposed, and every declared key is present.
+ */
+export function evaluateLifecycleInitialization(request) {
+  assertObject(request, "request");
+  assertClosedKeys(request, INITIALIZATION_REQUEST_KEYS, "request");
+  assertRequiredKeys(request, ["tenant", "initialization_id", "declared", "actor", "now"],
+    "request");
+  assertTenant(request.tenant, "request.tenant");
+  assertInstant(request.now, "request.now");
+  const initialization_id = assertEnum(request.initialization_id, V5_J102_INITIALIZATION_IDS,
+    "request.initialization_id", "unknown_initialization");
+  const c = INITIALIZATIONS[initialization_id];
+  const actor = assertActor(request.actor, "request.actor");
+
+  const rawDeclared = assertObject(request.declared, "request.declared");
+  assertClosedKeys(rawDeclared, INITIALIZATION_DECLARED_KEYS, "request.declared");
+  const declared = {};
+  for (const key of INITIALIZATION_DECLARED_KEYS) {
+    if (rawDeclared[key] === undefined || rawDeclared[key] === null) continue;
+    declared[key] = rawDeclared[key];
+  }
+
+  const related = {};
+  if (request.related !== undefined && request.related !== null) {
+    const rawRelated = assertObject(request.related, "request.related");
+    assertClosedKeys(rawRelated, RELATED_KEYS, "request.related", { allowAsserted: true });
+    for (const key of RELATED_KEYS) {
+      if (rawRelated[key] === undefined || rawRelated[key] === null) continue;
+      const projected = assertLifecycleSubject(rawRelated[key], `request.related.${key}`);
+      if (projected.subject_kind !== key) {
+        fail("related_subject_kind_mismatch", `request.related.${key} is a ${projected.subject_kind}`,
+          { path: `request.related.${key}`, expected: key, actual: projected.subject_kind });
+      }
+      related[key] = projected;
+    }
+  }
+
+  const base = {
+    initialization_id,
+    subject_kind: c.subject_kind,
+    decision_refs: [...c.decision_refs],
+    actor_slug: actor.slug,
+    requires_evidence: false,
+    evidence_supplied: 0,
+  };
+  const refuseInit = (reason_id, detail = {}) => initializationResult({
+    decision: "refuse", reason_id, ...base, subject_id: null, applied: false,
+    created_state: null, proposed_state: null, events: [], ...detail,
+  });
+
+  if (!c.permitted_actor_classes.includes(actor.authorization_class)) {
+    return refuseInit("actor_class_not_permitted", {
+      permitted_actor_classes: [...c.permitted_actor_classes],
+      actor_authorization_class: actor.authorization_class,
+    });
+  }
+
+  const subject_id = declared.new_subject_id;
+  if (typeof subject_id !== "string") {
+    return refuseInit("declared_subject_id_required", {});
+  }
+  assertExternalIdent(subject_id, "request.declared.new_subject_id", { maxLength: 128 });
+  for (const field of c.declared_identifiers) {
+    if (typeof declared[field] !== "string") {
+      return refuseInit("declared_identifier_required", { missing_declared_identifier: field });
+    }
+    assertExternalIdent(declared[field], `request.declared.${field}`, { maxLength: 128 });
+  }
+  // An identifier the caller supplied that this initialization does not use is an
+  // identifier nothing would read. It refuses rather than being dropped in
+  // silence, because a caller that named a property on a relationship has
+  // misunderstood which row it is creating.
+  for (const field of INITIALIZATION_DECLARED_KEYS) {
+    if (field === "new_subject_id" || declared[field] === undefined) continue;
+    if (!c.declared_identifiers.includes(field)) {
+      return refuseInit("declared_identifier_not_used", { unexpected_declared_identifier: field });
+    }
+  }
+
+  // THE PARENT CHAIN. Every context subject is READ from the loaded set, and the
+  // one that identifies the next is verified rather than trusted.
+  const context = {};
+  for (const rule of c.required_context) {
+    const loaded = related[rule.subject] ?? null;
+    if (loaded === null) return refuseInit(rule.absent_reason_id, {});
+    // The FIRST context subject is the parent this row is created under and is
+    // read as loaded; a LATER one is reached through a field on the one before
+    // it, and that link is verified rather than assumed.
+    if (rule.chained_from !== undefined) {
+      const anchor = context[rule.chained_from.subject] ?? null;
+      if (anchor === null) return refuseInit(rule.absent_reason_id, {});
+      if (anchor[rule.chained_from.field] !== loaded.subject_id) {
+        return refuseInit(rule.chain_reason_id, {
+          expected_id: anchor[rule.chained_from.field] ?? null,
+          loaded_id: loaded.subject_id,
+        });
+      }
+    }
+    for (const condition of rule.conditions) {
+      const observed = loaded[condition.field] ?? null;
+      const met = condition.equals !== undefined
+        ? observed === condition.equals
+        : condition.in.includes(observed);
+      if (!met) {
+        const override = (rule.unmet_reason_overrides ?? [])
+          .find(o => o.field === condition.field && o.observed === observed);
+        return refuseInit(override === undefined ? rule.unmet_reason_id : override.reason_id, {
+          unmet_field: condition.field,
+          observed,
+          permitted: condition.equals !== undefined ? [condition.equals] : [...condition.in],
+        });
+      }
+    }
+    context[rule.subject] = loaded;
+  }
+
+  const parent = c.parent === null ? null : context[c.parent.kind];
+  const created_state = assertLifecycleSubject({
+    subject_kind: c.subject_kind,
+    subject_id,
+    ...(c.parent === null ? {} : { [c.parent.field]: parent.subject_id }),
+    ...Object.fromEntries(c.declared_identifiers.map(field => [field, declared[field]])),
+    ...c.initial_state,
+  }, "created_state");
+
+  const detail = {};
+  for (const field of c.event_detail_fields) {
+    detail[field] = created_state[field];
+  }
+
+  return initializationResult({
+    decision: "allow",
+    reason_id: c.reason_id,
+    ...base,
+    subject_id,
+    // `applied: false` for the same reason a transition's allow says so: this
+    // kernel DECIDES and the store APPLIES.
+    applied: false,
+    created_state,
+    proposed_state: deepFreeze({ [c.subject_kind]: created_state }),
+    events: deepFreeze([
+      lifecycleEvent(c.event_kind, c.subject_kind, subject_id, detail),
+    ]),
+    atomic_or_refuse: true,
+    parent_subject_kind: c.parent === null ? null : c.parent.kind,
+    parent_subject_id: parent === null ? null : parent.subject_id,
+    context_verified: Object.keys(context).sort(),
+    // The four negatives a reader of this answer needs, stated rather than
+    // inferred from the absence of a row.
+    establishes_client_status: false,
+    creates_deal: false,
+    opens_assignment: false,
+    submits_loi: false,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Q095 — the single-target constraint, as its own evaluator.
 //
 // Multiple LOIs and multiple acceptances are UNCONSTRAINED: Joe's correction is
@@ -3197,6 +3626,20 @@ export function v5J102PolicyPreimage() {
     subject_binding_sources: [...V5_J102_SUBJECT_BINDING_SOURCES],
     partner_authored_record_kinds: [...V5_J102_PARTNER_AUTHORED_RECORD_KINDS],
     transitions: V5_J102_TRANSITION_IDS.map(id => v5J102TransitionContract(id)),
+    initializations: V5_J102_INITIALIZATION_IDS.map(id => v5J102InitializationContract(id)),
+    // Said on the policy itself, because "which door creates a row of this kind"
+    // is the first question a reader of the two tables has: three kinds are
+    // created by their own narrow initialization, two are COUPLED creations of a
+    // transition whose primary was loaded, and no transition creates its own
+    // primary subject.
+    subject_creation_doors: {
+      by_initialization: Object.fromEntries(V5_J102_INITIALIZATION_IDS
+        .map(id => [INITIALIZATIONS[id].subject_kind, id])),
+      coupled_to_transition: { engagement: "establish-client-and-engagement",
+        deal: "commit-winning-property" },
+      primary_subject_of_a_transition_is_never_created: true,
+      initialization_requires_evidence: false,
+    },
     field_classes: [...V5_J102_FIELD_CLASSES],
     material_field_classes: [...V5_J102_MATERIAL_FIELD_CLASSES],
     field_class_registry: Object.fromEntries(
@@ -3296,6 +3739,107 @@ for (const [transition_id, t] of Object.entries(TRANSITIONS)) {
   }
 }
 
+// THE INITIALIZATION TABLE, held to the same invariants as the transition table
+// AND to two of its own: an initialization may not create a subject a transition
+// creates as a coupled fact, and the state it creates must be one the vocabulary
+// registers. The first keeps the two doors disjoint — an engagement created
+// outside establish-client-and-engagement would be a Client with no coupled
+// status change, and a deal created outside commit-winning-property would be a
+// Deal from no commitment, which is the exact thing Q078 removes.
+const COUPLED_CREATED_SUBJECT_KINDS = Object.freeze(["engagement", "deal"]);
+
+// ONE DOOR PER KIND. Two initializations creating one subject kind would collapse
+// silently in the policy preimage's `by_initialization` map — Object.fromEntries
+// keeps the last — so the projection would report one door where two exist, which
+// is the one shape this file's own self-checks would otherwise miss.
+const INITIALIZED_KIND_COUNTS = new Map();
+for (const c of Object.values(INITIALIZATIONS)) {
+  INITIALIZED_KIND_COUNTS.set(c.subject_kind,
+    (INITIALIZED_KIND_COUNTS.get(c.subject_kind) ?? 0) + 1);
+}
+
+for (const [initialization_id, c] of Object.entries(INITIALIZATIONS)) {
+  if (!V5_J102_SUBJECT_KINDS.includes(c.subject_kind)) {
+    throw new V5J102Error("contract_self_check_failed",
+      `${initialization_id} creates unregistered subject kind "${c.subject_kind}"`);
+  }
+  if (INITIALIZED_KIND_COUNTS.get(c.subject_kind) !== 1) {
+    throw new V5J102Error("contract_self_check_failed",
+      `${INITIALIZED_KIND_COUNTS.get(c.subject_kind)} initializations create a ` +
+      `${c.subject_kind}; one kind has exactly one creation door, or the policy ` +
+      "projection reports one where several exist");
+  }
+  // THE CREATED STATE IS THE EARLIEST DECLARED STATE OF ITS KIND, and this is the
+  // check that makes "creation reaches nothing an evidence-bound transition is
+  // supposed to establish" structural rather than a reading of three literals. A
+  // later edit setting `assignment_phase: "committed"` or `negotiation_state:
+  // "loi_accepted"` passes every other check in this file — registered value,
+  // right kind, cited decisions, checked parent — and the SQL parity suite would
+  // faithfully follow the map to the same wrong place. The vocabularies are
+  // declared in lifecycle order, so index 0 is the earliest state each axis has.
+  for (const [axis, value] of Object.entries(c.initial_state)) {
+    const registered = SUBJECT_ENUMS[c.subject_kind][axis];
+    if (registered !== undefined && registered[0] !== value) {
+      throw new V5J102Error("contract_self_check_failed",
+        `${initialization_id} creates a ${c.subject_kind} at ${axis} "${value}", and the ` +
+        `earliest declared ${axis} is "${registered[0]}"; a creation carries no evidence, ` +
+        "so it may not reach a state an evidence-bound transition establishes");
+    }
+  }
+  if (COUPLED_CREATED_SUBJECT_KINDS.includes(c.subject_kind)) {
+    throw new V5J102Error("contract_self_check_failed",
+      `${initialization_id} would create a ${c.subject_kind}, which is a COUPLED creation of a ` +
+      "transition; creating one outside that transition would be a client status or a Deal with " +
+      "no commitment behind it");
+  }
+  for (const [axis, value] of Object.entries(c.initial_state)) {
+    const registered = SUBJECT_ENUMS[c.subject_kind][axis];
+    if (registered !== undefined && !registered.includes(value)) {
+      throw new V5J102Error("contract_self_check_failed",
+        `${initialization_id} creates a ${c.subject_kind} with unregistered ${axis} "${value}"`);
+    }
+  }
+  for (const id of c.decision_refs) {
+    if (!V5_J102_SETTLED_DECISION_IDS.includes(id)) {
+      throw new V5J102Error("contract_self_check_failed",
+        `${initialization_id} cites unsettled decision "${id}"`);
+    }
+  }
+  for (const actor_class of c.permitted_actor_classes) {
+    if (!V5_J102_ACTOR_CLASSES.includes(actor_class)) {
+      throw new V5J102Error("contract_self_check_failed",
+        `${initialization_id} admits unregistered actor class "${actor_class}"`);
+    }
+  }
+  if (c.parent !== null && !V5_J102_SUBJECT_KINDS.includes(c.parent.kind)) {
+    throw new V5J102Error("contract_self_check_failed",
+      `${initialization_id} names unregistered parent kind "${c.parent.kind}"`);
+  }
+  // A parent that is named and never CHECKED would be a reference with no
+  // prerequisite behind it, which is how an assignment ends up under a lapsed
+  // engagement.
+  if (c.parent !== null &&
+      !c.required_context.some(rule => rule.subject === c.parent.kind)) {
+    throw new V5J102Error("contract_self_check_failed",
+      `${initialization_id} creates a row under a ${c.parent.kind} it never checks`);
+  }
+  for (const field of c.declared_identifiers) {
+    if (!INITIALIZATION_DECLARED_KEYS.includes(field)) {
+      throw new V5J102Error("contract_self_check_failed",
+        `${initialization_id} needs declared identifier "${field}", which the closed request cannot carry`);
+    }
+  }
+  // Every fact the event states must be a field of the row that was created, so
+  // the history cannot say something the state does not.
+  const created_fields = SUBJECT_SHAPES[c.subject_kind].keys;
+  for (const field of c.event_detail_fields) {
+    if (!created_fields.includes(field)) {
+      throw new V5J102Error("contract_self_check_failed",
+        `${initialization_id} states "${field}" in its event and the created ${c.subject_kind} has no such field`);
+    }
+  }
+}
+
 for (const [kind, contract] of Object.entries(EVIDENCE_KIND_TABLE)) {
   if (!Object.prototype.hasOwnProperty.call(contract, "binds_subject_kind")) {
     throw new V5J102Error("contract_self_check_failed",
@@ -3364,6 +3908,8 @@ const DELIBERATE_GUARD_COLLISIONS = Object.freeze({
 
 for (const [label, keys] of Object.entries({
   request: REQUEST_KEYS, related: RELATED_KEYS, declared: DECLARED_KEYS,
+  initialization_request: INITIALIZATION_REQUEST_KEYS,
+  initialization_declared: INITIALIZATION_DECLARED_KEYS,
   constraint: CONSTRAINT_KEYS, merge: MERGE_KEYS, edit: EDIT_KEYS,
   salesforce: SALESFORCE_KEYS, legacy_row: LEGACY_ROW_KEYS, readiness: READINESS_KEYS,
   census: CENSUS_KEYS, ownership: OWNERSHIP_KEYS, automation: AUTOMATION_KEYS,

@@ -18,10 +18,15 @@ import assert from "node:assert/strict";
 import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
 import { V5_F01_AUTHORITY_INJECTION_FRAGMENTS } from "../src/record-source-authority.v5.js";
 import {
+  V5_J102_ASSIGNMENT_PHASES,
   V5_J102_AUTHORITY_INJECTION_FRAGMENTS,
   V5_J102_DEAL_AXES,
+  V5_J102_NEGOTIATION_STATES,
+  V5_J102_RELATIONSHIP_STATES,
   V5_J102_EVIDENCE_KINDS,
   V5_J102_FIELD_CLASS_REGISTRY,
+  V5_J102_INITIALIZATION_IDS,
+  V5_J102_INITIALIZED_SUBJECT_KINDS,
   V5_J102_PARTNER_AUTHORED_RECORD_KINDS,
   V5_J102_SETTLED_DECISIONS,
   V5_J102_SETTLED_DECISION_IDS,
@@ -35,6 +40,7 @@ import {
   classifyLegacyLifecycleRow,
   compareMigrationShadow,
   evaluateConcurrentEdit,
+  evaluateLifecycleInitialization,
   evaluateLifecycleTransition,
   evaluateSelectedPropertyConstraint,
   projectLegacyCompatibilityView,
@@ -43,6 +49,7 @@ import {
   v5J102DecisionSubsetDigest,
   v5J102EvidenceContract,
   v5J102FieldClass,
+  v5J102InitializationContract,
   v5J102MigrationReadiness,
   v5J102PolicyDigest,
   v5J102Projection,
@@ -185,6 +192,13 @@ const evaluate = over => evaluateLifecycleTransition({
   tenant: ORGANIZATION_TENANT_ID, actor: PARTNER, now: NOW, ...over,
 });
 
+const initialize = over => evaluateLifecycleInitialization({
+  tenant: ORGANIZATION_TENANT_ID, actor: PARTNER, now: NOW, ...over,
+});
+
+const client = (over = {}) =>
+  relationship({ relationship_state: "client", active_engagement_count: 1, ...over });
+
 // --- the settled binding ---------------------------------------------------
 
 test("the thirteen settled decisions are bound exactly, and drift is refused in both directions", () => {
@@ -270,9 +284,25 @@ test("the policy digest is stable across calls and covers the transition table",
   const projection = v5J102Projection();
   assert.equal(projection.policy_digest, v5J102PolicyDigest());
   assert.equal(projection.transitions.length, V5_J102_TRANSITION_IDS.length);
+  assert.equal(projection.initializations.length, V5_J102_INITIALIZATION_IDS.length);
   assert.equal(projection.evidence_kinds.length, V5_J102_EVIDENCE_KINDS.length);
   assert.equal(projection.journey_three_excluded.tour_activation, false);
   assert.equal(projection.legacy.may_retire_callers, false);
+  // WHICH DOOR CREATES EACH KIND, on the policy itself. Three kinds have their
+  // own narrow initialization; the other two are COUPLED creations of the
+  // transition that establishes them, and no transition creates its own primary.
+  assert.deepEqual(projection.subject_creation_doors.by_initialization, {
+    relationship: "initialize-prospect-relationship",
+    assignment: "initialize-assignment",
+    property_negotiation: "initialize-property-negotiation",
+  });
+  assert.deepEqual(projection.subject_creation_doors.coupled_to_transition, {
+    engagement: "establish-client-and-engagement",
+    deal: "commit-winning-property",
+  });
+  assert.equal(
+    projection.subject_creation_doors.primary_subject_of_a_transition_is_never_created, true);
+  assert.equal(projection.subject_creation_doors.initialization_requires_evidence, false);
 });
 
 // --- Q077 / Q069: what creates a Client -----------------------------------
@@ -1656,4 +1686,407 @@ test("M4: a client outside the deal's own chain refuses rather than being rewrit
   assert.equal(wrongChain.decision, "refuse");
   assert.equal(wrongChain.reason_id, "relationship_not_in_verified_chain");
   assert.equal(wrongChain.proposed_state, null);
+});
+
+// --- initialization: the first row of a chain ------------------------------
+//
+// THE CASES THAT MATTER HERE ARE THE ANTI-BYPASS ONES. A creation path is the
+// obvious place to smuggle a later state past the evidence that is supposed to
+// establish it, so the group below spends most of its cases proving that a
+// created row is the EARLIEST state of its kind, that the parent chain is a real
+// prerequisite rather than a reference, and that every transition afterwards
+// still refuses exactly as it did before.
+
+test("the three initializations declare their contracts, cite settled decisions and carry no evidence", () => {
+  assert.deepEqual(V5_J102_INITIALIZATION_IDS,
+    ["initialize-assignment", "initialize-property-negotiation",
+      "initialize-prospect-relationship"]);
+  for (const id of V5_J102_INITIALIZATION_IDS) {
+    const contract = v5J102InitializationContract(id);
+    assert.equal(contract.initialization_id, id);
+    assert.equal(contract.requires_evidence, false);
+    assert.equal(contract.advances_lifecycle_state, false);
+    assert.equal(contract.establishes_client_status, false);
+    assert.equal(contract.creates_deal, false);
+    assert.equal(contract.creates_or_activates_tour, false);
+    assert.equal(contract.transition_prerequisites_bypassed, false);
+    assert.ok(contract.decision_refs.length > 0);
+    for (const ref of contract.decision_refs) {
+      assert.ok(V5_J102_SETTLED_DECISION_IDS.includes(ref), `${id} cites ${ref}`);
+    }
+    assert.ok(contract.permitted_actor_classes.length > 0);
+    // A parent that is NAMED must be CHECKED; a reference with no prerequisite
+    // behind it is how an assignment ends up under a lapsed engagement.
+    if (contract.parent_subject_kind !== null) {
+      assert.ok(contract.required_context.some(r => r.subject === contract.parent_subject_kind),
+        `${id} checks the ${contract.parent_subject_kind} it creates under`);
+    }
+    // An initialization is not a transition and cannot be reached as one.
+    assert.ok(!V5_J102_TRANSITION_IDS.includes(id));
+  }
+  // The two COUPLED creations stay with their transitions: an engagement created
+  // outside establish-client-and-engagement would be a Client with no coupled
+  // status change, and a deal created outside commit-winning-property would be a
+  // Deal from no commitment, which is the whole of the overruled Q078 rule.
+  assert.deepEqual(V5_J102_INITIALIZED_SUBJECT_KINDS,
+    ["assignment", "property_negotiation", "relationship"]);
+  assert.ok(!V5_J102_INITIALIZED_SUBJECT_KINDS.includes("engagement"));
+  assert.ok(!V5_J102_INITIALIZED_SUBJECT_KINDS.includes("deal"));
+  // ONE DOOR PER KIND. Two initializations creating one kind would collapse
+  // silently in the policy projection's `by_initialization` map, which keeps the
+  // last entry — so the projection would report one door where two exist.
+  assert.equal(new Set(V5_J102_INITIALIZED_SUBJECT_KINDS).size,
+    V5_J102_INITIALIZED_SUBJECT_KINDS.length,
+    "each subject kind has exactly one creation door");
+  assert.equal(Object.keys(v5J102Projection().subject_creation_doors.by_initialization).length,
+    V5_J102_INITIALIZATION_IDS.length,
+    "and the projection reports one door per initialization rather than collapsing two");
+});
+
+test("a created row is the EARLIEST declared state of its kind, and nothing later", () => {
+  // THE STRUCTURAL FORM OF THE WHOLE ANTI-BYPASS ARGUMENT. A creation carries no
+  // evidence, so the state it reaches must be the one that asserts least. Every
+  // other self-check in the kernel would pass an `initial_state` of `committed`
+  // or `loi_accepted` — the value is registered, the kind is right, the parent is
+  // checked — and the SQL parity suite would faithfully follow the map to the
+  // same wrong place. The vocabularies are declared in lifecycle order, so index
+  // 0 is the earliest state each axis has.
+  const vocabulary = {
+    relationship_state: V5_J102_RELATIONSHIP_STATES,
+    assignment_phase: V5_J102_ASSIGNMENT_PHASES,
+    negotiation_state: V5_J102_NEGOTIATION_STATES,
+  };
+  const seen = [];
+  for (const id of V5_J102_INITIALIZATION_IDS) {
+    const contract = v5J102InitializationContract(id);
+    for (const [axis, value] of Object.entries(contract.initial_state)) {
+      if (vocabulary[axis] === undefined) continue;
+      assert.equal(value, vocabulary[axis][0],
+        `${id} creates a ${contract.subject_kind} at ${axis} "${value}", and the earliest is "${vocabulary[axis][0]}"`);
+      seen.push(axis);
+    }
+  }
+  // And the check is not vacuous: all three state axes are actually covered.
+  assert.deepEqual(seen.sort(),
+    ["assignment_phase", "negotiation_state", "relationship_state"]);
+  // The counters and references a created row carries are the empty ones.
+  const assignment = v5J102InitializationContract("initialize-assignment").initial_state;
+  assert.equal(assignment.open_negotiation_count, 0);
+  for (const field of ["selected_property_id", "active_lease_draft_target_id",
+    "pending_deal_id", "multi_target_exception_ref"]) {
+    assert.equal(assignment[field], null, `a created assignment holds no ${field}`);
+  }
+});
+
+test("Q069/Q077: an initialized relationship is a PROSPECT, and it is not a Client", () => {
+  const created = initialize({
+    initialization_id: "initialize-prospect-relationship",
+    declared: { new_subject_id: "rel-synthetic-1" },
+  });
+  assert.equal(created.decision, "allow");
+  assert.equal(created.reason_id, "prospect_relationship_initialized");
+  assert.deepEqual(created.created_state, {
+    subject_kind: "relationship", subject_id: "rel-synthetic-1",
+    relationship_state: "prospect", active_engagement_count: 0,
+  });
+  assert.equal(created.establishes_client_status, false);
+  assert.equal(created.advances_lifecycle_state, false);
+  assert.equal(created.transition_prerequisites_bypassed, false);
+  assert.equal(created.requires_evidence, false);
+  assert.equal(created.evidence_supplied, 0);
+  assert.equal(created.applied, false);
+  assert.equal(created.events.length, 1);
+  assert.equal(created.events[0].event_kind, "relationship_initialized");
+  assert.equal(created.events[0].subject_id, "rel-synthetic-1");
+  assert.equal(created.events[0].relationship_state, "prospect");
+  assert.equal(created.creates_or_activates_tour, false);
+
+  // AND THE ANTI-BYPASS HALF: the created prospect cannot hold an assignment,
+  // because Q077's client gate is still the client gate.
+  const opened = evaluate({
+    transition_id: "open-assignment",
+    subject: assignment({ assignment_phase: "research" }),
+    related: { relationship: created.created_state, engagement: engagement() },
+    evidence: [recordEvidence("search_initiation")],
+    declared: { mandate_scope: "search" },
+  });
+  assert.equal(opened.decision, "refuse");
+  assert.equal(opened.reason_id, "client_status_required");
+});
+
+test("Q077: an Assignment is initialized only under an ACTIVE engagement held by a CLIENT", () => {
+  const ok = initialize({
+    initialization_id: "initialize-assignment",
+    related: { engagement: engagement(), relationship: client() },
+    declared: { new_subject_id: "asg-synthetic-1" },
+  });
+  assert.equal(ok.decision, "allow");
+  assert.equal(ok.created_state.assignment_phase, "research",
+    "the earliest declared phase, so open-assignment still declares the scope");
+  assert.equal(ok.created_state.engagement_id, "eng-synthetic-1");
+  assert.equal(ok.created_state.open_negotiation_count, 0);
+  assert.equal(ok.created_state.selected_property_id, null);
+  assert.equal(ok.created_state.active_lease_draft_target_id, null);
+  assert.equal(ok.created_state.pending_deal_id, null);
+  assert.equal(ok.parent_subject_kind, "engagement");
+  assert.deepEqual(ok.context_verified, ["engagement", "relationship"]);
+  assert.equal(ok.opens_assignment, false);
+
+  // Every way the chain can fail, by name.
+  const cases = [
+    [{ relationship: client() }, "engagement_not_loaded"],
+    [{ engagement: engagement() }, "relationship_not_loaded"],
+    [{ engagement: engagement({ engagement_state: "expired" }), relationship: client() },
+      "engagement_not_active"],
+    [{ engagement: engagement({ engagement_state: "terminated" }), relationship: client() },
+      "engagement_not_active"],
+    [{ engagement: engagement(), relationship: relationship() }, "client_status_required"],
+    [{ engagement: engagement(), relationship: client({ relationship_state: "client_ended" }) },
+      "client_status_required"],
+    // An engagement whose client is somebody else's: the link is verified, not
+    // taken from whichever relationship the caller supplied.
+    [{ engagement: engagement({ relationship_id: "rel-synthetic-other" }), relationship: client() },
+      "relationship_not_in_verified_chain"],
+  ];
+  for (const [related, reason_id] of cases) {
+    const refused = initialize({
+      initialization_id: "initialize-assignment", related,
+      declared: { new_subject_id: "asg-synthetic-1" },
+    });
+    assert.equal(refused.decision, "refuse", `${reason_id} refuses`);
+    assert.equal(refused.reason_id, reason_id);
+    assert.equal(refused.created_state, null);
+    assert.deepEqual(refused.events, []);
+  }
+});
+
+test("Q095: a negotiation is initialized only under an assignment that is still OPEN", () => {
+  const ok = initialize({
+    initialization_id: "initialize-property-negotiation",
+    related: { assignment: assignment() },
+    declared: { new_subject_id: "neg-synthetic-1", property_id: "prop-synthetic-1" },
+  });
+  assert.equal(ok.decision, "allow");
+  assert.deepEqual(ok.created_state, {
+    subject_kind: "property_negotiation", subject_id: "neg-synthetic-1",
+    assignment_id: "asg-synthetic-1", property_id: "prop-synthetic-1",
+    negotiation_state: "loi_drafted",
+  });
+  assert.equal(ok.submits_loi, false);
+  assert.equal(ok.creates_deal, false);
+
+  // Q095's own bound, at creation: once the winner is committed a fresh LOI is a
+  // different decision, and a draft that could never be submitted is not created.
+  const committedAssignment = assignment({
+    assignment_phase: "committed", selected_property_id: "prop-synthetic-1",
+    pending_deal_id: "deal-synthetic-1",
+  });
+  const refused = initialize({
+    initialization_id: "initialize-property-negotiation",
+    related: { assignment: committedAssignment },
+    declared: { new_subject_id: "neg-synthetic-2", property_id: "prop-synthetic-2" },
+  });
+  assert.equal(refused.decision, "refuse");
+  assert.equal(refused.reason_id, "assignment_already_committed");
+
+  const concluded = initialize({
+    initialization_id: "initialize-property-negotiation",
+    related: { assignment: assignment({ assignment_phase: "concluded" }) },
+    declared: { new_subject_id: "neg-synthetic-3", property_id: "prop-synthetic-3" },
+  });
+  assert.equal(concluded.decision, "refuse");
+  assert.equal(concluded.reason_id, "assignment_phase_not_open");
+  assert.equal(concluded.observed, "concluded");
+
+  // CONCURRENT DRAFTS ARE UNCONSTRAINED. Q095's correction is that submitting
+  // several is normal practice, so nothing here caps how many negotiations one
+  // open assignment may hold.
+  for (const n of [1, 2, 3]) {
+    const drafted = initialize({
+      initialization_id: "initialize-property-negotiation",
+      related: { assignment: assignment({ open_negotiation_count: n }) },
+      declared: { new_subject_id: `neg-synthetic-${n}`, property_id: `prop-synthetic-${n}` },
+    });
+    assert.equal(drafted.decision, "allow");
+  }
+});
+
+test("an initialization accepts IDENTIFIERS and nothing else — a state, an approval or evidence refuses", () => {
+  // The state axes: there is no key to carry one, so the closed request refuses
+  // by name rather than reading it.
+  for (const bad of [
+    { relationship_state: "client" }, { assignment_phase: "committed" },
+    { negotiation_state: "loi_accepted" }, { deal_state: "pending" },
+    { open_negotiation_count: 4 }, { selected_property_id: "prop-synthetic-1" },
+  ]) {
+    assert.throws(() => initialize({
+      initialization_id: "initialize-prospect-relationship",
+      declared: { new_subject_id: "rel-synthetic-1", ...bad },
+    }), error => error instanceof V5J102Error &&
+      ["unknown_field", "caller_asserted_fact_refused"].includes(error.code));
+  }
+  // Evidence: there is no parameter for it at all, which is the point — no
+  // evidence in this rail can bind to a subject that does not exist yet.
+  assert.throws(() => initialize({
+    initialization_id: "initialize-prospect-relationship",
+    declared: { new_subject_id: "rel-synthetic-1" },
+    evidence: [documentEvidence("signed_engagement_letter")],
+  }), error => error instanceof V5J102Error && error.code === "unknown_field");
+  // Authority, and an asserted fact.
+  assert.throws(() => initialize({
+    initialization_id: "initialize-prospect-relationship",
+    declared: { new_subject_id: "rel-synthetic-1" }, acting_as: "joe",
+  }), error => error instanceof V5J102Error && error.code === "caller_authority_field_refused");
+  assert.throws(() => initialize({
+    initialization_id: "initialize-prospect-relationship",
+    declared: { new_subject_id: "rel-synthetic-1" }, approved_by: "joe",
+  }), error => error instanceof V5J102Error && error.code === "caller_authority_field_refused");
+  // An unregistered initialization, and a TRANSITION id offered as one.
+  for (const id of ["initialize-deal", "seed-subject", "commit-winning-property",
+    "establish-client-and-engagement"]) {
+    assert.throws(() => initialize({
+      initialization_id: id, declared: { new_subject_id: "rel-synthetic-1" },
+    }), error => error instanceof V5J102Error && error.code === "unknown_initialization");
+  }
+});
+
+test("the declared identifiers are required where used and refused where not", () => {
+  const missingId = initialize({
+    initialization_id: "initialize-prospect-relationship", declared: {},
+  });
+  assert.equal(missingId.decision, "refuse");
+  assert.equal(missingId.reason_id, "declared_subject_id_required");
+
+  const missingProperty = initialize({
+    initialization_id: "initialize-property-negotiation",
+    related: { assignment: assignment() },
+    declared: { new_subject_id: "neg-synthetic-1" },
+  });
+  assert.equal(missingProperty.decision, "refuse");
+  assert.equal(missingProperty.reason_id, "declared_identifier_required");
+  assert.equal(missingProperty.missing_declared_identifier, "property_id");
+
+  // A property named on a relationship is a caller that has misunderstood which
+  // row it is creating; it refuses rather than being dropped in silence.
+  const unused = initialize({
+    initialization_id: "initialize-prospect-relationship",
+    declared: { new_subject_id: "rel-synthetic-1", property_id: "prop-synthetic-1" },
+  });
+  assert.equal(unused.decision, "refuse");
+  assert.equal(unused.reason_id, "declared_identifier_not_used");
+  assert.equal(unused.unexpected_declared_identifier, "property_id");
+
+  // An identifier that is not one at all.
+  assert.throws(() => initialize({
+    initialization_id: "initialize-prospect-relationship",
+    declared: { new_subject_id: "rel synthetic 1" },
+  }), error => error instanceof V5J102Error && error.code === "invalid_identifier");
+});
+
+test("both admitted actor classes may initialize, and an unregistered class cannot", () => {
+  for (const actor of [PARTNER, AGENT]) {
+    const created = initialize({
+      actor, initialization_id: "initialize-prospect-relationship",
+      declared: { new_subject_id: "rel-synthetic-1" },
+    });
+    assert.equal(created.decision, "allow", `${actor.slug} may create a prospect`);
+    assert.equal(created.actor_slug, actor.slug);
+  }
+  assert.throws(() => initialize({
+    actor: { ...PARTNER, authorization_class: "probe" },
+    initialization_id: "initialize-prospect-relationship",
+    declared: { new_subject_id: "rel-synthetic-1" },
+  }), error => error instanceof V5J102Error && error.code === "unknown_actor_class");
+  assert.throws(() => initialize({
+    actor: { ...PARTNER, derived_by: "caller_supplied" },
+    initialization_id: "initialize-prospect-relationship",
+    declared: { new_subject_id: "rel-synthetic-1" },
+  }), error => error instanceof V5J102Error && error.code === "actor_not_server_derived");
+});
+
+test("Journey 1 from its FIRST row: initialization feeds the existing transitions unchanged", () => {
+  // 1. A prospect exists. It is a prospect.
+  const prospect = initialize({
+    initialization_id: "initialize-prospect-relationship",
+    declared: { new_subject_id: "rel-synthetic-1" },
+  }).created_state;
+  assert.equal(prospect.relationship_state, "prospect");
+
+  // 2. The ETL still does the whole of Q069/Q077 — the created row bought none
+  //    of it, and the transition runs from `prospect` exactly as it always did.
+  const established = evaluate({
+    transition_id: "establish-client-and-engagement",
+    subject: prospect,
+    evidence: [documentEvidence("signed_engagement_letter")],
+    declared: { new_subject_id: "eng-synthetic-1" },
+  });
+  assert.equal(established.decision, "allow");
+  const clientRow = established.proposed_state.relationship;
+  const eng = established.proposed_state.engagement;
+  assert.equal(clientRow.relationship_state, "client");
+
+  // 3. The assignment is created under that engagement, and is NOT open.
+  const asgCreated = initialize({
+    initialization_id: "initialize-assignment",
+    related: { engagement: eng, relationship: clientRow },
+    declared: { new_subject_id: "asg-synthetic-1" },
+  });
+  assert.equal(asgCreated.decision, "allow");
+  assert.equal(asgCreated.created_state.assignment_phase, "research");
+
+  // 3a. AND IT STILL NEEDS ITS MANDATE. Without the search-initiation record the
+  //     transition refuses; the created row did not open anything.
+  const unevidenced = evaluate({
+    transition_id: "open-assignment", subject: asgCreated.created_state,
+    related: { relationship: clientRow, engagement: eng },
+    evidence: [recordEvidence("diligence_outcome",
+      {}, { subject_kind: "deal", subject_id: "deal-synthetic-1" })],
+    declared: { mandate_scope: "search" },
+  });
+  assert.equal(unevidenced.decision, "refuse");
+  assert.equal(unevidenced.reason_id, "required_evidence_absent");
+
+  // 4. With the mandate, it opens.
+  const opened = evaluate({
+    transition_id: "open-assignment", subject: asgCreated.created_state,
+    related: { relationship: clientRow, engagement: eng },
+    evidence: [recordEvidence("search_initiation")],
+    declared: { mandate_scope: "search" },
+  });
+  assert.equal(opened.decision, "allow");
+  const asg = opened.proposed_state.assignment;
+  assert.equal(asg.assignment_phase, "search");
+
+  // 5. Two negotiations are drafted under it. Neither is an LOI yet.
+  const drafts = [1, 2].map(n => initialize({
+    initialization_id: "initialize-property-negotiation",
+    related: { assignment: asg },
+    declared: { new_subject_id: `neg-synthetic-${n}`, property_id: `prop-synthetic-${n}` },
+  }));
+  for (const draft of drafts) {
+    assert.equal(draft.decision, "allow");
+    assert.equal(draft.created_state.negotiation_state, "loi_drafted");
+  }
+
+  // 5a. AND A DRAFT IS NOT A SUBMISSION. Without the delivered document the
+  //     submission refuses, and a drafted negotiation cannot be committed to.
+  const uncommittable = evaluate({
+    transition_id: "commit-winning-property", subject: asg,
+    related: { property_negotiation: drafts[0].created_state },
+    evidence: [recordEvidence("winner_selection_commitment")],
+    declared: { instrument_kind: "lease", new_deal_id: "deal-synthetic-1" },
+  });
+  assert.equal(uncommittable.decision, "refuse");
+  assert.equal(uncommittable.reason_id, "winning_negotiation_not_accepted");
+
+  // 6. The LOI is submitted with its own document, exactly as before.
+  const submitted = evaluate({
+    transition_id: "record-loi-submission",
+    subject: drafts[0].created_state, related: { assignment: asg },
+    evidence: [documentEvidence("submitted_loi", {}, { subject_id: "neg-synthetic-1" })],
+  });
+  assert.equal(submitted.decision, "allow");
+  assert.equal(submitted.creates_deal, false, "no LOI submission creates a Deal");
+  assert.equal(submitted.proposed_state.assignment.open_negotiation_count, 1);
+  assert.equal(submitted.proposed_state.property_negotiation.negotiation_state, "loi_submitted");
 });
