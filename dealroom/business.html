@@ -15,8 +15,13 @@
   <link rel="stylesheet" href="/css/workspace-business.css">
 </head>
 <body>
-  <a class="skip" href="#main">Skip to records</a>
-  <header class="topbar">
+  <!-- data-panel-background marks everything the record panel COVERS when the
+       phone layout takes it full screen. The script makes exactly these regions
+       inert while it is a dialog, so keyboard and screen-reader focus cannot
+       walk underneath it; on a desktop the panel sits beside them and none of
+       this applies. -->
+  <a class="skip" href="#main" data-panel-background>Skip to records</a>
+  <header class="topbar" data-panel-background>
     <a class="brand" href="/" aria-label="DoctorCRE Home"><span class="brand-mark">C</span><span>DoctorCRE <small>workspace</small></span></a>
     <nav class="primary-nav" aria-label="Primary navigation">
       <a href="/">Home</a>
@@ -36,7 +41,7 @@
   </header>
 
   <main id="main" class="shell business-shell">
-    <section class="hero business-hero" aria-labelledby="pageTitle">
+    <section class="hero business-hero" aria-labelledby="pageTitle" data-panel-background>
       <div>
         <p class="eyebrow"><a class="back-home" href="/">&larr; Home</a> · <span id="viewerWorkspace">Partner workspace</span></p>
         <h1 id="pageTitle">Clients</h1>
@@ -48,7 +53,7 @@
       </div>
     </section>
 
-    <section class="business-controls" aria-labelledby="controlsTitle">
+    <section class="business-controls" aria-labelledby="controlsTitle" data-panel-background>
       <h2 class="visually-hidden" id="controlsTitle">Search and filter</h2>
       <form id="filterForm" class="filter-form glass" novalidate>
         <div class="filter-row">
@@ -92,10 +97,10 @@
       <div id="chipBar" class="chip-bar" aria-label="Active filters"></div>
     </section>
 
-    <div id="noticeRegion" class="notice-region" role="status" aria-live="polite"></div>
+    <div id="noticeRegion" class="notice-region" role="status" aria-live="polite" data-panel-background></div>
 
     <section class="business-body" aria-labelledby="resultsTitle">
-      <div class="result-column">
+      <div class="result-column" data-panel-background>
         <div class="result-heading">
           <h2 id="resultsTitle">Results</h2>
           <p class="result-summary" id="resultSummary" tabindex="-1">Checking…</p>
@@ -129,20 +134,20 @@
       </aside>
     </section>
 
-    <section class="business-footnote glass" aria-labelledby="footnoteTitle">
+    <section class="business-footnote glass" aria-labelledby="footnoteTitle" data-panel-background>
       <h2 id="footnoteTitle">About this list</h2>
       <p>These come straight from the client and vendor records. Merged and deleted records are left out, and anything nobody filled in reads "Not recorded" rather than being guessed at. Status and ETL are what someone entered on the record — they are not proof that an agreement was signed or that anyone was put on the work.</p>
       <p class="inert-note">Not available yet: <span class="inert-entry" aria-disabled="true">Calls</span> <span class="inert-entry" aria-disabled="true">Tours</span></p>
     </section>
   </main>
 
-  <footer class="footer"><span>DoctorCRE · Clients and Vendors</span><span>Every list says where it came from and when.</span></footer>
-  <nav class="mobile-nav" aria-label="Workspace shortcuts">
+  <footer class="footer" data-panel-background><span>DoctorCRE · Clients and Vendors</span><span>Every list says where it came from and when.</span></footer>
+  <nav class="mobile-nav" aria-label="Workspace shortcuts" data-panel-background>
     <a href="/" aria-label="Home"><span aria-hidden="true">⌂</span>Home</a>
+    <a href="/leads" aria-label="Leads"><span aria-hidden="true">⌁</span>Leads</a>
     <a href="/deals" aria-label="Deals"><span aria-hidden="true">◈</span>Deals</a>
     <a href="/clients" aria-label="Clients"><span aria-hidden="true">◍</span>Clients</a>
     <a href="/vendors" aria-label="Vendors"><span aria-hidden="true">◇</span>Vendors</a>
-    <a href="/leads" aria-label="Leads"><span aria-hidden="true">⌁</span>Leads</a>
   </nav>
   <script type="module" src="/js/workspace-business.js"></script>
 </body>

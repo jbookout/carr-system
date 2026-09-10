@@ -138,6 +138,30 @@ test("each read-model refusal keeps its own status, and none of them becomes an 
   assert.equal((await authed.json()).error, "INTERNAL_ERROR");
 });
 
+test("an unprovisioned read is a named 503, and no SQL or driver text reaches the browser", async () => {
+  const env = environment();
+  for (const [dependency, status] of [["read_access", 503], ["read_source", 503], ["read_credential", 503]]) {
+    const handler = createDealroomHandler(overrides(async () => {
+      throw Object.assign(new Error("permission denied for table client"), { code: "DEPENDENCY_NOT_PROVISIONED", detail: { dependency } });
+    }));
+    const session = await signIn(handler, env);
+    const response = await handler.fetch(new Request(`https://${HOST}/api/v1/business/clients`, { headers: { cookie: session } }), env, {});
+    assert.equal(response.status, status, dependency);
+    const body = await response.json();
+    assert.deepEqual(body, { error: "DEPENDENCY_NOT_PROVISIONED", dependency });
+    assert.doesNotMatch(JSON.stringify(body), /select|permission|table|denied|stack/i);
+  }
+  // An unrecognised class is not echoed back, and neither is a driver message
+  // smuggled in as the detail.
+  const loose = createDealroomHandler(overrides(async () => {
+    throw Object.assign(new Error("boom"), { code: "DEPENDENCY_NOT_PROVISIONED", detail: { dependency: "relation \"client\" does not exist" } });
+  }));
+  const session = await signIn(loose, env);
+  const response = await loose.fetch(new Request(`https://${HOST}/api/v1/business/clients`, { headers: { cookie: session } }), env, {});
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: "DEPENDENCY_NOT_PROVISIONED" });
+});
+
 test("the business read answers GET and HEAD only and never becomes a write door", async () => {
   const env = environment();
   const handler = createDealroomHandler(overrides());

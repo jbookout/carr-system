@@ -22,9 +22,10 @@ import {
   DATASET_LABEL, DATASET_ROUTE, DATASET_SINGULAR, MAX_QUERY_LENGTH, PIPELINE_FILTERS, PIPELINE_LABEL, SORTS,
   SOURCE_LABEL, acceptsResponse, cachedPayload, createBusinessState, datasetForPath, defaultQuery,
   displayedFreshness, echoesQuery, emptyCopy, expireSession, filterChips, freshnessSignature, hasActiveFilters,
-  isSessionExpiry, listPhase, listRequestUrl, ownerPresentation, pageSummary, parseViewState, partyKindText,
-  recordRequestUrl, recordSections, recordedCode, recordedValue, refusalCopy, rememberPayload, restoreSession,
-  rowTone, sameQuery, sourceIsFresh, validListPayload, validRecordPayload, viewHref,
+  isSessionExpiry, listPhase, listRequestUrl, ownerPresentation, pageSummary, panelModality, panelTabTarget,
+  parseViewState, partyKindText, recordRequestUrl, recordSections, recordedCode, recordedValue, refusalCopy,
+  rememberPayload, restoreSession, rowTone, sameQuery, scrollIntent, searchBoxValue, sourceIsFresh,
+  validListPayload, validRecordPayload, viewHref,
 } from "./workspace-business-model.js";
 
 const EXPIRY_TICK_MS = 5_000;
@@ -124,14 +125,27 @@ function rememberScroll() {
   window.history.replaceState({ ...(window.history.state || {}), scrollY: Math.round(window.scrollY) }, "", currentHref());
 }
 
+/**
+ * Opening, closing or swapping a record leaves the list underneath untouched,
+ * so the reader's exact position is CARRIED INTO the new history entry and
+ * restored after any focus move. Changing the list itself — a filter, a sort, a
+ * page, the other dataset — is a new list and starts at the top.
+ */
 function navigate(href, { replace = false } = {}) {
   if (href === currentHref()) return;
-  if (replace) window.history.replaceState({ ...(window.history.state || {}) }, "", href);
+  const scrollY = Math.round(window.scrollY);
+  const nextScroll = scrollIntent(view.query, href) === "keep" ? scrollY : 0;
+  if (replace) window.history.replaceState({ ...(window.history.state || {}), scrollY: nextScroll }, "", href);
   else {
     rememberScroll();
-    window.history.pushState({ scrollY: 0 }, "", href);
+    window.history.pushState({ scrollY: nextScroll }, "", href);
   }
-  applyLocation({ reason: "navigate", restoreScroll: replace ? null : 0 });
+  applyLocation({ reason: "navigate", restoreScroll: nextScroll });
+}
+
+/** Focus that never scrolls; the scroll position is restored deliberately, once. */
+function focusWithoutScrolling(element) {
+  element?.focus?.({ preventScroll: true });
 }
 
 // ------------------------------------------------------------- the controls
@@ -155,9 +169,30 @@ function optionsHtml(options, emptyLabel, selected) {
     `<option value="${escapeHtml(option.slug)}"${option.slug === selected ? " selected" : ""}>${escapeHtml(option.label)}</option>`).join("");
 }
 
-function renderControls() {
+/**
+ * `syncSearch` is the difference between the two reasons this runs. A LOCATION
+ * change (first load, a link, Back, forward) is authoritative about what the
+ * search box should say, even while it holds focus, so Back cannot leave stale
+ * text next to restored chips — and the pending keystroke timer is dropped so
+ * the text it was about to submit cannot fire afterwards. An ordinary repaint
+ * (a finished read, a refresh) is not authoritative and never touches a draft
+ * the reader is still typing.
+ */
+function renderControls({ syncSearch = false } = {}) {
   const { dataset, query, facets } = view;
-  if (dom.search && document.activeElement !== dom.search) dom.search.value = query.q;
+  if (dom.search) {
+    const next = searchBoxValue({
+      current: dom.search.value, query: query.q,
+      editing: document.activeElement === dom.search, fromLocation: syncSearch,
+    });
+    if (next !== null) {
+      // A pending keystroke would otherwise fire after the reconciliation and
+      // navigate back to the text the reader just left behind.
+      if (searchTimer) clearTimeout(searchTimer);
+      searchTimer = null;
+      dom.search.value = next;
+    }
+  }
   if (dom.sort) dom.sort.value = SORTS.includes(query.sort) ? query.sort : "name";
   for (const field of FILTER_FIELDS[dataset]) {
     const select = dom[field.select];
@@ -225,7 +260,9 @@ function rowFacts(dataset, row) {
     const stage = recordedCode(row.recorded_stage, row.recorded_stage_label);
     facts.push({ label: "Stage", value: stage.text, known: stage.known, unresolved: stage.known && !stage.resolved });
     const level = recordedCode(row.relationship_level, row.relationship_level_label);
-    facts.push({ label: "Relationship", value: level.text, known: level.known });
+    // A level with no entry in the list is a bare number; say so rather than
+    // letting it read as a name everyone is supposed to recognise.
+    facts.push({ label: "Relationship", value: level.text, known: level.known, unresolved: level.known && !level.resolved });
     const touch = row.last_touch ? formatDay(row.last_touch) : null;
     facts.push({ label: "Last touch", value: touch || "Not recorded", known: Boolean(touch) });
   }
@@ -252,8 +289,7 @@ function paintList(html, { busy = false } = {}) {
   // A repaint must not drop the reader's keyboard place. The same row is
   // preferred; when that row is genuinely gone, the results summary takes focus
   // so the next Tab continues from the list rather than from the page top.
-  const restored = dom.list?.querySelector(`#${CSS.escape(activeId)}`) || dom.summary;
-  restored?.focus?.();
+  focusWithoutScrolling(dom.list?.querySelector(`#${CSS.escape(activeId)}`) || dom.summary);
 }
 
 function renderEmpty(phase) {
@@ -330,7 +366,9 @@ function renderList() {
     notices.push({ kind: "refreshing", title: "Refreshing", copy: "Showing the previous list while a fresh one loads." });
   }
   if (payload.partial) {
-    notices.push({ kind: "partial", title: `${payload.partial.count} ${payload.partial.count === 1 ? "entry uses a code" : "entries use codes"} with no name`, copy: payload.partial.note });
+    // The count is records, not cells: one record with two unnamed codes is one
+    // record here, and the read model counts it the same way.
+    notices.push({ kind: "partial", title: `${payload.partial.count} ${payload.partial.count === 1 ? "record uses a code" : "records use codes"} with no name`, copy: payload.partial.note });
   }
   if (payload.out_of_range) {
     notices.push({ kind: "empty", title: "Past the last page",
@@ -347,6 +385,62 @@ function renderList() {
 }
 
 // ------------------------------------------------------------- the record
+//
+// THE SAME PANEL IS TWO DIFFERENT THINGS AT TWO WIDTHS. On a desktop it sits
+// beside the list and both are usable, so it stays a non-modal complementary
+// region. On a phone the stylesheet takes it full screen, and a region that
+// COVERS the list while leaving the list tabbable is a trap for anyone not
+// using a mouse — so at that width it becomes a real dialog: aria-modal, the
+// background made inert, Tab kept inside it, and focus handed back to the row
+// that opened it on the way out.
+
+const PHONE_PANEL = typeof window.matchMedia === "function" ? window.matchMedia("(max-width: 767px)") : null;
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+function panelIsModal() {
+  return panelModality({ recordId: view.recordId, phoneWidth: Boolean(PHONE_PANEL?.matches) }) === "modal";
+}
+
+function backgroundRegions() {
+  return [...document.querySelectorAll("[data-panel-background]")];
+}
+
+function applyPanelModality() {
+  if (!dom.panel) return;
+  const modal = panelIsModal();
+  dom.panel.setAttribute("role", modal ? "dialog" : "complementary");
+  if (modal) dom.panel.setAttribute("aria-modal", "true");
+  else dom.panel.removeAttribute("aria-modal");
+  for (const region of backgroundRegions()) {
+    // `inert` is the real containment; aria-hidden keeps assistive technology
+    // out of the covered content where inert is not supported yet.
+    region.inert = modal;
+    if (modal) region.setAttribute("aria-hidden", "true");
+    else region.removeAttribute("aria-hidden");
+  }
+}
+
+/**
+ * Tab and Shift+Tab wrap inside the dialog instead of walking under it. The
+ * heading the panel opens on is inside the dialog but is not a tab stop, so
+ * panelTabTarget decides for every position — including that one — rather than
+ * only for the two ends.
+ */
+function containPanelFocus(event) {
+  if (event.key !== "Tab" || !panelIsModal() || !dom.panel) return;
+  const stops = [...dom.panel.querySelectorAll(FOCUSABLE)];
+  const active = document.activeElement;
+  const target = panelTabTarget({
+    inside: dom.panel.contains(active),
+    stopIndex: stops.indexOf(active),
+    stopCount: stops.length,
+    shiftKey: event.shiftKey,
+  });
+  if (!target) return;
+  event.preventDefault();
+  if (target === "title") return focusWithoutScrolling(dom.panelTitle);
+  focusWithoutScrolling(target === "first" ? stops[0] : stops[stops.length - 1]);
+}
 
 function renderRecordPanel() {
   if (!dom.panel) return;
@@ -354,10 +448,12 @@ function renderRecordPanel() {
   if (!view.recordId) {
     dom.panel.hidden = true;
     dom.panel.classList.remove("open");
+    applyPanelModality();
     return;
   }
   dom.panel.hidden = false;
   dom.panel.classList.add("open");
+  applyPanelModality();
   if (dom.panelEyebrow) dom.panelEyebrow.textContent = DATASET_SINGULAR[dataset];
   // A known sign-out empties the panel before anything else can render from it.
   if (view.signedOut) {
@@ -425,12 +521,16 @@ async function loadList(reason = "initial") {
   renderList();
   try {
     const response = await fetch(key, { headers: { accept: "application/json" }, cache: "no-store" });
-    if (!acceptsResponse(view.list.sequence, sequence)) return;
+    // THE SIGN-OUT IS HEARD EVEN WHEN THE ANSWER IS STALE. A superseded read is
+    // not allowed to paint its DATA, but it still learned something true about
+    // this session, and dropping that would leave records on screen that the
+    // session can no longer fetch. The expiry check therefore runs BEFORE the
+    // sequence guard; everything below it stays behind the guard.
     if (response.status === 401) return expireNow();
     if (!response.ok) {
       const failure = await response.json().catch(() => ({}));
-      if (!acceptsResponse(view.list.sequence, sequence)) return;
       if (isSessionExpiry(response.status, failure.error)) return expireNow();
+      if (!acceptsResponse(view.list.sequence, sequence)) return;
       return settleList({ status: "error", code: failure.error || "INTERNAL_ERROR" }, sequence);
     }
     const payload = await response.json().catch(() => null);
@@ -471,7 +571,7 @@ async function loadRecord(id, { focusOnOpen = false } = {}) {
   view.record.payload = null;
   view.record.code = null;
   renderRecordPanel();
-  if (focusOnOpen && dom.panelTitle) dom.panelTitle.focus();
+  if (focusOnOpen) focusWithoutScrolling(dom.panelTitle);
   const settle = (status, code, payload = null) => {
     if (!acceptsResponse(view.record.sequence, sequence) || view.recordId !== id) return;
     view.record.status = status;
@@ -481,14 +581,17 @@ async function loadRecord(id, { focusOnOpen = false } = {}) {
   };
   try {
     const response = await fetch(recordRequestUrl(view.dataset, id), { headers: { accept: "application/json" }, cache: "no-store" });
-    if (!acceptsResponse(view.record.sequence, sequence) || view.recordId !== id) return;
+    // A record read is as authoritative about the session as a list read, and
+    // it stays authoritative after the panel closes or another record is
+    // opened. The expiry check runs before the selection and sequence guards
+    // for exactly that reason; the DATA below it still cannot paint.
+    if (response.status === 401) return expireNow();
     if (!response.ok) {
       const failure = await response.json().catch(() => ({}));
-      if (!acceptsResponse(view.record.sequence, sequence) || view.recordId !== id) return;
-      // A record read is as authoritative as a list read about the session.
       if (isSessionExpiry(response.status, failure.error)) return expireNow();
       return settle("error", failure.error || "INTERNAL_ERROR");
     }
+    if (!acceptsResponse(view.record.sequence, sequence) || view.recordId !== id) return;
     const payload = await response.json().catch(() => null);
     if (!validRecordPayload(payload, view.dataset, id)) return settle("error", "FRESHNESS_UNKNOWN");
     settle("ready", null, payload);
@@ -502,6 +605,15 @@ async function loadRecord(id, { focusOnOpen = false } = {}) {
 function applyLocation({ reason = "initial", restoreScroll = null } = {}) {
   const parsed = parseViewState(window.location.pathname, window.location.search);
   if (!parsed) return;
+  // THE ADDRESS AND THE VIEW SAY THE SAME THING. Anything unrecognised was
+  // already dropped by the parser; rewriting the current entry to the canonical
+  // form is what stops a bookmarked `?scope=everyone&owner=dell&page=0` from
+  // living on in the address bar beside an empty chip bar. It rewrites within
+  // the route it was already on and never invents a destination.
+  const wantedHref = viewHref(parsed.query, parsed.recordId);
+  if (wantedHref !== currentHref()) {
+    window.history.replaceState({ ...(window.history.state || {}) }, "", wantedHref);
+  }
   const datasetChanged = parsed.dataset !== view.dataset;
   const queryChanged = datasetChanged || !sameQuery(parsed.query, view.query);
   const recordChanged = parsed.recordId !== view.recordId;
@@ -520,7 +632,9 @@ function applyLocation({ reason = "initial", restoreScroll = null } = {}) {
     view.cache.clear();
     view.facets = {};
   }
-  renderControls();
+  // A location change is authoritative about the search box; an ordinary
+  // repaint is not (see renderControls).
+  renderControls({ syncSearch: true });
   renderChips();
 
   // Opening or closing a record never re-reads the list, so the reader's place,
@@ -535,14 +649,17 @@ function applyLocation({ reason = "initial", restoreScroll = null } = {}) {
       view.record = { id: null, status: "idle", payload: null, code: null, sequence: view.record.sequence + 1 };
       renderRecordPanel();
       if (hadRecord) {
+        // Focus returns to the row that opened the panel — the modal case needs
+        // this most — and never drags the list somewhere else while doing it.
         const row = view.returnFocusId ? document.querySelector(`#${CSS.escape(view.returnFocusId)}`) : null;
-        (row || dom.summary)?.focus?.();
+        focusWithoutScrolling(row || dom.summary);
         view.returnFocusId = null;
       }
     }
   } else if (parsed.recordId) {
     renderRecordPanel();
   }
+  // Last, so it corrects any scroll a focus move would otherwise have caused.
   if (typeof restoreScroll === "number") window.scrollTo({ top: restoreScroll, behavior: "auto" });
 }
 
@@ -599,7 +716,7 @@ function wireControls() {
       const next = event.key === "Home" ? 0 : event.key === "End" ? scopeButtons.length - 1
         : (index + (event.key === "ArrowRight" ? 1 : scopeButtons.length - 1)) % scopeButtons.length;
       const target = scopeButtons[next];
-      target?.focus();
+      focusWithoutScrolling(target);
       if (target && target.dataset.scope !== view.query.scope) updateQuery({ scope: target.dataset.scope });
     });
   });
@@ -646,11 +763,17 @@ function wireControls() {
   });
 
   document.addEventListener("keydown", (event) => {
+    // On a phone the panel is a dialog, so Tab stays inside it.
+    containPanelFocus(event);
     if (event.key !== "Escape" || !view.recordId) return;
     // Escape leaves the panel, never the page, and never the reader's place.
     event.preventDefault();
     closeRecord();
   });
+
+  // Rotating the phone or resizing the window changes which of the two panels
+  // this is, so the modality is recomputed rather than fixed at open time.
+  PHONE_PANEL?.addEventListener?.("change", () => applyPanelModality());
 
   window.addEventListener("popstate", (event) => {
     applyLocation({ reason: "history", restoreScroll: Number.isFinite(event.state?.scrollY) ? event.state.scrollY : null });

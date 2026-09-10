@@ -50,6 +50,21 @@ export const FRESHNESS_WINDOW_MS = 60_000;
 
 const VALID_ACTORS = new Set(["joe", "dell"]);
 const DEPENDENCY_CODES = new Set(["DEPENDENCY_UNAVAILABLE", "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND", "08000", "57P01"]);
+// A MISSING GRANT IS NOT A BUG IN THIS CODE, AND MUST NOT READ LIKE ONE. This
+// module reads base tables through a reader role documented as views-only, so
+// "the role cannot see this" and "the object is not there" are the two most
+// likely first-deploy failures. They get their own answer, naming the CLASS of
+// gap and nothing else: no SQL, no statement text, no table or column name, no
+// driver message. INTERNAL_ERROR stays for genuine surprises.
+const PROVISIONING_CODES = new Map([
+  ["42501", "read_access"],       // insufficient_privilege
+  ["42P01", "read_source"],       // undefined_table
+  ["42703", "read_source"],       // undefined_column
+  ["3F000", "read_source"],       // invalid_schema_name
+  ["3D000", "read_source"],       // invalid_catalog_name
+  ["28000", "read_credential"],   // invalid_authorization_specification
+  ["28P01", "read_credential"],   // invalid_password
+]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Lookup slugs are bounded defensively. Values are parameterized regardless;
 // this only keeps a nonsense filter from reaching the database at all.
@@ -70,6 +85,9 @@ export function businessError(code, detail = null) {
 }
 
 function classifyReadError(error) {
+  const provisioning = PROVISIONING_CODES.get(error?.code);
+  // The class travels; the driver's message deliberately does not.
+  if (provisioning) return businessError("DEPENDENCY_NOT_PROVISIONED", { dependency: provisioning });
   if (DEPENDENCY_CODES.has(error?.code)) return businessError("DEPENDENCY_UNAVAILABLE");
   if (error?.code === "INTERNAL_ERROR") return error;
   return businessError("INTERNAL_ERROR");
@@ -185,8 +203,17 @@ export function parseBusinessRecordQuery(searchParams, viewerSlug) {
 // `$1` is ALWAYS the authenticated actor slug. Nothing else in this module is
 // allowed to occupy that slot, which is what makes the owner subquery below
 // impossible to point at another partner.
+//
+// EVERY BASE RELATION IS WRITTEN `public.<table>`, HERE AND IN THE FACET AND
+// OWNER QUERIES. Not for search_path safety alone: the repository's own grant
+// audit (tools/test-handler-reads-are-granted.py) recognises relations only by
+// their qualified name, so a bare `from client` reads to it as no relation at
+// all — the read would look grant-clean while depending on eight tables nobody
+// had checked. Qualifying them is what lets that audit see this module's real
+// dependency list. It changes no result: these are the same relations, named in
+// full. Parameterisation is untouched; nothing below interpolates a value.
 
-const VIEWER_OWNER = "(select a.id from actor a where a.slug = $1::text)";
+const VIEWER_OWNER = "(select a.id from public.actor a where a.slug = $1::text)";
 
 const ORDER = {
   name: "lower(f.name) asc, f.id asc",
@@ -239,10 +266,10 @@ function recordStatement({ columns, from, where, values }) {
 
 // ----------------------------------------------------------------- clients
 
-const CLIENT_FROM = `client c
-       join party p on p.id = c.party_id
-       left join client_status cs on cs.slug = c.status
-       left join client_type ct on ct.slug = c.client_type`;
+const CLIENT_FROM = `public.client c
+       join public.party p on p.id = c.party_id
+       left join public.client_status cs on cs.slug = c.status
+       left join public.client_type ct on ct.slug = c.client_type`;
 
 // Merged business record, merged party and deleted party are all excluded, in
 // the list, the total and the single-record read alike.
@@ -333,12 +360,12 @@ function clientPredicates(query) {
 // coalesce() reads either shape, and an unmatched value simply produces a null
 // label that the partial signal below reports rather than hides.
 const VENDOR_CATEGORY_KEY = "coalesce(v.category_slug, v.category)";
-const VENDOR_FROM = `vendor v
-       join party p on p.id = v.party_id
-       left join vendor_category vc on vc.slug = ${VENDOR_CATEGORY_KEY}
-       left join vendor_stage vs on vs.slug = v.stage
-       left join vendor_disposition vd on vd.slug = v.disposition
-       left join vendor_relationship_level vrl on vrl.level = v.relationship_level`;
+const VENDOR_FROM = `public.vendor v
+       join public.party p on p.id = v.party_id
+       left join public.vendor_category vc on vc.slug = ${VENDOR_CATEGORY_KEY}
+       left join public.vendor_stage vs on vs.slug = v.stage
+       left join public.vendor_disposition vd on vd.slug = v.disposition
+       left join public.vendor_relationship_level vrl on vrl.level = v.relationship_level`;
 
 const VENDOR_LIVE = ["v.merged_into is null", "p.merged_into is null", "p.deleted_at is null"];
 
@@ -433,13 +460,13 @@ function vendorPredicates(query) {
 // status that does not exist in the lookup cannot be offered as a filter.
 
 const CLIENT_FACETS = `select
-    coalesce((select json_agg(json_build_object('slug', slug, 'label', label, 'is_active_pipeline', is_active_pipeline) order by sort, slug) from client_status), '[]'::json) as statuses,
-    coalesce((select json_agg(json_build_object('slug', slug, 'label', label) order by label, slug) from client_type), '[]'::json) as types`;
+    coalesce((select json_agg(json_build_object('slug', slug, 'label', label, 'is_active_pipeline', is_active_pipeline) order by sort, slug) from public.client_status), '[]'::json) as statuses,
+    coalesce((select json_agg(json_build_object('slug', slug, 'label', label) order by label, slug) from public.client_type), '[]'::json) as types`;
 
 const VENDOR_FACETS = `select
-    coalesce((select json_agg(json_build_object('slug', slug, 'label', label) order by sort, slug) from vendor_category), '[]'::json) as categories,
-    coalesce((select json_agg(json_build_object('slug', slug, 'label', label) order by sort, slug) from vendor_stage), '[]'::json) as stages,
-    coalesce((select json_agg(json_build_object('slug', slug, 'label', label, 'workable', workable) order by sort, slug) from vendor_disposition), '[]'::json) as dispositions`;
+    coalesce((select json_agg(json_build_object('slug', slug, 'label', label) order by sort, slug) from public.vendor_category), '[]'::json) as categories,
+    coalesce((select json_agg(json_build_object('slug', slug, 'label', label) order by sort, slug) from public.vendor_stage), '[]'::json) as stages,
+    coalesce((select json_agg(json_build_object('slug', slug, 'label', label, 'workable', workable) order by sort, slug) from public.vendor_disposition), '[]'::json) as dispositions`;
 
 // -------------------------------------------------------------- envelopes
 
@@ -496,18 +523,26 @@ function rowsOf(value) {
 export function partialSignal(dataset, rows) {
   const pairs = dataset === "clients"
     ? [["recorded_status", "recorded_status_label"], ["recorded_client_type", "recorded_client_type_label"]]
-    : [["recorded_category", "recorded_category_label"], ["recorded_stage", "recorded_stage_label"], ["recorded_disposition", "recorded_disposition_label"]];
+    // relationship_level is a coded field like the rest: an unmatched level is
+    // a bare number, and it belongs in the same signal.
+    : [["recorded_category", "recorded_category_label"], ["recorded_stage", "recorded_stage_label"],
+      ["recorded_disposition", "recorded_disposition_label"], ["relationship_level", "relationship_level_label"]];
   const fields = new Set();
+  // COUNTED PER RECORD, NOT PER CELL. One record carrying two unnamed codes is
+  // one record; counting cells and saying "records" is the kind of small lie a
+  // truthful-count surface cannot afford.
   let count = 0;
   for (const row of rows) {
+    let affected = false;
     for (const [value, label] of pairs) {
       const recorded = row?.[value];
       const resolved = row?.[label];
       if (recorded !== null && recorded !== undefined && (resolved === null || resolved === undefined)) {
         fields.add(value);
-        count += 1;
+        affected = true;
       }
     }
+    if (affected) count += 1;
   }
   if (count === 0) return null;
   return {

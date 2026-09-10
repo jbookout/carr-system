@@ -8,10 +8,10 @@ import {
   DATASET_LABEL, DEFAULT_SCOPE, NOT_RECORDED, PAGE_SIZE, PIPELINE_LABEL, REFUSAL_COPY, SCOPE_LABEL, SORT_LABEL,
   SOURCE_LABEL, acceptsResponse, cachedPayload, clientPipelineTone, createBusinessState, datasetForPath,
   defaultQuery, displayedFreshness, echoesQuery, emptyCopy, expireSession, filterChips, freshnessSignature,
-  hasActiveFilters, isSessionExpiry, listPhase, listRequestUrl, ownerPresentation, pageSummary, parseViewState,
-  partyKindText, recordRequestUrl, recordSections, recordedCode, recordedValue, refusalCopy, rememberPayload,
-  restoreSession, rowTone, sameQuery, sourceIsFresh, validListPayload, validRecordPayload, vendorDispositionTone,
-  viewHref,
+  hasActiveFilters, isSessionExpiry, listPhase, listRequestUrl, ownerPresentation, pageSummary, panelModality,
+  panelTabTarget, parseViewState, partyKindText, recordRequestUrl, recordSections, recordedCode, recordedValue, refusalCopy,
+  rememberPayload, restoreSession, rowTone, sameQuery, scrollIntent, searchBoxValue, sourceIsFresh,
+  validListPayload, validRecordPayload, vendorDispositionTone, viewHref,
 } from "../../dealroom/js/workspace-business-model.js";
 import { parseBusinessQuery, readBusinessList, readBusinessRecord } from "../src/workspace-business-read.js";
 
@@ -138,6 +138,14 @@ test("a payload is only rendered when it is this view's answer, in a shape that 
   assert.equal(validListPayload(listPayload({ source: source({ source: "vendor" }) }), "clients"), false);
   assert.equal(validListPayload(listPayload({ source: source({ valid_until: OBSERVED }) }), "clients"), false);
   assert.equal(validListPayload(listPayload({ partial: { kind: "unlabelled_recorded_codes", count: 0, fields: [], note: "x" } }), "clients"), false);
+  // The partial sentence counts records on screen, so it can never claim more
+  // of them than were sent — whatever a future server decides to count.
+  const flagged = { kind: "unlabelled_recorded_codes", count: 1, fields: ["recorded_status"], note: "x" };
+  assert.equal(validListPayload(listPayload({ partial: flagged }), "clients"), true);
+  assert.equal(validListPayload(listPayload({ partial: { ...flagged, count: 2 } }), "clients"), false, "one row cannot hold two flagged records");
+  assert.equal(validListPayload(listPayload({ total: 0, rows: [], partial: flagged }), "clients"), false, "no rows, nothing to flag");
+  assert.equal(validRecordPayload(recordPayload({ partial: flagged }), "clients", ID), true);
+  assert.equal(validRecordPayload(recordPayload({ partial: { ...flagged, count: 2 } }), "clients", ID), false, "one record is at most one");
   assert.equal(validListPayload(listPayload({ facets: { statuses: [] } }), "clients"), false);
   assert.equal(validRecordPayload(recordPayload(), "clients", ID), true);
   assert.equal(validRecordPayload(recordPayload(), "clients", OTHER_ID), false, "a record answer must be the record that was asked for");
@@ -183,10 +191,14 @@ test("loading, refreshing, stale, both empties, past-the-end, unauthorized and u
   assert.notEqual(emptyCopy("vendors", "empty-no-records").title, emptyCopy("vendors", "empty-no-matches").title);
   // Each refusal says its own thing; none of them says "no records".
   for (const code of ["AUTHENTICATION_REQUIRED", "AUTHORIZATION_REFUSED", "QUERY_INVALID", "RECORD_NOT_FOUND",
-    "VIEWER_OWNER_UNKNOWN", "FRESHNESS_UNKNOWN", "DEPENDENCY_UNAVAILABLE", "offline"]) {
+    "VIEWER_OWNER_UNKNOWN", "FRESHNESS_UNKNOWN", "DEPENDENCY_UNAVAILABLE", "DEPENDENCY_NOT_PROVISIONED", "offline"]) {
     assert.doesNotMatch(refusalCopy(code), /^No records/);
     assert.notEqual(refusalCopy(code), refusalCopy("INTERNAL_ERROR"), code);
   }
+  // A deployment that has not been given access says so, and says nothing about
+  // the records themselves or about the database.
+  assert.match(refusalCopy("DEPENDENCY_NOT_PROVISIONED"), /has not been given access/);
+  assert.doesNotMatch(refusalCopy("DEPENDENCY_NOT_PROVISIONED"), /grant|role|table|select|schema|sql/i);
 });
 
 test("freshness is measured against the current clock and repaints only when it changes", () => {
@@ -347,6 +359,80 @@ test("an ordinary failure is not a sign-out, and keeps refresh and Back working"
   const recovered = restoreSession(expireSession(openState()));
   assert.equal(recovered.signedOut, false);
   assert.equal(restoreSession(state), state, "an already-signed-in state is untouched");
+});
+
+test("opening, closing or swapping a record keeps the reader's place; a new list starts at the top", () => {
+  // REGRESSION: every push navigated with scrollY 0, so clicking row 20 threw
+  // the reader back to the top of the list they were reading.
+  const query = { ...defaultQuery("clients"), scope: "mine", q: "ridge", page: 2 };
+  assert.equal(scrollIntent(query, viewHref(query, ID)), "keep", "opening a record");
+  assert.equal(scrollIntent(query, viewHref(query)), "keep", "closing it again");
+  assert.equal(scrollIntent(query, viewHref(query, OTHER_ID)), "keep", "swapping to another record");
+  assert.equal(scrollIntent(query, viewHref({ ...query, page: 3 })), "top", "a different page is a different list");
+  assert.equal(scrollIntent(query, viewHref({ ...query, q: "other" })), "top", "a different search");
+  assert.equal(scrollIntent(query, viewHref({ ...query, scope: "team" })), "top", "a different scope");
+  assert.equal(scrollIntent(query, viewHref(defaultQuery("vendors"))), "top", "the other dataset");
+  assert.equal(scrollIntent(null, viewHref(query)), "top", "nothing to preserve on a first load");
+  assert.equal(scrollIntent(query, "/deals"), "top", "somewhere that is not this view at all");
+});
+
+test("Back reconciles the search box; an ordinary refresh never clobbers a draft", () => {
+  // REGRESSION: the box was skipped whenever it had focus, so Back restored the
+  // chips and rows while stale text stayed in the input.
+  assert.equal(searchBoxValue({ current: "ridge", query: "", editing: true, fromLocation: true }), "",
+    "history is authoritative even while the reader is in the box");
+  assert.equal(searchBoxValue({ current: "ridge", query: "gulf", editing: false, fromLocation: true }), "gulf");
+  assert.equal(searchBoxValue({ current: "ridg", query: "", editing: true, fromLocation: false }), null,
+    "a finished read never overwrites what is being typed");
+  assert.equal(searchBoxValue({ current: "stale", query: "ridge", editing: false, fromLocation: false }), "ridge",
+    "an unfocused box still catches up on an ordinary repaint");
+  assert.equal(searchBoxValue({ current: "ridge", query: "ridge", editing: true, fromLocation: true }), null,
+    "no needless write, so the caret is left alone when nothing changed");
+  assert.equal(searchBoxValue({ current: "", query: null, editing: false, fromLocation: true }), null);
+});
+
+test("the phone panel is a dialog and the desktop panel is not", () => {
+  // REGRESSION: the full-screen phone panel kept role="complementary" with no
+  // aria-modal and no inert background, so Tab walked into the covered list.
+  assert.equal(panelModality({ recordId: ID, phoneWidth: true }), "modal");
+  assert.equal(panelModality({ recordId: ID, phoneWidth: false }), "inline");
+  assert.equal(panelModality({ recordId: null, phoneWidth: true }), "closed");
+  assert.equal(panelModality({ recordId: null, phoneWidth: false }), "closed");
+});
+
+test("Tab inside the phone dialog is decided for every position, including the heading it opens on", () => {
+  const stops = 3;
+  // REGRESSION: the panel opens with focus on its heading, which carries
+  // tabindex="-1" and so is inside the dialog but is not one of the stops. That
+  // position fell through to the browser, and the first Shift+Tab after opening
+  // walked out into the background wherever `inert` is unsupported.
+  assert.equal(panelTabTarget({ inside: true, stopIndex: -1, stopCount: stops, shiftKey: true }), "last");
+  assert.equal(panelTabTarget({ inside: true, stopIndex: -1, stopCount: stops, shiftKey: false }), "first");
+  // The two ends still wrap, and the middle is still the browser's to move.
+  assert.equal(panelTabTarget({ inside: true, stopIndex: stops - 1, stopCount: stops, shiftKey: false }), "first");
+  assert.equal(panelTabTarget({ inside: true, stopIndex: 0, stopCount: stops, shiftKey: true }), "last");
+  assert.equal(panelTabTarget({ inside: true, stopIndex: 0, stopCount: stops, shiftKey: false }), null);
+  assert.equal(panelTabTarget({ inside: true, stopIndex: 1, stopCount: stops, shiftKey: true }), null);
+  assert.equal(panelTabTarget({ inside: true, stopIndex: stops - 1, stopCount: stops, shiftKey: true }), null);
+  // A single stop wraps onto itself in both directions rather than escaping.
+  assert.equal(panelTabTarget({ inside: true, stopIndex: 0, stopCount: 1, shiftKey: false }), "first");
+  assert.equal(panelTabTarget({ inside: true, stopIndex: 0, stopCount: 1, shiftKey: true }), "last");
+  // Focus that has already left is pulled back; a dialog with nothing tabbable
+  // keeps focus on its heading either way.
+  assert.equal(panelTabTarget({ inside: false, stopIndex: -1, stopCount: stops, shiftKey: true }), "first");
+  assert.equal(panelTabTarget({ inside: false, stopIndex: -1, stopCount: stops, shiftKey: false }), "first");
+  assert.equal(panelTabTarget({ inside: true, stopIndex: -1, stopCount: 0, shiftKey: true }), "title");
+  assert.equal(panelTabTarget({ inside: false, stopIndex: -1, stopCount: 0, shiftKey: false }), "title");
+  // No position anywhere is left undecided except a genuine mid-list move.
+  for (const shiftKey of [true, false]) {
+    for (const stopIndex of [-1, 0, 1, 2]) {
+      const target = panelTabTarget({ inside: true, stopIndex, stopCount: stops, shiftKey });
+      const midList = stopIndex > 0 && stopIndex < stops - 1;
+      const atWrappingEnd = shiftKey ? stopIndex === 0 : stopIndex === stops - 1;
+      assert.equal(target === null, midList || (!atWrappingEnd && stopIndex !== -1),
+        `stopIndex ${stopIndex}, shift ${shiftKey}`);
+    }
+  }
 });
 
 test("nothing a reader sees claims an agreement, a representation or an assignment", () => {

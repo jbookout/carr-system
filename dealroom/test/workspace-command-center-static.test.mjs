@@ -52,11 +52,18 @@ test("Home asset is a dark, visual, responsive workstation with honest states", 
   assert.match(dealJs, /deal\.attention === true/);
   assert.match(dealJs, /params\.get\('owner'\) === 'me'/);
   assert.match(html, /class="mobile-nav"/);
-  assert.match(html, />Home</);
-  assert.match(html, />Leads</);
-  assert.match(html, />Deals</);
-  assert.match(html, />System</);
-  assert.match(html, />Observe</);
+  // The five phone shortcuts are the five business destinations, the same five
+  // the Clients and Vendors pages carry. Asserted against the phone bar itself,
+  // because every one of these labels also appears in the primary nav and an
+  // unscoped match would pin nothing. Operations did not disappear: they moved
+  // to the More disclosure, asserted here and in its own test.
+  const phoneBar = html.match(/<nav class="mobile-nav"[\s\S]*?<\/nav>/)?.[0] || "";
+  for (const label of ["Home", "Leads", "Deals", "Clients", "Vendors"]) {
+    assert.match(phoneBar, new RegExp(`>${label}<`), `phone bar is missing ${label}`);
+  }
+  assert.doesNotMatch(phoneBar, /system-work|room\.html/);
+  assert.match(html, /href="\/system-work\.html"[^>]*>System work<\/a>/);
+  assert.match(html, /href="\/room\.html"[^>]*>Observatory<\/a>/);
   assert.match(css, /max-width:\s*767px/);
   assert.match(css, /mobile-nav/);
   assert.match(html, /id="needsYouNow"/);
@@ -216,6 +223,20 @@ test("operations stay reachable, in a secondary More rather than as a business t
   assert.match(css, /\.nav-more-panel a\{[^}]*min-height:44px/);
 });
 
+test("Home and the business pages carry the same five phone shortcuts", async () => {
+  const expected = [["/", "Home"], ["/leads", "Leads"], ["/deals", "Deals"], ["/clients", "Clients"], ["/vendors", "Vendors"]];
+  for (const file of ["workspace.html", "business.html"]) {
+    const html = await readFile(`${ROOT}/${file}`, "utf8");
+    const bar = html.match(/<nav class="mobile-nav"[\s\S]*?<\/nav>/)?.[0] || "";
+    const links = [...bar.matchAll(/href="([^"]+)"[^>]*>(?:<span[^>]*>[^<]*<\/span>)?([^<]+)</g)].map((match) => [match[1], match[2]]);
+    // Five slots stay five, in the same order, on both surfaces.
+    assert.deepEqual(links, expected, file);
+    // Operations are not on the phone bar and are still reachable from it.
+    assert.doesNotMatch(bar, /system-work|room\.html/, file);
+    assert.match(html, /<details class="nav-more">[\s\S]*?href="\/system-work\.html"[\s\S]*?<\/details>/, file);
+  }
+});
+
 test("Clients and Vendors is a real read journey with distinguishable states", async () => {
   const html = await readFile(`${ROOT}/business.html`, "utf8");
   const js = await readFile(`${ROOT}/js/workspace-business.js`, "utf8");
@@ -298,7 +319,57 @@ test("Clients and Vendors is a real read journey with distinguishable states", a
   assert.match(js, /ArrowRight/);
   assert.match(js, /popstate/);
   assert.match(js, /scrollY/);
-  assert.match(js, /\.focus\(\)/);
+  // Every focus move in this view is a focus move only: the scroll position is
+  // restored deliberately, once, after them.
+  assert.match(js, /function focusWithoutScrolling/);
+  assert.match(js, /focus\?\.\(\{ preventScroll: true \}\)/);
+  assert.doesNotMatch(js, /\.focus\(\)/, "no bare focus call is left to scroll the list");
+  assert.match(js, /scrollIntent\(view\.query, href\)/);
+  assert.match(js, /window\.scrollTo\(\{ top: restoreScroll/);
+  // The address is rewritten to the state actually being shown.
+  assert.match(js, /const wantedHref = viewHref\(parsed\.query, parsed\.recordId\)/);
+  assert.match(js, /if \(wantedHref !== currentHref\(\)\)/);
+  // The search box is reconciled by location, not by a finished read.
+  assert.match(js, /searchBoxValue\(\{/);
+  assert.match(js, /renderControls\(\{ syncSearch: true \}\)/);
+  // The phone panel is a dialog with an inert background and contained focus.
+  assert.match(js, /panelModality\(\{ recordId: view\.recordId, phoneWidth/);
+  assert.match(js, /matchMedia\("\(max-width: 767px\)"\)/);
+  assert.match(js, /setAttribute\("role", modal \? "dialog" : "complementary"\)/);
+  assert.match(js, /setAttribute\("aria-modal", "true"\)/);
+  assert.match(js, /region\.inert = modal/);
+  assert.match(js, /function containPanelFocus/);
+  // Every position is decided, including the heading the panel opens on, which
+  // is inside the dialog but is not one of the tab stops.
+  assert.match(modelJs, /export function panelTabTarget/);
+  assert.match(js, /stopIndex: stops\.indexOf\(active\)/);
+  assert.match(js, /if \(!target\) return;\n {2}event\.preventDefault\(\);/);
+  // The width the script calls modal is the width the stylesheet makes
+  // full-screen; if one moves without the other the containment stops matching
+  // what is actually covering the list.
+  assert.match(css, /@media\(max-width:767px\)[\s\S]*\.record-panel\.open\{position:fixed/);
+  assert.match(html, /data-panel-background/);
+  assert.match(html, /<aside class="record-panel glass" id="recordPanel" role="complementary"/);
+  assert.doesNotMatch(html, /<aside[^>]*data-panel-background/, "the panel is never inert against itself");
+  // The sign-out is heard even when the answer that carried it is stale — in
+  // BOTH reads, pinned separately, because the record path is the one this
+  // correction was made for and the two bodies are otherwise indistinguishable
+  // to a document-wide regex.
+  const bodyOf = (name) => js.match(new RegExp(`async function ${name}\\([\\s\\S]*?\\n\\}`))?.[0] || "";
+  for (const name of ["loadList", "loadRecord"]) {
+    const body = bodyOf(name);
+    assert.notEqual(body, "", `${name} body not found`);
+    assert.match(body, /if \(response\.status === 401\) return expireNow\(\);\n {4}if \(!response\.ok\)/, name);
+    // The guards still stand between a stale answer and the screen; they just
+    // no longer stand in front of the sign-out. Measured from the fetch, since
+    // loadRecord's settle closure mentions the guard earlier in the source.
+    const afterFetch = body.slice(body.indexOf("const response = await fetch"));
+    assert.ok(afterFetch.indexOf("expireNow()") > -1 && afterFetch.indexOf("acceptsResponse(") > -1);
+    assert.ok(afterFetch.indexOf("expireNow()") < afterFetch.indexOf("acceptsResponse("), `${name} expiry precedes its guard`);
+  }
+  assert.match(bodyOf("loadRecord"), /view\.recordId !== id/);
+  // The partial count is records, and the sentence says records.
+  assert.match(js, /"record uses a code" : "records use codes"/);
   assert.match(css, /@media\(prefers-reduced-motion:reduce\)/);
   assert.match(css, /\.record-row\{[^}]*min-height:44px/);
   assert.match(css, /\.field input,\.field select\{[^}]*min-height:44px/);

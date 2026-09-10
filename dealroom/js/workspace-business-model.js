@@ -182,6 +182,67 @@ export function filterChips(query, facets = {}) {
   return chips;
 }
 
+// ------------------------------------------------------ navigation intent
+//
+// Three small decisions the view used to make inline, and got wrong. They are
+// here because they are decisions, not drawing: each one is a rule about what
+// the reader should experience, and each is now checkable without a browser.
+
+/**
+ * Opening, closing or swapping a record leaves the SAME list underneath, so the
+ * reader keeps their exact place. Changing the list itself — filter, sort,
+ * page, dataset — is a different list and starts at the top.
+ */
+export function scrollIntent(currentQuery, href) {
+  if (!currentQuery) return "top";
+  const [pathname, search = ""] = String(href).split("?");
+  const parsed = parseViewState(pathname, search);
+  return parsed && sameQuery(parsed.query, currentQuery) ? "keep" : "top";
+}
+
+/**
+ * What the search box should say, or null to leave it alone. A LOCATION change
+ * (first load, a link, Back, forward) is authoritative even while the box has
+ * focus — otherwise Back restores the chips and rows but leaves stale text in
+ * the input. An ordinary repaint is not authoritative and never overwrites a
+ * draft someone is still typing.
+ */
+export function searchBoxValue({ current, query, editing = false, fromLocation = false }) {
+  const wanted = query || "";
+  if (String(current ?? "") === wanted) return null;
+  if (fromLocation) return wanted;
+  return editing ? null : wanted;
+}
+
+/**
+ * The same panel is a side panel on a desktop and a full-screen cover on a
+ * phone. Only the second one is a dialog, and only the second one may take the
+ * background out of the keyboard and screen-reader order.
+ */
+export function panelModality({ recordId, phoneWidth = false }) {
+  if (!recordId) return "closed";
+  return phoneWidth ? "modal" : "inline";
+}
+
+/**
+ * Where a Tab inside the phone dialog must land, or null to let the browser
+ * move focus itself. Total on purpose: the heading the panel opens on carries
+ * `tabindex="-1"`, so it is INSIDE the dialog but is not one of the tab stops,
+ * and "inside but not a stop" was the case that fell through to the browser —
+ * the very first Shift+Tab after opening then walked out into the background
+ * wherever `inert` is not supported, which is the only place this trap matters.
+ * Anything inside that is not a stop clamps: back to the last stop, forward to
+ * the first, which is also where the heading's own forward Tab already goes.
+ */
+export function panelTabTarget({ inside, stopIndex, stopCount, shiftKey = false }) {
+  if (stopCount === 0) return "title";
+  if (!inside) return "first";
+  if (stopIndex === -1) return shiftKey ? "last" : "first";
+  if (!shiftKey && stopIndex === stopCount - 1) return "first";
+  if (shiftKey && stopIndex === 0) return "last";
+  return null;
+}
+
 // ----------------------------------------------------------- session state
 //
 // A KNOWN SIGN-OUT IS NOT A FAILED READ. When the server says the session has
@@ -327,6 +388,10 @@ export function validListPayload(payload, dataset) {
   if (payload.page_count !== Math.max(1, Math.ceil(payload.total / PAGE_SIZE))) return false;
   if (payload.out_of_range !== (payload.page > payload.page_count)) return false;
   if (!partialValid(payload.partial)) return false;
+  // "N records use codes with no name" is a claim about the rows on screen, so
+  // it cannot exceed them. Enforced here rather than trusted from the server:
+  // the sentence is rendered by this file and must be true in this file.
+  if (payload.partial && payload.partial.count > payload.rows.length) return false;
   const facets = payload.facets;
   if (!facets || typeof facets !== "object") return false;
   return dataset === "clients"
@@ -340,6 +405,8 @@ export function validRecordPayload(payload, dataset, id = null) {
   if (!VIEWERS.has(payload.viewer) || payload.dataset !== dataset || !sourceValid(payload.source, dataset)) return false;
   if (!Array.isArray(payload.not_in_this_read) || !payload.not_in_this_read.every((item) => typeof item === "string")) return false;
   if (typeof payload.recorded_field_note !== "string" || !partialValid(payload.partial)) return false;
+  // One record is one record: the same bound as the list, at its smallest size.
+  if (payload.partial && payload.partial.count > 1) return false;
   const record = payload.record;
   if (!exactKeys(record, RECORD_KEYS[dataset]) || typeof record.id !== "string" || !UUID.test(record.id)) return false;
   if (typeof record.name !== "string" || !record.name) return false;
@@ -473,6 +540,9 @@ export const REFUSAL_COPY = {
   VIEWER_OWNER_UNKNOWN: "My work cannot be worked out for this account, so nothing is shown rather than an empty list.",
   FRESHNESS_UNKNOWN: "The count and the rows did not agree, so nothing is shown as current.",
   DEPENDENCY_UNAVAILABLE: "These records cannot be reached right now.",
+  // Not a failure of the read and not a statement about the records: this
+  // deployment has not been given access to them yet.
+  DEPENDENCY_NOT_PROVISIONED: "This workspace has not been given access to these records yet, so nothing was read.",
   // The installed service worker answers an unreachable read with this exact
   // code rather than a cached list, so it is a reachable state here.
   offline: "You are offline, so nothing was read. Nothing here is filled in from an older answer.",

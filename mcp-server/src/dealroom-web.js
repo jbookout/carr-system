@@ -93,8 +93,16 @@ const BUSINESS_ERROR_STATUS = {
   VIEWER_OWNER_UNKNOWN: 409,
   FRESHNESS_UNKNOWN: 409,
   DEPENDENCY_UNAVAILABLE: 503,
+  // A read the deployment has not been given access to is unavailable, not
+  // broken: 503 like the other dependency answers, and it says which CLASS of
+  // access is missing so an operator is not left guessing.
+  DEPENDENCY_NOT_PROVISIONED: 503,
   INTERNAL_ERROR: 500,
 };
+// The only classes an unprovisioned read may name. Anything else answers with a
+// bare code, so no driver message, statement text or schema name can reach a
+// browser through this door.
+const BUSINESS_DEPENDENCY_CLASSES = new Set(["read_access", "read_source", "read_credential"]);
 const DEALROOM_PATH_PREFIXES = ["/auth/", "/api/system-work/", "/api/room/", "/api/tours/", "/tours/", COMMAND_CENTER_API_PREFIX, "/css/", "/js/", "/data/", "/icons/"];
 const LEGACY_BROWSER_REDIRECT_PATHS = new Set([
   "/", "/index.html", "/deals", "/leads", "/leads.html", "/workspace", "/workspace.html",
@@ -720,9 +728,14 @@ async function businessResponse(request, env, session, dependencies) {
     return json(payload);
   } catch (error) {
     const code = Object.prototype.hasOwnProperty.call(BUSINESS_ERROR_STATUS, error?.code) ? error.code : "INTERNAL_ERROR";
-    // Only a malformed query says which parameter was wrong; a refusal never
-    // narrates the record, the tenant, or anything about the database.
-    const body = code === "QUERY_INVALID" && error?.detail ? { error: code, detail: error.detail } : { error: code };
+    // Only a malformed query says which parameter was wrong, and only an
+    // unprovisioned read says which class of access is missing. Neither says
+    // anything about the record, the tenant, the schema or the statement.
+    const body = { error: code };
+    if (code === "QUERY_INVALID" && error?.detail) body.detail = error.detail;
+    if (code === "DEPENDENCY_NOT_PROVISIONED" && BUSINESS_DEPENDENCY_CLASSES.has(error?.detail?.dependency)) {
+      body.dependency = error.detail.dependency;
+    }
     return json(body, BUSINESS_ERROR_STATUS[code]);
   }
 }

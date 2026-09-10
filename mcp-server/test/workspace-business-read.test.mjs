@@ -45,6 +45,19 @@ function fakeClient({ head = {}, facets = CLIENT_FACETS, fail = null } = {}) {
 }
 
 const listQuery = (overrides = {}) => parseBusinessQuery("clients", new URLSearchParams(overrides), "joe");
+// The fixed clock the time-sensitive tests in this file already use, named once
+// so a test that does not care about time still reads deterministically.
+const CLOCK = () => new Date("2026-09-10T15:00:00.000Z");
+
+// Relations as the repository's grant audit reads them: whatever follows FROM
+// or JOIN. The two CTE names are not relations and are excluded by name.
+const CTE_NAMES = new Set(["filtered", "ordered"]);
+const BASE_RELATIONS = ["client", "client_status", "client_type", "party", "vendor", "vendor_category",
+  "vendor_disposition", "vendor_relationship_level", "vendor_stage", "actor"];
+function relationsIn(sql) {
+  return [...sql.matchAll(/\b(?:from|join)\s+([A-Za-z_][A-Za-z0-9_.]*)/g)]
+    .map((match) => match[1]).filter((name) => !CTE_NAMES.has(name));
+}
 // The predicate block alone: the owner subquery also appears inside the row
 // payload (as the `owned_by_viewer` flag), and only the WHERE decides the set.
 const whereOf = (text) => text.split("\n     where ")[1].split(/\n {2}\)|\n {5}limit/)[0];
@@ -58,6 +71,56 @@ test("the API path parser admits exactly the two datasets and a uuid record", ()
     assert.equal(parseBusinessApiPath(path), null, path);
     assert.equal(isBusinessApiPath(path), false, path);
   }
+});
+
+test("every base relation this module reads is schema-qualified, in every statement it can emit", async () => {
+  // The repository's grant audit recognises a relation only by its qualified
+  // name, so an unqualified `from client` makes this module look grant-clean
+  // while it quietly depends on ten relations nobody checked. This test walks
+  // every statement shape the module can produce — both datasets, both scopes,
+  // list and record, page and facets — and holds the whole dependency list.
+  const clientsTeam = fakeClient();
+  await readBusinessList({ client: clientsTeam, actor: JOE, query: listQuery(), correlationId: "corr-q1", now: CLOCK });
+  // Page two exists here to exercise the offset, so its fixture has to be a
+  // page two that could exist: a single row at offset 25 needs a total of at
+  // least 26. Answering with total 1 was the fixture describing an impossible
+  // page, and readBusinessList was right to refuse it — that invariant is the
+  // one keeping a page from reaching past the total it was counted with, and it
+  // stays exactly as it is.
+  const clientsMine = fakeClient({ head: { total_count: 30 } });
+  await readBusinessList({ client: clientsMine, actor: JOE, query: listQuery({ scope: "mine", q: "ridge", status: "active", type: "practice", pipeline: "active", sort: "recent", page: "2" }), correlationId: "corr-q2", now: CLOCK });
+  const vendorsTeam = fakeClient({ facets: VENDOR_FACETS, head: { rows: [vendorRow()], total_count: 1 } });
+  await readBusinessList({ client: vendorsTeam, actor: DELL, query: parseBusinessQuery("vendors", new URLSearchParams(), "dell"), correlationId: "corr-q3", now: CLOCK });
+  const vendorsMine = fakeClient({ facets: VENDOR_FACETS, head: { rows: [vendorRow()], total_count: 1 } });
+  await readBusinessList({ client: vendorsMine, actor: DELL, query: parseBusinessQuery("vendors", new URLSearchParams({ scope: "mine", category: "cpa", stage: "warm", disposition: "active", q: "gulf" }), "dell"), correlationId: "corr-q4", now: CLOCK });
+  const clientDetail = fakeClient();
+  await readBusinessRecord({ client: clientDetail, actor: JOE, dataset: "clients", id: ID, correlationId: "corr-q5", now: CLOCK });
+  // A vendor read answers with a vendor record, as the vendor tests below do.
+  const vendorDetail = fakeClient({ facets: VENDOR_FACETS, head: { record: vendorRow() } });
+  await readBusinessRecord({ client: vendorDetail, actor: JOE, dataset: "vendors", id: ID, correlationId: "corr-q6", now: CLOCK });
+
+  const statements = [clientsTeam, clientsMine, vendorsTeam, vendorsMine, clientDetail, vendorDetail]
+    .flatMap((client) => client.queries.map((query) => query.text));
+  assert.equal(statements.length, 10, "four list statements plus four facet statements plus two record statements");
+
+  // The exact dependency list, and nothing else appearing unannounced.
+  const relations = [...new Set(statements.flatMap(relationsIn))].sort();
+  assert.deepEqual(relations, [
+    "public.actor", "public.client", "public.client_status", "public.client_type", "public.party",
+    "public.vendor", "public.vendor_category", "public.vendor_disposition",
+    "public.vendor_relationship_level", "public.vendor_stage",
+  ]);
+  // And not one of them is reachable in its bare form anywhere.
+  for (const sql of statements) {
+    for (const name of BASE_RELATIONS) {
+      assert.doesNotMatch(sql, new RegExp(`(?:from|join)\\s+${name}\\b`), `${name} is unqualified`);
+    }
+  }
+  // Qualifying changed the names, not the shape: parameters and predicates hold.
+  assert.deepEqual(clientsTeam.queries[0].params, ["joe", PAGE_SIZE, 0]);
+  assert.deepEqual(vendorsMine.queries[0].params, ["dell", "%gulf%", "cpa", "warm", "active", PAGE_SIZE, 0]);
+  assert.match(whereOf(clientsMine.queries[0].text), /c\.owner_id = \(select a\.id from public\.actor a where a\.slug = \$1::text\)/);
+  assert.match(whereOf(vendorDetail.queries[0].text), /v\.merged_into is null/);
 });
 
 test("the query parser bounds every filter and refuses anything it does not own", () => {
@@ -119,8 +182,8 @@ test("the list total and the list rows come from one filtered set, with a stable
   assert.match(page.text, /p\.merged_into is null/);
   assert.match(page.text, /p\.deleted_at is null/);
   assert.doesNotMatch(page.text, /insert |update |delete |truncate /i);
-  assert.match(facets.text, /from client_status/);
-  assert.match(facets.text, /from client_type/);
+  assert.match(facets.text, /from public\.client_status/);
+  assert.match(facets.text, /from public\.client_type/);
   assert.equal(result.total, 1);
   assert.equal(result.page, 1);
   assert.equal(result.page_size, PAGE_SIZE);
@@ -169,7 +232,7 @@ test("team is owner-independent and My work binds to the authenticated owner uui
   const mine = fakeClient();
   await readBusinessList({ client: mine, actor: DELL, query: listQuery({ scope: "mine" }), correlationId: "corr-mine" });
   const predicate = whereOf(mine.queries[0].text);
-  assert.match(predicate, /c\.owner_id = \(select a\.id from actor a where a\.slug = \$1::text\)/);
+  assert.match(predicate, /c\.owner_id = \(select a\.id from public\.actor a where a\.slug = \$1::text\)/);
   // The owner never comes from anywhere but $1, and $1 is the session slug.
   assert.equal(mine.queries[0].params[0], "dell");
   assert.doesNotMatch(predicate, /owner_label\s*=/);
@@ -246,9 +309,9 @@ test("vendor reads carry their own lookups, filters and live-record predicate", 
   assert.match(page.text, /v\.stage = \$4::text/);
   assert.match(page.text, /v\.disposition = \$5::text/);
   assert.deepEqual(page.params, ["joe", "%gulf%", "cpa", "warm", "active", PAGE_SIZE, 0]);
-  assert.match(facets.text, /from vendor_category/);
-  assert.match(facets.text, /from vendor_stage/);
-  assert.match(facets.text, /from vendor_disposition/);
+  assert.match(facets.text, /from public\.vendor_category/);
+  assert.match(facets.text, /from public\.vendor_stage/);
+  assert.match(facets.text, /from public\.vendor_disposition/);
   assert.equal(result.source.source, "vendor");
   assert.deepEqual(result.facets, VENDOR_FACETS);
   assert.match(result.recorded_field_note, /not proof of a commitment/);
@@ -263,6 +326,57 @@ test("a recorded code with no lookup label is reported as partial, not relabelle
   // A recorded value that is simply absent is not a partial label; it is unknown.
   assert.equal(partialSignal("clients", [clientRow({ recorded_status: null, recorded_status_label: null })]), null);
   assert.equal(partialSignal("vendors", [vendorRow({ recorded_stage_label: null })]).fields[0], "recorded_stage");
+});
+
+test("the partial count is records, not cells, and covers every coded field", () => {
+  // REGRESSION: one record with two unnamed codes was counted as two, under a
+  // heading that says "records".
+  const both = partialSignal("clients", [clientRow({ recorded_status_label: null, recorded_client_type_label: null })]);
+  assert.equal(both.count, 1, "one record is one record however many of its codes are unnamed");
+  assert.deepEqual(both.fields, ["recorded_client_type", "recorded_status"]);
+  const mixed = partialSignal("clients", [
+    clientRow({ recorded_status_label: null, recorded_client_type_label: null }),
+    clientRow(),
+    clientRow({ recorded_status_label: null }),
+  ]);
+  assert.equal(mixed.count, 2);
+  // REGRESSION: relationship_level was the one coded vendor field with no
+  // unresolved path, so an unmatched level rendered as a bare number.
+  const level = partialSignal("vendors", [vendorRow({ relationship_level_label: null })]);
+  assert.equal(level.count, 1);
+  assert.deepEqual(level.fields, ["relationship_level"]);
+  assert.equal(partialSignal("vendors", [vendorRow({ relationship_level: null, relationship_level_label: null })]), null,
+    "a level nobody recorded is unknown, not an unnamed code");
+  const everything = partialSignal("vendors", [vendorRow({
+    recorded_category_label: null, recorded_stage_label: null, recorded_disposition_label: null, relationship_level_label: null,
+  })]);
+  assert.equal(everything.count, 1);
+  assert.deepEqual(everything.fields, ["recorded_category", "recorded_disposition", "recorded_stage", "relationship_level"]);
+});
+
+test("a missing grant or missing source is named as a provisioning gap, and leaks no SQL", async () => {
+  // Deployed against a role that cannot see these tables, the first read must
+  // not read as a bug in this code — and must not narrate the database.
+  const cases = [["42501", "read_access"], ["42P01", "read_source"], ["42703", "read_source"],
+    ["3F000", "read_source"], ["3D000", "read_source"], ["28000", "read_credential"], ["28P01", "read_credential"]];
+  for (const [pgCode, dependency] of cases) {
+    const failure = Object.assign(new Error(`permission denied for table client; select c.id from client c where ...`), { code: pgCode });
+    const client = fakeClient({ fail: failure });
+    await assert.rejects(
+      () => readBusinessList({ client, actor: JOE, query: listQuery(), correlationId: "corr-grant" }),
+      (error) => {
+        assert.equal(error.code, "DEPENDENCY_NOT_PROVISIONED", pgCode);
+        assert.deepEqual(error.detail, { dependency });
+        // The class travels; the statement and the driver's words do not.
+        assert.doesNotMatch(JSON.stringify(error.detail), /select|from |table|client|permission/i);
+        return true;
+      });
+  }
+  // Connection trouble is still ordinary unavailability, and a surprise is
+  // still an internal error — the new class does not swallow either.
+  await assert.rejects(() => readBusinessList({ client: fakeClient({ fail: Object.assign(new Error("x"), { code: "ECONNRESET" }) }), actor: JOE, query: listQuery(), correlationId: "c" }), /DEPENDENCY_UNAVAILABLE/);
+  await assert.rejects(() => readBusinessList({ client: fakeClient({ fail: Object.assign(new Error("x"), { code: "42601" }) }), actor: JOE, query: listQuery(), correlationId: "c" }), /INTERNAL_ERROR/);
+  await assert.rejects(() => readBusinessRecord({ client: fakeClient({ fail: Object.assign(new Error("x"), { code: "42501" }) }), actor: JOE, dataset: "vendors", id: ID, correlationId: "c" }), /DEPENDENCY_NOT_PROVISIONED/);
 });
 
 test("nullable source fields survive the read as null and are never filled in", async () => {
