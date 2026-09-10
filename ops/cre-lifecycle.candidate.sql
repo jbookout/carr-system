@@ -1007,7 +1007,7 @@ begin
     'record-loi-submission', 'record-loi-acceptance', 'commit-winning-property',
     'record-deal-execution', 'record-diligence-outcome', 'record-deal-closing',
     'cancel-pending-deal', 'record-deal-axis', 'link-salesforce-reference',
-    'record-lifecycle-correction') then
+    'record-lifecycle-correction', 'record-lifecycle-reconciliation') then
     raise exception 'j102_unknown_write_operation: %', p_operation using errcode = '22023';
   end if;
   if p_idempotency_key is null or length(p_idempotency_key) not between 1 and 200 then
@@ -4881,32 +4881,277 @@ $$;
 comment on function ops.j102_record_correction(jsonb,text,text) is
   'Q082/Q072: append one partner-authority correction receipt binding the reason, the durable correction record and the exact prior state digest. Append-only; it overwrites nothing and no assistant text is ever its basis.';
 
-create or replace function ops.j102_record_reconciliation_item(p_envelope jsonb)
+-- ---------------------------------------------------------------------------
+-- THE RECONCILIATION WRITER -- Q103's visible conflict, written under the same
+-- governance every other writer in this file carries.
+--
+-- THE ONE-ARGUMENT FORM IS REPLACED, NOT SHADOWED. It took an envelope and
+-- nothing else: no idempotency key, so a retried request wrote a second visible
+-- item; no compare-and-swap operand, so the `current_version_digest` it stored
+-- was whatever the caller had read whenever it read it; and no re-read of the
+-- subject, so a conflict item could be filed claiming a "current" version that
+-- had stopped being current before the insert. An application-level readback
+-- cannot close any of that -- it is not atomic, two callers pass it
+-- simultaneously, and it cannot tell a stale claim from a fresh one at all. The
+-- old signature is DROPPED so no ungoverned overload survives beside this one;
+-- `create or replace` alone would have left it callable, and its grants revoked
+-- and re-granted below name the new signature.
+--
+-- WHAT IT NOW BINDS, and each is a fact about the row at COMMIT time rather than
+-- at read time:
+--
+--   1. THE REQUEST. It claims its idempotency key through the same
+--      ops.j102_claim_idempotency every sibling uses, so a replay returns the
+--      stored outcome and writes nothing, and the same key over DIFFERENT bytes
+--      refuses rather than substituting one conflict for another. The claim is
+--      tier 1 and is taken before any state is read.
+--   2. THE SUBJECT, under the tier-2 advisory lock in the established order, with
+--      an explicit compare-and-swap operand. The operand must be the digest the
+--      caller decided against AND the digest the row actually holds.
+--   3. THE "CURRENT" VERSION THE ITEM CLAIMS. It must equal that same committed
+--      digest. A conflict item whose `current_version_digest` is not current is a
+--      stale reading filed as a fact, and it is the shape a person resolving the
+--      conflict is least able to detect.
+--   4. THE STATE SNAPSHOT INSIDE THE ITEM. The evidence the item carries so a
+--      human can see what the record says now must HASH to the version it names.
+--   5. THE HISTORY EVIDENCE. The newest row of the tail the item carries must
+--      still be the newest committed event for that subject.
+--   6. THAT THERE IS A CONFLICT AT ALL. A base equal to the current version is
+--      not a conflict, and an item recording one would be noise in the one place
+--      a person is supposed to look.
+--
+-- WHAT IT DELIBERATELY DOES NOT DO: collapse distinct proposals. Two callers, or
+-- one caller twice, proposing DIFFERENT edits against the same two versions have
+-- raised two real conflicts, and both are visible. Idempotency is keyed on the
+-- REQUEST -- which covers the edits -- and on nothing else; there is no unique
+-- index over the version pair, deliberately, because one would silently discard
+-- the second proposal.
+-- ---------------------------------------------------------------------------
+
+-- The ungoverned single-argument form holds no data and is removed rather than
+-- left callable beside its replacement.
+drop function if exists ops.j102_record_reconciliation_item(jsonb);
+
+create or replace function ops.j102_record_reconciliation_item(
+  p_envelope jsonb, p_expected_state_digests jsonb,
+  p_idempotency_key text, p_request_digest text, p_diagnostics jsonb)
 returns jsonb language plpgsql security definer
 set search_path = pg_catalog, ops, public
 as $$
-declare v_actor text := ops.f01_context_actor_slug(); v_record jsonb; v_seq bigint;
+declare
+  v_actor text := ops.f01_context_actor_slug();
+  v_class text := ops.f01_principal() ->> 'authorization_class';
+  v_operation text := p_diagnostics ->> 'operation';
+  v_txn_now timestamptz := now();
+  v_txn_now_text text := ops.f01_instant_text(now());
+  v_replay jsonb;
+  v_record jsonb;
+  v_evidence jsonb;
+  v_tail jsonb;
+  v_digest text;
+  v_kind text;
+  v_id text;
+  v_key text;
+  v_operand_keys integer;
+  v_stored_state jsonb;
+  v_stored text;
+  v_expected text;
+  v_newest text;
+  v_seq bigint;
+  v_result jsonb;
 begin
+  if v_operation is distinct from 'record-lifecycle-reconciliation' then
+    raise exception 'j102_operation_reconciliation_mismatch: this writer records reconciliation items for the record-lifecycle-reconciliation operation, and this call names %',
+      coalesce(v_operation, 'no operation') using errcode = '22023';
+  end if;
+  if jsonb_typeof(p_expected_state_digests) is distinct from 'object' then
+    raise exception 'j102_expected_state_digests_not_an_object: the subject this conflict is about carries a compare-and-swap operand; this call supplies %',
+      coalesce(jsonb_typeof(p_expected_state_digests), 'no operand map at all')
+      using errcode = '22023';
+  end if;
+
+  -- TIER 1, and before any state is read, exactly as every sibling writer does.
+  v_replay := ops.j102_claim_idempotency(v_operation, p_idempotency_key, p_request_digest);
+  if v_replay is not null then return v_replay; end if;
+
   v_record := p_envelope -> 'record';
+  if jsonb_typeof(v_record) is distinct from 'object' then
+    raise exception 'j102_item_envelope_not_an_object: a reconciliation envelope carries % where its record should be',
+      coalesce(jsonb_typeof(v_record), 'nothing') using errcode = '22023';
+  end if;
+  v_digest := ops.f01_digest_jsonb(v_record);
+  if (p_envelope ->> 'record_digest') is distinct from v_digest then
+    raise exception 'j102_item_digest_mismatch: the supplied item does not hash to its claim'
+      using errcode = '22000';
+  end if;
+  if (p_envelope ->> 'record_kind') is distinct from 'stored_reconciliation_item' then
+    raise exception 'j102_item_record_kind_mismatch: this writer stores reconciliation items, and this envelope is a %',
+      coalesce(p_envelope ->> 'record_kind', 'record of no kind') using errcode = '22023';
+  end if;
+  if (v_record ->> 'tenant') is distinct from ops.f01_tenant()
+     or (p_envelope ->> 'tenant') is distinct from ops.f01_tenant() then
+    raise exception 'j102_item_tenant_mismatch: this database is tenant %, and this item names %',
+      ops.f01_tenant(),
+      coalesce(v_record ->> 'tenant', p_envelope ->> 'tenant', 'nothing') using errcode = '42501';
+  end if;
   if (v_record ->> 'proposed_by') is distinct from v_actor then
     raise exception 'j102_actor_injection_refused: proposed_by is derived, never supplied'
       using errcode = '42501';
   end if;
+  -- AN ITEM MAY NOT RESOLVE ITSELF. The relation restates the machine half as a
+  -- CHECK; these are the three a caller could otherwise use to file a conflict
+  -- that reads as already handled.
+  if (v_record ->> 'resolved_by_machine') is distinct from 'false'
+     or (v_record ->> 'visible') is distinct from 'true'
+     or (v_record ->> 'applied') is distinct from 'false' then
+    raise exception 'j102_reconciliation_resolves_itself: a conflict lands visible, unapplied and unresolved by any machine; this one claims resolved_by_machine=%, visible=%, applied=%',
+      coalesce(v_record ->> 'resolved_by_machine', 'nothing'),
+      coalesce(v_record ->> 'visible', 'nothing'),
+      coalesce(v_record ->> 'applied', 'nothing') using errcode = '42501';
+  end if;
+
+  v_kind := v_record ->> 'subject_kind';
+  v_id := v_record ->> 'subject_id';
+  if v_kind is null or v_id is null then
+    raise exception 'j102_item_subject_missing: a conflict item names the subject it is about'
+      using errcode = '22023';
+  end if;
+  v_key := v_kind || ':' || v_id;
+  -- ONE SUBJECT, AND ONLY THAT SUBJECT. An extra operand would be a row locked
+  -- and compared and never consulted, reported on the receipt as though it had
+  -- been part of the answer.
+  select count(*) into v_operand_keys from jsonb_object_keys(p_expected_state_digests);
+  if not (p_expected_state_digests ? v_key) or v_operand_keys <> 1 then
+    raise exception 'j102_item_operand_set_mismatch: this conflict is about % and its operand map must name exactly that subject; it names %',
+      v_key,
+      coalesce((select jsonb_agg(k order by k)
+                  from jsonb_object_keys(p_expected_state_digests) as k), '[]'::jsonb)
+      using errcode = '22023';
+  end if;
+
+  -- TIER 2, in the same order the transition and initialization writers take it.
+  perform pg_advisory_xact_lock(hashtextextended(
+    'j102:subject:' || ops.f01_tenant() || ':' || v_key, 0));
+
+  select c.envelope -> 'record' -> 'state' into v_stored_state
+    from ops.j102_subject_current c
+   where c.tenant = ops.f01_tenant() and c.subject_kind = v_kind and c.subject_id = v_id;
+  if not found then
+    raise exception 'j102_reconciliation_subject_not_found: % holds no committed row, so there is no version for a conflict to be about',
+      v_key using errcode = '22023';
+  end if;
+  v_stored := ops.f01_digest_jsonb(v_stored_state);
+  v_expected := p_expected_state_digests ->> v_key;
+  if v_stored is distinct from v_expected then
+    raise exception 'j102_stale_subject_digest: the current state of % is %, and the caller decided against %',
+      v_key, v_stored, coalesce(v_expected, 'absent') using errcode = '40001';
+  end if;
+
+  -- THE THREE STALENESS BINDINGS. Everything above proves the request is
+  -- internally consistent and that the row has not moved since the caller read
+  -- it. These prove that what the ITEM SAYS about the current version is true of
+  -- the row at the instant it is filed.
+  if (v_record ->> 'current_version_digest') is distinct from v_stored then
+    raise exception 'j102_reconciliation_current_version_not_current: the item files % as the current version of %, and the committed row is %',
+      coalesce(v_record ->> 'current_version_digest', 'nothing'), v_key, v_stored
+      using errcode = '40001';
+  end if;
+  v_evidence := v_record -> 'concurrent_change_evidence';
+  if jsonb_typeof(v_evidence) is distinct from 'object' then
+    raise exception 'j102_reconciliation_evidence_missing: a visible conflict carries the evidence a person resolves it from'
+      using errcode = '22023';
+  end if;
+  if ops.f01_digest_jsonb(v_evidence -> 'current_state') is distinct from v_stored then
+    raise exception 'j102_reconciliation_state_evidence_stale: the state this item shows as current does not hash to the version it names'
+      using errcode = '40001';
+  end if;
+  select e.event_digest into v_newest from ops.j102_subject_event e
+   where e.tenant = ops.f01_tenant() and e.subject_kind = v_kind and e.subject_id = v_id
+   order by e.event_seq desc limit 1;
+  v_tail := coalesce(v_evidence -> 'history_tail', '[]'::jsonb);
+  if jsonb_typeof(v_tail) is distinct from 'array' then
+    raise exception 'j102_reconciliation_evidence_missing: the history evidence is % where a list should be',
+      jsonb_typeof(v_tail) using errcode = '22023';
+  end if;
+  if v_newest is null then
+    if jsonb_array_length(v_tail) <> 0 then
+      raise exception 'j102_reconciliation_history_evidence_stale: % has no committed history and this item shows % rows of it',
+        v_key, jsonb_array_length(v_tail) using errcode = '40001';
+    end if;
+  elsif jsonb_array_length(v_tail) = 0
+        or (v_tail -> (jsonb_array_length(v_tail) - 1) ->> 'record_digest')
+             is distinct from v_newest then
+    raise exception 'j102_reconciliation_history_evidence_stale: the newest committed event for % is %, and this item''s history evidence ends at %',
+      v_key, v_newest,
+      coalesce(v_tail -> (jsonb_array_length(v_tail) - 1) ->> 'record_digest', 'nothing')
+      using errcode = '40001';
+  end if;
+
+  -- AND THERE MUST BE A CONFLICT. A base equal to the current version is a caller
+  -- that has not been overtaken by anybody.
+  if (v_record ->> 'base_version_digest') is not distinct from v_stored then
+    raise exception 'j102_reconciliation_without_conflict: % is at % and the caller decided against the same version; there is nothing to reconcile',
+      v_key, v_stored using errcode = '22023';
+  end if;
+
   insert into ops.j102_reconciliation_item
     (tenant, subject_kind, subject_id, conflict_kind, base_version_digest,
      current_version_digest, envelope, envelope_digest, item_digest, proposed_by, recorded_at)
   values (
-    ops.f01_tenant(), v_record ->> 'subject_kind', v_record ->> 'subject_id',
+    ops.f01_tenant(), v_kind, v_id,
     v_record ->> 'conflict_kind', v_record ->> 'base_version_digest',
     v_record ->> 'current_version_digest', p_envelope, ops.f01_digest_jsonb(p_envelope),
-    ops.f01_digest_jsonb(v_record), v_actor, now())
+    v_digest, v_actor, v_txn_now)
   returning item_seq into v_seq;
-  return jsonb_build_object('item_seq', v_seq, 'visible', true, 'resolved_by_machine', false);
+
+  v_result := jsonb_build_object(
+    'operation', v_operation,
+    'decision', 'reconcile',
+    'outcome', 'recorded',
+    'actor_slug', v_actor,
+    'actor_authorization_class', v_class,
+    'subject_kind', v_kind,
+    'subject_id', v_id,
+    'item_seq', v_seq,
+    'item_digest', v_digest,
+    -- STORED FACTS, read back off what was just inserted rather than echoed from
+    -- the diagnostics.
+    'conflict_kind', v_record ->> 'conflict_kind',
+    'base_version_digest', v_record ->> 'base_version_digest',
+    'current_version_digest', v_record ->> 'current_version_digest',
+    'expected_state_digests', p_expected_state_digests,
+    -- WHAT THIS WRITER ENFORCED, as facts rather than hedges.
+    'current_version_bound_to_committed_row', true,
+    'state_evidence_bound_to_committed_row', true,
+    'history_evidence_bound_to_committed_history', true,
+    'conflict_present', true,
+    'visible', true,
+    'applied', false,
+    'resolved_by_machine', false,
+    'advances_lifecycle_state', false,
+    -- AND WHAT IT DOES NOT DO: it collapses no distinct proposal. Two different
+    -- edit sets against the same two versions carry different request digests and
+    -- both land, because both are real conflicts.
+    'distinct_proposals_collapsed', false,
+    'committed_at', v_txn_now_text,
+    'caller_reported_reason_id', p_diagnostics ->> 'reason_id',
+    'caller_reported_reason_id_scope',
+      'kernel_result_diagnostic_asserted_by_the_caller_and_not_recomputed_here',
+    'request_digest', p_request_digest,
+    'request_digest_scope', 'caller_supplied_intent_digest_not_recomputed_here',
+    'committed_content_digest', ops.f01_digest_jsonb(jsonb_build_object(
+      'item_digest', v_digest,
+      'item_seq', v_seq,
+      'committed_at', v_txn_now_text)),
+    'committed_content_digest_source', 'recomputed_from_committed_rows',
+    'readback', jsonb_build_object('item_seq', v_seq, 'record', v_record),
+    'external_effects', false);
+  return ops.j102_settle_idempotency(v_operation, p_idempotency_key, v_result);
 end;
 $$;
 
-comment on function ops.j102_record_reconciliation_item(jsonb) is
-  'Q103: record one visible conflict with both versions preserved. Nothing here resolves it.';
+comment on function ops.j102_record_reconciliation_item(jsonb,jsonb,text,text,jsonb) is
+  'Q103: append one VISIBLE, unresolved conflict item, under the same governance every other writer here carries. It claims its idempotency key before reading any state, so a replay returns the stored outcome and the same key over different bytes refuses; it locks the subject in the established tier-2 order and compare-and-swaps it; and it then binds what the item SAYS to what the row IS at commit time -- the current version digest, the state snapshot the item shows and the newest row of its history evidence must all match the committed subject and its committed history, so a reading that went stale between the caller''s read and this insert cannot be filed as a current fact. A base equal to the current version is refused as no conflict at all. It collapses no distinct proposal: idempotency is keyed on the request, which covers the edits, and there is deliberately no unique index over the version pair. The ungoverned single-argument form is DROPPED rather than shadowed.';
 
 -- ---------------------------------------------------------------------------
 -- Q081 -- the compatibility projection and the migration shadow.
@@ -5140,7 +5385,7 @@ revoke all on function
   ops.j102_record_evidence_subject_link(jsonb,text,text),
   ops.j102_record_salesforce_reference(jsonb,text,text),
   ops.j102_record_correction(jsonb,text,text),
-  ops.j102_record_reconciliation_item(jsonb)
+  ops.j102_record_reconciliation_item(jsonb,jsonb,text,text,jsonb)
   from public, carr_reader, carr_writer, carr_jobs, carr_authority;
 grant execute on function
   ops.j102_replay_outcome(text,text,text),
@@ -5153,7 +5398,7 @@ grant execute on function
   ops.j102_initialize_subject(text,jsonb,jsonb,jsonb,text,text,jsonb),
   ops.j102_record_first_party_fact(jsonb,text,text),
   ops.j102_record_salesforce_reference(jsonb,text,text),
-  ops.j102_record_reconciliation_item(jsonb)
+  ops.j102_record_reconciliation_item(jsonb,jsonb,text,text,jsonb)
   to carr_writer, carr_authority;
 -- Correction and the evidence association reach the authority bundle only, and
 -- each additionally checks the DERIVED PRINCIPAL inside the function: the grant
@@ -5183,7 +5428,7 @@ begin
     'j102_record_evidence_subject_link(jsonb,text,text)',
     'j102_record_salesforce_reference(jsonb,text,text)',
     'j102_record_correction(jsonb,text,text)',
-    'j102_record_reconciliation_item(jsonb)',
+    'j102_record_reconciliation_item(jsonb,jsonb,text,text,jsonb)',
     'j102_claim_idempotency(text,text,text)',
     'j102_settle_idempotency(text,text,jsonb)'
   ] loop

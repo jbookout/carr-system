@@ -336,6 +336,11 @@ declare
   v_fact3_digest     text;
   v_state            jsonb;
   v_init_def         text;
+  v_recon_def        text;
+  v_item             jsonb;
+  v_item_env         jsonb;
+  v_newest_event     text;
+  v_base_digest      text;
 
   -- One synthetic Assignment in the shape `open-assignment` would leave it. It is
   -- never committed to the database -- nothing can commit it -- and exists here so
@@ -765,6 +770,73 @@ begin
   end if;
   if v_init_def ~ 'ops\.j102_apply_transition\s*\(' then
     raise exception 'S8: the initialization writer CALLS the transition writer; the two doors must stay separate';
+  end if;
+
+  -- === S9: the reconciliation writer is GOVERNED, and the old one is gone =====
+  --
+  -- Q103's conflict writer used to take an envelope and nothing else: no
+  -- idempotency key, so a retry wrote a second visible item; no compare-and-swap
+  -- operand; and no re-read of the subject, so an item could be filed claiming a
+  -- "current" version that had stopped being current before the insert. This
+  -- group is the structural half of the replacement, and the FIRST assertion is
+  -- the one that matters: the ungoverned overload must not still be callable
+  -- beside its successor.
+  if to_regprocedure('ops.j102_record_reconciliation_item(jsonb)') is not null then
+    raise exception 'S9: the ungoverned single-argument reconciliation writer still exists; create-or-replace left it callable beside the governed one, and anything holding its grant can still file an unkeyed, unbound conflict';
+  end if;
+  if to_regprocedure('ops.j102_record_reconciliation_item(jsonb,jsonb,text,text,jsonb)') is null then
+    raise exception 'S9: the governed reconciliation writer is absent, so Q103 has no atomic conflict door';
+  end if;
+  -- It must be reachable by the same bundles as the other ordinary writers, and
+  -- by nobody else.
+  for v_role in select unnest(array['carr_reader', 'carr_jobs']) loop
+    if exists (select 1 from pg_roles where rolname = v_role)
+       and has_function_privilege(v_role,
+             'ops.j102_record_reconciliation_item(jsonb,jsonb,text,text,jsonb)', 'EXECUTE') then
+      raise exception 'S9: % can file a reconciliation item; the conflict writer reaches carr_writer and carr_authority only',
+        v_role;
+    end if;
+  end loop;
+  -- In its OWN variable: v_predicate carries the transition writer's definition
+  -- from S5 and S7 still reads it.
+  v_recon_def := pg_get_functiondef(
+    to_regprocedure('ops.j102_record_reconciliation_item(jsonb,jsonb,text,text,jsonb)'));
+  foreach v_role in array array[
+    -- The governance every sibling writer carries.
+    'ops.j102_claim_idempotency(', 'ops.j102_settle_idempotency(',
+    'pg_advisory_xact_lock', 'ops.f01_principal()',
+    'j102_stale_subject_digest', 'j102_item_operand_set_mismatch',
+    'j102_actor_injection_refused', 'j102_item_digest_mismatch',
+    -- And the three staleness bindings, which are what stop a reading that went
+    -- stale between the caller's read and this insert being filed as current.
+    'j102_reconciliation_current_version_not_current',
+    'j102_reconciliation_state_evidence_stale',
+    'j102_reconciliation_history_evidence_stale',
+    'j102_reconciliation_without_conflict',
+    'j102_reconciliation_resolves_itself',
+    'j102_reconciliation_subject_not_found'
+  ] loop
+    if position(v_role in v_recon_def) = 0 then
+      raise exception 'S9: the reconciliation writer does not carry %; a conflict could be filed unkeyed, unbound or already stale',
+        v_role;
+    end if;
+  end loop;
+  -- THE REPLAY DOOR MUST KNOW THE OPERATION, or the key could never be claimed at
+  -- all and the writer would be governed in name only.
+  if position('record-lifecycle-reconciliation' in
+       pg_get_functiondef(to_regprocedure('ops.j102_replay_outcome(text,text,text)'))) = 0 then
+    raise exception 'S9: ops.j102_replay_outcome does not admit record-lifecycle-reconciliation, so its idempotency key cannot be claimed';
+  end if;
+  -- AND NO UNIQUE INDEX COLLAPSES DISTINCT PROPOSALS. Two different edit sets
+  -- against the same two versions are two real conflicts; an index over the
+  -- version pair would silently discard the second.
+  if exists (
+    select 1 from pg_index i join pg_class c on c.oid = i.indexrelid
+      join pg_class t on t.oid = i.indrelid
+      join pg_namespace n on n.oid = t.relnamespace
+     where n.nspname = 'ops' and t.relname = 'j102_reconciliation_item' and i.indisunique
+       and c.relname <> 'j102_reconciliation_item_pkey') then
+    raise exception 'S9: a unique index on the reconciliation relation would collapse distinct proposals sharing two version digests';
   end if;
 
   -- === S7: the history is bound as tightly as the state ======================
@@ -3216,6 +3288,286 @@ begin
       end if;
     end;
     raise notice 'U2c PROVED at the citation check: %', v_refusal;
+
+    -- ======================================================================
+    -- === R: Q103's CONFLICT WRITER, against the committed assignment ========
+    --
+    -- Every case here is a DIRECT call on ops.j102_record_reconciliation_item
+    -- holding nothing more than its EXECUTE grant, against a real subject with a
+    -- real history. They exist because the properties that matter — a retry does
+    -- not write twice, a substituted payload refuses, two DIFFERENT proposals
+    -- both land, and a reading that went stale cannot be filed as current — are
+    -- all properties of what happens under the lock at commit time, and an
+    -- application-level readback can establish none of them.
+    -- ======================================================================
+    v_asg_digest := ops.j102_subject('assignment', v_walk_asg_id) ->> 'state_digest';
+    v_base_digest := 'sha256:' || repeat('5c', 32);
+    select e.event_digest into v_newest_event from ops.j102_subject_event e
+     where e.tenant = v_tenant and e.subject_kind = 'assignment'
+       and e.subject_id = v_walk_asg_id
+     order by e.event_seq desc limit 1;
+
+    -- The canonical item: the kernel's own reconciliation shape, plus the subject
+    -- identity the relation requires and the evidence a person resolves it from.
+    v_item := jsonb_build_object(
+      'schema_version', 'doctorcre-v5-j102-lifecycle-reconciliation-item.v1',
+      'tenant', v_tenant,
+      'conflict_kind', 'uncharacterized_concurrent_change',
+      'base_version_digest', v_base_digest,
+      'current_version_digest', v_asg_digest,
+      'incoming_edits', jsonb_build_array(jsonb_build_object(
+        'field', 'assignment_phase', 'value_digest', v_lie,
+        'field_class', 'lifecycle', 'edited_by', v_actor, 'edited_at', v_now)),
+      'concurrent_edits', '[]'::jsonb,
+      'proposed_by', v_actor,
+      'visible', true, 'applied', false, 'resolved_by_machine', false,
+      'subject_kind', 'assignment', 'subject_id', v_walk_asg_id,
+      'concurrent_change_evidence', jsonb_build_object(
+        'characterized', false,
+        'why', 'synthetic fixture conflict',
+        'current_state', ops.j102_subject('assignment', v_walk_asg_id) -> 'state',
+        'current_state_source', 'ops.j102_read.subject',
+        'history_tail', jsonb_build_array(jsonb_build_object(
+          'transition_id', 'open-assignment', 'event_kind', 'assignment_opened',
+          'recorded_by', v_actor, 'recorded_at', v_now,
+          'record_digest', v_newest_event)),
+        'history_tail_source', 'ops.j102_read.subject_events',
+        'history_tail_is_complete', false));
+    v_item_env := jsonb_build_object(
+      'schema_version', v_env_schema, 'record_kind', 'stored_reconciliation_item',
+      'tenant', v_tenant, 'record', v_item, 'record_digest', ops.f01_digest_jsonb(v_item),
+      'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder);
+
+    -- R1. THE CONFLICT LANDS, visible and unresolved.
+    v_result := ops.j102_record_reconciliation_item(
+      v_item_env,
+      jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+      'j102-fixture-key-r1', v_placeholder,
+      jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+        'reason_id', 'concurrent_change_not_characterized'));
+    if (v_result ->> 'outcome') <> 'recorded'
+       or (v_result ->> 'visible') <> 'true'
+       or (v_result ->> 'resolved_by_machine') <> 'false'
+       or (v_result ->> 'current_version_bound_to_committed_row') <> 'true'
+       or (v_result ->> 'state_evidence_bound_to_committed_row') <> 'true'
+       or (v_result ->> 'history_evidence_bound_to_committed_history') <> 'true' then
+      raise exception 'R1: the conflict receipt does not report what it bound: %', v_result;
+    end if;
+    select count(*) into v_count from ops.j102_reconciliation_item
+     where tenant = v_tenant and subject_id = v_walk_asg_id;
+    if v_count <> 1 then
+      raise exception 'R1: the conflict did not land exactly once (% rows)', v_count;
+    end if;
+
+    -- R2. A RETRY REPLAYS. The same key and the same bytes return the stored
+    --     outcome and write nothing — which is the property the read-before-write
+    --     check could never give, because it was not atomic.
+    v_replay := ops.j102_record_reconciliation_item(
+      v_item_env,
+      jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+      'j102-fixture-key-r1', v_placeholder,
+      jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+        'reason_id', 'concurrent_change_not_characterized'));
+    if (v_replay ->> 'item_digest') is distinct from (v_result ->> 'item_digest')
+       or (v_replay ->> 'item_seq') is distinct from (v_result ->> 'item_seq') then
+      raise exception 'R2: the replay did not return the committed outcome: %', v_replay;
+    end if;
+    select count(*) into v_count from ops.j102_reconciliation_item
+     where tenant = v_tenant and subject_id = v_walk_asg_id;
+    if v_count <> 1 then
+      raise exception 'R2: the replay filed a second visible conflict';
+    end if;
+
+    -- R3. THE SAME KEY OVER DIFFERENT BYTES REFUSES rather than substituting one
+    --     conflict for another.
+    begin
+      perform ops.j102_record_reconciliation_item(
+        jsonb_build_object(
+          'schema_version', v_env_schema, 'record_kind', 'stored_reconciliation_item',
+          'tenant', v_tenant, 'record', v_item,
+          'record_digest', ops.f01_digest_jsonb(v_item),
+          'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+        jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+        'j102-fixture-key-r1', v_lie,
+        jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+          'reason_id', 'concurrent_change_not_characterized'));
+      raise exception 'R3: one idempotency key bound two different requests';
+    exception when unique_violation then
+      if sqlerrm !~ 'j102_idempotency_payload_mismatch' then raise; end if;
+    end;
+
+    -- R4. A DISTINCT PROPOSAL LANDS BESIDE IT. Different edits against the SAME
+    --     two versions are a second real conflict, and collapsing them on the
+    --     version pair would discard somebody's proposal silently.
+    v_rec2 := jsonb_set(v_item, '{incoming_edits}', jsonb_build_array(
+      jsonb_build_object('field', 'open_negotiation_count', 'value_digest', v_placeholder,
+        'field_class', 'lifecycle', 'edited_by', v_actor, 'edited_at', v_now)));
+    perform ops.j102_record_reconciliation_item(
+      jsonb_build_object(
+        'schema_version', v_env_schema, 'record_kind', 'stored_reconciliation_item',
+        'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+        'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+      jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+      'j102-fixture-key-r4', v_placeholder,
+      jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+        'reason_id', 'concurrent_change_not_characterized'));
+    select count(*) into v_count from ops.j102_reconciliation_item
+     where tenant = v_tenant and subject_id = v_walk_asg_id
+       and base_version_digest = v_base_digest and current_version_digest = v_asg_digest;
+    if v_count <> 2 then
+      raise exception 'R4: two distinct proposals against one version pair collapsed to % row(s)',
+        v_count;
+    end if;
+
+    -- R5. A STALE OPERAND refuses at the compare-and-swap, like every other
+    --     writer here.
+    begin
+      perform ops.j102_record_reconciliation_item(
+        v_item_env, jsonb_build_object('assignment:' || v_walk_asg_id, v_lie),
+        'j102-fixture-key-r5', v_placeholder,
+        jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+          'reason_id', 'concurrent_change_not_characterized'));
+      raise exception 'R5: a conflict was filed against a version the row does not hold';
+    exception when serialization_failure then
+      if sqlerrm !~ 'j102_stale_subject_digest' then raise; end if;
+    end;
+
+    -- R6. A STALE "CURRENT" VERSION INSIDE THE ITEM. This is the one the earlier
+    --     readback could not catch at all: the operand is right, the row has not
+    --     moved, and the ITEM claims a current version that is not the committed
+    --     one. A person resolving it would be comparing against a version that
+    --     never was current.
+    begin
+      v_rec2 := jsonb_set(v_item, '{current_version_digest}', to_jsonb(v_lie));
+      perform ops.j102_record_reconciliation_item(
+        jsonb_build_object(
+          'schema_version', v_env_schema, 'record_kind', 'stored_reconciliation_item',
+          'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+          'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+        jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+        'j102-fixture-key-r6', v_placeholder,
+        jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+          'reason_id', 'concurrent_change_not_characterized'));
+      raise exception 'R6: an item filed a version as current that the committed row is not at';
+    exception when serialization_failure then
+      if sqlerrm !~ 'j102_reconciliation_current_version_not_current' then raise; end if;
+    end;
+
+    -- R7. A STALE STATE SNAPSHOT. The item names the right version and SHOWS a
+    --     different one, which is the evidence half of the same lie.
+    begin
+      v_rec2 := jsonb_set(v_item, '{concurrent_change_evidence,current_state}',
+        v_assignment_state);
+      perform ops.j102_record_reconciliation_item(
+        jsonb_build_object(
+          'schema_version', v_env_schema, 'record_kind', 'stored_reconciliation_item',
+          'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+          'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+        jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+        'j102-fixture-key-r7', v_placeholder,
+        jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+          'reason_id', 'concurrent_change_not_characterized'));
+      raise exception 'R7: the state an item shows as current did not have to hash to the version it names';
+    exception when serialization_failure then
+      if sqlerrm !~ 'j102_reconciliation_state_evidence_stale' then raise; end if;
+    end;
+
+    -- R8. STALE HISTORY EVIDENCE. The tail no longer ends at the newest committed
+    --     event, so the changes a person is meant to review are not the changes
+    --     that happened.
+    begin
+      v_rec2 := jsonb_set(v_item, '{concurrent_change_evidence,history_tail}',
+        jsonb_build_array(jsonb_build_object(
+          'transition_id', 'open-assignment', 'event_kind', 'assignment_opened',
+          'recorded_by', v_actor, 'recorded_at', v_now, 'record_digest', v_lie)));
+      perform ops.j102_record_reconciliation_item(
+        jsonb_build_object(
+          'schema_version', v_env_schema, 'record_kind', 'stored_reconciliation_item',
+          'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+          'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+        jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+        'j102-fixture-key-r8', v_placeholder,
+        jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+          'reason_id', 'concurrent_change_not_characterized'));
+      raise exception 'R8: an item filed history evidence that is not the committed history';
+    exception when serialization_failure then
+      if sqlerrm !~ 'j102_reconciliation_history_evidence_stale' then raise; end if;
+    end;
+
+    -- R9. NO CONFLICT, NO ITEM. A base equal to the current version is a caller
+    --     nobody overtook, and an item for it is noise where a person looks.
+    begin
+      v_rec2 := jsonb_set(v_item, '{base_version_digest}', to_jsonb(v_asg_digest));
+      perform ops.j102_record_reconciliation_item(
+        jsonb_build_object(
+          'schema_version', v_env_schema, 'record_kind', 'stored_reconciliation_item',
+          'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+          'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+        jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+        'j102-fixture-key-r9', v_placeholder,
+        jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+          'reason_id', 'no_concurrent_movement'));
+      raise exception 'R9: a conflict item was filed for a subject nobody had moved';
+    exception when others then
+      if sqlerrm !~ 'j102_reconciliation_without_conflict' then raise; end if;
+    end;
+
+    -- R10. AND AN ITEM MAY NOT ARRIVE ALREADY RESOLVED, nor attributed to
+    --      somebody else.
+    begin
+      v_rec2 := jsonb_set(v_item, '{resolved_by_machine}', 'true'::jsonb);
+      perform ops.j102_record_reconciliation_item(
+        jsonb_build_object(
+          'schema_version', v_env_schema, 'record_kind', 'stored_reconciliation_item',
+          'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+          'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+        jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+        'j102-fixture-key-r10', v_placeholder,
+        jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+          'reason_id', 'concurrent_change_not_characterized'));
+      raise exception 'R10: a conflict was filed already resolved by a machine';
+    exception when insufficient_privilege then
+      if sqlerrm !~ 'j102_reconciliation_resolves_itself' then raise; end if;
+    end;
+    begin
+      v_rec2 := jsonb_set(v_item, '{proposed_by}', '"somebody-else"'::jsonb);
+      perform ops.j102_record_reconciliation_item(
+        jsonb_build_object(
+          'schema_version', v_env_schema, 'record_kind', 'stored_reconciliation_item',
+          'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+          'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+        jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+        'j102-fixture-key-r11', v_placeholder,
+        jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+          'reason_id', 'concurrent_change_not_characterized'));
+      raise exception 'R10: a conflict was attributed to an actor who did not raise it';
+    exception when insufficient_privilege then
+      if sqlerrm !~ 'j102_actor_injection_refused' then raise; end if;
+    end;
+
+    -- R11. AN EXTRA OPERAND is a row locked, compared and never consulted.
+    begin
+      perform ops.j102_record_reconciliation_item(
+        v_item_env,
+        jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest,
+                           'relationship:' || v_walk_rel_id,
+                             ops.j102_subject('relationship', v_walk_rel_id) ->> 'state_digest'),
+        'j102-fixture-key-r12', v_placeholder,
+        jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+          'reason_id', 'concurrent_change_not_characterized'));
+      raise exception 'R11: a conflict locked a subject it is not about';
+    exception when others then
+      if sqlerrm !~ 'j102_item_operand_set_mismatch' then raise; end if;
+    end;
+
+    -- AND EXACTLY TWO CONFLICTS EXIST: the one R1 filed and the distinct proposal
+    -- R4 filed. Every refusal above left nothing behind.
+    select count(*) into v_count from ops.j102_reconciliation_item where tenant = v_tenant;
+    if v_count <> 2 then
+      raise exception 'R: the reconciliation relation holds % rows and exactly 2 were filed',
+        v_count;
+    end if;
+    raise notice 'R: the conflict writer is GOVERNED -- a retry replayed, a substituted payload refused, two distinct proposals both landed, and a stale operand, a stale current version, a stale state snapshot and stale history evidence were each refused at the write boundary.';
 
     -- AND NOTHING U1 OR U2 ATTEMPTED LANDED. Every one of them was a refusal, so
     -- the walk's own history is exactly what the walk appended.

@@ -33,6 +33,7 @@ import { readFileSync } from "node:fs";
 import { canonicalJson, digest } from "../src/artifact-trust.js";
 import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
 import {
+  V5_J102_AUTHORITY_INJECTION_FRAGMENTS,
   V5_J102_TRANSITION_IDS, V5_J102_DEAL_AXES, V5_J102_EVIDENCE_KINDS,
   V5_J102_EVIDENCE_INTEGRITY, V5_J102_EVIDENCE_LOADER,
   V5_J102_EVENT_SCHEMA_VERSION,
@@ -46,6 +47,7 @@ import {
 import {
   V5_J102_ABSENT_EVIDENCE_READERS,
   V5_J102_AXIS_TRANSITIONS,
+  V5_J102_COMPOSED_READ_KINDS,
   V5_J102_INSTRUMENT_TRANSITIONS,
   V5_J102_DECLARED_DOMAIN_FIELDS,
   V5_J102_DECLARED_SELECTOR_FIELDS,
@@ -59,6 +61,7 @@ import {
   V5_J102_STORED_EVENT_SCHEMA_VERSION,
   V5_J102_STORED_SUBJECT_SCHEMA_VERSION,
   V5_J102_UNWIRED_CAPABILITIES,
+  V5_J102_WIRED_CONCURRENCY_CAPABILITIES,
   V5_J102_WIRED_INITIALIZATION_CAPABILITIES,
   V5J102StoreError,
   createCreLifecycleStore,
@@ -250,14 +253,23 @@ class FakeDb {
         subject_kind, subject_id].join("|");
       return { rows: [{ link: links[key] ?? null }] };
     }
+    // The read door answers PER KIND when a fixture scripts one, so a composed
+    // read that issues two different reads gets two different answers rather than
+    // the same blob twice — which is what makes the ownership assertions below
+    // about the store's composition rather than about the fake.
     if (text.includes("ops.j102_read(")) {
+      const [kind] = params;
+      const byKind = this.script.read_bodies ?? {};
+      if (Object.prototype.hasOwnProperty.call(byKind, kind)) {
+        return { rows: [{ body: { operation: "read-cre-lifecycle", kind, body: byKind[kind] } }] };
+      }
       return { rows: [{ body: this.script.read_body ?? { body: null } }] };
     }
 
     for (const fn of ["j102_apply_transition", "j102_initialize_subject",
       "j102_record_first_party_fact",
       "j102_record_evidence_subject_link", "j102_record_salesforce_reference",
-      "j102_record_correction"]) {
+      "j102_record_correction", "j102_record_reconciliation_item"]) {
       if (text.includes(`ops.${fn}(`)) {
         this.lastWrite = { fn, params };
         if (this.script.writeError) throw this.script.writeError;
@@ -352,6 +364,52 @@ class FakeDb {
       };
     }
     const record = envelope(0).record;
+    if (fn === "j102_record_reconciliation_item") {
+      // The GOVERNED writer's receipt, reconstructed from the parameters the
+      // store actually bound. It now carries an operation, an actor, a committed
+      // instant and the properties it enforced at the write boundary — which is
+      // what lets this path go through resultFromOutcome like every sibling and
+      // report on replay what LANDED rather than what a fresh reading would say.
+      const operands = JSON.parse(params[1]);
+      const diagnostics = JSON.parse(params[4]);
+      const item_digest = envelope(0).record_digest;
+      return {
+        operation: diagnostics.operation,
+        decision: "reconcile",
+        outcome: "recorded",
+        actor_slug,
+        actor_authorization_class:
+          this.script.principal?.authorization_class ?? "verified_partner",
+        subject_kind: record.subject_kind,
+        subject_id: record.subject_id,
+        item_seq: 1,
+        item_digest,
+        conflict_kind: record.conflict_kind,
+        base_version_digest: record.base_version_digest,
+        current_version_digest: record.current_version_digest,
+        expected_state_digests: operands,
+        current_version_bound_to_committed_row: true,
+        state_evidence_bound_to_committed_row: true,
+        history_evidence_bound_to_committed_history: true,
+        conflict_present: true,
+        visible: true,
+        applied: false,
+        resolved_by_machine: false,
+        advances_lifecycle_state: false,
+        distinct_proposals_collapsed: false,
+        committed_at: SERVER_NOW,
+        caller_reported_reason_id: diagnostics.reason_id,
+        caller_reported_reason_id_scope:
+          "kernel_result_diagnostic_asserted_by_the_caller_and_not_recomputed_here",
+        request_digest: params[3],
+        request_digest_scope: "caller_supplied_intent_digest_not_recomputed_here",
+        committed_content_digest: digest({
+          item_digest, item_seq: 1, committed_at: SERVER_NOW }),
+        committed_content_digest_source: "recomputed_from_committed_rows",
+        readback: { item_seq: 1, record },
+        external_effects: false,
+      };
+    }
     if (fn === "j102_record_first_party_fact") {
       return { operation: "record-lifecycle-fact", decision: "allow",
         reason_id: "first_party_record_appended", actor_slug,
@@ -445,8 +503,9 @@ test("an envelope hashes to its own claim, and the canonical bytes are reproduci
   assert.equal(v5J102EnvelopeCanonicalBytes(envelope), canonicalJson(envelope));
   assert.throws(() => v5J102StoreEnvelope("stored_invented_kind", record),
     e => e instanceof V5J102StoreError && e.code === "unknown_record_kind");
-  assert.equal(V5_J102_STORE_RECORD_KINDS.length, 6);
+  assert.equal(V5_J102_STORE_RECORD_KINDS.length, 7);
   assert.ok(V5_J102_STORE_RECORD_KINDS.includes("stored_evidence_subject_link"));
+  assert.ok(V5_J102_STORE_RECORD_KINDS.includes("stored_reconciliation_item"));
 });
 
 // --- derived-field and authority guards ------------------------------------
@@ -1731,15 +1790,31 @@ test("the association producer checks BOTH ends and is partner-only", async () =
   e => e instanceof V5J102StoreError && e.code === "authority_only_operation_refused");
 });
 
-test("H1/H3: the capabilities this store does not wire are named, and the two that remain are the TWO that remain", async () => {
+test("H1/H3: what remains unwired is two FACTS, not two callers, and each names its remedy", async () => {
   const named = V5_J102_UNWIRED_CAPABILITIES.map(c => c.capability).sort();
-  // THE LIST SHRANK BECAUSE THREE OF THEM WERE BUILT, and this case pins exactly
-  // which two are left. Q103's visible reconciliation and its ownership/freshness
-  // projection are still evaluated by the kernel and called by nothing here.
+  // THE LIST CHANGED SHAPE BECAUSE THE CALLERS WERE BUILT. Q103's reconciliation
+  // caller and its ownership read both exist now; what is left is two facts no
+  // relation in this record layer holds, so no caller of any shape could report
+  // them honestly. Each entry must name the exact minimal change.
   assert.deepEqual(named, [
-    "ownership_and_freshness_exposure",
-    "reconciliation_runtime_integration",
+    "active_automation_registry",
+    "subject_ownership_authority",
   ].sort());
+  for (const entry of V5_J102_UNWIRED_CAPABILITIES) {
+    assert.ok(entry.exact_minimal_change.length > 0,
+      `${entry.capability} names the change that would produce it`);
+  }
+  // AND THE TWO THAT LANDED ARE RECORDED WITH THEIR RESIDUALS, including the one
+  // claim this module must not make: neither is registered at runtime.
+  assert.deepEqual(
+    V5_J102_WIRED_CONCURRENCY_CAPABILITIES.map(c => c.capability).sort(),
+    ["ownership_and_freshness_exposure", "reconciliation_runtime_integration"]);
+  for (const entry of V5_J102_WIRED_CONCURRENCY_CAPABILITIES) {
+    assert.equal(entry.registered_at_runtime, false,
+      "wired at source is not registered at runtime, and the registry says only the first");
+    assert.ok(entry.residual.length > 0, `${entry.capability} states what it still does not do`);
+    assert.ok(V5_J102_OPERATIONS.includes(entry.operation));
+  }
   // AND NOTHING QUIETLY DROPPED OFF THE LIST. The three initialization entries
   // and the bootstrap entry are gone because operations exist for them, so the
   // wired registry must account for each subject kind they used to name.
@@ -1787,13 +1862,16 @@ test("H1/H3: the capabilities this store does not wire are named, and the two th
     assert.equal(db.callsTo("j102_apply_transition").length, 0);
   }
 
-  // No operation in the registered surface writes a reconciliation item or
-  // returns an ownership projection, and the read kinds do not offer one.
+  // THE KERNEL IS STILL NOT RE-EXPORTED. The store CALLS evaluateConcurrentEdit
+  // and projectOwnershipAndFreshness; it does not hand a caller a pure evaluator
+  // to drive with facts of its own, which would be the caller-invented ownership
+  // this whole read exists to refuse.
   const store = createCreLifecycleStore({ db: new FakeDb() });
   assert.equal(typeof store.evaluateConcurrentEdit, "undefined");
   assert.equal(typeof store.projectOwnershipAndFreshness, "undefined");
-  assert.equal(V5_J102_READ_KINDS.includes("ownership"), false);
-  assert.equal(V5_J102_READ_KINDS.includes("automation"), false);
+  assert.equal(typeof store.recordLifecycleReconciliation, "function");
+  assert.ok(V5_J102_READ_KINDS.includes("ownership_and_freshness"));
+  assert.deepEqual([...V5_J102_COMPOSED_READ_KINDS], ["ownership_and_freshness"]);
 });
 
 test("the open owner questions are recorded as OPEN, and the rail still behaves as if unanswered", () => {
@@ -1907,6 +1985,503 @@ test("a correction binds the prior state digest and refuses without a durable co
   assert.equal(answer2.reason_id, "correction_record_not_found");
   assert.equal(answer2.missing_fact, "first_party_lifecycle_correction_record");
   assert.equal(withoutRecord.callsTo("j102_record_correction").length, 0);
+});
+
+// --- Q103: ownership, freshness and visible reconciliation ------------------
+//
+// THESE RUN THE REAL STORE PATH INTO THE REAL KERNEL. Nothing below hands the
+// kernel a fact a caller made up: the state digest, the freshness pair and the
+// current version all come out of scripted READBACKS, and the assertions are
+// about what the store composed from them.
+
+/** One verified event readback, as ops.j102_read('subject_events') returns it. */
+const storedEvent = (over = {}) => {
+  const record = {
+    schema_version: V5_J102_STORED_EVENT_SCHEMA_VERSION,
+    tenant: ORGANIZATION_TENANT_ID,
+    event: { schema_version: V5_J102_EVENT_SCHEMA_VERSION, event_kind: "assignment_opened",
+      subject_kind: "assignment", subject_id: "asg-synthetic-1" },
+    transition_id: "open-assignment",
+    evidence_references: [{ evidence_kind: "search_initiation",
+      source: "first_party_record", reference: "rec-synthetic-1" }],
+    recorded_by: "joe", recorded_at: T.late, ...over,
+  };
+  return { record, record_digest: digest(record), integrity: "recomputed_from_committed_row" };
+};
+
+/** The shape ops.j102_read('subject') returns: the verified row plus provenance. */
+const subjectReadback = (state, over = {}) => ({
+  subject_kind: state.subject_kind, subject_id: state.subject_id,
+  state, state_digest: digest(state),
+  established_by_transition: "open-assignment",
+  updated_by: "joe", updated_at: T.late,
+  integrity: "recomputed_from_committed_row", ...over,
+});
+
+const ownershipDb = (extra = {}) => new FakeDb({
+  read_bodies: {
+    subject: subjectReadback(assignmentState()),
+    subject_events: [storedEvent()],
+  },
+  ...extra,
+});
+
+const ownershipRead = { selector: { kind: "ownership_and_freshness",
+  subject_kind: "assignment", subject_id: "asg-synthetic-1" } };
+
+test("Q103: the ownership read projects freshness from the HISTORY and names what it cannot know", async () => {
+  const db = ownershipDb();
+  const answer = await createCreLifecycleStore({ db }).readCreLifecycle(ownershipRead, ctx(JOE));
+  assert.equal(answer.decision, "allow");
+  assert.equal(answer.reason_id, "ownership_and_freshness_projected_from_committed_rows");
+
+  // IT IS COMPOSED FROM TWO EXISTING SQL READS, and never asks the database for a
+  // read kind it does not have — which is why this landed without a SQL change.
+  assert.deepEqual(db.sequence, ["BEGIN", "f01_principal", "j102_read", "j102_read", "COMMIT"]);
+  assert.deepEqual(db.callsTo("j102_read").map(c => c.params[0]), ["subject", "subject_events"]);
+
+  const projection = answer.readback;
+  // FRESHNESS IS DERIVED, and from the append-only history rather than the row.
+  assert.equal(projection.last_material_change_at, T.late);
+  assert.equal(projection.last_material_change_by, "joe");
+  assert.equal(projection.freshness_known, true);
+  assert.equal(projection.freshness_age_seconds,
+    Math.floor((Date.parse(SERVER_NOW) - Date.parse(T.late)) / 1000));
+  // THE DIGEST IS THE STORED ONE, recomputed here from the state the database
+  // returned rather than echoed from a caller.
+  assert.equal(projection.state_digest, digest(assignmentState()));
+  // AND THE TWO FACTS NOBODY HOLDS ARE UNKNOWN, not empty. "Nothing is running"
+  // and "nobody asked" are different answers and the kernel makes the difference.
+  assert.equal(projection.owner_slug, null);
+  assert.equal(projection.owner_known, false);
+  assert.equal(projection.active_automation, null);
+  assert.equal(projection.active_automation_known, false);
+  assert.deepEqual(projection.inferred_fields, []);
+  // The read says WHERE each field came from, and names both missing facts from
+  // the registry rather than restating them.
+  assert.equal(answer.derived_from.state_digest, "ops.j102_read.subject");
+  assert.equal(answer.derived_from.last_material_change, "ops.j102_read.subject_events");
+  assert.equal(answer.derived_from.owner_slug, "not_produced_by_this_record_layer");
+  assert.equal(answer.derived_from.active_automation, "not_produced_by_this_record_layer");
+  assert.equal(answer.missing_facts.length, V5_J102_UNWIRED_CAPABILITIES.length);
+  for (const missing of answer.missing_facts) {
+    assert.ok(missing.exact_minimal_change.length > 0);
+    assert.equal(missing.produced_by, "not_produced_by_this_slice");
+  }
+});
+
+test("Q103: a subject with NO history reports freshness unknown rather than falling back to the row", async () => {
+  const db = ownershipDb({ read_bodies: {
+    subject: subjectReadback(assignmentState()),
+    subject_events: [],
+  } });
+  const answer = await createCreLifecycleStore({ db }).readCreLifecycle(ownershipRead, ctx(JOE));
+  assert.equal(answer.decision, "allow");
+  // The row's own updated_at is RIGHT THERE and is deliberately not used: the
+  // question is when the subject last materially changed, and only the history
+  // answers that.
+  assert.equal(answer.readback.last_material_change_at, null);
+  assert.equal(answer.readback.last_material_change_by, null);
+  assert.equal(answer.readback.freshness_known, false);
+  assert.equal(answer.readback.freshness_age_seconds, null);
+  assert.equal(answer.current_state_agrees_with_history, false);
+  assert.equal(answer.derived_from.last_material_change,
+    "no history rows exist for this subject");
+});
+
+test("Q103: a history row that disagrees with the current row refuses rather than picking one", async () => {
+  // Every writer in this rail stamps the subject and its event from ONE instant
+  // in ONE transaction, so a disagreement is a record layer that cannot say when
+  // it last changed — and answering anyway is the confident wrong answer.
+  for (const [drift, label] of [
+    [{ recorded_by: "dell" }, "a different actor"],
+    [{ recorded_at: T.mid }, "a different instant"],
+  ]) {
+    const db = ownershipDb({ read_bodies: {
+      subject: subjectReadback(assignmentState()),
+      subject_events: [storedEvent(drift)],
+    } });
+    const answer = await createCreLifecycleStore({ db }).readCreLifecycle(ownershipRead, ctx(JOE));
+    assert.equal(answer.decision, "refuse", label);
+    assert.equal(answer.reason_id, "subject_history_disagrees_with_current_state");
+    assert.equal(answer.readback, null);
+  }
+});
+
+test("Q103: the ownership read refuses a missing subject, a corrupt row and an unverified readback", async () => {
+  const missing = new FakeDb({ read_bodies: { subject: null, subject_events: [] } });
+  const gone = await createCreLifecycleStore({ db: missing })
+    .readCreLifecycle(ownershipRead, ctx(JOE));
+  assert.equal(gone.reason_id, "subject_not_found");
+  assert.equal(gone.readback, null);
+  // A row whose stored digest no longer describes its own bytes is refused, not
+  // repaired and not reported as an ownership fact.
+  const corrupt = new FakeDb({ read_bodies: {
+    subject: subjectReadback(assignmentState(), { state_digest: D(9) }),
+    subject_events: [storedEvent()],
+  } });
+  await assert.rejects(
+    () => createCreLifecycleStore({ db: corrupt }).readCreLifecycle(ownershipRead, ctx(JOE)),
+    e => e instanceof V5J102StoreError && e.code === "corrupt_stored_subject");
+  // And a readback that does not claim to have been recomputed inside PostgreSQL
+  // is not evidence of anything.
+  const trusted = new FakeDb({ read_bodies: {
+    subject: subjectReadback(assignmentState(), { integrity: "trusted" }),
+    subject_events: [storedEvent()],
+  } });
+  await assert.rejects(
+    () => createCreLifecycleStore({ db: trusted }).readCreLifecycle(ownershipRead, ctx(JOE)),
+    e => e instanceof V5J102StoreError && e.code === "readback_not_recomputed");
+});
+
+test("Q103: ownership, freshness and automation cannot be supplied by the caller", async () => {
+  const db = ownershipDb();
+  const store = createCreLifecycleStore({ db });
+  // The selector is closed, so there is nowhere to put them; and at the payload
+  // level each is refused BY NAME.
+  //
+  // WHICH GUARD FIRES IS PART OF THE ASSERTION, and `owner_slug` is the one that
+  // proves the point. It sits in the AUTHORITY-injection fragment list — the list
+  // this slice imports from F01 rather than copying — so it is refused one guard
+  // earlier than the rest, as an authority claim rather than as a derived value.
+  // That is the stronger refusal and the earlier one, and an assertion that
+  // demanded `caller_derived_field_refused` here would have been asking for the
+  // guard to be weakened to satisfy it.
+  for (const [field, code] of [
+    ["owner_slug", "caller_authority_field_refused"],
+    ["last_material_change_at", "caller_derived_field_refused"],
+    ["last_material_change_by", "caller_derived_field_refused"],
+    ["active_automation", "caller_derived_field_refused"],
+    ["state_digest", "caller_derived_field_refused"],
+  ]) {
+    await assert.rejects(
+      () => store.readCreLifecycle({ ...ownershipRead, [field]: "x" }, ctx(JOE)),
+      e => e instanceof V5J102StoreError && e.code === code,
+      `${field} must be refused on the ownership read as ${code}`);
+  }
+  assert.ok(V5_J102_AUTHORITY_INJECTION_FRAGMENTS.includes("owner_slug"),
+    "and it is refused as authority because F01's own fragment list names it");
+  await assert.rejects(() => store.readCreLifecycle({
+    selector: { ...ownershipRead.selector, owner_slug: "joe" },
+  }, ctx(JOE)), e => e instanceof V5J102StoreError &&
+    e.code === "caller_authority_field_refused");
+  // The subject is not optional for this kind: an ownership projection with no
+  // subject is a question about nothing.
+  await assert.rejects(() => store.readCreLifecycle({
+    selector: { kind: "ownership_and_freshness" },
+  }, ctx(JOE)), e => e instanceof V5J102StoreError && e.code === "missing_field");
+  assert.equal(db.callsTo("j102_record_reconciliation_item").length, 0);
+});
+
+// --- Q103: the reconciliation writer ---------------------------------------
+
+const reconcileDb = (extra = {}) => new FakeDb({
+  read_bodies: {
+    subject: subjectReadback(assignmentState()),
+    subject_events: [storedEvent()],
+    reconciliation_items: [],
+  },
+  ...extra,
+});
+
+const reconcilePayload = (over = {}) => ({
+  idempotency_key: "j102-fixture-reconcile-1",
+  subject_ref: { subject_kind: "assignment", subject_id: "asg-synthetic-1",
+    expected_state_digest: D(7) },
+  edits: [{ field: "assignment_phase", value_digest: D(3) }],
+  ...over,
+});
+
+test("Q103: an UNMOVED subject reconciles nothing, writes nothing, and merges nothing", async () => {
+  const db = reconcileDb();
+  const answer = await createCreLifecycleStore({ db }).recordLifecycleReconciliation(
+    reconcilePayload({
+      subject_ref: { subject_kind: "assignment", subject_id: "asg-synthetic-1",
+        // The version the caller decided against IS the one the database holds.
+        expected_state_digest: digest(assignmentState()) },
+    }), ctx(JOE));
+  assert.equal(answer.decision, "allow");
+  assert.equal(answer.reason_id, "no_concurrent_movement");
+  assert.equal(answer.subject_moved, false);
+  assert.equal(answer.records_written, 0);
+  assert.equal(answer.reconciliation_item, null);
+  assert.equal(answer.merged, false);
+  assert.equal(answer.last_writer_wins, false);
+  assert.equal(db.callsTo("j102_record_reconciliation_item").length, 0);
+});
+
+test("Q103: a MOVED subject writes ONE visible item carrying both versions and the history between", async () => {
+  const db = reconcileDb();
+  const answer = await createCreLifecycleStore({ db }).recordLifecycleReconciliation(
+    reconcilePayload({
+      edits: [
+        { field: "assignment_phase", value_digest: D(3) },
+        { field: "client_phone_number", value_digest: D(4) },
+      ],
+    }), ctx(JOE));
+  assert.equal(answer.decision, "reconcile");
+  assert.equal(answer.reason_id, "concurrent_change_not_characterized");
+  assert.equal(answer.subject_moved, true);
+  assert.equal(answer.merged, false);
+  assert.equal(answer.records_written, 1);
+  assert.equal(answer.resolved_by_machine, false);
+  assert.equal(answer.advances_lifecycle_state, false);
+  assert.equal(answer.item_seq, 1);
+  // THE FIELD CLASS IS THE KERNEL'S, from its own registry. `assignment_phase` is
+  // lifecycle and classified; `client_phone_number` is a customer-facing field
+  // this module does not classify, and it is reported as unclassified rather than
+  // guessed routine — which is the difference between reconciling and merging.
+  // AND IT IS DERIVED FROM THE STORED ITEM, not from a fresh reading: the class
+  // was hashed into the record when the kernel judged it, so a replay of this
+  // call reports the same split.
+  assert.deepEqual(answer.unclassified_fields, ["client_phone_number"]);
+  assert.deepEqual(answer.material_incoming_fields, ["assignment_phase"]);
+  assert.deepEqual(answer.incoming_fields, ["assignment_phase", "client_phone_number"]);
+
+  const envelope = JSON.parse(db.paramsFor("j102_record_reconciliation_item")[0]);
+  assert.equal(envelope.record_kind, "stored_reconciliation_item");
+  const item = envelope.record;
+  // THE IDENTITY THE RELATION REQUIRES AND THE KERNEL DOES NOT CARRY.
+  assert.equal(item.subject_kind, "assignment");
+  assert.equal(item.subject_id, "asg-synthetic-1");
+  // THE TWO VERSIONS, the caller's from its own pin and the current from the row.
+  assert.equal(item.base_version_digest, D(7));
+  assert.equal(item.current_version_digest, digest(assignmentState()));
+  // THE INCOMING EDITS, STAMPED. The caller said which field and what the value
+  // hashes to; who and when are the derived actor and the server clock.
+  assert.deepEqual(item.incoming_edits.map(e => e.field),
+    ["assignment_phase", "client_phone_number"]);
+  for (const edit of item.incoming_edits) {
+    assert.equal(edit.edited_by, "joe");
+    assert.equal(edit.edited_at, SERVER_NOW);
+  }
+  assert.equal(item.incoming_edits[0].field_class, "lifecycle",
+    "and the class is derived by the kernel, not supplied");
+  // THE OTHER SIDE, as far as this layer can honestly show it: not an invented
+  // edit list, but the committed state and the history that produced it.
+  assert.deepEqual(item.concurrent_edits, []);
+  assert.equal(item.concurrent_change_evidence.characterized, false);
+  assert.deepEqual(item.concurrent_change_evidence.current_state, assignmentState());
+  assert.equal(item.concurrent_change_evidence.current_state_source, "ops.j102_read.subject");
+  assert.equal(item.concurrent_change_evidence.history_tail.length, 1);
+  assert.equal(item.concurrent_change_evidence.history_tail[0].transition_id, "open-assignment");
+  assert.equal(item.concurrent_change_evidence.history_tail_is_complete, false);
+  assert.ok(item.concurrent_change_evidence.why.includes("prior_state_digest"),
+    "and it names the exact reader gap that stops it being characterized");
+  // THE THREE PROPERTIES A REVIEWER NEEDS, which the relation also CHECK-binds.
+  assert.equal(item.visible, true);
+  assert.equal(item.applied, false);
+  assert.equal(item.resolved_by_machine, false);
+  assert.equal(item.proposed_by, "joe");
+  assert.equal(envelope.record_digest, digest(item));
+  // THE OPERAND IS BOUND AND SENT, so the writer can re-read the subject under
+  // its own lock and refuse a row that moved between this read and that write.
+  const operands = JSON.parse(db.paramsFor("j102_record_reconciliation_item")[1]);
+  assert.deepEqual(operands,
+    { "assignment:asg-synthetic-1": digest(assignmentState()) });
+  assert.equal(answer.current_version_bound_to_committed_row, true);
+  assert.equal(answer.state_evidence_bound_to_committed_row, true);
+  assert.equal(answer.history_evidence_bound_to_committed_history, true);
+  // AND THE PATH IS GOVERNED LIKE EVERY SIBLING: the key is claimed before any
+  // state is read, and the receipt distinguishes the caller's intent digest from
+  // what the database recomputed.
+  assert.deepEqual(db.sequence, ["BEGIN", "f01_principal", "j102_replay_outcome",
+    "j102_read", "j102_read", "j102_record_reconciliation_item", "COMMIT"]);
+  assert.equal(answer.request_digest_scope,
+    "caller_supplied_intent_digest_not_recomputed_here");
+  assert.equal(answer.committed_content_digest_source, "recomputed_from_committed_rows");
+  assert.equal(answer.caller_reported_reason_id, "concurrent_change_not_characterized");
+  assert.equal(answer.concurrent_change_characterized, false);
+  assert.equal(answer.distinct_proposals_collapsed, false);
+});
+
+test("Q103: the CURRENT version comes from the stored row, and the edit's author cannot be supplied", async () => {
+  const db = reconcileDb();
+  const store = createCreLifecycleStore({ db });
+  for (const field of ["current_version_digest", "base_version_digest", "conflict_kind",
+    "incoming_edits", "concurrent_edits", "proposed_by", "resolved_by_machine"]) {
+    await assert.rejects(
+      () => store.recordLifecycleReconciliation(reconcilePayload({ [field]: "x" }), ctx(JOE)),
+      e => e instanceof V5J102StoreError && e.code === "caller_derived_field_refused",
+      `${field} must be refused as a derived field`);
+  }
+  // And inside an edit: who made it, when, and — the one the kernel removed —
+  // what class it is.
+  for (const field of ["edited_by", "edited_at", "field_class"]) {
+    await assert.rejects(() => store.recordLifecycleReconciliation(reconcilePayload({
+      edits: [{ field: "assignment_phase", value_digest: D(3), [field]: "x" }],
+    }), ctx(JOE)), e => e instanceof V5J102StoreError && e.code === "caller_derived_field_refused",
+    `${field} must be refused inside an edit`);
+  }
+  assert.equal(db.calls.length, 0, "and no closed-schema refusal reaches the database");
+});
+
+test("Q103: the base version is required, and a subject that does not exist refuses", async () => {
+  const db = reconcileDb();
+  const store = createCreLifecycleStore({ db });
+  // A concurrent-edit question with no version to have decided against is not a
+  // question; defaulting it to the stored digest would answer "no conflict" to
+  // every caller that forgot to say.
+  await assert.rejects(() => store.recordLifecycleReconciliation(reconcilePayload({
+    subject_ref: { subject_kind: "assignment", subject_id: "asg-synthetic-1" },
+  }), ctx(JOE)), e => e instanceof V5J102StoreError && e.code === "missing_field");
+  await assert.rejects(() => store.recordLifecycleReconciliation(reconcilePayload({ edits: [] }),
+    ctx(JOE)), e => e instanceof V5J102StoreError && e.code === "invalid_shape");
+
+  const empty = new FakeDb({ read_bodies: { subject: null } });
+  const answer = await createCreLifecycleStore({ db: empty })
+    .recordLifecycleReconciliation(reconcilePayload(), ctx(JOE));
+  assert.equal(answer.reason_id, "subject_not_found");
+  assert.equal(answer.records_written, 0);
+  assert.equal(empty.callsTo("j102_record_reconciliation_item").length, 0);
+});
+
+test("Q103: a RETRY replays what landed, and reads no state to decide it", async () => {
+  // The stored outcome the writer settled under this key. A replay must report
+  // the conflict that WAS filed — including the versions it was filed about —
+  // even though the subject has moved on since.
+  const settled = {
+    operation: "record-lifecycle-reconciliation", decision: "reconcile",
+    outcome: "recorded", actor_slug: "joe",
+    subject_kind: "assignment", subject_id: "asg-synthetic-1",
+    item_seq: 4, item_digest: D(5),
+    conflict_kind: "uncharacterized_concurrent_change",
+    base_version_digest: D(7), current_version_digest: D(6),
+    conflict_present: true, visible: true, applied: false, resolved_by_machine: false,
+    current_version_bound_to_committed_row: true,
+    state_evidence_bound_to_committed_row: true,
+    history_evidence_bound_to_committed_history: true,
+    caller_reported_reason_id: "concurrent_change_not_characterized",
+    committed_at: T.late,
+    readback: { item_seq: 4, record: { incoming_edits: [
+      { field: "assignment_phase", value_digest: D(3), field_class: "lifecycle",
+        edited_by: "joe", edited_at: T.late }] } },
+  };
+  const db = reconcileDb({ replay_outcome: settled });
+  const answer = await createCreLifecycleStore({ db })
+    .recordLifecycleReconciliation(reconcilePayload(), ctx(JOE));
+  assert.equal(answer.decision, "reconcile");
+  assert.equal(answer.reason_id, "concurrent_change_not_characterized");
+  assert.equal(answer.item_seq, 4);
+  assert.equal(answer.item_digest, D(5));
+  // The versions are the ones that were FILED, not the ones a fresh reading of
+  // the subject would produce now.
+  assert.equal(answer.current_version_digest, D(6));
+  assert.deepEqual(answer.material_incoming_fields, ["assignment_phase"]);
+  // A REPLAY READS NO STATE AND WRITES NOTHING.
+  assert.deepEqual(db.sequence, ["BEGIN", "f01_principal", "j102_replay_outcome", "COMMIT"]);
+  assert.equal(db.callsTo("j102_record_reconciliation_item").length, 0);
+  assert.equal(db.callsTo("j102_read").length, 0);
+});
+
+test("Q103: a stored outcome attributed to another actor is not replayed to this one", async () => {
+  const db = reconcileDb({ replay_outcome: {
+    operation: "record-lifecycle-reconciliation", decision: "reconcile",
+    actor_slug: "dell", caller_reported_reason_id: "concurrent_change_not_characterized",
+  } });
+  await assert.rejects(
+    () => createCreLifecycleStore({ db }).recordLifecycleReconciliation(
+      reconcilePayload(), ctx(JOE)),
+    e => e instanceof V5J102StoreError && e.code === "invalid_stored_outcome");
+});
+
+test("Q103: the same key over DIFFERENT bytes refuses, and the store does not swallow it", async () => {
+  // The refusal itself is the database's: ops.j102_claim_idempotency raises
+  // j102_idempotency_payload_mismatch inside the writer, which is where it can be
+  // atomic. What this proves is that the store propagates it rather than turning
+  // a substituted conflict into a success — the SQL fixture drives the raise.
+  const db = reconcileDb({
+    writeError: Object.assign(new Error(
+      "j102_idempotency_payload_mismatch: key j102-fixture-reconcile-1 already binds a different payload"),
+    { code: "23505" }),
+  });
+  await assert.rejects(
+    () => createCreLifecycleStore({ db }).recordLifecycleReconciliation(
+      reconcilePayload({ edits: [{ field: "payment_state", value_digest: D(4) }] }), ctx(JOE)),
+    error => /j102_idempotency_payload_mismatch/.test(error.message));
+  assert.equal(db.rolledBack, 1);
+  assert.equal(db.committed, 0);
+});
+
+test("Q103: DISTINCT proposals against the same two versions both land, and are not collapsed", async () => {
+  // Two callers — or one caller twice — proposing DIFFERENT edits against the
+  // same base and the same current have raised TWO real conflicts. The earlier
+  // read-before-write check collapsed them on the version pair, which is the
+  // wrong answer and was not atomic either; idempotency is keyed on the REQUEST,
+  // which covers the edits, so both are visible.
+  const db = reconcileDb();
+  const store = createCreLifecycleStore({ db });
+  const first = await store.recordLifecycleReconciliation(reconcilePayload({
+    idempotency_key: "j102-fixture-reconcile-a",
+    edits: [{ field: "assignment_phase", value_digest: D(3) }],
+  }), ctx(JOE));
+  const second = await store.recordLifecycleReconciliation(reconcilePayload({
+    idempotency_key: "j102-fixture-reconcile-b",
+    edits: [{ field: "assignment_phase", value_digest: D(4) }],
+  }), ctx(JOE));
+
+  assert.equal(first.records_written, 1);
+  assert.equal(second.records_written, 1);
+  assert.equal(first.distinct_proposals_collapsed, false);
+  assert.equal(second.distinct_proposals_collapsed, false);
+  const writes = db.callsTo("j102_record_reconciliation_item");
+  assert.equal(writes.length, 2, "both proposals reached the writer");
+  const [a, b] = writes.map(call => JSON.parse(call.params[0]));
+  assert.notEqual(a.record_digest, b.record_digest,
+    "and they are different items, because the edits differ");
+  assert.equal(a.record.base_version_digest, b.record.base_version_digest);
+  assert.equal(a.record.current_version_digest, b.record.current_version_digest);
+  // NOTHING IS READ TO DECIDE THIS. The store no longer inspects existing items
+  // at all, so there is no read-before-write claim left to be wrong about.
+  assert.equal(db.callsTo("j102_read").filter(c => c.params[0] === "reconciliation_items").length,
+    0, "the store makes no duplicate-suppression readback");
+  // The two idempotency keys are bound to two different request digests.
+  assert.notEqual(writes[0].params[3], writes[1].params[3]);
+});
+
+test("Q103: an unauthenticated or inadmissible actor cannot raise a conflict at all", async () => {
+  const db = reconcileDb();
+  const store = createCreLifecycleStore({ db });
+  await assert.rejects(
+    () => store.recordLifecycleReconciliation(reconcilePayload(), ctx({ slug: "nobody", human: true })),
+    e => e instanceof V5J102StoreError && e.code === "unauthenticated_actor");
+  await assert.rejects(
+    () => store.recordLifecycleReconciliation(reconcilePayload(),
+      ctx({ slug: "codex", human: false, probe: true })),
+    e => e instanceof V5J102StoreError && e.code === "actor_class_not_admitted_for_lifecycle");
+  assert.equal(db.calls.length, 0, "no authority failure reaches the database");
+
+  // A SPONSORED AGENT MAY RAISE ONE. Noticing that two writers disagree is not an
+  // exercise of authority, and the item resolves nothing.
+  const agentDb = reconcileDb({
+    principal: { actor_slug: "codex", human: false, authorization_class: "sponsored_agent" },
+  });
+  const raised = await createCreLifecycleStore({ db: agentDb })
+    .recordLifecycleReconciliation(reconcilePayload(), ctx(AGENT));
+  assert.equal(raised.decision, "reconcile");
+  assert.equal(raised.records_written, 1);
+  assert.equal(
+    JSON.parse(agentDb.paramsFor("j102_record_reconciliation_item")[0]).record.proposed_by,
+    "codex");
+
+  // AND THE DATABASE'S OWN ACTOR MUST BE THE HANDLER'S, on this path too.
+  const mismatched = reconcileDb({
+    principal: { actor_slug: "dell", human: true, authorization_class: "verified_partner" },
+  });
+  await assert.rejects(
+    () => createCreLifecycleStore({ db: mismatched })
+      .recordLifecycleReconciliation(reconcilePayload(), ctx(JOE)),
+    e => e instanceof V5J102StoreError && e.code === "actor_context_mismatch");
+});
+
+test("Q103: a failing reconciliation write rolls back and reports nothing as landed", async () => {
+  const db = reconcileDb({ writeError: new Error("synthetic reconciliation failure") });
+  await assert.rejects(
+    () => createCreLifecycleStore({ db }).recordLifecycleReconciliation(
+      reconcilePayload(), ctx(JOE)),
+    error => error.message === "synthetic reconciliation failure");
+  assert.equal(db.rolledBack, 1);
+  assert.equal(db.committed, 0);
 });
 
 // --- reads -----------------------------------------------------------------
@@ -2639,6 +3214,62 @@ test("ANTI-BYPASS: the creation door is a separate writer and apply_transition s
     "and no transition is inside it, so a transition still cannot cite nothing");
 });
 
+test("Q103: the reconciliation writer is governed, and the ungoverned overload is DROPPED", () => {
+  // THE DROP IS THE ASSERTION THAT MATTERS. `create or replace` with a new
+  // argument list creates an OVERLOAD: the old one-argument writer — no
+  // idempotency key, no compare-and-swap operand, no re-read of the subject —
+  // would still be callable by anything holding its grant, and every property the
+  // replacement adds would be one call away from being skipped.
+  assert.ok(CANDIDATE_SQL.includes(
+    "drop function if exists ops.j102_record_reconciliation_item(jsonb);"),
+  "the ungoverned single-argument writer is dropped, not shadowed");
+  assert.ok(CANDIDATE_SQL.includes(
+    "create or replace function ops.j102_record_reconciliation_item(\n  p_envelope jsonb, p_expected_state_digests jsonb,\n  p_idempotency_key text, p_request_digest text, p_diagnostics jsonb)"),
+  "and the governed form takes the operand map, the key, the request digest and the diagnostics");
+  // No stale signature survives in a grant, a revoke or the shadow assertion —
+  // any one of them would fail at apply time against the dropped function.
+  const stale = CANDIDATE_SQL.split("\n")
+    .filter(line => line.includes("j102_record_reconciliation_item"))
+    .filter(line => /record_reconciliation_item\(jsonb\)/.test(line));
+  assert.deepEqual(stale,
+    ["drop function if exists ops.j102_record_reconciliation_item(jsonb);"],
+    "the one-argument signature appears only in its own drop");
+
+  const start = CANDIDATE_SQL.indexOf(
+    "create or replace function ops.j102_record_reconciliation_item(");
+  const body = CANDIDATE_SQL.slice(start,
+    CANDIDATE_SQL.indexOf("comment on function ops.j102_record_reconciliation_item", start));
+  const executable = executableSql(body);
+  // IT CLAIMS BEFORE IT READS, and settles what it wrote — the same governance
+  // every sibling writer carries.
+  assert.ok(executable.includes("ops.j102_claim_idempotency("));
+  assert.ok(executable.includes("ops.j102_settle_idempotency("));
+  assert.ok(executable.indexOf("ops.j102_claim_idempotency(") <
+    executable.indexOf("ops.j102_subject_current"),
+  "the key is claimed before any state is read");
+  // IT TAKES THE ESTABLISHED TIER-2 LOCK before the compare-and-swap.
+  assert.ok(executable.indexOf("pg_advisory_xact_lock") <
+    executable.indexOf("ops.f01_digest_jsonb(v_stored_state)"),
+  "the subject is locked before its digest is compared");
+  // AND THE THREE STALENESS BINDINGS ARE IN THE CODE, not in a comment.
+  for (const refusal of ["j102_reconciliation_current_version_not_current",
+    "j102_reconciliation_state_evidence_stale",
+    "j102_reconciliation_history_evidence_stale",
+    "j102_reconciliation_without_conflict", "j102_reconciliation_resolves_itself",
+    "j102_item_operand_set_mismatch", "j102_stale_subject_digest"]) {
+    assert.ok(body.includes(refusal), `the writer carries ${refusal}`);
+  }
+  // The replay door admits the operation, or the key could never be claimed.
+  const replay = CANDIDATE_SQL.slice(
+    CANDIDATE_SQL.indexOf("create or replace function ops.j102_replay_outcome("),
+    CANDIDATE_SQL.indexOf("create or replace function ops.j102_claim_idempotency("));
+  assert.ok(replay.includes("'record-lifecycle-reconciliation'"),
+    "the closed write-operation vocabulary admits the reconciliation operation");
+  // AND NO UNIQUE INDEX COLLAPSES DISTINCT PROPOSALS on the version pair.
+  assert.equal(/create\s+unique\s+index[^;]*j102_reconciliation_item/i.test(CANDIDATE_SQL), false,
+    "two different proposals against one version pair are two conflicts, and both stay visible");
+});
+
 test("M-c/M-f: the association pins its version, and a future Salesforce observation refuses", () => {
   assert.ok(CANDIDATE_SQL.includes("j102_link_version_matches_envelope"),
     "M-c: version_no is CHECK-bound to the envelope like every other binding column");
@@ -2735,6 +3366,20 @@ test("the SQL fixture stays UNEXECUTED source, and rolls every synthetic row bac
     "and it appears exactly once, in the note that retires it");
   assert.ok(fixture.includes("=== J4:"),
     "and the negative context cases the walk makes reachable are carried");
+  // Q103's conflict writer, structurally and behaviourally. The behavioural group
+  // needs a committed subject, so it lives inside the walk for the same reason
+  // U1 and U2 do.
+  assert.ok(fixture.includes("=== S9:"),
+    "the fixture asserts the reconciliation writer is governed and the old one is gone");
+  assert.ok(fixture.includes("=== R:"),
+    "and drives it against a committed subject: replay, payload mismatch, distinct proposals, stale operands");
+  for (const refusal of ["j102_idempotency_payload_mismatch", "j102_stale_subject_digest",
+    "j102_reconciliation_current_version_not_current",
+    "j102_reconciliation_state_evidence_stale",
+    "j102_reconciliation_history_evidence_stale",
+    "j102_reconciliation_without_conflict"]) {
+    assert.ok(fixture.includes(refusal), `the conflict group drives ${refusal}`);
+  }
   // THE ONE ARM THAT IS STILL UNREACHABLE HERE IS NAMED, not left to be inferred
   // from the cases that happen to be present.
   assert.ok(fixture.includes("UNPROVEN IN THIS FILE -- j102_required_context_not_met"),
