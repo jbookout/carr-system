@@ -32,6 +32,16 @@
 //     digest checks stay beside the identity checks; neither replaces the other,
 //     and the identity check is process-local only (see the routing module's
 //     header and its `unimplemented_dependencies`).
+//   * AN INVOCATION PROPOSAL OR A VALIDATED RESPONSE THIS MODULE DID NOT PRODUCE
+//     is refused, for exactly the same reason and by the same mechanism. This
+//     file's own preimages are public too, so a hand-built proposal carrying a
+//     correct `proposal_digest` over its own public fields can still describe an
+//     envelope and a prompt that never existed; the two registers below are what
+//     tell it apart from one `buildInvocationProposal` built. WHAT "VALIDATED"
+//     MEANS ON A RESPONSE, exactly: this module checked the response CONTRACT
+//     against an AUTHENTIC proposal in this process. It is not a claim that any
+//     backend produced it — none is reachable from here — and the model's text
+//     remains untrusted content that no check in this file can vouch for.
 //   * A BACKEND MISMATCH is refused: an adapter for one backend may not carry an
 //     invocation routed to another.
 //   * NO ADAPTER MINTS PERMISSIONS. `capability_grants` must be empty and
@@ -89,6 +99,33 @@ const REF = /^[a-z0-9][a-z0-9_.:/-]{0,127}$/;
 const SHA256_REF = /^sha256:[0-9a-f]{64}$/;
 const ISO_INSTANT =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|([+-])(\d{2}):(\d{2}))$/;
+
+// ---------------------------------------------------------------------------
+// Local provenance registers.
+//
+// The same mechanism the routing module uses for envelopes and prompt payloads,
+// applied to the two products this file creates. Membership is by OBJECT
+// IDENTITY of the frozen product, recorded at the moment it is built, so nothing
+// a caller can construct, spread, parse or re-hash is a member.
+//
+// The scope of the claim is identical and no larger: "this object was produced
+// by this module in this process". It is NOT durable, NOT transferable, and NOT
+// a statement about a backend, a wire or a stored row — see
+// `v5ModelRoutingAdapterProjection().unimplemented_dependencies`.
+// ---------------------------------------------------------------------------
+
+const AUTHENTIC_INVOCATION_PROPOSALS = new WeakSet();
+const VALIDATED_MODEL_RESPONSES = new WeakSet();
+
+/** True only for a proposal `buildInvocationProposal` produced in this process. */
+export function isInvocationProposal(value) {
+  return typeof value === "object" && value !== null && AUTHENTIC_INVOCATION_PROPOSALS.has(value);
+}
+
+/** True only for a response `validateBoundResponse` produced in this process. */
+export function isValidatedModelResponse(value) {
+  return typeof value === "object" && value !== null && VALIDATED_MODEL_RESPONSES.has(value);
+}
 
 export class V5AdapterError extends Error {
   constructor(code, message, detail) {
@@ -424,7 +461,7 @@ export function buildInvocationProposal(args) {
     },
     prompt_payload_digest: payload.payload_digest,
   };
-  return deepFreeze({
+  const proposal = deepFreeze({
     ...preimage,
     proposal_digest: digest(preimage),
     dispatch: V5_DISPATCH_SEAM,
@@ -435,6 +472,8 @@ export function buildInvocationProposal(args) {
     product_identity: V5_PUBLIC_PRODUCT_IDENTITY,
     effects: V5_NO_EFFECTS,
   });
+  AUTHENTIC_INVOCATION_PROPOSALS.add(proposal);
+  return proposal;
 }
 
 function assertProposal(proposal, path = "proposal") {
@@ -476,6 +515,19 @@ function assertProposal(proposal, path = "proposal") {
   if (proposal.dispatched !== false || proposal.dispatch_implemented !== false) {
     fail("dispatch_claim_refused",
       `${path} claims a dispatch this slice cannot perform`, { path, seam: V5_DISPATCH_SEAM });
+  }
+  // PROVENANCE LAST, so the checks above still name what is actually wrong with
+  // an edited or over-claiming object. Everything above is tamper-EVIDENCE over
+  // a public preimage: a hand-built proposal naming an envelope and a prompt
+  // that never existed can satisfy every one of them, because `digest` is
+  // exported and every field of the preimage above is public. Only this refuses
+  // it. The check is process-local and claims nothing more; a proposal that
+  // crossed a serialization boundary is refused here rather than re-admitted on
+  // its digest.
+  if (!isInvocationProposal(proposal)) {
+    fail("proposal_not_locally_produced",
+      `${path} was not produced by buildInvocationProposal in this process, so no bound envelope and no validated prompt payload were ever checked behind it; a matching shape and a correct digest are not provenance`,
+      { path, provenance_scope: V5_PROVENANCE_SCOPE });
   }
   return proposal;
 }
@@ -656,7 +708,7 @@ export function validateBoundResponse(args) {
     });
   }
 
-  return deepFreeze({
+  const validated = deepFreeze({
     schema_version: V5_MODEL_RESPONSE_SCHEMA_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
     invocation_id: proposal.invocation_id,
@@ -672,7 +724,9 @@ export function validateBoundResponse(args) {
     finish_reason: response.finish_reason,
     content: response.content,
     typed_proposals: typedProposals.sort((a, b) => (a.proposal_id < b.proposal_id ? -1 : 1)),
-    // The properties a caller is entitled to rely on after this returns.
+    // The properties a caller is entitled to rely on after this returns. The
+    // contract was validated against an authentic proposal; the content itself
+    // is untrusted model output and nothing here says otherwise.
     model_content_is_advisory: true,
     authority_granted: false,
     executed: false,
@@ -680,6 +734,48 @@ export function validateBoundResponse(args) {
     live_backend_verified: false,
     effects: V5_NO_EFFECTS,
   });
+  VALIDATED_MODEL_RESPONSES.add(validated);
+  return validated;
+}
+
+/**
+ * Read one validated response as evidence.
+ *
+ * THE READ A RECEIPT LAYER OWES. `validateBoundResponse` returns a frozen
+ * `model-response.v1`, and that object carries no digest of its own — its
+ * bindings are the proposal's, copied across after the contract check. So a
+ * spread copy or a JSON round trip carrying the genuine `proposal_digest` and
+ * `envelope_binding_digest` is indistinguishable by hashing, and object identity
+ * is the only thing separating it from a response this module actually
+ * validated.
+ *
+ * WHAT PASSING THIS MEANS, EXACTLY: this module validated the response CONTRACT
+ * — invocation, proposal bytes, adapter, envelope binding, context, receipt,
+ * occupant and ordering — against an AUTHENTIC proposal, in this process. It is
+ * not a claim that a backend produced the content, not a claim that the content
+ * is true, and not a claim that survives leaving this process.
+ */
+export function assertValidatedResponse(response, path = "validated_response") {
+  assertObject(response, path);
+  if (response.schema_version !== V5_MODEL_RESPONSE_SCHEMA_VERSION) {
+    fail("response_schema_version_invalid",
+      `${path}.schema_version must be ${V5_MODEL_RESPONSE_SCHEMA_VERSION}`, { path });
+  }
+  // Checked at every read for the same reason the proposal's three are: they
+  // are claims about what happened, and nothing seals them.
+  if (response.executed !== false || response.dispatch_implemented !== false) {
+    fail("dispatch_claim_refused",
+      `${path} claims an execution this slice cannot perform`, { path, seam: V5_DISPATCH_SEAM });
+  }
+  if (response.authority_granted !== false) {
+    fail("adapter_authority_mint_refused", `${path} claims to grant authority`, { path });
+  }
+  if (!isValidatedModelResponse(response)) {
+    fail("validated_response_not_locally_produced",
+      `${path} was not produced by validateBoundResponse in this process, so no proposal was ever checked behind it; the bindings it carries are copied values, not a seal`,
+      { path, provenance_scope: V5_PROVENANCE_SCOPE });
+  }
+  return response;
 }
 
 // ---------------------------------------------------------------------------
@@ -818,16 +914,26 @@ export function v5ModelRoutingAdapterProjection() {
     adapter_can_mint_permissions: false,
     adapter_can_change_product_identity: false,
     live_backend_verified: false,
-    // Scoped honestly: within this process the envelope and the prompt must be
-    // the routing module's own objects. Nothing here can establish that about
+    // Scoped honestly: within this process the envelope, the prompt, the
+    // proposal and the validated response must each be the object the module
+    // that owns them actually produced. Nothing here can establish that about
     // anything that arrived over a wire.
     provenance_scope: V5_PROVENANCE_SCOPE,
     provenance_survives_serialization: false,
+    proposal_provenance_registered: true,
+    validated_response_provenance_registered: true,
+    // What a validated response is, and the three things it is not. Stated as
+    // fields because a downstream receipt layer reads this projection, and the
+    // difference between these lines is the whole weight of the record.
+    validated_response_is_contract_validated_against_an_authentic_proposal: true,
+    validated_response_is_an_authentic_backend_answer: false,
+    model_payload_is_trusted_content: false,
     unimplemented_dependencies: [
       "actual dispatch to any backend: V5-F06/V5-F07 own it and dispatchInvocation always refuses",
       "durable invocation and response record store: the ledger here is process-local, and this slice adds no table or migration",
       "live backend health and provider version evidence: none is observed or claimed anywhere in this slice",
-      "authenticity for an envelope or prompt that crossed a process boundary: the checks here are object-identity checks against the routing module's process-local registers, and a deserialized envelope is refused rather than re-admitted on its digest; a signed capability token from the record layer is what this would need and none exists in this slice",
+      "authenticity for an envelope, prompt, invocation proposal or validated response that crossed a process boundary: every check here is an object-identity check against a process-local register — the routing module's for envelopes and prompts, this module's for proposals and responses — and a deserialized one is refused rather than re-admitted on its digest; a signed capability token from the record layer is what this would need and none exists in this slice",
+      "an authenticated backend answer: a validated response means this module checked the response contract against an authentic proposal, never that a backend produced the content or that the content is true; the model payload stays untrusted and no signature over it exists here",
     ],
     effects: V5_NO_EFFECTS,
   });

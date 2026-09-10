@@ -41,6 +41,9 @@ import {
   buildInvocationProposal,
   dispatchInvocation,
   validateBoundResponse,
+  assertValidatedResponse,
+  isInvocationProposal,
+  isValidatedModelResponse,
   createInvocationLedger,
   assertAdapterContractEquivalence,
   v5ModelRoutingAdapterProjection,
@@ -657,6 +660,150 @@ test("an edited or over-claiming proposal is refused wherever it is read", () =>
   const renamed = clone(proposalOn({ adapter: localAdapter() }));
   renamed.product_identity = "Hermes";
   refuses(() => createInvocationLedger().open(renamed), "product_identity_change_refused");
+});
+
+// ---------------------------------------------------------------------------
+// Provenance: the proposal and the validated response.
+//
+// This module's preimages are public and `digest` is exported, exactly as the
+// routing module's are, so these are the cases that matter: an object that
+// hashes correctly and was not produced here must still be refused.
+// ---------------------------------------------------------------------------
+
+/**
+ * Re-hash a proposal over the exact public preimage `assertProposal` verifies.
+ * If this drifts from the module, the tests below fail with
+ * `proposal_digest_mismatch` instead of the provenance refusal they assert —
+ * which is what keeps them honest about WHICH check is doing the work.
+ */
+function rehashProposal(proposal) {
+  return {
+    ...proposal,
+    proposal_digest: digest({
+      schema_version: proposal.schema_version,
+      tenant: proposal.tenant,
+      invocation_id: proposal.invocation_id,
+      proposed_at: proposal.proposed_at,
+      adapter_id: proposal.adapter_id,
+      adapter_version: proposal.adapter_version,
+      adapter_contract_digest: proposal.adapter_contract_digest,
+      envelope_binding_digest: proposal.envelope_binding_digest,
+      job_id: proposal.job_id,
+      role_digest: proposal.role_digest,
+      context_digest: proposal.context_digest,
+      receipt_binding_ref: proposal.receipt_binding_ref,
+      route: proposal.route,
+      prompt_payload_digest: proposal.prompt_payload_digest,
+    }),
+  };
+}
+
+test("a proposal this module did not build is refused by every consumer that reads one", () => {
+  const adapter = localAdapter();
+  const genuine = proposalOn({ adapter });
+  assert.equal(isInvocationProposal(genuine), true);
+
+  // The genuine object still works through each public consumer.
+  const ledger = createInvocationLedger();
+  assert.equal(ledger.open(genuine).state, "open");
+  assert.ok(ledger.bindResponse({
+    adapter, proposal: genuine, now: OBSERVED_AT, response: responseFor(genuine),
+  }));
+  assert.ok(validateBoundResponse({
+    adapter, proposal: genuine, now: OBSERVED_AT, response: responseFor(genuine),
+  }));
+  assert.ok(assertAdapterContractEquivalence([
+    genuine,
+    proposalOn({
+      adapter: adapterFor("backend:mac-studio-local", "local_node_worker", "adapter:fixture-local-c"),
+      invocation_id: "invocation:fixture-provenance-2",
+    }),
+  ]));
+  refuses(() => dispatchInvocation(genuine), "dispatch_not_implemented");
+
+  // The forged one: another invocation id and a cheaper occupant, re-hashed so
+  // its `proposal_digest` is correct over its own bytes. It describes a bound
+  // envelope and a prompt payload that were never built.
+  const forged = rehashProposal({
+    ...clone(genuine),
+    invocation_id: "invocation:forged",
+    route: { ...genuine.route, model_key: "model:fixture-mid-b" },
+  });
+  assert.equal(isInvocationProposal(forged), false);
+  refuses(() => createInvocationLedger().open(forged), "proposal_not_locally_produced");
+  refuses(() => validateBoundResponse({
+    adapter, proposal: forged, now: OBSERVED_AT, response: responseFor(forged),
+  }), "proposal_not_locally_produced");
+  refuses(() => dispatchInvocation(forged), "proposal_not_locally_produced");
+  refuses(() => assertAdapterContractEquivalence([genuine, forged]), "proposal_not_locally_produced");
+
+  // A plain JSON round trip of a genuine proposal is refused for the same
+  // reason, and that is deliberate: the register is process-local, and nothing
+  // here can re-establish provenance from bytes.
+  refuses(() => createInvocationLedger().open(clone(genuine)), "proposal_not_locally_produced");
+  refuses(() => createInvocationLedger().open({ ...genuine }), "proposal_not_locally_produced");
+});
+
+test("a validated response this module did not produce is refused as evidence", () => {
+  const adapter = localAdapter();
+  const proposal = proposalOn({ adapter });
+  const validated = validateBoundResponse({
+    adapter, proposal, now: OBSERVED_AT, response: responseFor(proposal),
+  });
+  assert.equal(isValidatedModelResponse(validated), true);
+  assert.equal(assertValidatedResponse(validated), validated);
+
+  // Every binding on a validated response is a value COPIED from the proposal,
+  // and the record carries no digest of its own — so a copy is indistinguishable
+  // by hashing and only object identity separates the two.
+  const roundTripped = clone(validated);
+  assert.equal(roundTripped.proposal_digest, proposal.proposal_digest);
+  assert.equal(roundTripped.envelope_binding_digest, proposal.envelope_binding_digest);
+  assert.equal(isValidatedModelResponse(roundTripped), false);
+  refuses(() => assertValidatedResponse(roundTripped), "validated_response_not_locally_produced");
+  refuses(() => assertValidatedResponse({ ...validated }), "validated_response_not_locally_produced");
+  // The genuine bindings, someone else's content.
+  refuses(() => assertValidatedResponse({ ...clone(validated), content: "a finding nobody produced" }),
+    "validated_response_not_locally_produced");
+  // The over-claims are still named first, wherever the object came from.
+  refuses(() => assertValidatedResponse({ ...clone(validated), executed: true }), "dispatch_claim_refused");
+  refuses(() => assertValidatedResponse({ ...clone(validated), authority_granted: true }),
+    "adapter_authority_mint_refused");
+  refuses(() => assertValidatedResponse({ ...clone(validated), schema_version: "model-response.v2" }),
+    "response_schema_version_invalid");
+
+  // The ledger's product carries the same provenance, because it is the same
+  // object `validateBoundResponse` returned.
+  const ledger = createInvocationLedger();
+  const second = proposalOn({ adapter, invocation_id: "invocation:fixture-ledger-provenance" });
+  ledger.open(second);
+  const fromLedger = ledger.bindResponse({
+    adapter, proposal: second, now: OBSERVED_AT, response: responseFor(second),
+  });
+  assert.equal(assertValidatedResponse(fromLedger), fromLedger);
+});
+
+test("the projection says what a validated response is, and the three things it is not", () => {
+  const projection = v5ModelRoutingAdapterProjection();
+  assert.equal(projection.proposal_provenance_registered, true);
+  assert.equal(projection.validated_response_provenance_registered, true);
+  assert.equal(
+    projection.validated_response_is_contract_validated_against_an_authentic_proposal, true);
+  assert.equal(projection.validated_response_is_an_authentic_backend_answer, false);
+  assert.equal(projection.model_payload_is_trusted_content, false);
+  assert.equal(projection.provenance_survives_serialization, false);
+  assert.ok(projection.unimplemented_dependencies.some(entry =>
+    entry.includes("invocation proposal or validated response")));
+  assert.ok(projection.unimplemented_dependencies.some(entry =>
+    entry.includes("an authenticated backend answer")));
+  // The gaps that were already true are still true and still named: no
+  // dispatch, no durable store, no live backend health.
+  assert.equal(projection.dispatch_implemented, false);
+  assert.equal(projection.live_backend_verified, false);
+  assert.ok(projection.unimplemented_dependencies.some(entry =>
+    entry.includes("durable invocation and response record store")));
+  assert.ok(projection.unimplemented_dependencies.some(entry =>
+    entry.includes("live backend health")));
 });
 
 // ---------------------------------------------------------------------------
