@@ -6,6 +6,26 @@ workflow run, attempt and commit. A successful Check is possible only after the
 artifact API readback matches the producer's ID and metadata. The observer is
 read-only: it classifies terminal provider state for a separate caller and
 never sends a notification itself.
+
+``validate-controlled-failure`` and ``controlled-failure`` are the WR54 seam
+that lets one manually dispatched run end in a real, exactly attributed failure
+without touching a credential or a dump — the only honest way to find out
+whether GitHub's failure email actually reaches a human. The first is read-only
+and refuses before anything durable exists; the second repeats every guard at
+the write boundary, flips this run's own in-progress Check to a structured
+backup-failure, and exits ``CONTROLLED_FAILURE_EXIT`` so the workflow itself
+concludes failure.
+
+WHAT THE HELPER CAN AND CANNOT ENFORCE. It can prove runtime provenance: the
+event, both actors, the repository, the ref, that the supplied head equals this
+run's own GITHUB_SHA, that the proof ID is a canonical UUID unused on this
+head, that the run holds zero artifacts, and that exactly one exact-bound
+in-progress Check exists. It CANNOT prove the supplied UUID is the one a human
+approved — there is no durable allowlist here, and adding a generic approval
+oracle was explicitly out of scope. A dispatch by the same GitHub account with
+a different fresh UUID satisfies every check below. Binding a dispatch to an
+approved effect packet is the supervised operator's job, done by reading the
+run's own recorded inputs back afterwards.
 """
 from __future__ import annotations
 
@@ -31,6 +51,24 @@ ARTIFACT_NAME_RE = re.compile(
 )
 CHECKS_PER_PAGE = 100
 MAX_CHECK_PAGES = 5
+
+# ── the WR54 controlled-failure seam ────────────────────────────────────────
+# Every one of these is a literal because the seam is deliberately narrow: it
+# exists for one repository, on one branch, dispatched by one account. A guard
+# that read its own expected value from the environment would be no guard.
+CONTROLLED_FAILURE_EVENT = "workflow_dispatch"
+CONTROLLED_FAILURE_ACTOR = "jbookout"
+CONTROLLED_FAILURE_REPOSITORY = "jbookout/carr-system"
+CONTROLLED_FAILURE_REF = "refs/heads/main"
+CONTROLLED_FAILURE_REASON = "approved WR54 controlled failure before dump"
+# A DOCUMENTED, DISTINCT NONZERO EXIT. 2 already means "refused, nothing
+# written", so reusing it here would make a successful proof indistinguishable
+# from a rejected one in the step log. 9 means the opposite: the Check WAS
+# written and this process failed the run on purpose.
+CONTROLLED_FAILURE_EXIT = 9
+UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
 
 
 class StatusError(RuntimeError):
@@ -374,6 +412,110 @@ def producer_fail(identity: Identity, reason: str) -> int:
     return 0
 
 
+def head_carries_proof(identity: Identity, proof_id: str) -> bool:
+    """Has any Backup artifact Check on this head already carried this proof ID?
+
+    Deliberately wider than "a failure Check": a Check in ANY state carrying the
+    ID blocks reuse, because the question being answered is whether this exact
+    proof has already been spent on this commit, and a half-written Check is
+    still a spent one. ``checks`` fails closed when the provider cannot supply a
+    complete answer, so an exhausted pagination cap refuses rather than
+    reporting a clean head.
+    """
+    for item in checks(identity):
+        if item.get("name") != CHECK_NAME:
+            continue
+        if str(item.get("head_sha", "")).lower() != identity.head_sha:
+            continue
+        summary = summary_of(item)
+        if isinstance(summary, dict) and summary.get("proof_id") == proof_id:
+            return True
+    return False
+
+
+def controlled_failure_guards(identity: Identity, args: argparse.Namespace) -> str:
+    """Every helper-local guard for the controlled-failure seam, in order.
+
+    Raises on the first failure, so a partly-checked request never reaches a
+    write. Both commands call this: the read-only one to refuse before anything
+    durable exists, and the writing one again at the write boundary, because
+    time passes between them and only the second check is the one that counts.
+    """
+    event = required_env("GITHUB_EVENT_NAME")
+    if event != CONTROLLED_FAILURE_EVENT:
+        raise StatusError(
+            f"controlled failure requires {CONTROLLED_FAILURE_EVENT}, not {event}"
+        )
+    actor = required_env("GITHUB_ACTOR")
+    triggering = required_env("GITHUB_TRIGGERING_ACTOR")
+    if actor != CONTROLLED_FAILURE_ACTOR or triggering != CONTROLLED_FAILURE_ACTOR:
+        raise StatusError(
+            "controlled failure requires both the actor and the triggering actor "
+            f"to be {CONTROLLED_FAILURE_ACTOR}"
+        )
+    if identity.repository != CONTROLLED_FAILURE_REPOSITORY:
+        raise StatusError(
+            f"controlled failure is bound to {CONTROLLED_FAILURE_REPOSITORY}"
+        )
+    ref = required_env("GITHUB_REF")
+    if ref != CONTROLLED_FAILURE_REF:
+        raise StatusError(f"controlled failure is bound to {CONTROLLED_FAILURE_REF}")
+    expected_head = str(args.expected_head or "").strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_head):
+        raise StatusError("--expected-head must be a lowercase 40-character commit SHA")
+    if expected_head != identity.head_sha:
+        raise StatusError("--expected-head does not equal this run's GITHUB_SHA")
+    proof_id = str(args.proof_id or "").strip()
+    if not UUID_RE.fullmatch(proof_id):
+        raise StatusError("--proof-id must be a canonical lowercase UUID")
+    if run_artifacts(identity):
+        raise StatusError("controlled failure requires a run with zero artifacts")
+    if head_carries_proof(identity, proof_id):
+        raise StatusError("this proof ID is already carried by a Check on this head")
+    return proof_id
+
+
+def validate_controlled_failure(identity: Identity, args: argparse.Namespace) -> int:
+    """Read-only. Exit 0 only when every helper-local guard passes."""
+    proof_id = controlled_failure_guards(identity, args)
+    print(canonical({
+        "state": "validated",
+        "proof_id": proof_id,
+        "head_sha": identity.head_sha,
+        "run_id": identity.run_id,
+        "run_attempt": identity.run_attempt,
+    }))
+    return 0
+
+
+def controlled_failure(identity: Identity, args: argparse.Namespace) -> int:
+    """Flip this run's own in-progress Check to the approved failure, then fail."""
+    proof_id = controlled_failure_guards(identity, args)
+    current = require_one_check(identity)
+    if current.get("status") != "in_progress":
+        raise StatusError("controlled failure requires this attempt's in-progress Check")
+    if current.get("conclusion") is not None:
+        raise StatusError("refusing to overwrite an already-concluded Check")
+    summary: dict[str, object] = {
+        "signal": "backup-failure",
+        "reason": CONTROLLED_FAILURE_REASON,
+        "proof_id": proof_id,
+    }
+    update_check(
+        identity,
+        positive_int(current.get("id"), "check ID"),
+        check_body(identity, status="completed", conclusion="failure", summary=summary),
+    )
+    require_readback(identity, status="completed", conclusion="failure", summary=summary)
+    print(canonical({
+        "state": "failure",
+        "signal": "backup-failure",
+        "proof_id": proof_id,
+        "reason": CONTROLLED_FAILURE_REASON,
+    }))
+    return CONTROLLED_FAILURE_EXIT
+
+
 def run_artifacts(identity: Identity) -> list[dict[str, Any]]:
     response = api(f"/repos/{identity.repository}/actions/runs/{identity.run_id}/artifacts")
     rows = response.get("artifacts") if isinstance(response, dict) else None
@@ -469,8 +611,16 @@ def run_readback(identity: Identity) -> dict[str, Any]:
     return result
 
 
-def emit(state: str, signal: str | None, detail: str) -> int:
-    print(canonical({"state": state, "signal": signal, "detail": detail}))
+def emit(state: str, signal: str | None, detail: str, proof_id: str | None = None) -> int:
+    # proof_id is always present, null when there is none, so the supervised
+    # incident writer binds the same proof from a structured field instead of
+    # parsing it back out of the human-readable detail line.
+    print(canonical({
+        "state": state,
+        "signal": signal,
+        "detail": detail,
+        "proof_id": proof_id,
+    }))
     return {"disabled": 0, "success": 0, "failure": 1, "unknown": 2}[state]
 
 
@@ -489,7 +639,18 @@ def observer(identity: Identity) -> int:
     summary = summary_of(item)
     if conclusion == "failure":
         if isinstance(summary, dict) and summary.get("signal") == "backup-failure":
-            return emit("failure", "backup-failure", str(summary.get("reason", "backup failed")))
+            raw_proof = summary.get("proof_id")
+            proof_id = (
+                raw_proof
+                if isinstance(raw_proof, str) and UUID_RE.fullmatch(raw_proof)
+                else None
+            )
+            return emit(
+                "failure",
+                "backup-failure",
+                str(summary.get("reason", "backup failed")),
+                proof_id,
+            )
         return emit("unknown", None, "failure Check has no exact backup-failure signal")
     if conclusion == "success":
         if summary_matches_artifact(identity, summary, artifacts):
@@ -517,6 +678,10 @@ def parser() -> argparse.ArgumentParser:
     failed.add_argument("--reason", required=True)
     sub.add_parser("neutral-cancel")
     sub.add_parser("observe")
+    for name in ("validate-controlled-failure", "controlled-failure"):
+        proof = sub.add_parser(name)
+        proof.add_argument("--proof-id", required=True)
+        proof.add_argument("--expected-head", required=True)
     return root
 
 
@@ -534,6 +699,10 @@ def main(argv: list[str] | None = None) -> int:
             return neutral_cancel(identity)
         if args.command == "observe":
             return observer(identity)
+        if args.command == "validate-controlled-failure":
+            return validate_controlled_failure(identity, args)
+        if args.command == "controlled-failure":
+            return controlled_failure(identity, args)
         raise StatusError("unknown command")
     except StatusError as exc:
         print(f"backup-workflow-status: {exc}", file=sys.stderr)

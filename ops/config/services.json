@@ -828,6 +828,24 @@
           "notes": "Wakes every 10 min; cadence declared at 30 min so one missed pass is not an alarm. It is itself wrapped by bin/run-scheduled.sh, because a watcher whose own failure is invisible is the one thing nothing watches. Grace widened 900→2700 on 2026-08-18 for the spool delay (tools/ops-spool.py). It returns EX_CONFIG (78) rather than a failure when NOTHING could be recorded at all — since the spool, that means the local recording path itself is broken (not even the SQLite queue writable), not merely an unreachable database — and a probe that alarmed every 10 minutes on a Mac in that state would be the smoke-suite mistake again."
         }
       ]
+    },
+
+    {
+      "key": "backup-nightly-cloud",
+      "name": "Cloud nightly backup (GitHub Actions)",
+      "purpose": "The GitHub-hosted Nightly backup (cloud) workflow and its exact failure/disabled/artifact evidence contract; registered so supervised observer-qualified failures can be filed under their true service identity rather than nightly-record-layer.",
+      "family": "Cloud operations",
+      "criticality": "high",
+      "owner_actor": "joe",
+      "repo_path": ".github/workflows/backup-nightly.yml",
+      "runtime": "github-actions",
+      "environments": [
+        {
+          "environment": "production",
+          "deploy_mechanism": "GitHub Actions workflow backup-nightly.yml",
+          "notes": "Externally scheduled by GitHub Actions daily at 02:35 UTC. GitHub native failure email reports a failed run; it does not detect a missed or skipped schedule. GitHub runs are not continuously ingested into ops.run, so expected_cadence_seconds is omitted and CARR service-environment health remains unknown. Missed-run freshness is evaluated separately when the Mac-local nightly-record-layer invokes ops/recovery-point.py on its host-local daily 02:05 schedule. recovery-point.py applies RPO_HOURS=24 to the newest qualified artifact; provider/API unreadability remains unknown. nightly-record-layer's cadence_grace_seconds=7200 is service-health grace, not a guaranteed consumer observation or alert-delivery bound. Observation delay depends on host availability and the timestamp of the last qualified artifact. This is consumer observation, not service cadence ingestion."
+        }
+      ]
     }
   ],
 

@@ -265,11 +265,28 @@ inherited_abort() {  # inherited_abort <check-name> <cmd...> -- never returns if
 }
 
 # ---------------------------------------------------------------- unit
+# F03_PARITY_REQUIRE_PYTHON=1, ON THE mcp-server SUITE ONLY. The V5-F03
+# cross-language parity suite (mcp-server/test/f03-design-contract-parity.test.mjs)
+# drives the portable Python validator over the same corpus as the server one,
+# and every one of its cross-language cases SKIPS when no Python 3.9+ interpreter
+# can be found. Unset, that is a skip inside a suite whose runner reports pass, so
+# it never reaches this file's SKIPPED accounting and --strict cannot see it: a
+# runner that lost its interpreter would keep printing a green unit class while
+# the half of the parity claim that compares the two validators stopped running.
+# SKIPPED IS NOT PASSED, per the header. The variable is the suite's own
+# documented escape from that — set, a missing interpreter FAILS instead of
+# skipping, which is correct here because CI has Python by construction.
+# Deliberately scoped to this one command: control-room's and workspace's
+# environment, every other class, and the semantics of every test on a machine
+# that HAS Python are all unchanged.
 check_unit() {
   local failed_pkgs=""
   for pkg in mcp-server control-room workspace; do
     [ -f "$pkg/package.json" ] || continue
-    if ! run_quiet "$LOGDIR/unit-$pkg.log" npm --prefix "$pkg" test; then
+    local unit_env=""
+    [ "$pkg" = "mcp-server" ] && unit_env="F03_PARITY_REQUIRE_PYTHON=1"
+    # shellcheck disable=SC2086  # one deliberate assignment, or nothing at all
+    if ! run_quiet "$LOGDIR/unit-$pkg.log" env $unit_env npm --prefix "$pkg" test; then
       failed_pkgs="$failed_pkgs $pkg"
       echo "--- $pkg ---" >&2
       tail -25 "$LOGDIR/unit-$pkg.log" >&2
@@ -942,25 +959,25 @@ check_pushfloor() {
                "a new mechanism must name the doctrine section explaining it (open loop 504 — knowledge ships with the mechanism)."; }
     fi
 
-    # ...but never when the full gates class is ALREADY going to run in this
-    # invocation. Hosted CI runs every class, so the fallback there would simply
-    # run the 252 suites twice. It is a substitute for the class, not a second
-    # copy of it.
+    # A TOUCHED GATE WITH NO PAIRED SELFTEST IS NAMED, NOT PAID FOR LOCALLY.
+    #
+    # This branch used to run the WHOLE gates class here. That is a class-scale
+    # suite on the push path, and the floor is the only thing between a session
+    # and --no-verify, which disables this hook entirely — so an expensive floor
+    # costs the cheap checks above it too.
+    #
+    # Nothing stopped being checked: `gates` is a REQUIRED status check on main
+    # (ops/ci.sh --strict), so the class still runs hosted on this exact push
+    # before anything merges. Only the payment moved. Name the gate, name the
+    # command for anyone who wants the class now, and name the durable fix.
+    #
+    # Silent when the class is already selected: hosted runs every class, so the
+    # note would only advise running something already running.
     if [ -n "$unclassified" ] && [ -n "$ONLY" ] && ! selected gates; then
-      # THE DELIBERATE EXPENSE. Codex's chair asked for this by name: when the
-      # gate impact cannot be classified, fall back to the full gates class
-      # locally rather than assume it is fine. It costs ~222s and it fires only
-      # on a gate with no paired selftest, which is itself worth fixing.
-      printf '        \033[33mfull gates\033[0m — no paired selftest for:%s — running the whole class rather than guessing\n' \
+      ran="$ran gates-deferred"
+      printf '        \033[33mdeferred\033[0m   gates — no paired selftest for:%s — the full class runs hosted (required check on main)\n' \
         "$unclassified" >&2
-      ran="$ran full-gates-fallback"
-      check_gates
-      if [ -n "$FAILED_CLASSES" ]; then
-        case " $FAILED_CLASSES " in
-          *" gates "*) floor_fail gates-fallback \
-            "give each gate a paired ops/<gate>-selftest.py so this push does not have to run all 252 suites." ;;
-        esac
-      fi
+      printf '                   run it locally now: ops/ci.sh --only gates · durable fix: add ops/<gate>-selftest.py\n' >&2
     fi
   fi
 
@@ -1097,6 +1114,9 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
 
   # Tour Operations carries database-owned rights, identity, route, digest,
   # ACL, and append-only invariants that cannot be proved by text-shape tests.
+  # The DoctorCRE v5 portfolio proof joins the same loop for the same reason:
+  # its digest recomputation, append-only guards and post-acceptance freeze are
+  # database behaviour, and a regex over the migration would prove none of it.
   # Run every slice's transaction-scoped acceptance proof on the same
   # disposable database after pending migrations apply. Each proof rolls back
   # every fixture row and must be independently green.
@@ -1106,7 +1126,8 @@ The supported lane builds and removes one for you: ./run.sh local-db-ci --class 
     mcp-server/test/tour-operations-slice2-postgres.sql \
     mcp-server/test/tour-property-identity-jurisdiction-postgres.sql \
     mcp-server/test/tour-domain-route-cheat-sheet-postgres.sql \
-    mcp-server/test/tour-delivery-data-plane-postgres.sql; do
+    mcp-server/test/tour-delivery-data-plane-postgres.sql \
+    mcp-server/test/work-portfolio-postgres.sql; do
     [ -f "$tour_pg_proof" ] || continue
     tour_pg_log="$LOGDIR/$(basename "$tour_pg_proof" .sql).log"
     if ! run_quiet "$tour_pg_log" \

@@ -38,11 +38,13 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
@@ -786,6 +788,120 @@ def test_gates_selftests_have_a_process_group_watchdog():
               f"rc={p.returncode}")
 
 
+# ------------------------------------------------- 6. the push floor stays a floor
+# A gate path that exists only for this fixture, so the case never depends on the
+# pairing state of a real gate: nobody can add ops/<this>-selftest.py and quietly
+# turn the assertions vacuous.
+FIXTURE_GATE = "hooks/zz-ci-selftest-fixture-gate.py"
+# Not a real revision. The stub git below answers only for this exact token, and
+# real git never sees it, so the fixture needs no history, no commit and no index.
+FIXTURE_RANGE = "CI-SELFTEST-FLOOR-FIXTURE-RANGE"
+# A floor that has kept its shape returns in about a second. This is a guard on a
+# hung run, not the regression detector — that job belongs to _push_floor_body().
+FLOOR_BUDGET_SECONDS = 60
+
+
+def _push_floor_body():
+    """check_pushfloor()'s source, which is where the expensive path is visible."""
+    src = CI.read_text(encoding="utf-8")
+    return src[src.index("check_pushfloor()"):src.index("check_dependency()")]
+
+
+@contextlib.contextmanager
+def _stub_git_answering_the_floor(changed_paths):
+    """PATH-shadow git so the floor sees a chosen diff, and real git does the rest.
+
+    The floor decides what to run from `git diff --name-only ... $CARR_CI_RANGE`.
+    Feeding that one question is enough to drive the branch under test, and doing
+    it here rather than from history keeps the fixture hermetic: no commit is
+    made, no path is written into the tree, and the repository is not touched.
+    Every other git call — the branch name, HEAD, status — passes straight
+    through, so ci.sh still runs against the real checkout.
+    """
+    real = shutil.which("git")
+    with tempfile.TemporaryDirectory(prefix="ci-selftest-stub-git-") as td:
+        stub = pathlib.Path(td) / "git"
+        stub.write_text(
+            "#!/bin/sh\n"
+            f'case " $* " in *" {FIXTURE_RANGE} "*)\n'
+            '  case " $* " in *--diff-filter=ACMR*)\n'
+            f'    printf "%s\\n" {" ".join(changed_paths)}; exit 0 ;;\n'
+            # ACR drives path-hygiene, which reads the files it is given. The
+            # fixture path does not exist, so report nothing ADDED rather than
+            # handing a checker a path it cannot open.
+            '  *--diff-filter=ACR*) exit 0 ;;\n'
+            '  esac ;;\n'
+            'esac\n'
+            f'exec {shlex.quote(real or "git")} "$@"\n'
+        )
+        stub.chmod(0o755)
+        yield {"PATH": f"{td}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+
+def test_push_floor_defers_the_gates_class_instead_of_running_it():
+    """A touched gate with no paired selftest is NAMED, not paid for locally.
+
+    check_pushfloor() used to answer "this push touched a gate whose blast radius
+    I cannot predict" by running the whole gates class on the push path. The push
+    floor is the only thing between a session and --no-verify, and --no-verify
+    disables the entire hook — owner check and secret scan included — so a floor
+    that can turn one push into minutes does not get skipped occasionally, it
+    gets skipped as a habit. Nothing stopped being checked: `gates` is still a
+    class and hosted `ops/ci.sh --strict` is the required check on main.
+
+    THE REGRESSION IS DETECTED FROM SOURCE, BEFORE ANYTHING RUNS. A reintroduced
+    call is a fact about the file, so this case reads it and stops. That is what
+    keeps the test from running the very class it exists to keep off the push
+    path — the failure it is looking for is exactly the one that would make
+    running it expensive.
+    """
+    body = _push_floor_body()
+    if "check_gates" in body:
+        check("the floor no longer calls the gates class as a fallback", False,
+              "check_pushfloor calls check_gates — refusing to run the class to confirm it")
+        return
+    check("the floor no longer calls the gates class as a fallback", True)
+
+    t0 = time.monotonic()
+    with _stub_git_answering_the_floor([FIXTURE_GATE]) as stub_env:
+        try:
+            rc, out = run(["--only", "pushfloor"],
+                          env={"CARR_CI_RANGE": FIXTURE_RANGE, **stub_env},
+                          timeout=FLOOR_BUDGET_SECONDS)
+        except subprocess.TimeoutExpired:
+            check("the floor returns promptly on the unpaired-gate shape", False,
+                  f"still running after {FLOOR_BUDGET_SECONDS}s")
+            return
+    elapsed = time.monotonic() - t0
+
+    gate_name = pathlib.Path(FIXTURE_GATE).stem
+    check("the unpaired gate is still detected and named",
+          gate_name in out and "deferred" in out, out[-600:])
+    check("the deferral says where the class actually runs",
+          "hosted" in out.lower(), out[-600:])
+    check("the gates class produced no verdict on the push path",
+          not re.search(r"(OK|FAIL|SKIP)\s+gates\b", out), out[-600:])
+    check("the floor returns promptly on the unpaired-gate shape",
+          elapsed < FLOOR_BUDGET_SECONDS, f"{elapsed:.0f}s")
+    check("naming a deferred gate is not itself a failure", rc == 0, f"rc={rc}")
+
+
+def test_strict_still_owns_the_gates_class():
+    """The deferral is scoped to a --only run, so hosted strict never takes it.
+
+    Asserted from source: the behavioural proof would mean running the gates
+    class from a file ops/ci.sh runs inside that class. test_class_table_is_complete
+    independently proves `gates` is still a real class with a check_ behind it.
+    """
+    body = CI.read_text(encoding="utf-8")
+    body = body[body.index("check_pushfloor()"):body.index("check_dependency()")]
+
+    check("the deferral only fires on a class-scoped (--only) run",
+          '[ -n "$ONLY" ]' in body, "guard missing — hosted would defer too")
+    check("and never when the gates class is already selected",
+          "! selected gates" in body)
+
+
 def main():
     for fn in (test_no_green_without_running,
                test_class_table_is_complete,
@@ -804,7 +920,9 @@ def main():
                test_mypy_pin_acceptance_is_narrow,
                test_every_test_file_in_the_tree_is_collected,
                test_gates_treats_only_78_as_not_configured,
-               test_gates_selftests_have_a_process_group_watchdog):
+               test_gates_selftests_have_a_process_group_watchdog,
+               test_push_floor_defers_the_gates_class_instead_of_running_it,
+               test_strict_still_owns_the_gates_class):
         try:
             fn()
         except Exception as exc:  # a crashing case is a failing case, never a silent skip

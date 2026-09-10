@@ -52,6 +52,12 @@ export const REGISTRY_V18_VERSION = "scac-mutation-registry.v18";
 export const REGISTRY_V19_VERSION = "scac-mutation-registry.v19";
 // v20 binds the continuity archive successor after the final v19 seal.
 export const REGISTRY_V20_VERSION = "scac-mutation-registry.v20";
+// v21 binds the R06 hooks-correctness re-digest after the final v20 seal.
+export const REGISTRY_V21_VERSION = "scac-mutation-registry.v21";
+// v22 binds the DoctorCRE v5 portfolio hierarchy after the final v21 seal.
+export const REGISTRY_V22_VERSION = "scac-mutation-registry.v22";
+export const REGISTRY_V23_VERSION = "scac-mutation-registry.v23";
+export const REGISTRY_V24_VERSION = "scac-mutation-registry.v24";
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_INVENTORY_FIXTURE_PATH = new URL(
   "./config/scac-registry-source-inventory-fixtures.v1.json", import.meta.url);
@@ -91,6 +97,10 @@ export const HISTORICAL_REGISTRY_SEALS = Object.freeze({
   v17: Object.freeze({ version: REGISTRY_V17_VERSION, digest: "sha256:5aab15679a2d26207210bde3e16be265301b9c69816e08dc90b2f2e8a48c7db2", entryCount: 1509, sourceEntryCount: 827 }),
   v18: Object.freeze({ version: REGISTRY_V18_VERSION, digest: "sha256:680d42c68be736fe3f227019e3a4afd3e0aad53ed63d115db1fbb0467ea884c8", entryCount: 1515, sourceEntryCount: 827 }),
   v19: Object.freeze({ version: REGISTRY_V19_VERSION, digest: "sha256:19c1c9967bf960a64cefa39c53f6011193180f0c65128a1d8d5987ea6e120841", entryCount: 1520, sourceEntryCount: 828 }),
+  v20: Object.freeze({ version: REGISTRY_V20_VERSION, digest: "sha256:45bf7a56d2756337c1b5efdad195f4935259fad6cf5f6a9c081c28592bacfb05", entryCount: 1524, sourceEntryCount: 828 }),
+  v21: Object.freeze({ version: REGISTRY_V21_VERSION, digest: "sha256:d9100082d444f090e062a2fb9ac55043d0c9790c2fbd9b68672987e3ed12927b", entryCount: 1528, sourceEntryCount: 828 }),
+  v22: Object.freeze({ version: REGISTRY_V22_VERSION, digest: "sha256:5bbe68942f2652523b52c024c07615b1718b59c7de4c0e41524a955566ba5f75", entryCount: 1590, sourceEntryCount: 833 }),
+  v23: Object.freeze({ version: REGISTRY_V23_VERSION, digest: "sha256:d6633db96266ebd54bf6ade83cd35b587ee9f128f0f9db35ea557861e66f743b", entryCount: 1596, sourceEntryCount: 835 }),
 });
 export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
   "migrations/0454_siep11_mutation_registry.sql": "7985d42b9b36964b33503f4ff42d332e6bcce085217f06464a9d6abf58126bdd",
@@ -131,6 +141,14 @@ export const HISTORICAL_REGISTRY_ARTIFACT_SHA256 = Object.freeze({
   "mcp-server/src/scac-mutation-registry.v18.generated.js": "980da606f08812d7f256427ca2f64a0209b8652cef834b4cf69de7a6f2afc59f",
   "migrations/0493_incident_work_request_link_scac_successor.sql": "0c7ba65bde7d0479cfec28c89d01f2721940c6be23a7ec9ad6c2f27e4f39ef3f",
   "mcp-server/src/scac-mutation-registry.v19.generated.js": "cd5c11d4caa792533ca46bdaf7ac1e3b698d633ea80c470a90c50192a1119dc9",
+  "migrations/0494_codex_continuity_archive_registry.sql": "510e96efbff3870d87c4efefd6ad5bb1b32c7647cb3f5d306aa2aaead12a4a8e",
+  "mcp-server/src/scac-mutation-registry.v20.generated.js": "dd679c9fa87fb45afe25d8508be462acfa395c532bf235f7fbdc0511b8678371",
+  "migrations/0495_r06_hooks_correctness_scac_successor.sql": "97ba2964737373f31d17c089046ddae2337050dcdc278e309cd1a4797e16ad83",
+  "mcp-server/src/scac-mutation-registry.v21.generated.js": "ff1088b58871db05d0eeb37e520eaefda35c1756b6b8144f9cd9d595b8e49b61",
+  "migrations/0496_doctorcre_portfolio_hierarchy_and_scac_successor.sql": "b8de4ce8bfa23c5ac06c4a1729456da4cfc301ec6b82e54b336ab072c3d6dca7",
+  "migrations/0497_r07_repo_hygiene_janitor_and_scac_successor.sql": "88a9f228116f9814bc32d4d26663ec5e2885557ea8f985f4468300894ff4ad1b",
+  "mcp-server/src/scac-mutation-registry.v23.generated.js": "0dec1d570e18816106f22401dfcf32a78179c265f7b2a48e3e1ebe04f87d0ccb",
+  "mcp-server/src/scac-mutation-registry.v22.generated.js": "58e37870d1aba7750b841468ef0c4bea76cb75f18ee2a978eb4b3ce567302c20",
 });
 // WR-000068 rebases four Production-applied consumers of the sourced shape
 // columns on the effective receipt-backed lineage. The v18 generator reads the
@@ -373,6 +391,64 @@ export const CONTINUITY_ARCHIVE_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
   // are the entire delta from the v19 receipt.
   secdef_execute: { count: 389, digest: "sha256:570bebcdfb87098b8b71ca59ed7e9a2fb5849099d6e3ba10cb99c934421aceb7" },
 });
+export const R06_HOOKS_CORRECTNESS_PRE_V21_DB_CATALOG_BASELINE =
+  CONTINUITY_ARCHIVE_FORWARD_DB_CATALOG_BASELINE;
+export const R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
+  ...R06_HOOKS_CORRECTNESS_PRE_V21_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v21",
+  // Filled from the complete disposable-Postgres 0495 successor readback: the
+  // four v20/v21 seal-and-catalog functions this registry-only successor adds
+  // are the entire delta from the v20 receipt.
+  secdef_execute: { count: 393, digest: "sha256:6889d02e1c7e8eda58e8e91cdb61da685f307153696448832b27b8cf3a0e2bb7" },
+});
+export const DOCTORCRE_PORTFOLIO_PRE_V22_DB_CATALOG_BASELINE =
+  R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE;
+export const DOCTORCRE_PORTFOLIO_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
+  ...R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v22",
+  // Read back from a clean disposable Postgres carrying db/schema.sql and every
+  // migration through this one. The security-definer surface is the entire
+  // delta from v21's 393: the portfolio's canonical, digest, structure,
+  // governance and definer-write functions, PLUS the four seal and catalog
+  // functions this successor itself installs -- which is why the figure is
+  // taken after the whole migration runs and not after its domain SQL alone.
+  // relation_dml is unchanged because the portfolio tables grant SELECT only,
+  // every write going through a definer function, and role_authority is
+  // unchanged because this change creates no role.
+  secdef_execute: { count: 450, digest: "sha256:dbd281eef92b9232e4bdd9bfb35c5884011b9d8f7177ebae919557a4aa25047b" },
+});
+
+export const R07_REPO_HYGIENE_JANITOR_PRE_V23_DB_CATALOG_BASELINE =
+  DOCTORCRE_PORTFOLIO_FORWARD_DB_CATALOG_BASELINE;
+export const R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
+  ...DOCTORCRE_PORTFOLIO_FORWARD_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v23",
+  // Read back from a clean disposable Postgres carrying db/schema.sql and every
+  // migration through this one. This successor is registry-only: the repo
+  // hygiene janitor is a tools/ script and an uninstalled LaunchAgent
+  // definition, so it creates no table, no role and no domain function. The
+  // entire security-definer delta from v22's 450 is the four seal-and-catalog
+  // functions this successor installs for itself, exactly as the v20 and v21
+  // registry-only successors before it. relation_dml, column_dml,
+  // role_authority and runtime_dml_grants are unchanged for the same reason.
+  secdef_execute: { count: 454, digest: "sha256:d4a15c2d2f507d75c4c3c3d8c722d4d09f704fb141c8783ea0a640a721a0af55" },
+});
+
+export const V5_F09_WORKFLOW_TRUTH_PRE_V24_DB_CATALOG_BASELINE =
+  R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE;
+export const V5_F09_WORKFLOW_TRUTH_FORWARD_DB_CATALOG_BASELINE = Object.freeze({
+  ...R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE,
+  projection_version: "scac-db-catalog-projection.v24",
+  // Read back from a clean disposable Postgres carrying db/schema.sql and every
+  // migration through this one. V5-F09 REPLACES two existing security-definer
+  // functions (ops.enqueue_job and ops.current_sourced_work_requests) rather
+  // than adding any, so the count delta from v23's 454 is exactly the four
+  // seal-and-catalog functions this successor installs for itself. The DIGEST
+  // still moves, because the two replaced bodies are part of the projection --
+  // which is the whole reason a domain change owes a registry successor.
+  secdef_execute: { count: 458, digest: "sha256:3b9472c743e1ab3cff189e370e4a785c0483391adacbb85b495842f5c4e2b7b0" },
+});
+
 export const JOB_DEFINITION_BASELINE = Object.freeze({
   count: 26,
   digest: "sha256:152742893824c64275a99326335f2b8ca97cf592153c5cb280b353adfa15eb91",
@@ -802,7 +878,28 @@ export function parsePlistXml(source) {
   return value;
 }
 
-export function validateLaunchdAuthorityCatalogs(launchdPaths, services, legacy) {
+// A LaunchAgent with no trigger and no load-time start cannot run: launchd has
+// no moment at which to fire it. Such a definition is a reviewed artifact rather
+// than a deployed service, so it is exempt from ops.service catalog closure --
+// requiring a deploy_mechanism for it would assert a deployment that must not
+// exist. The exemption is derived from the artifact itself rather than from a
+// list, so it cannot drift out of step with the file it describes, and it is
+// two-directional: a definition-only agent that DOES appear in the service
+// catalog is a contradiction and still refuses below.
+const LAUNCHD_TRIGGER_KEYS = Object.freeze([
+  "StartCalendarInterval", "StartInterval", "WatchPaths", "KeepAlive",
+  "StartOnMount", "QueueDirectories", "Sockets", "MachServices",
+]);
+
+export function isDefinitionOnlyLaunchd(plist) {
+  if (!plist || typeof plist !== "object") return false;
+  if (plist.RunAtLoad === true) return false;
+  return !LAUNCHD_TRIGGER_KEYS.some(key => plist[key] !== undefined);
+}
+
+export function validateLaunchdAuthorityCatalogs(launchdPaths, services, legacy,
+  definitionOnlyPaths = []) {
+  const definitionOnly = new Set(definitionOnlyPaths);
   const reviewedPaths = new Set(launchdPaths);
   if (reviewedPaths.size !== launchdPaths.length) throw new Error("duplicate launchd source path");
   const serviceKeys = new Set();
@@ -827,7 +924,14 @@ export function validateLaunchdAuthorityCatalogs(launchdPaths, services, legacy)
         .sort((left, right) => `${left.service_key}:${left.environment}`.localeCompare(`${right.service_key}:${right.environment}`)));
     }
   }
-  const missingServices = [...reviewedPaths].filter(path => !servicesByPlist.has(path)).sort();
+  for (const path of definitionOnly) {
+    if (!reviewedPaths.has(path))
+      throw new Error(`definition-only launchd path is not a reviewed source: ${path}`);
+    if (servicesByPlist.has(path))
+      throw new Error(`definition-only launchd agent claims a deploy mechanism: ${path}`);
+  }
+  const missingServices = [...reviewedPaths]
+    .filter(path => !servicesByPlist.has(path) && !definitionOnly.has(path)).sort();
   const orphanServices = [...servicesByPlist.keys()].filter(path => !reviewedPaths.has(path)).sort();
   if (missingServices.length || orphanServices.length)
     throw new Error(`launchd ops.service catalog closure mismatch missing=${missingServices.join(",")} orphan=${orphanServices.join(",")}`);
@@ -859,7 +963,10 @@ function launchdAuthorityMaps(launchdPaths) {
   const legacyPath = "ops/config/control-plane-scheduler-cutover.v1.json";
   const services = JSON.parse(readFileSync(resolve(REPO_ROOT, servicesPath), "utf8"));
   const legacy = JSON.parse(readFileSync(resolve(REPO_ROOT, legacyPath), "utf8"));
-  const { servicesByPlist, legacyByPlist } = validateLaunchdAuthorityCatalogs(launchdPaths, services, legacy);
+  const definitionOnlyPaths = launchdPaths.filter(path =>
+    isDefinitionOnlyLaunchd(parsePlistXml(readFileSync(resolve(REPO_ROOT, path), "utf8"))));
+  const { servicesByPlist, legacyByPlist } = validateLaunchdAuthorityCatalogs(
+    launchdPaths, services, legacy, definitionOnlyPaths);
   return {
     servicesByPlist,
     legacyByPlist,
@@ -929,9 +1036,20 @@ export function workflowDefinitionInventory() {
       .filter(key => Object.hasOwn(plist, key)).map(key => [key, plist[key]]));
     const environmentContract = plist.EnvironmentVariables || {};
     const serviceMappings = servicesByPlist.get(source_locator) || [];
-    if (!serviceMappings.length) throw new Error(`launchd workflow lacks ops.service authority mapping: ${source_locator}`);
-    const physicalAuthorityRefs = serviceMappings.map(mapping =>
-      `ops.service_environment:${mapping.service_key}:${mapping.environment}`);
+    const definitionOnly = isDefinitionOnlyLaunchd(plist);
+    // A deployed agent must name the service environment that deploys it. A
+    // definition-only agent has no deployment to name, and is inventoried with
+    // an explicit non-deployed authority ref instead of an absent one, so it is
+    // still a registered row a reviewer can see rather than a silent gap.
+    if (!serviceMappings.length && !definitionOnly)
+      throw new Error(`launchd workflow lacks ops.service authority mapping: ${source_locator}`);
+    // A DISTINCT NAMESPACE, not an ops.service_environment ref: this agent has
+    // no service environment, and borrowing that prefix would have made it
+    // count as one wherever deployed environments are totalled.
+    const physicalAuthorityRefs = definitionOnly
+      ? ["ops.definition_only_launchd:not_deployed"]
+      : serviceMappings.map(mapping =>
+        `ops.service_environment:${mapping.service_key}:${mapping.environment}`);
     const legacySurface = legacyByPlist.get(source_locator);
     if (legacySurface) {
       assertLegacyLaunchdSource(legacySurface, source_locator, plist);
@@ -996,6 +1114,10 @@ const SOURCE_INVENTORY_VERSION_KEYS = Object.freeze({
   [REGISTRY_V18_VERSION]: "v18",
   [REGISTRY_V19_VERSION]: "v19",
   [REGISTRY_V20_VERSION]: "v20",
+  [REGISTRY_V21_VERSION]: "v21",
+  [REGISTRY_V22_VERSION]: "v22",
+  [REGISTRY_V23_VERSION]: "v23",
+  [REGISTRY_V24_VERSION]: "v24",
 });
 
 function sourceInventoryFixtureDigest(rows) {
@@ -1051,7 +1173,7 @@ export function frozenInventory(version) {
 }
 
 export function assertCurrentSourceInventoryMatchesFixture(tools = defaultTools,
-  version = REGISTRY_V20_VERSION) {
+  version = REGISTRY_V24_VERSION) {
   const current = fullInventory(tools);
   let frozen = frozenInventory(version);
   const review = SOURCE_INVENTORY_FIXTURES.current_source_review;
@@ -1088,7 +1210,9 @@ export function registryDigestFor(version, rows = fullInventory(), dbCatalogBase
     REGISTRY_V9_VERSION, REGISTRY_V10_VERSION, REGISTRY_V11_VERSION,
     REGISTRY_V12_VERSION, REGISTRY_V13_VERSION, REGISTRY_V14_VERSION,
     REGISTRY_V15_VERSION, REGISTRY_V16_VERSION, REGISTRY_V17_VERSION,
-    REGISTRY_V18_VERSION, REGISTRY_V19_VERSION, REGISTRY_V20_VERSION].includes(version))
+    REGISTRY_V18_VERSION, REGISTRY_V19_VERSION, REGISTRY_V20_VERSION,
+    REGISTRY_V21_VERSION, REGISTRY_V22_VERSION,
+    REGISTRY_V23_VERSION, REGISTRY_V24_VERSION].includes(version))
     throw new Error(`unsupported SCAC mutation registry version: ${version}`);
   return sha256({ schema_version: version, rows, db_catalog_baseline: dbCatalogBaseline });
 }
@@ -5348,10 +5472,2364 @@ ${preflightBody}end $continuity_archive_preflight$;
 }
 
 
-export function renderGeneratedFrontier() {
-  // Refuse before the expensive v2-v19 predecessor cascade: this frontier ends
-  // in v20 artifacts, and every input to the guard is a fixed module constant.
+// Shared v21 trust root. Every entry path that renders or writes a v21
+// artifact calls this BEFORE doing work, so an unbound template constant can
+// never reach a digest, a projection or a written file. It reads only fixed
+// module constants: there is deliberately no parameter through which a caller
+// could supply its own expected seal, pin or baseline.
+const R06_HOOKS_CORRECTNESS_V20_MIGRATION_PATH =
+  "migrations/0494_codex_continuity_archive_registry.sql";
+const R06_HOOKS_CORRECTNESS_V20_RUNTIME_PATH =
+  "mcp-server/src/scac-mutation-registry.v20.generated.js";
+
+function assertR06HooksCorrectnessCatalogBaseline(label, baseline, projectionVersion) {
+  if (!baseline || baseline.projection_version !== projectionVersion)
+    throw new Error(
+      `R06 hooks correctness ${label} catalog baseline is not ${projectionVersion}`);
+  for (const category of [
+    "secdef_execute", "relation_dml", "column_dml", "role_authority", "runtime_dml_grants",
+  ]) {
+    const receipt = baseline[category];
+    if (!Number.isInteger(receipt?.count) || receipt.count < 0 ||
+        !CONTINUITY_ARCHIVE_DIGEST_RE.test(receipt?.digest ?? ""))
+      throw new Error(`R06 hooks correctness ${label} ${category} receipt is unbound`);
+  }
+}
+
+export function assertR06HooksCorrectnessV21TrustRoot() {
+  // Strictly stronger than the root it succeeds: the entire v20 chain has to
+  // be bound before a v21 artifact can exist at all, so an unbound v19 limb
+  // still refuses here.
   assertContinuityArchiveV20TrustRoot();
+  const { v20: v20Seal } = HISTORICAL_REGISTRY_SEALS;
+  if (v20Seal?.version !== REGISTRY_V20_VERSION ||
+      !CONTINUITY_ARCHIVE_DIGEST_RE.test(v20Seal?.digest ?? "") ||
+      !Number.isInteger(v20Seal?.entryCount) || v20Seal.entryCount < 1 ||
+      !Number.isInteger(v20Seal?.sourceEntryCount) || v20Seal.sourceEntryCount < 1)
+    throw new Error("R06 hooks correctness v21 predecessor seal is unbound");
+  // The chain is exact in both directions: v20 is the only accepted predecessor
+  // projection and v21 the only accepted successor, so the predecessor catalog
+  // can never be handed back as the successor.
+  assertR06HooksCorrectnessCatalogBaseline("predecessor v20",
+    R06_HOOKS_CORRECTNESS_PRE_V21_DB_CATALOG_BASELINE, "scac-db-catalog-projection.v20");
+  assertR06HooksCorrectnessCatalogBaseline("successor v21",
+    R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE, "scac-db-catalog-projection.v21");
+  for (const path of [
+    R06_HOOKS_CORRECTNESS_V20_MIGRATION_PATH, R06_HOOKS_CORRECTNESS_V20_RUNTIME_PATH,
+  ]) {
+    if (!CONTINUITY_ARCHIVE_ARTIFACT_SHA_RE.test(
+      HISTORICAL_REGISTRY_ARTIFACT_SHA256[path] ?? ""))
+      throw new Error(`R06 hooks correctness v21 predecessor artifact pin is unbound: ${path}`);
+  }
+}
+
+// Registry-only successor for the R06 hooks-correctness contract. The source
+// change re-digests hook and ops entrypoints that were already registered and
+// adds no ingress, so this migration carries no domain DDL and no business
+// rows; it only seals the new source inventory and installs the v21
+// catalog/policy projection after the immutable v20 frontier.
+export function renderR06HooksCorrectnessForwardRegistrySql(rows = fullInventory(),
+  dbCatalogBaseline = R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE,
+  predecessorArtifacts = undefined) {
+  // The predecessor seal, its catalog projection and the sealed v20 artifact
+  // hashes are fixed production constants, asserted by the shared v21 trust
+  // root that every v21 entry path calls. There is deliberately no caller
+  // binding for them: a supplied predecessor artifact is checked AGAINST these
+  // pins, it never supplies its own expected hash.
+  assertR06HooksCorrectnessV21TrustRoot();
+  const { v20: v20Seal } = HISTORICAL_REGISTRY_SEALS;
+  const predecessorDbCatalogBaseline = R06_HOOKS_CORRECTNESS_PRE_V21_DB_CATALOG_BASELINE;
+  const artifactShaRe = CONTINUITY_ARCHIVE_ARTIFACT_SHA_RE;
+  // A caller-supplied successor baseline is held to the SAME exact-projection
+  // shape as the fixed constant; it can only ever narrow, never widen.
+  assertR06HooksCorrectnessCatalogBaseline("successor v21", dbCatalogBaseline,
+    "scac-db-catalog-projection.v21");
+
+  const v21Digest = registryDigestFor(REGISTRY_V21_VERSION, rows, dbCatalogBaseline);
+  const catalogCount = dbCatalogBaseline.secdef_execute.count +
+    dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
+  const entryCount = rows.length + catalogCount;
+  const v20MigrationPath = R06_HOOKS_CORRECTNESS_V20_MIGRATION_PATH;
+  const v20RuntimePath = R06_HOOKS_CORRECTNESS_V20_RUNTIME_PATH;
+  const v20Rows = frozenInventory(REGISTRY_V20_VERSION);
+  // A partial predecessor bundle regenerates only the missing half, and it
+  // regenerates it from the canonical prior inputs: the v20 renderer's third
+  // argument is its own v19-shaped predecessor bundle, so this v20-shaped one
+  // is never forwarded into it.
+  const v20Migration = predecessorArtifacts?.migration ??
+    renderContinuityArchiveForwardRegistrySql(v20Rows, predecessorDbCatalogBaseline);
+  const v20Runtime = predecessorArtifacts?.runtime ?? renderRuntimeProjection(v20Rows, {
+    version: REGISTRY_V20_VERSION,
+    dbCatalogBaseline: predecessorDbCatalogBaseline,
+  });
+  for (const [path, source] of [
+    [v20MigrationPath, v20Migration], [v20RuntimePath, v20Runtime],
+  ]) {
+    const expected = HISTORICAL_REGISTRY_ARTIFACT_SHA256[path];
+    if (!artifactShaRe.test(expected ?? ""))
+      throw new Error(`R06 hooks correctness v21 predecessor artifact pin is unbound: ${path}`);
+    const observed = sha256(source);
+    if (observed !== expected)
+      throw new Error(`sealed historical SCAC v20 artifact changed: ${path}: ${observed}`);
+  }
+
+  const headerMarker =
+    "-- SCAC-12: registry-only mutation registry v20 after Codex continuity archive recovery.";
+  const coreStart = v20Migration.indexOf(headerMarker);
+  if (coreStart < 0 || v20Migration.indexOf(headerMarker, coreStart + headerMarker.length) >= 0)
+    throw new Error("sealed SCAC v20 migration has no exact successor core boundary");
+  const v20Core = v20Migration.slice(coreStart);
+  const currentV20Marker = "create or replace function ops.scac_mutation_catalog_v20_current()";
+  const policyMarker =
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v19;";
+  const currentV20Start = v20Core.indexOf(currentV20Marker);
+  const secondCurrentV20 = v20Core.indexOf(
+    currentV20Marker, currentV20Start + currentV20Marker.length);
+  const v19HistoryMarker =
+    "alter function ops.scac_mutation_catalog_v19_current() rename to scac_mutation_catalog_v19_live_at_seal;";
+  const v19HistoryStart = v20Core.indexOf(v19HistoryMarker);
+  const secondV19History = v20Core.indexOf(
+    v19HistoryMarker, v19HistoryStart + v19HistoryMarker.length);
+  const policyStart = v20Core.indexOf(policyMarker);
+  const secondPolicy = v20Core.indexOf(policyMarker, policyStart + policyMarker.length);
+  if (v19HistoryStart < 0 || secondV19History >= 0 || currentV20Start <= v19HistoryStart ||
+      secondCurrentV20 >= 0 || policyStart <= currentV20Start || secondPolicy >= 0)
+    throw new Error("sealed SCAC v20 migration has no exact catalog successor boundary");
+  const installedV19History = v20Core.slice(v19HistoryStart, currentV20Start);
+  const v20Current = v20Core.slice(currentV20Start, policyStart);
+  const v20History =
+`alter function ops.scac_mutation_catalog_v20_current() rename to scac_mutation_catalog_v20_live_at_seal;
+create or replace function ops.scac_mutation_registry_v20_seal_available()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_registry_seal_valid('scac-mutation-registry.v20')
+$fn$;
+create or replace function ops.scac_mutation_catalog_v20_current()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_catalog_v20_live_at_seal()
+$fn$;
+comment on function ops.scac_mutation_registry_v20_seal_available() is 'Exact immutable v20 registry seal; separate from whether the live catalog still equals v20.';
+comment on function ops.scac_mutation_catalog_v20_current() is 'Historical v20 live-catalog validator; expected to become false after the v21 authority surface is installed.';
+
+`;
+  const renderV21Current = baseline => {
+    let current = v20Current
+      .replaceAll("scac_mutation_catalog_v20_current", "scac_mutation_catalog_v21_current")
+      .replaceAll("scac-mutation-registry.v20", "scac-mutation-registry.v21");
+    for (const [category, label] of [
+      ["secdef_execute", "security-definer"],
+      ["relation_dml", "relation"],
+      ["column_dml", "column"],
+    ]) {
+      current = replaceExactlyOnce(current,
+        `if observed_count<>${predecessorDbCatalogBaseline[category].count} or observed_digest<>'${predecessorDbCatalogBaseline[category].digest}' then return false; end if;`,
+        `if observed_count<>${baseline[category].count} or observed_digest<>'${baseline[category].digest}' then return false; end if;`,
+        `R06 hooks correctness v21 ${label} baseline`);
+    }
+    return replaceExactlyOnce(current,
+      `return observed_count=${predecessorDbCatalogBaseline.role_authority.count} and observed_digest='${predecessorDbCatalogBaseline.role_authority.digest}';`,
+      `return observed_count=${baseline.role_authority.count} and observed_digest='${baseline.role_authority.digest}';`,
+      "R06 hooks correctness v21 role-authority baseline");
+  };
+  const v21Current = renderV21Current(dbCatalogBaseline);
+
+  let sql = replaceExactlyOnce(v20Core, v20Current,
+    "__CONTINUITY_ARCHIVE_V20_CATALOG_SUCCESSOR__",
+    "R06 hooks correctness v20 current catalog block");
+  sql = replaceExactlyOnce(sql, installedV19History, "",
+    "R06 hooks correctness already-installed v19 catalog history");
+  sql = replaceExactlyOnce(sql, headerMarker,
+    "-- SCAC-12: registry-only mutation registry v21 after R06 hook-correctness evidence routing.",
+    "R06 hooks correctness migration header");
+  sql = sql
+    .replaceAll("scac-mutation-registry.v20", "scac-mutation-registry.v21")
+    .replaceAll("_v20", "_v21")
+    .replaceAll(" v20", " v21");
+  sql = replaceExactlyOnce(sql, JSON.stringify(predecessorDbCatalogBaseline),
+    JSON.stringify(dbCatalogBaseline), "R06 hooks correctness v21 catalog projection");
+  sql = replaceExactlyOnce(sql,
+    `'${v20Seal.digest}',${v20Seal.entryCount},${v20Seal.sourceEntryCount},`,
+    `'sha256:${v21Digest}',${entryCount},${rows.length},`,
+    "R06 hooks correctness v21 registry row");
+  sql = replaceExactlyOnce(sql,
+    `ops.scac_mutation_registration_v21('${v20Seal.digest}',`,
+    `ops.scac_mutation_registration_v21('sha256:${v21Digest}',`,
+    "R06 hooks correctness v21 snapshot registry lookup");
+  sql = replaceExactlyOnce(sql,
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v19;",
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v20;",
+    "R06 hooks correctness policy snapshot predecessor");
+  sql = replaceExactlyOnce(sql, "__CONTINUITY_ARCHIVE_V20_CATALOG_SUCCESSOR__",
+    `${v20History}${v21Current}`, "R06 hooks correctness v20 catalog history insertion");
+
+  const versionsThrough20 = Array.from({ length: 20 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  const versionsThrough19 = Array.from({ length: 19 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  sql = replaceExactlyOnce(sql,
+    `check (registry_version in (${versionsThrough19},'scac-mutation-registry.v21'))`,
+    `check (registry_version in (${versionsThrough20},'scac-mutation-registry.v21'))`,
+    "R06 hooks correctness registry-version constraint");
+  sql = replaceExactlyOnce(sql,
+    `if p_registry_version not in (${versionsThrough19}) then return false; end if;`,
+    `if p_registry_version not in (${versionsThrough20}) then return false; end if;`,
+    "R06 hooks correctness historical seal allowlist");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v19' then '${HISTORICAL_REGISTRY_SEALS.v19.digest}' end;`,
+    `    when 'scac-mutation-registry.v19' then '${HISTORICAL_REGISTRY_SEALS.v19.digest}'\n    when '${v20Seal.version}' then '${v20Seal.digest}' end;`,
+    "R06 hooks correctness historical digest case");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v19' then '${JSON.stringify(INCIDENT_WORK_REQUEST_LINK_FORWARD_DB_CATALOG_BASELINE)}'::jsonb end;`,
+    `    when 'scac-mutation-registry.v19' then '${JSON.stringify(INCIDENT_WORK_REQUEST_LINK_FORWARD_DB_CATALOG_BASELINE)}'::jsonb\n    when '${v20Seal.version}' then '${JSON.stringify(predecessorDbCatalogBaseline)}'::jsonb end;`,
+    "R06 hooks correctness historical catalog case");
+  sql = replaceExactlyOnce(sql,
+    `    ('scac-mutation-registry.v19','${HISTORICAL_REGISTRY_SEALS.v19.digest}',${HISTORICAL_REGISTRY_SEALS.v19.entryCount},${HISTORICAL_REGISTRY_SEALS.v19.sourceEntryCount})\n`,
+    `    ('scac-mutation-registry.v19','${HISTORICAL_REGISTRY_SEALS.v19.digest}',${HISTORICAL_REGISTRY_SEALS.v19.entryCount},${HISTORICAL_REGISTRY_SEALS.v19.sourceEntryCount}),\n    ('${v20Seal.version}','${v20Seal.digest}',${v20Seal.entryCount},${v20Seal.sourceEntryCount})\n`,
+    "R06 hooks correctness historical seal tuple");
+  sql = replaceExactlyOnce(sql,
+    "    ops.scac_mutation_registry_v19_seal_available()) then",
+    "    ops.scac_mutation_registry_v19_seal_available() and\n    ops.scac_mutation_registry_v20_seal_available()) then",
+    "R06 hooks correctness snapshot predecessor seal");
+  sql = replaceExactlyOnce(sql,
+    `or (r.registry_version='scac-mutation-registry.v21' and r.registry_digest='${v20Seal.digest}')`,
+    `or (r.registry_version='scac-mutation-registry.v20' and r.registry_digest='${v20Seal.digest}')\n         or (r.registry_version='scac-mutation-registry.v21' and r.registry_digest='sha256:${v21Digest}')`,
+    "R06 hooks correctness epoch-chain digest cases");
+  sql = replaceExactlyOnce(sql,
+    `  (registry_version='scac-mutation-registry.v21' and registry_digest='${v20Seal.digest}')`,
+    `  (registry_version='scac-mutation-registry.v20' and registry_digest='${v20Seal.digest}') or\n  (registry_version='scac-mutation-registry.v21' and registry_digest='sha256:${v21Digest}')`,
+    "R06 hooks correctness epoch constraint digest cases");
+  sql = replaceExactlyOnce(sql,
+    `'{registry_digest}',to_jsonb('${v20Seal.digest}'::text)`,
+    `'{registry_digest}',to_jsonb('sha256:${v21Digest}'::text)`,
+    "R06 hooks correctness snapshot registry digest");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_mutation_registry_v18_seal_available(),ops.scac_mutation_catalog_v19_live_at_seal(),ops.scac_mutation_catalog_v19_current(),ops.scac_mutation_registry_v19_seal_available(),ops.scac_mutation_catalog_v21_current()",
+    "ops.scac_mutation_registry_v18_seal_available(),ops.scac_mutation_catalog_v19_live_at_seal(),ops.scac_mutation_catalog_v19_current(),ops.scac_mutation_registry_v19_seal_available(),ops.scac_mutation_catalog_v20_live_at_seal(),ops.scac_mutation_catalog_v20_current(),ops.scac_mutation_registry_v20_seal_available(),ops.scac_mutation_catalog_v21_current()",
+    "R06 hooks correctness historical function revoke list");
+  sql = replaceExactlyOnce(sql,
+    "Continuity archive successor snapshot: current policy epochs bind mutation registry v21 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19 epochs remain immutable.",
+    "R06 hooks-correctness successor snapshot: current policy epochs bind mutation registry v21 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20 epochs remain immutable.",
+    "R06 hooks correctness policy snapshot comment");
+  sql = replaceExactlyOnce(sql,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v21')<>${v20Seal.entryCount}`,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v21')<>${entryCount}`,
+    "R06 hooks correctness v21 entry count guard");
+  sql = replaceExactlyOnce(sql,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v19')<>'${HISTORICAL_REGISTRY_SEALS.v19.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v19')<>${HISTORICAL_REGISTRY_SEALS.v19.entryCount} then raise exception 'sealed SCAC mutation registry v19 changed during successor creation'; end if;`,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v20')<>'${v20Seal.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v20')<>${v20Seal.entryCount} then raise exception 'sealed SCAC mutation registry v20 changed during successor creation'; end if;`,
+    "R06 hooks correctness predecessor seal guard");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),ops.scac_policy_epoch_snapshot_v15(),ops.scac_policy_epoch_snapshot_v16(),ops.scac_policy_epoch_snapshot_v17(),ops.scac_policy_epoch_snapshot_v18(),ops.scac_policy_epoch_snapshot_v19(),",
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),ops.scac_policy_epoch_snapshot_v15(),ops.scac_policy_epoch_snapshot_v16(),ops.scac_policy_epoch_snapshot_v17(),ops.scac_policy_epoch_snapshot_v18(),ops.scac_policy_epoch_snapshot_v19(),ops.scac_policy_epoch_snapshot_v20(),",
+    "R06 hooks correctness historical policy snapshot revoke list");
+
+  const seedStartMarker = "with seed as (select value as contract from jsonb_array_elements(";
+  const seedEndMarker = "::jsonb))\ninsert into ops.scac_mutation_registry_entry";
+  const seedStart = sql.indexOf(seedStartMarker);
+  const secondSeedStart = sql.indexOf(seedStartMarker, seedStart + seedStartMarker.length);
+  const seedEnd = sql.indexOf(seedEndMarker, seedStart + seedStartMarker.length);
+  const secondSeedEnd = sql.indexOf(seedEndMarker, seedEnd + seedEndMarker.length);
+  if (seedStart < 0 || secondSeedStart >= 0 || seedEnd < 0 || secondSeedEnd >= 0)
+    throw new Error("sealed SCAC v20 migration has no exact source-seed boundary");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart + seedStartMarker.length)}${sqlLiteral(seed)}${sql.slice(seedEnd)}`;
+
+  const preflightCurrent = renderV21Current(predecessorDbCatalogBaseline);
+  const preflightBegin = preflightCurrent.indexOf("begin\n");
+  const preflightEnd = preflightCurrent.lastIndexOf("end $fn$;");
+  if (preflightBegin < 0 || preflightEnd <= preflightBegin)
+    throw new Error("generated v21 catalog predicate has no exact preflight body boundary");
+  let preflightBody = preflightCurrent.slice(preflightBegin + "begin\n".length, preflightEnd);
+  preflightBody = preflightBody.replaceAll(
+    "then return false; end if;",
+    "then raise exception 'R06 hooks correctness pre-v21 catalog receipt drifted'; end if;");
+  preflightBody = replaceExactlyOnce(preflightBody,
+    `return observed_count=${predecessorDbCatalogBaseline.role_authority.count} and observed_digest='${predecessorDbCatalogBaseline.role_authority.digest}';`,
+    `if observed_count<>${predecessorDbCatalogBaseline.role_authority.count} or observed_digest<>'${predecessorDbCatalogBaseline.role_authority.digest}' then raise exception 'R06 hooks correctness pre-v21 role-authority receipt drifted'; end if;`,
+    "R06 hooks correctness pre-v21 role receipt");
+  const predecessorHash = sha256(v20Migration);
+  const predecessorPreflight =
+`-- Exact disposable-Postgres post-0494 receipt. Refuse before any v21 function
+-- exists; this registry-only successor changes no domain DDL or business rows.
+do $r06_hooks_correctness_preflight$
+declare observed_count integer; observed_digest text; grant_snapshot jsonb;
+begin
+  if (select count(*) from public.schema_migrations where filename='0494_codex_continuity_archive_registry.sql')<>1
+     or not exists(select 1 from public.schema_migrations where filename='0494_codex_continuity_archive_registry.sql'
+       and sha256='${predecessorHash}') then
+    raise exception 'R06 hooks correctness pre-v21 migration ledger receipt drifted';
+  end if;
+  grant_snapshot:=ops.scac_runtime_dml_grant_snapshot();
+  if (grant_snapshot->>'entry_count')::integer<>${predecessorDbCatalogBaseline.runtime_dml_grants.count}
+     or grant_snapshot->>'grant_digest'<>'${predecessorDbCatalogBaseline.runtime_dml_grants.digest}' then
+    raise exception 'R06 hooks correctness pre-v21 runtime grant receipt drifted';
+  end if;
+${preflightBody}end $r06_hooks_correctness_preflight$;
+
+`;
+  return `${predecessorPreflight}${sql}`.replace(/\n+$/, "\n");
+}
+
+
+// Shared v22 trust root. Every entry path that renders or writes a v22
+// artifact calls this BEFORE doing work, so an unbound template constant can
+// never reach a digest, a projection or a written file.
+const DOCTORCRE_PORTFOLIO_V21_MIGRATION_PATH =
+  "migrations/0495_r06_hooks_correctness_scac_successor.sql";
+const DOCTORCRE_PORTFOLIO_V21_RUNTIME_PATH =
+  "mcp-server/src/scac-mutation-registry.v21.generated.js";
+
+export function assertDoctorcrePortfolioV22TrustRoot() {
+  // Strictly stronger than the root it succeeds: the whole v21 chain has to be
+  // bound before a v22 artifact can exist at all.
+  assertR06HooksCorrectnessV21TrustRoot();
+  const { v21: v21Seal } = HISTORICAL_REGISTRY_SEALS;
+  if (v21Seal?.version !== REGISTRY_V21_VERSION ||
+      !CONTINUITY_ARCHIVE_DIGEST_RE.test(v21Seal?.digest ?? "") ||
+      !Number.isInteger(v21Seal?.entryCount) || v21Seal.entryCount < 1 ||
+      !Number.isInteger(v21Seal?.sourceEntryCount) || v21Seal.sourceEntryCount < 1)
+    throw new Error("DoctorCRE portfolio v22 predecessor seal is unbound");
+  assertR06HooksCorrectnessCatalogBaseline("predecessor v21",
+    DOCTORCRE_PORTFOLIO_PRE_V22_DB_CATALOG_BASELINE, "scac-db-catalog-projection.v21");
+  assertR06HooksCorrectnessCatalogBaseline("successor v22",
+    DOCTORCRE_PORTFOLIO_FORWARD_DB_CATALOG_BASELINE, "scac-db-catalog-projection.v22");
+  for (const path of [
+    DOCTORCRE_PORTFOLIO_V21_MIGRATION_PATH, DOCTORCRE_PORTFOLIO_V21_RUNTIME_PATH,
+  ]) {
+    if (!CONTINUITY_ARCHIVE_ARTIFACT_SHA_RE.test(
+      HISTORICAL_REGISTRY_ARTIFACT_SHA256[path] ?? ""))
+      throw new Error(`DoctorCRE portfolio v22 predecessor artifact pin is unbound: ${path}`);
+  }
+}
+
+// The append-only portfolio hierarchy itself. It is a template literal rather
+// than a separate file because the migration is generated: the domain SQL and
+// the catalog seal it produces have to be emitted together or the sealed
+// catalog would describe a database the migration never built.
+const DOCTORCRE_PORTFOLIO_DOMAIN_SQL = String.raw`
+-- DoctorCRE v5 portfolio hierarchy: append-only typed persistence.
+--
+-- Proposal is inert, review is independent and exact-digest, acceptance is a
+-- verified partner act on an exact hash. None of the three creates a job, an
+-- execution envelope, a capability session, a schedule, a deployment or a
+-- clock; the existing Engineering admission path gains an ancestor and
+-- predecessor check and gains no second queue.
+--
+-- TWO DIGESTS, DELIBERATELY. The GRAPH digest answers "is this the settled
+-- 21-node four-child shape". The ACCEPTED digest answers "is this the exact
+-- thing a partner approved", and it covers strictly more: the graph plus every
+-- child binding -- identity, ordinal, version, the child's own digest and its
+-- applicable accepted source. Those three decide what a descendant inherits, so
+-- a hash that omitted them would let the governing facts move under an
+-- unchanged signature. Acceptance binds the ACCEPTED digest.
+--
+-- NO ACTOR ARRIVES IN A PAYLOAD. Proposal and review derive the writer from the
+-- transaction-local actor context the server sets from verified session state;
+-- acceptance derives the partner from ops.authority_actor_slug(), which reads
+-- session_user. Direct INSERT is granted to nobody, so the derivation cannot be
+-- stepped around with raw SQL.
+
+
+-- ---------------------------------------------------------------------------
+-- Shared canonicalization helpers.
+-- ---------------------------------------------------------------------------
+
+-- A budget ceiling is a JSON number on both sides of the digest, so PostgreSQL
+-- has to spell it the way JavaScript does. JavaScript switches to exponent form
+-- below 1e-6 and at or above 1e21; PostgreSQL's float8 text switches below
+-- roughly 1e-4, and numeric text never does. Rendering from the double's own
+-- shortest representation and then re-spelling it to JavaScript's thresholds is
+-- what makes 1e-7 a value we CARRY rather than a value we refuse.
+create or replace function ops.portfolio_canonical_number_text(p_value numeric)
+returns text language plpgsql immutable
+set search_path = pg_catalog set extra_float_digits = 1
+as $$
+declare v_shortest text; v_mantissa text; v_exponent integer; v_plain text;
+begin
+  if p_value is null then return null; end if;
+  if p_value = 0 then return '0'; end if;
+  v_shortest := (p_value::float8)::text;
+  if strpos(v_shortest, 'e') = 0 then
+    v_plain := p_value::text;
+  else
+    v_mantissa := split_part(v_shortest, 'e', 1);
+    v_exponent := split_part(v_shortest, 'e', 2)::integer;
+    if v_exponent < -6 or v_exponent >= 21 then
+      -- JavaScript's exponent form, without PostgreSQL's zero padding.
+      return v_mantissa || 'e' || v_exponent::text;
+    end if;
+    v_plain := p_value::text;
+  end if;
+  if strpos(v_plain, '.') > 0 then
+    v_plain := rtrim(rtrim(v_plain, '0'), '.');
+  end if;
+  return coalesce(nullif(v_plain, ''), '0');
+end;
+$$;
+
+-- Representable means the value IS a double's value. Extra precision a double
+-- cannot hold is refused at the boundary; a value JavaScript can express is not.
+create or replace function ops.portfolio_canonical_number_valid(p_value numeric)
+returns boolean language sql immutable
+set search_path = pg_catalog set extra_float_digits = 1
+as $$
+  select p_value is not null and p_value = ((p_value::float8)::text)::numeric
+$$;
+
+comment on function ops.portfolio_canonical_number_text(numeric) is
+  'One numeric rendered exactly as JavaScript renders it, including JavaScript exponent thresholds.';
+comment on function ops.portfolio_canonical_number_valid(numeric) is
+  'True when a numeric is a value a double can hold. Extra precision refuses; every JavaScript-expressible value is carried.';
+
+-- Portfolio-local canonical JSON. It matches the module canonicalJson exactly:
+-- object keys sorted by code unit, array order preserved, strings via to_jsonb,
+-- and NUMBERS through the JavaScript-faithful renderer above. The shared
+-- guidance canonicalizer renders numbers in jsonb's own spelling, which is
+-- correct for the integral values it was written for and wrong here, so this is
+-- a separate function rather than a change to a historical shared one.
+create or replace function ops.portfolio_canonical_json(p_value jsonb)
+returns text language plpgsql immutable
+set search_path = pg_catalog, ops
+as $$
+declare v_kind text := jsonb_typeof(p_value); v_result text;
+begin
+  if v_kind = 'object' then
+    select '{' || coalesce(string_agg(
+             to_jsonb(entry.key)::text || ':' || ops.portfolio_canonical_json(entry.value),
+             ',' order by entry.key collate "C"), '') || '}'
+      into v_result from jsonb_each(p_value) as entry(key, value);
+    return v_result;
+  elsif v_kind = 'array' then
+    select '[' || coalesce(string_agg(
+             ops.portfolio_canonical_json(entry.value), ',' order by entry.ordinality), '') || ']'
+      into v_result from jsonb_array_elements(p_value) with ordinality as entry(value, ordinality);
+    return v_result;
+  elsif v_kind = 'string' then
+    return to_jsonb(p_value #>> '{}')::text;
+  elsif v_kind = 'number' then
+    return ops.portfolio_canonical_number_text((p_value #>> '{}')::numeric);
+  end if;
+  return p_value::text;
+end;
+$$;
+
+comment on function ops.portfolio_canonical_json(jsonb) is
+  'Canonical JSON for portfolio digests, matching the module canonicalJson including JavaScript number rendering.';
+
+-- A check constraint cannot hold a subquery, so the closed shape of the model
+-- floor is an immutable predicate the constraint calls.
+create or replace function ops.portfolio_model_floor_valid(p_floor jsonb)
+returns boolean language sql immutable
+set search_path = pg_catalog
+as $$
+  select jsonb_typeof(p_floor) = 'object'
+     and (select coalesce(array_agg(k order by k collate "C"), '{}')
+            from jsonb_object_keys(p_floor) k) = array['effort','model','provider','version']
+     and (select bool_and(jsonb_typeof(p_floor -> k) = 'string'
+                          and btrim(p_floor ->> k) <> '')
+            from jsonb_object_keys(p_floor) k)
+$$;
+
+comment on function ops.portfolio_model_floor_valid(jsonb) is
+  'True when a node model floor is exactly {effort, model, provider, version} with non-empty string values.';
+
+-- The writer whose authorship the server established for this transaction.
+-- This is a DERIVATION, not an authentication: what authenticates the write is
+-- that only the server sets this context and that no role holds direct INSERT.
+create or replace function ops.portfolio_writer_actor_id()
+returns uuid language plpgsql stable
+set search_path = pg_catalog, ops, public
+as $$
+declare v_slug text; v_id uuid; v_human boolean; v_verified text;
+begin
+  v_slug := nullif(current_setting('carr.acting_actor_slug', true), '');
+  if v_slug is null then
+    raise exception 'portfolio writes require the server-established actor context; none is set on this transaction';
+  end if;
+  select id, kind = 'human' into v_id, v_human from public.actor where slug = v_slug and active;
+  if not found then
+    raise exception 'acting actor % is not an active actor', v_slug;
+  end if;
+  -- Writing AS A HUMAN needs the second, narrower context the server sets only
+  -- for a verified partner. Without it a sponsored agent could name a partner
+  -- as the author of its own work.
+  if v_human then
+    v_verified := nullif(current_setting('carr.verified_human_actor_slug', true), '');
+    if v_verified is distinct from v_slug then
+      raise exception 'writing as human actor % requires the verified-partner context, which names %',
+        v_slug, coalesce(v_verified, '(none)');
+    end if;
+  end if;
+  return v_id;
+end;
+$$;
+
+comment on function ops.portfolio_writer_actor_id() is
+  'The active actor the server established for this transaction through carr.acting_actor_slug. Portfolio proposal and review derive authorship from it instead of accepting an actor in the payload.';
+
+-- ---------------------------------------------------------------------------
+-- Revision: one immutable graph plus the accepted binding over it.
+-- ---------------------------------------------------------------------------
+create table if not exists ops.portfolio_revision (
+  id                    uuid primary key default gen_random_uuid(),
+  portfolio_ref         text not null check (portfolio_ref ~ '^[A-Za-z0-9][A-Za-z0-9:._-]{2,199}$'),
+  revision_version      integer not null check (revision_version > 0),
+  idempotency_key       uuid not null unique,
+  schema_version        text not null check (schema_version = 'doctorcre-v5-portfolio-revision.v1'),
+  accepted_schema_version text not null
+                          check (accepted_schema_version = 'doctorcre-v5-portfolio-accepted-revision.v1'),
+  preimage              jsonb not null check (jsonb_typeof(preimage) = 'object'),
+  graph_digest          text not null check (graph_digest ~ '^sha256:[0-9a-f]{64}$'),
+  accepted_digest       text not null check (accepted_digest ~ '^sha256:[0-9a-f]{64}$'),
+  node_count            integer not null check (node_count = 21),
+  edge_count            integer not null check (edge_count >= 0),
+  child_count           integer not null check (child_count = 4),
+  proposed_by_actor_id  uuid not null references public.actor(id),
+  created_at            timestamptz not null default now(),
+  unique (portfolio_ref, revision_version),
+  unique (portfolio_ref, accepted_digest)
+);
+
+comment on table ops.portfolio_revision is
+  'Append-only DoctorCRE v5 portfolio revision. graph_digest covers the settled 21-node shape; accepted_digest additionally covers every child binding and is the hash a partner accepts. Inert: creates no job, envelope, capability or schedule.';
+
+-- ---------------------------------------------------------------------------
+-- Children: four immutable identities, each with its own version, its own hash
+-- over its own content, and its applicable accepted source binding. The source
+-- binding points at the EXISTING Program 6 plan acceptance; no second authority
+-- ledger is created.
+-- ---------------------------------------------------------------------------
+create table if not exists ops.portfolio_child_revision (
+  id                    uuid primary key default gen_random_uuid(),
+  portfolio_revision_id uuid not null references ops.portfolio_revision(id),
+  child_ref             text not null check (child_ref in
+                          ('foundation-and-control-plane','assurance-fabric',
+                           'product-journeys','rollout-and-retirement')),
+  child_ordinal         integer not null check (child_ordinal between 0 and 3),
+  child_version         integer not null check (child_version > 0),
+  child_digest          text not null check (child_digest ~ '^sha256:[0-9a-f]{64}$'),
+  accepted_plan_id      uuid references ops.sourced_work_request_plan(id),
+  created_at            timestamptz not null default now(),
+  unique (portfolio_revision_id, child_ref),
+  unique (portfolio_revision_id, child_ordinal)
+);
+
+comment on table ops.portfolio_child_revision is
+  'The four immutable DoctorCRE v5 child programs for one portfolio revision, each with its own version, content digest and applicable accepted source binding.';
+
+-- ---------------------------------------------------------------------------
+-- Nodes: the 21 master milestones with COMPLETE typed metadata. Every metadata
+-- column is NOT NULL: a node governed by an authority class or budget it does
+-- not carry is not governed at all.
+-- ---------------------------------------------------------------------------
+create table if not exists ops.portfolio_node (
+  id                    uuid primary key default gen_random_uuid(),
+  portfolio_revision_id uuid not null references ops.portfolio_revision(id),
+  node_ref              text not null check (node_ref ~ '^[A-Za-z0-9][A-Za-z0-9:._-]{2,199}$'),
+  node_kind             text not null check (node_kind in ('portfolio','child','milestone','slice')),
+  ordinal               integer not null check (ordinal between 1 and 21),
+  parent_ref            text not null check (parent_ref ~ '^[A-Za-z0-9][A-Za-z0-9:._-]{2,199}$'),
+  child_ref             text not null check (child_ref in
+                          ('foundation-and-control-plane','assurance-fabric',
+                           'product-journeys','rollout-and-retirement')),
+  authority_class       text not null check (authority_class ~ '^[a-z][a-z0-9_]{1,63}$'),
+  effect_class          text not null check (effect_class ~ '^[a-z][a-z0-9_]{1,63}$'),
+  data_class            text not null check (data_class ~ '^[a-z][a-z0-9_]{1,63}$'),
+  budget_identity       text not null check (btrim(budget_identity) <> '' and char_length(budget_identity) <= 200),
+  budget_ceiling        numeric not null check (budget_ceiling >= 0 and budget_ceiling <= 1000000000000
+                          and ops.portfolio_canonical_number_valid(budget_ceiling)),
+  model_floor           jsonb not null,
+  recovery_ref          text not null check (recovery_ref ~ '^[A-Za-z0-9][A-Za-z0-9:._-]{2,199}$'),
+  terminal_predicate    text not null check (btrim(terminal_predicate) <> '' and char_length(terminal_predicate) <= 500),
+  created_at            timestamptz not null default now(),
+  constraint portfolio_node_model_floor_closed check (ops.portfolio_model_floor_valid(model_floor)),
+  constraint portfolio_node_not_self_parent check (parent_ref <> node_ref),
+  unique (portfolio_revision_id, node_ref),
+  unique (portfolio_revision_id, ordinal)
+);
+
+comment on table ops.portfolio_node is
+  'The 21 master milestone nodes of one portfolio revision, with complete typed metadata and the child program that governs each.';
+
+create table if not exists ops.portfolio_node_edge (
+  id                    uuid primary key default gen_random_uuid(),
+  portfolio_revision_id uuid not null references ops.portfolio_revision(id),
+  from_node_ref         text not null,
+  to_node_ref           text not null,
+  created_at            timestamptz not null default now(),
+  constraint portfolio_edge_not_self check (from_node_ref <> to_node_ref),
+  unique (portfolio_revision_id, from_node_ref, to_node_ref)
+);
+
+comment on table ops.portfolio_node_edge is
+  'Dependency edges of one portfolio revision; from_node_ref must complete before to_node_ref.';
+
+create table if not exists ops.portfolio_revision_review (
+  id                    uuid primary key default gen_random_uuid(),
+  portfolio_revision_id uuid not null references ops.portfolio_revision(id),
+  idempotency_key       uuid not null unique,
+  reviewed_digest       text not null check (reviewed_digest ~ '^sha256:[0-9a-f]{64}$'),
+  verdict               text not null check (verdict in ('pass','fail')),
+  review_summary        text not null check (btrim(review_summary) <> '' and char_length(review_summary) <= 1000),
+  reviewer_actor_id     uuid not null references public.actor(id),
+  created_at            timestamptz not null default now()
+);
+
+comment on table ops.portfolio_revision_review is
+  'Append-only independent review of one exact accepted digest. A review naming a digest the revision does not currently have is refused at write time, so a passing review can never be carried onto different bytes.';
+
+create table if not exists ops.portfolio_revision_acceptance_receipt (
+  id                    uuid primary key default gen_random_uuid(),
+  portfolio_revision_id uuid not null unique references ops.portfolio_revision(id),
+  portfolio_ref         text not null,
+  idempotency_key       uuid not null unique,
+  accepted_digest       text not null check (accepted_digest ~ '^sha256:[0-9a-f]{64}$'),
+  review_id             uuid not null unique references ops.portfolio_revision_review(id),
+  accepted_by_actor_id  uuid not null references public.actor(id),
+  accepted_at           timestamptz not null default now()
+);
+
+comment on table ops.portfolio_revision_acceptance_receipt is
+  'Private verified-partner receipt accepting one exact portfolio accepted digest. It grants no dispatch or execution authority; it only makes that revision the current accepted ancestor.';
+
+-- ---------------------------------------------------------------------------
+-- Append-only enforcement, and the freeze that follows acceptance.
+-- ---------------------------------------------------------------------------
+create or replace function ops.portfolio_rows_immutable()
+returns trigger language plpgsql
+set search_path = pg_catalog, ops
+as $$
+begin
+  raise exception 'DoctorCRE v5 portfolio rows are append-only';
+end;
+$$;
+
+comment on function ops.portfolio_rows_immutable() is
+  'Refuses every update and delete on the DoctorCRE v5 portfolio hierarchy tables.';
+
+do $$
+declare t text;
+begin
+  foreach t in array array[
+    'portfolio_revision','portfolio_child_revision','portfolio_node',
+    'portfolio_node_edge','portfolio_revision_review',
+    'portfolio_revision_acceptance_receipt'
+  ] loop
+    execute format('drop trigger if exists %I on ops.%I', t || '_append_only', t);
+    execute format(
+      'create trigger %I before update or delete on ops.%I for each row execute function ops.portfolio_rows_immutable()',
+      t || '_append_only', t);
+  end loop;
+end $$;
+
+-- Append-only blocks rewriting an accepted revision. It does NOT block ADDING
+-- to one, and a structural row appended after acceptance would change what the
+-- accepted hash covers while the receipt still read as valid. So once a
+-- revision is accepted its structure is closed to inserts too.
+create or replace function ops.portfolio_structure_frozen_after_acceptance()
+returns trigger language plpgsql
+set search_path = pg_catalog, ops
+as $$
+begin
+  if exists (select 1 from ops.portfolio_revision_acceptance_receipt
+              where portfolio_revision_id = new.portfolio_revision_id) then
+    raise exception 'portfolio revision % is accepted; its structure is closed to further % rows',
+      new.portfolio_revision_id, tg_table_name;
+  end if;
+  return new;
+end;
+$$;
+
+comment on function ops.portfolio_structure_frozen_after_acceptance() is
+  'Refuses a child, node or edge insert against a revision that already carries an acceptance receipt, so no structural row can appear outside the hash the partner accepted.';
+
+do $$
+declare t text;
+begin
+  foreach t in array array[
+    'portfolio_child_revision','portfolio_node','portfolio_node_edge'
+  ] loop
+    execute format('drop trigger if exists %I on ops.%I', t || '_frozen_after_acceptance', t);
+    execute format(
+      'create trigger %I before insert on ops.%I for each row execute function ops.portfolio_structure_frozen_after_acceptance()',
+      t || '_frozen_after_acceptance', t);
+  end loop;
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- Canonical preimages, rebuilt FROM THE STORED ROWS. Recomputing from structure
+-- is what makes a digest a statement about the persisted hierarchy rather than
+-- about a blob a caller once supplied.
+--
+-- Ordering is declared: nodes and child bindings keep ordinal order; edges and
+-- child member lists are unordered sets sorted by code unit (collate "C"),
+-- matching the JavaScript comparator exactly.
+-- ---------------------------------------------------------------------------
+create or replace function ops.portfolio_graph_preimage(p_revision_id uuid)
+returns jsonb language plpgsql stable security definer
+set search_path = pg_catalog, ops, public
+as $$
+declare
+  v_rev ops.portfolio_revision%rowtype;
+  v_children jsonb; v_nodes jsonb; v_edges jsonb;
+begin
+  select * into v_rev from ops.portfolio_revision where id = p_revision_id;
+  if not found then
+    raise exception 'portfolio revision % does not exist', p_revision_id;
+  end if;
+
+  select coalesce(jsonb_agg(c.child_ref order by c.child_ordinal), '[]'::jsonb)
+    into v_children from ops.portfolio_child_revision c
+   where c.portfolio_revision_id = p_revision_id;
+
+  select coalesce(jsonb_agg(node_object order by ordinal), '[]'::jsonb)
+    into v_nodes from (
+      select n.ordinal, jsonb_build_object(
+               'node_ref', n.node_ref, 'node_kind', n.node_kind, 'ordinal', n.ordinal,
+               'parent_ref', n.parent_ref,
+               'authority_class', n.authority_class, 'effect_class', n.effect_class,
+               'data_class', n.data_class, 'budget_identity', n.budget_identity,
+               'budget_ceiling', n.budget_ceiling, 'model_floor', n.model_floor,
+               'recovery_ref', n.recovery_ref, 'terminal_predicate', n.terminal_predicate) as node_object
+        from ops.portfolio_node n where n.portfolio_revision_id = p_revision_id) ordered;
+
+  select coalesce(jsonb_agg(edge_object order by from_ref collate "C", to_ref collate "C"), '[]'::jsonb)
+    into v_edges from (
+      select e.from_node_ref as from_ref, e.to_node_ref as to_ref,
+             jsonb_build_object('from_node_ref', e.from_node_ref,
+                                'to_node_ref', e.to_node_ref) as edge_object
+        from ops.portfolio_node_edge e where e.portfolio_revision_id = p_revision_id) ordered;
+
+  return jsonb_build_object(
+    'schema_version', v_rev.schema_version,
+    'revision_version', v_rev.revision_version,
+    'portfolio_ref', v_rev.portfolio_ref,
+    'source_digests', v_rev.preimage -> 'source_digests',
+    'child_program_refs', v_children,
+    'nodes', v_nodes,
+    'edges', v_edges);
+end;
+$$;
+
+comment on function ops.portfolio_graph_preimage(uuid) is
+  'Canonical graph preimage of one portfolio revision, rebuilt from its persisted rows.';
+
+-- Digests use ops.portfolio_canonical_json, the portfolio-local canonicalizer.
+-- It is not a gratuitous second copy: the shared guidance canonicalizer renders
+-- numbers in jsonb's spelling, which cannot express 1e-7 the way JavaScript
+-- does, and that function is historical shared source this change may not edit.
+create or replace function ops.portfolio_graph_digest(p_revision_id uuid)
+returns text language sql stable security definer
+set search_path = pg_catalog, ops, public
+as $$
+  select 'sha256:' || encode(digest(convert_to(
+    ops.portfolio_canonical_json(ops.portfolio_graph_preimage(p_revision_id)),
+    'UTF8'), 'sha256'), 'hex')
+$$;
+
+comment on function ops.portfolio_graph_digest(uuid) is
+  'Deterministic sha256 of one portfolio revision graph preimage.';
+
+-- One child's own content: identity, version, ordered membership and the
+-- accepted source binding that applies to it. The child hashes only what it
+-- owns, so the parent can hash the child bindings without recursion.
+create or replace function ops.portfolio_child_preimage(p_revision_id uuid, p_child_ref text)
+returns jsonb language plpgsql stable security definer
+set search_path = pg_catalog, ops, public
+as $$
+declare v_child ops.portfolio_child_revision%rowtype; v_members jsonb; v_plan_ref text;
+begin
+  select * into v_child from ops.portfolio_child_revision
+   where portfolio_revision_id = p_revision_id and child_ref = p_child_ref;
+  if not found then
+    raise exception 'portfolio revision % has no child %', p_revision_id, p_child_ref;
+  end if;
+  select coalesce(jsonb_agg(n.node_ref order by n.node_ref collate "C"), '[]'::jsonb)
+    into v_members from ops.portfolio_node n
+   where n.portfolio_revision_id = p_revision_id and n.child_ref = p_child_ref;
+  -- The digest binds the stable plan REFERENCE, never the surrogate row id.
+  select p.plan_ref into v_plan_ref from ops.sourced_work_request_plan p
+   where p.id = v_child.accepted_plan_id;
+  return jsonb_build_object(
+    'schema_version', 'doctorcre-v5-portfolio-child.v1',
+    'child_ref', v_child.child_ref,
+    'child_version', v_child.child_version,
+    'member_node_refs', v_members,
+    'accepted_plan_ref', coalesce(to_jsonb(v_plan_ref), 'null'::jsonb));
+end;
+$$;
+
+comment on function ops.portfolio_child_preimage(uuid, text) is
+  'Canonical preimage of one child program: identity, version, ordered membership and applicable accepted source reference.';
+
+create or replace function ops.portfolio_child_digest(p_revision_id uuid, p_child_ref text)
+returns text language sql stable security definer
+set search_path = pg_catalog, ops, public
+as $$
+  select 'sha256:' || encode(digest(convert_to(
+    ops.portfolio_canonical_json(ops.portfolio_child_preimage(p_revision_id, p_child_ref)),
+    'UTF8'), 'sha256'), 'hex')
+$$;
+
+comment on function ops.portfolio_child_digest(uuid, text) is
+  'Deterministic sha256 of one child program content preimage.';
+
+-- The accepted preimage: the graph plus every child binding. This is what a
+-- partner accepts.
+create or replace function ops.portfolio_accepted_preimage(p_revision_id uuid)
+returns jsonb language plpgsql stable security definer
+set search_path = pg_catalog, ops, public
+as $$
+declare v_bindings jsonb;
+begin
+  select coalesce(jsonb_agg(binding order by child_ordinal), '[]'::jsonb)
+    into v_bindings from (
+      select c.child_ordinal, jsonb_build_object(
+               'child_ref', c.child_ref,
+               'child_ordinal', c.child_ordinal,
+               'child_version', c.child_version,
+               'child_digest', c.child_digest,
+               'accepted_plan_ref', coalesce(to_jsonb(p.plan_ref), 'null'::jsonb)) as binding
+        from ops.portfolio_child_revision c
+        left join ops.sourced_work_request_plan p on p.id = c.accepted_plan_id
+       where c.portfolio_revision_id = p_revision_id) ordered;
+  return jsonb_build_object(
+    'schema_version', 'doctorcre-v5-portfolio-accepted-revision.v1',
+    'graph', ops.portfolio_graph_preimage(p_revision_id),
+    'child_bindings', v_bindings);
+end;
+$$;
+
+comment on function ops.portfolio_accepted_preimage(uuid) is
+  'Canonical accepted preimage: the graph plus every child binding. Nothing that governs a descendant sits outside it.';
+
+create or replace function ops.portfolio_accepted_digest(p_revision_id uuid)
+returns text language sql stable security definer
+set search_path = pg_catalog, ops, public
+as $$
+  select 'sha256:' || encode(digest(convert_to(
+    ops.portfolio_canonical_json(ops.portfolio_accepted_preimage(p_revision_id)),
+    'UTF8'), 'sha256'), 'hex')
+$$;
+
+comment on function ops.portfolio_accepted_digest(uuid) is
+  'Deterministic sha256 a partner accepts, covering the graph and every child binding.';
+
+-- ---------------------------------------------------------------------------
+-- Structural validation: closed and acyclic in BOTH structures, the parent
+-- hierarchy and the dependency set.
+-- ---------------------------------------------------------------------------
+create or replace function ops.portfolio_revision_structure_valid(p_revision_id uuid)
+returns boolean language plpgsql stable security definer
+set search_path = pg_catalog, ops, public
+as $$
+declare v_portfolio_ref text; v_nodes integer; v_children integer; v_bad integer; v_ordered integer;
+begin
+  select portfolio_ref into v_portfolio_ref from ops.portfolio_revision where id = p_revision_id;
+  if not found then return false; end if;
+
+  select count(*) into v_nodes from ops.portfolio_node where portfolio_revision_id = p_revision_id;
+  select count(*) into v_children from ops.portfolio_child_revision where portfolio_revision_id = p_revision_id;
+  if v_nodes <> 21 or v_children <> 4 then return false; end if;
+
+  select count(*) into v_bad from ops.portfolio_node_edge e
+   where e.portfolio_revision_id = p_revision_id
+     and (not exists (select 1 from ops.portfolio_node n
+                       where n.portfolio_revision_id = p_revision_id and n.node_ref = e.from_node_ref)
+       or not exists (select 1 from ops.portfolio_node n
+                       where n.portfolio_revision_id = p_revision_id and n.node_ref = e.to_node_ref));
+  if v_bad > 0 then return false; end if;
+
+  select count(*) into v_bad from ops.portfolio_node n
+   where n.portfolio_revision_id = p_revision_id
+     and n.parent_ref <> v_portfolio_ref
+     and not exists (select 1 from ops.portfolio_node p
+                      where p.portfolio_revision_id = p_revision_id and p.node_ref = n.parent_ref);
+  if v_bad > 0 then return false; end if;
+
+  -- Every node names a child this revision actually carries.
+  select count(*) into v_bad from ops.portfolio_node n
+   where n.portfolio_revision_id = p_revision_id
+     and not exists (select 1 from ops.portfolio_child_revision c
+                      where c.portfolio_revision_id = p_revision_id and c.child_ref = n.child_ref);
+  if v_bad > 0 then return false; end if;
+
+  -- The parent hierarchy terminates at the portfolio for every node; a chain
+  -- that never reaches it is a parent cycle.
+  with recursive walk(node_ref, current_ref, depth) as (
+    select n.node_ref, n.parent_ref, 1 from ops.portfolio_node n
+     where n.portfolio_revision_id = p_revision_id
+    union all
+    select w.node_ref, p.parent_ref, w.depth + 1
+      from walk w join ops.portfolio_node p
+        on p.portfolio_revision_id = p_revision_id and p.node_ref = w.current_ref
+     where w.current_ref <> v_portfolio_ref and w.depth <= 21)
+  select count(*) into v_bad from ops.portfolio_node n
+   where n.portfolio_revision_id = p_revision_id
+     and not exists (select 1 from walk w
+                      where w.node_ref = n.node_ref and w.current_ref = v_portfolio_ref);
+  if v_bad > 0 then return false; end if;
+
+  -- The dependency set is acyclic: every node reaches a topological position.
+  with recursive ordered(node_ref, level) as (
+    select n.node_ref, 1 from ops.portfolio_node n
+     where n.portfolio_revision_id = p_revision_id
+       and not exists (select 1 from ops.portfolio_node_edge e
+                        where e.portfolio_revision_id = p_revision_id and e.to_node_ref = n.node_ref)
+    union
+    select e.to_node_ref, o.level + 1
+      from ordered o join ops.portfolio_node_edge e
+        on e.portfolio_revision_id = p_revision_id and e.from_node_ref = o.node_ref
+     where o.level <= 21)
+  select count(distinct node_ref) into v_ordered from ordered;
+  if v_ordered <> 21 then return false; end if;
+
+  return true;
+end;
+$$;
+
+comment on function ops.portfolio_revision_structure_valid(uuid) is
+  'True when one portfolio revision has 21 nodes, four children, closed edges and child references, a parent hierarchy terminating at the portfolio, and an acyclic dependency set.';
+
+-- A revision is only complete once its children, nodes and edges are in, so its
+-- structure and both digests are checked at COMMIT. Stored digests are compared
+-- against ones recomputed from the rows: a caller may supply a hash, it is
+-- never taken as the answer.
+create or replace function ops.portfolio_revision_complete()
+returns trigger language plpgsql
+set search_path = pg_catalog, ops, public
+as $$
+declare v_graph text; v_accepted text; v_child record;
+begin
+  if not ops.portfolio_revision_structure_valid(new.id) then
+    raise exception 'portfolio revision % is not a closed acyclic 21-node four-child graph', new.id;
+  end if;
+  v_graph := ops.portfolio_graph_digest(new.id);
+  if new.graph_digest <> v_graph then
+    raise exception 'portfolio graph digest does not match its rows: stored %, computed %',
+      new.graph_digest, v_graph;
+  end if;
+  for v_child in select child_ref, child_digest from ops.portfolio_child_revision
+                  where portfolio_revision_id = new.id loop
+    if v_child.child_digest <> ops.portfolio_child_digest(new.id, v_child.child_ref) then
+      raise exception 'child % digest does not match its content: stored %, computed %',
+        v_child.child_ref, v_child.child_digest, ops.portfolio_child_digest(new.id, v_child.child_ref);
+    end if;
+  end loop;
+  v_accepted := ops.portfolio_accepted_digest(new.id);
+  if new.accepted_digest <> v_accepted then
+    raise exception 'portfolio accepted digest does not match its rows: stored %, computed %',
+      new.accepted_digest, v_accepted;
+  end if;
+  if new.edge_count <> (select count(*) from ops.portfolio_node_edge
+                         where portfolio_revision_id = new.id) then
+    raise exception 'portfolio revision edge_count disagrees with its edges';
+  end if;
+  return null;
+end;
+$$;
+
+comment on function ops.portfolio_revision_complete() is
+  'Deferred completeness check: at commit a revision must be structurally valid and its stored graph, child and accepted digests must each equal the digest recomputed from its own rows.';
+
+drop trigger if exists portfolio_revision_complete on ops.portfolio_revision;
+create constraint trigger portfolio_revision_complete
+  after insert on ops.portfolio_revision
+  deferrable initially deferred
+  for each row execute function ops.portfolio_revision_complete();
+
+-- ---------------------------------------------------------------------------
+-- Review and acceptance guards. Everything either act depends on is checked
+-- HERE, so a handler bug cannot admit an unreviewed, stale or misattributed
+-- hash.
+-- ---------------------------------------------------------------------------
+create or replace function ops.portfolio_review_guard()
+returns trigger language plpgsql
+set search_path = pg_catalog, ops, public
+as $$
+declare v_live text; v_proposer uuid;
+begin
+  select proposed_by_actor_id into v_proposer from ops.portfolio_revision
+   where id = new.portfolio_revision_id;
+  if not found then
+    raise exception 'portfolio review names an unknown revision';
+  end if;
+  -- The reviewer is the server-established writer, never a payload field.
+  if new.reviewer_actor_id <> ops.portfolio_writer_actor_id() then
+    raise exception 'portfolio review actor does not match the authenticated writer context';
+  end if;
+  v_live := ops.portfolio_accepted_digest(new.portfolio_revision_id);
+  if new.reviewed_digest <> v_live then
+    raise exception 'portfolio review digest is stale: expected %', v_live;
+  end if;
+  if new.verdict = 'pass' and new.reviewer_actor_id = v_proposer then
+    raise exception 'a proposer may not pass their own portfolio revision';
+  end if;
+  return new;
+end;
+$$;
+
+comment on function ops.portfolio_review_guard() is
+  'Refuses a portfolio review that is misattributed, written against a digest the revision no longer has, or a self-review pass.';
+
+drop trigger if exists portfolio_review_guard on ops.portfolio_revision_review;
+create trigger portfolio_review_guard
+  before insert on ops.portfolio_revision_review
+  for each row execute function ops.portfolio_review_guard();
+
+create or replace function ops.portfolio_proposal_guard()
+returns trigger language plpgsql
+set search_path = pg_catalog, ops, public
+as $$
+begin
+  if new.proposed_by_actor_id <> ops.portfolio_writer_actor_id() then
+    raise exception 'portfolio proposal actor does not match the authenticated writer context';
+  end if;
+  return new;
+end;
+$$;
+
+comment on function ops.portfolio_proposal_guard() is
+  'Binds a proposal to the server-established writer, so a proposal cannot be attributed to another actor.';
+
+drop trigger if exists portfolio_proposal_guard on ops.portfolio_revision;
+create trigger portfolio_proposal_guard
+  before insert on ops.portfolio_revision
+  for each row execute function ops.portfolio_proposal_guard();
+
+create or replace function ops.portfolio_acceptance_guard()
+returns trigger language plpgsql
+set search_path = pg_catalog, ops, public
+as $$
+declare
+  v_rev ops.portfolio_revision%rowtype;
+  v_review ops.portfolio_revision_review%rowtype;
+  v_live text; v_partner text; v_partner_actor_id uuid;
+begin
+  select * into v_rev from ops.portfolio_revision where id = new.portfolio_revision_id;
+  if not found then raise exception 'portfolio acceptance names an unknown revision'; end if;
+  if new.portfolio_ref <> v_rev.portfolio_ref then
+    raise exception 'portfolio acceptance names the wrong portfolio';
+  end if;
+
+  -- The digest is RECOMPUTED from the persisted rows; a caller-supplied hash is
+  -- only ever compared against it, never trusted as the value.
+  v_live := ops.portfolio_accepted_digest(new.portfolio_revision_id);
+  if new.accepted_digest <> v_live or v_rev.accepted_digest <> v_live then
+    raise exception 'portfolio acceptance digest is stale: expected %', v_live;
+  end if;
+  if not ops.portfolio_revision_structure_valid(new.portfolio_revision_id) then
+    raise exception 'portfolio revision structure is invalid';
+  end if;
+
+  select * into v_review from ops.portfolio_revision_review where id = new.review_id;
+  if not found then raise exception 'portfolio acceptance names an unknown review'; end if;
+  if v_review.portfolio_revision_id <> new.portfolio_revision_id then
+    raise exception 'portfolio acceptance names a review of a different revision';
+  end if;
+  if v_review.verdict <> 'pass' then
+    raise exception 'portfolio acceptance requires a passing review';
+  end if;
+  if v_review.reviewed_digest <> v_live then
+    raise exception 'the passing review was written against different bytes';
+  end if;
+  if v_review.reviewer_actor_id = v_rev.proposed_by_actor_id then
+    raise exception 'the reviewer may not be the proposer of the same revision';
+  end if;
+
+  -- THE TRUST BOUNDARY. An actor id in the payload proves nothing: anyone able
+  -- to insert could name Joe. What authenticates the acceptor is the database
+  -- session -- the per-partner authority credential the server selects from
+  -- verified session state. ops.authority_actor_slug() reads session_user and
+  -- raises for any other principal, so a supplied id may only agree with it.
+  v_partner := ops.authority_actor_slug();
+  select id into v_partner_actor_id from public.actor
+   where slug = v_partner and active and kind = 'human';
+  if not found then
+    raise exception 'partner authority session % has no active human actor', v_partner;
+  end if;
+  if new.accepted_by_actor_id <> v_partner_actor_id then
+    raise exception 'portfolio acceptance actor does not match the authenticated partner session';
+  end if;
+
+  -- Three distinct roles, not two: a reviewer who can accept their own pass is
+  -- not an independent reviewer.
+  if new.accepted_by_actor_id = v_rev.proposed_by_actor_id then
+    raise exception 'the acceptor may not be the proposer of the same revision';
+  end if;
+  if new.accepted_by_actor_id = v_review.reviewer_actor_id then
+    raise exception 'the acceptor may not also be the independent reviewer';
+  end if;
+
+  return new;
+end;
+$$;
+
+comment on function ops.portfolio_acceptance_guard() is
+  'Authoritative acceptance precondition: recomputed accepted digest, valid structure, a fresh passing independent review on the same bytes, three distinct identities, and an acceptor derived from the authenticated partner session.';
+
+drop trigger if exists portfolio_acceptance_guard on ops.portfolio_revision_acceptance_receipt;
+create trigger portfolio_acceptance_guard
+  before insert on ops.portfolio_revision_acceptance_receipt
+  for each row execute function ops.portfolio_acceptance_guard();
+
+-- ---------------------------------------------------------------------------
+-- The accepted ancestor, and the descendant binding the existing Engineering
+-- admission consults. The route is derived from TRUSTED STORED SOURCE: whether
+-- work is portfolio-governed is answered by the accepted portfolio, never by a
+-- caller flag.
+-- ---------------------------------------------------------------------------
+-- The current accepted identity, chosen WITHOUT looking at integrity. Which
+-- revision is current is a fact about acceptance; whether it is intact is a
+-- separate question asked next. Deciding them together is what let a tampered
+-- current revision disappear behind an older healthy one.
+create or replace function ops.portfolio_current_accepted_revision(p_portfolio_ref text)
+returns uuid language sql stable security definer
+set search_path = pg_catalog, ops, public
+as $$
+  select r.id from ops.portfolio_revision r
+    join ops.portfolio_revision_acceptance_receipt a on a.portfolio_revision_id = r.id
+   where r.portfolio_ref = p_portfolio_ref
+   order by r.revision_version desc limit 1
+$$;
+
+comment on function ops.portfolio_current_accepted_revision(text) is
+  'The highest-version revision of one portfolio that carries an acceptance receipt, regardless of integrity.';
+
+-- Why one revision is not trustworthy, or null when it is. Every clause is a
+-- recomputation from the persisted rows, so a tampered row cannot answer for
+-- itself.
+create or replace function ops.portfolio_revision_integrity_error(p_revision_id uuid)
+returns text language plpgsql stable security definer
+set search_path = pg_catalog, ops, public
+as $$
+declare v_rev ops.portfolio_revision%rowtype; v_receipt ops.portfolio_revision_acceptance_receipt%rowtype;
+        v_live text; v_child record;
+begin
+  select * into v_rev from ops.portfolio_revision where id = p_revision_id;
+  if not found then return format('revision %s does not exist', p_revision_id); end if;
+  if not ops.portfolio_revision_structure_valid(p_revision_id) then
+    return format('revision %s is no longer a closed acyclic 21-node four-child graph', p_revision_id);
+  end if;
+  if v_rev.graph_digest <> ops.portfolio_graph_digest(p_revision_id) then
+    return format('revision %s graph digest no longer matches its rows', p_revision_id);
+  end if;
+  for v_child in select child_ref, child_digest from ops.portfolio_child_revision
+                  where portfolio_revision_id = p_revision_id loop
+    if v_child.child_digest <> ops.portfolio_child_digest(p_revision_id, v_child.child_ref) then
+      return format('revision %s child %s digest no longer matches its content',
+                    p_revision_id, v_child.child_ref);
+    end if;
+  end loop;
+  v_live := ops.portfolio_accepted_digest(p_revision_id);
+  if v_rev.accepted_digest <> v_live then
+    return format('revision %s accepted digest no longer matches its rows', p_revision_id);
+  end if;
+  select * into v_receipt from ops.portfolio_revision_acceptance_receipt
+   where portfolio_revision_id = p_revision_id;
+  if found and v_receipt.accepted_digest <> v_live then
+    return format('revision %s acceptance receipt names a digest the rows no longer produce', p_revision_id);
+  end if;
+  return null;
+end;
+$$;
+
+comment on function ops.portfolio_revision_integrity_error(uuid) is
+  'Why one portfolio revision is not trustworthy, recomputed from its rows, or null when it is intact.';
+
+-- The accepted ancestor. It selects the current accepted identity first and
+-- then REFUSES an integrity failure. It never falls back to an older healthy
+-- revision and never reports a tampered portfolio as no portfolio: both would
+-- turn corruption into ordinary source, which is the fail-open shape this guard
+-- exists to prevent.
+create or replace function ops.portfolio_accepted_revision(p_portfolio_ref text)
+returns uuid language plpgsql stable security definer
+set search_path = pg_catalog, ops, public
+as $$
+declare v_id uuid; v_error text;
+begin
+  v_id := ops.portfolio_current_accepted_revision(p_portfolio_ref);
+  if v_id is null then return null; end if;
+  v_error := ops.portfolio_revision_integrity_error(v_id);
+  if v_error is not null then
+    raise exception 'accepted portfolio % failed integrity: %', p_portfolio_ref, v_error
+      using errcode = 'integrity_constraint_violation';
+  end if;
+  return v_id;
+end;
+$$;
+
+comment on function ops.portfolio_accepted_revision(text) is
+  'The current accepted portfolio revision. Null when the portfolio has no acceptance at all; an explicit refusal when the current accepted revision fails integrity.';
+
+create or replace function ops.portfolio_descendant_binding(p_slice_ref text)
+returns jsonb language plpgsql stable security definer
+set search_path = pg_catalog, ops, public
+as $$
+declare
+  v_node ops.portfolio_node%rowtype;
+  v_revision_id uuid; v_portfolio_ref text;
+  v_child ops.portfolio_child_revision%rowtype;
+  v_plan_ref text; v_predecessors jsonb;
+  v_accepted record; v_error text;
+  v_refs text[]; v_ids uuid[];
+begin
+  -- INTEGRITY BEFORE DISCOVERY. Looking the node up first made governance
+  -- depend on the very rows corruption can edit: delete or rename a node in the
+  -- accepted revision and the lookup simply misses, and a missing row read as
+  -- "no portfolio names this" is the fail-open answer. So every current accepted
+  -- revision is verified FIRST, and a failure refuses outright -- a portfolio
+  -- whose rows no longer produce its accepted digest might be exactly the one
+  -- that names this slice, so no honest answer about any slice is available
+  -- while one is unreadable.
+  for v_accepted in
+    select r.portfolio_ref, r.id
+      from ops.portfolio_revision r
+     where r.id = ops.portfolio_current_accepted_revision(r.portfolio_ref)
+  loop
+    v_error := ops.portfolio_revision_integrity_error(v_accepted.id);
+    if v_error is not null then
+      raise exception 'accepted portfolio % failed integrity: %', v_accepted.portfolio_ref, v_error
+        using errcode = 'integrity_constraint_violation';
+    end if;
+  end loop;
+
+  -- Only a VERIFIED current accepted revision can govern. A proposal nobody
+  -- accepted governs nothing and blocks nothing, so an arbitrary proposal
+  -- naming a slice can never blanket-block ordinary work.
+  --
+  -- AN AMBIGUOUS ANCESTOR IS REFUSED, NEVER RANKED. Node reference uniqueness
+  -- is enforced per revision, so two different portfolios may each hold a
+  -- current accepted revision naming this same slice. Both can pass integrity
+  -- and both can bind the same child plan while carrying different budget,
+  -- authority, model-floor or terminal metadata -- and every one of those
+  -- fields rides into the envelope. Taking the first row would let an ordering
+  -- decide which portfolio governs, so the collision is a genuine contradiction
+  -- about governance that only a human can settle. Refusing keeps that visible
+  -- instead of resolving it silently in whichever direction the plan happened
+  -- to scan.
+  select array_agg(r.portfolio_ref order by r.portfolio_ref collate "C"),
+         array_agg(r.id order by r.portfolio_ref collate "C")
+    into v_refs, v_ids
+    from ops.portfolio_node n
+    join ops.portfolio_revision r on r.id = n.portfolio_revision_id
+   where n.node_ref = p_slice_ref
+     and r.id = ops.portfolio_current_accepted_revision(r.portfolio_ref);
+
+  if v_refs is null then
+    -- Every accepted portfolio is intact and none names this slice: genuine
+    -- ordinary attended source work, which this route leaves alone.
+    return jsonb_build_object('governed', false);
+  end if;
+  if array_length(v_refs, 1) > 1 then
+    raise exception
+      'slice % is named by % current accepted portfolios (%); an ambiguous governing ancestor is refused, never ranked',
+      p_slice_ref, array_length(v_refs, 1), array_to_string(v_refs, ', ')
+      using errcode = 'integrity_constraint_violation';
+  end if;
+  v_portfolio_ref := v_refs[1];
+  v_revision_id := v_ids[1];
+
+  select * into v_node from ops.portfolio_node
+   where portfolio_revision_id = v_revision_id and node_ref = p_slice_ref;
+  select * into v_child from ops.portfolio_child_revision
+   where portfolio_revision_id = v_revision_id and child_ref = v_node.child_ref;
+  if not found then
+    raise exception 'accepted portfolio revision % has no child % for node %',
+      v_revision_id, v_node.child_ref, p_slice_ref;
+  end if;
+  select p.plan_ref into v_plan_ref from ops.sourced_work_request_plan p
+   where p.id = v_child.accepted_plan_id;
+
+  -- Each predecessor carries the child and accepted plan that actually govern
+  -- IT. Proof for a same-named slice under a different plan is not proof of
+  -- this predecessor, so the consumer needs the predecessor's own binding
+  -- rather than the current one.
+  select coalesce(jsonb_agg(jsonb_build_object(
+             'node_ref', e.from_node_ref,
+             'child_ref', pn.child_ref,
+             'accepted_plan_ref', coalesce(to_jsonb(pp.plan_ref), 'null'::jsonb))
+           order by e.from_node_ref collate "C"), '[]'::jsonb)
+    into v_predecessors
+    from ops.portfolio_node_edge e
+    join ops.portfolio_node pn
+      on pn.portfolio_revision_id = v_revision_id and pn.node_ref = e.from_node_ref
+    left join ops.portfolio_child_revision pc
+      on pc.portfolio_revision_id = v_revision_id and pc.child_ref = pn.child_ref
+    left join ops.sourced_work_request_plan pp on pp.id = pc.accepted_plan_id
+   where e.portfolio_revision_id = v_revision_id and e.to_node_ref = p_slice_ref;
+
+  -- Every field returned is inside the accepted digest. Nothing outside it is
+  -- exposed here, so an admission decision can never rest on unaccepted data.
+  return jsonb_build_object(
+    'governed', true,
+    'portfolio_ref', v_portfolio_ref,
+    'portfolio_revision_id', v_revision_id,
+    'accepted_digest', ops.portfolio_accepted_digest(v_revision_id),
+    'child_ref', v_child.child_ref,
+    'child_version', v_child.child_version,
+    'child_digest', v_child.child_digest,
+    'child_accepted_plan_ref', coalesce(to_jsonb(v_plan_ref), 'null'::jsonb),
+    'node_ref', v_node.node_ref,
+    'parent_ref', v_node.parent_ref,
+    'authority_class', v_node.authority_class,
+    'effect_class', v_node.effect_class,
+    'data_class', v_node.data_class,
+    'budget_identity', v_node.budget_identity,
+    'budget_ceiling', v_node.budget_ceiling,
+    'model_floor', v_node.model_floor,
+    'recovery_ref', v_node.recovery_ref,
+    'terminal_predicate', v_node.terminal_predicate,
+    'predecessors', v_predecessors);
+end;
+$$;
+
+comment on function ops.portfolio_descendant_binding(text) is
+  'Ancestor and predecessor binding for one slice reference, derived from the accepted portfolio and exposing only fields inside the accepted digest. Returns governed=false for a slice no accepted portfolio names.';
+
+create or replace function ops.portfolio_readback(p_portfolio_ref text)
+returns jsonb language plpgsql stable security definer
+set search_path = pg_catalog, ops, public
+as $$
+declare v_rev ops.portfolio_revision%rowtype; v_accepted_id uuid;
+begin
+  select * into v_rev from ops.portfolio_revision
+   where portfolio_ref = p_portfolio_ref order by revision_version desc limit 1;
+  if not found then
+    return jsonb_build_object('portfolio_ref', p_portfolio_ref, 'exists', false);
+  end if;
+  v_accepted_id := ops.portfolio_accepted_revision(p_portfolio_ref);
+
+  return jsonb_build_object(
+    'portfolio_ref', v_rev.portfolio_ref,
+    'exists', true,
+    'schema_version', v_rev.schema_version,
+    'accepted_schema_version', v_rev.accepted_schema_version,
+    'revision_version', v_rev.revision_version,
+    'graph_digest', ops.portfolio_graph_digest(v_rev.id),
+    'accepted_digest', ops.portfolio_accepted_digest(v_rev.id),
+    'stored_accepted_digest', v_rev.accepted_digest,
+    'structure_valid', ops.portfolio_revision_structure_valid(v_rev.id),
+    'node_count', v_rev.node_count,
+    'edge_count', v_rev.edge_count,
+    'child_bindings', ops.portfolio_accepted_preimage(v_rev.id) -> 'child_bindings',
+    'reviews', (select coalesce(jsonb_agg(jsonb_build_object(
+                         'verdict', rv.verdict, 'reviewed_digest', rv.reviewed_digest,
+                         'reviewer_actor_id', rv.reviewer_actor_id) order by rv.created_at), '[]'::jsonb)
+                  from ops.portfolio_revision_review rv where rv.portfolio_revision_id = v_rev.id),
+    'accepted', v_accepted_id is not null and v_accepted_id = v_rev.id,
+    'accepted_revision_id', v_accepted_id,
+    -- Inert by construction: nothing here can produce an effect, and acceptance
+    -- remains a separate human exact-hash act.
+    'effects', jsonb_build_object(
+      'creates_effect', false, 'jobs', 0, 'capabilities', 0, 'execution_envelopes', 0,
+      'admissions', 0, 'schedules', 0, 'deployments', 0));
+end;
+$$;
+
+comment on function ops.portfolio_readback(text) is
+  'Deterministic zero-effect readback of one portfolio, exposing only content inside its accepted digest.';
+
+-- ---------------------------------------------------------------------------
+-- Grants. Reads reach the ordinary bundles. DIRECT INSERT IS GRANTED TO NOBODY:
+-- every write goes through a definer function that derives its own actor, so a
+-- writer holding a raw connection cannot attribute a row to someone else.
+-- ---------------------------------------------------------------------------
+grant select on ops.portfolio_revision, ops.portfolio_child_revision,
+  ops.portfolio_node, ops.portfolio_node_edge, ops.portfolio_revision_review,
+  ops.portfolio_revision_acceptance_receipt to carr_reader, carr_writer, carr_authority;
+
+revoke insert, update, delete, truncate on ops.portfolio_revision,
+  ops.portfolio_child_revision, ops.portfolio_node, ops.portfolio_node_edge,
+  ops.portfolio_revision_review, ops.portfolio_revision_acceptance_receipt
+  from public, carr_reader, carr_writer, carr_jobs, carr_authority;
+
+revoke all on function ops.portfolio_writer_actor_id(),
+  ops.portfolio_canonical_number_text(numeric), ops.portfolio_canonical_json(jsonb),
+  ops.portfolio_canonical_number_valid(numeric), ops.portfolio_model_floor_valid(jsonb),
+  ops.portfolio_graph_preimage(uuid), ops.portfolio_graph_digest(uuid),
+  ops.portfolio_child_preimage(uuid,text), ops.portfolio_child_digest(uuid,text),
+  ops.portfolio_accepted_preimage(uuid), ops.portfolio_accepted_digest(uuid),
+  ops.portfolio_revision_structure_valid(uuid), ops.portfolio_accepted_revision(text),
+  ops.portfolio_current_accepted_revision(text), ops.portfolio_revision_integrity_error(uuid),
+  ops.portfolio_descendant_binding(text), ops.portfolio_readback(text)
+  from public, carr_reader, carr_writer, carr_jobs, carr_authority;
+grant execute on function ops.portfolio_writer_actor_id(),
+  ops.portfolio_canonical_number_text(numeric), ops.portfolio_canonical_json(jsonb),
+  ops.portfolio_canonical_number_valid(numeric), ops.portfolio_model_floor_valid(jsonb),
+  ops.portfolio_graph_preimage(uuid), ops.portfolio_graph_digest(uuid),
+  ops.portfolio_child_preimage(uuid,text), ops.portfolio_child_digest(uuid,text),
+  ops.portfolio_accepted_preimage(uuid), ops.portfolio_accepted_digest(uuid),
+  ops.portfolio_revision_structure_valid(uuid), ops.portfolio_accepted_revision(text),
+  ops.portfolio_current_accepted_revision(text), ops.portfolio_revision_integrity_error(uuid),
+  ops.portfolio_descendant_binding(text), ops.portfolio_readback(text)
+  to carr_reader, carr_writer, carr_jobs, carr_authority;
+
+-- ---------------------------------------------------------------------------
+-- The only write path. Each function derives its own actor and accepts none.
+-- ---------------------------------------------------------------------------
+create or replace function ops.portfolio_propose_revision(
+  p_portfolio_ref text, p_revision_version integer, p_idempotency_key uuid,
+  p_source_digests jsonb, p_graph_digest text, p_accepted_digest text,
+  p_children jsonb, p_nodes jsonb, p_edges jsonb)
+returns uuid language plpgsql security definer
+set search_path = pg_catalog, ops, public
+as $$
+declare v_rev uuid; v_actor uuid; c jsonb; n jsonb; e jsonb; v_plan_id uuid;
+begin
+  v_actor := ops.portfolio_writer_actor_id();
+  insert into ops.portfolio_revision(
+    portfolio_ref, revision_version, idempotency_key, schema_version,
+    accepted_schema_version, preimage, graph_digest, accepted_digest,
+    node_count, edge_count, child_count, proposed_by_actor_id)
+  values (p_portfolio_ref, p_revision_version, p_idempotency_key,
+    'doctorcre-v5-portfolio-revision.v1', 'doctorcre-v5-portfolio-accepted-revision.v1',
+    jsonb_build_object('source_digests', p_source_digests), p_graph_digest, p_accepted_digest,
+    jsonb_array_length(p_nodes), jsonb_array_length(p_edges), jsonb_array_length(p_children),
+    v_actor)
+  returning id into v_rev;
+
+  for c in select value from jsonb_array_elements(p_children) loop
+    v_plan_id := null;
+    if jsonb_typeof(c -> 'accepted_plan_ref') = 'string' then
+      -- ACCEPTED means accepted. A sourced plan row is only a proposal until a
+      -- human acceptance receipt exists for it, and binding a child to a merely
+      -- proposed plan would let an unaccepted plan inherit governing authority
+      -- through the portfolio. The join to the receipt is the whole check.
+      select p.id into v_plan_id
+        from ops.sourced_work_request_plan p
+        join ops.sourced_work_request_plan_acceptance_receipt a on a.plan_id = p.id
+       where p.plan_ref = c ->> 'accepted_plan_ref'
+         and a.plan_hash = p.plan_hash;
+      if not found then
+        raise exception 'child % names accepted_plan_ref %, which is not an accepted plan: no acceptance receipt binds that exact plan hash',
+          c ->> 'child_ref', c ->> 'accepted_plan_ref';
+      end if;
+    end if;
+    insert into ops.portfolio_child_revision(
+      portfolio_revision_id, child_ref, child_ordinal, child_version, child_digest, accepted_plan_id)
+    values (v_rev, c ->> 'child_ref', (c ->> 'child_ordinal')::integer,
+      (c ->> 'child_version')::integer, c ->> 'child_digest', v_plan_id);
+  end loop;
+
+  for n in select value from jsonb_array_elements(p_nodes) loop
+    insert into ops.portfolio_node(
+      portfolio_revision_id, node_ref, node_kind, ordinal, parent_ref, child_ref,
+      authority_class, effect_class, data_class, budget_identity, budget_ceiling,
+      model_floor, recovery_ref, terminal_predicate)
+    values (v_rev, n ->> 'node_ref', n ->> 'node_kind', (n ->> 'ordinal')::integer,
+      n ->> 'parent_ref', n ->> 'child_ref', n ->> 'authority_class', n ->> 'effect_class',
+      n ->> 'data_class', n ->> 'budget_identity', (n ->> 'budget_ceiling')::numeric,
+      n -> 'model_floor', n ->> 'recovery_ref', n ->> 'terminal_predicate');
+  end loop;
+
+  for e in select value from jsonb_array_elements(p_edges) loop
+    insert into ops.portfolio_node_edge(portfolio_revision_id, from_node_ref, to_node_ref)
+    values (v_rev, e ->> 'from_node_ref', e ->> 'to_node_ref');
+  end loop;
+
+  return v_rev;
+end;
+$$;
+
+comment on function ops.portfolio_propose_revision(text,integer,uuid,jsonb,text,text,jsonb,jsonb,jsonb) is
+  'The only way to create a portfolio revision. Proposal is inert; the proposer is derived from the server-established writer context and is not a parameter.';
+
+create or replace function ops.portfolio_review_revision(
+  p_revision_id uuid, p_idempotency_key uuid, p_reviewed_digest text,
+  p_verdict text, p_review_summary text)
+returns uuid language plpgsql security definer
+set search_path = pg_catalog, ops, public
+as $$
+declare v_id uuid;
+begin
+  insert into ops.portfolio_revision_review(
+    portfolio_revision_id, idempotency_key, reviewed_digest, verdict,
+    review_summary, reviewer_actor_id)
+  values (p_revision_id, p_idempotency_key, p_reviewed_digest, p_verdict,
+    p_review_summary, ops.portfolio_writer_actor_id())
+  returning id into v_id;
+  return v_id;
+end;
+$$;
+
+comment on function ops.portfolio_review_revision(uuid,uuid,text,text,text) is
+  'The only way to record an independent portfolio review. The reviewer is derived from the server-established writer context and is not a parameter.';
+
+create or replace function ops.portfolio_accept_revision(
+  p_revision_id uuid, p_idempotency_key uuid, p_accepted_digest text, p_review_id uuid)
+returns uuid language plpgsql security definer
+set search_path = pg_catalog, ops, public
+as $$
+declare v_id uuid; v_partner text; v_actor uuid; v_portfolio_ref text;
+begin
+  -- Raises unless session_user is an admitted partner authority principal.
+  v_partner := ops.authority_actor_slug();
+  select id into v_actor from public.actor where slug = v_partner and active and kind = 'human';
+  if not found then
+    raise exception 'partner authority session % has no active human actor', v_partner;
+  end if;
+  select portfolio_ref into v_portfolio_ref from ops.portfolio_revision where id = p_revision_id;
+  if not found then raise exception 'portfolio acceptance names an unknown revision'; end if;
+  insert into ops.portfolio_revision_acceptance_receipt(
+    portfolio_revision_id, portfolio_ref, idempotency_key, accepted_digest,
+    review_id, accepted_by_actor_id)
+  values (p_revision_id, v_portfolio_ref, p_idempotency_key, p_accepted_digest,
+    p_review_id, v_actor)
+  returning id into v_id;
+  return v_id;
+end;
+$$;
+
+comment on function ops.portfolio_accept_revision(uuid,uuid,text,uuid) is
+  'The only way to accept a portfolio revision. The acceptor is derived from the authenticated partner authority session and is not a parameter.';
+
+revoke all on function
+  ops.portfolio_propose_revision(text,integer,uuid,jsonb,text,text,jsonb,jsonb,jsonb),
+  ops.portfolio_review_revision(uuid,uuid,text,text,text),
+  ops.portfolio_accept_revision(uuid,uuid,text,uuid)
+  from public, carr_reader, carr_writer, carr_jobs, carr_authority;
+grant execute on function
+  ops.portfolio_propose_revision(text,integer,uuid,jsonb,text,text,jsonb,jsonb,jsonb),
+  ops.portfolio_review_revision(uuid,uuid,text,text,text)
+  to carr_writer, carr_authority;
+-- Acceptance reaches the authority bundle only.
+grant execute on function ops.portfolio_accept_revision(uuid,uuid,text,uuid) to carr_authority;
+
+`;
+
+// Forward successor for the DoctorCRE v5 portfolio hierarchy. Unlike the
+// registry-only successors before it this migration DOES carry domain DDL: the
+// append-only portfolio tables, their guards and their closed definer write
+// path. The domain SQL runs first, moving the security-definer catalog, and the
+// v22 successor then seals the catalog the domain produced -- which is why the
+// two cannot be separate migrations.
+export function renderDoctorcrePortfolioForwardRegistrySql(rows = fullInventory(),
+  dbCatalogBaseline = DOCTORCRE_PORTFOLIO_FORWARD_DB_CATALOG_BASELINE,
+  predecessorArtifacts = undefined) {
+  // The predecessor seal, its catalog projection and the sealed v21 artifact
+  // hashes are fixed production constants, asserted by the shared v22 trust
+  // root that every v22 entry path calls. There is deliberately no caller
+  // binding for them: a supplied predecessor artifact is checked AGAINST these
+  // pins, it never supplies its own expected hash.
+  assertDoctorcrePortfolioV22TrustRoot();
+  const { v21: v21Seal } = HISTORICAL_REGISTRY_SEALS;
+  const predecessorDbCatalogBaseline = DOCTORCRE_PORTFOLIO_PRE_V22_DB_CATALOG_BASELINE;
+  const artifactShaRe = CONTINUITY_ARCHIVE_ARTIFACT_SHA_RE;
+  // A caller-supplied successor baseline is held to the SAME exact-projection
+  // shape as the fixed constant; it can only ever narrow, never widen.
+  assertR06HooksCorrectnessCatalogBaseline("successor v22", dbCatalogBaseline,
+    "scac-db-catalog-projection.v22");
+
+  const v22Digest = registryDigestFor(REGISTRY_V22_VERSION, rows, dbCatalogBaseline);
+  const catalogCount = dbCatalogBaseline.secdef_execute.count +
+    dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
+  const entryCount = rows.length + catalogCount;
+  const v21MigrationPath = DOCTORCRE_PORTFOLIO_V21_MIGRATION_PATH;
+  const v21RuntimePath = DOCTORCRE_PORTFOLIO_V21_RUNTIME_PATH;
+  const v21Rows = frozenInventory(REGISTRY_V21_VERSION);
+  // A partial predecessor bundle regenerates only the missing half, and it
+  // regenerates it from the canonical prior inputs: the v21 renderer's third
+  // argument is its own v20-shaped predecessor bundle, so this v21-shaped one
+  // is never forwarded into it.
+  const v21Migration = predecessorArtifacts?.migration ??
+    renderR06HooksCorrectnessForwardRegistrySql(v21Rows, predecessorDbCatalogBaseline);
+  const v21Runtime = predecessorArtifacts?.runtime ?? renderRuntimeProjection(v21Rows, {
+    version: REGISTRY_V21_VERSION,
+    dbCatalogBaseline: predecessorDbCatalogBaseline,
+  });
+  for (const [path, source] of [
+    [v21MigrationPath, v21Migration], [v21RuntimePath, v21Runtime],
+  ]) {
+    const expected = HISTORICAL_REGISTRY_ARTIFACT_SHA256[path];
+    if (!artifactShaRe.test(expected ?? ""))
+      throw new Error(`DoctorCRE portfolio v22 predecessor artifact pin is unbound: ${path}`);
+    const observed = sha256(source);
+    if (observed !== expected)
+      throw new Error(`sealed historical SCAC v21 artifact changed: ${path}: ${observed}`);
+  }
+
+  const headerMarker =
+    "-- SCAC-12: registry-only mutation registry v21 after R06 hook-correctness evidence routing.";
+  const coreStart = v21Migration.indexOf(headerMarker);
+  if (coreStart < 0 || v21Migration.indexOf(headerMarker, coreStart + headerMarker.length) >= 0)
+    throw new Error("sealed SCAC v21 migration has no exact successor core boundary");
+  const v21Core = v21Migration.slice(coreStart);
+  const currentV21Marker = "create or replace function ops.scac_mutation_catalog_v21_current()";
+  const policyMarker =
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v20;";
+  const currentV21Start = v21Core.indexOf(currentV21Marker);
+  const secondCurrentV21 = v21Core.indexOf(
+    currentV21Marker, currentV21Start + currentV21Marker.length);
+  const v20HistoryMarker =
+    "alter function ops.scac_mutation_catalog_v20_current() rename to scac_mutation_catalog_v20_live_at_seal;";
+  const v20HistoryStart = v21Core.indexOf(v20HistoryMarker);
+  const secondV20History = v21Core.indexOf(
+    v20HistoryMarker, v20HistoryStart + v20HistoryMarker.length);
+  const policyStart = v21Core.indexOf(policyMarker);
+  const secondPolicy = v21Core.indexOf(policyMarker, policyStart + policyMarker.length);
+  if (v20HistoryStart < 0 || secondV20History >= 0 || currentV21Start <= v20HistoryStart ||
+      secondCurrentV21 >= 0 || policyStart <= currentV21Start || secondPolicy >= 0)
+    throw new Error("sealed SCAC v21 migration has no exact catalog successor boundary");
+  const installedV20History = v21Core.slice(v20HistoryStart, currentV21Start);
+  const v21Current = v21Core.slice(currentV21Start, policyStart);
+  const v21History =
+`alter function ops.scac_mutation_catalog_v21_current() rename to scac_mutation_catalog_v21_live_at_seal;
+create or replace function ops.scac_mutation_registry_v21_seal_available()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_registry_seal_valid('scac-mutation-registry.v21')
+$fn$;
+create or replace function ops.scac_mutation_catalog_v21_current()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_catalog_v21_live_at_seal()
+$fn$;
+comment on function ops.scac_mutation_registry_v21_seal_available() is 'Exact immutable v21 registry seal; separate from whether the live catalog still equals v21.';
+comment on function ops.scac_mutation_catalog_v21_current() is 'Historical v21 live-catalog validator; expected to become false after the v22 authority surface is installed.';
+
+`;
+  const renderV22Current = baseline => {
+    let current = v21Current
+      .replaceAll("scac_mutation_catalog_v21_current", "scac_mutation_catalog_v22_current")
+      .replaceAll("scac-mutation-registry.v21", "scac-mutation-registry.v22");
+    for (const [category, label] of [
+      ["secdef_execute", "security-definer"],
+      ["relation_dml", "relation"],
+      ["column_dml", "column"],
+    ]) {
+      current = replaceExactlyOnce(current,
+        `if observed_count<>${predecessorDbCatalogBaseline[category].count} or observed_digest<>'${predecessorDbCatalogBaseline[category].digest}' then return false; end if;`,
+        `if observed_count<>${baseline[category].count} or observed_digest<>'${baseline[category].digest}' then return false; end if;`,
+        `DoctorCRE portfolio v22 ${label} baseline`);
+    }
+    return replaceExactlyOnce(current,
+      `return observed_count=${predecessorDbCatalogBaseline.role_authority.count} and observed_digest='${predecessorDbCatalogBaseline.role_authority.digest}';`,
+      `return observed_count=${baseline.role_authority.count} and observed_digest='${baseline.role_authority.digest}';`,
+      "DoctorCRE portfolio v22 role-authority baseline");
+  };
+  const v22Current = renderV22Current(dbCatalogBaseline);
+
+  let sql = replaceExactlyOnce(v21Core, v21Current,
+    "__CONTINUITY_ARCHIVE_V20_CATALOG_SUCCESSOR__",
+    "DoctorCRE portfolio v21 current catalog block");
+  sql = replaceExactlyOnce(sql, installedV20History, "",
+    "DoctorCRE portfolio already-installed v20 catalog history");
+  sql = replaceExactlyOnce(sql, headerMarker,
+    "-- SCAC-12: mutation registry v22 after the DoctorCRE v5 portfolio hierarchy.",
+    "DoctorCRE portfolio migration header");
+  sql = sql
+    .replaceAll("scac-mutation-registry.v21", "scac-mutation-registry.v22")
+    .replaceAll("_v21", "_v22")
+    .replaceAll(" v21", " v22");
+  sql = replaceExactlyOnce(sql, JSON.stringify(predecessorDbCatalogBaseline),
+    JSON.stringify(dbCatalogBaseline), "DoctorCRE portfolio v22 catalog projection");
+  sql = replaceExactlyOnce(sql,
+    `'${v21Seal.digest}',${v21Seal.entryCount},${v21Seal.sourceEntryCount},`,
+    `'sha256:${v22Digest}',${entryCount},${rows.length},`,
+    "DoctorCRE portfolio v22 registry row");
+  sql = replaceExactlyOnce(sql,
+    `ops.scac_mutation_registration_v22('${v21Seal.digest}',`,
+    `ops.scac_mutation_registration_v22('sha256:${v22Digest}',`,
+    "DoctorCRE portfolio v22 snapshot registry lookup");
+  sql = replaceExactlyOnce(sql,
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v20;",
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v21;",
+    "DoctorCRE portfolio policy snapshot predecessor");
+  sql = replaceExactlyOnce(sql, "__CONTINUITY_ARCHIVE_V20_CATALOG_SUCCESSOR__",
+    `${v21History}${v22Current}`, "DoctorCRE portfolio v21 catalog history insertion");
+
+  const versionsThrough21 = Array.from({ length: 21 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  const versionsThrough20 = Array.from({ length: 20 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  sql = replaceExactlyOnce(sql,
+    `check (registry_version in (${versionsThrough20},'scac-mutation-registry.v22'))`,
+    `check (registry_version in (${versionsThrough21},'scac-mutation-registry.v22'))`,
+    "DoctorCRE portfolio registry-version constraint");
+  sql = replaceExactlyOnce(sql,
+    `if p_registry_version not in (${versionsThrough20}) then return false; end if;`,
+    `if p_registry_version not in (${versionsThrough21}) then return false; end if;`,
+    "DoctorCRE portfolio historical seal allowlist");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v20' then '${HISTORICAL_REGISTRY_SEALS.v20.digest}' end;`,
+    `    when 'scac-mutation-registry.v20' then '${HISTORICAL_REGISTRY_SEALS.v20.digest}'\n    when '${v21Seal.version}' then '${v21Seal.digest}' end;`,
+    "DoctorCRE portfolio historical digest case");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v20' then '${JSON.stringify(CONTINUITY_ARCHIVE_FORWARD_DB_CATALOG_BASELINE)}'::jsonb end;`,
+    `    when 'scac-mutation-registry.v20' then '${JSON.stringify(CONTINUITY_ARCHIVE_FORWARD_DB_CATALOG_BASELINE)}'::jsonb\n    when '${v21Seal.version}' then '${JSON.stringify(predecessorDbCatalogBaseline)}'::jsonb end;`,
+    "DoctorCRE portfolio historical catalog case");
+  sql = replaceExactlyOnce(sql,
+    `    ('scac-mutation-registry.v20','${HISTORICAL_REGISTRY_SEALS.v20.digest}',${HISTORICAL_REGISTRY_SEALS.v20.entryCount},${HISTORICAL_REGISTRY_SEALS.v20.sourceEntryCount})\n`,
+    `    ('scac-mutation-registry.v20','${HISTORICAL_REGISTRY_SEALS.v20.digest}',${HISTORICAL_REGISTRY_SEALS.v20.entryCount},${HISTORICAL_REGISTRY_SEALS.v20.sourceEntryCount}),\n    ('${v21Seal.version}','${v21Seal.digest}',${v21Seal.entryCount},${v21Seal.sourceEntryCount})\n`,
+    "DoctorCRE portfolio historical seal tuple");
+  sql = replaceExactlyOnce(sql,
+    "    ops.scac_mutation_registry_v20_seal_available()) then",
+    "    ops.scac_mutation_registry_v20_seal_available() and\n    ops.scac_mutation_registry_v21_seal_available()) then",
+    "DoctorCRE portfolio snapshot predecessor seal");
+  sql = replaceExactlyOnce(sql,
+    `or (r.registry_version='scac-mutation-registry.v22' and r.registry_digest='${v21Seal.digest}')`,
+    `or (r.registry_version='scac-mutation-registry.v21' and r.registry_digest='${v21Seal.digest}')\n         or (r.registry_version='scac-mutation-registry.v22' and r.registry_digest='sha256:${v22Digest}')`,
+    "DoctorCRE portfolio epoch-chain digest cases");
+  sql = replaceExactlyOnce(sql,
+    `  (registry_version='scac-mutation-registry.v22' and registry_digest='${v21Seal.digest}')`,
+    `  (registry_version='scac-mutation-registry.v21' and registry_digest='${v21Seal.digest}') or\n  (registry_version='scac-mutation-registry.v22' and registry_digest='sha256:${v22Digest}')`,
+    "DoctorCRE portfolio epoch constraint digest cases");
+  sql = replaceExactlyOnce(sql,
+    `'{registry_digest}',to_jsonb('${v21Seal.digest}'::text)`,
+    `'{registry_digest}',to_jsonb('sha256:${v22Digest}'::text)`,
+    "DoctorCRE portfolio snapshot registry digest");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_mutation_registry_v19_seal_available(),ops.scac_mutation_catalog_v20_live_at_seal(),ops.scac_mutation_catalog_v20_current(),ops.scac_mutation_registry_v20_seal_available(),ops.scac_mutation_catalog_v22_current()",
+    "ops.scac_mutation_registry_v19_seal_available(),ops.scac_mutation_catalog_v20_live_at_seal(),ops.scac_mutation_catalog_v20_current(),ops.scac_mutation_registry_v20_seal_available(),ops.scac_mutation_catalog_v21_live_at_seal(),ops.scac_mutation_catalog_v21_current(),ops.scac_mutation_registry_v21_seal_available(),ops.scac_mutation_catalog_v22_current()",
+    "DoctorCRE portfolio historical function revoke list");
+  sql = replaceExactlyOnce(sql,
+    // The anchor is the predecessor comment AS IT STANDS AFTER the global
+    // version rename above, which has already bumped "registry v21" to v22.
+    "R06 hooks-correctness successor snapshot: current policy epochs bind mutation registry v22 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20 epochs remain immutable.",
+    "DoctorCRE portfolio successor snapshot: current policy epochs bind mutation registry v22 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21 epochs remain immutable.",
+    "DoctorCRE portfolio policy snapshot comment");
+  sql = replaceExactlyOnce(sql,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v22')<>${v21Seal.entryCount}`,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v22')<>${entryCount}`,
+    "DoctorCRE portfolio v22 entry count guard");
+  sql = replaceExactlyOnce(sql,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v20')<>'${HISTORICAL_REGISTRY_SEALS.v20.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v20')<>${HISTORICAL_REGISTRY_SEALS.v20.entryCount} then raise exception 'sealed SCAC mutation registry v20 changed during successor creation'; end if;`,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v21')<>'${v21Seal.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v21')<>${v21Seal.entryCount} then raise exception 'sealed SCAC mutation registry v21 changed during successor creation'; end if;`,
+    "DoctorCRE portfolio predecessor seal guard");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),ops.scac_policy_epoch_snapshot_v15(),ops.scac_policy_epoch_snapshot_v16(),ops.scac_policy_epoch_snapshot_v17(),ops.scac_policy_epoch_snapshot_v18(),ops.scac_policy_epoch_snapshot_v19(),ops.scac_policy_epoch_snapshot_v20(),",
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),ops.scac_policy_epoch_snapshot_v15(),ops.scac_policy_epoch_snapshot_v16(),ops.scac_policy_epoch_snapshot_v17(),ops.scac_policy_epoch_snapshot_v18(),ops.scac_policy_epoch_snapshot_v19(),ops.scac_policy_epoch_snapshot_v20(),ops.scac_policy_epoch_snapshot_v21(),",
+    "DoctorCRE portfolio historical policy snapshot revoke list");
+
+  const seedStartMarker = "with seed as (select value as contract from jsonb_array_elements(";
+  const seedEndMarker = "::jsonb))\ninsert into ops.scac_mutation_registry_entry";
+  const seedStart = sql.indexOf(seedStartMarker);
+  const secondSeedStart = sql.indexOf(seedStartMarker, seedStart + seedStartMarker.length);
+  const seedEnd = sql.indexOf(seedEndMarker, seedStart + seedStartMarker.length);
+  const secondSeedEnd = sql.indexOf(seedEndMarker, seedEnd + seedEndMarker.length);
+  if (seedStart < 0 || secondSeedStart >= 0 || seedEnd < 0 || secondSeedEnd >= 0)
+    throw new Error("sealed SCAC v21 migration has no exact source-seed boundary");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart + seedStartMarker.length)}${sqlLiteral(seed)}${sql.slice(seedEnd)}`;
+
+  const preflightCurrent = renderV22Current(predecessorDbCatalogBaseline);
+  const preflightBegin = preflightCurrent.indexOf("begin\n");
+  const preflightEnd = preflightCurrent.lastIndexOf("end $fn$;");
+  if (preflightBegin < 0 || preflightEnd <= preflightBegin)
+    throw new Error("generated v22 catalog predicate has no exact preflight body boundary");
+  let preflightBody = preflightCurrent.slice(preflightBegin + "begin\n".length, preflightEnd);
+  preflightBody = preflightBody.replaceAll(
+    "then return false; end if;",
+    "then raise exception 'DoctorCRE portfolio pre-v22 catalog receipt drifted'; end if;");
+  preflightBody = replaceExactlyOnce(preflightBody,
+    `return observed_count=${predecessorDbCatalogBaseline.role_authority.count} and observed_digest='${predecessorDbCatalogBaseline.role_authority.digest}';`,
+    `if observed_count<>${predecessorDbCatalogBaseline.role_authority.count} or observed_digest<>'${predecessorDbCatalogBaseline.role_authority.digest}' then raise exception 'DoctorCRE portfolio pre-v22 role-authority receipt drifted'; end if;`,
+    "DoctorCRE portfolio pre-v22 role receipt");
+  const predecessorHash = sha256(v21Migration);
+  const predecessorPreflight =
+`-- Exact disposable-Postgres post-0495 receipt. Refuse before any v22 function
+-- exists. Unlike the registry-only successors before it this migration DOES
+-- carry domain DDL: the append-only DoctorCRE v5 portfolio hierarchy runs
+-- first and moves the security-definer catalog, and the v22 successor then
+-- seals the catalog that domain SQL produced.
+do $doctorcre_portfolio_preflight$
+declare observed_count integer; observed_digest text; grant_snapshot jsonb;
+begin
+  if (select count(*) from public.schema_migrations where filename='0495_r06_hooks_correctness_scac_successor.sql')<>1
+     or not exists(select 1 from public.schema_migrations where filename='0495_r06_hooks_correctness_scac_successor.sql'
+       and sha256='${predecessorHash}') then
+    raise exception 'DoctorCRE portfolio pre-v22 migration ledger receipt drifted';
+  end if;
+  grant_snapshot:=ops.scac_runtime_dml_grant_snapshot();
+  if (grant_snapshot->>'entry_count')::integer<>${predecessorDbCatalogBaseline.runtime_dml_grants.count}
+     or grant_snapshot->>'grant_digest'<>'${predecessorDbCatalogBaseline.runtime_dml_grants.digest}' then
+    raise exception 'DoctorCRE portfolio pre-v22 runtime grant receipt drifted';
+  end if;
+${preflightBody}end $doctorcre_portfolio_preflight$;
+
+`;
+  return `${predecessorPreflight}${DOCTORCRE_PORTFOLIO_DOMAIN_SQL}${sql}`.replace(/\n+$/, "\n");
+}
+
+// Shared v23 trust root. Every entry path that renders or writes a v23
+// artifact calls this BEFORE doing work, so an unbound template constant can
+// never reach a digest, a projection or a written file.
+const R07_REPO_HYGIENE_JANITOR_V22_MIGRATION_PATH =
+  "migrations/0496_doctorcre_portfolio_hierarchy_and_scac_successor.sql";
+const R07_REPO_HYGIENE_JANITOR_V22_RUNTIME_PATH =
+  "mcp-server/src/scac-mutation-registry.v22.generated.js";
+
+export function assertR07RepoHygieneJanitorV23TrustRoot() {
+  // Strictly stronger than the root it succeeds: the whole v22 chain has to be
+  // bound before a v23 artifact can exist at all.
+  assertDoctorcrePortfolioV22TrustRoot();
+  const { v22: v22Seal } = HISTORICAL_REGISTRY_SEALS;
+  if (v22Seal?.version !== REGISTRY_V22_VERSION ||
+      !CONTINUITY_ARCHIVE_DIGEST_RE.test(v22Seal?.digest ?? "") ||
+      !Number.isInteger(v22Seal?.entryCount) || v22Seal.entryCount < 1 ||
+      !Number.isInteger(v22Seal?.sourceEntryCount) || v22Seal.sourceEntryCount < 1)
+    throw new Error("R07 repo hygiene janitor v23 predecessor seal is unbound");
+  assertR06HooksCorrectnessCatalogBaseline("predecessor v22",
+    R07_REPO_HYGIENE_JANITOR_PRE_V23_DB_CATALOG_BASELINE, "scac-db-catalog-projection.v22");
+  assertR06HooksCorrectnessCatalogBaseline("successor v23",
+    R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE, "scac-db-catalog-projection.v23");
+  for (const path of [
+    R07_REPO_HYGIENE_JANITOR_V22_MIGRATION_PATH, R07_REPO_HYGIENE_JANITOR_V22_RUNTIME_PATH,
+  ]) {
+    if (!CONTINUITY_ARCHIVE_ARTIFACT_SHA_RE.test(
+      HISTORICAL_REGISTRY_ARTIFACT_SHA256[path] ?? ""))
+      throw new Error(`R07 repo hygiene janitor v23 predecessor artifact pin is unbound: ${path}`);
+  }
+}
+
+// Registry-only successor for the R07 repo-hygiene janitor. The source change
+// adds one tools/ planner script and one DELIBERATELY UNINSTALLED LaunchAgent
+// definition, and re-digests the two entrypoints that carry them, so this
+// migration creates no table, no role and no domain function. It only seals the
+// new source inventory and installs the v23 catalog/policy projection after the
+// immutable v22 frontier -- the same shape as the v20 and v21 registry-only
+// successors, and unlike v22, which carried the portfolio's domain DDL.
+export function renderR07RepoHygieneJanitorForwardRegistrySql(rows = fullInventory(),
+  dbCatalogBaseline = R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE,
+  predecessorArtifacts = undefined) {
+  // The predecessor seal, its catalog projection and the sealed v22 artifact
+  // hashes are fixed production constants, asserted by the shared v23 trust
+  // root that every v23 entry path calls. There is deliberately no caller
+  // binding for them: a supplied predecessor artifact is checked AGAINST these
+  // pins, it never supplies its own expected hash.
+  assertR07RepoHygieneJanitorV23TrustRoot();
+  const { v22: v22Seal } = HISTORICAL_REGISTRY_SEALS;
+  const predecessorDbCatalogBaseline = R07_REPO_HYGIENE_JANITOR_PRE_V23_DB_CATALOG_BASELINE;
+  const artifactShaRe = CONTINUITY_ARCHIVE_ARTIFACT_SHA_RE;
+  // A caller-supplied successor baseline is held to the SAME exact-projection
+  // shape as the fixed constant; it can only ever narrow, never widen.
+  assertR06HooksCorrectnessCatalogBaseline("successor v23", dbCatalogBaseline,
+    "scac-db-catalog-projection.v23");
+
+  const v23Digest = registryDigestFor(REGISTRY_V23_VERSION, rows, dbCatalogBaseline);
+  const catalogCount = dbCatalogBaseline.secdef_execute.count +
+    dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
+  const entryCount = rows.length + catalogCount;
+  const v22MigrationPath = R07_REPO_HYGIENE_JANITOR_V22_MIGRATION_PATH;
+  const v22RuntimePath = R07_REPO_HYGIENE_JANITOR_V22_RUNTIME_PATH;
+  const v22Rows = frozenInventory(REGISTRY_V22_VERSION);
+  // A partial predecessor bundle regenerates only the missing half, and it
+  // regenerates it from the canonical prior inputs: the v22 renderer's third
+  // argument is its own v21-shaped predecessor bundle, so this v22-shaped one
+  // is never forwarded into it.
+  const v22Migration = predecessorArtifacts?.migration ??
+    renderDoctorcrePortfolioForwardRegistrySql(v22Rows, predecessorDbCatalogBaseline);
+  const v22Runtime = predecessorArtifacts?.runtime ?? renderRuntimeProjection(v22Rows, {
+    version: REGISTRY_V22_VERSION,
+    dbCatalogBaseline: predecessorDbCatalogBaseline,
+  });
+  for (const [path, source] of [
+    [v22MigrationPath, v22Migration], [v22RuntimePath, v22Runtime],
+  ]) {
+    const expected = HISTORICAL_REGISTRY_ARTIFACT_SHA256[path];
+    if (!artifactShaRe.test(expected ?? ""))
+      throw new Error(`R07 repo hygiene janitor v23 predecessor artifact pin is unbound: ${path}`);
+    const observed = sha256(source);
+    if (observed !== expected)
+      throw new Error(`sealed historical SCAC v22 artifact changed: ${path}: ${observed}`);
+  }
+
+  // Slicing from the header marker is also what drops v22's domain SQL: the
+  // portfolio DDL sits BEFORE this marker, and a registry-only successor must
+  // not re-emit it.
+  const headerMarker =
+    "-- SCAC-12: mutation registry v22 after the DoctorCRE v5 portfolio hierarchy.";
+  const coreStart = v22Migration.indexOf(headerMarker);
+  if (coreStart < 0 || v22Migration.indexOf(headerMarker, coreStart + headerMarker.length) >= 0)
+    throw new Error("sealed SCAC v22 migration has no exact successor core boundary");
+  const v22Core = v22Migration.slice(coreStart);
+  const currentV22Marker = "create or replace function ops.scac_mutation_catalog_v22_current()";
+  const policyMarker =
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v21;";
+  const currentV22Start = v22Core.indexOf(currentV22Marker);
+  const secondCurrentV22 = v22Core.indexOf(
+    currentV22Marker, currentV22Start + currentV22Marker.length);
+  const v21HistoryMarker =
+    "alter function ops.scac_mutation_catalog_v21_current() rename to scac_mutation_catalog_v21_live_at_seal;";
+  const v21HistoryStart = v22Core.indexOf(v21HistoryMarker);
+  const secondV21History = v22Core.indexOf(
+    v21HistoryMarker, v21HistoryStart + v21HistoryMarker.length);
+  const policyStart = v22Core.indexOf(policyMarker);
+  const secondPolicy = v22Core.indexOf(policyMarker, policyStart + policyMarker.length);
+  if (v21HistoryStart < 0 || secondV21History >= 0 || currentV22Start <= v21HistoryStart ||
+      secondCurrentV22 >= 0 || policyStart <= currentV22Start || secondPolicy >= 0)
+    throw new Error("sealed SCAC v22 migration has no exact catalog successor boundary");
+  const installedV21History = v22Core.slice(v21HistoryStart, currentV22Start);
+  const v22Current = v22Core.slice(currentV22Start, policyStart);
+  const v22History =
+`alter function ops.scac_mutation_catalog_v22_current() rename to scac_mutation_catalog_v22_live_at_seal;
+create or replace function ops.scac_mutation_registry_v22_seal_available()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_registry_seal_valid('scac-mutation-registry.v22')
+$fn$;
+create or replace function ops.scac_mutation_catalog_v22_current()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_catalog_v22_live_at_seal()
+$fn$;
+comment on function ops.scac_mutation_registry_v22_seal_available() is 'Exact immutable v22 registry seal; separate from whether the live catalog still equals v22.';
+comment on function ops.scac_mutation_catalog_v22_current() is 'Historical v22 live-catalog validator; expected to become false after the v23 authority surface is installed.';
+
+`;
+  const renderV23Current = baseline => {
+    let current = v22Current
+      .replaceAll("scac_mutation_catalog_v22_current", "scac_mutation_catalog_v23_current")
+      .replaceAll("scac-mutation-registry.v22", "scac-mutation-registry.v23");
+    for (const [category, label] of [
+      ["secdef_execute", "security-definer"],
+      ["relation_dml", "relation"],
+      ["column_dml", "column"],
+    ]) {
+      current = replaceExactlyOnce(current,
+        `if observed_count<>${predecessorDbCatalogBaseline[category].count} or observed_digest<>'${predecessorDbCatalogBaseline[category].digest}' then return false; end if;`,
+        `if observed_count<>${baseline[category].count} or observed_digest<>'${baseline[category].digest}' then return false; end if;`,
+        `R07 repo hygiene janitor v23 ${label} baseline`);
+    }
+    return replaceExactlyOnce(current,
+      `return observed_count=${predecessorDbCatalogBaseline.role_authority.count} and observed_digest='${predecessorDbCatalogBaseline.role_authority.digest}';`,
+      `return observed_count=${baseline.role_authority.count} and observed_digest='${baseline.role_authority.digest}';`,
+      "R07 repo hygiene janitor v23 role-authority baseline");
+  };
+  const v23Current = renderV23Current(dbCatalogBaseline);
+
+  let sql = replaceExactlyOnce(v22Core, v22Current,
+    "__DOCTORCRE_PORTFOLIO_V22_CATALOG_SUCCESSOR__",
+    "R07 repo hygiene janitor v22 current catalog block");
+  sql = replaceExactlyOnce(sql, installedV21History, "",
+    "R07 repo hygiene janitor already-installed v21 catalog history");
+  sql = replaceExactlyOnce(sql, headerMarker,
+    "-- SCAC-12: registry-only mutation registry v23 after the R07 repo-hygiene janitor definition.",
+    "R07 repo hygiene janitor migration header");
+  sql = sql
+    .replaceAll("scac-mutation-registry.v22", "scac-mutation-registry.v23")
+    .replaceAll("_v22", "_v23")
+    .replaceAll(" v22", " v23");
+  sql = replaceExactlyOnce(sql, JSON.stringify(predecessorDbCatalogBaseline),
+    JSON.stringify(dbCatalogBaseline), "R07 repo hygiene janitor v23 catalog projection");
+  sql = replaceExactlyOnce(sql,
+    `'${v22Seal.digest}',${v22Seal.entryCount},${v22Seal.sourceEntryCount},`,
+    `'sha256:${v23Digest}',${entryCount},${rows.length},`,
+    "R07 repo hygiene janitor v23 registry row");
+  sql = replaceExactlyOnce(sql,
+    `ops.scac_mutation_registration_v23('${v22Seal.digest}',`,
+    `ops.scac_mutation_registration_v23('sha256:${v23Digest}',`,
+    "R07 repo hygiene janitor v23 snapshot registry lookup");
+  sql = replaceExactlyOnce(sql,
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v21;",
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v22;",
+    "R07 repo hygiene janitor policy snapshot predecessor");
+  sql = replaceExactlyOnce(sql, "__DOCTORCRE_PORTFOLIO_V22_CATALOG_SUCCESSOR__",
+    `${v22History}${v23Current}`, "R07 repo hygiene janitor v22 catalog history insertion");
+
+  const versionsThrough22 = Array.from({ length: 22 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  const versionsThrough21 = Array.from({ length: 21 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  sql = replaceExactlyOnce(sql,
+    `check (registry_version in (${versionsThrough21},'scac-mutation-registry.v23'))`,
+    `check (registry_version in (${versionsThrough22},'scac-mutation-registry.v23'))`,
+    "R07 repo hygiene janitor registry-version constraint");
+  sql = replaceExactlyOnce(sql,
+    `if p_registry_version not in (${versionsThrough21}) then return false; end if;`,
+    `if p_registry_version not in (${versionsThrough22}) then return false; end if;`,
+    "R07 repo hygiene janitor historical seal allowlist");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v21' then '${HISTORICAL_REGISTRY_SEALS.v21.digest}' end;`,
+    `    when 'scac-mutation-registry.v21' then '${HISTORICAL_REGISTRY_SEALS.v21.digest}'\n    when '${v22Seal.version}' then '${v22Seal.digest}' end;`,
+    "R07 repo hygiene janitor historical digest case");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v21' then '${JSON.stringify(R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE)}'::jsonb end;`,
+    `    when 'scac-mutation-registry.v21' then '${JSON.stringify(R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE)}'::jsonb\n    when '${v22Seal.version}' then '${JSON.stringify(predecessorDbCatalogBaseline)}'::jsonb end;`,
+    "R07 repo hygiene janitor historical catalog case");
+  sql = replaceExactlyOnce(sql,
+    `    ('scac-mutation-registry.v21','${HISTORICAL_REGISTRY_SEALS.v21.digest}',${HISTORICAL_REGISTRY_SEALS.v21.entryCount},${HISTORICAL_REGISTRY_SEALS.v21.sourceEntryCount})\n`,
+    `    ('scac-mutation-registry.v21','${HISTORICAL_REGISTRY_SEALS.v21.digest}',${HISTORICAL_REGISTRY_SEALS.v21.entryCount},${HISTORICAL_REGISTRY_SEALS.v21.sourceEntryCount}),\n    ('${v22Seal.version}','${v22Seal.digest}',${v22Seal.entryCount},${v22Seal.sourceEntryCount})\n`,
+    "R07 repo hygiene janitor historical seal tuple");
+  sql = replaceExactlyOnce(sql,
+    "    ops.scac_mutation_registry_v21_seal_available()) then",
+    "    ops.scac_mutation_registry_v21_seal_available() and\n    ops.scac_mutation_registry_v22_seal_available()) then",
+    "R07 repo hygiene janitor snapshot predecessor seal");
+  sql = replaceExactlyOnce(sql,
+    `or (r.registry_version='scac-mutation-registry.v23' and r.registry_digest='${v22Seal.digest}')`,
+    `or (r.registry_version='scac-mutation-registry.v22' and r.registry_digest='${v22Seal.digest}')\n         or (r.registry_version='scac-mutation-registry.v23' and r.registry_digest='sha256:${v23Digest}')`,
+    "R07 repo hygiene janitor epoch-chain digest cases");
+  sql = replaceExactlyOnce(sql,
+    `  (registry_version='scac-mutation-registry.v23' and registry_digest='${v22Seal.digest}')`,
+    `  (registry_version='scac-mutation-registry.v22' and registry_digest='${v22Seal.digest}') or\n  (registry_version='scac-mutation-registry.v23' and registry_digest='sha256:${v23Digest}')`,
+    "R07 repo hygiene janitor epoch constraint digest cases");
+  sql = replaceExactlyOnce(sql,
+    `'{registry_digest}',to_jsonb('${v22Seal.digest}'::text)`,
+    `'{registry_digest}',to_jsonb('sha256:${v23Digest}'::text)`,
+    "R07 repo hygiene janitor snapshot registry digest");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_mutation_registry_v20_seal_available(),ops.scac_mutation_catalog_v21_live_at_seal(),ops.scac_mutation_catalog_v21_current(),ops.scac_mutation_registry_v21_seal_available(),ops.scac_mutation_catalog_v23_current()",
+    "ops.scac_mutation_registry_v20_seal_available(),ops.scac_mutation_catalog_v21_live_at_seal(),ops.scac_mutation_catalog_v21_current(),ops.scac_mutation_registry_v21_seal_available(),ops.scac_mutation_catalog_v22_live_at_seal(),ops.scac_mutation_catalog_v22_current(),ops.scac_mutation_registry_v22_seal_available(),ops.scac_mutation_catalog_v23_current()",
+    "R07 repo hygiene janitor historical function revoke list");
+  sql = replaceExactlyOnce(sql,
+    // The anchor is the predecessor comment AS IT STANDS AFTER the global
+    // version rename above, which has already bumped "registry v22" to v23.
+    "DoctorCRE portfolio successor snapshot: current policy epochs bind mutation registry v23 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21 epochs remain immutable.",
+    "R07 repo-hygiene janitor successor snapshot: current policy epochs bind mutation registry v23 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22 epochs remain immutable.",
+    "R07 repo hygiene janitor policy snapshot comment");
+  sql = replaceExactlyOnce(sql,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v23')<>${v22Seal.entryCount}`,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v23')<>${entryCount}`,
+    "R07 repo hygiene janitor v23 entry count guard");
+  sql = replaceExactlyOnce(sql,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v21')<>'${HISTORICAL_REGISTRY_SEALS.v21.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v21')<>${HISTORICAL_REGISTRY_SEALS.v21.entryCount} then raise exception 'sealed SCAC mutation registry v21 changed during successor creation'; end if;`,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v22')<>'${v22Seal.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v22')<>${v22Seal.entryCount} then raise exception 'sealed SCAC mutation registry v22 changed during successor creation'; end if;`,
+    "R07 repo hygiene janitor predecessor seal guard");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),ops.scac_policy_epoch_snapshot_v15(),ops.scac_policy_epoch_snapshot_v16(),ops.scac_policy_epoch_snapshot_v17(),ops.scac_policy_epoch_snapshot_v18(),ops.scac_policy_epoch_snapshot_v19(),ops.scac_policy_epoch_snapshot_v20(),ops.scac_policy_epoch_snapshot_v21(),",
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),ops.scac_policy_epoch_snapshot_v15(),ops.scac_policy_epoch_snapshot_v16(),ops.scac_policy_epoch_snapshot_v17(),ops.scac_policy_epoch_snapshot_v18(),ops.scac_policy_epoch_snapshot_v19(),ops.scac_policy_epoch_snapshot_v20(),ops.scac_policy_epoch_snapshot_v21(),ops.scac_policy_epoch_snapshot_v22(),",
+    "R07 repo hygiene janitor historical policy snapshot revoke list");
+
+  const seedStartMarker = "with seed as (select value as contract from jsonb_array_elements(";
+  const seedEndMarker = "::jsonb))\ninsert into ops.scac_mutation_registry_entry";
+  const seedStart = sql.indexOf(seedStartMarker);
+  const secondSeedStart = sql.indexOf(seedStartMarker, seedStart + seedStartMarker.length);
+  const seedEnd = sql.indexOf(seedEndMarker, seedStart + seedStartMarker.length);
+  const secondSeedEnd = sql.indexOf(seedEndMarker, seedEnd + seedEndMarker.length);
+  if (seedStart < 0 || secondSeedStart >= 0 || seedEnd < 0 || secondSeedEnd >= 0)
+    throw new Error("sealed SCAC v22 migration has no exact source-seed boundary");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart + seedStartMarker.length)}${sqlLiteral(seed)}${sql.slice(seedEnd)}`;
+
+  const preflightCurrent = renderV23Current(predecessorDbCatalogBaseline);
+  const preflightBegin = preflightCurrent.indexOf("begin\n");
+  const preflightEnd = preflightCurrent.lastIndexOf("end $fn$;");
+  if (preflightBegin < 0 || preflightEnd <= preflightBegin)
+    throw new Error("generated v23 catalog predicate has no exact preflight body boundary");
+  let preflightBody = preflightCurrent.slice(preflightBegin + "begin\n".length, preflightEnd);
+  preflightBody = preflightBody.replaceAll(
+    "then return false; end if;",
+    "then raise exception 'R07 repo hygiene janitor pre-v23 catalog receipt drifted'; end if;");
+  preflightBody = replaceExactlyOnce(preflightBody,
+    `return observed_count=${predecessorDbCatalogBaseline.role_authority.count} and observed_digest='${predecessorDbCatalogBaseline.role_authority.digest}';`,
+    `if observed_count<>${predecessorDbCatalogBaseline.role_authority.count} or observed_digest<>'${predecessorDbCatalogBaseline.role_authority.digest}' then raise exception 'R07 repo hygiene janitor pre-v23 role-authority receipt drifted'; end if;`,
+    "R07 repo hygiene janitor pre-v23 role receipt");
+  const predecessorHash = sha256(v22Migration);
+  const predecessorPreflight =
+`-- Exact disposable-Postgres post-0496 receipt. Refuse before any v23 function
+-- exists; this registry-only successor changes no domain DDL or business rows.
+do $r07_repo_hygiene_janitor_preflight$
+declare observed_count integer; observed_digest text; grant_snapshot jsonb;
+begin
+  if (select count(*) from public.schema_migrations where filename='0496_doctorcre_portfolio_hierarchy_and_scac_successor.sql')<>1
+     or not exists(select 1 from public.schema_migrations where filename='0496_doctorcre_portfolio_hierarchy_and_scac_successor.sql'
+       and sha256='${predecessorHash}') then
+    raise exception 'R07 repo hygiene janitor pre-v23 migration ledger receipt drifted';
+  end if;
+  grant_snapshot:=ops.scac_runtime_dml_grant_snapshot();
+  if (grant_snapshot->>'entry_count')::integer<>${predecessorDbCatalogBaseline.runtime_dml_grants.count}
+     or grant_snapshot->>'grant_digest'<>'${predecessorDbCatalogBaseline.runtime_dml_grants.digest}' then
+    raise exception 'R07 repo hygiene janitor pre-v23 runtime grant receipt drifted';
+  end if;
+${preflightBody}end $r07_repo_hygiene_janitor_preflight$;
+
+`;
+  return `${predecessorPreflight}${sql}`.replace(/\n+$/, "\n");
+}
+
+
+
+const V5_F09_DOMAIN_SQL = "-- V5-F09 domain enforcement. This successor is NOT registry-only: it replaces\n-- two existing security-definer functions in place, which is exactly why it\n-- owes the registry successor below.\n-- ONE ADMISSION PATH, EXTENDED. ops.enqueue_job stays the only route into\n-- ops.job. 0334's enabled-definition gate, shadow/canary/live evidence ladder\n-- and duplicate-delivery reconciliation are reproduced verbatim below; the only\n-- addition is the duplicate_group exclusion between DISTINCT workflow\n-- identities, which no unique index can express because their definition keys\n-- differ.\n--\n-- WHY AN ADVISORY TRANSACTION LOCK. The same-identity case is already excluded\n-- by the unique (definition_key,definition_version,scheduled_for) index, which\n-- holds under concurrency for free. Two DISTINCT identities collide on no\n-- index at all, so two concurrent connections would each see an empty table and\n-- both insert. The lock is keyed on the exact duplicate_group and canonical\n-- slot, is released at commit or rollback, and makes the second caller observe\n-- the first caller's committed row instead of racing it. First committer wins;\n-- the loser is refused with an exact message, never silently dropped.\ncreate or replace function ops.enqueue_job(\n  p_definition_key text,\n  p_definition_version integer,\n  p_scheduled_for timestamptz,\n  p_payload jsonb,\n  p_idempotency_key text,\n  p_mode text default 'live'\n) returns ops.job\nlanguage plpgsql security definer set search_path=ops,public,pg_temp\nas $$\ndeclare\n  d ops.job_definition%rowtype;\n  j ops.job%rowtype;\n  canary_disabled boolean;\n  duplicate_group_name text;\n  conflicting_key text;\nbegin\n  select * into d from ops.job_definition\n   where key=p_definition_key and version=p_definition_version and enabled;\n  if not found then\n    raise exception 'job definition % v% is not enabled',p_definition_key,p_definition_version;\n  end if;\n  if p_mode not in ('shadow','canary','live','replay') then\n    raise exception 'invalid job mode %',p_mode;\n  end if;\n  -- A missing canary key (every cognition contract, and any deterministic\n  -- contract that never named one) is not the same claim as an explicit\n  -- canary.enabled=false; only the explicit false is a contractual refusal.\n  canary_disabled := (d.execution_contract #>> '{canary,enabled}') = 'false';\n  if p_mode='canary' then\n    if canary_disabled then\n      raise exception 'workflow % cannot enqueue canary mode: canary is contractually disabled for definition v%',\n        p_definition_key,p_definition_version;\n    end if;\n    if not exists (\n      select 1 from ops.workflow_acceptance\n       where workflow_key=p_definition_key and workflow_version=p_definition_version\n         and mode='shadow' and status='accepted'\n    ) then\n      raise exception 'workflow % cannot enqueue canary mode: no accepted shadow acceptance evidence for definition v%',\n        p_definition_key,p_definition_version;\n    end if;\n  elsif p_mode='live' then\n    if canary_disabled then\n      if not exists (\n        select 1 from ops.workflow_acceptance\n         where workflow_key=p_definition_key and workflow_version=p_definition_version\n           and mode='shadow' and status='accepted'\n      ) then\n        raise exception 'workflow % cannot enqueue live mode: canary is contractually disabled and no accepted shadow acceptance evidence exists for definition v%',\n          p_definition_key,p_definition_version;\n      end if;\n    elsif not exists (\n      select 1 from ops.workflow_acceptance\n       where workflow_key=p_definition_key and workflow_version=p_definition_version\n         and mode='canary' and status='accepted'\n    ) then\n      raise exception 'workflow % cannot enqueue live mode: no accepted canary acceptance evidence for definition v%',\n        p_definition_key,p_definition_version;\n    end if;\n  end if;\n\n  -- V5-F09: exclude two DISTINCT registered workflow identities that share one\n  -- duplicate_group from both becoming executable at one canonical slot.\n  select r.duplicate_group into duplicate_group_name\n    from ops.legacy_schedule_surface_registry r\n   where r.workflow_key=p_definition_key and r.workflow_version=p_definition_version\n     and r.duplicate_group is not null\n   limit 1;\n  if duplicate_group_name is not null then\n    -- ONE bigint key: the two-argument advisory form is (int4,int4) and would\n    -- not take these hashes. The slot is rendered as epoch microseconds rather\n    -- than ::text because a timestamptz cast follows the CALLER's TimeZone, and\n    -- two connections in different zones must not hash one instant into two\n    -- different locks -- which would silently reopen the race this closes.\n    perform pg_advisory_xact_lock(hashtextextended(\n      'carr.enqueue_job.duplicate_group:'||duplicate_group_name||'@'||\n      (extract(epoch from p_scheduled_for)*1000000)::bigint::text,0));\n    -- A cancelled job never executed; every other state either is executable or\n    -- already executed, so only 'cancelled' is excluded here.\n    select j2.definition_key into conflicting_key\n      from ops.job j2\n      join ops.legacy_schedule_surface_registry r2\n        on r2.workflow_key=j2.definition_key and r2.workflow_version=j2.definition_version\n     where r2.duplicate_group=duplicate_group_name\n       and j2.scheduled_for=p_scheduled_for\n       and j2.definition_key<>p_definition_key\n       and j2.state<>'cancelled'\n     order by j2.definition_key\n     limit 1;\n    if conflicting_key is not null then\n      raise exception 'workflow % cannot enqueue: duplicate_group % already has an executable job for this canonical slot from workflow %',\n        p_definition_key,duplicate_group_name,conflicting_key;\n    end if;\n  end if;\n\n  insert into ops.job\n    (definition_key,definition_version,idempotency_key,scheduled_for,mode,payload,\n     max_attempts,timeout_seconds)\n  values\n    (d.key,d.version,p_idempotency_key,p_scheduled_for,p_mode,coalesce(p_payload,'{}'::jsonb),\n     (d.retry_policy->>'max_attempts')::integer,\n     (d.retry_policy->>'timeout_seconds')::integer)\n  on conflict do nothing\n  returning * into j;\n  if j.id is null then\n    select * into j from ops.job\n     where idempotency_key=p_idempotency_key\n        or (definition_key=p_definition_key\n            and definition_version=p_definition_version\n            and scheduled_for=p_scheduled_for)\n     order by (idempotency_key=p_idempotency_key) desc\n     limit 1;\n    if j.id is null\n       or j.definition_key <> p_definition_key\n       or j.definition_version <> p_definition_version\n       or j.scheduled_for <> p_scheduled_for\n       or j.payload <> coalesce(p_payload,'{}'::jsonb)\n       or j.mode <> p_mode then\n      raise exception 'duplicate delivery conflicts with the canonical scheduled job';\n    end if;\n  end if;\n  return j;\nend $$;\ncreate or replace function ops.current_sourced_work_requests(\n  p_organization_tenant_id text\n)\nreturns table (\n  ref text,\n  title text,\n  state text,\n  source_label text,\n  source_freshness text,\n  next_human_action text\n)\nlanguage sql stable security definer\nset search_path = pg_catalog, ops\nas $$\n  select w.ref,\n         w.title,\n         w.state,\n         coalesce(s.title, s.section_key) as source_label,\n         'current'::text as source_freshness,\n         case\n           when w.state = 'captured' then 'Review and triage'\n           when w.state = 'triaged' then 'Prepare or review bounded plan'\n           when w.state = 'ready' then 'Record or review outcome evidence'\n         end as next_human_action\n    from ops.work_request w\n    join public.doctrine_section s on s.id = w.doctrine_section_id\n    join public.doctrine_document d on d.id = s.document_id\n   where p_organization_tenant_id = 'carr-internal'\n     and w.organization_tenant_id = p_organization_tenant_id\n     and w.capture_idempotency_key is not null\n     and w.state in ('captured', 'triaged', 'ready')\n     -- V5-F09: an accepted outcome feedback receipt removes ACTIONABILITY and\n     -- nothing else. The Work Request keeps its state, its plan, its feedback\n     -- and its card/history lookups; it simply stops being offered as work\n     -- somebody still has to do. Read-only: this function mutates no row.\n     and not exists (\n       select 1\n         from ops.sourced_work_request_outcome_feedback_acceptance_receipt accepted_outcome\n        where accepted_outcome.work_request_id = w.id\n     )\n     and d.visibility = 'shared'\n     and s.status = 'active'\n     and s.current_revision_id = w.doctrine_revision_id\n     and (\n       w.state <> 'triaged'\n       or (\n         not exists (\n           select 1\n             from ops.sourced_work_request_plan existing_plan\n            where existing_plan.work_request_id = w.id\n         )\n         and exists (\n           select 1\n             from public.doctrine_document runbook_document\n             join public.doctrine_section runbook_section\n               on runbook_section.document_id = runbook_document.id\n             join public.doctrine_revision runbook_revision\n               on runbook_revision.id = runbook_section.current_revision_id\n              and runbook_revision.section_id = runbook_section.id\n            where runbook_document.slug = 'runbook'\n              and runbook_document.visibility = 'shared'\n              and runbook_section.section_key = 'diagnosis-checklist-in-order-2-minutes'\n              and runbook_section.status = 'active'\n              and runbook_revision.content_hash ~ '^[0-9a-f]{64}$'\n              and encode(public.digest(runbook_revision.plain_text, 'sha256'), 'hex') = runbook_revision.content_hash\n              and runbook_revision.body = jsonb_build_object('text', runbook_revision.plain_text)\n         )\n       )\n       or exists (\n         select 1\n           from ops.sourced_work_request_plan current_plan\n           join public.doctrine_section planned_runbook_section\n             on planned_runbook_section.id = current_plan.runbook_section_id\n           join public.doctrine_document planned_runbook_document\n             on planned_runbook_document.id = planned_runbook_section.document_id\n           join public.doctrine_revision planned_runbook_revision\n             on planned_runbook_revision.id = planned_runbook_section.current_revision_id\n            and planned_runbook_revision.section_id = planned_runbook_section.id\n          where current_plan.id = (\n            select latest_plan.id\n              from ops.sourced_work_request_plan latest_plan\n             where latest_plan.work_request_id = w.id\n             order by latest_plan.plan_version desc\n             limit 1\n          )\n            and planned_runbook_document.slug = 'runbook'\n            and planned_runbook_document.visibility = 'shared'\n            and planned_runbook_section.status = 'active'\n            and planned_runbook_revision.id = current_plan.runbook_revision_id\n            and planned_runbook_revision.content_hash = current_plan.runbook_content_hash\n            and ('doctrine:' || planned_runbook_document.slug || '#' || planned_runbook_section.section_key) = current_plan.runbook_ref\n            and encode(public.digest(planned_runbook_revision.plain_text, 'sha256'), 'hex') = planned_runbook_revision.content_hash\n            and planned_runbook_revision.body = jsonb_build_object('text', planned_runbook_revision.plain_text)\n       )\n     )\n   order by w.captured_at asc, w.ref asc\n   limit 20;\n$$;\n";
+
+// Shared v24 trust root. Every entry path that renders or writes a v24
+// artifact calls this BEFORE doing work, so an unbound template constant can
+// never reach a digest, a projection or a written file.
+const V5_F09_WORKFLOW_TRUTH_V23_MIGRATION_PATH =
+  "migrations/0497_r07_repo_hygiene_janitor_and_scac_successor.sql";
+const V5_F09_WORKFLOW_TRUTH_V23_RUNTIME_PATH =
+  "mcp-server/src/scac-mutation-registry.v23.generated.js";
+
+export function assertV5F09WorkflowTruthV24TrustRoot() {
+  // Strictly stronger than the root it succeeds: the whole v23 chain has to be
+  // bound before a v24 artifact can exist at all.
+  assertR07RepoHygieneJanitorV23TrustRoot();
+  const { v23: v23Seal } = HISTORICAL_REGISTRY_SEALS;
+  if (v23Seal?.version !== REGISTRY_V23_VERSION ||
+      !CONTINUITY_ARCHIVE_DIGEST_RE.test(v23Seal?.digest ?? "") ||
+      !Number.isInteger(v23Seal?.entryCount) || v23Seal.entryCount < 1 ||
+      !Number.isInteger(v23Seal?.sourceEntryCount) || v23Seal.sourceEntryCount < 1)
+    throw new Error("V5-F09 workflow truth v24 predecessor seal is unbound");
+  assertR06HooksCorrectnessCatalogBaseline("predecessor v23",
+    V5_F09_WORKFLOW_TRUTH_PRE_V24_DB_CATALOG_BASELINE, "scac-db-catalog-projection.v23");
+  assertR06HooksCorrectnessCatalogBaseline("successor v24",
+    V5_F09_WORKFLOW_TRUTH_FORWARD_DB_CATALOG_BASELINE, "scac-db-catalog-projection.v24");
+  for (const path of [
+    V5_F09_WORKFLOW_TRUTH_V23_MIGRATION_PATH, V5_F09_WORKFLOW_TRUTH_V23_RUNTIME_PATH,
+  ]) {
+    if (!CONTINUITY_ARCHIVE_ARTIFACT_SHA_RE.test(
+      HISTORICAL_REGISTRY_ARTIFACT_SHA256[path] ?? ""))
+      throw new Error(`V5-F09 workflow truth v24 predecessor artifact pin is unbound: ${path}`);
+  }
+}
+
+// Registry-only successor for the V5-F09 workflow truth. The source change
+// adds one tools/ planner script and one DELIBERATELY UNINSTALLED LaunchAgent
+// definition, and re-digests the two entrypoints that carry them, so this
+// migration creates no table, no role and no domain function. It only seals the
+// new source inventory and installs the v24 catalog/policy projection after the
+// immutable v23 frontier -- the same shape as the v21 and v22 registry-only
+// successors, and unlike v23, which carried the portfolio's domain DDL.
+export function renderV5F09WorkflowTruthForwardRegistrySql(rows = fullInventory(),
+  dbCatalogBaseline = V5_F09_WORKFLOW_TRUTH_FORWARD_DB_CATALOG_BASELINE,
+  predecessorArtifacts = undefined) {
+  // The predecessor seal, its catalog projection and the sealed v23 artifact
+  // hashes are fixed production constants, asserted by the shared v24 trust
+  // root that every v24 entry path calls. There is deliberately no caller
+  // binding for them: a supplied predecessor artifact is checked AGAINST these
+  // pins, it never supplies its own expected hash.
+  assertV5F09WorkflowTruthV24TrustRoot();
+  const { v23: v23Seal } = HISTORICAL_REGISTRY_SEALS;
+  const predecessorDbCatalogBaseline = V5_F09_WORKFLOW_TRUTH_PRE_V24_DB_CATALOG_BASELINE;
+  const artifactShaRe = CONTINUITY_ARCHIVE_ARTIFACT_SHA_RE;
+  // A caller-supplied successor baseline is held to the SAME exact-projection
+  // shape as the fixed constant; it can only ever narrow, never widen.
+  assertR06HooksCorrectnessCatalogBaseline("successor v24", dbCatalogBaseline,
+    "scac-db-catalog-projection.v24");
+
+  const v24Digest = registryDigestFor(REGISTRY_V24_VERSION, rows, dbCatalogBaseline);
+  const catalogCount = dbCatalogBaseline.secdef_execute.count +
+    dbCatalogBaseline.relation_dml.count + dbCatalogBaseline.column_dml.count;
+  const entryCount = rows.length + catalogCount;
+  const v23MigrationPath = V5_F09_WORKFLOW_TRUTH_V23_MIGRATION_PATH;
+  const v23RuntimePath = V5_F09_WORKFLOW_TRUTH_V23_RUNTIME_PATH;
+  const v23Rows = frozenInventory(REGISTRY_V23_VERSION);
+  // A partial predecessor bundle regenerates only the missing half, and it
+  // regenerates it from the canonical prior inputs: the v23 renderer's third
+  // argument is its own v22-shaped predecessor bundle, so this v23-shaped one
+  // is never forwarded into it.
+  const v23Migration = predecessorArtifacts?.migration ??
+    renderR07RepoHygieneJanitorForwardRegistrySql(v23Rows, predecessorDbCatalogBaseline);
+  const v23Runtime = predecessorArtifacts?.runtime ?? renderRuntimeProjection(v23Rows, {
+    version: REGISTRY_V23_VERSION,
+    dbCatalogBaseline: predecessorDbCatalogBaseline,
+  });
+  for (const [path, source] of [
+    [v23MigrationPath, v23Migration], [v23RuntimePath, v23Runtime],
+  ]) {
+    const expected = HISTORICAL_REGISTRY_ARTIFACT_SHA256[path];
+    if (!artifactShaRe.test(expected ?? ""))
+      throw new Error(`V5-F09 workflow truth v24 predecessor artifact pin is unbound: ${path}`);
+    const observed = sha256(source);
+    if (observed !== expected)
+      throw new Error(`sealed historical SCAC v23 artifact changed: ${path}: ${observed}`);
+  }
+
+  // Slicing from the header marker is also what drops v23's domain SQL: the
+  // portfolio DDL sits BEFORE this marker, and a registry-only successor must
+  // not re-emit it.
+  const headerMarker =
+    "-- SCAC-12: registry-only mutation registry v23 after the R07 repo-hygiene janitor definition.";
+  const coreStart = v23Migration.indexOf(headerMarker);
+  if (coreStart < 0 || v23Migration.indexOf(headerMarker, coreStart + headerMarker.length) >= 0)
+    throw new Error("sealed SCAC v23 migration has no exact successor core boundary");
+  const v23Core = v23Migration.slice(coreStart);
+  const currentV23Marker = "create or replace function ops.scac_mutation_catalog_v23_current()";
+  const policyMarker =
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v22;";
+  const currentV23Start = v23Core.indexOf(currentV23Marker);
+  const secondCurrentV23 = v23Core.indexOf(
+    currentV23Marker, currentV23Start + currentV23Marker.length);
+  const v22HistoryMarker =
+    "alter function ops.scac_mutation_catalog_v22_current() rename to scac_mutation_catalog_v22_live_at_seal;";
+  const v22HistoryStart = v23Core.indexOf(v22HistoryMarker);
+  const secondV22History = v23Core.indexOf(
+    v22HistoryMarker, v22HistoryStart + v22HistoryMarker.length);
+  const policyStart = v23Core.indexOf(policyMarker);
+  const secondPolicy = v23Core.indexOf(policyMarker, policyStart + policyMarker.length);
+  if (v22HistoryStart < 0 || secondV22History >= 0 || currentV23Start <= v22HistoryStart ||
+      secondCurrentV23 >= 0 || policyStart <= currentV23Start || secondPolicy >= 0)
+    throw new Error("sealed SCAC v23 migration has no exact catalog successor boundary");
+  const installedV22History = v23Core.slice(v22HistoryStart, currentV23Start);
+  const v23Current = v23Core.slice(currentV23Start, policyStart);
+  const v23History =
+`alter function ops.scac_mutation_catalog_v23_current() rename to scac_mutation_catalog_v23_live_at_seal;
+create or replace function ops.scac_mutation_registry_v23_seal_available()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_registry_seal_valid('scac-mutation-registry.v23')
+$fn$;
+create or replace function ops.scac_mutation_catalog_v23_current()
+returns boolean language sql stable security definer set search_path=pg_catalog,ops as $fn$
+  select ops.scac_mutation_catalog_v23_live_at_seal()
+$fn$;
+comment on function ops.scac_mutation_registry_v23_seal_available() is 'Exact immutable v23 registry seal; separate from whether the live catalog still equals v23.';
+comment on function ops.scac_mutation_catalog_v23_current() is 'Historical v23 live-catalog validator; expected to become false after the v24 authority surface is installed.';
+
+`;
+  const renderV24Current = baseline => {
+    let current = v23Current
+      .replaceAll("scac_mutation_catalog_v23_current", "scac_mutation_catalog_v24_current")
+      .replaceAll("scac-mutation-registry.v23", "scac-mutation-registry.v24");
+    for (const [category, label] of [
+      ["secdef_execute", "security-definer"],
+      ["relation_dml", "relation"],
+      ["column_dml", "column"],
+    ]) {
+      current = replaceExactlyOnce(current,
+        `if observed_count<>${predecessorDbCatalogBaseline[category].count} or observed_digest<>'${predecessorDbCatalogBaseline[category].digest}' then return false; end if;`,
+        `if observed_count<>${baseline[category].count} or observed_digest<>'${baseline[category].digest}' then return false; end if;`,
+        `V5-F09 workflow truth v24 ${label} baseline`);
+    }
+    return replaceExactlyOnce(current,
+      `return observed_count=${predecessorDbCatalogBaseline.role_authority.count} and observed_digest='${predecessorDbCatalogBaseline.role_authority.digest}';`,
+      `return observed_count=${baseline.role_authority.count} and observed_digest='${baseline.role_authority.digest}';`,
+      "V5-F09 workflow truth v24 role-authority baseline");
+  };
+  const v24Current = renderV24Current(dbCatalogBaseline);
+
+  let sql = replaceExactlyOnce(v23Core, v23Current,
+    "__DOCTORCRE_PORTFOLIO_V23_CATALOG_SUCCESSOR__",
+    "V5-F09 workflow truth v23 current catalog block");
+  sql = replaceExactlyOnce(sql, installedV22History, "",
+    "V5-F09 workflow truth already-installed v22 catalog history");
+  sql = replaceExactlyOnce(sql, headerMarker,
+    "-- SCAC-12: mutation registry v24 after the V5-F09 workflow truth enforcement.",
+    "V5-F09 workflow truth migration header");
+  sql = sql
+    .replaceAll("scac-mutation-registry.v23", "scac-mutation-registry.v24")
+    .replaceAll("_v23", "_v24")
+    .replaceAll(" v23", " v24");
+  sql = replaceExactlyOnce(sql, JSON.stringify(predecessorDbCatalogBaseline),
+    JSON.stringify(dbCatalogBaseline), "V5-F09 workflow truth v24 catalog projection");
+  sql = replaceExactlyOnce(sql,
+    `'${v23Seal.digest}',${v23Seal.entryCount},${v23Seal.sourceEntryCount},`,
+    `'sha256:${v24Digest}',${entryCount},${rows.length},`,
+    "V5-F09 workflow truth v24 registry row");
+  sql = replaceExactlyOnce(sql,
+    `ops.scac_mutation_registration_v24('${v23Seal.digest}',`,
+    `ops.scac_mutation_registration_v24('sha256:${v24Digest}',`,
+    "V5-F09 workflow truth v24 snapshot registry lookup");
+  sql = replaceExactlyOnce(sql,
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v22;",
+    "alter function ops.scac_policy_epoch_snapshot() rename to scac_policy_epoch_snapshot_v23;",
+    "V5-F09 workflow truth policy snapshot predecessor");
+  sql = replaceExactlyOnce(sql, "__DOCTORCRE_PORTFOLIO_V23_CATALOG_SUCCESSOR__",
+    `${v23History}${v24Current}`, "V5-F09 workflow truth v23 catalog history insertion");
+
+  const versionsThrough23 = Array.from({ length: 23 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  const versionsThrough22 = Array.from({ length: 22 }, (_, index) =>
+    `'scac-mutation-registry.v${index + 1}'`).join(",");
+  sql = replaceExactlyOnce(sql,
+    `check (registry_version in (${versionsThrough22},'scac-mutation-registry.v24'))`,
+    `check (registry_version in (${versionsThrough23},'scac-mutation-registry.v24'))`,
+    "V5-F09 workflow truth registry-version constraint");
+  sql = replaceExactlyOnce(sql,
+    `if p_registry_version not in (${versionsThrough22}) then return false; end if;`,
+    `if p_registry_version not in (${versionsThrough23}) then return false; end if;`,
+    "V5-F09 workflow truth historical seal allowlist");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v22' then '${HISTORICAL_REGISTRY_SEALS.v22.digest}' end;`,
+    `    when 'scac-mutation-registry.v22' then '${HISTORICAL_REGISTRY_SEALS.v22.digest}'\n    when '${v23Seal.version}' then '${v23Seal.digest}' end;`,
+    "V5-F09 workflow truth historical digest case");
+  sql = replaceExactlyOnce(sql,
+    `    when 'scac-mutation-registry.v22' then '${JSON.stringify(DOCTORCRE_PORTFOLIO_FORWARD_DB_CATALOG_BASELINE)}'::jsonb end;`,
+    `    when 'scac-mutation-registry.v22' then '${JSON.stringify(DOCTORCRE_PORTFOLIO_FORWARD_DB_CATALOG_BASELINE)}'::jsonb\n    when '${v23Seal.version}' then '${JSON.stringify(predecessorDbCatalogBaseline)}'::jsonb end;`,
+    "V5-F09 workflow truth historical catalog case");
+  sql = replaceExactlyOnce(sql,
+    `    ('scac-mutation-registry.v22','${HISTORICAL_REGISTRY_SEALS.v22.digest}',${HISTORICAL_REGISTRY_SEALS.v22.entryCount},${HISTORICAL_REGISTRY_SEALS.v22.sourceEntryCount})\n`,
+    `    ('scac-mutation-registry.v22','${HISTORICAL_REGISTRY_SEALS.v22.digest}',${HISTORICAL_REGISTRY_SEALS.v22.entryCount},${HISTORICAL_REGISTRY_SEALS.v22.sourceEntryCount}),\n    ('${v23Seal.version}','${v23Seal.digest}',${v23Seal.entryCount},${v23Seal.sourceEntryCount})\n`,
+    "V5-F09 workflow truth historical seal tuple");
+  sql = replaceExactlyOnce(sql,
+    "    ops.scac_mutation_registry_v22_seal_available()) then",
+    "    ops.scac_mutation_registry_v22_seal_available() and\n    ops.scac_mutation_registry_v23_seal_available()) then",
+    "V5-F09 workflow truth snapshot predecessor seal");
+  sql = replaceExactlyOnce(sql,
+    `or (r.registry_version='scac-mutation-registry.v24' and r.registry_digest='${v23Seal.digest}')`,
+    `or (r.registry_version='scac-mutation-registry.v23' and r.registry_digest='${v23Seal.digest}')\n         or (r.registry_version='scac-mutation-registry.v24' and r.registry_digest='sha256:${v24Digest}')`,
+    "V5-F09 workflow truth epoch-chain digest cases");
+  sql = replaceExactlyOnce(sql,
+    `  (registry_version='scac-mutation-registry.v24' and registry_digest='${v23Seal.digest}')`,
+    `  (registry_version='scac-mutation-registry.v23' and registry_digest='${v23Seal.digest}') or\n  (registry_version='scac-mutation-registry.v24' and registry_digest='sha256:${v24Digest}')`,
+    "V5-F09 workflow truth epoch constraint digest cases");
+  sql = replaceExactlyOnce(sql,
+    `'{registry_digest}',to_jsonb('${v23Seal.digest}'::text)`,
+    `'{registry_digest}',to_jsonb('sha256:${v24Digest}'::text)`,
+    "V5-F09 workflow truth snapshot registry digest");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_mutation_registry_v21_seal_available(),ops.scac_mutation_catalog_v22_live_at_seal(),ops.scac_mutation_catalog_v22_current(),ops.scac_mutation_registry_v22_seal_available(),ops.scac_mutation_catalog_v24_current()",
+    "ops.scac_mutation_registry_v21_seal_available(),ops.scac_mutation_catalog_v22_live_at_seal(),ops.scac_mutation_catalog_v22_current(),ops.scac_mutation_registry_v22_seal_available(),ops.scac_mutation_catalog_v23_live_at_seal(),ops.scac_mutation_catalog_v23_current(),ops.scac_mutation_registry_v23_seal_available(),ops.scac_mutation_catalog_v24_current()",
+    "V5-F09 workflow truth historical function revoke list");
+  sql = replaceExactlyOnce(sql,
+    // The anchor is the predecessor comment AS IT STANDS AFTER the global
+    // version rename above, which has already bumped "registry v23" to v24.
+    "R07 repo-hygiene janitor successor snapshot: current policy epochs bind mutation registry v24 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22 epochs remain immutable.",
+    "V5-F09 workflow truth successor snapshot: current policy epochs bind mutation registry v24 while historical v2/v3/v4/v5/v6/v7/v8/v9/v10/v11/v12/v13/v14/v15/v16/v17/v18/v19/v20/v21/v22/v23 epochs remain immutable.",
+    "V5-F09 workflow truth policy snapshot comment");
+  sql = replaceExactlyOnce(sql,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v24')<>${v23Seal.entryCount}`,
+    `(select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v24')<>${entryCount}`,
+    "V5-F09 workflow truth v24 entry count guard");
+  sql = replaceExactlyOnce(sql,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v22')<>'${HISTORICAL_REGISTRY_SEALS.v22.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v22')<>${HISTORICAL_REGISTRY_SEALS.v22.entryCount} then raise exception 'sealed SCAC mutation registry v22 changed during successor creation'; end if;`,
+    `if (select registry_digest from ops.scac_mutation_registry_version where registry_version='scac-mutation-registry.v23')<>'${v23Seal.digest}'\n     or (select count(*) from ops.scac_mutation_registry_entry where registry_version='scac-mutation-registry.v23')<>${v23Seal.entryCount} then raise exception 'sealed SCAC mutation registry v23 changed during successor creation'; end if;`,
+    "V5-F09 workflow truth predecessor seal guard");
+  sql = replaceExactlyOnce(sql,
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),ops.scac_policy_epoch_snapshot_v15(),ops.scac_policy_epoch_snapshot_v16(),ops.scac_policy_epoch_snapshot_v17(),ops.scac_policy_epoch_snapshot_v18(),ops.scac_policy_epoch_snapshot_v19(),ops.scac_policy_epoch_snapshot_v20(),ops.scac_policy_epoch_snapshot_v21(),ops.scac_policy_epoch_snapshot_v22(),",
+    "ops.scac_policy_epoch_snapshot(),ops.scac_policy_epoch_snapshot_v6(),ops.scac_policy_epoch_snapshot_v7(),ops.scac_policy_epoch_snapshot_v8(),ops.scac_policy_epoch_snapshot_v9(),ops.scac_policy_epoch_snapshot_v10(),ops.scac_policy_epoch_snapshot_v11(),ops.scac_policy_epoch_snapshot_v12(),ops.scac_policy_epoch_snapshot_v13(),ops.scac_policy_epoch_snapshot_v14(),ops.scac_policy_epoch_snapshot_v15(),ops.scac_policy_epoch_snapshot_v16(),ops.scac_policy_epoch_snapshot_v17(),ops.scac_policy_epoch_snapshot_v18(),ops.scac_policy_epoch_snapshot_v19(),ops.scac_policy_epoch_snapshot_v20(),ops.scac_policy_epoch_snapshot_v21(),ops.scac_policy_epoch_snapshot_v22(),ops.scac_policy_epoch_snapshot_v23(),",
+    "V5-F09 workflow truth historical policy snapshot revoke list");
+
+  const seedStartMarker = "with seed as (select value as contract from jsonb_array_elements(";
+  const seedEndMarker = "::jsonb))\ninsert into ops.scac_mutation_registry_entry";
+  const seedStart = sql.indexOf(seedStartMarker);
+  const secondSeedStart = sql.indexOf(seedStartMarker, seedStart + seedStartMarker.length);
+  const seedEnd = sql.indexOf(seedEndMarker, seedStart + seedStartMarker.length);
+  const secondSeedEnd = sql.indexOf(seedEndMarker, seedEnd + seedEndMarker.length);
+  if (seedStart < 0 || secondSeedStart >= 0 || seedEnd < 0 || secondSeedEnd >= 0)
+    throw new Error("sealed SCAC v23 migration has no exact source-seed boundary");
+  const seed = JSON.stringify(rows.map(row => ({ ...row, entry_digest: `sha256:${sha256(row)}` })));
+  sql = `${sql.slice(0, seedStart + seedStartMarker.length)}${sqlLiteral(seed)}${sql.slice(seedEnd)}`;
+
+  const preflightCurrent = renderV24Current(predecessorDbCatalogBaseline);
+  const preflightBegin = preflightCurrent.indexOf("begin\n");
+  const preflightEnd = preflightCurrent.lastIndexOf("end $fn$;");
+  if (preflightBegin < 0 || preflightEnd <= preflightBegin)
+    throw new Error("generated v24 catalog predicate has no exact preflight body boundary");
+  let preflightBody = preflightCurrent.slice(preflightBegin + "begin\n".length, preflightEnd);
+  preflightBody = preflightBody.replaceAll(
+    "then return false; end if;",
+    "then raise exception 'V5-F09 workflow truth pre-v24 catalog receipt drifted'; end if;");
+  preflightBody = replaceExactlyOnce(preflightBody,
+    `return observed_count=${predecessorDbCatalogBaseline.role_authority.count} and observed_digest='${predecessorDbCatalogBaseline.role_authority.digest}';`,
+    `if observed_count<>${predecessorDbCatalogBaseline.role_authority.count} or observed_digest<>'${predecessorDbCatalogBaseline.role_authority.digest}' then raise exception 'V5-F09 workflow truth pre-v24 role-authority receipt drifted'; end if;`,
+    "V5-F09 workflow truth pre-v24 role receipt");
+  const predecessorHash = sha256(v23Migration);
+  const predecessorPreflight =
+`-- Exact disposable-Postgres post-0497 receipt. Refuse before any v24 function
+-- exists; the V5-F09 domain SQL below replaces two existing definer functions
+-- in place and creates no table, role or business row.
+do $v5_f09_workflow_truth_preflight$
+declare observed_count integer; observed_digest text; grant_snapshot jsonb;
+begin
+  if (select count(*) from public.schema_migrations where filename='0497_r07_repo_hygiene_janitor_and_scac_successor.sql')<>1
+     or not exists(select 1 from public.schema_migrations where filename='0497_r07_repo_hygiene_janitor_and_scac_successor.sql'
+       and sha256='${predecessorHash}') then
+    raise exception 'V5-F09 workflow truth pre-v24 migration ledger receipt drifted';
+  end if;
+  grant_snapshot:=ops.scac_runtime_dml_grant_snapshot();
+  if (grant_snapshot->>'entry_count')::integer<>${predecessorDbCatalogBaseline.runtime_dml_grants.count}
+     or grant_snapshot->>'grant_digest'<>'${predecessorDbCatalogBaseline.runtime_dml_grants.digest}' then
+    raise exception 'V5-F09 workflow truth pre-v24 runtime grant receipt drifted';
+  end if;
+${preflightBody}end $v5_f09_workflow_truth_preflight$;
+
+`;
+  return `${predecessorPreflight}${V5_F09_DOMAIN_SQL}\n${sql}`.replace(/\n+$/, "\n");
+}
+
+
+
+export function renderGeneratedFrontier() {
+  // Refuse before the expensive v2-v20 predecessor cascade: this frontier ends
+  // in v21 artifacts, and every input to the guard is a fixed module constant.
+  // The v21 root re-asserts the whole v20 chain, so an unbound v19 limb still
+  // refuses here before any predecessor renderer runs.
+  assertDoctorcrePortfolioV22TrustRoot();
   const v2Rows = frozenInventory(REGISTRY_V2_VERSION);
   const artifacts = {};
   artifacts["migrations/0454_siep11_mutation_registry.sql"] = renderMigration(v2Rows);
@@ -5591,9 +8069,61 @@ export function renderGeneratedFrontier() {
         runtime: artifacts["mcp-server/src/scac-mutation-registry.v19.generated.js"],
       });
 
+  const v21Rows = frozenInventory(REGISTRY_V21_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v21.generated.js"] =
+    renderRuntimeProjection(v21Rows, {
+      version: REGISTRY_V21_VERSION,
+      dbCatalogBaseline: R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0495_r06_hooks_correctness_scac_successor.sql"] =
+    renderR06HooksCorrectnessForwardRegistrySql(v21Rows,
+      R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE, {
+        migration: artifacts["migrations/0494_codex_continuity_archive_registry.sql"],
+        runtime: artifacts["mcp-server/src/scac-mutation-registry.v20.generated.js"],
+      });
+
+  const v22Rows = frozenInventory(REGISTRY_V22_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v22.generated.js"] =
+    renderRuntimeProjection(v22Rows, {
+      version: REGISTRY_V22_VERSION,
+      dbCatalogBaseline: DOCTORCRE_PORTFOLIO_FORWARD_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0496_doctorcre_portfolio_hierarchy_and_scac_successor.sql"] =
+    renderDoctorcrePortfolioForwardRegistrySql(v22Rows,
+      DOCTORCRE_PORTFOLIO_FORWARD_DB_CATALOG_BASELINE, {
+        migration: artifacts["migrations/0495_r06_hooks_correctness_scac_successor.sql"],
+        runtime: artifacts["mcp-server/src/scac-mutation-registry.v21.generated.js"],
+      });
+
+  const v23Rows = frozenInventory(REGISTRY_V23_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v23.generated.js"] =
+    renderRuntimeProjection(v23Rows, {
+      version: REGISTRY_V23_VERSION,
+      dbCatalogBaseline: R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0497_r07_repo_hygiene_janitor_and_scac_successor.sql"] =
+    renderR07RepoHygieneJanitorForwardRegistrySql(v23Rows,
+      R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE, {
+        migration: artifacts["migrations/0496_doctorcre_portfolio_hierarchy_and_scac_successor.sql"],
+        runtime: artifacts["mcp-server/src/scac-mutation-registry.v22.generated.js"],
+      });
+
+  const v24Rows = frozenInventory(REGISTRY_V24_VERSION);
+  artifacts["mcp-server/src/scac-mutation-registry.v24.generated.js"] =
+    renderRuntimeProjection(v24Rows, {
+      version: REGISTRY_V24_VERSION,
+      dbCatalogBaseline: V5_F09_WORKFLOW_TRUTH_FORWARD_DB_CATALOG_BASELINE,
+    });
+  artifacts["migrations/0498_f09_workflow_truth_and_scac_successor.sql"] =
+    renderV5F09WorkflowTruthForwardRegistrySql(v24Rows,
+      V5_F09_WORKFLOW_TRUTH_FORWARD_DB_CATALOG_BASELINE, {
+        migration: artifacts["migrations/0497_r07_repo_hygiene_janitor_and_scac_successor.sql"],
+        runtime: artifacts["mcp-server/src/scac-mutation-registry.v23.generated.js"],
+      });
+
   const migrationCount = Object.keys(artifacts).filter(path => path.startsWith("migrations/")).length;
   const runtimeCount = Object.keys(artifacts).filter(path => path.startsWith("mcp-server/src/")).length;
-  if (migrationCount !== 28 || runtimeCount !== 19 || Object.keys(artifacts).length !== 47)
+  if (migrationCount !== 32 || runtimeCount !== 23 || Object.keys(artifacts).length !== 55)
     throw new Error(`generated frontier is incomplete: ${migrationCount} migrations, ${runtimeCount} runtimes`);
   return Object.freeze(artifacts);
 }
@@ -5991,9 +8521,68 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     const rows = frozenInventory(REGISTRY_V20_VERSION);
     await writeFile(target, renderContinuityArchiveForwardRegistrySql(rows));
     process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-runtime-v21") {
+    assertR06HooksCorrectnessV21TrustRoot();
+    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v21.generated.js");
+    const rows = frozenInventory(REGISTRY_V21_VERSION);
+    await writeFile(target, renderRuntimeProjection(rows, {
+      version: REGISTRY_V21_VERSION,
+      dbCatalogBaseline: R06_HOOKS_CORRECTNESS_FORWARD_DB_CATALOG_BASELINE,
+    }));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-r06-hooks-correctness-registry-migration") {
+    const target = resolve(process.argv[3] || "migrations/0495_r06_hooks_correctness_scac_successor.sql");
+    const rows = frozenInventory(REGISTRY_V21_VERSION);
+    await writeFile(target, renderR06HooksCorrectnessForwardRegistrySql(rows));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-runtime-v22") {
+    assertDoctorcrePortfolioV22TrustRoot();
+    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v22.generated.js");
+    const rows = frozenInventory(REGISTRY_V22_VERSION);
+    await writeFile(target, renderRuntimeProjection(rows, {
+      version: REGISTRY_V22_VERSION,
+      dbCatalogBaseline: DOCTORCRE_PORTFOLIO_FORWARD_DB_CATALOG_BASELINE,
+    }));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-doctorcre-portfolio-registry-migration") {
+    const target = resolve(process.argv[3] ||
+      "migrations/0496_doctorcre_portfolio_hierarchy_and_scac_successor.sql");
+    const rows = frozenInventory(REGISTRY_V22_VERSION);
+    await writeFile(target, renderDoctorcrePortfolioForwardRegistrySql(rows));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-runtime-v23") {
+    assertR07RepoHygieneJanitorV23TrustRoot();
+    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v23.generated.js");
+    const rows = frozenInventory(REGISTRY_V23_VERSION);
+    await writeFile(target, renderRuntimeProjection(rows, {
+      version: REGISTRY_V23_VERSION,
+      dbCatalogBaseline: R07_REPO_HYGIENE_JANITOR_FORWARD_DB_CATALOG_BASELINE,
+    }));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-r07-repo-hygiene-janitor-registry-migration") {
+    const target = resolve(process.argv[3] ||
+      "migrations/0497_r07_repo_hygiene_janitor_and_scac_successor.sql");
+    const rows = frozenInventory(REGISTRY_V23_VERSION);
+    await writeFile(target, renderR07RepoHygieneJanitorForwardRegistrySql(rows));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-runtime-v24") {
+    assertV5F09WorkflowTruthV24TrustRoot();
+    const target = resolve(process.argv[3] || "mcp-server/src/scac-mutation-registry.v24.generated.js");
+    const rows = frozenInventory(REGISTRY_V24_VERSION);
+    await writeFile(target, renderRuntimeProjection(rows, {
+      version: REGISTRY_V24_VERSION,
+      dbCatalogBaseline: V5_F09_WORKFLOW_TRUTH_FORWARD_DB_CATALOG_BASELINE,
+    }));
+    process.stdout.write(`${target}\n`);
+  } else if (process.argv[2] === "--write-v5-f09-workflow-truth-registry-migration") {
+    const target = resolve(process.argv[3] ||
+      "migrations/0498_f09_workflow_truth_and_scac_successor.sql");
+    const rows = frozenInventory(REGISTRY_V24_VERSION);
+    await writeFile(target, renderV5F09WorkflowTruthForwardRegistrySql(rows));
+    process.stdout.write(`${target}\n`);
   } else if (process.argv[2] === "--check-source-inventory-frontier") {
     assertCurrentSourceInventoryMatchesFixture(await loadDefaultTools());
-    process.stdout.write("source inventory matches frozen v20 frontier fixture\n");
+    process.stdout.write(`source inventory matches frozen ${REGISTRY_V24_VERSION} frontier fixture\n`);
   } else if (process.argv[2] === "--check-generated-frontier") {
     const paths = assertGeneratedFrontierMatchesCommitted();
     process.stdout.write(`generated frontier is byte-exact (${paths.length} artifacts)\n`);

@@ -22,6 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "backup-nightly.yml"
 STATUS_HELPER = ROOT / "ops" / "backup-workflow-status.py"
+SERVICES = ROOT / "ops" / "config" / "services.json"
 
 passed = 0
 failed: list[str] = []
@@ -77,16 +78,27 @@ elif '/check-runs/' in url and method in ('PATCH', 'POST'):
     if item is None: print('missing check', file=sys.stderr); raise SystemExit(1)
     item.update(body); save(); answer(item)
 elif url.endswith('/check-runs'):
+    if state.get('check_list_error'):
+        print('synthetic check listing failure', file=sys.stderr); raise SystemExit(1)
     rows = state.get('check_runs', [])
     if state.get('check_requires_filter_all') and 'filter=all' not in args:
         rows = []
-    answer({{'total_count': len(rows), 'check_runs': rows}})
+    if state.get('check_pagination_exhausted'):
+        # A full page every time with a total the cap can never reach: the
+        # exact shape that must fail closed rather than answer from a partial
+        # view of the head's Checks.
+        filler = [{{'id': 90000 + i, 'name': 'other', 'head_sha': 'a' * 40}} for i in range(100)]
+        answer({{'total_count': 10 ** 6, 'check_runs': filler}})
+    else:
+        answer({{'total_count': len(rows), 'check_runs': rows}})
 elif '/actions/artifacts/' in url:
     artifact_id = int(url.rsplit('/', 1)[1])
     item = next((x for x in state.get('artifacts', []) if x.get('id') == artifact_id), None)
     if item is None: print('missing artifact', file=sys.stderr); raise SystemExit(1)
     answer(item)
 elif url.endswith('/artifacts'):
+    if state.get('artifact_list_error'):
+        print('synthetic artifact listing failure', file=sys.stderr); raise SystemExit(1)
     answer({{'total_count': len(state.get('artifacts', [])), 'artifacts': state.get('artifacts', [])}})
 elif url.endswith('/cancel') and method == 'POST':
     state.setdefault('cancel_calls', []).append(url); save()
@@ -165,7 +177,11 @@ def named_check(conclusion: str, *, bound: bool = True) -> dict[str, object]:
     }
 
 
-def fixture_env(root: Path, state: dict[str, object]) -> tuple[dict[str, str], Path, Path]:
+def fixture_env(
+    root: Path,
+    state: dict[str, object],
+    overrides: dict[str, str] | None = None,
+) -> tuple[dict[str, str], Path, Path]:
     bin_dir = root / "bin"
     bin_dir.mkdir()
     fake_gh(bin_dir / "gh")
@@ -180,9 +196,18 @@ def fixture_env(root: Path, state: dict[str, object]) -> tuple[dict[str, str], P
         "GITHUB_RUN_ID": "101",
         "GITHUB_RUN_ATTEMPT": "2",
         "GITHUB_SHA": "a" * 40,
+        # The controlled-failure guards read these four. Every fixture sets
+        # them explicitly, including the ones that never touch the proof
+        # commands, so a guard can never quietly pass by inheriting the real
+        # GitHub Actions environment this suite may itself be running inside.
+        "GITHUB_EVENT_NAME": "workflow_dispatch",
+        "GITHUB_ACTOR": "jbookout",
+        "GITHUB_TRIGGERING_ACTOR": "jbookout",
+        "GITHUB_REF": "refs/heads/main",
         "CARR_TEST_GH_STATE": str(state_path),
         "CARR_TEST_GH_LOG": str(log_path),
     }
+    env.update(overrides or {})
     return env, state_path, log_path
 
 
@@ -537,6 +562,526 @@ def behavioral_contract() -> None:
     )
 
 
+PROOF_ID = "3f1c2d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f"
+PROOF_HEAD = "a" * 40
+PROOF_REASON = "approved WR54 controlled failure before dump"
+CONTROLLED_FAILURE_EXIT = 9
+
+
+def proof_args(*, proof_id: str = PROOF_ID, head: str = PROOF_HEAD) -> tuple[str, ...]:
+    return ("--proof-id", proof_id, "--expected-head", head)
+
+
+def spent_proof_check(proof_id: str = PROOF_ID) -> dict[str, object]:
+    """A proof Check left on this head by an EARLIER run.
+
+    Its run identity is 99/1, not this fixture's 101/2, on purpose: the reuse
+    scan has to find a proof spent by any run on the head, not merely one bound
+    to the current run's own external_id.
+    """
+    earlier = {
+        "repository": "jbookout/carr-system",
+        "run_id": 99,
+        "run_attempt": 1,
+        "head_sha": PROOF_HEAD,
+    }
+    summary = {"signal": "backup-failure", "reason": PROOF_REASON, "proof_id": proof_id}
+    return {
+        "id": 8500,
+        "name": "Backup artifact",
+        "head_sha": PROOF_HEAD,
+        "status": "completed",
+        "conclusion": "failure",
+        "external_id": json.dumps(earlier, sort_keys=True, separators=(",", ":")),
+        "output": {"title": "Backup artifact", "summary": json.dumps(summary, sort_keys=True)},
+    }
+
+
+def controlled_failure_contract() -> None:
+    """The WR54 seam: refuse loudly, or fail exactly once with a bound proof."""
+
+    # ── the read-only validation passes on an exact request, writing nothing ──
+    with tempfile.TemporaryDirectory(prefix="carr-wr54-proof-validate-") as raw:
+        env, state_path, _ = fixture_env(
+            Path(raw), {"run": run_state(), "artifacts": [], "check_runs": []},
+        )
+        validated = invoke(env, "validate-controlled-failure", *proof_args())
+        after_validate = read_json(state_path)
+        check(
+            "validate-controlled-failure accepts an exact request and writes nothing",
+            validated.returncode == 0
+            and after_validate.get("check_runs") == []
+            and after_validate.get("artifacts") == [],
+            f"rc={validated.returncode} err={validated.stderr!r} "
+            f"state={json.dumps(after_validate, sort_keys=True)}",
+        )
+
+    # ── every wrong guard refuses, and none of them mutates a Check ──────────
+    refusals: list[tuple[str, dict[str, object], dict[str, str], tuple[str, ...]]] = [
+        (
+            "a wrong actor cannot spend a controlled failure",
+            {"run": run_state(), "artifacts": [], "check_runs": []},
+            {"GITHUB_ACTOR": "someone-else"},
+            proof_args(),
+        ),
+        (
+            "a wrong triggering actor cannot spend a controlled failure",
+            {"run": run_state(), "artifacts": [], "check_runs": []},
+            {"GITHUB_TRIGGERING_ACTOR": "someone-else"},
+            proof_args(),
+        ),
+        (
+            "a scheduled event can never reach the controlled failure",
+            {"run": run_state(), "artifacts": [], "check_runs": []},
+            {"GITHUB_EVENT_NAME": "schedule"},
+            proof_args(),
+        ),
+        (
+            "a non-main ref cannot spend a controlled failure",
+            {"run": run_state(), "artifacts": [], "check_runs": []},
+            {"GITHUB_REF": "refs/heads/topic"},
+            proof_args(),
+        ),
+        (
+            "another repository cannot spend a controlled failure",
+            {"run": run_state(), "artifacts": [], "check_runs": []},
+            {"GITHUB_REPOSITORY": "someone-else/carr-system"},
+            proof_args(),
+        ),
+        (
+            "an expected head that is not this run's GITHUB_SHA refuses",
+            {"run": run_state(), "artifacts": [], "check_runs": []},
+            {},
+            proof_args(head="b" * 40),
+        ),
+        (
+            "a short expected head refuses",
+            {"run": run_state(), "artifacts": [], "check_runs": []},
+            {},
+            proof_args(head="abc123"),
+        ),
+        (
+            "an uppercase expected head refuses rather than being normalised",
+            {"run": run_state(), "artifacts": [], "check_runs": []},
+            {},
+            proof_args(head="A" * 40),
+        ),
+        (
+            "a malformed proof ID refuses",
+            {"run": run_state(), "artifacts": [], "check_runs": []},
+            {},
+            proof_args(proof_id="not-a-uuid"),
+        ),
+        (
+            "an uppercase proof ID is not canonical and refuses",
+            {"run": run_state(), "artifacts": [], "check_runs": []},
+            {},
+            proof_args(proof_id=PROOF_ID.upper()),
+        ),
+        (
+            "a proof ID already spent on this head refuses",
+            {"run": run_state(), "artifacts": [], "check_runs": [spent_proof_check()]},
+            {},
+            proof_args(),
+        ),
+        (
+            "an artifact already on this run refuses before any Check write",
+            {"run": run_state(), "artifacts": [artifact()], "check_runs": []},
+            {},
+            proof_args(),
+        ),
+        (
+            "exhausted Check pagination fails closed instead of reporting a clean head",
+            {
+                "run": run_state(),
+                "artifacts": [],
+                "check_runs": [],
+                "check_pagination_exhausted": True,
+            },
+            {},
+            proof_args(),
+        ),
+        (
+            "a provider Check-listing failure refuses",
+            {"run": run_state(), "artifacts": [], "check_runs": [], "check_list_error": True},
+            {},
+            proof_args(),
+        ),
+        (
+            "a provider artifact-listing failure refuses",
+            {"run": run_state(), "artifacts": [], "check_runs": [], "artifact_list_error": True},
+            {},
+            proof_args(),
+        ),
+    ]
+    for label, state, overrides, args in refusals:
+        for command in ("validate-controlled-failure", "controlled-failure"):
+            with tempfile.TemporaryDirectory(prefix="carr-wr54-proof-refuse-") as raw:
+                env, state_path, _ = fixture_env(Path(raw), dict(state), overrides)
+                before = json.dumps(read_json(state_path).get("check_runs"), sort_keys=True)
+                refused = invoke(env, command, *args)
+                after = json.dumps(read_json(state_path).get("check_runs"), sort_keys=True)
+                check(
+                    f"{command}: {label}",
+                    refused.returncode != 0
+                    and refused.returncode != CONTROLLED_FAILURE_EXIT
+                    and after == before,
+                    f"rc={refused.returncode} err={refused.stderr!r} checks={after}",
+                )
+
+    # ── the exact proof: one Check, flipped once, and a failing exit ─────────
+    with tempfile.TemporaryDirectory(prefix="carr-wr54-proof-write-") as raw:
+        env, state_path, log_path = fixture_env(
+            Path(raw),
+            {"run": run_state(conclusion="failure"), "artifacts": [], "check_runs": []},
+        )
+        started = invoke(env, "producer-start")
+        proved = invoke(env, "controlled-failure", *proof_args())
+        rows = read_json(state_path).get("check_runs", [])
+        item = rows[0] if isinstance(rows, list) and len(rows) == 1 else {}
+        try:
+            summary = json.loads(item.get("output", {}).get("summary", "{}"))
+            bound = json.loads(item.get("external_id", ""))
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            summary, bound = {}, {}
+        check(
+            "controlled-failure flips only this run's Check to a structured proof failure",
+            started.returncode == 0
+            and proved.returncode == CONTROLLED_FAILURE_EXIT
+            and item.get("name") == "Backup artifact"
+            and item.get("status") == "completed"
+            and item.get("conclusion") == "failure"
+            and bound == identity()
+            and summary == {
+                "signal": "backup-failure",
+                "reason": PROOF_REASON,
+                "proof_id": PROOF_ID,
+            },
+            f"rc={proved.returncode} err={proved.stderr!r} checks={json.dumps(rows, sort_keys=True)}",
+        )
+        check(
+            "the controlled proof reads no credential and creates no artifact",
+            read_json(state_path).get("artifacts") == []
+            and not any(
+                "/actions/artifacts" in str(call.get("url", ""))
+                for call in calls(log_path)
+            ),
+            json.dumps(calls(log_path), sort_keys=True),
+        )
+        observed = invoke(env, "observe")
+        result = parsed_output(observed)
+        check(
+            "the observer reports the proof failure with its structured proof_id",
+            observed.returncode == 1
+            and result.get("state") == "failure"
+            and result.get("signal") == "backup-failure"
+            and result.get("proof_id") == PROOF_ID
+            and result.get("detail") == PROOF_REASON,
+            f"rc={observed.returncode} out={observed.stdout!r}",
+        )
+        replayed = invoke(env, "validate-controlled-failure", *proof_args())
+        check(
+            "the same proof ID cannot be spent twice on the same head",
+            replayed.returncode != 0 and replayed.returncode != CONTROLLED_FAILURE_EXIT,
+            f"rc={replayed.returncode} err={replayed.stderr!r}",
+        )
+
+    # ── the write boundary needs this attempt's own in-progress Check ────────
+    with tempfile.TemporaryDirectory(prefix="carr-wr54-proof-no-check-") as raw:
+        env, state_path, _ = fixture_env(
+            Path(raw), {"run": run_state(), "artifacts": [], "check_runs": []},
+        )
+        orphan = invoke(env, "controlled-failure", *proof_args())
+        check(
+            "controlled-failure without a started Check refuses and creates none",
+            orphan.returncode != 0
+            and orphan.returncode != CONTROLLED_FAILURE_EXIT
+            and read_json(state_path).get("check_runs") == [],
+            f"rc={orphan.returncode} err={orphan.stderr!r}",
+        )
+
+    # A Check that exists but has not reached in_progress is the case the
+    # conclusion guard alone does NOT cover: it carries no conclusion, so only
+    # the status guard can refuse it. A mutation run found this uncovered.
+    with tempfile.TemporaryDirectory(prefix="carr-wr54-proof-queued-") as raw:
+        queued = named_check("neutral")
+        queued["status"] = "queued"
+        queued["conclusion"] = None
+        env, state_path, _ = fixture_env(
+            Path(raw), {"run": run_state(), "artifacts": [], "check_runs": [queued]},
+        )
+        premature = invoke(env, "controlled-failure", *proof_args())
+        rows = read_json(state_path).get("check_runs", [])
+        check(
+            "controlled-failure refuses a Check that has not reached in_progress",
+            premature.returncode != 0
+            and premature.returncode != CONTROLLED_FAILURE_EXIT
+            and isinstance(rows, list)
+            and all(
+                row.get("status") == "queued" and row.get("conclusion") is None
+                for row in rows
+            ),
+            f"rc={premature.returncode} err={premature.stderr!r} checks={json.dumps(rows, sort_keys=True)}",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="carr-wr54-proof-success-") as raw:
+        env, state_path, _ = fixture_env(
+            Path(raw),
+            {"run": run_state(), "artifacts": [artifact()], "check_runs": [named_check("success")]},
+        )
+        over_success = invoke(env, "controlled-failure", *proof_args())
+        rows = read_json(state_path).get("check_runs", [])
+        check(
+            "controlled-failure refuses to overwrite an artifact-backed success Check",
+            over_success.returncode != 0
+            and over_success.returncode != CONTROLLED_FAILURE_EXIT
+            and isinstance(rows, list)
+            and all(row.get("conclusion") == "success" for row in rows),
+            f"rc={over_success.returncode} err={over_success.stderr!r} checks={json.dumps(rows, sort_keys=True)}",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="carr-wr54-proof-ambiguous-") as raw:
+        second = named_check("neutral")
+        second["id"] = 8002
+        env, state_path, _ = fixture_env(
+            Path(raw),
+            {
+                "run": run_state(),
+                "artifacts": [],
+                "check_runs": [named_check("neutral"), second],
+            },
+        )
+        ambiguous = invoke(env, "controlled-failure", *proof_args())
+        rows = read_json(state_path).get("check_runs", [])
+        check(
+            "two exact Checks make the proof ambiguous and it refuses",
+            ambiguous.returncode != 0
+            and ambiguous.returncode != CONTROLLED_FAILURE_EXIT
+            and isinstance(rows, list)
+            and all(row.get("conclusion") == "neutral" for row in rows),
+            f"rc={ambiguous.returncode} err={ambiguous.stderr!r}",
+        )
+
+
+def workflow_mode_contract(source: str, backup_job: str) -> None:
+    """The gate resolves three modes, and every effect step names exactly one."""
+    dispatch = re.search(
+        r"(?ms)^  workflow_dispatch:\s*\n(?P<body>.*?)(?=^\S|^concurrency:|\Z)", source
+    )
+    dispatch_body = dispatch.group("body") if dispatch else ""
+    # EACH INPUT IS READ FROM ITS OWN BLOCK. A single regex walking the whole
+    # dispatch body with .*? will happily satisfy one input's "required: false"
+    # from the OTHER input's, so flipping either one to required stays green —
+    # which is exactly what a mutation run caught this assertion doing.
+    # NO DOTALL HERE. With (?s) the `.` in `.*\n` matches newlines too, so the
+    # first input's block ran straight through the second one and the whole
+    # per-input scoping was decorative — the same mutation caught that as well.
+    def input_block(name: str) -> str:
+        match = re.search(
+            rf"(?m)^      {name}:\n(?P<body>(?:^ {{8,}}[^\n]*\n)*)",
+            dispatch_body,
+        )
+        return match.group("body") if match else ""
+
+    optional = {
+        name: block
+        for name in ("wr54_failure_proof_id", "wr54_failure_proof_expected_head")
+        if (block := input_block(name))
+        and re.search(r"(?m)^        type: string\s*$", block)
+        and re.search(r"(?m)^        required: false\s*$", block)
+        and re.search(r"(?m)^        default: \"\"\s*$", block)
+    }
+    check(
+        "both proof inputs are optional and default to empty",
+        len(optional) == 2,
+        "an ordinary manual dispatch must stay byte-for-behavior unchanged, which "
+        "means both inputs optional with an empty default; satisfied: "
+        + json.dumps(sorted(optional)),
+    )
+    check(
+        "the gate resolves exactly the three declared modes",
+        all(f"MODE={mode}" in backup_job for mode in ("backup", "disabled", "failure-proof"))
+        and 'echo "mode=$MODE" >> "$GITHUB_OUTPUT"' in backup_job
+        and "gate.outputs.enabled" not in backup_job,
+        "the three-mode gate replaces the old boolean enabled output",
+    )
+    # ORDER IS ASSERTED ON THE INVOCATIONS, NOT ON THE PROSE. Comments name
+    # these commands too, so an index into the raw job text would measure where
+    # a sentence sits rather than where a step runs.
+    start_call = "backup-workflow-status.py producer-start"
+    validate_call = "backup-workflow-status.py validate-controlled-failure"
+    convert_call = "backup-workflow-status.py controlled-failure"
+    check(
+        "a half-filled proof request is refused at the gate, before producer-start",
+        "refusing before producer-start" in backup_job
+        and start_call in backup_job
+        and backup_job.index("refusing before producer-start") < backup_job.index(start_call),
+        "the refusal must precede the first durable write, so nothing needs unwinding",
+    )
+    check(
+        "a non-dispatch event carrying proof inputs is refused rather than downgraded",
+        bool(re.search(
+            r'\[ "\$EVENT_NAME" != "workflow_dispatch" \][^\n]*\\\n[^\n]*'
+            r'\{ \[ -n "\$PROOF_ID" \] \|\| \[ -n "\$PROOF_EXPECTED_HEAD" \]; \}',
+            backup_job,
+        )),
+        "a scheduled event must never enter failure-proof mode, and must not fall back to backup",
+    )
+
+    steps = workflow_steps(backup_job)
+    effect_tokens = (
+        "secrets.BACKUP_DATABASE_URL",
+        "secrets.R2_ACCESS_KEY_ID",
+        "secrets.R2_SECRET_ACCESS_KEY",
+        "vars.CLOUDFLARE_ACCOUNT_ID",
+        "backup-dump.sh",
+        "upload-artifact",
+        "s3api",
+        "producer-complete",
+        "setup-python",
+        "requirements.lock",
+        "postgresql-client-18",
+    )
+    ungated = [
+        step.splitlines()[0].strip()
+        for step in steps
+        if any(token in step for token in effect_tokens)
+        and "steps.gate.outputs.mode == 'backup'" not in step
+    ]
+    check(
+        "every credential, dependency, dump, upload and R2 step is gated to mode=backup",
+        bool(steps) and not ungated,
+        "ungated effect steps: " + json.dumps(ungated),
+    )
+    invoking = {
+        call: [step for step in steps if call in step]
+        for call in (start_call, validate_call, convert_call,
+                     "backup-workflow-status.py producer-fail",
+                     "backup-workflow-status.py neutral-cancel")
+    }
+    proof_steps = invoking[validate_call] + invoking[convert_call]
+    check(
+        "validation runs read-only before producer-start, and the write step after it",
+        len(invoking[validate_call]) == 1
+        and len(invoking[convert_call]) == 1
+        and all(
+            step_condition(step) == "steps.gate.outputs.mode == 'failure-proof'"
+            for step in proof_steps
+        )
+        and backup_job.index(validate_call)
+        < backup_job.index(start_call)
+        < backup_job.index(convert_call),
+        "expected exactly one failure-proof-gated validate step and one convert step, "
+        "in validate/start/convert order",
+    )
+    check(
+        "producer-start is the one step shared by backup and failure-proof",
+        len(invoking[start_call]) == 1
+        and step_condition(invoking[start_call][0])
+        == "steps.gate.outputs.mode == 'backup' || steps.gate.outputs.mode == 'failure-proof'",
+        "the proof needs a real in-progress Check to convert, and nothing else in common",
+    )
+    recorder = invoking["backup-workflow-status.py producer-fail"]
+    check(
+        "the generic pipeline-failure recorder stays mode=backup only",
+        len(recorder) == 1
+        and "steps.gate.outputs.mode == 'backup'" in step_condition(recorder[0])
+        and "failure-proof" not in step_condition(recorder[0]),
+        "a generic recorder reachable in proof mode could overwrite or duplicate the "
+        "proof Check: " + json.dumps([step_condition(s) for s in recorder]),
+    )
+    canceller = invoking["backup-workflow-status.py neutral-cancel"]
+    check(
+        "the disabled scheduled branch keeps its neutral self-cancel path",
+        len(canceller) == 1
+        and step_condition(canceller[0]) == "steps.gate.outputs.mode == 'disabled'"
+        and 'CLOUD_BACKUP_ENABLED:-}" = "true"' in backup_job,
+        "the reviewed disabled predicate and its neutral/self-cancel semantics are unchanged",
+    )
+
+
+def workflow_steps(job_body: str) -> list[str]:
+    """Split a job body into its step blocks on the six-space list markers.
+
+    A run of comment lines directly above a marker belongs to the step it
+    introduces, not to the one it follows. Attaching it to the previous block
+    would file every explanatory header under the wrong step and quietly
+    corrupt any scan that reads a block's text.
+    """
+    blocks: list[str] = []
+    current: list[str] = []
+    pending: list[str] = []
+    for line in job_body.splitlines():
+        if re.match(r"^      - (?:name|uses):", line):
+            if current:
+                blocks.append("\n".join(current))
+            current = [*pending, line]
+            pending = []
+        elif re.match(r"^      #", line):
+            pending.append(line)
+        elif current:
+            current.extend(pending)
+            pending = []
+            current.append(line)
+    if current:
+        current.extend(pending)
+        blocks.append("\n".join(current))
+    return blocks
+
+
+def step_condition(step: str) -> str:
+    """The step's own `if:` expression, or empty when it has none."""
+    match = re.search(r"(?m)^        if: (?P<expr>.*)$", step)
+    return match.group("expr").strip() if match else ""
+
+
+def service_identity_contract() -> None:
+    """One cloud-backup service identity, and it aliases neither neighbour."""
+    try:
+        catalog = json.loads(SERVICES.read_text(encoding="utf-8"))
+        services = catalog.get("services", [])
+    except (OSError, json.JSONDecodeError) as exc:
+        check("service catalog parses", False, str(exc))
+        return
+    rows = [row for row in services if row.get("key") == "backup-nightly-cloud"]
+    row = rows[0] if len(rows) == 1 else {}
+    environments = row.get("environments", []) if isinstance(row, dict) else []
+    production = [e for e in environments if e.get("environment") == "production"]
+    check(
+        "the catalog declares exactly one backup-nightly-cloud production identity",
+        len(rows) == 1
+        and len(environments) == 1
+        and len(production) == 1
+        and row.get("repo_path") == ".github/workflows/backup-nightly.yml"
+        and row.get("runtime") == "github-actions"
+        and row.get("owner_actor") == "joe",
+        json.dumps(rows, sort_keys=True),
+    )
+    environment = production[0] if production else {}
+    check(
+        "the cloud backup declares no CARR cadence and says why in its own notes",
+        "expected_cadence_seconds" not in environment
+        and "cadence_grace_seconds" not in environment
+        and "not continuously ingested into ops.run" in str(environment.get("notes", ""))
+        and "does not detect a missed or skipped schedule" in str(environment.get("notes", ""))
+        and "health remains unknown" in str(environment.get("notes", "")),
+        "a declared cadence would invent continuous ingestion; the notes must carry the "
+        "unknown-state limit and must not claim the failure email detects a missed schedule: "
+        + json.dumps(environment, sort_keys=True),
+    )
+    check(
+        "the cloud backup never aliases nightly-record-layer or restore-rehearse-weekly",
+        row.get("key") == "backup-nightly-cloud"
+        and row.get("repo_path") not in ("bin/nightly.sh",)
+        and all(
+            other.get("repo_path") != row.get("repo_path")
+            for other in services
+            if other.get("key") != "backup-nightly-cloud"
+        ),
+        "the Mac-local nightly chain and the weekly restore rehearsal are distinct services",
+    )
+
+
 def main() -> int:
     source = WORKFLOW.read_text(encoding="utf-8")
     status_source = STATUS_HELPER.read_text(encoding="utf-8") if STATUS_HELPER.is_file() else ""
@@ -618,7 +1163,10 @@ def main() -> int:
         and bool(re.search(r"artifact[^\n]{0,200}(?:run|RUN_ID)[^\n]{0,200}(?:attempt|RUN_ATTEMPT)", source, re.I)),
         "reruns must not overwrite or inherit another attempt's artifact identity",
     )
+    workflow_mode_contract(source, backup_job)
+    service_identity_contract()
     behavioral_contract()
+    controlled_failure_contract()
 
     print(f"\nbackup-workflow-selftest: {passed}/{passed + len(failed)} passed")
     if failed:

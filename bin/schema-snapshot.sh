@@ -275,6 +275,38 @@ case "$CONTINUITY_ARCHIVE_REGISTRY_APPLIED" in
   *) echo "schema-snapshot: could not read the continuity-archive registry ledger state" >&2; exit 1 ;;
 esac
 
+R06_HOOKS_CORRECTNESS_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0495_r06_hooks_correctness_scac_successor.sql')" \
+  2>/dev/null)"
+case "$R06_HOOKS_CORRECTNESS_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the R06 hooks-correctness registry ledger state" >&2; exit 1 ;;
+esac
+
+DOCTORCRE_PORTFOLIO_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0496_doctorcre_portfolio_hierarchy_and_scac_successor.sql')" \
+  2>/dev/null)"
+case "$DOCTORCRE_PORTFOLIO_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the DoctorCRE portfolio registry ledger state" >&2; exit 1 ;;
+esac
+
+R07_REPO_HYGIENE_JANITOR_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0497_r07_repo_hygiene_janitor_and_scac_successor.sql')" \
+  2>/dev/null)"
+case "$R07_REPO_HYGIENE_JANITOR_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the R07 repo-hygiene janitor registry ledger state" >&2; exit 1 ;;
+esac
+
+V5_F09_WORKFLOW_TRUTH_REGISTRY_APPLIED="$("$PSQL" "$URL" -Atqc \
+  "select exists (select 1 from schema_migrations where filename='0498_f09_workflow_truth_and_scac_successor.sql')" \
+  2>/dev/null)"
+case "$V5_F09_WORKFLOW_TRUTH_REGISTRY_APPLIED" in
+  t|f) ;;
+  *) echo "schema-snapshot: could not read the V5-F09 workflow truth registry ledger state" >&2; exit 1 ;;
+esac
+
 # pg_dump renders timestamptz in the server session timezone; pin it so the
 # Production and disposable-local paths serialize identical instants alike.
 export PGOPTIONS='-c timezone=UTC'
@@ -1264,7 +1296,64 @@ case "$SCAC_REGISTRY_APPLIED" in
 esac
 
 if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
-  if [ "$CONTINUITY_ARCHIVE_REGISTRY_APPLIED" = t ]; then
+  if [ "$V5_F09_WORKFLOW_TRUTH_REGISTRY_APPLIED" = t ]; then
+    SCAC_CURRENT_NUMBER=24
+    SCAC_VERSION_COUNT=24
+    SCAC_TOTAL_ENTRY_COUNT=35446
+    SCAC_CURRENT_ENTRY_COUNT=1600
+    SCAC_CURRENT_SOURCE_COUNT=835
+    SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v24.generated.js"
+    SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23','scac-mutation-registry.v24'"
+    SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23'"
+    # Same one-behind rule as every branch below: the v23 full entry set became
+    # readable only once 0498 sealed it, so this branch is where that seal is
+    # first required. All 23 sealed histories are covered here.
+    SCAC_FULL_SET_SEAL_COUNT=23
+    SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v24_current()"
+  elif [ "$R07_REPO_HYGIENE_JANITOR_REGISTRY_APPLIED" = t ]; then
+    SCAC_CURRENT_NUMBER=23
+    SCAC_VERSION_COUNT=23
+    SCAC_TOTAL_ENTRY_COUNT=33846
+    SCAC_CURRENT_ENTRY_COUNT=1596
+    SCAC_CURRENT_SOURCE_COUNT=835
+    SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v23.generated.js"
+    SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22','scac-mutation-registry.v23'"
+    SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22'"
+    # Same one-behind rule as every branch below: the v22 full entry set became
+    # readable only once 0497 sealed it, so this branch is where that seal is
+    # first required. All 22 sealed histories are covered here.
+    SCAC_FULL_SET_SEAL_COUNT=22
+    SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v23_current()"
+  elif [ "$DOCTORCRE_PORTFOLIO_REGISTRY_APPLIED" = t ]; then
+    SCAC_CURRENT_NUMBER=22
+    SCAC_VERSION_COUNT=22
+    SCAC_TOTAL_ENTRY_COUNT=32250
+    SCAC_CURRENT_ENTRY_COUNT=1590
+    SCAC_CURRENT_SOURCE_COUNT=833
+    SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v22.generated.js"
+    SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21','scac-mutation-registry.v22'"
+    SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21'"
+    # Same one-behind rule as every branch below: the v21 full entry set became
+    # readable only once 0496 sealed it, so this branch is where that seal is
+    # first required. All 21 sealed histories are covered here.
+    SCAC_FULL_SET_SEAL_COUNT=21
+    SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v22_current()"
+  elif [ "$R06_HOOKS_CORRECTNESS_REGISTRY_APPLIED" = t ]; then
+    SCAC_CURRENT_NUMBER=21
+    SCAC_VERSION_COUNT=21
+    SCAC_TOTAL_ENTRY_COUNT=30660
+    SCAC_CURRENT_ENTRY_COUNT=1528
+    SCAC_CURRENT_SOURCE_COUNT=828
+    SCAC_CURRENT_RUNTIME="$REPO/mcp-server/src/scac-mutation-registry.v21.generated.js"
+    SCAC_VERSION_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20','scac-mutation-registry.v21'"
+    SCAC_HISTORICAL_ARRAY="'scac-mutation-registry.v1','scac-mutation-registry.v2','scac-mutation-registry.v3','scac-mutation-registry.v4','scac-mutation-registry.v5','scac-mutation-registry.v6','scac-mutation-registry.v7','scac-mutation-registry.v8','scac-mutation-registry.v9','scac-mutation-registry.v10','scac-mutation-registry.v11','scac-mutation-registry.v12','scac-mutation-registry.v13','scac-mutation-registry.v14','scac-mutation-registry.v15','scac-mutation-registry.v16','scac-mutation-registry.v17','scac-mutation-registry.v18','scac-mutation-registry.v19','scac-mutation-registry.v20'"
+    # A full entry set covers the DB-catalog-projected ACL rows as well as the
+    # source rows, so it is only readable from a database that already applied
+    # the migration: the seal file trails the frontier by one, and the v20 set
+    # lands with the release that applies 0495.
+    SCAC_FULL_SET_SEAL_COUNT=20
+    SCAC_CURRENT_CATALOG_FUNCTION="ops.scac_mutation_catalog_v21_current()"
+  elif [ "$CONTINUITY_ARCHIVE_REGISTRY_APPLIED" = t ]; then
     SCAC_CURRENT_NUMBER=20
     SCAC_VERSION_COUNT=20
     SCAC_TOTAL_ENTRY_COUNT=29132
@@ -1422,10 +1511,10 @@ if [ "$SCAC_REGISTRY_APPLIED" = t ]; then
   SCAC_FULL_SET_SEALS="$REPO/ops/config/scac-registry-full-entry-set-seals.json"
   SCAC_FULL_SET_SQL="$(node -e '
     const fs=require("fs"); const seals=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
-    const allKeys=Array.from({length:19},(_,i)=>`scac-mutation-registry.v${i+1}`);
+    const allKeys=Array.from({length:23},(_,i)=>`scac-mutation-registry.v${i+1}`);
     const count=Number(process.argv[2]); const keys=allKeys.slice(0,count);
     if (Object.keys(seals).sort().join("|")!==allKeys.sort().join("|") ||
-        !Number.isInteger(count) || count<9 || count>19 ||
+        !Number.isInteger(count) || count<9 || count>23 ||
         allKeys.some(key=>!/^sha256:[0-9a-f]{64}$/.test(seals[key]))) process.exit(2);
     const quote=String.fromCharCode(39);
     const literal=value=>quote+String(value).replaceAll(quote,quote+quote)+quote;

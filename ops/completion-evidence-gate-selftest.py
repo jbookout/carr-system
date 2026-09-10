@@ -563,6 +563,28 @@ def cancel_capability_session_is_a_write():
     return passed
 
 
+def review_portfolio_revision_is_a_write():
+    """The portfolio's independent review is a write; other review-* stay reads.
+
+    Same shape as the cancel-capability-session pair above. "review" is
+    deliberately NOT a write prefix, because review-memory and review-queue are
+    genuine reads, so the portfolio verb has to earn its classification through
+    an exact WRITE_ACTION_EXACT entry. The negative half is what keeps that
+    honest: if someone ever "fixes" a future review-* write by adding the
+    prefix instead, these reads start reporting as mutations and the gate
+    begins demanding completion evidence for looking something up.
+    """
+    write = mod.is_write_action("review-portfolio-revision")
+    reads = {name: mod.is_write_action(name) for name in
+             ("review-memory", "review-queue", "read-portfolio",
+              "review-something-that-does-not-exist")}
+    passed = write and not any(reads.values())
+    print(f"{'PASS' if passed else 'FAIL'}  review-portfolio-revision classifies as a write "
+          f"without making 'review' a blanket prefix"
+          + ("" if passed else f"; write={write} reads={reads}"))
+    return passed
+
+
 def registry_prefix_coverage():
     """Keep the family classifier honest against the local live registry when present."""
     registry = os.path.join(REPO, "mcp-server", "src", "tools.js")
@@ -879,6 +901,7 @@ def main():
     outcomes.append(clause_extraction_coverage())
     outcomes.append(floor_preserved())
     outcomes.append(cancel_capability_session_is_a_write())
+    outcomes.append(review_portfolio_revision_is_a_write())
     outcomes.append(registry_prefix_coverage())
     outcomes.append(authority_family_coverage())
     outcomes.append(latch_cases())
