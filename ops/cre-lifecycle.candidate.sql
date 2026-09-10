@@ -53,6 +53,13 @@
 --      census exists. It is a reader, and it says no.
 --   4. NO TOUR. Journey 3 owns active Tour behaviour. No relation, function or
 --      view here creates, activates or reads one.
+--   5. NO F01 SCHEMA PATCH. Evidence has to name the subject it advances, and an
+--      F01 document carries no lifecycle binding. Rather than adding a column to
+--      a schema this slice does not own, the association lives in the J102-scoped
+--      ops.j102_evidence_subject_link below, written by its own registered
+--      partner-only producer. Nothing here alters, extends or writes to any
+--      ops.f01_* relation; F01 remains the sole authority for document identity
+--      and document state, and an association asserts neither.
 
 -- ---------------------------------------------------------------------------
 -- Prerequisites. This file REFUSES TO APPLY rather than creating a second copy
@@ -88,6 +95,19 @@ end $$;
 -- PG_CONTEXT names the actual PL/pgSQL frames beneath the trigger, so the guard
 -- can require that a write genuinely arrived through a registered ops.j102_*
 -- writer.
+--
+-- THE SCHEMA HALF, and how far it can honestly be taken. PG_CONTEXT renders each
+-- frame through format_procedure, which OMITS the schema when the function is
+-- visible on the current search_path -- and this guard's own search_path puts
+-- `ops` ahead of `public`, so a genuine ops.j102_apply_transition frame prints
+-- unqualified. Requiring a literal `ops.` prefix would therefore refuse every
+-- legitimate write, which is why the prefix stays optional. What makes the
+-- optional prefix safe is that an unqualified `j102_apply_transition(` frame can
+-- only be the function that search_path resolves that name to, and the
+-- application-time check below asserts that every writer name resolves to the
+-- ops one under exactly this search_path. A same-named function in `public` is
+-- shadowed by ops and prints QUALIFIED, so `public.j102_apply_transition(` does
+-- not satisfy the pattern.
 -- ---------------------------------------------------------------------------
 create or replace function ops.j102_guard_direct_dml()
 returns trigger language plpgsql
@@ -97,7 +117,7 @@ declare v_context text;
 begin
   get diagnostics v_context = pg_context;
   if regexp_replace(v_context, 'PL/pgSQL function (ops\.)?j102_guard_direct_dml\(\)[^\n]*', '', 'g')
-       !~ 'PL/pgSQL function (ops\.)?j102_(apply_transition|record_first_party_fact|record_salesforce_reference|record_correction|record_reconciliation_item|claim_idempotency|settle_idempotency)\('
+       !~ 'PL/pgSQL function (ops\.)?j102_(apply_transition|record_first_party_fact|record_evidence_subject_link|record_salesforce_reference|record_correction|record_reconciliation_item|claim_idempotency|settle_idempotency)\('
   then
     raise exception 'j102_direct_dml_refused: %.% is written only through the registered ops.j102_* writers',
       tg_table_schema, tg_table_name using errcode = '42501';
@@ -240,6 +260,13 @@ create index if not exists j102_subject_event_by_subject
 -- by id and the record layer loads it; the fact never travels inside the
 -- transition request. That is the difference between "the broker recorded that
 -- the closing happened on the 14th" and "the caller said closed: true".
+-- THE TYPED SUBJECT BINDING IS PART OF THE ROW, and it is the correction this
+-- table most needed. A record used to say WHAT happened and WHO recorded it and
+-- never WHICH deal, assignment or client it happened to, so one closing
+-- settlement with one date could close any number of unrelated deals and a
+-- commitment recorded for assignment A could commit assignment B. The columns
+-- below are CHECK-bound to the hashed envelope, so the binding cannot be edited
+-- beside the bytes it is supposed to describe.
 create table if not exists ops.j102_first_party_record (
   tenant            text not null,
   record_kind       text not null check (record_kind in
@@ -250,8 +277,16 @@ create table if not exists ops.j102_first_party_record (
   envelope          jsonb not null,
   envelope_digest   text not null,
   record_digest     text not null,
+  bound_subject_kind text not null check (bound_subject_kind in
+                      ('relationship', 'engagement', 'assignment', 'property_negotiation', 'deal')),
+  bound_subject_id  text not null check (bound_subject_id ~ '^[A-Za-z0-9][A-Za-z0-9._:/@!+=-]{0,127}$'),
   closing_date      timestamptz,
   recorded_by       text not null,
+  -- H5. The author's own authorization class, stamped from the derived principal
+  -- at write time. It is what makes "a partner stated this" a checkable property
+  -- of the row rather than a property of whoever presents it later.
+  recorded_by_class text not null check (recorded_by_class in
+                      ('verified_partner', 'sponsored_agent')),
   recorded_at       timestamptz not null,
   idempotency_key   text not null,
   primary key (tenant, record_kind, record_id),
@@ -264,8 +299,32 @@ create table if not exists ops.j102_first_party_record (
     check (record_kind = envelope -> 'record' ->> 'record_kind'),
   constraint j102_fact_id_matches_envelope
     check (record_id = envelope -> 'record' ->> 'record_id'),
+  constraint j102_fact_binding_matches_envelope
+    check (bound_subject_kind = envelope -> 'record' ->> 'subject_kind'
+       and bound_subject_id = envelope -> 'record' ->> 'subject_id'),
   constraint j102_fact_recorded_by_matches_envelope
     check (recorded_by = envelope -> 'record' ->> 'recorded_by'),
+  constraint j102_fact_recorded_by_class_matches_envelope
+    check (recorded_by_class = envelope -> 'record' ->> 'recorded_by_authorization_class'),
+  -- H5 structurally: the four facts only a partner may state cannot be stored
+  -- with any other author class, so an agent-authored closing date, winning
+  -- property commitment, failure reason or correction proof does not exist to be
+  -- laundered through a partner-performed transition later.
+  constraint j102_fact_partner_authored_kinds
+    check (record_kind not in ('winning_property_commitment', 'closing_settlement',
+                               'deal_failure', 'lifecycle_correction')
+        or recorded_by_class = 'verified_partner'),
+  -- M1 structurally. A reason or detail that is not a JSON string stores
+  -- perfectly well and then makes the record UNREADABLE as evidence, which turns
+  -- a policy question into a thrown contract violation at read time.
+  constraint j102_fact_reason_is_text
+    check (jsonb_typeof(envelope -> 'record' -> 'reason') in ('string', 'null')),
+  constraint j102_fact_detail_is_text
+    check (jsonb_typeof(envelope -> 'record' -> 'detail') in ('string', 'null')),
+  constraint j102_fact_supporting_document_is_ident
+    check (envelope -> 'record' ->> 'supporting_document_id' is null
+        or envelope -> 'record' ->> 'supporting_document_id'
+             ~ '^[A-Za-z0-9][A-Za-z0-9._:/@!+=-]{0,127}$'),
   -- Q094 structurally: a closing_settlement record without an actual closing
   -- date cannot exist, so no closing transition can ever find one to read.
   constraint j102_fact_closing_requires_date
@@ -283,7 +342,90 @@ create table if not exists ops.j102_first_party_record (
 );
 
 comment on table ops.j102_first_party_record is
-  'Append-only authenticated first-party business records. A lifecycle transition names one by id and the record layer loads it; the fact never travels inside a transition request, which is what keeps a caller from asserting the outcome it is asking for.';
+  'Append-only authenticated first-party business records, each bound to the exact subject it is about and carrying its author''s authorization class. A lifecycle transition names one by id and the record layer loads it; the fact never travels inside a transition request, which is what keeps a caller from asserting the outcome it is asking for.';
+
+create index if not exists j102_fact_by_bound_subject
+  on ops.j102_first_party_record (tenant, bound_subject_kind, bound_subject_id, record_kind);
+
+-- ---------------------------------------------------------------------------
+-- THE EVIDENCE -> SUBJECT ASSOCIATION, and why it lives here rather than in F01.
+--
+-- A first-party record can carry its own binding because this rail writes it. An
+-- F01 DOCUMENT cannot: F01 owns document identity, versions, signature, validity
+-- and version state, and it holds no lifecycle concept at all -- there is no
+-- column on an F01 document that says which DoctorCRE deal it belongs to, and
+-- adding one would be this slice editing a schema it does not own to make its
+-- own problem easier. The same is true of a corporate artifact.
+--
+-- So the association is held HERE, scoped to J102, and it is a RECORD rather
+-- than a claim on a request: one partner-authored, append-only, digest-bound row
+-- saying that one exact document version, or one exact artifact, belongs to one
+-- lifecycle subject. A transition reads it; nobody asserts it in passing.
+--
+-- IT IS PINNED, NOT NAMED. The association binds document_id + version_no +
+-- content_digest, so a document that gains a version is not the document that
+-- was associated and needs its own association. That is deliberately the same
+-- rule the evidence pin itself follows, for the same reason: "the document still
+-- exists" is not the question.
+--
+-- WHAT AN ASSOCIATION IS NOT. It is not a document, it does not create one, and
+-- it asserts nothing whatever about signature, validity or version state -- every
+-- one of those is read from F01 at judgement time and none of them is copied
+-- here. A partner saying "this lease is that deal's lease" is not a partner
+-- saying the lease is signed.
+-- ---------------------------------------------------------------------------
+create table if not exists ops.j102_evidence_subject_link (
+  tenant            text not null,
+  link_seq          bigserial primary key,
+  evidence_source   text not null check (evidence_source in
+                      ('f01_document', 'f01_corporate_artifact')),
+  -- The document id, or the artifact digest. The pin's identity half.
+  evidence_ref      text not null check (btrim(evidence_ref) <> ''),
+  -- The document version. An artifact has none, and 0 says so rather than a null
+  -- the unique index would have to work around.
+  version_no        integer not null,
+  -- The document version's content digest, or -- for an artifact, whose pin IS
+  -- its digest -- the artifact digest again.
+  content_digest    text not null,
+  subject_kind      text not null check (subject_kind in
+                      ('relationship', 'engagement', 'assignment', 'property_negotiation', 'deal')),
+  subject_id        text not null check (subject_id ~ '^[A-Za-z0-9][A-Za-z0-9._:/@!+=-]{0,127}$'),
+  envelope          jsonb not null,
+  envelope_digest   text not null,
+  link_digest       text not null,
+  associated_by     text not null,
+  associated_by_class text not null check (associated_by_class = 'verified_partner'),
+  associated_at     timestamptz not null,
+  idempotency_key   text not null,
+  constraint j102_link_tenant check (tenant = ops.f01_tenant()),
+  constraint j102_link_envelope_digest
+    check (envelope_digest = ops.f01_digest_jsonb(envelope)),
+  constraint j102_link_digest_bound
+    check (link_digest = ops.f01_digest_jsonb(envelope -> 'record')),
+  constraint j102_link_content_digest_shape check (ops.f01_is_digest_ref(content_digest)),
+  constraint j102_link_version_matches_source
+    check ((evidence_source = 'f01_document') = (version_no > 0)),
+  constraint j102_link_matches_envelope
+    check (evidence_source = envelope -> 'record' ->> 'evidence_source'
+       and evidence_ref = envelope -> 'record' ->> 'evidence_ref'
+       and content_digest = envelope -> 'record' ->> 'content_digest'
+       and subject_kind = envelope -> 'record' ->> 'subject_kind'
+       and subject_id = envelope -> 'record' ->> 'subject_id'
+       and associated_by = envelope -> 'record' ->> 'associated_by'),
+  -- An association says nothing about the document's own states, and a record
+  -- claiming otherwise is refused rather than stored and ignored.
+  constraint j102_link_asserts_no_document_state
+    check ((envelope -> 'record' ->> 'asserts_document_state') = 'false'
+       and (envelope -> 'record' ->> 'creates_document') = 'false')
+);
+
+comment on table ops.j102_evidence_subject_link is
+  'The J102-scoped association between one EXACT evidence pin (an F01 document id + version + content digest, or a corporate artifact digest) and one lifecycle subject. Written only by ops.j102_record_evidence_subject_link, only by a verified partner, append-only. It creates no document and asserts no document state; F01 remains the sole authority for both.';
+
+-- One association per (pin, subject). A repeat is the same fact, not a second one.
+create unique index if not exists j102_evidence_subject_link_uq
+  on ops.j102_evidence_subject_link
+     (tenant, evidence_source, evidence_ref, version_no, content_digest, subject_kind, subject_id);
 
 create table if not exists ops.j102_salesforce_reference (
   tenant            text not null,
@@ -419,6 +561,7 @@ begin
       ('j102_subject_current', false),
       ('j102_subject_event', true),
       ('j102_first_party_record', true),
+      ('j102_evidence_subject_link', true),
       ('j102_salesforce_reference', true),
       ('j102_correction_receipt', true),
       ('j102_reconciliation_item', true),
@@ -526,7 +669,44 @@ end;
 $$;
 
 comment on function ops.j102_first_party_record(text,text) is
-  'One verified first-party business record, or null. This is the ONLY door a lifecycle transition reads a business fact through.';
+  'One verified first-party business record, or null. This is the ONLY door a lifecycle transition reads a business fact through, and every record it returns names the subject it is about.';
+
+-- THE ASSOCIATION READER ASKS A YES/NO QUESTION, and the question is the point.
+--
+-- It takes the subject as a PARAMETER rather than returning whichever subject
+-- the association happens to name, so the caller asks "is this exact document
+-- version bound to THIS deal" and gets null when it is not. A reader that
+-- returned the association's own subject would read identically on every happy
+-- path and differ on exactly the case BLOCK-2 describes -- a perfectly authentic
+-- lease, bound to somebody else's deal, presented against this one.
+create or replace function ops.j102_evidence_subject_link(
+  p_evidence_source text, p_evidence_ref text, p_version_no integer,
+  p_content_digest text, p_subject_kind text, p_subject_id text)
+returns jsonb language plpgsql stable security definer
+set search_path = pg_catalog, ops, public
+as $$
+declare v_row ops.j102_evidence_subject_link%rowtype; v_verified jsonb;
+begin
+  select * into v_row from ops.j102_evidence_subject_link
+   where tenant = ops.f01_tenant()
+     and evidence_source = p_evidence_source
+     and evidence_ref = p_evidence_ref
+     and version_no = coalesce(p_version_no, 0)
+     and content_digest = p_content_digest
+     and subject_kind = p_subject_kind
+     and subject_id = p_subject_id;
+  if not found then return null; end if;
+  v_verified := ops.j102_verify_envelope(v_row.envelope, v_row.envelope_digest,
+    v_row.link_digest, 'stored_evidence_subject_link');
+  return jsonb_build_object(
+    'record', v_verified -> 'record',
+    'link_digest', v_row.link_digest,
+    'integrity', 'recomputed_from_committed_row');
+end;
+$$;
+
+comment on function ops.j102_evidence_subject_link(text,text,integer,text,text,text) is
+  'Whether one EXACT evidence pin is associated with one named lifecycle subject, verified from committed bytes, or null. The subject is asked about rather than reported, so an authentic document bound to a different subject answers null.';
 
 -- ---------------------------------------------------------------------------
 -- THE PRIVATE FAIL-CLOSED APPROVAL READER.
@@ -590,7 +770,8 @@ begin
   -- The closed write-operation vocabulary. A new writer MUST be added here or it
   -- cannot claim, replay or settle a key at all; nothing here is a wildcard.
   if p_operation not in (
-    'record-lifecycle-fact', 'record-representation-agreement', 'open-cre-assignment',
+    'record-lifecycle-fact', 'record-evidence-subject-link',
+    'record-representation-agreement', 'open-cre-assignment',
     'record-loi-submission', 'record-loi-acceptance', 'commit-winning-property',
     'record-deal-execution', 'record-diligence-outcome', 'record-deal-closing',
     'cancel-pending-deal', 'record-deal-axis', 'link-salesforce-reference',
@@ -692,6 +873,15 @@ $$;
 -- content digest it meant; a first-party record names the record digest it meant.
 -- "The document still exists" is not the check. "The document is still the one
 -- the decision was taken against" is.
+--
+-- AND IT RE-ASSERTS THE SUBJECT BINDING, which is the half that used to be
+-- missing entirely. The recheck compared the record's digest and never asked
+-- which deal the record was about, so an authentic, unmoved, correctly pinned
+-- settlement could close a deal it had nothing to do with. Every manifest item
+-- now carries the subject the transition is moving, and the binding is re-read
+-- under the same lock: an association withdrawn, or a record re-bound, between
+-- the decision and the write refuses the whole transition exactly as a moved
+-- version does.
 -- ---------------------------------------------------------------------------
 create or replace function ops.j102_recheck_evidence(p_recheck jsonb)
 returns jsonb language plpgsql stable security definer
@@ -701,6 +891,7 @@ declare
   v_item jsonb;
   v_body jsonb;
   v_record jsonb;
+  v_link jsonb;
   v_checked jsonb := '[]'::jsonb;
 begin
   if jsonb_typeof(p_recheck) is distinct from 'array' or jsonb_array_length(p_recheck) < 1 then
@@ -708,6 +899,15 @@ begin
       using errcode = '22023';
   end if;
   for v_item in select * from jsonb_array_elements(p_recheck) loop
+    -- EVERY item must name the subject it binds to. A manifest entry without one
+    -- is a decision nobody can re-check, and it refuses rather than being
+    -- re-checked on the half of itself that is present.
+    if v_item -> 'binding' is null
+       or (v_item -> 'binding' ->> 'subject_kind') is null
+       or (v_item -> 'binding' ->> 'subject_id') is null then
+      raise exception 'j102_evidence_binding_required: % evidence names no subject binding to re-assert',
+        coalesce(v_item ->> 'evidence_kind', 'unnamed') using errcode = '22023';
+    end if;
     if (v_item ->> 'source') = 'f01_document' then
       v_body := ops.f01_read('document',
         jsonb_build_object('document_id', v_item -> 'selector' ->> 'document_id')) -> 'body';
@@ -723,11 +923,31 @@ begin
         raise exception 'j102_evidence_moved: document % is not the version this transition was decided against',
           v_item -> 'selector' ->> 'document_id' using errcode = '40001';
       end if;
+      v_link := ops.j102_evidence_subject_link(
+        'f01_document', v_item -> 'selector' ->> 'document_id',
+        (v_item ->> 'expected_version_no')::integer, v_item ->> 'expected_content_digest',
+        v_item -> 'binding' ->> 'subject_kind', v_item -> 'binding' ->> 'subject_id');
+      if v_link is null or (v_link ->> 'link_digest') is distinct from (v_item ->> 'expected_link_digest') then
+        raise exception 'j102_evidence_unbound: document % is not associated with % % under this lock',
+          v_item -> 'selector' ->> 'document_id',
+          v_item -> 'binding' ->> 'subject_kind', v_item -> 'binding' ->> 'subject_id'
+          using errcode = '40001';
+      end if;
     elsif (v_item ->> 'source') = 'f01_corporate_artifact' then
       v_body := ops.f01_stored_artifact(v_item -> 'selector' ->> 'artifact_digest');
       if v_body is null then
         raise exception 'j102_evidence_moved: artifact % is no longer readable',
           v_item -> 'selector' ->> 'artifact_digest' using errcode = '40001';
+      end if;
+      v_link := ops.j102_evidence_subject_link(
+        'f01_corporate_artifact', v_item -> 'selector' ->> 'artifact_digest', 0,
+        v_item -> 'selector' ->> 'artifact_digest',
+        v_item -> 'binding' ->> 'subject_kind', v_item -> 'binding' ->> 'subject_id');
+      if v_link is null or (v_link ->> 'link_digest') is distinct from (v_item ->> 'expected_link_digest') then
+        raise exception 'j102_evidence_unbound: artifact % is not associated with % % under this lock',
+          v_item -> 'selector' ->> 'artifact_digest',
+          v_item -> 'binding' ->> 'subject_kind', v_item -> 'binding' ->> 'subject_id'
+          using errcode = '40001';
       end if;
     elsif (v_item ->> 'source') = 'first_party_record' then
       v_body := ops.j102_first_party_record(
@@ -740,6 +960,16 @@ begin
       if (v_body ->> 'record_digest') is distinct from (v_item ->> 'expected_record_digest') then
         raise exception 'j102_evidence_moved: % record % is not the record this transition was decided against',
           v_item -> 'selector' ->> 'record_kind', v_item -> 'selector' ->> 'record_id'
+          using errcode = '40001';
+      end if;
+      -- The record's OWN typed binding, re-read under the lock from the row
+      -- rather than taken from the manifest that travelled here.
+      if (v_body -> 'record' ->> 'subject_kind') is distinct from (v_item -> 'binding' ->> 'subject_kind')
+         or (v_body -> 'record' ->> 'subject_id') is distinct from (v_item -> 'binding' ->> 'subject_id') then
+        raise exception 'j102_evidence_unbound: % record % is bound to % %, not to the % % this transition moves',
+          v_item -> 'selector' ->> 'record_kind', v_item -> 'selector' ->> 'record_id',
+          v_body -> 'record' ->> 'subject_kind', v_body -> 'record' ->> 'subject_id',
+          v_item -> 'binding' ->> 'subject_kind', v_item -> 'binding' ->> 'subject_id'
           using errcode = '40001';
       end if;
     elsif (v_item ->> 'source') = 'typed_approval' then
@@ -755,7 +985,10 @@ begin
       'evidence_kind', v_item ->> 'evidence_kind',
       'source', v_item ->> 'source',
       'reader', v_item ->> 'reader',
-      'still_exact', true));
+      'bound_subject_kind', v_item -> 'binding' ->> 'subject_kind',
+      'bound_subject_id', v_item -> 'binding' ->> 'subject_id',
+      'still_exact', true,
+      'still_bound', true));
   end loop;
   return v_checked;
 end;
@@ -803,6 +1036,14 @@ set search_path = pg_catalog, ops, public
 as $$
 declare
   v_actor text := ops.f01_context_actor_slug();
+  -- H4. THE CLOCK IS THE DATABASE'S, and it is read ONCE here. Every writer used
+  -- to take updated_at and recorded_at from the supplied envelope and store them
+  -- unexamined, so anything holding the carr_writer execute grant could backdate
+  -- lifecycle state and its history. now() is the transaction timestamp, so every
+  -- row this call writes shares one instant and a receipt can never appear to
+  -- precede the event it binds.
+  v_txn_now timestamptz := now();
+  v_txn_now_text text := ops.f01_instant_text(now());
   v_operation text := p_diagnostics ->> 'operation';
   v_replay jsonb;
   v_key text;
@@ -813,6 +1054,7 @@ declare
   v_id text;
   v_stored text;
   v_expected text;
+  v_proposed jsonb := '{}'::jsonb;
   v_subject_digests jsonb := '{}'::jsonb;
   v_event_digests jsonb := '[]'::jsonb;
   v_checked jsonb;
@@ -849,11 +1091,52 @@ begin
       'j102:subject:' || ops.f01_tenant() || ':' || v_key, 0));
   end loop;
 
-  -- THE COMPARE-AND-SWAP, decided against the STORED row under the lock. Every
-  -- operand is checked, including the ones for subjects this transition only
-  -- read: a prerequisite that moved invalidates the decision exactly as a target
-  -- that moved does.
-  for v_key in select jsonb_object_keys(p_expected_state_digests) loop
+  -- EVERY PROPOSED SUBJECT MUST CARRY AN OPERAND, and a caller that omits one is
+  -- refused rather than defaulted.
+  --
+  -- BLOCK-1. The compare-and-swap loop used to iterate the SUPPLIED MAP, so a
+  -- subject that appeared only in the envelopes -- a creation -- was never
+  -- checked at all, and the upsert below silently overwrote whatever already
+  -- held that key. A caller naming an existing deal id as its new deal replaced
+  -- that deal's authoritative current state, closing date and all, under a
+  -- different assignment, while its events stayed behind: history and current
+  -- state disagreeing about what that id is. Iterating the UNION, and demanding
+  -- a key for every proposed subject, is what closes it. A creation's operand is
+  -- an explicit JSON null, which the `is distinct from` below reads as "this
+  -- subject must be ABSENT" -- so a collision refuses instead of upserting, and
+  -- omitting the key is not a way to ask for the old behaviour.
+  for v_envelope in select * from jsonb_array_elements(p_subject_envelopes) loop
+    v_key := (v_envelope -> 'record' ->> 'subject_kind') || ':'
+             || (v_envelope -> 'record' ->> 'subject_id');
+    if not (p_expected_state_digests ? v_key) then
+      raise exception 'j102_expected_state_digest_missing: % is proposed with no compare-and-swap operand; a creation must supply an explicit null',
+        v_key using errcode = '22023';
+    end if;
+    -- The envelope's own prior_state_digest and the operand are the same claim
+    -- written twice, and they must agree: a pair that disagrees is a request
+    -- whose history would describe a version its own check did not enforce.
+    if (v_envelope -> 'record' ->> 'prior_state_digest')
+         is distinct from (p_expected_state_digests ->> v_key) then
+      raise exception 'j102_prior_state_digest_mismatch: % declares prior state % and its operand is %',
+        v_key, coalesce(v_envelope -> 'record' ->> 'prior_state_digest', 'null'),
+        coalesce(p_expected_state_digests ->> v_key, 'null') using errcode = '22023';
+    end if;
+    v_proposed := v_proposed || jsonb_build_object(v_key, true);
+  end loop;
+
+  -- THE COMPARE-AND-SWAP, decided against the STORED row under the lock, over the
+  -- UNION of the supplied operands and the proposed subjects. Every operand is
+  -- checked, including the ones for subjects this transition only read: a
+  -- prerequisite that moved invalidates the decision exactly as a target that
+  -- moved does. And presence AND ABSENCE are both enforced -- a null operand for
+  -- a subject that now exists refuses, which is the creation collision.
+  for v_key in
+    select k from (
+      select jsonb_object_keys(p_expected_state_digests) as k
+      union
+      select jsonb_object_keys(v_proposed)
+    ) s order by k collate "C"
+  loop
     v_kind := split_part(v_key, ':', 1);
     v_id := substr(v_key, length(v_kind) + 2);
     v_expected := p_expected_state_digests ->> v_key;
@@ -870,9 +1153,12 @@ begin
   -- THE EVIDENCE RECHECK, under the locks just taken and before any write.
   v_checked := ops.j102_recheck_evidence(p_evidence_recheck);
 
-  -- Every proposed subject, upserted. A subject named in the envelopes but NOT
-  -- in the compare-and-swap operands is a creation; the primary key makes a
-  -- concurrent double creation impossible rather than unlikely.
+  -- Every proposed subject, written. A subject whose operand is null is a
+  -- CREATION and the loop above has already proved, under this transaction's
+  -- locks, that no row holds that key; a subject whose operand is a digest is an
+  -- update of the exact version that digest names. Both take the same advisory
+  -- lock, so two concurrent creations of one id serialize on it and the second
+  -- one's null operand meets the first one's committed row and refuses.
   for v_envelope in select * from jsonb_array_elements(p_subject_envelopes) loop
     v_record := v_envelope -> 'record';
     v_state := v_record -> 'state';
@@ -881,6 +1167,13 @@ begin
     if (v_record ->> 'updated_by') is distinct from v_actor then
       raise exception 'j102_actor_injection_refused: updated_by is derived, never supplied'
         using errcode = '42501';
+    end if;
+    -- H4. THE INSTANT IS THE DATABASE'S, verified against this transaction's own
+    -- clock and then stamped from it. A caller-chosen updated_at is refused here
+    -- rather than stored, so no grant holder can backdate lifecycle state.
+    if (v_record ->> 'updated_at') is distinct from v_txn_now_text then
+      raise exception 'j102_clock_injection_refused: updated_at is the database transaction time %, not %',
+        v_txn_now_text, coalesce(v_record ->> 'updated_at', 'null') using errcode = '42501';
     end if;
     if ops.f01_digest_jsonb(v_record) is distinct from (v_envelope ->> 'record_digest') then
       raise exception 'j102_subject_digest_mismatch: the supplied subject does not hash to its claim'
@@ -895,7 +1188,7 @@ begin
       coalesce(v_state ->> 'relationship_id', v_state ->> 'engagement_id',
                v_state ->> 'assignment_id'),
       v_state ->> 'deal_state',
-      v_actor, ops.f01_instant(v_record ->> 'updated_at'))
+      v_actor, v_txn_now)
     on conflict (tenant, subject_kind, subject_id) do update
       set envelope = excluded.envelope,
           envelope_digest = excluded.envelope_digest,
@@ -918,6 +1211,10 @@ begin
       raise exception 'j102_actor_injection_refused: recorded_by is derived, never supplied'
         using errcode = '42501';
     end if;
+    if (v_record ->> 'recorded_at') is distinct from v_txn_now_text then
+      raise exception 'j102_clock_injection_refused: recorded_at is the database transaction time %, not %',
+        v_txn_now_text, coalesce(v_record ->> 'recorded_at', 'null') using errcode = '42501';
+    end if;
     insert into ops.j102_subject_event
       (tenant, subject_kind, subject_id, event_kind, transition_id, envelope, envelope_digest,
        event_digest, recorded_by, recorded_at, idempotency_key)
@@ -928,7 +1225,7 @@ begin
       v_record -> 'event' ->> 'event_kind',
       v_record ->> 'transition_id',
       v_envelope, ops.f01_digest_jsonb(v_envelope), ops.f01_digest_jsonb(v_record),
-      v_actor, ops.f01_instant(v_record ->> 'recorded_at'), p_idempotency_key);
+      v_actor, v_txn_now, p_idempotency_key);
     v_event_digests := v_event_digests || jsonb_build_array(ops.f01_digest_jsonb(v_record));
   end loop;
 
@@ -944,7 +1241,14 @@ begin
     'subject_digests', v_subject_digests,
     'event_digests', v_event_digests,
     'evidence_rechecked_under_lock', true,
+    'evidence_bound_under_lock', true,
     'evidence_checked', v_checked,
+    -- THE COMMITTED RECEIPT. The instant every row in this transaction carries,
+    -- taken from the database rather than echoed back from the request, and the
+    -- operands the swap was actually decided against.
+    'committed_at', v_txn_now_text,
+    'committed_state_digests', v_subject_digests,
+    'expected_state_digests', p_expected_state_digests,
     'readback', v_readback,
     'external_effects', false);
   return ops.j102_settle_idempotency(v_operation, p_idempotency_key, v_result);
@@ -952,7 +1256,7 @@ end;
 $$;
 
 comment on function ops.j102_apply_transition(text,jsonb,jsonb,jsonb,jsonb,text,text,jsonb) is
-  'The ONLY writer of lifecycle state. Claims its idempotency key before reading any state, locks every subject it reads or writes in ascending order, enforces the compare-and-swap against the stored rows, re-reads the exact evidence pins under those locks, then writes every proposed subject and every event in one transaction or none. It derives its own actor and accepts none.';
+  'The ONLY writer of lifecycle state. Claims its idempotency key before reading any state, locks every subject it reads or writes in ascending order, requires a compare-and-swap operand for EVERY proposed subject (an explicit null for a creation, which the swap enforces as absence), re-reads the exact evidence pins and their subject associations under those locks, derives both the actor and the instant, then writes every proposed subject and every event in one transaction or none.';
 
 -- ---------------------------------------------------------------------------
 -- The three non-transition writers.
@@ -965,6 +1269,9 @@ set search_path = pg_catalog, ops, public
 as $$
 declare
   v_actor text := ops.f01_context_actor_slug();
+  v_class text := ops.f01_principal() ->> 'authorization_class';
+  v_txn_now timestamptz := now();
+  v_txn_now_text text := ops.f01_instant_text(now());
   v_replay jsonb; v_record jsonb; v_digest text; v_result jsonb;
 begin
   v_replay := ops.j102_claim_idempotency('record-lifecycle-fact', p_idempotency_key, p_request_digest);
@@ -979,20 +1286,60 @@ begin
     raise exception 'j102_actor_injection_refused: recorded_by is derived, never supplied'
       using errcode = '42501';
   end if;
+  -- H5. The author's class is DERIVED from the same principal the actor comes
+  -- from; a record claiming a different one is refused rather than believed.
+  if (v_record ->> 'recorded_by_authorization_class') is distinct from v_class then
+    raise exception 'j102_author_class_injection_refused: the author class is derived (% here), never supplied',
+      v_class using errcode = '42501';
+  end if;
+  if v_record ->> 'record_kind' in ('winning_property_commitment', 'closing_settlement',
+                                    'deal_failure', 'lifecycle_correction')
+     and v_class <> 'verified_partner' then
+    raise exception 'j102_partner_authored_record_refused: a % record is authored by a verified partner, and % holds %',
+      v_record ->> 'record_kind', v_actor, v_class using errcode = '42501';
+  end if;
+  -- H4. The instant is the transaction's, verified and then stamped from it.
+  if (v_record ->> 'recorded_at') is distinct from v_txn_now_text then
+    raise exception 'j102_clock_injection_refused: recorded_at is the database transaction time %, not %',
+      v_txn_now_text, coalesce(v_record ->> 'recorded_at', 'null') using errcode = '42501';
+  end if;
+  -- BLOCK-2, and WHY THE EXISTENCE OF THE BOUND SUBJECT IS NOT RAISED HERE.
+  --
+  -- The store refuses `bound_subject_not_found` before it reaches this function,
+  -- so a record bound to an id nobody holds does not get written through the
+  -- shipped path. It is deliberately not a hard error at this layer, because
+  -- requiring the subject to pre-exist would make the record layer unseedable in
+  -- a single transaction -- a business record needs its subject, a transition
+  -- needs its record, and nothing here creates the first subject (see the store's
+  -- V5_J102_UNWIRED_CAPABILITIES). What actually gives the binding its force is
+  -- one layer along: ops.j102_recheck_evidence re-reads this row's own typed
+  -- binding under the transition's lock and refuses when it is not the subject
+  -- being moved. A record bound to an id that does not exist can therefore never
+  -- advance anything, which is the property that matters.
   insert into ops.j102_first_party_record
     (tenant, record_kind, record_id, envelope, envelope_digest, record_digest,
-     closing_date, recorded_by, recorded_at, idempotency_key)
+     bound_subject_kind, bound_subject_id,
+     closing_date, recorded_by, recorded_by_class, recorded_at, idempotency_key)
   values (
     ops.f01_tenant(), v_record ->> 'record_kind', v_record ->> 'record_id',
     p_envelope, ops.f01_digest_jsonb(p_envelope), v_digest,
+    v_record ->> 'subject_kind', v_record ->> 'subject_id',
+    -- THE ONE DATE THAT IS NOT THE SERVER'S, and it is the business fact this
+    -- record exists to carry: Q094 closes a deal on the ACTUAL final closing
+    -- date, which is a statement about the world and not about when the row was
+    -- written. It stays distinct from recorded_at above on purpose.
     case when v_record ->> 'closing_date' is null then null
          else ops.f01_instant(v_record ->> 'closing_date') end,
-    v_actor, ops.f01_instant(v_record ->> 'recorded_at'), p_idempotency_key);
+    v_actor, v_class, v_txn_now, p_idempotency_key);
   v_result := jsonb_build_object(
     'operation', 'record-lifecycle-fact', 'decision', 'allow',
     'reason_id', 'first_party_record_appended', 'actor_slug', v_actor,
     'record_kind', v_record ->> 'record_kind', 'record_id', v_record ->> 'record_id',
     'record_digest', v_digest,
+    'bound_subject_kind', v_record ->> 'subject_kind',
+    'bound_subject_id', v_record ->> 'subject_id',
+    'recorded_by_authorization_class', v_class,
+    'committed_at', v_txn_now_text,
     'readback', ops.j102_first_party_record(v_record ->> 'record_kind', v_record ->> 'record_id'),
     'advances_lifecycle_state', false, 'external_effects', false);
   return ops.j102_settle_idempotency('record-lifecycle-fact', p_idempotency_key, v_result);
@@ -1000,7 +1347,90 @@ end;
 $$;
 
 comment on function ops.j102_record_first_party_fact(jsonb,text,text) is
-  'Append one authenticated first-party business record. It advances no lifecycle state; a transition still has to accept it as evidence.';
+  'Append one authenticated first-party business record, bound to an existing subject and stamped with the derived author, the derived author class and the database transaction time. The record''s closing_date remains the business fact it carries and is deliberately distinct from the server instant. It advances no lifecycle state; a transition still has to accept it as evidence.';
+
+create or replace function ops.j102_record_evidence_subject_link(
+  p_envelope jsonb, p_idempotency_key text, p_request_digest text)
+returns jsonb language plpgsql security definer
+set search_path = pg_catalog, ops, public
+as $$
+declare
+  v_actor text := ops.f01_context_actor_slug();
+  v_class text := ops.f01_principal() ->> 'authorization_class';
+  v_txn_now timestamptz := now();
+  v_txn_now_text text := ops.f01_instant_text(now());
+  v_replay jsonb; v_record jsonb; v_digest text; v_result jsonb; v_seq bigint;
+begin
+  -- A partner's statement about which transaction a document belongs to. An
+  -- agent that could make it could bind any authentic lease to any deal.
+  if v_class <> 'verified_partner' then
+    raise exception 'j102_evidence_association_requires_partner_authority: % holds %',
+      v_actor, v_class using errcode = '42501';
+  end if;
+  v_replay := ops.j102_claim_idempotency('record-evidence-subject-link',
+    p_idempotency_key, p_request_digest);
+  if v_replay is not null then return v_replay; end if;
+  v_record := p_envelope -> 'record';
+  v_digest := ops.f01_digest_jsonb(v_record);
+  if (p_envelope ->> 'record_digest') is distinct from v_digest then
+    raise exception 'j102_link_digest_mismatch' using errcode = '22000';
+  end if;
+  if (v_record ->> 'associated_by') is distinct from v_actor then
+    raise exception 'j102_actor_injection_refused: associated_by is derived, never supplied'
+      using errcode = '42501';
+  end if;
+  if (v_record ->> 'associated_at') is distinct from v_txn_now_text then
+    raise exception 'j102_clock_injection_refused: associated_at is the database transaction time %, not %',
+      v_txn_now_text, coalesce(v_record ->> 'associated_at', 'null') using errcode = '42501';
+  end if;
+  -- BOTH ENDS ARE REAL, checked here as well as in the store. The subject has to
+  -- exist in this rail; the pin has to exist in F01, at exactly the version and
+  -- content digest named, so an association cannot be made to a document version
+  -- the record layer does not hold.
+  if ops.j102_subject(v_record ->> 'subject_kind', v_record ->> 'subject_id') is null then
+    raise exception 'j102_link_subject_missing: no % % exists to associate evidence with',
+      v_record ->> 'subject_kind', v_record ->> 'subject_id' using errcode = '23503';
+  end if;
+  if (v_record ->> 'evidence_source') = 'f01_document' then
+    if (ops.f01_read('document', jsonb_build_object(
+          'document_id', v_record ->> 'evidence_ref')) -> 'body' -> 'record'
+          -> 'neon_identity' ->> 'content_digest')
+         is distinct from (v_record ->> 'content_digest') then
+      raise exception 'j102_link_pin_not_held: F01 does not hold document % at the content digest this association names',
+        v_record ->> 'evidence_ref' using errcode = '23503';
+    end if;
+  elsif ops.f01_stored_artifact(v_record ->> 'evidence_ref') is null then
+    raise exception 'j102_link_pin_not_held: no stored corporate artifact exists for %',
+      v_record ->> 'evidence_ref' using errcode = '23503';
+  end if;
+  insert into ops.j102_evidence_subject_link
+    (tenant, evidence_source, evidence_ref, version_no, content_digest,
+     subject_kind, subject_id, envelope, envelope_digest, link_digest,
+     associated_by, associated_by_class, associated_at, idempotency_key)
+  values (
+    ops.f01_tenant(), v_record ->> 'evidence_source', v_record ->> 'evidence_ref',
+    coalesce((v_record ->> 'version_no')::integer, 0), v_record ->> 'content_digest',
+    v_record ->> 'subject_kind', v_record ->> 'subject_id',
+    p_envelope, ops.f01_digest_jsonb(p_envelope), v_digest,
+    v_actor, v_class, v_txn_now, p_idempotency_key)
+  returning link_seq into v_seq;
+  v_result := jsonb_build_object(
+    'operation', 'record-evidence-subject-link', 'decision', 'allow',
+    'reason_id', 'evidence_subject_association_appended', 'actor_slug', v_actor,
+    'link_digest', v_digest,
+    'evidence_source', v_record ->> 'evidence_source',
+    'bound_subject_kind', v_record ->> 'subject_kind',
+    'bound_subject_id', v_record ->> 'subject_id',
+    'committed_at', v_txn_now_text,
+    'readback', jsonb_build_object('link_seq', v_seq, 'record', v_record),
+    'advances_lifecycle_state', false, 'creates_document', false,
+    'asserts_document_state', false, 'external_effects', false);
+  return ops.j102_settle_idempotency('record-evidence-subject-link', p_idempotency_key, v_result);
+end;
+$$;
+
+comment on function ops.j102_record_evidence_subject_link(jsonb,text,text) is
+  'BLOCK-2''s producer: append one partner-authored association between an exact F01 document version or corporate artifact and one existing lifecycle subject. It creates no document, asserts no document state, and advances no lifecycle state.';
 
 create or replace function ops.j102_record_salesforce_reference(
   p_envelope jsonb, p_idempotency_key text, p_request_digest text)
@@ -1009,6 +1439,8 @@ set search_path = pg_catalog, ops, public
 as $$
 declare
   v_actor text := ops.f01_context_actor_slug();
+  v_txn_now timestamptz := now();
+  v_txn_now_text text := ops.f01_instant_text(now());
   v_replay jsonb; v_record jsonb; v_digest text; v_result jsonb; v_seq bigint;
 begin
   v_replay := ops.j102_claim_idempotency('link-salesforce-reference', p_idempotency_key, p_request_digest);
@@ -1028,6 +1460,13 @@ begin
     raise exception 'j102_salesforce_label_mapping_refused: a Salesforce phase is never a DoctorCRE state'
       using errcode = '42501';
   end if;
+  -- H4. `recorded_at` is OURS and is verified; `observed_at` is SALESFORCE'S own
+  -- statement about when it saw its own record, and stays the caller's to supply.
+  -- The two are different facts and this is the one place they meet.
+  if (v_record ->> 'recorded_at') is distinct from v_txn_now_text then
+    raise exception 'j102_clock_injection_refused: recorded_at is the database transaction time %, not %',
+      v_txn_now_text, coalesce(v_record ->> 'recorded_at', 'null') using errcode = '42501';
+  end if;
   insert into ops.j102_salesforce_reference
     (tenant, opportunity_id, opportunity_name, opportunity_phase, linked_subject_kind,
      linked_subject_id, observed_at, envelope, envelope_digest, reference_digest,
@@ -1037,7 +1476,7 @@ begin
     v_record ->> 'opportunity_phase', v_record ->> 'linked_subject_kind',
     v_record ->> 'linked_subject_id', ops.f01_instant(v_record ->> 'observed_at'),
     p_envelope, ops.f01_digest_jsonb(p_envelope), v_digest,
-    v_actor, ops.f01_instant(v_record ->> 'recorded_at'), p_idempotency_key)
+    v_actor, v_txn_now, p_idempotency_key)
   returning reference_seq into v_seq;
   v_result := jsonb_build_object(
     'operation', 'link-salesforce-reference', 'decision', 'allow',
@@ -1048,6 +1487,7 @@ begin
     'opportunity_id', v_record ->> 'opportunity_id',
     'linked_subject_kind', v_record ->> 'linked_subject_kind',
     'reference_digest', v_digest,
+    'committed_at', v_txn_now_text,
     'readback', jsonb_build_object('reference_seq', v_seq, 'record', v_record),
     'sets_lifecycle_state', false, 'external_effects', false);
   return ops.j102_settle_idempotency('link-salesforce-reference', p_idempotency_key, v_result);
@@ -1063,14 +1503,25 @@ returns jsonb language plpgsql security definer
 set search_path = pg_catalog, ops, public
 as $$
 declare
+  v_principal jsonb := ops.f01_principal();
   v_actor text := ops.f01_context_actor_slug();
+  v_txn_now timestamptz := now();
+  v_txn_now_text text := ops.f01_instant_text(now());
   v_replay jsonb; v_record jsonb; v_digest text; v_result jsonb; v_seq bigint;
 begin
   -- humanOnly plus authorityOnly, checked HERE and not only in the handler, so a
   -- writer that somehow reached this function still refuses.
-  if session_user not in ('carr_authority_joe', 'carr_authority_dell') then
+  --
+  -- M3. FROM THE DERIVED PRINCIPAL, NOT FROM A ROLE-NAME LITERAL. This used to
+  -- read `session_user not in ('carr_authority_joe','carr_authority_dell')`,
+  -- which was a SECOND identity source sitting beside ops.f01_principal() — one
+  -- that would have to be edited in two places to stay true, and that answered a
+  -- different question from the one every other writer here asks. The principal
+  -- is derived from session_user in exactly one place, and this reads that.
+  if (v_principal ->> 'human') is distinct from 'true'
+     or (v_principal ->> 'authorization_class') is distinct from 'verified_partner' then
     raise exception 'j102_correction_requires_partner_authority: % may not correct the lifecycle record',
-      session_user using errcode = '42501';
+      v_actor using errcode = '42501';
   end if;
   v_replay := ops.j102_claim_idempotency('record-lifecycle-correction', p_idempotency_key, p_request_digest);
   if v_replay is not null then return v_replay; end if;
@@ -1082,6 +1533,10 @@ begin
   if (v_record ->> 'corrected_by') is distinct from v_actor then
     raise exception 'j102_actor_injection_refused: corrected_by is derived, never supplied'
       using errcode = '42501';
+  end if;
+  if (v_record ->> 'corrected_at') is distinct from v_txn_now_text then
+    raise exception 'j102_clock_injection_refused: corrected_at is the database transaction time %, not %',
+      v_txn_now_text, coalesce(v_record ->> 'corrected_at', 'null') using errcode = '42501';
   end if;
   -- The correction must rest on a durable authored record, not on a summary of
   -- what somebody meant. An absent one refuses here as well as in the store.
@@ -1098,12 +1553,13 @@ begin
     v_record ->> 'correction_record_id', v_record ->> 'reason',
     v_record ->> 'prior_state_digest',
     p_envelope, ops.f01_digest_jsonb(p_envelope), v_digest,
-    v_actor, ops.f01_instant(v_record ->> 'corrected_at'), p_idempotency_key)
+    v_actor, v_txn_now, p_idempotency_key)
   returning receipt_seq into v_seq;
   v_result := jsonb_build_object(
     'operation', 'record-lifecycle-correction', 'decision', 'allow',
     'reason_id', 'correction_receipt_appended', 'actor_slug', v_actor,
     'receipt_digest', v_digest,
+    'committed_at', v_txn_now_text,
     'corrected_fields', coalesce(v_record -> 'corrected_fields', '[]'::jsonb),
     'readback', jsonb_build_object('receipt_seq', v_seq, 'record', v_record),
     'external_effects', false);
@@ -1246,6 +1702,18 @@ begin
                and e.subject_id = p_selector ->> 'subject_id') s;
   elsif p_kind = 'first_party_record' then
     v_body := ops.j102_first_party_record(p_selector ->> 'record_kind', p_selector ->> 'record_id');
+  elsif p_kind = 'evidence_subject_links' then
+    -- The associations one subject holds, so a reviewer can see WHICH documents
+    -- a deal's transitions were entitled to rest on without having to ask the
+    -- writer.
+    select coalesce(jsonb_agg(verified order by seq), '[]'::jsonb) into v_body
+      from (select l.link_seq as seq,
+                   ops.j102_verify_envelope(l.envelope, l.envelope_digest, l.link_digest,
+                                            'stored_evidence_subject_link') as verified
+              from ops.j102_evidence_subject_link l
+             where l.tenant = ops.f01_tenant()
+               and l.subject_kind = p_selector ->> 'subject_kind'
+               and l.subject_id = p_selector ->> 'subject_id') s;
   elsif p_kind = 'salesforce_references' then
     select coalesce(jsonb_agg(verified order by seq), '[]'::jsonb) into v_body
       from (select r.reference_seq as seq,
@@ -1300,22 +1768,26 @@ comment on function ops.j102_read(text,jsonb) is
 -- No role is created by this file. Every role named below already exists.
 -- ---------------------------------------------------------------------------
 grant select on ops.j102_subject_current, ops.j102_subject_event,
-  ops.j102_first_party_record, ops.j102_salesforce_reference,
+  ops.j102_first_party_record, ops.j102_evidence_subject_link,
+  ops.j102_salesforce_reference,
   ops.j102_correction_receipt, ops.j102_reconciliation_item
   to carr_reader, carr_writer, carr_authority;
 
 revoke insert, update, delete, truncate on ops.j102_subject_current,
-  ops.j102_subject_event, ops.j102_first_party_record, ops.j102_salesforce_reference,
+  ops.j102_subject_event, ops.j102_first_party_record, ops.j102_evidence_subject_link,
+  ops.j102_salesforce_reference,
   ops.j102_correction_receipt, ops.j102_reconciliation_item, ops.j102_idempotency
   from public, carr_reader, carr_writer, carr_jobs, carr_authority;
 
 revoke all on function ops.j102_verify_envelope(jsonb,text,text,text),
   ops.j102_subject(text,text), ops.j102_first_party_record(text,text),
+  ops.j102_evidence_subject_link(text,text,integer,text,text,text),
   ops.j102_compatibility_view(text,text), ops.j102_migration_readiness(),
   ops.j102_read(text,jsonb), ops.j102_recheck_evidence(jsonb)
   from public, carr_reader, carr_writer, carr_jobs, carr_authority;
 grant execute on function ops.j102_verify_envelope(jsonb,text,text,text),
   ops.j102_subject(text,text), ops.j102_first_party_record(text,text),
+  ops.j102_evidence_subject_link(text,text,integer,text,text,text),
   ops.j102_compatibility_view(text,text), ops.j102_migration_readiness(),
   ops.j102_read(text,jsonb)
   to carr_reader, carr_writer, carr_jobs, carr_authority;
@@ -1335,6 +1807,7 @@ revoke all on function
   ops.j102_settle_idempotency(text,text,jsonb),
   ops.j102_apply_transition(text,jsonb,jsonb,jsonb,jsonb,text,text,jsonb),
   ops.j102_record_first_party_fact(jsonb,text,text),
+  ops.j102_record_evidence_subject_link(jsonb,text,text),
   ops.j102_record_salesforce_reference(jsonb,text,text),
   ops.j102_record_correction(jsonb,text,text),
   ops.j102_record_reconciliation_item(jsonb)
@@ -1346,8 +1819,41 @@ grant execute on function
   ops.j102_record_salesforce_reference(jsonb,text,text),
   ops.j102_record_reconciliation_item(jsonb)
   to carr_writer, carr_authority;
--- Correction reaches the authority bundle only, and additionally checks
--- session_user inside the function: the grant says who may call it, the check
--- says who may succeed.
-grant execute on function ops.j102_record_correction(jsonb,text,text)
+-- Correction and the evidence association reach the authority bundle only, and
+-- each additionally checks the DERIVED PRINCIPAL inside the function: the grant
+-- says who may call it, the check says who may succeed.
+grant execute on function ops.j102_record_correction(jsonb,text,text),
+  ops.j102_record_evidence_subject_link(jsonb,text,text)
   to carr_authority;
+
+-- ---------------------------------------------------------------------------
+-- The direct-DML guard's schema assumption, asserted rather than assumed.
+--
+-- The guard matches an OPTIONALLY ops-qualified frame, because a genuine ops
+-- writer prints unqualified under the guard's own search_path. That is only safe
+-- while each unqualified writer NAME resolves to the ops function under exactly
+-- that search_path; if something else shadowed one, an unqualified frame from
+-- the impostor would satisfy the pattern. This block refuses to leave the file
+-- in that state.
+-- ---------------------------------------------------------------------------
+do $$
+declare v_name text; v_signature text;
+begin
+  perform set_config('search_path', 'pg_catalog, ops, public', true);
+  foreach v_signature in array array[
+    'j102_apply_transition(text,jsonb,jsonb,jsonb,jsonb,text,text,jsonb)',
+    'j102_record_first_party_fact(jsonb,text,text)',
+    'j102_record_evidence_subject_link(jsonb,text,text)',
+    'j102_record_salesforce_reference(jsonb,text,text)',
+    'j102_record_correction(jsonb,text,text)',
+    'j102_record_reconciliation_item(jsonb)',
+    'j102_claim_idempotency(text,text,text)',
+    'j102_settle_idempotency(text,text,jsonb)'
+  ] loop
+    v_name := to_regprocedure(v_signature)::text;
+    if to_regprocedure(v_signature) is distinct from to_regprocedure('ops.' || v_signature) then
+      raise exception 'j102_writer_name_shadowed: the unqualified name % resolves to %, not to the ops writer; the direct-DML guard cannot rely on an unqualified frame',
+        v_signature, coalesce(v_name, 'nothing');
+    end if;
+  end loop;
+end $$;

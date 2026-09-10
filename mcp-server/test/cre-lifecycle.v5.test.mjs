@@ -15,16 +15,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { digest } from "../src/artifact-trust.js";
 import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
 import { V5_F01_AUTHORITY_INJECTION_FRAGMENTS } from "../src/record-source-authority.v5.js";
 import {
   V5_J102_AUTHORITY_INJECTION_FRAGMENTS,
   V5_J102_DEAL_AXES,
   V5_J102_EVIDENCE_KINDS,
+  V5_J102_FIELD_CLASS_REGISTRY,
+  V5_J102_PARTNER_AUTHORED_RECORD_KINDS,
   V5_J102_SETTLED_DECISIONS,
   V5_J102_SETTLED_DECISION_IDS,
+  V5_J102_SUBJECT_BINDING_SOURCES,
   V5_J102_TRANSITION_IDS,
+  V5_J102_UNCLASSIFIED_FIELD_POLICY,
   V5_J102_USER_CORRECTIONS,
   V5J102Error,
   applyLifecycleModelProposal,
@@ -39,6 +42,7 @@ import {
   projectSalesforceReference,
   v5J102DecisionSubsetDigest,
   v5J102EvidenceContract,
+  v5J102FieldClass,
   v5J102MigrationReadiness,
   v5J102PolicyDigest,
   v5J102Projection,
@@ -102,8 +106,34 @@ const provenance = reader => ({
   integrity: "recomputed_from_committed_row",
 });
 
-const documentEvidence = (evidence_kind, over = {}) => ({
+// BLOCK-2. EVERY EVIDENCE RECORD NAMES THE SUBJECT IT ADVANCES, and the fixtures
+// bind to the canonical synthetic subject of the kind each evidence kind
+// declares. A test that wants the WRONG subject — the whole point of the
+// adversarial cases below — passes a third argument and gets an otherwise
+// perfect record about somebody else's deal.
+const DEFAULT_BOUND_ID = Object.freeze({
+  relationship: "rel-synthetic-1", engagement: "eng-synthetic-1",
+  assignment: "asg-synthetic-1", property_negotiation: "neg-synthetic-1",
+  deal: "deal-synthetic-1",
+});
+
+const boundTo = (evidence_kind, bind = {}) => {
+  const contract = v5J102EvidenceContract(evidence_kind);
+  const subject_kind = bind.subject_kind ?? contract.binds_subject_kind ?? "deal";
+  const first_party = contract.source === "first_party_record";
+  return {
+    subject_kind,
+    subject_id: bind.subject_id ?? DEFAULT_BOUND_ID[subject_kind],
+    bound_by: bind.bound_by ?? (first_party ? "first_party_record" : "stored_evidence_subject_link"),
+    // A first-party record's binding digest IS its own record digest; a document
+    // or artifact binds through a stored association and carries that row's.
+    binding_digest: bind.binding_digest ?? (first_party ? D(2) : D(8)),
+  };
+};
+
+const documentEvidence = (evidence_kind, over = {}, bind = {}) => ({
   evidence_kind, source: "f01_document", reference: "doc-synthetic-1",
+  subject_binding: boundTo(evidence_kind, bind),
   document: {
     document_id: "doc-synthetic-1", document_class: "synthetic_agreement",
     version_no: 1, content_digest: D(1),
@@ -114,18 +144,23 @@ const documentEvidence = (evidence_kind, over = {}) => ({
   provenance: provenance("ops.f01_read.document"),
 });
 
-const recordEvidence = (evidence_kind, over = {}) => ({
+const recordEvidence = (evidence_kind, over = {}, bind = {}) => ({
   evidence_kind, source: "first_party_record", reference: "rec-synthetic-1",
+  subject_binding: boundTo(evidence_kind, bind),
   record: {
     record_kind: v5J102EvidenceContract(evidence_kind).record_kind,
     record_id: "rec-synthetic-1", content_digest: D(2),
-    recorded_by: "joe", recorded_at: T.mid, ...over,
+    recorded_by: "joe",
+    // H5. The author's own class, as the record layer stamped it.
+    recorded_by_authorization_class: "verified_partner",
+    recorded_at: T.mid, ...over,
   },
   provenance: provenance("ops.j102_first_party_record"),
 });
 
-const artifactEvidence = (evidence_kind, over = {}) => ({
+const artifactEvidence = (evidence_kind, over = {}, bind = {}) => ({
   evidence_kind, source: "f01_corporate_artifact", reference: D(3),
+  subject_binding: boundTo(evidence_kind, bind),
   artifact: {
     artifact_digest: D(3), content_digest: D(4),
     source_system: "synthetic_counterparty", evidence_class: "synthetic_countersigned_loi",
@@ -134,8 +169,9 @@ const artifactEvidence = (evidence_kind, over = {}) => ({
   provenance: provenance("ops.f01_stored_artifact"),
 });
 
-const approvalEvidence = (evidence_kind, over = {}) => ({
+const approvalEvidence = (evidence_kind, over = {}, bind = {}) => ({
   evidence_kind, source: "typed_approval", reference: "appr-synthetic-1",
+  subject_binding: boundTo(evidence_kind, bind),
   approval: {
     approval_kind: v5J102EvidenceContract(evidence_kind).approval_kind,
     approval_ref: "appr-synthetic-1", approver_slug: "joe",
@@ -403,6 +439,79 @@ test("Q077: an Assignment cannot be opened for a Prospect or under an inactive E
   assert.equal(terminated.reason_id, "engagement_not_active");
 });
 
+test("H2: opening an Assignment cannot rewind a committed one, or leave a conflicting row", () => {
+  const client = relationship({ relationship_state: "client", active_engagement_count: 1 });
+  const open = over => evaluate({
+    transition_id: "open-assignment",
+    subject: assignment(over),
+    related: { relationship: client, engagement: engagement() },
+    evidence: [recordEvidence("search_initiation")],
+    declared: { mandate_scope: "search" },
+  });
+
+  // THE REPRODUCER. A committed assignment holding a pending Deal and a selected
+  // property used to be moved back to `search` on a mandate record, keeping both
+  // fields — an internally inconsistent row, and a way past the
+  // `assignment_already_committed` refusal Q095 rests on.
+  const committed = open({
+    assignment_phase: "committed", selected_property_id: "prop-synthetic-1",
+    active_lease_draft_target_id: "prop-synthetic-1", pending_deal_id: "deal-synthetic-1",
+  });
+  assert.equal(committed.decision, "refuse");
+  assert.equal(committed.reason_id, "prerequisite_not_met");
+  assert.equal(committed.unmet_axis, "assignment_phase");
+  assert.deepEqual(committed.permitted, ["research", "search"]);
+
+  for (const phase of ["negotiation", "concluded"]) {
+    assert.equal(open({ assignment_phase: phase }).reason_id, "prerequisite_not_met",
+      `${phase} must not be reopened by a mandate record`);
+  }
+
+  // And the phase alone is not the check: a row left at `search` while still
+  // carrying the commitment fields is the same inconsistency wearing a different
+  // label, so each field is refused by name.
+  assert.equal(open({ pending_deal_id: "deal-synthetic-1" }).reason_id,
+    "assignment_holds_pending_deal");
+  assert.equal(open({ selected_property_id: "prop-synthetic-1" }).reason_id,
+    "assignment_holds_committed_target");
+  assert.equal(open({ active_lease_draft_target_id: "prop-synthetic-1" }).reason_id,
+    "assignment_holds_committed_target");
+
+  // Narrowing back to research while negotiations are open would deny a fact the
+  // record already proves.
+  const narrowed = evaluate({
+    transition_id: "open-assignment",
+    subject: assignment({ open_negotiation_count: 2 }),
+    related: { relationship: client, engagement: engagement() },
+    evidence: [recordEvidence("search_initiation")],
+    declared: { mandate_scope: "research" },
+  });
+  assert.equal(narrowed.reason_id, "open_negotiations_outlast_research_scope");
+
+  // The chain is checked too: an engagement that is not this assignment's.
+  const strayEngagement = evaluate({
+    transition_id: "open-assignment",
+    subject: assignment({ engagement_id: "eng-synthetic-other" }),
+    related: { relationship: client, engagement: engagement() },
+    evidence: [recordEvidence("search_initiation")],
+    declared: { mandate_scope: "search" },
+  });
+  assert.equal(strayEngagement.reason_id, "assignment_not_under_loaded_engagement");
+
+  const strayClient = evaluate({
+    transition_id: "open-assignment",
+    subject: assignment(),
+    related: {
+      relationship: relationship({ subject_id: "rel-synthetic-other",
+        relationship_state: "client", active_engagement_count: 1 }),
+      engagement: engagement(),
+    },
+    evidence: [recordEvidence("search_initiation")],
+    declared: { mandate_scope: "search" },
+  });
+  assert.equal(strayClient.reason_id, "engagement_not_under_loaded_relationship");
+});
+
 test("Q072: research versus search is declared by the mandate, never guessed", () => {
   const answer = evaluate({
     transition_id: "open-assignment",
@@ -565,7 +674,7 @@ test("Q095: once committed, the Assignment refuses a fresh LOI rather than silen
     subject: negotiation({ subject_id: "neg-synthetic-2", property_id: "prop-synthetic-2" }),
     related: { assignment: assignment({ assignment_phase: "committed",
       selected_property_id: "prop-synthetic-1", pending_deal_id: "deal-synthetic-1" }) },
-    evidence: [documentEvidence("submitted_loi")],
+    evidence: [documentEvidence("submitted_loi", {}, { subject_id: "neg-synthetic-2" })],
   });
   assert.equal(answer.reason_id, "assignment_already_committed");
 });
@@ -751,6 +860,7 @@ test("Q096: a failed pending Deal is cancelled with its reason, and the Client i
         selected_property_id: "prop-synthetic-1",
         active_lease_draft_target_id: "prop-synthetic-1",
         pending_deal_id: "deal-synthetic-1" }),
+      engagement: engagement(),
       relationship: client,
     },
     evidence: [recordEvidence("deal_failure_record",
@@ -766,9 +876,12 @@ test("Q096: a failed pending Deal is cancelled with its reason, and the Client i
   assert.equal(answer.proposed_state.assignment.selected_property_id, null);
   assert.equal(answer.proposed_state.assignment.active_lease_draft_target_id, null);
   assert.equal(answer.proposed_state.assignment.pending_deal_id, null);
-  // Losing one property is not losing the client.
+  // Losing one property is not losing the client — and M4: it is reported
+  // rather than rewritten, so nothing stamps a new toucher onto the client row.
   assert.equal(answer.client_relationship_preserved, true);
-  assert.equal(answer.proposed_state.relationship.relationship_state, "client");
+  assert.equal(answer.relationship_state, "client");
+  assert.equal(answer.relationship_rewritten, false);
+  assert.equal(answer.proposed_state.relationship, undefined);
   assert.equal(answer.history_preserved, true);
   assert.equal(answer.deal_row_deleted, false);
   assert.equal(answer.negotiation_history_deleted, false);
@@ -913,6 +1026,168 @@ test("Q082: there is no free-form stage update — an unregistered transition ca
   }
 });
 
+// --- BLOCK-2: evidence is bound to the subject it advances -----------------
+
+test("BLOCK-2: a valid closing settlement cannot close a deal it is not bound to", () => {
+  // EVERYTHING ELSE ABOUT THIS RECORD IS RIGHT. Right kind, right author class,
+  // right state, right digest, recorded before now, presented by a verified
+  // partner. It is a settlement for ANOTHER deal, and that is the whole refusal.
+  const wrongDeal = evaluate({
+    transition_id: "record-deal-closing",
+    subject: deal({ execution_state: "executed" }),
+    evidence: [recordEvidence("final_closing_settlement", { closing_date: T.late },
+      { subject_id: "deal-synthetic-elsewhere" })],
+  });
+  assert.equal(wrongDeal.decision, "refuse");
+  assert.equal(wrongDeal.reason_id, "evidence_not_bound_to_subject");
+  assert.equal(wrongDeal.bound_subject_id, "deal-synthetic-elsewhere");
+  assert.equal(wrongDeal.bound_by, "first_party_record");
+  assert.equal(wrongDeal.proposed_state, null);
+
+  // The same record against the deal it IS about closes it, so the refusal is
+  // the binding and not the shape.
+  const rightDeal = evaluate({
+    transition_id: "record-deal-closing",
+    subject: deal({ execution_state: "executed" }),
+    evidence: [recordEvidence("final_closing_settlement", { closing_date: T.late })],
+  });
+  assert.equal(rightDeal.decision, "allow");
+  assert.equal(rightDeal.proposed_state.deal.closing_date, T.late);
+});
+
+test("BLOCK-2: a commitment for another assignment, and a lease for another deal, both refuse", () => {
+  const wrongAssignment = evaluate({
+    transition_id: "commit-winning-property",
+    subject: assignment({ assignment_phase: "negotiation", open_negotiation_count: 1 }),
+    related: { property_negotiation: negotiation({ negotiation_state: "loi_accepted" }) },
+    evidence: [recordEvidence("winner_selection_commitment", {},
+      { subject_id: "asg-synthetic-elsewhere" })],
+    declared: { instrument_kind: "lease", new_deal_id: "deal-synthetic-1" },
+  });
+  assert.equal(wrongAssignment.reason_id, "evidence_not_bound_to_subject");
+  assert.equal(wrongAssignment.bound_subject_kind, "assignment");
+
+  // A lease executed for one client's deal cannot mark another client's.
+  const wrongLease = evaluate({
+    transition_id: "record-lease-execution",
+    subject: deal(),
+    evidence: [documentEvidence("executed_lease", { document_class: "lease" },
+      { subject_id: "deal-synthetic-another-client" })],
+  });
+  assert.equal(wrongLease.reason_id, "evidence_not_bound_to_subject");
+  assert.equal(wrongLease.bound_by, "stored_evidence_subject_link");
+
+  // A countersigned acceptance for one negotiation cannot accept another.
+  const wrongNegotiation = evaluate({
+    transition_id: "record-loi-acceptance",
+    subject: negotiation({ negotiation_state: "loi_submitted" }),
+    evidence: [artifactEvidence("counterparty_loi_acceptance", {},
+      { subject_id: "neg-synthetic-elsewhere" })],
+  });
+  assert.equal(wrongNegotiation.reason_id, "evidence_not_bound_to_subject");
+});
+
+test("BLOCK-2: evidence bound to the wrong KIND of subject refuses before the id is compared", () => {
+  const answer = evaluate({
+    transition_id: "record-deal-closing",
+    subject: deal({ execution_state: "executed" }),
+    evidence: [recordEvidence("final_closing_settlement", { closing_date: T.late },
+      { subject_kind: "assignment", subject_id: "asg-synthetic-1" })],
+  });
+  assert.equal(answer.reason_id, "evidence_bound_to_wrong_subject_kind");
+  assert.equal(answer.required_subject_kind, "deal");
+});
+
+test("BLOCK-2: every evidence record must carry a server-derived binding, and it cannot be crossed", () => {
+  const unbound = { ...documentEvidence("executed_lease") };
+  delete unbound.subject_binding;
+  assert.throws(() => evaluate({
+    transition_id: "record-lease-execution", subject: deal(), evidence: [unbound],
+  }), e => e instanceof V5J102Error && e.code === "missing_field");
+
+  // A document claiming to bind the way a first-party record does would be
+  // claiming a standing it does not have.
+  const crossed = documentEvidence("executed_lease", {}, { bound_by: "first_party_record" });
+  assert.throws(() => evaluate({
+    transition_id: "record-lease-execution", subject: deal(), evidence: [crossed],
+  }), e => e instanceof V5J102Error && e.code === "subject_binding_source_mismatch");
+
+  // And a record's binding digest has to be the record's own bytes.
+  const detached = recordEvidence("invoice_issued", {}, { binding_digest: D(9) });
+  assert.throws(() => evaluate({
+    transition_id: "record-invoice-issued", subject: deal(), evidence: [detached],
+  }), e => e instanceof V5J102Error && e.code === "subject_binding_digest_mismatch");
+
+  // Every registered evidence kind binds to the subject kind of every transition
+  // that consumes it, so no transition can be dead on its own binding check.
+  for (const id of V5_J102_TRANSITION_IDS) {
+    const contract = v5J102TransitionContract(id);
+    for (const set of contract.required_evidence_alternatives) {
+      for (const kind of set) {
+        assert.equal(v5J102EvidenceContract(kind).binds_subject_kind, contract.subject_kind,
+          `${id} and ${kind} must agree about the subject the evidence binds`);
+      }
+    }
+  }
+  assert.deepEqual([...V5_J102_SUBJECT_BINDING_SOURCES],
+    ["first_party_record", "stored_evidence_subject_link"]);
+});
+
+// --- H5: who AUTHORED the fact, not only who presents it -------------------
+
+test("H5: a sponsored agent cannot author a closing, a winner, a failure or a correction proof", () => {
+  assert.deepEqual([...V5_J102_PARTNER_AUTHORED_RECORD_KINDS],
+    ["closing_settlement", "deal_failure", "lifecycle_correction", "winning_property_commitment"]);
+
+  // THE LAUNDERING PATH. The partner performs the transition — so every
+  // permitted-actor check passes — and the record it rests on was written by an
+  // agent. The author class is on the record, and it refuses.
+  const laundered = evaluate({
+    transition_id: "record-deal-closing",
+    subject: deal({ execution_state: "executed" }),
+    actor: PARTNER,
+    evidence: [recordEvidence("final_closing_settlement",
+      { closing_date: T.late, recorded_by: "codex",
+        recorded_by_authorization_class: "sponsored_agent" })],
+  });
+  assert.equal(laundered.decision, "refuse");
+  assert.equal(laundered.reason_id, "evidence_author_class_not_permitted");
+  assert.equal(laundered.required_author_class, "verified_partner");
+  assert.equal(laundered.evidence_author_class, "sponsored_agent");
+  assert.equal(laundered.evidence_author, "codex");
+
+  const winner = evaluate({
+    transition_id: "commit-winning-property",
+    subject: assignment({ assignment_phase: "negotiation", open_negotiation_count: 1 }),
+    related: { property_negotiation: negotiation({ negotiation_state: "loi_accepted" }) },
+    evidence: [recordEvidence("winner_selection_commitment",
+      { recorded_by: "codex", recorded_by_authorization_class: "sponsored_agent" })],
+    declared: { instrument_kind: "lease", new_deal_id: "deal-synthetic-1" },
+  });
+  assert.equal(winner.reason_id, "evidence_author_class_not_permitted");
+
+  const failure = evaluate({
+    transition_id: "cancel-pending-deal",
+    subject: deal(),
+    related: { assignment: assignment({ assignment_phase: "committed",
+      open_negotiation_count: 1, pending_deal_id: "deal-synthetic-1" }) },
+    evidence: [recordEvidence("deal_failure_record",
+      { reason: "synthetic fixture reason", recorded_by: "codex",
+        recorded_by_authorization_class: "sponsored_agent" })],
+    declared: { return_phase: "negotiation" },
+  });
+  assert.equal(failure.reason_id, "evidence_author_class_not_permitted");
+
+  // An agent-recordable kind is unaffected, so the rule is the four and not a
+  // blanket suspicion of agents.
+  const invoice = evaluate({
+    transition_id: "record-invoice-issued", subject: deal(), actor: AGENT,
+    evidence: [recordEvidence("invoice_issued",
+      { recorded_by: "codex", recorded_by_authorization_class: "sponsored_agent" })],
+  });
+  assert.equal(invoice.decision, "allow");
+});
+
 // --- Q072: the model seam --------------------------------------------------
 
 test("Q072: a model proposes within its seam and advances nothing", () => {
@@ -976,61 +1251,103 @@ test("Q083: an attempt to map a Salesforce label onto lifecycle state refuses by
 
 // --- Q103: concurrency -----------------------------------------------------
 
-test("Q103: only demonstrably non-overlapping ROUTINE edits auto-merge", () => {
-  const edit = (field, field_class, by) => ({
-    field, field_class, value_digest: D(7), edited_by: by, edited_at: T.mid,
-  });
-  const merged = evaluateConcurrentEdit({
-    tenant: ORGANIZATION_TENANT_ID, actor: PARTNER,
-    base_version_digest: D(10), current_version_digest: D(11),
-    incoming: [edit("internal_note", "routine", "joe")],
-    concurrent: [edit("next_touch_hint", "routine", "dell")],
-  });
-  assert.equal(merged.decision, "allow");
-  assert.equal(merged.merged, true);
-  assert.deepEqual(merged.auto_merged_fields, ["internal_note"]);
-  assert.equal(merged.last_writer_wins, false);
-  assert.equal(merged.silent_overwrite, false);
+const edit = (field, by) => ({
+  field, value_digest: D(7), edited_by: by, edited_at: T.mid,
 });
 
-test("Q103: overlapping edits and material-class edits reconcile visibly with both versions kept", () => {
-  const edit = (field, field_class, by) => ({
-    field, field_class, value_digest: D(7), edited_by: by, edited_at: T.mid,
-  });
+test("Q103: a caller cannot label a field's class, and the class is derived from the registry", () => {
+  // THE BYPASS THIS CLOSES. `field_class: "routine"` on a lifecycle field used to
+  // be believed, and belief bought the auto-merge branch — the one branch that
+  // resolves a conflict without a human seeing it.
+  assert.throws(() => evaluateConcurrentEdit({
+    tenant: ORGANIZATION_TENANT_ID, actor: PARTNER,
+    base_version_digest: D(10), current_version_digest: D(11),
+    incoming: [{ ...edit("deal_state", "joe"), field_class: "routine" }],
+    concurrent: [edit("payment_state", "dell")],
+  }), e => e instanceof V5J102Error && e.code === "unknown_field",
+  "a caller-supplied field_class is not a field this evaluator reads");
+
+  // And the derivation is the registry's, not the caller's.
+  assert.equal(v5J102FieldClass("deal_state"), "lifecycle");
+  assert.equal(v5J102FieldClass("payment_state"), "financial");
+  assert.equal(v5J102FieldClass("supporting_document_id"), "document");
+  assert.equal(v5J102FieldClass("some_customer_field"), null,
+    "this module classifies no field it does not define");
+});
+
+test("Q103: material-class edits reconcile visibly with both versions kept", () => {
   const overlapping = evaluateConcurrentEdit({
     tenant: ORGANIZATION_TENANT_ID, actor: PARTNER,
     base_version_digest: D(10), current_version_digest: D(11),
-    incoming: [edit("internal_note", "routine", "joe")],
-    concurrent: [edit("internal_note", "routine", "dell")],
+    incoming: [edit("deal_state", "joe")],
+    concurrent: [edit("deal_state", "dell")],
   });
   assert.equal(overlapping.decision, "reconcile");
   assert.equal(overlapping.reason_id, "overlapping_edits_require_reconciliation");
-  assert.deepEqual(overlapping.overlapping_fields, ["internal_note"]);
+  assert.deepEqual(overlapping.overlapping_fields, ["deal_state"]);
   assert.equal(overlapping.reconciliation_item.visible, true);
   assert.equal(overlapping.reconciliation_item.resolved_by_machine, false);
   assert.equal(overlapping.reconciliation_item.incoming_edits.length, 1);
   assert.equal(overlapping.reconciliation_item.concurrent_edits.length, 1);
   assert.deepEqual(overlapping.preserved_versions, ["base", "current", "incoming"]);
 
-  for (const cls of ["lifecycle", "financial", "recipient", "document"]) {
+  // One registered field of each material class, against a DIFFERENT registered
+  // field, so the refusal is the class and not the overlap.
+  for (const [field, cls] of [["deal_state", "lifecycle"], ["payment_state", "financial"],
+    ["supporting_document_id", "document"]]) {
     const material = evaluateConcurrentEdit({
       tenant: ORGANIZATION_TENANT_ID, actor: PARTNER,
       base_version_digest: D(10), current_version_digest: D(11),
-      incoming: [edit(`${cls}_field`, cls, "joe")],
-      concurrent: [edit("internal_note", "routine", "dell")],
+      incoming: [edit(field, "joe")],
+      concurrent: [edit("closing_state", "dell")],
     });
     assert.equal(material.decision, "reconcile", `${cls} must reconcile`);
     assert.equal(material.reason_id, "material_class_edits_require_reconciliation");
     assert.equal(material.merged, false);
+    assert.equal(v5J102FieldClass(field), cls);
   }
 });
 
-test("Q103: an uncharacterized concurrent change reconciles rather than merging on an absence", () => {
+test("Q103: an unclassified field never auto-merges, and the missing policy is named", () => {
+  // The conservative half of the fix. Two demonstrably non-overlapping edits on
+  // fields nobody has classified are exactly the case that used to merge on a
+  // caller's say-so. There is no routine entry in the registry today, so this is
+  // where every customer-facing edit lands — visibly, with the fact named.
   const answer = evaluateConcurrentEdit({
     tenant: ORGANIZATION_TENANT_ID, actor: PARTNER,
     base_version_digest: D(10), current_version_digest: D(11),
-    incoming: [{ field: "internal_note", field_class: "routine", value_digest: D(7),
-      edited_by: "joe", edited_at: T.mid }],
+    incoming: [edit("internal_note", "joe")],
+    concurrent: [edit("next_touch_hint", "dell")],
+  });
+  assert.equal(answer.decision, "reconcile");
+  assert.equal(answer.reason_id, "field_classification_not_established");
+  assert.equal(answer.merged, false);
+  assert.deepEqual(answer.unclassified_fields, ["internal_note", "next_touch_hint"]);
+  assert.equal(answer.missing_fact, V5_J102_UNCLASSIFIED_FIELD_POLICY.fact);
+  assert.equal(answer.produced_by, "not_produced_by_this_slice");
+  assert.equal(answer.reconciliation_item.conflict_kind, "unclassified_field_edit");
+  assert.equal(answer.last_writer_wins, false);
+  assert.equal(answer.silent_overwrite, false);
+
+  // And the registry says so about itself rather than leaving a reader to count.
+  assert.equal(V5_J102_UNCLASSIFIED_FIELD_POLICY.routine_fields_registered, 0);
+  assert.equal(Object.values(V5_J102_FIELD_CLASS_REGISTRY).includes("routine"), false);
+});
+
+test("Q103: an unmoved base still allows, and an uncharacterized change reconciles", () => {
+  const quiet = evaluateConcurrentEdit({
+    tenant: ORGANIZATION_TENANT_ID, actor: PARTNER,
+    base_version_digest: D(10), current_version_digest: D(10),
+    incoming: [edit("deal_state", "joe")],
+  });
+  assert.equal(quiet.decision, "allow");
+  assert.equal(quiet.reason_id, "no_concurrent_movement");
+  assert.equal(quiet.merged, false);
+
+  const answer = evaluateConcurrentEdit({
+    tenant: ORGANIZATION_TENANT_ID, actor: PARTNER,
+    base_version_digest: D(10), current_version_digest: D(11),
+    incoming: [edit("internal_note", "joe")],
   });
   assert.equal(answer.decision, "reconcile");
   assert.equal(answer.reason_id, "concurrent_change_not_characterized");
@@ -1205,7 +1522,10 @@ test("Journey 1 end to end: Prospect through Client, Assignment, multiple LOIs, 
       transition_id: "record-loi-submission",
       subject: negotiation({ subject_id: `neg-synthetic-${n}`, property_id: `prop-synthetic-${n}` }),
       related: { assignment: asg },
-      evidence: [documentEvidence("submitted_loi")],
+      // Each LOI is bound to its OWN negotiation. Three concurrent LOIs are
+      // normal practice (Q095) and each carries its own evidence; one document
+      // cannot stand for all three.
+      evidence: [documentEvidence("submitted_loi", {}, { subject_id: `neg-synthetic-${n}` })],
     });
     assert.equal(submitted.decision, "allow");
     assert.equal(submitted.creates_deal, false, "no LOI submission creates a Deal");
@@ -1219,7 +1539,8 @@ test("Journey 1 end to end: Prospect through Client, Assignment, multiple LOIs, 
     const answer = evaluate({
       transition_id: "record-loi-acceptance",
       subject: negotiations[i],
-      evidence: [artifactEvidence("counterparty_loi_acceptance")],
+      evidence: [artifactEvidence("counterparty_loi_acceptance", {},
+        { subject_id: negotiations[i].subject_id })],
     });
     assert.equal(answer.creates_deal, false, "no acceptance creates a Deal");
     return answer.proposed_state.property_negotiation;
@@ -1262,6 +1583,7 @@ test("Journey 1 end to end: Prospect through Client, Assignment, multiple LOIs, 
 
 test("the failed-deal branch returns the Assignment to work without touching the Client", () => {
   const client = relationship({ relationship_state: "client", active_engagement_count: 1 });
+  const eng = engagement();
   const committedAssignment = assignment({
     assignment_phase: "committed", open_negotiation_count: 2,
     selected_property_id: "prop-synthetic-1",
@@ -1271,7 +1593,7 @@ test("the failed-deal branch returns the Assignment to work without touching the
   const cancelled = evaluate({
     transition_id: "cancel-pending-deal",
     subject: deal(),
-    related: { assignment: committedAssignment, relationship: client },
+    related: { assignment: committedAssignment, engagement: eng, relationship: client },
     evidence: [recordEvidence("deal_failure_record",
       { reason: "synthetic fixture: terms could not be agreed" })],
     declared: { return_phase: "negotiation" },
@@ -1283,10 +1605,55 @@ test("the failed-deal branch returns the Assignment to work without touching the
     transition_id: "record-loi-submission",
     subject: negotiation({ subject_id: "neg-synthetic-9", property_id: "prop-synthetic-9" }),
     related: { assignment: reopened },
-    evidence: [documentEvidence("submitted_loi")],
+    evidence: [documentEvidence("submitted_loi", {}, { subject_id: "neg-synthetic-9" })],
   });
   assert.equal(resubmitted.decision, "allow");
-  assert.equal(cancelled.proposed_state.relationship.relationship_state, "client");
-  assert.equal(digest(cancelled.proposed_state.relationship), digest(client),
-    "the client row is written back byte-identical");
+  // M4. THE CLIENT ROW IS NOT WRITTEN AT ALL. It used to be echoed into the
+  // proposed state and written back byte-identical — which still stamped a new
+  // updated_by and updated_at onto it, so the record answered "who last touched
+  // this client" with somebody who had only cancelled a deal. Not touching it is
+  // the stronger form of Q096's "without losing the Client relationship".
+  assert.equal(cancelled.proposed_state.relationship, undefined,
+    "a cancelled deal writes no client row");
+  assert.equal(cancelled.relationship_rewritten, false);
+  assert.equal(cancelled.client_relationship_preserved, true);
+  assert.equal(cancelled.relationship_chain_verified, true);
+  assert.equal(cancelled.relationship_state, "client");
+});
+
+test("M4: a client outside the deal's own chain refuses rather than being rewritten", () => {
+  const stranger = relationship({
+    subject_id: "rel-synthetic-unrelated", relationship_state: "client",
+    active_engagement_count: 1,
+  });
+  const committedAssignment = assignment({
+    assignment_phase: "committed", open_negotiation_count: 2,
+    pending_deal_id: "deal-synthetic-1",
+  });
+  const failure = recordEvidence("deal_failure_record",
+    { reason: "synthetic fixture: terms could not be agreed" });
+
+  // An unrelated client, with the engagement that would have to vouch for it
+  // absent entirely.
+  const unchained = evaluate({
+    transition_id: "cancel-pending-deal", subject: deal(),
+    related: { assignment: committedAssignment, relationship: stranger },
+    evidence: [failure], declared: { return_phase: "negotiation" },
+  });
+  assert.equal(unchained.decision, "refuse");
+  assert.equal(unchained.reason_id, "relationship_chain_not_loaded");
+
+  // And with an engagement present that belongs to a different client.
+  const wrongChain = evaluate({
+    transition_id: "cancel-pending-deal", subject: deal(),
+    related: {
+      assignment: committedAssignment,
+      engagement: engagement(),
+      relationship: stranger,
+    },
+    evidence: [failure], declared: { return_phase: "negotiation" },
+  });
+  assert.equal(wrongChain.decision, "refuse");
+  assert.equal(wrongChain.reason_id, "relationship_not_in_verified_chain");
+  assert.equal(wrongChain.proposed_state, null);
 });

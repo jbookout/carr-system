@@ -46,6 +46,16 @@
 // the missing fact named. They are not stubbed, defaulted, or satisfied from a
 // caller field, and landing a producer for one does not silently open the other.
 //
+// FIVE CAPABILITIES ARE NOT WIRED, AND THE LIST IS IN THE CODE. See
+// V5_J102_UNWIRED_CAPABILITIES below. Journey 1 cannot be BOOTSTRAPPED through
+// this store: no operation creates a prospect relationship, an assignment or a
+// property negotiation, so the transitions that require one refuse
+// `subject_not_found` and this module claims no end-to-end run. Q103's visible
+// reconciliation and its ownership/freshness projection are likewise not
+// connected — the kernel evaluates both and nothing here calls either. Those are
+// named as remaining source gaps, not worked around, not stubbed, and not
+// counted as done anywhere in this file.
+//
 // WHAT THIS MODULE IS NOT. It registers nothing: v5J102ToolRegistrations() below
 // is a DESCRIPTION the parent may register from, and this file does not touch
 // tools.js, mcp.js, the mutation registry or any generated catalog. It performs
@@ -67,6 +77,7 @@ import {
   V5_J102_EVIDENCE_INTEGRITY,
   V5_J102_EVIDENCE_LOADER,
   V5_J102_EVIDENCE_KINDS,
+  V5_J102_PARTNER_AUTHORED_RECORD_KINDS,
   V5_J102_SUBJECT_KINDS,
   V5_J102_TRANSITION_IDS,
   evaluateLifecycleTransition,
@@ -91,6 +102,8 @@ export const V5_J102_STORED_REFERENCE_SCHEMA_VERSION =
   "doctorcre-v5-j102-stored-salesforce-reference.v1";
 export const V5_J102_STORED_CORRECTION_SCHEMA_VERSION =
   "doctorcre-v5-j102-stored-correction-receipt.v1";
+export const V5_J102_STORED_EVIDENCE_LINK_SCHEMA_VERSION =
+  "doctorcre-v5-j102-stored-evidence-subject-link.v1";
 
 /** The exact record_kind vocabulary the ops relations enforce. */
 export const V5_J102_STORE_RECORD_KINDS = Object.freeze([
@@ -99,11 +112,13 @@ export const V5_J102_STORE_RECORD_KINDS = Object.freeze([
   "stored_first_party_record",
   "stored_salesforce_reference",
   "stored_correction_receipt",
+  "stored_evidence_subject_link",
 ]);
 
 export const V5_J102_OPERATIONS = Object.freeze([
   "read-cre-lifecycle",
   "record-lifecycle-fact",
+  "record-evidence-subject-link",
   "record-representation-agreement",
   "open-cre-assignment",
   "record-loi-submission",
@@ -160,6 +175,55 @@ export const V5_J102_ABSENT_EVIDENCE_READERS = Object.freeze({
   }),
 });
 
+/**
+ * THE CAPABILITIES THIS RECORD LAYER DOES NOT WIRE, named rather than implied.
+ *
+ * The absent-reader registry above covers evidence this layer cannot READ. This
+ * one covers behaviour this layer does not CONNECT, and it exists because the
+ * absence is invisible from the kernel suite: the kernel's end-to-end test
+ * constructs a relationship, an assignment and a property negotiation directly,
+ * so nothing there notices that no shipped operation ever creates one.
+ *
+ * NOTHING BELOW IS A PLAN, A SCHEDULE OR A PROMISE. Each entry names one exact
+ * missing producer or caller and who would have to own it. None of them is
+ * worked around anywhere in this module: `runTransition` refuses
+ * `subject_not_found` for an absent primary subject and does not create it, and
+ * no reconciliation item or ownership projection is written or exposed by any
+ * code path that ships here.
+ */
+export const V5_J102_UNWIRED_CAPABILITIES = Object.freeze([
+  Object.freeze({
+    capability: "relationship_prospect_initialization",
+    missing_fact: "an operation that creates a relationship subject in the prospect state",
+    why: "Q069/Q077 start Journey 1 at a prospect, and `record-representation-agreement` promotes an EXISTING relationship to client. No operation in V5_J102_OPERATIONS creates the prospect row, so the first step of the journey cannot be taken through this store.",
+    produced_by: "not_produced_by_this_slice",
+  }),
+  Object.freeze({
+    capability: "assignment_initialization",
+    missing_fact: "an operation that creates an assignment subject under an active engagement",
+    why: "`open-cre-assignment` moves an EXISTING assignment into research or search and refuses subject_not_found otherwise. Only `record-representation-agreement` and `commit-winning-property` create subjects at all, and they create an engagement and a deal.",
+    produced_by: "not_produced_by_this_slice",
+  }),
+  Object.freeze({
+    capability: "property_negotiation_initialization",
+    missing_fact: "an operation that creates a property_negotiation subject in the loi_drafted state",
+    why: "`record-loi-submission` requires a negotiation already at loi_drafted or loi_countered. Nothing here drafts one, so Q095's multiple concurrent LOIs cannot be started through this store.",
+    produced_by: "not_produced_by_this_slice",
+  }),
+  Object.freeze({
+    capability: "reconciliation_runtime_integration",
+    missing_fact: "a caller that evaluates a concurrent edit and writes the resulting reconciliation item",
+    why: "The kernel's evaluateConcurrentEdit and the SQL writer ops.j102_record_reconciliation_item both exist and neither has a caller in shipped code. Q103's 'material conflicts reconcile visibly' is therefore NOT met end to end today, and no result of this module claims that it is.",
+    produced_by: "not_produced_by_this_slice",
+  }),
+  Object.freeze({
+    capability: "ownership_and_freshness_exposure",
+    missing_fact: "a read kind that returns the kernel's ownership, freshness and active-automation projection",
+    why: "The kernel's projectOwnershipAndFreshness is pure and has no caller here, and `read-cre-lifecycle` exposes no kind that returns it. Q103's 'expose ownership, freshness, and active automation' is unmet at the record layer.",
+    produced_by: "not_produced_by_this_slice",
+  }),
+]);
+
 export class V5J102StoreError extends Error {
   constructor(code, message, detail) {
     super(message);
@@ -215,6 +279,12 @@ export const V5_J102_DERIVED_ONLY_FIELDS = deepFreeze([
   "subject", "subjects", "related", "current_state", "prior_state",
   "evidence", "evidence_record", "document", "artifact", "record", "approval",
   "provenance", "loaded_by", "integrity",
+  // The subject binding and the author's class are DERIVED FROM STORED ROWS. A
+  // caller able to name either would be asserting which deal an authentic record
+  // is about, or which authority wrote it — the two facts BLOCK-2 and H5 exist
+  // to take out of a caller's hands.
+  "subject_binding", "bound_by", "binding_digest", "link_digest",
+  "recorded_by_authorization_class", "bound_subject_kind", "bound_subject_id",
   "decision", "reason_id", "outcome", "applied", "proposed_state", "events",
   "coupled_facts_committed", "reversibility", "decision_refs",
   "policy_digest", "domain_policy_digest", "decision_subset_digest",
@@ -317,6 +387,84 @@ function assertDigestRef(value, path) {
   return value;
 }
 
+// M1. THE TYPED FIELDS OF A BUSINESS RECORD, CHECKED BEFORE THE DURABLE WRITE.
+//
+// These used to go in unvalidated. A malformed closing_date failed loudly at
+// ops.f01_instant, but a non-string reason or detail stored perfectly well — and
+// then made the record UNREADABLE as evidence later, at which point the kernel's
+// assertLifecycleEvidence THREW a contract violation instead of returning a
+// refusal. That breaks the module's own two-kinds-of-no contract at the store
+// boundary, and it breaks it long after the request that caused it. The fix is
+// to refuse the malformed field where it arrives, in the same shape the SQL
+// CHECK constraints enforce it.
+const ISO_INSTANT_TEXT =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+// WRITTEN AS NUMERIC RANGES RATHER THAN A REGEX CHARACTER CLASS, for the reason
+// the kernel's own copy of this guard records: a literal control byte in the
+// committed source makes the file read as BINARY to file(1), rg and git diff, so
+// the module that refuses invisible characters stops being reviewable as text
+// itself. Hex code points cannot become bytes by accident.
+const UNSAFE_CODE_POINT_RANGES = Object.freeze([
+  [0x0000, 0x001f], [0x007f, 0x009f], [0x200b, 0x200f], [0x202a, 0x202e],
+  [0x2060, 0x2064], [0x2066, 0x2069], [0xfeff, 0xfeff],
+]);
+
+function hasUnsafeCodePoint(value) {
+  for (const character of value) {
+    const point = character.codePointAt(0);
+    for (const [low, high] of UNSAFE_CODE_POINT_RANGES) {
+      if (point >= low && point <= high) return true;
+    }
+  }
+  return false;
+}
+
+function assertPlainText(value, path, { maxLength }) {
+  if (typeof value !== "string" || value.length === 0) {
+    fail("invalid_shape", `${path} must be a non-empty string`, { path });
+  }
+  if (value.length > maxLength) {
+    fail("text_too_long", `${path} may be at most ${maxLength} characters`,
+      { path, length: value.length });
+  }
+  if (typeof value.isWellFormed === "function" && !value.isWellFormed()) {
+    fail("malformed_unicode", `${path} contains an unpaired surrogate`, { path });
+  }
+  if (hasUnsafeCodePoint(value)) {
+    fail("unsafe_unicode", `${path} contains a control, bidirectional or invisible format character`,
+      { path });
+  }
+  if (value.normalize("NFC") !== value) {
+    fail("non_canonical_unicode", `${path} is not in Unicode NFC; it is refused rather than normalized`,
+      { path });
+  }
+  if (value.trim() !== value) {
+    fail("untrimmed_text", `${path} has leading or trailing whitespace`, { path });
+  }
+  return value;
+}
+
+function assertInstantText(value, path) {
+  if (typeof value !== "string" || !ISO_INSTANT_TEXT.test(value) ||
+      !Number.isFinite(Date.parse(value))) {
+    fail("invalid_timestamp", `${path} must be an ISO-8601 instant with an explicit offset`, { path });
+  }
+  // The calendar is checked against the LITERAL fields, because Date.parse
+  // silently normalizes 31 February into 3 March and a closing date nobody wrote
+  // is not the date the deal closed on.
+  const [y, mo, d] = value.slice(0, 10).split("-").map(Number);
+  const daysInMonth = mo === 2
+    ? ((y % 4 === 0 && y % 100 !== 0) || y % 400 === 0 ? 29 : 28)
+    : [4, 6, 9, 11].includes(mo) ? 30 : 31;
+  if (mo < 1 || mo > 12 || d < 1 || d > daysInMonth) {
+    fail("invalid_timestamp",
+      `${path} names an instant that does not exist on the calendar; it is not normalized into a different one`,
+      { path });
+  }
+  return value;
+}
+
 // ---------------------------------------------------------------------------
 // Evidence REFERENCES. A caller names one of four shapes, and each resolves to a
 // server-loaded record through exactly one reader.
@@ -412,9 +560,34 @@ function assertSubjectRef(raw, path, expected_kind) {
 const FACT_KEYS = Object.freeze([
   "schema_version", "idempotency_key", "fact",
 ]);
+// `subject_kind` and `subject_id` are REFERENCES, and that is why a caller may
+// name them: they say which deal, assignment or client this business record is
+// ABOUT. What the caller cannot do is state them later, at the transition — the
+// binding is written into the record once, by its author, and every reader takes
+// it from the stored row.
 const FACT_BODY_KEYS = Object.freeze([
-  "record_kind", "record_id", "reason", "detail", "closing_date", "supporting_document_id",
+  "record_kind", "record_id", "subject_kind", "subject_id",
+  "reason", "detail", "closing_date", "supporting_document_id",
 ]);
+
+// One evidence→subject association. The caller names the exact evidence pin and
+// the exact subject; the store checks BOTH against the record layer before it
+// writes anything, so an association can only ever be made between a document
+// version F01 really holds and a lifecycle subject this rail really holds.
+const LINK_KEYS = Object.freeze(["schema_version", "idempotency_key", "link"]);
+const LINK_BODY_KEYS = Object.freeze([
+  "evidence_source", "document_id", "expected_version_no", "expected_content_digest",
+  "artifact_digest", "subject_kind", "subject_id",
+]);
+const LINK_DOCUMENT_KEYS = Object.freeze([
+  "evidence_source", "document_id", "expected_version_no", "expected_content_digest",
+  "subject_kind", "subject_id",
+]);
+const LINK_ARTIFACT_KEYS = Object.freeze([
+  "evidence_source", "artifact_digest", "subject_kind", "subject_id",
+]);
+export const V5_J102_LINKABLE_EVIDENCE_SOURCES =
+  Object.freeze(["f01_document", "f01_corporate_artifact"]);
 
 const TRANSITION_PAYLOAD_KEYS = Object.freeze([
   "schema_version", "idempotency_key", "subject_ref", "related_refs", "evidence_refs", "declared",
@@ -466,8 +639,9 @@ const READ_SELECTOR_KEYS = Object.freeze([
 ]);
 
 export const V5_J102_READ_KINDS = Object.freeze([
-  "subject", "subject_events", "first_party_record", "salesforce_references",
-  "correction_receipts", "reconciliation_items", "compatibility_view", "migration_shadow",
+  "subject", "subject_events", "first_party_record", "evidence_subject_links",
+  "salesforce_references", "correction_receipts", "reconciliation_items",
+  "compatibility_view", "migration_shadow",
 ]);
 
 /**
@@ -501,6 +675,20 @@ const OPERATION_SCHEMAS = deepFreeze({
   "record-lifecycle-fact": {
     write: true, humanOnly: false, authorityOnly: false, transition: null,
     keys: FACT_KEYS, required: ["idempotency_key", "fact"],
+  },
+  // BLOCK-2's other half. F01 owns documents and corporate artifacts and carries
+  // no lifecycle binding on either, and this slice does not patch F01's schema to
+  // add one. The association therefore lives in a J102-OWNED relation, written
+  // through this operation by a verified partner against a document version F01
+  // really holds and a subject this rail really holds.
+  //
+  // authorityOnly, and the reason is H5's reason. Saying "this executed lease is
+  // THIS client's deal" is a partner's statement about a transaction, not a
+  // clerical act, and an agent that could make it could bind any authentic lease
+  // to any deal and then present it as evidence.
+  "record-evidence-subject-link": {
+    write: true, humanOnly: false, authorityOnly: true, transition: null,
+    keys: LINK_KEYS, required: ["idempotency_key", "link"],
   },
   "record-representation-agreement": {
     write: true, humanOnly: false, authorityOnly: false,
@@ -590,7 +778,9 @@ export function v5J102ToolRegistrations() {
     "read-cre-lifecycle":
       "Read lifecycle subjects, events, references, receipts and compatibility projections with recomputed integrity; no side write.",
     "record-lifecycle-fact":
-      "Append one authenticated first-party business record so a later transition has server-held evidence; advances no lifecycle state.",
+      "Append one authenticated first-party business record, bound to the exact subject it is about, so a later transition has server-held evidence; advances no lifecycle state.",
+    "record-evidence-subject-link":
+      "Append one partner-authored association between an exact F01 document version or corporate artifact and one lifecycle subject; advances no lifecycle state and creates no document.",
     "record-representation-agreement":
       "Establish Client status and the active Engagement together from an active signed representation agreement, atomically or not at all.",
     "open-cre-assignment":
@@ -619,6 +809,7 @@ export function v5J102ToolRegistrations() {
   const handlers = {
     "read-cre-lifecycle": "readCreLifecycle",
     "record-lifecycle-fact": "recordLifecycleFact",
+    "record-evidence-subject-link": "recordEvidenceSubjectLink",
     "record-representation-agreement": "recordRepresentationAgreement",
     "open-cre-assignment": "openCreAssignment",
     "record-loi-submission": "recordLoiSubmission",
@@ -766,22 +957,57 @@ export function storedEventRecord({ event, transition_id, evidence_references, r
   };
 }
 
-export function storedFirstPartyFactRecord({ fact, recorded_by, recorded_at }) {
+export function storedFirstPartyFactRecord({
+  fact, recorded_by, recorded_by_authorization_class, recorded_at,
+}) {
   return {
     schema_version: V5_J102_STORED_FACT_SCHEMA_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
     record_kind: fact.record_kind,
     record_id: fact.record_id,
+    // THE BINDING, written once and never re-stated. A closing settlement says
+    // which deal closed at the moment somebody records that it closed; a later
+    // transition reads that and cannot point the record at a different deal.
+    subject_kind: fact.subject_kind,
+    subject_id: fact.subject_id,
     reason: fact.reason ?? null,
     detail: fact.detail ?? null,
     closing_date: fact.closing_date ?? null,
     supporting_document_id: fact.supporting_document_id ?? null,
     recorded_by,
+    // THE AUTHOR'S CLASS, derived from the authenticated principal that wrote the
+    // row. It is what makes "a partner stated this" checkable afterwards.
+    recorded_by_authorization_class,
     recorded_at,
     // Stated in the record itself, because this is the shape most easily
     // mistaken for a state change: it is a business fact with an author, and a
     // transition still has to accept it.
     advances_lifecycle_state: false,
+  };
+}
+
+export function storedEvidenceSubjectLinkRecord({
+  link, associated_by, associated_by_authorization_class, associated_at,
+}) {
+  return {
+    schema_version: V5_J102_STORED_EVIDENCE_LINK_SCHEMA_VERSION,
+    tenant: ORGANIZATION_TENANT_ID,
+    evidence_source: link.evidence_source,
+    // The EXACT pin. A document that gains a version is not this document, so a
+    // new version needs its own association rather than inheriting one — which
+    // is the same rule the evidence pin itself follows.
+    evidence_ref: link.evidence_ref,
+    version_no: link.version_no,
+    content_digest: link.content_digest,
+    subject_kind: link.subject_kind,
+    subject_id: link.subject_id,
+    associated_by,
+    associated_by_authorization_class,
+    associated_at,
+    // The three things an association is NOT.
+    advances_lifecycle_state: false,
+    creates_document: false,
+    asserts_document_state: false,
   };
 }
 
@@ -887,11 +1113,19 @@ export function createCreLifecycleStore({ db } = {}) {
         "the database-derived actor is not the handler's authenticated actor; the write cannot be attributed",
         { operation, handler_actor: principal.slug, database_actor: dbPrincipal?.actor_slug ?? null });
     }
-    if (OPERATION_SCHEMAS[operation].authorityOnly &&
-        (dbPrincipal.human !== principal.human ||
-         dbPrincipal.authorization_class !== principal.authorization_class)) {
-      fail("actor_context_mismatch", "the database principal does not attest the required authority",
-        { operation, actor_slug: principal.slug });
+    // THE CLASS IS COMPARED ON EVERY OPERATION, not only the authorityOnly ones.
+    // It used to be checked only where authority was required, which left the
+    // ordinary writes attributing an author class the database might not agree
+    // with — and since H5 puts the AUTHOR'S CLASS on the record itself, a
+    // disagreement there would be a durable false statement about who wrote a
+    // business fact rather than a transient one about who is asking.
+    if (dbPrincipal.human !== principal.human ||
+        dbPrincipal.authorization_class !== principal.authorization_class) {
+      fail("actor_context_mismatch",
+        "the database principal and the handler's disagree about the actor's class or personhood",
+        { operation, actor_slug: principal.slug,
+          handler_authorization_class: principal.authorization_class,
+          database_authorization_class: dbPrincipal.authorization_class ?? null });
     }
     return { now: row.server_now, database_principal: dbPrincipal };
   }
@@ -957,7 +1191,14 @@ export function createCreLifecycleStore({ db } = {}) {
     if (typeof outcome.reason_id !== "string" || outcome.reason_id.length === 0) {
       fail("invalid_stored_outcome", "stored outcome is missing its original reason", { operation });
     }
-    const extra = { actor_slug: outcome.actor_slug, readback: outcome.readback ?? null };
+    const extra = {
+      actor_slug: outcome.actor_slug,
+      // H4's receipt half: the instant the DATABASE committed under, reported
+      // back rather than re-derived, so a caller records the server's answer
+      // instead of its own idea of when this happened.
+      committed_at: outcome.committed_at ?? null,
+      readback: outcome.readback ?? null,
+    };
     if (OPERATION_SCHEMAS[operation].transition !== null) {
       Object.assign(extra, {
         transition_id: outcome.transition_id,
@@ -965,6 +1206,7 @@ export function createCreLifecycleStore({ db } = {}) {
         event_digests: outcome.event_digests ?? null,
         coupled_facts_committed: outcome.coupled_facts_committed ?? [],
         evidence_rechecked_under_lock: outcome.evidence_rechecked_under_lock === true,
+        evidence_bound_under_lock: outcome.evidence_bound_under_lock === true,
         // Said on every applied transition, because it is what Q082 buys: the
         // whole coupled set landed, or none of it did.
         partial_application: false,
@@ -973,7 +1215,20 @@ export function createCreLifecycleStore({ db } = {}) {
     } else if (operation === "record-lifecycle-fact") {
       Object.assign(extra, {
         record_kind: outcome.record_kind, record_id: outcome.record_id,
-        record_digest: outcome.record_digest, advances_lifecycle_state: false,
+        record_digest: outcome.record_digest,
+        bound_subject_kind: outcome.bound_subject_kind ?? null,
+        bound_subject_id: outcome.bound_subject_id ?? null,
+        advances_lifecycle_state: false,
+      });
+    } else if (operation === "record-evidence-subject-link") {
+      Object.assign(extra, {
+        link_digest: outcome.link_digest,
+        evidence_source: outcome.evidence_source,
+        bound_subject_kind: outcome.bound_subject_kind ?? null,
+        bound_subject_id: outcome.bound_subject_id ?? null,
+        advances_lifecycle_state: false,
+        creates_document: false,
+        asserts_document_state: false,
       });
     } else if (operation === "link-salesforce-reference") {
       Object.assign(extra, {
@@ -1041,7 +1296,39 @@ export function createCreLifecycleStore({ db } = {}) {
    * record that was superseded between this read and the write refuses there
    * rather than being applied against a picture that has moved.
    */
-  async function loadEvidence(client, ref, now, operation) {
+  /**
+   * Read the independently stored association between one exact evidence pin
+   * and one subject, or return null.
+   *
+   * THE SUBJECT IS THE TRANSITION'S OWN SUBJECT, and it is passed in rather than
+   * read out of the association, so this is a lookup that ASKS "is this document
+   * version bound to THIS deal" instead of one that reports whichever deal the
+   * document happens to mention. The two read the same on a happy path and
+   * differ on exactly the case BLOCK-2 names.
+   */
+  async function loadSubjectBinding(client, { evidence_source, evidence_ref, version_no,
+    content_digest, subject_kind, subject_id }) {
+    const row = await one(client,
+      `SELECT ops.j102_evidence_subject_link($1::text, $2::text, $3::integer, $4::text,
+                                             $5::text, $6::text) AS link`,
+      [evidence_source, evidence_ref, version_no, content_digest, subject_kind, subject_id]);
+    const stored = parse(row?.link);
+    if (stored == null || !isPlainObject(stored.record)) return null;
+    return { record: stored.record, link_digest: stored.link_digest };
+  }
+
+  function unboundEvidenceRefusal(ref, bound, detail) {
+    return {
+      refusal: {
+        evidence_kind: ref.evidence_kind,
+        missing_fact: "j102_evidence_subject_association",
+        why: `${detail} F01 owns documents and corporate artifacts and carries no lifecycle binding on either, so this rail holds the association in its own relation; record-evidence-subject-link is what writes one, and a partner has to write it for ${bound.subject_kind} ${bound.subject_id} before this evidence can advance that subject.`,
+        produced_by: "j102_record_evidence_subject_link",
+      },
+    };
+  }
+
+  async function loadEvidence(client, ref, now, operation, bound) {
     // hasOwnProperty, not a bare lookup. The key arrives from a caller payload,
     // and `{}["constructor"]` answers with something truthy — a fail-closed
     // branch that could be entered or skipped by naming an inherited property is
@@ -1082,11 +1369,32 @@ export function createCreLifecycleStore({ db } = {}) {
           why: `document ${ref.document_id} version ${ref.expected_version_no} does not carry the content digest this request named`,
           evidence_kind: ref.evidence_kind, produced_by: "f01_record_document" } };
       }
+      // BLOCK-2. The pin says the document has not moved; it says nothing about
+      // WHOSE document it is. An executed lease for one client would otherwise
+      // mark another client's deal executed, with every state check passing.
+      const documentBinding = await loadSubjectBinding(client, {
+        evidence_source: "f01_document",
+        evidence_ref: ref.document_id,
+        version_no: ref.expected_version_no,
+        content_digest: ref.expected_content_digest,
+        subject_kind: bound.subject_kind,
+        subject_id: bound.subject_id,
+      });
+      if (documentBinding === null) {
+        return unboundEvidenceRefusal(ref, bound,
+          `document ${ref.document_id} version ${ref.expected_version_no} is not associated with ${bound.subject_kind} ${bound.subject_id}.`);
+      }
       return {
         evidence: {
           evidence_kind: ref.evidence_kind,
           source: "f01_document",
           reference: ref.document_id,
+          subject_binding: {
+            subject_kind: documentBinding.record.subject_kind,
+            subject_id: documentBinding.record.subject_id,
+            bound_by: "stored_evidence_subject_link",
+            binding_digest: documentBinding.link_digest,
+          },
           document: {
             document_id: identity.document_id,
             document_class: record.document_class,
@@ -1111,6 +1419,19 @@ export function createCreLifecycleStore({ db } = {}) {
           selector: { document_id: ref.document_id },
           expected_version_no: ref.expected_version_no,
           expected_content_digest: ref.expected_content_digest,
+          // The binding travels with the pin, so the writer re-asserts BOTH
+          // under the lock it already holds: an association withdrawn between
+          // the decision and the write refuses the transition exactly as a moved
+          // document version does.
+          binding: {
+            evidence_source: "f01_document",
+            evidence_ref: ref.document_id,
+            version_no: ref.expected_version_no,
+            content_digest: ref.expected_content_digest,
+            subject_kind: bound.subject_kind,
+            subject_id: bound.subject_id,
+          },
+          expected_link_digest: documentBinding.link_digest,
         },
       };
     }
@@ -1124,11 +1445,34 @@ export function createCreLifecycleStore({ db } = {}) {
           evidence_kind: ref.evidence_kind, produced_by: "f01_record_artifact" } };
       }
       const artifact = stored.artifact;
+      // A COUNTERPARTY ACCEPTANCE IS ABOUT ONE NEGOTIATION. An authentic
+      // countersigned LOI for property A cannot be allowed to accept the
+      // negotiation on property B, so the artifact binds the same way a document
+      // does. An artifact's pin IS its digest, so the association is stored with
+      // version_no 0 and the digest in both the reference and the pin column.
+      const artifactBinding = await loadSubjectBinding(client, {
+        evidence_source: "f01_corporate_artifact",
+        evidence_ref: ref.artifact_digest,
+        version_no: 0,
+        content_digest: ref.artifact_digest,
+        subject_kind: bound.subject_kind,
+        subject_id: bound.subject_id,
+      });
+      if (artifactBinding === null) {
+        return unboundEvidenceRefusal(ref, bound,
+          `corporate artifact ${ref.artifact_digest} is not associated with ${bound.subject_kind} ${bound.subject_id}.`);
+      }
       return {
         evidence: {
           evidence_kind: ref.evidence_kind,
           source: "f01_corporate_artifact",
           reference: ref.artifact_digest,
+          subject_binding: {
+            subject_kind: artifactBinding.record.subject_kind,
+            subject_id: artifactBinding.record.subject_id,
+            bound_by: "stored_evidence_subject_link",
+            binding_digest: artifactBinding.link_digest,
+          },
           artifact: {
             artifact_digest: stored.artifact_digest,
             content_digest: artifact.content_digest,
@@ -1142,6 +1486,15 @@ export function createCreLifecycleStore({ db } = {}) {
           evidence_kind: ref.evidence_kind, source: "f01_corporate_artifact",
           reader: "ops.f01_stored_artifact",
           selector: { artifact_digest: ref.artifact_digest },
+          binding: {
+            evidence_source: "f01_corporate_artifact",
+            evidence_ref: ref.artifact_digest,
+            version_no: 0,
+            content_digest: ref.artifact_digest,
+            subject_kind: bound.subject_kind,
+            subject_id: bound.subject_id,
+          },
+          expected_link_digest: artifactBinding.link_digest,
         },
       };
     }
@@ -1155,16 +1508,53 @@ export function createCreLifecycleStore({ db } = {}) {
         evidence_kind: ref.evidence_kind, produced_by: "j102_record_first_party_fact" } };
     }
     const record = stored.record;
+    // A record written before the binding existed, or by anything that skipped
+    // the writer, cannot be read as bound evidence. It is refused with the
+    // missing fact named rather than treated as binding to whatever is being
+    // asked about.
+    if (typeof record.subject_kind !== "string" || typeof record.subject_id !== "string" ||
+        typeof record.recorded_by_authorization_class !== "string") {
+      return { refusal: {
+        evidence_kind: ref.evidence_kind,
+        missing_fact: "first_party_record_subject_binding",
+        why: `${ref.record_kind} record ${ref.record_id} carries no typed subject binding and author class; a record that does not say which subject it is about cannot advance one`,
+        produced_by: "j102_record_first_party_fact" } };
+    }
+    if (record.subject_kind !== bound.subject_kind || record.subject_id !== bound.subject_id) {
+      return { refusal: {
+        evidence_kind: ref.evidence_kind,
+        missing_fact: "first_party_record_bound_to_a_different_subject",
+        why: `${ref.record_kind} record ${ref.record_id} is bound to ${record.subject_kind} ${record.subject_id}, and this request would advance ${bound.subject_kind} ${bound.subject_id}`,
+        produced_by: "j102_record_first_party_fact" } };
+    }
+    // M1's other half. A stored field that cannot be read as evidence refuses
+    // HERE, as a policy answer naming the field, rather than throwing a contract
+    // violation out of the kernel's evidence assertion later.
+    const unreadable = unreadableFactField(record);
+    if (unreadable !== null) {
+      return { refusal: {
+        evidence_kind: ref.evidence_kind,
+        missing_fact: "readable_first_party_record",
+        why: `${ref.record_kind} record ${ref.record_id} stores an unreadable ${unreadable}; it is refused rather than being parsed into whatever it resembles`,
+        produced_by: "j102_record_first_party_fact" } };
+    }
     return {
       evidence: {
         evidence_kind: ref.evidence_kind,
         source: "first_party_record",
         reference: ref.record_id,
+        subject_binding: {
+          subject_kind: record.subject_kind,
+          subject_id: record.subject_id,
+          bound_by: "first_party_record",
+          binding_digest: stored.record_digest,
+        },
         record: {
           record_kind: record.record_kind,
           record_id: record.record_id,
           content_digest: stored.record_digest,
           recorded_by: record.recorded_by,
+          recorded_by_authorization_class: record.recorded_by_authorization_class,
           recorded_at: record.recorded_at,
           reason: record.reason ?? null,
           detail: record.detail ?? null,
@@ -1178,8 +1568,34 @@ export function createCreLifecycleStore({ db } = {}) {
         reader: "ops.j102_first_party_record",
         selector: { record_kind: ref.record_kind, record_id: ref.record_id },
         expected_record_digest: stored.record_digest,
+        // Re-asserted under the lock, with the digest: a record rewritten to
+        // point at a different deal between the decision and the write refuses.
+        binding: {
+          subject_kind: bound.subject_kind,
+          subject_id: bound.subject_id,
+        },
       },
     };
+  }
+
+  /** The first stored fact field that cannot be read as evidence, or null. */
+  function unreadableFactField(record) {
+    const text = (value, max) => value === undefined || value === null ||
+      (typeof value === "string" && value.length > 0 && value.length <= max &&
+       !hasUnsafeCodePoint(value) && value.normalize("NFC") === value && value.trim() === value);
+    if (!text(record.reason, 1000)) return "reason";
+    if (!text(record.detail, 2000)) return "detail";
+    if (record.closing_date !== undefined && record.closing_date !== null &&
+        !(typeof record.closing_date === "string" && ISO_INSTANT_TEXT.test(record.closing_date) &&
+          Number.isFinite(Date.parse(record.closing_date)))) {
+      return "closing_date";
+    }
+    if (record.supporting_document_id !== undefined && record.supporting_document_id !== null &&
+        !(typeof record.supporting_document_id === "string" &&
+          /^[A-Za-z0-9][A-Za-z0-9._:/@!+=-]{0,127}$/.test(record.supporting_document_id))) {
+      return "supporting_document_id";
+    }
+    return null;
   }
 
   // -- the shared transition path -------------------------------------------
@@ -1294,8 +1710,14 @@ export function createCreLifecycleStore({ db } = {}) {
 
       const evidence = [];
       const rechecks = [];
+      // THE SUBJECT THE EVIDENCE MUST BE ABOUT is the subject this operation
+      // names, taken from the validated reference and not from anything the
+      // evidence itself says.
+      const boundSubject = {
+        subject_kind: subject_ref.subject_kind, subject_id: subject_ref.subject_id,
+      };
       for (const ref of evidenceRefs) {
-        const loaded = await loadEvidence(client, ref, now, operation);
+        const loaded = await loadEvidence(client, ref, now, operation, boundSubject);
         if (loaded.refusal !== undefined) {
           return result(operation, "refuse", "required_evidence_unavailable", {
             actor_slug: principal.slug,
@@ -1345,14 +1767,59 @@ export function createCreLifecycleStore({ db } = {}) {
         });
       }
 
+      // BLOCK-1. EVERY PROPOSED SUBJECT GETS A COMPARE-AND-SWAP OPERAND,
+      // INCLUDING THE ONES THIS TRANSITION CREATES.
+      //
+      // Only LOADED subjects used to appear in the map, so a created subject
+      // carried no operand at all — and the writer's CAS loop, which iterated the
+      // map, never looked at it. A caller naming an EXISTING deal id as
+      // `new_deal_id` therefore had that deal's authoritative current state
+      // replaced by a fresh pending one, under a different assignment, with its
+      // events left behind: history and current state disagreeing about what that
+      // id is. The same shape applied to `new_subject_id` naming an existing
+      // engagement.
+      //
+      // A creation's operand is an EXPLICIT JSON null, which the writer reads as
+      // "this subject must be ABSENT" rather than as "no opinion". The two are
+      // different requests and used to be the same bytes.
+      const expectedStateDigests = { ...casDigests };
+      const createdKeys = [];
+      for (const [kind, state] of Object.entries(evaluated.proposed_state)) {
+        const key = `${kind}:${state.subject_id}`;
+        if (Object.prototype.hasOwnProperty.call(expectedStateDigests, key)) continue;
+        expectedStateDigests[key] = null;
+        createdKeys.push({ key, subject_kind: kind, subject_id: state.subject_id });
+      }
+      // The collision is ALSO checked here, before the write, so a caller learns
+      // that the id it chose is already taken rather than receiving a
+      // serialization failure from the writer. The writer's under-lock check is
+      // what actually enforces it; this one is what explains it.
+      for (const created of createdKeys) {
+        const existing = await loadSubject(client, created.subject_kind, created.subject_id);
+        if (existing.state !== null) {
+          return result(operation, "refuse", "created_subject_id_already_exists", {
+            actor_slug: principal.slug,
+            transition_id,
+            subject_kind: created.subject_kind, subject_id: created.subject_id,
+            stored_state_digest: existing.state_digest,
+            overwrote_existing_subject: false,
+            records_written: 0, readback: null,
+          });
+        }
+      }
+
       const evidence_references = evidence.map(e => ({
         evidence_kind: e.evidence_kind, source: e.source, reference: e.reference,
+        subject_binding: { ...e.subject_binding },
       }));
       const subjectEnvelopes = Object.entries(evaluated.proposed_state).map(([kind, state]) =>
         storeEnvelope("stored_lifecycle_subject", storedSubjectRecord({
           subject: state,
           transition_id,
-          prior_state_digest: casDigests[`${kind}:${state.subject_id}`] ?? null,
+          // Taken FROM THE MAP rather than computed a second way, so the envelope
+          // and the compare-and-swap operand cannot disagree; the writer refuses
+          // the pair if they ever do.
+          prior_state_digest: expectedStateDigests[`${kind}:${state.subject_id}`],
           updated_by: principal.slug,
           updated_at: now,
         }), { alone_sufficient: false }));
@@ -1365,7 +1832,7 @@ export function createCreLifecycleStore({ db } = {}) {
       const row = await one(client,
         `SELECT ops.j102_apply_transition($1::text, $2::jsonb, $3::jsonb, $4::jsonb,
                                           $5::jsonb, $6::text, $7::text, $8::jsonb) AS outcome`,
-        [transition_id, J(casDigests), J(subjectEnvelopes), J(eventEnvelopes), J(rechecks),
+        [transition_id, J(expectedStateDigests), J(subjectEnvelopes), J(eventEnvelopes), J(rechecks),
          request.idempotency_key, requestDigest(operation, request, principal),
          J({ operation, reason_id: evaluated.reason_id,
              coupled_facts: evaluated.coupled_facts_committed,
@@ -1382,7 +1849,12 @@ export function createCreLifecycleStore({ db } = {}) {
       "supplied_evidence_kinds", "required_evidence_alternatives", "unexpected_evidence_kinds",
       "closing_date", "negotiation_state", "assignment_phase", "engagement_state",
       "relationship_state", "diligence_state", "pending_deal_id", "selected_property_id",
-      "open_negotiation_count", "instrument_kind", "permitted_instrument_kinds"]) {
+      "open_negotiation_count", "instrument_kind", "permitted_instrument_kinds",
+      // BLOCK-2 and H5 refusals name WHICH subject the evidence was about and
+      // WHO authored it; a refusal that hid either would be unactionable.
+      "bound_subject_kind", "bound_subject_id", "bound_by", "required_subject_kind",
+      "required_author_class", "evidence_author_class", "evidence_author",
+      "active_lease_draft_target_id", "relationship_id", "engagement_id"]) {
       if (evaluated[key] !== undefined) detail[key] = evaluated[key];
     }
     return deepFreeze(detail);
@@ -1424,32 +1896,220 @@ export function createCreLifecycleStore({ db } = {}) {
   async function recordLifecycleFact(payload, context) {
     const operation = "record-lifecycle-fact";
     const { principal, payload: request } = begin(operation, payload, context);
-    const fact = assertClosed(request.fact, FACT_BODY_KEYS, ["record_kind", "record_id"], "payload.fact");
+    const fact = assertClosed(request.fact, FACT_BODY_KEYS,
+      ["record_kind", "record_id", "subject_kind", "subject_id"], "payload.fact");
     // The kind must be one some evidence contract actually consumes. A record
     // nothing can ever be judged against is not a business fact, it is a note,
     // and this store is not a place to keep notes.
-    const consumed = V5_J102_EVIDENCE_KINDS
+    const contracts = V5_J102_EVIDENCE_KINDS
       .map(kind => v5J102EvidenceContract(kind))
-      .filter(c => c.source === "first_party_record")
-      .map(c => c.record_kind);
+      .filter(c => c.source === "first_party_record");
+    const consumed = contracts.map(c => c.record_kind);
     if (!consumed.includes(fact.record_kind)) {
       fail("unknown_first_party_record_kind",
         `"${fact.record_kind}" is consumed by no lifecycle evidence contract`,
         { record_kind: fact.record_kind, registered: [...new Set(consumed)].sort() });
     }
     assertIdent(fact.record_id, "payload.fact.record_id");
+    if (!V5_J102_SUBJECT_KINDS.includes(fact.subject_kind)) {
+      fail("unknown_subject_kind", `"${fact.subject_kind}" is not a registered subject kind`,
+        { path: "payload.fact.subject_kind", registered: [...V5_J102_SUBJECT_KINDS] });
+    }
+    assertIdent(fact.subject_id, "payload.fact.subject_id");
+    // BLOCK-2, at the door the record comes in through: the kind of subject a
+    // record may name is fixed by the evidence contract that consumes it, so a
+    // closing settlement cannot be bound to an assignment and then used to close
+    // a deal by pointing the transition somewhere else.
+    const bindsTo = [...new Set(contracts.filter(c => c.record_kind === fact.record_kind)
+      .map(c => c.binds_subject_kind).filter(kind => kind !== null))];
+    if (bindsTo.length > 0 && !bindsTo.includes(fact.subject_kind)) {
+      fail("first_party_record_subject_kind_mismatch",
+        `a ${fact.record_kind} record binds to a ${bindsTo.join(" or ")}, not to a ${fact.subject_kind}`,
+        { path: "payload.fact.subject_kind", record_kind: fact.record_kind, permitted: bindsTo });
+    }
+    // H5. THE AUTHOR IS RESTRICTED AT THE WRITER, not merely at the transition.
+    // Otherwise a sponsored agent authors the closing date, the winning-property
+    // commitment or the failure reason, and a partner performing the transition
+    // afterwards launders it into the record.
+    if (V5_J102_PARTNER_AUTHORED_RECORD_KINDS.includes(fact.record_kind) &&
+        principal.authorization_class !== "verified_partner") {
+      fail("partner_authored_record_kind_refused",
+        `a ${fact.record_kind} record is authored by a verified partner; ${principal.slug} holds ${principal.authorization_class}`,
+        { record_kind: fact.record_kind, actor_slug: principal.slug,
+          authorization_class: principal.authorization_class,
+          partner_authored_record_kinds: [...V5_J102_PARTNER_AUTHORED_RECORD_KINDS] });
+    }
+    // M1. The typed fields are validated BEFORE the durable write, in the shape
+    // the SQL CHECK constraints enforce, so an unreadable record cannot be stored
+    // and then blow up as a contract violation when a transition reads it.
+    if (fact.reason !== undefined && fact.reason !== null) {
+      assertPlainText(fact.reason, "payload.fact.reason", { maxLength: 1000 });
+    }
+    if (fact.detail !== undefined && fact.detail !== null) {
+      assertPlainText(fact.detail, "payload.fact.detail", { maxLength: 2000 });
+    }
+    if (fact.closing_date !== undefined && fact.closing_date !== null) {
+      assertInstantText(fact.closing_date, "payload.fact.closing_date");
+    }
+    if (fact.supporting_document_id !== undefined && fact.supporting_document_id !== null) {
+      assertIdent(fact.supporting_document_id, "payload.fact.supporting_document_id");
+    }
+    // The two mandatory fields, checked against the evidence contracts that
+    // consume this kind rather than against a list restated here.
+    const requiresClosingDate = contracts.some(c =>
+      c.record_kind === fact.record_kind && c.requires_closing_date === true);
+    if (requiresClosingDate && (fact.closing_date === undefined || fact.closing_date === null)) {
+      fail("missing_field",
+        `payload.fact.closing_date is required for a ${fact.record_kind} record; Q094 closes a deal on the actual date and on nothing else`,
+        { path: "payload.fact.closing_date", record_kind: fact.record_kind });
+    }
+    const requiresReason = contracts.some(c =>
+      c.record_kind === fact.record_kind && c.requires_reason === true);
+    if (requiresReason && (fact.reason === undefined || fact.reason === null)) {
+      fail("missing_field",
+        `payload.fact.reason is required for a ${fact.record_kind} record; a reason is preserved, never inferred`,
+        { path: "payload.fact.reason", record_kind: fact.record_kind });
+    }
 
     return withTransaction(async client => {
       const { now } = await openOperation(client, operation, principal);
       const replay = await replayOutcome(client, operation, request, principal);
       if (replay !== null) return replay;
+      // The subject a record claims to be about must EXIST. A binding to an id
+      // nobody holds is a dangling reference wearing the shape of provenance,
+      // and it would sit in the record layer until some future subject took that
+      // id and inherited a fact nobody wrote about it.
+      const boundSubject = await loadSubject(client, fact.subject_kind, fact.subject_id);
+      if (boundSubject.state === null) {
+        return result(operation, "refuse", "bound_subject_not_found", {
+          actor_slug: principal.slug,
+          subject_kind: fact.subject_kind, subject_id: fact.subject_id,
+          records_written: 0, readback: null,
+        });
+      }
       const record = storedFirstPartyFactRecord({
-        fact, recorded_by: principal.slug, recorded_at: now,
+        fact,
+        recorded_by: principal.slug,
+        recorded_by_authorization_class: principal.authorization_class,
+        recorded_at: now,
       });
       const envelope = storeEnvelope("stored_first_party_record", record,
         { append_only: true, advances_lifecycle_state: false });
       const row = await one(client,
         "SELECT ops.j102_record_first_party_fact($1::jsonb, $2::text, $3::text) AS outcome",
+        [J(envelope), request.idempotency_key, requestDigest(operation, request, principal)]);
+      return resultFromOutcome(operation, parse(row.outcome), principal);
+    });
+  }
+
+  // -- 2b. record-evidence-subject-link -------------------------------------
+
+  /**
+   * Associate one EXACT evidence pin with one lifecycle subject.
+   *
+   * WHAT THIS IS NOT. It is not a document, not a document state, and not an
+   * assertion that anything was signed: F01 owns all three and this operation
+   * reads them rather than writing them. It is one partner-authored statement
+   * that a document version or a corporate artifact F01 really holds belongs to
+   * a lifecycle subject this rail really holds — which is the fact no layer
+   * carried, and the reason an executed lease could advance the wrong deal.
+   *
+   * BOTH ENDS ARE CHECKED BEFORE ANYTHING IS WRITTEN. The document is read back
+   * from F01 at the exact version and content digest named, and the subject is
+   * loaded from this rail. An association to a version F01 does not hold, or to
+   * a subject that does not exist, refuses.
+   */
+  async function recordEvidenceSubjectLink(payload, context) {
+    const operation = "record-evidence-subject-link";
+    const { principal, payload: request } = begin(operation, payload, context);
+    const raw = assertClosed(request.link, LINK_BODY_KEYS,
+      ["evidence_source", "subject_kind", "subject_id"], "payload.link");
+    if (!V5_J102_LINKABLE_EVIDENCE_SOURCES.includes(raw.evidence_source)) {
+      fail("unknown_evidence_source",
+        `"${String(raw.evidence_source)}" is not an evidence source a subject association is held for`,
+        { path: "payload.link.evidence_source",
+          registered: [...V5_J102_LINKABLE_EVIDENCE_SOURCES] });
+    }
+    if (!V5_J102_SUBJECT_KINDS.includes(raw.subject_kind)) {
+      fail("unknown_subject_kind", `"${String(raw.subject_kind)}" is not a registered subject kind`,
+        { path: "payload.link.subject_kind", registered: [...V5_J102_SUBJECT_KINDS] });
+    }
+    const link = {
+      evidence_source: raw.evidence_source,
+      subject_kind: raw.subject_kind,
+      subject_id: assertIdent(raw.subject_id, "payload.link.subject_id"),
+    };
+    if (raw.evidence_source === "f01_document") {
+      assertClosed(raw, LINK_DOCUMENT_KEYS, LINK_DOCUMENT_KEYS, "payload.link");
+      link.evidence_ref = assertIdent(raw.document_id, "payload.link.document_id");
+      if (!Number.isSafeInteger(raw.expected_version_no) || raw.expected_version_no < 1) {
+        fail("invalid_shape", "payload.link.expected_version_no must be a positive integer",
+          { path: "payload.link.expected_version_no" });
+      }
+      link.version_no = raw.expected_version_no;
+      link.content_digest = assertDigestRef(raw.expected_content_digest,
+        "payload.link.expected_content_digest");
+    } else {
+      assertClosed(raw, LINK_ARTIFACT_KEYS, LINK_ARTIFACT_KEYS, "payload.link");
+      link.evidence_ref = assertDigestRef(raw.artifact_digest, "payload.link.artifact_digest");
+      // An artifact's pin IS its digest, so there is no version to name and the
+      // digest stands in both columns. Zero is the version of a thing that has
+      // none, said once here rather than left as a null the reader has to guess at.
+      link.version_no = 0;
+      link.content_digest = link.evidence_ref;
+    }
+
+    return withTransaction(async client => {
+      const { now } = await openOperation(client, operation, principal);
+      const replay = await replayOutcome(client, operation, request, principal);
+      if (replay !== null) return replay;
+
+      const subject = await loadSubject(client, link.subject_kind, link.subject_id);
+      if (subject.state === null) {
+        return result(operation, "refuse", "subject_not_found", {
+          actor_slug: principal.slug,
+          subject_kind: link.subject_kind, subject_id: link.subject_id,
+          records_written: 0, readback: null,
+        });
+      }
+      if (link.evidence_source === "f01_document") {
+        const row = await one(client, "SELECT ops.f01_read('document', $1::jsonb) AS body",
+          [J({ document_id: link.evidence_ref })]);
+        const verified = parse(row?.body)?.body ?? null;
+        const identity = isPlainObject(verified?.record) ? (verified.record.neon_identity ?? {}) : null;
+        if (identity === null || identity.version_no !== link.version_no ||
+            identity.content_digest !== link.content_digest) {
+          return result(operation, "refuse", "evidence_pin_not_held", {
+            actor_slug: principal.slug,
+            missing_fact: "f01_document_version_at_the_named_pin",
+            missing_fact_reason: `F01 does not hold document ${link.evidence_ref} at version ${link.version_no} with the content digest this association names`,
+            produced_by: "f01_record_document",
+            records_written: 0, readback: null,
+          });
+        }
+      } else {
+        const row = await one(client, "SELECT ops.f01_stored_artifact($1::text) AS artifact",
+          [link.evidence_ref]);
+        const stored = parse(row?.artifact);
+        if (stored == null || !isPlainObject(stored.artifact)) {
+          return result(operation, "refuse", "evidence_pin_not_held", {
+            actor_slug: principal.slug,
+            missing_fact: "f01_corporate_artifact_at_the_named_digest",
+            missing_fact_reason: `no stored corporate artifact exists for ${link.evidence_ref}`,
+            produced_by: "f01_record_artifact",
+            records_written: 0, readback: null,
+          });
+        }
+      }
+      const envelope = storeEnvelope("stored_evidence_subject_link",
+        storedEvidenceSubjectLinkRecord({
+          link,
+          associated_by: principal.slug,
+          associated_by_authorization_class: principal.authorization_class,
+          associated_at: now,
+        }), { append_only: true, authorityOnly: true, advances_lifecycle_state: false });
+      const row = await one(client,
+        "SELECT ops.j102_record_evidence_subject_link($1::jsonb, $2::text, $3::text) AS outcome",
         [J(envelope), request.idempotency_key, requestDigest(operation, request, principal)]);
       return resultFromOutcome(operation, parse(row.outcome), principal);
     });
@@ -1640,6 +2300,7 @@ export function createCreLifecycleStore({ db } = {}) {
   return Object.freeze({
     readCreLifecycle,
     recordLifecycleFact,
+    recordEvidenceSubjectLink,
     recordRepresentationAgreement,
     openCreAssignment,
     recordLoiSubmission,
@@ -1684,6 +2345,17 @@ for (const [axis, transition] of Object.entries(AXIS_TRANSITIONS)) {
   if (!V5_J102_TRANSITION_IDS.includes(transition)) {
     throw new V5J102StoreError("contract_self_check_failed",
       `the axis dispatch names unregistered transition "${transition}"`);
+  }
+}
+
+// The unwired-capability registry has to stay a list of FACTS rather than a list
+// of intentions, so every entry must name the missing thing and its owner.
+for (const entry of V5_J102_UNWIRED_CAPABILITIES) {
+  for (const key of ["capability", "missing_fact", "why", "produced_by"]) {
+    if (typeof entry[key] !== "string" || entry[key].length === 0) {
+      throw new V5J102StoreError("contract_self_check_failed",
+        `the unwired-capability registry entry "${entry.capability}" does not name its ${key}`);
+    }
   }
 }
 

@@ -41,8 +41,10 @@ import {
   V5_J102_DERIVED_ONLY_FIELDS,
   V5_J102_ENVELOPE_SCHEMA_VERSION,
   V5_J102_OPERATIONS,
+  V5_J102_READ_KINDS,
   V5_J102_STORE_RECORD_KINDS,
   V5_J102_STORE_SCHEMA_VERSION,
+  V5_J102_UNWIRED_CAPABILITIES,
   V5J102StoreError,
   createCreLifecycleStore,
   storedSubjectRecord,
@@ -112,15 +114,46 @@ const storedDocument = (over = {}) => {
   return { body: { record, record_digest: digest(record), integrity: "recomputed_from_committed_row" } };
 };
 
-/** The shape ops.j102_first_party_record returns. */
+/**
+ * The shape ops.j102_first_party_record returns.
+ *
+ * IT NAMES ITS SUBJECT. The binding lives on the stored row, not on the request
+ * that later reads it, so these fixtures carry the subject each record kind is
+ * about — and the adversarial cases below hand back a record about somebody
+ * else's deal without changing anything else on it.
+ */
+const FACT_SUBJECT = Object.freeze({
+  assignment_mandate: { subject_kind: "assignment", subject_id: "asg-synthetic-1" },
+  winning_property_commitment: { subject_kind: "assignment", subject_id: "asg-synthetic-1" },
+});
 const storedFact = (record_kind, over = {}) => {
+  const bound = FACT_SUBJECT[record_kind] ??
+    { subject_kind: "deal", subject_id: "deal-synthetic-1" };
   const record = {
     schema_version: "doctorcre-v5-j102-stored-first-party-record.v1",
     tenant: ORGANIZATION_TENANT_ID, record_kind, record_id: "rec-synthetic-1",
+    subject_kind: bound.subject_kind, subject_id: bound.subject_id,
     reason: null, detail: null, closing_date: null, supporting_document_id: null,
-    recorded_by: "joe", recorded_at: T.mid, advances_lifecycle_state: false, ...over,
+    recorded_by: "joe", recorded_by_authorization_class: "verified_partner",
+    recorded_at: T.mid, advances_lifecycle_state: false, ...over,
   };
   return { record, record_digest: digest(record), integrity: "recomputed_from_committed_row" };
+};
+
+/** The shape ops.j102_evidence_subject_link returns when the pin IS associated. */
+const storedLink = (over = {}) => {
+  const record = {
+    schema_version: "doctorcre-v5-j102-stored-evidence-subject-link.v1",
+    tenant: ORGANIZATION_TENANT_ID,
+    evidence_source: "f01_document", evidence_ref: "doc-synthetic-1",
+    version_no: 1, content_digest: D(1),
+    subject_kind: "deal", subject_id: "deal-synthetic-1",
+    associated_by: "joe", associated_by_authorization_class: "verified_partner",
+    associated_at: T.early,
+    advances_lifecycle_state: false, creates_document: false,
+    asserts_document_state: false, ...over,
+  };
+  return { record, link_digest: digest(record), integrity: "recomputed_from_committed_row" };
 };
 
 // --- the scripted fake handle ---------------------------------------------
@@ -189,12 +222,25 @@ class FakeDb {
       const facts = this.script.facts ?? {};
       return { rows: [{ record: facts[record_kind] ?? null }] };
     }
+    // THE ASSOCIATION READER ASKS A YES/NO QUESTION, and the fake answers it the
+    // same way: keyed on the SUBJECT as well as the pin, so a script that
+    // associates a document with one deal answers null for every other deal
+    // rather than handing the association back with somebody else's subject on it.
+    if (text.includes("ops.j102_evidence_subject_link(")) {
+      const [evidence_source, evidence_ref, version_no, content_digest,
+        subject_kind, subject_id] = params;
+      const links = this.script.links ?? {};
+      const key = [evidence_source, evidence_ref, version_no, content_digest,
+        subject_kind, subject_id].join("|");
+      return { rows: [{ link: links[key] ?? null }] };
+    }
     if (text.includes("ops.j102_read(")) {
       return { rows: [{ body: this.script.read_body ?? { body: null } }] };
     }
 
     for (const fn of ["j102_apply_transition", "j102_record_first_party_fact",
-      "j102_record_salesforce_reference", "j102_record_correction"]) {
+      "j102_record_evidence_subject_link", "j102_record_salesforce_reference",
+      "j102_record_correction"]) {
       if (text.includes(`ops.${fn}(`)) {
         this.lastWrite = { fn, params };
         if (this.script.writeError) throw this.script.writeError;
@@ -212,6 +258,10 @@ class FakeDb {
    */
   outcomeFor(fn, params) {
     const envelope = index => (params[index] == null ? null : JSON.parse(params[index]));
+    // The actor the SCRIPTED principal names, not a literal, so a fixture running
+    // as a sponsored agent gets an outcome attributed to that agent — which is
+    // what resultFromOutcome checks before it reports anything.
+    const actor_slug = this.script.principal?.actor_slug ?? "joe";
     if (fn === "j102_apply_transition") {
       const subjects = envelope(2);
       const events = envelope(3);
@@ -220,7 +270,7 @@ class FakeDb {
         operation: diagnostics.operation,
         decision: "allow",
         outcome: "applied",
-        actor_slug: "joe",
+        actor_slug,
         transition_id: params[0],
         reason_id: diagnostics.reason_id,
         coupled_facts_committed: diagnostics.coupled_facts,
@@ -234,20 +284,30 @@ class FakeDb {
     const record = envelope(0).record;
     if (fn === "j102_record_first_party_fact") {
       return { operation: "record-lifecycle-fact", decision: "allow",
-        reason_id: "first_party_record_appended", actor_slug: "joe",
+        reason_id: "first_party_record_appended", actor_slug,
         record_kind: record.record_kind, record_id: record.record_id,
-        record_digest: envelope(0).record_digest, readback: { record } };
+        record_digest: envelope(0).record_digest,
+        bound_subject_kind: record.subject_kind, bound_subject_id: record.subject_id,
+        readback: { record } };
+    }
+    if (fn === "j102_record_evidence_subject_link") {
+      return { operation: "record-evidence-subject-link", decision: "allow",
+        reason_id: "evidence_subject_association_appended", actor_slug,
+        link_digest: envelope(0).record_digest,
+        evidence_source: record.evidence_source,
+        bound_subject_kind: record.subject_kind, bound_subject_id: record.subject_id,
+        readback: { record } };
     }
     if (fn === "j102_record_salesforce_reference") {
       return { operation: "link-salesforce-reference", decision: "allow",
         reason_id: record.linked_subject_kind == null
           ? "external_reference_recorded_unlinked" : "external_reference_progressively_linked",
-        actor_slug: "joe", opportunity_id: record.opportunity_id,
+        actor_slug, opportunity_id: record.opportunity_id,
         linked_subject_kind: record.linked_subject_kind,
         reference_digest: envelope(0).record_digest, readback: { record } };
     }
     return { operation: "record-lifecycle-correction", decision: "allow",
-      reason_id: "correction_receipt_appended", actor_slug: "joe",
+      reason_id: "correction_receipt_appended", actor_slug,
       receipt_digest: envelope(0).record_digest,
       corrected_fields: record.corrected_fields, readback: { record } };
   }
@@ -282,10 +342,14 @@ test("the registration description is a description, and it says what the parent
   // Four acts need partner authority: committing to a winner, closing a deal,
   // cancelling one, and correcting the record. Everything else an authenticated
   // sponsored agent may do, because the evidence is what decides.
+  // Five acts need partner authority: committing to a winner, closing a deal,
+  // cancelling one, correcting the record, and — H5's shape applied to BLOCK-2's
+  // producer — saying which transaction a document belongs to. Everything else an
+  // authenticated sponsored agent may do, because the evidence is what decides.
   const authorityOnly = V5_J102_OPERATIONS.filter(n => schemas[n].authorityOnly).sort();
   assert.deepEqual(authorityOnly,
     ["cancel-pending-deal", "commit-winning-property", "record-deal-closing",
-      "record-lifecycle-correction"]);
+      "record-evidence-subject-link", "record-lifecycle-correction"]);
   assert.deepEqual(V5_J102_OPERATIONS.filter(n => schemas[n].humanOnly),
     ["record-lifecycle-correction"]);
 });
@@ -311,7 +375,8 @@ test("an envelope hashes to its own claim, and the canonical bytes are reproduci
   assert.equal(v5J102EnvelopeCanonicalBytes(envelope), canonicalJson(envelope));
   assert.throws(() => v5J102StoreEnvelope("stored_invented_kind", record),
     e => e instanceof V5J102StoreError && e.code === "unknown_record_kind");
-  assert.equal(V5_J102_STORE_RECORD_KINDS.length, 5);
+  assert.equal(V5_J102_STORE_RECORD_KINDS.length, 6);
+  assert.ok(V5_J102_STORE_RECORD_KINDS.includes("stored_evidence_subject_link"));
 });
 
 // --- derived-field and authority guards ------------------------------------
@@ -326,7 +391,12 @@ test("a caller cannot supply the tenant, the clock, the subject, the evidence or
   };
   for (const field of ["tenant", "now", "subject", "evidence", "recorded_by",
     "deal_state", "closing_state", "closing_date", "state_digest",
-    "relationship_state", "assignment_phase"]) {
+    "relationship_state", "assignment_phase",
+    // BLOCK-2 and H5: which subject an authentic record is about, and in what
+    // capacity its author wrote it, are read off stored rows and are not a
+    // caller's to state on the request that consumes them.
+    "subject_binding", "bound_by", "binding_digest", "link_digest",
+    "bound_subject_kind", "bound_subject_id"]) {
     await assert.rejects(() => store.recordDealExecution({ ...base, [field]: "x" }, ctx(JOE)),
       e => e instanceof V5J102StoreError && e.code === "caller_derived_field_refused",
       `${field} must be refused as a derived field`);
@@ -399,10 +469,18 @@ test("an unauthenticated actor, an inadmissible class, and a non-partner on an a
 
 // --- ordering and bindings -------------------------------------------------
 
+/** The association a lease document needs before it can advance THIS deal. */
+const LEASE_LINK_KEY =
+  ["f01_document", "doc-synthetic-1", 1, D(1), "deal", "deal-synthetic-1"].join("|");
+/** The same, for the engagement letter that establishes THIS client. */
+const ETL_LINK_KEY =
+  ["f01_document", "doc-synthetic-1", 1, D(1), "relationship", "rel-synthetic-1"].join("|");
+
 function leaseExecutionDb(extra = {}) {
   return new FakeDb({
     subjects: { "deal:deal-synthetic-1": storedSubject(dealState()) },
     document: storedDocument({ document_class: "lease" }),
+    links: { [LEASE_LINK_KEY]: storedLink() },
     ...extra,
   });
 }
@@ -426,6 +504,9 @@ test("replay is claimed BEFORE any state is read, and the whole statement order 
     "j102_replay_outcome",
     "j102_subject",
     "f01_read",
+    // BLOCK-2: the document is pinned AND its association with this deal is
+    // read, both before the writer is called at all.
+    "j102_evidence_subject_link",
     "j102_apply_transition",
     "COMMIT",
   ]);
@@ -472,19 +553,34 @@ test("the transition writer receives the CAS digests, the envelopes and the rech
   assert.equal(events.length, 1);
   assert.equal(events[0].record.event.event_kind, "lease_executed");
   assert.equal(events[0].record.transition_id, "record-lease-execution");
-  assert.deepEqual(events[0].record.evidence_references,
-    [{ evidence_kind: "executed_lease", source: "f01_document", reference: "doc-synthetic-1" }]);
+  // The history says WHICH deal each piece of evidence was about, not only which
+  // document it was.
+  assert.deepEqual(events[0].record.evidence_references, [{
+    evidence_kind: "executed_lease", source: "f01_document", reference: "doc-synthetic-1",
+    subject_binding: {
+      subject_kind: "deal", subject_id: "deal-synthetic-1",
+      bound_by: "stored_evidence_subject_link",
+      binding_digest: storedLink().link_digest,
+    },
+  }]);
   assert.equal(events[0].record_digest, digest(events[0].record));
 
   // THE RECHECK MANIFEST, which is what lets the database re-read the exact pin
-  // under its own lock. A manifest carrying only the document id would let a
-  // newer version satisfy it.
+  // AND the exact binding under its own lock. A manifest carrying only the
+  // document id would let a newer version satisfy it; one carrying no binding
+  // would let somebody else's lease satisfy it.
   const recheck = JSON.parse(recheckJson);
   assert.deepEqual(recheck, [{
     evidence_kind: "executed_lease", source: "f01_document",
     reader: "ops.f01_read.document",
     selector: { document_id: "doc-synthetic-1" },
     expected_version_no: 1, expected_content_digest: D(1),
+    binding: {
+      evidence_source: "f01_document", evidence_ref: "doc-synthetic-1",
+      version_no: 1, content_digest: D(1),
+      subject_kind: "deal", subject_id: "deal-synthetic-1",
+    },
+    expected_link_digest: storedLink().link_digest,
   }]);
 
   assert.equal(key, "j102-fixture-1");
@@ -499,6 +595,7 @@ test("the executed instrument is chosen from the stored deal, so a purchase cann
   const db = new FakeDb({
     subjects: { "deal:deal-synthetic-1": storedSubject(dealState({ instrument_kind: "purchase" })) },
     document: storedDocument({ document_class: "purchase_contract", validity_state: "draft" }),
+    links: { [LEASE_LINK_KEY]: storedLink() },
   });
   const store = createCreLifecycleStore({ db });
   await store.recordDealExecution({
@@ -615,13 +712,21 @@ test("a commitment loads the related negotiation and binds BOTH compare-and-swap
   assert.equal(answer.decision, "allow");
 
   const params = db.paramsFor("j102_apply_transition");
-  // Both subjects the decision was taken against are compare-and-swap operands,
-  // including the negotiation, which is only READ. A prerequisite that moved
-  // invalidates the decision exactly as a target that moved does.
+  // BLOCK-1. EVERY subject the decision touches is a compare-and-swap operand:
+  // the ones that were READ, including the negotiation, and the one that is
+  // CREATED. A prerequisite that moved invalidates the decision exactly as a
+  // target that moved does, and a created id that is already taken must not be
+  // upserted over.
   const cas = JSON.parse(params[1]);
   assert.deepEqual(Object.keys(cas).sort(),
-    ["assignment:asg-synthetic-1", "property_negotiation:neg-synthetic-1"]);
+    ["assignment:asg-synthetic-1", "deal:deal-synthetic-1",
+      "property_negotiation:neg-synthetic-1"]);
   assert.equal(cas["property_negotiation:neg-synthetic-1"], digest(neg));
+  // AN EXPLICIT null, present as a key. "This subject must be ABSENT" and "I
+  // have no opinion about this subject" used to be the same bytes — no key at
+  // all — and the writer could only read the second.
+  assert.ok(Object.prototype.hasOwnProperty.call(cas, "deal:deal-synthetic-1"));
+  assert.equal(cas["deal:deal-synthetic-1"], null);
 
   // Three subjects land together: the negotiation, the assignment and the NEW
   // pending deal. Q082's coupled facts, as parameters.
@@ -631,10 +736,83 @@ test("a commitment loads the related negotiation and binds BOTH compare-and-swap
   const dealEnvelope = subjects.find(e => e.record.subject_kind === "deal");
   assert.equal(dealEnvelope.record.state.deal_state, "pending");
   assert.equal(dealEnvelope.record.state.execution_state, "unexecuted");
-  // A newly created subject has no prior digest, which is what tells the writer
-  // it is a creation rather than an update.
+  // A newly created subject declares a null prior digest, and it is the SAME
+  // null the operand carries — the writer refuses the pair if they disagree.
   assert.equal(dealEnvelope.record.prior_state_digest, null);
   assert.equal(JSON.parse(params[3]).length, 3, "three events accompany three facts");
+});
+
+test("BLOCK-1: a created subject id that is already taken refuses instead of overwriting", async () => {
+  // THE REPRODUCER, at the store. deal-A exists, closed, with its closing date,
+  // under its own assignment. A verified partner commits a winner on a DIFFERENT
+  // assignment and names deal-A as the new deal id. Every kernel check passes,
+  // because the kernel has no view of existing deals.
+  const asg = assignmentState({ subject_id: "asg-synthetic-2",
+    assignment_phase: "negotiation", open_negotiation_count: 1 });
+  const neg = {
+    subject_kind: "property_negotiation", subject_id: "neg-synthetic-2",
+    assignment_id: "asg-synthetic-2", property_id: "prop-synthetic-2",
+    negotiation_state: "loi_accepted",
+  };
+  const existing = dealState({ subject_id: "deal-synthetic-1", deal_state: "closed",
+    execution_state: "executed", closing_state: "closed", closing_date: T.late });
+  const db = new FakeDb({
+    subjects: {
+      "assignment:asg-synthetic-2": storedSubject(asg),
+      "property_negotiation:neg-synthetic-2": storedSubject(neg),
+      "deal:deal-synthetic-1": storedSubject(existing),
+    },
+    facts: { winning_property_commitment: storedFact("winning_property_commitment",
+      { subject_kind: "assignment", subject_id: "asg-synthetic-2" }) },
+  });
+  const store = createCreLifecycleStore({ db });
+  const answer = await store.commitWinningProperty({
+    idempotency_key: "j102-fixture-1",
+    subject_ref: { subject_kind: "assignment", subject_id: "asg-synthetic-2" },
+    related_refs: { property_negotiation: { subject_kind: "property_negotiation",
+      subject_id: "neg-synthetic-2" } },
+    evidence_refs: [recordRef("winner_selection_commitment")],
+    declared: { instrument_kind: "lease", new_deal_id: "deal-synthetic-1" },
+  }, ctx(JOE));
+
+  assert.equal(answer.decision, "refuse");
+  assert.equal(answer.reason_id, "created_subject_id_already_exists");
+  assert.equal(answer.subject_id, "deal-synthetic-1");
+  assert.equal(answer.overwrote_existing_subject, false);
+  assert.equal(answer.records_written, 0);
+  assert.equal(db.callsTo("j102_apply_transition").length, 0,
+    "the writer is never reached, so the closed deal cannot be replaced");
+});
+
+test("BLOCK-1: a valid new creation still lands, and its operand is an explicit null", async () => {
+  const asg = assignmentState({ assignment_phase: "negotiation", open_negotiation_count: 1 });
+  const neg = {
+    subject_kind: "property_negotiation", subject_id: "neg-synthetic-1",
+    assignment_id: "asg-synthetic-1", property_id: "prop-synthetic-1",
+    negotiation_state: "loi_accepted",
+  };
+  const db = new FakeDb({
+    subjects: {
+      "assignment:asg-synthetic-1": storedSubject(asg),
+      "property_negotiation:neg-synthetic-1": storedSubject(neg),
+    },
+    facts: { winning_property_commitment: storedFact("winning_property_commitment") },
+  });
+  const store = createCreLifecycleStore({ db });
+  const answer = await store.commitWinningProperty({
+    idempotency_key: "j102-fixture-1",
+    subject_ref: { subject_kind: "assignment", subject_id: "asg-synthetic-1" },
+    related_refs: { property_negotiation: { subject_kind: "property_negotiation",
+      subject_id: "neg-synthetic-1" } },
+    evidence_refs: [recordRef("winner_selection_commitment")],
+    declared: { instrument_kind: "lease", new_deal_id: "deal-synthetic-fresh" },
+  }, ctx(JOE));
+  assert.equal(answer.decision, "allow");
+  const cas = JSON.parse(db.paramsFor("j102_apply_transition")[1]);
+  assert.equal(cas["deal:deal-synthetic-fresh"], null);
+  // The absence was CHECKED rather than assumed: the store asked for the id it
+  // was about to create.
+  assert.ok(db.callsTo("j102_subject").some(c => c.params[1] === "deal-synthetic-fresh"));
 });
 
 // --- refusals that never reach a write -------------------------------------
@@ -712,6 +890,8 @@ test("an absent evidence reader fails closed with the missing fact named and no 
   const working = new FakeDb({
     subjects: { "relationship:rel-synthetic-1": storedSubject(relationshipState()) },
     document: storedDocument({ document_class: "engagement_letter" }),
+    links: { [ETL_LINK_KEY]: storedLink({ subject_kind: "relationship",
+      subject_id: "rel-synthetic-1" }) },
   });
   const ok = await createCreLifecycleStore({ db: working }).recordRepresentationAgreement({
     idempotency_key: "j102-fixture-2",
@@ -743,6 +923,7 @@ test("a kernel refusal is reported with its reason and detail, and nothing is wr
     // Already executed: the transition's own prerequisite refuses.
     subjects: { "deal:deal-synthetic-1": storedSubject(dealState({ execution_state: "executed" })) },
     document: storedDocument({ document_class: "lease" }),
+    links: { [LEASE_LINK_KEY]: storedLink() },
   });
   const store = createCreLifecycleStore({ db });
   const answer = await store.recordDealExecution({
@@ -847,12 +1028,17 @@ test("a stored outcome attributed to another actor is refused rather than replay
 
 // --- the non-transition writers --------------------------------------------
 
-test("a first-party fact is appended with the server's actor and instant, and advances nothing", async () => {
-  const db = new FakeDb();
+const dealSubjectDb = (extra = {}) => new FakeDb({
+  subjects: { "deal:deal-synthetic-1": storedSubject(dealState()) }, ...extra,
+});
+
+test("a first-party fact is appended with the server's actor, instant, binding and author class", async () => {
+  const db = dealSubjectDb();
   const store = createCreLifecycleStore({ db });
   const answer = await store.recordLifecycleFact({
     idempotency_key: "j102-fixture-1",
     fact: { record_kind: "closing_settlement", record_id: "rec-synthetic-1",
+      subject_kind: "deal", subject_id: "deal-synthetic-1",
       closing_date: T.late, supporting_document_id: "doc-synthetic-1" },
   }, ctx(JOE));
   assert.equal(answer.decision, "allow");
@@ -861,8 +1047,89 @@ test("a first-party fact is appended with the server's actor and instant, and ad
   assert.equal(envelope.record.recorded_by, "joe");
   assert.equal(envelope.record.recorded_at, SERVER_NOW);
   assert.equal(envelope.record.closing_date, T.late);
+  // BLOCK-2: the record says which deal it is about, once, at authoring time.
+  assert.equal(envelope.record.subject_kind, "deal");
+  assert.equal(envelope.record.subject_id, "deal-synthetic-1");
+  // H5: and who — in what capacity — wrote it, derived rather than supplied.
+  assert.equal(envelope.record.recorded_by_authorization_class, "verified_partner");
   assert.equal(envelope.record.advances_lifecycle_state, false);
   assert.equal(envelope.record_digest, digest(envelope.record));
+
+  // A record about a subject nobody holds is a fact waiting for whatever later
+  // takes that id.
+  const dangling = new FakeDb({ subjects: {} });
+  const answer2 = await createCreLifecycleStore({ db: dangling }).recordLifecycleFact({
+    idempotency_key: "j102-fixture-2",
+    fact: { record_kind: "closing_settlement", record_id: "rec-synthetic-2",
+      subject_kind: "deal", subject_id: "deal-nonexistent", closing_date: T.late },
+  }, ctx(JOE));
+  assert.equal(answer2.reason_id, "bound_subject_not_found");
+  assert.equal(dangling.callsTo("j102_record_first_party_fact").length, 0);
+});
+
+test("H5: a sponsored agent cannot AUTHOR a partner-only business record", async () => {
+  const db = dealSubjectDb();
+  const store = createCreLifecycleStore({ db });
+  for (const record_kind of ["closing_settlement", "winning_property_commitment",
+    "deal_failure", "lifecycle_correction"]) {
+    await assert.rejects(() => store.recordLifecycleFact({
+      idempotency_key: `j102-fixture-${record_kind}`,
+      fact: {
+        record_kind, record_id: "rec-synthetic-1",
+        subject_kind: record_kind === "winning_property_commitment" ? "assignment" : "deal",
+        subject_id: record_kind === "winning_property_commitment"
+          ? "asg-synthetic-1" : "deal-synthetic-1",
+        closing_date: record_kind === "closing_settlement" ? T.late : undefined,
+        reason: "synthetic fixture reason",
+      },
+    }, ctx(AGENT)),
+    e => e instanceof V5J102StoreError && e.code === "partner_authored_record_kind_refused",
+    `${record_kind} must not be agent-authored`);
+  }
+  assert.equal(db.calls.length, 0, "no partner-only authoring attempt reaches the database");
+
+  // The agent-recordable kinds are untouched, so this is the four and not a
+  // blanket suspicion of agents.
+  const agentDb = dealSubjectDb({
+    principal: { actor_slug: "codex", human: false, authorization_class: "sponsored_agent" },
+  });
+  const ok = await createCreLifecycleStore({ db: agentDb }).recordLifecycleFact({
+    idempotency_key: "j102-fixture-invoice",
+    fact: { record_kind: "invoice", record_id: "rec-synthetic-1",
+      subject_kind: "deal", subject_id: "deal-synthetic-1" },
+  }, ctx(AGENT));
+  assert.equal(ok.decision, "allow");
+  const envelope = JSON.parse(agentDb.paramsFor("j102_record_first_party_fact")[0]);
+  // The class is DERIVED from the principal that wrote the row, so the record
+  // itself carries the fact a later transition checks.
+  assert.equal(envelope.record.recorded_by_authorization_class, "sponsored_agent");
+});
+
+test("M1: the typed fact fields are validated BEFORE the durable write", async () => {
+  const store = createCreLifecycleStore({ db: dealSubjectDb() });
+  const bad = (fact, code) => assert.rejects(
+    () => store.recordLifecycleFact({ idempotency_key: "j102-fixture-1", fact }, ctx(JOE)),
+    e => e instanceof V5J102StoreError && e.code === code, JSON.stringify(fact));
+  const base = { record_id: "rec-synthetic-1", subject_kind: "deal",
+    subject_id: "deal-synthetic-1" };
+
+  // A non-string reason used to store durably and then make the record
+  // UNREADABLE as evidence, at which point the kernel THREW instead of refusing.
+  await bad({ ...base, record_kind: "deal_failure", reason: { text: "no" } }, "invalid_shape");
+  await bad({ ...base, record_kind: "invoice", detail: 17 }, "invalid_shape");
+  await bad({ ...base, record_kind: "closing_settlement", closing_date: "2026-02-31T00:00:00Z" },
+    "invalid_timestamp");
+  await bad({ ...base, record_kind: "closing_settlement", closing_date: "yesterday" },
+    "invalid_timestamp");
+  await bad({ ...base, record_kind: "invoice", supporting_document_id: "not a document id" },
+    "invalid_identifier");
+  // The two mandatory fields, taken from the evidence contracts rather than
+  // restated: a dateless closing and a reasonless failure.
+  await bad({ ...base, record_kind: "closing_settlement" }, "missing_field");
+  await bad({ ...base, record_kind: "deal_failure" }, "missing_field");
+  // And the binding must be the kind the record's own evidence contract names.
+  await bad({ ...base, record_kind: "winning_property_commitment", subject_kind: "deal" },
+    "first_party_record_subject_kind_mismatch");
 });
 
 test("a first-party record kind no evidence contract consumes is refused", async () => {
@@ -870,9 +1137,198 @@ test("a first-party record kind no evidence contract consumes is refused", async
   const store = createCreLifecycleStore({ db });
   await assert.rejects(() => store.recordLifecycleFact({
     idempotency_key: "j102-fixture-1",
-    fact: { record_kind: "freeform_note", record_id: "rec-synthetic-1" },
+    fact: { record_kind: "freeform_note", record_id: "rec-synthetic-1",
+      subject_kind: "deal", subject_id: "deal-synthetic-1" },
   }, ctx(JOE)), e => e instanceof V5J102StoreError && e.code === "unknown_first_party_record_kind");
   assert.equal(db.calls.length, 0);
+});
+
+test("BLOCK-2: an unbound document, and one bound to another subject, both refuse", async () => {
+  // NO ASSOCIATION AT ALL. The document is authentic, current, fully executed and
+  // pinned exactly; nothing says it is this deal's lease.
+  const unbound = new FakeDb({
+    subjects: { "deal:deal-synthetic-1": storedSubject(dealState()) },
+    document: storedDocument({ document_class: "lease" }),
+    links: {},
+  });
+  const answer = await createCreLifecycleStore({ db: unbound }).recordDealExecution({
+    idempotency_key: "j102-fixture-1",
+    subject_ref: { subject_kind: "deal", subject_id: "deal-synthetic-1" },
+    evidence_refs: [documentRef("executed_lease")],
+  }, ctx(JOE));
+  assert.equal(answer.decision, "refuse");
+  assert.equal(answer.reason_id, "required_evidence_unavailable");
+  assert.equal(answer.missing_fact, "j102_evidence_subject_association");
+  assert.equal(answer.produced_by, "j102_record_evidence_subject_link");
+  assert.equal(unbound.callsTo("j102_apply_transition").length, 0);
+
+  // ASSOCIATED WITH SOMEBODY ELSE'S DEAL. The reader is asked about THIS deal and
+  // answers null, so a lease executed for one client cannot mark another's.
+  const elsewhere = new FakeDb({
+    subjects: { "deal:deal-synthetic-1": storedSubject(dealState()) },
+    document: storedDocument({ document_class: "lease" }),
+    links: {
+      [["f01_document", "doc-synthetic-1", 1, D(1), "deal", "deal-other-client"].join("|")]:
+        storedLink({ subject_id: "deal-other-client" }),
+    },
+  });
+  const answer2 = await createCreLifecycleStore({ db: elsewhere }).recordDealExecution({
+    idempotency_key: "j102-fixture-1",
+    subject_ref: { subject_kind: "deal", subject_id: "deal-synthetic-1" },
+    evidence_refs: [documentRef("executed_lease")],
+  }, ctx(JOE));
+  assert.equal(answer2.missing_fact, "j102_evidence_subject_association");
+  assert.equal(elsewhere.callsTo("j102_apply_transition").length, 0);
+});
+
+test("BLOCK-2: a stored record bound to a different deal cannot close this one", async () => {
+  const db = new FakeDb({
+    subjects: { "deal:deal-synthetic-1": storedSubject(dealState({ execution_state: "executed" })) },
+    facts: { closing_settlement: storedFact("closing_settlement",
+      { subject_kind: "deal", subject_id: "deal-somebody-else", closing_date: T.late }) },
+  });
+  const answer = await createCreLifecycleStore({ db }).recordDealClosing({
+    idempotency_key: "j102-fixture-1",
+    subject_ref: { subject_kind: "deal", subject_id: "deal-synthetic-1" },
+    evidence_refs: [recordRef("final_closing_settlement")],
+  }, ctx(JOE));
+  assert.equal(answer.decision, "refuse");
+  assert.equal(answer.missing_fact, "first_party_record_bound_to_a_different_subject");
+  assert.equal(db.callsTo("j102_apply_transition").length, 0);
+
+  // A record predating the binding is refused rather than read as binding to
+  // whatever it is asked about.
+  const legacy = storedFact("closing_settlement", { closing_date: T.late });
+  delete legacy.record.subject_id;
+  legacy.record_digest = digest(legacy.record);
+  const old = new FakeDb({
+    subjects: { "deal:deal-synthetic-1": storedSubject(dealState({ execution_state: "executed" })) },
+    facts: { closing_settlement: legacy },
+  });
+  const answer2 = await createCreLifecycleStore({ db: old }).recordDealClosing({
+    idempotency_key: "j102-fixture-1",
+    subject_ref: { subject_kind: "deal", subject_id: "deal-synthetic-1" },
+    evidence_refs: [recordRef("final_closing_settlement")],
+  }, ctx(JOE));
+  assert.equal(answer2.missing_fact, "first_party_record_subject_binding");
+});
+
+test("M1: an unreadable stored field refuses as a policy answer, not as a thrown violation", async () => {
+  const broken = storedFact("closing_settlement", { closing_date: T.late, reason: 17 });
+  broken.record_digest = digest(broken.record);
+  const db = new FakeDb({
+    subjects: { "deal:deal-synthetic-1": storedSubject(dealState({ execution_state: "executed" })) },
+    facts: { closing_settlement: broken },
+  });
+  const answer = await createCreLifecycleStore({ db }).recordDealClosing({
+    idempotency_key: "j102-fixture-1",
+    subject_ref: { subject_kind: "deal", subject_id: "deal-synthetic-1" },
+    evidence_refs: [recordRef("final_closing_settlement")],
+  }, ctx(JOE));
+  assert.equal(answer.decision, "refuse", "a refusal, and not a V5J102Error out of the kernel");
+  assert.equal(answer.missing_fact, "readable_first_party_record");
+  assert.match(answer.missing_fact_reason, /reason/);
+});
+
+test("the association producer checks BOTH ends and is partner-only", async () => {
+  const db = new FakeDb({
+    subjects: { "deal:deal-synthetic-1": storedSubject(dealState()) },
+    document: storedDocument({ document_class: "lease" }),
+  });
+  const store = createCreLifecycleStore({ db });
+  const answer = await store.recordEvidenceSubjectLink({
+    idempotency_key: "j102-fixture-1",
+    link: { evidence_source: "f01_document", document_id: "doc-synthetic-1",
+      expected_version_no: 1, expected_content_digest: D(1),
+      subject_kind: "deal", subject_id: "deal-synthetic-1" },
+  }, ctx(JOE));
+  assert.equal(answer.decision, "allow");
+  assert.equal(answer.advances_lifecycle_state, false);
+  assert.equal(answer.creates_document, false);
+  assert.equal(answer.asserts_document_state, false);
+  const envelope = JSON.parse(db.paramsFor("j102_record_evidence_subject_link")[0]);
+  assert.equal(envelope.record.evidence_ref, "doc-synthetic-1");
+  assert.equal(envelope.record.version_no, 1);
+  assert.equal(envelope.record.content_digest, D(1));
+  assert.equal(envelope.record.associated_by, "joe");
+  assert.equal(envelope.record.associated_at, SERVER_NOW);
+  assert.equal(envelope.record_digest, digest(envelope.record));
+
+  // A pin F01 does not hold cannot be associated with anything.
+  const movedPin = new FakeDb({
+    subjects: { "deal:deal-synthetic-1": storedSubject(dealState()) },
+    document: storedDocument({ document_class: "lease",
+      neon_identity: { document_id: "doc-synthetic-1", content_digest: D(1), version_no: 4 } }),
+  });
+  const answer2 = await createCreLifecycleStore({ db: movedPin }).recordEvidenceSubjectLink({
+    idempotency_key: "j102-fixture-2",
+    link: { evidence_source: "f01_document", document_id: "doc-synthetic-1",
+      expected_version_no: 1, expected_content_digest: D(1),
+      subject_kind: "deal", subject_id: "deal-synthetic-1" },
+  }, ctx(JOE));
+  assert.equal(answer2.reason_id, "evidence_pin_not_held");
+  assert.equal(movedPin.callsTo("j102_record_evidence_subject_link").length, 0);
+
+  // A subject this rail does not hold cannot be associated with anything either.
+  const noSubject = new FakeDb({ subjects: {}, document: storedDocument() });
+  const answer3 = await createCreLifecycleStore({ db: noSubject }).recordEvidenceSubjectLink({
+    idempotency_key: "j102-fixture-3",
+    link: { evidence_source: "f01_document", document_id: "doc-synthetic-1",
+      expected_version_no: 1, expected_content_digest: D(1),
+      subject_kind: "deal", subject_id: "deal-nonexistent" },
+  }, ctx(JOE));
+  assert.equal(answer3.reason_id, "subject_not_found");
+
+  // And an agent may not say which transaction a document belongs to.
+  await assert.rejects(() => store.recordEvidenceSubjectLink({
+    idempotency_key: "j102-fixture-4",
+    link: { evidence_source: "f01_document", document_id: "doc-synthetic-1",
+      expected_version_no: 1, expected_content_digest: D(1),
+      subject_kind: "deal", subject_id: "deal-synthetic-1" },
+  }, ctx(AGENT)),
+  e => e instanceof V5J102StoreError && e.code === "authority_only_operation_refused");
+});
+
+test("H1/H3: the capabilities this store does not wire are named, not implied", async () => {
+  const named = V5_J102_UNWIRED_CAPABILITIES.map(c => c.capability).sort();
+  assert.deepEqual(named, [
+    "assignment_initialization",
+    "ownership_and_freshness_exposure",
+    "property_negotiation_initialization",
+    "relationship_prospect_initialization",
+    "reconciliation_runtime_integration",
+  ].sort());
+  for (const entry of V5_J102_UNWIRED_CAPABILITIES) {
+    assert.equal(entry.produced_by, "not_produced_by_this_slice");
+    assert.ok(entry.why.length > 0);
+  }
+
+  // AND THE GAPS ARE REAL, asserted against behaviour rather than against the
+  // list. Journey 1's first step cannot be taken here: the transition refuses
+  // `subject_not_found` and creates nothing.
+  for (const [handler, subject_kind, subject_id] of [
+    ["openCreAssignment", "assignment", "asg-nonexistent"],
+    ["recordLoiSubmission", "property_negotiation", "neg-nonexistent"],
+  ]) {
+    const db = new FakeDb({ subjects: {} });
+    const answer = await createCreLifecycleStore({ db })[handler]({
+      idempotency_key: "j102-fixture-1",
+      subject_ref: { subject_kind, subject_id },
+      evidence_refs: [recordRef("search_initiation")],
+      declared: { mandate_scope: "search" },
+    }, ctx(JOE));
+    assert.equal(answer.reason_id, "subject_not_found");
+    assert.equal(answer.records_written, 0);
+    assert.equal(db.callsTo("j102_apply_transition").length, 0);
+  }
+
+  // No operation in the registered surface writes a reconciliation item or
+  // returns an ownership projection, and the read kinds do not offer one.
+  const store = createCreLifecycleStore({ db: new FakeDb() });
+  assert.equal(typeof store.evaluateConcurrentEdit, "undefined");
+  assert.equal(typeof store.projectOwnershipAndFreshness, "undefined");
+  assert.equal(V5_J102_READ_KINDS.includes("ownership"), false);
+  assert.equal(V5_J102_READ_KINDS.includes("automation"), false);
 });
 
 test("a Salesforce reference keeps its own labels, requires a real link target, and sets no state", async () => {

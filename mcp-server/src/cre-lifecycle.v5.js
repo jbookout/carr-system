@@ -744,11 +744,35 @@ export function assertLifecycleSubject(subject, path = "subject") {
 // ---------------------------------------------------------------------------
 // Q072 / Q082 — the evidence vocabulary.
 //
-// EVERY EVIDENCE KIND NAMES ITS SOURCE AND ITS EXACT REQUIRED SHAPE. An F01
-// document kind additionally names the document states that must hold, so
-// "signed" is a fact read off the record layer's own document identity rather
-// than a word a caller wrote. A first-party record kind names the record kind it
-// needs; a typed approval names the approval kind and the approver class.
+// EVERY EVIDENCE KIND NAMES ITS SOURCE, ITS EXACT REQUIRED SHAPE, AND THE
+// SUBJECT IT BINDS TO. An F01 document kind additionally names the document
+// states that must hold, so "signed" is a fact read off the record layer's own
+// document identity rather than a word a caller wrote. A first-party record kind
+// names the record kind it needs; a typed approval names the approval kind and
+// the approver class.
+//
+// `binds_subject_kind` IS THE SECOND HALF OF "EVIDENCE-BOUND TRANSITIONS", and
+// it is the half that was missing. A record that is authentic, of the right
+// kind, in the right state and pinned to the right bytes still says nothing
+// about WHICH deal closed, WHICH assignment committed or WHICH client signed.
+// Without a binding, one closing settlement closes every deal it is pointed at,
+// a commitment recorded for assignment A commits assignment B, and a lease
+// executed for one client marks another client's deal executed — all with an
+// authorized actor and a valid pin. So every evidence kind declares the subject
+// kind it must name, every admitted evidence record carries a SERVER-DERIVED
+// `subject_binding`, and the evaluator refuses when that binding is not the
+// subject the transition moves. The binding is never a field on the transition
+// request: it comes off the stored first-party record's own typed columns, or
+// off an independently stored evidence→subject association, and the store and
+// the SQL writer re-assert it under the same lock that holds the subject.
+//
+// `requires_author_class` IS THE THIRD HALF, for the four facts only a partner
+// may state. Q082's permitted actors bound the actor PERFORMING the transition;
+// they said nothing about who AUTHORED the record it rests on, so a sponsored
+// agent could write the closing date, the winning-property commitment or the
+// failure reason and a partner could then launder it through by performing the
+// transition afterwards. The author's own authorization class is recorded on the
+// record when it is written and is checked here.
 //
 // `assistant_text` and `model_output` ARE NOT SOURCES, and they are not merely
 // absent from the list: V5_J102_REFUSED_EVIDENCE_SOURCES names them so a request
@@ -766,6 +790,32 @@ export const V5_J102_REFUSED_EVIDENCE_SOURCES = deepFreeze([
 ]);
 
 export const V5_J102_ACTOR_CLASSES = deepFreeze(["verified_partner", "sponsored_agent"]);
+
+/**
+ * WHERE A SUBJECT BINDING MAY COME FROM, and the list is exactly two entries
+ * long because there are exactly two durable places one can be stored.
+ *
+ *   first_party_record         — the typed subject columns on the stored
+ *                                first-party business record itself. The record
+ *                                names the deal it is about when it is written,
+ *                                by an authenticated author, and nothing on the
+ *                                transition request can change that afterwards.
+ *   stored_evidence_subject_link
+ *                              — an independently stored association between one
+ *                                exact evidence pin (a document id + version +
+ *                                content digest, or an artifact digest) and one
+ *                                subject. F01 owns documents and artifacts and
+ *                                carries no lifecycle binding on either; this
+ *                                slice therefore holds the association in its
+ *                                OWN relation rather than patching F01's schema.
+ *
+ * A CALLER-SUPPLIED BINDING IS NOT ON THIS LIST, and that is the whole point. A
+ * transition request naming "this lease belongs to that deal" would be the
+ * caller asserting the fact the binding exists to establish.
+ */
+export const V5_J102_SUBJECT_BINDING_SOURCES = deepFreeze([
+  "first_party_record", "stored_evidence_subject_link",
+]);
 
 const EVIDENCE_KIND_TABLE = deepFreeze({
   // Q069 / Q077, and the one evidence contract that had to be drawn against what
@@ -785,6 +835,7 @@ const EVIDENCE_KIND_TABLE = deepFreeze({
   // one from the server clock would be worse than either.
   signed_engagement_letter: {
     source: "f01_document",
+    binds_subject_kind: "relationship",
     document_states: {
       signature_state: "fully_executed",
       validity_state: "effective",
@@ -799,22 +850,26 @@ const EVIDENCE_KIND_TABLE = deepFreeze({
   // never one it infers, and never a new business policy it writes.
   approved_representation_equivalent: {
     source: "typed_approval",
+    binds_subject_kind: "relationship",
     approval_kind: "representation_equivalence_approval",
     requires_approver_class: "verified_partner",
     permitted_actor_classes: ["verified_partner"],
   },
   search_initiation: {
     source: "first_party_record",
+    binds_subject_kind: "assignment",
     record_kind: "assignment_mandate",
     permitted_actor_classes: ["verified_partner", "sponsored_agent"],
   },
   submitted_loi: {
     source: "f01_document",
+    binds_subject_kind: "property_negotiation",
     document_states: { delivery_state: "delivered", version_state: "current" },
     permitted_actor_classes: ["verified_partner", "sponsored_agent"],
   },
   counterparty_loi_acceptance: {
     source: "f01_corporate_artifact",
+    binds_subject_kind: "property_negotiation",
     evidence_class_required: true,
     permitted_actor_classes: ["verified_partner", "sponsored_agent"],
   },
@@ -823,11 +878,17 @@ const EVIDENCE_KIND_TABLE = deepFreeze({
   // signs anything at the moment a broker commits to one property.
   winner_selection_commitment: {
     source: "first_party_record",
+    binds_subject_kind: "assignment",
     record_kind: "winning_property_commitment",
+    // H5. The commitment is a partner's decision, so the partner has to be the
+    // one who WROTE it. Requiring only that a partner performs the transition
+    // would let an agent author the commitment and a partner wave it through.
+    requires_author_class: "verified_partner",
     permitted_actor_classes: ["verified_partner"],
   },
   executed_lease: {
     source: "f01_document",
+    binds_subject_kind: "deal",
     document_states: {
       signature_state: "fully_executed",
       validity_state: "effective",
@@ -841,11 +902,13 @@ const EVIDENCE_KIND_TABLE = deepFreeze({
   // yet run its course.
   signed_purchase_contract: {
     source: "f01_document",
+    binds_subject_kind: "deal",
     document_states: { signature_state: "fully_executed", version_state: "current" },
     permitted_actor_classes: ["verified_partner", "sponsored_agent"],
   },
   diligence_outcome: {
     source: "first_party_record",
+    binds_subject_kind: "deal",
     record_kind: "diligence_outcome",
     permitted_actor_classes: ["verified_partner", "sponsored_agent"],
   },
@@ -865,33 +928,45 @@ const EVIDENCE_KIND_TABLE = deepFreeze({
   // invented as mandatory here.
   final_closing_settlement: {
     source: "first_party_record",
+    // BLOCK-2, at the place it did the most damage: ONE settlement record with
+    // ONE date used to close any number of unrelated deals, because nothing tied
+    // the record to a deal. It names its deal now, and a settlement bound to a
+    // different one refuses however authentic it is.
+    binds_subject_kind: "deal",
     record_kind: "closing_settlement",
     requires_closing_date: true,
+    requires_author_class: "verified_partner",
     permitted_actor_classes: ["verified_partner"],
   },
   deal_failure_record: {
     source: "first_party_record",
+    binds_subject_kind: "deal",
     record_kind: "deal_failure",
     requires_reason: true,
+    requires_author_class: "verified_partner",
     permitted_actor_classes: ["verified_partner"],
   },
   commission_agreement: {
     source: "f01_document",
+    binds_subject_kind: "deal",
     document_states: { signature_state: "fully_executed", version_state: "current" },
     permitted_actor_classes: ["verified_partner", "sponsored_agent"],
   },
   invoice_issued: {
     source: "first_party_record",
+    binds_subject_kind: "deal",
     record_kind: "invoice",
     permitted_actor_classes: ["verified_partner", "sponsored_agent"],
   },
   payment_received: {
     source: "first_party_record",
+    binds_subject_kind: "deal",
     record_kind: "payment",
     permitted_actor_classes: ["verified_partner", "sponsored_agent"],
   },
   completion_recorded: {
     source: "first_party_record",
+    binds_subject_kind: "deal",
     record_kind: "completion",
     permitted_actor_classes: ["verified_partner", "sponsored_agent"],
   },
@@ -900,18 +975,38 @@ const EVIDENCE_KIND_TABLE = deepFreeze({
   // principal lives.
   manual_correction: {
     source: "first_party_record",
+    // NULL, and it is the only null in this column. A correction is the one
+    // record that may be about any subject kind, and no transition in the table
+    // consumes it: `record-lifecycle-correction` is a receipt path, and the
+    // binding it checks is against the subject named in the correction payload.
+    // The record still CARRIES a typed binding — it is stored and re-read like
+    // any other — it simply is not narrowed to one kind here.
+    binds_subject_kind: null,
     record_kind: "lifecycle_correction",
     requires_reason: true,
+    requires_author_class: "verified_partner",
     permitted_actor_classes: ["verified_partner"],
   },
   // Q095's explicit exception. Without one, the single-target constraint binds.
   multi_target_exception_approval: {
     source: "typed_approval",
+    binds_subject_kind: "assignment",
     approval_kind: "multi_target_exception",
     requires_approver_class: "verified_partner",
     permitted_actor_classes: ["verified_partner"],
   },
 });
+
+/**
+ * The record kinds only a verified partner may AUTHOR, derived from the table
+ * above rather than restated. The store restricts its fact writer to this exact
+ * set, and the SQL relation carries the same list as a CHECK, so an agent-
+ * authored closing date cannot exist to be laundered later.
+ */
+export const V5_J102_PARTNER_AUTHORED_RECORD_KINDS = deepFreeze(
+  Object.values(EVIDENCE_KIND_TABLE)
+    .filter(c => c.source === "first_party_record" && c.requires_author_class === "verified_partner")
+    .map(c => c.record_kind).sort());
 
 export const V5_J102_EVIDENCE_KINDS = deepFreeze(Object.keys(EVIDENCE_KIND_TABLE).sort());
 
@@ -927,10 +1022,18 @@ export function v5J102EvidenceContract(kind) {
 
 const EVIDENCE_KEYS = Object.freeze([
   "evidence_kind", "source", "reference", "document", "artifact", "record",
-  "approval", "provenance",
+  "approval", "provenance", "subject_binding",
 ]);
 const EVIDENCE_PROVENANCE_KEYS = Object.freeze([
   "loaded_by", "reader", "loaded_at", "integrity",
+]);
+// The binding, and every field on it is server-derived. `bound_by` names WHICH
+// durable place the association was read from, and `binding_digest` is the
+// digest of the row that carries it — the stored record for a first-party fact,
+// the stored association for a document or an artifact — so a reader can go and
+// check the binding rather than taking the evidence record's word for it.
+const SUBJECT_BINDING_KEYS = Object.freeze([
+  "subject_kind", "subject_id", "bound_by", "binding_digest",
 ]);
 // `closing_date` is deliberately NOT here. It lives on the first-party record
 // shape and nowhere else, so there is one home for the fact and no chance of two
@@ -944,8 +1047,11 @@ const ARTIFACT_EVIDENCE_KEYS = Object.freeze([
   "artifact_digest", "content_digest", "source_system", "evidence_class", "observed_at",
 ]);
 const RECORD_EVIDENCE_KEYS = Object.freeze([
-  "record_kind", "record_id", "content_digest", "recorded_by", "recorded_at",
-  "reason", "detail", "closing_date", "supporting_document_id",
+  "record_kind", "record_id", "content_digest", "recorded_by",
+  // H5. The author's own class, stamped on the row by the writer that derived
+  // it, not by whoever presents the record later.
+  "recorded_by_authorization_class",
+  "recorded_at", "reason", "detail", "closing_date", "supporting_document_id",
 ]);
 const APPROVAL_EVIDENCE_KEYS = Object.freeze([
   "approval_kind", "approval_ref", "approver_slug", "approver_authorization_class",
@@ -967,7 +1073,7 @@ export const V5_J102_EVIDENCE_INTEGRITY = "recomputed_from_committed_row";
 export function assertLifecycleEvidence(evidence, path = "evidence") {
   assertObject(evidence, path);
   assertClosedKeys(evidence, EVIDENCE_KEYS, path, { allowAsserted: true });
-  assertRequiredKeys(evidence, ["evidence_kind", "source", "provenance"], path);
+  assertRequiredKeys(evidence, ["evidence_kind", "source", "provenance", "subject_binding"], path);
   const kind = assertEnum(evidence.evidence_kind, V5_J102_EVIDENCE_KINDS,
     `${path}.evidence_kind`, "unknown_evidence_kind");
   const contract = EVIDENCE_KIND_TABLE[kind];
@@ -1001,12 +1107,42 @@ export function assertLifecycleEvidence(evidence, path = "evidence") {
   assertExternalIdent(provenance.reader, `${path}.provenance.reader`, { maxLength: 128 });
   assertInstant(provenance.loaded_at, `${path}.provenance.loaded_at`);
 
+  // THE SUBJECT BINDING. Read here rather than in the evaluator, so a caller
+  // reaching this function directly — the constraint evaluator, the legacy
+  // classifier, a future handler — cannot admit an unbound evidence record at
+  // all. WHETHER the binding is the right one is a policy question and is
+  // answered in evaluateLifecycleTransition; whether one exists is not.
+  const binding = assertObject(evidence.subject_binding, `${path}.subject_binding`);
+  assertClosedKeys(binding, SUBJECT_BINDING_KEYS, `${path}.subject_binding`, { allowAsserted: true });
+  assertRequiredKeys(binding, SUBJECT_BINDING_KEYS, `${path}.subject_binding`);
+  const bound_by = assertEnum(binding.bound_by, V5_J102_SUBJECT_BINDING_SOURCES,
+    `${path}.subject_binding.bound_by`, "unknown_subject_binding_source");
+  // A first-party record binds through its own typed columns and through nothing
+  // else; a document or an artifact binds through the stored association and
+  // through nothing else. Crossing the two would let a document claim the
+  // standing of a record it is not.
+  const expected_bound_by = source === "first_party_record"
+    ? "first_party_record" : "stored_evidence_subject_link";
+  if (bound_by !== expected_bound_by) {
+    fail("subject_binding_source_mismatch",
+      `${path}.subject_binding.bound_by is "${bound_by}" but ${source} evidence binds through "${expected_bound_by}"`,
+      { path: `${path}.subject_binding.bound_by`, expected: expected_bound_by, actual: bound_by });
+  }
+
   const out = {
     evidence_kind: kind,
     source,
     reference: evidence.reference === undefined || evidence.reference === null
       ? null : assertExternalIdent(evidence.reference, `${path}.reference`, { maxLength: 255 }),
     document: null, artifact: null, record: null, approval: null,
+    subject_binding: {
+      subject_kind: assertEnum(binding.subject_kind, V5_J102_SUBJECT_KINDS,
+        `${path}.subject_binding.subject_kind`, "unknown_subject_kind"),
+      subject_id: assertExternalIdent(binding.subject_id, `${path}.subject_binding.subject_id`,
+        { maxLength: 128 }),
+      bound_by,
+      binding_digest: assertDigestRef(binding.binding_digest, `${path}.subject_binding.binding_digest`),
+    },
     provenance: {
       loaded_by: provenance.loaded_by, reader: provenance.reader,
       loaded_at: provenance.loaded_at, integrity: provenance.integrity,
@@ -1061,8 +1197,16 @@ export function assertLifecycleEvidence(evidence, path = "evidence") {
   } else if (source === "first_party_record") {
     const record = assertObject(evidence.record, `${path}.record`);
     assertClosedKeys(record, RECORD_EVIDENCE_KEYS, `${path}.record`, { allowAsserted: true });
-    assertRequiredKeys(record, ["record_kind", "record_id", "content_digest", "recorded_by", "recorded_at"],
-      `${path}.record`);
+    assertRequiredKeys(record, ["record_kind", "record_id", "content_digest", "recorded_by",
+      "recorded_by_authorization_class", "recorded_at"], `${path}.record`);
+    // The binding digest of a first-party record is the record's own digest, and
+    // the two are checked against each other here: a binding that pointed at
+    // some other row's bytes would be a binding nobody could re-derive.
+    if (out.subject_binding.binding_digest !== record.content_digest) {
+      fail("subject_binding_digest_mismatch",
+        `${path}.subject_binding.binding_digest must be the bound record's own digest`,
+        { path: `${path}.subject_binding.binding_digest` });
+    }
     const record_kind = assertExternalIdent(record.record_kind, `${path}.record.record_kind`,
       { maxLength: 128 });
     if (record_kind !== contract.record_kind) {
@@ -1086,6 +1230,8 @@ export function assertLifecycleEvidence(evidence, path = "evidence") {
       record_id: assertExternalIdent(record.record_id, `${path}.record.record_id`, { maxLength: 128 }),
       content_digest: assertDigestRef(record.content_digest, `${path}.record.content_digest`),
       recorded_by: assertExternalIdent(record.recorded_by, `${path}.record.recorded_by`, { maxLength: 128 }),
+      recorded_by_authorization_class: assertEnum(record.recorded_by_authorization_class,
+        V5_J102_ACTOR_CLASSES, `${path}.record.recorded_by_authorization_class`, "unknown_actor_class"),
       recorded_at: nullableInstant(record.recorded_at, `${path}.record.recorded_at`),
       reason: record.reason === undefined || record.reason === null
         ? null : assertSafeText(record.reason, `${path}.record.reason`, { maxLength: 1000 }),
@@ -1174,6 +1320,14 @@ const TRANSITIONS = deepFreeze({
     evidence_alternatives: [["search_initiation"]],
     permitted_actor_classes: ["verified_partner", "sponsored_agent"],
     requires_active_engagement: true,
+    // H2. THE PREREQUISITE THAT WAS MISSING. Without a `from` clause this
+    // transition would take an assignment at `committed` — one holding a pending
+    // Deal and a selected property — and write `search` over it on the strength
+    // of a mandate record, keeping both fields. That is a rewind, an internally
+    // inconsistent row, and a way past the `assignment_already_committed`
+    // refusal Q095 rests on. Opening is for an assignment that has not yet
+    // started negotiating; a committed or concluded one needs its own decision.
+    from: { assignment_phase: ["research", "search"] },
     coupled_facts: ["assignment.assignment_phase"],
     reversibility: "reversible_by_declared_transition",
     creates_deal: false,
@@ -1558,6 +1712,34 @@ export function evaluateLifecycleTransition(request) {
         { ...base, evidence_kind: kind,
           permitted_actor_classes: [...contract.permitted_actor_classes] });
     }
+    // BLOCK-2. The evidence must be about THIS subject, and the binding it is
+    // checked against was read off a stored row rather than off the request.
+    // Everything above this line can be satisfied by an authentic record for a
+    // DIFFERENT deal, assignment or client.
+    const binding = item.subject_binding;
+    if (contract.binds_subject_kind !== null && binding.subject_kind !== contract.binds_subject_kind) {
+      return refuse(transition_id, "evidence_bound_to_wrong_subject_kind",
+        { ...base, evidence_kind: kind, bound_subject_kind: binding.subject_kind,
+          required_subject_kind: contract.binds_subject_kind });
+    }
+    if (binding.subject_kind !== subject.subject_kind || binding.subject_id !== subject.subject_id) {
+      return refuse(transition_id, "evidence_not_bound_to_subject",
+        { ...base, evidence_kind: kind,
+          bound_subject_kind: binding.subject_kind, bound_subject_id: binding.subject_id,
+          bound_by: binding.bound_by });
+    }
+    // H5. WHO AUTHORED the fact, not merely who is presenting it now. A partner
+    // performing the transition does not launder an agent-authored closing date,
+    // winning-property commitment or failure reason.
+    if (contract.requires_author_class !== undefined &&
+        item.record !== null &&
+        item.record.recorded_by_authorization_class !== contract.requires_author_class) {
+      return refuse(transition_id, "evidence_author_class_not_permitted",
+        { ...base, evidence_kind: kind,
+          required_author_class: contract.requires_author_class,
+          evidence_author_class: item.record.recorded_by_authorization_class,
+          evidence_author: item.record.recorded_by });
+    }
     if (contract.document_states !== undefined) {
       for (const [axis, required] of Object.entries(contract.document_states)) {
         if (item.document[axis] !== required) {
@@ -1683,12 +1865,40 @@ function applyTransition({ transition_id, t, subject, related, declared, evidenc
         return refuse(transition_id, "client_status_required",
           { ...base, relationship_state: relationship?.relationship_state ?? null });
       }
+      if (engagement.subject_id !== subject.engagement_id) {
+        return refuse(transition_id, "assignment_not_under_loaded_engagement",
+          { ...base, engagement_id: subject.engagement_id });
+      }
+      if (relationship.subject_id !== engagement.relationship_id) {
+        return refuse(transition_id, "engagement_not_under_loaded_relationship",
+          { ...base, relationship_id: engagement.relationship_id });
+      }
       // Q072: search initiation maps to research OR search, and the mandate says
       // which. Nothing here guesses; an unstated scope refuses.
       const scope = declared.mandate_scope;
       if (scope !== "research" && scope !== "search") {
         return refuse(transition_id, "mandate_scope_required",
           { ...base, permitted_mandate_scopes: ["research", "search"] });
+      }
+      // H2, continued. THE PHASE IS NOT THE ONLY THING THAT CAN REWIND. An
+      // assignment left at `search` while still carrying a committed deal's
+      // fields is exactly the internally inconsistent row this transition must
+      // not produce, so the three commitment fields are checked by name rather
+      // than trusted to have been cleared with the phase.
+      if (subject.pending_deal_id !== null) {
+        return refuse(transition_id, "assignment_holds_pending_deal",
+          { ...base, pending_deal_id: subject.pending_deal_id });
+      }
+      if (subject.selected_property_id !== null || subject.active_lease_draft_target_id !== null) {
+        return refuse(transition_id, "assignment_holds_committed_target",
+          { ...base, selected_property_id: subject.selected_property_id,
+            active_lease_draft_target_id: subject.active_lease_draft_target_id });
+      }
+      // Narrowing an assignment back to research while negotiations are open
+      // would say the search had not started on a record that proves it had.
+      if (scope === "research" && subject.open_negotiation_count > 0) {
+        return refuse(transition_id, "open_negotiations_outlast_research_scope",
+          { ...base, open_negotiation_count: subject.open_negotiation_count });
       }
       return allow(base, {
         reason_id: "search_initiation_opens_assignment",
@@ -1951,7 +2161,35 @@ function applyTransition({ transition_id, t, subject, related, declared, evidenc
           { ...base, open_negotiation_count: assignment.open_negotiation_count });
       }
       const reason = ev("deal_failure_record").record.reason;
+      // M4. A SUPPLIED CLIENT ROW MUST BE THIS DEAL'S CLIENT.
+      //
+      // The relationship used to be echoed straight into the proposed state on
+      // the strength of having been supplied, so cancelling deal D could rewrite
+      // an unrelated client row — byte-identical, but with a new `updated_by` and
+      // `updated_at`, which is a false answer to "who last touched this client".
+      // Two things change. The chain deal → assignment → engagement →
+      // relationship is VERIFIED before the relationship is read at all, and a
+      // relationship outside it refuses rather than being ignored. And even a
+      // verified relationship is NOT written: Q096 asks that the client survive a
+      // failed deal, and the strongest form of surviving is not being touched.
       const relationship = related.relationship ?? null;
+      const engagement = related.engagement ?? null;
+      let relationship_chain_verified = false;
+      if (relationship !== null) {
+        if (engagement === null) {
+          return refuse(transition_id, "relationship_chain_not_loaded",
+            { ...base, missing_related: "engagement" });
+        }
+        if (engagement.subject_id !== assignment.engagement_id ||
+            relationship.subject_id !== engagement.relationship_id) {
+          return refuse(transition_id, "relationship_not_in_verified_chain",
+            { ...base, assignment_engagement_id: assignment.engagement_id,
+              engagement_id: engagement.subject_id,
+              engagement_relationship_id: engagement.relationship_id,
+              relationship_id: relationship.subject_id });
+        }
+        relationship_chain_verified = true;
+      }
       return allow(base, {
         reason_id: "pending_deal_cancelled_assignment_returned",
         coupled_facts: [...t.coupled_facts],
@@ -1962,10 +2200,6 @@ function applyTransition({ transition_id, t, subject, related, declared, evidenc
             selected_property_id: null, active_lease_draft_target_id: null,
             pending_deal_id: null,
           },
-          // The relationship is echoed UNCHANGED rather than omitted, so the
-          // store writes back the same client row it read and a reviewer can see
-          // that losing a property did not touch the client (Q096).
-          ...(relationship === null ? {} : { relationship: { ...relationship } }),
         },
         events: [
           lifecycleEvent("pending_deal_cancelled", "deal", subject.subject_id,
@@ -1976,7 +2210,12 @@ function applyTransition({ transition_id, t, subject, related, declared, evidenc
         extra: {
           cancellation_reason: reason,
           client_relationship_preserved: true,
+          // Reported, and reported as NOT WRITTEN, so the answer says plainly
+          // that the client row this transition did not touch is the client row
+          // it did not touch.
           relationship_state: relationship?.relationship_state ?? null,
+          relationship_chain_verified,
+          relationship_rewritten: false,
           history_preserved: true,
           deal_row_deleted: false,
           negotiation_history_deleted: false,
@@ -2274,10 +2513,12 @@ export function projectSalesforceReference(request) {
 // Q103 — optimistic concurrency, and the one merge that is allowed.
 //
 // AUTOMATIC MERGE IS THE EXCEPTION, NOT THE RULE. It applies only when every
-// edited field is in the routine class AND the two edit sets touch no field in
-// common AND the concurrent change is actually characterized. Anything touching
-// lifecycle, financial, recipient or document fields reconciles VISIBLY with
-// both versions preserved. There is no path in this function that resolves a
+// edited field is in the routine class ACCORDING TO THIS MODULE'S OWN POLICY
+// REGISTRY — never according to a label on the edit — AND the two edit sets
+// touch no field in common AND the concurrent change is actually characterized.
+// Anything touching lifecycle, financial, recipient or document fields
+// reconciles VISIBLY with both versions preserved, and so does anything policy
+// has not classified at all. There is no path in this function that resolves a
 // conflict by taking the later write.
 // ---------------------------------------------------------------------------
 
@@ -2289,10 +2530,79 @@ export const V5_J102_MATERIAL_FIELD_CLASSES = deepFreeze([
   "lifecycle", "financial", "recipient", "document",
 ]);
 
+/**
+ * THE FIELD CLASS IS POLICY, AND POLICY IS NOT A CALLER INPUT.
+ *
+ * `field_class` used to arrive on each edit and was believed. Labelling a
+ * lifecycle or financial field `routine` therefore bought the auto-merge branch,
+ * which is the one branch Q103 admits and the one that silently overwrites the
+ * other partner — the exact outcome the decision exists to prevent. A caller
+ * cannot supply it any more; it is DERIVED here, from this registry, and a field
+ * the registry does not name is UNCLASSIFIED rather than routine.
+ *
+ * WHAT IS IN THE REGISTRY, and why it stops where it does. Every field this
+ * module itself defines — the state axes, the structural ids and the money axes
+ * — is classified, because this slice owns their meaning. NOTHING ELSE IS, and
+ * the omission is deliberate: the customer-facing editable fields of a client,
+ * an assignment or a deal record are not this module's to classify, and guessing
+ * that (say) a phone number is routine would be inventing the very policy this
+ * registry exists to hold. Those fields reconcile visibly, and the answer names
+ * them as unclassified rather than pretending they were judged.
+ *
+ * THE ROUTINE CLASS IS DELIBERATELY EMPTY TODAY. The auto-merge branch below is
+ * kept, because it is what Q103 settles and it becomes reachable the moment a
+ * policy owner registers a routine field — but on today's registry no edit set
+ * can reach it, and the module says so rather than leaving a reader to work it
+ * out from the absence of entries.
+ */
+export const V5_J102_FIELD_CLASS_REGISTRY = deepFreeze({
+  // Identity and structure.
+  subject_kind: "lifecycle", subject_id: "lifecycle",
+  relationship_id: "lifecycle", engagement_id: "lifecycle", assignment_id: "lifecycle",
+  property_id: "lifecycle",
+  // Q069 / Q077 — the client and the engagement.
+  relationship_state: "lifecycle", active_engagement_count: "lifecycle",
+  engagement_state: "lifecycle", representation_basis: "lifecycle",
+  effective_from: "lifecycle", effective_to: "lifecycle",
+  // Q080 / Q095 — the assignment and its negotiations.
+  assignment_phase: "lifecycle", open_negotiation_count: "lifecycle",
+  selected_property_id: "lifecycle", active_lease_draft_target_id: "lifecycle",
+  pending_deal_id: "lifecycle", multi_target_exception_ref: "lifecycle",
+  negotiation_state: "lifecycle",
+  // Q080 / Q094 — the deal's eight axes and its two recorded facts.
+  instrument_kind: "lifecycle", deal_state: "lifecycle", execution_state: "lifecycle",
+  diligence_state: "lifecycle", closing_state: "lifecycle", closing_date: "lifecycle",
+  cancellation_reason: "lifecycle", completion_state: "lifecycle",
+  commission_agreement_state: "financial", invoice_state: "financial",
+  payment_state: "financial",
+  // The document references a lifecycle record carries.
+  supporting_document_id: "document", document_id: "document",
+  content_digest: "document", version_no: "document",
+});
+
+/** The class of one edited field, or null when policy has not classified it. */
+export function v5J102FieldClass(field) {
+  return Object.prototype.hasOwnProperty.call(V5_J102_FIELD_CLASS_REGISTRY, field)
+    ? V5_J102_FIELD_CLASS_REGISTRY[field] : null;
+}
+
+/**
+ * The fact this registry does not hold, named the way every other missing fact
+ * in this slice is named rather than left as an empty object nobody notices.
+ */
+export const V5_J102_UNCLASSIFIED_FIELD_POLICY = deepFreeze({
+  fact: "policy_owned_classification_of_customer_editable_fields",
+  why: "Q103's auto-merge is admitted only for ROUTINE fields, and only the owner of a field's meaning can say that it is routine. This module classifies the lifecycle, financial and document fields it defines itself; it classifies no customer-facing field of a client, assignment or deal record, and it does not guess. An edit naming an unclassified field reconciles visibly and is reported as unclassified.",
+  produced_by: "not_produced_by_this_slice",
+  routine_fields_registered: 0,
+});
+
 const MERGE_KEYS = Object.freeze([
   "tenant", "base_version_digest", "current_version_digest", "incoming", "concurrent", "actor",
 ]);
-const EDIT_KEYS = Object.freeze(["field", "field_class", "value_digest", "edited_by", "edited_at"]);
+// `field_class` IS NOT HERE, and its absence is the fix. A caller naming it now
+// gets `unknown_field` rather than the merge branch it was asking for.
+const EDIT_KEYS = Object.freeze(["field", "value_digest", "edited_by", "edited_at"]);
 
 function assertEdits(value, path) {
   assertArray(value, path, { min: 1, max: 256 });
@@ -2310,8 +2620,8 @@ function assertEdits(value, path) {
     seen.set(field, i);
     return {
       field,
-      field_class: assertEnum(raw.field_class, V5_J102_FIELD_CLASSES, `${p}.field_class`,
-        "unknown_field_class"),
+      // DERIVED, never read off the edit.
+      field_class: v5J102FieldClass(field),
       value_digest: assertDigestRef(raw.value_digest, `${p}.value_digest`),
       edited_by: assertExternalIdent(raw.edited_by, `${p}.edited_by`, { maxLength: 128 }),
       edited_at: nullableInstant(raw.edited_at, `${p}.edited_at`),
@@ -2351,7 +2661,7 @@ export function evaluateConcurrentEdit(request) {
   // No concurrent movement at all: the ordinary optimistic path.
   if (base_version_digest === current_version_digest) {
     return deepFreeze({ decision: "allow", reason_id: "no_concurrent_movement", ...base,
-      merged: false, auto_merged_fields: [], overlapping_fields: [],
+      merged: false, auto_merged_fields: [], overlapping_fields: [], unclassified_fields: [],
       reconciliation_item: null, preserved_versions: [] });
   }
 
@@ -2361,6 +2671,8 @@ export function evaluateConcurrentEdit(request) {
     .map(e => e.field).sort();
   const materialConcurrent = concurrent.filter(e => V5_J102_MATERIAL_FIELD_CLASSES.includes(e.field_class))
     .map(e => e.field).sort();
+  const unclassified = [...new Set([...incoming, ...concurrent]
+    .filter(e => e.field_class === null).map(e => e.field))].sort();
 
   // A base that no longer matches current, with NOTHING known about what moved,
   // is not a demonstrably non-overlapping edit. It reconciles rather than
@@ -2369,6 +2681,8 @@ export function evaluateConcurrentEdit(request) {
     return deepFreeze({
       decision: "reconcile", reason_id: "concurrent_change_not_characterized", ...base,
       merged: false, auto_merged_fields: [], overlapping_fields: [],
+      unclassified_fields: [...new Set(incoming.filter(e => e.field_class === null)
+        .map(e => e.field))].sort(),
       reconciliation_item: reconciliationItem({
         conflict_kind: "uncharacterized_concurrent_change",
         base_version_digest, current_version_digest, incoming, concurrent, actor,
@@ -2382,35 +2696,51 @@ export function evaluateConcurrentEdit(request) {
     ? "overlapping_field_edit"
     : materialIncoming.length > 0 || materialConcurrent.length > 0
       ? "material_class_edit"
-      : null;
+      // An edit policy has not classified is not a routine edit. It is an edit
+      // nobody has said anything about, and merging on that silence is the same
+      // last-writer-wins outcome reached by a longer route.
+      : unclassified.length > 0
+        ? "unclassified_field_edit"
+        : null;
 
   if (conflict_kind !== null) {
     return deepFreeze({
       decision: "reconcile",
       reason_id: overlap.length > 0
         ? "overlapping_edits_require_reconciliation"
-        : "material_class_edits_require_reconciliation",
+        : materialIncoming.length > 0 || materialConcurrent.length > 0
+          ? "material_class_edits_require_reconciliation"
+          : "field_classification_not_established",
       ...base,
       merged: false, auto_merged_fields: [],
       overlapping_fields: overlap,
       material_incoming_fields: materialIncoming,
       material_concurrent_fields: materialConcurrent,
+      unclassified_fields: unclassified,
       reconciliation_item: reconciliationItem({
         conflict_kind, base_version_digest, current_version_digest, incoming, concurrent, actor,
       }),
       preserved_versions: ["base", "current", "incoming"],
       resolved_by_machine: false,
+      ...(unclassified.length > 0
+        ? { missing_fact: V5_J102_UNCLASSIFIED_FIELD_POLICY.fact,
+            missing_fact_reason: V5_J102_UNCLASSIFIED_FIELD_POLICY.why,
+            produced_by: V5_J102_UNCLASSIFIED_FIELD_POLICY.produced_by }
+        : {}),
     });
   }
 
-  // Demonstrably non-overlapping AND entirely routine, against an authenticated
-  // base and the current version the database actually holds. This is the one
-  // case Q103 admits.
+  // Demonstrably non-overlapping, POLICY-CLASSIFIED and entirely routine, against
+  // an authenticated base and the current version the database actually holds.
+  // This is the one case Q103 admits — and on today's registry, which registers
+  // no routine field, nothing reaches it. That is the conservative half of the
+  // fix rather than an oversight.
   return deepFreeze({
     decision: "allow", reason_id: "nonoverlapping_routine_edits_auto_merged", ...base,
     merged: true,
     auto_merged_fields: incoming.map(e => e.field).sort(),
     overlapping_fields: [],
+    unclassified_fields: [],
     reconciliation_item: null,
     preserved_versions: ["base", "current", "incoming"],
   });
@@ -2851,6 +3181,8 @@ export function v5J102PolicyPreimage() {
     evidence_kinds: V5_J102_EVIDENCE_KINDS.map(kind => ({
       evidence_kind: kind,
       source: EVIDENCE_KIND_TABLE[kind].source,
+      binds_subject_kind: EVIDENCE_KIND_TABLE[kind].binds_subject_kind ?? null,
+      requires_author_class: EVIDENCE_KIND_TABLE[kind].requires_author_class ?? null,
       document_states: EVIDENCE_KIND_TABLE[kind].document_states ?? null,
       record_kind: EVIDENCE_KIND_TABLE[kind].record_kind ?? null,
       approval_kind: EVIDENCE_KIND_TABLE[kind].approval_kind ?? null,
@@ -2862,9 +3194,15 @@ export function v5J102PolicyPreimage() {
       permitted_actor_classes: [...EVIDENCE_KIND_TABLE[kind].permitted_actor_classes],
     })),
     refused_evidence_sources: [...V5_J102_REFUSED_EVIDENCE_SOURCES],
+    subject_binding_sources: [...V5_J102_SUBJECT_BINDING_SOURCES],
+    partner_authored_record_kinds: [...V5_J102_PARTNER_AUTHORED_RECORD_KINDS],
     transitions: V5_J102_TRANSITION_IDS.map(id => v5J102TransitionContract(id)),
     field_classes: [...V5_J102_FIELD_CLASSES],
     material_field_classes: [...V5_J102_MATERIAL_FIELD_CLASSES],
+    field_class_registry: Object.fromEntries(
+      Object.keys(V5_J102_FIELD_CLASS_REGISTRY).sort()
+        .map(field => [field, V5_J102_FIELD_CLASS_REGISTRY[field]])),
+    caller_supplied_field_class_admitted: false,
     salesforce: {
       link_targets: [...V5_J102_SALESFORCE_LINK_TARGETS],
       phase_label_is_doctorcre_state: false,
@@ -2919,6 +3257,16 @@ for (const [transition_id, t] of Object.entries(TRANSITIONS)) {
         throw new V5J102Error("contract_self_check_failed",
           `${transition_id} requires unregistered evidence kind "${kind}"`);
       }
+      // BLOCK-2, made structural. Every evidence kind a transition consumes must
+      // bind to the SUBJECT KIND that transition moves, or the binding check in
+      // the evaluator could never succeed and the transition would be dead —
+      // which is a worse failure than the unbound one it replaces, and a silent
+      // one. A new evidence kind that forgets its binding fails at import.
+      if (EVIDENCE_KIND_TABLE[kind].binds_subject_kind !== t.subject_kind) {
+        throw new V5J102Error("contract_self_check_failed",
+          `${transition_id} moves a ${t.subject_kind} but its evidence kind "${kind}" binds to ` +
+          `"${EVIDENCE_KIND_TABLE[kind].binds_subject_kind}"`);
+      }
     }
   }
   for (const id of t.decision_refs) {
@@ -2946,6 +3294,42 @@ for (const [transition_id, t] of Object.entries(TRANSITIONS)) {
       }
     }
   }
+}
+
+for (const [kind, contract] of Object.entries(EVIDENCE_KIND_TABLE)) {
+  if (!Object.prototype.hasOwnProperty.call(contract, "binds_subject_kind")) {
+    throw new V5J102Error("contract_self_check_failed",
+      `evidence kind "${kind}" declares no subject binding; an unbound evidence kind is the BLOCK-2 defect`);
+  }
+  if (contract.binds_subject_kind !== null &&
+      !V5_J102_SUBJECT_KINDS.includes(contract.binds_subject_kind)) {
+    throw new V5J102Error("contract_self_check_failed",
+      `evidence kind "${kind}" binds to unregistered subject kind "${contract.binds_subject_kind}"`);
+  }
+  if (contract.requires_author_class !== undefined) {
+    if (!V5_J102_ACTOR_CLASSES.includes(contract.requires_author_class)) {
+      throw new V5J102Error("contract_self_check_failed",
+        `evidence kind "${kind}" requires unregistered author class "${contract.requires_author_class}"`);
+    }
+    // An author requirement wider than the performer requirement would be a
+    // rule that reads as a restriction and is not one.
+    if (!contract.permitted_actor_classes.includes(contract.requires_author_class)) {
+      throw new V5J102Error("contract_self_check_failed",
+        `evidence kind "${kind}" requires an author class its own permitted actors exclude`);
+    }
+  }
+}
+
+for (const [field, field_class] of Object.entries(V5_J102_FIELD_CLASS_REGISTRY)) {
+  if (!V5_J102_FIELD_CLASSES.includes(field_class)) {
+    throw new V5J102Error("contract_self_check_failed",
+      `the field-class registry gives "${field}" the unregistered class "${field_class}"`);
+  }
+}
+if (V5_J102_UNCLASSIFIED_FIELD_POLICY.routine_fields_registered !==
+    Object.values(V5_J102_FIELD_CLASS_REGISTRY).filter(c => c === "routine").length) {
+  throw new V5J102Error("contract_self_check_failed",
+    "the unclassified-field policy no longer describes the registry's routine entries");
 }
 
 /**
