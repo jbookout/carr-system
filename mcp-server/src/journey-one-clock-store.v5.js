@@ -442,7 +442,7 @@ export const JOURNEY_ONE_CLOCK_APPEND_INVARIANTS = Object.freeze([
   // through one definer function. "Refusing an UPDATE" is a thing only the
   // database can do, so only the database claims it.
   Object.freeze({ id: "j1_clock_rows_are_append_only", enforced_in: Object.freeze(["record_layer"]),
-    statement: "Update, delete and truncate are refused on every relation of this rail. There is no reset, no rebase and no replacement. Enforced only at the database: this module has no mutation path to refuse." }),
+    statement: "Update, delete and truncate are refused on every relation of this rail, by TWO triggers per relation: a row-level one for update and delete, and a statement-level one for truncate, which a row-level trigger never sees and which cannot be revoked from the table owner. There is no reset, no rebase and no replacement. Enforced only at the database: this module has no mutation path to refuse." }),
 ]);
 
 export const JOURNEY_ONE_CLOCK_APPEND_INVARIANT_IDS = Object.freeze(
@@ -911,9 +911,11 @@ export function assertJourneyOneClockHistoryIntact(state, tenant = ORGANIZATION_
   // Q008.D1 forbids CLAIMING DEADLINE SUCCESS once a miss is durably recorded.
   // The kernel refuses this shape under this very name a few lines below, and
   // the record layer states it in its own voice as well: this is one of the
-  // fourteen shared append invariants, it has a home in the SQL guard, and an
-  // id that appeared only in a declaration would be a rule with no enforcement
-  // to point at. The two cannot disagree — the same condition, the same name.
+  // invariants JOURNEY_ONE_CLOCK_APPEND_INVARIANTS marks `enforced_in: BOTH`, it
+  // has a home in the SQL guard, and an id that appeared only in a declaration
+  // would be a rule with no enforcement to point at. The two cannot disagree —
+  // the same condition, the same name. The table is the count; the unit suite
+  // reads `enforced_in` rather than this sentence.
   if (rebuilt.miss_at !== null && rebuilt.status === "completed_on_time") {
     refuse("deadline_success_claimed_after_recorded_miss",
       "a revision carrying a recorded miss may not carry status completed_on_time",
@@ -1513,6 +1515,30 @@ export function createJourneyOneClockStore({
               { invariant: "j1_clock_scope_sealed_at_creation", clock_key: clockKey,
                 bound_clock_scope_key: boundScope.clock_scope_key,
                 supplied_clock_scope_key: scope.clock_scope_key });
+          }
+          // THE LABEL SEAL, HERE AS WELL AS IN THE JOURNAL. Both bindings were
+          // just read, and the label is on each of them. The reference journal
+          // refuses a relabelled scope inside bindScope, but on the DURABLE path
+          // that refusal lives in ops.j1_clock_bind_scope — SQL that has never
+          // run — so without this clause the store would pass its whole read,
+          // its compare-and-swap and its append-only diff before meeting the
+          // seal, and would meet it in the one home this rail cannot execute.
+          // The label is not identity — the key ignores it, which is what makes
+          // a relabelled scope the SAME scope — and precisely because it is not
+          // identity the record must not end up holding two names for one scope.
+          // `!== undefined` so a journal that does not carry the label back
+          // cannot false-refuse a legitimate append; both journals here do.
+          for (const row of [boundClock, boundScope]) {
+            if (row && row.clock_scope_key === scope.clock_scope_key &&
+                row.clock_scope_ref !== undefined &&
+                row.clock_scope_ref !== scope.clock_scope_ref) {
+              refuse("clock_scope_label_changed",
+                "this authoritative scope was bound under another label; the label is provenance, is recorded once, and is never rewritten by a later write",
+                { invariant: "j1_clock_scope_label_is_not_identity",
+                  clock_scope_key: scope.clock_scope_key,
+                  bound_clock_scope_ref: row.clock_scope_ref,
+                  supplied_clock_scope_ref: scope.clock_scope_ref });
+            }
           }
           // THE COMPARE-AND-SWAP. An explicit null creates and succeeds only
           // against an empty clock; anything else must be the exact head.

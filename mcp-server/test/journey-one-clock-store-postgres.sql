@@ -58,8 +58,13 @@
 --     The label a scope was bound under is recorded once and a later write may
 --     not replace it.
 --   * A legacy v1 state schema is refused by name rather than migrated.
---   * UPDATE and DELETE are refused everywhere (append-only), and a child row
---     cannot be added to a revision a later revision already seals.
+--   * UPDATE, DELETE and TRUNCATE are refused everywhere (append-only), and a
+--     child row cannot be added to a revision a later revision already seals.
+--     The truncate half is the only thing that can show the statement-level
+--     trigger exists: a row-level trigger never sees TRUNCATE, and the `revoke`
+--     does not bind the table owner. The attempts need the privilege they test,
+--     so they run as the table owner and SKIP with a notice otherwise; that both
+--     triggers exist is asserted from pg_trigger on every run.
 --   * Direct INSERT is executable by none of the runtime role bundles, and the
 --     append function reaches the writer and authority bundles only.
 --   * Every function the module's postgres journal calls exists with the exact
@@ -138,6 +143,13 @@ declare
   v_signature       text;
   v_role            text;
   v_relation        text;
+  -- Whether THIS role can even reach the append-only triggers. See the group
+  -- itself: update, delete and truncate are revoked from every runtime bundle,
+  -- so a non-owner meets insufficient-privilege before any trigger fires.
+  v_may_attempt_dml boolean := true;
+  v_relations       constant text[] := array[
+                      'j1_clock', 'j1_clock_scope_binding', 'j1_clock_revision',
+                      'j1_clock_revision_pause_interval', 'j1_clock_revision_event'];
 
   -- The synthetic clock. Every digest is an obvious fixture value; none of them
   -- names a real receipt, and no real receipt exists to name.
@@ -896,7 +908,30 @@ begin
   -- APPEND-ONLY, THE FREEZE, AND TAMPER DETECTION.
   -- =========================================================================
 
-  -- APPEND-ONLY: update and delete are refused on every relation of this rail.
+  -- APPEND-ONLY: update, delete and truncate are refused on every relation of
+  -- this rail.
+  --
+  -- THE ATTEMPTS BELOW NEED THE PRIVILEGE THEY ARE TESTING. update, delete and
+  -- truncate are revoked from every runtime bundle at the foot of the candidate
+  -- SQL, so a run as `carr_writer` fails each one with insufficient privilege
+  -- (42501) BEFORE the trigger fires; the handlers match on the message text,
+  -- would re-raise, and the whole proof would abort having proved nothing about
+  -- append-only. The table owner is the intended mode -- has_table_privilege
+  -- reports true for an owner with no explicit grant -- so a role that cannot
+  -- reach the triggers SKIPS the attempts with a notice instead of turning an
+  -- environment fact into a false negative. The structural half, that both
+  -- triggers exist, needs no privilege and runs either way.
+  foreach v_relation in array v_relations loop
+    if not (has_table_privilege(current_user, 'ops.' || v_relation, 'UPDATE')
+        and has_table_privilege(current_user, 'ops.' || v_relation, 'DELETE')
+        and has_table_privilege(current_user, 'ops.' || v_relation, 'TRUNCATE')) then
+      v_may_attempt_dml := false;
+    end if;
+  end loop;
+  if not v_may_attempt_dml then
+    raise notice 'SKIPPED: % holds no UPDATE/DELETE/TRUNCATE on the Journey 1 clock relations, so the append-only negatives would fail with insufficient privilege before reaching the trigger and would prove nothing. Run this fixture as the table owner to exercise them.',
+      current_user;
+  else
   begin
     update ops.j1_clock_revision set status = 'completed_on_time' where id = v_revision1;
     raise exception 'NEGATIVE FAILED: a stored revision was updated';
@@ -929,6 +964,39 @@ begin
   exception when others then
     if sqlerrm not like '%append-only%' then raise; end if;
   end;
+  -- TRUNCATE IS A STATEMENT EVENT AND A ROW-LEVEL TRIGGER NEVER SEES IT. The
+  -- header's claim that truncate is refused everywhere on this rail was carried
+  -- by `revoke` alone, which does not bind the table owner; the second,
+  -- statement-level trigger is what makes it true, and an attempted truncate is
+  -- the only thing that can show it. CASCADE because the child tables reference
+  -- the revision, and the first refusal is the point either way.
+  foreach v_relation in array v_relations loop
+    begin
+      execute format('truncate ops.%I cascade', v_relation);
+      raise exception 'NEGATIVE FAILED: truncate was accepted on ops.%', v_relation;
+    exception when others then
+      if sqlerrm not like '%append-only%' then raise; end if;
+    end;
+  end loop;
+  end if;
+  -- THE STRUCTURAL HALF, NOT GATED ON THE ROLE: reading pg_trigger needs no
+  -- privilege on the relation, so whether each trigger EXISTS is asserted for
+  -- every run, including one that had to skip the attempts above.
+  foreach v_relation in array v_relations loop
+    if not exists (select 1 from pg_trigger t join pg_class c on c.oid = t.tgrelid
+                    join pg_namespace n on n.oid = c.relnamespace
+                   where n.nspname = 'ops' and c.relname = v_relation
+                     and t.tgname = v_relation || '_no_truncate' and not t.tgisinternal) then
+      raise exception 'APPEND-ONLY: ops.% has no statement-level truncate trigger, so the claim rests on a revoke the owner is not bound by',
+        v_relation;
+    end if;
+    if not exists (select 1 from pg_trigger t join pg_class c on c.oid = t.tgrelid
+                    join pg_namespace n on n.oid = c.relnamespace
+                   where n.nspname = 'ops' and c.relname = v_relation
+                     and t.tgname = v_relation || '_append_only' and not t.tgisinternal) then
+      raise exception 'APPEND-ONLY: ops.% has no row-level update/delete trigger', v_relation;
+    end if;
+  end loop;
 
   -- THE FREEZE: a hashed child row cannot be added to a revision that a later
   -- revision already seals, or the digest would stop covering the rows.
@@ -971,9 +1039,13 @@ begin
     foreach v_relation in array array['ops.j1_clock', 'ops.j1_clock_scope_binding',
       'ops.j1_clock_revision',
       'ops.j1_clock_revision_pause_interval', 'ops.j1_clock_revision_event'] loop
+      -- TRUNCATE IS ASSERTED HERE TOO, because it is a first-class claim of this
+      -- rail with its own statement-level trigger. The revoke is the half that
+      -- binds a runtime bundle; the trigger is the half that binds the owner.
       if has_table_privilege(v_role, v_relation, 'INSERT')
          or has_table_privilege(v_role, v_relation, 'UPDATE')
-         or has_table_privilege(v_role, v_relation, 'DELETE') then
+         or has_table_privilege(v_role, v_relation, 'DELETE')
+         or has_table_privilege(v_role, v_relation, 'TRUNCATE') then
         raise exception 'GRANTS: % holds direct DML on %', v_role, v_relation;
       end if;
     end loop;

@@ -36,15 +36,23 @@ import {
 } from "../src/journey-one-clock.v5.js";
 import { journeyOneClockScopeKey } from "../src/journey-one-clock-store.v5.js";
 import {
+  BENCHMARK_COST_VARIANCE_THRESHOLDS, BENCHMARK_DEADLINE_CONTRACT, BENCHMARK_SLO_THRESHOLDS,
+  MINIMUM_SAMPLES_PER_CELL, MINIMUM_WARMUP_RUNS, P95_AGGREGATION_METHOD,
+  WORKLOAD_WEIGHT_TOTAL_BASIS_POINTS, benchmarkPayloadDigest,
+} from "../src/benchmark-minimum.v5.js";
+import {
   JOURNEY_ONE_MINIMUM_ACCEPTED_POLICY_FIELDS, JOURNEY_ONE_MINIMUM_ACCEPTED_SOURCE_FIELDS,
   JOURNEY_ONE_MINIMUM_ADMISSION_FIELDS, JOURNEY_ONE_MINIMUM_ADMISSION_INVARIANT_IDS,
+  JOURNEY_ONE_MINIMUM_BENCHMARK_DERIVED_SOURCE_FIELDS,
   JOURNEY_ONE_MINIMUM_COMPOSE_FIELDS, JOURNEY_ONE_MINIMUM_INPUT_AUTHORITY_REQUIREMENT,
   JOURNEY_ONE_MINIMUM_INPUT_STORE_CANNOT_PROVE, JOURNEY_ONE_MINIMUM_INVENTORY_READBACK_SCHEMA,
   JOURNEY_ONE_MINIMUM_PROJECTION_INPUTS_SCHEMA, JOURNEY_ONE_MINIMUM_RECEIPT_IDENTITY_SEATS,
+  JOURNEY_ONE_MINIMUM_TRUSTED_POLICY_SOURCE_FIELDS,
   createEphemeralJourneyOneMinimumAdmissionJournal, createJourneyOneClockMinimumInputStore,
   createJourneyOneClockProjectionComposer, createPostgresJourneyOneMinimumAdmissionJournal,
   journeyOneClockMinimumInputStoreIntegrationRequirements, journeyOneClockMinimumInputStoreTools,
-  journeyOneMinimumAdmissionDigest, journeyOneMinimumReceiptDigest,
+  journeyOneMinimumAdmissionDigest, journeyOneMinimumBenchmarkAcceptedSources,
+  journeyOneMinimumReceiptDigest,
 } from "../src/journey-one-clock-input-store.v5.js";
 
 // --- fixtures ---------------------------------------------------------------
@@ -124,14 +132,71 @@ const POLICY = Object.freeze({
   maximum_minimum_receipt_ttl_ms: MINIMUM_TTL_POLICY,
   minimum_environment_manifest_digest: D(4),
 });
-/** The remaining accepted source bindings the composer is constructed with. */
+
+/**
+ * THE ACCEPTED BENCHMARK MANIFEST THIS SUITE'S PROJECTIONS ARE ABOUT.
+ *
+ * It is a real, valid benchmark-manifest.v1 for this suite's own accepted scope,
+ * composed by this file exactly as a trusted integration composes a real one —
+ * and it is SYNTHETIC. validateBenchmarkManifest reads the shape of an
+ * acceptance envelope and authenticates nobody, so nothing below is evidence
+ * that a verified partner accepted anything.
+ */
+const BENCHMARK_ACCEPTED_AT = iso(ORIGIN_MS - HOUR);
+function benchmarkPayload() {
+  return {
+    subject_digest: D(1), candidate_digest: D(2), policy_digest: D(3),
+    capacity_profiles: ["baseline"],
+    workload_mix: [{ workload_id: "search",
+      weight_basis_points: WORKLOAD_WEIGHT_TOTAL_BASIS_POINTS, operation_mix_digest: D(10) }],
+    request_size_distribution: [{ percentile: 50, bytes: 2048 }],
+    concurrency_levels: [1],
+    arrival_patterns: ["steady"],
+    routes: ["/deals"],
+    browsers: [{ name: "chrome", version: "141", build: "141.0.1" }],
+    runtime_versions: ["node-24"],
+    device_profiles: ["macbook-pro-m3"],
+    hardware_profiles: ["m3-16gb"],
+    network_profiles: ["broadband"],
+    cache_states: ["cold", "warm"],
+    samples_per_cell: MINIMUM_SAMPLES_PER_CELL,
+    warmup_runs: MINIMUM_WARMUP_RUNS,
+    p95_aggregation_method: P95_AGGREGATION_METHOD,
+    outlier_rule: "discard samples above five times the cell median",
+    acknowledgement_endpoints: ["/commands/ack"],
+    evaluator_identities: [I("bench-evaluator")],
+    comparator_versions: ["comparator-1.4.0"],
+    slo_thresholds: { ...BENCHMARK_SLO_THRESHOLDS },
+    cost_expectation_matrix_digest: D(12),
+    cost_variance_thresholds: { ...BENCHMARK_COST_VARIANCE_THRESHOLDS },
+    deadline_contract: copy(BENCHMARK_DEADLINE_CONTRACT),
+  };
+}
+function benchmarkManifest(overrides = {}) {
+  const body = benchmarkPayload();
+  return { ...copy(body), benchmark_manifest_digest: benchmarkPayloadDigest(body),
+    accepted_by_identity: I("joe"), accepted_at: BENCHMARK_ACCEPTED_AT,
+    status: "accepted", ...overrides };
+}
+/**
+ * The five accepted source bindings the composer is constructed with. THE THREE
+ * ACCEPTANCE-ENVELOPE FIELDS ARE DERIVED from the manifest above rather than
+ * written out as literals; the two policy fields appear on no benchmark manifest
+ * at all, so deriving them would mint a binding and they stay trusted inputs.
+ */
 const SOURCES = Object.freeze({
-  benchmark_accepted_at: iso(ORIGIN_MS - HOUR),
-  benchmark_accepted_by_identity: I("joe"),
-  benchmark_manifest_digest: D(8),
+  ...journeyOneMinimumBenchmarkAcceptedSources(benchmarkManifest()),
   maximum_completion_receipt_ttl_ms: COMPLETION_TTL_POLICY,
   production_environment_manifest_digest: D(6),
 });
+/**
+ * Every composer in this suite is constructed with the accepted manifest its
+ * envelope was derived from, because the constructor requires it.
+ */
+function composerFor(store, overrides = {}) {
+  return createJourneyOneClockProjectionComposer({
+    store, accepted_sources: SOURCES, benchmark_manifest: benchmarkManifest(), ...overrides });
+}
 
 const ACTOR = { slug: "claude", human: false, sponsoring_human_slug: "joe" };
 let keySerial = 0;
@@ -176,7 +241,7 @@ function harness() {
 }
 /** Admit one receipt, compose the projection over the STORED rows, evaluate it. */
 async function evaluateStored(store, compose = {}) {
-  const composer = createJourneyOneClockProjectionComposer({ store, accepted_sources: SOURCES });
+  const composer = composerFor(store);
   const composed = await composer.compose({ as_of: ORIGIN, completion: null,
     completion_expectation: copy(EXPECTATION), pauses: [], amendments: [], history: null,
     ...compose });
@@ -188,6 +253,31 @@ const CANDIDATE_SQL = readFileSync(
   "utf8");
 const PROOF_SQL = readFileSync(
   fileURLToPath(new URL("./journey-one-clock-input-store-postgres.sql", import.meta.url)), "utf8");
+
+/**
+ * The TOP-LEVEL arguments of one SQL call, split on commas at depth one, so a
+ * reader can assert what a jsonb_build_object EMITS rather than what the text
+ * around it mentions. Nested calls keep their own commas; string literals in the
+ * text this is used on contain none.
+ */
+function topLevelArguments(text, from) {
+  const args = [];
+  let depth = 0, current = "";
+  for (let i = text.indexOf("(", from); i < text.length; i += 1) {
+    const character = text[i];
+    if (character === "(") {
+      depth += 1;
+      if (depth === 1) continue;   // the call's own opening parenthesis
+    } else if (character === ")") {
+      depth -= 1;
+      if (depth === 0) { args.push(current.trim()); break; }
+    } else if (character === "," && depth === 1) {
+      args.push(current.trim()); current = ""; continue;
+    }
+    current += character;
+  }
+  return args;
+}
 
 // --- 1. a valid admission, read back, and evaluated by the real kernel -------
 
@@ -440,7 +530,7 @@ test("REGRESSION: a failed attempt first does not let a later same-instant lower
   const row1 = await admit(store, higher, row0.admission_digest);
 
   // The kernel's origin is the T1 row, NOT the first row in the ledger.
-  const composer = createJourneyOneClockProjectionComposer({ store, accepted_sources: SOURCES });
+  const composer = composerFor(store);
   const evaluator = harness();
   const base = { completion: null, completion_expectation: copy(EXPECTATION),
     pauses: [], amendments: [], history: null };
@@ -624,8 +714,7 @@ test("a receipt the kernel could not READ is refused at admission, not stored", 
   // an inventory carrying one is not skipped over, it is unreadable.
   const clean = newStore();
   await admit(clean.store, minimum(), null);
-  const composer = createJourneyOneClockProjectionComposer({
-    store: clean.store, accepted_sources: SOURCES });
+  const composer = composerFor(clean.store);
   const poisoned = copy((await composer.compose({ as_of: ORIGIN, completion: null,
     completion_expectation: copy(EXPECTATION), pauses: [], amendments: [],
     history: null })).projection);
@@ -675,7 +764,7 @@ test("seat INDEPENDENCE is not re-judged here, and the rail says so rather than 
   assert.ok(disclosure, "seat independence is not disclosed");
   assert.ok(disclosure.includes("self_attestation"));
   // And the kernel is what refuses it, by that name, over this stored row.
-  const composer = createJourneyOneClockProjectionComposer({ store, accepted_sources: SOURCES });
+  const composer = composerFor(store);
   const projection = (await composer.compose({ as_of: ORIGIN, completion: null,
     completion_expectation: copy(EXPECTATION), pauses: [], amendments: [],
     history: null })).projection;
@@ -739,7 +828,7 @@ test("the stored inventory is byte-identical across running, missed and late com
   const opening = await admit(store, minimum(), null);
   const before = await store.read();
 
-  const composer = createJourneyOneClockProjectionComposer({ store, accepted_sources: SOURCES });
+  const composer = composerFor(store);
   const evaluator = harness();
   const compose = async args => (await composer.compose({ completion: null,
     completion_expectation: copy(EXPECTATION), pauses: [], amendments: [], history: null,
@@ -868,7 +957,7 @@ test("a tampered readback refuses rather than serving a shorter or edited invent
 test("the composer refuses an as_of the kernel could not read, and an incomplete source set", async () => {
   const { store } = newStore();
   await admit(store, minimum(), null);
-  const composer = createJourneyOneClockProjectionComposer({ store, accepted_sources: SOURCES });
+  const composer = composerFor(store);
 
   const early = await refusal(composer.compose({ as_of: iso(ORIGIN_MS - HOUR), completion: null,
     completion_expectation: null, pauses: [], amendments: [], history: null }));
@@ -880,11 +969,10 @@ test("the composer refuses an as_of the kernel could not read, and an incomplete
 
   const incomplete = { ...SOURCES };
   delete incomplete.benchmark_manifest_digest;
-  assert.throws(() => createJourneyOneClockProjectionComposer({
-    store, accepted_sources: incomplete }), error => error.code === "closed_shape");
+  assert.throws(() => composerFor(store, { accepted_sources: incomplete }),
+    error => error.code === "closed_shape");
 
-  const empty = createJourneyOneClockProjectionComposer({
-    store: newStore().store, accepted_sources: SOURCES });
+  const empty = composerFor(newStore().store);
   const none = await refusal(empty.compose({ as_of: ORIGIN, completion: null,
     completion_expectation: null, pauses: [], amendments: [], history: null }));
   assert.equal(none.code, "minimum_inventory_unavailable");
@@ -896,7 +984,7 @@ test("a supplied history is read by the kernel's own reader, under the kernel's 
   const { result } = await evaluateStored(store);
   const broken = copy(result.state);
   broken.events = [];
-  const composer = createJourneyOneClockProjectionComposer({ store, accepted_sources: SOURCES });
+  const composer = composerFor(store);
   const error = await refusal(composer.compose({ as_of: ORIGIN, completion: null,
     completion_expectation: copy(EXPECTATION), pauses: [], amendments: [], history: broken }));
   assert.equal(error.name, "JourneyOneClockError");
@@ -1139,6 +1227,68 @@ test("the SQL readback answers in the module's own readback schema", () => {
     "ops.j1_minimum_history must name the schema version the module's read() returns");
 });
 
+test("the SQL exists:false branch carries the module's exists:false key set exactly", async () => {
+  // The claim in the SQL header is PARITY, and five of six keys is not parity:
+  // the branch used to return gate_admitted_by_record_layer, which read() does
+  // not carry on an absent inventory, and to omit `effects`, which it does. An
+  // overstated parity claim is worse than none, because it is the reason nobody
+  // re-checks. This reads the module's own answer and the SQL's own text.
+  const absent = await newStore().store.read();
+  assert.equal(absent.exists, false);
+  assert.deepEqual(Object.keys(absent).sort(), ["clock_scope_key", "effects", "exists",
+    "record_layer_cannot_prove", "schema_version", "tenant"]);
+  assert.equal(Object.hasOwn(absent, "gate_admitted_by_record_layer"), false);
+
+  // The `if not found` branch of ops.j1_minimum_history, read out of the file --
+  // WITH ITS COMMENTS STRIPPED, because what is under test is the object the
+  // branch EMITS and not the prose beside it. A source-text scan that reads a
+  // comment as an emitted field is the same defect one layer up: it reports on
+  // what the file says rather than on what it does.
+  const branch = CANDIDATE_SQL.slice(
+    CANDIDATE_SQL.indexOf("  if not found then",
+      CANDIDATE_SQL.indexOf("create or replace function ops.j1_minimum_history(")));
+  const executable = branch.slice(0, branch.indexOf("  end if;"))
+    .split("\n").map(line => line.replace(/--.*$/, "")).join("\n");
+  // The TOP-LEVEL arguments of the emitted jsonb_build_object, split on commas
+  // at depth one, so a nested object's own keys are not mistaken for this one's.
+  // (Both this and the comment strip above are sound on THIS branch, whose
+  // string literals contain neither a comma nor a double hyphen; neither is a
+  // general SQL parser and neither is used as one.)
+  const args = topLevelArguments(executable, executable.indexOf("jsonb_build_object"));
+  const emitted = args.filter((_, index) => index % 2 === 0).map(a => a.replace(/^'|'$/g, ""));
+  assert.deepEqual([...emitted].sort(), Object.keys(absent).sort(),
+    "the SQL exists:false branch must emit the module's exists:false key set exactly");
+  assert.equal(emitted.includes("gate_admitted_by_record_layer"), false,
+    "an inventory that does not exist has admitted nothing to say false about");
+  // And the effects object it emits is the nine keys of V5_NO_EFFECTS, which is
+  // what the exists:true branch already emits.
+  const effects = args[args.indexOf("'effects'") + 1];
+  const effectKeys = topLevelArguments(effects, effects.indexOf("jsonb_build_object"))
+    .filter((_, index) => index % 2 === 0).map(a => a.replace(/^'|'$/g, ""));
+  assert.deepEqual([...effectKeys].sort(), Object.keys(absent.effects).sort());
+});
+
+test("the fixture's append-only negatives cannot silently prove nothing under the wrong role", () => {
+  // update, delete and truncate are revoked from every runtime bundle, so under
+  // carr_writer each negative fails with insufficient privilege BEFORE the
+  // trigger fires; the handler matches on the invariant id, re-raises, and the
+  // whole proof aborts having proved nothing -- the same defect class as the
+  // column that did not exist, gated on role rather than on schema.
+  assert.ok(PROOF_SQL.includes(
+    "has_table_privilege(current_user, 'ops.j1_minimum_admission', 'TRUNCATE')"),
+    "the fixture must check it can reach the trigger before attempting the negatives");
+  assert.ok(/raise notice 'SKIPPED: % holds no UPDATE\/DELETE\/TRUNCATE/.test(PROOF_SQL),
+    "and must SKIP with a notice rather than turning an environment fact into a false negative");
+  // The structural half needs no privilege, so it is asserted on every run --
+  // including one that skipped the attempts.
+  assert.ok(PROOF_SQL.includes("_append_only' and not t.tgisinternal"));
+  assert.ok(PROOF_SQL.includes("_no_truncate' and not t.tgisinternal"));
+  // TRUNCATE is now a first-class claim, so the bundle-privilege assertion says
+  // so too rather than checking only INSERT/UPDATE/DELETE.
+  assert.ok(PROOF_SQL.includes("has_table_privilege(v_role, v_relation, 'TRUNCATE')"));
+  assert.ok(CANDIDATE_SQL.includes("revoke insert, update, delete, truncate on"));
+});
+
 test("the postgres proof names every function the durable journal calls", () => {
   for (const signature of [
     "ops.j1_minimum_lock(text)",
@@ -1169,4 +1319,152 @@ test("the declared field sets are closed, C-sorted and match what the rail compu
   // hashing a different object.
   assert.throws(() => journeyOneMinimumAdmissionDigest({ admitted_at: ORIGIN }),
     error => error.code === "closed_shape");
+});
+
+// --- 13. the benchmark acceptance envelope is DERIVED, and says what it is not ---
+//
+// Three of the five accepted source bindings are the acceptance envelope of
+// benchmark-manifest.v1. Supplied as literals they were three unaudited strings
+// nothing compared against the artifact they claim to describe: a digest no
+// manifest produces, an instant no manifest records and an acceptor no manifest
+// names would all compose a projection the kernel then starts a clock on. The
+// composer now REQUIRES that artifact, so there is no path left on which those
+// three are asserted rather than derived.
+//
+// NOTHING BELOW AUTHENTICATES ANYBODY, and the tests assert that too. A00's
+// validateBenchmarkManifest reads the SHAPE of an acceptance envelope; the
+// manifest this suite uses is composed by this file, exactly as a trusted
+// integration would compose a real one.
+
+test("the acceptance envelope is derived from the manifest, and the two policy fields are not", () => {
+  const derived = journeyOneMinimumBenchmarkAcceptedSources(benchmarkManifest());
+  assert.deepEqual(Object.keys(derived).sort(),
+    [...JOURNEY_ONE_MINIMUM_BENCHMARK_DERIVED_SOURCE_FIELDS]);
+  // The digest is the one A00's validator RECOMPUTED from the payload, so a
+  // manifest carrying a digest of its own choosing cannot supply one.
+  assert.equal(derived.benchmark_manifest_digest, benchmarkPayloadDigest(benchmarkPayload()));
+  assert.equal(derived.benchmark_accepted_at, BENCHMARK_ACCEPTED_AT);
+  assert.deepEqual(derived.benchmark_accepted_by_identity, I("joe"));
+  // And this is exactly what the suite's own accepted sources carry, so every
+  // composition in this file is composed from the manifest rather than beside it.
+  for (const field of JOURNEY_ONE_MINIMUM_BENCHMARK_DERIVED_SOURCE_FIELDS) {
+    assert.deepEqual(SOURCES[field], derived[field]);
+  }
+  assert.throws(() => { derived.benchmark_manifest_digest = D(9); }, TypeError);
+
+  // THE OTHER TWO ARE ON NO BENCHMARK MANIFEST AT ALL. Deriving them would mint
+  // a binding rather than carry one, so they stay trusted policy inputs.
+  const manifest = benchmarkManifest();
+  for (const field of JOURNEY_ONE_MINIMUM_TRUSTED_POLICY_SOURCE_FIELDS) {
+    assert.equal(Object.hasOwn(derived, field), false);
+    assert.equal(Object.hasOwn(manifest, field), false);
+  }
+  // And the two halves are exactly the accepted source set, with no overlap.
+  assert.deepEqual([...JOURNEY_ONE_MINIMUM_BENCHMARK_DERIVED_SOURCE_FIELDS,
+    ...JOURNEY_ONE_MINIMUM_TRUSTED_POLICY_SOURCE_FIELDS].sort(),
+    [...JOURNEY_ONE_MINIMUM_ACCEPTED_SOURCE_FIELDS]);
+});
+
+test("a manifest that is not an accepted one refuses, under A00's own codes", () => {
+  for (const [label, manifest, code] of [
+    ["not an object at all", null, "invalid_shape"],
+    ["an envelope-less payload", benchmarkPayload(), "closed_shape"],
+    ["a manifest carrying an extra field", benchmarkManifest({ note: "x" }), "closed_shape"],
+    ["a manifest that is not accepted", benchmarkManifest({ status: "proposed" }),
+      "benchmark_status_not_accepted"],
+    ["a digest that is not its payload's", benchmarkManifest({ benchmark_manifest_digest: D(9) }),
+      "benchmark_manifest_digest_mismatch"],
+    ["a payload edited after the digest was taken", benchmarkManifest({ routes: ["/elsewhere"] }),
+      "benchmark_manifest_digest_mismatch"],
+    ["an acceptor who is not a verified partner", benchmarkManifest({ accepted_by_identity: I("claude") }),
+      "verified_partner_required"],
+  ]) {
+    assert.throws(() => journeyOneMinimumBenchmarkAcceptedSources(manifest), error => {
+      assert.equal(error.code, code, label);
+      return true;
+    }, label);
+  }
+});
+
+test("no composer exists without the accepted manifest its envelope is derived from", async () => {
+  const { store } = newStore();
+  await admit(store, minimum(), null);
+
+  // THERE IS NO LITERAL PATH LEFT. An omitted, null or non-object manifest is a
+  // caller asserting the acceptance envelope, and this rail has no way to tell
+  // an asserted digest, instant or acceptor from a derived one — so it refuses
+  // to be constructed rather than composing a projection nothing checked.
+  for (const [label, manifest] of [
+    ["omitted", undefined], ["explicitly null", null], ["a digest standing in for it", D(8)],
+  ]) {
+    assert.throws(() => createJourneyOneClockProjectionComposer({
+      store, accepted_sources: SOURCES, ...(manifest === undefined ? {} : { benchmark_manifest: manifest }) }),
+    error => {
+      assert.equal(error.code, "benchmark_manifest_required", label);
+      assert.equal(error.detail.derived_fields.length, 3);
+      return true;
+    }, label);
+  }
+
+  // WITH the manifest, the three envelope fields on the composed projection are
+  // the ones that manifest produces.
+  const composed = await composerFor(store).compose({ as_of: ORIGIN, completion: null,
+    completion_expectation: copy(EXPECTATION), pauses: [], amendments: [], history: null });
+  assert.equal(composed.benchmark_envelope.derived_from_validated_accepted_manifest, true);
+  assert.deepEqual(composed.benchmark_envelope.derived_fields,
+    [...JOURNEY_ONE_MINIMUM_BENCHMARK_DERIVED_SOURCE_FIELDS]);
+  assert.equal(composed.projection.benchmark.manifest_digest,
+    benchmarkPayloadDigest(benchmarkPayload()));
+  assert.equal(composed.projection.benchmark.accepted_at, BENCHMARK_ACCEPTED_AT);
+  assert.deepEqual(composed.projection.benchmark.accepted_by_identity, I("joe"));
+  // AND IT IS STILL NOT ACCEPTANCE. Deriving removes a caller's freedom to
+  // invent the envelope; it consults no live actor and reads no acceptance
+  // record, and the composition refuses to be read as though it had.
+  assert.equal(composed.benchmark_envelope.human_acceptance_authenticated, false);
+  assert.equal(composed.authenticated, false);
+  assert.equal(composed.trusted_verifier_still_required, true);
+  assert.ok(composed.benchmark_envelope.statement.includes(
+    "not evidence that a verified partner accepted anything"));
+  // The two policy fields are reported as what they are: trusted inputs, and
+  // the kernel still reads them off the binding.
+  assert.deepEqual(composed.benchmark_envelope.trusted_policy_fields,
+    [...JOURNEY_ONE_MINIMUM_TRUSTED_POLICY_SOURCE_FIELDS]);
+  assert.equal(composed.projection.binding.production_environment_manifest_digest, D(6));
+  assert.equal(composed.projection.binding.maximum_completion_receipt_ttl_ms, COMPLETION_TTL_POLICY);
+  assert.equal(harness().evaluate(composed.projection).state.status, "running");
+});
+
+test("an accepted_sources the manifest does not produce, and a manifest for another scope, both refuse", async () => {
+  const { store } = newStore();
+  await admit(store, minimum(), null);
+
+  // ONE FIELD AT A TIME, each a value nothing about the manifest supports.
+  for (const [field, value] of [
+    ["benchmark_manifest_digest", D(8)],
+    ["benchmark_accepted_at", iso(ORIGIN_MS - 2 * HOUR)],
+    ["benchmark_accepted_by_identity", I("dell")],
+  ]) {
+    assert.throws(() => composerFor(store,
+      { accepted_sources: { ...SOURCES, [field]: value } }), error => {
+      assert.equal(error.code, "benchmark_accepted_sources_not_derived");
+      assert.equal(error.detail.field, field);
+      return true;
+    }, field);
+  }
+
+  // A GENUINELY ACCEPTED MANIFEST FOR ANOTHER PROGRAM. Its envelope is
+  // internally consistent and its digest is real; it is simply not about this
+  // inventory's accepted subject. The kernel could never catch it — the manifest
+  // digest is in none of the comparisons it makes against a receipt.
+  const other = benchmarkPayload(); other.subject_digest = D(11);
+  const otherManifest = { ...copy(other), benchmark_manifest_digest: benchmarkPayloadDigest(other),
+    accepted_by_identity: I("joe"), accepted_at: BENCHMARK_ACCEPTED_AT, status: "accepted" };
+  assert.throws(() => composerFor(store, {
+    accepted_sources: { ...SOURCES, benchmark_manifest_digest: benchmarkPayloadDigest(other) },
+    benchmark_manifest: otherManifest }), error => {
+    assert.equal(error.code, "benchmark_manifest_scope_mismatch");
+    assert.equal(error.detail.field, "subject_digest");
+    assert.equal(error.detail.expected, SCOPE.benchmark_subject_digest);
+    return true;
+  });
 });
