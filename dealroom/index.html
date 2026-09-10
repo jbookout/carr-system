@@ -72,6 +72,7 @@
             <button type="button" class="filter" data-filter="delta">Changed since review</button>
             <button type="button" class="filter" data-filter="parked">Parked</button>
           </div>
+          <button type="button" class="receipts-jump" id="receiptsJump" aria-label="Go to recent changes" hidden>Recent changes<span class="receipts-count" id="receiptsCount">0</span></button>
           <label class="search-wrap">
             <span class="sr-only">Search work records</span>
             <input id="search" type="search" autocomplete="off" placeholder="Search work records…">
@@ -98,6 +99,17 @@
         </table>
         <div class="empty" id="emptyState" hidden></div>
       </div>
+    </section>
+
+    <section class="receipts" id="receiptsPanel" aria-labelledby="receiptsTitle" hidden>
+      <header class="receipts-head">
+        <div>
+          <p class="eyebrow">Change receipts</p>
+          <h2 id="receiptsTitle" tabindex="-1">Recent changes</h2>
+        </div>
+        <p class="receipts-note">Newest 25, in this browser session only. Each deal’s Change history holds the full record.</p>
+      </header>
+      <ol class="receipt-list" id="receiptsList" role="log" aria-live="polite" aria-label="Recent Deal Room changes"></ol>
     </section>
   </main>
 
