@@ -32912,7 +32912,7 @@
     "base_version": "v24",
     "reason": "Codex continuity reference-manifest capacity hotfix, approved 0494/0494a interstitial pair, and 0494a rollback/readback optional-letter compatibility repair: regenerate the existing v24 overlay from the release candidate source. Existing ingresses only; no ingress is added or removed.",
     "expected_count": 835,
-    "expected_sha256": "8301a3d3c02e57b015ec6628f4d63ff68cfabf3db1494b43030fe8247f8f5ee0",
+    "expected_sha256": "55c0ca0f27e150e3114c62ec225a283a5b64722a53dadc81e1f3eed84beb92c4",
     "upsert": [
       {
         "ingress_key": "mcp-tool:admit-engineering-slice",
@@ -33242,8 +33242,8 @@
         "operation": "ops/program5-forward-fix-rehearsal-gate.py",
         "effect_class": "administrative_mutation",
         "source_locator": "ops/program5-forward-fix-rehearsal-gate.py",
-        "schema_digest": "1e20ae3ff5ce685cbbd32d3b5a82175ca09ac2babd57e561248f11b19601d68a",
-        "handler_digest": "1e20ae3ff5ce685cbbd32d3b5a82175ca09ac2babd57e561248f11b19601d68a",
+        "schema_digest": "0e34d23dbec50ec4dbb8d047295483f0074f749f783d4a706549482bfb30d61b",
+        "handler_digest": "0e34d23dbec50ec4dbb8d047295483f0074f749f783d4a706549482bfb30d61b",
         "write": true,
         "human_only": false,
         "authority_only": true,
