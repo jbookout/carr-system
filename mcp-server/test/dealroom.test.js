@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { pipelineChanges } from "../src/dealroom.js";
 import { TOOLS } from "../src/tools.js";
+import {
+  createFieldWriteState, performFieldWrite, nextCellBase,
+} from "../../dealroom/js/field-write-reconciliation.mjs";
 
 const ids = {
   deal: "10000000-0000-0000-0000-000000000001",
@@ -43,9 +47,10 @@ class FakeClient {
     return row.recorded_at > time || (row.recorded_at === time && row.id > id);
   }
   addEvent({ actor = actors.joe, verb = "seed", subject_type = "deal", subject_id = ids.deal,
-    field = null, old_value = null, new_value = null, recorded_at = this.now.toISOString(), id = this.uuid() }) {
+    field = null, old_value = null, new_value = null, recorded_at = this.now.toISOString(),
+    id = this.uuid(), idempotency_key = null }) {
     const row = { id, recorded_at, actor: actor.slug, actor_id: actor.id, verb, subject_type,
-      subject_id, field, old_value, new_value };
+      subject_id, field, old_value, new_value, idempotency_key };
     this.events.push(row);
     return row;
   }
@@ -73,6 +78,12 @@ class FakeClient {
         event.subject_id === params[0] && event.field === params[1])
         .sort((a, b) => b.recorded_at.localeCompare(a.recorded_at) || b.id.localeCompare(a.id));
       return { rows: rows.slice(0, 1).map(event => ({ id:event.id })) };
+    }
+    if (sql.includes("from v_ref_index") && sql.includes("where subject_id=$1")) {
+      // A raw uuid resolves exactly — the Deal Room board addresses deals by id,
+      // and so does every write the board makes.
+      const deal = this.deals.get(params[0]);
+      return { rows: deal ? [{ subject_type: "deal", subject_id: deal.id }] : [] };
     }
     if (sql.includes("from v_ref_index") && sql.includes("subject_type='deal'")) {
       const needle = String(params[0]).replaceAll("%", "").toLowerCase();
@@ -152,8 +163,45 @@ class FakeClient {
         subject_type: params[3], subject_id: params[4], field: params[5],
         old_value: params[6] ? JSON.parse(params[6]) : null,
         new_value: params[7] ? JSON.parse(params[7]) : null,
+        // $11 in writeEvent's insert: the operation's key, which is how the row
+        // it just wrote is found again without a `returning` clause.
+        idempotency_key: params[10] ?? null,
         recorded_at: this.now.toISOString() });
       return { rows: [] };
+    }
+    if (sql.includes("dealroom:board-field-base")) {
+      // The board list read, with each editable cell's latest committed event —
+      // the same (recorded_at desc, id desc) the SQL orders by, and the same
+      // single pass, so a value and its base cannot come from different moments.
+      const fields = params[2] || [];
+      const rows = [...this.deals.values()].map(deal => {
+        const field_base = {};
+        for (const event of this.events) {
+          if (event.subject_type !== "deal" || event.subject_id !== deal.id) continue;
+          if (!event.field || !fields.includes(event.field)) continue;
+          const held = field_base[event.field];
+          if (!held || this.tupleAfter(event, held.recorded_at, held.id))
+            field_base[event.field] = { id: event.id, recorded_at: event.recorded_at };
+        }
+        return { id: deal.id, name: deal.name, type: deal.type, phase: deal.phase,
+          owner: deal.owner, attention: deal.attention, next_date: deal.next_date,
+          next_step: null, market: deal.city, segment: deal.segment, workspace_kind: "team",
+          client_id: null, client_ref: "C-1", client_name: deal.name,
+          account_client_id: null, account_client_ref: null, account_name: null,
+          account_owner: null, market_agent: null, last_touch: null, last_review_at: null,
+          operating_state: deal.operating_state, parking_reason: deal.parking_reason,
+          parking_note: deal.parking_note, parked_at: deal.parked_at, parked_by: deal.parked_by,
+          field_base };
+      });
+      return { rows };
+    }
+    if (sql.includes("from v_deal_room_account")) return { rows: [] };
+    if (sql.includes("from v_deal_room_session")) return { rows: [] };
+    if (sql.includes("dealroom:written-event")) {
+      const rows = this.events.filter(e => e.subject_type === "deal" && e.subject_id === params[0] &&
+        e.field === params[1] && e.idempotency_key === params[2])
+        .sort((a, b) => b.recorded_at.localeCompare(a.recorded_at) || b.id.localeCompare(a.id));
+      return { rows: rows.slice(0, 1).map(e => ({ id: e.id, recorded_at: e.recorded_at })) };
     }
     if (sql.includes("dealroom:create-conflict")) {
       const conflict = { id: this.uuid(), deal_id: params[0], field: params[1],
@@ -364,6 +412,460 @@ test("same-field conflict retains both actors and values; resolve uses normal at
   assert.deepEqual(db.events.map(e => [e.verb, e.actor]),
     [["patch-deal-field", "joe"], ["resolve-conflict", "joe"]]);
   assert.ok(db.events.every(e => e.actor_id));
+});
+
+test("a retry under the same key replays; a fresh key over the same intent conflicts with itself", async () => {
+  // The property the board's write path depends on, pinned here so a later
+  // server change cannot quietly remove it.
+  const db = new FakeClient();
+  const args = { deal: "Deal Alpha", field: "attention", value: true, base_event_id: null };
+  const first = await call("patch-deal-field", db, actors.joe, { idempotency_key: "flag-1", ...args });
+  assert.equal(first.ok, true);
+  assert.equal(db.events.length, 1);
+
+  db.tick(1000);
+  const replay = await call("patch-deal-field", db, actors.joe, { idempotency_key: "flag-1", ...args });
+  assert.equal(replay.replayed, true);
+  assert.deepEqual({ ...replay, replayed: undefined }, { ...first, replayed: undefined },
+    "the recorded answer comes back, not a new one");
+  assert.equal(db.events.length, 1, "no second write");
+  assert.equal(db.conflicts.length, 0);
+
+  // The same intent, from the same stale base, under a NEW key is a different
+  // operation — and the event the first one wrote is now an intervening change.
+  const fresh = await call("patch-deal-field", db, actors.joe, { idempotency_key: "flag-2", ...args });
+  assert.equal(fresh.ok, false);
+  assert.equal(db.conflicts.length, 1);
+  assert.deepEqual([fresh.conflict.actor_a, fresh.conflict.actor_b], ["joe", "joe"]);
+  assert.deepEqual([fresh.conflict.value_a, fresh.conflict.value_b], [true, true]);
+
+  // And a key already spent on different arguments is refused rather than replayed.
+  await assert.rejects(call("patch-deal-field", db, actors.joe,
+    { idempotency_key: "flag-1", ...args, value: false }), /key_reuse/);
+});
+
+test("the board's retry after a lost answer lands once, under the key it first used", async () => {
+  // The client model (dealroom/js/field-write-reconciliation.mjs) driven against
+  // the real verb, over a transport that loses the answer AFTER the write
+  // commits — the failure the per-cell key exists for.
+  const db = new FakeClient();
+  const sent = [];
+  let dropAnswer = true;
+  const patch = async (request) => {
+    sent.push(request);
+    const res = await call("patch-deal-field", db, actors.joe, {
+      idempotency_key: request.idempotency_key, deal: request.deal, field: request.field,
+      value: request.value, base_event_id: request.base_event_id,
+    });
+    if (dropAnswer) { dropAnswer = false; throw new Error("connection lost before the answer arrived"); }
+    return res.ok === false && res.conflict
+      ? { status: "conflict", conflict: res.conflict }
+      : { status: "ok", ...res };
+  };
+  let writes = createFieldWriteState();
+  const io = { getState: () => writes, setState: (next) => { writes = next; },
+    newKey: () => "board-attention-1", patch };
+
+  const lost = await performFieldWrite({ deal: "Deal Alpha", field: "attention", value: true, base: null, ...io });
+  assert.equal(lost.status, "unknown", "the board says it does not know, and shows nothing as saved");
+  assert.equal(db.events.length, 1, "while the write did in fact land");
+  assert.equal(db.deals.get(ids.deal).attention, true);
+
+  // The feed delivers that event and moves this cell's base before the person
+  // presses Retry. The retained request is not rewritten by it.
+  const base = db.events[0].id;
+  const retry = await performFieldWrite({ deal: "Deal Alpha", field: "attention", value: true, base, ...io });
+  assert.equal(retry.status, "ok");
+  assert.equal(retry.replayed, true);
+  assert.deepEqual(sent[1], sent[0], "same key, same base, same value");
+  assert.equal(db.events.length, 1, "one event for one intended change");
+  assert.equal(db.conflicts.length, 0, "and no conflict between a partner and themselves");
+  assert.deepEqual(writes, {}, "the cell is settled and open to the next intent");
+  // The event that moved the base here is this operation's OWN, and the answer
+  // says so: the replay names the event it committed, and that is the id the feed
+  // moved the base to. So this is not a newer change to reconcile with — it is
+  // this change, arriving twice, and the board applies it and says nothing.
+  assert.equal(retry.event_id, db.events[0].id);
+  assert.equal(retry.superseded, false,
+    "an operation is never superseded by the event it itself committed");
+  assert.equal(retry.message, null, "and no sentence about a partner's change is shown");
+
+  // What the same two clicks used to do, kept here so the difference is visible.
+  const secondKey = await call("patch-deal-field", db, actors.joe, { idempotency_key: "a-second-key",
+    deal: "Deal Alpha", field: "attention", value: true, base_event_id: null });
+  assert.equal(secondKey.ok, false);
+  assert.equal(db.conflicts.length, 1);
+  assert.equal(secondKey.conflict.actor_a, secondKey.conflict.actor_b);
+});
+
+/**
+ * The board's own write path against the real verb, as app.js runs it: one write
+ * state, one base per cell, and the same two rules app.js uses — performFieldWrite
+ * for the operation and nextCellBase for the base — imported here rather than
+ * restated, so a change to either shows up in these sequences.
+ *
+ * `dropAnswers` loses the answer to that many attempts AFTER the write has
+ * committed, which is the failure the per-cell key exists for. `feedSaw` is the
+ * changes feed delivering an event. Nothing else moves a base.
+ */
+function boardCells(db, actor, { dropAnswers = 0 } = {}) {
+  const sent = [];
+  let losses = dropAnswers;
+  let minted = 0;
+  let writes = createFieldWriteState();
+  const fieldBase = new Map();
+  // Normalized exactly as app.js's noteCellBase normalizes: a base is an identity
+  // and a time. A feed event carries values too, and none of them belong in this
+  // map — which is what the board's own rule says, so the harness must say it too.
+  const noteBase = (cell, event) => {
+    if (!event?.id) return;
+    const seen = { id: event.id, recorded_at: event.recorded_at ?? null };
+    fieldBase.set(cell, nextCellBase(fieldBase.get(cell) || null, seen));
+  };
+  // What applyBoardSnapshot does with an authoritative read: seed every editable
+  // cell's base from the snapshot, through the same forward-only rule.
+  const readBoard = async () => {
+    const board = await TOOLS["deal-room-board"].handler(db, actor, { workspace: "all" });
+    for (const deal of board.deals) {
+      for (const [field, seen] of Object.entries(deal.field_base || {})) {
+        noteBase(`${deal.id}|${field}`, seen);
+      }
+    }
+    return board;
+  };
+  const write = async (field, value, deal = ids.deal) => {
+    const cell = `${deal}|${field}`;
+    const result = await performFieldWrite({
+      deal, field, value,
+      base: fieldBase.get(cell)?.id || null,
+      baseNow: () => fieldBase.get(cell)?.id || null,
+      getState: () => writes, setState: (next) => { writes = next; },
+      newKey: () => `board-${field}-${++minted}`,
+      patch: async (request) => {
+        sent.push(request);
+        const res = await call("patch-deal-field", db, actor, {
+          idempotency_key: request.idempotency_key, deal: request.deal, field: request.field,
+          value: request.value, base_event_id: request.base_event_id,
+        });
+        if (losses > 0) { losses -= 1; throw new Error("connection lost before the answer arrived"); }
+        return res.ok === false && res.conflict
+          ? { status: "conflict", conflict: res.conflict }
+          : { status: "ok", ...res };
+      },
+    });
+    if (result.status === "ok" && !result.superseded && result.event_id) {
+      noteBase(cell, { id: result.event_id, recorded_at: result.event_recorded_at });
+    }
+    return result;
+  };
+  return {
+    sent, write, readBoard,
+    keys: () => minted,
+    base: (field, deal = ids.deal) => fieldBase.get(`${deal}|${field}`) || null,
+    feedSaw: (field, event, deal = ids.deal) => noteBase(`${deal}|${field}`, event),
+    state: () => writes,
+  };
+}
+
+test("the write's answer names the event it committed, and two edits before any poll both land", async () => {
+  // The fast-second-edit route: no feed at all between them, which is what a
+  // second click a second later looks like. The first edit's answer names its
+  // event, so the second edit sends THAT as its base instead of the stale one
+  // the board started with — and stops conflicting with itself.
+  const db = new FakeClient();
+  const joe = boardCells(db, actors.joe);
+
+  const first = await joe.write("attention", true);
+  assert.equal(first.status, "ok");
+  assert.equal(first.event_id, db.events[0].id, "read back from the record, not constructed");
+  assert.equal(first.event_recorded_at, db.events[0].recorded_at);
+  assert.deepEqual(joe.base("attention"), { id: db.events[0].id, recorded_at: db.events[0].recorded_at });
+
+  db.tick(1000);
+  const second = await joe.write("attention", false);
+  assert.equal(second.status, "ok", "a genuinely different second edit lands");
+  assert.equal(joe.sent[1].base_event_id, db.events[0].id, "on the base its own first edit created");
+  assert.notEqual(joe.sent[1].idempotency_key, joe.sent[0].idempotency_key, "and under its own key");
+
+  assert.equal(db.events.length, 2, "two intended changes, two events");
+  assert.equal(db.conflicts.length, 0, "and no conflict between a partner and themselves");
+  assert.equal(db.deals.get(ids.deal).attention, false);
+  assert.equal(second.event_id, db.events[1].id);
+  assert.deepEqual(joe.base("attention"), { id: db.events[1].id, recorded_at: db.events[1].recorded_at });
+});
+
+test("the two base statements hold together as written, since no test can run them", async () => {
+  // NOT execution, and it does not pretend to be: every suite that touches these
+  // verbs answers a fake by matching the comment marker, so a scoping or
+  // parameter fault in either statement would reach production untested — and
+  // deal-room-board is the Deal Room's only home read, so its failure mode is a
+  // blank board. This is the cheapest guard against silent drift in the parts a
+  // reader cannot check by eye: the correlation, the parameter count, and the
+  // distinct-on/order-by agreement Postgres requires.
+  const tools = await readFile(new URL("../src/tools.js", import.meta.url), "utf8");
+
+  const board = tools.slice(tools.indexOf('"deal-room-board": {'),
+    tools.indexOf("dealroom:board-field-base") + 200);
+  assert.match(board, /from v_deal_room_board b\b/, "the outer relation is aliased, so b.id resolves");
+  assert.match(board, /where e\.subject_type='deal' and e\.subject_id=b\.id/,
+    "the subquery is correlated to the row it decorates, not to the whole table");
+  assert.match(board, /distinct on \(e\.field\) e\.field, e\.id, e\.recorded_at[\s\S]*?order by e\.field, e\.recorded_at desc, e\.id desc/,
+    "distinct on must lead the order by, and the rest is the record layer's own ordering");
+  assert.match(board, /coalesce\(\([\s\S]*?\), '\{\}'::jsonb\) as field_base/,
+    "an aggregate over no rows is NULL, and the client must get an object");
+  assert.match(board, /e\.field = any\(\$3::text\[\]\)/);
+  assert.match(board, /\[workspace, args\.account_client_id \|\| null, \[\.\.\.DEAL_ROOM_FIELDS\]\]/,
+    "three placeholders, three arguments, and the field list is the registered one");
+  for (const column of ["b.workspace_kind", "b.account_client_id", "b.attention", "b.next_date", "b.name"]) {
+    assert.ok(board.includes(column), `${column} must stay qualified once the relation is aliased`);
+  }
+
+  const written = tools.slice(tools.indexOf("async function applyDealRoomField"),
+    tools.indexOf("dealroom:written-event") + 200);
+  assert.match(written, /where subject_type='deal' and subject_id=\$1 and field=\$2 and idempotency_key=\$3/,
+    "the readback names the row this operation wrote, and cannot name a partner's");
+  assert.match(written, /\[dealId, field, idempotencyKey\]/);
+  assert.match(written, /to_jsonb\(recorded_at\)#>>'\{\}' as recorded_at/,
+    "serialized as the changes feed serializes it, so the client compares like with like");
+});
+
+test("a write that names no base still fails closed, which is why the board read carries one", async () => {
+  // Unchanged server behaviour, kept executable: a request with no base makes no
+  // claim about what was seen, so any prior event on that cell conflicts. It
+  // refuses and never overwrites — and it is exactly what a cold board used to
+  // send on a person's first edit of the session.
+  const db = new FakeClient();
+  db.addEvent({ field: "phase", new_value: { phase: "research" }, actor: actors.dell });
+  db.tick(60000);
+
+  const blind = await call("patch-deal-field", db, actors.joe, { idempotency_key: "blind-1",
+    deal: "Deal Alpha", field: "phase", value: "closing", base_event_id: null });
+  assert.equal(blind.ok, false);
+  assert.equal(db.deals.get(ids.deal).phase, "research", "the record is untouched");
+  assert.equal(db.conflicts.length, 1);
+});
+
+test("the board read carries each cell's base, so a first edit on a record with history lands", async () => {
+  // The cold-first-write route, end to end: history on two cells, one
+  // authoritative read, then a first edit — with no changes feed at all.
+  const db = new FakeClient();
+  db.addEvent({ field: "phase", new_value: { phase: "research" }, actor: actors.dell });
+  db.tick(1000);
+  db.addEvent({ field: "attention", new_value: { attention: true }, actor: actors.dell });
+  db.tick(1000);
+  // An older event for a cell that also has a newer one: the base must be the
+  // newer of the two, not whichever the scan met first.
+  const superseded = db.events[0];
+  db.addEvent({ field: "phase", new_value: { phase: "negotiation" }, actor: actors.dell });
+  db.tick(60000);
+  const newestPhase = db.events.at(-1);
+
+  const joe = boardCells(db, actors.joe);
+  const board = await joe.readBoard();
+  const row = board.deals.find((deal) => deal.id === ids.deal);
+  assert.deepEqual(Object.keys(row.field_base).sort(), ["attention", "phase"],
+    "one entry per cell that has history, and none for the cells that have none");
+  assert.deepEqual(row.field_base.phase, { id: newestPhase.id, recorded_at: newestPhase.recorded_at });
+  assert.notEqual(row.field_base.phase.id, superseded.id);
+  assert.equal(row.field_base.owner, undefined, "a cell with no history has no base to send");
+  assert.equal(joe.base("owner"), null);
+
+  const first = await joe.write("phase", "closing");
+  assert.equal(first.status, "ok", "the first edit of the session lands on a record with history");
+  assert.equal(joe.sent[0].base_event_id, newestPhase.id, "on the base the read handed it");
+  assert.equal(db.conflicts.length, 0, "no conflict naming an old change as concurrent");
+  assert.equal(db.deals.get(ids.deal).phase, "closing");
+
+  // A cell with no history is still written with no base, and still lands.
+  const owner = await joe.write("owner", "dell");
+  assert.equal(owner.status, "ok");
+  assert.equal(joe.sent[1].base_event_id, null, "null is preserved for a genuinely empty cell");
+});
+
+test("a partner's write after the snapshot still conflicts, and rapid own edits still land", async () => {
+  const db = new FakeClient();
+  db.addEvent({ field: "phase", new_value: { phase: "research" }, actor: actors.dell });
+  db.tick(1000);
+  const joe = boardCells(db, actors.joe);
+  await joe.readBoard();
+
+  // Dell writes after Joe's snapshot was taken. Joe's base is now behind, and the
+  // read having handed him one changes nothing about that.
+  db.tick(1000);
+  const dell = await call("patch-deal-field", db, actors.dell, { idempotency_key: "dell-after-snapshot",
+    deal: "Deal Alpha", field: "phase", value: "legal", base_event_id: db.events[0].id });
+  assert.equal(dell.ok, true);
+
+  db.tick(1000);
+  const crossed = await joe.write("phase", "closing");
+  assert.equal(crossed.status, "conflict", "a snapshot base is a claim about a moment, not a licence");
+  assert.deepEqual([crossed.conflict.actor_a, crossed.conflict.actor_b], ["dell", "joe"]);
+  assert.equal(db.deals.get(ids.deal).phase, "legal", "Dell's value stands until it is resolved");
+
+  // Rapid own edits on a cell the snapshot did give him: two in a row, no feed.
+  db.tick(1000);
+  const one = await joe.write("attention", true);
+  const two = await joe.write("attention", false);
+  assert.deepEqual([one.status, two.status], ["ok", "ok"]);
+  assert.notEqual(joe.sent.at(-1).idempotency_key, joe.sent.at(-2).idempotency_key);
+  assert.equal(joe.sent.at(-1).base_event_id, one.event_id, "the second stands on the first's event");
+  assert.equal(db.conflicts.length, 1, "and neither of them conflicted with the other");
+});
+
+test("a park that crosses a partner answers with a conflict and no sentence of its own", async () => {
+  // The park form's conflict branch, in the half that is not the DOM: the answer
+  // is the server's conflict, carrying no message, so the form falls back to its
+  // own line ("This record was not parked.") while the chooser replaces the
+  // dialog's contents. That the chooser is a CONTENT SWAP rather than a second
+  // showModal() — which threw a DOMException onto that same line — is asserted in
+  // dealroom-board-sync.test.mjs, where app.js's dialog handling is placed.
+  const db = new FakeClient();
+  db.addEvent({ field: "operating_state", actor: actors.dell,
+    new_value: { operating_state: { state: "active", reason: null, note: null } } });
+  db.tick(1000);
+  const joe = boardCells(db, actors.joe);
+  await joe.readBoard();
+
+  db.tick(1000);
+  const dell = await call("patch-deal-field", db, actors.dell, { idempotency_key: "dell-parks",
+    deal: "Deal Alpha", field: "operating_state",
+    value: { state: "parked", reason: "client_paused", note: null },
+    base_event_id: db.events[0].id });
+  assert.equal(dell.ok, true);
+
+  db.tick(1000);
+  const crossed = await joe.write("operating_state", { state: "parked", reason: "other", note: null });
+  assert.equal(crossed.status, "conflict");
+  assert.deepEqual([crossed.conflict.actor_a, crossed.conflict.actor_b], ["dell", "joe"]);
+  assert.equal(crossed.message, null,
+    "a conflict is the server's own answer; nothing invents a sentence over it");
+  assert.equal(crossed.message || "This record was not parked.", "This record was not parked.",
+    "which is the expression the park form throws onto its error line");
+  assert.equal(db.deals.get(ids.deal).parking_reason, "client_paused", "Dell's park stands");
+  assert.equal(db.events.length, 2, "the refused write is not an event");
+});
+
+test("a snapshot taken before a write cannot walk that cell's base backwards", async () => {
+  // The board read and a confirmed write can be in flight together: the snapshot
+  // carries the OLDER base for a cell this page has already written, which is why
+  // seeding is forward-only. Taking it would make the next edit collide with our
+  // own committed one.
+  const db = new FakeClient();
+  db.addEvent({ field: "phase", new_value: { phase: "research" }, actor: actors.dell });
+  db.tick(1000);
+  const joe = boardCells(db, actors.joe);
+  // A read that answers, and whose payload is still in hand when a write lands.
+  const opened = await joe.readBoard();
+  const staleBase = opened.deals.find((deal) => deal.id === ids.deal).field_base.phase;
+
+  db.tick(1000);
+  const written = await joe.write("phase", "negotiation");
+  assert.equal(written.status, "ok");
+  assert.equal(joe.base("phase").id, written.event_id);
+
+  // The read that was already open now lands, older base and all.
+  joe.feedSaw("phase", staleBase);
+  assert.equal(joe.base("phase").id, written.event_id, "the newer event stands");
+
+  db.tick(1000);
+  const next = await joe.write("phase", "legal");
+  assert.equal(next.status, "ok", "so the next edit does not collide with our own committed one");
+  assert.equal(db.conflicts.length, 0);
+});
+
+test("advancing the base does not weaken the partner check: an intervening edit still conflicts", async () => {
+  const db = new FakeClient();
+  const joe = boardCells(db, actors.joe);
+
+  const first = await joe.write("phase", "negotiation");
+  assert.equal(first.status, "ok");
+
+  // Dell edits the same cell from the base Joe's write created — Dell's own board
+  // saw it. Joe's next write is now behind, and must be refused, not merged.
+  db.tick(1000);
+  const dell = await call("patch-deal-field", db, actors.dell, { idempotency_key: "dell-phase-1",
+    deal: "Deal Alpha", field: "phase", value: "legal", base_event_id: db.events[0].id });
+  assert.equal(dell.ok, true);
+
+  db.tick(1000);
+  const crossed = await joe.write("phase", "closing");
+  assert.equal(crossed.status, "conflict", "the server still refuses a write from a superseded base");
+  assert.equal(db.conflicts.length, 1);
+  assert.deepEqual([crossed.conflict.actor_a, crossed.conflict.actor_b], ["dell", "joe"],
+    "a real partner conflict, with both sides named");
+  assert.equal(db.deals.get(ids.deal).phase, "legal", "and Dell's value stands until it is resolved");
+  assert.equal(db.events.length, 2, "the refused write is not an event");
+  assert.deepEqual(joe.base("phase"), { id: db.events[0].id, recorded_at: db.events[0].recorded_at },
+    "a conflict names no committed event, so Joe's base does not move");
+});
+
+test("a replayed answer never puts a partner's newer value back — ordinary cell", async () => {
+  const db = new FakeClient();
+  const joe = boardCells(db, actors.joe, { dropAnswers: 1 });
+
+  const lost = await joe.write("phase", "negotiation");
+  assert.equal(lost.status, "unknown", "Joe's board never heard the answer");
+  assert.equal(db.events.length, 1, "though the write landed");
+  assert.equal(joe.base("phase"), null, "an unanswered write names no base to advance to");
+
+  // Dell edits the same cell from the base Joe's write created. No conflict:
+  // Dell saw it.
+  db.tick(1000);
+  const dell = await call("patch-deal-field", db, actors.dell, { idempotency_key: "dell-phase-1",
+    deal: "Deal Alpha", field: "phase", value: "legal", base_event_id: db.events[0].id });
+  assert.equal(dell.ok, true);
+  assert.equal(db.deals.get(ids.deal).phase, "legal");
+
+  // Joe's feed delivers Dell's event, and only then does Joe press Retry.
+  joe.feedSaw("phase", db.events[1]);
+  const retry = await joe.write("phase", "negotiation");
+  assert.equal(retry.status, "ok");
+  assert.equal(retry.replayed, true, "the server truthfully replays Joe's recorded answer");
+  assert.equal(retry.response.new_value, "negotiation", "which is about Joe's older operation");
+  assert.equal(retry.event_id, db.events[0].id, "and names Joe's older event");
+  assert.equal(joe.sent[1].base_event_id, null, "sent under the base it was built on");
+  assert.equal(retry.superseded, true, "so the board is told not to paint it");
+  assert.match(retry.message, /showing the current value rather than applying this one/);
+
+  assert.deepEqual(joe.base("phase"), { id: db.events[1].id, recorded_at: db.events[1].recorded_at },
+    "and the replay does not reset the base onto Joe's older event");
+  assert.deepEqual(Object.keys(joe.base("phase")).sort(), ["id", "recorded_at"],
+    "a base is an identity and a time: no value from an event is kept in it");
+  assert.equal(db.deals.get(ids.deal).phase, "legal", "the record still holds Dell's newer value");
+  assert.equal(db.events.length, 2, "and the retry wrote nothing");
+  assert.equal(db.conflicts.length, 0);
+});
+
+test("a replayed answer never un-restores a record a partner has restored — operating state", async () => {
+  const db = new FakeClient();
+  const joe = boardCells(db, actors.joe, { dropAnswers: 1 });
+  const parked = { state: "parked", reason: "prospect_never_active", note: "Intake did not advance" };
+
+  const lost = await joe.write("operating_state", parked);
+  assert.equal(lost.status, "unknown");
+  assert.equal(db.deals.get(ids.deal).operating_state, "parked");
+
+  db.tick(1000);
+  const restored = await call("patch-deal-field", db, actors.dell, { idempotency_key: "dell-restore-1",
+    deal: "Deal Alpha", field: "operating_state", value: { state: "active" },
+    base_event_id: db.events[0].id });
+  assert.equal(restored.ok, true);
+  assert.equal(db.deals.get(ids.deal).operating_state, "active");
+
+  joe.feedSaw("operating_state", db.events[1]);
+  const retry = await joe.write("operating_state", parked);
+  assert.equal(retry.status, "ok");
+  assert.equal(retry.replayed, true);
+  assert.deepEqual(retry.response.new_value, parked, "the recorded answer still says parked");
+  assert.equal(retry.superseded, true);
+  assert.match(retry.message, /was recorded\. The board has since seen a newer change/);
+
+  assert.deepEqual(joe.base("operating_state"), { id: db.events[1].id, recorded_at: db.events[1].recorded_at },
+    "the base stays on the partner's newer event");
+  assert.equal(db.deals.get(ids.deal).operating_state, "active", "the record is still active work");
+  assert.equal(db.deals.get(ids.deal).parking_reason, null);
+  assert.equal(db.events.length, 2);
+  assert.equal(db.conflicts.length, 0);
 });
 
 test("parking is a reversible operating state and never changes phase or outcome", async () => {
