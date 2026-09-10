@@ -53,7 +53,17 @@ test("Home asset is a dark, visual, responsive workstation with honest states", 
   assert.doesNotMatch(js, /escapeHtml\(source\.freshness\)/);
   assert.match(js, /\.catch/);
   assert.doesNotMatch(html, /System online/);
-  assert.match(html, /Checking workspace/);
+  // The server-rendered health label is bound to the script's own loading label,
+  // not restated as a literal here. A literal in this file is one more place to
+  // forget, and it is what let the markup and the script disagree: this assertion
+  // used to pin the old markup string and passed happily while the two had drifted
+  // apart. mcp-server/test/workspace-surface-inventory.test.mjs clause 5b owns this
+  // rule for every workspace surface; this is the same rule where a reader of the
+  // Home static suite will look for it.
+  const loadingLabel = js.match(/\bloading: "([^"]+)"/)?.[1];
+  assert.notEqual(loadingLabel, undefined, "HEALTH_LABEL declares no loading state");
+  assert.ok(html.includes(`id="healthLabel">${loadingLabel}<`),
+    `workspace.html must ship the script's loading label, "${loadingLabel}"`);
   assert.doesNotMatch(html, /pulse-attention[^>]+href="\/system-work\.html"/);
   assert.match(html, /System state/);
   assert.match(modelJs, /valid_until/);
@@ -167,6 +177,16 @@ test("Home has one first-region primary action, one workspace directory, and sec
   assert.ok(html.indexOf("data-home-primary-region") < html.indexOf("id=\"commandCenterVisual\""));
 });
 
+/**
+ * GLOBAL nav is on six surfaces; the workspace SHELL — css/workspace.css, the More
+ * disclosure, the phone bar and the Clients/Vendors links — is on two of seven. That
+ * split is not asserted here and must not be re-derived here: it is declared once, in
+ * mcp-server/src/workspace-surface-inventory.js, and checked against every file by
+ * mcp-server/test/workspace-surface-inventory.test.mjs, which also holds the
+ * whole-surface Tours assertion and the negatives that keep both from passing
+ * vacuously. This test and deal-change-receipts.test.mjs's "navigation is out of this
+ * increment" are the two other parties to that one statement.
+ */
 test("all six authenticated surfaces expose deterministic global navigation", async () => {
   const expectations = {
     "workspace.html": ["/", "Home"],
