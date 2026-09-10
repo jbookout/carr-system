@@ -5,6 +5,7 @@ import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
 import { JOURNEY_ONE_DEADLINE_CONTRACT } from "../src/journey-one-clock.v5.js";
 import {
   BENCHMARK_ACCEPTANCE_ENVELOPE_FIELDS, BENCHMARK_CACHE_STATES, BENCHMARK_COST_VARIANCE_THRESHOLDS,
+  BENCHMARK_COVERAGE_FACT_FIELDS, BENCHMARK_COVERAGE_FACT_SCHEMA,
   BENCHMARK_DEADLINE_CONTRACT, BENCHMARK_MANIFEST_FIELDS, BENCHMARK_MANIFEST_SCHEMA,
   BENCHMARK_METRICS, BENCHMARK_PAYLOAD_DOMAIN_TAG, BENCHMARK_PAYLOAD_FIELDS,
   BENCHMARK_SLO_THRESHOLDS, BENCHMARK_STEP_REF, CONSUMER_GATE_RECEIPT_FIELDS,
@@ -14,8 +15,8 @@ import {
   benchmarkPayloadDigest, benchmarkPayloadOf, benchmarkRequiredCells,
   createFoundationAssuranceMinimumGate, evaluateBenchmarkAdmissibility,
   evaluateBenchmarkWorkloadCoverage, foundationAssuranceMinimumNegativeAdmission,
-  journeyOneClockMinimumReceiptView, nearestRankP95, validateBenchmarkManifest,
-  validateBenchmarkPayload,
+  journeyOneClockMinimumReceiptView, nearestRankP95, proposeBenchmarkCoverageFact,
+  validateBenchmarkManifest, validateBenchmarkPayload,
 } from "../src/benchmark-minimum.v5.js";
 
 // --- fixtures ---------------------------------------------------------------
@@ -32,6 +33,7 @@ const DAY = 86400000;
 
 const GATE_ZERO_AT = "2026-02-01T00:00:00.000Z";
 const ACCEPTED_AT = "2026-02-02T00:00:00.000Z";
+const COVERAGE_AT = "2026-02-02T12:00:00.000Z";
 const OBSERVED_AT = "2026-02-03T00:00:00.000Z";
 const AS_OF = "2026-02-04T00:00:00.000Z";
 
@@ -93,6 +95,24 @@ function measurements(body = payload(), { valueFor = () => 100 } = {}) {
   };
 }
 
+/**
+ * The coverage fact a trusted producer would compose from that measurement set.
+ * Composed through the module's own composer so the fixture cannot drift from
+ * the evaluator; a test that needs a fact the evaluator would never emit builds
+ * it by mutating this one, which is the only way such a fact can exist.
+ */
+function coverageFact(body = payload(), overrides = {}) {
+  const fact = copy(proposeBenchmarkCoverageFact({
+    payload: body,
+    measurements: measurements(body),
+    evaluator_identity: I("bench-evaluator"),
+    evidence_ref: "safe:a00-test:coverage-evidence",
+    observed_at: COVERAGE_AT,
+    ttl_expires_at: iso(Date.parse(COVERAGE_AT) + 7 * DAY),
+  }));
+  return { ...fact, ...overrides };
+}
+
 function member(spec, overrides = {}) {
   if (spec.output_schema_ref === BENCHMARK_MANIFEST_SCHEMA) {
     return { step_ref: spec.step_ref, receipt: manifest() };
@@ -137,6 +157,7 @@ function snapshot() {
       minimum_receipt_ttl_ms: 7 * DAY,
     },
     gate_zero: { step_ref: GATE_ZERO_STEP_REF, outcome_digest: D(6), observed_at: GATE_ZERO_AT },
+    benchmark_coverage: coverageFact(),
     members: MINIMUM_REQUIRED_MEMBERS.map(spec => member(spec)),
     minimum_receipt_context: {
       subject_maker_identity: I("builder"),
@@ -794,7 +815,308 @@ test("benchmark acceptance before or at Gate Zero is refused, and after it is ad
   assert.equal(run(after).admissible, true);
   const ahead = snapshot();
   at(ahead, BENCHMARK_STEP_REF).receipt = manifest(payload(), { acceptedAt: "2026-02-05T00:00:00.000Z" });
-  refuse(ahead, "benchmark_accepted_after_reference");
+  refuse(ahead, "benchmark_accepted_at_or_after_reference");
+});
+
+test("acceptance AT the reference instant is refused, because M01 needs it strictly earlier", () => {
+  // The join stamps the receipt it proposes with observed_at = as_of, and the
+  // clock kernel refuses a benchmark accepted at or after the origin receipt's
+  // own observation. Admitting the equal instant here would propose a receipt
+  // that can never become a clock origin, so the two boundaries are one.
+  const equal = snapshot();
+  at(equal, BENCHMARK_STEP_REF).receipt = manifest(payload(), { acceptedAt: AS_OF });
+  // The coverage fact beside it is complete, current and passing: a fully
+  // measured benchmark accepted at the reference instant is still refused, and
+  // the acceptance boundary is not something coverage evidence can buy past.
+  assert.equal(equal.benchmark_coverage.coverage_complete, true);
+  assert.equal(equal.benchmark_coverage.all_required_cells_meet_slo, true);
+  refuse(equal, "benchmark_accepted_at_or_after_reference");
+  // One millisecond earlier is admitted, so the rule is exclusive rather than
+  // merely strict-looking, and the admitted instant is the one reported.
+  const before = snapshot();
+  const acceptedAt = iso(Date.parse(AS_OF) - 1);
+  at(before, BENCHMARK_STEP_REF).receipt = manifest(payload(), { acceptedAt });
+  const result = run(before);
+  assert.equal(result.admissible, true);
+  assert.equal(result.benchmark_accepted_at, acceptedAt);
+  assert.ok(Date.parse(result.benchmark_accepted_at) < Date.parse(result.proposed_receipt.observed_at));
+});
+
+// --- the authenticated benchmark coverage fact ------------------------------
+
+test("the join consumes an authenticated coverage fact and republishes what it bound", () => {
+  const result = run(snapshot());
+  const fact = coverageFact();
+  assert.deepEqual(Object.keys(fact).sort(), [...BENCHMARK_COVERAGE_FACT_FIELDS].sort());
+  assert.equal(fact.schema_version, BENCHMARK_COVERAGE_FACT_SCHEMA);
+  assert.equal(result.admissible, true);
+  assert.equal(result.benchmark_coverage_measurement_set_digest, fact.measurement_set_digest);
+  assert.equal(result.benchmark_coverage_evaluation_digest, fact.evaluation_digest);
+  assert.equal(result.benchmark_coverage_observed_at, COVERAGE_AT);
+  assert.equal(result.benchmark_coverage_required_cell_count, benchmarkRequiredCells(payload()).length);
+  // The join evaluated no measurements and verified no stored artifact; it bound
+  // a fact and says so in both directions.
+  assert.equal(result.benchmark_coverage_evaluated_here, false);
+  assert.equal(result.durable_coverage_verification_required, true);
+  assert.equal(result.authority_granted, false);
+  // And none of it touches the r7-exact receipt or its digest.
+  assert.deepEqual(Object.keys(result.proposed_receipt).sort(), [...CONSUMER_GATE_RECEIPT_FIELDS].sort());
+  assert.equal(result.proposed_receipt_reference_digest, digest(result.proposed_receipt));
+});
+
+test("a projection carrying no coverage fact refuses by naming the fact it lacks", () => {
+  // This is the gap the audit found: an accepted manifest with no measurement
+  // evidence used to be indistinguishable here from a measured one. It now
+  // refuses, and it refuses with the concrete missing fact rather than by
+  // defaulting the manifest to unevaluated and passing anyway.
+  const absent = snapshot();
+  delete absent.benchmark_coverage;
+  assert.throws(() => run(absent),
+    e => e.code === "closed_shape" && e.detail.missing.includes("benchmark_coverage"));
+  const nulled = snapshot();
+  nulled.benchmark_coverage = null;
+  refuse(nulled, "invalid_object");
+  for (const field of BENCHMARK_COVERAGE_FACT_FIELDS) {
+    const s = snapshot();
+    delete s.benchmark_coverage[field];
+    assert.throws(() => run(s),
+      e => e.code === "closed_shape" && e.detail.missing.includes(field), field);
+  }
+});
+
+test("a coverage fact bound to another payload, rule or method refuses", () => {
+  const wrongPayload = snapshot();
+  wrongPayload.benchmark_coverage.benchmark_payload_digest = D(96);
+  refuse(wrongPayload, "benchmark_coverage_payload_binding_mismatch");
+  // A complete, passing evaluation of a DIFFERENT benchmark is not evidence
+  // about this one, however honest it is about its own.
+  const other = payload();
+  other.routes = ["/prospecting"];
+  const swapped = snapshot();
+  swapped.benchmark_coverage = coverageFact(other);
+  refuse(swapped, "benchmark_coverage_payload_binding_mismatch");
+  const rule = snapshot();
+  rule.benchmark_coverage.outlier_rule = "discard whatever looks wrong";
+  refuse(rule, "benchmark_coverage_rule_mismatch");
+  const method = snapshot();
+  method.benchmark_coverage.p95_aggregation_method = "mean";
+  refuse(method, "benchmark_coverage_rule_mismatch");
+  const schema = snapshot();
+  schema.benchmark_coverage.schema_version = "doctorcre-v5-benchmark-measurement-set.v1";
+  refuse(schema, "benchmark_coverage_wrong_schema");
+});
+
+test("the measurement and evaluation pointers are bound in form and left to the verifier in fact", () => {
+  for (const field of ["measurement_set_digest", "evaluation_digest"]) {
+    const s = snapshot();
+    s.benchmark_coverage[field] = "measured-somewhere-else";
+    assert.throws(() => run(s), e => e.code === "invalid_digest", field);
+  }
+  const unsafe = snapshot();
+  unsafe.benchmark_coverage.evidence_ref = "https://example.invalid/coverage";
+  refuse(unsafe, "invalid_evidence_ref");
+  // STATED PLAINLY, because it is the limit of what a source kernel holding no
+  // measurements can prove: a well-formed pointer to the WRONG measurement set
+  // is admitted here. Re-deriving these two digests from the stored artifacts is
+  // the verifier obligation the module header retains, and nothing in this file
+  // discharges it or claims it was discharged.
+  const unbound = snapshot();
+  unbound.benchmark_coverage.measurement_set_digest = D(95);
+  unbound.benchmark_coverage.evaluation_digest = D(94);
+  const result = run(unbound);
+  assert.equal(result.admissible, true);
+  assert.equal(result.benchmark_coverage_evaluated_here, false);
+  assert.equal(result.durable_coverage_verification_required, true);
+});
+
+test("counts cannot be claimed: the join re-derives the required cell count", () => {
+  const required = benchmarkRequiredCells(payload()).length;
+  const inflated = snapshot();
+  inflated.benchmark_coverage.required_cell_count = required + 1;
+  inflated.benchmark_coverage.measured_cell_count = required + 1;
+  refuse(inflated, "benchmark_coverage_cell_count_mismatch");
+  const short = snapshot();
+  short.benchmark_coverage.measured_cell_count = required - 1;
+  refuse(short, "benchmark_coverage_cell_count_mismatch");
+  const none = snapshot();
+  none.benchmark_coverage.measured_cell_count = 0;
+  refuse(none, "invalid_integer");
+  const incomplete = snapshot();
+  incomplete.benchmark_coverage.coverage_complete = false;
+  refuse(incomplete, "benchmark_coverage_incomplete");
+  // The case the re-derivation exists for: the accepted manifest's matrix is
+  // wider than the one the evaluation covered, and every field of the fact is
+  // internally consistent. Only recomputing the count from the ACCEPTED payload
+  // catches it.
+  const wider = payload();
+  wider.routes = ["/deals", "/prospecting"];
+  assert.ok(benchmarkRequiredCells(wider).length > required);
+  const grown = snapshot();
+  grown.binding.benchmark_manifest_digest = benchmarkPayloadDigest(wider);
+  at(grown, BENCHMARK_STEP_REF).receipt = manifest(wider);
+  grown.benchmark_coverage.benchmark_payload_digest = benchmarkPayloadDigest(wider);
+  assert.throws(() => run(grown), e => e.code === "benchmark_coverage_cell_count_mismatch" &&
+    e.detail.required === benchmarkRequiredCells(wider).length);
+});
+
+test("a coverage claim with no per-cell SLO proof cannot pass", () => {
+  const dropped = snapshot();
+  delete dropped.benchmark_coverage.worst_p95_by_slo_key.cold_lcp_p95_ms;
+  assert.throws(() => run(dropped), e => e.code === "benchmark_coverage_slo_proof_missing" &&
+    e.detail.missing.includes("cold_lcp_p95_ms"));
+  const empty = snapshot();
+  empty.benchmark_coverage.worst_p95_by_slo_key = {};
+  refuse(empty, "benchmark_coverage_slo_proof_missing");
+  const invented = snapshot();
+  invented.benchmark_coverage.worst_p95_by_slo_key.invented_p95_ms =
+    copy(invented.benchmark_coverage.worst_p95_by_slo_key.cold_lcp_p95_ms);
+  refuse(invented, "benchmark_coverage_slo_proof_missing");
+  // The outcome boolean does not carry itself: `all_required_cells_meet_slo`
+  // still says true here, and the p95 beside it refuses.
+  const over = snapshot();
+  over.benchmark_coverage.worst_p95_by_slo_key.warm_core_navigation_p95_ms.p95_ms =
+    BENCHMARK_SLO_THRESHOLDS.warm_core_navigation_p95_ms + 1;
+  assert.equal(over.benchmark_coverage.all_required_cells_meet_slo, true);
+  refuse(over, "benchmark_coverage_slo_not_met");
+  const claimed = snapshot();
+  claimed.benchmark_coverage.all_required_cells_meet_slo = false;
+  refuse(claimed, "benchmark_coverage_slo_not_met");
+  // Exactly at the threshold passes, on the same reading the evaluator uses.
+  const exact = snapshot();
+  exact.benchmark_coverage.worst_p95_by_slo_key.warm_core_navigation_p95_ms.p95_ms =
+    BENCHMARK_SLO_THRESHOLDS.warm_core_navigation_p95_ms;
+  assert.equal(run(exact).admissible, true);
+  // A proof filed under the wrong threshold, and a proof about a cell the
+  // accepted matrix never required.
+  const mismatched = snapshot();
+  mismatched.benchmark_coverage.worst_p95_by_slo_key.cold_lcp_p95_ms.cell.metric = "command_acknowledgement_ms";
+  refuse(mismatched, "benchmark_coverage_slo_proof_mismatched");
+  const unrequired = snapshot();
+  unrequired.benchmark_coverage.worst_p95_by_slo_key.cold_lcp_p95_ms.cell.network_profile = "lab-fiber";
+  refuse(unrequired, "benchmark_coverage_unrequired_cell");
+  const openEntry = snapshot();
+  openEntry.benchmark_coverage.worst_p95_by_slo_key.cold_lcp_p95_ms.note = "rerun of the third pass";
+  refuse(openEntry, "closed_shape");
+});
+
+test("a stale, future, pre-Gate-Zero or over-long coverage proof refuses", () => {
+  const stale = snapshot();
+  stale.benchmark_coverage.ttl_expires_at = "2026-02-03T00:00:00.000Z";
+  refuse(stale, "benchmark_coverage_not_current");
+  const future = snapshot();
+  future.benchmark_coverage.observed_at = "2026-02-05T00:00:00.000Z";
+  refuse(future, "benchmark_coverage_observed_after_reference");
+  const early = snapshot();
+  early.benchmark_coverage.observed_at = "2026-01-20T00:00:00.000Z";
+  refuse(early, "benchmark_coverage_observed_before_gate_zero");
+  // The boundary instant itself, on the one exclusive convention this file reads
+  // every other instant under.
+  const atGateZero = snapshot();
+  atGateZero.benchmark_coverage.observed_at = GATE_ZERO_AT;
+  refuse(atGateZero, "benchmark_coverage_observed_before_gate_zero");
+  const overlong = snapshot();
+  overlong.benchmark_coverage.ttl_expires_at = iso(Date.parse(COVERAGE_AT) + 400 * DAY);
+  refuse(overlong, "benchmark_coverage_ttl_policy_exceeded");
+  const inverted = snapshot();
+  inverted.benchmark_coverage.ttl_expires_at = COVERAGE_AT;
+  refuse(inverted, "benchmark_coverage_window_invalid");
+  const unreadable = snapshot();
+  unreadable.benchmark_coverage.observed_at = "2026-02-31T00:00:00.000Z";
+  refuse(unreadable, "invalid_timestamp");
+});
+
+test("a non-passing coverage proof refuses, whichever way it fails to pass", () => {
+  for (const status of ["fail", "unknown", "stale", "quarantined"]) {
+    const s = snapshot();
+    s.benchmark_coverage.status = status;
+    assert.throws(() => run(s), e => e.code === "benchmark_coverage_not_passing", status);
+  }
+  const invented = snapshot();
+  invented.benchmark_coverage.status = "measured-with-notes";
+  refuse(invented, "benchmark_coverage_status_unregistered");
+});
+
+test("the coverage evaluator must be a declared, independent seat", () => {
+  const undeclared = snapshot();
+  undeclared.benchmark_coverage.evaluator_identity = I("some-other-evaluator");
+  refuse(undeclared, "benchmark_coverage_evaluator_not_declared");
+  // Matched on the seat pair the manifest's own duplicate-evaluator rule uses,
+  // never on a class string read back out of a record.
+  const otherSession = snapshot();
+  otherSession.benchmark_coverage.evaluator_identity.session_ref = "session:a00-test-bench-evaluator-two";
+  refuse(otherSession, "benchmark_coverage_evaluator_not_declared");
+  const openIdentity = snapshot();
+  openIdentity.benchmark_coverage.evaluator_identity.verified_human = true;
+  refuse(openIdentity, "closed_shape");
+  // Declared and STILL self-attested: the builder measuring its own subject.
+  const withMaker = payload();
+  withMaker.evaluator_identities = [I("bench-evaluator"), I("builder")];
+  const maker = snapshot();
+  maker.binding.benchmark_manifest_digest = benchmarkPayloadDigest(withMaker);
+  at(maker, BENCHMARK_STEP_REF).receipt = manifest(withMaker);
+  maker.benchmark_coverage = coverageFact(withMaker, { evaluator_identity: I("builder") });
+  refuse(maker, "benchmark_coverage_self_attestation");
+  // The join's own oracle may not have measured the benchmark it consumes...
+  const oracle = snapshot();
+  oracle.minimum_receipt_context.producer_identity = copy(oracle.benchmark_coverage.evaluator_identity);
+  refuse(oracle, "minimum_producer_not_independent");
+  // ...and the partner who accepted the manifest may not be the seat that
+  // measured it, on the same independence rule that already covers reviewers.
+  const partner = payload();
+  partner.evaluator_identities = [I("joe")];
+  const acceptor = snapshot();
+  acceptor.binding.benchmark_manifest_digest = benchmarkPayloadDigest(partner);
+  at(acceptor, BENCHMARK_STEP_REF).receipt = manifest(partner);
+  acceptor.benchmark_coverage = coverageFact(partner, { evaluator_identity: I("joe") });
+  refuse(acceptor, "benchmark_authority_not_independent");
+});
+
+test("no caller boolean can stand in for an evaluated benchmark", () => {
+  const onFact = snapshot();
+  onFact.benchmark_coverage.coverage_verified_by_partner = true;
+  refuse(onFact, "closed_shape");
+  const onProjection = snapshot();
+  onProjection.benchmark_evaluated = true;
+  refuse(onProjection, "closed_shape");
+  const onManifest = snapshot();
+  at(onManifest, BENCHMARK_STEP_REF).receipt.workload_coverage_verified = true;
+  refuse(onManifest, "closed_shape");
+});
+
+test("composing a coverage fact from the evaluator is not authenticating one", () => {
+  const body = payload();
+  const compose = (overrides = {}) => proposeBenchmarkCoverageFact({
+    payload: body,
+    measurements: measurements(body),
+    evaluator_identity: I("bench-evaluator"),
+    evidence_ref: "safe:a00-test:coverage-evidence",
+    observed_at: COVERAGE_AT,
+    ttl_expires_at: iso(Date.parse(COVERAGE_AT) + 7 * DAY),
+    ...overrides,
+  });
+  const fact = compose();
+  assert.ok(Object.isFrozen(fact));
+  assert.deepEqual(Object.keys(fact).sort(), [...BENCHMARK_COVERAGE_FACT_FIELDS].sort());
+  // The composer is the one deterministic coverage evaluator and nothing else:
+  // its numbers are that evaluator's, and evaluation_digest names that result.
+  const evaluated = evaluateBenchmarkWorkloadCoverage({ payload: body, measurements: measurements(body) });
+  assert.equal(fact.evaluation_digest, digest(evaluated));
+  assert.equal(fact.required_cell_count, evaluated.required_cell_count);
+  assert.equal(fact.measurement_set_digest, digest(measurements(body)));
+  // It cannot compose evidence the evaluator denies...
+  const short = measurements(body);
+  short.cells.pop();
+  refuseCall(() => compose({ measurements: short }), "benchmark_matrix_coverage_incomplete");
+  refuseCall(() => compose({ measurements: measurements(body, { valueFor: () => 99999 }) }), "benchmark_slo_not_met");
+  refuseCall(() => compose({ ttl_expires_at: COVERAGE_AT }), "benchmark_coverage_window_invalid");
+  refuseCall(() => compose({ evidence_ref: "https://example.invalid/coverage" }), "invalid_evidence_ref");
+  // ...and composing one grants nothing. It carries no acceptance, no authority
+  // and no claim to have been verified; it reaches the join only by way of the
+  // installed verifier, which is the act this function is not.
+  for (const field of ["verified", "authenticated", "accepted", "authority_granted"]) {
+    assert.ok(!Object.hasOwn(fact, field), field);
+  }
+  assert.equal(evaluateBenchmarkAdmissibility({ payload: body, measurements: measurements(body) }).accepted, false);
 });
 
 test("every member must be observed after the Gate Zero outcome", () => {
@@ -915,18 +1237,30 @@ test("the manifest deadline contract and the M01 kernel contract are one contrac
   assert.equal(BENCHMARK_DEADLINE_CONTRACT.clock_terminus_gate_id, "journey-one-kernel-production-accepted");
 });
 
-test("the M01 receipt view is the only place the two receipt shapes are reconciled", () => {
-  const proposed = run(snapshot()).proposed_receipt;
-  // r7's consumer-gate-receipt.v1 is closed and declares no schema_version.
+test("the M01 receipt view keeps one receipt with one canonical form and one digest", () => {
+  const result = run(snapshot());
+  const proposed = result.proposed_receipt;
+  // r7's consumer-gate-receipt.v1 is closed and declares no schema_version, and
+  // neither side of the seam adds one.
   assert.ok(!Object.hasOwn(proposed, "schema_version"));
   const view = journeyOneClockMinimumReceiptView(proposed);
-  assert.equal(view.schema_version, "consumer-gate-receipt.v1");
-  assert.equal(Object.keys(view).length, CONSUMER_GATE_RECEIPT_FIELDS.length + 1);
-  // And the adapted shape is not admissible evidence here, which is the whole
-  // point of stating the divergence instead of loosening either schema.
+  assert.ok(!Object.hasOwn(view, "schema_version"));
+  assert.equal(Object.keys(view).length, CONSUMER_GATE_RECEIPT_FIELDS.length);
+  assert.deepEqual({ ...view }, { ...proposed });
+  // The identity that matters downstream: the digest A00 publishes is the digest
+  // M01 records as the clock origin, so a store keyed on one finds the other.
+  assert.equal(digest(view), digest(proposed));
+  assert.equal(digest(view), result.proposed_receipt_reference_digest);
+  // The view is still a distinct object, not the frozen result's own receipt.
+  assert.notEqual(view, proposed);
+});
+
+test("a receipt carrying an added schema_version is refused on both sides of the seam", () => {
+  const proposed = run(snapshot()).proposed_receipt;
+  refuseCall(() => journeyOneClockMinimumReceiptView({ ...copy(proposed), schema_version: "consumer-gate-receipt.v1" }),
+    "closed_shape");
   const s = snapshot();
-  at(s, PHI).receipt = { ...view, gate_id: "global-phi-boundary-accepted",
-    receipt_producer_step_ref: PHI };
+  at(s, PHI).receipt.schema_version = "consumer-gate-receipt.v1";
   refuse(s, "closed_shape");
 });
 
@@ -940,10 +1274,21 @@ test("the denial set exercises both categories r7's denial_rule names, by their 
     "duplicate_member_receipt", "member_receipt_ttl_policy_exceeded",
     "member_receipt_window_invalid", "member_observed_before_gate_zero",
     "member_producers_not_distinct",
+    // Both acceptance boundaries, including the equal instant the clock kernel
+    // refuses, so the seam's convention is proved and not merely written down.
+    "benchmark_accepted_at_or_after_reference",
+    // The "unevaluated" category. An accepted manifest with no coverage fact,
+    // one bound to another payload, one whose counts or SLO proof do not hold
+    // up, one measured by an undeclared seat, and one that has gone stale.
+    "benchmark_coverage_payload_binding_mismatch", "benchmark_coverage_cell_count_mismatch",
+    "benchmark_coverage_slo_not_met", "benchmark_coverage_slo_proof_missing",
+    "benchmark_coverage_unrequired_cell", "benchmark_coverage_evaluator_not_declared",
+    "benchmark_coverage_self_attestation", "benchmark_coverage_not_passing",
+    "benchmark_coverage_not_current", "benchmark_coverage_observed_before_gate_zero",
   ]) {
     assert.ok(proof.observed_codes.includes(code), code);
   }
-  assert.ok(proof.case_count >= 37, `expected the widened denial set, saw ${proof.case_count}`);
+  assert.ok(proof.case_count >= 55, `expected the widened denial set, saw ${proof.case_count}`);
 });
 
 test("a member receipt replayed under a second step is a replay, not a second pass", () => {
@@ -1085,16 +1430,15 @@ test("the M01 seam rejects a reference or instant M01 cannot read, and shortens 
   }), "m01_incompatible_session_ref");
 
   // The receipt this join actually proposes is inside every M01 domain, which is
-  // why the divergence is a seam to reconcile and not a live defect.
+  // why the remaining divergence is a seam to check and not a live defect.
   const view = journeyOneClockMinimumReceiptView(proposed);
-  assert.equal(view.schema_version, "consumer-gate-receipt.v1");
   assert.equal(view.evidence_ref, proposed.evidence_ref);
   assert.equal(view.observed_at, proposed.observed_at);
 });
 
-test("the seam adapts a receipt's field set and converts no deadline contract", () => {
+test("the seam changes no field of the receipt and converts no deadline contract", () => {
   const view = journeyOneClockMinimumReceiptView(run(snapshot()).proposed_receipt);
-  assert.deepEqual(Object.keys(view).sort(), [...CONSUMER_GATE_RECEIPT_FIELDS, "schema_version"].sort());
+  assert.deepEqual(Object.keys(view).sort(), [...CONSUMER_GATE_RECEIPT_FIELDS].sort());
   assert.ok(!Object.hasOwn(view, "deadline_contract"));
   // Days here, hours there: reconciled at module load, never silently converted
   // for a caller. Neither contract carries the other's unit.
