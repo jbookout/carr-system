@@ -1020,6 +1020,12 @@ test("the public admit verb refuses before it issues any query, and says why", a
   for (const blocker of ["issuance", "terminus", "coverage", "Gate Zero"]) {
     assert.ok(why.includes(blocker), blocker);
   }
+  // AND THE SEAT THAT READS THIS COMPOSER IS NAMED, with what it can and cannot
+  // do: it reads this inventory, never writes to it, and cannot run here.
+  const loop = requirements.trusted_integration_contract.composition_loop;
+  assert.ok(loop.includes("journey-one-clock-runtime.v5.js"));
+  assert.ok(loop.includes("reads this inventory and never writes to it"));
+  assert.ok(loop.includes("minimum_inventory_unavailable"));
 });
 
 test("the postgres journal is constructible and issues no query until it is used", () => {
