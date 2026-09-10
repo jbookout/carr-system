@@ -47,13 +47,14 @@ def one(cur):
     return row
 
 
-def refuses(cur, statement: str, params: tuple = ()) -> bool:
+def refuses(cur, statement: str, params: tuple = (), *, expected_primary: str | None = None) -> bool:
     cur.execute("savepoint forward_fix_refusal")
     try:
         cur.execute(statement, params)
-    except psycopg.Error:
+    except psycopg.Error as error:
         cur.execute("rollback to savepoint forward_fix_refusal")
-        return True
+        return (expected_primary is None
+                or (error.sqlstate == "P0001" and error.diag.message_primary == expected_primary))
     cur.execute("rollback to savepoint forward_fix_refusal")
     return False
 
@@ -205,7 +206,8 @@ def main() -> int:
         jobs(cur)
         check("rollback preparation rejects a malformed optional-letter filename", refuses(
             cur, base.prepare_sql(),
-            base.prepare_params(malformed_prepare, uuid.uuid4(), "current_before", uuid.uuid4())))
+            base.prepare_params(malformed_prepare, uuid.uuid4(), "current_before", uuid.uuid4()),
+            expected_primary="release does not declare an exact migration/schema set"))
         owner(cur)
 
         malformed_readback = base.seed_fixture(cur, "optional-letter-readback")
@@ -218,7 +220,8 @@ def main() -> int:
         check("rollback readback rejects a malformed optional-letter filename", refuses(
             cur, base.record_sql(),
             (malformed_idem, uuid.uuid4(), malformed_tag, 211,
-             "0494aa_not_a_migration.sql", base.SCHEMA_APPLIED_COUNT, 170, False)))
+             "0494aa_not_a_migration.sql", base.SCHEMA_APPLIED_COUNT, 170, False),
+            expected_primary="invalid typed staging readback input"))
         cur.execute(base.record_sql(),
                     (malformed_idem, uuid.uuid4(), malformed_tag, 211,
                      base.SCHEMA_HIGHEST_MIGRATION, base.SCHEMA_APPLIED_COUNT, 170, False))
