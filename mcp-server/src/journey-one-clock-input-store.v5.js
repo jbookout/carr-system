@@ -90,8 +90,12 @@
 //   * benchmark-minimum.v5.js — journeyOneClockMinimumReceiptView is the ONE
 //     validator of "is this an M01-readable r7-exact minimum receipt", and
 //     digest(view) is by its own contract the exact origin_receipt_digest the
-//     kernel records. The gate, step, role, oracle and scope constants are A00's
-//     and are imported, not copied.
+//     kernel records. validateBenchmarkManifest is the ONE validator of "is this
+//     an accepted benchmark-manifest.v1", and the composer's benchmark
+//     acceptance envelope is DERIVED through it rather than restated beside it —
+//     shape only, never authentication, as that derivation says at length. The
+//     gate, step, role, oracle and scope constants are A00's and are imported,
+//     not copied.
 //   * journey-one-clock.v5.js — the projection schema, the accepted deadline
 //     contract, and readJourneyOneClockHistory for a supplied history.
 //   * journey-one-clock-store.v5.js — journeyOneClockScopeBinding (ONE scope
@@ -124,9 +128,11 @@ import { ORGANIZATION_TENANT_ID } from "./identity.js";
 import { V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 import { assertNoSelfAssertedAuthority } from "./benchmark-acceptance-store.v5.js";
 import {
-  AUTHENTICATED_RECEIPT_IDENTITY_SCHEMA, CONSUMER_GATE_RECEIPT_SCHEMA, MINIMUM_EVIDENCE_SCOPE,
+  AUTHENTICATED_RECEIPT_IDENTITY_SCHEMA, BENCHMARK_ACCEPTANCE_ENVELOPE_FIELDS,
+  BENCHMARK_MANIFEST_SCHEMA, CONSUMER_GATE_RECEIPT_SCHEMA, MINIMUM_EVIDENCE_SCOPE,
   MINIMUM_GATE_ID, MINIMUM_ORACLE_REF, MINIMUM_ORACLE_VERSION, MINIMUM_PRODUCER_ROLE,
   MINIMUM_STEP_REF, MINIMUM_SUBJECT_ENVIRONMENT, journeyOneClockMinimumReceiptView,
+  validateBenchmarkManifest,
 } from "./benchmark-minimum.v5.js";
 import {
   JOURNEY_ONE_CLOCK_PROJECTION, JOURNEY_ONE_DEADLINE_CONTRACT, readJourneyOneClockHistory,
@@ -190,6 +196,27 @@ export const JOURNEY_ONE_MINIMUM_ACCEPTED_POLICY_FIELDS = Object.freeze([
  */
 export const JOURNEY_ONE_MINIMUM_ACCEPTED_SOURCE_FIELDS = Object.freeze([
   "benchmark_accepted_at", "benchmark_accepted_by_identity", "benchmark_manifest_digest",
+  "maximum_completion_receipt_ttl_ms", "production_environment_manifest_digest",
+]);
+
+/**
+ * THE SPLIT INSIDE THAT SET, AND WHY IT IS NOT COSMETIC.
+ *
+ * Three of the five are the ACCEPTANCE ENVELOPE of benchmark-manifest.v1 —
+ * A00's own BENCHMARK_ACCEPTANCE_ENVELOPE_FIELDS minus `status`, renamed with
+ * the `benchmark_` prefix M01's projection uses. They describe an artifact that
+ * exists, so they can be DERIVED from it rather than restated beside it, and
+ * journeyOneMinimumBenchmarkAcceptedSources below is that derivation.
+ *
+ * The other two appear NOWHERE on benchmark-manifest.v1. Deriving them would be
+ * minting a binding rather than carrying one, so they stay exactly what they
+ * were: accepted-policy inputs handed over at construction by trusted server
+ * code, and no more audited than the code that hands them over.
+ */
+export const JOURNEY_ONE_MINIMUM_BENCHMARK_DERIVED_SOURCE_FIELDS = Object.freeze([
+  "benchmark_accepted_at", "benchmark_accepted_by_identity", "benchmark_manifest_digest",
+]);
+export const JOURNEY_ONE_MINIMUM_TRUSTED_POLICY_SOURCE_FIELDS = Object.freeze([
   "maximum_completion_receipt_ttl_ms", "production_environment_manifest_digest",
 ]);
 
@@ -317,6 +344,33 @@ if (MINIMUM_GATE_ID !== JOURNEY_ONE_DEADLINE_CONTRACT.clock_origin_gate_id) {
     "journey-one-clock-input-store: A00's minimum gate id and the accepted deadline contract's clock_origin_gate_id disagree");
 }
 
+// THE DERIVABLE/NOT-DERIVABLE SPLIT, RECONCILED AT LOAD RATHER THAN TRUSTED.
+// A field that fell out of both halves would silently stop being derived and
+// stop being declared a trusted input; a field in both would be claimed as
+// derived while a caller still supplied it. Either is a startup failure here
+// rather than a quiet weakening of the composer's own report about itself.
+{
+  const split = [...JOURNEY_ONE_MINIMUM_BENCHMARK_DERIVED_SOURCE_FIELDS,
+    ...JOURNEY_ONE_MINIMUM_TRUSTED_POLICY_SOURCE_FIELDS].sort();
+  if (split.length !== JOURNEY_ONE_MINIMUM_ACCEPTED_SOURCE_FIELDS.length ||
+      split.some((field, i) => field !== JOURNEY_ONE_MINIMUM_ACCEPTED_SOURCE_FIELDS[i])) {
+    throw new Error(
+      "journey-one-clock-input-store: the derived and trusted-policy accepted-source halves are not exactly the accepted source field set");
+  }
+  // And the derivable half is A00's acceptance envelope under M01's names — not
+  // a second opinion about which fields an acceptance envelope carries. `status`
+  // is excluded because M01's projection has no slot for it: validateBenchmark-
+  // Manifest already refuses any value but "accepted", so carrying it would be
+  // carrying a constant. The rest gain the `benchmark_` prefix M01 spells them
+  // with, and benchmark_manifest_digest already has it.
+  const envelope = BENCHMARK_ACCEPTANCE_ENVELOPE_FIELDS.filter(f => f !== "status")
+    .map(f => f.startsWith("benchmark_") ? f : `benchmark_${f}`).sort();
+  if (envelope.join("|") !== [...JOURNEY_ONE_MINIMUM_BENCHMARK_DERIVED_SOURCE_FIELDS].join("|")) {
+    throw new Error(
+      `journey-one-clock-input-store: the derivable accepted-source fields are no longer ${BENCHMARK_MANIFEST_SCHEMA}'s acceptance envelope`);
+  }
+}
+
 export class JourneyOneMinimumInputStoreError extends Error {
   constructor(code, message, detail) {
     super(message);
@@ -426,6 +480,50 @@ export function journeyOneMinimumAcceptedPolicy(policy) {
   assertDigestRef(policy.minimum_environment_manifest_digest,
     "accepted_minimum_policy.minimum_environment_manifest_digest");
   return deepFreeze({ ...policy });
+}
+
+/**
+ * THE BENCHMARK ACCEPTANCE ENVELOPE, DERIVED FROM THE ACCEPTED MANIFEST RATHER
+ * THAN RESTATED BESIDE IT.
+ *
+ * `benchmark_manifest_digest`, `benchmark_accepted_at` and
+ * `benchmark_accepted_by_identity` describe an artifact that exists. Handed to a
+ * composer as three literals they are three strings nothing compares against
+ * that artifact: a digest no manifest produces, an instant no manifest records
+ * and an acceptor no manifest names would all compose a projection the kernel
+ * would then start a clock on. Derived here, each one comes off the manifest
+ * itself, and the digest returned is the one A00's validator RECOMPUTED from the
+ * payload rather than the field the manifest carries.
+ *
+ * IT REUSES A00's ONE VALIDATOR AND ADDS NO SECOND OPINION.
+ * validateBenchmarkManifest owns "is this an accepted benchmark-manifest.v1",
+ * and its refusals travel to the caller under its own codes rather than a local
+ * vocabulary for the same fact.
+ *
+ * WHAT THIS IS NOT, AND THE DISTINCTION IS THE WHOLE TRUST BOUNDARY. That
+ * validator reads the SHAPE of an acceptance envelope: that the payload hashes
+ * to the digest the manifest claims, that `status` is the single accepted value,
+ * and that `accepted_by_identity` NAMES a known partner in verified-partner
+ * form. IT AUTHENTICATES NOBODY. No live actor is consulted, no acceptance
+ * record is read, and a manifest trusted server code assembled a moment ago is
+ * indistinguishable here from one Joe or Dell actually accepted — the exact
+ * `authority_class` seat the kernel's own header warns must never be read back
+ * out of a stored record. Deriving these three removes a caller's freedom to
+ * INVENT them; it does not turn shape validation into human acceptance, and
+ * nothing downstream may report it as such.
+ */
+export function journeyOneMinimumBenchmarkAcceptedSources(manifest) {
+  if (!isPlainObject(manifest)) {
+    refuse("invalid_shape",
+      `the benchmark acceptance envelope is derived from an accepted ${BENCHMARK_MANIFEST_SCHEMA}, never from a pair of caller strings`,
+      { path: "benchmark_manifest" });
+  }
+  const { payload_digest } = validateBenchmarkManifest(manifest);
+  return deepFreeze({
+    benchmark_accepted_at: manifest.accepted_at,
+    benchmark_accepted_by_identity: copy(manifest.accepted_by_identity),
+    benchmark_manifest_digest: payload_digest,
+  });
 }
 
 /**
@@ -1203,8 +1301,21 @@ export function createJourneyOneClockMinimumInputStore({
  * verified partner performed, which A00's rail refuses outright from a caller.
  * They reach here only because trusted server code read them from the accepted
  * benchmark acceptance and handed them over.
+ *
+ * `benchmark_manifest` IS THE ARTIFACT THOSE THREE DESCRIBE, AND IT IS REQUIRED.
+ * The envelope is derived from it by journeyOneMinimumBenchmarkAcceptedSources
+ * and must MATCH the accepted_sources handed over, and the manifest's own
+ * subject, candidate and policy digests must be this inventory's accepted scope
+ * — so a real manifest for another program is refused rather than quietly
+ * composed into this projection. There is deliberately NO path on which the three
+ * are asserted instead of derived: an optional check is one a caller can decline
+ * exactly when it would have mattered, and this rail cannot tell an invented
+ * digest, instant or acceptor from a real one. A composer with no manifest is a
+ * composer that cannot exist.
+ * It is still shape and not authentication: see the derivation's own note.
  */
-export function createJourneyOneClockProjectionComposer({ store, accepted_sources } = {}) {
+export function createJourneyOneClockProjectionComposer(
+  { store, accepted_sources, benchmark_manifest } = {}) {
   if (!store || typeof store.read !== "function" || !isPlainObject(store.clock_scope)) {
     refuse("invalid_shape",
       "a projection composer needs a minimum input store constructed with its authoritative clock scope",
@@ -1225,8 +1336,61 @@ export function createJourneyOneClockProjectionComposer({ store, accepted_source
   const sources = deepFreeze(copy(accepted_sources));
   const scope = store.clock_scope;
 
+  // THE ARTIFACT THE ENVELOPE DESCRIBES IS REQUIRED, and its absence is refused
+  // by name rather than defaulted into a composition nothing checked.
+  if (!isPlainObject(benchmark_manifest)) {
+    refuse("benchmark_manifest_required",
+      `composing a projection requires the accepted ${BENCHMARK_MANIFEST_SCHEMA} the benchmark acceptance envelope is derived from. The manifest digest, the acceptance instant and the acceptor seat are the record of an act another authority performed; taken as caller literals they are three strings this rail cannot tell from invented ones, and the kernel would start a clock on them`,
+      { path: "benchmark_manifest",
+        derived_fields: [...JOURNEY_ONE_MINIMUM_BENCHMARK_DERIVED_SOURCE_FIELDS],
+        trusted_policy_fields: [...JOURNEY_ONE_MINIMUM_TRUSTED_POLICY_SOURCE_FIELDS] });
+  }
+  // THE ENVELOPE AGAINST THE ARTIFACT IT DESCRIBES. Compared field by field
+  // through digest() so the identity seat is compared as a whole object rather
+  // than by a hand-written walk of its three keys.
+  const derived = journeyOneMinimumBenchmarkAcceptedSources(benchmark_manifest);
+  for (const field of JOURNEY_ONE_MINIMUM_BENCHMARK_DERIVED_SOURCE_FIELDS) {
+    if (digest(derived[field]) !== digest(sources[field])) {
+      refuse("benchmark_accepted_sources_not_derived",
+        `accepted_sources.${field} is not the value the supplied accepted benchmark manifest produces; the acceptance envelope is derived from the manifest and never asserted beside it`,
+        { field, derived: copy(derived[field]), supplied: copy(sources[field]) });
+    }
+  }
+  // AND THE MANIFEST IS THIS INVENTORY'S. A genuine accepted manifest for
+  // another accepted subject would otherwise compose a projection whose
+  // benchmark half is about one program and whose binding half is about
+  // another; the kernel compares each receipt to the binding and would never
+  // see the disagreement, because the manifest digest is not in that
+  // comparison at all.
+  for (const [field, expected] of [
+    ["subject_digest", scope.scope.benchmark_subject_digest],
+    ["candidate_digest", scope.scope.benchmark_candidate_digest],
+    ["policy_digest", scope.scope.benchmark_policy_digest],
+  ]) {
+    if (benchmark_manifest[field] !== expected) {
+      refuse("benchmark_manifest_scope_mismatch",
+        `the supplied accepted benchmark manifest's ${field} is not this inventory's accepted scope's`,
+        { field, expected, supplied: benchmark_manifest[field] });
+    }
+  }
+  /**
+   * WHERE EACH ACCEPTED SOURCE FIELD CAME FROM, reported on the composer and on
+   * every composition it produces. The three envelope fields are derived, and
+   * the two policy fields are not derivable from any benchmark manifest and stay
+   * trusted construction-time inputs — a reader is entitled to see which is
+   * which, and to see in the same place that neither is authentication.
+   */
+  const envelopeProvenance = deepFreeze({
+    derived_from_validated_accepted_manifest: true,
+    derived_fields: [...JOURNEY_ONE_MINIMUM_BENCHMARK_DERIVED_SOURCE_FIELDS],
+    trusted_policy_fields: [...JOURNEY_ONE_MINIMUM_TRUSTED_POLICY_SOURCE_FIELDS],
+    human_acceptance_authenticated: false,
+    statement: "the benchmark manifest digest, acceptance instant and acceptor seat were derived from an accepted benchmark-manifest.v1 through A00's validateBenchmarkManifest, and that manifest's own subject, candidate and policy digests are this inventory's accepted scope. That is SHAPE: no live actor was consulted and no acceptance record was read, so it is not evidence that a verified partner accepted anything. The completion TTL maximum and the production environment manifest digest are on no benchmark manifest at all and remain trusted construction-time inputs.",
+  });
+
   return Object.freeze({
     accepted_sources: sources,
+    benchmark_envelope: envelopeProvenance,
     clock_scope_key: scope.clock_scope_key,
     /**
      * Read the inventory and compose the projection as of one instant.
@@ -1307,6 +1471,7 @@ export function createJourneyOneClockProjectionComposer({ store, accepted_source
         projection,
         // Stated on the object so nothing downstream can read composition as
         // verification. This is an INPUT to verifySnapshot, not its output.
+        benchmark_envelope: envelopeProvenance,
         authenticated: false,
         authenticated_by: null,
         trusted_verifier_still_required: true,
@@ -1352,6 +1517,7 @@ export const JOURNEY_ONE_MINIMUM_INPUT_AUTHORITY_REQUIREMENT = deepFreeze({
     "a caller-supplied admitted_at, or any admission instant not taken from the record layer's own trusted clock",
     "a caller-chosen clock scope or accepted minimum policy",
     "a fabricated or self-hashed minimum receipt, a minted session_ref, or an envelope carrying { verified: true }",
+    "a benchmark acceptance envelope asserted beside a projection rather than derived from the accepted manifest it describes; the composer refuses to exist without that manifest, and refuses one whose digests are not this inventory's accepted scope",
     "a coverage or Gate Zero binding invented here to fill a slot no producer supplies",
     "a public admit verb that steps around the missing issuance producer",
     "a second benchmark, a second receipt validator, or a second history validator in this file",
@@ -1401,7 +1567,8 @@ export function journeyOneClockMinimumInputStoreIntegrationRequirements() {
     public_admit_blocked_by: [JOURNEY_ONE_MINIMUM_INPUT_AUTHORITY_REQUIREMENT.binding_ref],
     trusted_integration_contract: {
       entry_point: "createJourneyOneClockMinimumInputStore({ journal, actor, clock_scope, accepted_minimum_policy })",
-      reader: "createJourneyOneClockProjectionComposer({ store, accepted_sources }).compose({ as_of, completion, completion_expectation, pauses, amendments, history })",
+      reader: "createJourneyOneClockProjectionComposer({ store, accepted_sources, benchmark_manifest }).compose({ as_of, completion, completion_expectation, pauses, amendments, history })",
+      benchmark_envelope: "the accepted benchmark manifest is REQUIRED at construction, and the three acceptance-envelope fields of accepted_sources are DERIVED from it by journeyOneMinimumBenchmarkAcceptedSources: a mismatch, a manifest for another accepted scope, and a missing manifest are each refused by name. Deriving them is SHAPE validation through A00's own validateBenchmarkManifest and is never a claim that a verified partner was authenticated; the other two accepted source fields are on no benchmark manifest at all and stay trusted construction-time policy inputs.",
       records: "one issued minimum receipt as an input the kernel may read, with the record layer's own admission instant and scoped provenance",
       does_not_record: "an acceptance, a gate admission, a verification, a clock start or any claim about a deadline",
     },

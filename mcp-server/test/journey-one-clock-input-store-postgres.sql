@@ -39,6 +39,13 @@
 --   * One active actor must already exist for the writer context. THIS FILE
 --     CREATES NO ROLE AND NO ACTOR: minting either would manufacture the
 --     identity the rail exists to derive.
+--   * The append-only NEGATIVES additionally need the invoking role to hold
+--     UPDATE, DELETE and TRUNCATE on the two relations -- which in practice
+--     means running as the TABLE OWNER, since all three are revoked from every
+--     runtime bundle. Run as anyone else those statements fail with
+--     insufficient privilege before the trigger fires, so they are SKIPPED with
+--     a notice rather than re-raised as a proof. The structural half -- that
+--     both triggers exist -- needs no privilege and always runs.
 --
 -- WHAT IT PROVES, none of which can be shown by reading SQL text:
 --   * THE ADMISSION INSTANT IS THE DATABASE'S. ops.j1_minimum_admission_instant()
@@ -674,10 +681,24 @@ begin
      or jsonb_array_length(v_readback -> 'record_layer_cannot_prove') < 5 then
     raise exception 'READBACK: the readback does not say what it cannot prove';
   end if;
-  if ops.j1_minimum_history(ops.j1_clock_scope_digest(
-       v_scope || jsonb_build_object('benchmark_policy_digest', 'sha256:' || repeat('7a', 32))))
-     ->> 'exists' <> 'false' then
+  v_variant := ops.j1_minimum_history(ops.j1_clock_scope_digest(
+    v_scope || jsonb_build_object('benchmark_policy_digest', 'sha256:' || repeat('7a', 32))));
+  if v_variant ->> 'exists' <> 'false' then
     raise exception 'READBACK: an unopened inventory reported as existing';
+  end if;
+  -- AND ITS KEY SET IS THE MODULE'S OWN exists:false SHAPE, not five of its six
+  -- keys. read() returns schema_version, clock_scope_key, tenant, exists,
+  -- record_layer_cannot_prove and effects -- and no gate_admitted_by_record_layer,
+  -- because an inventory that does not exist has admitted nothing to say false
+  -- about. A parity claim that is off by one field is the reason nobody rechecks.
+  if (select array_agg(k order by k) from jsonb_object_keys(v_variant) as t(k))
+     is distinct from array['clock_scope_key', 'effects', 'exists',
+                            'record_layer_cannot_prove', 'schema_version', 'tenant']::text[] then
+    raise exception 'READBACK: the exists:false branch is not the module''s exists:false key set: %',
+      (select string_agg(k, ',' order by k) from jsonb_object_keys(v_variant) as t(k));
+  end if;
+  if (v_variant -> 'effects' ->> 'database_writes') <> '0' then
+    raise exception 'READBACK: a zero-write readback must report zero database writes';
   end if;
 
   -- --- THE ORIGIN REGRESSION, IN ITS DISCRIMINATING FORM ---------------------
@@ -781,6 +802,22 @@ begin
   -- testing is worse than no negative, so the column is checked rather than
   -- assumed. minimum_receipt_ttl_policy_ms is on both relations, and updating it
   -- is also the exact retroactive policy revision the seal forbids.
+  --
+  -- AND THE STATEMENT MUST BE ABLE TO REACH THE TRIGGER AT ALL. update, delete
+  -- and truncate are revoked from every runtime bundle at the foot of the
+  -- candidate SQL, so a run as `carr_writer` fails each attempt below with
+  -- insufficient-privilege (42501) BEFORE the trigger fires. The handlers match
+  -- on the invariant id in the message, so they would re-raise and abort the
+  -- whole proof having proved nothing about append-only -- the same defect as
+  -- the missing column above, gated on ROLE rather than on schema. The owner is
+  -- the intended and natural mode (has_table_privilege reports true for an owner
+  -- without an explicit grant), so this is a SKIP with a notice and not a
+  -- failure: the fixture says what it could not test instead of claiming it.
+  --
+  -- THE COLUMN PRECHECK IS STRUCTURAL AND IS NOT GATED ON THE ROLE. Reading
+  -- information_schema.columns needs no privilege on the relation, so a run that
+  -- has to SKIP the attempts below still asserts that the column those attempts
+  -- name exists on both relations.
   foreach v_relation in array array['j1_minimum_inventory', 'j1_minimum_admission'] loop
     if not exists (select 1 from information_schema.columns
                     where table_schema = 'ops' and table_name = v_relation
@@ -788,6 +825,17 @@ begin
       raise exception 'FIXTURE: ops.% has no minimum_receipt_ttl_policy_ms column, so this negative would fail at parse instead of reaching the append-only trigger',
         v_relation;
     end if;
+  end loop;
+  if not (has_table_privilege(current_user, 'ops.j1_minimum_inventory', 'UPDATE')
+      and has_table_privilege(current_user, 'ops.j1_minimum_inventory', 'DELETE')
+      and has_table_privilege(current_user, 'ops.j1_minimum_inventory', 'TRUNCATE')
+      and has_table_privilege(current_user, 'ops.j1_minimum_admission', 'UPDATE')
+      and has_table_privilege(current_user, 'ops.j1_minimum_admission', 'DELETE')
+      and has_table_privilege(current_user, 'ops.j1_minimum_admission', 'TRUNCATE')) then
+    raise notice 'SKIPPED: % holds no UPDATE/DELETE/TRUNCATE on the admitted-minimum relations, so the append-only negatives would fail with insufficient privilege before reaching the trigger and would prove nothing. Run this fixture as the table owner to exercise them.',
+      current_user;
+  else
+  foreach v_relation in array array['j1_minimum_inventory', 'j1_minimum_admission'] loop
     begin
       execute format(
         'update ops.%I set minimum_receipt_ttl_policy_ms = minimum_receipt_ttl_policy_ms + 1 where true',
@@ -812,12 +860,24 @@ begin
     exception when others then
       if sqlerrm not like '%j1_minimum_rows_are_append_only%' then raise; end if;
     end;
+  end loop;
+  end if;
+  -- THE STRUCTURAL HALF IS NOT GATED ON THE ROLE. Reading pg_trigger needs no
+  -- privilege on the relation, so whether the statement-level trigger EXISTS is
+  -- asserted for every run, including one that had to skip the attempts above.
+  foreach v_relation in array array['j1_minimum_inventory', 'j1_minimum_admission'] loop
     if not exists (select 1 from pg_trigger t join pg_class c on c.oid = t.tgrelid
                     join pg_namespace n on n.oid = c.relnamespace
                    where n.nspname = 'ops' and c.relname = v_relation
                      and t.tgname = v_relation || '_no_truncate' and not t.tgisinternal) then
       raise exception 'APPEND-ONLY: ops.% has no statement-level truncate trigger, so the claim rests on a revoke the owner is not bound by',
         v_relation;
+    end if;
+    if not exists (select 1 from pg_trigger t join pg_class c on c.oid = t.tgrelid
+                    join pg_namespace n on n.oid = c.relnamespace
+                   where n.nspname = 'ops' and c.relname = v_relation
+                     and t.tgname = v_relation || '_append_only' and not t.tgisinternal) then
+      raise exception 'APPEND-ONLY: ops.% has no row-level update/delete trigger', v_relation;
     end if;
   end loop;
 
@@ -827,9 +887,13 @@ begin
   foreach v_role in array array['carr_reader', 'carr_writer', 'carr_jobs', 'carr_authority'] loop
     if not exists (select 1 from pg_roles where rolname = v_role) then continue; end if;
     foreach v_relation in array array['ops.j1_minimum_inventory', 'ops.j1_minimum_admission'] loop
+      -- TRUNCATE IS ASSERTED HERE TOO, because it is now a first-class claim of
+      -- this rail with its own trigger. The revoke is the half that binds a
+      -- runtime bundle; the trigger above is the half that binds the owner.
       if has_table_privilege(v_role, v_relation, 'INSERT')
          or has_table_privilege(v_role, v_relation, 'UPDATE')
-         or has_table_privilege(v_role, v_relation, 'DELETE') then
+         or has_table_privilege(v_role, v_relation, 'DELETE')
+         or has_table_privilege(v_role, v_relation, 'TRUNCATE') then
         raise exception 'GRANTS: % holds a direct write on %', v_role, v_relation;
       end if;
     end loop;

@@ -1200,6 +1200,11 @@ test("every shared append invariant is stated in both homes, and the one-home en
     }
   }
   assert.equal(invariants.filter(i => !i.enforced_in.includes("module")).length, 1);
+  // THE SHARED COUNT IS THE LIST'S OWN, read off enforced_in rather than off any
+  // description of it: sixteen of the seventeen have two homes, and the
+  // seventeenth is the record layer's alone.
+  assert.equal(invariants.filter(i =>
+    i.enforced_in.includes("module") && i.enforced_in.includes("record_layer")).length, 16);
 });
 
 test("the candidate SQL is fresh-or-exactly-compatible and namespaced, with no ALTER and no backfill", () => {
@@ -1242,6 +1247,30 @@ test("the candidate SQL is fresh-or-exactly-compatible and namespaced, with no A
   // value by a CHECK, so no writer can widen it into a claim of verification.
   assert.ok(SQL.includes("check (input_authority = 'trusted_projection_not_independently_verified_by_this_record_layer')"));
   assert.ok(columns.includes("input_authority"));
+});
+
+test("truncate is refused by a statement-level trigger and not only by a revoke", () => {
+  // The header of the candidate SQL claims "update, delete and truncate are
+  // refused everywhere on this rail". A ROW-LEVEL trigger never sees TRUNCATE --
+  // it is a statement event -- and `revoke ... truncate` does not bind the table
+  // owner, so for a while that claim was true of every runtime bundle and false
+  // of the owner. The second trigger is what makes it true. Same pattern as
+  // ops/journey-one-clock-input-store.candidate.sql, which fixed it first.
+  assert.match(SQL,
+    /create trigger %I before truncate on ops\.%I for each statement execute function ops\.j1_clock_rows_immutable\(\)/);
+  assert.ok(SQL.includes("_no_truncate"));
+  assert.ok(SQL.includes("using errcode = '42501'"),
+    "a refusal that is really a privilege refusal says so in its SQLSTATE, as the house pattern does");
+  assert.ok(SQL.includes("revoke insert, update, delete, truncate on ops.j1_clock,"),
+    "the grant half stays; it is the half that binds a runtime bundle");
+  // And the rollback-only fixture attempts it and checks the trigger by name --
+  // the part a revoke could never demonstrate.
+  assert.ok(POSTGRES_PROOF.includes("truncate ops.%I cascade"));
+  assert.ok(POSTGRES_PROOF.includes("_no_truncate"));
+  assert.ok(POSTGRES_PROOF.includes("has_table_privilege(current_user, 'ops.' || v_relation, 'TRUNCATE')"),
+    "the fixture must skip rather than re-raise when the invoking role cannot reach the trigger");
+  assert.ok(POSTGRES_PROOF.includes("has_table_privilege(v_role, v_relation, 'TRUNCATE')"),
+    "and truncate must be part of the bundle-privilege assertion, now that it is a first-class claim");
 });
 
 test("the candidate SQL reuses the existing canonicalizer and writer derivation rather than restating them", () => {
@@ -1651,6 +1680,66 @@ test("the label a scope was bound under is recorded once and is never replaced",
   await store.record({ state: copy(next), expected_prior_history_digest: first.history_digest,
     idempotency_key: key(), verifier_ref: VERIFIER });
   assert.equal((await store.read(clockKey)).revision_count, 2);
+});
+
+test("the store itself meets the label seal, before the journal's own seal can", async () => {
+  // The refusal above is real, but until now its only home on the DURABLE path
+  // was ops.j1_clock_bind_scope — SQL that has never run. The store would pass
+  // its whole read, its compare-and-swap and its append-only diff, and meet the
+  // seal in the one place this rail cannot execute. So the store holds it too,
+  // and this proves the refusal happens without the binding write being reached.
+  const watch = watchedJournal();
+  const store = createJourneyOneClockStore({
+    journal: watch.journal, actor: ACTOR, clock_scope: SCOPE });
+  const first = run(snapshot()).state;
+  const clockKey = journeyOneClockKeyForState(first);
+  await store.record({ state: copy(first), expected_prior_history_digest: null,
+    idempotency_key: key(), verifier_ref: VERIFIER });
+
+  const p = snapshot(iso(Date.parse(ORIGIN) + 2 * DAY));
+  p.history = copy(first);
+  const next = run(p).state;
+  const renamed = createJourneyOneClockStore({
+    journal: watch.journal, actor: ACTOR, clock_scope: RELABELLED_SCOPE });
+  watch.calls.length = 0;
+  await refuses(renamed.record({ state: copy(next),
+    expected_prior_history_digest: first.history_digest,
+    idempotency_key: key(), verifier_ref: VERIFIER }), "clock_scope_label_changed");
+  assert.deepEqual(watch.calls, ["runAppend", "readScopeBindings"],
+    "the seal is met on the bindings already read, not by attempting the binding write");
+  assert.equal((await store.read(clockKey)).revision_count, 1);
+  assert.equal((await store.read(clockKey)).clock_scope_ref, SCOPE.scope_ref);
+});
+
+test("a journal that does not carry the label back cannot be false-refused by that seal", async () => {
+  // The store's clause is guarded on `!== undefined` for exactly this: a journal
+  // whose binding rows omit the label has said nothing about it, and reading
+  // silence as disagreement would refuse legitimate appends. Both journals in
+  // this repository do return it; a third implementation need not.
+  const watch = watchedJournal();
+  const silent = { ...watch.journal,
+    async readScopeBindings(args) {
+      const bindings = await watch.journal.readScopeBindings(args);
+      const strip = row => { if (!row) return row; const { clock_scope_ref, ...rest } = row; return rest; };
+      return { by_scope: strip(bindings.by_scope), by_clock: strip(bindings.by_clock) };
+    } };
+  const store = createJourneyOneClockStore({ journal: silent, actor: ACTOR, clock_scope: SCOPE });
+  const first = run(snapshot()).state;
+  await store.record({ state: copy(first), expected_prior_history_digest: null,
+    idempotency_key: key(), verifier_ref: VERIFIER });
+  const p = snapshot(iso(Date.parse(ORIGIN) + 2 * DAY));
+  p.history = copy(first);
+  const next = run(p).state;
+
+  const renamed = createJourneyOneClockStore({ journal: silent, actor: ACTOR, clock_scope: RELABELLED_SCOPE });
+  watch.calls.length = 0;
+  // Still refused — but by the JOURNAL, which is the home that holds the rows.
+  // The store's clause did not fire, which is what `!== undefined` buys.
+  await refuses(renamed.record({ state: copy(next),
+    expected_prior_history_digest: first.history_digest,
+    idempotency_key: key(), verifier_ref: VERIFIER }), "clock_scope_label_changed");
+  assert.ok(watch.calls.includes("bindScope"),
+    "with no label in the readback the store must pass the seal through to the journal");
 });
 
 test("both homes state the label rule, and the candidate SQL hashes the six identity fields", () => {
