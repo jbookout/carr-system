@@ -1845,6 +1845,12 @@ test("a missing or malformed verified binding refuses, with no bypass", async ()
       "clock_verified_binding_malformed"],
     ["an unhashed digest", withBinding({ ...good, subject_digest: "not-a-digest" }),
       "clock_verified_binding_malformed"],
+    // v2's projection digest is not read on this path — this rail holds no
+    // projection to compare it against — but a binding it cannot read whole is
+    // not one to derive a scope from either.
+    ["an unhashed projection digest",
+      withBinding({ ...good, authenticated_projection_digest: "not-a-digest" }),
+      "clock_verified_binding_malformed"],
     ["another gate", withBinding({ ...good, clock_terminus_gate_id: "some-other-gate-accepted" }),
       "wrong_clock_scope_gate"],
     ["another tenant", withBinding({ ...good, tenant: "someone-elses-tenant" }), "wrong_tenant"],
@@ -1947,4 +1953,129 @@ test("the existing compare-and-swap and idempotency are unchanged through the re
   assert.equal(readback.history_digest, expected.history_digest);
   assert.deepEqual(readback.history, copy(expected));
   assert.equal(readback.revision_count, 2);
+});
+
+// ---------------------------------------------------------------------------
+// 12. THE OPTIONAL PRE-WRITE ASSERTION, WHICH CAN ONLY REFUSE.
+//
+// journey-one-clock-runtime.v5.js holds a fact this rail structurally cannot
+// see — the admitted-minimum inventory a computation was composed from — and
+// needs to refuse on it BEFORE a row exists. Rather than a second
+// evaluate-check-record sequence living there, the sequence stays here and the
+// extra refusal is injected. These tests are about the seam's limits, not about
+// what the runtime asserts through it.
+// ---------------------------------------------------------------------------
+
+test("a pre-write assertion refuses before any journal call, and its error travels unchanged", async () => {
+  const watch = watchedJournal();
+  const h = harness();
+  const store = createJourneyOneClockStore({
+    journal: watch.journal, actor: ACTOR, clock_scope: SCOPE });
+  const seen = [];
+  const recorder = createJourneyOneClockRecorder({
+    clock: h.clock, store, verifier_ref: VERIFIER,
+    assert_before_write: result => {
+      seen.push(result);
+      const error = new Error("the computation was not composed from this inventory");
+      error.name = "JourneyOneClockRuntimeError";
+      error.code = "clock_computation_origin_not_in_composed_inventory";
+      throw error;
+    },
+  });
+  await assert.rejects(recorder.evaluateAndRecord({ envelope: h.envelopeFor(snapshot()),
+    expected_prior_history_digest: null, idempotency_key: key() }), error => {
+    // The seat that holds the inventory owns the vocabulary for its own fact.
+    assert.equal(error.code, "clock_computation_origin_not_in_composed_inventory");
+    return true;
+  });
+  assert.equal(seen.length, 1, "the assertion is called once, with the kernel result");
+  assert.deepEqual(watch.calls, [],
+    "no read, no compare-and-swap and no row for a refused computation");
+  assert.equal(await watch.inner.readClock(journeyOneClockKeyForState(run(snapshot()).state)), null);
+});
+
+test("the pre-write assertion runs AFTER the scope check, and is never reached without it", async () => {
+  const watch = watchedJournal();
+  const h = harness();
+  const store = createJourneyOneClockStore({
+    journal: watch.journal, actor: ACTOR, clock_scope: { ...SCOPE, benchmark_policy_digest: D(23) } });
+  let called = false;
+  const recorder = createJourneyOneClockRecorder({
+    clock: h.clock, store, verifier_ref: VERIFIER,
+    assert_before_write: () => { called = true; },
+  });
+  await refuses(recorder.evaluateAndRecord({ envelope: h.envelopeFor(snapshot()),
+    expected_prior_history_digest: null, idempotency_key: key() }),
+    "clock_scope_not_the_verified_binding");
+  assert.equal(called, false,
+    "a computation judged under another scope never reaches the extra assertion");
+  assert.deepEqual(watch.calls, []);
+});
+
+test("the pre-write assertion is handed the kernel's frozen result and can admit nothing", async () => {
+  const { h, store } = recorderOn();
+  let handed = null;
+  const recorder = createJourneyOneClockRecorder({
+    clock: h.clock, store, verifier_ref: VERIFIER,
+    // A hook that returns a truthy value, mutates nothing it can mutate, and
+    // tries to: none of it changes the outcome, because the return value is
+    // never read and the result is frozen.
+    assert_before_write: result => {
+      handed = result;
+      assert.throws(() => { result.state.status = "completed_on_time"; }, TypeError);
+      assert.throws(() => { result.verified_binding.subject_digest = D(21); }, TypeError);
+      return { admitted: true, deadline_success: true };
+    },
+  });
+  const p = snapshot();
+  const recorded = await recorder.evaluateAndRecord({
+    envelope: h.envelopeFor(p), expected_prior_history_digest: null, idempotency_key: key() });
+  assert.equal(handed.state.history_digest, run(p).state.history_digest);
+  assert.equal(recorded.kernel_verdict.status, "running");
+  assert.equal(recorded.kernel_verdict.deadline_success, false);
+  assert.equal((await store.read(recorded.clock_key)).history.status, "running");
+});
+
+test("a recorder without a pre-write assertion is unchanged, and a non-function one refuses", async () => {
+  const journal = createEphemeralJourneyOneClockJournal();
+  const store = createJourneyOneClockStore({ journal, actor: ACTOR, clock_scope: SCOPE });
+  const h = harness();
+  for (const bad of [true, "assert", {}, 0]) {
+    assert.throws(() => createJourneyOneClockRecorder({
+      clock: h.clock, store, verifier_ref: VERIFIER, assert_before_write: bad }),
+    error => {
+      assert.equal(error.code, "invalid_shape");
+      assert.equal(error.detail.path, "assert_before_write");
+      return true;
+    });
+  }
+  // Omitted and explicitly null are the same recorder, and both still write.
+  for (const value of [undefined, null]) {
+    const own = harness();
+    const scoped = createJourneyOneClockStore({
+      journal: createEphemeralJourneyOneClockJournal(), actor: ACTOR, clock_scope: SCOPE });
+    const recorder = createJourneyOneClockRecorder({
+      clock: own.clock, store: scoped, verifier_ref: VERIFIER, assert_before_write: value });
+    const recorded = await recorder.evaluateAndRecord({
+      envelope: own.envelopeFor(snapshot()), expected_prior_history_digest: null,
+      idempotency_key: key() });
+    assert.equal(recorded.revision_ordinal, 0);
+  }
+});
+
+test("the descriptor names the pre-write seam as something that can only refuse", () => {
+  const contract = journeyOneClockStoreIntegrationRequirements().trusted_integration_contract;
+  assert.ok(contract.optional_pre_write_assertion.includes("can only add a refusal"));
+  assert.ok(contract.optional_pre_write_assertion.includes("return value is ignored"));
+  assert.ok(contract.composition_loop.includes("journey-one-clock-runtime.v5.js"));
+  assert.ok(contract.composition_loop.includes("cannot run here"));
+
+  const loop = journeyOneClockStoreIntegrationRequirements()
+    .input_authority.record_layer_composition_loop;
+  assert.equal(loop.resolved, true);
+  assert.ok(loop.what_landed.includes("neither is an argument"));
+  assert.ok(loop.still_not_resolved.includes("minimum_inventory_unavailable"));
+  assert.ok(loop.explicitly_not_done_instead.some(l => l.includes("second evaluate-check-record")));
+  // And the requirement AROUND it is untouched: no reader, no producers.
+  assert.equal(journeyOneClockStoreIntegrationRequirements().input_authority.resolved, false);
 });

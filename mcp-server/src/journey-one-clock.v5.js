@@ -35,6 +35,13 @@
 //     under, so a store had no way to derive the scope it is writing for from
 //     the computation itself. It is a read-only restatement of facts already
 //     enforced here, outside the hashed state, and it authenticates nothing.
+//     Its v2 `authenticated_projection_digest` answers the SECOND question a
+//     consumer holding its own projection has to ask — WHICH snapshot was
+//     judged — because the accepted scope alone is shared by every snapshot
+//     built for one program, and two valid ones differing only in their
+//     completion, amendments, history or pause instants produce the same scope
+//     and different clocks. It says which, never whether: this kernel hashes
+//     whatever the installed verifier returned.
 //   * The terminus accepts exactly one rollout-component-receipt.v1 and checks
 //     `all_current_exact_distinct_pass` as an exact contract string rather than
 //     re-implementing it, so "distinct" does no work at arity one.
@@ -118,12 +125,45 @@ export const JOURNEY_ONE_CLOCK_PROJECTION = "doctorcre-v5-journey-one-clock-proj
  * is frozen with the rest of the result, so a reader cannot edit the binding it
  * was just told was verified. A pass is not evidence about the RECORD: it says
  * the installed verifier read these values, exactly as the header says.
+ *
+ * v2 ADDS `authenticated_projection_digest`: WHICH PROJECTION WAS JUDGED, EXACTLY.
+ *
+ * The five values above are the ACCEPTED SCOPE, and a scope is shared by every
+ * projection built for one program. Two different valid snapshots for the same
+ * subject, candidate, policy, tenant and origin — one carrying a terminus
+ * completion and one not, or two pauses with one id and one end but different
+ * start instants — produce the same five values and DIFFERENT clocks. A consumer
+ * holding a projection of its own therefore could not tell, from the binding
+ * alone, whether the computation in its hand was made from that projection or
+ * from another one; a field-by-field comparison of the parts the binding exposes
+ * cannot answer it either, because the parts it exposes are precisely the ones
+ * the two snapshots agree on. This is that answer: the canonical digest of the
+ * WHOLE snapshot the installed verifier returned, computed here, over the exact
+ * value every clause below then reads.
+ *
+ * WHAT IT IS NOT, and the distinction is the entire trust boundary. It says WHICH
+ * projection was judged. It says NOTHING about whether that projection was
+ * authentic, and it cannot: verifySnapshot is trusted server code, and this
+ * kernel hashes whatever it returned. A consumer comparing this against its own
+ * composed projection learns that the two are the same object; it does not learn
+ * that either one is true. It is also NOT an anti-rollback fact and not an
+ * identity for the clock — the clock's identity is still derived from its origin.
+ *
+ * IT IS NOT IN THE HASHED STATE, for the same reason nothing else here is: the
+ * v2 state gained no field, no history_digest moved, and no stored clock is
+ * rebased by this. The projection is an INPUT to one evaluation and the state is
+ * the clock's whole history, so a per-evaluation input has no business in it.
  */
-export const JOURNEY_ONE_CLOCK_VERIFIED_BINDING = "doctorcre-v5-journey-one-clock-verified-binding.v1";
-/** The closed field set of that projection, so a consumer can check it exactly. */
+export const JOURNEY_ONE_CLOCK_VERIFIED_BINDING = "doctorcre-v5-journey-one-clock-verified-binding.v2";
+/**
+ * The closed field set of that projection, so a consumer can check it exactly.
+ * The tag is versioned rather than silently widened, because a consumer that
+ * closed-shape checks this set would refuse a v1 binding and be refused by a v2
+ * one; adding a field to a published closed shape is a new shape.
+ */
 export const JOURNEY_ONE_CLOCK_VERIFIED_BINDING_FIELDS = Object.freeze([
-  "candidate_digest", "clock_origin_gate_id", "clock_terminus_gate_id", "policy_digest",
-  "schema_version", "subject_digest", "tenant",
+  "authenticated_projection_digest", "candidate_digest", "clock_origin_gate_id",
+  "clock_terminus_gate_id", "policy_digest", "schema_version", "subject_digest", "tenant",
 ]);
 export const JOURNEY_ONE_CLOCK_RULE_REF =
   "native-task:01a0869f-fe0d-7493-bda3-ab8b3c0d6683:user-turn:01a086d1-2f70-7a73-b0ea-14e68da841ca";
@@ -564,6 +604,13 @@ export function createJourneyOneClock({ verifySnapshot } = {}) {
     closed(verified, ["envelope_digest", "snapshot"], "verification");
     if (verified.envelope_digest !== digest(input)) fail("verification_binding_mismatch");
     const p = copy(verified.snapshot);
+    // WHICH PROJECTION THIS EVALUATION IS ABOUT, hashed BEFORE a clause reads it
+    // and over the SNAPSHOT COPY rather than the verifier's own object, so the
+    // value hashed is exactly the value every clause below goes on to read. It
+    // is reported beside the state (see JOURNEY_ONE_CLOCK_VERIFIED_BINDING) and
+    // is not consulted by anything here: this kernel judges the projection, it
+    // does not judge its digest.
+    const authenticatedProjectionDigest = digest(p);
     closed(p, ["schema_version", "tenant", "as_of", "binding", "benchmark", "minimum_history", "completion", "completion_expectation", "pauses", "amendments", "history"], "snapshot");
     if (p.schema_version !== JOURNEY_ONE_CLOCK_PROJECTION || p.tenant !== ORGANIZATION_TENANT_ID) fail("wrong_projection_or_tenant");
     const now = stamp(p.as_of), b = p.binding;
@@ -906,7 +953,12 @@ export function createJourneyOneClock({ verifySnapshot } = {}) {
         subject_digest: b.subject_digest, candidate_digest: b.candidate_digest,
         policy_digest: b.policy_digest,
         clock_origin_gate_id: JOURNEY_ONE_DEADLINE_CONTRACT.clock_origin_gate_id,
-        clock_terminus_gate_id: JOURNEY_ONE_DEADLINE_CONTRACT.clock_terminus_gate_id },
+        clock_terminus_gate_id: JOURNEY_ONE_DEADLINE_CONTRACT.clock_terminus_gate_id,
+        // WHICH projection, not WHETHER it was authentic. The five values above
+        // are the accepted scope and are shared by every snapshot built for this
+        // program; this one is exact, and it is the only thing here that
+        // distinguishes two valid snapshots of the same scope from each other.
+        authenticated_projection_digest: authenticatedProjectionDigest },
       // Success is claimable only by a clock that carries NO recorded miss. The
       // status can never spell `completed_on_time` after one, and the miss test
       // is stated here as well so the two can never drift into disagreement.

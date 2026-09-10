@@ -1736,7 +1736,14 @@ function assertVerifiedBindingMatchesScope(result, installed) {
       `verified_binding.schema_version must be ${JOURNEY_ONE_CLOCK_VERIFIED_BINDING}`,
       { invariant: "j1_clock_scope_binds_one_clock", actual: seen.schema_version });
   }
-  for (const field of ["subject_digest", "candidate_digest", "policy_digest"]) {
+  // `authenticated_projection_digest` is checked for SHAPE here and used for
+  // nothing on this path: it names WHICH snapshot the kernel judged, and this
+  // rail holds no projection to compare it against. A seat that does — the
+  // composition loop in journey-one-clock-runtime.v5.js — is where it is read.
+  // It is validated all the same, because a binding this rail cannot read whole
+  // is one it should not be deriving a scope from either.
+  for (const field of ["subject_digest", "candidate_digest", "policy_digest",
+    "authenticated_projection_digest"]) {
     if (typeof seen[field] !== "string" || !SHA256_REF.test(seen[field])) {
       refuse("clock_verified_binding_malformed",
         `verified_binding.${field} must be a sha256: reference`,
@@ -1792,8 +1799,27 @@ function assertVerifiedBindingMatchesScope(result, installed) {
  * journal read, no compare-and-swap, no row. A store with no scope cannot be
  * recorded through at all, and that refuses at CONSTRUCTION rather than on the
  * first write.
+ *
+ * `assert_before_write` IS AN OPTIONAL TRUSTED PRE-WRITE ASSERTION THAT CAN ONLY
+ * REFUSE. It exists because there are facts about a computation that neither the
+ * kernel nor this rail can see: journey-one-clock-runtime.v5.js holds the
+ * INVENTORY the projection was composed from, and "the origin this kernel
+ * selected is one this record layer actually admitted" is a pairwise fact only
+ * that seat has both halves of. Rather than a second evaluate-check-record
+ * sequence living there — two homes for one order, which is the drift rule
+ * a8c55a47 forbids — the sequence stays here and the extra refusal is injected.
+ *
+ * ITS LIMITS ARE STRUCTURAL, NOT PROMISED. It is a CONSTRUCTION-TIME callback
+ * from trusted server code, never a request field. It runs AFTER the scope check
+ * and BEFORE any journal read, compare-and-swap or row. It is handed the kernel's
+ * own deep-frozen result and nothing else, so it cannot edit the computation it
+ * is inspecting. ITS RETURN VALUE IS IGNORED — there is no value it can return
+ * that admits anything, and no path by which it can pass a computation this
+ * recorder would otherwise refuse. A recorder built without one behaves exactly
+ * as it did before; the only thing it can add is a throw.
  */
-export function createJourneyOneClockRecorder({ clock, store, verifier_ref } = {}) {
+export function createJourneyOneClockRecorder({
+  clock, store, verifier_ref, assert_before_write = null } = {}) {
   if (!clock || typeof clock.evaluate !== "function") {
     refuse("authenticated_kernel_required",
       "recording requires a kernel built by createJourneyOneClock({ verifySnapshot }); this rail never constructs one and never accepts a verifier as data",
@@ -1801,6 +1827,11 @@ export function createJourneyOneClockRecorder({ clock, store, verifier_ref } = {
   }
   if (!store || typeof store.record !== "function" || typeof store.read !== "function") {
     refuse("invalid_shape", "a recorder needs a clock store", { path: "store" });
+  }
+  if (assert_before_write !== null && typeof assert_before_write !== "function") {
+    refuse("invalid_shape",
+      "assert_before_write is an optional trusted pre-write assertion supplied at construction; it must be a function, and it may only refuse",
+      { path: "assert_before_write" });
   }
   const installed = store.clock_scope ?? null;
   if (!isPlainObject(installed) || typeof installed.clock_scope_key !== "string" ||
@@ -1820,6 +1851,13 @@ export function createJourneyOneClockRecorder({ clock, store, verifier_ref } = {
       // runs before store.record(), so a mismatch, a missing binding or a
       // malformed one refuses with no journal call and no row written.
       const clock_scope_key = assertVerifiedBindingMatchesScope(result, installed);
+      // AND ANY TRUSTED PRE-WRITE ASSERTION, in the same window: after the scope
+      // check, before the store is called. Its refusal travels unchanged, for the
+      // same reason the kernel's does — a caller who would learn
+      // `clock_computation_origin_not_in_composed_inventory` from the seat that
+      // holds the inventory should meet that code and not a second vocabulary.
+      // Nothing is read from its return value.
+      if (assert_before_write !== null) assert_before_write(result);
       const recorded = await store.record({
         state: copy(result.state), expected_prior_history_digest, idempotency_key,
         claimed_history_digest: result.state.history_digest, clock_ref, verifier_ref,
@@ -1891,7 +1929,7 @@ export const JOURNEY_ONE_CLOCK_INPUT_AUTHORITY_REQUIREMENT = deepFreeze({
   read_only_kernel_projection_extension_required: {
     resolved: true,
     exact_requirement: "A read-only projection-binding projection from journey-one-clock.v5.js: the trusted binding {subject_digest, candidate_digest, policy_digest} the kernel already read and enforced, returned beside the state so a store can derive the scope key from the same facts the kernel judged. Read-only, decides nothing, and adds no field to the hashed state -- adding one would change every history_digest and rebase every stored clock.",
-    what_landed: "createJourneyOneClock().evaluate() returns verified_binding beside the state: {schema_version, tenant, subject_digest, candidate_digest, policy_digest, clock_origin_gate_id, clock_terminus_gate_id}, deep-frozen with the rest of the result. Every value was already enforced by that evaluation -- the three digests against the accepted benchmark and against every receipt read, the gate ids by the exact deadline-contract comparison. createJourneyOneClockRecorder derives the authoritative scope key from it through the same journeyOneClockScopeBinding every other caller uses and refuses when it is not the scope the store was constructed for, BEFORE any journal read or write. A missing or malformed binding refuses too; there is no bypass and no option.",
+    what_landed: "createJourneyOneClock().evaluate() returns verified_binding beside the state: {schema_version, tenant, subject_digest, candidate_digest, policy_digest, clock_origin_gate_id, clock_terminus_gate_id, authenticated_projection_digest}, deep-frozen with the rest of the result. The last of those is v2 and is not read by this rail, which holds no projection to compare it against; it is checked for shape and used by the composition loop. Every value was already enforced by that evaluation -- the three digests against the accepted benchmark and against every receipt read, the gate ids by the exact deadline-contract comparison. createJourneyOneClockRecorder derives the authoritative scope key from it through the same journeyOneClockScopeBinding every other caller uses and refuses when it is not the scope the store was constructed for, BEFORE any journal read or write. A missing or malformed binding refuses too; there is no bypass and no option.",
     hashed_state_unchanged: "doctorcre-v5-journey-one-clock.v2 gained no field. The state, its schema version and every history_digest are exactly what they were, which is why no stored clock is rebased and no migration is proposed.",
     still_not_proved: [
       "that the projection the kernel read was authentic: verifySnapshot remains trusted server code, and this compares two trusted-seat statements about one computation rather than authenticating either",
@@ -1903,6 +1941,23 @@ export const JOURNEY_ONE_CLOCK_INPUT_AUTHORITY_REQUIREMENT = deepFreeze({
       "deriving a scope from the stored history's origin fields, which would make the scope move with the origin and defend nothing",
       "accepting a scope, or a verified binding, as a request field",
       "inventing a fixed one-clock-per-tenant rule, which is a policy nobody accepted",
+    ],
+  },
+  /**
+   * THE JOIN BETWEEN THIS RAIL AND THE ADMITTED-MINIMUM INVENTORY, which used to
+   * exist only inside a test. It closes NONE of `why_unresolved` above: the
+   * producers and the authenticated reader are still missing, and this seat
+   * cannot run at all until an inventory exists to compose from.
+   */
+  record_layer_composition_loop: {
+    resolved: true,
+    exact_requirement: "A production seat where the composed projection, the kernel and this store meet: read the authoritative scope's clock and its head history from this rail, compose the projection from the admitted-minimum inventory against that exact head, evaluate, and compare-and-swap on that same head. Both halves were published as trusted_integration_contracts and nothing joined them, so every caller had to re-derive the order — and the two facts that make the loop coherent, the history evaluated and the prior it appends onto, were two independent caller arguments on two rails.",
+    what_landed: "journey-one-clock-runtime.v5.js. createJourneyOneClockRuntime({ composer, clock, clock_store, present_projection, verifier_ref }).advance() reads store.readClockKeyForScope() and store.read() ONCE and derives both the composed `history` and the `expected_prior_history_digest` from that one read — neither is an argument, and supplying either is refused by name. It then asserts the computation IS the composed projection: the kernel's v2 authenticated_projection_digest must equal the digest of the projection that seat composed, and the selected origin must additionally be a receipt the composed inventory admitted. Seven named field checks run first as diagnostics only -- the accepted scope is shared by every projection for one program, so they cannot establish identity on their own. That assertion runs through this recorder's assert_before_write seam, so the evaluate-check-record order still has exactly one home.",
+    still_not_resolved: "Everything in why_unresolved. The loop cannot run in this repository: composing refuses with minimum_inventory_unavailable because no receipt can be admitted, and the runtime installs no verifier, admits no receipt and starts no clock.",
+    explicitly_not_done_instead: [
+      "creating or accepting a verifySnapshot callback anywhere in the runtime seat: it takes an ALREADY-CONSTRUCTED kernel, exactly as this recorder does",
+      "a second evaluate-check-record sequence in the runtime, which would be two homes for one order",
+      "a public verb, a tool registration, or any relaxation of the fail-closed readers on either rail",
     ],
   },
   /**
@@ -1977,8 +2032,10 @@ export function journeyOneClockStoreIntegrationRequirements() {
       entry_point: "createJourneyOneClockRecorder({ clock, store, verifier_ref })",
       requires: "a kernel built by createJourneyOneClock({ verifySnapshot }), which only trusted server code can construct, and a store constructed with the authoritative clock scope it writes for",
       checks_before_any_write: "the kernel's verified_binding for this computation derives the authoritative scope key, and a scope that is not the store's refuses -- as does a missing or malformed binding -- before any journal read, compare-and-swap or row",
+      optional_pre_write_assertion: "assert_before_write is a construction-time trusted callback that runs after the scope check and before any journal call. It is handed the kernel's deep-frozen result, its return value is ignored, and it can only add a refusal; a recorder built without one is unchanged",
       records: "a kernel computation with accurately scoped provenance and independently rebuilt content",
       does_not_record: "an acceptance, a receipt, a verification, or any claim of deadline success",
+      composition_loop: "createJourneyOneClockRuntime({ composer, clock, clock_store, present_projection, verifier_ref }) in journey-one-clock-runtime.v5.js is the seat that reads this store's head once, composes the projection from the admitted-minimum inventory against it, and appends onto that same head through this recorder. It cannot run here: no receipt can be admitted, so there is no inventory to compose from",
     },
     append_invariants: JOURNEY_ONE_CLOCK_APPEND_INVARIANTS.map(i => ({ ...i })),
     record_layer_cannot_prove: [...JOURNEY_ONE_CLOCK_STORE_CANNOT_PROVE],
