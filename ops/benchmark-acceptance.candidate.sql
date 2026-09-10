@@ -18,10 +18,11 @@
 -- the persisted rows on every read, review and acceptance. A caller may supply
 -- a hash; it is only ever compared against the one the rows produce. The
 -- manifest is therefore stored as typed rows rather than as one jsonb blob whose
--- meaning nothing in the database can check. NINE relations carry the whole rail:
+-- meaning nothing in the database can check. TEN relations carry the whole rail:
 -- the draft, its six ordered content tables (dimensions, workloads, request-size
 -- points, concurrency levels, browsers and evaluator seats), the independent
--- review, and the acceptance receipt.
+-- review, the measurement coverage attestation recorded beside a passing review,
+-- and the acceptance receipt.
 --
 -- THREE THINGS ARE DELIBERATELY NOT STORED, because storing them would move an
 -- authority this slice does not hold:
@@ -51,9 +52,11 @@
 --      Both are TRUSTED writers -- direct INSERT is granted to nobody and the
 --      write functions reach only the writer and authority bundles -- and that
 --      trusted-writer authority is deliberately preserved rather than replaced
---      by a second authority. What is missing is the RECORD that tells the two
---      apart, and until it exists acceptance fails closed on it: see
---      ops.benchmark_measurement_coverage_binding(uuid) below.
+--      by a second authority. The RECORD that tells the two apart is now written:
+--      ops.benchmark_measurement_coverage_attestation, recorded in the same
+--      definer call that records the passing review, names the kernel evaluator,
+--      the payload digest it proved against and the measurement digest it proved
+--      over. Read that narrowly too -- see THE REMAINING TRUST BOUNDARY below.
 --   3. A REVIEW TTL. r7 attaches no currentness window to benchmark-manifest.v1
 --      at all -- no maximum review age, and no relation to the consumer-gate
 --      receipt TTLs, which govern a different set of receipts. Inventing one
@@ -110,28 +113,39 @@
 --     today. That is the honest state, and it is preferred to a caller-selected
 --     work-request reference, a synthetic fixture digest or a new Gate Zero
 --     policy invented in this file.
---   MEASUREMENT COVERAGE -- NO PROOF BINDING IN THIS RECORD LAYER. A review row
---     carries the digest of the measurement set its writer read (see 2 above).
---     Nothing recorded beside it distinguishes a digest whose coverage the MCP
---     verb proved with the kernel from one a trusted writer asserted directly,
---     so an acceptance that treated the digest as evidence would be claiming an
---     independent verification it does not have.
---     ops.benchmark_measurement_coverage_binding(uuid) is a second PRIVATE
---     fail-closed reader, and it is deliberately INDEPENDENT of Gate Zero:
---     landing the Gate Zero record must not silently upgrade this assertion, so
---     acceptance still refuses here afterwards, until the coverage attestation
---     lands too.
+--   MEASUREMENT COVERAGE -- BOUND, TO EXACTLY WHAT IT PROVES AND NO MORE. A
+--     review row carries the digest of the measurement set its writer read (see
+--     2 above). Beside it, ops.benchmark_measurement_coverage_attestation now
+--     records WHAT PROVED IT: the kernel evaluator by name from a closed set,
+--     the payload digest that evaluator returned, the measurement digest it
+--     proved over, and the digest of the evaluation result so the judgement is
+--     replayable. It is written in the SAME definer call that writes the review,
+--     and a passing review cannot be written without it, so the pass and its
+--     attestation cannot come apart.
+--     ops.benchmark_measurement_coverage_binding(uuid) reads that record and is
+--     still PRIVATE, still fail-closed, and still deliberately INDEPENDENT of
+--     Gate Zero. It RECOMPUTES the payload digest from the draft's own rows with
+--     ops.benchmark_payload_digest() and refuses an attestation naming a
+--     different one, refuses an attestation whose measurement digest is not the
+--     review row's, and refuses an evaluator name outside the closed set. Two of
+--     the three attested values are therefore checkable here rather than merely
+--     stored.
 --
--- THE REMAINING TRUST BOUNDARY, STATED EXACTLY, because the attestation named
--- above moves it less far than it may look. The samples live outside this record
--- layer and this database cannot read them. Even once the MCP path records that
--- it ran evaluateBenchmarkWorkloadCoverage over the payload rebuilt from these
--- rows and over bytes that hash to that digest, the database is still believing
--- a TRUSTED WRITER about an evaluation it did not perform and cannot repeat.
--- What the attestation buys is that the assertion becomes explicit, attributed
--- and auditable instead of implicit and anonymous. This database does not become
--- an independent verifier of benchmark coverage, and nothing below should be
--- read as saying that it does.
+-- THE REMAINING TRUST BOUNDARY, STATED EXACTLY, because the attestation moves it
+-- less far than it may look. The samples live outside this record layer and this
+-- database cannot read them. The attestation records that the MCP path ran
+-- evaluateBenchmarkWorkloadCoverage over the payload rebuilt from these rows and
+-- over bytes that hash to that digest -- and the database is still believing a
+-- TRUSTED WRITER about an evaluation it did not perform and cannot repeat. What
+-- the attestation buys is that the assertion is explicit, attributed and
+-- auditable instead of implicit and anonymous, and that an unattested pass is
+-- unwritable. This database does not become an independent verifier of benchmark
+-- coverage, and nothing below should be read as saying that it does.
+--
+-- AND ACCEPTANCE STILL REFUSES. Landing this attestation clears ONE of the two
+-- unbound acceptance bindings. ops.benchmark_gate_zero_outcome() still raises,
+-- it is still read first, and no acceptance receipt can exist until an
+-- authenticated Gate Zero outcome is recorded here by someone who observed it.
 --
 -- Acceptance is strictly after both r7 prerequisites and the review it rests on:
 -- an acceptance recorded AT the Gate Zero instant, at the portfolio acceptance
@@ -270,6 +284,22 @@ as $$
     'kernel_obligation_decision_ids', jsonb_build_array('Q002.D1', 'Q014.D1', 'Q123.D1'),
     'miss_consequence', 'mark_deadline_missed_require_replan_preserve_origin_and_elapsed_continue_safe_construction_without_claiming_deadline_success')
 $$;
+
+-- THE CLOSED SET OF COVERAGE EVALUATORS. One member, and it is a NAME rather
+-- than an implementation: this database evaluates no coverage and this function
+-- is not a second coverage authority. It exists so that "which evaluator proved
+-- this" is a constrained value the reader can check rather than free text a
+-- writer can invent, in exactly the way gate_id and producer_role are constrained
+-- on the draft. Adding a member is a deliberate edit to a closed set, which is
+-- the point; benchmark-minimum.v5.js's BENCHMARK_COVERAGE_EVALUATORS carries the
+-- same list on the other side.
+create or replace function ops.benchmark_coverage_evaluators()
+returns text[] language sql immutable
+set search_path = pg_catalog
+as $$ select array['benchmark-minimum.v5.js#evaluateBenchmarkWorkloadCoverage']::text[] $$;
+
+comment on function ops.benchmark_coverage_evaluators() is
+  'The closed set of names a measurement coverage attestation may cite as the evaluator that proved coverage. A name, not an implementation: nothing in this database evaluates coverage.';
 
 comment on function ops.benchmark_slo_thresholds() is
   'The three fixed r7 SLO thresholds. Identity, not configuration: emitted into every payload preimage and never stored per draft.';
@@ -452,10 +482,18 @@ create table if not exists ops.benchmark_manifest_review (
   -- than supplied. When ops.benchmark_review_manifest_draft is called directly by
   -- a holder of the writer bundle, this column is that trusted writer's
   -- assertion and nothing more. Both writers are trusted -- no role holds direct
-  -- INSERT -- and that authority is preserved deliberately; what is missing is
-  -- any record that tells the two apart, which is why acceptance fails closed at
-  -- ops.benchmark_measurement_coverage_binding(uuid) rather than reading this
-  -- column as evidence.
+  -- INSERT -- and that authority is preserved deliberately. WHAT TELLS THE TWO
+  -- APART IS RECORDED: a passing review carries a row in
+  -- ops.benchmark_measurement_coverage_attestation written in the same definer
+  -- call, naming the kernel evaluator that proved coverage, the payload digest
+  -- that evaluator returned and the measurement digest it proved over. A passing
+  -- review with no attestation cannot be written at all.
+  -- ops.benchmark_measurement_coverage_binding(uuid) reads THAT record -- it
+  -- recomputes the payload digest from the draft's own rows and compares the
+  -- attested measurement digest against this column -- rather than reading this
+  -- column as evidence. The attestation makes the writer's assertion attributed
+  -- and checkable; it does not make it a verification, and this column on its own
+  -- still proves nothing.
   measurement_set_digest  text check (measurement_set_digest ~ '^sha256:[0-9a-f]{64}$'),
   review_summary          text not null check (btrim(review_summary) <> '' and char_length(review_summary) <= 1000),
   reviewer_actor_id       uuid not null references public.actor(id),
@@ -465,7 +503,61 @@ create table if not exists ops.benchmark_manifest_review (
 );
 
 comment on table ops.benchmark_manifest_review is
-  'Append-only independent review of one exact benchmark payload digest. A review naming a digest the draft no longer produces is refused at write time, so a passing review can never be carried onto different bytes. A passing review must additionally NAME the exact measurement set its writer read: naming is not proving, this database evaluates no coverage, and acceptance therefore fails closed on the missing coverage proof binding rather than reading measurement_set_digest as evidence.';
+  'Append-only independent review of one exact benchmark payload digest. A review naming a digest the draft no longer produces is refused at write time, so a passing review can never be carried onto different bytes. A passing review must additionally NAME the exact measurement set its writer read AND carry a coverage attestation in ops.benchmark_measurement_coverage_attestation recorded in the same call: naming is still not proving, this database still evaluates no coverage, and the attestation is what makes the assertion attributed and checkable rather than anonymous.';
+
+-- ---------------------------------------------------------------------------
+-- THE MEASUREMENT COVERAGE ATTESTATION.
+--
+-- WHAT THIS ROW IS. A statement, by the trusted writer that recorded a passing
+-- review, of WHICH evaluator proved coverage, WHICH payload digest it proved
+-- against, WHICH measurement digest it proved over, and WHAT the evaluation
+-- returned. All four values are computed on the write path before the review is
+-- written: the payload digest and the evaluation are the kernel evaluator's own
+-- RETURN VALUE, not a recomputation, and not a caller argument.
+--
+-- WHAT THIS ROW IS NOT, and the distinction is the whole reason the wording of
+-- the reader below is so careful. It is not a verification. The samples are not
+-- here and cannot be read here, so the database cannot repeat the evaluation and
+-- does not claim to. What changes is that a passing review's measurement digest
+-- stops being anonymous: it now carries a named evaluator, an attributed writer,
+-- a payload digest this database CAN recompute, and an evaluation digest that
+-- makes the judgement replayable by anyone who holds the samples.
+--
+-- ONE ATTESTATION PER REVIEW, enforced by the unique constraint rather than by
+-- convention: two attestations for one review would be two answers to a question
+-- that has one.
+create table if not exists ops.benchmark_measurement_coverage_attestation (
+  id                      uuid primary key default gen_random_uuid(),
+  review_id               uuid not null unique references ops.benchmark_manifest_review(id),
+  -- Carried so the reader can recompute the payload digest without a second
+  -- join, and so a reader that reaches this row directly still knows which
+  -- draft it is about.
+  draft_id                uuid not null references ops.benchmark_manifest_draft(id),
+  -- Constrained to the closed set literally here, the way gate_id and
+  -- producer_role are constrained on the draft, AND checked against
+  -- ops.benchmark_coverage_evaluators() on both the write and the read path. A
+  -- column check cannot be stepped around by a future write path; a function
+  -- check cannot be stepped around by a future column edit.
+  coverage_proved_by      text not null
+                            check (coverage_proved_by = 'benchmark-minimum.v5.js#evaluateBenchmarkWorkloadCoverage'),
+  -- The digest the evaluator RETURNED, not one recomputed beside it. The reader
+  -- recomputes ops.benchmark_payload_digest(draft_id) and refuses a mismatch, so
+  -- an attestation naming a payload the draft no longer produces is refused.
+  benchmark_payload_digest text not null check (benchmark_payload_digest ~ '^sha256:[0-9a-f]{64}$'),
+  -- The same bytes the review row names. Stored again rather than joined so the
+  -- reader can compare the two and refuse a divergence instead of assuming one
+  -- cannot happen.
+  measurement_set_digest  text not null check (measurement_set_digest ~ '^sha256:[0-9a-f]{64}$'),
+  -- digest(coverage) over the evaluator's frozen return value. It makes the
+  -- judgement replayable: a holder of the samples can re-run the named evaluator
+  -- and compare. It is not read as evidence by anything here.
+  evaluation_digest       text not null check (evaluation_digest ~ '^sha256:[0-9a-f]{64}$'),
+  attested_by_actor_id    uuid not null references public.actor(id),
+  created_at              timestamptz not null default now()
+);
+
+comment on table ops.benchmark_measurement_coverage_attestation is
+  'The trusted writer''s explicit, attributed statement that benchmark-minimum.v5.js proved coverage for one passing review: the evaluator by name from a closed set, the payload digest that evaluator returned, the measurement digest it proved over, and the digest of its result. Written in the same definer call as the review it attests, so an unattested pass cannot be written. It is not a verification: the samples stay outside this record layer and the database cannot repeat the evaluation.';
 
 create table if not exists ops.benchmark_manifest_acceptance_receipt (
   id                      uuid primary key default gen_random_uuid(),
@@ -517,17 +609,27 @@ comment on table ops.benchmark_manifest_acceptance_receipt is
 -- ---------------------------------------------------------------------------
 -- Append-only, and the freeze that follows acceptance.
 -- ---------------------------------------------------------------------------
+-- TWO TRIGGERS PER RELATION, because UPDATE/DELETE and TRUNCATE are different
+-- events. A ROW-LEVEL TRIGGER NEVER SEES TRUNCATE -- it is a statement event --
+-- so a row-level-only posture leaves "a benchmark row cannot be erased" true of
+-- every runtime bundle and FALSE of the table owner, from whom TRUNCATE cannot
+-- be revoked. The `revoke ... truncate` in the grants section below is the grant
+-- half and does not bind the owner; this is the half that does. Same shape as
+-- ops/journey-one-clock-input-store.candidate.sql, ops/model-role-store.candidate.sql
+-- and ops/cre-lifecycle.candidate.sql, which is the house pattern rather than a
+-- new one invented here.
 create or replace function ops.benchmark_rows_immutable()
 returns trigger language plpgsql
 set search_path = pg_catalog, ops
 as $$
 begin
-  raise exception 'DoctorCRE v5 benchmark rows are append-only';
+  raise exception 'DoctorCRE v5 benchmark rows are append-only: % is refused on ops.%',
+    tg_op, tg_table_name using errcode = '42501';
 end;
 $$;
 
 comment on function ops.benchmark_rows_immutable() is
-  'Refuses every update and delete on the DoctorCRE v5 benchmark manifest tables.';
+  'Refuses every update, delete and truncate on the DoctorCRE v5 benchmark manifest tables. Installed twice per relation because a row-level trigger never sees TRUNCATE, and TRUNCATE cannot be revoked from the table owner.';
 
 do $$
 declare t text;
@@ -536,12 +638,18 @@ begin
     'benchmark_manifest_draft', 'benchmark_manifest_dimension', 'benchmark_manifest_workload',
     'benchmark_manifest_request_size', 'benchmark_manifest_concurrency',
     'benchmark_manifest_browser', 'benchmark_manifest_evaluator',
-    'benchmark_manifest_review', 'benchmark_manifest_acceptance_receipt'
+    'benchmark_manifest_review', 'benchmark_measurement_coverage_attestation',
+    'benchmark_manifest_acceptance_receipt'
   ] loop
     execute format('drop trigger if exists %I on ops.%I', t || '_append_only', t);
     execute format(
       'create trigger %I before update or delete on ops.%I for each row execute function ops.benchmark_rows_immutable()',
       t || '_append_only', t);
+    -- TRUNCATE is statement-level and BEFORE-only; there is no row to see.
+    execute format('drop trigger if exists %I on ops.%I', t || '_no_truncate', t);
+    execute format(
+      'create trigger %I before truncate on ops.%I for each statement execute function ops.benchmark_rows_immutable()',
+      t || '_no_truncate', t);
   end loop;
 end $$;
 
@@ -957,54 +1065,97 @@ $$;
 comment on function ops.benchmark_gate_zero_outcome() is
   'PRIVATE fail-closed reader for the Gate Zero read-only outcome. Always raises: this record layer holds no authenticated Gate Zero outcome to bind, which is a statement about what is available here and not about whether the external pre-v5 step produced an outcome. Granted to no role; reachable only from the definer write path in this file.';
 
--- THE THIRD BINDING, ALSO UNBOUND HERE, AND DELIBERATELY INDEPENDENT OF THE
--- SECOND. THE PRIVATE FAIL-CLOSED MEASUREMENT COVERAGE PROOF READER.
+-- THE THIRD BINDING, NOW BOUND, AND DELIBERATELY STILL INDEPENDENT OF THE
+-- SECOND. THE PRIVATE MEASUREMENT COVERAGE PROOF READER.
 --
--- WHAT IS MISSING. ops.benchmark_manifest_review.measurement_set_digest names
--- the bytes a reviewer read. Nothing recorded beside it says HOW that digest
--- came to be there. Through the MCP verb, the kernel proved coverage against the
--- payload rebuilt from the stored rows and computed the digest itself; through a
--- direct call to ops.benchmark_review_manifest_draft by a holder of the writer
--- bundle, the digest is an assertion. Both writers are trusted, and that is not
--- the defect -- the defect would be an acceptance receipt that reads either one
--- as INDEPENDENTLY VERIFIED COVERAGE. It cannot, so it refuses.
+-- WHAT IT READS. ops.benchmark_manifest_review.measurement_set_digest names the
+-- bytes a reviewer read. ops.benchmark_measurement_coverage_attestation, written
+-- in the same definer call, says HOW that digest came to be there: which
+-- evaluator proved coverage, which payload digest it proved against, which
+-- measurement digest it proved over. This function reads that attestation and
+-- returns the three fields acceptance binds.
+--
+-- IT DOES NOT TRUST WHAT IT READS. Two of the three attested values are checked
+-- against something the database derives for itself:
+--   * the payload digest is RECOMPUTED with ops.benchmark_payload_digest() from
+--     the draft's own rows. An attestation naming a payload digest the draft no
+--     longer produces is refused, so appending content to a draft after a review
+--     invalidates the attestation instead of silently outliving it;
+--   * the measurement digest is compared against the review row's own. An
+--     attestation that does not attest THIS review's bytes is refused;
+--   * the evaluator name is constrained to ops.benchmark_coverage_evaluators().
+-- A missing attestation refuses, exactly as it did when none could exist.
 --
 -- THIS IS NOT A SECOND COVERAGE AUTHORITY. It evaluates no matrix, reads no
 -- samples and re-decides no r7 pass_rule; benchmark-minimum.v5.js remains the
--- only place coverage is judged. This function only answers "is there a record
--- binding this review's digest to that judgement", and today the answer is no.
+-- only place coverage is judged. It answers "is there a checkable record binding
+-- this review's digest to that judgement", and no more than that.
 --
--- IT IS SEPARATE FROM GATE ZERO ON PURPOSE. Implementing
--- ops.benchmark_gate_zero_outcome() must not silently promote a writer's
--- assertion into a proof, so this refusal survives that change and acceptance
--- still fails closed here until the attestation lands.
+-- WHAT IS STILL TRUE AFTER THIS LANDS, said here rather than left to be
+-- discovered: the samples are outside this record layer, the evaluation cannot
+-- be repeated here, and the database is believing a trusted writer about work it
+-- did not do. The attestation makes that belief explicit, attributed and
+-- auditable, and makes an unattested pass unwritable. It does not make this
+-- database a verifier of coverage.
 --
--- INTEGRATION REQUIREMENT: record, in the same definer write path that records a
--- passing review, an attestation naming the kernel evaluator that proved
--- coverage, the payload digest it proved it against and the measurement digest
--- it proved it over; then implement this reader against that attestation. Note
--- what that does and does not buy, because the comment must not overstate it:
--- the samples remain outside this record layer, so the database still believes a
--- trusted writer about an evaluation it did not perform. The attestation makes
--- that belief explicit, attributed and auditable. It does not make this database
--- a verifier.
+-- IT IS SEPARATE FROM GATE ZERO ON PURPOSE, in both directions. This binding
+-- resolving does not resolve Gate Zero: ops.benchmark_gate_zero_outcome() still
+-- raises, is still read first, and acceptance still fails closed there.
 create or replace function ops.benchmark_measurement_coverage_binding(p_review_id uuid)
 returns jsonb language plpgsql stable security definer
 set search_path = pg_catalog, ops, public
 as $$
+declare
+  v_review ops.benchmark_manifest_review%rowtype;
+  v_attestation ops.benchmark_measurement_coverage_attestation%rowtype;
+  v_live text;
 begin
-  raise exception 'benchmark acceptance requires a recorded coverage proof binding for the measurement set named by review %, and this record layer holds none: measurement_set_digest names the bytes a trusted writer read, and no record here binds those bytes to a coverage evaluation by benchmark-minimum.v5.js. Accepting on the digest alone would claim an independent verification that does not exist. INTEGRATION REQUIREMENT: record a coverage attestation alongside the review and implement this reader against it. This function evaluates no coverage and is not a second coverage authority.', p_review_id;
-  -- Unreachable, and null-valued for the same reason as the Gate Zero stub: a
-  -- half-finished implementation must refuse, not pass.
+  select * into v_review from ops.benchmark_manifest_review where id = p_review_id;
+  if not found then
+    raise exception 'the coverage proof binding names an unknown benchmark review %', p_review_id;
+  end if;
+
+  select * into v_attestation from ops.benchmark_measurement_coverage_attestation
+   where review_id = p_review_id;
+  if not found then
+    raise exception 'benchmark acceptance requires a recorded coverage proof binding for the measurement set named by review %, and none is recorded: measurement_set_digest names the bytes a trusted writer read, and without an attestation beside it nothing binds those bytes to a coverage evaluation by benchmark-minimum.v5.js. Accepting on the digest alone would claim an independent verification that does not exist. This function evaluates no coverage and is not a second coverage authority.', p_review_id;
+  end if;
+
+  -- RECOMPUTED, not read back. This is the half of the attestation the database
+  -- can check for itself, and checking it is what makes the record more than a
+  -- note the writer left.
+  v_live := ops.benchmark_payload_digest(v_attestation.draft_id);
+  if v_attestation.benchmark_payload_digest is distinct from v_live then
+    raise exception 'the coverage proof binding for review % attests payload digest %, which this draft no longer produces: it now produces %',
+      p_review_id, v_attestation.benchmark_payload_digest, v_live;
+  end if;
+  if v_attestation.draft_id is distinct from v_review.draft_id then
+    raise exception 'the coverage proof binding for review % attests a different draft', p_review_id;
+  end if;
+  -- The attestation must attest THIS review's bytes. The write path already
+  -- refuses a divergence, so this is the fail-closed half: a future write path
+  -- that lost that check must not become an acceptance that bound nothing.
+  if v_attestation.measurement_set_digest is distinct from v_review.measurement_set_digest then
+    raise exception 'the coverage proof binding for review % attests measurement set %, which is not the set the review names',
+      p_review_id, v_attestation.measurement_set_digest;
+  end if;
+  if not (v_attestation.coverage_proved_by = any (ops.benchmark_coverage_evaluators())) then
+    raise exception 'the coverage proof binding for review % names %, which is not a benchmark coverage evaluator this rail admits',
+      p_review_id, v_attestation.coverage_proved_by;
+  end if;
+
+  -- The documented return: exactly what acceptance binds. The evaluation digest
+  -- is deliberately NOT returned -- acceptance binds nothing to it, and a value
+  -- on this result that nothing consumes invites a future reader to consume it.
   return jsonb_build_object(
-    'review_id', p_review_id,
-    'measurement_set_digest', null,
-    'coverage_proved_by', null);
+    'review_id', v_review.id,
+    'measurement_set_digest', v_attestation.measurement_set_digest,
+    'coverage_proved_by', v_attestation.coverage_proved_by);
 end;
 $$;
 
 comment on function ops.benchmark_measurement_coverage_binding(uuid) is
-  'PRIVATE fail-closed reader for the proof binding between a review''s measurement_set_digest and a kernel coverage evaluation. Always raises: no such record exists, so acceptance cannot claim independently verified coverage from a digest. Evaluates no coverage and is not a second coverage authority. Independent of the Gate Zero binding on purpose. Granted to no role.';
+  'PRIVATE reader for the proof binding between a review''s measurement_set_digest and a kernel coverage evaluation. Returns { review_id, measurement_set_digest, coverage_proved_by } for an attested review and raises for one with no attestation, one whose attested payload digest the draft no longer produces, one whose measurement digest is not the review''s, and one naming an evaluator outside ops.benchmark_coverage_evaluators(). Evaluates no coverage and is not a second coverage authority: the samples are outside this record layer and the evaluation cannot be repeated here. Independent of the Gate Zero binding on purpose. Granted to no role.';
 
 -- ---------------------------------------------------------------------------
 -- Proposal, review and acceptance guards. Everything each act depends on is
@@ -1197,15 +1348,28 @@ begin
   perform ops.benchmark_assert_bound('Gate Zero read-only outcome', 'observed instant',
     new.gate_zero_observed_at, (v_gate_zero ->> 'observed_at')::timestamptz);
 
-  -- THE THIRD BINDING. The passing review named a measurement set above; this is
-  -- where the receipt would have to show that the naming was a proof. There is no
-  -- such record, so this raises, and it raises independently of Gate Zero: a
-  -- future Gate Zero implementation does not upgrade a trusted writer's
-  -- assertion into verified coverage, and acceptance must not start behaving as
-  -- if it did.
+  -- THE THIRD BINDING, WHICH NOW READS A RECORD RATHER THAN REFUSING FOR WANT OF
+  -- ONE. The passing review named a measurement set above; the attestation
+  -- recorded in the same call says which kernel evaluator proved it, against
+  -- which payload digest, over which bytes. The reader recomputes the payload
+  -- digest and refuses a stale attestation, so this binds a checked record.
+  --
+  -- IT STILL BINDS ONLY WHAT THE RECORD SAYS. The samples are outside this
+  -- database, the evaluation cannot be repeated here, and this clause does not
+  -- turn a trusted writer's attributed statement into an independent
+  -- verification. It is also still ordered AFTER the Gate Zero binding, which
+  -- still raises: acceptance refuses at Gate Zero, and reaching this line at all
+  -- requires a fact this record layer does not hold.
   v_coverage := ops.benchmark_measurement_coverage_binding(new.review_id);
   perform ops.benchmark_assert_bound('measurement coverage proof', 'measurement set digest',
     v_review.measurement_set_digest, v_coverage ->> 'measurement_set_digest');
+  -- The evaluator is bound too, against the closed set rather than against a
+  -- value the receipt carries: there is no evaluator column on the receipt, and
+  -- adding one would record a coverage claim the receipt does not make.
+  perform ops.benchmark_assert_bound('measurement coverage proof', 'coverage evaluator',
+    v_coverage ->> 'coverage_proved_by',
+    (select e from unnest(ops.benchmark_coverage_evaluators()) e
+      where e = v_coverage ->> 'coverage_proved_by'));
 
   -- STRICTLY AFTER, on the exclusive reading benchmark-minimum.v5.js uses for
   -- every member: an acceptance recorded AT a prerequisite instant did not
@@ -1226,7 +1390,7 @@ end;
 $$;
 
 comment on function ops.benchmark_acceptance_guard() is
-  'Authoritative benchmark acceptance precondition: recomputed exact payload digest, complete payload, a fresh passing independent review on the same bytes naming its measurement set, three distinct identities, an acceptor derived from the authenticated partner session, the accepted portfolio constitution the acceptor named, the Gate Zero outcome as authenticated here, a recorded coverage proof binding for the review''s measurement set, and an acceptance strictly after the portfolio, the Gate Zero instant and the review. Every binding comparison runs through ops.benchmark_assert_bound(), so an underived binding refuses instead of comparing to NULL and falling through.';
+  'Authoritative benchmark acceptance precondition: recomputed exact payload digest, complete payload, a fresh passing independent review on the same bytes naming its measurement set, three distinct identities, an acceptor derived from the authenticated partner session, the accepted portfolio constitution the acceptor named, the Gate Zero outcome as authenticated here, the recorded coverage proof binding for the review''s measurement set and its named evaluator, and an acceptance strictly after the portfolio, the Gate Zero instant and the review. Every binding comparison runs through ops.benchmark_assert_bound(), so an underived binding refuses instead of comparing to NULL and falling through. It still cannot succeed: the Gate Zero reader is read first and always raises.';
 
 drop trigger if exists benchmark_acceptance_guard on ops.benchmark_manifest_acceptance_receipt;
 create trigger benchmark_acceptance_guard
@@ -1344,15 +1508,23 @@ begin
                          -- measurement_coverage_binding below before reading this
                          -- as verified coverage.
                          'measurement_set_digest', r.measurement_set_digest,
+                         -- Per review, so a reader can see WHICH reviews carry an
+                         -- attestation rather than being told about the rail in
+                         -- general. A fail verdict carries none and needs none.
+                         'coverage_proved_by', (
+                           select a.coverage_proved_by
+                             from ops.benchmark_measurement_coverage_attestation a
+                            where a.review_id = r.id),
                          'reviewer_actor_id', r.reviewer_actor_id)
                        order by r.created_at, r.id), '[]'::jsonb)
                   from ops.benchmark_manifest_review r where r.draft_id = v_draft.id),
     -- Said out loud in the readback, because a caller reading a measurement
-    -- digest off a passing review would otherwise be entitled to assume this
-    -- database had checked something. It has not, and it does not.
+    -- digest off a passing review is entitled to know exactly how much this
+    -- database checked -- which is more than nothing and much less than a
+    -- verification.
     'measurement_coverage_binding', jsonb_build_object(
-      'resolved', false,
-      'note', 'measurement_set_digest names the bytes the review''s writer read. This database evaluates no coverage and holds no record binding that digest to a coverage evaluation by benchmark-minimum.v5.js, so it is not evidence of verified coverage and acceptance fails closed on it.'),
+      'resolved', true,
+      'note', 'measurement_set_digest names the bytes the review''s writer read. Beside each passing review this database records an attestation naming the kernel evaluator that proved coverage, the payload digest it proved against and the measurement digest it proved over, and it refuses an attestation whose payload digest the draft no longer produces. It still evaluates no coverage itself: the samples are outside this record layer and the evaluation cannot be repeated here, so this is an attributed, checkable assertion by a trusted writer and not an independent verification.'),
     'accepted', v_accepted_id is not null and v_accepted_id = v_draft.id,
     'accepted_draft_id', v_accepted_id,
     -- Inert by construction. Acceptance remains a separate human exact-hash act
@@ -1459,13 +1631,40 @@ $$;
 comment on function ops.benchmark_propose_manifest_draft(text,integer,uuid,text,jsonb,jsonb,jsonb,jsonb,jsonb,jsonb,jsonb) is
   'The only way to create a benchmark manifest draft. The draft is inert; the proposer is derived from the server-established writer context and is not a parameter. The supplied payload digest is compared at commit against one recomputed from the stored rows.';
 
+-- THE REVIEW AND ITS ATTESTATION ARE ONE ACT. p_coverage_attestation is a fourth
+-- kind of parameter and it is worth naming what it is not. It is not a coverage
+-- VERDICT: the verdict is p_verdict, and on the MCP path it comes from the kernel
+-- evaluator throwing or returning, never from an argument. It is not a caller
+-- input either -- the MCP verb's inputSchema has no attestation field, and the
+-- values below are the evaluator's own return value, computed on the write path
+-- microseconds earlier. What it IS: the TRUSTED WRITER's statement of what
+-- proved this pass, which is precisely the trusted-writer authority this rail
+-- has always run on, made explicit instead of left anonymous.
+--
+-- A PASS WITHOUT ONE IS REFUSED HERE, which is what stops a pass and its
+-- attestation coming apart. A direct caller holding the writer bundle can still
+-- record a passing review -- that authority is preserved -- but it can no longer
+-- record one without saying, on the record and under its own actor id, what
+-- proved it.
+--
+-- The old six-argument signature is dropped rather than left beside this one: two
+-- overloads would mean the unattested write path still existed under a shorter
+-- name, which is exactly the thing being closed.
+drop function if exists ops.benchmark_review_manifest_draft(uuid,uuid,text,text,text,text);
+
 create or replace function ops.benchmark_review_manifest_draft(
   p_draft_id uuid, p_idempotency_key uuid, p_reviewed_payload_digest text,
-  p_verdict text, p_measurement_set_digest text, p_review_summary text)
+  p_verdict text, p_measurement_set_digest text, p_review_summary text,
+  p_coverage_attestation jsonb)
 returns uuid language plpgsql security definer
 set search_path = pg_catalog, ops, public
 as $$
-declare v_id uuid; v_existing ops.benchmark_manifest_review%rowtype;
+declare
+  v_id uuid;
+  v_existing ops.benchmark_manifest_review%rowtype;
+  v_existing_attestation ops.benchmark_measurement_coverage_attestation%rowtype;
+  v_proved_by text; v_payload_digest text; v_measurements text; v_evaluation text;
+  v_key text;
 begin
   select * into v_existing from ops.benchmark_manifest_review where idempotency_key = p_idempotency_key;
   if found then
@@ -1482,20 +1681,132 @@ begin
        or v_existing.review_summary is distinct from p_review_summary then
       raise exception 'benchmark idempotency key % was already used for a different review', p_idempotency_key;
     end if;
+    -- THE ATTESTATION IS A STORED PARAMETER TOO, so it is compared on a replay
+    -- for the same reason review_summary is: a replay carrying a different
+    -- attestation is a different request wearing the same key, and returning the
+    -- first row would leave the caller believing the second had been recorded.
+    select * into v_existing_attestation from ops.benchmark_measurement_coverage_attestation
+     where review_id = v_existing.id;
+    if found <> (p_coverage_attestation is not null)
+       or (p_coverage_attestation is not null and (
+            v_existing_attestation.coverage_proved_by is distinct from (p_coverage_attestation ->> 'coverage_proved_by')
+         or v_existing_attestation.benchmark_payload_digest is distinct from (p_coverage_attestation ->> 'benchmark_payload_digest')
+         or v_existing_attestation.measurement_set_digest is distinct from (p_coverage_attestation ->> 'measurement_set_digest')
+         or v_existing_attestation.evaluation_digest is distinct from (p_coverage_attestation ->> 'evaluation_digest'))) then
+      raise exception 'benchmark idempotency key % was already used for a different review', p_idempotency_key;
+    end if;
     return v_existing.id;
   end if;
+
+  -- THE PASS/ATTESTATION PAIR, CHECKED BEFORE EITHER ROW EXISTS.
+  if p_verdict = 'pass' and p_coverage_attestation is null then
+    raise exception 'a passing benchmark review must record a measurement coverage attestation naming the kernel evaluator that proved coverage, the payload digest it proved against and the measurement digest it proved over; an unattested pass is refused';
+  end if;
+  if p_verdict <> 'pass' and p_coverage_attestation is not null then
+    raise exception 'a benchmark review that does not pass proves no coverage and must record no coverage attestation';
+  end if;
+
+  if p_coverage_attestation is not null then
+    if jsonb_typeof(p_coverage_attestation) <> 'object' then
+      raise exception 'the benchmark coverage attestation must be an object';
+    end if;
+    -- CLOSED, the way every other shape in this rail is closed: an unknown key is
+    -- a caller believing it recorded something that was silently dropped.
+    for v_key in select key from jsonb_object_keys(p_coverage_attestation) as t(key) loop
+      if v_key not in ('coverage_proved_by', 'benchmark_payload_digest',
+                       'measurement_set_digest', 'evaluation_digest') then
+        raise exception 'the benchmark coverage attestation carries an unknown field %', v_key;
+      end if;
+    end loop;
+    v_proved_by      := p_coverage_attestation ->> 'coverage_proved_by';
+    v_payload_digest := p_coverage_attestation ->> 'benchmark_payload_digest';
+    v_measurements   := p_coverage_attestation ->> 'measurement_set_digest';
+    v_evaluation     := p_coverage_attestation ->> 'evaluation_digest';
+    if v_proved_by is null or v_payload_digest is null
+       or v_measurements is null or v_evaluation is null then
+      raise exception 'the benchmark coverage attestation must name the evaluator, the payload digest, the measurement digest and the evaluation digest';
+    end if;
+    if not (v_proved_by = any (ops.benchmark_coverage_evaluators())) then
+      raise exception 'the benchmark coverage attestation names %, which is not a benchmark coverage evaluator this rail admits', v_proved_by;
+    end if;
+    -- THE ATTESTATION MUST BE ABOUT THIS REVIEW'S BYTES. Refused here as well as
+    -- in the reader, because a row that never diverges is better than a
+    -- divergence a later reader has to catch.
+    if v_measurements is distinct from p_measurement_set_digest then
+      raise exception 'the benchmark coverage attestation proves coverage over measurement set %, which is not the set this review names', v_measurements;
+    end if;
+    -- AND ABOUT THIS REVIEW'S PAYLOAD, pinned to the digest the review itself
+    -- names rather than to a second recomputation here.
+    --
+    -- THAT IS NOT A WEAKER CHECK, AND THE REASON IS WORTH STATING. The review
+    -- guard already refuses this insert unless p_reviewed_payload_digest is the
+    -- digest ops.benchmark_payload_digest() produces from the draft's rows right
+    -- now; it is the rail's ONE currentness authority and the same insert runs
+    -- it. Pinning the attestation to that value therefore binds it to the live
+    -- digest transitively, through the check that already exists, instead of
+    -- adding a second currentness authority that could disagree with it. It also
+    -- keeps an unknown draft arriving as the guard's named refusal rather than as
+    -- a raw digest error, and it does not rebuild the whole preimage twice per
+    -- review. The reader recomputes independently at acceptance time, which is
+    -- where an attestation that has been outgrown actually matters.
+    if v_payload_digest is distinct from p_reviewed_payload_digest then
+      raise exception 'the benchmark coverage attestation proves coverage against payload digest %, which this draft does not produce', v_payload_digest;
+    end if;
+  end if;
+
   insert into ops.benchmark_manifest_review(
     draft_id, idempotency_key, reviewed_payload_digest, verdict,
     measurement_set_digest, review_summary, reviewer_actor_id)
   values (p_draft_id, p_idempotency_key, p_reviewed_payload_digest, p_verdict,
     p_measurement_set_digest, p_review_summary, ops.portfolio_writer_actor_id())
   returning id into v_id;
+
+  if p_coverage_attestation is not null then
+    -- SAME CALL, SAME TRANSACTION, SAME DERIVED ACTOR. The attesting writer is
+    -- ops.portfolio_writer_actor_id() exactly as the reviewer is: the attestation
+    -- is attributed to whoever recorded the review, and is not a parameter.
+    insert into ops.benchmark_measurement_coverage_attestation(
+      review_id, draft_id, coverage_proved_by, benchmark_payload_digest,
+      measurement_set_digest, evaluation_digest, attested_by_actor_id)
+    values (v_id, p_draft_id, v_proved_by, v_payload_digest,
+      v_measurements, v_evaluation, ops.portfolio_writer_actor_id());
+  end if;
+
   return v_id;
 end;
 $$;
 
-comment on function ops.benchmark_review_manifest_draft(uuid,uuid,text,text,text,text) is
-  'The only way to record an independent benchmark review. The reviewer is derived from the server-established writer context and is not a parameter. p_measurement_set_digest is recorded as the calling trusted writer supplies it: through the MCP verb the kernel proved that coverage and computed that digest, through a direct call it is the writer''s assertion, and this function does not and cannot tell the two apart -- which is why acceptance fails closed on the missing coverage proof binding instead of reading the column as evidence. Every stored parameter, review_summary included, is compared on an idempotent replay.';
+comment on function ops.benchmark_review_manifest_draft(uuid,uuid,text,text,text,text,jsonb) is
+  'The only way to record an independent benchmark review, and the only way to record the coverage attestation that must accompany a passing one. The reviewer and the attesting writer are both derived from the server-established writer context and neither is a parameter. A pass with no attestation is refused and a non-pass with one is refused, so the pass and its attestation cannot come apart. The attestation is still a TRUSTED WRITER''s statement -- through the MCP verb its values are benchmark-minimum.v5.js''s own return value, through a direct call they are the writer''s assertion -- but it is now explicit, attributed, closed to a known evaluator set, and checked against the digest this draft actually produces. Every stored parameter, review_summary and the attestation included, is compared on an idempotent replay.';
+
+-- THE PASS/ATTESTATION PAIR, ENFORCED AT COMMIT AS WELL AS AT THE WRITE PATH.
+-- The function above refuses an unattested pass, and the function above is the
+-- only write path any role can reach -- direct INSERT is granted to nobody. What
+-- this deferred constraint trigger adds is the TABLE OWNER, from whom INSERT
+-- cannot be revoked, and any future write path that forgets the rule. It has to
+-- be DEFERRED because the attestation row references the review row and
+-- therefore cannot exist until after it.
+create or replace function ops.benchmark_pass_requires_attestation()
+returns trigger language plpgsql
+set search_path = pg_catalog, ops
+as $$
+begin
+  if new.verdict = 'pass' and not exists (
+       select 1 from ops.benchmark_measurement_coverage_attestation where review_id = new.id) then
+    raise exception 'benchmark review % passes and records no measurement coverage attestation; an unattested pass is refused', new.id;
+  end if;
+  return null;
+end;
+$$;
+
+comment on function ops.benchmark_pass_requires_attestation() is
+  'Commit-time refusal of a passing benchmark review with no coverage attestation. The write function refuses one first; this is the half that binds the table owner, from whom INSERT cannot be revoked.';
+
+drop trigger if exists benchmark_pass_requires_attestation on ops.benchmark_manifest_review;
+create constraint trigger benchmark_pass_requires_attestation
+  after insert on ops.benchmark_manifest_review
+  deferrable initially deferred
+  for each row execute function ops.benchmark_pass_requires_attestation();
 
 -- ACCEPTANCE. Every authoritative fact is DERIVED inside this function: the
 -- partner from the authenticated session, the portfolio binding from the 0496
@@ -1504,9 +1815,16 @@ comment on function ops.benchmark_review_manifest_draft(uuid,uuid,text,text,text
 -- on, and which portfolio it descends from. There is no parameter through which
 -- an accepted_by, a verified boolean or a Gate Zero digest could arrive.
 --
--- THIS FUNCTION CANNOT SUCCEED TODAY. ops.benchmark_gate_zero_outcome() and
--- ops.benchmark_measurement_coverage_binding() both raise, and both are called
--- before any row is written.
+-- THIS FUNCTION CANNOT SUCCEED TODAY, FOR ONE REMAINING REASON:
+-- ops.benchmark_gate_zero_outcome() raises, and it is called before any row is
+-- written. ops.benchmark_measurement_coverage_binding() NO LONGER RAISES. It
+-- reads the attestation recorded beside the review and RETURNS for an attested
+-- review, refusing only a review whose record does not hold up: no attestation,
+-- an attested payload digest the draft no longer produces, an evaluator outside
+-- the closed set, or a measurement digest the review does not name. What it
+-- returns is still a trusted writer's attributed assertion and not an
+-- independent verification -- the samples stay outside this record layer and
+-- this database evaluates no coverage itself.
 create or replace function ops.benchmark_accept_manifest_draft(
   p_draft_id uuid, p_idempotency_key uuid, p_accepted_payload_digest text,
   p_review_id uuid, p_portfolio_ref text)
@@ -1555,9 +1873,13 @@ begin
 
   -- All three bindings, derived. Order is deliberate: a caller missing an
   -- accepted portfolio learns about that first rather than being told only about
-  -- an unimplemented reader, and the coverage binding is last so that landing the
-  -- Gate Zero record leaves a refusal that names the assertion still outstanding
-  -- rather than silently admitting it. All three refusals are terminal.
+  -- the unimplemented Gate Zero reader, and the coverage binding is read LAST so
+  -- that deleting the Gate Zero throw cannot SKIP it -- the coverage record is
+  -- checked on the way to every acceptance, not only on the ones a bound Gate
+  -- Zero would have let through anyway. Once the Gate Zero record lands, this
+  -- clause PASSES for an attested review and refuses an unattested or outgrown
+  -- one; it is not a second gate held shut behind the first. All three refusals
+  -- are terminal.
   v_portfolio := ops.benchmark_portfolio_prerequisite(p_portfolio_ref);
   v_gate_zero := ops.benchmark_gate_zero_outcome();
   v_coverage := ops.benchmark_measurement_coverage_binding(p_review_id);
@@ -1599,18 +1921,25 @@ grant select on ops.benchmark_manifest_draft, ops.benchmark_manifest_dimension,
   ops.benchmark_manifest_workload, ops.benchmark_manifest_request_size,
   ops.benchmark_manifest_concurrency, ops.benchmark_manifest_browser,
   ops.benchmark_manifest_evaluator, ops.benchmark_manifest_review,
+  ops.benchmark_measurement_coverage_attestation,
   ops.benchmark_manifest_acceptance_receipt to carr_reader, carr_writer, carr_authority;
 
+-- THE GRANT HALF OF APPEND-ONLY, AND IT DOES NOT BIND THE OWNER. TRUNCATE cannot
+-- be revoked from the table owner, and the row-level append-only trigger never
+-- sees a TRUNCATE at all; the statement-level trigger installed beside it above
+-- is the half that closes that. Both halves are kept.
 revoke insert, update, delete, truncate on ops.benchmark_manifest_draft,
   ops.benchmark_manifest_dimension, ops.benchmark_manifest_workload,
   ops.benchmark_manifest_request_size, ops.benchmark_manifest_concurrency,
   ops.benchmark_manifest_browser, ops.benchmark_manifest_evaluator,
-  ops.benchmark_manifest_review, ops.benchmark_manifest_acceptance_receipt
+  ops.benchmark_manifest_review, ops.benchmark_measurement_coverage_attestation,
+  ops.benchmark_manifest_acceptance_receipt
   from public, carr_reader, carr_writer, carr_jobs, carr_authority;
 
 revoke all on function ops.benchmark_payload_domain_tag(),
   ops.benchmark_utf16_length(text),
   ops.benchmark_assert_bound(text,text,anyelement,anyelement),
+  ops.benchmark_coverage_evaluators(),
   ops.benchmark_slo_thresholds(), ops.benchmark_cost_variance_thresholds(),
   ops.benchmark_deadline_contract(), ops.benchmark_dimension_array(uuid,text),
   ops.benchmark_payload_preimage(uuid), ops.benchmark_payload_digest(uuid),
@@ -1625,6 +1954,7 @@ revoke all on function ops.benchmark_payload_domain_tag(),
 grant execute on function ops.benchmark_payload_domain_tag(),
   ops.benchmark_utf16_length(text),
   ops.benchmark_assert_bound(text,text,anyelement,anyelement),
+  ops.benchmark_coverage_evaluators(),
   ops.benchmark_slo_thresholds(), ops.benchmark_cost_variance_thresholds(),
   ops.benchmark_deadline_contract(), ops.benchmark_dimension_array(uuid,text),
   ops.benchmark_payload_preimage(uuid), ops.benchmark_payload_digest(uuid),
@@ -1647,12 +1977,12 @@ revoke all on function ops.benchmark_gate_zero_outcome(),
 
 revoke all on function
   ops.benchmark_propose_manifest_draft(text,integer,uuid,text,jsonb,jsonb,jsonb,jsonb,jsonb,jsonb,jsonb),
-  ops.benchmark_review_manifest_draft(uuid,uuid,text,text,text,text),
+  ops.benchmark_review_manifest_draft(uuid,uuid,text,text,text,text,jsonb),
   ops.benchmark_accept_manifest_draft(uuid,uuid,text,uuid,text)
   from public, carr_reader, carr_writer, carr_jobs, carr_authority;
 grant execute on function
   ops.benchmark_propose_manifest_draft(text,integer,uuid,text,jsonb,jsonb,jsonb,jsonb,jsonb,jsonb,jsonb),
-  ops.benchmark_review_manifest_draft(uuid,uuid,text,text,text,text)
+  ops.benchmark_review_manifest_draft(uuid,uuid,text,text,text,text,jsonb)
   to carr_writer, carr_authority;
 -- Acceptance reaches the authority bundle only.
 grant execute on function ops.benchmark_accept_manifest_draft(uuid,uuid,text,uuid,text)
