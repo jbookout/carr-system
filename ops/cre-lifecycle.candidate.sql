@@ -723,9 +723,19 @@ comment on table ops.j102_correction_receipt is
 create table if not exists ops.j102_reconciliation_item (
   tenant            text not null,
   item_seq          bigserial primary key,
-  subject_kind      text not null,
+  -- The same structural floor ops.j102_subject_current carries, for the same
+  -- reason: a conflict about a kind this slice does not have is not a conflict
+  -- anyone can resolve.
+  subject_kind      text not null constraint j102_item_subject_kind check (subject_kind in
+                      ('relationship', 'engagement', 'assignment', 'property_negotiation', 'deal')),
   subject_id        text not null,
-  conflict_kind     text not null,
+  -- AND THE SAME FLOOR UNDER THE LABEL. These four are the kinds
+  -- evaluateConcurrentEdit can file (V5_J102_CONFLICT_KINDS); the writer checks
+  -- the admission map, and this restates it structurally so a row that reached
+  -- the table another way still cannot carry a label nothing authored.
+  conflict_kind     text not null constraint j102_item_conflict_kind check (conflict_kind in
+                      ('uncharacterized_concurrent_change', 'overlapping_field_edit',
+                       'material_class_edit', 'unclassified_field_edit')),
   base_version_digest text not null,
   current_version_digest text not null,
   envelope          jsonb not null,
@@ -743,12 +753,24 @@ create table if not exists ops.j102_reconciliation_item (
   constraint j102_item_preserves_both_sides
     check (jsonb_typeof(envelope -> 'record' -> 'incoming_edits') = 'array'
        and jsonb_typeof(envelope -> 'record' -> 'concurrent_edits') = 'array'),
+  -- VISIBLE, UNAPPLIED AND UNRESOLVED, AS ACTUAL JSON BOOLEANS. `->>` renders
+  -- the string "false" and the boolean false identically, so the text comparison
+  -- alone was satisfied by a caller that wrote `"resolved_by_machine": "false"`
+  -- -- a value that reads as the right answer and is a string. The type is
+  -- checked beside the value so the three properties a reader acts on are the
+  -- three the row actually holds.
+  constraint j102_item_resolution_flags_are_booleans
+    check (jsonb_typeof(envelope -> 'record' -> 'resolved_by_machine') = 'boolean'
+       and jsonb_typeof(envelope -> 'record' -> 'visible') = 'boolean'
+       and jsonb_typeof(envelope -> 'record' -> 'applied') = 'boolean'),
   constraint j102_item_not_machine_resolved
-    check ((envelope -> 'record' ->> 'resolved_by_machine') = 'false')
+    check ((envelope -> 'record' -> 'resolved_by_machine') = 'false'::jsonb
+       and (envelope -> 'record' -> 'visible') = 'true'::jsonb
+       and (envelope -> 'record' -> 'applied') = 'false'::jsonb)
 );
 
 comment on table ops.j102_reconciliation_item is
-  'Q103: a lifecycle, financial, recipient or document conflict, visible and unresolved, with both versions preserved. Nothing in this file resolves one; a person does.';
+  'Q103: a lifecycle, financial, recipient or document conflict, visible and unresolved, with both versions preserved. Nothing in this file resolves one; a person does. The label is closed to the four kinds evaluateConcurrentEdit can file, the subject kind to the five this slice defines, and visible/applied/resolved_by_machine are pinned as JSON BOOLEANS rather than as text -- so a row here cannot read as already handled, and cannot carry a conflict kind nothing authored.';
 
 create table if not exists ops.j102_idempotency (
   tenant            text not null,
@@ -1212,8 +1234,8 @@ set search_path = pg_catalog
 as $fn$
 select $policy$
 {
-  "policy_id": "j102-sql-admission.v4",
-  "derived_from": "cre-lifecycle.v5.js v5J102TransitionContract + v5J102EvidenceContract + v5J102InitializationContract + applyTransition/axisResult/lifecycleEvent/evaluateLifecycleInitialization",
+  "policy_id": "j102-sql-admission.v5",
+  "derived_from": "cre-lifecycle.v5.js v5J102TransitionContract + v5J102EvidenceContract + v5J102InitializationContract + V5_J102_CONFLICT_KINDS + V5_J102_FIELD_CLASS_REGISTRY + applyTransition/axisResult/lifecycleEvent/evaluateLifecycleInitialization/evaluateConcurrentEdit",
   "invented_business_policy": false,
   "subject_creation": "coupled_only_never_the_primary_subject",
   "initialization_writer": "ops.j102_initialize_subject",
@@ -1241,6 +1263,52 @@ select $policy$
     "assignment.open_negotiation_count",
     "assignment.active_lease_draft_target_id"
   ],
+  "reconciliation": {
+    "writer": "ops.j102_record_reconciliation_item",
+    "conflict_kinds": ["uncharacterized_concurrent_change", "overlapping_field_edit",
+      "material_class_edit", "unclassified_field_edit"],
+    "field_classes": ["lifecycle", "financial", "recipient", "document", "routine"],
+    "material_field_classes": ["lifecycle", "financial", "recipient", "document"],
+    "caller_supplied_field_class_admitted": false,
+    "unregistered_field_class": null,
+    "routine_fields_registered": 0,
+    "field_class_registry": {
+      "active_engagement_count": "lifecycle",
+      "active_lease_draft_target_id": "lifecycle",
+      "assignment_id": "lifecycle",
+      "assignment_phase": "lifecycle",
+      "cancellation_reason": "lifecycle",
+      "closing_date": "lifecycle",
+      "closing_state": "lifecycle",
+      "commission_agreement_state": "financial",
+      "completion_state": "lifecycle",
+      "content_digest": "document",
+      "deal_state": "lifecycle",
+      "diligence_state": "lifecycle",
+      "document_id": "document",
+      "effective_from": "lifecycle",
+      "effective_to": "lifecycle",
+      "engagement_id": "lifecycle",
+      "engagement_state": "lifecycle",
+      "execution_state": "lifecycle",
+      "instrument_kind": "lifecycle",
+      "invoice_state": "financial",
+      "multi_target_exception_ref": "lifecycle",
+      "negotiation_state": "lifecycle",
+      "open_negotiation_count": "lifecycle",
+      "payment_state": "financial",
+      "pending_deal_id": "lifecycle",
+      "property_id": "lifecycle",
+      "relationship_id": "lifecycle",
+      "relationship_state": "lifecycle",
+      "representation_basis": "lifecycle",
+      "selected_property_id": "lifecycle",
+      "subject_id": "lifecycle",
+      "subject_kind": "lifecycle",
+      "supporting_document_id": "document",
+      "version_no": "document"
+    }
+  },
   "initializations": {
     "initialize-prospect-relationship": {
       "subject_kind": "relationship",
@@ -2019,7 +2087,7 @@ $policy$::jsonb
 $fn$;
 
 comment on function ops.j102_admission_policy() is
-  'The closed SQL admission map: which operation may perform which transition, which actor class may perform it, which subjects it must write and which it may CREATE (never the primary one), the EXACT resulting value of every field it moves, the exact event set it appends AND the exact nested detail of every one of those events, and which evidence kinds bound to which subject it requires. A transcription of the kernel''s exported contracts and of its evaluator, asserted equal to both by the Node parity suite -- which runs the evaluator and requires this map to predict its answer. It decides nothing the kernel does not already decide and adds no business policy.';
+  'The closed SQL admission map: which operation may perform which transition, which actor class may perform it, which subjects it must write and which it may CREATE (never the primary one), the EXACT resulting value of every field it moves, the exact event set it appends AND the exact nested detail of every one of those events, and which evidence kinds bound to which subject it requires. It also carries Q103''s reconciliation vocabulary -- the four conflict kinds evaluateConcurrentEdit can file and the field-class registry that says what class each field is -- because ops.j102_record_reconciliation_item is granted to carr_writer and enforces both against this map rather than against a caller''s label. A transcription of the kernel''s exported contracts and of its evaluator, asserted equal to both by the Node parity suite -- which runs the evaluator and requires this map to predict its answer. It decides nothing the kernel does not already decide and adds no business policy.';
 
 -- ---------------------------------------------------------------------------
 -- THE EFFECT INTERPRETER.
@@ -4944,6 +5012,14 @@ declare
   v_operation text := p_diagnostics ->> 'operation';
   v_txn_now timestamptz := now();
   v_txn_now_text text := ops.f01_instant_text(now());
+  -- The same map every other governed writer here reads, so the vocabulary a
+  -- direct caller is held to is the kernel's transcribed vocabulary and not a
+  -- second list maintained beside it.
+  v_recon jsonb := ops.j102_admission_policy() -> 'reconciliation';
+  v_edit jsonb;
+  v_side text;
+  v_field text;
+  v_registered jsonb;
   v_replay jsonb;
   v_record jsonb;
   v_evidence jsonb;
@@ -4998,17 +5074,68 @@ begin
     raise exception 'j102_actor_injection_refused: proposed_by is derived, never supplied'
       using errcode = '42501';
   end if;
-  -- AN ITEM MAY NOT RESOLVE ITSELF. The relation restates the machine half as a
-  -- CHECK; these are the three a caller could otherwise use to file a conflict
-  -- that reads as already handled.
-  if (v_record ->> 'resolved_by_machine') is distinct from 'false'
-     or (v_record ->> 'visible') is distinct from 'true'
-     or (v_record ->> 'applied') is distinct from 'false' then
-    raise exception 'j102_reconciliation_resolves_itself: a conflict lands visible, unapplied and unresolved by any machine; this one claims resolved_by_machine=%, visible=%, applied=%',
-      coalesce(v_record ->> 'resolved_by_machine', 'nothing'),
-      coalesce(v_record ->> 'visible', 'nothing'),
-      coalesce(v_record ->> 'applied', 'nothing') using errcode = '42501';
+  -- AN ITEM MAY NOT RESOLVE ITSELF. The relation restates these three as CHECKs;
+  -- they are what a caller would otherwise use to file a conflict that reads as
+  -- already handled.
+  --
+  -- COMPARED AS JSON BOOLEANS, NOT AS TEXT. `->>` renders the string "false" and
+  -- the boolean false the same way, so a text comparison accepts an item whose
+  -- flags are strings -- a row that looks right to this writer and is a different
+  -- type to everything that reads it afterwards.
+  if (v_record -> 'resolved_by_machine') is distinct from 'false'::jsonb
+     or (v_record -> 'visible') is distinct from 'true'::jsonb
+     or (v_record -> 'applied') is distinct from 'false'::jsonb then
+    raise exception 'j102_reconciliation_resolves_itself: a conflict lands visible, unapplied and unresolved by any machine, and each is a JSON boolean; this one carries resolved_by_machine=%, visible=%, applied=%',
+      coalesce(v_record -> 'resolved_by_machine', 'null'::jsonb),
+      coalesce(v_record -> 'visible', 'null'::jsonb),
+      coalesce(v_record -> 'applied', 'null'::jsonb) using errcode = '42501';
   end if;
+
+  -- THE LABEL IS NOT THE CALLER'S TO INVENT EITHER.
+  --
+  -- On the shipped path `conflict_kind` and every edit's `field_class` are
+  -- DERIVED -- the store refuses both as caller-supplied fields and spreads the
+  -- kernel's own item. This function, though, is granted to carr_writer, and that
+  -- is the caller the admission map exists for. Without these two checks a direct
+  -- caller could file a visible item labelled `material_class_edit` whose edits
+  -- are labelled `routine`, or labelled with a kind no evaluator emits, and the
+  -- receipt derives `material_incoming_fields` and `unclassified_fields` from
+  -- exactly those stored labels. It cannot merge, apply or resolve anything --
+  -- but it mislabels the queue a person is supposed to read, and the map already
+  -- holds the vocabulary needed to refuse it.
+  -- The null arm is spelled out: `jsonb ? null` is NULL rather than false, and an
+  -- `if` on NULL does not raise -- which is the shape a fail-open guard has.
+  if v_record ->> 'conflict_kind' is null
+     or not (v_recon -> 'conflict_kinds' ? (v_record ->> 'conflict_kind')) then
+    raise exception 'j102_item_conflict_kind_unregistered: % is not a conflict this slice files; the registered kinds are %',
+      coalesce(v_record ->> 'conflict_kind', 'no kind at all'),
+      v_recon -> 'conflict_kinds' using errcode = '22023';
+  end if;
+
+  -- AND THE CLASS OF A FIELD IS THE REGISTRY'S ANSWER ABOUT THAT FIELD. Both
+  -- sides are checked: a lying `concurrent_edits` entry is as misleading to the
+  -- person resolving the conflict as a lying incoming one. An unregistered field
+  -- must carry JSON null -- policy has said nothing about it, and `routine` is
+  -- the one label that would matter, so silence is recorded as silence.
+  foreach v_side in array array['incoming_edits', 'concurrent_edits'] loop
+    if jsonb_typeof(v_record -> v_side) is distinct from 'array' then
+      raise exception 'j102_item_edits_not_an_array: % carries % where both sides of the conflict should be lists',
+        v_side, coalesce(jsonb_typeof(v_record -> v_side), 'nothing') using errcode = '22023';
+    end if;
+    for v_edit in select value from jsonb_array_elements(v_record -> v_side) loop
+      v_field := v_edit ->> 'field';
+      if v_field is null then
+        raise exception 'j102_item_edit_names_no_field: an edit in % names no field'
+          , v_side using errcode = '22023';
+      end if;
+      v_registered := coalesce(v_recon -> 'field_class_registry' -> v_field, 'null'::jsonb);
+      if coalesce(v_edit -> 'field_class', 'null'::jsonb) is distinct from v_registered then
+        raise exception 'j102_item_field_class_mismatch: %.% is classified % by policy and this item labels it %',
+          v_side, v_field, v_registered,
+          coalesce(v_edit -> 'field_class', 'null'::jsonb) using errcode = '42501';
+      end if;
+    end loop;
+  end loop;
 
   v_kind := v_record ->> 'subject_kind';
   v_id := v_record ->> 'subject_id';
@@ -5125,6 +5252,11 @@ begin
     'state_evidence_bound_to_committed_row', true,
     'history_evidence_bound_to_committed_history', true,
     'conflict_present', true,
+    -- THE TWO LABELS, CHECKED RATHER THAN CARRIED. Both are derived on the
+    -- shipped path and re-derived here against the admission map, so a direct
+    -- caller's label is not what this receipt is reporting.
+    'conflict_kind_registered', true,
+    'field_classes_bound_to_policy_registry', true,
     'visible', true,
     'applied', false,
     'resolved_by_machine', false,
@@ -5151,7 +5283,7 @@ end;
 $$;
 
 comment on function ops.j102_record_reconciliation_item(jsonb,jsonb,text,text,jsonb) is
-  'Q103: append one VISIBLE, unresolved conflict item, under the same governance every other writer here carries. It claims its idempotency key before reading any state, so a replay returns the stored outcome and the same key over different bytes refuses; it locks the subject in the established tier-2 order and compare-and-swaps it; and it then binds what the item SAYS to what the row IS at commit time -- the current version digest, the state snapshot the item shows and the newest row of its history evidence must all match the committed subject and its committed history, so a reading that went stale between the caller''s read and this insert cannot be filed as a current fact. A base equal to the current version is refused as no conflict at all. It collapses no distinct proposal: idempotency is keyed on the request, which covers the edits, and there is deliberately no unique index over the version pair. The ungoverned single-argument form is DROPPED rather than shadowed.';
+  'Q103: append one VISIBLE, unresolved conflict item, under the same governance every other writer here carries. It claims its idempotency key before reading any state, so a replay returns the stored outcome and the same key over different bytes refuses; it locks the subject in the established tier-2 order and compare-and-swaps it; and it then binds what the item SAYS to what the row IS at commit time -- the current version digest, the state snapshot the item shows and the newest row of its history evidence must all match the committed subject and its committed history, so a reading that went stale between the caller''s read and this insert cannot be filed as a current fact. A base equal to the current version is refused as no conflict at all. It collapses no distinct proposal: idempotency is keyed on the request, which covers the edits, and there is deliberately no unique index over the version pair. IT ALSO REFUSES THE TWO LABELS A DIRECT carr_writer CALLER COULD OTHERWISE INVENT: conflict_kind must be one of the four kinds evaluateConcurrentEdit files, and every edit on BOTH sides must carry the class the policy registry gives that field -- JSON null for a field policy has not classified -- both read out of ops.j102_admission_policy() rather than restated here. visible, applied and resolved_by_machine are compared as JSON BOOLEANS, so a string "false" is not accepted where the boolean is meant. The ungoverned single-argument form is DROPPED rather than shadowed.';
 
 -- ---------------------------------------------------------------------------
 -- Q081 -- the compatibility projection and the migration shadow.

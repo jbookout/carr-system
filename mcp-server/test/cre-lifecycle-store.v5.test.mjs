@@ -34,12 +34,18 @@ import { canonicalJson, digest } from "../src/artifact-trust.js";
 import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
 import {
   V5_J102_AUTHORITY_INJECTION_FRAGMENTS,
+  V5_J102_CONFLICT_KINDS,
   V5_J102_TRANSITION_IDS, V5_J102_DEAL_AXES, V5_J102_EVIDENCE_KINDS,
   V5_J102_EVIDENCE_INTEGRITY, V5_J102_EVIDENCE_LOADER,
   V5_J102_EVENT_SCHEMA_VERSION,
+  V5_J102_FIELD_CLASSES,
+  V5_J102_FIELD_CLASS_REGISTRY,
   V5_J102_INITIALIZATION_IDS,
+  V5_J102_MATERIAL_FIELD_CLASSES,
   V5_J102_SUBJECT_KINDS,
+  V5_J102_UNCLASSIFIED_FIELD_POLICY,
   assertLifecycleSubject,
+  evaluateConcurrentEdit,
   evaluateLifecycleInitialization,
   evaluateLifecycleTransition, v5J102EvidenceContract,
   v5J102InitializationContract, v5J102TransitionContract,
@@ -2616,6 +2622,52 @@ function executableSql(source) {
   return out;
 }
 
+/**
+ * One chunk of SQL with its COMMENTS removed and its literals LEFT IN PLACE.
+ *
+ * executableSql() above answers "does this code call that function", and to do it
+ * safely it also removes the literals — which makes it the wrong tool for the
+ * other question this file asks: "does this code compare THAT key against THAT
+ * value". A jsonb key is a single-quoted literal, so stripping literals erases
+ * the very thing under test, and asserting against the raw body instead would let
+ * a comment satisfy the check.
+ */
+function sqlWithoutComments(source) {
+  let out = "";
+  let i = 0;
+  while (i < source.length) {
+    // A quoted literal is copied WHOLE, so a `--` inside one is not a comment.
+    if (source[i] === "'") {
+      out += source[i];
+      i += 1;
+      while (i < source.length) {
+        out += source[i];
+        if (source[i] === "'") {
+          if (source[i + 1] === "'") { out += source[i + 1]; i += 2; continue; }
+          i += 1;
+          break;
+        }
+        i += 1;
+      }
+      continue;
+    }
+    if (source[i] === "-" && source[i + 1] === "-") {
+      while (i < source.length && source[i] !== "\n") i += 1;
+      out += " ";
+      continue;
+    }
+    if (source[i] === "/" && source[i + 1] === "*") {
+      const close = source.indexOf("*/", i + 2);
+      i = close === -1 ? source.length : close + 2;
+      out += " ";
+      continue;
+    }
+    out += source[i];
+    i += 1;
+  }
+  return out;
+}
+
 /** Which transitions each write operation may perform, from the store's own tables. */
 function operationsForTransition() {
   const schemas = v5J102StoreOperationSchemas();
@@ -3256,8 +3308,48 @@ test("Q103: the reconciliation writer is governed, and the ungoverned overload i
     "j102_reconciliation_state_evidence_stale",
     "j102_reconciliation_history_evidence_stale",
     "j102_reconciliation_without_conflict", "j102_reconciliation_resolves_itself",
-    "j102_item_operand_set_mismatch", "j102_stale_subject_digest"]) {
+    "j102_item_operand_set_mismatch", "j102_stale_subject_digest",
+    "j102_item_conflict_kind_unregistered", "j102_item_field_class_mismatch"]) {
     assert.ok(body.includes(refusal), `the writer carries ${refusal}`);
+  }
+  // THE TWO LABEL CHECKS READ THE MAP, rather than restating the vocabulary in a
+  // second place that nothing compares. A literal list here would pass the
+  // refusal-code assertion above and drift from the kernel silently.
+  assert.ok(executable.includes("ops.j102_admission_policy()"),
+    "the writer's vocabulary is the admission map's, not its own copy");
+  // The rest are comparisons against particular jsonb KEYS, which are literals —
+  // so they are asserted against the body with its comments removed and its
+  // literals kept, and a prose mention of either cannot satisfy them.
+  const code = sqlWithoutComments(body);
+  assert.ok(code.includes("v_recon -> 'conflict_kinds'"),
+    "conflict_kind is checked against the map's registered kinds");
+  assert.ok(code.includes("v_recon -> 'field_class_registry' -> v_field"),
+    "and every edit's class is checked against the map's registry entry for THAT field");
+  // BOTH SIDES. A lying concurrent_edits label misleads the person resolving the
+  // conflict exactly as much as a lying incoming one.
+  assert.ok(code.includes("array['incoming_edits', 'concurrent_edits']"),
+    "the field-class check walks both preserved sides");
+  // AND THE RESOLUTION FLAGS ARE JSON BOOLEANS at both the writer and the
+  // relation, so the string "false" is not accepted where the boolean is meant.
+  for (const [field, value] of [["resolved_by_machine", "false"], ["visible", "true"],
+    ["applied", "false"]]) {
+    assert.ok(code.includes(`(v_record -> '${field}') is distinct from '${value}'::jsonb`),
+      `${field} is compared as a jsonb boolean rather than through ->>`);
+    assert.equal(code.includes(`v_record ->> '${field}'`), false,
+      `and the text comparison of ${field} is gone rather than sitting beside it`);
+  }
+  const relation = CANDIDATE_SQL.slice(
+    CANDIDATE_SQL.indexOf("create table if not exists ops.j102_reconciliation_item ("),
+    CANDIDATE_SQL.indexOf("comment on table ops.j102_reconciliation_item"));
+  assert.ok(relation.includes("j102_item_resolution_flags_are_booleans"),
+    "the relation pins the three flags' JSON TYPE as well as their value");
+  for (const kind of V5_J102_CONFLICT_KINDS) {
+    assert.ok(relation.includes(`'${kind}'`),
+      `the relation's own conflict_kind CHECK names ${kind}`);
+  }
+  for (const kind of V5_J102_SUBJECT_KINDS) {
+    assert.ok(relation.includes(`'${kind}'`),
+      `and its subject_kind CHECK carries the same five kinds j102_subject_current does (${kind})`);
   }
   // The replay door admits the operation, or the key could never be claimed.
   const replay = CANDIDATE_SQL.slice(
@@ -3268,6 +3360,61 @@ test("Q103: the reconciliation writer is governed, and the ungoverned overload i
   // AND NO UNIQUE INDEX COLLAPSES DISTINCT PROPOSALS on the version pair.
   assert.equal(/create\s+unique\s+index[^;]*j102_reconciliation_item/i.test(CANDIDATE_SQL), false,
     "two different proposals against one version pair are two conflicts, and both stay visible");
+});
+
+test("SQL parity: the admission map's reconciliation vocabulary IS the kernel's", () => {
+  // THE POINT OF THE TRANSCRIPTION IS THAT IT IS ONE CONTRACT WITH TWO READERS.
+  // The writer refuses a conflict_kind and a field_class against the map, so a map
+  // that has drifted from the kernel would refuse real kernel answers at the
+  // database, or admit labels the kernel never files. Both are failures here.
+  const recon = admissionPolicy().reconciliation;
+  assert.deepEqual(recon.conflict_kinds, [...V5_J102_CONFLICT_KINDS]);
+  assert.deepEqual(recon.field_classes, [...V5_J102_FIELD_CLASSES]);
+  assert.deepEqual(recon.material_field_classes, [...V5_J102_MATERIAL_FIELD_CLASSES]);
+  assert.equal(recon.caller_supplied_field_class_admitted, false);
+  assert.equal(recon.writer, "ops.j102_record_reconciliation_item");
+
+  // FIELD BY FIELD, IN BOTH DIRECTIONS. A missing entry would let a real edit be
+  // refused as mislabelled; an extra one would let an unregistered field carry a
+  // class — and `routine` is the class that would matter.
+  assert.deepEqual(Object.keys(recon.field_class_registry).sort(),
+    Object.keys(V5_J102_FIELD_CLASS_REGISTRY).sort());
+  for (const [field, cls] of Object.entries(V5_J102_FIELD_CLASS_REGISTRY)) {
+    assert.equal(recon.field_class_registry[field], cls, `${field} is classified ${cls}`);
+  }
+  // The registry's own statement about itself travels with it, so a routine entry
+  // added on one side is visible on the other.
+  assert.equal(recon.routine_fields_registered,
+    V5_J102_UNCLASSIFIED_FIELD_POLICY.routine_fields_registered);
+  assert.equal(Object.values(recon.field_class_registry).includes("routine"), false);
+  // An unregistered field's class is JSON null in both places, which is what the
+  // writer compares an edit against.
+  assert.equal(recon.unregistered_field_class, null);
+
+  // AND THE KINDS ARE THE ONES THE EVALUATOR ACTUALLY FILES, driven rather than
+  // restated — the same check the kernel suite makes, made here against the SQL.
+  const edit = (field) => ({
+    field, value_digest: `sha256:${"7".repeat(64)}`, edited_by: "joe", edited_at: T.mid,
+  });
+  const kinds = new Set();
+  for (const [incoming, concurrent] of [
+    [[edit("internal_note")], undefined],
+    [[edit("deal_state")], [edit("deal_state")]],
+    [[edit("deal_state")], [edit("closing_state")]],
+    [[edit("internal_note")], [edit("next_touch_hint")]],
+  ]) {
+    const answer = evaluateConcurrentEdit({
+      tenant: ORGANIZATION_TENANT_ID,
+      actor: { slug: "joe", human: true, authorization_class: "verified_partner",
+        derived_by: "authenticated_handler_context" },
+      base_version_digest: `sha256:${"1".repeat(64)}`,
+      current_version_digest: `sha256:${"2".repeat(64)}`,
+      incoming, concurrent,
+    });
+    if (answer.reconciliation_item !== null) kinds.add(answer.reconciliation_item.conflict_kind);
+  }
+  assert.deepEqual([...kinds].sort(), [...recon.conflict_kinds].sort(),
+    "the SQL vocabulary is exactly the set evaluateConcurrentEdit can produce");
 });
 
 test("M-c/M-f: the association pins its version, and a future Salesforce observation refuses", () => {
@@ -3377,9 +3524,31 @@ test("the SQL fixture stays UNEXECUTED source, and rolls every synthetic row bac
     "j102_reconciliation_current_version_not_current",
     "j102_reconciliation_state_evidence_stale",
     "j102_reconciliation_history_evidence_stale",
-    "j102_reconciliation_without_conflict"]) {
+    "j102_reconciliation_without_conflict",
+    // And the two label refusals, which are what stop the queue a person reads
+    // from carrying a category nothing files or a lifecycle field called routine.
+    "j102_item_conflict_kind_unregistered", "j102_item_field_class_mismatch"]) {
     assert.ok(fixture.includes(refusal), `the conflict group drives ${refusal}`);
   }
+  // THE CLOSING NOTICES MUST ACCOUNT FOR BOTH NEW GROUPS, or a skipped walk reads
+  // as a run that proved the conflict writer. S9 is structural and runs always; R
+  // lives INSIDE the walk and runs only when J does, which is exactly the
+  // distinction the two lines have to carry.
+  const notices = fixture.split("\n").filter(line => line.includes("RUNNABLE GROUPS PASSED")
+    || line.includes("PARTIAL RUN"));
+  assert.equal(notices.length, 2, "there are exactly two closing notices to keep honest");
+  const [full, partial] = notices;
+  for (const group of ["S1-S9", "R1-R15", "J4", "U1", "U2"]) {
+    assert.ok(full.includes(group), `the full-run notice enumerates ${group}`);
+  }
+  assert.ok(partial.includes("S1-S9"),
+    "the partial-run notice enumerates S9, which is structural and DOES run");
+  assert.ok(partial.includes("R1-R15 did not run"),
+    "and says the conflict group did not run rather than leaving it out");
+  assert.ok(partial.includes("ANY BEHAVIOUR OF THE Q103 CONFLICT WRITER"),
+    "and says what that costs the reader rather than only naming the group");
+  assert.ok(partial.includes("S9 ran and is structural only"),
+    "and does not let a structural group stand in for the behavioural one");
   // THE ONE ARM THAT IS STILL UNREACHABLE HERE IS NAMED, not left to be inferred
   // from the cases that happen to be present.
   assert.ok(fixture.includes("UNPROVEN IN THIS FILE -- j102_required_context_not_met"),

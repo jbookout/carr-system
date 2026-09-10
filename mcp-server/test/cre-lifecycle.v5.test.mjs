@@ -20,6 +20,7 @@ import { V5_F01_AUTHORITY_INJECTION_FRAGMENTS } from "../src/record-source-autho
 import {
   V5_J102_ASSIGNMENT_PHASES,
   V5_J102_AUTHORITY_INJECTION_FRAGMENTS,
+  V5_J102_CONFLICT_KINDS,
   V5_J102_DEAL_AXES,
   V5_J102_NEGOTIATION_STATES,
   V5_J102_RELATIONSHIP_STATES,
@@ -1382,6 +1383,44 @@ test("Q103: an unmoved base still allows, and an uncharacterized change reconcil
   assert.equal(answer.decision, "reconcile");
   assert.equal(answer.reason_id, "concurrent_change_not_characterized");
   assert.equal(answer.merged, false);
+});
+
+test("Q103: the exported conflict vocabulary IS what the evaluator can file, exactly", () => {
+  // WHY THIS EXISTS. `ops.j102_record_reconciliation_item` is granted to
+  // carr_writer, and the SQL boundary now refuses a conflict_kind outside this
+  // list. A list that is wider than the evaluator would admit a label nothing
+  // authors; a list that is narrower would refuse a real kernel answer at the
+  // database. So the set is DRIVEN out of the evaluator here rather than restated.
+  const filed = new Set();
+  const drive = (incoming, concurrent) => {
+    const answer = evaluateConcurrentEdit({
+      tenant: ORGANIZATION_TENANT_ID, actor: PARTNER,
+      base_version_digest: D(10), current_version_digest: D(11),
+      incoming, concurrent,
+    });
+    if (answer.reconciliation_item !== null) filed.add(answer.reconciliation_item.conflict_kind);
+    return answer;
+  };
+  drive([edit("internal_note", "joe")], undefined);              // uncharacterized
+  drive([edit("deal_state", "joe")], [edit("deal_state", "dell")]);   // overlapping
+  drive([edit("deal_state", "joe")], [edit("closing_state", "dell")]); // material
+  drive([edit("internal_note", "joe")], [edit("next_touch_hint", "dell")]); // unclassified
+
+  assert.deepEqual([...filed].sort(), [...V5_J102_CONFLICT_KINDS].sort(),
+    "every registered kind is reachable and no reachable kind is unregistered");
+  assert.equal(V5_J102_CONFLICT_KINDS.length, new Set(V5_J102_CONFLICT_KINDS).size);
+
+  // And the policy the SQL map is checked against carries the same list.
+  assert.deepEqual(v5J102Projection().conflict_kinds, [...V5_J102_CONFLICT_KINDS]);
+
+  // Every edit an item carries names the class the REGISTRY gives that field —
+  // which is what the write boundary re-derives, so a stored label and the
+  // registry can never disagree.
+  const item = drive([edit("deal_state", "joe")], [edit("internal_note", "dell")])
+    .reconciliation_item;
+  for (const e of [...item.incoming_edits, ...item.concurrent_edits]) {
+    assert.equal(e.field_class, v5J102FieldClass(e.field), `${e.field} carries its registered class`);
+  }
 });
 
 test("Q103: ownership and freshness are projected from trusted state, and unknown stays unknown", () => {
