@@ -2,6 +2,11 @@ import { createClient, PHASES, PHICON, ACTOR_LABEL } from './client.js';
 import { deploymentIdentity, resolveDealroomBoot } from './boot-mode.js';
 import { uuidv4 } from './uuid.js';
 import { createPostCallClient } from './post-call-client.js';
+import {
+  REVERTIBLE_FIELDS, escapeText, parkingReasonLabel, ingestChangeEvents,
+  receiptViews, receiptListHtml, receiptsSignature, receiptsAnnouncement,
+  createFeedProgress, observeChangeBatch, createUndoState, performUndo,
+} from './change-receipts.mjs';
 
 const POLL_MS = 1400;
 const CALL_MODE_URL = 'http://127.0.0.1:4682';
@@ -11,7 +16,12 @@ const state = {
   mode: 'fixture',
   workspace: 'team', accountId: null, filter: 'active', query: '', deepLinkMine: false,
   changed: new Set(), fieldBase: new Map(), presence: [], captureSessions: [],
-  confirms: [], review: null, pollTimer: null, undoEventId: null,
+  confirms: [], review: null, pollTimer: null,
+  // Recent changes are session memory only: bounded, never stored, and never
+  // a substitute for the deal's own Change history. The feed cursor starts at
+  // the beginning of the log, so nothing is shown until it reaches the present.
+  receipts: [], undo: createUndoState(), feed: createFeedProgress(),
+  receiptSignature: null, receiptFocus: null, receiptAnnounced: null,
   callMode: { state: 'idle' }, callModeTimer: null,
   postCallClient: null, postCallTimer: null,
   postCall: { status: 'idle', session: null, report: null, error: null,
@@ -21,9 +31,7 @@ const state = {
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const today = () => new Date(new Date().toDateString());
-const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
-  '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;',
-}[char]));
+const esc = escapeText;
 const actorName = (slug) => ACTOR_LABEL[slug] || slug || 'Unassigned';
 const account = () => state.accounts.find((item) => item.account_client_id === state.accountId) || null;
 
@@ -55,14 +63,6 @@ function isStale(deal) {
   return (Date.now() - new Date(`${deal.last_touch}T12:00:00`).getTime()) / 864e5 >= 14;
 }
 
-function parkingReasonLabel(reason) {
-  return ({
-    prospect_never_active: 'Prospect never became active work',
-    client_paused: 'Client paused activity',
-    other: 'Not active right now',
-  })[reason] || 'Parked';
-}
-
 function reasonFor(deal) {
   if (deal.operating_state === 'parked') return parkingReasonLabel(deal.parking_reason);
   const days = daysFromNow(deal.next_date);
@@ -83,8 +83,9 @@ function priority(deal) {
 
 function showToast(message, undoEventId = null) {
   const el = $('#toast');
-  state.undoEventId = undoEventId;
-  el.innerHTML = `${esc(message)}${undoEventId ? '<button type="button" data-undo>Undo</button>' : ''}`;
+  // The toast's Undo is the same event-specific action as the receipt row's:
+  // it names its event, and both go through runUndo.
+  el.innerHTML = `${esc(message)}${undoEventId ? `<button type="button" data-undo="${esc(undoEventId)}">Undo</button>` : ''}`;
   el.classList.add('show');
   clearTimeout(showToast.timer);
   showToast.timer = setTimeout(() => el.classList.remove('show'), undoEventId ? 7000 : 3200);
@@ -119,7 +120,12 @@ async function pollOnce(initial = false) {
     state.presence = result.presence || [];
     state.captureSessions = result.capture_sessions || [];
     renderCaptureStatus();
-    for (const event of result.events || []) {
+    const batch = result.events || [];
+    state.feed = observeChangeBatch(state.feed, batch);
+    // Until the cursor reaches the present, these are pages of history, not
+    // news: no toast announces them and the panel stays closed.
+    const announce = !initial && state.feed.caught_up;
+    for (const event of batch) {
       if (event.field) state.fieldBase.set(`${event.subject_id}|${event.field}`, event.id);
       const deal = state.deals.get(event.subject_id);
       if (!deal) continue;
@@ -135,12 +141,19 @@ async function pollOnce(initial = false) {
         deal.parking_reason = value.reason || null;
         deal.parking_note = value.note || null;
       }
-      if (!initial && event.actor === state.selfActor && ['phase','owner','attention','next_date','operating_state'].includes(event.field)) {
+      if (announce && event.actor === state.selfActor && REVERTIBLE_FIELDS.includes(event.field)) {
         showToast(`${deal.name} updated`, event.id);
-      } else if (!initial && event.actor !== state.selfActor && event.field) {
+      } else if (announce && event.actor !== state.selfActor && event.field) {
         showToast(`${actorName(event.actor)} updated ${deal.name}`);
       }
     }
+    // Same events, kept instead of discarded once the toast fades. No second
+    // read: this is the batch the board just consumed.
+    state.receipts = ingestChangeEvents(state.receipts, batch, {
+      dealName: (dealId) => state.deals.get(dealId)?.name || null,
+      actorLabel: actorName,
+    });
+    renderReceipts();
     if (state.client.getPendingConfirms) {
       const pending = await state.client.getPendingConfirms();
       state.confirms = pending.proposals || [];
@@ -666,6 +679,96 @@ function renderConfirms() {
     <button type="button" class="yes" data-confirm="yes">Confirm</button><button type="button" class="skip-confirm" data-confirm="no">Skip</button></span>`).join('');
 }
 
+function renderReceipts() {
+  const panel = $('#receiptsPanel');
+  if (!panel) return;
+  const list = $('#receiptsList');
+  const jump = $('#receiptsJump');
+  // Nothing is shown while the cursor is still working through history: an old
+  // page is not "recent", and its newest row is not safely undoable.
+  const views = state.feed.caught_up
+    ? receiptViews(state.receipts, { selfActor: state.selfActor, undo: state.undo, now: Date.now() })
+    : [];
+  panel.hidden = views.length === 0;
+  // The board is long. A counted control sits with the other board controls so
+  // the panel below the table is findable without scrolling for it.
+  jump.hidden = views.length === 0;
+  $('#receiptsCount').textContent = String(views.length);
+  jump.setAttribute('aria-label', `Go to recent changes — ${views.length} seen in this session`);
+  // Read the focus request whether or not this render proceeds, so a skipped
+  // render cannot leave it to be spent on an unrelated one later.
+  const active = document.activeElement;
+  const keep = state.receiptFocus
+    || (active && list.contains(active) ? active.closest('[data-receipt]')?.dataset.receipt : null)
+    || null;
+  state.receiptFocus = null;
+  const signature = receiptsSignature(views);
+  if (signature === state.receiptSignature) return;
+  state.receiptSignature = signature;
+  // Re-render only on a real change, so an Undo button under the partner's
+  // finger keeps its focus. The list is NOT a live region — announcing it
+  // wholesale would read all 25 rows back for one change — so what actually
+  // arrived is named on its own short status line.
+  // Renders while the list is closed hold no news and leave the baseline
+  // unset, so the render that finally opens it announces nothing either.
+  const opened = views.length > 0;
+  const announcement = opened ? receiptsAnnouncement(state.receiptAnnounced, views) : '';
+  if (opened) state.receiptAnnounced = views.map((view) => view.event_id);
+  $('#receiptsLive').textContent = announcement;
+  list.innerHTML = receiptListHtml(views);
+  if (keep) focusReceipt(keep);
+}
+
+/**
+ * Land the keyboard somewhere sensible after a row is rebuilt. The Undo button
+ * is gone once the change is undone or refused, and is disabled while pending,
+ * so the row itself is the next best position; the panel heading is the last
+ * resort when the row has fallen off the end of the list.
+ */
+function focusReceipt(eventId) {
+  const list = $('#receiptsList');
+  const target = $(`[data-undo="${CSS.escape(eventId)}"]`, list)
+    || $(`[data-receipt="${CSS.escape(eventId)}"]`, list)
+    || $('#receiptsTitle');
+  // Restoring focus must not yank the page: this runs on poll-driven renders.
+  target?.focus({ preventScroll: true });
+}
+
+function goToReceipts() {
+  const panel = $('#receiptsPanel');
+  if (panel.hidden) return;
+  panel.scrollIntoView({ block: 'start' });
+  $('#receiptsTitle').focus({ preventScroll: true });
+}
+
+/**
+ * One undo, one event, one in-flight request, one idempotency key.
+ *
+ * Nothing about the deal is changed here before the server answers, and the
+ * row is marked undone only on a confirmed success. A refusal stays on the
+ * row; an unconfirmed answer is left unconfirmed rather than retried.
+ */
+async function runUndo(eventId, trigger = null) {
+  if (!eventId) return;
+  // Focus is only moved when the click came from the list itself; a toast Undo
+  // must not drag the keyboard down the page.
+  const fromList = Boolean(trigger && $('#receiptsList')?.contains(trigger));
+  const result = await performUndo({
+    eventId,
+    getState: () => state.undo,
+    setState: (next) => { state.undo = next; if (fromList) state.receiptFocus = eventId; renderReceipts(); },
+    newKey: uuidv4,
+    revert: (request) => state.client.revertDealField(request),
+  });
+  if (!result.started) return;
+  if (result.outcome.status === 'succeeded') {
+    await loadHome();
+    showToast('Change undone');
+    return;
+  }
+  showToast(result.outcome.message);
+}
+
 async function patchField(dealId, field, value) {
   const result = await state.client.patchDealField({ deal:dealId, field, value,
     base_event_id:state.fieldBase.get(`${dealId}|${field}`) || null, idempotency_key:uuidv4() });
@@ -919,7 +1022,7 @@ function wireEvents() {
     const agent = event.target.closest('[data-market-agent]'); if (agent) { marketAgentForm(agent.dataset.marketAgent); return; }
     const filter = event.target.closest('[data-filter]'); if (filter) { state.filter=filter.dataset.filter; state.deepLinkMine = false; $$('.filter').forEach((b)=>b.classList.toggle('on',b===filter)); renderBoardOnly(); return; }
     if (event.target.closest('[data-close-deal]')) { $('#dealDialog').close(); return; }
-    if (event.target.closest('[data-undo]') && state.undoEventId) { await state.client.revertDealField({ event_id:state.undoEventId,idempotency_key:uuidv4() }); state.undoEventId=null; await loadHome(); showToast('Change undone'); return; }
+    const undoButton = event.target.closest('[data-undo]'); if (undoButton) { await runUndo(undoButton.dataset.undo, undoButton); return; }
     const confirm = event.target.closest('[data-confirm]'); if (confirm) { const chip=confirm.closest('[data-proposal]'); const yes=confirm.dataset.confirm==='yes'; await state.client.resolveConfirm({proposal_id:chip.dataset.proposal,accept:yes,idempotency_key:uuidv4()}); state.confirms=state.confirms.filter((p)=>p.id!==chip.dataset.proposal); renderConfirms(); if(yes)await loadHome(); showToast(yes?'Suggestion confirmed':'Suggestion skipped'); return; }
     const postConfirm = event.target.closest('[data-post-call-confirm]'); if (postConfirm) { await resolvePostCallCandidate(postConfirm.dataset.postCallConfirm, true, postConfirm); return; }
     const postSkip = event.target.closest('[data-post-call-skip]'); if (postSkip) { await resolvePostCallCandidate(postSkip.dataset.postCallSkip, false, postSkip); return; }
@@ -945,6 +1048,7 @@ function wireEvents() {
   $('#accountBack').onclick = () => { state.accountId=null; render(); };
   const openAddForm = () => state.workspace === 'team' ? addTeamDealForm() : state.accountId ? addMarketDealForm() : addAccountForm();
   $('#stickyAddButton').onclick = openAddForm;
+  $('#receiptsJump').onclick = goToReceipts;
   $('#ownerButton').onclick = accountOwnerForm;
   $('#agendaButton').onclick = startAgenda;
   $('#callModeButton').onclick = openCallMode;
