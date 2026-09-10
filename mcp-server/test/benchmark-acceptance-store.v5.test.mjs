@@ -7,21 +7,27 @@
 // is not, and is not treated as, a claim about durable behaviour. The
 // transaction-scoped proofs against a real PostgreSQL live in
 // benchmark-acceptance-postgres.sql, and NO benchmark has been accepted by
-// running either file: acceptance fails closed on TWO independent unbound
-// bindings, which the last group below asserts directly.
+// running either file: acceptance fails closed on the unbound Gate Zero
+// binding, which the last group below asserts directly.
 //
 // The strongest test in this file is the smallest: the acceptance verb issues
 // ZERO statements. A refusal that happens after a query is a refusal that can
-// be mistaken for an acceptance that nearly worked.
+// be mistaken for an acceptance that nearly worked. That assertion survives the
+// coverage binding becoming a real read, because Gate Zero still throws first —
+// and it now means "nothing reaches the database while Gate Zero is unbound"
+// rather than "nothing reaches the database", which is what the module says.
 //
-// ONE THING THIS FILE CANNOT REACH, named rather than left implicit. The
-// measurement coverage proof binding is refused AFTER the Gate Zero binding, and
-// neither private reader is exported or injectable — deliberately, since an
-// injectable stub is a configurable one. So the second refusal cannot be
-// observed firing here; what is asserted instead is that it is a separate,
-// separately-resolved binding that the prerequisites report and the verb
-// description names. The candidate SQL's own reader IS reachable, and
-// benchmark-acceptance-postgres.sql calls it directly and asserts it raises.
+// WHAT THIS FILE CAN AND CANNOT REACH, named rather than left implicit.
+// readMeasurementCoverageBinding is still private and still not injectable —
+// deliberately, since an injectable reader is a configurable one — so it cannot
+// be called directly from here. It IS now exercised, through the review path,
+// which reads the attestation back through the same reader acceptance uses: the
+// four refusals below drive it by handing the mock a record that does not hold
+// up. What still cannot be observed here is that reader firing INSIDE THE
+// ACCEPTANCE PATH, because Gate Zero refuses before it on purpose. That is a
+// consequence of the ordering the module chose, not a gap in it, and
+// benchmark-acceptance-postgres.sql covers the acceptance-side behaviour by
+// calling ops.benchmark_measurement_coverage_binding() directly.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -31,9 +37,11 @@ import {
   BENCHMARK_MEASUREMENT_SET_SCHEMA, BENCHMARK_PAYLOAD_DOMAIN_TAG, BENCHMARK_PAYLOAD_FIELDS,
   BENCHMARK_PRODUCER_ROLE, BENCHMARK_SLO_THRESHOLDS, BENCHMARK_STEP_REF, GATE_ZERO_STEP_REF,
   P95_AGGREGATION_METHOD, benchmarkPayloadDigest, benchmarkRequiredCells,
+  evaluateBenchmarkWorkloadCoverage,
 } from "../src/benchmark-minimum.v5.js";
 import * as store from "../src/benchmark-acceptance-store.v5.js";
 import {
+  BENCHMARK_COVERAGE_EVALUATOR, BENCHMARK_COVERAGE_EVALUATORS,
   BENCHMARK_DIMENSIONS, BENCHMARK_DRAFT_ROWS_SCHEMA, BENCHMARK_DRAFT_SCALAR_FIELDS,
   BENCHMARK_EMITTED_CONSTANT_FIELDS, BENCHMARK_GATE_ZERO_INTEGRATION_REQUIREMENT,
   BENCHMARK_MEASUREMENT_COVERAGE_INTEGRATION_REQUIREMENT,
@@ -317,19 +325,23 @@ test("both private readers are private and not exported", () => {
   }
 });
 
-test("the prerequisites report two unbound acceptance bindings and a bound portfolio", () => {
+test("the prerequisites report ONE unbound acceptance binding and acceptance still unavailable", () => {
   const prerequisites = benchmarkAcceptancePrerequisites();
+  // THE ASSERTION THE WHOLE UNIT TURNS ON. The list was two entries. The
+  // coverage binding cleared on its own evidence and Gate Zero did not clear
+  // with it, so the list is now exactly one entry long and that entry is Gate
+  // Zero. Both halves matter: a list that had shrunk to zero would mean the
+  // coverage work had been let to open the gate, and a list that still had two
+  // would mean nothing was recorded.
+  assert.equal(prerequisites.acceptance_blocked_by.length, 1);
+  assert.deepEqual(prerequisites.acceptance_blocked_by, [GATE_ZERO_STEP_REF]);
+  // AND ACCEPTANCE IS STILL SHUT. One unbound binding is as closed as two.
   assert.equal(prerequisites.acceptance_available, false);
-  // TWO ENTRIES. Landing the Gate Zero record clears the first and leaves the
-  // second, which is the whole point of keeping them separate.
-  assert.deepEqual(prerequisites.acceptance_blocked_by, [
-    GATE_ZERO_STEP_REF, "binding:benchmark-measurement-coverage-proof",
-  ]);
   assert.equal(prerequisites.gate_zero.resolved, false);
   assert.equal(prerequisites.gate_zero.step_ref, GATE_ZERO_STEP_REF);
   assert.ok(prerequisites.gate_zero.required_to_resolve.length > 0);
   assert.ok(prerequisites.gate_zero.explicitly_refused.length > 0);
-  assert.equal(prerequisites.measurement_coverage_proof.resolved, false);
+  assert.equal(prerequisites.measurement_coverage_proof.resolved, true);
   assert.equal(prerequisites.measurement_coverage_proof.independent_of, GATE_ZERO_STEP_REF);
   assert.equal(prerequisites.portfolio_constitution.resolved, true);
   assert.equal(prerequisites.portfolio_constitution.resolved_by, "ops.portfolio_accepted_revision(text)");
@@ -367,22 +379,49 @@ test("the Gate Zero requirement is scoped to this record layer, not to Gate Zero
   assert.ok(requirement.why_unresolved.some(clause => /this record layer/i.test(clause)));
 });
 
-test("the coverage requirement names a missing record, not a second coverage authority", () => {
+test("the coverage requirement is resolved and its trust boundary is unchanged", () => {
   const requirement = BENCHMARK_MEASUREMENT_COVERAGE_INTEGRATION_REQUIREMENT;
-  assert.equal(requirement.resolved, false);
+  assert.equal(requirement.resolved, true);
   assert.equal(requirement.binding_ref, "binding:benchmark-measurement-coverage-proof");
   assert.equal(requirement.independent_of, GATE_ZERO_STEP_REF);
+  // ALL FOUR REFUSALS SURVIVE THE RESOLUTION. Resolving the binding retires none
+  // of them, and the last one is the reason the list is checked here rather than
+  // deleted with the gap: "silently upgrading the assertion when the Gate Zero
+  // binding lands" is a rule about the change that has NOT happened yet.
   assert.ok(requirement.explicitly_refused.includes(
     "treating measurement_set_digest as evidence that coverage was proved"));
+  assert.ok(requirement.explicitly_refused.includes(
+    "a coverage verdict supplied by a caller"));
   assert.ok(requirement.explicitly_refused.includes(
     "a second coverage evaluator written outside benchmark-minimum.v5.js"));
   assert.ok(requirement.explicitly_refused.includes(
     "silently upgrading the assertion when the Gate Zero binding lands"));
-  // And the boundary the attestation does NOT move is stated rather than left
-  // for a reader to discover after building it.
-  assert.ok(/does not make the record layer an independent verifier/i
-    .test(requirement.remaining_trust_boundary));
-  assert.ok(requirement.why_unresolved.some(clause => /trusted/i.test(clause)));
+  // KEPT VERBATIM. This is the sentence that set the bar before the work was
+  // done, and a resolution that quietly enlarged it would be the overselling the
+  // requirement exists to prevent. Asserted whole, not by keyword.
+  assert.equal(requirement.remaining_trust_boundary,
+    "The samples stay outside the record layer. The attestation makes a trusted writer's assertion explicit, attributed and auditable; it does not make the record layer an independent verifier of coverage, because the evaluation cannot be repeated there.");
+  // The history is kept rather than deleted, and it reads as history.
+  assert.ok(requirement.what_was_unbound.some(clause => /trusted/i.test(clause)));
+  assert.equal(Object.hasOwn(requirement, "why_unresolved"), false);
+  // Both readers landed together, which is what the second clause demanded.
+  assert.ok(requirement.resolved_by.some(clause => /ops\.benchmark_measurement_coverage_binding/.test(clause)));
+  assert.ok(requirement.resolved_by.some(clause => /readMeasurementCoverageBinding/.test(clause)));
+  // And the third clause: Gate Zero is untouched and said to be untouched.
+  assert.ok(requirement.still_unresolved_elsewhere.some(clause => /Gate Zero/.test(clause)));
+});
+
+test("the coverage evaluator set is a closed frozen constant naming the kernel", () => {
+  // NOT AN EVALUATOR. A name, cited from a closed set, so "which evaluator
+  // proved this" is a constrained fact rather than text a writer chooses.
+  assert.ok(Object.isFrozen(BENCHMARK_COVERAGE_EVALUATORS));
+  assert.deepEqual([...BENCHMARK_COVERAGE_EVALUATORS],
+    ["benchmark-minimum.v5.js#evaluateBenchmarkWorkloadCoverage"]);
+  assert.equal(BENCHMARK_COVERAGE_EVALUATOR, BENCHMARK_COVERAGE_EVALUATORS[0]);
+  // It names the KERNEL module and the KERNEL export. If this file ever named
+  // something inside benchmark-acceptance-store.v5.js, a second coverage
+  // authority would have been written.
+  assert.ok(/^benchmark-minimum\.v5\.js#/.test(BENCHMARK_COVERAGE_EVALUATOR));
 });
 
 test("both integration requirements are frozen and name what they refuse to invent", () => {
@@ -465,6 +504,39 @@ test("every verb takes a closed input schema and no identity or authority field"
   }
 });
 
+// THE DRIFT ASSERTION. Five stale comments were the whole of the last review's
+// rejection, and exactly one of them was machine-readable: the read verb's
+// description told callers the coverage proof was unbound while the JSON the
+// same call returns said resolved:true. Nothing caught it because nothing read
+// the description. This does.
+//
+// It derives the expected word from the constant's own `resolved` flag rather
+// than restating today's answer, so it bites in BOTH directions: flipping a
+// flag without rewriting the prose fails here, and rewriting the prose ahead of
+// the flag fails here too. WHAT IT DOES NOT COVER, said plainly: the other four
+// stale sites were SQL and JS comments, which no test can read, and this is not
+// a general guard against a comment going stale. It guards the one surface that
+// ships to callers.
+test("the read verb's description says bound or unbound to match each requirement's own flag", () => {
+  const description = tools["read-benchmark-manifest"].description;
+  const bindings = [
+    ["the Gate Zero outcome", BENCHMARK_GATE_ZERO_INTEGRATION_REQUIREMENT],
+    ["the measurement coverage proof", BENCHMARK_MEASUREMENT_COVERAGE_INTEGRATION_REQUIREMENT],
+  ];
+  for (const [named, requirement] of bindings) {
+    const said = new RegExp(`${named} \\((unbound|bound)`).exec(description);
+    assert.ok(said, `the description does not say whether ${named} is bound`);
+    assert.equal(said[1], requirement.resolved ? "bound" : "unbound",
+      `the description contradicts resolved:${requirement.resolved} for ${named}`);
+  }
+  // Resolving a binding must not quietly delete what it is still NOT. The same
+  // pair of clauses is pinned on the accept verb's description below.
+  if (BENCHMARK_MEASUREMENT_COVERAGE_INTEGRATION_REQUIREMENT.resolved) {
+    assert.ok(/not an independent verification/i.test(description));
+    assert.ok(/samples stay outside this record layer/i.test(description));
+  }
+});
+
 // --- propose ----------------------------------------------------------------
 
 test("propose sends the decomposed rows and the digest it computed itself", async () => {
@@ -535,11 +607,51 @@ function liveDraftResponse(body = payload()) {
   };
 }
 
+/**
+ * The row the private coverage reader's own statement comes back with.
+ *
+ * The reader joins the review to its attestation and asks the database to
+ * RECOMPUTE the draft's payload digest beside them. This helper returns the
+ * healthy shape; each negative below overrides exactly one field, which is what
+ * makes the four refusals separable rather than one refusal with four names.
+ */
+function coverageBindingResponse(body = payload(), overrides = {}) {
+  const evidence = measurements(body);
+  return {
+    benchmark_measurement_coverage_attestation: [{
+      review_id: REVIEW_ID,
+      review_measurement_set_digest: digest(evidence),
+      live_payload_digest: benchmarkPayloadDigest(body),
+      coverage_proved_by: BENCHMARK_COVERAGE_EVALUATOR,
+      attested_payload_digest: benchmarkPayloadDigest(body),
+      attested_measurement_set_digest: digest(evidence),
+      ...overrides,
+    }],
+  };
+}
+
+/** A passing review handled against a healthy record, for reuse by the negatives. */
+function passingReview(body, extraResponses = {}) {
+  const c = mockDatabase({
+    ...liveDraftResponse(body),
+    benchmark_review_manifest_draft: [{ id: REVIEW_ID }],
+    ...coverageBindingResponse(body),
+    ...extraResponses,
+  });
+  return [c, tools["review-benchmark-manifest-draft"].handler(c, PARTNER, {
+    idempotency_key: KEY, draft_id: DRAFT_ID,
+    reviewed_payload_digest: benchmarkPayloadDigest(body),
+    verdict: "pass", review_summary: "matrix complete, every cell inside its fixed SLO",
+    measurements: measurements(body),
+  })];
+}
+
 test("a passing review proves coverage against the stored payload and binds its digest", async () => {
   const body = payload();
   const c = mockDatabase({
     ...liveDraftResponse(body),
     benchmark_review_manifest_draft: [{ id: REVIEW_ID }],
+    ...coverageBindingResponse(body),
   });
   const evidence = measurements(body);
   const result = await tools["review-benchmark-manifest-draft"].handler(c, PARTNER, {
@@ -549,7 +661,9 @@ test("a passing review proves coverage against the stored payload and binds its 
     measurements: evidence,
   });
 
-  assert.equal(c.calls.length, 2);
+  // THREE STATEMENTS NOW, NOT TWO: read the draft, write the review with its
+  // attestation, read the attestation back. The third is the point of the unit.
+  assert.equal(c.calls.length, 3);
   const params = c.calls[1].params;
   // The digest written is the one read back from the rows, not the one supplied.
   assert.equal(params[2], benchmarkPayloadDigest(body));
@@ -558,13 +672,122 @@ test("a passing review proves coverage against the stored payload and binds its 
   assert.equal(result.review_id, REVIEW_ID);
   assert.equal(result.measurement_set_digest, digest(evidence));
   assert.equal(result.coverage_proved_against_stored_payload, true);
-  // Proved ON THIS PATH, and the result says in its own fields that the proof
-  // was not RECORDED anywhere. The row carries the name of the bytes; nothing
-  // downstream may read it as verified coverage.
-  assert.equal(result.measurement_coverage_proof_recorded, false);
+  // THE REAL ANSWER, and it is real because it came back from the record layer
+  // through the same reader acceptance uses -- not from this handler restating
+  // the branch it is in.
+  assert.equal(result.measurement_coverage_proof_recorded, true);
+  assert.deepEqual(result.measurement_coverage_proof, {
+    review_id: REVIEW_ID,
+    measurement_set_digest: digest(evidence),
+    coverage_proved_by: BENCHMARK_COVERAGE_EVALUATOR,
+  });
   assert.equal(result.measurement_coverage_proof_binding,
     BENCHMARK_MEASUREMENT_COVERAGE_INTEGRATION_REQUIREMENT.binding_ref);
+  // AND IT IS NOT OVERSOLD. The result carries the trust boundary verbatim, so a
+  // consumer reading measurement_coverage_proof_recorded: true is told in the
+  // same object what it is not.
+  assert.equal(result.measurement_coverage_proof_limit,
+    BENCHMARK_MEASUREMENT_COVERAGE_INTEGRATION_REQUIREMENT.remaining_trust_boundary);
+  assert.ok(/does not make the record layer an independent verifier/i
+    .test(result.measurement_coverage_proof_limit));
   assert.equal(result.accepted, false);
+});
+
+test("the attestation carries the evaluator's OWN returned payload digest, not a recomputation", async () => {
+  const body = payload();
+  const [c, promise] = passingReview(body);
+  await promise;
+  const attestation = JSON.parse(c.calls[1].params[6]);
+  // FOUR FIELDS, CLOSED. An extra one would be a value the SQL side refuses.
+  assert.deepEqual(Object.keys(attestation).sort(), [
+    "benchmark_payload_digest", "coverage_proved_by", "evaluation_digest",
+    "measurement_set_digest",
+  ]);
+  // THE FIELD THE WHOLE UNIT EXISTS FOR. This is the value the kernel RETURNED
+  // from the evaluation that was actually performed -- taken from the return
+  // value that used to be discarded, not computed a second time beside it.
+  const coverage = evaluateBenchmarkWorkloadCoverage({
+    payload: body, measurements: measurements(body),
+  });
+  assert.equal(attestation.benchmark_payload_digest, coverage.benchmark_payload_digest);
+  // And the evaluation itself is digested, so a holder of the samples can replay
+  // the judgement rather than having to trust that it happened.
+  assert.equal(attestation.evaluation_digest, digest(coverage));
+  assert.equal(attestation.measurement_set_digest, digest(measurements(body)));
+  // The evaluator is the closed constant, never a caller value and never text
+  // this handler composed.
+  assert.equal(attestation.coverage_proved_by, BENCHMARK_COVERAGE_EVALUATOR);
+});
+
+test("the attestation is never a caller input: it is not in the verb's schema", () => {
+  const schema = tools["review-benchmark-manifest-draft"].inputSchema;
+  assert.equal(schema.additionalProperties, false);
+  // "a coverage verdict supplied by a caller" is refused, and this is the check
+  // that keeps it refused: the MCP caller supplies measurements and nothing else
+  // about coverage. Every attested value is derived on the write path.
+  for (const key of ["coverage_proved_by", "coverage", "coverage_attestation",
+    "benchmark_payload_digest", "evaluation_digest", "measurement_set_digest"]) {
+    assert.equal(Object.hasOwn(schema.properties, key), false,
+      `${key} is a caller input on the review verb`);
+  }
+  assert.deepEqual(Object.keys(schema.properties).sort(), [
+    "draft_id", "idempotency_key", "measurements", "review_summary",
+    "reviewed_payload_digest", "verdict",
+  ]);
+});
+
+test("a recorded attestation naming a payload digest the draft no longer produces refuses", async () => {
+  // THE CASE THE RECOMPUTATION EXISTS FOR. A draft's content can still be
+  // appended to before acceptance, which moves the digest its rows produce. An
+  // attestation that outlived those bytes proves nothing about them.
+  const body = payload();
+  const [c, promise] = passingReview(body, coverageBindingResponse(body, {
+    attested_payload_digest: D(77),
+  }));
+  const refused = await refusal(promise);
+  assert.equal(refused.error, "measurement_coverage_payload_stale");
+  assert.equal(refused.detail.attested, D(77));
+  assert.equal(refused.detail.recomputed, benchmarkPayloadDigest(body));
+  // The review is not returned as a pass whose proof could not be read.
+  assert.equal(c.events.length, 0);
+});
+
+test("a recorded attestation over a measurement set the review does not name refuses", async () => {
+  const body = payload();
+  const [, promise] = passingReview(body, coverageBindingResponse(body, {
+    attested_measurement_set_digest: D(66),
+  }));
+  const refused = await refusal(promise);
+  assert.equal(refused.error, "measurement_coverage_measurement_mismatch");
+  assert.equal(refused.detail.attested, D(66));
+  assert.equal(refused.detail.reviewed, digest(measurements(body)));
+});
+
+test("a recorded attestation naming an evaluator outside the closed set refuses", async () => {
+  const body = payload();
+  const [, promise] = passingReview(body, coverageBindingResponse(body, {
+    coverage_proved_by: "some-other-module.js#proveCoverage",
+  }));
+  const refused = await refusal(promise);
+  assert.equal(refused.error, "measurement_coverage_evaluator_unknown");
+  assert.equal(refused.detail.coverage_proved_by, "some-other-module.js#proveCoverage");
+  assert.deepEqual(refused.detail.admitted, [...BENCHMARK_COVERAGE_EVALUATORS]);
+});
+
+test("a review with no recorded attestation refuses on the unbound coverage proof", async () => {
+  // The write path refuses an unattested pass before this can happen; this is
+  // the reader's own fail-closed half, and it keeps the refusal code the
+  // requirement has always been quoted under.
+  const body = payload();
+  const [, promise] = passingReview(body, coverageBindingResponse(body, {
+    coverage_proved_by: null, attested_payload_digest: null,
+    attested_measurement_set_digest: null,
+  }));
+  const refused = await refusal(promise);
+  assert.equal(refused.error, "measurement_coverage_proof_unbound");
+  assert.equal(refused.detail.binding_ref,
+    BENCHMARK_MEASUREMENT_COVERAGE_INTEGRATION_REQUIREMENT.binding_ref);
+  assert.equal(refused.detail.review_id, REVIEW_ID);
 });
 
 test("a review naming an unknown draft is a named refusal, not a raw database error", async () => {
@@ -684,10 +907,14 @@ test("a review naming a digest the draft no longer produces is refused", async (
   assert.equal(c.calls.length, 1);
 });
 
-test("a failing review needs no measurement set and binds none", async () => {
+test("a failing review needs no measurement set, no attestation, and reads none back", async () => {
   const c = mockDatabase({
     ...liveDraftResponse(),
     benchmark_review_manifest_draft: [{ id: REVIEW_ID }],
+    // Declared but never matched: a fail verdict must not read the attestation
+    // back, and if it did this response would let it pass silently. The call
+    // count below is what actually proves it did not.
+    ...coverageBindingResponse(),
   });
   const result = await tools["review-benchmark-manifest-draft"].handler(c, PARTNER, {
     idempotency_key: KEY, draft_id: DRAFT_ID,
@@ -697,6 +924,13 @@ test("a failing review needs no measurement set and binds none", async () => {
   assert.equal(result.measurement_set_digest, null);
   assert.equal(result.coverage_proved_against_stored_payload, false);
   assert.equal(c.calls[1].params[4], null);
+  // A FAIL VERDICT PROVES NO COVERAGE AND STORES NO ATTESTATION. The seventh
+  // parameter is null, so the SQL side records nothing -- and it refuses a
+  // non-pass that arrives carrying one.
+  assert.equal(c.calls[1].params[6], null);
+  assert.equal(result.measurement_coverage_proof_recorded, false);
+  assert.equal(result.measurement_coverage_proof, null);
+  assert.equal(c.calls.length, 2, "a failing review read a coverage attestation back");
 });
 
 // --- acceptance, which fails closed -----------------------------------------
@@ -717,13 +951,20 @@ test("acceptance fails closed on the unresolved Gate Zero binding, before any st
   assert.equal(c.events.length, 0, "the acceptance path recorded an event");
 });
 
-test("the acceptance verb names both unbound bindings and claims neither is live", () => {
+test("the acceptance verb names its one remaining refusal and oversells the other's retirement not at all", () => {
   const description = tools["accept-benchmark-manifest-draft"].description;
-  // Two independent reasons, said in the description a caller actually reads.
-  assert.ok(/TWO INDEPENDENT REASONS/.test(description));
+  // ONE reason now, said in the description a caller actually reads.
+  assert.ok(/FOR ONE REMAINING REASON/.test(description));
+  assert.equal(/TWO INDEPENDENT REASONS/.test(description), false);
   assert.ok(/record layer holds no authenticated Gate Zero outcome/i.test(description));
-  assert.ok(/coverage/i.test(description));
-  assert.ok(/both must be resolved separately/i.test(description));
+  // The retirement is attributed to the coverage record, explicitly NOT to Gate
+  // Zero -- which is the fourth thing the coverage requirement refuses.
+  assert.ok(/on its own evidence and not by Gate Zero/i.test(description));
+  // And the description still says what the attestation is not.
+  assert.ok(/not an independent verification/i.test(description));
+  assert.ok(/samples are outside this record layer/i.test(description));
+  // The guarantee is stated in its honest form, not dropped.
+  assert.ok(/while Gate Zero is unbound/i.test(description));
   // And the portfolio binding is described as a prerequisite, not as lineage.
   assert.ok(/not a claim of lineage/i.test(description));
   // It does not claim Gate Zero produced nothing anywhere.
