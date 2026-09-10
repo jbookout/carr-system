@@ -29,14 +29,15 @@ test("Home asset is a dark, visual, responsive workstation with honest states", 
   assert.doesNotMatch(js, /api\/v1\/workspace\/command-center/);
   assert.match(js, /AUTHENTICATION_REQUIRED/);
   assert.match(js, /observed_at/);
-  assert.match(js, /source\.freshness/);
+  assert.match(js, /displayedFreshness\(source\)/);
+  assert.doesNotMatch(js, /escapeHtml\(source\.freshness\)/);
   assert.match(js, /\.catch/);
   assert.doesNotMatch(html, /System online/);
   assert.match(html, /Checking workspace/);
   assert.doesNotMatch(html, /pulse-attention[^>]+href="\/system-work\.html"/);
   assert.match(html, /System state/);
   assert.match(modelJs, /valid_until/);
-  assert.match(modelJs, /owned_flagged_deals/);
+  assert.match(modelJs, /flagged_deals/);
   assert.match(modelJs, /state: "unavailable"/);
   assert.match(dealHtml, /data-filter="flagged"/);
   assert.match(dealJs, /deal\.attention === true/);
@@ -54,6 +55,75 @@ test("Home asset is a dark, visual, responsive workstation with honest states", 
   assert.match(html, /id="recentActivity"/);
   assert.match(js, /renderAggregates/);
   Object.values(surfaces).forEach((surface) => assert.match(surface, /href="\/deals"[^>]*>Deals<\/a>/));
+});
+
+test("Home defaults to the combined team scope and offers My work as a keyboard and touch secondary", async () => {
+  const html = await readFile(`${ROOT}/workspace.html`, "utf8");
+  const css = await readFile(`${ROOT}/css/workspace.css`, "utf8");
+  const js = await readFile(`${ROOT}/js/workspace-command-center.js`, "utf8");
+  const modelJs = await readFile(`${ROOT}/js/workspace-command-center-model.js`, "utf8");
+  assert.match(html, /id="scopeSwitch"[^>]*role="group"[^>]*aria-label="Home scope"/);
+  assert.match(html, /<button[^>]*data-scope="team"[^>]*aria-pressed="true"/);
+  assert.match(html, /<button[^>]*data-scope="mine"[^>]*aria-pressed="false"/);
+  assert.match(html, /id="scopeNote"/);
+  assert.match(html, /Team book/);
+  assert.match(html, /My work/);
+  // Buttons are reachable by keyboard and pointer; arrow keys move between the two scopes.
+  assert.match(js, /addEventListener\("click"/);
+  assert.match(js, /ArrowLeft/);
+  assert.match(js, /ArrowRight/);
+  assert.match(js, /aria-pressed/);
+  assert.match(css, /\.scope-option\{[^}]*min-height:4[4-9]px/);
+  assert.match(modelJs, /DEFAULT_SCOPE = "team"/);
+  assert.match(modelJs, /SCOPES = \["team", "mine"\]/);
+  // No partner ranking or comparison surface is introduced.
+  assert.doesNotMatch(html, /rank|leaderboard|vs\. Dell|vs\. Joe/i);
+  assert.doesNotMatch(js, /rank|leaderboard/i);
+});
+
+test("Home only links to Deal Room filters the board already honors", async () => {
+  const modelJs = await readFile(`${ROOT}/js/workspace-command-center-model.js`, "utf8");
+  const serverJs = await readFile(`${ROOT}/../mcp-server/src/workspace-command-center.js`, "utf8");
+  const dealJs = await readFile(`${ROOT}/js/app.js`, "utf8");
+  assert.match(dealJs, /params\.get\('filter'\) === 'flagged'/);
+  assert.match(dealJs, /params\.get\('workspace'\) === 'team'/);
+  for (const source of [modelJs, serverJs]) {
+    assert.match(source, /"\/deals\?workspace=team&filter=flagged"/);
+    assert.match(source, /"\/deals\?workspace=team&filter=flagged&owner=me"/);
+    assert.match(source, /"\/deals\?workspace=team"/);
+    // The board has no URL form for mine-active, waiting or deadline lists.
+    assert.doesNotMatch(source, /filter=(mine|waiting|deadline|stale|missing)/);
+  }
+  // No invented waiting or deadline counts in this unit.
+  assert.doesNotMatch(serverJs, /waiting_count|deadline_count|due_soon/);
+});
+
+test("Home distinguishes loading, refreshing, stale and unavailable and cannot be repainted by a late read", async () => {
+  const js = await readFile(`${ROOT}/js/workspace-command-center.js`, "utf8");
+  const modelJs = await readFile(`${ROOT}/js/workspace-command-center-model.js`, "utf8");
+  assert.match(modelJs, /export function homeReadPhase/);
+  assert.match(modelJs, /export function acceptsResponse/);
+  assert.match(js, /view\.status = view\.payload \? "refreshing" : "loading"/);
+  assert.match(js, /acceptsResponse\(view\.sequence, sequence\)/);
+  assert.match(js, /\+\+view\.sequence/);
+  // The local clock re-checks the contract window — including the selected metric and each work
+  // card's own deadline — instead of leaving expired counts on screen.
+  assert.match(js, /setInterval/);
+  assert.match(js, /freshnessSignature\(view\.payload, view\.scope\)/);
+  assert.match(modelJs, /export function freshnessSignature/);
+  assert.match(modelJs, /export function displayedFreshness/);
+  // Retry is an explicit read, and focus survives a repaint — including the repaint that removes Retry.
+  assert.match(js, /id="retryHome"/);
+  assert.match(js, /load\("retry"\)/);
+  assert.match(js, /document\.activeElement/);
+  assert.match(js, /card\.querySelector\("#homePrimaryAction"\)/);
+  assert.match(js, /\.focus\(\)/);
+  // The Needs card's link is reset on every path, so a scope switch cannot leave the other scope's filter.
+  assert.match(js, /function setNeedsHref/);
+  assert.match(js, /setNeedsHref\(destination\)/);
+  const css = await readFile(`${ROOT}/css/workspace.css`, "utf8");
+  assert.match(css, /\.refresh-badge\{/);
+  assert.match(css, /\.status-orb\.refreshing\{/);
 });
 
 test("Home has one first-region primary action, one workspace directory, and secondary flow", async () => {
