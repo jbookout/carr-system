@@ -17,24 +17,83 @@
 //     computable by whoever supplies it, so an OLDER GENUINE history replays
 //     unless the durable store compare-and-swaps on the exact prior
 //     history_digest and refuses a write whose prior does not match the stored
-//     one. Sticky miss_at, the recorded amendment set and
-//     origin_benchmark_manifest_digest are each defended by that CAS alone.
+//     one. Sticky miss_at, the recorded amendment set,
+//     origin_benchmark_manifest_digest, and the completion seals —
+//     completion_receipt_ttl_policy_ms, completion_artifact_digest and
+//     completion_fixture_set_digest — are each defended by that CAS alone.
+//     Sealing a value into the history below binds it to THAT history and
+//     nothing more: an older genuine history that never carried the seal still
+//     replays unless the external store refuses the write, and this file
+//     fabricates no protection it cannot provide.
 //   * The terminus accepts exactly one rollout-component-receipt.v1 and checks
 //     `all_current_exact_distinct_pass` as an exact contract string rather than
 //     re-implementing it, so "distinct" does no work at arity one.
 //   * An amendment applies to a clock that already has history. The first
 //     evaluation must present the pre-origin benchmark, because there is no
 //     recorded original for an amendment to preserve yet.
+//   * The two receipt shapes below are r7-EXACT and carry no schema_version:
+//     consumer-gate-receipt.v1 is twenty-one closed fields and
+//     rollout-component-receipt.v1 is twenty-two, and neither declares one. The
+//     kernel discriminates on the producer step ref, which is required on both
+//     and disjoint between them; a receipt carrying an added schema_version is
+//     refused as `closed_shape` exactly as any other extra field is. That makes
+//     the minimum receipt ONE artifact with ONE digest across the A00 seam:
+//     digest(A00's proposed_receipt) is the origin_receipt_digest recorded here.
+//   * `completion_expectation` and the two TTL maxima on `binding` are TRUSTED
+//     PROJECTION FACTS, not caller assertions and not values read back off the
+//     receipt they judge. The installed verifier must derive them from the
+//     accepted kernel scope and the accepted policy exactly as it derives
+//     `authority_class`; a projection that copies artifact_digest or
+//     fixture_set_digest out of the completion receipt turns the binding below
+//     into the tautology it exists to replace. The kernel cannot check that from
+//     inside, which is why it is stated here rather than implied.
+//     `completion_expectation` is nullable BECAUSE the exact kernel artifact is
+//     not knowable at the origin: it is required only when a completion is
+//     presented, so knowing the future artifact is never a prerequisite for
+//     starting the clock.
+//     THE FIRST COMPLETION SEALS BOTH OF THEM. The completion TTL policy that
+//     admitted the terminus receipt and the exact artifact and fixture set it
+//     was judged against are written into the history the moment a completion is
+//     recorded, and a later projection that changes either one is refused BY NAME
+//     rather than re-judging a receipt that was already accepted under them.
+//     Before that first completion neither is sealed, so changing either one
+//     while the clock is still running is an ordinary policy change.
+// A SEALED HISTORY IS NEVER REWRITTEN HERE. v1 of the state schema sealed its
+// origin_receipt_digest over a 22-field minimum; this file reads the r7-exact
+// twenty-one, so a v1 history names an origin digest v2 cannot recompute.
+// Silently re-deriving it would rebase a sealed origin, so a v1 history is
+// refused BY NAME (`legacy_history_migration_required`) and moving it forward is
+// an explicit migration owned by whoever owns the durable store.
 // No live clock is read anywhere: every instant comes from the verified `as_of`.
+// NO CLOCK HAS BEEN STARTED. Nothing in this repository has yet produced a
+// minimum receipt, so there is no live origin — that is an absence of evidence
+// here, not a proof of absence about the record as a whole.
 // Chicago wall time requires a full-ICU Node build.
 import { digest } from "./artifact-trust.js";
 import { ORGANIZATION_TENANT_ID, isKnownPartner } from "./identity.js";
 import { V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 
-export const JOURNEY_ONE_CLOCK_SCHEMA = "doctorcre-v5-journey-one-clock.v1";
-export const JOURNEY_ONE_CLOCK_PROJECTION = "doctorcre-v5-journey-one-clock-projection.v1";
+export const JOURNEY_ONE_CLOCK_SCHEMA = "doctorcre-v5-journey-one-clock.v2";
+/**
+ * State schemas this kernel can no longer read, and refuses by name rather than
+ * reinterpreting. v1 sealed origin_receipt_digest over a 22-field minimum (the
+ * r7 twenty-one plus an added schema_version) and carried neither the TTL policy
+ * that selected its origin nor the deadline resolution that produced its base
+ * deadline. Re-deriving any of those from a v1 record would rebase a sealed
+ * origin or silently reset a policy, so migration is explicit and external.
+ * v2 additionally seals, on the first completion, the completion TTL policy that
+ * admitted the terminus receipt and the exact accepted kernel scope it was judged
+ * against; a migration of a v1 record that already carries a completion has to
+ * supply those from the policy and scope that actually judged it, and never from
+ * the recorded receipt's own values.
+ */
+export const JOURNEY_ONE_CLOCK_LEGACY_SCHEMAS = Object.freeze(["doctorcre-v5-journey-one-clock.v1"]);
+export const JOURNEY_ONE_CLOCK_PROJECTION = "doctorcre-v5-journey-one-clock-projection.v2";
 export const JOURNEY_ONE_CLOCK_RULE_REF =
   "native-task:01a0869f-fe0d-7493-bda3-ab8b3c0d6683:user-turn:01a086d1-2f70-7a73-b0ea-14e68da841ca";
+/** The Chicago DST resolution convention below is decided, not inferred. */
+export const JOURNEY_ONE_DST_RULE_REF =
+  "native-task:01a0869f-fe0d-7493-bda3-ab8b3c0d6683:user-turn:01a08809-a9f2-73f3-beb6-4ee831e30ee5";
 export const JOURNEY_ONE_DEADLINE_CONTRACT = Object.freeze({
   timezone: "America/Chicago", calendar_days: 30,
   clock_origin_gate_id: "foundation-assurance-minimum-accepted",
@@ -51,20 +110,56 @@ export const JOURNEY_ONE_DEADLINE_CONTRACT = Object.freeze({
 const HOUR = 3600000;
 const CAP = JOURNEY_ONE_DEADLINE_CONTRACT.maximum_external_blocker_pause_hours * HOUR;
 const IDENTITY = ["actor_id", "session_ref", "authority_class"];
-const COMMON_RECEIPT = ["schema_version", "subject_digest", "candidate_digest", "policy_digest",
+// r7-EXACT, both of them. Neither schema declares schema_version and both are
+// additional_properties:false, so the field is absent here and an added one is
+// refused as an extra field. The producer step ref discriminates the two.
+const COMMON_RECEIPT = ["subject_digest", "candidate_digest", "policy_digest",
   "subject_environment", "evidence_scope", "subject_maker_identity", "producer_identity",
   "evaluator_identity", "producer_role", "independent_oracle_ref", "oracle_version",
   "evidence_ref", "fixture_set_digest", "observed_at", "ttl_expires_at", "status",
   "comparator", "negative_admission_result"];
+/** consumer-gate-receipt.v1: twenty-one required fields. */
 const MINIMUM = [...COMMON_RECEIPT, "gate_id", "receipt_producer_step_ref", "environment_manifest_digest"];
+/** rollout-component-receipt.v1: twenty-two required fields. */
 const COMPLETION = [...COMMON_RECEIPT, "receipt_ref", "producer_step_ref", "rollout_environment_manifest_digest", "artifact_digest"];
+const COMPLETION_EXPECTATION = ["artifact_digest", "fixture_set_digest"];
 const STATE = ["schema_version", "origin_receipt_digest", "origin_at",
   "origin_benchmark_manifest_digest", "current_benchmark_manifest_digest",
-  "base_deadline_at", "due_at", "paused_ms", "status", "miss_at", "completion_receipt_digest",
-  "completion_observed_at", "evaluated_at", "pause_intervals", "events", "history_digest"];
+  "origin_receipt_ttl_policy_ms", "base_deadline_at", "base_deadline_resolution",
+  "due_at", "paused_ms", "status", "miss_at", "completion_receipt_digest",
+  "completion_observed_at", "completion_receipt_ttl_policy_ms", "completion_artifact_digest",
+  "completion_fixture_set_digest", "evaluated_at", "pause_intervals", "events", "history_digest"];
+/**
+ * The recorded completion and its seals are ONE fact. All four are null before a
+ * completion is recorded and all four are present after it, alongside
+ * completion_receipt_digest: the instant it was observed, the per-receipt TTL
+ * policy that admitted the terminus, and the exact accepted kernel scope it was
+ * judged against.
+ */
+const SEALED_ON_COMPLETION = ["completion_observed_at", "completion_receipt_ttl_policy_ms",
+  "completion_artifact_digest", "completion_fixture_set_digest"];
 const EVENT_KEYS = ["type", "at", "recorded_at", "evidence_digest", "previous_event_digest", "event_digest"];
 const EVENT_TYPES = ["clock_started", "pause_approved", "amendment_recorded", "deadline_missed", "completion_observed"];
+/**
+ * Q008.D1 forbids CLAIMING DEADLINE SUCCESS once a miss is durably recorded, and
+ * it never licenses rewriting when a completion was actually observed. After a
+ * miss those two facts stop fitting in one word, so the completed cases are
+ * three rather than two: `completed_after_recorded_miss` is a completion whose
+ * own observation instant falls at or before the CURRENT deadline while a
+ * recorded miss stands. It is not `completed_on_time`, which would claim the
+ * success the decision forbids, and it is not `completed_late`, which would
+ * misreport an observation that was not late. The observational fact travels
+ * beside it as `completion_observed_within_deadline`.
+ */
 const STATUSES = ["running", "missed", "completed_on_time", "completed_late",
+  "completed_after_recorded_miss", "unresolved_deadline", "completed_unresolved_deadline"];
+/**
+ * A durably recorded miss requires replan, and so does a deadline this kernel
+ * cannot resolve. Every status here is reachable only with a recorded miss or an
+ * unresolved deadline, and the returned verdict ORs this against miss_at itself
+ * so the obligation follows the recorded fact rather than a status spelling.
+ */
+const REPLAN_STATUSES = ["missed", "completed_late", "completed_after_recorded_miss",
   "unresolved_deadline", "completed_unresolved_deadline"];
 const PAUSE_KEYS = ["pause_id", "clock_origin_digest", "blocker_ref", "starts_at", "ends_at",
   "approved_at", "approved_by_identity", "approval_digest"];
@@ -75,7 +170,13 @@ const AMENDMENT_KEYS = ["amendment_ref", "clock_origin_digest", "benchmark_manif
 // origin, and it must not make the clock permanently uncomputable. Every other
 // refusal below stays fatal, because a misbound or malformed receipt in an
 // authoritative inventory means the projection itself is wrong.
-const INADMISSIBLE = new Set(["nonpassing_receipt", "receipt_not_current", "receipt_ttl_policy_exceeded"]);
+//
+// `receipt_ttl_policy_exceeded` is deliberately NOT in this set. An overlong
+// window is a misissued receipt or a misbound policy, not a non-pass: skipping
+// it would silently pass over a genuine first passing minimum and hand the
+// origin to a later one, and the same history re-read under a different policy
+// would then select a different origin. It is fatal, by name.
+const INADMISSIBLE = new Set(["nonpassing_receipt", "receipt_not_current"]);
 
 export class JourneyOneClockError extends Error {
   constructor(code, detail) { super(code); this.name = "JourneyOneClockError"; this.code = code; this.detail = detail; }
@@ -137,17 +238,67 @@ function wall(ms) {
   date.setUTCHours(Number(p.hour), Number(p.minute), Number(p.second), ((ms % 1000) + 1000) % 1000);
   return date.getTime();
 }
-/** Same Chicago wall time 30 dates later. Ambiguous/nonexistent target refuses resolution. */
+/** Deadline resolutions, recorded in state so the three cases stay distinguishable. */
+export const DEADLINE_PLAIN = "same_chicago_wall_time_after_30_dates";
+export const DEADLINE_GAP_SHIFTED = "chicago_wall_time_gap_shifted_forward_by_gap_length";
+export const DEADLINE_OVERLAP_ORIGIN_OFFSET = "chicago_wall_time_overlap_resolved_to_origin_utc_offset";
+export const DEADLINE_UNSUPPORTED = "unsupported_chicago_calendar_case";
+const DEADLINE_RESOLUTIONS = Object.freeze([
+  DEADLINE_PLAIN, DEADLINE_GAP_SHIFTED, DEADLINE_OVERLAP_ORIGIN_OFFSET, DEADLINE_UNSUPPORTED]);
+
+/** Every Chicago UTC offset in force within two days of a wall-clock target. */
+function offsetsAround(target) {
+  const offsets = new Set();
+  for (let h = -48; h <= 48; h += 6) { const probe = target + h * HOUR; offsets.add(wall(probe) - probe); }
+  return [...offsets];
+}
+/** The instants whose Chicago wall time is exactly `target`: 0 in a gap, 2 in a fold. */
+function instantsAt(target) {
+  return offsetsAround(target).map(offset => target - offset)
+    .filter(ms => wall(ms) === target).sort((a, b) => a - b);
+}
+/**
+ * The same Chicago wall time 30 CALENDAR DATES later — never 720 fixed hours: an
+ * ordinary DST crossing makes the interval 719 or 721 hours and both are correct.
+ *
+ * The two boundary cases are DECIDED, not inferred, and the decision is recorded
+ * so a reader can tell which one produced a deadline (JOURNEY_ONE_DST_RULE_REF):
+ *
+ *   FOLD (the target wall time happens twice, autumn). Take the occurrence whose
+ *   UTC offset equals the ORIGIN's — for a clock started on daylight time that is
+ *   the first, daylight occurrence.
+ *   GAP (the target wall time never happens, spring). Shift the wall time forward
+ *   by exactly the gap length, so 02:30 becomes 03:30 rather than snapping to the
+ *   03:00 transition instant.
+ *
+ * Anything those two rules do not settle FAILS CLOSED as an unresolved deadline
+ * that requires a replan; it is never left as a deadline that can quietly never
+ * be missed. No America/Chicago instant reaches that branch under current tzdata
+ * (the zone has exactly two offsets, so a fold always contains the origin's and a
+ * gap always resolves one date forward), and it is kept because a calendar this
+ * kernel cannot resolve must stop the clock rather than silence it.
+ */
 export function chicagoThirtyDayDeadline(origin) {
   const start = stamp(origin);
   const targetDate = new Date(wall(start)); targetDate.setUTCDate(targetDate.getUTCDate() + 30);
   const target = targetDate.getTime();
-  const offsets = new Set();
-  for (let h = -48; h <= 48; h += 6) { const probe = target + h * HOUR; offsets.add(wall(probe) - probe); }
-  const candidates = [...offsets].map(offset => target - offset).filter(ms => wall(ms) === target);
-  return freeze({ status: candidates.length === 1 ? "resolved" : "unresolved_deadline",
-    due_at: candidates.length === 1 ? iso(candidates[0]) : null,
-    reason_id: candidates.length === 0 ? "nonexistent_chicago_wall_time" : candidates.length > 1 ? "ambiguous_chicago_wall_time" : "same_chicago_wall_time_after_30_dates" });
+  const unsupported = () => freeze({ status: "unresolved_deadline", due_at: null, reason_id: DEADLINE_UNSUPPORTED });
+  const resolved = (ms, reason) => freeze({ status: "resolved", due_at: iso(ms), reason_id: reason });
+
+  const candidates = instantsAt(target);
+  if (candidates.length === 1) return resolved(candidates[0], DEADLINE_PLAIN);
+  if (candidates.length > 1) {
+    const originOffset = wall(start) - start;
+    const preferred = candidates.filter(ms => wall(ms) - ms === originOffset);
+    return preferred.length === 1 ? resolved(preferred[0], DEADLINE_OVERLAP_ORIGIN_OFFSET) : unsupported();
+  }
+  // A gap. Reading the target under the PRE-transition offset lands after the
+  // transition and reports a wall time exactly one gap later, which is the gap
+  // length without assuming it is an hour.
+  const gaps = offsetsAround(target).map(offset => wall(target - offset) - target).filter(delta => delta > 0);
+  if (!gaps.length) return unsupported();
+  const shifted = instantsAt(target + Math.min(...gaps));
+  return shifted.length === 1 ? resolved(shifted[0], DEADLINE_GAP_SHIFTED) : unsupported();
 }
 /**
  * `actor_id` is an identity.js actor SLUG — the exact strings isKnownPartner is
@@ -171,10 +322,12 @@ function identity(value, partner = false) {
  * admission instant for a minimum, the evaluation instant for the terminus.
  */
 function receipt(r, completion, binding, at) {
+  // The r7-exact field set IS the schema discriminator: the two shapes are
+  // closed and their required fields are disjoint, so neither carries — nor
+  // tolerates — a schema_version. The producer step ref then names the producer.
   closed(r, completion ? COMPLETION : MINIMUM, "receipt");
   const step = completion ? "step:j1-kernel-production-outcome" : "step:foundation-assurance-minimum-receipt";
-  if (r.schema_version !== (completion ? "rollout-component-receipt.v1" : "consumer-gate-receipt.v1") ||
-      (completion ? r.producer_step_ref : r.receipt_producer_step_ref) !== step) fail("wrong_producer_or_schema");
+  if ((completion ? r.producer_step_ref : r.receipt_producer_step_ref) !== step) fail("wrong_producer_or_schema");
   if (completion) {
     if (r.receipt_ref !== "safe:receipt:journey-one-kernel-production") fail("wrong_terminus_receipt");
     hash(r.artifact_digest);
@@ -203,7 +356,12 @@ function receipt(r, completion, binding, at) {
   const observed = stamp(r.observed_at), expires = stamp(r.ttl_expires_at);
   if (observed > at) fail("receipt_observed_after_reference");
   if (expires <= observed) fail("invalid_receipt_window");
-  if (expires - observed > binding.maximum_receipt_ttl_ms) fail("receipt_ttl_policy_exceeded");
+  // TWO MAXIMA, ONE PER RECEIPT KIND. r7 says "within the accepted per-receipt
+  // maximum" and the two kinds are issued by different producers under different
+  // policies, so one number applied to both would refuse a legitimate terminus
+  // for being longer-lived than a minimum. Neither is derived from the other.
+  const maximum = completion ? binding.maximum_completion_receipt_ttl_ms : binding.maximum_minimum_receipt_ttl_ms;
+  if (expires - observed > maximum) fail("receipt_ttl_policy_exceeded", completion ? "completion" : "minimum");
   if (expires <= at) fail("receipt_not_current");
   return observed;
 }
@@ -224,11 +382,22 @@ function event(state, type, at, recordedAt, evidence) {
 }
 function readHistory(history, now) {
   if (history === null) return null;
+  // A sealed history this kernel cannot recompute is refused BY NAME, before any
+  // structural reading, so nothing here can be mistaken for a rebase or a reset.
+  // Migrating a v1 record is the durable store's explicit act, not this file's.
+  if (typeof history === "object" && history !== null && JOURNEY_ONE_CLOCK_LEGACY_SCHEMAS.includes(history.schema_version)) {
+    fail("legacy_history_migration_required", { history_schema_version: history.schema_version,
+      current_schema_version: JOURNEY_ONE_CLOCK_SCHEMA,
+      reason: "origin_receipt_digest_basis_changed_to_r7_exact_minimum_and_state_gained_policy_and_resolution" });
+  }
   closed(history, STATE, "history");
   const { history_digest, ...body } = history;
   if (history.schema_version !== JOURNEY_ONE_CLOCK_SCHEMA || digest(body) !== history_digest) fail("corrupt_history");
   hash(history.origin_receipt_digest);
   hash(history.origin_benchmark_manifest_digest); hash(history.current_benchmark_manifest_digest);
+  if (!Number.isSafeInteger(history.origin_receipt_ttl_policy_ms) || history.origin_receipt_ttl_policy_ms <= 0) fail("corrupt_history");
+  if (!DEADLINE_RESOLUTIONS.includes(history.base_deadline_resolution)) fail("corrupt_history");
+  if ((history.base_deadline_at === null) !== (history.base_deadline_resolution === DEADLINE_UNSUPPORTED)) fail("corrupt_history");
   const origin = stamp(history.origin_at), evaluated = stamp(history.evaluated_at);
   if (origin > now || evaluated > now || evaluated < origin) fail("history_time_reversed");
   if ((history.base_deadline_at === null) !== (history.due_at === null)) fail("corrupt_history");
@@ -236,9 +405,24 @@ function readHistory(history, now) {
   if (!Number.isSafeInteger(history.paused_ms) || history.paused_ms < 0 || history.paused_ms > CAP) fail("corrupt_history");
   if (!STATUSES.includes(history.status)) fail("corrupt_history");
   if (history.miss_at !== null) stamp(history.miss_at);
-  if ((history.completion_receipt_digest === null) !== (history.completion_observed_at === null)) fail("corrupt_history");
-  if (history.completion_receipt_digest !== null) {
+  // A recorded miss and a claim of deadline success cannot coexist in a record
+  // this kernel will read. Q008.D1 forbids the claim outright, so a history
+  // carrying both is refused BY NAME rather than quietly recomputed into
+  // something truthful: the two contradict each other, and reading past that
+  // would make this the place a forbidden claim went unnoticed.
+  if (history.miss_at !== null && history.status === "completed_on_time") fail("deadline_success_claimed_after_recorded_miss");
+  if (history.status === "completed_after_recorded_miss" &&
+      (history.miss_at === null || history.completion_receipt_digest === null)) fail("corrupt_history");
+  // A history can neither carry a completion seal it never earned nor drop one it
+  // did: a completed clock always names the policy and the accepted scope that
+  // judged its terminus, and a running one names neither.
+  const completed = history.completion_receipt_digest !== null;
+  for (const key of SEALED_ON_COMPLETION) if ((history[key] === null) === completed) fail("corrupt_history");
+  if (completed) {
     hash(history.completion_receipt_digest);
+    hash(history.completion_artifact_digest); hash(history.completion_fixture_set_digest);
+    if (!Number.isSafeInteger(history.completion_receipt_ttl_policy_ms) ||
+        history.completion_receipt_ttl_policy_ms <= 0) fail("corrupt_history");
     if (stamp(history.completion_observed_at) < origin) fail("corrupt_history");
   }
   if (!Array.isArray(history.pause_intervals)) fail("corrupt_history");
@@ -280,18 +464,35 @@ export function createJourneyOneClock({ verifySnapshot } = {}) {
   if (typeof verifySnapshot !== "function") fail("authenticated_verifier_required");
   return Object.freeze({ evaluate(envelope) {
     json(envelope);
+    // A PLAIN JSON OBJECT, before anything is copied or hashed, exactly as the
+    // A00 gate refuses one at the same point. artifact-trust.js hashes a
+    // top-level string as its own raw bytes, so the string `{"a":1}` and the
+    // object {a:1} produce ONE envelope_digest; json() cannot catch that,
+    // because a top-level string is perfectly JSON-safe. The verification
+    // binding below is only as strong as this digest's injectivity, so a string
+    // envelope would otherwise borrow an authenticated object's digest.
+    if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) fail("invalid_object", "envelope");
     const input = freeze(copy(envelope));
     const verified = verifySnapshot(input);
     json(verified);
     closed(verified, ["envelope_digest", "snapshot"], "verification");
     if (verified.envelope_digest !== digest(input)) fail("verification_binding_mismatch");
     const p = copy(verified.snapshot);
-    closed(p, ["schema_version", "tenant", "as_of", "binding", "benchmark", "minimum_history", "completion", "pauses", "amendments", "history"], "snapshot");
+    closed(p, ["schema_version", "tenant", "as_of", "binding", "benchmark", "minimum_history", "completion", "completion_expectation", "pauses", "amendments", "history"], "snapshot");
     if (p.schema_version !== JOURNEY_ONE_CLOCK_PROJECTION || p.tenant !== ORGANIZATION_TENANT_ID) fail("wrong_projection_or_tenant");
     const now = stamp(p.as_of), b = p.binding;
-    closed(b, ["subject_digest", "candidate_digest", "policy_digest", "minimum_environment_manifest_digest", "production_environment_manifest_digest", "maximum_receipt_ttl_ms"], "binding");
-    for (const [key, value] of Object.entries(b)) if (key !== "maximum_receipt_ttl_ms") hash(value);
-    if (!Number.isSafeInteger(b.maximum_receipt_ttl_ms) || b.maximum_receipt_ttl_ms <= 0) fail("invalid_receipt_ttl_policy");
+    closed(b, ["subject_digest", "candidate_digest", "policy_digest", "minimum_environment_manifest_digest",
+      "production_environment_manifest_digest", "maximum_minimum_receipt_ttl_ms", "maximum_completion_receipt_ttl_ms"], "binding");
+    for (const [key, value] of Object.entries(b)) {
+      if (key.endsWith("_ttl_ms")) { if (!Number.isSafeInteger(value) || value <= 0) fail("invalid_receipt_ttl_policy", key); }
+      else hash(value);
+    }
+    // The expected kernel scope. Absent until the kernel exists, which is why it
+    // is nullable here and required only where a completion is actually read.
+    if (p.completion_expectation !== null) {
+      closed(p.completion_expectation, COMPLETION_EXPECTATION, "completion_expectation");
+      hash(p.completion_expectation.artifact_digest); hash(p.completion_expectation.fixture_set_digest);
+    }
     const benchmark = p.benchmark;
     closed(benchmark, ["manifest_digest", "subject_digest", "candidate_digest", "policy_digest", "deadline_contract", "accepted_at", "accepted_by_identity"], "benchmark");
     hash(benchmark.manifest_digest); identity(benchmark.accepted_by_identity, true);
@@ -313,6 +514,46 @@ export function createJourneyOneClock({ verifySnapshot } = {}) {
     // and the deadline being tracked would become unreadable rather than wrong.
     // Ties break on the receipt digest so two receipts sharing an admitted_at
     // cannot make the answer depend on array order.
+    // The history is read BEFORE the origin is selected, because the policy that
+    // selected the recorded origin is part of that history. A projection that
+    // arrives under a different minimum-receipt TTL maximum would admit or skip
+    // a different set of attempts and could name a different first pass; that
+    // refuses here, by its own name, instead of surfacing later as a rebase.
+    const old = readHistory(p.history, now);
+    if (old && old.origin_receipt_ttl_policy_ms !== b.maximum_minimum_receipt_ttl_ms) {
+      fail("origin_ttl_policy_changed", { recorded: old.origin_receipt_ttl_policy_ms, supplied: b.maximum_minimum_receipt_ttl_ms });
+    }
+    // THE COMPLETION SEALS, read on the same terms and for the same reason, and
+    // BEFORE any receipt is validated. A clock that already recorded a completion
+    // also recorded which per-receipt TTL policy admitted that terminus and which
+    // artifact and fixture set the trusted projection accepted it as. A later
+    // projection that tightens the policy or names a different accepted scope
+    // refuses HERE, by name. Without this the change surfaces as
+    // `receipt_ttl_policy_exceeded` or `completion_artifact_mismatch` against the
+    // exact receipt this clock already judged: a generic verdict that reports a
+    // recorded fact as defective, makes a sealed history unreadable, and
+    // re-interprets a completion under a policy that never judged it instead of
+    // naming the thing that actually changed. Neither seal exists before the first
+    // completion, so changing either one while the clock is still running is an
+    // ordinary policy change and stays allowed.
+    // A NULL expectation is not a change but the ordinary "not knowable yet" case
+    // the header describes, and the seal never stands in for it: a completion
+    // presented without an expectation still refuses below, so the trusted
+    // projection remains the only thing that can supply that binding.
+    if (old && old.completion_receipt_digest !== null) {
+      if (old.completion_receipt_ttl_policy_ms !== b.maximum_completion_receipt_ttl_ms) {
+        fail("completion_ttl_policy_changed", { recorded: old.completion_receipt_ttl_policy_ms,
+          supplied: b.maximum_completion_receipt_ttl_ms });
+      }
+      if (p.completion_expectation !== null &&
+          (p.completion_expectation.artifact_digest !== old.completion_artifact_digest ||
+           p.completion_expectation.fixture_set_digest !== old.completion_fixture_set_digest)) {
+        fail("completion_expectation_changed", {
+          recorded: { artifact_digest: old.completion_artifact_digest,
+            fixture_set_digest: old.completion_fixture_set_digest },
+          supplied: copy(p.completion_expectation) });
+      }
+    }
     if (!Array.isArray(p.minimum_history) || !p.minimum_history.length) fail("origin_unavailable");
     let first = null, inadmissible = 0; const seen = new Set();
     for (const admission of p.minimum_history) {
@@ -332,16 +573,20 @@ export function createJourneyOneClock({ verifySnapshot } = {}) {
     }
     if (!first) fail("origin_unavailable", { inadmissible_admissions: inadmissible });
 
-    const old = readHistory(p.history, now);
     const base = chicagoThirtyDayDeadline(iso(first.observed));
     if (old && (old.origin_receipt_digest !== first.receiptDigest || stamp(old.origin_at) !== first.observed ||
-        old.base_deadline_at !== base.due_at)) fail("origin_reset_or_rebase");
+        old.base_deadline_at !== base.due_at || old.base_deadline_resolution !== base.reason_id)) fail("origin_reset_or_rebase");
     const state = old ?? { schema_version: JOURNEY_ONE_CLOCK_SCHEMA,
       origin_receipt_digest: first.receiptDigest, origin_at: iso(first.observed),
       origin_benchmark_manifest_digest: benchmark.manifest_digest,
       current_benchmark_manifest_digest: benchmark.manifest_digest,
-      base_deadline_at: base.due_at, due_at: base.due_at, paused_ms: 0, status: "running", miss_at: null,
-      completion_receipt_digest: null, completion_observed_at: null, evaluated_at: iso(now), pause_intervals: [], events: [] };
+      origin_receipt_ttl_policy_ms: b.maximum_minimum_receipt_ttl_ms,
+      base_deadline_at: base.due_at, base_deadline_resolution: base.reason_id,
+      due_at: base.due_at, paused_ms: 0, status: "running", miss_at: null,
+      completion_receipt_digest: null, completion_observed_at: null,
+      completion_receipt_ttl_policy_ms: null, completion_artifact_digest: null,
+      completion_fixture_set_digest: null,
+      evaluated_at: iso(now), pause_intervals: [], events: [] };
     if (!old) event(state, "clock_started", first.observed, now, first.receiptDigest);
     const pending = [];
     if (!Array.isArray(p.pauses) || !Array.isArray(p.amendments)) fail("invalid_inventory");
@@ -401,9 +646,16 @@ export function createJourneyOneClock({ verifySnapshot } = {}) {
       // backdated before the clock itself, and never dated ahead of the record.
       if (approved >= start || approved > now || approved < first.observed || start < first.observed ||
           (pause.ends_at !== null && end < start)) fail("pause_backdating_or_order");
+      // An end is immutable ONCE KNOWN, and only then. A blocker that actually
+      // ended twelve hours into a pause the ledger last read as ongoing is an
+      // honest late report of a fact, not a rewrite: the settled rule counts
+      // ACTUAL elapsed hours, and refusing an end earlier than the last
+      // evaluation would leave the only admissible report — the full
+      // twenty-four — the false one. Ends are compared as INSTANTS, so the same
+      // instant spelled `Z` and `+00:00` is the same end rather than a rewrite.
       const priorPause = state.pause_intervals.find(x => x.pause_id === pause.pause_id);
-      if (priorPause && ((priorPause.ends_at !== null && priorPause.ends_at !== pause.ends_at) ||
-          (priorPause.ends_at === null && pause.ends_at !== null && end < stamp(state.evaluated_at)))) fail("pause_history_rewritten");
+      if (priorPause && priorPause.ends_at !== null &&
+          (pause.ends_at === null || stamp(pause.ends_at) !== stamp(priorPause.ends_at))) fail("pause_history_rewritten");
       intervals.push([start, Math.min(end, now)]);
       pending.push(["pause_approved", approved, approval_digest]);
     }
@@ -428,12 +680,36 @@ export function createJourneyOneClock({ verifySnapshot } = {}) {
       // usability lapses, exactly as it does for a lapsed minimum. A receipt this
       // clock never recorded still refuses when it is not current, and every
       // other refusal stays fatal.
+      // CURRENTNESS IS THE ONLY REFUSAL SOFTENED, and `receipt_ttl_policy_exceeded`
+      // deliberately is not one of them. The policy that admitted a recorded
+      // completion is sealed above, so the exact recorded receipt can never be
+      // overlong under the policy this evaluation is reading — a tightened policy
+      // already refused by name, and a widened one cannot make a short window
+      // long. An overlong receipt this clock never recorded stays fatal, and no
+      // tolerance here can admit a new one under a policy that is not the
+      // supplied one.
       let observed = null;
       try { observed = receipt(r, true, b, now); }
       catch (e) {
         if (!(state.completion_receipt_digest === receiptDigest &&
             e instanceof JourneyOneClockError && e.code === "receipt_not_current")) throw e;
       }
+      // THE EXACT KERNEL SCOPE. r7's rollout pass rule makes the artifact and
+      // fixture digests exact, and format-checking them proves only that two
+      // strings are sha256-shaped: two completions differing only in
+      // artifact_digest would both pass. The expectation is a trusted projection
+      // fact (see the header) — never the receipt's own value read back, and
+      // never a decision-id label on the wrapper, which the A00 catalog
+      // explicitly excludes as evidence. It is required here and not at the
+      // origin, because the artifact does not exist when the clock starts.
+      // These two are ordinary receipt refusals about a receipt being judged for
+      // the FIRST time. Once a completion has been recorded, the expectation
+      // reaching this point has already been checked against the sealed scope
+      // above, so a changed one was named there and can never arrive here to
+      // report a recorded terminus as the wrong artifact.
+      if (p.completion_expectation === null) fail("completion_expectation_unavailable");
+      if (r.artifact_digest !== p.completion_expectation.artifact_digest) fail("completion_artifact_mismatch");
+      if (r.fixture_set_digest !== p.completion_expectation.fixture_set_digest) fail("completion_fixture_mismatch");
       if (observed !== null) {
         if (observed < first.observed) fail("completion_before_origin");
         completion = { observed, receiptDigest };
@@ -445,6 +721,14 @@ export function createJourneyOneClock({ verifySnapshot } = {}) {
     if (completion && state.completion_receipt_digest === null) {
       state.completion_receipt_digest = completion.receiptDigest;
       state.completion_observed_at = iso(completion.observed);
+      // Sealed from the TRUSTED PROJECTION's own facts and never read back off
+      // the receipt they judged: pinning `r.artifact_digest` here would record
+      // whatever the receipt claimed and make every later comparison the
+      // tautology the expectation exists to replace. The two are equal at this
+      // point only because the expectation just accepted the receipt.
+      state.completion_receipt_ttl_policy_ms = b.maximum_completion_receipt_ttl_ms;
+      state.completion_artifact_digest = p.completion_expectation.artifact_digest;
+      state.completion_fixture_set_digest = p.completion_expectation.fixture_set_digest;
       pending.push(["completion_observed", completion.observed, completion.receiptDigest]);
     }
     const stop = state.completion_observed_at !== null ? stamp(state.completion_observed_at) : now;
@@ -456,31 +740,64 @@ export function createJourneyOneClock({ verifySnapshot } = {}) {
       else union.push([start, end]);
     }
     let pauseMs = 0;
+    // Observational timeliness: whether the completion's OWN observation instant
+    // fell at or before the current deadline. Null while there is no completion
+    // or no resolvable deadline. It is reported beside the verdict and never
+    // folded into it — after a recorded miss the two deliberately disagree.
+    let observedWithinDeadline = null;
     if (base.due_at !== null) {
       const baseMs = stamp(base.due_at);
       for (const [start, end] of union) {
         // A pause beginning after an already missed deadline cannot revive it.
         if (start <= baseMs + pauseMs) pauseMs = Math.min(CAP, pauseMs + end - start);
       }
-      state.paused_ms = pauseMs; state.due_at = iso(baseMs + pauseMs);
+      const dueMs = baseMs + pauseMs;
+      state.paused_ms = pauseMs; state.due_at = iso(dueMs);
       // miss_at and due_at answer two different questions and are allowed to
       // disagree. due_at is the CURRENT deadline, recomputed from the whole
       // inventory every evaluation; miss_at is the HISTORICAL fact that a
-      // deadline once passed with no completion, and it is written once. A pause
-      // legitimately approved before the deadline but reported after the miss
-      // credits its actual elapsed hours, so due_at can move PAST an existing
-      // miss_at. That does not erase or reinterpret the miss: a settled miss is
-      // immutable, a later pass is completed_late and never retroactively on
-      // time, and replan stays required. Both facts stay readable in the record
-      // rather than one being invented away, and this kernel adds no new refusal
-      // for the ordinary late report that produced them.
-      if (state.miss_at === null && stop > baseMs + pauseMs) {
+      // deadline once passed with NO COMPLETION EVIDENCE IN HAND, and it is
+      // written once. A pause legitimately approved before the deadline but
+      // reported after the miss credits its actual elapsed hours, so due_at can
+      // move PAST an existing miss_at. That does not erase or reinterpret the
+      // miss: it stays in the record with its own event, and this kernel adds no
+      // new refusal for the ordinary late report that produced it. It does not
+      // restore deadline success either — changing a deadline through an
+      // admissible pause never clears a miss the record already carries.
+      if (state.miss_at === null && stop > dueMs) {
         state.miss_at = state.due_at;
         pending.push(["deadline_missed", stamp(state.miss_at), digest(["deadline_missed", state.due_at, state.origin_receipt_digest])]);
       }
-      state.status = state.completion_receipt_digest !== null
-        ? (state.miss_at === null ? "completed_on_time" : "completed_late")
-        : (state.miss_at === null ? "running" : "missed");
+      // A DURABLY RECORDED MISS ENDS DEADLINE SUCCESS. Q008.D1, as accepted:
+      // a miss "is durably recorded, requires replan, preserves origin and
+      // elapsed history, forbids claiming deadline success". It grants no
+      // exception for a proof that arrives after the miss carrying an earlier
+      // observation instant. Whether such a proof ought to earn one is an open
+      // question with no answer on the record, so this kernel implements the
+      // accepted rule and nothing beyond it.
+      //
+      // TWO FACTS, TWO FIELDS, NEITHER OVERWRITING THE OTHER.
+      //   * The OBSERVATION is never rewritten. A completion observed at or
+      //     before the current deadline — inclusive at the boundary — reports
+      //     `completion_observed_within_deadline: true` and is never called
+      //     late, whatever an evaluation happened to record before it was
+      //     admitted.
+      //   * The VERDICT is separate. With a miss standing, that same completion
+      //     is `completed_after_recorded_miss`: no success claimed, replan still
+      //     required, and the miss instant, its event and the elapsed history
+      //     all preserved exactly as they were written.
+      // The completion stays usable and safe construction continues, which is
+      // precisely what r7's terminus gate says a late passing kernel receipt
+      // does — without retroactively certifying the deadline.
+      // Absent a completion the recorded miss is still the status, and it never
+      // un-sticks.
+      const completedAt = state.completion_observed_at === null ? null : stamp(state.completion_observed_at);
+      observedWithinDeadline = completedAt === null ? null : completedAt <= dueMs;
+      state.status = completedAt === null
+        ? (state.miss_at === null ? "running" : "missed")
+        : state.miss_at !== null
+          ? (observedWithinDeadline ? "completed_after_recorded_miss" : "completed_late")
+          : (observedWithinDeadline ? "completed_on_time" : "completed_late");
     } else {
       for (const [start, end] of union) pauseMs = Math.min(CAP, pauseMs + end - start);
       state.paused_ms = pauseMs; state.due_at = null;
@@ -493,10 +810,30 @@ export function createJourneyOneClock({ verifySnapshot } = {}) {
     state.pause_intervals = p.pauses.map(x => ({ pause_id: x.pause_id, ends_at: x.ends_at }));
     delete state.history_digest; state.history_digest = digest(state);
     return freeze({ schema_version: JOURNEY_ONE_CLOCK_SCHEMA, state,
-      deadline_success: state.status === "completed_on_time",
-      replan_required: state.miss_at !== null, safe_construction_may_continue: true,
+      // Success is claimable only by a clock that carries NO recorded miss. The
+      // status can never spell `completed_on_time` after one, and the miss test
+      // is stated here as well so the two can never drift into disagreement.
+      deadline_success: state.miss_at === null && state.status === "completed_on_time",
+      // REPLAN FOLLOWS THE RECORDED MISS, not the later verdict: Q008.D1 makes
+      // the durable miss itself the trigger, so a completion admitted afterwards
+      // — however early its own observation — never retires the obligation. A
+      // deadline this kernel cannot resolve fails closed into a replan too,
+      // rather than into a deadline that can never be missed.
+      replan_required: state.miss_at !== null || REPLAN_STATUSES.includes(state.status),
+      safe_construction_may_continue: true,
       completion_currently_usable: completion !== null,
+      // OBSERVATIONAL TIMELINESS, reported apart from the verdict: true when the
+      // completion's own observation instant fell at or before the current
+      // deadline, false when it fell after, null with no completion or no
+      // resolvable deadline. A true here after a recorded miss is an honest
+      // report about the observation and never a claim of deadline success.
+      completion_observed_within_deadline: observedWithinDeadline,
+      // The recording of the miss itself, reported apart from the verdict so
+      // neither fact hides the other. It is written when a deadline passed with
+      // no completion evidence in hand, and it never un-sticks.
+      missing_evidence_miss_recorded: state.miss_at !== null,
       benchmark_amended: state.current_benchmark_manifest_digest !== state.origin_benchmark_manifest_digest,
+      deadline_resolution: base.reason_id,
       unresolved_reason: base.status === "unresolved_deadline" ? base.reason_id : null,
       durable_history_write_required: true, authority_granted: false, effects: V5_NO_EFFECTS });
   } });
