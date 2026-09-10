@@ -38,6 +38,8 @@ exactly as they bind Joe, with zero mechanical enforcement on his side today.
     ops/config-as-code.py install    # repo -> machine (deploy; needs --apply)
     ops/config-as-code.py install-codex-continuity --apply
     ops/config-as-code.py verify-codex-continuity
+    ops/config-as-code.py install-codex-continuity-mcp --apply
+    ops/config-as-code.py verify-codex-continuity-mcp
     ops/config-as-code.py remove-codex-continuity --apply
 
 `check` is what belongs in run.sh health: it answers "is the live config still
@@ -1143,6 +1145,63 @@ def persist_codex_continuity_trust(entries, contracts, remove=False):
         raise
 
 
+def cmd_install_codex_continuity_mcp(apply=False):
+    """Install the existing adapter in explicit Codex mode with scoped permissions."""
+    import copy
+    import hashlib
+    import shutil
+    from pathlib import Path
+    ROOT = Path(__file__).resolve().parents[1]
+    DEST = Path.home() / '.config/carr/codex-continuity'
+    SERVER = 'carr-codex-continuity'
+    TOOLS = ['codex-checkpoint', 'codex-read-recovery']
+    FILES = ['continuity-stdio-proxy.mjs', 'local-client-auth.mjs']
+    node = shutil.which('node')
+    if not node:
+        raise RuntimeError('Node runtime unavailable')
+    before = _codex_user_config_layer()
+    expected = copy.deepcopy(before['config'])
+    servers = expected.setdefault('mcp_servers', {})
+    servers[SERVER] = {'command': node, 'args': [str(DEST / FILES[0]), '--codex'],
+                       'enabled_tools': TOOLS,
+                       'tools': {name: {'approval_mode': 'approve'} for name in TOOLS}}
+    # Remove the two broken duplicate routes in Codex only. All other tools and
+    # authentication settings retain their previous values.
+    for name in ('carr', 'carr-records'):
+        if name in servers:
+            disabled = servers[name].setdefault('disabled_tools', [])
+            for tool in TOOLS:
+                if tool not in disabled:
+                    disabled.append(tool)
+    if apply:
+        DEST.mkdir(parents=True, exist_ok=True, mode=0o700)
+        for name in FILES:
+            source = ROOT / 'mcp-server' / name
+            target = DEST / name
+            if not target.exists() or target.read_bytes() != source.read_bytes():
+                temporary = DEST / (name + '.tmp')
+                temporary.write_bytes(source.read_bytes())
+                temporary.replace(target)
+        edits = [{'keyPath': 'mcp_servers.' + SERVER, 'value': servers[SERVER], 'mergeStrategy': 'replace'}]
+        for name in ('carr', 'carr-records'):
+            if name in servers:
+                edits.append({'keyPath': 'mcp_servers.' + name + '.disabled_tools',
+                              'value': servers[name]['disabled_tools'], 'mergeStrategy': 'replace'})
+        after = _write_codex_config_edits(edits, before['version'])
+    else:
+        after = before
+    if after['config'] != expected:
+        raise RuntimeError('Codex continuity MCP configuration differs from the expected scoped update')
+    for name in FILES:
+        if (DEST / name).read_bytes() != (ROOT / 'mcp-server' / name).read_bytes():
+            raise RuntimeError('Installed adapter differs from source: ' + name)
+    print(json.dumps({'ok': True, 'server': SERVER, 'tools': TOOLS,
+                      'credential': 'existing dedicated Codex credential, never copied into configuration',
+                      'adapter_sha256': hashlib.sha256((DEST / FILES[0]).read_bytes()).hexdigest()}))
+
+    return 0
+
+
 def cmd_verify_codex_continuity():
     """Read-only proof that Codex will automatically execute all four hooks."""
     try:
@@ -1962,6 +2021,10 @@ def main():
         return cmd_check()
     if mode == "pull":
         return cmd_pull(apply)
+    if mode == "install-codex-continuity-mcp":
+        return cmd_install_codex_continuity_mcp(apply)
+    if mode == "verify-codex-continuity-mcp":
+        return cmd_install_codex_continuity_mcp(False)
     if mode == "install-codex-continuity":
         return cmd_install_codex_continuity(apply)
     if mode == "remove-codex-continuity":
