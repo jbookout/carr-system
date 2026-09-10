@@ -5,11 +5,15 @@ import { createPostCallClient } from './post-call-client.js';
 import {
   REVERTIBLE_FIELDS, escapeText, parkingReasonLabel, ingestChangeEvents,
   receiptViews, receiptListHtml, receiptsSignature, receiptsAnnouncement,
-  createFeedProgress, observeChangeBatch, createUndoState, performUndo,
+  createFeedProgress, observeChangeBatch, createUndoState, performUndo, fieldLabel,
 } from './change-receipts.mjs';
 import {
   createBoardSync, batchTouchesBoard, resolveCurrentRow, SYNC_STATES, HEALTH,
 } from './board-sync.mjs';
+import {
+  cellKey, createFieldWriteState, performFieldWrite, unresolvedFieldWrites,
+  pendingFieldWrite, fieldWriteMessage, nextCellBase,
+} from './field-write-reconciliation.mjs';
 
 const POLL_MS = 1400;
 /**
@@ -33,13 +37,36 @@ const state = {
   boardSync: null,
   mode: 'fixture',
   workspace: 'team', accountId: null, filter: 'active', query: '', deepLinkMine: false,
-  changed: new Set(), fieldBase: new Map(), presence: [], captureSessions: [],
+  changed: new Set(),
+  // Per cell, the newest event this session has SEEN for it — `{id, recorded_at}`
+  // — which is the base its next write will send. THREE sources and one rule:
+  // the authoritative board read, which now carries each editable cell's latest
+  // committed event beside its value; the changes feed; and the answer to a write
+  // this board made. All of them go through noteCellBase, which only ever moves a
+  // base forward, so a read that was already open when a write was confirmed
+  // cannot walk it back onto the event that write superseded.
+  //
+  // A cell with no history has no entry, and its write correctly sends null —
+  // which the record layer reads as "any prior event conflicts", and on a cell
+  // with no prior event that is simply no conflict. Nothing here is invented: an
+  // absent base is absent, never a guess.
+  fieldBase: new Map(),
+  // One entry per edited cell, and only while its write is unanswered: the
+  // request as it was sent — value, base and idempotency key — so a retry is the
+  // SAME operation and not a second one. Never a value store; the board's values
+  // come from a snapshot. See field-write-reconciliation.mjs.
+  fieldWrites: createFieldWriteState(),
+  presence: [], captureSessions: [],
   confirms: [], review: null, pollTimer: null, boardRefreshTimer: null,
   // Recent changes are session memory only: bounded, never stored, and never
   // a substitute for the deal's own Change history. The feed cursor starts at
   // the beginning of the log, so nothing is shown until it reaches the present.
   receipts: [], undo: createUndoState(), feed: createFeedProgress(),
   receiptSignature: null, receiptFocus: null, receiptAnnounced: null,
+  // What the unconfirmed-changes bar last drew, so a poll does not rewrite it —
+  // a render memo, exactly like receiptSignature. The operations themselves live
+  // in fieldWrites and nowhere else.
+  pendingSignature: null,
   callMode: { state: 'idle' }, callModeTimer: null,
   postCallClient: null, postCallTimer: null,
   postCall: { status: 'idle', session: null, report: null, error: null,
@@ -210,6 +237,20 @@ function applyBoardSnapshot(home) {
   state.deals = new Map((home.deals || []).map((deal) => [deal.id, {
     workspace_kind: deal.account_client_id ? 'national_account' : 'team', ...deal,
   }]));
+  // The base for each editable cell, from the same read as the values — so the
+  // FIRST edit of a session sends what the record layer actually holds instead
+  // of nothing, which that layer reads as "any prior event conflicts".
+  //
+  // Through noteCellBase, which is forward-only, because a snapshot is not
+  // always the newest thing this page knows: a read that was already open when a
+  // write was confirmed carries that cell's OLDER base, and its value is being
+  // held over on the row for the same reason. Taking it would walk this cell's
+  // base backwards and make the next edit collide with our own committed one.
+  for (const deal of state.deals.values()) {
+    for (const [field, seen] of Object.entries(deal.field_base || {})) {
+      noteCellBase(cellKey(deal.id, field), seen);
+    }
+  }
   state.accounts = home.accounts || [];
   for (const deal of state.deals.values()) if (!deal.last_review_at) state.changed.add(deal.id);
   $('#selfAvatar').textContent = state.selfActor === 'dell' ? 'D' : state.selfActor === 'joe' ? 'J' : '?';
@@ -234,7 +275,10 @@ async function pollOnce(initial = false, { force = false } = {}) {
   // news: no toast announces them and the panel stays closed.
   const announce = !initial && state.feed.caught_up;
   for (const event of batch) {
-    if (event.field) state.fieldBase.set(`${event.subject_id}|${event.field}`, event.id);
+    // The base for the NEXT write to this cell. It never rewrites a write that
+    // is already out and unanswered: that request is a statement about what was
+    // on screen when the person acted, and replay depends on it unchanged.
+    if (event.field) noteCellBase(cellKey(event.subject_id, event.field), event);
     const deal = state.deals.get(event.subject_id);
     if (!deal) continue;
     if (!deal.last_review_at || String(event.recorded_at) > String(deal.last_review_at)) state.changed.add(deal.id);
@@ -376,7 +420,65 @@ function renderAccounts() {
     </button>`).join('') : '<div class="empty">No national accounts yet. Add the first portfolio when it is won.</div>';
 }
 
+/**
+ * Where an unconfirmed change can always be found.
+ *
+ * The row's own Retry is the natural place for one, and it is the place a filter,
+ * a search or a workspace switch takes away — so the sentence that says "send it
+ * again" was pointing at a control the person might not be able to see. This bar
+ * is the answer to that: one line per operation this page has not had an answer
+ * to, above the workspace, outside every filter, naming the actual record and the
+ * actual cell, carrying the SAME deliberate retry as everywhere else.
+ *
+ * Built here rather than in the markup, the way the freshness detail is: it is
+ * the one control whose existence depends on something having gone wrong.
+ */
+function pendingWritesNode() {
+  const existing = $('#pendingWrites');
+  if (existing) return existing;
+  const main = $('#main');
+  if (!main) return null;
+  const node = document.createElement('section');
+  node.id = 'pendingWrites';
+  node.className = 'parking-banner';
+  // A status region, not an alert: it is a standing list, and it is only rewritten
+  // when the set of unconfirmed operations actually changes — so a poll every
+  // 1.4 seconds neither re-announces it nor destroys the button under a finger.
+  node.setAttribute('role', 'status');
+  node.setAttribute('aria-label', 'Unconfirmed changes');
+  main.insertAdjacentElement('afterbegin', node);
+  return node;
+}
+
+function renderPendingWrites() {
+  const node = pendingWritesNode();
+  if (!node) return;
+  const pending = unresolvedFieldWrites(state.fieldWrites);
+  node.hidden = pending.length === 0;
+  const signature = JSON.stringify(pending.map((entry) => [entry.cell, state.deals.get(entry.deal)?.name || '']));
+  if (signature === state.pendingSignature) return;
+  state.pendingSignature = signature;
+  if (!pending.length) { node.innerHTML = ''; return; }
+  node.innerHTML = `<b>Unconfirmed changes · ${pending.length}</b>`
+    + pending.map((entry) => {
+      // The record as this board actually knows it. A deal the last snapshot did
+      // not return is not given a borrowed name: the cell is still nameable and
+      // the operation is still re-sendable, and Open record still reaches it,
+      // because a detail read asks the record layer by id.
+      const deal = state.deals.get(entry.deal);
+      const name = deal?.name || 'a record this board is not showing right now';
+      return `<span>${esc(fieldLabel(entry.field))} on ${esc(name)} — not confirmed
+        <button type="button" class="park-button" data-retry-write="${esc(entry.cell)}"
+          aria-label="Send the unconfirmed ${esc(fieldLabel(entry.field))} change on ${esc(name)} again">Send again</button>
+        <button type="button" class="park-button" data-open-deal="${esc(entry.deal)}"
+          aria-label="Open ${esc(name)} and check what it holds">Open record</button></span>`;
+    }).join('');
+}
+
 function renderBoardOnly() {
+  // Before the board's own visibility is considered: an unconfirmed change
+  // belongs to the page, not to whichever workspace or filter is showing.
+  renderPendingWrites();
   if ($('#boardSection').hidden) return;
   const deals = workspaceDeals();
   renderStats(deals);
@@ -426,6 +528,13 @@ function rowHtml(deal) {
   const meta = [deal.market, deal.type, state.query && deal.account_name ? deal.account_name : null,
     parked ? parkingReasonLabel(deal.parking_reason) : null,
     partnerPresence ? `${actorName(partnerPresence.actor)} is editing` : null].filter(Boolean);
+  // A write this board never got an answer to stays on its row until a person
+  // settles it. The control re-sends THAT request — same key — rather than
+  // guessing a new one, and it is the row's own text, not a toast that fades and
+  // not a title only a mouse can find.
+  const unconfirmed = unresolvedFieldWrites(state.fieldWrites, deal.id).map((entry) => `<button type="button"
+    class="park-button" data-retry-write="${esc(entry.cell)}"
+    aria-label="${esc(fieldLabel(entry.field))} on ${esc(deal.name)} was not confirmed — send the same change again">${esc(fieldLabel(entry.field))} not confirmed · Retry</button>`).join('');
   return `<tr class="${classes}" data-deal-id="${esc(deal.id)}">
     <td><div class="deal-cell"><button type="button" class="attention-button" data-attention="${esc(deal.id)}" aria-pressed="${Boolean(deal.attention)}" aria-label="${deal.attention ? 'Clear attention flag' : 'Flag for attention'} on ${esc(deal.name)}"${parked ? ' disabled' : ''}>${deal.attention ? '⚠' : (PHICON[deal.phase] || '○')}</button>
       <div><button type="button" class="deal-link" data-open-deal="${esc(deal.id)}">${esc(deal.name)}</button>
@@ -436,7 +545,7 @@ function rowHtml(deal) {
     <td>${deal.workspace_kind === 'national_account'
       ? `<button type="button" class="agent-button" data-market-agent="${esc(deal.id)}"${parked ? ' disabled' : ''}>${esc(deal.market_agent || 'Assign agent…')}</button>`
       : `<select class="cell-select" data-owner="${esc(deal.id)}" aria-label="Owner for ${esc(deal.name)}"${parked ? ' disabled' : ''}><option value="">Unassigned</option><option value="joe"${deal.owner === 'joe' ? ' selected' : ''}>Joe</option><option value="dell"${deal.owner === 'dell' ? ' selected' : ''}>Dell</option></select>`}</td>
-    <td class="row-actions"><button type="button" class="park-button" data-operating-state="${parked ? 'active' : 'parked'}" data-deal="${esc(deal.id)}">${parked ? 'Restore' : 'Park'}</button><button type="button" class="row-menu" data-open-deal="${esc(deal.id)}" aria-label="Open ${esc(deal.name)} details">•••</button></td>
+    <td class="row-actions">${unconfirmed}<button type="button" class="park-button" data-operating-state="${parked ? 'active' : 'parked'}" data-deal="${esc(deal.id)}">${parked ? 'Restore' : 'Park'}</button><button type="button" class="row-menu" data-open-deal="${esc(deal.id)}" aria-label="Open ${esc(deal.name)} details">•••</button></td>
   </tr>`;
 }
 
@@ -928,19 +1037,204 @@ async function runUndo(eventId, trigger = null) {
   showToast(result.outcome.message);
 }
 
-async function patchField(dealId, field, value) {
-  const result = await state.client.patchDealField({ deal:dealId, field, value,
-    base_event_id:state.fieldBase.get(`${dealId}|${field}`) || null, idempotency_key:uuidv4() });
+/**
+ * Send one cell change — or put the one that was never answered back out.
+ *
+ * The key is minted per intended action, not per attempt, and the retained
+ * request is sent unchanged: same value, same base, same key. That is what makes
+ * a retry a replay at the server instead of a second write that collides with
+ * the first one and manufactures a conflict between a person and themselves.
+ * Nothing here decides anything about the deal; the answer does.
+ */
+async function sendCellWrite(dealId, field, value) {
+  const cell = cellKey(dealId, field);
+  const result = await performFieldWrite({
+    deal: dealId, field, value,
+    base: state.fieldBase.get(cell)?.id || null,
+    // Read AGAIN when the answer lands. If the base moved while the request was
+    // out, the answer — a replayed one especially — is the recorded result of an
+    // operation the board has since learned something newer about, and its value
+    // must not be painted over what it learned.
+    baseNow: () => state.fieldBase.get(cell)?.id || null,
+    getState: () => state.fieldWrites,
+    setState: (next) => { state.fieldWrites = next; },
+    newKey: uuidv4,
+    patch: (request) => state.client.patchDealField(request),
+  });
+  // The base for the NEXT write to this cell, taken from the record's own answer
+  // about this one instead of waiting a poll for the feed to say the same thing.
+  // That wait is what made a second, different edit inside the poll window send a
+  // base its own first edit had already superseded — a conflict with itself.
+  //
+  // Only an accepted answer names an event. `superseded` is checked as well as
+  // ordered against: an answer replayed from an older operation must not reset
+  // the base even if the record layer sent no time to order it by.
+  if (result.status === 'ok' && !result.superseded && result.event_id) {
+    noteCellBase(cell, { id: result.event_id, recorded_at: result.event_recorded_at });
+  }
+  return result;
+}
+
+/**
+ * Record the newest event seen for one cell.
+ *
+ * One home for the rule, because there are now two sources: the changes feed —
+ * partner events, and this board's own arriving late — and the answer to a write
+ * this board made. `nextCellBase` keeps whichever is newer by `(recorded_at, id)`,
+ * the record layer's own ordering, so an old page of catch-up history and a
+ * replayed answer about an older operation both leave a newer base alone.
+ */
+function noteCellBase(cell, event) {
+  if (!event?.id) return;
+  // Identity and time only. A feed event carries values too, and none of them
+  // belong in this map — the board's values come from a snapshot, and this is a
+  // base, not a value.
+  const seen = { id: event.id, recorded_at: event.recorded_at ?? null };
+  state.fieldBase.set(cell, nextCellBase(state.fieldBase.get(cell) || null, seen));
+}
+
+/** The cell, named the way a person reading a toast about it would name it. */
+function cellSubject(dealId, field) {
+  return `${fieldLabel(field)} on ${state.deals.get(dealId)?.name || 'this record'}`;
+}
+
+/** Where an answer must appear: inside the modal the control was pressed in. */
+function writeSurfaceFor(trigger) {
+  const dialog = $('#dealDialog');
+  return trigger && dialog?.open && dialog.contains(trigger) ? 'dialog' : 'toast';
+}
+
+/**
+ * Put the answer where the person is actually looking.
+ *
+ * A dialog opened with showModal() is in the top layer — above every z-index and
+ * behind its own backdrop — so a toast raised while #dealDialog is open is
+ * dimmed, blurred and unreadable, and the row control that would act on it is
+ * behind the same backdrop. The sentence goes INSIDE the dialog instead, and
+ * carries the same deliberate retry the row carries: the same operation, the
+ * same key, never a fresh one. It takes the keyboard because it is the answer to
+ * what was just pressed here.
+ *
+ * It belongs to the dialog's own content: re-opening a record rebuilds it away,
+ * and every settled answer on this path closes the dialog, so nothing has to
+ * remember to take it down.
+ *
+ * @returns true when the notice was placed; false when no deal dialog is open
+ *   and the caller should say it the ordinary way.
+ */
+function showDealDialogNotice(message, retryCell = null) {
+  const dialog = $('#dealDialog');
+  if (!dialog?.open) return false;
+  const host = $('.deal-content', dialog) || $('#dealDetail');
+  if (!host) return false;
+  let notice = $('#dealNotice', dialog);
+  if (!notice) {
+    notice = document.createElement('div');
+    notice.id = 'dealNotice';
+    notice.className = 'parking-banner';
+    notice.setAttribute('role', 'alert');
+    notice.setAttribute('tabindex', '-1');
+    host.prepend(notice);
+  }
+  notice.innerHTML = `<b>${esc(message)}</b>${retryCell
+    ? `<button type="button" class="park-button" data-retry-write="${esc(retryCell)}">Send this change again</button>`
+    : ''}`;
+  ($('[data-retry-write]', notice) || notice).focus({ preventScroll: true });
+  return true;
+}
+
+/**
+ * Say what happened to a change — and only what is known — where it can be read.
+ *
+ * A refusal names the server's own reason; an unanswered write says it could not
+ * be confirmed and stays retryable under its own key; a cell whose earlier write
+ * is still unresolved says so rather than quietly taking a different intent; an
+ * answer that arrived after the feed moved says which value the board is showing.
+ *
+ * Three surfaces, because a modal changes what "visible" means: a form owns its
+ * own error line and keeps its draft, a control pressed inside the deal dialog is
+ * answered inside that dialog, and everything else is the toast. Whatever the
+ * surface, an operation still unresolved carries its retry with it.
+ *
+ * The board is redrawn first — deliberately without the `userIsEditing()` guard
+ * the feed path uses, because the edit being corrected is the one the person just
+ * made: a select left showing a value the server never took is the failure this
+ * slice exists to remove, and the row's Retry has to appear with the sentence.
+ */
+function reportCellWrite(dealId, field, result, { surface = 'toast' } = {}) {
+  renderBoardOnly();
+  if (surface === 'inline' && result.status !== 'ok') return result;
+  const message = fieldWriteMessage(result, cellSubject(dealId, field));
+  if (!message) return result;
+  const retryCell = result.status === 'unknown' || result.status === 'blocked'
+    ? result.pending?.cell || null : null;
+  if (surface === 'dialog' && showDealDialogNotice(message, retryCell)) return result;
+  showToast(message);
+  return result;
+}
+
+/**
+ * The server accepted this operation, and the board has since learned something
+ * newer about the same cell.
+ *
+ * The request's value is NOT written to the row. This cell's base has moved past
+ * the one the operation was built on, to an event that operation did not commit —
+ * its own event arriving on the feed is recognised and does not come here — so
+ * applying the value, and HOLDING it against the next snapshot the way
+ * confirmLocalWrite does, would put a stale value on the board and then defend it
+ * against the truth.
+ *
+ * What happens instead is what the board does anywhere else it does not know:
+ * mark the record changed, ask for an authoritative read, and say plainly which
+ * value is on screen. No event id is invented, nothing is inferred about who
+ * wrote what, and the read — not this function — decides what the cell holds.
+ */
+function reconcileNewerState(dealId, field, result, options = {}) {
+  state.changed.add(dealId);
+  state.boardSync.requestRefresh('after-write');
+  return reportCellWrite(dealId, field, result, options);
+}
+
+/**
+ * Send an unconfirmed cell change again, exactly as it was sent.
+ *
+ * Deliberate and person-driven: nothing on a timer re-sends a write nobody asked
+ * to re-send. It goes back through the ordinary write path, which is what keeps
+ * the key, the base and the value identical.
+ */
+async function retryCellWrite(cell, trigger = null) {
+  const entry = pendingFieldWrite(state.fieldWrites, cell);
+  if (!entry) { renderBoardOnly(); return null; }
+  const { deal, field, value } = entry.request;
+  // The retry is answered on the surface it was asked from: a Retry pressed in
+  // the deal dialog is answered in the deal dialog, not under its backdrop.
+  const options = { surface: writeSurfaceFor(trigger) };
+  if (field === 'operating_state') return patchOperatingState(deal, value, options);
+  return patchField(deal, field, value, options);
+}
+
+async function patchField(dealId, field, value, options = {}) {
+  const result = await sendCellWrite(dealId, field, value);
   if (result.status === 'conflict') return showConflict(result.conflict);
+  if (result.status !== 'ok') return reportCellWrite(dealId, field, result, options);
+  if (result.superseded) return reconcileNewerState(dealId, field, result, options);
   const deal = confirmLocalWrite(dealId, { [field]: value });
   renderBoardOnly();
   showToast(`${deal?.name || 'Deal'} updated`);
+  return result;
 }
 
-async function patchOperatingState(dealId, value) {
-  const result = await state.client.patchDealField({ deal:dealId, field:'operating_state', value,
-    base_event_id:state.fieldBase.get(`${dealId}|operating_state`) || null, idempotency_key:uuidv4() });
-  if (result.status === 'conflict') return showConflict(result.conflict);
+async function patchOperatingState(dealId, value, options = {}) {
+  const result = await sendCellWrite(dealId, 'operating_state', value);
+  if (result.status === 'conflict') { showConflict(result.conflict); return result; }
+  if (result.status !== 'ok') return reportCellWrite(dealId, 'operating_state', result, options);
+  if (result.superseded) {
+    // An answer is an answer: the dialog closes exactly as it does on the plain
+    // ok path. Only the value is withheld, because the board knows something
+    // newer about this record's active-work state than this operation does.
+    if ($('#dealDialog').open) $('#dealDialog').close();
+    return reconcileNewerState(dealId, 'operating_state', result, options);
+  }
   const deal = confirmLocalWrite(dealId, {
     operating_state: value.state,
     parking_reason: value.state === 'parked' ? value.reason : null,
@@ -953,6 +1247,7 @@ async function patchOperatingState(dealId, value) {
   showToast(value.state === 'parked'
     ? `${deal?.name || 'Work record'} parked`
     : `${deal?.name || 'Work record'} restored to active work`);
+  return result;
 }
 
 function openForm({ eyebrow='Deal Room', title, submit='Save', body, onSubmit }) {
@@ -976,7 +1271,14 @@ function openForm({ eyebrow='Deal Room', title, submit='Save', body, onSubmit })
       $('#formError').hidden = false;
     } finally { button.disabled = false; }
   };
-  dialog.showModal();
+  // One dialog element serves every form, so a form raised FROM a form — the
+  // conflict chooser opened while the park form is still up — is a content
+  // swap, not a second opening. showModal() on an already-open dialog throws,
+  // and that exception used to land on the error line the submit handler had
+  // just cleared: the person got the conflict chooser with a browser message
+  // above it. The body and the submit handler are already replaced above; this
+  // only has to make the dialog visible when it is not.
+  if (!dialog.open) dialog.showModal();
   setTimeout(() => $('input,textarea,select', dialog)?.focus(), 0);
 }
 
@@ -1003,9 +1305,16 @@ function parkDealForm(dealId) {
       <option value="other">Other / not active right now</option>
     </select></div>
     <div class="field"><label for="parkingNote">Context (optional)</label><textarea id="parkingNote" name="note" maxlength="500" placeholder="What would help when this record becomes active again?"></textarea></div>`,
-    onSubmit:async (data) => patchOperatingState(dealId, {
-      state:'parked', reason:String(data.get('reason')), note:String(data.get('note') || '').trim() || null,
-    }) });
+    onSubmit:async (data) => {
+      const result = await patchOperatingState(dealId, {
+        state:'parked', reason:String(data.get('reason')), note:String(data.get('note') || '').trim() || null,
+      }, { surface:'inline' });
+      // Only a parked record closes this form. An answer that did not park it —
+      // refused, or never confirmed — keeps the reason and the note the partner
+      // typed, and says why on the form's own error line instead of in a toast
+      // over a dialog that has already thrown the draft away.
+      if (result.status !== 'ok') throw new Error(result.message || 'This record was not parked.');
+    } });
 }
 
 function marketAgentForm(dealId) {
@@ -1171,10 +1480,14 @@ function wireEvents() {
     if (workspace) { state.workspace = workspace.dataset.workspace; state.accountId = null; state.filter = 'active'; state.deepLinkMine = false; state.query = ''; $('#search').value = ''; render(); return; }
     const accountButton = event.target.closest('[data-account]');
     if (accountButton) { state.workspace = 'national_account'; state.accountId = accountButton.dataset.account; render(); return; }
+    const retryWrite = event.target.closest('[data-retry-write]');
+    if (retryWrite) { await retryCellWrite(retryWrite.dataset.retryWrite, retryWrite); return; }
     const operating = event.target.closest('[data-operating-state]');
     if (operating) {
       const dealId = operating.dataset.deal;
-      if (operating.dataset.operatingState === 'active') await patchOperatingState(dealId, { state:'active' });
+      // Restore from the open deal dialog is answered inside that dialog: the
+      // modal's backdrop dims and covers a toast, and the row's Retry with it.
+      if (operating.dataset.operatingState === 'active') await patchOperatingState(dealId, { state:'active' }, { surface:writeSurfaceFor(operating) });
       else { if ($('#dealDialog').open) $('#dealDialog').close(); parkDealForm(dealId); }
       return;
     }

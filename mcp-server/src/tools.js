@@ -1993,7 +1993,41 @@ async function applyDealRoomField(c, actor, dealId, field, value, idempotencyKey
     new: { [field]: value },
     idempotency_key: idempotencyKey,
   });
-  return { old_value: oldRow.rows[0].value, new_value: value };
+  // The committed identity of the event this write just made, READ BACK from the
+  // record. Nothing here constructs an id: writeEvent's insert carries no
+  // `returning` and is shared by every verb in this file, so it is not this
+  // verb's to change, and the row is found the way any other row is found.
+  //
+  // What makes the read exact is the event's own idempotency_key — one intended
+  // action, one key, one event row — so it names the row written immediately
+  // above and can never name a partner's, which ordering by recorded_at alone
+  // could under a concurrent writer. Same table and same ordering the Deal Room
+  // already uses to find a cell's newest event (revert-deal-field).
+  //
+  // Why the answer needs it: the board's ONLY source of a field base was the
+  // changes feed, which lags a write by up to a poll. A second, different edit to
+  // the same cell inside that window therefore sent a base its own first edit had
+  // already superseded, and the server correctly recorded a conflict — between a
+  // partner and themselves. With the committed id in the answer the client can
+  // advance that cell's base immediately, from the record's own word for it.
+  //
+  // recorded_at is serialized exactly as the changes feed serializes it
+  // (dealroom.js), so the two are directly comparable on the client: a base is
+  // only ever moved forward, never back onto an older event.
+  const committed = (await c.query(
+    `select id, to_jsonb(recorded_at)#>>'{}' as recorded_at from event
+      where subject_type='deal' and subject_id=$1 and field=$2 and idempotency_key=$3
+      order by recorded_at desc, id desc limit 1 /* dealroom:written-event */`,
+    [dealId, field, idempotencyKey]))?.rows?.[0] || null;
+  return {
+    old_value: oldRow.rows[0].value,
+    new_value: value,
+    // Null when this write carried no key to find the row by. A client that gets
+    // no id simply does not advance its base and waits for the feed, which is
+    // exactly the behaviour it had before this existed.
+    event_id: committed?.id ?? null,
+    event_recorded_at: committed?.recorded_at ?? null,
+  };
 }
 
 const FIND_CATCH_UP_QUERY_MAX = 200;
@@ -2817,27 +2851,60 @@ export const TOOLS = {
 
   "deal-room-board": {
     write: false,
-    description: "The Deal Room home read: Salesforce-linked work records plus their active/parked operating state, national-account portfolio summaries, current partner identity, review clocks, market-agent assignments, and one open review session. workspace may be team, national_account, or all; no row is duplicated between workspaces.",
+    description: "The Deal Room home read: Salesforce-linked work records plus their active/parked operating state, national-account portfolio summaries, current partner identity, review clocks, market-agent assignments, and one open review session. Each record also carries field_base — the latest committed event id and time for every editable cell, read in the same statement as the values, which is what patch-deal-field takes as base_event_id. A cell with no history has no entry. workspace may be team, national_account, or all; no row is duplicated between workspaces.",
     inputSchema: { type: "object", properties: {
       workspace: { type: "string", enum: ["team","national_account","all"], default: "all" },
       account_client_id: { type: "string", description: "optional national-account client uuid" },
     } },
     handler: async (c, actor, args) => {
       const workspace = args.workspace || "all";
+      // field_base: the latest committed event for each EDITABLE cell, read in
+      // the SAME statement as the values it belongs to.
+      //
+      // Why it is here and not a second read: patch-deal-field bases on an event
+      // id, and until now the board had no way to learn one except the changes
+      // feed, which starts at the beginning of the log. So the first edit of a
+      // session to a cell with any history sent no base at all, which this verb's
+      // own concurrency rule treats as "any prior event conflicts" — a refusal
+      // naming a months-old change as concurrent. This closes that.
+      //
+      // ONE STATEMENT is the point, not an economy. A value and its base read in
+      // two statements can straddle a commit, and the dangerous half of that is a
+      // base NEWER than the value shown: the next write would then be accepted
+      // over a value the person never saw. Inside one statement both come from
+      // one snapshot, so a concurrent write is either wholly visible here or
+      // wholly invisible, and a partner's later edit still conflicts.
+      //
+      // One correlated subquery, not one query per deal: the ordering is the
+      // record layer's own (recorded_at desc, id desc), the same pair
+      // latestFieldConflict and revert-deal-field sort by, and a cell that has
+      // never been edited simply has no key — which the client must read as "no
+      // base", never as a base of null-meaning-anything.
       const deals = await c.query(
-        `select id, name, type, phase, owner, attention,
-                to_jsonb(next_date)#>>'{}' as next_date, next_step, market, segment,
-                client_id, client_ref, client_name, account_client_id, account_client_ref,
-                account_name, account_owner, market_agent,
-                to_jsonb(last_touch)#>>'{}' as last_touch,
-                to_jsonb(last_review_at)#>>'{}' as last_review_at, workspace_kind,
-                operating_state, parking_reason, parking_note,
-                to_jsonb(parked_at)#>>'{}' as parked_at, parked_by
-           from v_deal_room_board
-          where ($1 = 'all' or workspace_kind = $1)
-            and ($2::uuid is null or account_client_id = $2::uuid)
-          order by attention desc, next_date nulls last, name`,
-        [workspace, args.account_client_id || null]);
+        `select b.id, b.name, b.type, b.phase, b.owner, b.attention,
+                to_jsonb(b.next_date)#>>'{}' as next_date, b.next_step, b.market, b.segment,
+                b.client_id, b.client_ref, b.client_name, b.account_client_id, b.account_client_ref,
+                b.account_name, b.account_owner, b.market_agent,
+                to_jsonb(b.last_touch)#>>'{}' as last_touch,
+                to_jsonb(b.last_review_at)#>>'{}' as last_review_at, b.workspace_kind,
+                b.operating_state, b.parking_reason, b.parking_note,
+                to_jsonb(b.parked_at)#>>'{}' as parked_at, b.parked_by,
+                coalesce((
+                  select jsonb_object_agg(latest.field,
+                           jsonb_build_object('id', latest.id,
+                             'recorded_at', to_jsonb(latest.recorded_at)#>>'{}'))
+                    from (select distinct on (e.field) e.field, e.id, e.recorded_at
+                            from event e
+                           where e.subject_type='deal' and e.subject_id=b.id
+                             and e.field = any($3::text[])
+                           order by e.field, e.recorded_at desc, e.id desc) latest
+                ), '{}'::jsonb) as field_base
+           from v_deal_room_board b
+          where ($1 = 'all' or b.workspace_kind = $1)
+            and ($2::uuid is null or b.account_client_id = $2::uuid)
+          order by b.attention desc, b.next_date nulls last, b.name
+          /* dealroom:board-field-base */`,
+        [workspace, args.account_client_id || null, [...DEAL_ROOM_FIELDS]]);
       const accounts = await c.query(
         `select account_client_id, account_client_ref, account_name, account_owner,
                 open_deals, attention_deals, overdue_deals, stale_deals,
