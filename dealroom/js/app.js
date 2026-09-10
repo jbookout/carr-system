@@ -1,7 +1,6 @@
 import { createClient, PHASES, PHICON, ACTOR_LABEL } from './client.js';
 import { deploymentIdentity, resolveDealroomBoot } from './boot-mode.js';
 import { uuidv4 } from './uuid.js';
-import { createPostCallClient } from './post-call-client.js';
 import {
   REVERTIBLE_FIELDS, escapeText, parkingReasonLabel, ingestChangeEvents,
   receiptViews, receiptListHtml, receiptsSignature, receiptsAnnouncement,
@@ -27,8 +26,6 @@ const POLL_MS = 1400;
  * without limit, and the badge says so.
  */
 const BOARD_REFRESH_MS = 15000;
-const CALL_MODE_URL = 'http://127.0.0.1:4682';
-const CALL_MODE_HEADER = { 'X-CARR-Call-Mode': 'deal-room-v1' };
 const state = {
   client: null, selfActor: null, deals: new Map(), accounts: [],
   // Every displayed value comes from a board snapshot this coordinator applied;
@@ -67,10 +64,10 @@ const state = {
   // a render memo, exactly like receiptSignature. The operations themselves live
   // in fieldWrites and nowhere else.
   pendingSignature: null,
-  callMode: { state: 'idle' }, callModeTimer: null,
-  postCallClient: null, postCallTimer: null,
-  postCall: { status: 'idle', session: null, report: null, error: null,
-    contextReady: false, draftErrors: new Map() },
+  // No call state of any kind lives here. Recording is inactive in this release
+  // and this shell holds nothing that could start, stop, time or follow one.
+  // What the record layer already knows about past capture sessions still
+  // arrives on the ordinary feed above, and is only ever displayed.
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -564,357 +561,74 @@ function renderCaptureStatus() {
   if (active) badge.textContent = `Capture: ${String(active.state).replaceAll('_',' ')}`;
 }
 
-function elapsedTime(startedAt) {
-  if (!startedAt) return '0:00';
-  const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(startedAt)) / 1000));
-  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
-}
+/**
+ * Calls are inactive in this release, and this module is where that is TRUE
+ * rather than merely intended.
+ *
+ * There is no recorder address, no start, no stop, no recorder-state read and
+ * no poll of a local bridge anywhere in this file. The entrypoint opens a dialog
+ * that says so, and does nothing else: no request leaves the page, no timer
+ * starts, and no synthetic click, boot callback, query parameter or stored
+ * preference can reach a recording path, because this workspace no longer
+ * contains one.
+ *
+ * Nothing already recorded is affected. The recorder, its standalone controller
+ * and every saved call, action and summary are untouched; what the record layer
+ * holds about them still arrives through the same board read, change feed and
+ * suggestions dock as any other work, and is only ever displayed.
+ */
 
-function callModeActive(snapshot = state.callMode) {
-  return snapshot?.state === 'recording';
-}
+/**
+ * Controls that belonged to the retired in-shell recorder.
+ *
+ * A stale index.html can outlive the module that goes with it: the service
+ * worker caches a navigation and a script separately, so an installed app can
+ * pair yesterday's markup with today's code. Such a control arrives with no
+ * handler and is already inert — but it would still LOOK live, and a person
+ * pressing "Start weekly deal call" deserves better than a button that silently
+ * does nothing. They are disabled and hidden on sight, and never wired.
+ */
+const RETIRED_RECORDER_CONTROLS = [
+  '#callModeButton', '#callModeStop', '[data-call-mode-start]', '#postCallRefresh',
+  '[data-post-call-confirm]', '[data-post-call-skip]', '[data-create-outlook-draft]',
+  '[data-retry-call-context]',
+];
 
-function renderCallMode() {
-  const snapshot = state.callMode || { state: 'idle' };
-  const recording = callModeActive(snapshot);
-  const processing = ['transcribing', 'ready_to_extract', 'filed'].includes(snapshot.state);
-  const stage = $('#callModeStage');
-  if (!stage) return;
-  stage.classList.toggle('recording', recording);
-  stage.classList.toggle('processing', processing);
-  $('#callModeStarts').hidden = recording || processing;
-  $('#callModeConsentRow').hidden = recording || processing;
-  $('#callModeStop').hidden = !recording;
-  $('#callModeTimer').textContent = recording ? elapsedTime(snapshot.started_at) : ({
-    idle: 'Ready', transcribing: 'Processing', ready_to_extract: 'Transcript ready', filed: 'Summary saved', state_unknown: 'Check Quill',
-  }[snapshot.state] || 'Ready');
-  $('#callModeState').textContent = recording ? 'Recording live' : ({
-    transcribing: 'Quill is processing this call', ready_to_extract: 'Transcript ready for extraction',
-    filed: 'Meeting summary saved', state_unknown: 'Recorder state needs attention',
-  }[snapshot.state] || 'Ready to record');
-  $('#callModeDetail').textContent = recording ? 'Quill is recording separate local and other-side audio tracks.'
-    : processing ? 'The recording has stopped. Quill is preparing the local transcript for the review pipeline.'
-      : 'Start a weekly deal call or another conversation. Quill keeps the local and other-side tracks separate.';
-  const labels = snapshot.speaker_labels || {};
-  const speakers = $('#callModeSpeakers');
-  speakers.hidden = !labels.mic;
-  speakers.textContent = labels.mic ? `${labels.mic} on microphone · ${labels.system || 'Other participant'} on system audio` : '';
-  const toolbarButton = $('#callModeButton');
-  toolbarButton.classList.toggle('recording', recording);
-  toolbarButton.innerHTML = recording
-    ? `<span aria-hidden="true">●</span> ${elapsedTime(snapshot.started_at)}`
-    : '<span aria-hidden="true">✦</span> Call Mode';
-  toolbarButton.setAttribute('aria-label', recording ? `Call Mode recording ${elapsedTime(snapshot.started_at)}` : 'Open Call Mode');
-  renderPostCall();
-}
-
-function showCallModePermission() {
-  const message = 'Chrome needs one-time Local Network Access permission to reach Quill on this Mac. Allow the prompt, then retry here. The standalone controller remains available if the local bridge itself needs checking.';
-  const notice = $('#callModePermission');
-  notice.textContent = message;
-  notice.hidden = false;
-}
-
-async function callModeApi(path, body = null) {
-  const options = body ? {
-    method: 'POST', headers: { 'content-type': 'application/json', ...CALL_MODE_HEADER }, body: JSON.stringify(body), targetAddressSpace: 'loopback',
-  } : { method: 'GET', targetAddressSpace: 'loopback' };
-  let response;
-  try {
-    response = await fetch(`${CALL_MODE_URL}/api/${path}`, options);
-  } catch (error) {
-    showCallModePermission();
-    throw new Error('Call Mode could not reach Quill locally.');
+function neutralizeRetiredRecorderControls(root) {
+  const found = RETIRED_RECORDER_CONTROLS.flatMap((selector) => $$(selector, root));
+  // A link to a local controller is an entrypoint too, even though a person has
+  // to press it: this workspace does not offer one.
+  for (const link of $$('a', root)) {
+    if (/127\.0\.0\.1|localhost/i.test(link.getAttribute('href') || '')) found.push(link);
   }
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || 'Call Mode could not complete that action.');
-  return payload;
-}
-
-function postCallItemStatus(item) {
-  return item.candidate_status || item.status || (item.candidate_id ? 'pending' : 'needs_review');
-}
-
-function reportText(value) {
-  return String(value || '')
-    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/giu, 'unmatched record')
-    .replace(/\bP-\d+\b/giu, 'unmatched participant');
-}
-
-function postCallDealName(item) {
-  return item.deal_name || state.deals.get(item.deal_id)?.name || 'Work record';
-}
-
-function taskCard(item, owner) {
-  const status = postCallItemStatus(item);
-  const pending = status === 'pending';
-  const text = item.action || item.title || item.text || item.summary || 'Action needs review';
-  return `<article class="post-call-card" data-post-call-item="${esc(item.candidate_id || '')}">
-    <div class="post-call-card-head"><b>${esc(postCallDealName(item))}</b><span class="post-call-badge ${esc(status)}">${esc(status.replaceAll('_',' '))}</span></div>
-    <p>${esc(reportText(text))}</p>${item.due_on ? `<small>Due ${esc(dateLabel(item.due_on))}</small>` : ''}
-    ${pending ? `<div class="post-call-card-actions"><button type="button" class="primary" data-post-call-confirm="${esc(item.candidate_id)}" data-candidate-resolver="post_call">Confirm ${esc(owner)} task</button><button type="button" class="secondary" data-post-call-skip="${esc(item.candidate_id)}" data-candidate-resolver="post_call">Skip</button></div>` : ''}
-  </article>`;
-}
-
-function dealUpdateCard(item) {
-  const status = postCallItemStatus(item);
-  const pending = status === 'pending';
-  const summary = item.update || item.summary || item.text || item.action || 'Deal update needs review';
-  return `<article class="post-call-card" data-post-call-item="${esc(item.candidate_id || '')}">
-    <div class="post-call-card-head"><b>${esc(postCallDealName(item))}</b><span class="post-call-badge ${esc(status)}">${esc(status.replaceAll('_',' '))}</span></div>
-    <p>${esc(reportText(summary))}</p>
-    ${pending ? `<div class="post-call-card-actions"><button type="button" class="primary" data-post-call-confirm="${esc(item.candidate_id)}" data-candidate-resolver="${['assigned_action','email_draft'].includes(item.candidate_kind || item.kind) || item.candidate_table === 'capture_post_call_candidate' ? 'post_call' : 'legacy'}">Confirm update</button><button type="button" class="secondary" data-post-call-skip="${esc(item.candidate_id)}" data-candidate-resolver="${['assigned_action','email_draft'].includes(item.candidate_kind || item.kind) || item.candidate_table === 'capture_post_call_candidate' ? 'post_call' : 'legacy'}">Skip</button></div>` : ''}
-  </article>`;
-}
-
-function questionCard(item) {
-  const question = typeof item === 'string' ? item : (item.question || item.text || item.summary || 'Needs review');
-  const options = Array.isArray(item?.options) ? item.options : [];
-  return `<article class="post-call-card question"><p>${esc(reportText(question))}</p>${options.length ? `<div class="post-call-options" aria-label="Possible answers">${options.map((option) => `<span>${esc(reportText(typeof option === 'string' ? option : option.label || option.text))}</span>`).join('')}</div>` : ''}</article>`;
-}
-
-function draftCard(draft) {
-  const status = draft.status || draft.candidate_status || 'pending';
-  const created = ['created','already_created','draft_created'].includes(status) || draft.idempotent === true;
-  const skipped = status === 'skipped';
-  const awaitingReceipt = !draft.candidate_id && !created;
-  const busyError = state.postCall.draftErrors.get(draft.draft_id);
-  const recipient = draft.recipient_name || 'Recipient needs review';
-  return `<article class="post-call-card vendor-draft" data-post-call-draft-card="${esc(draft.draft_id)}">
-    <div class="post-call-card-head"><div><b>${esc(postCallDealName(draft))}</b><small>${esc(recipient)}${draft.recipient_email ? ` · ${esc(draft.recipient_email)}` : ''}</small></div><span class="post-call-badge ${esc(status)}">${esc(status.replaceAll('_',' '))}</span></div>
-    <h5>${esc(reportText(draft.subject || 'Deal update'))}</h5><p class="draft-body">${esc(reportText(draft.body || ''))}</p>
-    ${busyError ? `<p class="post-call-inline-error" role="alert">${esc(busyError)} You can retry safely.</p>` : ''}
-    <div class="post-call-card-actions"><button type="button" class="primary create-draft" data-create-outlook-draft="${esc(draft.draft_id)}" data-draft-candidate="${esc(draft.candidate_id || '')}" data-draft-status="${esc(status)}" data-content-hash="${esc(draft.content_hash || '')}"${created || skipped || awaitingReceipt ? ' disabled' : ''}>${created ? 'Created in Outlook' : skipped ? 'Skipped' : awaitingReceipt ? 'Preparing draft…' : busyError ? 'Retry Outlook draft' : 'Create Outlook draft'}</button>${status === 'pending' && draft.candidate_id ? `<button type="button" class="secondary" data-post-call-skip="${esc(draft.candidate_id)}" data-candidate-resolver="post_call">Skip</button>` : ''}</div>
-    <small class="human-gate">Creates a draft only. Joe or Dell reviews and sends it in Outlook.</small>
-  </article>`;
-}
-
-function reportSection(title, items, renderItem, empty) {
-  return `<section class="post-call-group"><h4>${esc(title)}</h4>${items.length ? `<div class="post-call-cards">${items.map(renderItem).join('')}</div>` : `<p class="post-call-empty">${esc(empty)}</p>`}</section>`;
-}
-
-function renderPostCall() {
-  const panel = $('#postCallPanel');
-  const post = state.postCall;
-  panel.hidden = !post.session && post.status === 'idle';
-  if (panel.hidden) return;
-  const labels = {
-    context_loading: 'Preparing the active weekly agenda…',
-    context_ready: 'Agenda context ready. Recording continues locally.',
-    awaiting_context: 'Preparing the active weekly agenda…',
-    waiting_for_transcript: 'Recording stopped. Quill is transcribing locally…',
-    distilling: 'Quill is distilling the weekly updates and next actions…',
-    review_ready: 'Report ready for Joe and Dell to review.',
-    filed: 'Post-call report filed. Outlook drafts still require a person to send them.',
-    failed: 'The post-call report needs attention.',
-  };
-  $('#postCallStatus').innerHTML = `<span class="post-call-spinner" aria-hidden="true"></span><b>${esc(labels[post.status] || 'Post-call workflow ready.')}</b>${post.error ? `<small role="alert">${esc(post.error)}</small><button type="button" class="secondary" data-retry-call-context>Retry agenda context</button>` : ''}`;
-  $('#postCallStatus').classList.toggle('failed', Boolean(post.error) || post.status === 'failed');
-  const envelope = post.report || {};
-  const core = envelope.report || {};
-  const joe = Array.isArray(envelope.joe_tasks) ? envelope.joe_tasks : [];
-  const dell = Array.isArray(envelope.dell_tasks) ? envelope.dell_tasks : [];
-  const updates = Array.isArray(envelope.deal_updates) ? envelope.deal_updates : (Array.isArray(envelope.deals) ? envelope.deals : []);
-  const questions = [...(Array.isArray(envelope.review_questions) ? envelope.review_questions : []),
-    ...(Array.isArray(core.open_questions) ? core.open_questions : []),
-    ...(Array.isArray(envelope.questions) ? envelope.questions : [])];
-  const drafts = Array.isArray(envelope.draft_proposals) ? envelope.draft_proposals : (Array.isArray(envelope.drafts) ? envelope.drafts : []);
-  const hasReport = post.status === 'review_ready' || post.status === 'filed' || joe.length || dell.length || updates.length || questions.length || drafts.length;
-  $('#postCallReport').innerHTML = hasReport ? `${core.summary ? `<p class="post-call-summary">${esc(reportText(core.summary))}</p>` : ''}
-    ${reportSection('Joe this week', joe, (item) => taskCard(item, 'Joe'), 'No Joe tasks were identified.')}
-    ${reportSection('Dell this week', dell, (item) => taskCard(item, 'Dell'), 'No Dell tasks were identified.')}
-    ${reportSection('Deal updates', updates, dealUpdateCard, 'No deal updates were identified.')}
-    ${reportSection('Questions to resolve', questions, questionCard, 'No unresolved questions.')}
-    ${reportSection('Vendor email drafts', drafts, draftCard, 'No vendor emails are needed from this call.')}` : '';
-}
-
-async function publishWeeklyCallContext(snapshot) {
-  if (!snapshot?.session) throw new Error('Quill did not return a recording session.');
-  if (!state.client.getCallContext) throw new Error('The exact call-context index is not available for this account.');
-  const deals = agendaDeals();
-  if (!deals.length) throw new Error('This weekly agenda has no active work records.');
-  state.postCall = { ...state.postCall, status:'context_loading', session:snapshot.session,
-    report:null, error:null, contextReady:false };
-  renderPostCall();
-  const exact = await state.client.getCallContext({ deal_ids:deals.map((deal) => deal.id) });
-  if (!Array.isArray(exact?.deals)) throw new Error('The call-context index returned an invalid response.');
-  const allowed = new Set(deals.map((deal) => deal.id));
-  const active = exact.deals.filter((deal) => allowed.has(deal.id) && deal.operating_state === 'active');
-  if (!active.length) throw new Error('The call-context index returned no active agenda work.');
-  for (const deal of active) {
-    if (!deal.id || !deal.name || !Array.isArray(deal.participants))
-      throw new Error('The call-context index is missing exact deal or participant metadata.');
+  for (const node of found) {
+    node.disabled = true;
+    node.hidden = true;
+    node.setAttribute('aria-hidden', 'true');
+    if (node.getAttribute('href') !== null) node.removeAttribute('href');
   }
-  await state.postCallClient.publishCallContext({ session:snapshot.session,
-    workspace_kind:state.workspace, ...(state.accountId ? { account_client_id:state.accountId } : {}),
-    generated_at:new Date().toISOString(), deals:active });
-  state.postCall = { ...state.postCall, status:'context_ready', contextReady:true, error:null };
-  renderPostCall();
+  return found;
 }
 
-function stopPostCallPolling() {
-  clearInterval(state.postCallTimer);
-  state.postCallTimer = null;
-}
-
-async function refreshPostCall({ quiet = false } = {}) {
-  if (!state.postCall.session) return;
-  try {
-    const payload = await state.postCallClient.getStatus(state.postCall.session);
-    const rawStatus = (typeof payload.status === 'object' ? payload.status.state : payload.status) || payload.state || 'waiting_for_transcript';
-    const status = ({ ready_review:'review_ready', blocked:'failed' })[rawStatus] || rawStatus;
-    state.postCall = { ...state.postCall, status, report:payload.report || null, error:null };
-    if (['review_ready','filed','failed'].includes(status)) stopPostCallPolling();
-    renderPostCall();
-  } catch (error) {
-    state.postCall.error = error.message;
-    renderPostCall();
-    if (!quiet) showToast(error.message);
-  }
-}
-
-function startPostCallPolling(session) {
-  stopPostCallPolling();
-  state.postCall.session = session;
-  refreshPostCall({ quiet:true });
-  state.postCallTimer = setInterval(() => refreshPostCall({ quiet:true }), 1600);
-}
-
-async function resolvePostCallCandidate(candidateId, accept, button) {
-  if (!candidateId) return;
-  button.disabled = true;
-  try {
-    if (button.dataset.candidateResolver === 'post_call') {
-      await state.client.resolvePostCallCandidate({ candidate_id:candidateId, accept, idempotency_key:uuidv4() });
-    } else {
-      await state.client.resolveConfirm({ proposal_id:candidateId, accept, idempotency_key:uuidv4() });
-    }
-    await state.postCallClient.syncStatus(state.postCall.session);
-    showToast(accept ? 'Post-call item confirmed.' : 'Post-call item skipped.');
-    await refreshPostCall();
-    if (accept) await loadHome();
-  } catch (error) {
-    showToast(error.message);
-  } finally { button.disabled = false; }
-}
-
-async function createPostCallDraft(button) {
-  const draftId = button.dataset.createOutlookDraft;
-  const candidateId = button.dataset.draftCandidate;
-  const status = button.dataset.draftStatus;
-  button.disabled = true;
-  state.postCall.draftErrors.delete(draftId);
-  try {
-    if (!['confirmed','created','already_created','draft_created'].includes(status)) {
-      if (!candidateId) throw new Error('This email draft still needs a matched metadata candidate.');
-      await state.client.resolvePostCallCandidate({ candidate_id:candidateId, accept:true, idempotency_key:uuidv4() });
-    }
-    await state.postCallClient.syncStatus(state.postCall.session);
-    const created = await state.postCallClient.createOutlookDraft(
-      state.postCall.session, draftId, button.dataset.contentHash,
-    );
-    await refreshPostCall();
-    const report = state.postCall.report;
-    for (const draft of report?.draft_proposals || report?.drafts || []) {
-      if (draft.draft_id === draftId) {
-        draft.status = created.idempotent ? 'already_created' : (created.status || 'created');
-        draft.idempotent = Boolean(created.idempotent);
-      }
-    }
-    renderPostCall();
-    showToast('Outlook draft created. Nothing was sent.');
-  } catch (error) {
-    state.postCall.draftErrors.set(draftId, error.message);
-    renderPostCall();
-  } finally { button.disabled = false; }
-}
-
-async function refreshCallMode({ quiet = false } = {}) {
-  try {
-    state.callMode = await callModeApi('state');
-    $('#callModePermission').hidden = true;
-    renderCallMode();
-    if (state.callMode.mode === 'weekly_deal_call' && state.callMode.session) {
-      if (callModeActive(state.callMode) && state.postCall.session !== state.callMode.session) {
-        state.postCall = { status:'idle', session:null, report:null, error:null,
-          contextReady:false, draftErrors:new Map() };
-        try { await publishWeeklyCallContext(state.callMode); }
-        catch (error) {
-          state.postCall = { ...state.postCall, status:'failed', session:state.callMode.session,
-            error:error.message };
-          renderPostCall();
-        }
-      } else if (!callModeActive(state.callMode) && state.postCall.session !== state.callMode.session) {
-        startPostCallPolling(state.callMode.session);
-      }
-    }
-  } catch (error) {
-    if (!quiet) showToast(error.message);
-  }
-}
-
-async function openCallMode() {
-  $('#callModeDialog').showModal();
-  renderCallMode();
-  await refreshCallMode({ quiet: true });
-}
-
-async function startCallMode(mode) {
-  if (!$('#callModeConsent').checked) {
-    showToast('Confirm that everyone has been told before recording.');
-    $('#callModeConsent').focus();
-    return;
-  }
-  const button = document.querySelector(`[data-call-mode-start="${mode}"]`);
-  if (button) button.disabled = true;
-  try {
-    state.callMode = await callModeApi('start', { mode, consent_confirmed: true });
-    stopPostCallPolling();
-    state.postCall = { status:'idle', session:null, report:null, error:null,
-      contextReady:false, draftErrors:new Map() };
-    renderCallMode();
-    if (mode === 'weekly_deal_call') {
-      try {
-        await publishWeeklyCallContext(state.callMode);
-      } catch (error) {
-        state.postCall = { ...state.postCall, status:'failed',
-          session:state.callMode.session || null, error:error.message };
-        renderPostCall();
-        showToast(`Recording started, but the weekly context needs attention: ${error.message}`);
-      }
-      try {
-        await startAgenda();
-        showToast('Weekly deal call is recording. The agenda is open.');
-      } catch (error) {
-        console.error('Could not start the weekly agenda', error);
-        showToast('Weekly deal call is recording. The agenda could not open.');
-      }
-    } else {
-      showToast('Call is recording.');
-    }
-  } catch (error) {
-    showToast(error.message);
-  } finally {
-    if (button) button.disabled = false;
-  }
-}
-
-async function stopCallMode() {
-  const button = $('#callModeStop');
-  button.disabled = true;
-  try {
-    state.callMode = await callModeApi('stop', {});
-    renderCallMode();
-    const session = state.callMode.session || state.postCall.session;
-    if (session && (state.callMode.mode === 'weekly_deal_call' || state.postCall.contextReady)) {
-      state.postCall = { ...state.postCall, status:'waiting_for_transcript', session, error:null };
-      renderPostCall();
-      startPostCallPolling(session);
-    }
-    showToast('Recording stopped. Quill is processing the call.');
-  } catch (error) {
-    showToast(error.message);
-  } finally { button.disabled = false; }
+/**
+ * Wire the Calls entrypoint: one dialog, opened and closed, and nothing else.
+ *
+ * Exported so the boundary can be exercised as BEHAVIOUR — installed on a
+ * document, pressed, and observed to make no request and start no timer —
+ * rather than only read as source.
+ */
+export function installCallsBoundary(root = document) {
+  const neutralized = neutralizeRetiredRecorderControls(root);
+  const button = $('#callsButton', root);
+  const dialog = $('#callsDialog', root);
+  const close = $('#callsClose', root);
+  if (button && dialog) button.addEventListener('click', () => {
+    if (typeof dialog.showModal === 'function' && !dialog.open) dialog.showModal();
+  });
+  if (close && dialog) close.addEventListener('click', () => {
+    if (dialog.open) dialog.close();
+  });
+  return { entrypoint: Boolean(button), dialog: Boolean(dialog), neutralized: neutralized.length };
 }
 
 function renderConfirms() {
@@ -1499,19 +1213,11 @@ function wireEvents() {
     if (event.target.closest('[data-close-deal]')) { $('#dealDialog').close(); return; }
     const undoButton = event.target.closest('[data-undo]'); if (undoButton) { await runUndo(undoButton.dataset.undo, undoButton); return; }
     const confirm = event.target.closest('[data-confirm]'); if (confirm) { const chip=confirm.closest('[data-proposal]'); const yes=confirm.dataset.confirm==='yes'; await state.client.resolveConfirm({proposal_id:chip.dataset.proposal,accept:yes,idempotency_key:uuidv4()}); state.confirms=state.confirms.filter((p)=>p.id!==chip.dataset.proposal); renderConfirms(); if(yes)await loadHome(); showToast(yes?'Suggestion confirmed':'Suggestion skipped'); return; }
-    const postConfirm = event.target.closest('[data-post-call-confirm]'); if (postConfirm) { await resolvePostCallCandidate(postConfirm.dataset.postCallConfirm, true, postConfirm); return; }
-    const postSkip = event.target.closest('[data-post-call-skip]'); if (postSkip) { await resolvePostCallCandidate(postSkip.dataset.postCallSkip, false, postSkip); return; }
-    const createDraft = event.target.closest('[data-create-outlook-draft]'); if (createDraft) { await createPostCallDraft(createDraft); return; }
-    const retryContext = event.target.closest('[data-retry-call-context]'); if (retryContext) {
-      retryContext.disabled = true;
-      try { await publishWeeklyCallContext(state.callMode); }
-      catch (error) { state.postCall = { ...state.postCall, status:'failed', error:error.message }; renderPostCall(); }
-      finally { retryContext.disabled = false; }
-      return;
-    }
     if (event.target.closest('[data-dialog-cancel]')) { $('#formDialog').close(); return; }
-    const callStart = event.target.closest('[data-call-mode-start]'); if (callStart) { await startCallMode(callStart.dataset.callModeStart); return; }
-    if (event.target.closest('#callModeClose')) { $('#callModeDialog').close(); return; }
+    // Deliberately no recorder branch below this line. This delegated listener
+    // sees every click in the page, so a branch here is the one thing that could
+    // turn a synthetic click into a recording; the Calls entrypoint is wired to
+    // its own control instead, and it opens a dialog and nothing more.
   });
 
   document.addEventListener('change', async (event) => {
@@ -1526,13 +1232,13 @@ function wireEvents() {
   $('#receiptsJump').onclick = goToReceipts;
   $('#ownerButton').onclick = accountOwnerForm;
   $('#agendaButton').onclick = startAgenda;
-  $('#callModeButton').onclick = openCallMode;
-  $('#callModeStop').onclick = stopCallMode;
-  $('#postCallRefresh').onclick = () => refreshPostCall();
   $('#agendaReviewed').onclick = () => advanceAgenda('reviewed');
   $('#agendaSkip').onclick = () => advanceAgenda('skipped');
   $('#agendaEnd').onclick = () => finishAgenda('completed');
   $('#agendaClose').onclick = () => finishAgenda('abandoned');
+  // The whole of Calls in this release: a control that explains its own absence,
+  // and a sweep for any recorder control a cached page may still be carrying.
+  installCallsBoundary();
   $('#themeButton').onclick = () => { document.body.classList.toggle('night'); localStorage.setItem('dealroom-theme',document.body.classList.contains('night')?'night':'light'); };
   $('#colorAssistButton').onclick = () => {
     const enabled = !document.body.classList.contains('color-assist');
@@ -1588,8 +1294,6 @@ async function boot() {
     applyBoard: (board) => { applyBoardSnapshot(board); if (!userIsEditing()) renderPreservingFocus(); },
     onStatus: setSync,
   });
-  state.postCallClient = createPostCallClient({ loopbackUrl:CALL_MODE_URL,
-    postHeaders:CALL_MODE_HEADER });
   wireEvents();
   await loadHome();
   // A tick that arrives while the last poll is still open is dropped by the
@@ -1607,13 +1311,24 @@ async function boot() {
   state.boardRefreshTimer = setInterval(() => {
     state.boardSync.requestRefresh('periodic');
   }, BOARD_REFRESH_MS);
-  state.callModeTimer = setInterval(() => {
-    if (callModeActive()) renderCallMode();
-  }, 250);
+  // Two timers, both about the board. There is deliberately no third one for a
+  // recorder clock: this release has no recording to time and nothing local to
+  // ask about one.
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('/sw.js').catch(()=>{});
 }
 
-boot().catch((error) => {
-  console.error(error);
-  document.body.insertAdjacentHTML('afterbegin', `<div class="offline">Deal Room could not start: ${esc(error.message)}</div>`);
-});
+/**
+ * The shell starts itself only when it is actually in its own page.
+ *
+ * The condition is the board's own root element, not a flag or a setting: a
+ * harness that imports this module to exercise a function gets the functions and
+ * none of the timers, reads or listeners, and there is no switch that changes
+ * that in either direction. `#rows` is asserted to exist in index.html by the
+ * release tests, so the sentinel cannot drift away from the markup it names.
+ */
+if (typeof document !== 'undefined' && document.getElementById('rows')) {
+  boot().catch((error) => {
+    console.error(error);
+    document.body.insertAdjacentHTML('afterbegin', `<div class="offline">Deal Room could not start: ${esc(error.message)}</div>`);
+  });
+}

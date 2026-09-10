@@ -78,7 +78,7 @@ test("national-account migration keeps the 0061 hierarchy and explicitly assigns
     "workspace migration must never reparent or duplicate an existing deal");
 });
 
-test("UI exposes two workspaces, explicit controls, mobile cards, and Call Mode", async () => {
+test("UI exposes two workspaces, explicit controls, mobile cards, and an inactive Calls entrypoint", async () => {
   const [html, app, css, sw] = await Promise.all([
     file("dealroom/index.html"), file("dealroom/js/app.js"),
     file("dealroom/css/app.css"), file("dealroom/public-shell/sw.js"),
@@ -87,12 +87,15 @@ test("UI exposes two workspaces, explicit controls, mobile cards, and Call Mode"
   assert.match(html, /data-workspace="national_account"/);
   assert.match(html, /Review deals/);
   assert.doesNotMatch(html, /Start agenda|id="callModeHeroButton"/);
-  assert.match(html, /id="callModeButton"/);
+  // Active Calls are excluded from this release (V5-J101). The entrypoint stays
+  // in the toolbar and SAYS so; the recorder controls are gone from the markup
+  // rather than hidden behind a flag that something could turn back on.
+  assert.match(html, /id="callsButton"/);
+  assert.doesNotMatch(html, /id="callModeButton"|id="callModeStop"|data-call-mode-start|id="callModeConsent"/);
   assert.doesNotMatch(app, /callModeHeroButton/);
   assert.match(html, /Search work records/);
   assert.match(app, /new Date\(new Date\(\)\.toDateString\(\)\)/);
   assert.doesNotMatch(app, /new Date\('2026-/);
-  assert.match(html + app, /Call Mode/);
   assert.match(app, /<select class="cell-select" data-phase/);
   assert.match(app, /<select class="cell-select" data-owner/);
   assert.match(css, /@media\(max-width:680px\)/);
@@ -154,31 +157,36 @@ test("Deal Room keeps accessibility and add-work controls available", async () =
   assert.doesNotMatch(css, /\.persistent-add-button\{/);
 });
 
-test("Call Mode post-call UI is review-first and never sends email", async () => {
+// The post-call workflow itself is NOT retired — V5-J101 excludes active
+// Calls from the first workspace release, and that is a statement about what
+// this shell can start, not about what the record layer and the standalone
+// controller already hold. So this test now has two halves: the shell reaches
+// none of it, and every library, route and never-send rule it will need again
+// is still here, unchanged and still covered.
+test("the release shell reaches no recorder, and the post-call libraries and never-send rule are preserved", async () => {
   const [html, app, live, local, css] = await Promise.all([
     file("dealroom/index.html"), file("dealroom/js/app.js"),
     file("dealroom/js/live-client.js"), file("dealroom/js/post-call-client.js"),
     file("dealroom/css/app.css"),
   ]);
-  assert.match(html, /id="postCallPanel"/);
-  assert.match(html, /Post-call report/);
-  assert.match(app, /Joe this week/);
-  assert.match(app, /Dell this week/);
-  assert.match(app, /Deal updates/);
-  assert.match(app, /Questions to resolve/);
-  assert.match(app, /Vendor email drafts/);
-  assert.match(app, /Create Outlook draft/);
-  assert.match(app, /Creates a draft only/);
-  assert.match(app, /data-post-call-confirm/);
-  assert.match(app, /data-post-call-skip/);
-  assert.match(app, /data-retry-call-context/);
+  // Half one: the shell. No recorder panel, no loopback address, no call to any
+  // of the recorder or post-call routes from this workspace.
+  assert.doesNotMatch(html, /id="postCallPanel"|id="callModeDialog"/);
+  assert.doesNotMatch(html, /127\.0\.0\.1|localhost/,
+    "the shell must not offer a local bridge, even as a link a person has to press");
+  assert.doesNotMatch(app, /https?:\/\/(127\.0\.0\.1|localhost)/);
+  assert.doesNotMatch(app, /post-call-client\.js/, "the shell does not load the local bridge client");
+  assert.doesNotMatch(app, /publishCallContext|createOutlookDraft|resolvePostCallCandidate|getCallContext/,
+    "no post-call verb is called from the release shell");
+  assert.doesNotMatch(html, /id="[^"\n]*transcript/i);
+
+  // Half two: what a later release will switch back on, untouched.
   assert.match(live, /rpc\('get-call-context', \{ deal_ids \}\)/);
   assert.match(live, /write\('resolve-post-call-candidate'/);
   assert.match(local, /\/api\/call-context/);
   assert.match(local, /\/api\/post-call\?session=/);
   assert.match(local, /\/api\/post-call\/sync/);
   assert.match(local, /approved_content_hash/);
-  assert.doesNotMatch(html, /id="[^"\n]*transcript/i);
   assert.doesNotMatch(app + local, /sendMail|\/send\b|Send email/);
   assert.match(css, /post-call-card/);
   assert.match(css, /@media\(max-width:680px\).*post-call/s);
