@@ -1240,6 +1240,53 @@ test("the candidate SQL reuses the existing canonicalizer and writer derivation 
   }
 });
 
+test("the append function brackets its deferred guard instead of leaving a mode behind", () => {
+  // A TEXT-ORDERING CHECK OVER SQL THAT HAS NEVER RUN. It proves the three mode
+  // statements are WRITTEN in the only order that can work, and nothing about
+  // what a database does with them. The behavioural claim lives in the postgres
+  // fixture, which has not been executed either.
+  //
+  // WHY THE ORDER IS LOAD-BEARING: SET CONSTRAINTS is transaction-scoped, so an
+  // IMMEDIATE left in force by one call validates the NEXT revision row at the
+  // end of its own INSERT -- before that revision's events and pause intervals
+  // have been written -- and refuses a valid append for carrying no events.
+  const start = SQL.indexOf("create or replace function ops.j1_clock_append_revision(");
+  assert.ok(start > 0, "the candidate SQL still defines the append function");
+  const body = SQL.slice(start, SQL.indexOf("\n$$;", start));
+  const modes = [...body.matchAll(
+    /execute 'set constraints ops\.j1_clock_append_guard (deferred|immediate)'/g)];
+  assert.deepEqual(modes.map(m => m[1]), ["deferred", "immediate", "deferred"],
+    "defer before the revision row exists, force over its complete children, restore before returning");
+
+  const at = (needle) => {
+    const index = body.indexOf(needle);
+    assert.ok(index > 0, `the append function no longer contains: ${needle}`);
+    return index;
+  };
+  const parentInsert = at("insert into ops.j1_clock_revision(");
+  const pauseInsert = at("insert into ops.j1_clock_revision_pause_interval(");
+  const eventInsert = at("insert into ops.j1_clock_revision_event(");
+  const [deferBefore, force, restore] = modes.map(m => m.index);
+  assert.ok(deferBefore < parentInsert,
+    "the guard is deferred BEFORE the revision row is inserted, or a mode left immediate fires against no children");
+  assert.ok(force > pauseInsert && force > eventInsert,
+    "the guard is forced only after both child relations are written");
+  assert.ok(force > parentInsert && restore > force,
+    "the deferred mode is restored after the forced check, not before it");
+  assert.ok(restore < at("return v_row"),
+    "the mode is restored before the function returns, not left for the next caller");
+  // The guard itself is untouched: still a deferrable constraint trigger, still
+  // firing after insert. This fix changed WHEN it is asked, never whether.
+  assert.ok(/create constraint trigger j1_clock_append_guard\s+after insert on ops\.j1_clock_revision\s+deferrable initially deferred/
+    .test(SQL), "the append guard is still a deferrable constraint trigger");
+  assert.ok(!/execute\s+'set constraints all/i.test(body),
+    "the write path narrows its own guard's mode and never every constraint's");
+  // And the whole candidate issues no OTHER constraint-mode statement: three
+  // executed statements in the file, and all three are the ones bracketed above.
+  assert.equal([...SQL.matchAll(/execute\s+'set constraints[^']*'/g)].length, modes.length,
+    "the candidate's only constraint-mode statements are this function's three");
+});
+
 test("the postgres proof is transaction-scoped, skips cleanly and asserts the direct-writer negatives", () => {
   assert.ok(POSTGRES_PROOF.includes("\\set ON_ERROR_STOP on"));
   assert.ok(POSTGRES_PROOF.trimEnd().endsWith("rollback;"), "every fixture row is rolled back");
@@ -1254,6 +1301,23 @@ test("the postgres proof is transaction-scoped, skips cleanly and asserts the di
     assert.ok(POSTGRES_PROOF.toLowerCase().includes(negative.toLowerCase()),
       `the proof does not exercise: ${negative}`);
   }
+
+  // THE TRANSACTION-SEQUENCING GROUP. The fixture opens ONE transaction, so its
+  // four appends are four appends in one transaction by construction -- the
+  // shape that a constraint mode left in force would break at the second one.
+  // One of them is issued after the fixture itself sets every constraint
+  // immediate, which is the caller-entered case the append function corrects.
+  assert.equal(POSTGRES_PROOF.split("begin;").length - 1, 1,
+    "the fixture is one transaction, so its appends share one constraint-mode state");
+  assert.ok(POSTGRES_PROOF.includes("execute 'set constraints all immediate'"),
+    "the fixture enters the caller-set IMMEDIATE mode the append function has to correct");
+  assert.ok(POSTGRES_PROOF.includes("must be ordinal 2") && POSTGRES_PROOF.includes("must be ordinal 3"),
+    "the fixture appends a third and a fourth revision in that same transaction");
+  assert.ok(POSTGRES_PROOF.includes("lost its event chain")
+    && POSTGRES_PROOF.includes("lost its pause interval"),
+    "each of those appends is checked for its complete children, not merely for landing");
+  assert.ok(POSTGRES_PROOF.split("ops.j1_clock_append_revision(").length - 1 >= 20,
+    "the fixture still drives the append function directly for every case");
 });
 
 test("the postgres journal issues only the definer calls the candidate SQL defines", async () => {

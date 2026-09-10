@@ -1192,8 +1192,18 @@ comment on function ops.j1_clock_bind_scope(text,jsonb) is
 -- JavaScript at all -- cannot land a revision that breaks an invariant.
 --
 -- It is a DEFERRED CONSTRAINT TRIGGER because the diff needs the new revision's
--- child rows, which do not exist yet at BEFORE INSERT time. Deferring to commit
--- is what lets it compare two complete event chains.
+-- child rows, which do not exist yet at BEFORE INSERT time. Deferring past the
+-- inserting statement is what lets it compare two complete event chains.
+--
+-- WHICH MEANS THE DEFERRAL MODE IS PART OF THIS GUARD, NOT A DETAIL OF ITS
+-- CALLER. SET CONSTRAINTS is transaction-scoped, so a mode set by one call
+-- outlives it: a guard left IMMEDIATE fires at the end of the next revision's
+-- own INSERT and reads a revision with no children, refusing a valid append.
+-- ops.j1_clock_append_revision therefore sets DEFERRED before it inserts the
+-- revision row, forces IMMEDIATE once the children are written, and restores
+-- DEFERRED before returning. Every path that writes a revision goes through
+-- that function -- direct INSERT is granted to nobody -- so the discipline is
+-- total rather than conventional.
 -- ---------------------------------------------------------------------------
 create or replace function ops.j1_clock_append_guard()
 returns trigger language plpgsql
@@ -1557,6 +1567,29 @@ begin
   select coalesce(max(revision_ordinal), -1) + 1 into v_ordinal
     from ops.j1_clock_revision where clock_id = v_clock.id;
 
+  -- THE GUARD'S DEFERRAL MODE IS OWNED BY THIS FUNCTION, FOR THE LENGTH OF THIS
+  -- CALL, AND IS SET BEFORE THE PARENT ROW EXISTS.
+  --
+  -- SET CONSTRAINTS is TRANSACTION-SCOPED, not statement-scoped: the IMMEDIATE
+  -- below outlives the call that issued it. Without this line the second append
+  -- in one transaction would insert its revision row while the guard was still
+  -- IMMEDIATE from the FIRST call, so the trigger would fire at the end of that
+  -- INSERT -- before this function had inserted a single event or pause-interval
+  -- child. The guard reads the persisted children (an empty event chain, a
+  -- digest over content that is not there yet) and would refuse a PERFECTLY
+  -- VALID append, by a name that describes nothing the caller did.
+  --
+  -- It is unconditional because the mode cannot be read back: a caller may have
+  -- entered the transaction under SET CONSTRAINTS ALL IMMEDIATE, and a previous
+  -- call of this function may have left it IMMEDIATE for the same reason. Both
+  -- arrive here identically and both are corrected the same way.
+  --
+  -- IT DEFERS NOTHING PAST THIS CALL. The forced IMMEDIATE below still validates
+  -- this revision before the function returns; deferral is narrowed to the
+  -- window between the parent insert and its own complete children, which is the
+  -- only window in which the guard could read an incomplete revision.
+  execute 'set constraints ops.j1_clock_append_guard deferred';
+
   insert into ops.j1_clock_revision(
     clock_id, revision_ordinal, idempotency_key, prior_history_digest, history_digest,
     state_schema_version, origin_receipt_digest, origin_at, origin_benchmark_manifest_digest,
@@ -1602,26 +1635,50 @@ begin
     from jsonb_array_elements(coalesce(p_events, '[]'::jsonb));
 
   -- THE CALLER'S HASH IS NEVER THE ANSWER. It is compared here against the
-  -- digest the rows just written produce, and the deferred guard compares it
-  -- again at commit over the settled rows.
+  -- digest the rows just written produce, and the guard compares it again over
+  -- the settled rows a few lines below, where it is forced to run.
   v_live := ops.j1_clock_history_digest(v_revision);
   if p_history_digest is distinct from v_live then
     raise exception '[j1_clock_claimed_history_digest_is_never_trusted] the named history digest is not the one these rows produce: named %, computed %',
       p_history_digest, v_live;
   end if;
 
-  -- FORCE THE DEFERRED APPEND GUARD TO RUN HERE, over the complete rows, rather
-  -- than at COMMIT. Two reasons, and the second one matters more than it looks:
-  -- a caller gets the named refusal at the point of the call instead of a
-  -- surprise at commit, and a ROLLBACK-ONLY PROOF FIXTURE can exercise the guard
-  -- at all -- a deferred constraint that only ever fires at commit is one no
-  -- transaction-scoped test can reach. The trigger stays DEFERRABLE so a
-  -- deliberate batch loader can still defer it.
+  -- FORCE THE DEFERRED APPEND GUARD TO RUN HERE, over the COMPLETE rows -- the
+  -- revision, its pause intervals and its whole event chain -- rather than at
+  -- COMMIT. Two reasons, and the second one matters more than it looks: a caller
+  -- gets the named refusal at the point of the call instead of a surprise at
+  -- commit, and a ROLLBACK-ONLY PROOF FIXTURE can exercise the guard at all -- a
+  -- deferred constraint that only ever fires at commit is one no
+  -- transaction-scoped test can reach.
   --
   -- Issued through EXECUTE rather than as a bare statement so it is handed
   -- straight to the SQL engine and does not depend on PL/pgSQL's own statement
   -- parser accepting SET CONSTRAINTS.
   execute 'set constraints ops.j1_clock_append_guard immediate';
+
+  -- AND RESTORED BEFORE RETURNING, because the line above would otherwise stay
+  -- in force for the whole transaction and break the NEXT append in it: that
+  -- one's revision row would be validated at the end of its own INSERT, against
+  -- children this function had not written yet. The guard is DEFERRABLE
+  -- INITIALLY DEFERRED by declaration, so restoring DEFERRED returns the
+  -- transaction to the trigger's declared state rather than to some state this
+  -- function invented.
+  --
+  -- IT WEAKENS NOTHING. Every revision this function writes has already been
+  -- validated, one line above, over its own settled rows; nothing is left
+  -- pending for commit to catch, and no caller can batch past the check by
+  -- deferring the constraint, because the check does not happen at commit.
+  -- A caller who deliberately entered under SET CONSTRAINTS ALL IMMEDIATE gets
+  -- that same guarantee -- validation at the point of the call -- and this
+  -- function does not restore their ad-hoc mode, which it has no way to read.
+  --
+  -- THE REFUSING PATH NEEDS NO RESTORE AND DOES NOT GET ONE. If the forced check
+  -- above raises, this line is never reached -- and it does not have to be: the
+  -- raise aborts the transaction, or the subtransaction of a caller that caught
+  -- it, and a constraint-mode change is rolled back with everything else that
+  -- subtransaction did. A refusal therefore cannot leave IMMEDIATE behind for
+  -- the next append either.
+  execute 'set constraints ops.j1_clock_append_guard deferred';
 
   v_row := ops.j1_clock_revision_json(v_revision);
   return v_row || jsonb_build_object('replayed', false);
@@ -1629,7 +1686,7 @@ end;
 $$;
 
 comment on function ops.j1_clock_append_revision(text,text,text,text,uuid,text,jsonb,jsonb,jsonb,jsonb) is
-  'The only way to append a Journey 1 clock revision. The writer, the clock identity and the history digest are all DERIVED; the caller supplies content, an idempotency key and the exact prior-history digest it believes is the head. It creates the clock row when the prior is an explicit null, refuses a stale prior, replays an exact idempotent repeat and refuses a key whose payload changed. It records a computation with scoped provenance: it accepts no deadline, admits no receipt, verifies no input and starts nothing.';
+  'The only way to append a Journey 1 clock revision. The writer, the clock identity and the history digest are all DERIVED; the caller supplies content, an idempotency key and the exact prior-history digest it believes is the head. It creates the clock row when the prior is an explicit null, refuses a stale prior, replays an exact idempotent repeat and refuses a key whose payload changed. It records a computation with scoped provenance: it accepts no deadline, admits no receipt, verifies no input and starts nothing. It owns the append guard''s deferral mode for the length of the call -- DEFERRED before the revision row is inserted, IMMEDIATE once its children are complete, DEFERRED again before returning -- so repeated appends in one transaction, and callers who entered under SET CONSTRAINTS ALL IMMEDIATE, are each validated over complete rows rather than over a revision whose children do not exist yet.';
 
 -- ---------------------------------------------------------------------------
 -- Grants. Reads reach the ordinary bundles. DIRECT INSERT IS GRANTED TO NOBODY:

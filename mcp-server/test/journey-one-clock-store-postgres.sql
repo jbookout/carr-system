@@ -31,6 +31,13 @@
 --     readback rebuilds both and recomputes the same digest it stored.
 --   * The digest is recomputed FROM THE STORED ROWS, and the parameter-form and
 --     row-form builders agree for the same content.
+--   * TRANSACTION SEQUENCING. Four appends land in ONE transaction, each with
+--     its complete children, including one issued after the caller set
+--     CONSTRAINTS ALL IMMEDIATE and one issued after a refusal was caught. The
+--     append guard is deferred while a revision row is inserted, forced over the
+--     settled children, and restored before the call returns; a mode left in
+--     force would validate the next revision row against children that do not
+--     exist yet and refuse a valid append.
 --   * A stale prior, a second creation, a reused idempotency key carrying a
 --     changed payload, a rebased origin, a removed miss, a changed seal, a lost
 --     event, a forged event digest and a lied-about history digest are each
@@ -100,16 +107,21 @@ declare
   v_wrong_key       text;
   v_digest0         text;
   v_digest1         text;
+  v_digest2         text;
+  v_digest3         text;
   v_result          jsonb;
   v_readback        jsonb;
   v_revision0       uuid;
   v_revision1       uuid;
+  v_revision2       uuid;
   v_err             text;
   v_count           integer;
   v_jobs            bigint := 0;
   v_jobs_after      bigint := 0;
   v_scalars0        jsonb;
   v_scalars1        jsonb;
+  v_scalars2        jsonb;
+  v_scalars3        jsonb;
   v_scalars_tamper  jsonb;
   v_events0         jsonb;
   v_events1         jsonb;
@@ -138,6 +150,8 @@ declare
   v_key1            constant uuid := '00000000-0000-4000-8000-00000000c002';
   v_key_dup         constant uuid := '00000000-0000-4000-8000-00000000c003';
   v_key_x           constant uuid := '00000000-0000-4000-8000-00000000c004';
+  v_key2            constant uuid := '00000000-0000-4000-8000-00000000c005';
+  v_key3            constant uuid := '00000000-0000-4000-8000-00000000c006';
 
   -- THE AUTHORITATIVE SCOPE, composed by this file exactly as a trusted
   -- integration would compose a real one. It is a synthetic binding: nothing
@@ -597,6 +611,100 @@ begin
       raise;
     end if;
   end;
+
+  -- =========================================================================
+  -- REPEATED APPENDS IN ONE TRANSACTION, AND A CALLER WHO ENTERED IMMEDIATE.
+  --
+  -- SET CONSTRAINTS IS TRANSACTION-SCOPED, NOT CALL-SCOPED. The append function
+  -- forces its deferred guard to IMMEDIATE so a caller gets a named refusal at
+  -- the point of the call; left in force, that mode would then validate the NEXT
+  -- revision row at the end of its own INSERT -- before that revision's events
+  -- and pause intervals had been written -- and refuse a perfectly valid append
+  -- for carrying no events. The function therefore sets DEFERRED before it
+  -- inserts a revision, forces IMMEDIATE over the complete children, and
+  -- restores DEFERRED before returning.
+  --
+  -- Revisions 0 and 1 above were ALREADY two appends inside this one
+  -- transaction. This group says so explicitly, checks that each landed with its
+  -- children intact, and then repeats it from the harder starting point: a
+  -- caller that entered under SET CONSTRAINTS ALL IMMEDIATE.
+  -- =========================================================================
+  select count(*) into v_count from ops.j1_clock_revision_event where revision_id = v_revision0;
+  if v_count <> 1 then
+    raise exception 'SEQUENCING: the creating revision did not keep its complete event chain';
+  end if;
+  select count(*) into v_count from ops.j1_clock_revision_event where revision_id = v_revision1;
+  if v_count <> 2 then
+    raise exception 'SEQUENCING: the second append in this transaction lost its event chain';
+  end if;
+  select count(*) into v_count from ops.j1_clock_revision_pause_interval where revision_id = v_revision1;
+  if v_count <> 1 then
+    raise exception 'SEQUENCING: the second append in this transaction lost its pause interval';
+  end if;
+
+  -- A CALLER-ENTERED IMMEDIATE MODE, set here exactly as a batch loader or an
+  -- outer fixture might set it, and never restored by this file: what follows
+  -- has to work with it in force.
+  execute 'set constraints all immediate';
+  v_scalars2 := v_scalars1 || jsonb_build_object('evaluated_at', '2026-09-15T00:00:00.000Z');
+  v_digest2 := ops.j1_clock_history_digest_of(v_scalars2, v_pauses1, v_events1);
+  v_result := ops.j1_clock_append_revision(
+    v_clock_key, v_tenant, 'J1-POSTGRES-PROOF', v_digest1, v_key2, v_digest2,
+    v_scalars2, v_pauses1, v_events1, v_provenance);
+  if (v_result ->> 'revision_ordinal')::integer <> 2 then
+    raise exception 'SEQUENCING: a third append in one transaction must be ordinal 2, got %',
+      v_result ->> 'revision_ordinal';
+  end if;
+  v_revision2 := (v_result ->> 'revision_id')::uuid;
+  select count(*) into v_count from ops.j1_clock_revision_event where revision_id = v_revision2;
+  if v_count <> 2 then
+    raise exception 'SEQUENCING: the append under a caller-entered IMMEDIATE lost its event chain';
+  end if;
+  select count(*) into v_count from ops.j1_clock_revision_pause_interval where revision_id = v_revision2;
+  if v_count <> 1 then
+    raise exception 'SEQUENCING: the append under a caller-entered IMMEDIATE lost its pause interval';
+  end if;
+  v_err := ops.j1_clock_revision_integrity_error(v_revision2);
+  if v_err is not null then
+    raise exception 'SEQUENCING: the append under a caller-entered IMMEDIATE is not intact: %', v_err;
+  end if;
+
+  -- THE GUARD IS STILL IN FORCE AFTERWARDS. Restoring the deferral mode is not
+  -- a way of switching the check off: this append is refused by name over the
+  -- new head, and a caught refusal rolls back its own subtransaction -- the
+  -- constraint mode it set along with everything else it wrote.
+  begin
+    perform ops.j1_clock_append_revision(
+      v_clock_key, v_tenant, null, v_digest2, v_key_x,
+      ops.j1_clock_history_digest_of(v_scalars2, '[]'::jsonb, v_events0),
+      v_scalars2, '[]'::jsonb, v_events0, v_provenance);
+    raise exception 'NEGATIVE FAILED: a lost event was admitted after the constraint mode was restored';
+  exception when others then
+    if sqlerrm not like '%j1_clock_events_are_append_only%' then raise; end if;
+  end;
+
+  -- AND THE TRANSACTION IS NOT WEDGED BY EITHER OF THEM: a fourth valid append
+  -- still lands, with its own children, and it is the head.
+  v_scalars3 := v_scalars2 || jsonb_build_object('evaluated_at', '2026-09-16T00:00:00.000Z');
+  v_digest3 := ops.j1_clock_history_digest_of(v_scalars3, v_pauses1, v_events1);
+  v_result := ops.j1_clock_append_revision(
+    v_clock_key, v_tenant, 'J1-POSTGRES-PROOF', v_digest2, v_key3, v_digest3,
+    v_scalars3, v_pauses1, v_events1, v_provenance);
+  if (v_result ->> 'revision_ordinal')::integer <> 3 then
+    raise exception 'SEQUENCING: a fourth append in one transaction must be ordinal 3, got %',
+      v_result ->> 'revision_ordinal';
+  end if;
+  select count(*) into v_count
+    from ops.j1_clock_revision_event where revision_id = (v_result ->> 'revision_id')::uuid;
+  if v_count <> 2 then
+    raise exception 'SEQUENCING: the fourth append in this transaction lost its event chain';
+  end if;
+  if (ops.j1_clock_head(v_clock_key) ->> 'history_digest') is distinct from v_digest3 then
+    raise exception 'SEQUENCING: the head is not the last revision appended in this transaction';
+  end if;
+  if (ops.j1_clock_history(v_clock_key) ->> 'revision_count')::integer <> 4 then
+    raise exception 'SEQUENCING: four appends in one transaction did not produce four revisions';
+  end if;
 
   -- =========================================================================
   -- THE MISS AND THE SEALS. A second clock, started already missed and already
