@@ -12,6 +12,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=DM+Sans:wght@400;500;600;700&display=swap">
   <link rel="stylesheet" href="/css/workspace.css">
+  <link rel="stylesheet" href="/css/workspace-business.css">
 </head>
 <body>
   <a class="skip" href="#main">Skip to Home</a>
@@ -21,9 +22,17 @@
       <a class="active" href="/" aria-current="page">Home</a>
       <a href="/leads">Leads</a>
       <a href="/deals">Deals</a>
-      <a href="/system-work.html">System work</a>
-      <a href="/room.html">Observatory</a>
+      <a href="/clients">Clients</a>
+      <a href="/vendors">Vendors</a>
     </nav>
+    <details class="nav-more">
+      <summary aria-label="More, including operations">More</summary>
+      <div class="nav-more-panel">
+        <p class="nav-more-heading">Operations</p>
+        <a href="/system-work.html">System work</a>
+        <a href="/room.html">Observatory</a>
+      </div>
+    </details>
   </header>
 
   <main id="main" class="shell">
@@ -71,6 +80,8 @@
       <div class="module-grid" aria-label="Open a workspace">
       <a class="module-card glass pulse-calm" href="/leads"><span class="module-kicker">Pipeline input</span><h2>Lead Board</h2><p>Review the full lead set where it belongs.</p><span class="module-arrow" aria-hidden="true">→</span></a>
       <a class="module-card glass pulse-calm" href="/deals"><span class="module-kicker">Canonical record</span><h2>Deal Room</h2><p>Move active work with the shared book.</p><span class="module-arrow" aria-hidden="true">→</span></a>
+      <a class="module-card glass pulse-calm" href="/clients"><span class="module-kicker">Relationships</span><h2>Clients</h2><p>Search everyone the team works with and open a record.</p><span class="module-arrow" aria-hidden="true">→</span></a>
+      <a class="module-card glass pulse-calm" href="/vendors"><span class="module-kicker">Relationships</span><h2>Vendors</h2><p>Search every vendor the team knows and open a record.</p><span class="module-arrow" aria-hidden="true">→</span></a>
       <a class="module-card glass pulse-calm" href="/deals"><span class="module-kicker">Conversation</span><h2>Calls</h2><p>Capture and review conversations in Deal Room Call Mode.</p><span class="module-arrow" aria-hidden="true">→</span></a>
       <a class="module-card glass pulse-calm" href="/system-work.html"><span class="module-kicker">System state</span><h2>System work</h2><p>Review bounded requests and observed system concerns.</p><span class="module-arrow" aria-hidden="true">→</span></a>
       <a class="module-card glass pulse-calm" href="/room.html"><span class="module-kicker">Shared context</span><h2>Observatory</h2><p>See the partner and agent conversation in one room.</p><span class="module-arrow" aria-hidden="true">→</span></a>
@@ -94,8 +105,8 @@
     <a href="/" aria-label="Home" aria-current="page"><span aria-hidden="true">⌂</span>Home</a>
     <a href="/leads" aria-label="Leads"><span aria-hidden="true">⌁</span>Leads</a>
     <a href="/deals" aria-label="Deals"><span aria-hidden="true">◈</span>Deals</a>
-    <a href="/system-work.html" aria-label="System"><span aria-hidden="true">◌</span>System</a>
-    <a href="/room.html" aria-label="Observe"><span aria-hidden="true">◎</span>Observe</a>
+    <a href="/clients" aria-label="Clients"><span aria-hidden="true">◍</span>Clients</a>
+    <a href="/vendors" aria-label="Vendors"><span aria-hidden="true">◇</span>Vendors</a>
   </nav>
   <script type="module" src="/js/workspace-command-center.js"></script>
 </body>

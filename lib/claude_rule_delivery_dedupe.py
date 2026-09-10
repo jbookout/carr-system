@@ -69,19 +69,40 @@ def _paths(session_id: str, leaf_digest: str) -> tuple[pathlib.Path, pathlib.Pat
 
 
 def _atomic(path: pathlib.Path, value: dict) -> None:
+    """Replace `path` atomically, owning the temp descriptor exactly once.
+
+    DESCRIPTOR OWNERSHIP IS THE WHOLE POINT OF THE SHAPE BELOW. os.fdopen TAKES
+    OWNERSHIP of the descriptor it is handed: the file object closes it when the
+    context exits, on success and on exception alike. A second os.close(fd) in a
+    finally is therefore not a harmless retry — by the time it runs, the kernel
+    may already have handed that same integer back out, and in a process with
+    more than one thread it hands it to somebody else. The "cleanup" then closes
+    a stranger's file, and the stranger fails with EBADF somewhere unrelated.
+    That is exactly how one dedupe write could break another thread's, make
+    _locked raise, and send should_deliver down its fail-open path so the same
+    rule set delivered twice.
+
+    So the raw descriptor is closed on one path only: the one where fdopen never
+    took it. After that, the file object is the sole owner and `with` is the
+    sole close.
+    """
     fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "wb") as handle:
+        handle = os.fdopen(fd, "wb")
+    except BaseException:
+        # Ownership never transferred, so this descriptor is still ours to close.
+        os.close(fd)
+        pathlib.Path(temp_name).unlink(missing_ok=True)
+        raise
+    try:
+        with handle:
             handle.write(_canonical(value) + b"\n")
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_name, path)
     finally:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+        # A successful replace leaves nothing here; a failure leaves the temp.
         pathlib.Path(temp_name).unlink(missing_ok=True)
 
 
