@@ -58,9 +58,9 @@ EXPECTED_LEGACY_ALIASES = {
 }
 
 
-def refuses(names: tuple[str, ...], expected: str) -> None:
+def refuses(names: tuple[str, ...], expected: str, **kwargs: Any) -> None:
     try:
-        validate_migration_names(names)
+        validate_migration_names(names, **kwargs)
     except MigrationNumberError as exc:
         assert expected in str(exc), str(exc)
     else:
@@ -115,7 +115,16 @@ def main() -> int:
     refuses(FROZEN_0169[:2], "frozen collision 0169 changed")
     refuses(FROZEN_0169 + ("0169_fourth.sql",), "frozen collision 0169 changed")
     refuses(FROZEN_0169 + ("0169a_escape.sql",), "frozen collision 0169 changed")
+    refuses(APPROVED_0494[:1], "approved interstitial collision 0494 changed")
     refuses((APPROVED_0494[1],), "approved interstitial collision 0494 changed")
+    validate_migration_names(
+        APPROVED_0494[:1], allow_approved_interstitial_base=True
+    )
+    refuses(
+        (APPROVED_0494[1],),
+        "approved interstitial collision 0494 changed",
+        allow_approved_interstitial_base=True,
+    )
     refuses(
         APPROVED_0494 + ("0494b_codex_continuity_unapproved.sql",),
         "approved interstitial collision 0494 changed",
@@ -123,6 +132,11 @@ def main() -> int:
     allocator_refuses_interstitial(
         actual,
         tuple(name for name in actual if name != APPROVED_0494[0]),
+        "approved interstitial collision 0494 changed",
+    )
+    allocator_refuses_interstitial(
+        actual,
+        tuple(name for name in actual if name != APPROVED_0494[1]),
         "approved interstitial collision 0494 changed",
     )
     allocator_refuses_interstitial(
