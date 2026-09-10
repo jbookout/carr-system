@@ -113,12 +113,15 @@
 --     claim the derived key ever did;
 --   * that one AUTHORITATIVE CLOCK SCOPE holds at most one clock --
 --     ops.j1_clock_scope_binding, keyed by a scope digest derived from the
---     accepted scope's own fields, unique on both sides. A second origin
---     presented for a scope that already names a clock is refused by name and
---     by constraint. WHAT THE DATABASE CANNOT SAY ABOUT IT: that the supplied
---     scope is the accepted scope of the projection the kernel read. The stored
---     state carries no subject, candidate or policy digest, so there is nothing
---     here to derive it from; the scope is compared, never verified, and
+--     accepted scope's own SIX IDENTITY FIELDS, unique on both sides. A second
+--     origin presented for a scope that already names a clock is refused by name
+--     and by constraint, and RENAMING THE SCOPE DOES NOT EVADE IT: the human
+--     scope_ref label is stored and sealed but is not in the preimage, so one
+--     accepted scope under two names is one key and meets the same constraint.
+--     WHAT THE DATABASE CANNOT SAY ABOUT IT: that the supplied scope is the
+--     accepted scope of the projection the kernel read. The stored state carries
+--     no subject, candidate or policy digest, so there is nothing here to derive
+--     it from; the scope is compared, never verified, and
 --     ops.j1_clock_record_layer_cannot_prove() says so on every readback;
 --   * the append named the EXACT current head, or an explicit NULL that succeeds
 --     only against a clock with no revisions;
@@ -221,13 +224,22 @@ comment on function ops.j1_clock_identity_digest(text,text,text,text) is
 -- what this database can check, because the stored state carries none of them.
 -- The scope OBJECT travels and the key is derived here; a key accepted on trust
 -- would be a caller-chosen address wearing a hash.
+--
+-- THE HUMAN LABEL IS NOT IN THE PREIMAGE, and the tag is v2 because it once was.
+-- Hashing scope_ref made one accepted scope -- same tenant, same three benchmark
+-- digests, same gate ids -- addressable under as many keys as it had names, so
+-- the uniqueness below held over LABELS rather than over scopes and a relabelled
+-- caller could bind a second clock for one program. The preimage is now the six
+-- identity fields; scope_ref is stored beside the key as provenance and is
+-- sealed at binding. This file has never been applied, so the version bump
+-- rewrites nothing and no backfill is proposed by it.
 create or replace function ops.j1_clock_scope_domain_tag()
 returns text language sql immutable
 set search_path = pg_catalog
-as $$ select 'doctorcre:j1-clock-scope:v1'::text $$;
+as $$ select 'doctorcre:j1-clock-scope:v2'::text $$;
 
 comment on function ops.j1_clock_scope_domain_tag() is
-  'The domain tag under which a Journey 1 authoritative clock scope is derived. Matches JOURNEY_ONE_CLOCK_SCOPE_DOMAIN_TAG in mcp-server/src/journey-one-clock-store.v5.js.';
+  'The domain tag under which a Journey 1 authoritative clock scope is derived. Matches JOURNEY_ONE_CLOCK_SCOPE_DOMAIN_TAG in mcp-server/src/journey-one-clock-store.v5.js. v2 excludes the human scope_ref label from the preimage; v1 hashed it and made one accepted scope addressable under two keys.';
 
 -- The two gate ids JOURNEY_ONE_DEADLINE_CONTRACT names, restated here for the
 -- same reason the status and deadline-resolution lists are: so a scope naming
@@ -275,14 +287,17 @@ begin
     end if;
   end loop;
   -- Rebuilt by name and C-sorted, so a reviewer can check it against
-  -- JOURNEY_ONE_CLOCK_SCOPE_FIELDS by eye. Key order is irrelevant to the hash.
+  -- JOURNEY_ONE_CLOCK_SCOPE_IDENTITY_FIELDS by eye. Key order is irrelevant to
+  -- the hash. `scope_ref` is validated above and DELIBERATELY ABSENT here: a
+  -- label a caller chose is not a fact about which program a clock belongs to,
+  -- and hashing it would let one accepted scope hold one clock PER NAME.
+  -- [j1_clock_scope_label_is_not_identity]
   v_fields := jsonb_build_object(
     'benchmark_candidate_digest', p_scope ->> 'benchmark_candidate_digest',
     'benchmark_policy_digest', p_scope ->> 'benchmark_policy_digest',
     'benchmark_subject_digest', p_scope ->> 'benchmark_subject_digest',
     'clock_origin_gate_id', p_scope ->> 'clock_origin_gate_id',
     'clock_terminus_gate_id', p_scope ->> 'clock_terminus_gate_id',
-    'scope_ref', p_scope ->> 'scope_ref',
     'tenant', p_scope ->> 'tenant');
   return 'sha256:' || encode(public.digest(convert_to(
     ops.portfolio_canonical_json(jsonb_build_array(
@@ -292,7 +307,7 @@ end;
 $$;
 
 comment on function ops.j1_clock_scope_digest(jsonb) is
-  'The key of one authoritative Journey 1 clock scope: sha256 over the canonical [domain_tag, the seven declared scope fields]. The gate ids and the tenant are checked rather than believed; the three benchmark digests are checked for shape only, because the stored clock state carries none of them and there is nothing here to compare them against.';
+  'The key of one authoritative Journey 1 clock scope: sha256 over the canonical [domain_tag, the SIX identity fields]. All seven declared fields are required and validated, but the human scope_ref label is excluded from the preimage -- it is provenance, not identity, and hashing it made one accepted scope addressable under two keys. The gate ids and the tenant are checked rather than believed; the three benchmark digests are checked for shape only, because the stored clock state carries none of them and there is nothing here to compare them against.';
 
 -- NULL IS NOT A MATCH, AND A MISSING DERIVATION IS NOT A PASS. `a <> b` is NULL
 -- when either side is null and `if NULL then ... end if` does not fire, so a
@@ -329,7 +344,7 @@ as $$
     'that the terminus receipt was admitted under the accepted per-receipt TTL policy against the accepted kernel scope',
     'that the projection the kernel read was authentic: the verifier is trusted server code and this record layer never sees it',
     'that a revision written by a direct holder of the writer bundle is a kernel computation rather than that writer''s assertion; both are trusted writers and nothing recorded here tells them apart',
-    'that the authoritative scope a clock is bound to is the accepted scope of the projection the kernel actually read: doctorcre-v5-journey-one-clock.v2 carries no subject, candidate or policy digest, so this rail compares the binding the trusted integration constructed it with and never derives one from a stored history',
+    'that the authoritative scope a stored revision is bound to is the accepted scope of the projection the kernel actually read. The module''s trusted recorder compares the kernel''s own verified_binding for that computation against its store''s scope before anything is written; a direct caller of this function is checked against neither, because doctorcre-v5-journey-one-clock.v2 carries no subject, candidate or policy digest and this rail never derives one from a stored history',
     'anything about deadline SUCCESS. A stored status is a recorded computation, never an acceptance of a deadline by this record layer')
 $$;
 
@@ -1164,6 +1179,14 @@ begin
       raise exception '[j1_clock_scope_binds_one_clock] authoritative clock scope % already holds clock %, and this revision''s origin derives %. A new origin for a scope that already has a clock is a reset wearing a new address: append to the clock that exists, or refuse',
         v_key, v_existing.clock_key, p_clock_key;
     end if;
+    -- THE LABEL IS SEALED AT BINDING. It is not identity -- v_key ignores it,
+    -- which is exactly what makes a relabelled scope the SAME scope -- and for
+    -- that reason the record must not end up holding two names for one scope or
+    -- quietly replacing the one it was bound under. Renaming is external.
+    if v_existing.clock_scope_ref is distinct from (p_clock_scope ->> 'scope_ref') then
+      raise exception '[j1_clock_scope_label_is_not_identity] authoritative clock scope % was bound under label %, and % was supplied. The label is provenance, is recorded once, and is never rewritten by a later write',
+        v_key, v_existing.clock_scope_ref, coalesce(p_clock_scope ->> 'scope_ref', 'null');
+    end if;
     return ops.j1_clock_scope_binding_json(v_existing.id);
   end if;
 
@@ -1184,7 +1207,7 @@ end;
 $$;
 
 comment on function ops.j1_clock_bind_scope(text,jsonb) is
-  'Bind one Journey 1 clock to the authoritative scope it is the clock for, deriving the scope key from the scope''s own fields. Idempotent for the exact pair; refuses a second clock for one scope and a second scope for one clock. It proves nothing about whether the supplied scope is the accepted scope of the projection the kernel read -- the stored state carries nothing to check that against, and ops.j1_clock_record_layer_cannot_prove() says so.';
+  'Bind one Journey 1 clock to the authoritative scope it is the clock for, deriving the scope key from the scope''s six identity fields. Idempotent for the exact pair; refuses a second clock for one scope, a second scope for one clock, and a second label for one scope. It proves nothing about whether the supplied scope is the accepted scope of the projection the kernel read -- the stored state carries nothing to check that against, and ops.j1_clock_record_layer_cannot_prove() says so.';
 
 -- ---------------------------------------------------------------------------
 -- THE APPEND GUARD. Everything an append depends on is checked HERE, from the

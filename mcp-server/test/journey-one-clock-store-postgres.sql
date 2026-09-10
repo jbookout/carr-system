@@ -49,8 +49,14 @@
 --     meets and the derived identity never could: a second origin for a bound
 --     scope, a clock rebound to a second scope, and an append for a clock with
 --     no scope binding at all are each refused by name. The scope key is derived
---     from the scope's own fields here, and a scope naming other gates is
---     refused rather than hashed.
+--     from the scope's own SIX IDENTITY FIELDS here, and a scope naming other
+--     gates is refused rather than hashed.
+--   * THE SCOPE LABEL IS NOT THE IDENTITY: one accepted scope under two names
+--     hashes to ONE key, so a relabelled scope presenting a fresh origin meets
+--     the clock that scope already holds -- refused before any revision is
+--     written -- while a different accepted subject is still a different scope.
+--     The label a scope was bound under is recorded once and a later write may
+--     not replace it.
 --   * A legacy v1 state schema is refused by name rather than migrated.
 --   * UPDATE and DELETE are refused everywhere (append-only), and a child row
 --     cannot be added to a revision a later revision already seals.
@@ -76,7 +82,8 @@
 --     its digest against ops.j1_clock_history_digest_of over the same
 --     decomposed content. THE SAME IS TRUE OF THE SCOPE KEY: ops.j1_clock_scope_digest
 --     and journeyOneClockScopeKey are asserted to hash the same
---     [domain_tag, seven fields] preimage and neither side can execute the
+--     [doctorcre:j1-clock-scope:v2, the six identity fields] preimage -- the
+--     human scope_ref label is excluded on both sides -- and neither can execute the
 --     other, so a disagreement there would file one program's clock under two
 --     scope keys -- one for each language -- and the uniqueness both rely on
 --     would silently hold over two different sets.
@@ -165,6 +172,19 @@ declare
                       'clock_origin_gate_id', 'foundation-assurance-minimum-accepted',
                       'clock_terminus_gate_id', 'journey-one-kernel-production-accepted',
                       'scope_ref', 'safe:clock-scope:postgres-proof-journey-one',
+                      'tenant', 'carr-internal');
+  -- THE SAME ACCEPTED SCOPE UNDER ANOTHER NAME. Identical tenant, benchmark
+  -- subject, candidate and policy digests and gate ids; only the human label
+  -- differs. It must hash to the SAME key, because a label is provenance and not
+  -- identity -- when it was in the preimage, relabelling produced a second scope
+  -- key and a caller could bind a second clock for one program under it.
+  v_scope_relabelled constant jsonb := jsonb_build_object(
+                      'benchmark_candidate_digest', 'sha256:' || repeat('92', 32),
+                      'benchmark_policy_digest', 'sha256:' || repeat('93', 32),
+                      'benchmark_subject_digest', 'sha256:' || repeat('91', 32),
+                      'clock_origin_gate_id', 'foundation-assurance-minimum-accepted',
+                      'clock_terminus_gate_id', 'journey-one-kernel-production-accepted',
+                      'scope_ref', 'safe:clock-scope:postgres-proof-journey-one-relabelled',
                       'tenant', 'carr-internal');
   -- A DIFFERENT accepted scope, for the second synthetic clock below. Two
   -- clocks are two scopes; one scope is never two clocks.
@@ -298,6 +318,49 @@ begin
   exception when others then
     if sqlerrm not like '%j1_clock_scope_binds_one_clock%' then raise; end if;
   end;
+
+  -- --- THE LABEL IS NOT THE IDENTITY --------------------------------------
+  -- ONE ACCEPTED SCOPE UNDER TWO NAMES IS ONE KEY. This is the whole of the
+  -- fix: with scope_ref in the preimage these two hashed differently, so "one
+  -- scope, one clock" was really "one label, one clock".
+  if ops.j1_clock_scope_digest(v_scope_relabelled) is distinct from v_scope_key then
+    raise exception 'SCOPE: relabelling an accepted scope produced a second scope key';
+  end if;
+  -- AND A DIFFERENT LEGITIMATE SUBJECT IS STILL A DIFFERENT SCOPE. The label is
+  -- excluded; the six identity fields are not, and moving one still separates
+  -- two programs.
+  if ops.j1_clock_scope_digest(
+       v_scope || jsonb_build_object('benchmark_subject_digest', 'sha256:' || repeat('97', 32)))
+     is not distinct from v_scope_key then
+    raise exception 'SCOPE: two different accepted subjects collapsed onto one scope key';
+  end if;
+  -- THE ALIAS ATTEMPT ITSELF, REFUSED BEFORE ANY REVISION EXISTS. A fresh origin
+  -- presented under a relabelled scope derives a clock key this rail has never
+  -- seen -- so no compare-and-swap could refuse it -- and meets the scope that
+  -- already holds a clock instead.
+  begin
+    perform ops.j1_clock_bind_scope(
+      ops.j1_clock_identity_digest(v_tenant, v_other_receipt, v_origin_at, v_benchmark),
+      v_scope_relabelled);
+    raise exception 'NEGATIVE FAILED: a relabelled scope opened a second clock for one program';
+  exception when others then
+    if sqlerrm not like '%j1_clock_scope_binds_one_clock%' then raise; end if;
+  end;
+  -- AND THE LABEL A SCOPE WAS BOUND UNDER IS RECORDED ONCE. Not identity, and
+  -- therefore not silently replaceable either: the same clock rebinding its own
+  -- scope under a new name is refused rather than overwriting the provenance.
+  begin
+    perform ops.j1_clock_bind_scope(v_clock_key, v_scope_relabelled);
+    raise exception 'NEGATIVE FAILED: a bound scope was relabelled by a later write';
+  exception when others then
+    if sqlerrm not like '%j1_clock_scope_label_is_not_identity%' then raise; end if;
+  end;
+  select count(*) into v_count from ops.j1_clock_scope_binding where clock_scope_key = v_scope_key;
+  if v_count <> 1
+     or (select clock_scope_ref from ops.j1_clock_scope_binding where clock_scope_key = v_scope_key)
+        is distinct from (v_scope ->> 'scope_ref') then
+    raise exception 'SCOPE: the refused relabelling changed the stored binding';
+  end if;
 
   -- --- POSITIVE CAS FIXTURE, part one: the creation ------------------------
   -- An explicit NULL prior. This is the only shape that may create a clock, and
