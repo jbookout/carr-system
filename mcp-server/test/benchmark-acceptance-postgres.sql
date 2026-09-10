@@ -3,7 +3,10 @@
 -- EVERY FIXTURE ROW IS ROLLED BACK, AND NO BENCHMARK IS ACCEPTED BY RUNNING
 -- THIS FILE. It cannot be: acceptance fails closed on the unresolved Gate Zero
 -- binding, which the last group below asserts directly, along with the fact that
--- the acceptance receipt table is still empty afterwards.
+-- the acceptance receipt table is still empty afterwards. The measurement
+-- coverage binding is now bound and this file proves it; that changed the number
+-- of reasons acceptance refuses from two to one and changed nothing about
+-- whether it refuses.
 --
 -- THE MANIFEST IS SYNTHETIC ON PURPOSE. The real benchmark subject -- Joe's
 -- routes, devices, hardware and cost matrix -- does not exist in any
@@ -31,11 +34,23 @@
 --   * list ORDER participates in the digest: two drafts with the same set of
 --     cache states in a different order hash differently
 --   * a draft is inert -- no job, execution envelope or capability session
---   * update and delete are refused
---   * review refuses a stale digest, a proposer's self-pass, and a pass that
---     names no measurement set
+--   * update, delete and TRUNCATE are refused
+--   * review refuses a stale digest, a proposer's self-pass, a pass that names
+--     no measurement set, and a pass that attests no coverage
+--   * the coverage proof binding RETURNS for an attested review and REFUSES for
+--     an unattested one and for one whose draft has outgrown its attestation
 --   * ACCEPTANCE FAILS CLOSED, the receipt table stays empty, and the private
 --     Gate Zero reader is executable by none of the runtime role bundles
+--
+-- TWO GROUPS ARE GUARDED AND ANNOUNCE SKIPPED, and it is worth knowing why
+-- before reading a green run as a full pass. The append-only and TRUNCATE cases
+-- need privileges the runtime bundles do not hold: under carr_writer they abort
+-- with insufficient-privilege BEFORE the trigger they exist to exercise is
+-- reached, which proves the grant half and says nothing about the trigger half.
+-- The trigger half is the one that binds the TABLE OWNER, from whom TRUNCATE
+-- cannot be revoked at all. Those groups therefore check the privilege first and
+-- say SKIPPED rather than pretending; the triggers' presence is asserted
+-- structurally either way. Run this file as the table owner to exercise them.
 --
 -- The regression fixtures added after the first review are grouped and labelled
 -- B1/B2/B3 below so each one can be traced to the finding it exists for:
@@ -46,10 +61,13 @@
 --     demonstrates the fail-open beside it so the two are visible together.
 --   * B2 -- the review function records the measurement digest a TRUSTED WRITER
 --     supplies, and cannot tell a kernel-proved digest from an asserted one. The
---     fixture writes a passing review with an arbitrary digest (which is
---     admitted: trusted-writer authority is preserved on purpose) and then shows
---     acceptance refusing on the missing coverage proof binding, so no receipt
---     can claim independently verified coverage.
+--     fixture writes a passing review with an arbitrary digest (which is still
+--     admitted: trusted-writer authority is preserved on purpose) and shows what
+--     the coverage attestation did and did not change. It did not make this
+--     database able to check those bytes -- they are not here. What it changed is
+--     that the writer can no longer record that pass ANONYMOUSLY: the attestation
+--     is required, attributed to the writer's own actor id, closed to a named
+--     evaluator, and bound to a payload digest this database recomputes.
 --   * B3 -- the Gate Zero refusal must be about the binding available HERE. The
 --     fixture asserts the message scopes itself to this record layer and does not
 --     assert that Gate Zero produced no outcome; the external pre-v5 producer is
@@ -86,6 +104,20 @@ declare
   v_jobs bigint; v_envelopes bigint; v_sessions bigint;
   v_proposer text; v_reviewer text; v_role text; v_field text; v_actor_count integer;
   v_gate_zero_message text; v_first_verdict text; v_instants integer; v_definition text;
+  v_binding jsonb;
+  -- A6. The negative cases below need privileges the runtime bundles do not
+  -- hold. Under carr_writer an UPDATE aborts with insufficient-privilege before
+  -- the append-only trigger is ever reached, which proves nothing about
+  -- append-only and looks exactly like the trigger working. These are read once
+  -- and the guarded groups announce SKIPPED rather than pretending.
+  v_can_modify boolean; v_can_truncate boolean;
+
+  -- The measurement digest the synthetic independent review names. Arbitrary on
+  -- purpose -- see B2 -- and the attestation below attests to it, which is what
+  -- makes B2 sharper rather than weaker: a trusted writer can still name bytes
+  -- nobody here checked, and now has to say so under its own actor id.
+  v_measurements   constant text := 'sha256:' || repeat('6', 64);
+  v_evaluator      constant text := 'benchmark-minimum.v5.js#evaluateBenchmarkWorkloadCoverage';
 
   -- One astral codepoint. char_length counts it once; JavaScript's String#length
   -- counts the surrogate pair as two, and that gap is the whole finding.
@@ -402,20 +434,83 @@ begin
   end if;
 
   -- --- append-only ----------------------------------------------------------
-  begin
-    update ops.benchmark_manifest_draft set draft_version = 99 where id = v_draft;
-    raise exception 'update of a benchmark draft was not refused';
-  exception when others then
-    get stacked diagnostics v_err = message_text;
-    if v_err !~ 'append-only' then raise; end if;
-  end;
-  begin
-    delete from ops.benchmark_manifest_dimension where draft_id = v_draft;
-    raise exception 'delete of a benchmark dimension was not refused';
-  exception when others then
-    get stacked diagnostics v_err = message_text;
-    if v_err !~ 'append-only' then raise; end if;
-  end;
+  -- A GREEN RUN UNDER THE WRONG ROLE IS NOT A PASS, WHICH IS WHY THIS IS GUARDED.
+  -- The grants in the candidate SQL revoke UPDATE, DELETE and TRUNCATE from
+  -- every runtime bundle, so under carr_writer these statements abort with
+  -- insufficient-privilege BEFORE the append-only trigger is reached. That
+  -- refusal is real but it is a different refusal: it proves the grant half and
+  -- says nothing about the trigger half, which is precisely the half that binds
+  -- the table owner. Running them anyway would either fail the whole proof for
+  -- an expected reason or -- worse, if the message check were ever loosened --
+  -- report the grant refusal as evidence of append-only. So the privilege is
+  -- read first and the group announces SKIPPED when it is absent.
+  v_can_modify := has_table_privilege(current_user, 'ops.benchmark_manifest_draft', 'update')
+              and has_table_privilege(current_user, 'ops.benchmark_manifest_dimension', 'delete');
+  v_can_truncate := has_table_privilege(current_user, 'ops.benchmark_manifest_draft', 'truncate');
+
+  if not v_can_modify then
+    raise notice 'SKIPPED: this session (%) holds no UPDATE/DELETE on the benchmark tables, so the append-only TRIGGER cannot be exercised here; what a run under this role shows is the grant half only. Re-run as the table owner to exercise the trigger.', current_user;
+  else
+    begin
+      update ops.benchmark_manifest_draft set draft_version = 99 where id = v_draft;
+      raise exception 'update of a benchmark draft was not refused';
+    exception when others then
+      get stacked diagnostics v_err = message_text;
+      if v_err !~ 'append-only' then raise; end if;
+    end;
+    begin
+      delete from ops.benchmark_manifest_dimension where draft_id = v_draft;
+      raise exception 'delete of a benchmark dimension was not refused';
+    exception when others then
+      get stacked diagnostics v_err = message_text;
+      if v_err !~ 'append-only' then raise; end if;
+    end;
+  end if;
+
+  -- TRUNCATE, WHICH IS THE ONE THE REVOKE CANNOT COVER. It cannot be revoked
+  -- from the table owner and a row-level trigger never sees it, so before the
+  -- statement-level trigger was installed beside the row-level one this was the
+  -- gap: every runtime bundle refused, and the owner could empty the table. The
+  -- guard is the same as above and matters more here, because the ONLY session
+  -- that can prove this is the one that could otherwise do the damage.
+  if not v_can_truncate then
+    raise notice 'SKIPPED: this session (%) cannot TRUNCATE the benchmark tables, so the statement-level append-only trigger cannot be exercised here. It is asserted structurally below and proved only under the table owner.', current_user;
+  else
+    begin
+      truncate ops.benchmark_manifest_dimension;
+      raise exception 'TRUNCATE of a benchmark content table was not refused; the revoke does not bind the table owner and a row-level trigger never sees TRUNCATE';
+    exception when others then
+      get stacked diagnostics v_err = message_text;
+      if v_err !~ 'append-only' then raise; end if;
+    end;
+  end if;
+
+  -- STRUCTURAL, so a run under any role still catches the trigger being dropped.
+  -- Both triggers, on all ten relations: the row-level one for UPDATE/DELETE and
+  -- the statement-level one for TRUNCATE. Losing either silently reopens exactly
+  -- one of the two holes.
+  foreach v_field in array array[
+    'benchmark_manifest_draft', 'benchmark_manifest_dimension', 'benchmark_manifest_workload',
+    'benchmark_manifest_request_size', 'benchmark_manifest_concurrency',
+    'benchmark_manifest_browser', 'benchmark_manifest_evaluator',
+    'benchmark_manifest_review', 'benchmark_measurement_coverage_attestation',
+    'benchmark_manifest_acceptance_receipt'
+  ] loop
+    if not exists (
+      select 1 from pg_trigger t join pg_class c on c.oid = t.tgrelid
+        join pg_namespace n on n.oid = c.relnamespace
+       where n.nspname = 'ops' and c.relname = v_field
+         and t.tgname = v_field || '_append_only' and not t.tgisinternal) then
+      raise exception 'ops.% carries no row-level append-only trigger', v_field;
+    end if;
+    if not exists (
+      select 1 from pg_trigger t join pg_class c on c.oid = t.tgrelid
+        join pg_namespace n on n.oid = c.relnamespace
+       where n.nspname = 'ops' and c.relname = v_field
+         and t.tgname = v_field || '_no_truncate' and not t.tgisinternal) then
+      raise exception 'ops.% carries no statement-level TRUNCATE trigger; the revoke does not bind the table owner and a row-level trigger never sees TRUNCATE', v_field;
+    end if;
+  end loop;
 
   -- --- review guards --------------------------------------------------------
   -- A 'fail' verdict is used for the staleness case: the self-pass and
@@ -423,7 +518,7 @@ begin
   -- this can be refused.
   begin
     perform ops.benchmark_review_manifest_draft(v_draft, gen_random_uuid(), v_placeholder,
-      'fail', null::text, 'stale');
+      'fail', null::text, 'stale', null::jsonb);
     raise exception 'a review against a stale digest was not refused';
   exception when others then
     get stacked diagnostics v_err = message_text;
@@ -432,7 +527,11 @@ begin
 
   begin
     perform ops.benchmark_review_manifest_draft(v_draft, gen_random_uuid(), v_digest,
-      'pass', 'sha256:' || repeat('6', 64), 'self');
+      'pass', v_measurements, 'self',
+      jsonb_build_object('coverage_proved_by', v_evaluator,
+        'benchmark_payload_digest', v_digest,
+        'measurement_set_digest', v_measurements,
+        'evaluation_digest', 'sha256:' || repeat('a', 64)));
     raise exception 'a proposer self-review pass was not refused';
   exception when others then
     get stacked diagnostics v_err = message_text;
@@ -443,18 +542,122 @@ begin
   -- different actor: the reviewer is derived from it and is never a parameter.
   perform set_config('carr.acting_actor_slug', v_reviewer, true);
 
-  -- A PASS THAT NAMES NO MEASUREMENT SET IS REFUSED. r7's pass rule requires
-  -- every required matrix cell to be exercised and to meet its fixed SLO, so a
-  -- passing review has to name the exact evidence it read. The reviewer is
-  -- independent here, so the self-pass rule cannot be what refuses this.
+  -- A PASS THAT NAMES NO MEASUREMENT SET AND ATTESTS NOTHING IS REFUSED. r7's
+  -- pass rule requires every required matrix cell to be exercised and to meet
+  -- its fixed SLO, so a passing review has to name the exact evidence it read
+  -- AND say what proved it. The reviewer is independent here, so the self-pass
+  -- rule cannot be what refuses this.
+  --
+  -- NOTE WHICH LAYER REFUSES, because it moved. The write function now checks the
+  -- pass/attestation pair before it inserts anything, so this arrives at the
+  -- attestation refusal rather than at the benchmark_review_pass_binds_measurements
+  -- column constraint. That constraint has not been weakened -- it still binds a
+  -- direct insert and its presence is asserted structurally below -- it is simply
+  -- no longer the first thing this call meets.
   begin
     perform ops.benchmark_review_manifest_draft(v_draft, gen_random_uuid(), v_digest,
-      'pass', null::text, 'no measurements');
+      'pass', null::text, 'no measurements', null::jsonb);
     raise exception 'a passing review naming no measurement set was not refused';
   exception when others then
     get stacked diagnostics v_err = message_text;
-    if v_err !~ 'benchmark_review_pass_binds_measurements' then raise; end if;
+    if v_err !~ 'unattested pass is refused' then raise; end if;
   end;
+
+  -- CLAUSE 4, AND THE ONE THAT RETIRES THE AMBIGUITY. A passing review written
+  -- by a DIRECT call to this function -- the exact path that used to produce a
+  -- digest nobody could distinguish from a proved one -- refuses at write time
+  -- unless it says what proved it. Trusted-writer authority is preserved: this
+  -- writer may still record a pass. It may no longer record one anonymously.
+  begin
+    perform ops.benchmark_review_manifest_draft(v_draft, gen_random_uuid(), v_digest,
+      'pass', v_measurements, 'a pass with evidence named and nothing attesting it', null::jsonb);
+    raise exception 'a passing review with no coverage attestation was not refused';
+  exception when others then
+    get stacked diagnostics v_err = message_text;
+    if v_err !~ 'unattested pass is refused' then raise; end if;
+  end;
+
+  -- AND THE CONVERSE. A fail verdict proves no coverage, so it must attest none:
+  -- an attestation beside a failing review would be a proof of something that
+  -- did not happen.
+  begin
+    perform ops.benchmark_review_manifest_draft(v_draft, gen_random_uuid(), v_digest,
+      'fail', null::text, 'a failure carrying a proof',
+      jsonb_build_object('coverage_proved_by', v_evaluator,
+        'benchmark_payload_digest', v_digest,
+        'measurement_set_digest', v_measurements,
+        'evaluation_digest', 'sha256:' || repeat('a', 64)));
+    raise exception 'a failing review carrying a coverage attestation was not refused';
+  exception when others then
+    get stacked diagnostics v_err = message_text;
+    if v_err !~ 'must record no coverage attestation' then raise; end if;
+  end;
+
+  -- THE THREE ATTESTATION NEGATIVES, EACH ITS OWN CASE so a single refusal
+  -- cannot stand in for three.
+  --
+  -- (a) an attestation over bytes the review does not name.
+  begin
+    perform ops.benchmark_review_manifest_draft(v_draft, gen_random_uuid(), v_digest,
+      'pass', v_measurements, 'attesting to other bytes',
+      jsonb_build_object('coverage_proved_by', v_evaluator,
+        'benchmark_payload_digest', v_digest,
+        'measurement_set_digest', 'sha256:' || repeat('7', 64),
+        'evaluation_digest', 'sha256:' || repeat('a', 64)));
+    raise exception 'an attestation naming a different measurement set was not refused';
+  exception when others then
+    get stacked diagnostics v_err = message_text;
+    if v_err !~ 'not the set this review names' then raise; end if;
+  end;
+  -- (b) an attestation against a payload digest this draft does not produce.
+  begin
+    perform ops.benchmark_review_manifest_draft(v_draft, gen_random_uuid(), v_digest,
+      'pass', v_measurements, 'attesting against other bytes',
+      jsonb_build_object('coverage_proved_by', v_evaluator,
+        'benchmark_payload_digest', v_placeholder,
+        'measurement_set_digest', v_measurements,
+        'evaluation_digest', 'sha256:' || repeat('a', 64)));
+    raise exception 'an attestation naming a payload digest this draft does not produce was not refused';
+  exception when others then
+    get stacked diagnostics v_err = message_text;
+    if v_err !~ 'which this draft does not produce' then raise; end if;
+  end;
+  -- (c) an evaluator outside the closed set. This is the clause that keeps
+  -- "which evaluator proved this" a constrained fact rather than free text, and
+  -- it is checked in three places: here, in the reader, and by the column.
+  begin
+    perform ops.benchmark_review_manifest_draft(v_draft, gen_random_uuid(), v_digest,
+      'pass', v_measurements, 'attested by something else entirely',
+      jsonb_build_object('coverage_proved_by', 'some-other-module.js#proveCoverage',
+        'benchmark_payload_digest', v_digest,
+        'measurement_set_digest', v_measurements,
+        'evaluation_digest', 'sha256:' || repeat('a', 64)));
+    raise exception 'an attestation naming an unadmitted evaluator was not refused';
+  exception when others then
+    get stacked diagnostics v_err = message_text;
+    if v_err !~ 'not a benchmark coverage evaluator this rail admits' then raise; end if;
+  end;
+  -- (d) the attestation shape is CLOSED, like every other shape in this rail: an
+  -- unknown key is a caller believing it recorded something that was dropped.
+  begin
+    perform ops.benchmark_review_manifest_draft(v_draft, gen_random_uuid(), v_digest,
+      'pass', v_measurements, 'an attestation with an extra field',
+      jsonb_build_object('coverage_proved_by', v_evaluator,
+        'benchmark_payload_digest', v_digest,
+        'measurement_set_digest', v_measurements,
+        'evaluation_digest', 'sha256:' || repeat('a', 64),
+        'verified', true));
+    raise exception 'an attestation carrying an unknown field was not refused';
+  exception when others then
+    get stacked diagnostics v_err = message_text;
+    if v_err !~ 'unknown field' then raise; end if;
+  end;
+
+  -- The column constraint the first case above used to meet is still there, and
+  -- still binds a direct insert that never reaches the write function.
+  if not exists (select 1 from pg_constraint where conname = 'benchmark_review_pass_binds_measurements') then
+    raise exception 'the benchmark_review_pass_binds_measurements constraint is missing; the write function alone does not bind a direct insert';
+  end if;
 
   -- B2. THIS DIGEST IS ARBITRARY, AND IT IS ADMITTED ON PURPOSE. Nothing proved
   -- coverage over sha256:6666...; the writer said it read those bytes and this
@@ -464,10 +667,23 @@ begin
   -- follow is an acceptance receipt that reads this column as independently
   -- verified coverage, which the acceptance group below proves it cannot.
   v_review := ops.benchmark_review_manifest_draft(v_draft, gen_random_uuid(), v_digest,
-    'pass', 'sha256:' || repeat('6', 64), 'synthetic independent review: matrix covered');
+    'pass', v_measurements, 'synthetic independent review: matrix covered',
+    jsonb_build_object('coverage_proved_by', v_evaluator,
+      'benchmark_payload_digest', v_digest,
+      'measurement_set_digest', v_measurements,
+      'evaluation_digest', 'sha256:' || repeat('a', 64)));
   if v_review is null then
     raise exception 'an independent passing review was not recorded';
   end if;
+
+  -- AND THE COMMIT-TIME CHECK ADMITS IT, which is what keeps the refusals above
+  -- from being a blanket refusal that would make every one of them vacuous. The
+  -- pass/attestation trigger is DEFERRED -- the attestation row references the
+  -- review row and cannot exist before it -- so in a rollback-only fixture it
+  -- would otherwise never fire at all. Forcing it immediate here fires it
+  -- against the one review that should survive it.
+  set constraints all immediate;
+  set constraints all deferred;
 
   -- --- review idempotency binds every stored parameter ----------------------
   -- review_summary included. A replay that matched on the digests but carried
@@ -478,14 +694,14 @@ begin
     v_replayed uuid;
   begin
     v_replayed := ops.benchmark_review_manifest_draft(v_draft, v_key, v_digest,
-      'fail', null::text, 'first summary');
+      'fail', null::text, 'first summary', null::jsonb);
     if ops.benchmark_review_manifest_draft(v_draft, v_key, v_digest,
-         'fail', null::text, 'first summary') <> v_replayed then
+         'fail', null::text, 'first summary', null::jsonb) <> v_replayed then
       raise exception 'an exact idempotent review replay created a second review';
     end if;
     begin
       v_replayed := ops.benchmark_review_manifest_draft(v_draft, v_key, v_digest,
-        'fail', null::text, 'a different summary entirely');
+        'fail', null::text, 'a different summary entirely', null::jsonb);
       raise exception 'a review idempotency key reused with a different summary was not refused';
     exception when others then
       get stacked diagnostics v_err = message_text;
@@ -498,7 +714,7 @@ begin
 
   -- A second recorded review, so the readback's ordering has something to order.
   v_review2 := ops.benchmark_review_manifest_draft(v_draft, gen_random_uuid(), v_digest,
-    'fail', null::text, 'synthetic second review: recorded for the ordering fixture');
+    'fail', null::text, 'synthetic second review: recorded for the ordering fixture', null::jsonb);
 
   -- --- the review order needs the primary-key tiebreak ----------------------
   -- created_at defaults to now(), which is TRANSACTION START TIME: both reviews
@@ -636,19 +852,102 @@ begin
     end if;
   end if;
 
-  -- B2. The coverage proof binding reader refuses too, and it is a SEPARATE
-  -- reader from Gate Zero on purpose: landing an authenticated Gate Zero record
-  -- must not silently promote a trusted writer's measurement digest into a
-  -- proof. It evaluates no coverage and is not a second coverage authority.
+  -- B2, REVISITED. The coverage proof binding reader now READS A RECORD, and it
+  -- is still a SEPARATE reader from Gate Zero on purpose: this binding resolving
+  -- did not resolve that one, and acceptance above still failed closed.
+  --
+  -- WHAT B2 STILL SHOWS, and it shows it more sharply than before. The digest
+  -- attested for v_review is sha256:6666... -- arbitrary bytes nothing in this
+  -- transaction evaluated. The attestation is admitted, because trusted-writer
+  -- authority is preserved deliberately and this database cannot read samples it
+  -- does not hold. What changed is that the assertion is now attributed, closed
+  -- to a named evaluator, and impossible to omit. The database still does not
+  -- know that coverage was proved; it knows exactly who said so and about what.
   begin
-    perform ops.benchmark_measurement_coverage_binding(v_review);
-    raise exception 'the coverage binding reader returned a proof; no coverage attestation exists here';
+    v_binding := ops.benchmark_measurement_coverage_binding(v_review);
+    if v_binding ->> 'review_id' <> v_review::text then
+      raise exception 'the coverage binding reader returned a different review';
+    end if;
+    if v_binding ->> 'measurement_set_digest' <> v_measurements then
+      raise exception 'the coverage binding reader did not return the measurement set the review names';
+    end if;
+    if v_binding ->> 'coverage_proved_by' <> v_evaluator then
+      raise exception 'the coverage binding reader did not return the attested evaluator';
+    end if;
+    -- The evaluation digest is recorded and deliberately NOT returned: nothing
+    -- binds to it, and a field nothing consumes invites a future reader to
+    -- consume it as something it is not.
+    if v_binding ? 'evaluation_digest' then
+      raise exception 'the coverage binding reader returns an evaluation digest nothing binds';
+    end if;
   exception when others then
     get stacked diagnostics v_err = message_text;
-    if v_err !~ 'coverage proof binding' and v_err !~ 'permission denied' then
+    if v_err !~ 'permission denied' then raise; end if;
+    raise notice 'the coverage binding reader is not executable from this session; its return is checked only where it is reachable.';
+  end;
+
+  -- AND IT STILL REFUSES FOR A REVIEW WITH NO ATTESTATION. v_review2 is a fail
+  -- verdict: it proved no coverage, it recorded none, and asking for its binding
+  -- is asking for something that does not exist. This is the refusal the
+  -- requirement was quoted under, and it survives the requirement resolving.
+  begin
+    perform ops.benchmark_measurement_coverage_binding(v_review2);
+    raise exception 'the coverage binding reader returned a proof for a review that attested nothing';
+  exception when others then
+    get stacked diagnostics v_err = message_text;
+    if v_err !~ 'none is recorded' and v_err !~ 'permission denied' then
       raise exception 'the coverage binding reader refused for an unexpected reason: %', v_err;
     end if;
   end;
+
+  -- AND IT REFUSES AN ATTESTATION THE DRAFT HAS OUTGROWN. This is the one check
+  -- the database can make entirely on its own, and it is the reason the payload
+  -- digest is RECOMPUTED rather than read back: a draft's content can still be
+  -- appended to before acceptance, and appending moves the digest its rows
+  -- produce. An attestation about the old bytes must stop binding at that moment
+  -- rather than silently outliving them.
+  --
+  -- Guarded and rolled back: direct INSERT is granted to nobody, so only the
+  -- table owner can stage this, and the subtransaction puts the draft back so
+  -- every later assertion still sees the digest it was written against.
+  if has_table_privilege(current_user, 'ops.benchmark_manifest_dimension', 'insert') then
+    begin
+      insert into ops.benchmark_manifest_dimension(draft_id, dimension, ordinal, value)
+      values (v_draft, 'routes', 1, '/synthetic/second');
+      if ops.benchmark_payload_digest(v_draft) = v_digest then
+        raise exception 'appending a dimension row did not move the payload digest; this fixture no longer stages the case it describes';
+      end if;
+      begin
+        perform ops.benchmark_measurement_coverage_binding(v_review);
+        raise exception 'a coverage attestation naming a payload digest the draft no longer produces was still returned as a binding';
+      exception when others then
+        get stacked diagnostics v_err = message_text;
+        if v_err !~ 'no longer produces' and v_err !~ 'permission denied' then
+          raise exception 'the coverage binding reader refused a stale attestation for an unexpected reason: %', v_err;
+        end if;
+      end;
+      raise exception '%', v_learn;
+    exception when others then
+      if sqlerrm <> v_learn then raise; end if;
+    end;
+    -- The rollback landed: the draft produces the digest it was reviewed under.
+    if ops.benchmark_payload_digest(v_draft) <> v_digest then
+      raise exception 'the staged dimension row did not roll back; the rest of this proof would be about different bytes';
+    end if;
+  else
+    raise notice 'SKIPPED: this session (%) cannot insert a benchmark content row, so the stale-attestation case is not staged here; it is exercised under the table owner.', current_user;
+  end if;
+
+  -- THE PASS/ATTESTATION PAIR IS ALSO ENFORCED AT COMMIT, for the table owner
+  -- and for any future write path that forgets. Structural, because a fixture
+  -- that rolls back never reaches commit.
+  if not exists (
+    select 1 from pg_trigger t join pg_class c on c.oid = t.tgrelid
+      join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'ops' and c.relname = 'benchmark_manifest_review'
+       and t.tgname = 'benchmark_pass_requires_attestation' and t.tgdeferrable) then
+    raise exception 'the deferred benchmark_pass_requires_attestation constraint trigger is missing; the write function alone does not bind the table owner';
+  end if;
 
   -- --- the private reader is granted to nobody ------------------------------
   -- PUBLIC is checked against the catalog rather than through
@@ -680,8 +979,15 @@ begin
     -- stepped around with raw SQL.
     if has_table_privilege(v_role, 'ops.benchmark_manifest_draft', 'insert')
        or has_table_privilege(v_role, 'ops.benchmark_manifest_review', 'insert')
+       or has_table_privilege(v_role, 'ops.benchmark_measurement_coverage_attestation', 'insert')
        or has_table_privilege(v_role, 'ops.benchmark_manifest_acceptance_receipt', 'insert') then
       raise exception 'role % holds direct INSERT on a benchmark table', v_role;
+    end if;
+    -- Nor UPDATE, DELETE or TRUNCATE. The TRUNCATE half is the one the trigger
+    -- above has to cover for the owner; for every runtime bundle it is revoked.
+    if has_table_privilege(v_role, 'ops.benchmark_manifest_review', 'truncate')
+       or has_table_privilege(v_role, 'ops.benchmark_measurement_coverage_attestation', 'truncate') then
+      raise exception 'role % can TRUNCATE a benchmark table', v_role;
     end if;
   end loop;
 
@@ -768,11 +1074,28 @@ begin
   -- The readback says out loud that a measurement digest is not verified
   -- coverage, so a caller reading one off a passing review is not entitled to
   -- assume this database checked anything. It did not.
-  if (v_readback -> 'measurement_coverage_binding' ->> 'resolved')::boolean is distinct from false then
-    raise exception 'the readback does not report the measurement coverage proof binding as unresolved';
+  if (v_readback -> 'measurement_coverage_binding' ->> 'resolved')::boolean is distinct from true then
+    raise exception 'the readback does not report the measurement coverage proof binding as resolved';
+  end if;
+  -- AND IT STILL SAYS WHAT THE BINDING IS NOT. A readback that reported
+  -- resolved: true and nothing else would let a caller read an attributed
+  -- assertion as a verification this database performed.
+  if v_readback -> 'measurement_coverage_binding' ->> 'note' !~* 'evaluates no coverage itself'
+     or v_readback -> 'measurement_coverage_binding' ->> 'note' !~* 'not an independent verification' then
+    raise exception 'the readback does not state the limit of the coverage attestation: %',
+      v_readback -> 'measurement_coverage_binding' ->> 'note';
+  end if;
+  -- Per review: the passing one names its evaluator, the failing one names none.
+  if (select r ->> 'coverage_proved_by' from jsonb_array_elements(v_readback -> 'reviews') r
+       where r ->> 'verdict' = 'pass' limit 1) <> v_evaluator then
+    raise exception 'the readback does not report the evaluator attested for the passing review';
+  end if;
+  if (select r ->> 'coverage_proved_by' from jsonb_array_elements(v_readback -> 'reviews') r
+       where r ->> 'verdict' = 'fail' limit 1) is not null then
+    raise exception 'the readback reports a coverage evaluator for a failing review';
   end if;
 
-  raise notice 'benchmark acceptance PostgreSQL proof passed: digest recomputed from rows and stable, order-sensitive, incomplete and mis-weighted payloads refused, request sizes bounded at 2^53-1, UTF-16 length parity enforced, append-only enforced, review guards and review idempotency refuse, reviews ordered by (created_at, id), an underived binding refuses instead of comparing to NULL, the Gate Zero refusal is scoped to this record layer, both private readers are unreachable from every role bundle, acceptance FAILS CLOSED on the Gate Zero binding AND on the measurement coverage proof binding, and no acceptance receipt exists.';
+  raise notice 'benchmark acceptance PostgreSQL proof passed: digest recomputed from rows and stable, order-sensitive, incomplete and mis-weighted payloads refused, request sizes bounded at 2^53-1, UTF-16 length parity enforced, append-only enforced on update, delete and truncate, review guards and review idempotency refuse, an unattested pass and a mis-attested pass are both refused at write time, the coverage proof binding returns for an attested review and refuses for an unattested or outgrown one, reviews ordered by (created_at, id), an underived binding refuses instead of comparing to NULL, the Gate Zero refusal is scoped to this record layer, both private readers are unreachable from every role bundle, acceptance FAILS CLOSED on the Gate Zero binding, and no acceptance receipt exists.';
 end $proof$;
 
 rollback;

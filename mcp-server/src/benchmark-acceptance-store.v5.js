@@ -44,10 +44,11 @@
 // a projection that copied a stored class string would turn the partner test
 // into the caller boolean this rail exists to prevent.
 //
-// THE ACCEPTANCE VERB REFUSES TODAY, ON PURPOSE, AND FOR TWO SEPARATE REASONS.
-// r7's receipt_producer_step_registry makes the benchmark acceptance step depend
-// on exactly two steps; acceptance additionally rests on the passing review's
-// measurement evidence, which is the second gap.
+// THE ACCEPTANCE VERB REFUSES TODAY, ON PURPOSE, AND NOW FOR ONE REASON RATHER
+// THAN TWO. r7's receipt_producer_step_registry makes the benchmark acceptance
+// step depend on exactly two steps; acceptance additionally rests on the passing
+// review's measurement evidence, which WAS the second gap and is now recorded.
+// The remaining refusal is Gate Zero, and it is not a gap this file can close.
 //
 //   * step:portfolio-constitution-human-exact-hash-acceptance-receipt — BOUND.
 //     ops.portfolio_accepted_revision() from migration 0496 answers it,
@@ -72,31 +73,38 @@
 //     exported, it takes no argument, it reads no configuration, and it always
 //     throws. The acceptance handler calls it BEFORE it issues any query, so
 //     the acceptance path cannot even be observed touching the database.
-//   * the review's MEASUREMENT COVERAGE — NO PROOF BINDING HERE, AND SEPARATE
-//     FROM GATE ZERO ON PURPOSE. This verb's own review path proves coverage
-//     with the kernel against the payload rebuilt from the stored rows and
-//     computes the measurement digest itself. But acceptance names a review by
-//     id and reads it back out of the record layer, where a row written by any
-//     other holder of the writer bundle — calling
-//     ops.benchmark_review_manifest_draft directly — carries a digest that was
-//     asserted rather than proved, and nothing recorded beside it tells the two
-//     apart. Both writers are trusted; that is not the defect. The defect would
-//     be a receipt reading either one as INDEPENDENTLY VERIFIED COVERAGE, so
-//     `readMeasurementCoverageBinding` is a second private fail-closed stub and
-//     it survives the Gate Zero record landing. Implementing Gate Zero must not
-//     silently promote an assertion into a proof.
+//   * the review's MEASUREMENT COVERAGE — BOUND, AND STILL SEPARATE FROM GATE
+//     ZERO ON PURPOSE. This verb's own review path proves coverage with the
+//     kernel against the payload rebuilt from the stored rows and computes the
+//     measurement digest itself. It now RECORDS what proved it, in the same
+//     definer call that writes the review: the evaluator by name from a closed
+//     source constant, the payload digest the evaluator returned, the
+//     measurement digest it proved over, and the digest of the evaluation. A
+//     passing review cannot be written without one, by any writer, so the
+//     "asserted or proved, and nothing tells them apart" ambiguity is retired —
+//     not by promoting the digest, but by making the pass unwritable without an
+//     attributed statement of what proved it.
+//     `readMeasurementCoverageBinding` is a real read of that record. It refuses
+//     a missing attestation, an evaluator outside the closed set, an attested
+//     payload digest the draft no longer produces, and an attested measurement
+//     digest that is not the review row's. It is still private, and it is still
+//     read AFTER Gate Zero, so landing Gate Zero cannot skip it.
 //
-// THE REMAINING TRUST BOUNDARY, STATED EXACTLY. The samples never enter the
-// record layer. Even once the review path records an attestation naming the
-// kernel evaluator, the payload digest it proved against and the measurement
-// digest it proved over, the record layer is still believing a TRUSTED WRITER
-// about an evaluation it did not perform and cannot repeat. The attestation
-// makes that belief explicit, attributed and auditable; it does not make the
-// database a verifier of coverage, and no comment here should be read that way.
+// THE REMAINING TRUST BOUNDARY, STATED EXACTLY, AND UNCHANGED BY THE
+// ATTESTATION LANDING. The samples never enter the record layer. Now that the
+// review path records an attestation naming the kernel evaluator, the payload
+// digest it proved against and the measurement digest it proved over, the record
+// layer is STILL believing a TRUSTED WRITER about an evaluation it did not
+// perform and cannot repeat. The attestation makes that belief explicit,
+// attributed and auditable, and it makes an unattested pass unwritable; it does
+// not make the database a verifier of coverage, and no comment here should be
+// read that way. Two of the three attested values — the payload digest and the
+// measurement digest — the database does check for itself. The third, that the
+// named evaluator is what ran, it takes on the writer's word.
 //
 // Both integration requirements are stated in full in the two frozen constants
-// below and repeated in the refusal details, so each gap is named at the point
-// where someone hits it. Every acceptance is additionally required to be
+// below and repeated in the refusal details, so each is named — the one still
+// unbound and the one resolved — at the point where someone hits it. Every acceptance is additionally required to be
 // strictly after both prerequisites — an acceptance AT a prerequisite instant
 // did not follow it, which is the same exclusive reading
 // benchmark-minimum.v5.js applies to member observation.
@@ -105,9 +113,14 @@
 //   * The authenticated Gate Zero outcome record, and reading it here and in
 //     ops.benchmark_gate_zero_outcome(). Both stubs must be replaced together;
 //     deleting the throw in one of them opens the gate without a record.
-//   * The measurement coverage attestation, and reading it here and in
-//     ops.benchmark_measurement_coverage_binding(uuid). Same rule: both stubs,
-//     one change.
+//   * NO LONGER OUTSTANDING: the measurement coverage attestation. It is
+//     recorded by the review write path and read by both readers, landed
+//     together in one change as the requirement demanded. What it does NOT
+//     resolve is the authenticated benchmark_coverage fact the join projection
+//     needs — that one requires a LIVE declared evaluator seat and a storage
+//     verifier that re-derives the evaluation, and it is a different obligation
+//     for a different artifact. See benchmark-minimum.v5.js's own statement of
+//     it; nothing here should be read as having supplied it.
 //   * Applying ops/benchmark-acceptance.candidate.sql as a numbered migration.
 //     It is candidate source and is not in public.schema_migrations.
 //   * Registering these verbs. `benchmarkAcceptanceStoreTools` is exported and
@@ -166,6 +179,27 @@ export const BENCHMARK_DRAFT_SCALAR_FIELDS = Object.freeze([
 export const BENCHMARK_EMITTED_CONSTANT_FIELDS = Object.freeze([
   "cost_variance_thresholds", "deadline_contract", "slo_thresholds",
 ]);
+
+/**
+ * THE CLOSED SET OF COVERAGE EVALUATORS THIS RAIL WILL ATTEST TO.
+ *
+ * One member, and it is a NAME rather than a second implementation. Recording
+ * "who proved this coverage" is citing the kernel, not evaluating anything:
+ * evaluateBenchmarkWorkloadCoverage remains the only place in this system where
+ * a benchmark coverage judgement is made, and nothing here re-decides it.
+ *
+ * It is a CLOSED SOURCE CONSTANT rather than a value on the write path because
+ * the alternative is free text a writer chooses, which would make "which
+ * evaluator proved this" an assertion instead of a constrained fact. The same
+ * list is carried in SQL by ops.benchmark_coverage_evaluators(), and both sides
+ * check membership: a name outside the set is refused on the write path, on the
+ * read path and by the attestation column's own check constraint.
+ */
+export const BENCHMARK_COVERAGE_EVALUATORS = Object.freeze([
+  "benchmark-minimum.v5.js#evaluateBenchmarkWorkloadCoverage",
+]);
+/** The one evaluator this module's own review path cites, from the closed set. */
+export const BENCHMARK_COVERAGE_EVALUATOR = BENCHMARK_COVERAGE_EVALUATORS[0];
 
 const SHA256_REF = /^sha256:[0-9a-f]{64}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -513,31 +547,54 @@ export const BENCHMARK_GATE_ZERO_INTEGRATION_REQUIREMENT = deepFreeze({
 });
 
 /**
- * The measurement coverage proof binding, stated once and quoted in its refusal.
+ * The measurement coverage proof binding — RESOLVED, and resolved to exactly
+ * what it claimed it would be worth and no more.
  *
- * Like the constant above this describes a MISSING RECORD. It is not a coverage
- * rule, it evaluates nothing, and it does not compete with
- * evaluateBenchmarkWorkloadCoverage — the kernel remains the only place coverage
- * is judged. The question it names is narrower: given a review row, is there
- * anything recorded that binds its measurement_set_digest to that judgement?
+ * Like the constant above it is not a coverage rule, it evaluates nothing, and
+ * it does not compete with evaluateBenchmarkWorkloadCoverage — the kernel
+ * remains the only place coverage is judged. The question it named was narrower:
+ * given a review row, is there anything recorded that binds its
+ * measurement_set_digest to that judgement? There is now.
+ *
+ * `remaining_trust_boundary` below is UNCHANGED, word for word, from when this
+ * requirement was unresolved. That is deliberate and it is the point: the
+ * attestation was specified in advance to be worth an explicit attributed
+ * assertion rather than a verification, so resolving it must not quietly
+ * re-describe it as something larger.
  */
 export const BENCHMARK_MEASUREMENT_COVERAGE_INTEGRATION_REQUIREMENT = deepFreeze({
   binding_ref: "binding:benchmark-measurement-coverage-proof",
-  resolved: false,
+  resolved: true,
   independent_of: GATE_ZERO_STEP_REF,
-  why_unresolved: [
-    "A review's measurement_set_digest names the bytes its writer read. Naming is not proving, and no record beside it says how the digest came to be there.",
-    "Written through review-benchmark-manifest-draft, the digest was computed here after evaluateBenchmarkWorkloadCoverage proved coverage against the payload rebuilt from the stored rows. Written by a direct call to ops.benchmark_review_manifest_draft, it is a trusted writer's assertion. Acceptance reads a review by id and cannot distinguish the two.",
-    "Both writers are trusted — direct INSERT is granted to no role — and that trusted-writer authority is preserved rather than replaced. What is absent is the record that tells them apart.",
+  what_was_unbound: [
+    "A review's measurement_set_digest named the bytes its writer read. Naming is not proving, and no record beside it said how the digest came to be there.",
+    "Written through review-benchmark-manifest-draft, the digest was computed here after evaluateBenchmarkWorkloadCoverage proved coverage against the payload rebuilt from the stored rows. Written by a direct call to ops.benchmark_review_manifest_draft, it was a trusted writer's assertion. Acceptance read a review by id and could not distinguish the two.",
+    "Both writers are trusted — direct INSERT is granted to no role — and that trusted-writer authority is preserved rather than replaced. What was absent is the record that tells them apart.",
   ],
-  required_to_resolve: [
-    "Record, in the same write path that records a passing review, an attestation naming the kernel evaluator that proved coverage, the payload digest it proved against and the measurement digest it proved over.",
-    "Implement the private reader in this module and ops.benchmark_measurement_coverage_binding(uuid) against that attestation, together.",
-    "Do not resolve this by landing the Gate Zero record: the two bindings are independent and acceptance must still refuse here afterwards.",
+  resolved_by: [
+    "ops.benchmark_measurement_coverage_attestation, written in the same definer call as the review it attests, so a passing review and its attestation cannot come apart and an unattested pass cannot be written at all.",
+    "readMeasurementCoverageBinding in this module and ops.benchmark_measurement_coverage_binding(uuid), implemented together against that attestation.",
   ],
-  // Said plainly so the attestation is not oversold before it is built.
+  // What is recorded, field by field, so nobody has to read the schema to know
+  // what the assertion actually says.
+  what_is_recorded: [
+    "the kernel evaluator that proved coverage, named from a closed source constant rather than chosen by a writer",
+    "the payload digest that evaluator RETURNED, which the database recomputes from the draft's own rows and refuses when it no longer matches",
+    "the measurement digest it proved over, which must be the digest the review row itself names",
+    "the digest of the evaluation result, so a holder of the samples can replay the judgement",
+  ],
+  // What resolving this did NOT do, kept as a field because it is the clause
+  // most likely to be forgotten by a reader who sees `resolved: true`.
+  still_unresolved_elsewhere: [
+    "The Gate Zero binding. It is independent, it is unbound, it is read first, and benchmark acceptance still fails closed there.",
+    "The authenticated benchmark_coverage fact the join projection needs, which requires a LIVE declared evaluator seat and a storage verifier that re-derives the evaluation. That is a different obligation for a different artifact and this attestation is not it.",
+  ],
+  // KEPT VERBATIM from the unresolved constant. Read the doc comment above.
   remaining_trust_boundary:
     "The samples stay outside the record layer. The attestation makes a trusted writer's assertion explicit, attributed and auditable; it does not make the record layer an independent verifier of coverage, because the evaluation cannot be repeated there.",
+  // Still refused, all four. Resolving the binding retires none of them: the
+  // digest alone is still not evidence, the verdict is still the kernel's, no
+  // second evaluator was written, and the Gate Zero binding is untouched.
   explicitly_refused: [
     "treating measurement_set_digest as evidence that coverage was proved",
     "a coverage verdict supplied by a caller",
@@ -567,26 +624,92 @@ function readGateZeroOutcome() {
 }
 
 /**
- * THE PRIVATE FAIL-CLOSED MEASUREMENT COVERAGE PROOF READER.
+ * THE PRIVATE MEASUREMENT COVERAGE PROOF READER — now a real read.
  *
- * Private, parameterless and configuration-free for the same reasons as the
- * reader above. It always throws, and it is called AFTER the Gate Zero read so
- * that landing the Gate Zero record leaves a refusal that names the assertion
- * still outstanding rather than quietly admitting it.
+ * STILL PRIVATE. It is not exported, for the same reason it never was: an
+ * exported reader is a callable surface, and a caller who could ask this module
+ * "was coverage proved for review X" outside an acceptance would be reading a
+ * trusted writer's attestation as an answer to a question it does not answer.
+ * It takes a CONNECTION and a REVIEW ID rather than nothing, because it now
+ * reads a record; that is the whole of the change to its shape.
  *
- * When the attestation exists, this body reads it for the named review and
- * returns { review_id, measurement_set_digest, coverage_proved_by } — and
- * ops.benchmark_measurement_coverage_binding(uuid) must be implemented in the
- * same change, because either stub alone lets an unproved digest through on the
- * other side.
+ * IT DOES NOT EVALUATE COVERAGE. evaluateBenchmarkWorkloadCoverage is the only
+ * coverage authority in this system and this function is not a second one. It
+ * reads what was recorded and refuses when the record does not hold up.
  *
- * It does NOT evaluate coverage. evaluateBenchmarkWorkloadCoverage is the only
- * coverage authority in this system and this function is not a second one.
+ * IT IS THE MODULE-SIDE TWIN OF ops.benchmark_measurement_coverage_binding(uuid),
+ * NOT A REPLACEMENT FOR IT. The database's reader is the authoritative one: it
+ * runs inside the definer acceptance path where a handler bug cannot step around
+ * it, and it is granted to no role, so this module cannot call it. What this one
+ * does is refuse EARLY and by name, on the same grounds, from the granted
+ * primitives — exactly the pattern deriveBenchmarkAcceptor already follows in
+ * re-deriving an authority class the SQL guard also re-derives. If the two ever
+ * disagreed, the database would win and the acceptance would refuse.
+ *
+ * THE THREE REFUSALS, and which of them the database can check for itself:
+ *   * no attestation for this review — the pass was written by a path that
+ *     recorded no proof, which the write path no longer permits;
+ *   * an attested payload digest the draft no longer produces — RECOMPUTED, so
+ *     appending content to a draft after its review invalidates the attestation
+ *     instead of letting it silently outlive the bytes it was about;
+ *   * an attested measurement digest that is not the review row's, or an
+ *     evaluator outside the closed set.
  */
-function readMeasurementCoverageBinding() {
-  refuse("measurement_coverage_proof_unbound",
-    "benchmark acceptance requires a recorded proof binding for the passing review's measurement set, and this record layer holds none: measurement_set_digest names the bytes a trusted writer read, and nothing recorded beside it binds those bytes to a coverage evaluation by benchmark-minimum.v5.js. Accepting on the digest alone would claim an independent verification that does not exist. This refusal is independent of the Gate Zero binding and survives it.",
-    BENCHMARK_MEASUREMENT_COVERAGE_INTEGRATION_REQUIREMENT);
+async function readMeasurementCoverageBinding(c, reviewId) {
+  assertUuid(reviewId, "review_id");
+  // The review is in the FROM clause and the attestation is LEFT JOINed, so an
+  // unknown review is zero rows and an unattested one is a row with nulls —
+  // both ordinary answers, each refused by name below rather than arriving as a
+  // raw database error. Same safe-query shape as readLiveDraft.
+  const row = (await c.query(
+    `select r.id as review_id,
+            r.measurement_set_digest as review_measurement_set_digest,
+            ops.benchmark_payload_digest(r.draft_id) as live_payload_digest,
+            a.coverage_proved_by,
+            a.benchmark_payload_digest as attested_payload_digest,
+            a.measurement_set_digest as attested_measurement_set_digest
+       from ops.benchmark_manifest_review r
+       left join ops.benchmark_measurement_coverage_attestation a on a.review_id = r.id
+      where r.id = $1::uuid`,
+    [reviewId])).rows[0];
+
+  if (!row) {
+    refuse("benchmark_review_unknown",
+      "the measurement coverage proof binding names a review this record layer does not hold",
+      { review_id: reviewId });
+  }
+  if (row.coverage_proved_by === null || row.coverage_proved_by === undefined) {
+    refuse("measurement_coverage_proof_unbound",
+      "benchmark acceptance requires a recorded proof binding for the passing review's measurement set, and none is recorded for this review: measurement_set_digest names the bytes a trusted writer read, and without an attestation beside it nothing binds those bytes to a coverage evaluation by benchmark-minimum.v5.js. Accepting on the digest alone would claim an independent verification that does not exist.",
+      { ...BENCHMARK_MEASUREMENT_COVERAGE_INTEGRATION_REQUIREMENT, review_id: reviewId });
+  }
+  if (!BENCHMARK_COVERAGE_EVALUATORS.includes(row.coverage_proved_by)) {
+    refuse("measurement_coverage_evaluator_unknown",
+      "the recorded coverage attestation names an evaluator this rail does not admit; the evaluator set is a closed source constant",
+      { review_id: reviewId, coverage_proved_by: row.coverage_proved_by,
+        admitted: [...BENCHMARK_COVERAGE_EVALUATORS] });
+  }
+  if (row.attested_payload_digest !== row.live_payload_digest) {
+    refuse("measurement_coverage_payload_stale",
+      "the recorded coverage attestation proves coverage against a payload digest this draft no longer produces; the proof is about bytes that have changed",
+      { review_id: reviewId, attested: row.attested_payload_digest,
+        recomputed: row.live_payload_digest });
+  }
+  if (row.attested_measurement_set_digest !== row.review_measurement_set_digest) {
+    refuse("measurement_coverage_measurement_mismatch",
+      "the recorded coverage attestation proves coverage over a measurement set the review does not name",
+      { review_id: reviewId, attested: row.attested_measurement_set_digest,
+        reviewed: row.review_measurement_set_digest });
+  }
+  // Exactly the documented return, and nothing more. The evaluation digest is
+  // recorded and is deliberately not returned: acceptance binds nothing to it,
+  // and a field on this result that nothing consumes invites a future reader to
+  // consume it as something it is not.
+  return deepFreeze({
+    review_id: row.review_id,
+    measurement_set_digest: row.review_measurement_set_digest,
+    coverage_proved_by: row.coverage_proved_by,
+  });
 }
 
 /**
@@ -624,12 +747,16 @@ export function benchmarkAcceptancePrerequisites() {
     gate_zero: BENCHMARK_GATE_ZERO_INTEGRATION_REQUIREMENT,
     measurement_coverage_proof: BENCHMARK_MEASUREMENT_COVERAGE_INTEGRATION_REQUIREMENT,
     acceptance_available: false,
-    // TWO ENTRIES, NOT ONE, AND THEY DO NOT CLEAR TOGETHER. Landing the Gate Zero
-    // record leaves the second in place.
-    acceptance_blocked_by: [
-      GATE_ZERO_STEP_REF,
-      BENCHMARK_MEASUREMENT_COVERAGE_INTEGRATION_REQUIREMENT.binding_ref,
-    ],
+    // ONE ENTRY NOW, AND IT WENT FROM TWO TO ONE THE ONLY HONEST WAY: by a
+    // record landing, visibly, in a field a reader can check — not by the two
+    // being quietly merged. The coverage binding cleared on its own evidence and
+    // Gate Zero is untouched by it, which is exactly what the coverage
+    // requirement's third clause demanded.
+    //
+    // AND ACCEPTANCE IS STILL UNAVAILABLE. One unbound binding is as closed as
+    // two: the Gate Zero outcome is a fact this record layer does not hold and
+    // cannot compute, and no source change can honestly supply it.
+    acceptance_blocked_by: [GATE_ZERO_STEP_REF],
     ordering_rule: "strictly_after_both_prerequisites_and_the_passing_review",
     effects: V5_NO_EFFECTS,
   });
@@ -772,7 +899,7 @@ export function benchmarkAcceptanceStoreTools({ withEnvelope, writeEvent, ToolEr
   return {
     "read-benchmark-manifest": {
       write: false,
-      description: "Read one DoctorCRE v5 benchmark manifest: its payload rebuilt from the stored rows, both the digest recorded at proposal and the digest recomputed from those rows right now, its structural validity, the independent reviews recorded against it, and whether a verified partner has accepted it. Also reports the acceptance bindings and which of them are still unbound: the portfolio prerequisite (bound, and reported with what it does and does not prove), the Gate Zero outcome (no authenticated binding here) and the measurement coverage proof (no record binding a review's measurement digest to a kernel coverage evaluation). Exposes only content inside the payload digest and produces no effect.",
+      description: "Read one DoctorCRE v5 benchmark manifest: its payload rebuilt from the stored rows, both the digest recorded at proposal and the digest recomputed from those rows right now, its structural validity, the independent reviews recorded against it, and whether a verified partner has accepted it. Also reports the acceptance bindings and whether each is bound: the portfolio prerequisite (bound, and reported with what it does and does not prove), the Gate Zero outcome (unbound — this record layer holds no authenticated binding, which says nothing about whether the external pre-v5 step produced an outcome) and the measurement coverage proof (bound, and bound to exactly what it claimed it would be worth: a passing review carries a recorded attestation naming the kernel evaluator, the payload digest it proved against and the measurement digest it proved over, and the database recomputes that payload digest from the draft's own rows and compares that measurement digest against the review's own — it stays a trusted writer's attributed assertion and not an independent verification, because the samples stay outside this record layer). Exposes only content inside the payload digest and produces no effect.",
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: { benchmark_ref: { type: "string" } }, required: ["benchmark_ref"],
@@ -852,7 +979,7 @@ export function benchmarkAcceptanceStoreTools({ withEnvelope, writeEvent, ToolEr
 
     "review-benchmark-manifest-draft": {
       write: true,
-      description: "Record one independent review of an exact DoctorCRE v5 benchmark payload digest. The reviewer is the authenticated writer and is never a field in this payload. The payload reviewed is read back from the stored rows, never taken from this call, so a reviewer cannot pass one manifest while naming another. A passing verdict additionally requires a measurement set that covers every required matrix cell and meets every fixed SLO: the coverage is proved ON THIS PATH by benchmark-minimum.v5.js against the stored payload, and the measurement digest recorded is computed here rather than accepted from the caller. Note what that does not extend to: the review ROW carries only the digest, the record layer evaluates no coverage, and a row written by a direct call to ops.benchmark_review_manifest_draft carries a digest asserted rather than proved — so acceptance fails closed on the missing coverage proof binding instead of reading any review's digest as verified coverage. A review naming a digest the draft no longer produces is refused, and a proposer cannot pass their own draft.",
+      description: "Record one independent review of an exact DoctorCRE v5 benchmark payload digest. The reviewer is the authenticated writer and is never a field in this payload. The payload reviewed is read back from the stored rows, never taken from this call, so a reviewer cannot pass one manifest while naming another. A passing verdict additionally requires a measurement set that covers every required matrix cell and meets every fixed SLO: the coverage is proved ON THIS PATH by benchmark-minimum.v5.js against the stored payload, and the measurement digest recorded is computed here rather than accepted from the caller. Recorded beside the review, in the same definer call, is an attestation naming the kernel evaluator that proved coverage, the payload digest it proved against, the measurement digest it proved over and the digest of its result; a passing review cannot be written without one, by this verb or by a direct call to ops.benchmark_review_manifest_draft. Note exactly what that is worth: the samples stay outside the record layer, so the attestation is a trusted writer's explicit, attributed and auditable assertion rather than an independent verification the database performed. The database does check two of its three values for itself — it recomputes the payload digest from the stored rows and compares the measurement digest against the review row. A review naming a digest the draft no longer produces is refused, and a proposer cannot pass their own draft.",
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {
@@ -883,33 +1010,72 @@ export function benchmarkAcceptanceStoreTools({ withEnvelope, writeEvent, ToolEr
         }
 
         let measurementSetDigest = null;
+        let attestation = null;
         if (args.verdict === "pass") {
           if (!isPlainObject(args.measurements)) {
             toolRefuse("benchmark_measurement_set_required",
               { reason: "r7's pass rule requires every required matrix cell to be exercised and to meet its fixed SLO; a passing review must name the measurement set that shows it" });
           }
+          let coverage;
           try {
             // Proved against the payload REBUILT FROM THE STORED ROWS, not
             // against anything in this call. The kernel refuses a missing cell,
             // an unrequired one, a duplicate, a short warmup, an exclusion that
             // takes a cell below its floor, a quoted rule that differs from the
             // accepted one, and any cell whose p95 misses its threshold.
-            evaluateBenchmarkWorkloadCoverage({
+            //
+            // THE RETURN VALUE IS KEPT NOW. It used to be discarded, and the
+            // attestation below is built out of it rather than out of a second
+            // computation: benchmark_payload_digest is the digest the kernel
+            // ACTUALLY PROVED AGAINST, and recomputing it here would attest to a
+            // digest nobody proved anything about — a difference that is
+            // invisible while the two agree and is the whole point when they do
+            // not.
+            coverage = evaluateBenchmarkWorkloadCoverage({
               payload: live.payload, measurements: args.measurements,
             });
           } catch (error) { return asToolError(error); }
           // The exact bytes that were proved ON THIS PATH. The samples stay
           // outside the record layer; the digest is what names them, and it is
-          // computed here rather than accepted from the caller. What the stored
-          // row can carry is the name, not the proof — see
-          // BENCHMARK_MEASUREMENT_COVERAGE_INTEGRATION_REQUIREMENT.
+          // computed here rather than accepted from the caller.
           measurementSetDigest = digest(args.measurements);
+          // THE ATTESTATION. Four values, none of them invented and none of them
+          // supplied by the MCP caller: a closed source constant naming the
+          // evaluator, the evaluator's own returned payload digest, the
+          // measurement digest computed on this path, and the digest of the
+          // evaluation itself so the judgement is replayable by whoever holds
+          // the samples. It carries no verdict — the verdict is the kernel's
+          // throw-or-return above — and it is not in this verb's inputSchema.
+          attestation = {
+            coverage_proved_by: BENCHMARK_COVERAGE_EVALUATOR,
+            benchmark_payload_digest: coverage.benchmark_payload_digest,
+            measurement_set_digest: measurementSetDigest,
+            evaluation_digest: digest(coverage),
+          };
         }
 
         const reviewId = (await c.query(
-          `select ops.benchmark_review_manifest_draft($1::uuid,$2::uuid,$3::text,$4::text,$5::text,$6::text) as id`,
+          `select ops.benchmark_review_manifest_draft($1::uuid,$2::uuid,$3::text,$4::text,$5::text,$6::text,$7::jsonb) as id`,
           [args.draft_id, args.idempotency_key, live.payload_digest, args.verdict,
-            measurementSetDigest, args.review_summary])).rows[0].id;
+            measurementSetDigest, args.review_summary,
+            attestation === null ? null : JSON.stringify(attestation)])).rows[0].id;
+
+        // READ THE RECORD BACK, THROUGH THE READER ACCEPTANCE ITSELF USES.
+        //
+        // This is what makes measurement_coverage_proof_recorded below a real
+        // answer rather than a restatement of the branch this handler is already
+        // inside. What it reports is not "I built an attestation and sent it" —
+        // it is "the record layer holds an attestation for this review, its
+        // evaluator is one this rail admits, its payload digest is the one this
+        // draft still produces, and its measurement digest is the one the review
+        // row names". The reader refuses on each of those, and a refusal here
+        // rolls the whole review back rather than returning a pass whose proof
+        // could not be read.
+        let recordedBinding = null;
+        if (args.verdict === "pass") {
+          recordedBinding = await readMeasurementCoverageBinding(c, reviewId)
+            .catch(error => asToolError(error));
+        }
 
         await writeEvent(c, {
           subject_type: "benchmark", subject_id: args.draft_id,
@@ -923,13 +1089,23 @@ export function benchmarkAcceptanceStoreTools({ withEnvelope, writeEvent, ToolEr
           reviewed_payload_digest: live.payload_digest,
           measurement_set_digest: measurementSetDigest,
           // True of THIS call: the kernel proved coverage against the payload
-          // rebuilt from the stored rows a moment ago. It is not a property of
-          // the stored row, and acceptance does not read it back — it reads the
-          // review by id and refuses on the unbound coverage proof.
+          // rebuilt from the stored rows a moment ago.
           coverage_proved_against_stored_payload: args.verdict === "pass",
           measurement_coverage_proof_binding:
             BENCHMARK_MEASUREMENT_COVERAGE_INTEGRATION_REQUIREMENT.binding_ref,
-          measurement_coverage_proof_recorded: false,
+          // THE REAL ANSWER, READ BACK FROM THE RECORD, not a constant and not
+          // this handler restating its own branch. It is true when the record
+          // layer holds an attestation for this review that survived every
+          // check the reader applies, and false for a fail verdict, which proves
+          // no coverage and records none.
+          measurement_coverage_proof_recorded: recordedBinding !== null,
+          // The attestation as the record layer holds it, so a caller sees the
+          // evaluator by name rather than being told a boolean.
+          measurement_coverage_proof: recordedBinding,
+          // And what it is worth, quoted from the requirement rather than
+          // paraphrased, so a passing review cannot be read as a verification.
+          measurement_coverage_proof_limit:
+            BENCHMARK_MEASUREMENT_COVERAGE_INTEGRATION_REQUIREMENT.remaining_trust_boundary,
           accepted: false,
           acceptance_prerequisites: benchmarkAcceptancePrerequisites(),
           effects: RECORD_LAYER_EFFECTS,
@@ -939,7 +1115,7 @@ export function benchmarkAcceptanceStoreTools({ withEnvelope, writeEvent, ToolEr
 
     "accept-benchmark-manifest-draft": {
       write: true, humanOnly: true, authorityOnly: true,
-      description: "HUMAN-ONLY: accept one exact DoctorCRE v5 benchmark payload digest as the verified_partner_benchmark_authority. The acceptor is derived from the authenticated partner authority session and is never a field in this payload; a writer connection cannot reach this verb at all. Acceptance requires a fresh passing independent review on the same bytes, three distinct identities, an accepted and intact portfolio constitution named by the acceptor (a prerequisite binding, not a claim of lineage: no benchmark-to-portfolio descent is recorded anywhere), and the Gate Zero read-only outcome as authenticated in this record layer — and must fall strictly after all of them. IT REFUSES TODAY, FOR TWO INDEPENDENT REASONS: this record layer holds no authenticated Gate Zero outcome to bind (which says nothing about whether the external pre-v5 step produced one), and it holds no record binding a review's measurement digest to a kernel coverage evaluation, so acceptance cannot claim independently verified coverage. Both refusals happen before this verb issues any query, both must be resolved separately, and no benchmark has been or can be accepted through it yet.",
+      description: "HUMAN-ONLY: accept one exact DoctorCRE v5 benchmark payload digest as the verified_partner_benchmark_authority. The acceptor is derived from the authenticated partner authority session and is never a field in this payload; a writer connection cannot reach this verb at all. Acceptance requires a fresh passing independent review on the same bytes, three distinct identities, an accepted and intact portfolio constitution named by the acceptor (a prerequisite binding, not a claim of lineage: no benchmark-to-portfolio descent is recorded anywhere), and the Gate Zero read-only outcome as authenticated in this record layer — and must fall strictly after all of them. IT REFUSES TODAY, FOR ONE REMAINING REASON: this record layer holds no authenticated Gate Zero outcome to bind, which says nothing about whether the external pre-v5 step produced one. That refusal happens before this verb issues any query, so nothing on this path reaches the database while Gate Zero is unbound, and no benchmark has been or can be accepted through it yet. THE SECOND REFUSAL IS RETIRED, on its own evidence and not by Gate Zero: a passing review now carries a recorded coverage attestation naming the kernel evaluator, the payload digest it proved against and the measurement digest it proved over, and the coverage binding is read after Gate Zero against that record. It remains a trusted writer's attributed assertion, not an independent verification: the samples are outside this record layer.",
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {
@@ -959,32 +1135,43 @@ export function benchmarkAcceptanceStoreTools({ withEnvelope, writeEvent, ToolEr
           assertNoSelfAssertedAuthority(args, "args");
         });
 
-        // ORDER IS DELIBERATE, and all three of these run before any query.
+        // ORDER IS DELIBERATE.
         //
         //   1. The acceptor is derived from the LIVE actor. The humanOnly and
         //      authorityOnly flags already gate this verb; deriving the class
         //      again here means the rail does not depend on a flag being read
         //      correctly somewhere else.
-        //   2. The Gate Zero read refuses. Putting it ahead of every query is
-        //      what makes "this verb cannot accept anything today" observable
-        //      rather than merely asserted: nothing on this path reaches the
-        //      database, so no acceptance can be half-attempted, logged as
-        //      pending, or mistaken for one that nearly worked.
-        //   3. The measurement coverage proof binding refuses too, and it is
-        //      LAST so that deleting the throw in (2) does not open the verb.
-        //      The two gaps are independent: a Gate Zero record says nothing
-        //      about whether a review's measurement digest was proved or merely
-        //      asserted, and acceptance must not start treating it as though it
-        //      did.
+        //   2. The Gate Zero read refuses, and it is FIRST. It takes no
+        //      argument, reads nothing and always throws.
+        //   3. The measurement coverage proof binding is read SECOND. It is now
+        //      a real read of a real record, so it issues a query — and that is
+        //      why the guarantee below is stated the way it is.
+        //
+        // THE GUARANTEE, RESTATED HONESTLY RATHER THAN QUIETLY DROPPED. It used
+        // to be "nothing on this path reaches the database", which was true when
+        // both readers were parameterless stubs. It is now: NOTHING ON THIS PATH
+        // REACHES THE DATABASE WHILE GATE ZERO IS UNBOUND. Gate Zero throws
+        // first, so no acceptance can be half-attempted, logged as pending, or
+        // mistaken for one that nearly worked — and the assertion in the tests
+        // that this verb issues ZERO statements is still the strongest thing
+        // said about it. When Gate Zero is bound, this path will read the
+        // coverage record before it writes anything, which is the correct order
+        // for a reader whose job is to refuse.
+        //
+        // The two bindings remain independent — one unbound, one resolved — and
+        // the coverage read stays after Gate Zero so that deleting the throw in
+        // (2) does not skip it.
         const acceptor = check(() => deriveBenchmarkAcceptor(actor));
         check(() => readGateZeroOutcome());
-        check(() => readMeasurementCoverageBinding());
+        const coverage = await readMeasurementCoverageBinding(c, args.review_id)
+          .catch(error => asToolError(error));
 
-        // UNREACHABLE UNTIL BOTH RECORDS EXIST. Everything below is written out
-        // in full rather than stubbed, so that landing them is a change to the
-        // four readers and nothing else — not a rewrite of the acceptance path
-        // under time pressure, and not a fresh set of decisions made by whoever
-        // happens to land it.
+        // UNREACHABLE UNTIL THE GATE ZERO RECORD EXISTS. Everything below is
+        // written out in full rather than stubbed, so that landing it is a change
+        // to the two Gate Zero readers and nothing else — not a rewrite of the
+        // acceptance path under time pressure, and not a fresh set of decisions
+        // made by whoever happens to land it. The coverage pair landed exactly
+        // that way, in one change to its two readers, and needed nothing here.
         const live = await readLiveDraft(c, args.draft_id);
         if (live.payload_digest !== args.accepted_payload_digest) {
           toolRefuse("benchmark_acceptance_digest_stale",
@@ -1016,6 +1203,14 @@ export function benchmarkAcceptanceStoreTools({ withEnvelope, writeEvent, ToolEr
           accepted_payload_digest: live.payload_digest,
           accepted: true, status: "accepted",
           portfolio_ref: args.portfolio_ref,
+          // The attestation the acceptance bound, named on the receipt result so
+          // a consumer can see WHICH evaluator's judgement stands behind the
+          // passing review — and, from the field name alone, that what stands
+          // behind it is an attributed assertion rather than a verification this
+          // database performed.
+          measurement_coverage_proved_by: coverage.coverage_proved_by,
+          measurement_coverage_attested_over: coverage.measurement_set_digest,
+          measurement_coverage_binding_proves: BENCHMARK_MEASUREMENT_COVERAGE_INTEGRATION_REQUIREMENT.remaining_trust_boundary,
           // What that portfolio binding proves, carried on the result so a
           // consumer does not read descent into it. See the header.
           portfolio_binding_proves: "the named portfolio constitution is accepted and intact; not that this benchmark descends from it",
