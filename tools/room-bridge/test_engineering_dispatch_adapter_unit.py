@@ -959,6 +959,38 @@ def test_helper_reader_hashes_and_emits_the_same_exact_bytes_once():
     assert payload["code"].encode("utf-8") == helper_bytes
 
 
+def test_helper_reader_command_resolves_an_interpreter_without_a_repository_venv():
+    """The reader command must run on a checkout that has no repository venv.
+
+    Pinning `$REPO/.venv/bin/python` unconditionally passed on this Mac and
+    exited 127 on the hosted runner, which installs requirements.lock into
+    setup-python and never builds a venv.  Point the adapter at an empty
+    checkout so the fallback branch -- the one a Mac never reaches -- is the
+    branch under test.  Evidence: the whole suite failed on the ubuntu runner,
+    run 34537991117, at the merge base 276909a0d980.
+    """
+    original = adapter.REPO
+    with tempfile.TemporaryDirectory() as directory:
+        venvless = Path(directory)
+        adapter.REPO = venvless
+        try:
+            interpreter = adapter._engineering_source_helper_interpreter()
+            command = adapter._engineering_source_helper_read_command(
+                adapter.ENGINEERING_SOURCE_HELPER_PATH)
+        finally:
+            adapter.REPO = original
+    assert interpreter != str(venvless / ".venv" / "bin" / "python")
+    assert os.access(interpreter, os.X_OK), interpreter
+    assert str(venvless) not in command, command
+    run = subprocess.run(
+        command, cwd=ROOT, shell=True, capture_output=True, text=True,
+        timeout=10, check=False)
+    assert run.returncode == 0, run.stderr
+    payload = json.loads(run.stdout)
+    assert payload["sha256"] == adapter.ENGINEERING_SOURCE_HELPER_SHA256
+    assert payload["byte_length"] == adapter.ENGINEERING_SOURCE_HELPER_BYTE_LENGTH
+
+
 def test_helper_reader_shell_quotes_paths_with_spaces_dollars_backticks_and_substitution_text():
     with tempfile.TemporaryDirectory(prefix="wr68 $CARR_TEST_SHELL_LITERAL `false` $(false) ") as directory:
         path = Path(directory) / "helper $CARR_TEST_SHELL_LITERAL `false` $(false).js"

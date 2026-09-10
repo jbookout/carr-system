@@ -22,11 +22,25 @@ const aggregateCards = {
 // One place holds what Home believes. Every render reads it; no renderer keeps its own copy.
 const view = { scope: DEFAULT_SCOPE, payload: null, status: "loading", message: null, sequence: 0, freshnessKey: null };
 
+/**
+ * THE ORB SAYS ONLY WHAT IT MEASURES, WHICH IS ONE READ.
+ *
+ * These four strings are driven by exactly one thing: the state of the fetch to
+ * /api/v1/command-center. "Workspace available" claimed more than that — it read as
+ * a verdict on the workspace while the only evidence behind it was that a single
+ * aggregate read came back. The slice's interfaces name an ops.doctorcre.com
+ * read-only health projection; this surface does not consume one, and no producer
+ * for one exists anywhere in the tree, so the honest label names the read.
+ *
+ * This is the discipline the static suite already applies to "System online": a
+ * surface may not make a health claim it does not read. Wiring a real projection is
+ * a different unit, and it starts by building the projection.
+ */
 const HEALTH_LABEL = {
-  loading: "Checking workspace…",
-  refreshing: "Refreshing workspace…",
-  available: "Workspace available",
-  unavailable: "Workspace unavailable",
+  loading: "Checking the workspace read…",
+  refreshing: "Refreshing the workspace read…",
+  available: "Workspace read available",
+  unavailable: "Workspace read unavailable",
 };
 
 function setHealth(state) {
