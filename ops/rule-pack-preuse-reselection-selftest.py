@@ -437,6 +437,156 @@ check("the compiled trigger table participates in the epoch source digest too",
 dedupe = load("claude_rule_delivery_dedupe_test",
               REPO / "lib/claude_rule_delivery_dedupe.py")
 runtime_dedupe = __import__("lib.claude_rule_delivery_dedupe", fromlist=["*"])
+
+# ---------------------------------------------------------------------------
+# THE DEDUPE WRITER'S DESCRIPTOR OWNERSHIP, proven before the concurrency check
+# that depends on it. os.fdopen takes ownership of the descriptor it is handed,
+# so closing that integer again after the context exits does not re-close "our"
+# file — the kernel hands the lowest free number straight back out, and in a
+# process with more than one thread it hands it to somebody else. The close then
+# destroys a stranger's file and the stranger fails with EBADF. That is how one
+# thread's dedupe write broke the other's, made _locked raise, and sent
+# should_deliver down its fail-open path so the same rule set delivered twice.
+#
+# Modeled deterministically and without threads: a stand-in for the real fdopen
+# context opens os.devnull the instant the real context releases its descriptor,
+# which reuses that exact number. If _atomic closes the raw descriptor again,
+# the stand-in's file is gone and os.fstat on it raises EBADF.
+
+
+class ReuseProbe:
+    """The real fdopen context, plus an unrelated open the moment it lets go."""
+
+    def __init__(self, handle):
+        self._handle = handle
+        self.owned_fd = handle.fileno()
+        self.reused_fd = None
+
+    def __enter__(self):
+        self._handle.__enter__()
+        return self._handle
+
+    def __exit__(self, *exc_info):
+        result = self._handle.__exit__(*exc_info)
+        self.reused_fd = os.open(os.devnull, os.O_RDONLY)
+        return result
+
+    def write(self, data):
+        return self._handle.write(data)
+
+    def flush(self):
+        return self._handle.flush()
+
+    def fileno(self):
+        return self._handle.fileno()
+
+
+def descriptor_open(fd: int | None) -> bool:
+    if fd is None:
+        return False
+    try:
+        os.fstat(fd)
+    except OSError:
+        return False
+    return True
+
+
+STATE_VALUE = {"schema_version": 1, "compaction_generation": 3, "digests": ["a" * 64]}
+_real_fdopen = os.fdopen
+_real_fsync = os.fsync
+
+with tempfile.TemporaryDirectory(prefix="rule-dedupe-fd-") as fd_temp_name:
+    fd_temp = Path(fd_temp_name)
+
+    def probing_fdopen(fd, *args, **kwargs):
+        probe = ReuseProbe(_real_fdopen(fd, *args, **kwargs))
+        PROBES.append(probe)
+        return probe
+
+    # 1. Success. The write must land and no descriptor but its own may close.
+    PROBES: list[ReuseProbe] = []
+    target = fd_temp / "state.json"
+    os.fdopen = probing_fdopen
+    try:
+        dedupe._atomic(target, STATE_VALUE)
+    finally:
+        os.fdopen = _real_fdopen
+    check("the atomic write hands its temp descriptor to exactly one fdopen",
+          len(PROBES) == 1, len(PROBES))
+    probe = PROBES[-1]
+    check("the released temp descriptor is genuinely reused by an unrelated open",
+          probe.reused_fd == probe.owned_fd, (probe.owned_fd, probe.reused_fd))
+    check("a successful atomic write never closes the descriptor fdopen already owned",
+          descriptor_open(probe.reused_fd), probe.reused_fd)
+    if descriptor_open(probe.reused_fd):
+        os.close(probe.reused_fd)
+    check("the atomic write still replaced the file with exactly the canonical bytes",
+          target.read_bytes() == json.dumps(
+              STATE_VALUE, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode() + b"\n",
+          target.read_bytes())
+    check("the replaced file keeps owner-only mode and leaves no temp behind",
+          (target.stat().st_mode & 0o777) == 0o600
+          and [entry.name for entry in fd_temp.iterdir()] == ["state.json"],
+          sorted(entry.name for entry in fd_temp.iterdir()))
+
+    # 2. Failure inside the context. The file object still closes exactly once,
+    #    the temp is removed, the target is untouched, and no stranger is hit.
+    PROBES = []
+    doomed = fd_temp / "never-written.json"
+
+    def failing_fsync(fd):
+        raise OSError("simulated fsync failure")
+
+    write_error = None
+    os.fdopen = probing_fdopen
+    os.fsync = failing_fsync
+    try:
+        dedupe._atomic(doomed, STATE_VALUE)
+    except OSError as error:
+        write_error = error
+    finally:
+        os.fdopen = _real_fdopen
+        os.fsync = _real_fsync
+    check("a failing atomic write still hands its descriptor to exactly one fdopen",
+          len(PROBES) == 1, len(PROBES))
+    probe = PROBES[-1]
+    check("a write failure propagates rather than reporting a durable write",
+          isinstance(write_error, OSError), write_error)
+    check("a failed atomic write closes no descriptor twice either",
+          probe.reused_fd == probe.owned_fd and descriptor_open(probe.reused_fd),
+          (probe.owned_fd, probe.reused_fd))
+    if descriptor_open(probe.reused_fd):
+        os.close(probe.reused_fd)
+    check("a failed atomic write leaves no temp file and no half-written target",
+          not doomed.exists()
+          and [entry.name for entry in fd_temp.iterdir()] == ["state.json"],
+          sorted(entry.name for entry in fd_temp.iterdir()))
+
+    # 3. Failure to construct the handle. Ownership never transferred, so the
+    #    raw descriptor is _atomic's to close — exactly once — and the temp goes.
+    CONSTRUCTION: dict[str, int] = {}
+
+    def refusing_fdopen(fd, *args, **kwargs):
+        CONSTRUCTION["fd"] = fd
+        raise OSError("simulated fdopen failure")
+
+    construction_error = None
+    os.fdopen = refusing_fdopen
+    try:
+        dedupe._atomic(fd_temp / "unconstructed.json", STATE_VALUE)
+    except OSError as error:
+        construction_error = error
+    finally:
+        os.fdopen = _real_fdopen
+    check("a handle that cannot be constructed propagates its failure",
+          isinstance(construction_error, OSError), construction_error)
+    check("the descriptor fdopen never took is closed by the writer that still owns it",
+          "fd" in CONSTRUCTION and not descriptor_open(CONSTRUCTION["fd"]), CONSTRUCTION)
+    check("a construction failure leaves no temp file and creates no target",
+          not (fd_temp / "unconstructed.json").exists()
+          and [entry.name for entry in fd_temp.iterdir()] == ["state.json"],
+          sorted(entry.name for entry in fd_temp.iterdir()))
+
 with tempfile.TemporaryDirectory(prefix="rule-dedupe-") as temp_name:
     temp = Path(temp_name)
     old_env = dict(os.environ)
