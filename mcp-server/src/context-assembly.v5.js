@@ -101,13 +101,28 @@ const {
   assertDigestRef, assertTenant,
 } = V5_F05_GUARDS;
 
-export const V5_F05_MANIFEST_SCHEMA_VERSION = "doctorcre-v5-f05-context-manifest.v1";
+// v2 ON TWO OF THE FIVE, and the reason is that the BODY changed rather than the
+// idea. A manifest now carries `unknown_lineage_records`,
+// `unknown_lineage_blocks_consequential_action`, `upstream_lineage_known` on
+// every projected record, and `uncertainty.unknown_lineage_record_count`; a
+// lineage now carries `upstream_lineage_known` per entry and
+// `unknown_lineage_record_ids`. The same input therefore hashes to a different
+// `manifest_digest` and `lineage_digest` than it did under v1, and a consumer
+// pinning the schema version alone could not otherwise tell. The request version
+// moves with the manifest version deliberately: `derived_kind` accepts a value it
+// did not accept before, so a v1 request is a different contract, and one that
+// says v1 is refused rather than read under v2 rules.
+//
+// NOTHING IS MIGRATED, because nothing is stored: `no_manifest_persistence` holds
+// (see contextAssemblyIntegrationGaps), no projection is registered anywhere, and
+// no runtime reads either version.
+export const V5_F05_MANIFEST_SCHEMA_VERSION = "doctorcre-v5-f05-context-manifest.v2";
 export const V5_F05_FROZEN_INPUT_SCHEMA_VERSION = "doctorcre-v5-f05-frozen-assembly-input.v1";
 export const V5_F05_ATTESTATION_SCHEMA_VERSION = "doctorcre-v5-f05-verifier-attestation.v1";
 export const V5_F05_CORRECTION_SCHEMA_VERSION = "doctorcre-v5-f05-correction-proposal.v1";
-export const V5_F05_LINEAGE_SCHEMA_VERSION = "doctorcre-v5-f05-taint-lineage.v1";
+export const V5_F05_LINEAGE_SCHEMA_VERSION = "doctorcre-v5-f05-taint-lineage.v2";
 
-export const V5_F05_MANIFEST_VERSION = 1;
+export const V5_F05_MANIFEST_VERSION = 2;
 
 /**
  * The only projection kind this module emits. `authenticated_runtime_projection`

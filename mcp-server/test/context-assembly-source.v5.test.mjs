@@ -47,6 +47,7 @@ import {
 } from "../src/context-assembly.v5.js";
 import {
   V5_F05_SOURCE_CONSUMABLE_COVERAGE_STATE,
+  V5_F05_SOURCE_DERIVATIVE_LINK_KEYS,
   V5_F05_SOURCE_EVIDENCE_CLASS_MAP,
   V5_F05_SOURCE_MAX_SELECTION,
   V5_F05_SOURCE_MODE,
@@ -116,7 +117,10 @@ function artifactPreimage(overrides = {}) {
  * shape a real row carries.
  */
 function storedEnvelope(record) {
-  const envelope = v5F01StoreEnvelope("stored_corporate_artifact", record);
+  // The SAME three extras ops.f01_record_artifact is called with, so the fixture
+  // is the envelope the writer actually stores rather than a near-miss.
+  const envelope = v5F01StoreEnvelope("stored_corporate_artifact", record,
+    { is_fact: false, makes_field_authoritative: false, immutable: true });
   return { envelope, envelope_digest: digest(envelope) };
 }
 
@@ -136,13 +140,21 @@ function storedArtifactBody(record) {
   };
 }
 
+const isPlainRecord = value =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
 /** What ops.f01_derivative_coverage returns: 'unknown' for every artifact, by design. */
 function coverageBody(artifact_digest, links = []) {
   return {
     artifact_digest,
     state: "unknown",
     reason_id: "producer_closure_not_established",
-    registered_derivative_kinds: [...new Set(links.map(l => l.derivative_kind))].sort(),
+    // `e.link ->> 'derivative_kind'`, which yields SQL NULL for an element that is
+    // not an object carrying that key rather than raising. The fixture has to
+    // match that, or a malformed link dies HERE and the adapter never sees the
+    // shape the case exists to hand it.
+    registered_derivative_kinds:
+      [...new Set(links.map(l => (isPlainRecord(l) ? l.derivative_kind ?? null : null)))].sort(),
     registered_links: links,
     registered_link_count: links.length,
     is_exhaustive_inventory: false,
@@ -151,7 +163,16 @@ function coverageBody(artifact_digest, links = []) {
   };
 }
 
-function link(artifact_digest, overrides = {}) {
+/**
+ * THE EXACT TEN KEYS ops.f01_derivative_links projects, and no eleventh.
+ *
+ * `source_artifact_digest` is deliberately ABSENT: the SQL filters on that column
+ * and never returns it, so a link carries no field naming the artifact it belongs
+ * to. The artifact is stated once, at the coverage answer's own `artifact_digest`.
+ * An earlier fixture invented the field, which made a per-link check look green
+ * against a shape the database cannot produce.
+ */
+function link(overrides = {}) {
   return {
     link_digest: D(31),
     derivative_kind: "f01_parsed_proposal",
@@ -163,7 +184,6 @@ function link(artifact_digest, overrides = {}) {
     evidence_ref: "test/run/1",
     evidence_digest: D(33),
     registered_by: "joe",
-    source_artifact_digest: artifact_digest,
     ...overrides,
   };
 }
@@ -550,10 +570,15 @@ test("a registered read kind that carries no F05 record is named and not read", 
 });
 
 test("an evidence reference the assembler would refuse is unmapped, not truncated", async () => {
+  // NOT A LEGAL STORED ROW, and the earlier note here was wrong about why. Both
+  // bounds are 255 — F01's assertProvenance and the F05 guard — so F01 could never
+  // have admitted this artifact in the first place. The case is kept as a defence
+  // against a row this module did not write and cannot re-validate end to end: if
+  // an over-long reference ever arrives, it is reported as unmapped rather than
+  // trimmed to fit, and it blocks the assembly like any other unmapped selector.
   const record = artifactPreimage({
     provenance: {
       adapter_kind: "graph_mail_test",
-      // Longer than the assembler's external-ident bound; F01's own bound is wider.
       evidence_ref: `test/${"x".repeat(300)}`,
       retrieval_class: "connector_fetch",
     },
@@ -681,6 +706,14 @@ test("every unmapped reason the module can report is in its closed list", async 
 });
 
 // -------------------------------------- tamper, tenant and identity
+//
+// NONE OF THE ROWS BELOW IS A LEGAL STORED ROW, and that is the point of them.
+// ops.f01_corporate_artifact's CHECK constraints recompute both digests and bind
+// the observed-instant column to the hashed preimage, so a committed row cannot
+// be in any of these states. What they model is an answer that was corrupted or
+// substituted BETWEEN the database and this module — the one thing F01's own
+// recomputation cannot cover — and the adapter's response is to refuse rather
+// than to repair, summarise or partially consume it.
 
 test("a tampered preimage under an unchanged digest refuses; no manifest is emitted",
   async () => {
@@ -750,12 +783,66 @@ test("the same selector twice refuses before any statement is sent", async () =>
   assert.deepEqual(db.calls, []);
 });
 
+test("a selector field the kind does not read is refused, so no duplicate slips past",
+  async () => {
+    // The bypass this closes: an ignored `document_id` still reached the dedupe
+    // key, so these two selectors hashed differently, both read the same artifact,
+    // and both produced a record at the same record_id — the duplicate arriving at
+    // the kernel instead of at this module's own guard.
+    const { db, source } = sourceWith();
+    await rejects(source.readSourceProjection({
+      selection: [
+        { kind: "artifact", artifact_digest: MAIL_DIGEST },
+        { kind: "artifact", artifact_digest: MAIL_DIGEST, document_id: "doc-test-1" },
+      ],
+    }, CONTEXT), "irrelevant_selector_field");
+    assert.deepEqual(db.calls, []);
+
+    // Both directions, and a kind that reads neither field.
+    await rejects(source.readSourceProjection({
+      selection: [{ kind: "document", document_id: "d", artifact_digest: MAIL_DIGEST }],
+    }, CONTEXT), "irrelevant_selector_field");
+    await rejects(source.readSourceProjection({
+      selection: [{ kind: "holds", artifact_digest: MAIL_DIGEST }],
+    }, CONTEXT), "irrelevant_selector_field");
+
+    // The ordinary selectors still work, and still dedupe on what they do read.
+    const { projection } = await project({}, select(MAIL_DIGEST));
+    assert.equal(projection.records.length, 1);
+  });
+
 // -------------------------------------- lineage that stays unknown
+
+test("an artifact with a real registered link still reaches F05 as one record",
+  async () => {
+    // THE SHAPE THE DATABASE ACTUALLY PRODUCES: ten keys, no source digest on the
+    // link. An artifact with a registered derivative is the ordinary case — a
+    // parsed proposal registers one in the same transaction as the proposal — so
+    // this is the path that must not refuse.
+    const { projection } = await project({
+      coverage: { [MAIL_DIGEST]: coverageBody(MAIL_DIGEST, [link()]) },
+    });
+    assert.deepEqual(Object.keys(link()).sort(),
+      [...V5_F05_SOURCE_DERIVATIVE_LINK_KEYS].sort());
+    assert.ok(!Object.prototype.hasOwnProperty.call(link(), "source_artifact_digest"));
+
+    assert.equal(projection.decision, "allow");
+    assert.equal(projection.assembly_permitted, true);
+    assert.deepEqual(projection.records.map(r => r.record_id), [MAIL_DIGEST]);
+
+    // And it assembles, through the real kernel, with the link reported and
+    // mapped into nothing.
+    const manifest = assembleContextFromSource({ projection, template: template() }).manifest;
+    assert.deepEqual(manifest.records.map(r => r.record_id), [MAIL_DIGEST]);
+    assert.equal(manifest.records[0].derived_kind, V5_F05_UNKNOWN_UPSTREAM_DERIVED_KIND);
+    assert.deepEqual(manifest.records[0].derived_from, []);
+    assert.equal(manifest.consequential_action_permitted, false);
+  });
 
 test("registered links are observations, never records, and coverage stays unknown",
   async () => {
     const { projection } = await project({
-      coverage: { [MAIL_DIGEST]: coverageBody(MAIL_DIGEST, [link(MAIL_DIGEST)]) },
+      coverage: { [MAIL_DIGEST]: coverageBody(MAIL_DIGEST, [link()]) },
     });
     assert.equal(projection.records.length, 1);
     const observed = projection.observations[0];
@@ -783,15 +870,46 @@ test("an empty link set is not read as verified absence", async () => {
   assert.equal(projection.observations[0].lineage_complete, false);
 });
 
-test("a link naming a parent this projection never read refuses", async () => {
-  const { source } = sourceWith({
-    coverage: {
-      [MAIL_DIGEST]: coverageBody(MAIL_DIGEST,
-        [link(MAIL_DIGEST, { source_artifact_digest: D(66) })]),
-    },
+test("the coverage answer, not a per-link field, binds links to the artifact read",
+  async () => {
+    // The binding F01 offers is the answer-level one: ops.f01_derivative_links
+    // filters WHERE source_artifact_digest = p_artifact_digest and projects no
+    // such key, and ops.f01_derivative_coverage names the artifact once. A
+    // coverage answer about a different artifact is therefore the refusal that
+    // matters, and it is checked before anything is read off the link list.
+    const { source } = sourceWith({
+      coverage: { [MAIL_DIGEST]: coverageBody(D(66), [link()]) },
+    });
+    await rejects(source.readSourceProjection(select(MAIL_DIGEST), CONTEXT),
+      "derivative_coverage_identity_mismatch");
   });
-  await rejects(source.readSourceProjection(select(MAIL_DIGEST), CONTEXT),
-    "derivative_link_parent_not_read");
+
+test("a link that is not the shape f01_derivative_links emits is refused", async () => {
+  // NOT A LEGAL STORED ROW. ops.f01_derivative_links builds every link with the
+  // same ten keys and its columns are NOT NULL, so none of the cases below can
+  // come from a committed row; they are what a corrupted or substituted answer in
+  // transit looks like, and the adapter refuses rather than summarising it.
+  const { link_digest: _dropped, ...missingKey } = link();
+  // The fixture must hand these to the ADAPTER intact. `->>` yields NULL for an
+  // element that is not an object, so the malformed link survives construction
+  // and the refusal below is the subject's, not the fixture's.
+  const built = coverageBody(MAIL_DIGEST, [null]);
+  assert.deepEqual(built.registered_links, [null]);
+  assert.deepEqual(built.registered_derivative_kinds, [null]);
+  assert.equal(built.registered_link_count, 1);
+
+  for (const malformed of [missingKey, "not-an-object", null]) {
+    const { source } = sourceWith({
+      coverage: { [MAIL_DIGEST]: coverageBody(MAIL_DIGEST, [malformed]) },
+    });
+    await assert.rejects(source.readSourceProjection(select(MAIL_DIGEST), CONTEXT),
+      error => {
+        assert.ok(error instanceof V5F05SourceError, `${error?.name}: ${error?.message}`);
+        assert.ok(["derivative_link_shape_unrecognized", "derivative_link_unreadable"]
+          .includes(error.code), error.code);
+        return true;
+      });
+  }
 });
 
 test("a coverage answer claiming an exhaustive inventory is refused, not consumed", async () => {
@@ -966,6 +1084,27 @@ test("a projection edited after it was read cannot be assembled", async () => {
     "source_projection_digest_mismatch");
 });
 
+test("a projection carrying an accessor is refused before it is hashed", async () => {
+  const { projection } = await project();
+  // The digest compare must not read one value and the assembly another. This is
+  // a shape refusal, not an authentication: the digest is unkeyed and the module
+  // says so, but the two reads at least see the same bytes.
+  const live = { ...projection };
+  let reads = 0;
+  Object.defineProperty(live, "now", {
+    enumerable: true, configurable: true,
+    get() { reads += 1; return reads === 1 ? projection.now : "2030-01-01T00:00:00.000Z"; },
+  });
+  refuses(() => assembleContextFromSource({ projection: live, template: template() }),
+    "accessor_property_refused");
+
+  // And a non-enumerable own field is refused rather than silently dropped.
+  const hidden = { ...projection };
+  Object.defineProperty(hidden, "assembly_permitted", { value: true, enumerable: false });
+  refuses(() => assembleContextFromSource({ projection: hidden, template: template() }),
+    "non_enumerable_key_refused");
+});
+
 test("a hand-built object is not a projection", async () => {
   refuses(() => assembleContextFromSource({
     projection: { assembly_permitted: true, records: [], unmapped: [] }, template: template(),
@@ -1132,6 +1271,13 @@ test("the contract names what this adapter does not do, and hashes it", () => {
   assert.equal(preimage.record_derived_kind, V5_F05_UNKNOWN_UPSTREAM_DERIVED_KIND);
   assert.equal(preimage.stored_copy_source_id, V5_F05_SOURCE_STORED_COPY_SOURCE_ID);
   assert.equal(preimage.consumable_coverage_state, V5_F05_SOURCE_CONSUMABLE_COVERAGE_STATE);
+  // The link projection this module reads, and the binding it relies on.
+  assert.deepEqual(preimage.derivative_link_keys, [...V5_F05_SOURCE_DERIVATIVE_LINK_KEYS]);
+  assert.equal(preimage.derivative_link_carries_source_artifact_digest, false);
+  assert.equal(preimage.derivative_links_bound_by, "coverage_answer_artifact_digest");
+  assert.equal(preimage.artifact_and_coverage_read_atomically, false);
+  // And the manifest version this adapter builds against is the one it states.
+  assert.equal(preimage.manifest_schema_version, "doctorcre-v5-f05-context-manifest.v2");
   assert.equal(preimage.unmapped_selector_blocks_assembly, true);
   assert.equal(preimage.reads_only_through_registered_store_read, true);
   assert.equal(v5F05SourceContractDigest(), digest(preimage));

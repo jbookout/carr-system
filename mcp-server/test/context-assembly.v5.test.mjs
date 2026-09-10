@@ -983,6 +983,38 @@ test("Q068 an unestablished upstream cannot be laundered into clean or authorita
   assert.equal(code(() => compileTaintLineage(primaryWithParents)), "primary_record_with_lineage");
 });
 
+test("Q068 the changed manifest and lineage bodies are versioned, not slipped in", () => {
+  // The bodies gained fields, so the SAME input hashes differently than it did
+  // under v1. The version says so rather than leaving a consumer to discover it
+  // from a digest that moved under an unchanged format string.
+  assert.equal(V5_F05_MANIFEST_SCHEMA_VERSION, "doctorcre-v5-f05-context-manifest.v2");
+  assert.equal(V5_F05_LINEAGE_SCHEMA_VERSION, "doctorcre-v5-f05-taint-lineage.v2");
+  const manifest = assemble();
+  assert.equal(manifest.schema_version, V5_F05_MANIFEST_SCHEMA_VERSION);
+  assert.equal(manifest.manifest_version, 2);
+  // The fields that made it v2, present on every manifest and every lineage.
+  assert.ok(Object.prototype.hasOwnProperty.call(manifest, "unknown_lineage_records"));
+  assert.equal(manifest.unknown_lineage_blocks_consequential_action, true);
+  assert.ok(manifest.records.every(
+    r => Object.prototype.hasOwnProperty.call(r, "upstream_lineage_known")));
+  assert.ok(Object.prototype.hasOwnProperty.call(
+    manifest.uncertainty, "unknown_lineage_record_count"));
+  const lineage = compileTaintLineage(records());
+  assert.equal(lineage.schema_version, V5_F05_LINEAGE_SCHEMA_VERSION);
+  assert.ok(Object.prototype.hasOwnProperty.call(lineage, "unknown_lineage_record_ids"));
+  assert.ok(lineage.entries.every(
+    e => Object.prototype.hasOwnProperty.call(e, "upstream_lineage_known")));
+
+  // The three formats that did NOT change keep their versions.
+  assert.equal(V5_F05_FROZEN_INPUT_SCHEMA_VERSION,
+    "doctorcre-v5-f05-frozen-assembly-input.v1");
+
+  // A request that still says v1 is refused rather than read under v2 rules.
+  const stale = { ...request(), schema_version: "doctorcre-v5-f05-context-manifest.v1" };
+  assert.equal(code(() => assembleContextManifest(freezeAssemblyInput(stale))),
+    "unknown_schema_version");
+});
+
 test("Q068 the contract states the price of the unknown lineage state", () => {
   const preimage = v5F05ContextContractPreimage();
   assert.ok(preimage.derived_kinds.includes("unknown_upstream"));

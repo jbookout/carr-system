@@ -154,6 +154,19 @@ export const V5_F05_SOURCE_EVIDENCE_CLASS_MAP = deepFreeze({
  */
 export const V5_F05_SOURCE_CONSUMABLE_COVERAGE_STATE = "unknown";
 
+/**
+ * The exact keys ops.f01_derivative_links projects, in its own order. NOTE what
+ * is NOT here: `source_artifact_digest`. The column exists on the row and inside
+ * the stored envelope's record, and the SQL filters on it — but the read
+ * projection does not return it, so the artifact a link belongs to is stated once,
+ * at the coverage answer's own `artifact_digest`, and nowhere else.
+ */
+export const V5_F05_SOURCE_DERIVATIVE_LINK_KEYS = deepFreeze([
+  "link_digest", "derivative_kind", "derivative_id", "derivative_content_digest",
+  "producer_workflow", "producer_run_ref", "produced_at", "evidence_ref",
+  "evidence_digest", "registered_by",
+]);
+
 /** Every reason a selector can fail to become a record. Closed, so it is testable. */
 export const V5_F05_SOURCE_UNMAPPED_REASONS = deepFreeze([
   "artifact_content_digest_unreadable",
@@ -425,17 +438,30 @@ function verifiedCoverage(body, artifact_digest) {
     fail("derivative_coverage_unreadable",
       "the coverage answer carries no readable link list", { artifact_digest });
   }
-  // EVERY LINK MUST BE BOUND TO THE ARTIFACT ACTUALLY READ. A link naming another
-  // source is a parent this projection never loaded, and a lineage edge whose
-  // parent was never read is exactly the hole F05 refuses on later as
-  // `taint_lineage_dangling_parent`. It is refused here, where the reason is
-  // still legible.
-  for (const link of links) {
-    if (!isPlainObject(link) || link.source_artifact_digest !== artifact_digest) {
-      fail("derivative_link_parent_not_read",
-        "a registered link names a source artifact this projection did not read",
-        { artifact_digest,
-          named: isPlainObject(link) ? link.source_artifact_digest ?? null : null });
+  // WHERE THE PARENT BINDING ACTUALLY COMES FROM, and it is not a field on the
+  // link. ops.f01_derivative_links selects `WHERE source_artifact_digest =
+  // p_artifact_digest` and then projects TEN KEYS, none of them the source digest;
+  // ops.f01_derivative_coverage passes that array through unchanged and states the
+  // artifact once, at the answer level. So the binding is the SQL filter plus the
+  // answer-level identity check above, and a per-link compare would be asserting a
+  // field the read projection has never emitted — which reads as a check while
+  // refusing every artifact that actually has a link.
+  //
+  // What IS checkable here is the shape: a link that is not the projection this
+  // module was written against is refused rather than summarised, because
+  // `registered_derivative_kinds` and the link count below are read off it.
+  for (const [index, link] of links.entries()) {
+    if (!isPlainObject(link)) {
+      fail("derivative_link_unreadable",
+        `registered_links[${index}] is not a readable link`, { artifact_digest, index });
+    }
+    for (const key of V5_F05_SOURCE_DERIVATIVE_LINK_KEYS) {
+      if (!Object.prototype.hasOwnProperty.call(link, key)) {
+        fail("derivative_link_shape_unrecognized",
+          `registered_links[${index}] is missing "${key}"; this is not the projection ops.f01_derivative_links emits`,
+          { artifact_digest, index, key,
+            expected: [...V5_F05_SOURCE_DERIVATIVE_LINK_KEYS] });
+      }
     }
   }
   return coverage;
@@ -608,10 +634,12 @@ export function createContextAssemblySource({ store } = {}) {
    * Read one deterministic selection and project it into F05 shapes.
    *
    * ORDERED, so a second reader reaches the same answer from the transcript:
-   *   1. The request is snapshotted, closed and bounded. A duplicate selector
-   *      refuses BEFORE any read: two copies of one record cannot both be carried
-   *      and choosing one silently is how a manifest starts differing from its
-   *      own selection.
+   *   1. The request is snapshotted, closed and bounded. Each selector carries
+   *      exactly the ONE field its kind reads — a field the kind ignores is
+   *      refused, because an ignored field still changed the dedupe key and let
+   *      one artifact through twice. A duplicate selector then refuses BEFORE any
+   *      read: two copies of one record cannot both be carried, and choosing one
+   *      silently is how a manifest starts differing from its own selection.
    *   2. A selector this module cannot map to a record — a document, a version
    *      list, anything but an artifact — is recorded UNMAPPED with its reason and
    *      is not read at all. No unregistered function is called to fill the field
@@ -647,11 +675,26 @@ export function createContextAssemblySource({ store } = {}) {
         fail("unknown_read_kind", `"${raw.kind}" is not a registered F01 read kind`,
           { path, kind: raw.kind, registered: [...V5_F01_READ_KINDS] });
       }
+      // ONE SELECTOR FIELD PER KIND, and a field the kind does not use is REFUSED
+      // rather than ignored. An ignored field still reached the dedupe key below,
+      // so `{artifact, X}` and `{artifact, X, document_id: "d"}` hashed
+      // differently, both read X, and both produced a record at record_id X — the
+      // duplicate the pre-read guard exists to catch, arriving at the kernel as
+      // duplicate_record instead of as this module's own refusal.
+      const selectorField = raw.kind === "artifact" ? "artifact_digest"
+        : ["document", "document_versions"].includes(raw.kind) ? "document_id"
+        : null;
+      for (const key of SELECTOR_KEYS) {
+        if (key === "kind" || key === selectorField || raw[key] === undefined) continue;
+        fail("irrelevant_selector_field",
+          `${path}.${key} is not read for a "${raw.kind}" selector; it is refused rather than ignored`,
+          { path: `${path}.${key}`, kind: raw.kind, key, reads: selectorField });
+      }
       const selector = { kind: raw.kind };
-      if (raw.artifact_digest !== undefined) {
+      if (selectorField === "artifact_digest" && raw.artifact_digest !== undefined) {
         selector.artifact_digest = assertDigestRef(raw.artifact_digest, `${path}.artifact_digest`);
       }
-      if (raw.document_id !== undefined) {
+      if (selectorField === "document_id" && raw.document_id !== undefined) {
         selector.document_id = assertExternalIdent(raw.document_id, `${path}.document_id`,
           { maxLength: 128 });
       }
@@ -735,6 +778,11 @@ export function createContextAssemblySource({ store } = {}) {
       noteActor(artifactRead.body);
       const stored = verifiedStoredArtifact(artifactRead.body, artifact_digest);
 
+      // A SECOND TRANSACTION, and therefore a second snapshot. The store opens one
+      // per read, so the artifact and its coverage are not read atomically. It
+      // changes no claim here: the artifact is immutable once stored, and coverage
+      // is `unknown` by construction whatever the link set does between the two
+      // reads. The projection states the seam rather than implying one snapshot.
       const coverageRead = await readOne("derivative_coverage", { artifact_digest }, context);
       readInstants.push(coverageRead.body.server_time);
       noteActor(coverageRead.body);
@@ -788,6 +836,9 @@ export function createContextAssemblySource({ store } = {}) {
           "derivative_record_not_readable_through_registered_read_kinds",
         empty_link_set_means_verified_absence: false,
         lineage_complete: false,
+        // The artifact and this coverage answer came from two separate read
+        // transactions, so they are two snapshots rather than one.
+        read_atomically_with_artifact: false,
       });
 
       const mapped = mapArtifactRecord({
@@ -886,6 +937,10 @@ export function createContextAssemblySource({ store } = {}) {
         absent_link_means_first_party_origin: false,
         upstream_derivation_inside_source_system_unknown: true,
         derivative_records_mapped: 0,
+        // Stated because it is true, not because it changes an answer: each read
+        // is its own transaction, so an artifact and its coverage are two
+        // snapshots. Coverage is `unknown` either way.
+        artifact_and_coverage_read_atomically: false,
       },
       uncertainty: {
         marker: true,
@@ -947,7 +1002,12 @@ export function createContextAssemblySource({ store } = {}) {
  */
 export function assembleContextFromSource(input) {
   const asked = assertClosed(input ?? {}, ASSEMBLY_KEYS, ASSEMBLY_KEYS, "input");
-  const projection = asked.projection;
+  // SNAPSHOTTED BEFORE IT IS HASHED, for the same reason the template below is
+  // and for the same reason freezeAssemblyInput exists: an accessor could answer
+  // one thing to the digest compare and another to the reads after it. This makes
+  // the check time-of-use-safe; it does not make the digest an authentication,
+  // which the contract says plainly it is not.
+  const projection = snapshot(asked.projection, "input.projection");
   if (!isPlainObject(projection) ||
       projection.schema_version !== V5_F05_SOURCE_PROJECTION_SCHEMA_VERSION) {
     fail("projection_not_compiled",
@@ -1090,6 +1150,13 @@ export function v5F05SourceContractPreimage() {
     record_derived_kind: V5_F05_UNKNOWN_UPSTREAM_DERIVED_KIND,
     stored_copy_source_id: V5_F05_SOURCE_STORED_COPY_SOURCE_ID,
     consumable_coverage_state: V5_F05_SOURCE_CONSUMABLE_COVERAGE_STATE,
+    // The exact link projection this module was written against, and where the
+    // artifact binding actually comes from, hashed so a later SQL change to
+    // either shows up as a contract difference rather than as a silent pass.
+    derivative_link_keys: [...V5_F05_SOURCE_DERIVATIVE_LINK_KEYS],
+    derivative_links_bound_by: "coverage_answer_artifact_digest",
+    derivative_link_carries_source_artifact_digest: false,
+    artifact_and_coverage_read_atomically: false,
     unmapped_reasons: [...V5_F05_SOURCE_UNMAPPED_REASONS],
     template_keys: [...V5_F05_SOURCE_TEMPLATE_KEYS],
     refused_template_keys: [...V5_F05_SOURCE_REFUSED_TEMPLATE_KEYS],
