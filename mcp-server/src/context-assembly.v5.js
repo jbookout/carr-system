@@ -101,13 +101,28 @@ const {
   assertDigestRef, assertTenant,
 } = V5_F05_GUARDS;
 
-export const V5_F05_MANIFEST_SCHEMA_VERSION = "doctorcre-v5-f05-context-manifest.v1";
+// v2 ON TWO OF THE FIVE, and the reason is that the BODY changed rather than the
+// idea. A manifest now carries `unknown_lineage_records`,
+// `unknown_lineage_blocks_consequential_action`, `upstream_lineage_known` on
+// every projected record, and `uncertainty.unknown_lineage_record_count`; a
+// lineage now carries `upstream_lineage_known` per entry and
+// `unknown_lineage_record_ids`. The same input therefore hashes to a different
+// `manifest_digest` and `lineage_digest` than it did under v1, and a consumer
+// pinning the schema version alone could not otherwise tell. The request version
+// moves with the manifest version deliberately: `derived_kind` accepts a value it
+// did not accept before, so a v1 request is a different contract, and one that
+// says v1 is refused rather than read under v2 rules.
+//
+// NOTHING IS MIGRATED, because nothing is stored: `no_manifest_persistence` holds
+// (see contextAssemblyIntegrationGaps), no projection is registered anywhere, and
+// no runtime reads either version.
+export const V5_F05_MANIFEST_SCHEMA_VERSION = "doctorcre-v5-f05-context-manifest.v2";
 export const V5_F05_FROZEN_INPUT_SCHEMA_VERSION = "doctorcre-v5-f05-frozen-assembly-input.v1";
 export const V5_F05_ATTESTATION_SCHEMA_VERSION = "doctorcre-v5-f05-verifier-attestation.v1";
 export const V5_F05_CORRECTION_SCHEMA_VERSION = "doctorcre-v5-f05-correction-proposal.v1";
-export const V5_F05_LINEAGE_SCHEMA_VERSION = "doctorcre-v5-f05-taint-lineage.v1";
+export const V5_F05_LINEAGE_SCHEMA_VERSION = "doctorcre-v5-f05-taint-lineage.v2";
 
-export const V5_F05_MANIFEST_VERSION = 1;
+export const V5_F05_MANIFEST_VERSION = 2;
 
 /**
  * The only projection kind this module emits. `authenticated_runtime_projection`
@@ -132,8 +147,50 @@ export const V5_F05_ORIGINS = deepFreeze([
   "record_layer", ...V5_F05_EXTERNAL_ORIGINS,
 ]);
 export const V5_F05_DERIVED_KINDS = deepFreeze([
-  "primary", "extract", "summary", "embedding", "translation",
+  "primary", "extract", "summary", "embedding", "translation", "unknown_upstream",
 ]);
+
+/**
+ * THE STATE THE VOCABULARY WAS MISSING: the parent set is NOT ESTABLISHED.
+ *
+ * `primary` says a record is derived from nothing, and compileRecord below is
+ * explicit that this is a positive claim. A retrieval adapter reading a stored
+ * corporate artifact cannot make it: the record layer can show which derivatives
+ * were registered FROM an artifact and has no read at all for what that artifact
+ * was itself derived from, so "no parent" and "nobody established a parent" are
+ * indistinguishable to it. Both were being written as `primary`, which is the
+ * laundering this half exists to stop, one level up.
+ *
+ * So it is a THIRD state rather than a permission. It buys exactly one thing —
+ * an empty `derived_from` on a record that is not claiming to be an original —
+ * and it pays for it:
+ *   * the origin must be one of Q068's EXTERNAL six, so the record is
+ *     `untrusted_external` by the ordinary taint rule and can never be labelled
+ *     first-party;
+ *   * an authority-bearing record kind refuses outright;
+ *   * `record_kind` "summary"/"embedding" still must declare their own
+ *     derivation, so the parent requirement on those two is untouched;
+ *   * every parent that IS named is still checked for existence, cycles and
+ *     self-reference, and taint still propagates from it;
+ *   * and the manifest blocks its own consequential action and says why.
+ *
+ * It is not a way to carry a record with less evidence. It is a way to say what
+ * is actually known without saying something false.
+ */
+export const V5_F05_UNKNOWN_UPSTREAM_DERIVED_KIND = "unknown_upstream";
+
+/**
+ * DERIVED FROM THE VALIDATED KIND, NEVER CARRIED AS A FIELD, and the reason is a
+ * seam this module already has: assembleContextManifest compiles its records and
+ * then hands the COMPILED records to compileTaintLineage, which re-validates them
+ * through compileRecord against the closed RECORD_KEYS. Any internal field on a
+ * compiled record is therefore an unknown_field on the second pass. Recomputing
+ * it is also the safer half of that accident: `upstream_lineage_known` is never a
+ * name a caller can set, so no request can assert its own lineage status.
+ */
+function upstreamLineageKnown(derived_kind) {
+  return derived_kind !== V5_F05_UNKNOWN_UPSTREAM_DERIVED_KIND;
+}
 
 /** F01's vocabulary, reused rather than reinvented. */
 export const V5_F05_TAINT_CLASSES = V5_F01_TAINT_CLASSES;
@@ -231,6 +288,23 @@ function compileRecord(raw, index, seen) {
     "unknown_record_kind");
   const derived_kind = assertEnum(raw.derived_kind, V5_F05_DERIVED_KINDS, `${path}.derived_kind`,
     "unknown_derived_kind");
+  const origin = assertEnum(raw.origin, V5_F05_ORIGINS, `${path}.origin`, "unknown_origin");
+  const upstream_unknown = derived_kind === V5_F05_UNKNOWN_UPSTREAM_DERIVED_KIND;
+
+  // The two conditions that keep the unknown state from becoming a shortcut. An
+  // externally-originated record is `untrusted_external` however its lineage
+  // reads, so nothing labelled unknown can arrive clean; and a kind that carries
+  // authority may not be held by a record whose provenance nobody established.
+  if (upstream_unknown && !V5_F05_EXTERNAL_ORIGINS.includes(origin)) {
+    fail("unknown_lineage_requires_external_origin",
+      `${path}.derived_kind is "${V5_F05_UNKNOWN_UPSTREAM_DERIVED_KIND}" with origin "${origin}"; an unestablished lineage may only be carried as external, untrusted evidence`,
+      { path, record_id, origin, external_origins: [...V5_F05_EXTERNAL_ORIGINS] });
+  }
+  if (upstream_unknown && V5_F05_AUTHORITY_BEARING_RECORD_KINDS.includes(record_kind)) {
+    fail("unknown_lineage_cannot_bear_authority",
+      `${path}.record_kind is "${record_kind}" and its lineage is not established; a record nobody can trace does not carry authority`,
+      { path, record_id, record_kind });
+  }
 
   // The cheapest laundering path there was: a record declaring
   // `derived_kind: "summary"` with `origin: "record_layer"` and an EMPTY
@@ -239,7 +313,12 @@ function compileRecord(raw, index, seen) {
   // derived record with no declared parent is refused rather than labelled
   // clean. The same for the two record KINDS that assert derivation in their
   // own name, and the same in reverse: a "primary" record cannot cite parents.
-  if (derived_kind !== "primary" && derived_from.length === 0) {
+  // `unknown_upstream` is the one exemption, and it is not an exemption from the
+  // check — it is the honest answer to it. The reason this refusal exists is that
+  // an empty parent set was indistinguishable from clean first-party content; a
+  // record that SAYS its lineage is unestablished, carries an external origin and
+  // blocks the write is distinguishable, which is the whole difference.
+  if (derived_kind !== "primary" && !upstream_unknown && derived_from.length === 0) {
     fail("derived_record_without_lineage",
       `${path}.derived_kind is "${derived_kind}" and ${path}.derived_from is empty; a derived record with no parent cannot be told apart from clean first-party content`,
       { path, record_id, derived_kind });
@@ -260,7 +339,7 @@ function compileRecord(raw, index, seen) {
     record_kind,
     version: assertSafeInteger(raw.version, `${path}.version`, { min: 1 }),
     content_digest: assertDigestRef(raw.content_digest, `${path}.content_digest`),
-    origin: assertEnum(raw.origin, V5_F05_ORIGINS, `${path}.origin`, "unknown_origin"),
+    origin,
     derived_kind,
     derived_from,
     query_id: assertExternalIdent(raw.query_id, `${path}.query_id`, { maxLength: 128 }),
@@ -364,6 +443,12 @@ export function compileTaintLineage(rawRecords) {
     labelled.set(record_id, {
       record_id, origin: record.origin, derived_kind: record.derived_kind,
       derived_from: [...record.derived_from],
+      // Stated per entry, because "no parent is carried here" and "no parent
+      // exists" are the two things this field exists to keep apart. Recomputed
+      // from the validated kind, so it is an OUTPUT here and never an input. It
+      // changes no taint class: an unknown-lineage record is external, so it is
+      // already untrusted_external above.
+      upstream_lineage_known: upstreamLineageKnown(record.derived_kind),
       taint_class, tainted: V5_F05_TAINTED_CLASSES.includes(taint_class),
       reason_id, tainted_ancestors,
       may_instruct: false, treated_as: "data",
@@ -376,6 +461,8 @@ export function compileTaintLineage(rawRecords) {
     schema_version: V5_F05_LINEAGE_SCHEMA_VERSION,
     entries,
     tainted_record_ids: entries.filter(e => e.tainted).map(e => e.record_id),
+    unknown_lineage_record_ids: entries
+      .filter(e => e.upstream_lineage_known === false).map(e => e.record_id),
     declassification_supported: false,
   };
   return deepFreeze({
@@ -763,6 +850,14 @@ export function assembleContextManifest(frozen) {
     }
   }
 
+  // MEASURED FROM THE COMPILED RECORDS, not from the ones that survive the
+  // budget: a record dropped for tokens does not make its own unestablished
+  // lineage go away, so this list — and the block below it — cannot be cleared by
+  // omitting the evidence that produced it.
+  const unknown_lineage_records = records
+    .filter(record => !upstreamLineageKnown(record.derived_kind))
+    .map(record => record.record_id);
+
   // Step 5. Freshness.
   const projectedRecords = records.map(record => {
     const observedAt = Date.parse(record.observed_at);
@@ -778,6 +873,7 @@ export function assembleContextManifest(frozen) {
       record_id: record.record_id, record_kind: record.record_kind, version: record.version,
       content_digest: record.content_digest, origin: record.origin,
       derived_kind: record.derived_kind, derived_from: [...record.derived_from],
+      upstream_lineage_known: upstreamLineageKnown(record.derived_kind),
       taint_class: taint.taint_class, tainted: taint.tainted, may_instruct: false,
       provenance: { ...record.provenance }, query_id: record.query_id,
       observed_at: record.observed_at, age_seconds, max_age_seconds: record.max_age_seconds,
@@ -1093,6 +1189,12 @@ export function assembleContextManifest(frozen) {
   }
   if (sources.some(s => s.state === "conflicting")) blocking_reasons.push("source_conflict_unresolved");
   if (stale_control_records.length > 0) blocking_reasons.push("control_backing_record_stale");
+  // UNCERTAINTY, NOT A REFUSAL. Q065's ladder exactly: a record whose lineage
+  // nobody established is a fact nobody has established, so marked read-only
+  // exploration continues and the consequential write does not.
+  if (unknown_lineage_records.length > 0) {
+    blocking_reasons.push("record_upstream_lineage_unknown");
+  }
   if (taint_violations.length > 0) blocking_reasons.push("untrusted_content_cannot_be_authority");
   if (rule_provenance_violations.length > 0) blocking_reasons.push("rule_provenance_not_trustworthy");
   if (rule_provenance_unresolved.length > 0) blocking_reasons.push("rule_provenance_unresolved");
@@ -1136,8 +1238,12 @@ export function assembleContextManifest(frozen) {
   if (coverage.delivery_refusals.length > 0) hardRefusals.push("rule_delivery_failed_closed");
   if (budget_exceeded) hardRefusals.push("budget_cannot_omit_binding_constraint");
 
+  // The unknown-lineage term is stated SEPARATELY as well as being a blocking
+  // reason, so a later edit to what `blocking_reasons` collects cannot quietly
+  // re-enable a consequential action over evidence nobody can trace.
   const consequential_action_permitted =
     hardRefusals.length === 0 && blocking_reasons.length === 0 &&
+    unknown_lineage_records.length === 0 &&
     coverage.consequential_action_permitted && authority_envelope.decision === "allow";
   const read_only_exploration_permitted = hardRefusals.length === 0;
 
@@ -1201,6 +1307,10 @@ export function assembleContextManifest(frozen) {
     records: projectedRecords,
     taint_lineage: lineage.entries,
     taint_violations,
+    // Which records this manifest carries whose upstream nobody established.
+    // Present on every manifest, empty where the question does not arise.
+    unknown_lineage_records,
+    unknown_lineage_blocks_consequential_action: true,
     // ONE evaluation per rule id over the union of every use that puts rule
     // text in front of the model, each entry naming its uses and its
     // disposition. `guidance` above carries the same answer per entry.
@@ -1242,6 +1352,7 @@ export function assembleContextManifest(frozen) {
     },
     uncertainty: {
       marker: blocking_reasons.length > 0,
+      unknown_lineage_record_count: unknown_lineage_records.length,
       unknown_fact_count: coverage.unknown_facts.length,
       possibly_binding_count: coverage.possibly_binding.length,
       pending_relation_count: coverage.pending_relations.length,
@@ -1644,6 +1755,14 @@ export function v5F05ContextContractPreimage() {
     unavailable_mandatory_binding_text_refuses: true,
     source_evidence_for_delivered_rule_text_is_omissible_for_tokens: false,
     derived_record_requires_declared_parent: true,
+    // The third lineage state and its price, hashed so a consumer cannot read an
+    // unknown-lineage record as either an original or a clean one.
+    unknown_upstream_lineage_representable: true,
+    unknown_upstream_lineage_requires_external_origin: true,
+    unknown_upstream_lineage_may_bear_authority: false,
+    unknown_upstream_lineage_exempts_summary_or_embedding_parent: false,
+    unknown_upstream_lineage_blocks_consequential_action: true,
+    unknown_upstream_lineage_permits_marked_read_only_exploration: true,
     write_gate_field: "consequential_action_permitted",
     authority_is_computed_not_asserted: true,
     declassification_supported: false,
