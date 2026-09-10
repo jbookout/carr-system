@@ -918,6 +918,57 @@ test("a completion observed exactly ON the composed deadline is on time, not lat
   assert.equal((await store.read(started.clock_key)).history.completion_observed_at, dueAt);
 });
 
+test("a completion within the deadline that arrives AFTER a recorded miss claims no success", async () => {
+  // Q008.D1's third completed case, at the seam. The observation and the verdict
+  // are two facts and neither overwrites the other: the completion was observed
+  // at or before the deadline, so it is never called late; a miss is durably
+  // recorded, so no deadline success may be claimed and replan still stands.
+  // The kernel suite proves this; the seam is where it has to hold over a
+  // projection composed from the stored inventory, revision after revision.
+  const { join, compose } = await admittedSeam();
+  const { kernel, store, recorder } = recordingSeam();
+  const file = async (projection, prior) => recorder.evaluateAndRecord({
+    envelope: kernel.envelopeFor(copy(projection)),
+    expected_prior_history_digest: prior, idempotency_key: uuid() });
+  const historyOf = async clockKey => copy((await store.read(clockKey)).history);
+
+  const started = await file((await compose({ as_of: CLOCK_AS_OF })).projection, null);
+  const dueAt = (await historyOf(started.clock_key)).due_at;
+  assert.equal(dueAt, chicagoThirtyDayDeadline(AS_OF).due_at, "no pause, so the deadline is the base one");
+
+  // The deadline passes with nothing in hand, and the miss is written down.
+  const missed = await file((await compose({ as_of: iso(Date.parse(dueAt) + HOUR),
+    history: await historyOf(started.clock_key) })).projection, started.history_digest);
+  assert.equal(missed.kernel_verdict.status, "missed");
+  const missAt = (await historyOf(started.clock_key)).miss_at;
+  assert.equal(missAt, dueAt);
+
+  // THEN a terminus receipt observed ON the deadline arrives, still inside its
+  // own window. Its observation instant is not rewritten by the miss that was
+  // recorded before it was admitted.
+  const done = await file((await compose({ as_of: iso(Date.parse(dueAt) + 2 * HOUR),
+    history: await historyOf(started.clock_key),
+    completion: { gate_id: "journey-one-kernel-production-accepted",
+      combiner: "all_current_exact_distinct_pass",
+      obligation_decision_ids: [...JOURNEY_ONE_DEADLINE_CONTRACT.kernel_obligation_decision_ids],
+      receipts: [terminusReceipt(dueAt)] } })).projection, missed.history_digest);
+
+  assert.equal(done.kernel_verdict.status, "completed_after_recorded_miss");
+  assert.equal(done.kernel_verdict.completion_observed_within_deadline, true,
+    "the observation is within the deadline and is never reported as late");
+  assert.equal(done.kernel_verdict.deadline_success, false, "and it still claims no success");
+  assert.equal(done.kernel_verdict.replan_required, true);
+
+  // THE MISS AND THE ORIGIN BOTH SURVIVED IT, in the stored history.
+  const final = await historyOf(started.clock_key);
+  assert.equal(final.miss_at, missAt, "the miss is preserved, not reinterpreted");
+  assert.equal(final.completion_observed_at, dueAt);
+  assert.equal(final.origin_receipt_digest, join.proposed_receipt_reference_digest);
+  assert.equal(final.origin_at, AS_OF);
+  assert.equal(final.events.filter(e => e.type === "deadline_missed").length, 1);
+  assert.equal((await store.read(started.clock_key)).revision_count, 3);
+});
+
 test("a pause longer than the accepted budget is credited only up to the contract's cap", async () => {
   // ≤5 accepted pause days, preserved as the union of overlaps clipped to the
   // contract's own hour budget. The number is READ from the accepted deadline
@@ -1010,6 +1061,149 @@ test("a projection composed for one accepted scope cannot be filed by a store bo
   error => {
     assert.equal(error.code, "minimum_receipt_scope_mismatch");
     assert.equal(error.detail.invariant, "j1_minimum_receipt_binds_accepted_scope");
+    return true;
+  });
+});
+
+test("the FIRST ELIGIBLE row is the origin, not the first row A00 got admitted", async () => {
+  // EVERY OTHER COMPOSITION ABOVE CARRIES ONE ADMITTED ROW, where the first
+  // ledger row and the first ELIGIBLE row are the same row. In production they
+  // are not: an append-only inventory keeps every attempt, and an attempt whose
+  // own window had already lapsed by the instant the record layer admitted it is
+  // ORDINARY HISTORY the kernel skips — not a defect this rail refuses and not a
+  // row it may discard. The input store proves that selection against its own
+  // synthetic receipts; here BOTH rows are receipts A00 proposed, so the row the
+  // kernel skips and the row it takes each came across the seam, and the origin
+  // it reaches is still the one the two-module seam proves.
+  const lapsedExpiresAt = iso(Date.parse(OBSERVED_AT) + MINIMUM_TTL);
+
+  // ROW 0: a join whose receipt was observed a day earlier, admitted an hour
+  // AFTER its own window closed. Admission is not backdated and the receipt is
+  // not edited; the delay is the record layer's, which is exactly the ordinary
+  // case the kernel calls inadmissible-not-fatal.
+  const lapsedProjection = minimumProjection();
+  lapsedProjection.as_of = OBSERVED_AT;
+  const seam = await admittedSeam({ projection: lapsedProjection,
+    admittedAt: iso(Date.parse(lapsedExpiresAt) + HOUR) });
+  assert.equal(seam.join.proposed_receipt.observed_at, OBSERVED_AT);
+  assert.equal(seam.join.proposed_receipt.ttl_expires_at, lapsedExpiresAt);
+  assert.ok(Date.parse(seam.admitted.admitted_at) > Date.parse(lapsedExpiresAt),
+    "row 0 must actually be lapsed at its own admission instant, or it proves nothing");
+
+  // ROW 1: the receipt this whole file carries, admitted an hour later and still
+  // inside its own window at that instant.
+  const current = joinOnce(minimumProjection());
+  seam.admissionClock.at = iso(Date.parse(lapsedExpiresAt) + 2 * HOUR);
+  const admittedCurrent = await seam.inputs.admit({
+    receipt: copy(current.proposed_receipt),
+    expected_prior_admission_digest: seam.admitted.admission_digest,
+    idempotency_key: uuid(),
+    claimed_receipt_digest: current.proposed_receipt_reference_digest,
+    source_ref: "safe:a00:current-proposed-minimum-receipt",
+  });
+  assert.notEqual(admittedCurrent.receipt_digest, seam.admitted.receipt_digest);
+  assert.ok(Date.parse(admittedCurrent.admitted_at) <
+    Date.parse(current.proposed_receipt.ttl_expires_at),
+  "row 1 must actually be current at its own admission instant");
+
+  // THE COMPOSITION IS ANCHORED ON THE HEAD AND CARRIES BOTH ROWS, in the
+  // kernel's own selection order. Nothing was filtered out on the way through.
+  const inventory = await seam.inputs.read();
+  assert.equal(inventory.admission_count, 2);
+  const composed = await seam.compose({ as_of: iso(Date.parse(lapsedExpiresAt) + 3 * HOUR) });
+  assert.equal(composed.head_admission_digest, admittedCurrent.admission_digest);
+  assert.equal(composed.admission_count, 2);
+  assert.deepEqual(composed.projection.minimum_history, copy(inventory.minimum_history));
+  assert.deepEqual(composed.projection.minimum_history.map(row => row.receipt.observed_at),
+    [OBSERVED_AT, AS_OF]);
+
+  // AND THE ORIGIN IS ROW 1. Same digest the two-module seam proves from a
+  // hand-built projection, same origin instant, still running.
+  const fromStorage = evaluateOnce(copy(composed.projection));
+  assert.equal(fromStorage.state.origin_receipt_digest,
+    current.proposed_receipt_reference_digest);
+  assert.notEqual(fromStorage.state.origin_receipt_digest,
+    seam.admitted.receipt_digest, "the skipped row must not be the origin");
+  assert.equal(fromStorage.state.origin_at, AS_OF);
+  assert.equal(fromStorage.state.status, "running");
+  assert.equal(fromStorage.state.base_deadline_at, chicagoThirtyDayDeadline(AS_OF).due_at);
+  assert.equal(fromStorage.state.origin_receipt_digest,
+    evaluateOnce(clockProjection(current,
+      journeyOneClockMinimumReceiptView(current.proposed_receipt))).state.origin_receipt_digest);
+
+  // THE SKIP IS REAL AND IT IS THE INADMISSIBLE KIND, proved rather than assumed:
+  // row 0 alone leaves the clock with no origin AND NO REFUSAL OF THE INVENTORY —
+  // `origin_unavailable`, counting one inadmissible admission. Had it been fatal
+  // instead, the two-row evaluation above could never have returned at all.
+  const lapsedAlone = copy(composed.projection);
+  lapsedAlone.minimum_history = [copy(composed.projection.minimum_history[0])];
+  assert.throws(() => evaluateOnce(lapsedAlone), error => {
+    assert.equal(error.name, "JourneyOneClockError");
+    assert.equal(error.code, "origin_unavailable");
+    assert.equal(error.detail.inadmissible_admissions, 1);
+    return true;
+  });
+
+  // AND THE REAL CLOCK STORE FILES THE RESULT under the one scope key, so the
+  // third rail agrees with the first two about which row started this clock.
+  const { kernel, store, recorder } = recordingSeam();
+  const recorded = await recorder.evaluateAndRecord({
+    envelope: kernel.envelopeFor(copy(composed.projection)),
+    expected_prior_history_digest: null, idempotency_key: uuid() });
+  assert.equal(recorded.kernel_verdict.status, "running");
+  assert.equal(recorded.clock_scope_key, journeyOneClockScopeKey(SEAM_SCOPE));
+  const readback = await store.read(recorded.clock_key);
+  assert.equal(readback.history.origin_receipt_digest,
+    current.proposed_receipt_reference_digest);
+  assert.equal(readback.history.origin_at, AS_OF);
+  // The inventory still holds both rows: nothing about being skipped removed one.
+  assert.equal((await seam.inputs.read()).admission_count, 2);
+});
+
+test("an acceptance envelope the manifest A00 read does not produce composes nothing", async () => {
+  // The composer's construction is where a caller could still assert the
+  // benchmark half of the projection, and it is refused there rather than
+  // surfacing as a clock started on three strings. Both halves of this are
+  // cross-module: the manifest is the one A00's join validated, and the scope is
+  // the inventory the receipt was admitted into.
+  const { inputs, join } = await admittedSeam();
+  const accepted = manifest();
+  assert.equal(seamSources(accepted).benchmark_manifest_digest, join.benchmark_manifest_digest,
+    "the manifest under test must be the one the join published a digest for");
+
+  // ONE ASSERTED FIELD AT A TIME. Each is a value the accepted manifest does not
+  // produce, and the derivation catches it by name.
+  for (const [field, value] of [
+    ["benchmark_manifest_digest", D(8)],
+    ["benchmark_accepted_at", iso(Date.parse(ACCEPTED_AT) - HOUR)],
+    ["benchmark_accepted_by_identity", I("dell")],
+  ]) {
+    assert.throws(() => createJourneyOneClockProjectionComposer({
+      store: inputs, benchmark_manifest: accepted,
+      accepted_sources: { ...seamSources(accepted), [field]: value } }), error => {
+      assert.equal(error.code, "benchmark_accepted_sources_not_derived", field);
+      assert.equal(error.detail.field, field);
+      return true;
+    }, field);
+  }
+
+  // AND A GENUINELY ACCEPTED MANIFEST FOR ANOTHER PROGRAM, whose envelope is
+  // internally consistent and honestly derived — it is simply not about the
+  // subject this inventory admitted a receipt for. The kernel could never catch
+  // it: the manifest digest is in none of the comparisons it makes.
+  const otherPayload = payload();
+  otherPayload.subject_digest = D(11);
+  const otherManifest = manifest(otherPayload);
+  assert.equal(otherManifest.status, "accepted");
+  assert.notEqual(seamSources(otherManifest).benchmark_manifest_digest,
+    join.benchmark_manifest_digest);
+  assert.throws(() => createJourneyOneClockProjectionComposer({
+    store: inputs, benchmark_manifest: otherManifest,
+    accepted_sources: seamSources(otherManifest) }), error => {
+    assert.equal(error.code, "benchmark_manifest_scope_mismatch");
+    assert.equal(error.detail.field, "subject_digest");
+    assert.equal(error.detail.expected, SEAM_SCOPE.benchmark_subject_digest);
+    assert.equal(error.detail.supplied, D(11));
     return true;
   });
 });
