@@ -35,6 +35,7 @@ import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
 import {
   V5_J102_TRANSITION_IDS, V5_J102_DEAL_AXES, V5_J102_EVIDENCE_KINDS,
   V5_J102_EVIDENCE_INTEGRITY, V5_J102_EVIDENCE_LOADER,
+  V5_J102_EVENT_SCHEMA_VERSION,
   V5_J102_SUBJECT_KINDS,
   assertLifecycleSubject,
   evaluateLifecycleTransition, v5J102EvidenceContract, v5J102TransitionContract,
@@ -51,9 +52,12 @@ import {
   V5_J102_READ_KINDS,
   V5_J102_STORE_RECORD_KINDS,
   V5_J102_STORE_SCHEMA_VERSION,
+  V5_J102_STORED_EVENT_SCHEMA_VERSION,
+  V5_J102_STORED_SUBJECT_SCHEMA_VERSION,
   V5_J102_UNWIRED_CAPABILITIES,
   V5J102StoreError,
   createCreLifecycleStore,
+  storedEventRecord,
   storedSubjectRecord,
   v5J102EnvelopeCanonicalBytes,
   v5J102StoreEnvelope,
@@ -279,8 +283,18 @@ class FakeDb {
         outcome: "applied",
         actor_slug,
         transition_id: params[0],
-        reason_id: diagnostics.reason_id,
+        // M-2, mirrored from the real writer's receipt rather than from the old
+        // one: the kernel's diagnostic reason arrives under its own name with its
+        // own scope, and the two derived fields arrive with the source label the
+        // database stamps on them. The fake is a stand-in for the shape, so it
+        // has to be the shape the writer actually returns.
+        caller_reported_reason_id: diagnostics.reason_id,
+        caller_reported_reason_id_scope:
+          "kernel_result_diagnostic_asserted_by_the_caller_and_not_recomputed_here",
         coupled_facts_committed: diagnostics.coupled_facts,
+        coupled_facts_committed_source: "derived_from_the_admission_contract",
+        decision_refs: diagnostics.decision_refs,
+        decision_refs_source: "derived_from_the_admission_contract",
         subject_digests: Object.fromEntries(subjects.map(e =>
           [`${e.record.subject_kind}:${e.record.subject_id}`, digest(e.record.state)])),
         event_digests: events.map(e => e.record_digest),
@@ -554,22 +568,41 @@ test("the transition writer receives the CAS digests, the envelopes and the rech
   assert.equal(subjects[0].record.prior_state_digest, digest(dealState()));
   assert.equal(subjects[0].record.state.execution_state, "executed");
   assert.equal(subjects[0].record_digest, digest(subjects[0].record));
+  // HIGH-5. The subject's own provenance is the transition that is actually being
+  // applied — the same string the writer compares it against and refuses on. It
+  // is the field ops.j102_subject reports as the row's provenance, so a store
+  // that stamped anything else would be building a receipt-shaped lie the
+  // database now refuses.
+  assert.equal(subjects[0].record.established_by_transition, transition_id);
+  assert.equal(subjects[0].record.schema_version, V5_J102_STORED_SUBJECT_SCHEMA_VERSION);
+  assert.equal(subjects[0].record.tenant, ORGANIZATION_TENANT_ID);
+  assert.deepEqual(Object.keys(subjects[0].record).sort(),
+    [...admissionPolicy().stored_subject_record_keys].sort());
 
   // One event envelope, naming the transition and the evidence it rested on.
   const events = JSON.parse(eventsJson);
   assert.equal(events.length, 1);
   assert.equal(events[0].record.event.event_kind, "lease_executed");
   assert.equal(events[0].record.transition_id, "record-lease-execution");
-  // The history says WHICH deal each piece of evidence was about, not only which
-  // document it was.
+  assert.equal(events[0].record.schema_version, V5_J102_STORED_EVENT_SCHEMA_VERSION);
+  assert.equal(events[0].record.tenant, ORGANIZATION_TENANT_ID);
+  assert.equal(events[0].record.event.schema_version, V5_J102_EVENT_SCHEMA_VERSION);
+  assert.deepEqual(Object.keys(events[0].record).sort(),
+    [...admissionPolicy().stored_event_record_keys].sort());
+  // THE CANONICAL EVIDENCE REFERENCE, and it is exactly the triple the database
+  // can independently rebuild from what its own readers returned: the kind, the
+  // source, and the reference — for a document, F01's own document_id. The
+  // writer compares this array element for element against
+  // ops.j102_recheck_evidence's answer, so a fourth key would be a key the
+  // comparison has to admit on a fact it already guarantees (every pin is proved
+  // bound to the one primary subject, which the receipt names).
   assert.deepEqual(events[0].record.evidence_references, [{
     evidence_kind: "executed_lease", source: "f01_document", reference: "doc-synthetic-1",
-    subject_binding: {
-      subject_kind: "deal", subject_id: "deal-synthetic-1",
-      bound_by: "stored_evidence_subject_link",
-      binding_digest: storedLink().link_digest,
-    },
   }]);
+  // And the reference really is the DOCUMENT ID, which is what the SQL recheck
+  // reads back off F01 — not a label the store chose beside it.
+  assert.equal(events[0].record.evidence_references[0].reference,
+    JSON.parse(recheckJson)[0].selector.document_id);
   assert.equal(events[0].record_digest, digest(events[0].record));
 
   // THE RECHECK MANIFEST, which is what lets the database re-read the exact pin
@@ -993,10 +1026,19 @@ test("a failing write rolls back, reports nothing as applied, and rethrows the o
 test("a replay reports what LANDED, and re-evaluates nothing", async () => {
   const stored = {
     operation: "record-deal-execution", decision: "allow",
-    reason_id: "lease_execution_marks_executed_lease", actor_slug: "joe",
+    caller_reported_reason_id: "lease_execution_marks_executed_lease",
+    caller_reported_reason_id_scope:
+      "kernel_result_diagnostic_asserted_by_the_caller_and_not_recomputed_here",
+    actor_slug: "joe",
     transition_id: "record-lease-execution",
     subject_digests: { "deal:deal-synthetic-1": D(42) },
     event_digests: [D(43)], coupled_facts_committed: ["deal.execution_state"],
+    coupled_facts_committed_source: "derived_from_the_admission_contract",
+    decision_refs: ["Q072.D1", "Q078.D1", "Q080.D1"],
+    decision_refs_source: "derived_from_the_admission_contract",
+    subject_provenance_bound_to_transition: true,
+    event_payloads_enforced: true,
+    event_evidence_references_enforced: true,
     evidence_rechecked_under_lock: true, readback: { subjects: [] },
   };
   // The stored deal is now CLOSED — a fresh evaluation would refuse. The replay
@@ -1016,6 +1058,21 @@ test("a replay reports what LANDED, and re-evaluates nothing", async () => {
   assert.equal(answer.transition_id, "record-lease-execution");
   assert.equal(answer.evidence_rechecked_under_lock, true);
   assert.equal(answer.partial_application, false);
+  // M-2. WHICH OF THESE THE DATABASE VOUCHES FOR is carried back, not inferred:
+  // the coupled facts and the decision refs are labelled as derived from the
+  // admission contract, and the kernel's diagnostic reason is labelled as the
+  // caller's own assertion. A reader of a replayed receipt sees the difference.
+  assert.equal(answer.coupled_facts_committed_source, "derived_from_the_admission_contract");
+  assert.equal(answer.decision_refs_source, "derived_from_the_admission_contract");
+  assert.deepEqual(answer.decision_refs,
+    v5J102TransitionContract("record-lease-execution").decision_refs);
+  assert.equal(answer.caller_reported_reason_id, "lease_execution_marks_executed_lease");
+  assert.equal(answer.caller_reported_reason_id_scope,
+    "kernel_result_diagnostic_asserted_by_the_caller_and_not_recomputed_here");
+  // HIGH-5/HIGH-6, reported: what the write actually enforced about the history.
+  assert.equal(answer.subject_provenance_bound_to_transition, true);
+  assert.equal(answer.event_payloads_enforced, true);
+  assert.equal(answer.event_evidence_references_enforced, true);
   // No state was read and no write was attempted after the replay hit.
   assert.deepEqual(db.sequence, ["BEGIN", "f01_principal", "j102_replay_outcome", "COMMIT"]);
 });
@@ -1551,7 +1608,81 @@ test("SQL parity: the admission map's transitions ARE the kernel's transition co
     assert.deepEqual([...admitted.operations].sort(), operations.get(id).sort(),
       `${id} is performed by exactly the operations this store routes to it`);
     assert.ok(admitted.operations.length > 0, `${id} is reachable from some operation`);
+    // M-2. The receipt now DERIVES coupled_facts_committed and decision_refs
+    // from this map instead of echoing the caller's diagnostics, so both have to
+    // be the kernel's own, transition by transition, rather than only the one
+    // that was already checked.
+    assert.deepEqual(admitted.decision_refs, contract.decision_refs, `${id} decision_refs`);
+    // M-1. requires_active_engagement, for EVERY transition rather than for the
+    // one that happens to carry it. The flag is on the kernel's contract; the SQL
+    // spends it as `required_context`, so the two must agree in BOTH directions
+    // — a second transition gaining the flag with no context entry, or a context
+    // entry appearing on a transition the kernel does not hold to an engagement,
+    // are the same defect from opposite sides.
+    assert.equal(admitted.requires_active_engagement, contract.requires_active_engagement,
+      `${id} requires_active_engagement`);
+    const engagementContext = (admitted.required_context ?? []).some(entry =>
+      entry.subject === "engagement" &&
+      entry.conditions.some(condition =>
+        condition.field === "engagement_state" && condition.equals === "active"));
+    assert.equal(engagementContext, contract.requires_active_engagement,
+      `${id} spends requires_active_engagement as an active-engagement required_context, or declares neither`);
   }
+  // And the flag is not vacuous: exactly one transition carries it today, and a
+  // second arriving without its context entry fails the loop above rather than
+  // passing unnoticed.
+  assert.deepEqual(
+    V5_J102_TRANSITION_IDS.filter(id => v5J102TransitionContract(id).requires_active_engagement),
+    ["open-assignment"]);
+});
+
+test("SQL parity: the map's stored-record constants ARE the store's and the kernel's", () => {
+  // HIGH-5. The writer refuses any subject or event envelope whose schema version
+  // or tenant is not these, and it reads them off the map rather than restating
+  // them, so this is the one comparison that keeps the map's copies honest. A
+  // drift here would turn a bounded validation into a blanket refusal of every
+  // legitimate call, which is exactly why it is asserted rather than assumed.
+  const policy = admissionPolicy();
+  assert.equal(policy.stored_subject_schema_version, V5_J102_STORED_SUBJECT_SCHEMA_VERSION);
+  assert.equal(policy.stored_event_schema_version, V5_J102_STORED_EVENT_SCHEMA_VERSION);
+  assert.equal(policy.event_schema_version, V5_J102_EVENT_SCHEMA_VERSION);
+  // The relations restate all three as CHECK constraints, so a row carrying a
+  // foreign schema cannot exist even if a future writer forgets to ask.
+  for (const literal of [V5_J102_STORED_SUBJECT_SCHEMA_VERSION,
+    V5_J102_STORED_EVENT_SCHEMA_VERSION, V5_J102_EVENT_SCHEMA_VERSION]) {
+    assert.ok(CANDIDATE_SQL.includes(`'${literal}'`),
+      `the relations bind ${literal} structurally as well as in the writer`);
+  }
+
+  // The record key sets the writer holds envelopes to are the shapes the store
+  // actually builds — read off the store's own builders, not restated here.
+  const subjectRecord = storedSubjectRecord({
+    subject: dealState(), transition_id: "record-completion",
+    prior_state_digest: D(1), updated_by: "joe", updated_at: SERVER_NOW,
+  });
+  assert.deepEqual([...policy.stored_subject_record_keys].sort(),
+    Object.keys(subjectRecord).sort());
+  const eventRecord = storedEventRecord({
+    event: { schema_version: V5_J102_EVENT_SCHEMA_VERSION, event_kind: "completion_recorded",
+      subject_kind: "deal", subject_id: "deal-synthetic-1" },
+    transition_id: "record-completion", evidence_references: [],
+    recorded_by: "joe", recorded_at: SERVER_NOW,
+  });
+  assert.deepEqual([...policy.stored_event_record_keys].sort(), Object.keys(eventRecord).sort());
+  // The four keys lifecycleEvent() always writes, which are the ones the writer
+  // skips when it walks an event's detail.
+  // Both sides sorted, so this compares the SET rather than the order. The map
+  // lists these in the order lifecycleEvent() writes them; the assertion is
+  // about which four keys they are.
+  assert.deepEqual([...policy.event_identity_keys].sort(),
+    ["event_kind", "schema_version", "subject_id", "subject_kind"].sort());
+  assert.deepEqual([...policy.evidence_reference_keys].sort(),
+    ["evidence_kind", "reference", "source"]);
+  // M-4: no derived event kind survives anywhere — not in the map, not in the
+  // interpreter, and not in the prose that described one as intentional.
+  assert.equal(policy.derived_event_kinds, false);
+  assert.equal(CANDIDATE_SQL.includes("event_kind_from"), false,
+    "the derived-kind branch and its rule are gone from the SQL, not merely unused");
 });
 
 test("SQL parity: `writes` is DERIVED from the coupled facts, plus three named derived fields", () => {
@@ -1715,9 +1846,52 @@ test("BLOCK-1/BLOCK-2/HIGH-1: the writer actually USES the map, refusal by refus
     "j102_event_digest_mismatch",
     "j102_event_transition_mismatch",
     "j102_event_subject_not_advanced",
+    // HIGH-5: the subject's own provenance, its schema, its tenant and its shape.
+    // The forged established_by_transition is the one this list exists for.
+    "j102_subject_provenance_mismatch",
+    "j102_subject_schema_version_mismatch",
+    "j102_subject_tenant_mismatch",
+    "j102_subject_record_kind_mismatch",
+    "j102_subject_record_shape_unrecognised",
+    "j102_subject_header_state_mismatch",
+    "j102_subject_envelope_not_an_object",
+    // HIGH-6: the whole event payload, and the evidence the history cites.
+    "j102_event_schema_version_mismatch",
+    "j102_event_payload_schema_version_mismatch",
+    "j102_event_tenant_mismatch",
+    "j102_event_record_kind_mismatch",
+    "j102_event_record_shape_unrecognised",
+    "j102_event_envelope_not_an_object",
+    "j102_event_detail_not_produced_by_transition",
+    "j102_event_detail_missing",
+    "j102_event_detail_not_canonical",
+    "j102_event_evidence_references_missing",
+    "j102_event_evidence_references_not_rechecked",
+    "j102_event_evidence_reference_not_rechecked",
+    "j102_event_evidence_reference_duplicated",
+    // M-3: the operand map's own type, named before anything indexes into it.
+    "j102_expected_state_digests_not_an_object",
   ]) {
     assert.ok(writer.includes(required), `the writer raises or derives ${required}`);
   }
+  // HIGH-6: the canonical reference set is built from the RECHECK's answer, and
+  // the event's citations are compared against that rather than against the
+  // manifest or the diagnostics.
+  assert.match(writer,
+    /into v_canonical_refs\s*\n\s*from jsonb_array_elements\(v_checked\)/,
+    "the citations are compared against what the recheck re-read, not against the request");
+  // M-2: the two derived receipt fields come off the admission contract, and the
+  // caller's diagnostic reason is carried under its own name with its own scope.
+  assert.ok(writer.includes("'coupled_facts_committed', coalesce(v_contract -> 'coupled_facts'"));
+  assert.ok(writer.includes("'decision_refs', coalesce(v_contract -> 'decision_refs'"));
+  assert.ok(writer.includes("'caller_reported_reason_id', p_diagnostics ->> 'reason_id'"),
+    "M-2: the kernel's diagnostic reason is labelled as the caller's, not restated as a fact");
+  assert.equal(/'reason_id',\s*p_diagnostics/.test(writer), false,
+    "M-2: and it is no longer reported under the authoritative name");
+  assert.equal(/'coupled_facts_committed',\s*coalesce\(p_diagnostics/.test(writer), false,
+    "M-2: coupled_facts_committed is derived, never echoed");
+  assert.equal(/'decision_refs',\s*coalesce\(p_diagnostics/.test(writer), false,
+    "M-2: decision_refs is derived, never echoed");
   // The effect interpreter is CALLED, in all three places the map declares a
   // value: a creation's shape, a prior condition's comparand, and a moved field.
   assert.ok(writer.split("ops.j102_expected_value(").length - 1 >= 4,
@@ -1857,9 +2031,24 @@ test("the SQL fixture stays UNEXECUTED source, and rolls every synthetic row bac
     "the fixture says plainly that it is source and not a result");
   // The adversarial groups, named so a future edit that drops one is visible
   // here rather than only in a diff.
-  for (const group of ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9", "A10"]) {
+  for (const group of ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9", "A10",
+    // HIGH-5's forged provenance and M-3's untyped operand map. Both refuse
+    // BEFORE any state is read, so unlike U1/U2 they really fire in a file with
+    // no committed subject.
+    "A11", "A12"]) {
     assert.ok(fixture.includes(`=== ${group}:`), `the fixture carries adversarial group ${group}`);
   }
+  // AND THE TWO GROUPS THAT CANNOT FIRE HERE SAY SO. U1's target rewrites and
+  // U2's lying event payloads are both decided against a committed row; the
+  // fixture runs them, asserts a refusal, and reports the refusal it actually got
+  // rather than claiming the check it is aimed at.
+  for (const group of ["U1", "U2"]) {
+    assert.ok(fixture.includes(`=== ${group}:`), `the fixture carries group ${group}`);
+    assert.ok(fixture.includes(`${group} `) && fixture.includes("UNPROVEN"),
+      `${group} reports its limitation rather than claiming a check that cannot run`);
+  }
+  assert.ok(fixture.includes("=== S7:"),
+    "the fixture asserts the provenance and citation bindings structurally too");
   // AND IT CLAIMS NO POSITIVE WALK. Nothing seeds the first lifecycle subject,
   // the writer refuses to create one, and the fixture says that rather than
   // showing a walk that cannot run.
@@ -2065,14 +2254,28 @@ function complaintsAgainstPolicy(policy, transition_id, proposed_state, ctx) {
   return complaints;
 }
 
-/** The writer's event-set check, transcribed. */
-function eventComplaints(policy, transition_id, events, ctx) {
-  const required = policy.transitions[transition_id].events.map(spec => ({
-    event_kind: spec.event_kind_from === undefined
-      ? spec.event_kind
-      : spec.event_kind_from.prefix +
-        String(orNull(at(at(ctx.proposed, spec.event_kind_from.subject),
-          spec.event_kind_from.field))),
+/**
+ * The writer's event checks, transcribed. THREE questions, not one:
+ *
+ *   1. the SET — which kinds, on which subjects, exactly and pairwise;
+ *   2. the PAYLOAD — every non-identity key of the nested event, against the
+ *      map's `detail` template, evaluated by the same interpreter the state
+ *      targets use. This is the class root named: `event_kind` and `subject`
+ *      can both be right while `closing_date`, `cancellation_reason`,
+ *      `evidence_reference` or an axis value inside the event is a lie;
+ *   3. the EVIDENCE REFERENCES the stored event record cites, against the
+ *      canonical set the recheck re-read.
+ *
+ * `events` is the kernel's own event array. `references` is what the store
+ * stamps on every one of them; a caller passing something else is exercising
+ * question 3.
+ */
+const EVENT_IDENTITY_KEYS = ["schema_version", "event_kind", "subject_kind", "subject_id"];
+
+function eventComplaints(policy, transition_id, events, ctx, references = ctx.references) {
+  const specs = policy.transitions[transition_id].events;
+  const required = specs.map(spec => ({
+    event_kind: spec.event_kind,
     subject_kind: spec.subject,
     subject_id: orNull(at(ctx.ids, spec.subject)),
   }));
@@ -2096,6 +2299,80 @@ function eventComplaints(policy, transition_id, events, ctx) {
   }
   for (const extra of remaining) {
     complaints.push(`j102_event_not_produced_by_transition: ${extra.event_kind}`);
+  }
+
+  for (const event of events) {
+    const spec = specs.find(entry =>
+      entry.event_kind === event.event_kind && entry.subject === event.subject_kind);
+    // An event with no spec is already complained about above as a wrong or
+    // extra one; there is nothing to compare its payload to.
+    if (spec === undefined) continue;
+    if (event.schema_version !== V5_J102_EVENT_SCHEMA_VERSION) {
+      complaints.push(
+        `j102_event_payload_schema_version_mismatch: ${event.event_kind} is ${show(event.schema_version)}`);
+    }
+    const detail = spec.detail ?? {};
+    for (const field of new Set([...Object.keys(detail), ...Object.keys(event)])) {
+      if (EVENT_IDENTITY_KEYS.includes(field)) continue;
+      if (detail[field] === undefined) {
+        complaints.push(
+          `j102_event_detail_not_produced_by_transition: ${event.event_kind}.${field}`);
+        continue;
+      }
+      if (at(event, field) === MISSING) {
+        complaints.push(`j102_event_detail_missing: ${event.event_kind}.${field}`);
+        continue;
+      }
+      const expected = expectedValue(detail[field], ctx);
+      const actual = at(event, field);
+      if (expected.kind === "unbound") continue;
+      if (expected.kind === "exact" && actual !== expected.value) {
+        complaints.push(
+          `j102_event_detail_not_canonical: ${event.event_kind}.${field} is ${show(actual)}, not ${show(expected.value)}`);
+      } else if (expected.kind === "any_of" && !expected.values.includes(actual)) {
+        complaints.push(
+          `j102_event_detail_not_canonical: ${event.event_kind}.${field} is ${show(actual)}`);
+      }
+    }
+  }
+
+  // The evidence references the stored event record carries, against what the
+  // recheck actually re-read. Absent `references` means the caller is only
+  // exercising the set and payload halves.
+  if (references !== undefined) {
+    const canonical = new Map(ctx.canonical_references.map(ref => [ref.evidence_kind, ref]));
+    for (const event of events) {
+      if (!Array.isArray(references)) {
+        complaints.push(`j102_event_evidence_references_missing: ${event.event_kind}`);
+        continue;
+      }
+      if (references.length !== ctx.canonical_references.length) {
+        complaints.push(
+          `j102_event_evidence_references_not_rechecked: ${event.event_kind} cites ${references.length} for ${ctx.canonical_references.length}`);
+      }
+      const seen = new Set();
+      for (const ref of references) {
+        const want = canonical.get(ref?.evidence_kind);
+        if (want === undefined) {
+          complaints.push(
+            `j102_event_evidence_reference_not_rechecked: ${event.event_kind} cites ${show(ref?.evidence_kind)}`);
+          continue;
+        }
+        if (seen.has(ref.evidence_kind)) {
+          complaints.push(
+            `j102_event_evidence_reference_duplicated: ${event.event_kind} cites ${ref.evidence_kind} twice`);
+          continue;
+        }
+        seen.add(ref.evidence_kind);
+        // Whole-object equality, exactly as the SQL compares jsonb: an extra
+        // key, a missing key or a changed value is not the element the recheck
+        // built.
+        if (canonicalJson(ref) !== canonicalJson(want)) {
+          complaints.push(
+            `j102_event_evidence_reference_not_rechecked: ${event.event_kind} cites ${JSON.stringify(ref)}, re-read as ${JSON.stringify(want)}`);
+        }
+      }
+    }
   }
   return complaints;
 }
@@ -2153,12 +2430,35 @@ const kernelRecord = (evidence_kind, record_kind, bound, over = {}) => ({
   provenance: provenance("ops.j102_first_party_record"),
 });
 
-/** The facts the SQL recheck returns for one evidence item, from the same row. */
+/**
+ * The facts the SQL recheck returns for one evidence item, from the same row.
+ *
+ * `reference` is built the way ops.j102_recheck_evidence builds it: off the
+ * READER's own answer for that source — F01's document_id, the stored artifact's
+ * digest, the record_id on the committed first-party row — and never off the
+ * selector the caller wrote. The assertion below that this equals the kernel
+ * evidence item's own `reference` is what ties the two together: the store sets
+ * that field from the same three identifiers, so a map that predicts the
+ * kernel's `evidence_reference` from these facts predicts what the SQL will
+ * compare the history against.
+ */
+const referenceFor = item =>
+  item.source === "first_party_record" ? item.record.record_id
+    : item.source === "f01_document" ? item.document.document_id
+      : item.artifact.artifact_digest;
+
 const factsFor = evidence => {
   const facts = {};
   for (const item of evidence) {
+    // The store's own `reference` on the loaded evidence IS the reader's
+    // identifier for that pin. If that ever stops being true, the SQL's
+    // recomputed reference and the kernel's event field diverge, and this is
+    // where it surfaces rather than in an unexecuted PL/pgSQL comparison.
+    assert.equal(item.reference, referenceFor(item),
+      `${item.evidence_kind}: the evidence reference must be the identifier its own reader returns`);
     if (item.source === "first_party_record") {
       facts[item.evidence_kind] = {
+        reference: referenceFor(item),
         record_kind: item.record.record_kind, record_id: item.record.record_id,
         closing_date: item.record.closing_date, reason: item.record.reason,
         subject_kind: item.subject_binding.subject_kind,
@@ -2166,15 +2466,29 @@ const factsFor = evidence => {
       };
     } else if (item.source === "f01_document") {
       facts[item.evidence_kind] = {
+        reference: referenceFor(item),
         document_id: item.document.document_id, version_no: item.document.version_no,
         content_digest: item.document.content_digest,
       };
     } else {
-      facts[item.evidence_kind] = { artifact_digest: item.artifact.artifact_digest };
+      facts[item.evidence_kind] = {
+        reference: referenceFor(item),
+        artifact_digest: item.artifact.artifact_digest,
+      };
     }
   }
   return facts;
 };
+
+/**
+ * ops.j102_recheck_evidence's canonical reference set, transcribed: exactly the
+ * triple the writer rebuilds from what it re-read, and exactly what the store
+ * stamps into every event's `evidence_references`.
+ */
+const canonicalReferences = evidence =>
+  evidence.map(item => ({
+    evidence_kind: item.evidence_kind, source: item.source, reference: referenceFor(item),
+  }));
 
 const REL = { subject_kind: "relationship", subject_id: "j102-rel-1",
   relationship_state: "prospect", active_engagement_count: 0 };
@@ -2311,9 +2625,14 @@ function runWalk(walk) {
     `${walk.transition_id} must be an ALLOW for the parity check to mean anything (${answer.reason_id})`);
   const ids = Object.fromEntries(
     Object.entries(answer.proposed_state).map(([kind, state]) => [kind, state.subject_id]));
+  const canonical_references = canonicalReferences(walk.evidence);
   const ctx = {
     prior: walk.prior, proposed: answer.proposed_state, context: walk.context,
     ids, facts: factsFor(walk.evidence),
+    canonical_references,
+    // What the store stamps on every event of this call — the same array, which
+    // is why the writer requires it identically on each of them.
+    references: canonical_references,
   };
   return { answer, ctx };
 }
@@ -2347,6 +2666,22 @@ test("SQL parity: every transition the map declares has a subject rule set and a
         `${id} moves exactly the ${kind} fields it declares, to declared values`);
     }
     assert.ok(admitted.events.length >= 1, `${id} appends at least one event`);
+    // Every event declares its whole nested payload, and no two events of one
+    // transition share a (kind, subject) — which is what lets the writer find the
+    // spec for a supplied event after the set check has matched it.
+    const seen = new Set();
+    for (const spec of admitted.events) {
+      assert.equal(typeof spec.event_kind, "string",
+        `${id} names its event kinds literally; nothing here is derived`);
+      assert.ok(spec.detail !== undefined && spec.detail !== null &&
+        typeof spec.detail === "object" && !Array.isArray(spec.detail),
+        `${id}'s ${spec.event_kind} declares which nested facts it carries, not only its kind`);
+      const key = `${spec.event_kind}:${spec.subject}`;
+      assert.equal(seen.has(key), false, `${id} appends ${key} once`);
+      seen.add(key);
+      assert.ok(Object.prototype.hasOwnProperty.call(admitted.subjects, spec.subject),
+        `${id}'s ${spec.event_kind} names a subject this transition advances`);
+    }
   }
   // The two created subjects, and there are exactly two.
   const creating = V5_J102_TRANSITION_IDS.flatMap(id =>
@@ -2541,11 +2876,149 @@ test("ROOT BLOCKER 2: the map REFUSES a wrong, missing or extra event", () => {
   // AN EVENT FOR AN UNRELATED SUBJECT.
   complainsAbout("record-completion",
     events => [{ ...events[0], subject_id: "j102-deal-c" }], "j102_event_missing_or_wrong");
-  // THE DERIVED KIND, which must agree with the payment level the same call
-  // writes: `payment_partially_paid` beside a `paid` state is a history that
-  // contradicts its own state row.
+  // THE KIND THE KERNEL DOES NOT SPELL. `payment_${level}` is record-payment's
+  // REASON_ID; the event kind beside it is the constant `payment_recorded`, and
+  // an event calling itself `payment_partially_paid` is a kind this transition
+  // never appends rather than a derived kind that disagrees with its level.
   complainsAbout("record-payment",
     events => { events[0].event_kind = "payment_partially_paid"; }, "j102_event_missing_or_wrong");
+});
+
+test("ROOT residual: the map REFUSES a lying nested event fact, on a right kind and subject", () => {
+  // The class the event-SET check cannot reach. Every payload below carries the
+  // correct event kind, on the correct subject, in the correct number, beside a
+  // state row the map admits — and says something inside the event that the
+  // transition did not produce. The event is what a reviewer reads history from,
+  // so a lie here is a lie on the review surface itself.
+  const policy = admissionPolicy();
+  const walkFor = id => WALKS.find(walk => walk.transition_id === id);
+  const complainsAbout = (id, change, fragment) => {
+    const { answer, ctx } = runWalk(walkFor(id));
+    const events = answer.events.map(event => ({ ...event }));
+    const mutated = change(events) ?? events;
+    const complaints = eventComplaints(policy, id, mutated, ctx);
+    assert.ok(complaints.some(complaint => complaint.includes(fragment)),
+      `${id} must refuse this event payload with ${fragment}; it said ${JSON.stringify(complaints)}`);
+  };
+
+  // Q094's date, INSIDE the event. The state row closes on the settlement's own
+  // date and the history says a different one; both are durable, and they
+  // disagree about the single fact Q094 is about.
+  complainsAbout("record-deal-closing",
+    events => { events[0].closing_date = "2027-01-01T00:00:00.000Z"; },
+    "j102_event_detail_not_canonical");
+  // Q096's reason, INSIDE the event: a reason nobody recorded, on a cancellation
+  // whose state row carries the recorded one.
+  complainsAbout("cancel-pending-deal",
+    events => { events[0].cancellation_reason = "a reason nobody recorded"; },
+    "j102_event_detail_not_canonical");
+  // THE EVIDENCE REFERENCE THE EVENT NAMES, pointed at another document.
+  complainsAbout("record-lease-execution",
+    events => { events[0].evidence_reference = "j102-doc-9"; },
+    "j102_event_detail_not_canonical");
+  // The axis value inside an axis event, disagreeing with the axis the same call
+  // writes.
+  complainsAbout("record-payment",
+    events => { events[0].payment_state = "partially_paid"; },
+    "j102_event_detail_not_canonical");
+  complainsAbout("record-diligence-outcome",
+    events => { events[0].diligence_state = "waived"; },
+    "j102_event_detail_not_canonical");
+  // The coupled event's own phase, on the assignment a cancelled deal returns.
+  complainsAbout("cancel-pending-deal",
+    events => { events[1].assignment_phase = "committed"; },
+    "j102_event_detail_not_canonical");
+  // Identity fields inside a coupled event: the property a winner selection
+  // names, and the deal an assignment commitment points at.
+  complainsAbout("commit-winning-property",
+    events => { events[0].property_id = "j102-prop-9"; },
+    "j102_event_detail_not_canonical");
+  complainsAbout("commit-winning-property",
+    events => { events[1].pending_deal_id = "j102-deal-9"; },
+    "j102_event_detail_not_canonical");
+  complainsAbout("open-assignment",
+    events => { events[0].engagement_id = "j102-eng-9"; },
+    "j102_event_detail_not_canonical");
+  complainsAbout("record-loi-submission",
+    events => { events[0].assignment_id = "j102-asg-9"; },
+    "j102_event_detail_not_canonical");
+  // A key the kernel never puts on an event, hashed into the history's bytes.
+  complainsAbout("record-completion",
+    events => { events[0].approved_by = "somebody"; },
+    "j102_event_detail_not_produced_by_transition");
+  // A key the kernel always puts there, deleted.
+  complainsAbout("record-invoice-issued",
+    events => { delete events[0].evidence_reference; },
+    "j102_event_detail_missing");
+  // The kernel's own event schema version, restamped.
+  complainsAbout("record-completion",
+    events => { events[0].schema_version = "doctorcre-v5-j102-lifecycle-event.v0"; },
+    "j102_event_payload_schema_version_mismatch");
+
+  // AND THE THREE COUPLED EVENTS THAT CARRY NO EVIDENCE REFERENCE AT ALL are the
+  // kernel's own shape, not an omission to be filled in. A caller ADDING one is
+  // adding a fact the kernel never wrote.
+  for (const [id, index] of [["commit-winning-property", 0], ["commit-winning-property", 1],
+    ["cancel-pending-deal", 1]]) {
+    const { answer } = runWalk(walkFor(id));
+    assert.ok(!Object.prototype.hasOwnProperty.call(answer.events[index], "evidence_reference"),
+      `${id} event ${index} names no single evidence reference; the map must not invent one`);
+  }
+  complainsAbout("cancel-pending-deal",
+    events => { events[1].evidence_reference = "j102-record-1"; },
+    "j102_event_detail_not_produced_by_transition");
+});
+
+test("HIGH-6: the event's evidence_references must be the set the recheck re-read", () => {
+  const policy = admissionPolicy();
+  const walkFor = id => WALKS.find(walk => walk.transition_id === id);
+  const cites = (id, references, fragment) => {
+    const { answer, ctx } = runWalk(walkFor(id));
+    const complaints = eventComplaints(policy, id, answer.events, ctx, references);
+    assert.ok(complaints.some(complaint => complaint.includes(fragment)),
+      `${id} must refuse this citation with ${fragment}; it said ${JSON.stringify(complaints)}`);
+  };
+  const truth = id => canonicalReferences(walkFor(id).evidence);
+
+  // THE HONEST CASE FIRST, so the refusals below mean something: the array the
+  // store actually stamps is admitted, on every event of every walk.
+  for (const walk of WALKS) {
+    const { answer, ctx } = runWalk(walk);
+    assert.deepEqual(
+      eventComplaints(policy, walk.transition_id, answer.events, ctx,
+        canonicalReferences(walk.evidence)),
+      [], `${walk.transition_id}: the references the store stamps are the ones re-read`);
+  }
+
+  // AN EMPTY ARRAY. The history says the transition rested on nothing.
+  cites("record-lease-execution", [], "j102_event_evidence_references_not_rechecked");
+  // A DOCUMENT THE TRANSITION NEVER RESTED ON, with an otherwise perfect call.
+  cites("record-lease-execution",
+    [{ ...truth("record-lease-execution")[0], reference: "j102-doc-9" }],
+    "j102_event_evidence_reference_not_rechecked");
+  // THE RIGHT REFERENCE UNDER THE WRONG KIND, and under the wrong source.
+  cites("record-lease-execution",
+    [{ ...truth("record-lease-execution")[0], evidence_kind: "signed_purchase_contract" }],
+    "j102_event_evidence_reference_not_rechecked");
+  cites("record-lease-execution",
+    [{ ...truth("record-lease-execution")[0], source: "first_party_record" }],
+    "j102_event_evidence_reference_not_rechecked");
+  // THE SAME PIN TWICE: one record counted as two.
+  cites("record-lease-execution",
+    [truth("record-lease-execution")[0], { ...truth("record-lease-execution")[0] }],
+    "j102_event_evidence_reference_duplicated");
+  // AN EXTRA PIN riding beside the real one.
+  cites("record-lease-execution",
+    [...truth("record-lease-execution"),
+      { evidence_kind: "invoice_issued", source: "first_party_record", reference: "j102-record-1" }],
+    "j102_event_evidence_references_not_rechecked");
+  // A FOURTH KEY. The canonical element is exactly the triple the database can
+  // rebuild from what it read; anything else is not that element.
+  cites("record-lease-execution",
+    [{ ...truth("record-lease-execution")[0], subject_binding: { subject_kind: "deal" } }],
+    "j102_event_evidence_reference_not_rechecked");
+  // AND NOT AN ARRAY AT ALL.
+  cites("record-lease-execution", "j102-doc-1", "j102_event_evidence_references_missing");
 });
 
 test("SQL parity: the effect vocabulary in the map is exactly the one the SQL implements", () => {

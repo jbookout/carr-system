@@ -1124,8 +1124,16 @@ export function storedEventRecord({ event, transition_id, evidence_references, r
     tenant: ORGANIZATION_TENANT_ID,
     event,
     transition_id,
-    // The exact evidence the event rests on, by reference, so the history says
-    // what a transition was judged against rather than only what it changed.
+    // The exact evidence the transition rests on, by reference, so the history
+    // says what a change was judged against rather than only what it changed.
+    //
+    // THE WHOLE SET GOES ON EVERY EVENT OF ONE CALL, including a coupled event
+    // that names no single pin of its own — `assignment_returned_to_market` has
+    // no `evidence_reference` in its detail, because the kernel gives it none.
+    // The two are different questions: which pin an event NAMES is inside
+    // `event`, and what the transition that produced it RESTED ON is this array,
+    // which is the same answer for every event the transition appends. The
+    // database enforces both, separately.
     evidence_references: [...evidence_references],
     recorded_by,
     recorded_at,
@@ -1380,7 +1388,17 @@ export function createCreLifecycleStore({ db } = {}) {
         outcome.actor_slug !== principal.slug) {
       fail("invalid_stored_outcome", "stored outcome operation or actor does not match", { operation });
     }
-    if (typeof outcome.reason_id !== "string" || outcome.reason_id.length === 0) {
+    // M-2. THE DIAGNOSTIC REASON IS READ UNDER THE NAME THE DATABASE GIVES IT.
+    //
+    // ops.j102_apply_transition no longer emits a bare `reason_id` beside the
+    // properties it enforced: the reason is the KERNEL's diagnostic for the
+    // branch its evaluator took, the database cannot recompute it, and echoing it
+    // under the same name as derived fields made a caller-asserted string read as
+    // an authoritative one. It arrives as `caller_reported_reason_id`, with its
+    // own scope label beside it, and the non-transition writers — which DO decide
+    // their own reason — still name it `reason_id`.
+    const storedReason = outcome.caller_reported_reason_id ?? outcome.reason_id;
+    if (typeof storedReason !== "string" || storedReason.length === 0) {
       fail("invalid_stored_outcome", "stored outcome is missing its original reason", { operation });
     }
     const extra = {
@@ -1396,7 +1414,18 @@ export function createCreLifecycleStore({ db } = {}) {
         transition_id: outcome.transition_id,
         subject_digests: outcome.subject_digests ?? null,
         event_digests: outcome.event_digests ?? null,
+        // M-2's receipt half. The database DERIVES both of these from the
+        // admission contract for the transition it actually applied, rather than
+        // echoing the diagnostics it was handed, and it says so in its own
+        // `*_source` fields — carried through here so a caller records which of
+        // the two they are reading. The kernel's diagnostic reason is beside
+        // them under its own name, labelled as the caller's assertion.
         coupled_facts_committed: outcome.coupled_facts_committed ?? [],
+        coupled_facts_committed_source: outcome.coupled_facts_committed_source ?? null,
+        decision_refs: outcome.decision_refs ?? [],
+        decision_refs_source: outcome.decision_refs_source ?? null,
+        caller_reported_reason_id: outcome.caller_reported_reason_id ?? null,
+        caller_reported_reason_id_scope: outcome.caller_reported_reason_id_scope ?? null,
         evidence_rechecked_under_lock: outcome.evidence_rechecked_under_lock === true,
         evidence_bound_under_lock: outcome.evidence_bound_under_lock === true,
         // BLOCK-2's receipt half, reported rather than asserted here: WHICH
@@ -1428,6 +1457,16 @@ export function createCreLifecycleStore({ db } = {}) {
         transition_effects_enforced: outcome.transition_effects_enforced === true,
         required_subject_set_enforced: outcome.required_subject_set_enforced === true,
         required_event_set_enforced: outcome.required_event_set_enforced === true,
+        // WHAT THE DATABASE ENFORCED ABOUT THE HISTORY, as distinct from the
+        // state: every subject envelope named the transition that actually ran as
+        // its own provenance, every event's whole nested payload equalled the one
+        // that transition produces, and every event cites exactly the evidence
+        // the writer re-read under its own lock.
+        subject_provenance_bound_to_transition:
+          outcome.subject_provenance_bound_to_transition === true,
+        event_payloads_enforced: outcome.event_payloads_enforced === true,
+        event_evidence_references_enforced:
+          outcome.event_evidence_references_enforced === true,
         created_subject_kinds: outcome.created_subject_kinds ?? [],
         // M-b, carried through: the caller's intent digest and the database's
         // recomputation of what landed are DIFFERENT claims and are reported as
@@ -1474,7 +1513,7 @@ export function createCreLifecycleStore({ db } = {}) {
     } else {
       fail("invalid_stored_outcome", "not a replayable write operation", { operation });
     }
-    return result(operation, outcome.decision ?? "allow", outcome.reason_id, extra);
+    return result(operation, outcome.decision ?? "allow", storedReason, extra);
   }
 
   async function replayOutcome(client, operation, request, principal) {
@@ -2036,9 +2075,26 @@ export function createCreLifecycleStore({ db } = {}) {
         }
       }
 
+      // THE CANONICAL EVIDENCE REFERENCE, and why it is exactly these three keys.
+      //
+      // ops.j102_apply_transition compares this array, one element for one, with
+      // the set ops.j102_recheck_evidence RE-READ under its own lock — F01's own
+      // document_id off the document record, the stored-artifact reader's own
+      // artifact_digest, the record_id on the committed first-party row — and
+      // refuses the whole coupled transition on a duplicate, an extra, a missing
+      // one or a wrong kind, source or reference. So the shape here is not a
+      // choice this module makes freely: it is the shape the database can
+      // independently rebuild from what it actually read.
+      //
+      // THE SUBJECT BINDING USED TO RIDE ALONG HERE AND NO LONGER DOES, which is
+      // a narrowing rather than a loss. Every pin on a transition is proved bound
+      // to the ONE primary subject that transition advances — that is what
+      // j102_evidence_not_bound_to_primary_subject refuses — and the receipt
+      // names that subject in `primary_subject_kind`/`primary_subject_id`. A
+      // fourth key restating it would be a fourth key the comparison has to
+      // admit, on a fact the comparison already guarantees.
       const evidence_references = evidence.map(e => ({
         evidence_kind: e.evidence_kind, source: e.source, reference: e.reference,
-        subject_binding: { ...e.subject_binding },
       }));
       const subjectEnvelopes = Object.entries(evaluated.proposed_state).map(([kind, state]) =>
         storeEnvelope("stored_lifecycle_subject", storedSubjectRecord({

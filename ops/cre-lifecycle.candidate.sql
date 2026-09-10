@@ -337,7 +337,32 @@ create table if not exists ops.j102_subject_current (
   constraint j102_subject_deal_state_matches_envelope
     check (deal_state is not distinct from envelope -> 'record' -> 'state' ->> 'deal_state'),
   constraint j102_subject_updated_by_matches_envelope
-    check (updated_by = envelope -> 'record' ->> 'updated_by')
+    check (updated_by = envelope -> 'record' ->> 'updated_by'),
+  -- HIGH-5, STRUCTURALLY. WHAT ESTABLISHED THIS SUBJECT'S STATE is a field
+  -- ops.j102_subject returns as the row's provenance and the transition receipt
+  -- echoes back in its readback, and it lived inside the hashed bytes bound to
+  -- nothing. The BINDING is the writer's -- ops.j102_apply_transition refuses any
+  -- envelope whose established_by_transition is not the transition actually being
+  -- applied -- and these are the structural floor beneath it: a row whose
+  -- provenance is absent, blank, of the wrong type, written under a foreign
+  -- schema or attributed to another tenant cannot exist to be read back as
+  -- authoritative. They decide nothing; WHICH transition established a subject
+  -- is the writer's answer and is never re-derived here.
+  constraint j102_subject_provenance_present
+    check (jsonb_typeof(envelope -> 'record' -> 'established_by_transition') = 'string'
+       and btrim(envelope -> 'record' ->> 'established_by_transition') <> ''),
+  constraint j102_subject_record_schema_version
+    check (envelope -> 'record' ->> 'schema_version'
+             = 'doctorcre-v5-j102-stored-lifecycle-subject.v1'),
+  constraint j102_subject_record_tenant
+    check (envelope -> 'record' ->> 'tenant' = ops.f01_tenant()),
+  -- THE ENVELOPE'S OWN DURABLE DIGEST CLAIM, which the store writes INSIDE the
+  -- hashed bytes and which ops.j102_subject used to "verify" by recomputing the
+  -- same bytes and comparing them to themselves. Bound here, so that arm of
+  -- j102_verify_envelope compares a stored claim against a recomputation on this
+  -- relation exactly as it already does on every other one.
+  constraint j102_subject_record_digest_claim
+    check (envelope ->> 'record_digest' = ops.f01_digest_jsonb(envelope -> 'record'))
 );
 
 comment on table ops.j102_subject_current is
@@ -377,11 +402,32 @@ create table if not exists ops.j102_subject_event (
     check (subject_kind = envelope -> 'record' -> 'event' ->> 'subject_kind'
        and subject_id = envelope -> 'record' -> 'event' ->> 'subject_id'),
   constraint j102_event_transition_matches_envelope
-    check (transition_id = envelope -> 'record' ->> 'transition_id')
+    check (transition_id = envelope -> 'record' ->> 'transition_id'),
+  -- HIGH-6, STRUCTURALLY. The comment below promises that every event names the
+  -- exact evidence references it rested on, and nothing made that true: the
+  -- array could be empty, absent or a scalar and the row stored perfectly well.
+  -- WHICH references are the right ones is the writer's answer -- it compares
+  -- them, one for one, against what ops.j102_recheck_evidence actually re-read
+  -- under the lock -- and this is the floor beneath it: a history row that cites
+  -- no evidence at all cannot exist.
+  constraint j102_event_cites_evidence
+    check (jsonb_typeof(envelope -> 'record' -> 'evidence_references') = 'array'
+       and jsonb_array_length(envelope -> 'record' -> 'evidence_references') > 0),
+  constraint j102_event_record_schema_version
+    check (envelope -> 'record' ->> 'schema_version'
+             = 'doctorcre-v5-j102-stored-lifecycle-event.v1'),
+  constraint j102_event_record_tenant
+    check (envelope -> 'record' ->> 'tenant' = ops.f01_tenant()),
+  -- The KERNEL's own event schema version, on the nested event the kernel built.
+  constraint j102_event_payload_schema_version
+    check (envelope -> 'record' -> 'event' ->> 'schema_version'
+             = 'doctorcre-v5-j102-lifecycle-event.v1'),
+  constraint j102_event_record_digest_claim
+    check (envelope ->> 'record_digest' = ops.f01_digest_jsonb(envelope -> 'record'))
 );
 
 comment on table ops.j102_subject_event is
-  'Append-only lifecycle history. Every event names the transition that produced it and the exact evidence references it rested on, so the history says what a change was judged against and not only what changed. Q096: a cancelled deal keeps every event it ever had.';
+  'Append-only lifecycle history. Every event names the transition that produced it and the exact evidence references it rested on -- the references being what the writer RE-READ under its own lock, compared one for one against the event, never the caller''s account of them -- so the history says what a change was judged against and not only what changed. Q096: a cancelled deal keeps every event it ever had.';
 
 create index if not exists j102_subject_event_by_subject
   on ops.j102_subject_event (tenant, subject_kind, subject_id, event_seq);
@@ -780,8 +826,15 @@ begin
   select * into v_row from ops.j102_subject_current
    where tenant = ops.f01_tenant() and subject_kind = p_subject_kind and subject_id = p_subject_id;
   if not found then return null; end if;
+  -- THE STORED CLAIM, not a recomputation of the same bytes compared to itself.
+  -- This reader used to pass ops.f01_digest_jsonb(envelope -> 'record') as the
+  -- EXPECTED record digest, which made that arm of j102_verify_envelope a
+  -- tautology here while it was a real check on every other relation. The
+  -- envelope's own durable record_digest -- written by the store, hashed inside
+  -- the envelope, and CHECK-bound by j102_subject_record_digest_claim above -- is
+  -- the claim, and comparing the recomputation to it is the check.
   v_verified := ops.j102_verify_envelope(v_row.envelope, v_row.envelope_digest,
-    ops.f01_digest_jsonb(v_row.envelope -> 'record'), 'stored_lifecycle_subject');
+    v_row.envelope ->> 'record_digest', 'stored_lifecycle_subject');
   -- The state digest is RECOMPUTED here too, not read off the column, so the
   -- compare-and-swap operand a caller receives is derived from the bytes rather
   -- than from a value that could have been written beside them.
@@ -1093,14 +1146,29 @@ $$;
 --   required_context        subjects the kernel requires to be LOADED and true
 --                           without writing them -- the active engagement and
 --                           the client relationship an assignment opens under.
---   events                  the exact event set: which kinds, on which subjects.
---                           Not "at least one event": a call cannot erase the
---                           history by sending an empty array, cannot append an
---                           event the transition does not produce, and cannot
---                           omit one it does. The one derived kind is
---                           record-payment's, which the kernel spells
---                           `payment_${level}` and which is therefore bound to
---                           the payment_state this same call writes.
+--   events                  the exact event set: which kinds, on which subjects,
+--                           AND the exact nested detail each one carries. Not
+--                           "at least one event": a call cannot erase the history
+--                           by sending an empty array, cannot append an event the
+--                           transition does not produce, and cannot omit one it
+--                           does. EVERY kind here is a literal read off a
+--                           lifecycleEvent() call site; none is derived. The
+--                           kernel's `payment_${level}` is a REASON_ID and has
+--                           never been an event kind -- record-payment appends
+--                           the constant `payment_recorded` -- and this map
+--                           carries no derived-kind rule of any sort.
+--   events[].detail         the EXACT value of every non-identity key the
+--                           kernel's own lifecycleEvent() detail carries: the
+--                           closing date on deal_closed, the cancellation reason
+--                           on pending_deal_cancelled, the axis value on every
+--                           axis event, the property and assignment a negotiation
+--                           event names, and the evidence reference each event
+--                           rested on. Written in the SAME effect vocabulary as
+--                           the state targets, so a lying nested fact is refused
+--                           by the machinery a lying state field already was.
+--                           Three coupled events carry no evidence_reference at
+--                           all, which is the kernel's shape and is transcribed
+--                           rather than filled in.
 --
 -- NONE OF THIS IS A SECOND BUSINESS POLICY. Every value below is read off the
 -- kernel's evaluator, and the Node suite proves it by running that evaluator on
@@ -1115,10 +1183,20 @@ set search_path = pg_catalog
 as $fn$
 select $policy$
 {
-  "policy_id": "j102-sql-admission.v2",
-  "derived_from": "cre-lifecycle.v5.js v5J102TransitionContract + v5J102EvidenceContract + applyTransition/axisResult",
+  "policy_id": "j102-sql-admission.v3",
+  "derived_from": "cre-lifecycle.v5.js v5J102TransitionContract + v5J102EvidenceContract + applyTransition/axisResult/lifecycleEvent",
   "invented_business_policy": false,
   "subject_creation": "coupled_only_never_the_primary_subject",
+  "derived_event_kinds": false,
+  "stored_subject_schema_version": "doctorcre-v5-j102-stored-lifecycle-subject.v1",
+  "stored_event_schema_version": "doctorcre-v5-j102-stored-lifecycle-event.v1",
+  "event_schema_version": "doctorcre-v5-j102-lifecycle-event.v1",
+  "stored_subject_record_keys": ["schema_version", "tenant", "subject_kind", "subject_id",
+    "state", "established_by_transition", "prior_state_digest", "updated_by", "updated_at"],
+  "stored_event_record_keys": ["schema_version", "tenant", "event", "transition_id",
+    "evidence_references", "recorded_by", "recorded_at"],
+  "event_identity_keys": ["schema_version", "event_kind", "subject_kind", "subject_id"],
+  "evidence_reference_keys": ["evidence_kind", "source", "reference"],
   "parent_reference_fields": {
     "relationship": "relationship_id",
     "engagement": "engagement_id",
@@ -1252,6 +1330,8 @@ select $policy$
       "subject_kind": "relationship",
       "operations": ["record-representation-agreement"],
       "permitted_actor_classes": ["verified_partner", "sponsored_agent"],
+      "decision_refs": ["Q069.D1", "Q072.D1", "Q077.D1", "Q079.D1"],
+      "requires_active_engagement": false,
       "prerequisites": { "relationship_state": ["prospect"] },
       "instrument_kinds": null,
       "required_evidence_alternatives":
@@ -1289,14 +1369,30 @@ select $policy$
         }
       },
       "events": [
-        { "event_kind": "client_status_established", "subject": "relationship" },
-        { "event_kind": "engagement_opened", "subject": "engagement" }
+        { "event_kind": "client_status_established", "subject": "relationship",
+          "detail": {
+            "representation_basis": { "op": "subject_field", "subject": "engagement",
+              "source": "proposed", "field": "representation_basis" },
+            "evidence_reference": { "op": "case_on_evidence", "cases": {
+              "signed_engagement_letter": { "op": "evidence_fact",
+                "evidence_kind": "signed_engagement_letter", "fact": "reference" },
+              "approved_representation_equivalent": { "op": "evidence_fact",
+                "evidence_kind": "approved_representation_equivalent", "fact": "reference" } } }
+          } },
+        { "event_kind": "engagement_opened", "subject": "engagement",
+          "detail": {
+            "relationship_id": { "op": "proposed_subject_id", "subject": "relationship" },
+            "representation_basis": { "op": "subject_field", "subject": "engagement",
+              "source": "proposed", "field": "representation_basis" }
+          } }
       ]
     },
     "open-assignment": {
       "subject_kind": "assignment",
       "operations": ["open-cre-assignment"],
       "permitted_actor_classes": ["verified_partner", "sponsored_agent"],
+      "decision_refs": ["Q072.D1", "Q079.D1", "Q080.D1"],
+      "requires_active_engagement": true,
       "prerequisites": { "assignment_phase": ["research", "search"] },
       "instrument_kinds": null,
       "required_evidence_alternatives": [["search_initiation"]],
@@ -1326,12 +1422,22 @@ select $policy$
           "identified_by": { "subject": "engagement", "source": "context", "field": "relationship_id" },
           "conditions": [ { "field": "relationship_state", "equals": "client" } ] }
       ],
-      "events": [ { "event_kind": "assignment_opened", "subject": "assignment" } ]
+      "events": [ { "event_kind": "assignment_opened", "subject": "assignment",
+        "detail": {
+          "engagement_id": { "op": "subject_field", "subject": "engagement",
+            "source": "context", "field": "subject_id" },
+          "assignment_phase": { "op": "subject_field", "subject": "assignment",
+            "source": "proposed", "field": "assignment_phase" },
+          "evidence_reference": { "op": "evidence_fact",
+            "evidence_kind": "search_initiation", "fact": "reference" }
+        } } ]
     },
     "record-loi-submission": {
       "subject_kind": "property_negotiation",
       "operations": ["record-loi-submission"],
       "permitted_actor_classes": ["verified_partner", "sponsored_agent"],
+      "decision_refs": ["Q072.D1", "Q080.D1", "Q095.D1"],
+      "requires_active_engagement": false,
       "prerequisites": { "negotiation_state": ["loi_drafted", "loi_countered"] },
       "instrument_kinds": null,
       "required_evidence_alternatives": [["submitted_loi"]],
@@ -1365,12 +1471,21 @@ select $policy$
           }
         }
       },
-      "events": [ { "event_kind": "loi_submitted", "subject": "property_negotiation" } ]
+      "events": [ { "event_kind": "loi_submitted", "subject": "property_negotiation",
+        "detail": {
+          "assignment_id": { "op": "proposed_subject_id", "subject": "assignment" },
+          "property_id": { "op": "subject_field", "subject": "property_negotiation",
+            "source": "prior", "field": "property_id" },
+          "evidence_reference": { "op": "evidence_fact",
+            "evidence_kind": "submitted_loi", "fact": "reference" }
+        } } ]
     },
     "record-loi-acceptance": {
       "subject_kind": "property_negotiation",
       "operations": ["record-loi-acceptance"],
       "permitted_actor_classes": ["verified_partner", "sponsored_agent"],
+      "decision_refs": ["Q078.D1", "Q095.D1"],
+      "requires_active_engagement": false,
       "prerequisites": { "negotiation_state": ["loi_submitted", "loi_countered"] },
       "instrument_kinds": null,
       "required_evidence_alternatives": [["counterparty_loi_acceptance"]],
@@ -1385,12 +1500,20 @@ select $policy$
           }
         }
       },
-      "events": [ { "event_kind": "loi_accepted", "subject": "property_negotiation" } ]
+      "events": [ { "event_kind": "loi_accepted", "subject": "property_negotiation",
+        "detail": {
+          "property_id": { "op": "subject_field", "subject": "property_negotiation",
+            "source": "prior", "field": "property_id" },
+          "evidence_reference": { "op": "evidence_fact",
+            "evidence_kind": "counterparty_loi_acceptance", "fact": "reference" }
+        } } ]
     },
     "commit-winning-property": {
       "subject_kind": "assignment",
       "operations": ["commit-winning-property"],
       "permitted_actor_classes": ["verified_partner"],
+      "decision_refs": ["Q069.D1", "Q078.D1", "Q080.D1", "Q095.D1"],
+      "requires_active_engagement": false,
       "prerequisites": { "assignment_phase": ["search", "negotiation"] },
       "instrument_kinds": null,
       "required_evidence_alternatives": [["winner_selection_commitment"]],
@@ -1459,15 +1582,35 @@ select $policy$
         }
       },
       "events": [
-        { "event_kind": "winning_property_selected", "subject": "property_negotiation" },
-        { "event_kind": "assignment_committed", "subject": "assignment" },
-        { "event_kind": "pending_deal_created", "subject": "deal" }
+        { "event_kind": "winning_property_selected", "subject": "property_negotiation",
+          "detail": {
+            "property_id": { "op": "subject_field", "subject": "property_negotiation",
+              "source": "prior", "field": "property_id" }
+          } },
+        { "event_kind": "assignment_committed", "subject": "assignment",
+          "detail": {
+            "selected_property_id": { "op": "subject_field", "subject": "property_negotiation",
+              "source": "prior", "field": "property_id" },
+            "pending_deal_id": { "op": "proposed_subject_id", "subject": "deal" }
+          } },
+        { "event_kind": "pending_deal_created", "subject": "deal",
+          "detail": {
+            "assignment_id": { "op": "proposed_subject_id", "subject": "assignment" },
+            "property_id": { "op": "subject_field", "subject": "property_negotiation",
+              "source": "prior", "field": "property_id" },
+            "instrument_kind": { "op": "subject_field", "subject": "deal",
+              "source": "proposed", "field": "instrument_kind" },
+            "evidence_reference": { "op": "evidence_fact",
+              "evidence_kind": "winner_selection_commitment", "fact": "reference" }
+          } }
       ]
     },
     "record-lease-execution": {
       "subject_kind": "deal",
       "operations": ["record-deal-execution"],
       "permitted_actor_classes": ["verified_partner", "sponsored_agent"],
+      "decision_refs": ["Q072.D1", "Q078.D1", "Q080.D1"],
+      "requires_active_engagement": false,
       "prerequisites": { "deal_state": ["pending"], "execution_state": ["unexecuted"] },
       "instrument_kinds": ["lease", "renewal", "amendment"],
       "required_evidence_alternatives": [["executed_lease"]],
@@ -1480,12 +1623,18 @@ select $policy$
           "effects": { "execution_state": { "op": "const", "value": "executed" } }
         }
       },
-      "events": [ { "event_kind": "lease_executed", "subject": "deal" } ]
+      "events": [ { "event_kind": "lease_executed", "subject": "deal",
+        "detail": {
+          "evidence_reference": { "op": "evidence_fact",
+            "evidence_kind": "executed_lease", "fact": "reference" }
+        } } ]
     },
     "record-purchase-contract-execution": {
       "subject_kind": "deal",
       "operations": ["record-deal-execution"],
       "permitted_actor_classes": ["verified_partner", "sponsored_agent"],
+      "decision_refs": ["Q072.D1", "Q094.D1"],
+      "requires_active_engagement": false,
       "prerequisites": { "deal_state": ["pending"], "execution_state": ["unexecuted"] },
       "instrument_kinds": ["purchase"],
       "required_evidence_alternatives": [["signed_purchase_contract"]],
@@ -1501,12 +1650,18 @@ select $policy$
           }
         }
       },
-      "events": [ { "event_kind": "purchase_contract_executed", "subject": "deal" } ]
+      "events": [ { "event_kind": "purchase_contract_executed", "subject": "deal",
+        "detail": {
+          "evidence_reference": { "op": "evidence_fact",
+            "evidence_kind": "signed_purchase_contract", "fact": "reference" }
+        } } ]
     },
     "record-diligence-outcome": {
       "subject_kind": "deal",
       "operations": ["record-diligence-outcome"],
       "permitted_actor_classes": ["verified_partner", "sponsored_agent"],
+      "decision_refs": ["Q080.D1", "Q094.D1"],
+      "requires_active_engagement": false,
       "prerequisites": { "deal_state": ["pending"], "diligence_state": ["in_progress"] },
       "instrument_kinds": null,
       "required_evidence_alternatives": [["diligence_outcome"]],
@@ -1520,12 +1675,20 @@ select $policy$
             "values": ["waived", "satisfied", "failed"] } }
         }
       },
-      "events": [ { "event_kind": "diligence_outcome_recorded", "subject": "deal" } ]
+      "events": [ { "event_kind": "diligence_outcome_recorded", "subject": "deal",
+        "detail": {
+          "diligence_state": { "op": "subject_field", "subject": "deal",
+            "source": "proposed", "field": "diligence_state" },
+          "evidence_reference": { "op": "evidence_fact",
+            "evidence_kind": "diligence_outcome", "fact": "reference" }
+        } } ]
     },
     "record-deal-closing": {
       "subject_kind": "deal",
       "operations": ["record-deal-closing"],
       "permitted_actor_classes": ["verified_partner"],
+      "decision_refs": ["Q080.D1", "Q082.D1", "Q094.D1"],
+      "requires_active_engagement": false,
       "prerequisites": { "deal_state": ["pending"], "execution_state": ["executed"],
         "closing_state": ["not_reached"] },
       "instrument_kinds": null,
@@ -1547,12 +1710,20 @@ select $policy$
           }
         }
       },
-      "events": [ { "event_kind": "deal_closed", "subject": "deal" } ]
+      "events": [ { "event_kind": "deal_closed", "subject": "deal",
+        "detail": {
+          "closing_date": { "op": "evidence_fact",
+            "evidence_kind": "final_closing_settlement", "fact": "closing_date" },
+          "evidence_reference": { "op": "evidence_fact",
+            "evidence_kind": "final_closing_settlement", "fact": "reference" }
+        } } ]
     },
     "cancel-pending-deal": {
       "subject_kind": "deal",
       "operations": ["cancel-pending-deal"],
       "permitted_actor_classes": ["verified_partner"],
+      "decision_refs": ["Q096.D1"],
+      "requires_active_engagement": false,
       "prerequisites": { "deal_state": ["pending"] },
       "instrument_kinds": null,
       "required_evidence_alternatives": [["deal_failure_record"]],
@@ -1590,14 +1761,26 @@ select $policy$
         }
       },
       "events": [
-        { "event_kind": "pending_deal_cancelled", "subject": "deal" },
-        { "event_kind": "assignment_returned_to_market", "subject": "assignment" }
+        { "event_kind": "pending_deal_cancelled", "subject": "deal",
+          "detail": {
+            "cancellation_reason": { "op": "evidence_fact",
+              "evidence_kind": "deal_failure_record", "fact": "reason" },
+            "evidence_reference": { "op": "evidence_fact",
+              "evidence_kind": "deal_failure_record", "fact": "reference" }
+          } },
+        { "event_kind": "assignment_returned_to_market", "subject": "assignment",
+          "detail": {
+            "assignment_phase": { "op": "subject_field", "subject": "assignment",
+              "source": "proposed", "field": "assignment_phase" }
+          } }
       ]
     },
     "record-commission-agreement": {
       "subject_kind": "deal",
       "operations": ["record-deal-axis"],
       "permitted_actor_classes": ["verified_partner", "sponsored_agent"],
+      "decision_refs": ["Q080.D1"],
+      "requires_active_engagement": false,
       "prerequisites": { "commission_agreement_state": ["absent"] },
       "instrument_kinds": null,
       "required_evidence_alternatives": [["commission_agreement"]],
@@ -1610,12 +1793,20 @@ select $policy$
           "effects": { "commission_agreement_state": { "op": "const", "value": "agreed" } }
         }
       },
-      "events": [ { "event_kind": "commission_agreement_recorded", "subject": "deal" } ]
+      "events": [ { "event_kind": "commission_agreement_recorded", "subject": "deal",
+        "detail": {
+          "commission_agreement_state": { "op": "subject_field", "subject": "deal",
+            "source": "proposed", "field": "commission_agreement_state" },
+          "evidence_reference": { "op": "evidence_fact",
+            "evidence_kind": "commission_agreement", "fact": "reference" }
+        } } ]
     },
     "record-invoice-issued": {
       "subject_kind": "deal",
       "operations": ["record-deal-axis"],
       "permitted_actor_classes": ["verified_partner", "sponsored_agent"],
+      "decision_refs": ["Q080.D1"],
+      "requires_active_engagement": false,
       "prerequisites": { "invoice_state": ["not_invoiced"] },
       "instrument_kinds": null,
       "required_evidence_alternatives": [["invoice_issued"]],
@@ -1628,12 +1819,20 @@ select $policy$
           "effects": { "invoice_state": { "op": "const", "value": "invoiced" } }
         }
       },
-      "events": [ { "event_kind": "invoice_issued", "subject": "deal" } ]
+      "events": [ { "event_kind": "invoice_issued", "subject": "deal",
+        "detail": {
+          "invoice_state": { "op": "subject_field", "subject": "deal",
+            "source": "proposed", "field": "invoice_state" },
+          "evidence_reference": { "op": "evidence_fact",
+            "evidence_kind": "invoice_issued", "fact": "reference" }
+        } } ]
     },
     "record-payment": {
       "subject_kind": "deal",
       "operations": ["record-deal-axis"],
       "permitted_actor_classes": ["verified_partner", "sponsored_agent"],
+      "decision_refs": ["Q072.D1", "Q080.D1"],
+      "requires_active_engagement": false,
       "prerequisites": { "payment_state": ["unpaid", "partially_paid"] },
       "instrument_kinds": null,
       "required_evidence_alternatives": [["payment_received"]],
@@ -1648,12 +1847,20 @@ select $policy$
             "prior_subject": "deal", "prior_field": "payment_state" } }
         }
       },
-      "events": [ { "event_kind": "payment_recorded", "subject": "deal" } ]
+      "events": [ { "event_kind": "payment_recorded", "subject": "deal",
+        "detail": {
+          "payment_state": { "op": "subject_field", "subject": "deal",
+            "source": "proposed", "field": "payment_state" },
+          "evidence_reference": { "op": "evidence_fact",
+            "evidence_kind": "payment_received", "fact": "reference" }
+        } } ]
     },
     "record-completion": {
       "subject_kind": "deal",
       "operations": ["record-deal-axis"],
       "permitted_actor_classes": ["verified_partner", "sponsored_agent"],
+      "decision_refs": ["Q072.D1", "Q080.D1"],
+      "requires_active_engagement": false,
       "prerequisites": { "completion_state": ["open"] },
       "instrument_kinds": null,
       "required_evidence_alternatives": [["completion_recorded"]],
@@ -1666,7 +1873,13 @@ select $policy$
           "effects": { "completion_state": { "op": "const", "value": "complete" } }
         }
       },
-      "events": [ { "event_kind": "completion_recorded", "subject": "deal" } ]
+      "events": [ { "event_kind": "completion_recorded", "subject": "deal",
+        "detail": {
+          "completion_state": { "op": "subject_field", "subject": "deal",
+            "source": "proposed", "field": "completion_state" },
+          "evidence_reference": { "op": "evidence_fact",
+            "evidence_kind": "completion_recorded", "fact": "reference" }
+        } } ]
     }
   }
 }
@@ -1674,7 +1887,7 @@ $policy$::jsonb
 $fn$;
 
 comment on function ops.j102_admission_policy() is
-  'The closed SQL admission map: which operation may perform which transition, which actor class may perform it, which subjects it must write and which it may CREATE (never the primary one), the EXACT resulting value of every field it moves, the exact event set it appends, and which evidence kinds bound to which subject it requires. A transcription of the kernel''s exported contracts and of its evaluator, asserted equal to both by the Node parity suite -- which runs the evaluator and requires this map to predict its answer. It decides nothing the kernel does not already decide and adds no business policy.';
+  'The closed SQL admission map: which operation may perform which transition, which actor class may perform it, which subjects it must write and which it may CREATE (never the primary one), the EXACT resulting value of every field it moves, the exact event set it appends AND the exact nested detail of every one of those events, and which evidence kinds bound to which subject it requires. A transcription of the kernel''s exported contracts and of its evaluator, asserted equal to both by the Node parity suite -- which runs the evaluator and requires this map to predict its answer. It decides nothing the kernel does not already decide and adds no business policy.';
 
 -- ---------------------------------------------------------------------------
 -- THE EFFECT INTERPRETER.
@@ -1911,6 +2124,14 @@ declare
   -- evidence -- a closing date, a cancellation reason -- is compared against the
   -- record rather than against the caller's account of it.
   v_facts jsonb;
+  -- HIGH-6. THE PIN'S CANONICAL REFERENCE, taken from what the READER returned
+  -- rather than from the selector the caller wrote: F01's own document_id off the
+  -- document record, the stored-artifact reader's own artifact_digest, and the
+  -- record_id on the committed first-party row. This is the value the kernel puts
+  -- on its events as `evidence_reference` and the value the store puts in
+  -- `evidence_references`, so deriving it HERE is what lets the writer compare
+  -- the history it is about to append against evidence that was actually re-read.
+  v_reference jsonb;
   v_supplied text[] := array[]::text[];
   v_supplied_sorted text[];
   v_alternative jsonb;
@@ -1949,6 +2170,7 @@ begin
     end if;
     v_supplied := v_supplied || v_kind;
     v_facts := '{}'::jsonb;
+    v_reference := null;
     -- THE SOURCE IS THE CONTRACT'S, not the manifest's. A first-party record
     -- presented as a document would otherwise take the document branch and skip
     -- the record's own typed binding entirely.
@@ -2029,7 +2251,13 @@ begin
             using errcode = '22023';
         end if;
       end loop;
+      -- F01's OWN identity for this document, not the selector the caller wrote.
+      -- The two agree on every honest call because f01_read looks the document up
+      -- by that id; taking the reader's answer is what makes the reference a
+      -- re-read fact rather than an echo.
+      v_reference := v_record -> 'neon_identity' -> 'document_id';
       v_facts := jsonb_build_object(
+        'reference', v_reference,
         'document_id', v_record -> 'neon_identity' -> 'document_id',
         'version_no', v_record -> 'neon_identity' -> 'version_no',
         'content_digest', v_record -> 'neon_identity' -> 'content_digest',
@@ -2053,8 +2281,13 @@ begin
           v_item -> 'binding' ->> 'subject_kind', v_item -> 'binding' ->> 'subject_id'
           using errcode = '40001';
       end if;
+      -- THE STORED ARTIFACT'S OWN DIGEST, off ops.f01_stored_artifact's answer.
+      -- This used to be copied from the caller's selector, which made the one
+      -- fact this branch reports an echo of the request rather than a reading.
+      v_reference := v_body -> 'artifact_digest';
       v_facts := jsonb_build_object(
-        'artifact_digest', v_item -> 'selector' -> 'artifact_digest');
+        'reference', v_reference,
+        'artifact_digest', v_body -> 'artifact_digest');
     elsif (v_item ->> 'source') = 'first_party_record' then
       v_body := ops.j102_first_party_record(
         v_item -> 'selector' ->> 'record_kind', v_item -> 'selector' ->> 'record_id');
@@ -2113,7 +2346,9 @@ begin
       -- Q096's cancellation reason -- taken from the stored row, so the writer
       -- compares the proposed state against the record instead of against the
       -- caller's copy of it.
+      v_reference := v_body -> 'record' -> 'record_id';
       v_facts := jsonb_build_object(
+        'reference', v_reference,
         'record_kind', v_body -> 'record' -> 'record_kind',
         'record_id', v_body -> 'record' -> 'record_id',
         'closing_date', v_body -> 'record' -> 'closing_date',
@@ -2129,9 +2364,19 @@ begin
     else
       raise exception 'j102_unknown_evidence_source: %', v_item ->> 'source' using errcode = '22023';
     end if;
+    -- A pin that reached here without a readable reference is a pin whose reader
+    -- returned no identity for it, and the history could not name it. It refuses
+    -- rather than being recorded as an unnamed piece of evidence.
+    if jsonb_typeof(v_reference) is distinct from 'string' then
+      raise exception 'j102_evidence_reference_unresolved: % was re-read and its reader named no reference for the history to cite',
+        v_kind using errcode = '40001';
+    end if;
     v_checked := v_checked || jsonb_build_array(jsonb_build_object(
       'evidence_kind', v_item ->> 'evidence_kind',
       'source', v_item ->> 'source',
+      -- The reference the READER returned. Everything the writer stamps into
+      -- history about which evidence a transition rested on comes from here.
+      'reference', v_reference,
       'reader', v_item ->> 'reader',
       'bound_subject_kind', v_item -> 'binding' ->> 'subject_kind',
       'bound_subject_id', v_item -> 'binding' ->> 'subject_id',
@@ -2168,7 +2413,7 @@ end;
 $$;
 
 comment on function ops.j102_recheck_evidence(jsonb,text,text,text) is
-  'Re-read the EXACT evidence pins a transition was decided against, inside the transaction that holds its subject locks, and bind every one of them to the ONE primary subject that transition advances. Any movement, any wrong source or record kind, any wrong author class, any binding naming a different subject, and any manifest that is not exactly one declared alternative refuses the whole coupled transition. Existence is not the check; sameness and identity are. Returns, per pin, the FACTS read off the stored row -- the closing date, the reason -- so the writer can compare a coupled fact derived from evidence against the evidence rather than against the caller.';
+  'Re-read the EXACT evidence pins a transition was decided against, inside the transaction that holds its subject locks, and bind every one of them to the ONE primary subject that transition advances. Any movement, any wrong source or record kind, any wrong author class, any binding naming a different subject, and any manifest that is not exactly one declared alternative refuses the whole coupled transition. Existence is not the check; sameness and identity are. Returns, per pin, the CANONICAL REFERENCE the reader itself named -- F01''s document_id, the stored artifact''s digest, the committed record''s record_id -- and the FACTS read off the stored row (the closing date, the reason), so the writer can compare both the state it is about to write and the history it is about to append against the evidence rather than against the caller.';
 
 -- ---------------------------------------------------------------------------
 -- THE ONE TRANSITION WRITER.
@@ -2276,6 +2521,21 @@ declare
   v_checked jsonb;
   v_readback jsonb := '{}'::jsonb;
   v_result jsonb;
+  -- HIGH-5/HIGH-6. THE CONSTANTS THE STORE AND THE KERNEL STAMP, read off the
+  -- admission map so there is one written copy of each in this file and the Node
+  -- parity suite can assert all three equal their exported originals.
+  v_subject_schema text;
+  v_event_record_schema text;
+  v_event_schema text;
+  v_subject_keys jsonb;
+  v_event_keys jsonb;
+  v_identity_keys jsonb;
+  -- HIGH-6. The evidence references the recheck ACTUALLY re-read, canonicalised
+  -- once and compared against every event this call appends.
+  v_canonical_refs jsonb := '{}'::jsonb;
+  v_canonical_count integer;
+  v_seen jsonb;
+  v_event jsonb;
 begin
   if v_operation is null then
     raise exception 'j102_operation_required' using errcode = '22023';
@@ -2288,6 +2548,20 @@ begin
      or jsonb_array_length(p_event_envelopes) < 1 then
     -- A state change with no event is a change nobody can audit afterwards.
     raise exception 'j102_no_event_envelopes: every transition appends its history'
+      using errcode = '22023';
+  end if;
+  -- M-3. THE COMPARE-AND-SWAP OPERAND MAP, ASKED ABOUT BEFORE ANYTHING INDEXES
+  -- INTO IT. A SQL NULL here propagated through every `?` and `->` below as NULL,
+  -- which `if` reads as false, so THREE named refusals were skipped in silence --
+  -- both creation gates and j102_expected_state_digest_missing -- and the call
+  -- refused further down for a different reason, with `created_subject_kinds`
+  -- reporting empty for a creation that had been attempted. A JSON scalar was
+  -- worse: it reached jsonb_object_keys and raised an unnamed `cannot call
+  -- jsonb_object_keys on a scalar` rather than any J102 refusal at all. Both now
+  -- refuse HERE, by name, before a key is claimed.
+  if jsonb_typeof(p_expected_state_digests) is distinct from 'object' then
+    raise exception 'j102_expected_state_digests_not_an_object: every proposed subject carries a compare-and-swap operand and a creation carries an explicit null; this call supplies %',
+      coalesce(jsonb_typeof(p_expected_state_digests), 'no operand map at all')
       using errcode = '22023';
   end if;
 
@@ -2333,6 +2607,12 @@ begin
   end if;
   v_writes := v_contract -> 'writes';
   v_subjects := v_contract -> 'subjects';
+  v_subject_schema := v_policy ->> 'stored_subject_schema_version';
+  v_event_record_schema := v_policy ->> 'stored_event_schema_version';
+  v_event_schema := v_policy ->> 'event_schema_version';
+  v_subject_keys := v_policy -> 'stored_subject_record_keys';
+  v_event_keys := v_policy -> 'stored_event_record_keys';
+  v_identity_keys := v_policy -> 'event_identity_keys';
   -- THE PRIMARY SUBJECT KIND IS THE CONTRACT'S, decided here and never read off
   -- the request. Everything below -- which row must already exist, which evidence
   -- must bind to what, which events may be appended -- hangs off this line.
@@ -2370,6 +2650,13 @@ begin
   -- omitting the key is not a way to ask for the old behaviour.
   for v_envelope in select * from jsonb_array_elements(p_subject_envelopes) loop
     v_record := v_envelope -> 'record';
+    -- Named rather than left to a cast error deeper in, on the same terms as the
+    -- operand-map guard above: an envelope whose `record` is a scalar, an array
+    -- or absent reaches jsonb_object_keys below.
+    if jsonb_typeof(v_record) is distinct from 'object' then
+      raise exception 'j102_subject_envelope_not_an_object: a proposed subject envelope carries % where its record should be',
+        coalesce(jsonb_typeof(v_record), 'nothing') using errcode = '22023';
+    end if;
     v_kind := v_record ->> 'subject_kind';
     v_id := v_record ->> 'subject_id';
     v_key := v_kind || ':' || v_id;
@@ -2402,6 +2689,75 @@ begin
     if ops.f01_digest_jsonb(v_record) is distinct from (v_envelope ->> 'record_digest') then
       raise exception 'j102_subject_digest_mismatch: the supplied subject does not hash to its claim'
         using errcode = '22000';
+    end if;
+    -- ======================================================================
+    -- HIGH-5. THE SUBJECT'S OWN PROVENANCE, BOUND TO THE TRANSITION THAT RAN.
+    --
+    -- `established_by_transition` is what ops.j102_subject returns as a subject's
+    -- provenance, what ops.j102_read('subject') surfaces, and what this function
+    -- echoes back in its own receipt's readback. It was compared to NOTHING. The
+    -- digest check above is no help at all here: a forged value is hashed into
+    -- its own claim, so a fully canonical `record-invoice-issued` -- real
+    -- evidence, exact target, correct event -- could leave a deal's authoritative
+    -- row reporting that its state was established by a partner-only
+    -- `record-deal-closing` that never happened.
+    --
+    -- This is the exact binding the EVENT side already had (`transition_id`
+    -- below, CHECK-bound to its column), applied to the subject's mirror of it.
+    -- It derives nothing: the transition that ran is p_transition_id, already
+    -- validated against the map, and the envelope must say so or refuse.
+    -- ======================================================================
+    if (v_record ->> 'established_by_transition') is distinct from p_transition_id then
+      raise exception 'j102_subject_provenance_mismatch: this call applies %, and the % % claims to be established by %; a subject may not carry provenance for a transition that did not run',
+        p_transition_id, v_kind, v_id,
+        coalesce(v_record ->> 'established_by_transition', 'nothing') using errcode = '42501';
+    end if;
+    -- THE ENVELOPE IS THE STORE'S SHAPE, not something that resembles it. The
+    -- schema version and the tenant are CONSTANTS on both sides -- the store
+    -- stamps V5_J102_STORED_SUBJECT_SCHEMA_VERSION and the kernel owns the
+    -- tenant -- so a record claiming another schema or another tenant is a record
+    -- this rail did not produce, and it refuses here rather than being stored and
+    -- read back later as authoritative. The relation restates both as CHECKs.
+    if (v_record ->> 'schema_version') is distinct from v_subject_schema then
+      raise exception 'j102_subject_schema_version_mismatch: a stored lifecycle subject is %, and this request carries %',
+        v_subject_schema, coalesce(v_record ->> 'schema_version', 'nothing')
+        using errcode = '22023';
+    end if;
+    if (v_record ->> 'tenant') is distinct from ops.f01_tenant()
+       or (v_envelope ->> 'tenant') is distinct from ops.f01_tenant() then
+      raise exception 'j102_subject_tenant_mismatch: this database is tenant %, and a proposed % names %',
+        ops.f01_tenant(), coalesce(v_kind, 'subject'),
+        coalesce(v_record ->> 'tenant', v_envelope ->> 'tenant', 'nothing')
+        using errcode = '42501';
+    end if;
+    if (v_envelope ->> 'record_kind') is distinct from 'stored_lifecycle_subject' then
+      raise exception 'j102_subject_record_kind_mismatch: this writer stores lifecycle subjects, and this envelope is a %',
+        coalesce(v_envelope ->> 'record_kind', 'record of no kind') using errcode = '22023';
+    end if;
+    -- NO DANGLING CLAIMED PROVENANCE BESIDE THE BOUND ONE. Every key of the
+    -- record is one the store writes, and every key the store writes is present.
+    -- Without this, a caller could hash a second, unchecked `approved_by`,
+    -- `established_at` or `source_of_truth` into the same bytes and have
+    -- j102_read hand it to a reviewer as part of the authoritative row -- which
+    -- is the same defect as the forged provenance above, one key over.
+    if exists (select 1 from jsonb_object_keys(v_record) as k
+                where not (v_subject_keys @> jsonb_build_array(k)))
+       or exists (select 1 from jsonb_array_elements_text(v_subject_keys) as k
+                   where not (v_record ? k)) then
+      raise exception 'j102_subject_record_shape_unrecognised: a stored lifecycle subject carries exactly %, and this request carries %',
+        v_subject_keys,
+        coalesce((select jsonb_agg(k order by k) from jsonb_object_keys(v_record) as k),
+                 '[]'::jsonb) using errcode = '22023';
+    end if;
+    -- And the record's own header must agree with the state it wraps: the header
+    -- is what the primary key columns are CHECK-bound to, and a header naming one
+    -- subject over a state describing another is a row whose identity depends on
+    -- which half of it a reader looks at.
+    if (v_record ->> 'subject_kind') is distinct from (v_record -> 'state' ->> 'subject_kind')
+       or (v_record ->> 'subject_id') is distinct from (v_record -> 'state' ->> 'subject_id') then
+      raise exception 'j102_subject_header_state_mismatch: the envelope names % %, and the state it carries describes % %',
+        v_kind, v_id, coalesce(v_record -> 'state' ->> 'subject_kind', 'nothing'),
+        coalesce(v_record -> 'state' ->> 'subject_id', 'nothing') using errcode = '22023';
     end if;
     -- ======================================================================
     -- ROOT BLOCKER 1. WHO MAY BE CREATED, AND WHO MAY NOT.
@@ -2523,28 +2879,30 @@ begin
   -- previous correction acknowledged and left open.
   --
   -- The required set comes from the kernel's evaluator: the event kinds
-  -- lifecycleEvent() is called with, on the subjects it is called with. One kind
-  -- is derived rather than literal -- record-payment's `payment_${level}` -- and
-  -- it is derived HERE from the payment_state this same call writes, so the event
-  -- and the state cannot disagree.
+  -- lifecycleEvent() is called with, on the subjects it is called with. EVERY ONE
+  -- OF THEM IS A LITERAL and none is derived. An earlier revision of this file
+  -- carried a derived-kind rule for record-payment, on the belief that the kernel
+  -- spelled that event `payment_${level}`; it does not, and never did. That
+  -- string is the transition's REASON_ID, the event kind beside it is the
+  -- constant `payment_recorded` (cre-lifecycle.v5.js axisResult call site), and
+  -- the derivation, the branch that implemented it and the prose that described
+  -- it as intentional are all gone rather than left to be read as the contract.
   -- ==========================================================================
   for v_event_spec in select * from jsonb_array_elements(v_contract -> 'events') loop
     v_kind := v_event_spec ->> 'subject';
-    if v_event_spec ? 'event_kind_from' then
-      v_key := (v_event_spec -> 'event_kind_from' ->> 'prefix') ||
-        coalesce((v_proposed_states -> (v_event_spec -> 'event_kind_from' ->> 'subject'))
-                   ->> (v_event_spec -> 'event_kind_from' ->> 'field'), '');
-    else
-      v_key := v_event_spec ->> 'event_kind';
-    end if;
     v_required_events := v_required_events || jsonb_build_array(jsonb_build_object(
-      'event_kind', v_key,
+      'event_kind', v_event_spec ->> 'event_kind',
       'subject_kind', v_kind,
       'subject_id', v_proposed_ids ->> v_kind));
   end loop;
 
   for v_envelope in select * from jsonb_array_elements(p_event_envelopes) loop
     v_record := v_envelope -> 'record';
+    if jsonb_typeof(v_record) is distinct from 'object'
+       or jsonb_typeof(v_record -> 'event') is distinct from 'object' then
+      raise exception 'j102_event_envelope_not_an_object: an event envelope carries % where its record and nested event should be',
+        coalesce(jsonb_typeof(v_record), 'nothing') using errcode = '22023';
+    end if;
     if (v_record ->> 'recorded_by') is distinct from v_actor then
       raise exception 'j102_actor_injection_refused: recorded_by is derived, never supplied'
         using errcode = '42501';
@@ -2568,6 +2926,39 @@ begin
     if (v_record ->> 'transition_id') is distinct from p_transition_id then
       raise exception 'j102_event_transition_mismatch: this call applies %, and an event claims %',
         p_transition_id, coalesce(v_record ->> 'transition_id', 'nothing') using errcode = '22023';
+    end if;
+    -- HIGH-5's other half, on the history side. Schema version, tenant and the
+    -- record's key set are the store's constants and the store's shape, checked
+    -- here because they are properties of the REQUEST alone; the nested event's
+    -- own schema version is the KERNEL's constant and is checked with it.
+    if (v_record ->> 'schema_version') is distinct from v_event_record_schema then
+      raise exception 'j102_event_schema_version_mismatch: a stored lifecycle event is %, and this request carries %',
+        v_event_record_schema, coalesce(v_record ->> 'schema_version', 'nothing')
+        using errcode = '22023';
+    end if;
+    if (v_record -> 'event' ->> 'schema_version') is distinct from v_event_schema then
+      raise exception 'j102_event_payload_schema_version_mismatch: the kernel builds every lifecycle event as %, and this request carries %',
+        v_event_schema, coalesce(v_record -> 'event' ->> 'schema_version', 'nothing')
+        using errcode = '22023';
+    end if;
+    if (v_record ->> 'tenant') is distinct from ops.f01_tenant()
+       or (v_envelope ->> 'tenant') is distinct from ops.f01_tenant() then
+      raise exception 'j102_event_tenant_mismatch: this database is tenant %, and an event names %',
+        ops.f01_tenant(),
+        coalesce(v_record ->> 'tenant', v_envelope ->> 'tenant', 'nothing') using errcode = '42501';
+    end if;
+    if (v_envelope ->> 'record_kind') is distinct from 'stored_lifecycle_event' then
+      raise exception 'j102_event_record_kind_mismatch: this writer appends lifecycle events, and this envelope is a %',
+        coalesce(v_envelope ->> 'record_kind', 'record of no kind') using errcode = '22023';
+    end if;
+    if exists (select 1 from jsonb_object_keys(v_record) as k
+                where not (v_event_keys @> jsonb_build_array(k)))
+       or exists (select 1 from jsonb_array_elements_text(v_event_keys) as k
+                   where not (v_record ? k)) then
+      raise exception 'j102_event_record_shape_unrecognised: a stored lifecycle event carries exactly %, and this request carries %',
+        v_event_keys,
+        coalesce((select jsonb_agg(k order by k) from jsonb_object_keys(v_record) as k),
+                 '[]'::jsonb) using errcode = '22023';
     end if;
     v_supplied_events := v_supplied_events || jsonb_build_array(jsonb_build_object(
       'event_kind', v_record -> 'event' ->> 'event_kind',
@@ -2955,6 +3346,159 @@ begin
     end loop;
   end loop;
 
+  -- ==========================================================================
+  -- THE WHOLE EVENT PAYLOAD, AND THE EVIDENCE THE HISTORY CITES.
+  --
+  -- The set check above proves WHICH events are appended and on which subjects.
+  -- It says nothing about what is INSIDE them, and the kernel puts the facts a
+  -- reviewer actually reads history for inside: the closing date on
+  -- `deal_closed`, the cancellation reason on `pending_deal_cancelled`, the axis
+  -- value on every axis event, the property and the assignment a negotiation
+  -- event names, and the evidence reference each one rested on. Every one of
+  -- those could be a lie on a call whose event KIND and SUBJECT were both
+  -- correct, and the state row beside it correct too -- so the history and the
+  -- row it was written with would disagree about the same fact.
+  --
+  -- HIGH-6, the other half: `record.evidence_references`. The table comment
+  -- promises "the exact evidence references it rested on"; nothing anywhere in
+  -- this file compared them to anything. An event could cite a document the
+  -- transition never rested on, another deal's settlement, a duplicate, an extra
+  -- pin, or an empty array, and Q072's "the correction is receipted" and Q082's
+  -- "transitions declare their evidence" became uncheckable from exactly the
+  -- surface a reviewer reads.
+  --
+  -- BOTH ARE DECIDED HERE, AGAINST THE SAME FACTS THE STATE WAS. The canonical
+  -- references come from ops.j102_recheck_evidence's own answer -- the document
+  -- id F01 returned, the digest the stored-artifact reader returned, the record
+  -- id on the committed row -- and never from the manifest's selector, from a
+  -- caller-supplied array or from the diagnostics. The nested detail is computed
+  -- by the SAME interpreter the state targets use, over the same committed prior
+  -- rows, the same coupled subjects and the same re-read evidence. An event this
+  -- transition would not have produced cannot be appended beside a state it would
+  -- have.
+  --
+  -- THE WHOLE ARRAY IS REQUIRED ON EVERY EVENT, INCLUDING A COUPLED ONE THAT
+  -- NAMES NO SINGLE PIN. Three of the fourteen transitions append an event with
+  -- no `evidence_reference` detail field at all -- winning_property_selected,
+  -- assignment_committed, assignment_returned_to_market -- and that absence is
+  -- the kernel's own shape, transcribed rather than filled in. It is a different
+  -- question from the array: "which pin does THIS event name" is the detail
+  -- field, and "what did the transition that produced it rest on" is the array,
+  -- which the store stamps identically on every event of one call and which is
+  -- therefore required identically on every one of them.
+  -- ==========================================================================
+  select coalesce(jsonb_object_agg(item ->> 'evidence_kind', jsonb_build_object(
+           'evidence_kind', item -> 'evidence_kind',
+           'source', item -> 'source',
+           'reference', item -> 'reference')), '{}'::jsonb)
+    into v_canonical_refs
+    from jsonb_array_elements(v_checked) as item;
+  v_canonical_count := jsonb_array_length(v_checked);
+
+  for v_envelope in select * from jsonb_array_elements(p_event_envelopes) loop
+    v_record := v_envelope -> 'record';
+    v_event := v_record -> 'event';
+    v_kind := v_event ->> 'subject_kind';
+    -- The spec for THIS event. The pairwise set check above already proved the
+    -- supplied events are exactly the contract's, so exactly one spec matches;
+    -- the refusal below is the structural belt for a future edit that widens the
+    -- set check without widening this one.
+    v_event_spec := null;
+    select spec into v_event_spec
+      from jsonb_array_elements(v_contract -> 'events') as spec
+     where (spec ->> 'event_kind') = (v_event ->> 'event_kind')
+       and (spec ->> 'subject') = v_kind
+     limit 1;
+    if v_event_spec is null then
+      raise exception 'j102_event_not_produced_by_transition: % appends %, and this request carries a % event on a %',
+        p_transition_id, v_contract -> 'events',
+        coalesce(v_event ->> 'event_kind', 'nameless'), coalesce(v_kind, 'subject of no kind')
+        using errcode = '42501';
+    end if;
+
+    -- THE EVENT'S CLOSED KEY SET. The kernel builds every event as
+    -- lifecycleEvent(kind, subject_kind, subject_id, detail): four identity keys
+    -- and the transition's own detail, and nothing else. A key outside that set
+    -- is a fact the kernel never wrote, hashed into the history's own bytes.
+    for v_field in
+      select k from (
+        select jsonb_object_keys(coalesce(v_event_spec -> 'detail', '{}'::jsonb)) as k
+        union
+        select jsonb_object_keys(v_event)
+      ) f order by k collate "C"
+    loop
+      continue when v_identity_keys @> jsonb_build_array(v_field);
+      v_effect := (v_event_spec -> 'detail') -> v_field;
+      if v_effect is null then
+        raise exception 'j102_event_detail_not_produced_by_transition: the % event % appends carries %, and this request supplies an extra %',
+          v_event ->> 'event_kind', p_transition_id,
+          coalesce((select jsonb_agg(k order by k)
+                      from jsonb_object_keys(coalesce(v_event_spec -> 'detail', '{}'::jsonb)) as k),
+                   '[]'::jsonb),
+          v_field using errcode = '42501';
+      end if;
+      if not (v_event ? v_field) then
+        raise exception 'j102_event_detail_missing: the % event % appends names %, and this request omits it',
+          v_event ->> 'event_kind', p_transition_id, v_field using errcode = '22023';
+      end if;
+      v_expected_value := ops.j102_expected_value(v_effect, v_prior_by_kind,
+        v_proposed_states, v_context_by_kind, v_proposed_ids, v_facts_by_kind);
+      v_actual_value := v_event -> v_field;
+      if (v_expected_value ->> 'kind') = 'unbound' then
+        continue;
+      elsif (v_expected_value ->> 'kind') = 'exact' then
+        if v_actual_value is distinct from (v_expected_value -> 'value') then
+          raise exception 'j102_event_detail_not_canonical: the % event names % of %, and this request supplies %',
+            v_event ->> 'event_kind', v_field,
+            coalesce(v_expected_value -> 'value', 'null'::jsonb),
+            coalesce(v_actual_value, '"absent"'::jsonb) using errcode = '42501';
+        end if;
+      else
+        if not (v_expected_value -> 'values' @> jsonb_build_array(v_actual_value)) then
+          raise exception 'j102_event_detail_not_canonical: the % event names % from %, and this request supplies %',
+            v_event ->> 'event_kind', v_field, v_expected_value -> 'values',
+            coalesce(v_actual_value, '"absent"'::jsonb) using errcode = '42501';
+        end if;
+      end if;
+    end loop;
+
+    -- THE EVIDENCE REFERENCES: exactly the set that was re-read, one for one.
+    v_actual_value := v_record -> 'evidence_references';
+    if jsonb_typeof(v_actual_value) is distinct from 'array' then
+      raise exception 'j102_event_evidence_references_missing: the % event cites % where it must cite the evidence this transition re-read',
+        v_event ->> 'event_kind', coalesce(jsonb_typeof(v_actual_value), 'nothing')
+        using errcode = '22023';
+    end if;
+    if jsonb_array_length(v_actual_value) <> v_canonical_count then
+      raise exception 'j102_event_evidence_references_not_rechecked: % re-read % evidence records under this lock, and the % event cites %',
+        p_transition_id, v_canonical_count, v_event ->> 'event_kind',
+        jsonb_array_length(v_actual_value) using errcode = '42501';
+    end if;
+    v_seen := '{}'::jsonb;
+    for v_item in select * from jsonb_array_elements(v_actual_value) loop
+      v_key := v_item ->> 'evidence_kind';
+      if v_key is null or not (v_canonical_refs ? v_key) then
+        raise exception 'j102_event_evidence_reference_not_rechecked: the % event cites % evidence, and this transition re-read %',
+          v_event ->> 'event_kind', coalesce(v_key, 'unnamed'),
+          coalesce((select jsonb_agg(k order by k) from jsonb_object_keys(v_canonical_refs) as k),
+                   '[]'::jsonb) using errcode = '42501';
+      end if;
+      if v_seen ? v_key then
+        raise exception 'j102_event_evidence_reference_duplicated: the % event cites % twice; two citations of one kind is one record counted as two',
+          v_event ->> 'event_kind', v_key using errcode = '42501';
+      end if;
+      -- Whole-object equality, which is also what closes the key set: an element
+      -- carrying an extra key, a missing key, another document's reference or a
+      -- source the contract does not name is not the element the recheck built.
+      if v_item is distinct from (v_canonical_refs -> v_key) then
+        raise exception 'j102_event_evidence_reference_not_rechecked: % was re-read as %, and the % event cites %',
+          v_key, v_canonical_refs -> v_key, v_event ->> 'event_kind', v_item
+          using errcode = '42501';
+      end if;
+      v_seen := v_seen || jsonb_build_object(v_key, true);
+    end loop;
+  end loop;
+
   -- Every proposed subject, written. A subject whose operand is null is a
   -- CREATION and the loop above has already proved, under this transaction's
   -- locks, that no row holds that key; a subject whose operand is a digest is an
@@ -3034,9 +3578,39 @@ begin
     'outcome', 'applied',
     'actor_slug', v_actor,
     'transition_id', p_transition_id,
-    'reason_id', p_diagnostics ->> 'reason_id',
-    'coupled_facts_committed', coalesce(p_diagnostics -> 'coupled_facts', '[]'::jsonb),
-    'decision_refs', coalesce(p_diagnostics -> 'decision_refs', '[]'::jsonb),
+    -- ======================================================================
+    -- M-2. WHAT THE RECEIPT MAY STATE AS FACT, AND WHAT IT MAY ONLY REPORT.
+    --
+    -- These three used to be taken straight off p_diagnostics -- the caller's
+    -- own account of the decision it says it took -- and reported beside
+    -- properties this function had actually enforced, in one flat object with
+    -- nothing distinguishing them. A direct caller could therefore write a
+    -- durable receipt that misdescribed what it committed.
+    --
+    -- TWO OF THEM ARE NOW DERIVED and no longer read the diagnostics at all.
+    -- `coupled_facts_committed` and `decision_refs` are properties of the
+    -- TRANSITION, and the transition is p_transition_id, already validated
+    -- against the admission map; the map's copies of both are asserted equal to
+    -- the kernel's exported contract, contract by contract, by the Node parity
+    -- suite. So the receipt states what this transition commits, and states it
+    -- from the same place the writer decided everything else from.
+    --
+    -- THE THIRD IS NOT DERIVABLE HERE and is labelled instead of laundered.
+    -- `reason_id` is the KERNEL's diagnostic for the branch its evaluator took --
+    -- `diligence_satisfied`, `payment_paid`, `search_initiation_opens_assignment`
+    -- -- and this file transcribes the kernel's contracts and its targets, not
+    -- its reason vocabulary. Deriving it would mean inventing a second copy of a
+    -- fourth thing; echoing it as `reason_id` beside two derived fields would
+    -- make a caller-asserted string read as an authoritative one. It is carried
+    -- under its own name, with its own scope, so history says who said it.
+    -- ======================================================================
+    'coupled_facts_committed', coalesce(v_contract -> 'coupled_facts', '[]'::jsonb),
+    'coupled_facts_committed_source', 'derived_from_the_admission_contract',
+    'decision_refs', coalesce(v_contract -> 'decision_refs', '[]'::jsonb),
+    'decision_refs_source', 'derived_from_the_admission_contract',
+    'caller_reported_reason_id', p_diagnostics ->> 'reason_id',
+    'caller_reported_reason_id_scope',
+      'kernel_result_diagnostic_asserted_by_the_caller_and_not_recomputed_here',
     'subject_digests', v_subject_digests,
     'event_digests', v_event_digests,
     'evidence_rechecked_under_lock', true,
@@ -3073,6 +3647,13 @@ begin
     'transition_effects_enforced', true,
     'required_event_set_enforced', true,
     'required_subject_set_enforced', true,
+    -- HIGH-5 and HIGH-6, reported as what they are: every subject envelope named
+    -- THIS transition as its own provenance, every event's whole payload equalled
+    -- the one this transition produces from the same facts the state came from,
+    -- and every event cites exactly the evidence that was re-read under the lock.
+    'subject_provenance_bound_to_transition', true,
+    'event_payloads_enforced', true,
+    'event_evidence_references_enforced', true,
     -- THE COMMITTED RECEIPT. The instant every row in this transaction carries,
     -- taken from the database rather than echoed back from the request, and the
     -- operands the swap was actually decided against.
@@ -3109,7 +3690,7 @@ end;
 $$;
 
 comment on function ops.j102_apply_transition(text,jsonb,jsonb,jsonb,jsonb,text,text,jsonb) is
-  'The ONLY writer of lifecycle state. Admits the transition against the closed SQL admission map first -- the transition must exist, the operation must be one that performs it, and the DERIVED principal class must be permitted -- then claims its idempotency key before reading any state and locks every subject it reads or writes in ascending order. It REFUSES TO CREATE THE PRIMARY SUBJECT: a transition advances a row that is already there, and creation is admitted only for the two coupled subjects the kernel itself creates (an engagement, a pending deal) in their exact shape. It requires a compare-and-swap operand for every proposed subject, the WHOLE coupled subject set rather than any subset, and EXACTLY the event set that transition appends -- so a call can neither erase history with an empty array nor fabricate an extra or wrong-kind event. It re-reads the exact evidence pins under those locks, binds every one of them to the single primary subject, and then checks the RESULT: the prerequisites and instrument kind against the committed row, the evaluator''s own prior conditions, and every field either equal to the exact value the transition computes -- from the stored prior state, the coupled subjects and the evidence facts read under the lock -- or byte-identical to what was committed. Actor and instant are derived. Then it writes every proposed subject and every event in one transaction or none.';
+  'The ONLY writer of lifecycle state. Admits the transition against the closed SQL admission map first -- the transition must exist, the operation must be one that performs it, and the DERIVED principal class must be permitted -- then claims its idempotency key before reading any state and locks every subject it reads or writes in ascending order. It REFUSES TO CREATE THE PRIMARY SUBJECT: a transition advances a row that is already there, and creation is admitted only for the two coupled subjects the kernel itself creates (an engagement, a pending deal) in their exact shape. It requires a compare-and-swap operand for every proposed subject, the WHOLE coupled subject set rather than any subset, and EXACTLY the event set that transition appends -- so a call can neither erase history with an empty array nor fabricate an extra or wrong-kind event. It re-reads the exact evidence pins under those locks, binds every one of them to the single primary subject, and then checks the RESULT: the prerequisites and instrument kind against the committed row, the evaluator''s own prior conditions, and every field either equal to the exact value the transition computes -- from the stored prior state, the coupled subjects and the evidence facts read under the lock -- or byte-identical to what was committed. THE HISTORY IS CHECKED THE SAME WAY: every subject envelope must name THIS transition as its own established_by_transition, every event''s whole payload -- not only its kind and subject -- must equal what the transition produces from those same facts, and every event must cite EXACTLY the evidence references the recheck actually re-read, derived from the readers'' own answers rather than from the manifest or from any supplied array. Actor, instant, schema versions and tenant are derived or fixed. Then it writes every proposed subject and every event in one transaction or none.';
 
 -- ---------------------------------------------------------------------------
 -- The three non-transition writers.
