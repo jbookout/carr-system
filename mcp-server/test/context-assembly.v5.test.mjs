@@ -865,10 +865,21 @@ test("Q068 a rule's text is bound to a first-party record this manifest carries"
   assert.equal(tainted.reason_id, "rule_provenance_not_trustworthy");
   assert.deepEqual(tainted.rule_provenance_violations, [{
     rule_id: "client-send-gate", mandatory: true, source_record_id: "r-email",
-    taint_class: "untrusted_external", reason_id: "untrusted_content_cannot_be_rule_text",
+    taint_class: "untrusted_external", use: "delivered_rule",
+    reason_id: "untrusted_content_cannot_be_rule_text",
   }]);
   // A hard refusal, exactly like a tainted record wearing an authority kind.
   assert.equal(tainted.read_only_exploration_permitted, false);
+  const refusedRule = tainted.delivered_rules.find(r => r.rule_id === "client-send-gate");
+  assert.equal(refusedRule.mode, "refused");
+  assert.equal(refusedRule.binding_text, null);
+  assert.equal(refusedRule.text_withheld, true);
+  assert.equal(refusedRule.included, true); // The required control is still visibly refused.
+  // And the delivered rule itself says so, so a reader holding one rule does
+  // not have to cross-reference the provenance table to find out.
+  const gateEntry = tainted.delivered_rules.find(r => r.rule_id === "client-send-gate");
+  assert.equal(gateEntry.provenance_state, "tainted");
+  assert.equal(gateEntry.provenance_disposition, "refused_untrusted_or_unavailable_rule_text");
 
   // Two generations out is still tainted; a summary of an email is not a
   // cleaner email when it is a rule's source either.
@@ -905,24 +916,375 @@ test("Q068 a rule's text is bound to a first-party record this manifest carries"
   assert.equal(assembleRaw({ records: guidanceOnly, mode: "read_only_exploration" }).decision,
     "allow");
 
-  // 4. DRIFTED SOURCE. The record moved on; the rule is bound to text that is
-  //    no longer what that record says.
+  // 4. DRIFTED SOURCE ON A MANDATORY RULE. The record moved on; the rule is
+  //    bound to text that is no longer what that record says, and it is a
+  //    control. The non-mandatory half of this ladder is its own test below.
   const drifted = withRuleSources();
   drifted.find(r => r.record_id === "r-rule-send-gate").version = 2;
   const driftedManifest = assembleRaw({ records: drifted });
   assert.equal(driftedManifest.reason_id, "rule_provenance_not_trustworthy");
   assert.deepEqual(driftedManifest.rule_provenance_violations.map(v => v.reason_id),
     ["rule_provenance_source_drifted"]);
+  assert.ok(driftedManifest.rule_provenance_violations.every(v => v.mandatory === true));
+  assert.equal(driftedManifest.read_only_exploration_permitted, false);
 
   const rehashed = withRuleSources();
   rehashed.find(r => r.record_id === "r-rule-no-phi").content_digest = sha("9");
   assert.equal(assembleRaw({ records: rehashed }).rule_provenance_violations[0].reason_id,
     "rule_provenance_source_drifted");
 
-  // 5. The named gap says what this does NOT buy, rather than overclaiming.
+  // 5. The named gap says what this does NOT buy, rather than overclaiming, and
+  //    it describes the ladder the code actually implements: the old text said
+  //    an unresolved source "blocks", which was false for a mandatory rule —
+  //    that case refuses.
   const gap = contextAssemblyIntegrationGaps().find(g => g.gap === "no_rule_text_origin_proof");
   assert.equal(gap.landed, false);
   assert.ok(gap.what.includes("point clean"));
+  assert.ok(gap.what.includes("MANDATORY rule whose source is missing or drifted refuses"));
+  assert.ok(gap.what.includes("semantic guidance"));
+});
+
+// ------- Q068 on the OTHER half of the rule text: retrieved semantic guidance
+//
+// The correction closed Q068 on `coverage.delivery` and stopped there, and the
+// comment said so — but semantic additions are the one category that reaches the
+// model with FULL BINDING TEXT and no provenance entry at all. So
+// `manifest.rule_provenance` covered a strict subset of the rule text the
+// manifest delivered, a reader could not tell which, and the hashed contract
+// asserted `rule_provenance_resolved_against_manifest_records: true`
+// unqualified. The identical tainted provenance hard-refused on
+// `client-send-gate` and passed silently on `tour-doctrine`.
+
+const tourSourcedFrom = (source_record_id, ch, version = 1) => {
+  const policy = universePolicy();
+  policy.rules.find(r => r.rule_id === "tour-doctrine").provenance = {
+    source_record_id, source_version: version, source_content_digest: sha(ch),
+    retrieved_at: OBSERVED,
+  };
+  return compileRuleUniverse(policy);
+};
+const RETRIEVED_TOUR = Object.freeze([
+  { rule_id: "tour-doctrine", reason: "the thread mentions a site tour" },
+]);
+
+test("Q068 retrieved guidance is covered by the same provenance evaluation as a bound rule", () => {
+  // THE LEGITIMATE POSITIVE FIRST. Ordinary untainted guidance is delivered
+  // with its text, labelled bound, and takes nothing away from the write.
+  const clean = assemble({ semantic_candidates: [...RETRIEVED_TOUR] });
+  const cleanGuidance = clean.guidance.find(g => g.rule_id === "tour-doctrine");
+  assert.equal(cleanGuidance.binding_text,
+    "A tour is planned around the client's day, not around the properties.");
+  assert.equal(cleanGuidance.text_withheld, false);
+  assert.equal(cleanGuidance.included, true);
+  assert.equal(cleanGuidance.provenance_state, "bound");
+  assert.equal(cleanGuidance.provenance_disposition, "guidance_bound");
+  assert.equal(clean.decision, "allow");
+  assert.equal(clean.consequential_action_permitted, true);
+  assert.deepEqual(clean.guidance_provenance_suppressed, []);
+  assert.deepEqual(clean.guidance_provenance_uncertain, []);
+
+  // ONE evaluation for the UNION, with each use named: three delivered rules
+  // plus the one retrieved candidate, one entry each.
+  assert.deepEqual(clean.rule_provenance.map(e =>
+    [e.rule_id, e.delivered_as_rule, e.delivered_as_guidance]), [
+    ["client-send-gate", true, false],
+    ["no-phi", true, false],
+    ["tone-guidance", true, false],
+    ["tour-doctrine", false, true],
+  ]);
+  assert.equal(clean.rule_provenance_covers_all_delivered_rule_text, true);
+
+  // THE REVIEWER'S REPRODUCER, run verbatim: the retrieved rule's text is
+  // sourced from the email-origin record. Before this correction the manifest
+  // read decision allow, consequential_action_permitted true, delivered the
+  // email-sourced text in full, and carried no rule_provenance entry for it.
+  const tainted = assemble({
+    universe: tourSourcedFrom("r-email", "4"),
+    semantic_candidates: [...RETRIEVED_TOUR],
+  });
+  const entry = tainted.rule_provenance.find(e => e.rule_id === "tour-doctrine");
+  assert.equal(entry.delivered_as_guidance, true);
+  assert.equal(entry.delivered_as_rule, false);
+  assert.equal(entry.state, "tainted");
+  assert.equal(entry.taint_class, "untrusted_external");
+  assert.equal(entry.source_record_id, "r-email");
+  assert.equal(entry.reason_id, "untrusted_content_cannot_be_rule_text");
+  assert.equal(entry.disposition, "guidance_suppressed_untrusted_source");
+
+  // THE TEXT IS WITHHELD. External content never arrives as a rule instruction.
+  const guidance = tainted.guidance.find(g => g.rule_id === "tour-doctrine");
+  assert.equal(guidance.binding_text, null);
+  assert.equal(guidance.text_withheld, true);
+  assert.equal(guidance.included, false);
+  assert.equal(guidance.estimated_tokens, 0);
+  assert.equal(tainted.external_text_delivered_as_rule_instruction, false);
+
+  // ...AND THE DIAGNOSTIC METADATA SURVIVES IT, so a compromised universe is
+  // visible rather than silently one rule shorter.
+  assert.equal(guidance.reason, "the thread mentions a site tour");
+  assert.equal(guidance.bucket, "not_applicable");
+  assert.equal(guidance.provenance_source_record_id, "r-email");
+  assert.equal(guidance.provenance_taint_class, "untrusted_external");
+  assert.equal(guidance.provenance_disposition, "guidance_suppressed_untrusted_source");
+  assert.ok(guidance.withheld_estimated_tokens > 0);
+  assert.deepEqual(tainted.guidance_provenance_suppressed, [{
+    rule_id: "tour-doctrine", source_record_id: "r-email", taint_class: "untrusted_external",
+    reason_id: "untrusted_content_cannot_be_rule_text",
+    disposition: "guidance_suppressed_untrusted_source",
+  }]);
+  assert.deepEqual(tainted.omissions, [{ kind: "semantic_guidance", ref: "tour-doctrine",
+    reason_id: "guidance_suppressed_untrusted_source",
+    estimated_tokens: guidance.withheld_estimated_tokens }]);
+
+  // THE DISPOSITION IS BLOCKING, NOT A HARD REFUSAL. Nothing untrusted is
+  // delivered, so marked exploration survives; the write does not, because a
+  // universe carrying email-sourced rule text is not one to act against.
+  assert.equal(tainted.decision, "refuse");
+  assert.equal(tainted.reason_id, "guidance_provenance_not_trustworthy");
+  assert.equal(tainted.consequential_action_permitted, false);
+  assert.equal(tainted.read_only_exploration_permitted, true);
+  assert.ok(tainted.blocking_reasons.includes("guidance_provenance_not_trustworthy"));
+  assert.deepEqual(tainted.rule_provenance_violations, []);
+
+  const explore = assemble({
+    universe: tourSourcedFrom("r-email", "4"),
+    semantic_candidates: [...RETRIEVED_TOUR],
+    mode: "read_only_exploration",
+  });
+  assert.equal(explore.decision, "allow");
+  assert.equal(explore.reason_id, "read_only_exploration_under_uncertainty");
+  assert.equal(explore.uncertainty.marker, true);
+  // Still withheld in the mode that is allowed to see uncertainty: uncertainty
+  // is not a licence to deliver known-tainted rule text.
+  assert.equal(explore.guidance.find(g => g.rule_id === "tour-doctrine").binding_text, null);
+
+  // The same answer evaluateUntrustedUse already gave for the same record, so
+  // the record path and the rule path cannot drift: tainted content may not
+  // author a rule, whether that rule arrives as a control or as guidance.
+  assert.equal(evaluateUntrustedUse({ lineage: compileTaintLineage(records()),
+    record_id: "r-email", intended_use: "rule_authorship" }).decision, "refuse");
+
+  // Two generations out is still tainted when it is guidance, exactly as it is
+  // when it is a control.
+  const derivedSource = assemble({
+    universe: tourSourcedFrom("r-email-vector", "6"),
+    semantic_candidates: [...RETRIEVED_TOUR],
+  });
+  assert.equal(derivedSource.guidance.find(g => g.rule_id === "tour-doctrine").text_withheld, true);
+  assert.equal(derivedSource.reason_id, "guidance_provenance_not_trustworthy");
+});
+
+test("Q068 guidance whose source is missing or drifted is marked, not withheld or refused", () => {
+  // NOT the same finding as a tainted source. Missing and drifted are UNKNOWN,
+  // and Q065 says uncertain guidance may still be delivered where it is useful
+  // as long as the write is blocked and the uncertainty is visible. Withholding
+  // it would lose retrieval for a fact nobody has established.
+  const missing = assembleRaw({
+    records: withRuleSources().filter(r => r.record_id !== "r-rule-tour"),
+    semantic_candidates: [...RETRIEVED_TOUR],
+  });
+  const unresolved = missing.guidance.find(g => g.rule_id === "tour-doctrine");
+  assert.equal(unresolved.provenance_state, "unresolved");
+  assert.equal(unresolved.provenance_reason_id, "rule_provenance_record_not_in_manifest");
+  assert.equal(unresolved.provenance_disposition,
+    "guidance_delivered_marked_source_uncertain");
+  assert.equal(unresolved.text_withheld, false);
+  assert.equal(unresolved.included, true);
+  assert.equal(missing.consequential_action_permitted, false);
+  assert.equal(missing.read_only_exploration_permitted, true);
+  assert.ok(missing.blocking_reasons.includes("guidance_provenance_uncertain"));
+  assert.deepEqual(missing.guidance_provenance_uncertain, [{
+    rule_id: "tour-doctrine", source_record_id: "r-rule-tour", state: "unresolved",
+    reason_id: "rule_provenance_record_not_in_manifest",
+    disposition: "guidance_delivered_marked_source_uncertain",
+  }]);
+  assert.deepEqual(missing.rule_provenance_violations, []);
+
+  const driftedRecords = withRuleSources();
+  driftedRecords.find(r => r.record_id === "r-rule-tour").version = 3;
+  const drifted = assembleRaw({
+    records: driftedRecords, semantic_candidates: [...RETRIEVED_TOUR] });
+  const driftedGuidance = drifted.guidance.find(g => g.rule_id === "tour-doctrine");
+  assert.equal(driftedGuidance.provenance_state, "drifted");
+  assert.equal(driftedGuidance.text_withheld, false);
+  assert.equal(drifted.guidance_provenance_uncertain[0].state, "drifted");
+  assert.equal(drifted.read_only_exploration_permitted, true);
+  assert.equal(drifted.consequential_action_permitted, false);
+  assert.deepEqual(drifted.rule_provenance_violations, []);
+  // The drifted entry names both versions, so the drift is diagnosable.
+  const entry = drifted.rule_provenance.find(e => e.rule_id === "tour-doctrine");
+  assert.equal(entry.declared_version, 1);
+  assert.equal(entry.source_version, 3);
+});
+
+test("Q065 an untainted non-mandatory rule's drifted source is uncertainty, not a refusal", () => {
+  // M1. Absent provenance on a guidance rule blocks and stays explorable, which
+  // was reasoned out carefully — and then a merely DRIFTED source pushed a
+  // violation regardless of `mandatory`, and any violation is a hard refusal.
+  // So the same rule, one field different, killed the exploration mode that
+  // exists for exactly this: a fact nobody has established yet. A mandatory
+  // rule's unavailable binding text still refuses, because the manifest cannot
+  // say what the control it is asserting says. Unknown APPLICABILITY and
+  // UNAVAILABLE BINDING TEXT are two different findings.
+  const driftedGuidance = withRuleSources();
+  driftedGuidance.find(r => r.record_id === "r-rule-tone").version = 4;
+  const write = assembleRaw({ records: driftedGuidance });
+
+  const entry = write.rule_provenance.find(e => e.rule_id === "tone-guidance");
+  assert.equal(entry.mandatory, false);
+  assert.equal(entry.delivered_as_rule, true);
+  assert.equal(entry.state, "drifted");
+  assert.equal(entry.disposition, "delivered_marked_source_uncertain");
+  assert.deepEqual(write.rule_provenance_violations, []);
+  assert.deepEqual(write.rule_provenance_drifted, ["tone-guidance"]);
+
+  // The write is blocked and named...
+  assert.equal(write.decision, "refuse");
+  assert.equal(write.reason_id, "rule_provenance_source_drifted");
+  assert.equal(write.consequential_action_permitted, false);
+  // ...and marked read-only exploration survives, with the text still delivered
+  // and the drift stated on it.
+  assert.equal(write.read_only_exploration_permitted, true);
+  const explore = assembleRaw({ records: driftedGuidance, mode: "read_only_exploration" });
+  assert.equal(explore.decision, "allow");
+  assert.equal(explore.reason_id, "read_only_exploration_under_uncertainty");
+  assert.equal(explore.uncertainty.marker, true);
+  const tone = explore.delivered_rules.find(r => r.rule_id === "tone-guidance");
+  assert.equal(tone.mode, "full_binding_text");
+  assert.equal(tone.binding_text,
+    "Write to a client the way Joe would: plain, specific, no hedging.");
+  assert.equal(tone.provenance_state, "drifted");
+  assert.equal(tone.provenance_disposition, "delivered_marked_source_uncertain");
+
+  // The MANDATORY half of the same ladder still hard-refuses, and the two are
+  // reachable from one fixture: drift the control's source instead.
+  const driftedControl = withRuleSources();
+  driftedControl.find(r => r.record_id === "r-rule-send-gate").version = 4;
+  const refused = assembleRaw({ records: driftedControl, mode: "read_only_exploration" });
+  assert.equal(refused.decision, "refuse");
+  assert.equal(refused.reason_id, "rule_provenance_not_trustworthy");
+  assert.equal(refused.read_only_exploration_permitted, false);
+
+  // No human-approval gate and no new mode were invented for any of this: the
+  // manifest still answers with the two fields it already had.
+  assert.equal(write.write_gate_field, "consequential_action_permitted");
+  assert.equal(write[write.write_gate_field], false);
+});
+
+test("Q065 stale rule evidence blocks writes even when the caller clears backs_control", () => {
+  const sourceRecords = withRuleSources();
+  const source = sourceRecords.find(r => r.record_id === "r-rule-send-gate");
+  source.backs_control = false;
+  source.omissible = true;
+  const age = (Date.parse(NOW) - Date.parse(source.observed_at)) / 1000;
+  assert.ok(age > 0);
+  source.max_age_seconds = age;
+  assert.equal(assembleRaw({ records: sourceRecords }).consequential_action_permitted, true);
+
+  source.max_age_seconds = age - 1;
+  const stale = assembleRaw({ records: sourceRecords });
+  assert.equal(stale.rule_provenance.find(r => r.rule_id === "client-send-gate").state, "bound");
+  assert.equal(stale.consequential_action_permitted, false);
+  assert.equal(stale.read_only_exploration_permitted, true);
+  assert.ok(stale.stale_control_records.some(r => r.record_id === source.record_id));
+  assert.ok(stale.blocking_reasons.includes("control_backing_record_stale"));
+});
+
+test("M2 the budget cannot drop the source evidence for a delivered binding rule", () => {
+  // `backs_control` is a CALLER BOOLEAN and the budget honoured nothing else, so
+  // the record a delivered mandatory rule's provenance resolves against — the
+  // evidence for the binding `rule_provenance` asserts — could be dropped for
+  // tokens by marking it omissible and backs_control false. The manifest then
+  // claimed a rule was bound to a record it had omitted.
+  const records0 = withRuleSources();
+  const gateSource = records0.find(r => r.record_id === "r-rule-send-gate");
+  gateSource.omissible = true;
+  gateSource.backs_control = false;
+  gateSource.estimated_tokens = 500;
+
+  const unbudgeted = assembleRaw({ records: records0 });
+  assert.equal(unbudgeted.rule_provenance.find(e => e.rule_id === "client-send-gate").state,
+    "bound");
+  const projected = unbudgeted.records.find(r => r.record_id === "r-rule-send-gate");
+  // Protection is DERIVED from the resolved provenance, not from the caller.
+  assert.equal(projected.backs_control, false);
+  assert.equal(projected.backs_delivered_rule_text, true);
+  assert.equal(projected.omissible, false);
+  assert.equal(projected.omission_protection_reason_id, "backs_delivered_rule_text");
+  assert.equal(unbudgeted.budget.omission_protection_derived_from_rule_provenance, true);
+
+  // Under real budget pressure the record survives, and the manifest never
+  // claims a binding to data it dropped.
+  const starved = assembleRaw({ records: records0, budget: { token_budget: 1 } });
+  const kept = starved.records.find(r => r.record_id === "r-rule-send-gate");
+  assert.equal(kept.included, true);
+  assert.equal(kept.omission_reason_id, null);
+  assert.ok(!starved.omissions.some(o => o.ref === "r-rule-send-gate"));
+  assert.equal(starved.rule_provenance.find(e => e.rule_id === "client-send-gate")
+    .source_record_included, true);
+  // MEASURED against the records that survived, not a hashed `false`: if a
+  // later edit ever drops such a record, the manifest says so and blocks.
+  assert.equal(starved.budget.source_evidence_for_delivered_rule_text_omitted, false);
+  assert.deepEqual(starved.budget.omitted_delivered_rule_sources, []);
+  assert.ok(!starved.blocking_reasons.includes("delivered_rule_source_evidence_omitted"));
+
+  // Every rule this manifest says is bound still has its evidence present.
+  for (const entry of starved.rule_provenance) {
+    if (entry.state !== "bound" || !entry.delivered_as_rule) continue;
+    assert.equal(entry.source_record_included, true, entry.rule_id);
+    assert.equal(starved.records.find(r => r.record_id === entry.source_record_id).included,
+      true, entry.rule_id);
+  }
+  // The ordinary omissible records with nothing behind them still drop, so the
+  // budget is not simply switched off.
+  assert.equal(starved.records.find(r => r.record_id === "r-email").included, false);
+});
+
+test("Q087/Q068 a rule that removes a control has its own source resolved like any other", () => {
+  // The kernel now requires a remover to NAME a source; this is the assembler
+  // half of that — the reference is resolved against the records in this
+  // manifest, so the text that deleted a mandatory control is traceable to a
+  // first-party record or the write does not happen. Note which rule is being
+  // checked: `client-send-gate` is suppressed and therefore not delivered at
+  // all, so the only rule text in front of the model here is the REMOVER'S.
+  const policy = universePolicy();
+  policy.rules.push({
+    rule_id: "send-gate-rehearsal-exception", version: 1, rule_class: "workflow",
+    scope: "shared", owner: "joe", mandatory: false,
+    trigger: { action: ["document.send"] },
+    binding_text: "A rehearsal send does not take the second-seat review.",
+    tests: ["check:send-gate-rehearsal"],
+    retirement: { behavior: "permanent_until_superseded" },
+    relations: [{ relation: "exception_to", target_rule_id: "client-send-gate",
+      target_version: 1 }],
+    scoped_validity: { environment: ["production"] },
+    provenance: ruleProv("r-rule-exception", "b"),
+  });
+  const universe = compileRuleUniverse(policy);
+
+  // THE POSITIVE: the removal fires and the remover's own text is bound to a
+  // record this manifest carries.
+  const manifest = assembleRaw({
+    universe, records: [...withRuleSources(), ruleSourceRecord("r-rule-exception", "b")] });
+  assert.deepEqual(manifest.rule_coverage.suppressed_by_exception.map(e => e.rule_id),
+    ["client-send-gate"]);
+  const entry = manifest.rule_provenance.find(e =>
+    e.rule_id === "send-gate-rehearsal-exception");
+  assert.equal(entry.delivered_as_rule, true);
+  assert.equal(entry.state, "bound");
+  assert.equal(entry.taint_class, "first_party_record_layer");
+  assert.equal(entry.source_record_included, true);
+  assert.equal(manifest.decision, "allow");
+  assert.equal(manifest.consequential_action_permitted, true);
+
+  // THE NEGATIVE: with the remover's source record absent, the manifest cannot
+  // show where the text that deleted a mandatory control came from.
+  const unbound = assembleRaw({ universe, records: withRuleSources() });
+  assert.equal(unbound.rule_provenance.find(e =>
+    e.rule_id === "send-gate-rehearsal-exception").state, "unresolved");
+  assert.equal(unbound.consequential_action_permitted, false);
+  assert.ok(unbound.blocking_reasons.includes("rule_provenance_unresolved"));
+  assert.equal(unbound.read_only_exploration_permitted, true);
 });
 
 test("the two objects that decide authority are swept for authority-injection fields", () => {
@@ -942,10 +1304,9 @@ test("the two objects that decide authority are swept for authority-injection fi
     "caller_assertion_field_refused");
 
   // The sweep reads own property names rather than enumerable keys, so a
-  // non-enumerable `enforced` cannot ride along either. It is unreachable
-  // THROUGH THIS ENTRY POINT — freezeAssemblyInput canonicalizes to bytes and a
-  // non-enumerable key never reaches them — which is why the case is proved
-  // against the kernel's live-object entry point instead of asserted here.
+  // non-enumerable `enforced` cannot ride along either — and the freeze itself
+  // now refuses one rather than silently dropping it on the way to the bytes,
+  // which the non-enumerable-key test below proves for this entry point.
 
   // And the legitimate S01 shapes still pass, which is what keeps this from
   // being a check people route around.
@@ -1022,9 +1383,59 @@ test("the context contract is closed, hashed and states what it does not permit"
   assert.equal(preimage.trust_anchor_available, false);
   assert.equal(preimage.code_enforcement_evidence_verified_by_kernel, false);
   assert.equal(preimage.rule_provenance_required_for_mandatory_rule, true);
-  assert.equal(preimage.rule_provenance_resolved_against_manifest_records, true);
+  assert.equal(preimage.rule_provenance_required_for_removing_rule, true);
   assert.equal(preimage.derived_record_requires_declared_parent, true);
   assert.equal(preimage.write_gate_field, "consequential_action_permitted");
+
+  // The unqualified `rule_provenance_resolved_against_manifest_records` is GONE
+  // rather than relabelled: it was a hashed claim the code did not carry, since
+  // the resolution covered the delivered set and skipped semantic guidance. What
+  // replaces it is qualified and true, and the flags next to it say what the
+  // resolution does with each answer.
+  assert.equal(preimage.rule_provenance_resolved_against_manifest_records, undefined);
+  assert.equal(
+    preimage.rule_provenance_resolved_against_manifest_records_for_all_delivered_rule_text, true);
+  assert.equal(preimage.semantic_guidance_covered_by_rule_provenance_resolution, true);
+  assert.equal(preimage.tainted_source_may_become_delivered_rule_text, false);
+  assert.equal(preimage.tainted_source_may_become_delivered_guidance_text, false);
+  assert.equal(preimage.guidance_from_tainted_source_is_withheld_with_stated_disposition, true);
+  assert.equal(preimage.untainted_non_mandatory_source_drift_is_uncertainty_not_refusal, true);
+  assert.equal(preimage.unavailable_mandatory_binding_text_refuses, true);
+  assert.equal(preimage.source_evidence_for_delivered_rule_text_is_omissible_for_tokens, false);
+
+  // Every rule text a manifest delivers is covered by that resolution, which is
+  // the property the field above now claims. Proved against a manifest rather
+  // than asserted, with retrieval in play so both uses are present.
+  const manifest = assemble({
+    semantic_candidates: [{ rule_id: "tour-doctrine", reason: "the thread mentions a tour" }] });
+  const covered = new Set(manifest.rule_provenance.map(e => e.rule_id));
+  for (const rule of manifest.delivered_rules) assert.ok(covered.has(rule.rule_id), rule.rule_id);
+  for (const entry of manifest.guidance) assert.ok(covered.has(entry.rule_id), entry.rule_id);
+  assert.equal(covered.size, manifest.delivered_rules.length + manifest.guidance.length);
+  assert.equal(manifest.rule_provenance_covers_all_delivered_rule_text, true);
+});
+
+test("a non-enumerable own key is refused when the request is frozen, not dropped", () => {
+  // The shared snapshot walk used to copy Object.keys, so a hidden own field
+  // named `enforced` or `authority` was silently deleted on its way into the
+  // frozen bytes rather than refused. It never reached a decision — and a guard
+  // that quietly drops what the closed-key sweep refuses is how the module's own
+  // "an unread field is an unenforced one" standard stops holding.
+  for (const key of ["enforced", "authority_grant", "not_a_request_field"]) {
+    const live = request();
+    Object.defineProperty(live.task, key, {
+      value: true, enumerable: false, configurable: true, writable: true,
+    });
+    assert.equal(code(() => freezeAssemblyInput(live)), "non_enumerable_key_refused", key);
+  }
+  // Nested inside a record, where no closed-key sweep runs before the freeze.
+  const nested = request();
+  Object.defineProperty(nested.records[0].provenance, "trusted", {
+    value: true, enumerable: false, configurable: true, writable: true,
+  });
+  assert.equal(code(() => freezeAssemblyInput(nested)), "non_enumerable_key_refused");
+  // And an ordinary request still freezes and assembles.
+  assert.equal(assemble().decision, "allow");
 });
 
 test("the unbuilt runtime seams are named and fail closed", () => {

@@ -23,6 +23,9 @@ import {
   V5_F05_UNKNOWN_FACT,
   V5_F05_DELIVERY_MODES,
   V5_F05_CODE_ENFORCED_CONSTRAINT_MODE_EMITTED,
+  V5_F05_HISTORICAL_BUCKETS,
+  V5_F05_REFUSED_ASSERTION_FIELDS,
+  V5_F05_AUTHORITY_INJECTION_FRAGMENTS,
   V5_NO_EFFECTS,
   assertF05DecisionBinding,
   compileRuleUniverse,
@@ -176,6 +179,12 @@ const sendGateExceptionRule = () => ({
   retirement: { behavior: "permanent_until_superseded" },
   relations: [{ relation: "exception_to", target_rule_id: "send-gate", target_version: 1 }],
   scoped_validity: { environment: ["development"] },
+  // A REMOVER CARRIES PROVENANCE even though it is not itself mandatory. This
+  // rule deletes the mandatory `send-gate` control; before the correction it did
+  // so while naming no source record at all, and the kernel-only receipt read
+  // coverage_complete with consequential_action_permitted true. Removal
+  // capability is mandatory capability, on provenance as on the class table.
+  provenance: prov("r-rule-send-gate-exception", "0"),
 });
 
 const toneRule = () => ({
@@ -478,6 +487,44 @@ test("Q064 retrieval that omits a bound control changes nothing about it", () =>
   assert.ok(receipt.delivery.some(e => e.rule_id === "send-gate" && e.mode === "full_binding_text"));
 });
 
+test("Q064 retrieved guidance from a rule that no longer binds is labelled historical", () => {
+  // Retrieval may surface a rule the system has RETIRED or superseded — that is
+  // useful, and the bucket said which. What it did not say is what the bucket
+  // MEANS once the full text is in front of a model: the same paragraph reads
+  // as an instruction whether or not the rule still stands.
+  const receipt = derive(basePolicy(), commitFacts(), {
+    semantic_candidates: [
+      { rule_id: "away-mode", reason: "the thread mentions unattended dispatch" },
+      { rule_id: "legacy-branching", reason: "the thread mentions the shared checkout" },
+      { rule_id: "send-gate", reason: "the thread mentions a client send" },
+    ],
+  });
+  const byId = Object.fromEntries(receipt.semantic_additions.map(e => [e.rule_id, e]));
+
+  assert.equal(byId["away-mode"].bucket, "retired");
+  assert.equal(byId["away-mode"].historical, true);
+  assert.equal(byId["away-mode"].authority_state, "historical_non_authority");
+  assert.equal(byId["legacy-branching"].bucket, "superseded");
+  assert.equal(byId["legacy-branching"].historical, true);
+  assert.equal(byId["legacy-branching"].authority_state, "historical_non_authority");
+
+  // A rule the typed facts merely ruled out never bound here at all, so it is
+  // labelled non-authority guidance rather than history.
+  assert.equal(byId["send-gate"].bucket, "not_applicable");
+  assert.equal(byId["send-gate"].historical, false);
+  assert.equal(byId["send-gate"].authority_state, "non_authority_guidance");
+
+  // None of them is elevated, and no rule lifecycle is decided here: `bucket`
+  // is the only input to the label.
+  assert.ok(receipt.semantic_additions.every(e => e.elevates_to_control === false
+    && e.delivered_as === "guidance_only"));
+  const preimage = v5F05RuleKernelPreimage();
+  assert.deepEqual([...V5_F05_HISTORICAL_BUCKETS],
+    ["overridden", "retired", "superseded", "suppressed_by_exception"]);
+  assert.deepEqual(preimage.historical_buckets, [...V5_F05_HISTORICAL_BUCKETS]);
+  assert.equal(preimage.semantic_addition_from_historical_bucket_is_labelled_non_authority, true);
+});
+
 test("Q064 retrieval cannot suppress, and cannot invent a rule", () => {
   assert.equal(code(() => derive(basePolicy(), sendFacts(), {
     semantic_candidates: [{ rule_id: "send-gate", reason: "not needed here", suppress: true }],
@@ -632,6 +679,9 @@ const joePrefersNoReview = (overrides = {}) => ({
   no_machine_control_reason: "Only a person can judge tone.",
   retirement: { behavior: "permanent_until_superseded" },
   relations: [{ relation: "overrides", target_rule_id: "send-gate", target_version: 1 }],
+  // Present so each layer below refuses on the hole it is peeling rather than
+  // on a missing source; the missing-source case is its own test.
+  provenance: prov("r-rule-joe-prefers-no-review", "1"),
   ...overrides,
 });
 
@@ -693,6 +743,65 @@ test("Q087 the reviewer's preference-deletes-a-mandatory-control reproduction re
     .some(gap => gap.gap === "no_relation_authority_grant_verifier" && gap.landed === false));
 });
 
+// ------------- removal-capability parity on PROVENANCE, not only on the class
+//
+// The correction reasoned its way to removal-capability parity for the class
+// table — "removing a mandatory control is strictly stronger than declaring
+// one" — and then required provenance only when `mandatory: true`. So a
+// NON-MANDATORY rule could delete a mandatory control while naming no source
+// record, version or digest, which is the exact state the refusal message calls
+// out as indistinguishable from text that arrived in an email. The shipped
+// exception fixture WAS one: it removed the mandatory `send-gate` and the
+// kernel-only receipt read suppressed_by_exception with
+// consequential_action_permitted true and no signal of any kind.
+
+test("Q087 any rule that removes another must name the source of its own text", () => {
+  // The positive first: the exception fixture now carries a real typed source
+  // reference, and its removal still fires exactly as before.
+  const inside = derive(basePolicy(), sendFacts({ environment: "development" }));
+  assert.deepEqual(inside.suppressed_by_exception.map(e => e.rule_id), ["send-gate"]);
+  assert.equal(inside.consequential_action_permitted, true);
+
+  // The negative, on the same fixture: take the source away and the universe
+  // does not compile, so no receipt can report the removal at all.
+  for (const rule_id of ["send-gate-exception", "worktree-first"]) {
+    const policy = basePolicy();
+    delete policy.rules.find(r => r.rule_id === rule_id).provenance;
+    const error = (() => {
+      try { compileRuleUniverse(policy); } catch (caught) { return caught; }
+      return null;
+    })();
+    assert.equal(error.code, "missing_rule_provenance", rule_id);
+    assert.deepEqual(error.detail.removing_edges,
+      rule_id === "send-gate-exception" ? ["exception_to"] : ["supersedes"], rule_id);
+  }
+
+  // send-gate-exception is NOT mandatory, which is the whole point: the old
+  // condition read `mandatory === true` and this rule passed it.
+  assert.equal(sendGateExceptionRule().mandatory, false);
+  const error = (() => {
+    const policy = basePolicy();
+    delete policy.rules.find(r => r.rule_id === "send-gate-exception").provenance;
+    try { compileRuleUniverse(policy); } catch (caught) { return caught; }
+    return null;
+  })();
+  assert.equal(error.detail.mandatory, false);
+
+  // All three relation kinds, since all three remove.
+  for (const relation of ["supersedes", "overrides", "exception_to"]) {
+    const policy = basePolicy();
+    const exception = policy.rules.find(r => r.rule_id === "send-gate-exception");
+    exception.relations = [{ relation, target_rule_id: "send-gate", target_version: 1 }];
+    delete exception.provenance;
+    assert.equal(code(() => compileRuleUniverse(policy)), "missing_rule_provenance", relation);
+  }
+
+  // And it is stated in the hashed kernel projection, not only in the refusal.
+  const preimage = v5F05RuleKernelPreimage();
+  assert.equal(preimage.removing_edge_requires_source_provenance, true);
+  assert.equal(preimage.removing_rule_requires_source_provenance, true);
+});
+
 test("Q087 a same-owner same-scope removal follows policy, inside its bound and nowhere else", () => {
   // The positive: a workflow rule of the same owner and scope removes a
   // mandatory control where its scoped validity matches...
@@ -743,6 +852,7 @@ test("Q087 a supersession chain is one pass, and the edge that did not fire is i
     tests: ["check:chain"],
     retirement: { behavior: "permanent_until_superseded" },
     scoped_validity: { action: ["document.send"] },
+    provenance: prov("r-rule-chain", "2"),
   });
   const policy = basePolicy();
   policy.rules.push(
@@ -1140,6 +1250,64 @@ test("an accessor, a prototype key or a symbol key is refused rather than read",
   }
 });
 
+test("a non-enumerable own key on a NESTED rule is refused by both entry points", () => {
+  // The two entry points disagreed about the same object. compileRuleUniverse
+  // refuses a hidden own field through assertClosedKeys, which reads own
+  // property names; requireCompiledUniverse snapshots the whole universe before
+  // checking anything below the top level, and the snapshot copied Object.keys
+  // — so the field was silently DELETED from a nested rule instead. Nothing read
+  // it either way, and a guard that quietly drops what another guard refuses is
+  // how "an unread field is an unenforced one" stops being true.
+  for (const key of ["enforced", "authority_grant", "not_a_rule_field"]) {
+    const compiled = structuredClone(compileRuleUniverse(basePolicy()));
+    Object.defineProperty(compiled.rules[0], key, {
+      value: true, enumerable: false, configurable: true, writable: true,
+    });
+    assert.equal(code(() => requireCompiledUniverse(compiled)), "non_enumerable_key_refused", key);
+  }
+
+  // The same shape reaching the compiler is still refused there, on the name.
+  const hidden = basePolicy();
+  Object.defineProperty(hidden.rules[0], "enforced", {
+    value: true, enumerable: false, configurable: true, writable: true,
+  });
+  assert.equal(code(() => compileRuleUniverse(hidden)), "caller_assertion_field_refused");
+
+  // Nested two levels down, where no closed-key sweep runs at all.
+  const deep = structuredClone(compileRuleUniverse(basePolicy()));
+  Object.defineProperty(deep.rules[0].retirement, "expires_whenever", {
+    value: "2030-01-01T00:00:00Z", enumerable: false, configurable: true, writable: true,
+  });
+  assert.equal(code(() => requireCompiledUniverse(deep)), "non_enumerable_key_refused");
+
+  // An ordinary compiled universe is untouched by the check.
+  const clean = compileRuleUniverse(basePolicy());
+  assert.equal(requireCompiledUniverse(structuredClone(clean)).universe_digest,
+    clean.universe_digest);
+});
+
+test("the guard-collision self-check covers the compiled universe shape it accepts", () => {
+  // requireCompiledUniverse runs assertClosedKeys over the COMPILED shape, and
+  // that key list was absent from the load-time self-check — so a key added to
+  // the compiled universe that collided with either guard would have refused
+  // every legitimate compiled universe rather than failing this module's import.
+  const compiled = compileRuleUniverse(basePolicy());
+  const keys = Object.keys(compiled);
+  assert.ok(keys.includes("removal_order"));
+  assert.ok(keys.includes("universe_digest"));
+  assert.ok(keys.includes("completeness"));
+  for (const key of keys) {
+    assert.ok(!V5_F05_REFUSED_ASSERTION_FIELDS.includes(key), key);
+    for (const fragment of V5_F05_AUTHORITY_INJECTION_FRAGMENTS) {
+      assert.ok(!key.includes(fragment), `${key} collides with the fragment "${fragment}"`);
+    }
+  }
+  // Which is the property that matters: the shape the module emits is a shape
+  // the module accepts.
+  assert.equal(requireCompiledUniverse(structuredClone(compiled)).universe_digest,
+    compiled.universe_digest);
+});
+
 test("a coverage receipt that was edited no longer hashes to its own digest", () => {
   const receipt = derive(basePolicy(), commitFacts());
   const forged = { ...receipt, consequential_action_permitted: true, effective: [] };
@@ -1184,8 +1352,11 @@ test("the kernel projection is closed, hashed and states what it does not do", (
   assert.equal(preimage.removing_edge_requires_scoped_validity, true);
   assert.equal(
     preimage.removing_edge_requires_mandatory_capable_class_against_mandatory_target, true);
+  assert.equal(preimage.removing_edge_requires_source_provenance, true);
   assert.equal(preimage.removing_edge_may_cross_owner_or_scope, false);
   assert.equal(preimage.removal_is_single_pass_in_compiler_order, true);
+  assert.equal(preimage.removing_rule_requires_source_provenance, true);
+  assert.equal(preimage.semantic_addition_from_historical_bucket_is_labelled_non_authority, true);
   assert.equal(preimage.code_enforced_constraint_mode_emitted, false);
   assert.equal(preimage.code_enforcement_evidence_verified_by_kernel, false);
   assert.equal(preimage.enforcement_evidence_age_policy_is_caller_supplied, true);
@@ -1220,5 +1391,9 @@ test("the unbuilt runtime seams are named and fail closed", () => {
     "no_rule_provenance_taint_resolver",
     "no_rule_registry_persistence",
   ]);
+  // The provenance gap text names both rules that must carry a source, so it
+  // does not read as covering mandatory rules alone.
+  const provenanceGap = gaps.find(gap => gap.gap === "no_rule_provenance_taint_resolver");
+  assert.ok(provenanceGap.what.includes("removing edge"));
   assert.equal(code(() => assertRuleKernelIntegrationComplete()), "kernel_integration_incomplete");
 });

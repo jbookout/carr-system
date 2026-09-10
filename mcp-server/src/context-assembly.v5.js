@@ -578,6 +578,58 @@ function manifestPreimage(manifest) {
 }
 
 /**
+ * Resolve ONE rule's declared source against the records this manifest carries.
+ *
+ * This is the only place the question is answered, for every use of a rule's
+ * text. A second copy specialised for guidance is how the two paths drifted
+ * apart in the first place — the delivered set was checked and the semantic
+ * additions, which reach the model with the same full binding text, were not.
+ *
+ * FOUR STATES AND FIVE REASONS, kept apart because they have five remedies:
+ *   * `unresolved`, `rule_provenance_not_declared` — the rule names no source.
+ *   * `unresolved`, `rule_provenance_record_not_in_manifest` — it names one this
+ *                    manifest does not carry.
+ *   * `tainted`      — it names a record Q068 says cannot instruct anybody.
+ *   * `drifted`      — it names a record that has since moved on, so the text
+ *                      the rule was bound to is not what that record says now.
+ *   * `bound`        — present, first-party, at the exact version and digest.
+ *
+ * TAINT IS CHECKED BEFORE DRIFT, and the order matters: a source that is BOTH
+ * tainted and drifted is KNOWN-BAD, which outranks "we cannot tell". Reporting
+ * it as drift would route email-origin text into the uncertainty ladder.
+ */
+function resolveRuleProvenance(rule, recordById, byTaint) {
+  const base = {
+    rule_id: rule.rule_id,
+    mandatory: rule.mandatory,
+    source_record_id: rule.provenance === null ? null : rule.provenance.source_record_id,
+    taint_class: null,
+  };
+  if (rule.provenance === null) {
+    return { ...base, state: "unresolved", reason_id: "rule_provenance_not_declared" };
+  }
+  const source = recordById.get(rule.provenance.source_record_id);
+  if (source === undefined) {
+    return { ...base, state: "unresolved", reason_id: "rule_provenance_record_not_in_manifest" };
+  }
+  const taint = byTaint.get(source.record_id);
+  if (taint.tainted) {
+    return { ...base, taint_class: taint.taint_class, state: "tainted",
+      reason_id: "untrusted_content_cannot_be_rule_text" };
+  }
+  if (source.version !== rule.provenance.source_version ||
+      source.content_digest !== rule.provenance.source_content_digest) {
+    return { ...base, taint_class: taint.taint_class, state: "drifted",
+      reason_id: "rule_provenance_source_drifted",
+      declared_version: rule.provenance.source_version, source_version: source.version,
+      declared_content_digest: rule.provenance.source_content_digest,
+      source_content_digest: source.content_digest };
+  }
+  return { ...base, taint_class: taint.taint_class, state: "bound",
+    reason_id: "rule_provenance_bound_to_first_party_record" };
+}
+
+/**
  * Assemble one task-specific context manifest from frozen input bytes.
  *
  * ORDERED, so a second reader reaches the same answer from the transcript:
@@ -594,13 +646,18 @@ function manifestPreimage(manifest) {
  *   5. Freshness is computed per record against `now`. A stale record that
  *      backs a mandatory control is a blocking reason.
  *   6. The coverage receipt is derived from the typed facts (Q064/Q065/Q087).
- *   6b. Every DELIVERED rule's declared source is resolved against the records
- *      above. Tainted or drifted rule text refuses; an unresolved source
- *      refuses for a mandatory rule and blocks for a guidance one.
+ *   6b. EVERY rule whose text this manifest delivers — the bound rules AND the
+ *      semantic guidance — has its declared source resolved against the records
+ *      above, once per rule id. Tainted text delivered as a rule refuses;
+ *      tainted text retrieved as guidance is withheld and blocks the write; a
+ *      mandatory rule whose source is missing or drifted refuses; a
+ *      non-mandatory one blocks and stays explorable.
+ *   6c. Each delivered rule and each piece of guidance carries that answer on
+ *      itself, so a reader is never handed rule text with no disposition.
  *   7. The token budget is applied LAST and may only drop guidance and records
- *      the caller marked omissible that back no control. If the budget still
- *      cannot be met, the manifest refuses rather than dropping a possible
- *      binding constraint.
+ *      the caller marked omissible that back no control AND that no delivered
+ *      rule's text is sourced from. If the budget still cannot be met, the
+ *      manifest refuses rather than dropping a possible binding constraint.
  *   8. The mode decides. A consequential proposal needs everything above clean.
  *      Read-only exploration is permitted under uncertainty and says so.
  */
@@ -730,10 +787,6 @@ export function assembleContextManifest(frozen) {
       included: true, omission_reason_id: null,
     };
   });
-  const stale_control_records = projectedRecords
-    .filter(record => record.freshness === "stale" && record.backs_control)
-    .map(record => ({ record_id: record.record_id, age_seconds: record.age_seconds,
-      max_age_seconds: record.max_age_seconds, reason_id: "control_backing_record_stale" }));
 
   // Step 6. Coverage.
   const coverage = deriveRuleApplicability({
@@ -748,101 +801,226 @@ export function assembleContextManifest(frozen) {
     now: request.now,
   });
 
-  // Step 6b. Q068 on the RULE path.
+  // Step 6b. Q068 on the RULE path, over ALL of it.
   //
   // The taint boundary was enforced on records and absent on rules: nothing
   // stopped text sourced from an email being compiled into a universe and
   // delivered as full_binding_text mandatory guidance, and the manifest gave a
-  // reader no way to tell. The kernel now requires a mandatory rule to name the
-  // record, version and content digest its text came from; this is where that
-  // reference is RESOLVED, because this is the half that holds records.
+  // reader no way to tell. The kernel now requires a mandatory rule — and any
+  // rule that removes another — to name the record, version and content digest
+  // its text came from; this is where that reference is RESOLVED, because this
+  // is the half that holds records.
   //
-  // Four outcomes and they are kept apart: the source is present and clean
-  // (bound), present and tainted (a violation, and a hard refusal for exactly
-  // the reason a tainted record wearing record_kind "rule" is), present but at
-  // a different version or digest (a violation — a rule bound to a source that
-  // has moved on is not bound), and absent from this manifest (unresolved).
+  // WHAT IS IN SCOPE, and this is the correction: EVERY RULE WHOSE TEXT THIS
+  // MANIFEST PUTS IN FRONT OF THE MODEL. The loop used to walk
+  // `coverage.delivery` only, so semantic additions — the one category that
+  // reaches the model with full binding text and no entry here at all — were
+  // exempt. `manifest.rule_provenance` then covered a strict subset of the rule
+  // text the manifest delivered and a reader could not tell which, while the
+  // hashed contract asserted the resolution unqualified. The identical tainted
+  // provenance therefore hard-refused on a bound rule and passed silently on a
+  // retrieved one.
   //
-  // WHAT IS IN SCOPE: the DELIVERED rules — everything effective or possibly
-  // binding, which is everything the model is told it must follow. Semantic
-  // additions are not checked here; they carry elevates_to_control: false,
-  // delivered_as: "guidance_only" and omissible: true, and are the one category
-  // the budget may drop. That boundary is a choice, and it is stated rather
-  // than left to be inferred from where the loop stops.
+  // So the union of the two uses is evaluated ONCE PER RULE ID by
+  // resolveRuleProvenance, and each entry says which uses it covers
+  // (`delivered_as_rule`, `delivered_as_guidance`). One evaluation, two uses, no
+  // second copy of the ladder to drift.
+  //
+  // THE DISPOSITION LADDER, and why the two uses differ where they do:
+  //
+  //   TAINTED, delivered as a rule — HARD REFUSAL. Identical to a tainted
+  //   record wearing record_kind "rule": the manifest would be handing the
+  //   model text from an email as a rule it must follow. A delivered rule
+  //   cannot simply have its text withheld — a delivered rule with no text is a
+  //   delivery failure — so the manifest refuses instead.
+  //
+  //   TAINTED, delivered as guidance — SUPPRESSED, not refused. The text is
+  //   withheld (`text_withheld: true`, `binding_text: null`) so external
+  //   content never arrives as a rule instruction, the diagnostic metadata is
+  //   KEPT so a reader can see what was suppressed and why, and the write is
+  //   blocked because a universe carrying email-sourced rule text is not a
+  //   universe a consequential action should be taken against. Marked read-only
+  //   exploration survives, because nothing untrusted is being delivered.
+  //
+  //   MANDATORY rule, source unresolved or drifted — HARD REFUSAL, unchanged.
+  //   This is not "we do not know whether the rule applies", which is what the
+  //   possibly-binding bucket and Q065's ladder are for. It is "the binding
+  //   text of a control this manifest is delivering cannot be shown to be the
+  //   text of record". Unknown APPLICABILITY still permits marked exploration;
+  //   unavailable BINDING TEXT does not, because the manifest cannot say what
+  //   the control it is asserting actually says.
+  //
+  //   NON-MANDATORY rule (delivered or guidance), source unresolved or drifted
+  //   — UNCERTAINTY. Blocks the consequential write, permits marked read-only
+  //   exploration, and the text is still delivered with the drift or the
+  //   unresolved reference stated on it. This is Q065 applied honestly: an
+  //   untainted source whose version has moved on is a fact nobody has
+  //   established, not a known-bad one, and a hard refusal there would kill the
+  //   exploration mode that exists precisely for unestablished facts. No human
+  //   approval gate is invented and no new policy is added; the two answers this
+  //   module already has are used in the order the settled decision states.
   //
   // WHAT THIS DOES NOT BUY, stated because it would be easy to overclaim: a
   // caller that authors both the rule and the record can point a rule at a
   // clean record whatever its text really was. This closes the LAUNDERING path
-  // — a legitimately-carried email being summarised into a control — and makes
-  // an unbound control visible. It is not a proof of origin, and no unkeyed
-  // structure here could be one.
+  // — a legitimately-carried email being summarised into a control or into
+  // retrieved guidance — and makes an unbound control visible. It is not a proof
+  // of origin, and no unkeyed structure here could be one.
   const universeById = new Map(universe.rules.map(rule => [rule.rule_id, rule]));
   const recordById = new Map(records.map(record => [record.record_id, record]));
+  const ruleTextUses = new Map();
+  const noteRuleTextUse = (rule_id, use) => {
+    if (!ruleTextUses.has(rule_id)) {
+      ruleTextUses.set(rule_id, { delivered_as_rule: false, delivered_as_guidance: false });
+    }
+    ruleTextUses.get(rule_id)[use] = true;
+  };
+  for (const delivered of coverage.delivery) noteRuleTextUse(delivered.rule_id, "delivered_as_rule");
+  for (const addition of coverage.semantic_additions) {
+    noteRuleTextUse(addition.rule_id, "delivered_as_guidance");
+  }
+
   const rule_provenance = [];
   const rule_provenance_violations = [];
-  for (const delivered of coverage.delivery) {
-    const rule = universeById.get(delivered.rule_id);
-    const entry = {
-      rule_id: rule.rule_id, mandatory: rule.mandatory,
-      source_record_id: rule.provenance === null ? null : rule.provenance.source_record_id,
-      taint_class: null, state: "unresolved", reason_id: "rule_provenance_not_declared",
-    };
-    if (rule.provenance === null) {
-      // The kernel guarantees this cannot be a mandatory rule. A guidance rule
-      // with no declared source is recorded and blocks the write; it does not
-      // hard-refuse, because guidance is not authority and Q065's ladder says
-      // marked exploration survives uncertainty.
-      rule_provenance.push(entry);
-      continue;
+  const provenanceByRuleId = new Map();
+  for (const rule_id of [...ruleTextUses.keys()].sort()) {
+    const uses = ruleTextUses.get(rule_id);
+    const resolved = resolveRuleProvenance(universeById.get(rule_id), recordById, byTaint);
+    const clean = resolved.state === "bound";
+    // A hard refusal on the delivered path: known-tainted text delivered as a
+    // rule, or a mandatory control whose binding text cannot be shown.
+    const refuses = uses.delivered_as_rule && (resolved.state === "tainted" ||
+      (resolved.mandatory && resolved.state !== "bound"));
+    const suppresses = uses.delivered_as_guidance && resolved.state === "tainted";
+    const disposition = refuses ? "refused_untrusted_or_unavailable_rule_text"
+      : suppresses ? "guidance_suppressed_untrusted_source"
+      : clean ? (uses.delivered_as_rule ? "delivered_bound" : "guidance_bound")
+      : uses.delivered_as_rule ? "delivered_marked_source_uncertain"
+      : "guidance_delivered_marked_source_uncertain";
+    const entry = { ...resolved, ...uses, disposition };
+    rule_provenance.push(entry);
+    provenanceByRuleId.set(rule_id, entry);
+    if (refuses) {
+      rule_provenance_violations.push({
+        rule_id: entry.rule_id, mandatory: entry.mandatory,
+        source_record_id: entry.source_record_id, taint_class: entry.taint_class,
+        use: "delivered_rule", reason_id: entry.reason_id,
+      });
     }
-    const source = recordById.get(rule.provenance.source_record_id);
-    if (source === undefined) {
-      rule_provenance.push({ ...entry, reason_id: "rule_provenance_record_not_in_manifest" });
-      continue;
-    }
-    const taint = byTaint.get(source.record_id);
-    if (source.version !== rule.provenance.source_version ||
-        source.content_digest !== rule.provenance.source_content_digest) {
-      const drifted = { ...entry, taint_class: taint.taint_class, state: "drifted",
-        reason_id: "rule_provenance_source_drifted",
-        declared_version: rule.provenance.source_version, source_version: source.version,
-        declared_content_digest: rule.provenance.source_content_digest,
-        source_content_digest: source.content_digest };
-      rule_provenance.push(drifted);
-      rule_provenance_violations.push({ rule_id: rule.rule_id, mandatory: rule.mandatory,
-        source_record_id: source.record_id, reason_id: "rule_provenance_source_drifted" });
-      continue;
-    }
-    if (taint.tainted) {
-      const violation = { rule_id: rule.rule_id, mandatory: rule.mandatory,
-        source_record_id: source.record_id, taint_class: taint.taint_class,
-        reason_id: "untrusted_content_cannot_be_rule_text" };
-      rule_provenance.push({ ...entry, taint_class: taint.taint_class, state: "tainted",
-        reason_id: "untrusted_content_cannot_be_rule_text" });
-      rule_provenance_violations.push(violation);
-      continue;
-    }
-    rule_provenance.push({ ...entry, taint_class: taint.taint_class, state: "bound",
-      reason_id: "rule_provenance_bound_to_first_party_record" });
-  }
-  const rule_provenance_unresolved = rule_provenance.filter(e => e.state === "unresolved");
-  for (const entry of rule_provenance_unresolved) {
-    if (!entry.mandatory) continue;
-    // A MANDATORY rule whose source this manifest cannot show is authority with
-    // untraceable text. Unavailable authoritative provenance REFUSES; only
-    // guidance is allowed to stay merely blocked.
-    rule_provenance_violations.push({ rule_id: entry.rule_id, mandatory: true,
-      source_record_id: entry.source_record_id, reason_id: entry.reason_id });
   }
   rule_provenance_violations.sort((a, b) => (a.rule_id < b.rule_id ? -1 : 1));
 
+  // The four uncertainty sets, kept apart from the refusals above and from each
+  // other, because they name four different things a reader may need. Note that
+  // `mandatory` is read only on the DELIVERED path: a mandatory rule the typed
+  // facts ruled out and retrieval surfaced arrives as guidance with
+  // elevates_to_control false, so this manifest is not asserting it as a
+  // control and does not refuse on its behalf.
+  const rule_provenance_unresolved = rule_provenance.filter(entry =>
+    entry.delivered_as_rule && entry.state === "unresolved" && !entry.mandatory);
+  const rule_provenance_drifted = rule_provenance.filter(entry =>
+    entry.delivered_as_rule && entry.state === "drifted" && !entry.mandatory);
+  const guidance_provenance_uncertain = rule_provenance.filter(entry =>
+    !entry.delivered_as_rule && entry.delivered_as_guidance &&
+    (entry.state === "unresolved" || entry.state === "drifted"));
+  const guidance_provenance_suppressed = rule_provenance.filter(entry =>
+    entry.disposition === "guidance_suppressed_untrusted_source");
+
+  // Step 6c. Every rule text this manifest carries says, on itself, what step 6b
+  // decided about its source. A reader holding one delivered rule or one piece
+  // of guidance does not have to cross-reference `rule_provenance` to find out
+  // whether the thing in front of them is bound, drifted, unresolved or
+  // withheld.
+  const annotate = entry => {
+    const resolved = provenanceByRuleId.get(entry.rule_id);
+    return {
+      provenance_state: resolved.state,
+      provenance_reason_id: resolved.reason_id,
+      provenance_taint_class: resolved.taint_class,
+      provenance_disposition: resolved.disposition,
+      provenance_source_record_id: resolved.source_record_id,
+    };
+  };
+  const deliveredRules = coverage.delivery.map(entry => {
+    const annotation = annotate(entry);
+    const withheld = annotation.provenance_state === "tainted";
+    // Keep the required rule slot visible as a refusal, without returning its
+    // tainted text as a binding instruction. The hard refusal remains decisive.
+    return { ...entry, ...annotation,
+      mode: withheld ? "refused" : entry.mode,
+      binding_text: withheld ? null : entry.binding_text,
+      resulting_constraint: withheld ? null : entry.resulting_constraint,
+      estimated_tokens: withheld ? 0 : entry.estimated_tokens,
+      text_withheld: withheld,
+      included: true, omission_reason_id: null };
+  });
+  const omissions = [];
+  const guidance = coverage.semantic_additions.map(entry => {
+    const annotation = annotate(entry);
+    const withheld = annotation.provenance_disposition === "guidance_suppressed_untrusted_source";
+    if (withheld) {
+      omissions.push({ kind: "semantic_guidance", ref: entry.rule_id,
+        reason_id: "guidance_suppressed_untrusted_source",
+        estimated_tokens: entry.estimated_tokens });
+    }
+    return {
+      ...entry,
+      ...annotation,
+      // The suppression, and exactly what survives it: the TEXT is withheld so
+      // untrusted content never arrives as a rule instruction, and every piece
+      // of diagnostic metadata stays — which rule, why retrieval surfaced it,
+      // which record its text was sourced from and what is wrong with that
+      // record. A silent drop would hide the compromised universe.
+      binding_text: withheld ? null : entry.binding_text,
+      resulting_constraint: withheld ? null : entry.resulting_constraint,
+      estimated_tokens: withheld ? 0 : entry.estimated_tokens,
+      text_withheld: withheld,
+      withheld_estimated_tokens: withheld ? entry.estimated_tokens : null,
+      included: !withheld,
+      omission_reason_id: withheld ? "guidance_suppressed_untrusted_source" : null,
+    };
+  });
+
+  // M2. WHICH RECORDS THE BUDGET MAY NOT DROP, derived rather than accepted.
+  //
+  // `backs_control` is a CALLER BOOLEAN. The budget honoured it and nothing else,
+  // so a record that a delivered binding rule's provenance resolves against —
+  // the evidence for the very binding `rule_provenance` asserts — could be
+  // dropped for tokens by marking it `omissible: true, backs_control: false`.
+  // The manifest then claimed a rule was bound to a record it had omitted. The
+  // protection now comes from the RESOLUTION above: if a delivered rule's text
+  // is sourced from this record, the record backs a control this manifest is
+  // delivering, whatever the caller said about it.
+  //
+  // A guidance rule's source is protected only while that guidance is still
+  // included, because guidance itself is droppable; the order below (guidance
+  // first, then records) is what makes that well defined.
+  const deliveredRuleSourceIds = new Set(rule_provenance
+    .filter(entry => entry.delivered_as_rule && entry.source_record_id !== null &&
+      recordById.has(entry.source_record_id))
+    .map(entry => entry.source_record_id));
+  const guidanceSourceIds = new Map();
+  for (const entry of rule_provenance) {
+    if (entry.delivered_as_rule || !entry.delivered_as_guidance) continue;
+    if (entry.source_record_id === null || !recordById.has(entry.source_record_id)) continue;
+    if (!guidanceSourceIds.has(entry.source_record_id)) {
+      guidanceSourceIds.set(entry.source_record_id, []);
+    }
+    guidanceSourceIds.get(entry.source_record_id).push(entry.rule_id);
+  }
+  for (const record of projectedRecords) {
+    record.backs_delivered_rule_text = deliveredRuleSourceIds.has(record.record_id);
+    if (record.backs_delivered_rule_text) {
+      record.omissible = false;
+      record.omission_protection_reason_id = "backs_delivered_rule_text";
+    } else {
+      record.omission_protection_reason_id = record.omissible ? null : (record.backs_control
+        ? "caller_declared_backs_control" : "caller_declared_not_omissible");
+    }
+  }
+
   // Step 7. Budget. Guidance first, then omissible records, in id order, so two
   // callers holding the same input drop the same things.
-  const deliveredRules = coverage.delivery.map(entry => ({ ...entry, included: true,
-    omission_reason_id: null }));
-  const guidance = coverage.semantic_additions.map(entry => ({ ...entry, included: true,
-    omission_reason_id: null }));
-  const omissions = [];
   const tokensOf = () =>
     deliveredRules.filter(r => r.included).reduce((sum, r) => sum + r.estimated_tokens, 0) +
     guidance.filter(g => g.included).reduce((sum, g) => sum + g.estimated_tokens, 0) +
@@ -852,6 +1030,9 @@ export function assembleContextManifest(frozen) {
   if (budget !== null) {
     for (const entry of guidance) {
       if (tokensOf() <= budget.token_budget) break;
+      // Already withheld by step 6c; dropping it again would overwrite the
+      // reason it is not here with a token-budget reason that is not true.
+      if (!entry.included) continue;
       entry.included = false;
       entry.omission_reason_id = "token_budget_guidance_dropped";
       omissions.push({ kind: "semantic_guidance", ref: entry.rule_id,
@@ -860,6 +1041,13 @@ export function assembleContextManifest(frozen) {
     for (const record of projectedRecords) {
       if (tokensOf() <= budget.token_budget) break;
       if (!record.omissible) continue;
+      // The source of guidance that is STILL INCLUDED after the loop above.
+      const backsIncludedGuidance = (guidanceSourceIds.get(record.record_id) ?? [])
+        .some(rule_id => guidance.some(g => g.rule_id === rule_id && g.included));
+      if (backsIncludedGuidance) {
+        record.omission_protection_reason_id = "backs_included_guidance_text";
+        continue;
+      }
       record.included = false;
       record.omission_reason_id = "token_budget_omissible_record_dropped";
       omissions.push({ kind: "record", ref: record.record_id,
@@ -867,6 +1055,35 @@ export function assembleContextManifest(frozen) {
     }
     budget_exceeded = tokensOf() > budget.token_budget;
   }
+
+  // Whether the record each entry names survived the budget, so a `bound` state
+  // is never read as a claim about data the manifest went on to omit. `null`
+  // means the rule named no source at all, which is a different finding from a
+  // named source that is absent. The protection above means this is only ever
+  // false for an unresolved reference, or for guidance the budget dropped along
+  // with its source.
+  const includedRecordIds = new Set(projectedRecords.filter(r => r.included).map(r => r.record_id));
+  const rule_provenance_projected = rule_provenance.map(entry => ({
+    ...entry,
+    source_record_included: entry.source_record_id === null
+      ? null : includedRecordIds.has(entry.source_record_id),
+  }));
+  // MEASURED, not asserted. The protection above should make this empty on
+  // every path, and the honest way to say so is to look rather than to hash a
+  // `false` — the shape of defect this correction is answering. If a later edit
+  // ever drops such a record, the manifest reports it and blocks instead of
+  // claiming a binding to data it omitted.
+  const omitted_delivered_rule_sources = projectedRecords
+    .filter(record => record.backs_delivered_rule_text && !record.included)
+    .map(record => record.record_id);
+
+  // Resolve control-backed freshness after provenance: the caller cannot exempt
+  // a delivered rule's source from freshness checks by clearing backs_control.
+  const stale_control_records = projectedRecords
+    .filter(record => record.freshness === "stale" &&
+      (record.backs_control || record.backs_delivered_rule_text))
+    .map(record => ({ record_id: record.record_id, age_seconds: record.age_seconds,
+      max_age_seconds: record.max_age_seconds, reason_id: "control_backing_record_stale" }));
 
   // Step 8. The decision.
   const blocking_reasons = [...coverage.blocking_reasons];
@@ -879,15 +1096,28 @@ export function assembleContextManifest(frozen) {
   if (taint_violations.length > 0) blocking_reasons.push("untrusted_content_cannot_be_authority");
   if (rule_provenance_violations.length > 0) blocking_reasons.push("rule_provenance_not_trustworthy");
   if (rule_provenance_unresolved.length > 0) blocking_reasons.push("rule_provenance_unresolved");
+  if (rule_provenance_drifted.length > 0) blocking_reasons.push("rule_provenance_source_drifted");
+  if (guidance_provenance_suppressed.length > 0) {
+    blocking_reasons.push("guidance_provenance_not_trustworthy");
+  }
+  if (guidance_provenance_uncertain.length > 0) {
+    blocking_reasons.push("guidance_provenance_uncertain");
+  }
+  if (omitted_delivered_rule_sources.length > 0) {
+    blocking_reasons.push("delivered_rule_source_evidence_omitted");
+  }
   if (budget_exceeded) blocking_reasons.push("budget_cannot_omit_binding_constraint");
 
   const actorRefused = authority_envelope.reason_id === "actor_not_verified_partner";
   // A hard refusal is one where producing the manifest at all would be a
-  // fiction: an unknown principal, tainted content wearing authority, a rule
-  // whose own text is tainted or untraceable, an unresolved conflict, a rule
-  // that would not deliver, or a budget that cannot be met without dropping a
-  // binding constraint. Everything else is UNCERTAINTY, which read-only
-  // exploration is allowed to see.
+  // fiction: an unknown principal, tainted content wearing authority, a
+  // delivered rule whose own text is tainted, a MANDATORY rule whose binding
+  // text cannot be shown to be the text of record, an unresolved conflict, a
+  // rule that would not deliver, or a budget that cannot be met without
+  // dropping a binding constraint. Everything else is UNCERTAINTY, which
+  // read-only exploration is allowed to see — including an untainted
+  // non-mandatory rule whose source has drifted or cannot be found, and
+  // including guidance whose tainted text was withheld.
   //
   // ON `rule_delivery_failed_closed` BEING HERE. This is stricter than Q065's
   // ladder, which blocks consequential writes and permits marked exploration.
@@ -971,8 +1201,23 @@ export function assembleContextManifest(frozen) {
     records: projectedRecords,
     taint_lineage: lineage.entries,
     taint_violations,
-    rule_provenance,
+    // ONE evaluation per rule id over the union of every use that puts rule
+    // text in front of the model, each entry naming its uses and its
+    // disposition. `guidance` above carries the same answer per entry.
+    rule_provenance: rule_provenance_projected,
+    rule_provenance_covers_all_delivered_rule_text: true,
     rule_provenance_violations,
+    rule_provenance_unresolved: rule_provenance_unresolved.map(e => e.rule_id),
+    rule_provenance_drifted: rule_provenance_drifted.map(e => e.rule_id),
+    guidance_provenance_suppressed: guidance_provenance_suppressed.map(e => ({
+      rule_id: e.rule_id, source_record_id: e.source_record_id, taint_class: e.taint_class,
+      reason_id: e.reason_id, disposition: e.disposition,
+    })),
+    guidance_provenance_uncertain: guidance_provenance_uncertain.map(e => ({
+      rule_id: e.rule_id, source_record_id: e.source_record_id, state: e.state,
+      reason_id: e.reason_id, disposition: e.disposition,
+    })),
+    external_text_delivered_as_rule_instruction: false,
     declassification_supported: false,
     queries,
     sources,
@@ -986,6 +1231,14 @@ export function assembleContextManifest(frozen) {
       estimated_tokens_total: tokensOf(),
       within_budget: budget === null ? true : !budget_exceeded,
       binding_constraint_omitted: false,
+      // The M2 protection, in the record rather than in a comment: a record a
+      // delivered rule's text is sourced from is not omissible for tokens,
+      // whatever the caller's own `backs_control` boolean says. The first field
+      // is MEASURED against the records that survived, not declared.
+      source_evidence_for_delivered_rule_text_omitted:
+        omitted_delivered_rule_sources.length > 0,
+      omitted_delivered_rule_sources,
+      omission_protection_derived_from_rule_provenance: true,
     },
     uncertainty: {
       marker: blocking_reasons.length > 0,
@@ -1067,6 +1320,15 @@ export function verifyContextManifest(manifest) {
 //     OUTPUT here, never an input the attestation can define;
 //   * a mutable request — there is no path from an object to a projection,
 //     only from bytes.
+//
+// ON BYTES THAT ARE SELF-CONSISTENT BUT NOT A VALID REQUEST. The re-derivation
+// below THROWS in that case rather than returning
+// `manifest_not_reproducible_from_input`, and that is the contract this slice
+// states at the top of rule-applicability.v5.js: a policy answer is returned,
+// an input the module cannot read at all is a contract violation. Bytes that do
+// not parse as a request cannot have produced the manifest presented with them,
+// so the caller is holding a manifest that was never assembled from them — a
+// broken caller, not a policy question. No second return shape is added for it.
 //
 // WHAT IT CANNOT REFUSE, which is why the authenticated kind is gone: a
 // self-minted credential. verifierAttestationDigest is exported and unkeyed, so
@@ -1365,7 +1627,22 @@ export function v5F05ContextContractPreimage() {
     default_max_attestation_age_seconds: null,
     code_enforcement_evidence_verified_by_kernel: false,
     rule_provenance_required_for_mandatory_rule: true,
-    rule_provenance_resolved_against_manifest_records: true,
+    rule_provenance_required_for_removing_rule: true,
+    // QUALIFIED, and true as written. The unqualified form of this field was a
+    // hashed claim the code did not carry: the resolution covered the delivered
+    // set and skipped semantic guidance, which reaches the model with the same
+    // full binding text. The resolution now covers the UNION of both uses, once
+    // per rule id, and the two flags below say what that does and does not do.
+    rule_provenance_resolved_against_manifest_records_for_all_delivered_rule_text: true,
+    semantic_guidance_covered_by_rule_provenance_resolution: true,
+    tainted_source_may_become_delivered_rule_text: false,
+    tainted_source_may_become_delivered_guidance_text: false,
+    guidance_from_tainted_source_is_withheld_with_stated_disposition: true,
+    // Q065 applied to rule text: known-bad refuses or is withheld, merely
+    // unestablished blocks the write and stays explorable.
+    untainted_non_mandatory_source_drift_is_uncertainty_not_refusal: true,
+    unavailable_mandatory_binding_text_refuses: true,
+    source_evidence_for_delivered_rule_text_is_omissible_for_tokens: false,
     derived_record_requires_declared_parent: true,
     write_gate_field: "consequential_action_permitted",
     authority_is_computed_not_asserted: true,
@@ -1419,9 +1696,12 @@ export function contextAssemblyIntegrationGaps() {
     {
       gap: "no_rule_text_origin_proof",
       where: "mcp-server/src/context-assembly.v5.js",
-      what: "a mandatory rule's provenance is resolved against the records in THIS manifest, so"
-        + " a rule whose source is a tainted or drifted record refuses and an unresolved one"
-        + " blocks; a caller that authors both the rule and the record can still point clean"
+      what: "every rule whose text this manifest delivers — bound rules and semantic guidance"
+        + " alike — has its provenance resolved against the records in THIS manifest: a tainted"
+        + " source refuses a delivered rule and withholds retrieved guidance, a MANDATORY rule"
+        + " whose source is missing or drifted refuses, and a non-mandatory rule's missing or"
+        + " drifted source blocks the consequential write while marked read-only exploration"
+        + " continues. A caller that authors both the rule and the record can still point clean"
         + " provenance at text that came from somewhere else. Proving rule text origin needs"
         + " the rule store this slice does not read",
       landed: false,

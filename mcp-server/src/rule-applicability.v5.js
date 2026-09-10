@@ -328,6 +328,17 @@ function assertDigestRef(value, path) {
  * A mutation-immune snapshot of validated caller data. Every compiled universe
  * and every echoed input is built through this, so a caller that mutates its
  * own object after validation cannot reach a decision taken later.
+ *
+ * A NON-ENUMERABLE OWN DATA PROPERTY IS REFUSED, NOT DROPPED. The walk used to
+ * copy `Object.keys` while assertNoAccessorsOrHiddenKeys read
+ * getOwnPropertyNames, so a hidden own field named `enforced` or `authority`
+ * survived the accessor sweep and then vanished silently from the copy. Two
+ * entry points then disagreed about the same object: compileRuleUniverse
+ * refused it through assertClosedKeys and requireCompiledUniverse — which
+ * snapshots the whole universe before checking anything but the top level —
+ * quietly dropped it from a NESTED rule. Nothing read such a field either way;
+ * "an unread field is an unenforced one" is this module's own standard, and a
+ * guard that silently deletes what another guard refuses is how it rots.
  */
 function snapshot(value, path, depth = 0) {
   if (depth > 12) fail("input_too_deep", `${path} nests deeper than the contract admits`, { path });
@@ -337,7 +348,14 @@ function snapshot(value, path, depth = 0) {
   if (isPlainObject(value)) {
     assertNoAccessorsOrHiddenKeys(value, path);
     const out = {};
-    for (const key of Object.keys(value)) out[key] = snapshot(value[key], `${path}.${key}`, depth + 1);
+    for (const key of Object.getOwnPropertyNames(value)) {
+      if (!Object.getOwnPropertyDescriptor(value, key).enumerable) {
+        fail("non_enumerable_key_refused",
+          `${path}.${key} is a non-enumerable own property; it is refused rather than dropped from the snapshot`,
+          { path: `${path}.${key}`, key });
+      }
+      out[key] = snapshot(value[key], `${path}.${key}`, depth + 1);
+    }
     return Object.freeze(out);
   }
   if (value === null || ["string", "number", "boolean"].includes(typeof value)) return value;
@@ -614,6 +632,11 @@ export const V5_F05_CONTROL_EFFECTS = deepFreeze(["require", "forbid"]);
 //      closed with `missing_relation_authority` and names the missing seam:
 //      there is no verified grant that would let one owner or scope remove
 //      another's control. See ruleKernelIntegrationGaps().
+//   4. A NAMED SOURCE FOR THE REMOVER'S OWN TEXT. Same reasoning, applied to
+//      provenance rather than to the class table: any rule holding a removing
+//      edge must name the record, version and digest its text came from, so a
+//      mandatory control cannot be deleted by a rule whose text is untraceable.
+//      See compileRule.
 // ---------------------------------------------------------------------------
 export const V5_F05_RELATIONS = deepFreeze(["supersedes", "overrides", "exception_to"]);
 
@@ -941,17 +964,32 @@ function compileRule(raw, index, seen, declared) {
   }
 
   // Q050 asks for per-rule source provenance and freshness; Q068 needs somewhere
-  // for the rule path to say where its text came from. A MANDATORY rule must
-  // carry it, because a mandatory rule is authority and unbound authority is the
-  // whole failure. A guidance rule may carry it and is checked when it does.
+  // for the rule path to say where its text came from. Two kinds of rule must
+  // carry it, and they are the same kind of thing:
+  //
+  //   * A MANDATORY rule, because a mandatory rule is authority and unbound
+  //     authority is the whole failure.
+  //   * A RULE THAT HOLDS A REMOVING EDGE, whatever its own `mandatory` flag
+  //     says. REMOVAL CAPABILITY IS MANDATORY CAPABILITY — the same sentence the
+  //     class table is built on at the Q087 header, and the parity it was
+  //     missing. A non-mandatory rule deleting a mandatory control is exercising
+  //     control over that control; a remover whose text names no source record,
+  //     version or digest is exactly the state the message below calls out, and
+  //     a kernel-only consumer would otherwise get a clean coverage_complete
+  //     receipt in which a mandatory control was deleted by untraceable text.
+  //
+  // A guidance rule that removes nothing may carry provenance and is checked
+  // when it does.
   let provenance = null;
   if (raw.provenance !== undefined && raw.provenance !== null) {
     provenance = compileRuleProvenance(raw.provenance, `${path}.provenance`);
   }
-  if (mandatory && provenance === null) {
+  if (provenance === null && (mandatory || relations.length > 0)) {
     fail("missing_rule_provenance",
-      `${path}.provenance is required for a mandatory rule; a control whose text has no source cannot be told apart from text that arrived in an email`,
-      { path, rule_id });
+      mandatory
+        ? `${path}.provenance is required for a mandatory rule; a control whose text has no source cannot be told apart from text that arrived in an email`
+        : `${path}.provenance is required for a rule that holds ${relations.length} removing edge(s); removing a control is strictly stronger than declaring one, and a remover whose text has no source cannot be told apart from text that arrived in an email`,
+      { path, rule_id, mandatory, removing_edges: relations.map(r => r.relation) });
   }
 
   return {
@@ -1441,6 +1479,17 @@ export const V5_F05_COVERAGE_BUCKETS = deepFreeze([
 ]);
 
 /**
+ * The buckets whose rules ONCE bound and no longer do. A semantic candidate
+ * landing in one of these is delivered as guidance — retrieval is allowed to
+ * surface history — and is labelled `historical_non_authority` so the model is
+ * never handed a retired rule's text with nothing but a bucket name to tell it
+ * apart from a standing one.
+ */
+export const V5_F05_HISTORICAL_BUCKETS = deepFreeze([
+  "overridden", "retired", "superseded", "suppressed_by_exception",
+]);
+
+/**
  * Read the typed facts. Absent and "unknown" collapse to the same state, and a
  * declared-dimension value the universe does not know is also unknown — the
  * universe simply may not have caught up with a new action yet, and guessing
@@ -1736,13 +1785,22 @@ export function deriveRuleApplicability(request) {
       continue;
     }
     const projected = deliveryForRule(rule, now, maxEvidenceAge);
+    const bucket = state.get(candidate.rule_id);
+    const historical = V5_F05_HISTORICAL_BUCKETS.includes(bucket);
     semantic_additions.push({
       rule_id: candidate.rule_id, reason: candidate.reason, similarity: candidate.similarity,
-      bucket: state.get(candidate.rule_id),
+      bucket,
       // A mandatory rule the typed facts ruled out is NOT elevated by having
       // looked relevant to a retriever; it arrives as guidance and says so.
       elevates_to_control: false,
       delivered_as: "guidance_only",
+      // A rule this system has RETIRED, superseded, overridden or excepted away
+      // still reads as instruction text once it is in front of a model. The
+      // bucket already said which, one field away; this says what the bucket
+      // MEANS, in the record rather than in the reader's head. Nothing about a
+      // rule's lifecycle is decided here — `bucket` is still the only input.
+      historical,
+      authority_state: historical ? "historical_non_authority" : "non_authority_guidance",
       mode: projected.mode, binding_text: projected.binding_text,
       resulting_constraint: projected.resulting_constraint,
       code_enforcement_claim: projected.code_enforcement_claim,
@@ -1861,14 +1919,20 @@ export function v5F05RuleKernelPreimage() {
     // from three separate refusals.
     removing_edge_requires_scoped_validity: true,
     removing_edge_requires_mandatory_capable_class_against_mandatory_target: true,
+    removing_edge_requires_source_provenance: true,
     removing_edge_may_cross_owner_or_scope: false,
     removal_is_single_pass_in_compiler_order: true,
+    // Retrieval may surface a retired, superseded, overridden or excepted rule
+    // as guidance; every such addition is labelled historical_non_authority.
+    historical_buckets: [...V5_F05_HISTORICAL_BUCKETS],
+    semantic_addition_from_historical_bucket_is_labelled_non_authority: true,
     // What this kernel does NOT establish about a code_enforced rule.
     code_enforced_constraint_mode_emitted: V5_F05_CODE_ENFORCED_CONSTRAINT_MODE_EMITTED,
     code_enforcement_evidence_verified_by_kernel: false,
     enforcement_evidence_age_policy_is_caller_supplied: true,
     default_enforcement_evidence_max_age_seconds: null,
     mandatory_rule_requires_source_provenance: true,
+    removing_rule_requires_source_provenance: true,
     rule_taint_class_resolved_by_kernel: false,
     write_gate_field: "consequential_action_permitted",
     semantic_retrieval_may_remove_controls: false,
@@ -1939,10 +2003,10 @@ export function ruleKernelIntegrationGaps() {
     {
       gap: "no_rule_provenance_taint_resolver",
       where: "mcp-server/src/rule-applicability.v5.js",
-      what: "a mandatory rule must name a source record, version and content digest, but this"
-        + " module holds no records and resolves none of it; whether that source is tainted"
-        + " is decided by the assembler against the manifest it was given, and by nothing at"
-        + " all for a caller that uses this kernel on its own",
+      what: "a mandatory rule and any rule holding a removing edge must name a source record,"
+        + " version and content digest, but this module holds no records and resolves none of"
+        + " it; whether that source is tainted is decided by the assembler against the manifest"
+        + " it was given, and by nothing at all for a caller that uses this kernel on its own",
       landed: false,
     },
   ]);
@@ -1963,9 +2027,14 @@ export function assertRuleKernelIntegrationComplete() {
 // module's own import rather than a caller's request.
 // ---------------------------------------------------------------------------
 
+// COMPILED_UNIVERSE_KEYS is in the list because requireCompiledUniverse runs
+// assertClosedKeys over it, so a key added to the compiled shape that collided
+// with either guard would refuse every legitimate compiled universe — the same
+// failure the other lists are here to prevent, on the one shape every caller of
+// this module has to present.
 const ACCEPTED_KEY_LISTS = [
-  UNIVERSE_KEYS, RULE_KEYS, CONTROL_EFFECT_KEYS, RETIREMENT_KEYS, RELATION_KEYS,
-  CODE_ENFORCEMENT_KEYS, ENFORCEMENT_EVIDENCE_KEYS, RULE_PROVENANCE_KEYS,
+  UNIVERSE_KEYS, COMPILED_UNIVERSE_KEYS, RULE_KEYS, CONTROL_EFFECT_KEYS, RETIREMENT_KEYS,
+  RELATION_KEYS, CODE_ENFORCEMENT_KEYS, ENFORCEMENT_EVIDENCE_KEYS, RULE_PROVENANCE_KEYS,
   ENFORCEMENT_EVIDENCE_POLICY_KEYS, PROJECT_RULE_KEYS, DERIVE_KEYS, SEMANTIC_CANDIDATE_KEYS,
   V5_F05_FACT_DIMENSIONS,
 ];
