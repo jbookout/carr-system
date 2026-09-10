@@ -187,8 +187,15 @@ export function createLiveClient(opts = {}) {
           const v = e[side];
           if (v && typeof v === 'object' && e.field && e.field in v) e[side] = v[e.field];
         }
-        if (e.field === 'phase' && typeof e.new_value === 'string') {
-          e.new_value = PHASE_TO_UI[e.new_value] || e.new_value;
+        // BOTH sides, through the one table above. A change receipt states what
+        // the value WAS as well as what it became, and a prior phase left as a
+        // record-layer slug names a phase no surface has ever shown: the board
+        // says "Diligence", never "due_diligence" — and never "Due diligence"
+        // either, which is what a generic slug-humanizer would produce.
+        if (e.field === 'phase') {
+          for (const side of ['old_value', 'new_value']) {
+            if (typeof e[side] === 'string') e[side] = PHASE_TO_UI[e[side]] || e[side];
+          }
         }
       }
       return data;

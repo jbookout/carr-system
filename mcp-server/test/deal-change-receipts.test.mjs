@@ -14,10 +14,56 @@ import {
   readableValue, normalizeChangeEvent, ingestChangeEvents, compareReceipts,
   receiptInstant, receiptTimeLabel, receiptViews, receiptsSignature, receiptListHtml, receiptRowHtml,
   createUndoState, beginUndo, settleUndo, classifyUndoOutcome, performUndo,
+  createFeedProgress, observeChangeBatch, receiptsAnnouncement,
 } from "../../dealroom/js/change-receipts.mjs";
 import { createLiveClient } from "../../dealroom/js/live-client.js";
+import { PHASES } from "../../dealroom/js/client.js";
 
 const file = (relative) => readFile(new URL(`../../${relative}`, import.meta.url), "utf8");
+
+const respond = (payload) => ({
+  ok: true, status: 200, json: async () => payload, text: async () => JSON.stringify(payload),
+});
+
+/**
+ * The changes feed as the server really serves it: the whole deal event log,
+ * oldest first, one bounded page per poll, cursor carried between polls.
+ * Nothing here is a new endpoint — it is the existing GET the board runs.
+ */
+function pagedFeed(events, limit = 200) {
+  const log = [...events];
+  const paths = [];
+  const client = createLiveClient({
+    selfActor: "joe",
+    fetchImpl: async (path) => {
+      paths.push(path);
+      const at = Number(new URL(path, "https://deals.invalid").searchParams.get("cursor") || 0);
+      const page = log.slice(at, at + limit);
+      return respond({
+        events: page.map((entry) => ({ ...entry })), presence: [], capture_sessions: [],
+        cursor: String(at + page.length),
+      });
+    },
+  });
+  return { client, paths, append: (entry) => log.push(entry) };
+}
+
+const newSession = () => ({ cursor: null, feed: createFeedProgress(), receipts: [], views: [] });
+
+// The receipt half of app.js's pollOnce, in the same order: read the batch the
+// board already consumed, note how far the cursor has got, fold it in, and
+// expose nothing until the cursor is current.
+async function pollSession(client, session) {
+  const result = await client.getChanges(session.cursor);
+  session.cursor = result.cursor;
+  const batch = result.events || [];
+  session.feed = observeChangeBatch(session.feed, batch);
+  session.receipts = ingestChangeEvents(session.receipts, batch, context);
+  session.views = session.feed.caught_up
+    ? receiptViews(session.receipts, { selfActor: "joe", undo: {} })
+    : [];
+  return session;
+}
 
 const DEALS = new Map([["d1", "Riverbank Dental"], ["d2", "Cooper Vet"]]);
 const context = {
@@ -140,6 +186,86 @@ test("ordering compares instants, not timestamp text: offsets and fraction width
   assert.equal(receiptInstant("whenever"), null);
   assert.equal(compareReceipts({ event_id: "a", recorded_at: "2026-09-10T14:00:00Z" }, { event_id: "b", recorded_at: "whenever" }) < 0, true,
     "a stamp that cannot be placed sorts last rather than being guessed at");
+});
+
+// ------------------------------------------------------- catching up
+
+test("the cursor must reach the present before anything is shown, and no clock decides that", () => {
+  let feed = createFeedProgress();
+  assert.equal(feed.caught_up, false, "a session starts behind: the cursor begins at the oldest event");
+
+  feed = observeChangeBatch(feed, new Array(200).fill({}));
+  assert.equal(feed.page_size, 200, "the page size is learned from the feed, never assumed");
+  assert.equal(feed.caught_up, false, "a full page cannot be the last one");
+  feed = observeChangeBatch(feed, new Array(200).fill({}));
+  assert.equal(feed.caught_up, false);
+  feed = observeChangeBatch(feed, new Array(43).fill({}));
+  assert.equal(feed.caught_up, true, "the short page is the one that reached the present");
+  feed = observeChangeBatch(feed, new Array(200).fill({}));
+  assert.equal(feed.caught_up, true, "and it stays reached; later pages are increments");
+
+  // A log that fits in one page looks exactly like a full one, so it opens on
+  // the following poll instead of the first. An empty page is unambiguous.
+  let small = observeChangeBatch(createFeedProgress(), new Array(12).fill({}));
+  assert.equal(small.caught_up, false);
+  small = observeChangeBatch(small, []);
+  assert.equal(small.caught_up, true);
+  assert.equal(observeChangeBatch(createFeedProgress(), []).caught_up, true);
+  assert.equal(observeChangeBatch(undefined, undefined).caught_up, true);
+
+  // Timestamps have no authority here: reaching the end is a property of the
+  // page, and a browser's idea of "now" is not evidence about the server.
+  const ancient = observeChangeBatch(observeChangeBatch(createFeedProgress(), new Array(200).fill({})),
+    [{ recorded_at: "1999-01-01T00:00:00Z" }]);
+  assert.equal(ancient.caught_up, true);
+  assert.equal(observeChangeBatch(createFeedProgress(), new Array(200).fill({ recorded_at: "2099-01-01T00:00:00Z" })).caught_up, false);
+});
+
+test("a log longer than one page never surfaces as recent, and never offers Undo mid-drain", async () => {
+  const base = Date.parse("2026-08-01T00:00:00Z");
+  const history = [];
+  for (let i = 1; i <= 450; i += 1) {
+    history.push({
+      id: `ev${String(i).padStart(4, "0")}`,
+      recorded_at: new Date(base + i * 1000).toISOString(),
+      actor: i % 2 ? "joe" : "dell", verb: "patch-deal-field",
+      subject_type: "deal", subject_id: "d1", field: "phase",
+      old_value: { phase: "research" }, new_value: { phase: "negotiation" },
+    });
+  }
+  const feed = pagedFeed(history);
+  const session = newSession();
+
+  await pollSession(feed.client, session);
+  assert.equal(session.feed.caught_up, false, "page one of a 450-event log is the OLDEST 200");
+  assert.equal(session.views.length, 0, "nothing from the beginning of the log is titled Recent changes");
+  assert.equal(receiptListHtml(session.views), "");
+  assert.ok(session.receipts.length > 0, "the drain still accumulates; it is exposure that waits");
+
+  // A real change lands while the session is still catching up.
+  feed.append({
+    id: "live-1", recorded_at: new Date(base + 9e5).toISOString(), actor: "joe",
+    verb: "patch-deal-field", subject_type: "deal", subject_id: "d1", field: "attention",
+    old_value: { attention: false }, new_value: { attention: true },
+  });
+
+  await pollSession(feed.client, session);
+  assert.equal(session.feed.caught_up, false, "still draining on page two");
+  assert.equal(session.views.length, 0);
+  assert.doesNotMatch(receiptListHtml(session.views), /data-undo=/,
+    "no Undo control can exist for a change that only looks latest because the rest has not arrived");
+
+  await pollSession(feed.client, session);
+  assert.equal(session.feed.caught_up, true, "page three came back short");
+  assert.equal(session.views.length, 25, "and now the newest 25 the session has seen are shown");
+  assert.equal(session.views[0].event_id, "live-1", "including the one that arrived mid-drain");
+  assert.equal(session.views[0].undo_status, "available", "which is genuinely the latest for its deal+field");
+  assert.equal(session.views.some((view) => view.event_id === "ev0001"), false,
+    "the oldest events are gone, not merely outranked");
+  assert.equal(session.views.at(-1).event_id, "ev0427");
+
+  assert.equal(feed.paths.length, 3, "three polls, no extra polling to catch up");
+  assert.equal(feed.paths.every((path) => path.startsWith("/pipeline/changes")), true, "and no second transport");
 });
 
 test("the latest change to a deal+field decides Undo, including a partner's", () => {
@@ -332,6 +458,130 @@ test("a refusal stays visible and terminal; only the server's yes marks a row un
   assert.equal(again.started, false, "a refusal is an answer, not a prompt to try again");
 });
 
+test("the server's own exception is an unknown, not a refusal, and stays retryable on one key", async () => {
+  // mcp-server/src/mcp.js returns an unhandled throw on the same isError
+  // channel as a real refusal — with a payload whose own hint says it is not
+  // one. Reading "there is a code" as "the server declined" badged the row
+  // Refused, printed server diagnostics at a partner, and closed it forever.
+  const serverFault = { error: "unhandled_verb_failure", verb: "revert-deal-field",
+    cause: "TypeError: cannot read properties of undefined\n    at applyDealRoomField",
+    hint: "this is the server's own exception, not a refusal of your arguments — the verb reached code that threw. Read it before retrying: an unhandled failure repeated with the same arguments fails the same way. If it names a database fault, the handler's SQL is the place to look." };
+
+  const outcome = classifyUndoOutcome({ error: Object.assign(new Error("live revert-deal-field refused: unhandled_verb_failure"), { payload: serverFault }) });
+  assert.equal(outcome.status, "unknown");
+  assert.equal(outcome.code, "unhandled_verb_failure");
+  assert.doesNotMatch(outcome.message, /exception|TypeError|SQL|handler|verb|arguments/i,
+    "a note the server wrote for whoever maintains it is not shown to a partner");
+  assert.ok(outcome.message.length <= 160, "and it stays one short line");
+  assert.match(outcome.message, /could not be confirmed/i);
+  assert.match(outcome.message, /check before trying again/i);
+
+  // Through the real client, on the real channel.
+  let posts = 0;
+  const client = createLiveClient({
+    selfActor: "joe",
+    fetchImpl: async () => {
+      posts += 1;
+      return {
+        ok: true, status: 200, text: async () => JSON.stringify(serverFault),
+        json: async () => ({ jsonrpc: "2.0", id: 1, result: { isError: true, content: [{ type: "text", text: JSON.stringify(serverFault) }] } }),
+      };
+    },
+  });
+  let undo = createUndoState();
+  let minted = 0;
+  const keys = [];
+  const base = {
+    eventId: "u9",
+    getState: () => undo,
+    setState: (next) => { undo = next; },
+    newKey: () => { minted += 1; return `key-${minted}`; },
+  };
+  const failed = await performUndo({ ...base, revert: async (request) => { keys.push(request.idempotency_key); return client.revertDealField(request); } });
+  assert.equal(failed.outcome.status, "unknown");
+  assert.equal(undo.u9.status, "unknown");
+  assert.equal(posts, 1, "an unknown is never retried on the partner's behalf");
+
+  const receipts = ingestChangeEvents([], [event({ id: "u9", field: "phase" })], context);
+  const view = viewFor(receipts, "u9", { undo });
+  assert.equal(view.undo_status, "unconfirmed");
+  assert.equal(view.can_undo, true, "the row stays actionable, unlike a genuine refusal");
+  assert.notEqual(view.badge, "Refused");
+  assert.match(receiptRowHtml(view), /data-undo="u9">Try undo again</);
+
+  // A deliberate second attempt reuses the one key, so the server's envelope
+  // replays rather than writing twice.
+  const retried = await performUndo({ ...base, revert: async (request) => { keys.push(request.idempotency_key); return { ok: true, replayed: true }; } });
+  assert.equal(retried.outcome.status, "succeeded");
+  assert.equal(minted, 1);
+  assert.equal(keys[0], keys[1]);
+});
+
+test("a decline shows the server's own words; our wording only fills a silence", () => {
+  // Precedence, both directions. The hint is the only text that knows why THIS
+  // request was declined, so it is never replaced by a local phrase.
+  const withHint = classifyUndoOutcome({
+    error: Object.assign(new Error("refused"), {
+      payload: { error: "newer_change_exists", hint: "Open the deal and review the newer value before changing it." },
+    }),
+  });
+  assert.equal(withHint.message, "Open the deal and review the newer value before changing it.");
+
+  const novelCode = classifyUndoOutcome({
+    error: Object.assign(new Error("refused"), {
+      payload: { error: "deal_locked_by_review", hint: "This deal is inside an open review session." },
+    }),
+  });
+  assert.equal(novelCode.status, "refused");
+  assert.equal(novelCode.message, "This deal is inside an open review session.",
+    "a code this surface has never seen still speaks for itself");
+
+  // Only when the server says nothing does the fallback table speak.
+  const bare = classifyUndoOutcome({ error: Object.assign(new Error("refused"), { payload: { error: "newer_change_exists" } }) });
+  assert.match(bare.message, /newer change to this field came first/i);
+  const unknownBare = classifyUndoOutcome({ error: Object.assign(new Error("refused"), { payload: { error: "some_new_gate" } }) });
+  assert.equal(unknownBare.message, "The server refused this undo: Some new gate.");
+
+  // A hint on a server FAULT is still withheld: that one is not about this deal.
+  const fault = classifyUndoOutcome({
+    error: Object.assign(new Error("boom"), {
+      payload: { error: "unhandled_verb_failure", hint: "this is the server's own exception, not a refusal of your arguments" },
+    }),
+  });
+  assert.equal(fault.status, "unknown");
+  assert.doesNotMatch(fault.message, /exception|arguments/i);
+
+  // The same precedence on the non-throwing shape.
+  assert.equal(classifyUndoOutcome({ response: { ok: false, error: "newer_change_exists", hint: "Server said so." } }).message, "Server said so.");
+});
+
+test("key_reuse stays a terminal safety refusal", async () => {
+  const refusal = Object.assign(new Error("live revert-deal-field refused: key_reuse"), {
+    payload: { error: "key_reuse" },
+  });
+  const outcome = classifyUndoOutcome({ error: refusal });
+  assert.equal(outcome.status, "refused", "a reused key is the server stopping a second write, not a fault");
+  assert.match(outcome.message, /safety key/i);
+  assert.doesNotMatch(outcome.message, /Key reuse/, "not a slug read back at a partner");
+
+  let undo = createUndoState();
+  let attempts = 0;
+  const call = {
+    eventId: "u9",
+    getState: () => undo,
+    setState: (next) => { undo = next; },
+    newKey: () => "key-1",
+    revert: async () => { attempts += 1; throw refusal; },
+  };
+  await performUndo(call);
+  assert.equal(undo.u9.status, "refused");
+  assert.equal((await performUndo(call)).started, false, "terminal: the safety stop is not re-sent");
+  assert.equal(attempts, 1);
+
+  const receipts = ingestChangeEvents([], [event({ id: "u9", field: "phase" })], context);
+  assert.equal(viewFor(receipts, "u9", { undo }).can_undo, false);
+});
+
 test("undo status never claims success it did not get", () => {
   const receipts = ingestChangeEvents([], [event({ id: "s1", field: "phase" })], context);
   const cases = {
@@ -419,6 +669,35 @@ test("every row stays a focus target, because Undo disappears the moment it is u
     "an unconfirmed attempt keeps a control, so focus returns to it");
 });
 
+test("only what arrived is announced — one change never reads back the whole list", () => {
+  const first = ingestChangeEvents([], [event({ id: "a1", field: "phase" })], context);
+  const firstViews = receiptViews(first, { selfActor: "joe" });
+  assert.equal(receiptsAnnouncement(null, firstViews), "",
+    "the list opening is not news; none of it just happened");
+
+  const seen = firstViews.map((view) => view.event_id);
+  const second = ingestChangeEvents(first, [event({
+    id: "a2", field: "owner", old_value: null, new_value: "dell",
+    recorded_at: "2026-09-10T18:00:00.000000+00:00",
+  })], context);
+  const secondViews = receiptViews(second, { selfActor: "joe" });
+  assert.equal(receiptsAnnouncement(seen, secondViews), "1 new change · Riverbank Dental · Owner");
+
+  // An Undo changes a row's state without adding one: nothing is announced,
+  // because the outcome is on the row the keyboard was just moved to.
+  const afterUndo = receiptViews(second, { selfActor: "joe", undo: { a2: { status: "succeeded" } } });
+  assert.equal(receiptsAnnouncement(secondViews.map((v) => v.event_id), afterUndo), "");
+  assert.notEqual(receiptsSignature(secondViews), receiptsSignature(afterUndo),
+    "the row is still re-rendered — it is the announcement that stays silent");
+
+  const many = ingestChangeEvents(second, [
+    event({ id: "a3", recorded_at: "2026-09-10T18:01:00.000000+00:00" }),
+    event({ id: "a4", recorded_at: "2026-09-10T18:02:00.000000+00:00" }),
+  ], context);
+  assert.equal(receiptsAnnouncement(seen, receiptViews(many, { selfActor: "joe" })), "3 new changes");
+  assert.equal(receiptsAnnouncement([], []), "");
+});
+
 // ---------------------------------------------------------------- wiring
 
 test("client Undo eligibility mirrors the server's revertible field list", async () => {
@@ -434,7 +713,6 @@ test("client Undo eligibility mirrors the server's revertible field list", async
 
 test("receipts and Undo reuse the Deal Room's existing transport and nothing else", async () => {
   const requests = [];
-  const respond = (payload) => ({ ok: true, status: 200, json: async () => payload, text: async () => JSON.stringify(payload) });
   const client = createLiveClient({
     selfActor: "joe",
     fetchImpl: async (path, init = {}) => {
@@ -479,6 +757,42 @@ test("receipts and Undo reuse the Deal Room's existing transport and nothing els
   assert.deepEqual(requests[1].body.params.arguments, { event_id: "w1", idempotency_key: "idem-1" });
 });
 
+test("both sides of a phase change speak the board's vocabulary, not the record layer's", async () => {
+  // The three slugs where the mapping is not the identity. Before this, only
+  // new_value was translated, so a receipt read "Due diligence → Closing"
+  // while the board chip for that same deal said "Diligence".
+  const moves = [["pending", "research"], ["site_selection", "negotiation"], ["due_diligence", "closing"]];
+  const wire = moves.map(([from, to], index) => ({
+    id: `p${index}`, recorded_at: `2026-09-10T14:0${index}:00.000000+00:00`, actor: "joe",
+    verb: "patch-deal-field", subject_type: "deal", subject_id: "d1", field: "phase",
+    old_value: { phase: from }, new_value: { phase: to },
+  }));
+  const client = createLiveClient({
+    selfActor: "joe",
+    fetchImpl: async () => respond({ events: wire, presence: [], capture_sessions: [], cursor: "1" }),
+  });
+
+  const changes = await client.getChanges(null);
+  const receipts = ingestChangeEvents([], changes.events, context);
+  const pair = (id) => {
+    const receipt = receipts.find((r) => r.event_id === id);
+    return [receipt.before, receipt.after];
+  };
+  assert.deepEqual(pair("p0"), ["On Deck", "Research"]);
+  assert.deepEqual(pair("p1"), ["Research", "Negotiation"]);
+  assert.deepEqual(pair("p2"), ["Diligence", "Closing"]);
+  for (const receipt of receipts) {
+    for (const side of [receipt.before, receipt.after]) {
+      assert.ok(PHASES.includes(side), `${side} is not a phase this board ever displays`);
+    }
+  }
+
+  const live = await file("dealroom/js/live-client.js");
+  assert.match(live, /if \(e\.field === 'phase'\) \{\s*for \(const side of \['old_value', 'new_value'\]\)/,
+    "one table, both sides — no second phase vocabulary anywhere");
+  assert.equal((live.match(/PHASE_TO_UI = \{/g) || []).length, 1);
+});
+
 test("a server refusal reaches the row through the existing client, unrewritten", async () => {
   let posts = 0;
   const client = createLiveClient({
@@ -508,12 +822,76 @@ test("a server refusal reaches the row through the existing client, unrewritten"
   assert.equal(posts, 1, "a refused undo is not re-sent");
 });
 
-test("the model stays a model: no transport, no DOM, no storage", async () => {
-  const model = await file("dealroom/js/change-receipts.mjs");
-  for (const forbidden of [/\bfetch\s*\(/, /WebSocket/, /EventSource/, /localStorage/, /sessionStorage/, /document\./, /window\./, /setTimeout|setInterval/]) {
-    assert.doesNotMatch(model, forbidden, `change-receipts.mjs must not reach for ${forbidden}`);
+test("the model stays a model: exercising every export reaches no network", async () => {
+  // The boundary itself, not a description of it: every network entry point a
+  // browser offers is replaced with a tripwire, then the whole model surface is
+  // driven. The one write the panel can make is injected (`revert`), so if the
+  // module could reach the wire on its own, this is where it would show.
+  const tripped = [];
+  const originals = new Map();
+  for (const name of ["fetch", "XMLHttpRequest", "WebSocket", "EventSource"]) {
+    originals.set(name, Object.getOwnPropertyDescriptor(globalThis, name));
+    try {
+      Object.defineProperty(globalThis, name, {
+        configurable: true, writable: true,
+        value: function tripwire() { tripped.push(name); throw new Error(`the model reached ${name}`); },
+      });
+    } catch { originals.delete(name); }
   }
-  assert.doesNotMatch(model, /\/api\/|\/pipeline\/|\/mcp/, "no endpoint string lives in the model");
+  try {
+    const events = [
+      event({ id: "z1", field: "phase" }),
+      event({ id: "z2", field: "note", old_value: null, new_value: "free text" }),
+      event({ id: "z3", field: null, old_value: null, new_value: null }),
+    ];
+    let feed = createFeedProgress();
+    feed = observeChangeBatch(feed, events);
+    const receipts = ingestChangeEvents(ingestChangeEvents([], events, context), events, context);
+    const views = receiptViews(receipts, { selfActor: "joe", undo: {}, now: Date.now() });
+    receiptListHtml(views);
+    views.map(receiptRowHtml);
+    receiptsSignature(views);
+    receiptsAnnouncement([], views);
+    receiptTimeLabel(events[0].recorded_at);
+    receiptInstant(events[0].recorded_at);
+    compareReceipts(receipts[0], receipts[1]);
+    normalizeChangeEvent(events[0], context);
+    readableValue("operating_state", { state: "parked", reason: "other" });
+    parkingReasonLabel("client_paused");
+    escapeText("<script>");
+    let undo = createUndoState();
+    const claim = beginUndo(undo, "z1", () => "k1");
+    undo = settleUndo(claim.state, "z1", classifyUndoOutcome({ response: { ok: true } }));
+    await performUndo({
+      eventId: "z2", getState: () => undo, setState: (next) => { undo = next; },
+      newKey: () => "k2", revert: async () => ({ ok: true }),
+    });
+    assert.deepEqual(tripped, [], "the model made no network call of its own");
+    assert.equal(feed.caught_up, false);
+    assert.equal(undo.z2.status, "succeeded");
+  } finally {
+    for (const [name, descriptor] of originals) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else delete globalThis[name];
+    }
+  }
+});
+
+test("the model holds no transport, storage, DOM or timer of its own", async () => {
+  const model = await file("dealroom/js/change-receipts.mjs");
+  // Comments are prose about the code, not the code: they name the server file
+  // and the verb this panel reuses, and a scan that cannot tell the difference
+  // fails on documentation. Strip them and read what actually executes.
+  const code = model
+    .replace(/^\s*\/\*[\s\S]*?\*\//gm, "")
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1");
+  assert.ok(code.includes("export function ingestChangeEvents"), "the stripper kept the code");
+  assert.ok(!code.includes("Pure model"), "and removed the prose");
+  for (const forbidden of [/\bfetch\s*\(/, /XMLHttpRequest/, /WebSocket/, /EventSource/, /\blocalStorage\b/,
+    /\bsessionStorage\b/, /\bdocument\b/, /\bwindow\b/, /\bnavigator\b/, /setTimeout|setInterval/]) {
+    assert.doesNotMatch(code, forbidden, `change-receipts.mjs must not reach for ${forbidden}`);
+  }
+  assert.doesNotMatch(code, /https?:|\/api\/|\/pipeline\/|\/mcp\b/, "no endpoint literal is compiled into the model");
 });
 
 test("app.js keeps one home for the revertible list, the parking labels and escaping", async () => {
@@ -532,8 +910,17 @@ test("app.js keeps one home for the revertible list, the parking labels and esca
 
 test("app.js accumulates from the poll it already runs and adds no endpoint or storage", async () => {
   const app = await file("dealroom/js/app.js");
-  assert.match(app, /state\.receipts = ingestChangeEvents\(state\.receipts, result\.events/,
-    "receipts come from the batch the board just consumed, not a second read");
+  // One read, one batch, two consumers. The behavioural half of this claim is
+  // the drain test above: three polls of a 450-event log produce exactly three
+  // GETs and no second transport. This half pins that the board and the
+  // receipts are fed from the same response rather than reading twice.
+  const pollOnce = app.slice(app.indexOf("async function pollOnce"), app.indexOf("function userIsEditing"));
+  assert.equal((app.match(/getChanges\(/g) || []).length, 1, "the app reads the changes feed in exactly one place");
+  assert.match(pollOnce, /const batch = result\.events \|\| \[\];/, "that response's events are named once");
+  assert.match(pollOnce, /for \(const event of batch\)/, "the board consumes that batch");
+  assert.match(pollOnce, /ingestChangeEvents\(state\.receipts, batch,/,
+    "and the receipts are folded from the same batch, never from a second read");
+  assert.equal((app.match(/ingestChangeEvents\(/g) || []).length, 1, "receipts have one accumulation point");
   assert.match(app, /revert: \(request\) => state\.client\.revertDealField\(request\)/,
     "Undo calls the verb the Deal Room already uses");
   assert.doesNotMatch(app, /fetch\(['"`]\//, "no new same-origin request path");
@@ -548,11 +935,33 @@ test("app.js accumulates from the poll it already runs and adds no endpoint or s
   assert.match(runUndo, /if \(result\.outcome\.status === 'succeeded'\)/, "reload of the board is gated on confirmed success");
 });
 
-test("the panel is a labelled log, reachable by keyboard and touch, and honest about its scope", async () => {
+test("app.js holds the panel and the toast shut until the cursor is current", async () => {
+  const app = await file("dealroom/js/app.js");
+  assert.match(app, /state\.feed = observeChangeBatch\(state\.feed, batch\);/,
+    "every batch reports how far the cursor has got");
+  assert.match(app, /const announce = !initial && state\.feed\.caught_up;/);
+  assert.match(app, /if \(announce && event\.actor === state\.selfActor/,
+    "no toast — and so no Undo — for a page of history");
+  assert.match(app, /const views = state\.feed\.caught_up\s*\?\s*receiptViews\(/,
+    "and no rows exposed until the same moment");
+  assert.match(app, /feed: createFeedProgress\(\)/);
+  assert.doesNotMatch(app, /session_start|sessionStart|receiptCutoff/i,
+    "the gate is the feed's own paging, not a browser clock");
+
+  // Focus bookkeeping: spent on every render, and never scrolls the page.
+  assert.match(app, /state\.receiptFocus = null;\s*const signature = receiptsSignature\(views\);/,
+    "a skipped render must not leave a focus request to be spent later");
+  assert.match(app, /target\?\.focus\(\{ preventScroll: true \}\)/);
+});
+
+test("the panel is labelled, reachable by keyboard and touch, and honest about its scope", async () => {
   const [html, css] = await Promise.all([file("dealroom/index.html"), file("dealroom/css/app.css")]);
   assert.match(html, /id="receiptsPanel"[^>]*aria-labelledby="receiptsTitle"/);
-  assert.match(html, /<ol class="receipt-list" id="receiptsList" role="log" aria-live="polite"/);
-  assert.match(html, /in this browser session only/i);
+  assert.match(html, /<ol class="receipt-list" id="receiptsList" aria-label="Recent Deal Room changes"><\/ol>/);
+  // Exactly what the list holds: not "changes you made", not a window over the
+  // log — the newest bounded set this session has seen, held in the page.
+  assert.match(html, /newest 25 changes this session has seen/i);
+  assert.match(html, /kept in this page only/i);
   assert.match(html, /Change history/, "the durable home is named on the surface");
   assert.doesNotMatch(html, /permanent|forever|always available|survives a reload/i,
     "no retention promise this surface cannot keep");
@@ -565,6 +974,21 @@ test("the panel is a labelled log, reachable by keyboard and touch, and honest a
   assert.doesNotMatch(css, /@media\(prefers-reduced-motion:reduce\)\{[^}]*\.receipt[^}]*display:\s*none/);
   assert.match(css, /\.receipt\{[^}]*var\(--card\)/, "the panel uses the board's own surface tokens");
   assert.doesNotMatch(css, /\.receipt-score|\.receipt-meter/, "no invented score");
+});
+
+test("the announcement lives on its own status line, and the list is not a live region", async () => {
+  const [html, app, css] = await Promise.all([
+    file("dealroom/index.html"), file("dealroom/js/app.js"), file("dealroom/css/app.css"),
+  ]);
+  assert.match(html, /<p class="receipts-live" id="receiptsLive" role="status" aria-live="polite"><\/p>/);
+  assert.doesNotMatch(html, /role="log"/, "role=log is an implicit live region; the list must not be one");
+  assert.doesNotMatch(html, /<ol[^>]*aria-live/, "and it must not be declared one either");
+  assert.match(app, /const announcement = opened \? receiptsAnnouncement\(state\.receiptAnnounced, views\) : '';/);
+  assert.match(app, /if \(opened\) state\.receiptAnnounced = views\.map\(\(view\) => view\.event_id\);/,
+    "the baseline is only set once the list is open, so opening it is not announced");
+  assert.match(app, /\$\('#receiptsLive'\)\.textContent = announcement;/,
+    "text only: an untrusted deal name never becomes markup in the status line");
+  assert.match(css, /\.receipts-live:empty\{margin:0;min-height:0\}/, "silence takes no space");
 });
 
 test("a counted control in the board toolbar reaches the panel and takes the keyboard with it", async () => {
@@ -580,7 +1004,7 @@ test("a counted control in the board toolbar reaches the panel and takes the key
 
   assert.match(app, /jump\.hidden = views\.length === 0;/, "no empty control before the first change");
   assert.match(app, /\$\('#receiptsCount'\)\.textContent = String\(views\.length\);/);
-  assert.match(app, /jump\.setAttribute\('aria-label', `Go to recent changes — \$\{views\.length\} in this session`\)/);
+  assert.match(app, /jump\.setAttribute\('aria-label', `Go to recent changes — \$\{views\.length\} seen in this session`\)/);
   assert.match(app, /\$\('#receiptsJump'\)\.onclick = goToReceipts;/);
   assert.match(app, /panel\.scrollIntoView\(\{ block: 'start' \}\);\s*\$\('#receiptsTitle'\)\.focus\(\{ preventScroll: true \}\)/,
     "scroll and focus move together, and the scroll honours the reduced-motion rule already in the stylesheet");

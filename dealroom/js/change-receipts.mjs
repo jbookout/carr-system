@@ -6,9 +6,12 @@
  * module returns, so the panel adds no transport and no second read path.
  *
  * What this list is, exactly:
- *   - session memory only. It lives in the page and is bounded at
- *     RECEIPT_LIMIT; nothing is written to browser storage and no new
- *     persistence surface exists. A reload starts it empty again.
+ *   - the newest RECEIPT_LIMIT changes THIS SESSION HAS SEEN on the feed. Not
+ *     "changes made since you opened the page", and not a window over the
+ *     event log: the tail of what was already recorded is in it too, once the
+ *     cursor reaches the present (see createFeedProgress).
+ *   - session memory only. It lives in the page; nothing is written to browser
+ *     storage and no new persistence surface exists. A reload starts it empty.
  *   - the durable record is unchanged: every one of these changes stays in the
  *     deal's own Change history, which is where the full lineage lives.
  *   - Undo eligibility shown here is a HINT drawn from the events this session
@@ -53,11 +56,28 @@ const PARKING_REASON_LABEL = Object.freeze({
   other: 'Not active right now',
 });
 
-// Server refusals this surface can explain in the partner's own words. Any
-// other refusal is shown with the server's message rather than reworded.
+// Fallback wording, used ONLY when a decline arrives without a hint of its own
+// (key_reuse travels bare). Anything the server says about this request is
+// shown instead of these, verbatim — see declineOutcome.
 const REFUSAL_MESSAGE = Object.freeze({
   newer_change_exists: 'A newer change to this field came first, so the server refused this undo. Open the deal and review the current value.',
   event_not_revertible: 'The server does not undo this kind of change.',
+  // A safety stop, not a decline of the value: the same key already carried a
+  // different request. Terminal on purpose — re-sending is what it prevents.
+  key_reuse: 'This undo was already sent under the same safety key for a different request. Open the deal and check its current value.',
+});
+
+// Codes that mean the SERVER broke, not that it declined. An unhandled throw
+// inside a verb comes back on the same isError channel as a real refusal
+// (mcp-server/src/mcp.js), and its own hint says so in as many words. Treating
+// it as a refusal would badge the row "Refused", print a paragraph of server
+// diagnostics at a partner, and close the row to any retry — while the write
+// may in fact have landed. It is an unknown, and it stays retryable.
+const SERVER_FAULT_CODES = new Set(['unhandled_verb_failure', 'internal_error']);
+
+const UNKNOWN_MESSAGE = Object.freeze({
+  fault: 'Undo could not be confirmed — the server hit an error before it answered. Open the deal to check before trying again.',
+  silent: 'Undo could not be confirmed — no answer from the server. Open the deal to check before trying again.',
 });
 
 const MONTHS = Object.freeze(['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']);
@@ -243,6 +263,59 @@ export function ingestChangeEvents(receipts, events, options = {}) {
   return [...byId.values()].sort(compareReceipts).slice(0, RECEIPT_LIMIT);
 }
 
+/**
+ * How far the session's change cursor has got.
+ *
+ * The changes feed is a cursor over the WHOLE deal event log, oldest first, one
+ * server page at a time. A session that opens with a null cursor therefore
+ * receives the OLDEST page first, and keeps receiving pages until it reaches
+ * the present. Folding those pages straight onto the surface would title
+ * ancient history "Recent changes" and offer Undo on a months-old change that
+ * only looks latest because nothing newer has arrived yet.
+ *
+ * So the list stays closed until the cursor is current. The page size is not
+ * published by the server and is not assumed here — it is LEARNED: the largest
+ * page yet seen is the page size, and the first page that comes back short of
+ * it (or empty) is the one that reached the present. No clock is consulted; a
+ * browser's idea of "now" has no authority over what the server has recorded.
+ * Once current, it stays current — later pages are increments.
+ *
+ * Cost of learning rather than assuming: when the whole log fits in one page,
+ * that page is indistinguishable from a full one, so the list opens on the
+ * following poll instead of the first.
+ */
+export function createFeedProgress() {
+  return { page_size: 0, caught_up: false, pages: 0 };
+}
+
+export function observeChangeBatch(progress, batch) {
+  const current = progress || createFeedProgress();
+  const size = Array.isArray(batch) ? batch.length : 0;
+  const pageSize = Math.max(current.page_size || 0, size);
+  return {
+    page_size: pageSize,
+    caught_up: Boolean(current.caught_up) || size === 0 || size < pageSize,
+    pages: (current.pages || 0) + 1,
+  };
+}
+
+/**
+ * A short line for a status region, naming only what ARRIVED since the last
+ * render. The list itself is not a live region: replacing 25 rows would make a
+ * screen reader read all 25 back on every single change.
+ *
+ * `previousIds` of null means the list has just opened — the first exposure
+ * announces nothing, because none of it is news.
+ */
+export function receiptsAnnouncement(previousIds, views) {
+  if (!Array.isArray(previousIds)) return '';
+  const known = new Set(previousIds);
+  const fresh = (Array.isArray(views) ? views : []).filter((view) => !known.has(view.event_id));
+  if (!fresh.length) return '';
+  if (fresh.length === 1) return `1 new change · ${fresh[0].deal_name} · ${fresh[0].action}`;
+  return `${fresh.length} new changes`;
+}
+
 /** Clock time for today's changes, dated for anything older. Never "3 minutes ago", which goes stale in a list that is only re-rendered when it changes. */
 export function receiptTimeLabel(recordedAt, now = Date.now()) {
   const instant = receiptInstant(recordedAt);
@@ -297,47 +370,51 @@ export function settleUndo(state, eventId, outcome) {
   };
 }
 
+function declineOutcome(code, hint) {
+  if (code && SERVER_FAULT_CODES.has(code)) {
+    // Deliberately NOT the server's hint: that text is written for whoever
+    // maintains the verb, and it is not a statement about this deal.
+    return { status: 'unknown', code, message: UNKNOWN_MESSAGE.fault };
+  }
+  return {
+    status: 'refused',
+    code: code || null,
+    // The server's own hint FIRST, verbatim. It is the only text that knows
+    // why this particular request was declined; the table below is a fallback
+    // for the codes that travel without one (key_reuse does), never a rewrite
+    // of something the server took the trouble to say.
+    message: hint || (code ? REFUSAL_MESSAGE[code] || `The server refused this undo: ${humanizeSlug(code)}.` : 'The server refused this undo.'),
+  };
+}
+
 /**
  * Classify one revert-deal-field answer.
  *
- * Success requires the server to say so (`ok: true`). A thrown error carrying
- * a tool payload is the server refusing — visible, terminal, not retried. Any
- * other failure is `unknown`: we do not know whether the write landed, so the
- * row is not marked undone, no deal value is touched, and nothing is retried
- * on the user's behalf.
+ * Three outcomes, and the difference between the last two is the whole point:
+ *
+ *   succeeded — the server said `ok: true`. Nothing else counts.
+ *   refused   — the server DECLINED the request: a newer change won, the field
+ *               is not revertible, the safety key was reused. Terminal and
+ *               visible, because re-sending would not change the answer.
+ *   unknown   — we do not know whether the write landed: no answer, no result,
+ *               or the server's own exception on the way through. The row is
+ *               not marked undone, no deal value is touched, nothing is retried
+ *               automatically, and the control stays available so a person can
+ *               deliberately re-send under the SAME idempotency key.
  */
 export function classifyUndoOutcome({ response = null, error = null } = {}) {
   if (error) {
     const code = error?.payload?.error || null;
-    if (code) {
-      return {
-        status: 'refused',
-        code,
-        message: error?.payload?.hint || REFUSAL_MESSAGE[code] || `The server refused this undo: ${humanizeSlug(code)}.`,
-      };
-    }
-    return {
-      status: 'unknown',
-      code: null,
-      message: `Undo could not be confirmed: ${error.message || 'no answer from the server'}. Nothing here was changed — open the deal to check before trying again.`,
-    };
+    if (code) return declineOutcome(code, error?.payload?.hint);
+    return { status: 'unknown', code: null, message: UNKNOWN_MESSAGE.silent };
   }
   if (response && response.ok === true) {
     return { status: 'succeeded', code: null, message: null };
   }
   if (response && response.ok === false) {
-    const code = response.error || null;
-    return {
-      status: 'refused',
-      code,
-      message: response.hint || (code ? REFUSAL_MESSAGE[code] || `The server refused this undo: ${humanizeSlug(code)}.` : 'The server refused this undo.'),
-    };
+    return declineOutcome(response.error || null, response.hint);
   }
-  return {
-    status: 'unknown',
-    code: null,
-    message: 'Undo could not be confirmed — the server did not answer with a result. Open the deal to check before trying again.',
-  };
+  return { status: 'unknown', code: null, message: UNKNOWN_MESSAGE.silent };
 }
 
 /**

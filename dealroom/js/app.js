@@ -4,7 +4,8 @@ import { uuidv4 } from './uuid.js';
 import { createPostCallClient } from './post-call-client.js';
 import {
   REVERTIBLE_FIELDS, escapeText, parkingReasonLabel, ingestChangeEvents,
-  receiptViews, receiptListHtml, receiptsSignature, createUndoState, performUndo,
+  receiptViews, receiptListHtml, receiptsSignature, receiptsAnnouncement,
+  createFeedProgress, observeChangeBatch, createUndoState, performUndo,
 } from './change-receipts.mjs';
 
 const POLL_MS = 1400;
@@ -17,8 +18,10 @@ const state = {
   changed: new Set(), fieldBase: new Map(), presence: [], captureSessions: [],
   confirms: [], review: null, pollTimer: null,
   // Recent changes are session memory only: bounded, never stored, and never
-  // a substitute for the deal's own Change history.
-  receipts: [], undo: createUndoState(), receiptSignature: null, receiptFocus: null,
+  // a substitute for the deal's own Change history. The feed cursor starts at
+  // the beginning of the log, so nothing is shown until it reaches the present.
+  receipts: [], undo: createUndoState(), feed: createFeedProgress(),
+  receiptSignature: null, receiptFocus: null, receiptAnnounced: null,
   callMode: { state: 'idle' }, callModeTimer: null,
   postCallClient: null, postCallTimer: null,
   postCall: { status: 'idle', session: null, report: null, error: null,
@@ -117,7 +120,12 @@ async function pollOnce(initial = false) {
     state.presence = result.presence || [];
     state.captureSessions = result.capture_sessions || [];
     renderCaptureStatus();
-    for (const event of result.events || []) {
+    const batch = result.events || [];
+    state.feed = observeChangeBatch(state.feed, batch);
+    // Until the cursor reaches the present, these are pages of history, not
+    // news: no toast announces them and the panel stays closed.
+    const announce = !initial && state.feed.caught_up;
+    for (const event of batch) {
       if (event.field) state.fieldBase.set(`${event.subject_id}|${event.field}`, event.id);
       const deal = state.deals.get(event.subject_id);
       if (!deal) continue;
@@ -133,15 +141,15 @@ async function pollOnce(initial = false) {
         deal.parking_reason = value.reason || null;
         deal.parking_note = value.note || null;
       }
-      if (!initial && event.actor === state.selfActor && REVERTIBLE_FIELDS.includes(event.field)) {
+      if (announce && event.actor === state.selfActor && REVERTIBLE_FIELDS.includes(event.field)) {
         showToast(`${deal.name} updated`, event.id);
-      } else if (!initial && event.actor !== state.selfActor && event.field) {
+      } else if (announce && event.actor !== state.selfActor && event.field) {
         showToast(`${actorName(event.actor)} updated ${deal.name}`);
       }
     }
     // Same events, kept instead of discarded once the toast fades. No second
     // read: this is the batch the board just consumed.
-    state.receipts = ingestChangeEvents(state.receipts, result.events, {
+    state.receipts = ingestChangeEvents(state.receipts, batch, {
       dealName: (dealId) => state.deals.get(dealId)?.name || null,
       actorLabel: actorName,
     });
@@ -674,27 +682,39 @@ function renderConfirms() {
 function renderReceipts() {
   const panel = $('#receiptsPanel');
   if (!panel) return;
-  const views = receiptViews(state.receipts, {
-    selfActor: state.selfActor, undo: state.undo, now: Date.now(),
-  });
   const list = $('#receiptsList');
   const jump = $('#receiptsJump');
+  // Nothing is shown while the cursor is still working through history: an old
+  // page is not "recent", and its newest row is not safely undoable.
+  const views = state.feed.caught_up
+    ? receiptViews(state.receipts, { selfActor: state.selfActor, undo: state.undo, now: Date.now() })
+    : [];
   panel.hidden = views.length === 0;
   // The board is long. A counted control sits with the other board controls so
   // the panel below the table is findable without scrolling for it.
   jump.hidden = views.length === 0;
   $('#receiptsCount').textContent = String(views.length);
-  jump.setAttribute('aria-label', `Go to recent changes — ${views.length} in this session`);
-  const signature = receiptsSignature(views);
-  if (signature === state.receiptSignature) return;
-  state.receiptSignature = signature;
-  // Re-render only on a real change, so the aria-live log stays quiet between
-  // changes and an Undo button under the partner's finger keeps its focus.
+  jump.setAttribute('aria-label', `Go to recent changes — ${views.length} seen in this session`);
+  // Read the focus request whether or not this render proceeds, so a skipped
+  // render cannot leave it to be spent on an unrelated one later.
   const active = document.activeElement;
   const keep = state.receiptFocus
     || (active && list.contains(active) ? active.closest('[data-receipt]')?.dataset.receipt : null)
     || null;
   state.receiptFocus = null;
+  const signature = receiptsSignature(views);
+  if (signature === state.receiptSignature) return;
+  state.receiptSignature = signature;
+  // Re-render only on a real change, so an Undo button under the partner's
+  // finger keeps its focus. The list is NOT a live region — announcing it
+  // wholesale would read all 25 rows back for one change — so what actually
+  // arrived is named on its own short status line.
+  // Renders while the list is closed hold no news and leave the baseline
+  // unset, so the render that finally opens it announces nothing either.
+  const opened = views.length > 0;
+  const announcement = opened ? receiptsAnnouncement(state.receiptAnnounced, views) : '';
+  if (opened) state.receiptAnnounced = views.map((view) => view.event_id);
+  $('#receiptsLive').textContent = announcement;
   list.innerHTML = receiptListHtml(views);
   if (keep) focusReceipt(keep);
 }
@@ -710,7 +730,8 @@ function focusReceipt(eventId) {
   const target = $(`[data-undo="${CSS.escape(eventId)}"]`, list)
     || $(`[data-receipt="${CSS.escape(eventId)}"]`, list)
     || $('#receiptsTitle');
-  target?.focus();
+  // Restoring focus must not yank the page: this runs on poll-driven renders.
+  target?.focus({ preventScroll: true });
 }
 
 function goToReceipts() {
