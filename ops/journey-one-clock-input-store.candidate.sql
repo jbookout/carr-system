@@ -366,6 +366,16 @@ create index if not exists j1_minimum_admission_by_inventory
 
 -- ---------------------------------------------------------------------------
 -- APPEND-ONLY. There is no reset, no re-dating and no replacement on this rail.
+--
+-- TWO TRIGGERS PER RELATION, because UPDATE/DELETE and TRUNCATE are different
+-- events. A ROW-LEVEL TRIGGER NEVER SEES TRUNCATE -- it is a statement event --
+-- so a row-level-only posture would leave "an admitted attempt cannot be erased"
+-- true of every runtime bundle and FALSE of the table owner, from whom TRUNCATE
+-- cannot be revoked. `revoke ... truncate` below is the grant half and does not
+-- bind the owner; this is the half that does. Same shape as
+-- ops/model-role-store.candidate.sql, ops/cre-lifecycle.candidate.sql and
+-- ops/document-derivative-registration.candidate.sql, which is the house
+-- pattern rather than a new one invented here.
 -- ---------------------------------------------------------------------------
 create or replace function ops.j1_minimum_rows_immutable()
 returns trigger language plpgsql
@@ -373,12 +383,12 @@ set search_path = pg_catalog, ops
 as $$
 begin
   raise exception '[j1_minimum_rows_are_append_only] Journey 1 minimum-input rows are append-only: % is refused on ops.%',
-    tg_op, tg_table_name;
+    tg_op, tg_table_name using errcode = '42501';
 end;
 $$;
 
 comment on function ops.j1_minimum_rows_immutable() is
-  'Refuses every update and delete on the admitted-minimum storage tables. Carries the shared invariant id j1_minimum_rows_are_append_only.';
+  'Refuses every update, delete and truncate on the admitted-minimum storage tables. Carries the shared invariant id j1_minimum_rows_are_append_only. It is installed twice per relation because a row-level trigger never sees TRUNCATE, and TRUNCATE cannot be revoked from the table owner.';
 
 do $$
 declare t text;
@@ -388,6 +398,11 @@ begin
     execute format(
       'create trigger %I before update or delete on ops.%I for each row execute function ops.j1_minimum_rows_immutable()',
       t || '_append_only', t);
+    -- TRUNCATE is statement-level and BEFORE-only; there is no row to see.
+    execute format('drop trigger if exists %I on ops.%I', t || '_no_truncate', t);
+    execute format(
+      'create trigger %I before truncate on ops.%I for each statement execute function ops.j1_minimum_rows_immutable()',
+      t || '_no_truncate', t);
   end loop;
 end $$;
 
@@ -458,6 +473,13 @@ as $$
            'previous_admission_digest', a.prior_admission_digest,
            'admission_digest', a.admission_digest,
            'recorded_at', a.recorded_at,
+           'written_by_actor_id', (select ac.slug from public.actor ac where ac.id = a.written_by_actor_id),
+           -- FIVE KEYS WHERE THE MODULE'S PROVENANCE HAS SIX, and the missing one
+           -- is deliberate. admitted_by_authority_class is derived by identity.js
+           -- from the LIVE actor; this database has no such derivation, and a
+           -- column filled from a caller -- or back-derived from a stored row --
+           -- would be exactly the caller boolean the whole rail exists to
+           -- prevent. The actor slug agrees on both sides.
            'provenance', jsonb_build_object(
              'receipt_schema_ref', a.receipt_schema_ref,
              'receipt_producer_step_ref', a.receipt_producer_step_ref,
@@ -468,6 +490,9 @@ as $$
     join ops.j1_minimum_inventory i on i.id = a.inventory_id
    where a.id = p_admission_id
 $$;
+
+comment on function ops.j1_minimum_admission_json(uuid) is
+  'One admitted-minimum row in the shape createPostgresJourneyOneMinimumAdmissionJournal consumes, with the receipt digest RECOMPUTED beside the one it was admitted under. Its provenance carries five of the module''s six keys: admitted_by_authority_class is derived from the live actor by identity.js and this database derives no authority class, so it is absent rather than invented.';
 
 create or replace function ops.j1_minimum_head(p_clock_scope_key text)
 returns jsonb language sql stable security definer
@@ -510,6 +535,13 @@ comment on function ops.j1_minimum_admissions(text) is
 -- no longer hashes to the digest it was admitted under is not skipped: a
 -- silently dropped attempt is exactly the discard this rail must not make, and
 -- dropping the FIRST one would move the origin.
+--
+-- IT ANSWERS IN THE MODULE'S OWN READBACK SHAPE. The two homes are read side by
+-- side by anyone comparing them, so the schema version, the top-level tenant and
+-- the two sealed policy fields are here under the names the module's read()
+-- uses, and the exists:false branch carries the same keys as the exists:true
+-- one minus the content. The scope and its label also stay nested under
+-- `inventory`, because that is the row this function actually read.
 create or replace function ops.j1_minimum_history(p_clock_scope_key text)
 returns jsonb language plpgsql stable security definer
 set search_path = pg_catalog, ops, public
@@ -517,10 +549,17 @@ as $$
 declare
   v_row record; v_previous text := null; v_ordinal integer := 0; v_history jsonb := '[]'::jsonb;
   v_last_at timestamptz := null; v_last_digest text := null;
+  v_inventory ops.j1_minimum_inventory%rowtype;
 begin
-  if not exists (select 1 from ops.j1_minimum_inventory where clock_scope_key = p_clock_scope_key) then
-    return jsonb_build_object('clock_scope_key', p_clock_scope_key, 'exists', false,
-      'record_layer_cannot_prove', ops.j1_minimum_record_layer_cannot_prove());
+  select * into v_inventory from ops.j1_minimum_inventory where clock_scope_key = p_clock_scope_key;
+  if not found then
+    return jsonb_build_object(
+      'schema_version', 'doctorcre-v5-journey-one-minimum-inventory-readback.v1',
+      'clock_scope_key', p_clock_scope_key,
+      'tenant', 'carr-internal',
+      'exists', false,
+      'record_layer_cannot_prove', ops.j1_minimum_record_layer_cannot_prove(),
+      'gate_admitted_by_record_layer', false);
   end if;
   for v_row in
     select a.* from ops.j1_minimum_admission a
@@ -546,10 +585,15 @@ begin
     -- this validates the whole sequence, because the induction is exactly what
     -- a row inserted by some other route would break. Serving an out-of-order
     -- inventory would hand the kernel an origin this rail never admitted first.
+    -- COLLATE "C" IS THE PARITY, NOT A PREFERENCE. The JavaScript home compares
+    -- these digests with UTF-16 code units; a database default collation is
+    -- locale-dependent, and two homes that agree by coincidence of locale are
+    -- two homes that can disagree after one initdb. Byte order is the rule on
+    -- both sides, so it is pinned here and in the guard rather than inherited.
     if v_last_at is not null
        and (v_row.admitted_at::timestamptz < v_last_at
             or (v_row.admitted_at::timestamptz = v_last_at
-                and v_row.receipt_digest <= v_last_digest)) then
+                and v_row.receipt_digest collate "C" <= v_last_digest)) then
       raise exception '[j1_minimum_first_origin_never_replaced] admission % does not sort after the one it follows; a stored inventory is in the kernel''s own (admitted_at, receipt_digest) selection order',
         v_ordinal;
     end if;
@@ -564,7 +608,14 @@ begin
     raise exception '[j1_minimum_content_rebuilds_to_its_digest] inventory % exists with no admissions', p_clock_scope_key;
   end if;
   return jsonb_build_object(
-    'clock_scope_key', p_clock_scope_key, 'exists', true,
+    'schema_version', 'doctorcre-v5-journey-one-minimum-inventory-readback.v1',
+    'clock_scope_key', p_clock_scope_key,
+    'tenant', v_inventory.tenant,
+    'exists', true,
+    'clock_scope_ref', v_inventory.clock_scope_ref,
+    'clock_scope', v_inventory.clock_scope,
+    'minimum_receipt_ttl_policy_ms', v_inventory.minimum_receipt_ttl_policy_ms,
+    'minimum_environment_manifest_digest', v_inventory.minimum_environment_manifest_digest,
     'inventory', ops.j1_minimum_inventory_row(p_clock_scope_key),
     'admission_count', v_ordinal,
     'head_admission_digest', v_previous,
@@ -697,6 +748,46 @@ begin
       ops.j1_clock_origin_gate_id();
   end if;
 
+  -- THE REMAINING FATAL-IN-KERNEL SHAPE FACTS, mirroring the module's clauses in
+  -- journeyOneMinimumAdmissionView. Each is fatal in the kernel rather than
+  -- skipped -- invalid_reference, invalid_identity, invalid_digest,
+  -- invalid_comparator -- so one admitted row would make every later evaluation
+  -- of this inventory throw, and an append-only inventory cannot shed it.
+  --
+  -- IT IS SHAPE, NOT ELIGIBILITY AND NOT SEAT AUTHORITY. No independence between
+  -- the seats is judged here and no authority class is derived: that belongs to
+  -- the join that PROPOSES a receipt, which is the only seat holding the live
+  -- identities, and it is disclosed in ops.j1_minimum_record_layer_cannot_prove().
+  -- The bounds are the KERNEL'S, counted the kernel's way: its ref() tests the
+  -- prefix and then the WHOLE string against [A-Za-z0-9:._/-]{3,300}, so the
+  -- five-character prefix leaves 295 and the eight-character one leaves 292.
+  if coalesce(new.receipt ->> 'evidence_ref', '') !~ '^safe:[A-Za-z0-9:._/-]{0,295}$' then
+    raise exception '[j1_minimum_receipt_readable_by_kernel] receipt.evidence_ref is a safe: reference the kernel can read';
+  end if;
+  if coalesce(new.receipt ->> 'fixture_set_digest', '') !~ '^sha256:[0-9a-f]{64}$' then
+    raise exception '[j1_minimum_receipt_readable_by_kernel] receipt.fixture_set_digest is a sha256 reference';
+  end if;
+  -- CODEPOINTS HERE, UTF-16 CODE UNITS IN THE MODULE, and the two differ only
+  -- for text above U+FFFF. The kernel counts the JavaScript way and is the
+  -- binding one; this is the coarser of the two bounds and is stated rather than
+  -- implied, because a second exact counter would be a second home for the rule.
+  if length(coalesce(new.receipt ->> 'comparator', '')) < 5
+     or length(new.receipt ->> 'comparator') > 300 then
+    raise exception '[j1_minimum_receipt_readable_by_kernel] receipt.comparator is between 5 and 300 characters';
+  end if;
+  foreach v_field in array array[
+    'evaluator_identity', 'producer_identity', 'subject_maker_identity'
+  ] loop
+    if jsonb_typeof(new.receipt -> v_field) <> 'object'
+       or (select count(*) from jsonb_object_keys(new.receipt -> v_field)) <> 3
+       or coalesce(new.receipt -> v_field ->> 'actor_id', '') = ''
+       or coalesce(new.receipt -> v_field ->> 'authority_class', '') = ''
+       or coalesce(new.receipt -> v_field ->> 'session_ref', '') !~ '^session:[A-Za-z0-9:._/-]{0,292}$' then
+      raise exception '[j1_minimum_receipt_readable_by_kernel] receipt.% is an authenticated-receipt-identity.v1 seat: exactly its three declared fields, each non-empty, with a session: reference',
+        v_field;
+    end if;
+  end loop;
+
   -- THE ACCEPTED SCOPE DECIDES, NOT THE RECEIPT. The three digests come from the
   -- scope this inventory was opened under and the environment from its sealed
   -- policy, so a receipt for another subject is refused rather than quietly
@@ -810,8 +901,11 @@ begin
     if new.recorded_at < v_head.recorded_at then
       raise exception '[j1_minimum_admission_instant_is_server_time] the server clock moved backwards between two admissions of one inventory';
     end if;
+    -- COLLATE "C": byte order, matching the JavaScript home's UTF-16 code-unit
+    -- comparison, rather than whatever collation this database happens to default
+    -- to. See the same pin in ops.j1_minimum_history.
     if v_admitted = v_head.admitted_at::timestamptz
-       and new.receipt_digest <= v_head.receipt_digest then
+       and new.receipt_digest collate "C" <= v_head.receipt_digest then
       raise exception '[j1_minimum_first_origin_never_replaced] this admission shares the head''s admission instant % and does not sort after it (head digest %, supplied %), so the kernel could prefer it to a row already stored in that group -- including the eligible row it has already selected as the origin. Within one admission instant the receipt digest strictly increases, because that is the order the kernel selects in',
         v_head.admitted_at, v_head.receipt_digest, new.receipt_digest;
     end if;

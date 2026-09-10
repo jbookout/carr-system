@@ -69,12 +69,21 @@
 --     STRICTLY GREATER than the first stored row, so a first-row comparison
 --     would have admitted it, and strictly less than the head, so the kernel
 --     could prefer it to a row already stored in that group. It is refused.
+--   * THE FATAL SHAPE FACTS A00's seam validator leaves open are refused: a
+--     wrong `safe:`/`session:` prefix, a malformed fixture-set digest, an
+--     out-of-bounds comparator, and an identity seat with a fourth key or an
+--     empty field. Each is a well-formed twenty-one-field receipt from the right
+--     producer that the kernel would refuse fatally.
 --   * NOTHING IS DISCARDED. A non-passing receipt is STORED and read back: the
 --     kernel calls it an ordinary fact of the ledger and this rail has no filter.
 --   * A readback whose rows are out of the selection order refuses rather than
 --     being served, so a row that reached the tables by another route cannot
 --     hand the kernel an origin this rail never admitted first.
---   * UPDATE and DELETE are refused everywhere (append-only).
+--   * UPDATE, DELETE and TRUNCATE are refused everywhere. The truncate half is
+--     the only thing that can show the statement-level trigger exists: a
+--     row-level trigger never sees TRUNCATE, and the `revoke` does not bind the
+--     table owner. The updated column is asserted to exist on both relations
+--     first, so the negative cannot fail at parse and prove nothing.
 --   * Direct INSERT is executable by none of the runtime role bundles, and the
 --     append function reaches the writer and authority bundles only.
 --   * Every function the module's postgres journal calls exists with the exact
@@ -266,7 +275,10 @@ begin
     v_receipt || jsonb_build_object('evidence_ref', 'safe:postgres-proof:minimum-evidence-two'),
     v_receipt || jsonb_build_object(
       'status', 'fail', 'evidence_ref', 'safe:postgres-proof:failed-attempt'));
-  select jsonb_agg(t.r order by ops.j1_minimum_receipt_digest(t.r))
+  -- COLLATE "C": byte order, the same rule the guard and the module compare
+  -- with. A locale-dependent sort here would build a fixture whose expectations
+  -- disagree with the invariant it is testing.
+  select jsonb_agg(t.r order by ops.j1_minimum_receipt_digest(t.r) collate "C")
     into v_sorted from jsonb_array_elements(v_candidates) as t(r);
   v_d1 := v_sorted -> 0; v_d2 := v_sorted -> 1; v_d3 := v_sorted -> 2;
 
@@ -435,6 +447,41 @@ begin
   exception when others then
     if sqlerrm not like '%j1_minimum_receipt_producer_bound%' then raise; end if;
   end;
+  -- THE FATAL SHAPE FACTS A00'S SEAM VALIDATOR LEAVES OPEN. Each of these is a
+  -- valid-shaped twenty-one-field receipt from the right producer that the
+  -- KERNEL refuses fatally, so one stored row would make every later evaluation
+  -- of this inventory throw and the inventory could not shed it.
+  foreach v_field in array array[
+    'evidence_ref', 'fixture_set_digest', 'comparator',
+    'identity_extra_key', 'identity_empty_actor', 'identity_bad_session_prefix'
+  ] loop
+    v_variant := case v_field
+      when 'evidence_ref' then v_receipt || jsonb_build_object(
+        'evidence_ref', 'notsafe:postgres-proof:wrong-prefix')
+      when 'fixture_set_digest' then v_receipt || jsonb_build_object(
+        'fixture_set_digest', 'not-a-digest', 'evidence_ref', 'safe:postgres-proof:bad-fixture')
+      when 'comparator' then v_receipt || jsonb_build_object(
+        'comparator', 'x', 'evidence_ref', 'safe:postgres-proof:short-comparator')
+      when 'identity_extra_key' then v_receipt || jsonb_build_object(
+        'producer_identity', (v_receipt -> 'producer_identity') || jsonb_build_object('display_name', 'x'),
+        'evidence_ref', 'safe:postgres-proof:seat-extra-key')
+      when 'identity_empty_actor' then v_receipt || jsonb_build_object(
+        'producer_identity', (v_receipt -> 'producer_identity') || jsonb_build_object('actor_id', ''),
+        'evidence_ref', 'safe:postgres-proof:seat-empty-actor')
+      else v_receipt || jsonb_build_object(
+        'producer_identity', (v_receipt -> 'producer_identity')
+          || jsonb_build_object('session_ref', 'notsession:postgres-proof'),
+        'evidence_ref', 'safe:postgres-proof:seat-bad-session')
+    end;
+    begin
+      perform ops.j1_minimum_append_admission(v_scope_key, v_tenant, v_key_x,
+        v_head, v_at, ops.j1_minimum_receipt_digest(v_variant), v_variant, v_provenance);
+      raise exception 'NEGATIVE FAILED: a receipt the kernel could not read was admitted (%)', v_field;
+    exception when others then
+      if sqlerrm not like '%j1_minimum_receipt_readable_by_kernel%' then raise; end if;
+    end;
+  end loop;
+
   -- THE ACCEPTED SCOPE DECIDES, NOT THE RECEIPT.
   begin
     v_variant := v_receipt || jsonb_build_object(
@@ -529,7 +576,7 @@ begin
      or (v_readback -> 'minimum_history' -> 2 -> 'receipt') is distinct from v_d3 then
     raise exception 'READBACK: the admitted artifacts did not come back unchanged in the kernel''s selection order';
   end if;
-  if (select bool_or(a.receipt_digest <= b.receipt_digest)
+  if (select bool_or(a.receipt_digest collate "C" <= b.receipt_digest)
         from ops.j1_minimum_admission a
         join ops.j1_minimum_admission b
           on b.inventory_id = a.inventory_id
@@ -571,7 +618,10 @@ begin
     v_receipt || jsonb_build_object(
       'subject_digest', v_scope_second ->> 'benchmark_subject_digest',
       'evidence_ref', 'safe:postgres-proof:order-c'));
-  select jsonb_agg(t.r order by ops.j1_minimum_receipt_digest(t.r))
+  -- COLLATE "C": byte order, the same rule the guard and the module compare
+  -- with. A locale-dependent sort here would build a fixture whose expectations
+  -- disagree with the invariant it is testing.
+  select jsonb_agg(t.r order by ops.j1_minimum_receipt_digest(t.r) collate "C")
     into v_sorted from jsonb_array_elements(v_candidates) as t(r);
   v_d1 := v_sorted -> 0; v_d2 := v_sorted -> 1; v_d3 := v_sorted -> 2;
 
@@ -582,8 +632,8 @@ begin
     v_d3, v_provenance);
   -- The discrimination, asserted rather than assumed: the challenger really is
   -- above the first stored row, so the retired comparison would have taken it.
-  if ops.j1_minimum_receipt_digest(v_d2) <= ops.j1_minimum_receipt_digest(v_d1)
-     or ops.j1_minimum_receipt_digest(v_d2) >= ops.j1_minimum_receipt_digest(v_d3) then
+  if ops.j1_minimum_receipt_digest(v_d2) collate "C" <= ops.j1_minimum_receipt_digest(v_d1)
+     or ops.j1_minimum_receipt_digest(v_d2) collate "C" >= ops.j1_minimum_receipt_digest(v_d3) then
     raise exception 'FIXTURE: the ordering candidates were not sorted, so this case discriminates nothing';
   end if;
   begin
@@ -596,9 +646,27 @@ begin
   end;
 
   -- --- APPEND-ONLY -----------------------------------------------------------
+  -- THE UPDATED COLUMN MUST EXIST ON BOTH RELATIONS, AND THAT IS ASSERTED FIRST.
+  -- An earlier revision of this fixture updated `tenant`, which ops.j1_minimum_
+  -- inventory has and ops.j1_minimum_admission does not -- its tenant is reached
+  -- through the inventory join. That statement fails at PARSE with 42703 before
+  -- the BEFORE UPDATE trigger can fire, the handler below sees a message with no
+  -- invariant id in it, re-raises, and the whole proof aborts having proved
+  -- nothing about append-only. A negative that cannot reach the thing it is
+  -- testing is worse than no negative, so the column is checked rather than
+  -- assumed. minimum_receipt_ttl_policy_ms is on both relations, and updating it
+  -- is also the exact retroactive policy revision the seal forbids.
   foreach v_relation in array array['j1_minimum_inventory', 'j1_minimum_admission'] loop
+    if not exists (select 1 from information_schema.columns
+                    where table_schema = 'ops' and table_name = v_relation
+                      and column_name = 'minimum_receipt_ttl_policy_ms') then
+      raise exception 'FIXTURE: ops.% has no minimum_receipt_ttl_policy_ms column, so this negative would fail at parse instead of reaching the append-only trigger',
+        v_relation;
+    end if;
     begin
-      execute format('update ops.%I set tenant = ''other'' where true', v_relation);
+      execute format(
+        'update ops.%I set minimum_receipt_ttl_policy_ms = minimum_receipt_ttl_policy_ms + 1 where true',
+        v_relation);
       raise exception 'NEGATIVE FAILED: update was accepted on ops.%', v_relation;
     exception when others then
       if sqlerrm not like '%j1_minimum_rows_are_append_only%' then raise; end if;
@@ -609,6 +677,23 @@ begin
     exception when others then
       if sqlerrm not like '%j1_minimum_rows_are_append_only%' then raise; end if;
     end;
+    -- TRUNCATE IS A STATEMENT EVENT AND A ROW-LEVEL TRIGGER NEVER SEES IT. The
+    -- claim "truncate is refused" was carried by `revoke` alone, which does not
+    -- bind the table owner; the second, statement-level trigger is what makes it
+    -- true, and this is the only thing that can show it.
+    begin
+      execute format('truncate ops.%I cascade', v_relation);
+      raise exception 'NEGATIVE FAILED: truncate was accepted on ops.%', v_relation;
+    exception when others then
+      if sqlerrm not like '%j1_minimum_rows_are_append_only%' then raise; end if;
+    end;
+    if not exists (select 1 from pg_trigger t join pg_class c on c.oid = t.tgrelid
+                    join pg_namespace n on n.oid = c.relnamespace
+                   where n.nspname = 'ops' and c.relname = v_relation
+                     and t.tgname = v_relation || '_no_truncate' and not t.tgisinternal) then
+      raise exception 'APPEND-ONLY: ops.% has no statement-level truncate trigger, so the claim rests on a revoke the owner is not bound by',
+        v_relation;
+    end if;
   end loop;
 
   -- --- GRANTS ----------------------------------------------------------------

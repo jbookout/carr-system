@@ -39,7 +39,8 @@ import {
   JOURNEY_ONE_MINIMUM_ACCEPTED_POLICY_FIELDS, JOURNEY_ONE_MINIMUM_ACCEPTED_SOURCE_FIELDS,
   JOURNEY_ONE_MINIMUM_ADMISSION_FIELDS, JOURNEY_ONE_MINIMUM_ADMISSION_INVARIANT_IDS,
   JOURNEY_ONE_MINIMUM_COMPOSE_FIELDS, JOURNEY_ONE_MINIMUM_INPUT_AUTHORITY_REQUIREMENT,
-  JOURNEY_ONE_MINIMUM_INPUT_STORE_CANNOT_PROVE, JOURNEY_ONE_MINIMUM_PROJECTION_INPUTS_SCHEMA,
+  JOURNEY_ONE_MINIMUM_INPUT_STORE_CANNOT_PROVE, JOURNEY_ONE_MINIMUM_INVENTORY_READBACK_SCHEMA,
+  JOURNEY_ONE_MINIMUM_PROJECTION_INPUTS_SCHEMA, JOURNEY_ONE_MINIMUM_RECEIPT_IDENTITY_SEATS,
   createEphemeralJourneyOneMinimumAdmissionJournal, createJourneyOneClockMinimumInputStore,
   createJourneyOneClockProjectionComposer, createPostgresJourneyOneMinimumAdmissionJournal,
   journeyOneClockMinimumInputStoreIntegrationRequirements, journeyOneClockMinimumInputStoreTools,
@@ -589,6 +590,71 @@ test("a receipt from another producer, gate, role, oracle or scope is refused", 
   assert.equal((await store.read()).exists, false);
 });
 
+test("a receipt the kernel could not READ is refused at admission, not stored", async () => {
+  // Each of these is a well-formed twenty-one-field receipt from the right
+  // producer that journeyOneClockMinimumReceiptView admits -- it checks
+  // JSON-safety, the closed keys and M01's two value domains, and not these --
+  // and that the kernel refuses FATALLY. One stored row would make every later
+  // evaluation of the inventory throw, and an append-only inventory cannot shed
+  // it, so the refusal has to happen here or not at all.
+  const { store } = newStore();
+  const seat = { ...I("producer") };
+  for (const [code, mutation] of [
+    ["minimum_receipt_invalid_reference", { evidence_ref: "notsafe:synthetic:wrong-prefix" }],
+    ["minimum_receipt_invalid_digest", { fixture_set_digest: "not-a-digest" }],
+    ["minimum_receipt_invalid_comparator", { comparator: "x" }],
+    ["minimum_receipt_invalid_comparator", { comparator: "c".repeat(301) }],
+    // A fourth key that is NOT an authority fragment, so this case reaches the
+    // seat-shape clause rather than assertNoSelfAssertedAuthority.
+    ["minimum_receipt_invalid_identity", { producer_identity: { ...seat, display_name: "x" } }],
+    ["minimum_receipt_invalid_identity", { producer_identity: { ...seat, actor_id: "" } }],
+    ["minimum_receipt_invalid_identity", { producer_identity: { ...seat, authority_class: "" } }],
+    ["minimum_receipt_invalid_identity",
+      { producer_identity: { ...seat, session_ref: "notsession:synthetic" } }],
+    ["minimum_receipt_invalid_identity",
+      { evaluator_identity: { actor_id: "e", session_ref: "session:e" } }],
+  ]) {
+    const error = await refusal(admit(store, { ...minimum(), ...mutation }, null));
+    assert.equal(error.code, code, JSON.stringify(mutation));
+    assert.equal(error.detail.invariant, "j1_minimum_receipt_readable_by_kernel");
+  }
+  assert.equal((await store.read()).exists, false);
+
+  // AND THE KERNEL REALLY DOES REFUSE THEM FATALLY, proved rather than asserted:
+  // an inventory carrying one is not skipped over, it is unreadable.
+  const clean = newStore();
+  await admit(clean.store, minimum(), null);
+  const composer = createJourneyOneClockProjectionComposer({
+    store: clean.store, accepted_sources: SOURCES });
+  const poisoned = copy((await composer.compose({ as_of: ORIGIN, completion: null,
+    completion_expectation: copy(EXPECTATION), pauses: [], amendments: [],
+    history: null })).projection);
+  poisoned.minimum_history.push({ admitted_at: ORIGIN,
+    receipt: { ...minimum(ORIGIN, "safe:synthetic:poison"), comparator: "x" } });
+  assert.throws(() => harness().evaluate(poisoned),
+    thrown => thrown.name === "JourneyOneClockError" && thrown.code === "invalid_comparator");
+});
+
+test("seat INDEPENDENCE is not re-judged here, and the rail says so rather than implying it", async () => {
+  // Shape is checked; the relationship between seats is not. It is fatal in the
+  // kernel like the rest, so it is disclosed instead of silently absent.
+  const { store } = newStore();
+  const selfAttested = { ...minimum(), producer_identity: copy(I("maker")) };
+  const row = await admit(store, selfAttested, null);
+  assert.equal(row.admission_ordinal, 0);
+  const disclosure = JOURNEY_ONE_MINIMUM_INPUT_STORE_CANNOT_PROVE.find(
+    line => line.includes("INDEPENDENT"));
+  assert.ok(disclosure, "seat independence is not disclosed");
+  assert.ok(disclosure.includes("self_attestation"));
+  // And the kernel is what refuses it, by that name, over this stored row.
+  const composer = createJourneyOneClockProjectionComposer({ store, accepted_sources: SOURCES });
+  const projection = (await composer.compose({ as_of: ORIGIN, completion: null,
+    completion_expectation: copy(EXPECTATION), pauses: [], amendments: [],
+    history: null })).projection;
+  assert.throws(() => harness().evaluate(projection),
+    thrown => thrown.name === "JourneyOneClockError" && thrown.code === "self_attestation");
+});
+
 test("a caller-asserted authority claim beside a legitimate write is refused by name", async () => {
   const { store } = newStore();
   const error = await refusal(store.admit({ receipt: minimum(),
@@ -848,6 +914,95 @@ test("the postgres journal is constructible and issues no query until it is used
   assert.equal(queried, 0);
 });
 
+/**
+ * A scripted connection handle for the durable journal. It answers each
+ * statement the journal issues and records whether the append was reached, so a
+ * test can prove a refusal happened BEFORE any row was written.
+ */
+function scriptedQuery(txids) {
+  let reads = 0;
+  const seen = { appended: 0, opened: 0 };
+  const query = async (sql) => {
+    if (sql.includes("txid_current")) return { rows: [{ txid: txids[reads++] ?? txids[0] }] };
+    if (sql.includes("j1_minimum_admission_instant")) return { rows: [{ at: ORIGIN }] };
+    if (sql.includes("j1_minimum_inventory_row")) return { rows: [{ inventory: null }] };
+    if (sql.includes("j1_minimum_head")) return { rows: [{ head: null }] };
+    if (sql.includes("j1_minimum_admissions")) return { rows: [{ admissions: [] }] };
+    if (sql.includes("j1_minimum_admission_by_idempotency_key")) return { rows: [{ admission: null }] };
+    if (sql.includes("j1_minimum_open_inventory")) {
+      seen.opened += 1;
+      return { rows: [{ inventory: { clock_scope_key: journeyOneClockScopeKey(SCOPE),
+        clock_scope_ref: SCOPE.scope_ref, tenant: ORGANIZATION_TENANT_ID } }] };
+    }
+    if (sql.includes("j1_minimum_append_admission")) {
+      seen.appended += 1;
+      return { rows: [{ admission: { admission_ordinal: 0, replayed: false } }] };
+    }
+    return { rows: [{}] };
+  };
+  return { query, seen };
+}
+
+test("the durable journal refuses when its statements are not in one transaction", async () => {
+  // pg_advisory_xact_lock releases at statement end under autocommit, and the
+  // "one reading, not two" argument for the admission instant is exactly the
+  // stability of now() within a transaction. txid_current() returns a different
+  // id per statement when there is no explicit transaction.
+  const split = scriptedQuery(["771", "772"]);
+  const splitStore = createJourneyOneClockMinimumInputStore({
+    journal: createPostgresJourneyOneMinimumAdmissionJournal({ query: split.query }),
+    actor: ACTOR, clock_scope: SCOPE, accepted_minimum_policy: POLICY });
+  const error = await refusal(admit(splitStore, minimum(), null));
+  assert.equal(error.code, "minimum_admission_transaction_not_shared");
+  assert.equal(error.detail.invariant, "j1_minimum_admission_instant_is_server_time");
+  // NOTHING WAS WRITTEN. The check runs before the append, not after it.
+  assert.equal(split.seen.appended, 0);
+
+  // One transaction, one id: the same path proceeds to the append.
+  const shared = scriptedQuery(["771", "771"]);
+  const sharedStore = createJourneyOneClockMinimumInputStore({
+    journal: createPostgresJourneyOneMinimumAdmissionJournal({ query: shared.query }),
+    actor: ACTOR, clock_scope: SCOPE, accepted_minimum_policy: POLICY });
+  await admit(sharedStore, minimum(), null);
+  assert.equal(shared.seen.appended, 1);
+});
+
+test("the store refuses a relabelled scope before the journal's own seal can", async () => {
+  // Both journals seal the label in openInventory, but on the durable path that
+  // refusal lives in SQL that has never run, so the store would pass its whole
+  // read and compare-and-swap before meeting it.
+  const { store } = newStore();
+  const opening = await admit(store, minimum(), null);
+  const head = copy(opening); delete head.replayed;
+  const calls = { opened: 0 };
+  const relabelledInventory = {
+    clock_scope_key: journeyOneClockScopeKey(SCOPE),
+    clock_scope_ref: "safe:clock-scope:a-name-this-inventory-was-not-opened-under",
+    scope: copy(SCOPE), tenant: ORGANIZATION_TENANT_ID,
+    minimum_receipt_ttl_policy_ms: MINIMUM_TTL_POLICY,
+    minimum_environment_manifest_digest: D(4), opened_at: ORIGIN,
+  };
+  const journal = {
+    durable: true, kind: "build-only",
+    async runAppend(scopeKey, { build }) {
+      return build({ inventory: relabelledInventory, head, admissions: [head],
+        replay: null, admitted_at: iso(ORIGIN_MS + HOUR) });
+    },
+    async readInventory() { return relabelledInventory; },
+    async readAdmissions() { return [head]; },
+    async openInventory() { calls.opened += 1; return relabelledInventory; },
+  };
+  const relabelled = createJourneyOneClockMinimumInputStore({ journal, actor: ACTOR,
+    clock_scope: SCOPE, accepted_minimum_policy: POLICY });
+  const error = await refusal(relabelled.admit({
+    receipt: minimum(ORIGIN, "safe:synthetic:after-rename"),
+    expected_prior_admission_digest: head.admission_digest, idempotency_key: key(),
+    claimed_receipt_digest: null, source_ref: SOURCE }));
+  assert.equal(error.code, "minimum_scope_label_changed");
+  assert.equal(error.detail.invariant, "j1_minimum_scope_label_is_not_identity");
+  assert.equal(calls.opened, 0);
+});
+
 // --- 12. one rule set, two homes ---------------------------------------------------
 
 test("every shared admission invariant id appears verbatim in the candidate SQL", () => {
@@ -869,6 +1024,52 @@ test("the candidate SQL is fresh-or-exactly-compatible and stores no minted bind
   assert.ok(CANDIDATE_SQL.includes("ops.j1_clock_scope_digest"));
   assert.equal(/create\s+or\s+replace\s+function\s+ops\.j1_minimum_scope_digest/i
     .test(CANDIDATE_SQL), false);
+});
+
+test("truncate is refused by a trigger and not only by a revoke", () => {
+  // A row-level trigger never sees TRUNCATE -- it is a statement event -- and
+  // `revoke ... truncate` does not bind the table owner. The invariant text
+  // claims truncate is refused, so the statement-level trigger has to exist.
+  assert.match(CANDIDATE_SQL,
+    /create trigger %I before truncate on ops\.%I for each statement execute function ops\.j1_minimum_rows_immutable\(\)/);
+  assert.ok(CANDIDATE_SQL.includes("_no_truncate"));
+  assert.ok(PROOF_SQL.includes("truncate ops.%I cascade"));
+  assert.ok(PROOF_SQL.includes("_no_truncate"));
+});
+
+test("the append-only negative in the fixture updates a column both relations have", () => {
+  // REGRESSION for a fixture defect that no check could see: the loop updated
+  // `tenant`, which ops.j1_minimum_admission does not have, so the statement
+  // failed at parse with 42703 before the trigger could fire and the whole proof
+  // aborted having proved nothing about append-only.
+  assert.equal(/update ops\.%I set tenant/.test(PROOF_SQL), false);
+  assert.ok(PROOF_SQL.includes("set minimum_receipt_ttl_policy_ms = minimum_receipt_ttl_policy_ms + 1"));
+  assert.ok(PROOF_SQL.includes("information_schema.columns"),
+    "the fixture must assert the updated column exists on both relations");
+  for (const relation of ["j1_minimum_inventory", "j1_minimum_admission"]) {
+    assert.ok(new RegExp(`create table if not exists ops\\.${relation}\\b`).test(CANDIDATE_SQL));
+  }
+  // Both relations really do carry it, read off their own DDL.
+  const admission = CANDIDATE_SQL.slice(
+    CANDIDATE_SQL.indexOf("create table if not exists ops.j1_minimum_admission"));
+  assert.ok(admission.slice(0, admission.indexOf(");")).includes("minimum_receipt_ttl_policy_ms"));
+  assert.equal(admission.slice(0, admission.indexOf(");")).includes("\n  tenant "), false,
+    "ops.j1_minimum_admission has no tenant column; its tenant is reached through the inventory");
+});
+
+test("digest ordering is pinned to byte order in both SQL homes", () => {
+  // The JavaScript home compares with UTF-16 code units. A database default
+  // collation is locale-dependent, so two homes that agree by coincidence of
+  // locale are two homes that can disagree after one initdb.
+  const ordering = CANDIDATE_SQL.match(/receipt_digest collate "C"/g) ?? [];
+  assert.ok(ordering.length >= 2,
+    `both the guard and the readback pin COLLATE "C"; found ${ordering.length}`);
+  assert.ok(PROOF_SQL.includes('collate "C"'));
+});
+
+test("the SQL readback answers in the module's own readback schema", () => {
+  assert.ok(CANDIDATE_SQL.includes(JOURNEY_ONE_MINIMUM_INVENTORY_READBACK_SCHEMA),
+    "ops.j1_minimum_history must name the schema version the module's read() returns");
 });
 
 test("the postgres proof names every function the durable journal calls", () => {
@@ -894,7 +1095,7 @@ test("the postgres proof names every function the durable journal calls", () => 
 test("the declared field sets are closed, C-sorted and match what the rail computes", () => {
   for (const fields of [JOURNEY_ONE_MINIMUM_ADMISSION_FIELDS,
     JOURNEY_ONE_MINIMUM_ACCEPTED_POLICY_FIELDS, JOURNEY_ONE_MINIMUM_ACCEPTED_SOURCE_FIELDS,
-    JOURNEY_ONE_MINIMUM_COMPOSE_FIELDS]) {
+    JOURNEY_ONE_MINIMUM_COMPOSE_FIELDS, JOURNEY_ONE_MINIMUM_RECEIPT_IDENTITY_SEATS]) {
     assert.deepEqual([...fields], [...fields].sort());
   }
   // The chain preimage is closed: a missing or extra field refuses rather than

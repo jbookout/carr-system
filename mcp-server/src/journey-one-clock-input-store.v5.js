@@ -55,22 +55,31 @@
 // EVERY later evaluation of the inventory refuse, and an append-only inventory
 // "is authoritative and cannot shed it".
 //
-//   * FATAL-class facts are refused HERE, at write time, by name: a receipt
-//     from another producer step, gate, role or oracle; a receipt whose
-//     subject/candidate/policy digests are not the accepted scope's; a receipt
-//     whose environment manifest digest is not the sealed accepted one; a window
-//     longer than the sealed accepted TTL policy; an observation instant AFTER
-//     the server admission instant.
+//   * FATAL-class facts are refused HERE, at write time, by name. The
+//     enumeration is exact rather than illustrative: a receipt from another
+//     producer step, gate, role, oracle, oracle version, evidence scope or
+//     subject environment; a receipt whose subject/candidate/policy digests are
+//     not the accepted scope's; a receipt whose environment manifest digest is
+//     not the sealed accepted one; a window inverted or longer than the sealed
+//     accepted TTL policy; an observation instant AFTER the server admission
+//     instant; and the SHAPE facts A00's seam validator leaves open — the
+//     `safe:` and `session:` prefixes, the three-field identity seats, the
+//     fixture-set digest format and the comparator bounds.
 //   * INADMISSIBLE-class facts are STORED. A failed attempt and a receipt whose
 //     window later lapses are both real history. This rail has no filter and no
 //     discard path: nothing is dropped, and the kernel decides what may be an
 //     origin.
 //
-// WHAT IT DELIBERATELY DOES NOT RE-JUDGE. The independence of the three seats
-// inside a receipt is enforced where the receipt is PROPOSED — benchmark-minimum
-// .v5.js's join — and refused by name by the kernel. This rail owns no second
-// copy of it; see JOURNEY_ONE_MINIMUM_INPUT_STORE_CANNOT_PROVE, which names the
-// consequence rather than implying the check.
+// WHAT IT DELIBERATELY DOES NOT RE-JUDGE, AND THIS IS NOW THE WHOLE OF IT. The
+// INDEPENDENCE of the three seats inside a receipt — that the subject's maker
+// shares neither actor nor session with the producer or the evaluator — is
+// enforced where the receipt is PROPOSED, in benchmark-minimum.v5.js's join, and
+// refused by name by the kernel as `self_attestation`. This rail checks the
+// seats' SHAPE and never their relationship to one another: an independence rule
+// here would be a second home for seat authority, and the one that matters is
+// the join's, which is also the only one holding the live identities. It is
+// fatal-and-unshedable like the rest, so it is disclosed rather than implied —
+// see JOURNEY_ONE_MINIMUM_INPUT_STORE_CANNOT_PROVE, which names the consequence.
 //
 // ---------------------------------------------------------------------------
 // REUSED READ-ONLY, NEVER RESTATED:
@@ -111,9 +120,9 @@ import { ORGANIZATION_TENANT_ID } from "./identity.js";
 import { V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 import { assertNoSelfAssertedAuthority } from "./benchmark-acceptance-store.v5.js";
 import {
-  CONSUMER_GATE_RECEIPT_SCHEMA, MINIMUM_EVIDENCE_SCOPE, MINIMUM_GATE_ID, MINIMUM_ORACLE_REF,
-  MINIMUM_ORACLE_VERSION, MINIMUM_PRODUCER_ROLE, MINIMUM_STEP_REF, MINIMUM_SUBJECT_ENVIRONMENT,
-  journeyOneClockMinimumReceiptView,
+  AUTHENTICATED_RECEIPT_IDENTITY_SCHEMA, CONSUMER_GATE_RECEIPT_SCHEMA, MINIMUM_EVIDENCE_SCOPE,
+  MINIMUM_GATE_ID, MINIMUM_ORACLE_REF, MINIMUM_ORACLE_VERSION, MINIMUM_PRODUCER_ROLE,
+  MINIMUM_STEP_REF, MINIMUM_SUBJECT_ENVIRONMENT, journeyOneClockMinimumReceiptView,
 } from "./benchmark-minimum.v5.js";
 import {
   JOURNEY_ONE_CLOCK_PROJECTION, JOURNEY_ONE_DEADLINE_CONTRACT, readJourneyOneClockHistory,
@@ -180,6 +189,23 @@ export const JOURNEY_ONE_MINIMUM_ACCEPTED_SOURCE_FIELDS = Object.freeze([
   "maximum_completion_receipt_ttl_ms", "production_environment_manifest_digest",
 ]);
 
+/**
+ * The three seats on a consumer-gate-receipt.v1, and the closed field set of
+ * each one, C-sorted.
+ *
+ * DECLARED HERE ONLY BECAUSE NOBODY EXPORTS THEM. benchmark-minimum.v5.js keeps
+ * its IDENTITY_FIELDS module-private and the kernel keeps its IDENTITY private,
+ * so this is the r7 authenticated-receipt-identity.v1 required set restated
+ * beside the schema ref it belongs to rather than a rule invented here. It is
+ * used for SHAPE only: nothing below reads an authority_class, derives one, or
+ * compares two seats.
+ */
+export const JOURNEY_ONE_MINIMUM_RECEIPT_IDENTITY_SEATS = Object.freeze([
+  "evaluator_identity", "producer_identity", "subject_maker_identity",
+]);
+const RECEIPT_IDENTITY_SEATS = JOURNEY_ONE_MINIMUM_RECEIPT_IDENTITY_SEATS;
+const RECEIPT_IDENTITY_FIELDS = Object.freeze(["actor_id", "authority_class", "session_ref"]);
+
 /** The per-evaluation facts a composer is handed, whose homes are elsewhere. */
 export const JOURNEY_ONE_MINIMUM_COMPOSE_FIELDS = Object.freeze([
   "amendments", "as_of", "completion", "completion_expectation", "history", "pauses",
@@ -212,6 +238,8 @@ export const JOURNEY_ONE_MINIMUM_ADMISSION_INVARIANTS = Object.freeze([
     statement: "An admission is stored under the tenant its inventory was opened with, and a read for another tenant refuses rather than serving it." }),
   Object.freeze({ id: "j1_minimum_receipt_producer_bound", enforced_in: BOTH,
     statement: "An admitted row is a consumer-gate-receipt.v1 for gate foundation-assurance-minimum-accepted from step:foundation-assurance-minimum-receipt, with that step's declared role, oracle, oracle version, evidence scope and subject environment. Any other producer is refused rather than stored: the kernel refuses it fatally, and an append-only inventory cannot shed such a row." }),
+  Object.freeze({ id: "j1_minimum_receipt_readable_by_kernel", enforced_in: BOTH,
+    statement: "An admitted row is one the kernel can still READ: safe:/session: prefixes, the three-field identity seats, a sha256 fixture-set digest and a 5-to-300 comparator. Each is fatal in the kernel rather than skipped, so one admitted row would make every later evaluation of this inventory throw and an append-only inventory could not shed it. It is SHAPE only -- no seat independence is judged and no authority class is derived, because those belong to the join that proposes a receipt and to the kernel." }),
   Object.freeze({ id: "j1_minimum_receipt_binds_accepted_scope", enforced_in: BOTH,
     statement: "The receipt's subject, candidate and policy digests are the accepted scope's and its environment manifest digest is the sealed accepted one. They are read from those accepted source bindings and never from the receipt being judged." }),
   Object.freeze({ id: "j1_minimum_receipt_window_within_accepted_policy", enforced_in: BOTH,
@@ -236,7 +264,7 @@ export const JOURNEY_ONE_MINIMUM_ADMISSION_INVARIANTS = Object.freeze([
   // module has no update or delete path to refuse, and the durable journal
   // issues no DML at all.
   Object.freeze({ id: "j1_minimum_rows_are_append_only", enforced_in: Object.freeze(["record_layer"]),
-    statement: "Update, delete and truncate are refused on every relation of this rail. Enforced only at the database: this module has no mutation path to refuse." }),
+    statement: "Update, delete and truncate are refused on every relation of this rail, by TWO triggers per relation: a row-level one for update and delete, and a statement-level one for truncate, which a row-level trigger never sees and which cannot be revoked from the table owner. Enforced only at the database: this module has no mutation path to refuse." }),
 ]);
 
 export const JOURNEY_ONE_MINIMUM_ADMISSION_INVARIANT_IDS = Object.freeze(
@@ -248,7 +276,7 @@ export const JOURNEY_ONE_MINIMUM_ADMISSION_INVARIANT_IDS = Object.freeze(
  */
 export const JOURNEY_ONE_MINIMUM_INPUT_STORE_CANNOT_PROVE = Object.freeze([
   "that an admitted artifact is a receipt a real independent foundation-assurance-minimum oracle issued. No issuance adapter exists: benchmark-minimum.v5.js PROPOSES a receipt and marks it proposed_not_issued, and a trusted writer's composed object is indistinguishable here from a genuine one",
-  "that the three seats inside an admitted receipt are independent of one another and of the subject's maker. A00's join enforces that where the receipt is proposed and the kernel refuses a collision by name; this rail owns no second copy, and a row failing it would make every later evaluation of this inventory refuse",
+  "that the three seats inside an admitted receipt are INDEPENDENT of one another and of the subject's maker. Their shape is checked here; their relationship is not. A00's join enforces independence where the receipt is proposed and the kernel refuses a collision by name as self_attestation; an independence rule here would be a second home for seat authority, held by the seat with no live identities to check it against. A row failing it is fatal and unshedable, exactly like the shape facts this rail does refuse",
   "that the identities inside a receipt are live authenticated seats rather than strings, or that its authority classes were derived from the live actor",
   "that the Gate Zero outcome and the benchmark coverage fact the join consumed were bound to this receipt. consumer-gate-receipt.v1 has no field for either and this rail stores neither; that binding is an open blocker, not a stored fact",
   "that the accepted scope and the accepted minimum policy an inventory was opened under are the ones a verifier accepted for any projection. Both are trusted construction-time bindings: they are compared and sealed, never verified",
@@ -452,6 +480,49 @@ export function journeyOneMinimumAdmissionView({ receipt, scope, policy }) {
         expected: policy.minimum_environment_manifest_digest,
         supplied: view.environment_manifest_digest });
   }
+  // THE REMAINING FATAL-IN-KERNEL SHAPE FACTS. journeyOneClockMinimumReceiptView
+  // validates JSON-safety, the closed twenty-one keys and M01's two narrower
+  // value DOMAINS -- it does not check the `safe:`/`session:` PREFIXES, the
+  // identity sub-object shape, the fixture digest format or the comparator
+  // bounds. Each of those is fatal in the kernel (invalid_reference,
+  // invalid_identity, invalid_digest, invalid_comparator), so one admitted row
+  // would make every later evaluation of this inventory throw, and an
+  // append-only inventory cannot shed it. They are SHAPE, not eligibility and
+  // not seat authority: no independence is judged here and no authority class is
+  // derived. Seat independence stays with A00's join and the kernel, disclosed
+  // in JOURNEY_ONE_MINIMUM_INPUT_STORE_CANNOT_PROVE rather than re-implemented.
+  if (!view.evidence_ref.startsWith("safe:")) {
+    refuse("minimum_receipt_invalid_reference",
+      "receipt.evidence_ref is a safe: reference; the kernel refuses another prefix fatally",
+      { invariant: "j1_minimum_receipt_readable_by_kernel", path: "receipt.evidence_ref",
+        kernel_refusal: "invalid_reference", supplied: view.evidence_ref });
+  }
+  for (const seat of RECEIPT_IDENTITY_SEATS) {
+    const identity = view[seat];
+    if (!isPlainObject(identity) ||
+        Object.keys(identity).length !== RECEIPT_IDENTITY_FIELDS.length ||
+        RECEIPT_IDENTITY_FIELDS.some(field => typeof identity[field] !== "string" || identity[field] === "") ||
+        !identity.session_ref.startsWith("session:")) {
+      refuse("minimum_receipt_invalid_identity",
+        `receipt.${seat} is an ${AUTHENTICATED_RECEIPT_IDENTITY_SCHEMA} seat: exactly its three declared fields, each a non-empty string, with a session: reference`,
+        { invariant: "j1_minimum_receipt_readable_by_kernel", path: `receipt.${seat}`,
+          kernel_refusal: "invalid_identity", expected: [...RECEIPT_IDENTITY_FIELDS] });
+    }
+  }
+  if (typeof view.fixture_set_digest !== "string" || !SHA256_REF.test(view.fixture_set_digest)) {
+    refuse("minimum_receipt_invalid_digest",
+      "receipt.fixture_set_digest is a sha256 reference; the kernel refuses another shape fatally",
+      { invariant: "j1_minimum_receipt_readable_by_kernel", path: "receipt.fixture_set_digest",
+        kernel_refusal: "invalid_digest", supplied: view.fixture_set_digest });
+  }
+  if (typeof view.comparator !== "string" ||
+      view.comparator.length < 5 || view.comparator.length > 300) {
+    refuse("minimum_receipt_invalid_comparator",
+      "receipt.comparator is between 5 and 300 UTF-16 code units, which is the bound the kernel refuses on",
+      { invariant: "j1_minimum_receipt_readable_by_kernel", path: "receipt.comparator",
+        kernel_refusal: "invalid_comparator",
+        length: typeof view.comparator === "string" ? view.comparator.length : null });
+  }
   const observed = instant(view.observed_at), expires = instant(view.ttl_expires_at);
   if (expires <= observed) {
     refuse("minimum_receipt_window_invalid",
@@ -584,7 +655,11 @@ export function createEphemeralJourneyOneMinimumAdmissionJournal({ now = Date.no
  * function refuses a supplied one that differs.
  *
  * `query` is the repository's ordinary handle contract: query(text, params) ->
- * { rows }, inside the caller's transaction.
+ * { rows }, inside the caller's transaction — and "inside" is ASSERTED rather
+ * than documented: txid_current() is read after the lock and again before the
+ * append, and a change means the statements are not sharing a transaction, so
+ * the advisory lock has already been released and the admission instant is no
+ * longer one reading. It refuses there, with nothing written.
  *
  * NEVER EXECUTED HERE. The candidate SQL has not been applied.
  */
@@ -599,6 +674,16 @@ export function createPostgresJourneyOneMinimumAdmissionJournal({ query } = {}) 
     kind: "postgres-minimum-admission-journal",
     async runAppend(scopeKey, { idempotencyKey, build }) {
       await query("select ops.j1_minimum_lock($1::text)", [scopeKey]);
+      // ONE TRANSACTION, ASSERTED RATHER THAN DOCUMENTED. Two of this journal's
+      // guarantees rest on the statements below sharing a transaction:
+      // pg_advisory_xact_lock releases at statement end otherwise, and the
+      // "one reading, not two" argument for the admission instant is exactly the
+      // stability of now() within a transaction. txid_current() assigns and
+      // returns the transaction's own id, so under autocommit these two readings
+      // differ. It is compared BEFORE the append, so a caller who forgot the
+      // transaction meets a named refusal instead of a row written under a lock
+      // that was already gone.
+      const txid = (await one("select txid_current()::text as txid"))?.txid ?? null;
       const admitted_at = (await one("select ops.j1_minimum_admission_instant() as at"))?.at ?? null;
       const inventory = (await one("select ops.j1_minimum_inventory_row($1::text) as inventory",
         [scopeKey]))?.inventory ?? null;
@@ -611,6 +696,13 @@ export function createPostgresJourneyOneMinimumAdmissionJournal({ query } = {}) 
       // A REPLAY IS NOT A SECOND WRITE. build() has already refused a key whose
       // payload changed, so a null candidate means it matched.
       if (candidate === null) return { ...replay, replayed: true };
+      const stillTxid = (await one("select txid_current()::text as txid"))?.txid ?? null;
+      if (stillTxid === null || stillTxid !== txid) {
+        refuse("minimum_admission_transaction_not_shared",
+          "the statements of this append are not in one transaction, so the advisory lock taken on this inventory has already been released and the admission instant is no longer one reading. Nothing is written",
+          { invariant: "j1_minimum_admission_instant_is_server_time",
+            clock_scope_key: scopeKey, at_lock: txid, before_append: stillTxid });
+      }
       const result = (await one(
         `select ops.j1_minimum_append_admission(
            $1::text,$2::text,$3::uuid,$4::text,$5::text,$6::text,$7::jsonb,$8::jsonb) as admission`,
@@ -877,6 +969,20 @@ export function createJourneyOneClockMinimumInputStore({
                   { invariant: "j1_minimum_inventory_policy_sealed", field,
                     recorded: inventory[field], supplied: value });
               }
+            }
+            // THE LABEL SEAL, HERE AS WELL AS IN THE JOURNAL. Both journals
+            // refuse a relabelled scope in openInventory, but on the durable
+            // path that refusal lives in SQL that has never run, so the store
+            // would pass its whole read and CAS before meeting it. The label is
+            // not identity — the key ignores it, which is what makes a relabelled
+            // scope the SAME scope — and precisely because it is not identity the
+            // record must not end up holding two names for one scope.
+            if (inventory.clock_scope_ref !== undefined &&
+                inventory.clock_scope_ref !== scope.clock_scope_ref) {
+              refuse("minimum_scope_label_changed",
+                "this authoritative scope's inventory was opened under another label; the label is provenance, is recorded once, and is never rewritten by a later write",
+                { invariant: "j1_minimum_scope_label_is_not_identity",
+                  recorded: inventory.clock_scope_ref, supplied: scope.clock_scope_ref });
             }
           }
           // THE COMPARE-AND-SWAP. An explicit null opens the inventory and
@@ -1271,7 +1377,9 @@ export function journeyOneClockMinimumInputStoreIntegrationRequirements() {
       "Admissions are hash-chained: each link hashes the previous link, the sealed accepted policy and environment, the scope key and the receipt digest, so a row cannot be removed, reordered or re-dated without every later link failing to rebuild.",
       "The ledger is stored in the kernel's own (admitted_at, receipt_digest) selection order and an append only ever extends it, so a later row cannot be preferred to one the kernel already selected as the origin. This rail computes no eligibility: the kernel skips inadmissible attempts, and storing in its selection order is what makes the guarantee hold across whatever it skipped. The order is enforced on write against the head and re-validated across the whole sequence on read.",
       "A receipt's identity is digest(journeyOneClockMinimumReceiptView(receipt)), which is by A00's own contract the exact origin_receipt_digest the kernel records. This file owns no second receipt validator and no second hash.",
-      "Fatal-in-kernel facts are refused at admission; inadmissible-but-ordinary ones are stored. A non-passing attempt and a receipt whose window later lapses are real history and this rail has no discard path.",
+      "Fatal-in-kernel facts are refused at admission; inadmissible-but-ordinary ones are stored. A non-passing attempt and a receipt whose window later lapses are real history and this rail has no discard path. The refused set includes the shape facts A00's seam validator leaves open -- the safe:/session: prefixes, the identity seats, the fixture digest and the comparator bounds -- because each is fatal rather than skipped. Seat INDEPENDENCE is the one fatal fact deliberately left to the join that proposes a receipt, and it is disclosed rather than implied.",
+      "The durable journal asserts that its statements share one transaction, reading txid_current() after the lock and again before the append: under autocommit the advisory lock is already released and the admission instant is no longer one reading, so it refuses with nothing written.",
+      "Update, delete and truncate are refused by TWO triggers per relation. A row-level trigger never sees TRUNCATE, and TRUNCATE cannot be revoked from the table owner, so the statement-level trigger is what makes the claim true rather than the grant.",
       "The scope derivation is the clock rail's own journeyOneClockScopeBinding: one domain tag, one preimage, and the human label is provenance rather than identity.",
       "ops/journey-one-clock-input-store.candidate.sql is candidate source: it has not been applied as a numbered migration and has never been executed. It depends on ops.j1_clock_scope_digest from the clock rail's candidate SQL rather than deriving a second scope key.",
     ],
