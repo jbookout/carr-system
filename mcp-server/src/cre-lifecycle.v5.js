@@ -84,10 +84,12 @@ import { V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 export { V5_NO_EFFECTS };
 
 export const V5_J102_SCHEMA_VERSION = "doctorcre-v5-cre-lifecycle.v1";
-// 2 rather than 1: the policy preimage below gained the initialization contracts,
-// so its digest is a different identity for a different contract. The version is
-// moved with the bytes rather than left to be inferred from them.
-export const V5_J102_POLICY_VERSION = 2;
+// 3 rather than 2: the policy preimage below gained the initialization contracts
+// (2), and then the reconciliation conflict-kind vocabulary the SQL write boundary
+// now enforces (3). Its digest is a different identity for a different contract
+// each time, and the version is moved with the bytes rather than left to be
+// inferred from them.
+export const V5_J102_POLICY_VERSION = 3;
 
 export const V5_J102_SUBJECT_SCHEMA_VERSION = "doctorcre-v5-j102-lifecycle-subject.v1";
 export const V5_J102_EVIDENCE_SCHEMA_VERSION = "doctorcre-v5-j102-lifecycle-evidence.v1";
@@ -2960,6 +2962,30 @@ export const V5_J102_MATERIAL_FIELD_CLASSES = deepFreeze([
 ]);
 
 /**
+ * THE FOUR KINDS OF CONFLICT THIS EVALUATOR CAN FILE, as a vocabulary rather than
+ * as four literals scattered through the branches below.
+ *
+ * IT IS EXPORTED BECAUSE THE WRITE BOUNDARY NEEDS IT. `conflict_kind` is a
+ * derived-only field on the shipped path, so no caller of the store can choose
+ * one — but `ops.j102_record_reconciliation_item` is granted to carr_writer, and
+ * a direct caller could otherwise file a visible item labelled with a kind this
+ * module never emits. A person reading the reconciliation queue would be reading
+ * a label nothing in this slice authored. The SQL admission map transcribes this
+ * list and the writer checks it, and the parity suite proves the two lists are
+ * the same list.
+ *
+ * `reconciliationItem` below REFUSES anything outside it, so a fifth branch added
+ * without a fifth entry here fails loudly at the point it is written rather than
+ * silently widening what the database will accept.
+ */
+export const V5_J102_CONFLICT_KINDS = deepFreeze([
+  "uncharacterized_concurrent_change",
+  "overlapping_field_edit",
+  "material_class_edit",
+  "unclassified_field_edit",
+]);
+
+/**
  * THE FIELD CLASS IS POLICY, AND POLICY IS NOT A CALLER INPUT.
  *
  * `field_class` used to arrive on each edit and was believed. Labelling a
@@ -3177,6 +3203,14 @@ export function evaluateConcurrentEdit(request) {
 
 function reconciliationItem({ conflict_kind, base_version_digest, current_version_digest,
   incoming, concurrent, actor }) {
+  // THE ONE PLACE EVERY ITEM IS BUILT, so it is the one place the vocabulary can
+  // be held. A branch above that invents a fifth kind fails here rather than
+  // shipping a label the SQL write boundary, the queue and the reader have never
+  // heard of.
+  if (!V5_J102_CONFLICT_KINDS.includes(conflict_kind)) {
+    throw new V5J102Error("contract_self_check_failed",
+      `this evaluator filed the unregistered conflict kind "${conflict_kind}"`);
+  }
   return deepFreeze({
     schema_version: V5_J102_RECONCILIATION_SCHEMA_VERSION,
     tenant: ORGANIZATION_TENANT_ID,
@@ -3646,6 +3680,10 @@ export function v5J102PolicyPreimage() {
       Object.keys(V5_J102_FIELD_CLASS_REGISTRY).sort()
         .map(field => [field, V5_J102_FIELD_CLASS_REGISTRY[field]])),
     caller_supplied_field_class_admitted: false,
+    // The conflict vocabulary sits on the policy because the SQL write boundary
+    // enforces it, and a control the database applies belongs in the identity of
+    // the policy the database is applying.
+    conflict_kinds: [...V5_J102_CONFLICT_KINDS],
     salesforce: {
       link_targets: [...V5_J102_SALESFORCE_LINK_TARGETS],
       phase_label_is_doctorcre_state: false,

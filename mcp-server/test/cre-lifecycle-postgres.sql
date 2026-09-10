@@ -105,6 +105,17 @@
 --       read, the receipt derives its coupled facts and decision refs instead of
 --       echoing them, and both history relations carry the CHECK constraints that
 --       are the floor beneath all of it. Runs in every session.
+--   S8  the creation door is a SEPARATE function with its own half of the map,
+--       and it does not call the transition writer. Runs in every session.
+--   S9  Q103's conflict writer is governed and the ungoverned single-argument
+--       overload is GONE: the right signature, the right grants, the idempotency
+--       and lock calls, every refusal by name, the reconciliation vocabulary in
+--       the admission map, the relation's own conflict-kind, subject-kind and
+--       boolean-flag constraints, and NO unique index over the version pair.
+--       Runs in every session -- and it is STRUCTURAL ONLY. It reads signatures,
+--       grants, constraints and function text; it drives nothing. Every claim
+--       about how that writer BEHAVES belongs to group R below, which runs only
+--       inside the walk.
 --   B5  an idempotent replay returns the committed outcome, and the same key
 --       over a different payload refuses (proved on the first-party record
 --       writer, which is the one writer this fixture can drive to a success)
@@ -210,6 +221,21 @@
 --       by IDENTITY rather than by kind. Both are direct calls on the creation
 --       writer against real, locked, unmoved rows of the right kind. J4 also
 --       NAMES the one context arm that is still unreachable here and why.
+--   R   Q103's CONFLICT WRITER, BEHAVIOURALLY (R1-R15), and it lives inside the
+--       walk for the reason U1 and U2 do: every property it asserts is a property
+--       of what happens under the lock against a COMMITTED subject with a real
+--       history. The conflict lands visible and unresolved; a retry replays and
+--       writes nothing; the same key over different bytes refuses; a SECOND,
+--       DIFFERENT proposal against the same two versions lands beside the first
+--       rather than collapsing into it; a stale operand, a stale "current"
+--       version inside the item, a stale state snapshot and stale history
+--       evidence are each refused at the write boundary; an item may not arrive
+--       already resolved or attributed to somebody else; an extra operand is
+--       refused; and the two LABELS are refused as well -- a conflict kind no
+--       evaluator emits, a lifecycle field labelled `routine`, an unclassified
+--       field carrying a class, and a resolution flag that is a STRING where the
+--       boolean is meant. WHEN THE WALK SKIPS, NONE OF THIS RUNS, and the closing
+--       notice says so in those words rather than leaving R out of the list.
 --
 -- WHERE GROUP J RUNS IN FULL, since that is not the configuration every database
 -- has: it needs a session running as a VERIFIED PARTNER (the evidence -> subject
@@ -336,6 +362,11 @@ declare
   v_fact3_digest     text;
   v_state            jsonb;
   v_init_def         text;
+  v_recon_def        text;
+  v_item             jsonb;
+  v_item_env         jsonb;
+  v_newest_event     text;
+  v_base_digest      text;
 
   -- One synthetic Assignment in the shape `open-assignment` would leave it. It is
   -- never committed to the database -- nothing can commit it -- and exists here so
@@ -765,6 +796,116 @@ begin
   end if;
   if v_init_def ~ 'ops\.j102_apply_transition\s*\(' then
     raise exception 'S8: the initialization writer CALLS the transition writer; the two doors must stay separate';
+  end if;
+
+  -- === S9: the reconciliation writer is GOVERNED, and the old one is gone =====
+  --
+  -- Q103's conflict writer used to take an envelope and nothing else: no
+  -- idempotency key, so a retry wrote a second visible item; no compare-and-swap
+  -- operand; and no re-read of the subject, so an item could be filed claiming a
+  -- "current" version that had stopped being current before the insert. This
+  -- group is the structural half of the replacement, and the FIRST assertion is
+  -- the one that matters: the ungoverned overload must not still be callable
+  -- beside its successor.
+  if to_regprocedure('ops.j102_record_reconciliation_item(jsonb)') is not null then
+    raise exception 'S9: the ungoverned single-argument reconciliation writer still exists; create-or-replace left it callable beside the governed one, and anything holding its grant can still file an unkeyed, unbound conflict';
+  end if;
+  if to_regprocedure('ops.j102_record_reconciliation_item(jsonb,jsonb,text,text,jsonb)') is null then
+    raise exception 'S9: the governed reconciliation writer is absent, so Q103 has no atomic conflict door';
+  end if;
+  -- It must be reachable by the same bundles as the other ordinary writers, and
+  -- by nobody else.
+  for v_role in select unnest(array['carr_reader', 'carr_jobs']) loop
+    if exists (select 1 from pg_roles where rolname = v_role)
+       and has_function_privilege(v_role,
+             'ops.j102_record_reconciliation_item(jsonb,jsonb,text,text,jsonb)', 'EXECUTE') then
+      raise exception 'S9: % can file a reconciliation item; the conflict writer reaches carr_writer and carr_authority only',
+        v_role;
+    end if;
+  end loop;
+  -- In its OWN variable: v_predicate carries the transition writer's definition
+  -- from S5 and S7 still reads it.
+  v_recon_def := pg_get_functiondef(
+    to_regprocedure('ops.j102_record_reconciliation_item(jsonb,jsonb,text,text,jsonb)'));
+  foreach v_role in array array[
+    -- The governance every sibling writer carries.
+    'ops.j102_claim_idempotency(', 'ops.j102_settle_idempotency(',
+    'pg_advisory_xact_lock', 'ops.f01_principal()',
+    'j102_stale_subject_digest', 'j102_item_operand_set_mismatch',
+    'j102_actor_injection_refused', 'j102_item_digest_mismatch',
+    -- And the three staleness bindings, which are what stop a reading that went
+    -- stale between the caller's read and this insert being filed as current.
+    'j102_reconciliation_current_version_not_current',
+    'j102_reconciliation_state_evidence_stale',
+    'j102_reconciliation_history_evidence_stale',
+    'j102_reconciliation_without_conflict',
+    'j102_reconciliation_resolves_itself',
+    'j102_reconciliation_subject_not_found',
+    -- AND THE TWO LABELS. conflict_kind and every edit's field_class are derived
+    -- on the shipped path; this writer is granted to carr_writer, so a direct
+    -- caller is the one who could otherwise file a visible item labelled with a
+    -- kind nothing emits, or a lifecycle field labelled routine.
+    'j102_item_conflict_kind_unregistered',
+    'j102_item_field_class_mismatch',
+    'ops.j102_admission_policy()'
+  ] loop
+    if position(v_role in v_recon_def) = 0 then
+      raise exception 'S9: the reconciliation writer does not carry %; a conflict could be filed unkeyed, unbound, already stale or mislabelled',
+        v_role;
+    end if;
+  end loop;
+  -- THE VOCABULARY IT CHECKS AGAINST IS THE MAP'S, and the map must actually hold
+  -- one. A writer that reads an absent key refuses nothing.
+  if jsonb_typeof(ops.j102_admission_policy() -> 'reconciliation' -> 'conflict_kinds')
+       is distinct from 'array'
+     or jsonb_array_length(ops.j102_admission_policy() -> 'reconciliation' -> 'conflict_kinds') <> 4
+     or jsonb_typeof(ops.j102_admission_policy() -> 'reconciliation' -> 'field_class_registry')
+       is distinct from 'object' then
+    raise exception 'S9: the admission map carries no reconciliation vocabulary, so the writer''s label checks compare against nothing';
+  end if;
+  -- The registry the writer re-derives every edit's class from must classify the
+  -- fields this fixture and the kernel both use, and must classify NO field
+  -- routine -- `routine` is the one class that would buy the auto-merge branch.
+  if (ops.j102_admission_policy() -> 'reconciliation' -> 'field_class_registry'
+        ->> 'assignment_phase') is distinct from 'lifecycle'
+     or (ops.j102_admission_policy() -> 'reconciliation' -> 'field_class_registry'
+        ->> 'payment_state') is distinct from 'financial'
+     or exists (select 1 from jsonb_each_text(
+          ops.j102_admission_policy() -> 'reconciliation' -> 'field_class_registry')
+          where value = 'routine') then
+    raise exception 'S9: the SQL field-class registry does not match the kernel''s, or has registered a routine field without a policy owner saying so';
+  end if;
+  -- AND THE RELATION RESTATES BOTH FLOORS STRUCTURALLY, so a row that reached the
+  -- table another way still cannot carry an unregistered label or a resolution
+  -- flag that is a STRING where a boolean is meant.
+  foreach v_role in array array[
+    'j102_item_conflict_kind', 'j102_item_subject_kind',
+    'j102_item_resolution_flags_are_booleans', 'j102_item_not_machine_resolved'
+  ] loop
+    if not exists (select 1 from pg_constraint c
+                     join pg_class t on t.oid = c.conrelid
+                     join pg_namespace n on n.oid = t.relnamespace
+                    where n.nspname = 'ops' and t.relname = 'j102_reconciliation_item'
+                      and c.conname = v_role) then
+      raise exception 'S9: ops.j102_reconciliation_item carries no % constraint', v_role;
+    end if;
+  end loop;
+  -- THE REPLAY DOOR MUST KNOW THE OPERATION, or the key could never be claimed at
+  -- all and the writer would be governed in name only.
+  if position('record-lifecycle-reconciliation' in
+       pg_get_functiondef(to_regprocedure('ops.j102_replay_outcome(text,text,text)'))) = 0 then
+    raise exception 'S9: ops.j102_replay_outcome does not admit record-lifecycle-reconciliation, so its idempotency key cannot be claimed';
+  end if;
+  -- AND NO UNIQUE INDEX COLLAPSES DISTINCT PROPOSALS. Two different edit sets
+  -- against the same two versions are two real conflicts; an index over the
+  -- version pair would silently discard the second.
+  if exists (
+    select 1 from pg_index i join pg_class c on c.oid = i.indexrelid
+      join pg_class t on t.oid = i.indrelid
+      join pg_namespace n on n.oid = t.relnamespace
+     where n.nspname = 'ops' and t.relname = 'j102_reconciliation_item' and i.indisunique
+       and c.relname <> 'j102_reconciliation_item_pkey') then
+    raise exception 'S9: a unique index on the reconciliation relation would collapse distinct proposals sharing two version digests';
   end if;
 
   -- === S7: the history is bound as tightly as the state ======================
@@ -3217,6 +3358,389 @@ begin
     end;
     raise notice 'U2c PROVED at the citation check: %', v_refusal;
 
+    -- ======================================================================
+    -- === R: Q103's CONFLICT WRITER, against the committed assignment ========
+    --
+    -- Every case here is a DIRECT call on ops.j102_record_reconciliation_item
+    -- holding nothing more than its EXECUTE grant, against a real subject with a
+    -- real history. They exist because the properties that matter — a retry does
+    -- not write twice, a substituted payload refuses, two DIFFERENT proposals
+    -- both land, and a reading that went stale cannot be filed as current — are
+    -- all properties of what happens under the lock at commit time, and an
+    -- application-level readback can establish none of them.
+    -- ======================================================================
+    v_asg_digest := ops.j102_subject('assignment', v_walk_asg_id) ->> 'state_digest';
+    v_base_digest := 'sha256:' || repeat('5c', 32);
+    select e.event_digest into v_newest_event from ops.j102_subject_event e
+     where e.tenant = v_tenant and e.subject_kind = 'assignment'
+       and e.subject_id = v_walk_asg_id
+     order by e.event_seq desc limit 1;
+
+    -- The canonical item: the kernel's own reconciliation shape, plus the subject
+    -- identity the relation requires and the evidence a person resolves it from.
+    v_item := jsonb_build_object(
+      'schema_version', 'doctorcre-v5-j102-lifecycle-reconciliation-item.v1',
+      'tenant', v_tenant,
+      'conflict_kind', 'uncharacterized_concurrent_change',
+      'base_version_digest', v_base_digest,
+      'current_version_digest', v_asg_digest,
+      'incoming_edits', jsonb_build_array(jsonb_build_object(
+        'field', 'assignment_phase', 'value_digest', v_lie,
+        'field_class', 'lifecycle', 'edited_by', v_actor, 'edited_at', v_now)),
+      'concurrent_edits', '[]'::jsonb,
+      'proposed_by', v_actor,
+      'visible', true, 'applied', false, 'resolved_by_machine', false,
+      'subject_kind', 'assignment', 'subject_id', v_walk_asg_id,
+      'concurrent_change_evidence', jsonb_build_object(
+        'characterized', false,
+        'why', 'synthetic fixture conflict',
+        'current_state', ops.j102_subject('assignment', v_walk_asg_id) -> 'state',
+        'current_state_source', 'ops.j102_read.subject',
+        'history_tail', jsonb_build_array(jsonb_build_object(
+          'transition_id', 'open-assignment', 'event_kind', 'assignment_opened',
+          'recorded_by', v_actor, 'recorded_at', v_now,
+          'record_digest', v_newest_event)),
+        'history_tail_source', 'ops.j102_read.subject_events',
+        'history_tail_is_complete', false));
+    v_item_env := jsonb_build_object(
+      'schema_version', v_env_schema, 'record_kind', 'stored_reconciliation_item',
+      'tenant', v_tenant, 'record', v_item, 'record_digest', ops.f01_digest_jsonb(v_item),
+      'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder);
+
+    -- R1. THE CONFLICT LANDS, visible and unresolved.
+    v_result := ops.j102_record_reconciliation_item(
+      v_item_env,
+      jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+      'j102-fixture-key-r1', v_placeholder,
+      jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+        'reason_id', 'concurrent_change_not_characterized'));
+    if (v_result ->> 'outcome') <> 'recorded'
+       or (v_result ->> 'visible') <> 'true'
+       or (v_result ->> 'resolved_by_machine') <> 'false'
+       or (v_result ->> 'current_version_bound_to_committed_row') <> 'true'
+       or (v_result ->> 'state_evidence_bound_to_committed_row') <> 'true'
+       or (v_result ->> 'history_evidence_bound_to_committed_history') <> 'true' then
+      raise exception 'R1: the conflict receipt does not report what it bound: %', v_result;
+    end if;
+    select count(*) into v_count from ops.j102_reconciliation_item
+     where tenant = v_tenant and subject_id = v_walk_asg_id;
+    if v_count <> 1 then
+      raise exception 'R1: the conflict did not land exactly once (% rows)', v_count;
+    end if;
+
+    -- R2. A RETRY REPLAYS. The same key and the same bytes return the stored
+    --     outcome and write nothing — which is the property the read-before-write
+    --     check could never give, because it was not atomic.
+    v_replay := ops.j102_record_reconciliation_item(
+      v_item_env,
+      jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+      'j102-fixture-key-r1', v_placeholder,
+      jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+        'reason_id', 'concurrent_change_not_characterized'));
+    if (v_replay ->> 'item_digest') is distinct from (v_result ->> 'item_digest')
+       or (v_replay ->> 'item_seq') is distinct from (v_result ->> 'item_seq') then
+      raise exception 'R2: the replay did not return the committed outcome: %', v_replay;
+    end if;
+    select count(*) into v_count from ops.j102_reconciliation_item
+     where tenant = v_tenant and subject_id = v_walk_asg_id;
+    if v_count <> 1 then
+      raise exception 'R2: the replay filed a second visible conflict';
+    end if;
+
+    -- R3. THE SAME KEY OVER DIFFERENT BYTES REFUSES rather than substituting one
+    --     conflict for another.
+    begin
+      perform ops.j102_record_reconciliation_item(
+        jsonb_build_object(
+          'schema_version', v_env_schema, 'record_kind', 'stored_reconciliation_item',
+          'tenant', v_tenant, 'record', v_item,
+          'record_digest', ops.f01_digest_jsonb(v_item),
+          'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+        jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+        'j102-fixture-key-r1', v_lie,
+        jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+          'reason_id', 'concurrent_change_not_characterized'));
+      raise exception 'R3: one idempotency key bound two different requests';
+    exception when unique_violation then
+      if sqlerrm !~ 'j102_idempotency_payload_mismatch' then raise; end if;
+    end;
+
+    -- R4. A DISTINCT PROPOSAL LANDS BESIDE IT. Different edits against the SAME
+    --     two versions are a second real conflict, and collapsing them on the
+    --     version pair would discard somebody's proposal silently.
+    v_rec2 := jsonb_set(v_item, '{incoming_edits}', jsonb_build_array(
+      jsonb_build_object('field', 'open_negotiation_count', 'value_digest', v_placeholder,
+        'field_class', 'lifecycle', 'edited_by', v_actor, 'edited_at', v_now)));
+    perform ops.j102_record_reconciliation_item(
+      jsonb_build_object(
+        'schema_version', v_env_schema, 'record_kind', 'stored_reconciliation_item',
+        'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+        'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+      jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+      'j102-fixture-key-r4', v_placeholder,
+      jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+        'reason_id', 'concurrent_change_not_characterized'));
+    select count(*) into v_count from ops.j102_reconciliation_item
+     where tenant = v_tenant and subject_id = v_walk_asg_id
+       and base_version_digest = v_base_digest and current_version_digest = v_asg_digest;
+    if v_count <> 2 then
+      raise exception 'R4: two distinct proposals against one version pair collapsed to % row(s)',
+        v_count;
+    end if;
+
+    -- R5. A STALE OPERAND refuses at the compare-and-swap, like every other
+    --     writer here.
+    begin
+      perform ops.j102_record_reconciliation_item(
+        v_item_env, jsonb_build_object('assignment:' || v_walk_asg_id, v_lie),
+        'j102-fixture-key-r5', v_placeholder,
+        jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+          'reason_id', 'concurrent_change_not_characterized'));
+      raise exception 'R5: a conflict was filed against a version the row does not hold';
+    exception when serialization_failure then
+      if sqlerrm !~ 'j102_stale_subject_digest' then raise; end if;
+    end;
+
+    -- R6. A STALE "CURRENT" VERSION INSIDE THE ITEM. This is the one the earlier
+    --     readback could not catch at all: the operand is right, the row has not
+    --     moved, and the ITEM claims a current version that is not the committed
+    --     one. A person resolving it would be comparing against a version that
+    --     never was current.
+    begin
+      v_rec2 := jsonb_set(v_item, '{current_version_digest}', to_jsonb(v_lie));
+      perform ops.j102_record_reconciliation_item(
+        jsonb_build_object(
+          'schema_version', v_env_schema, 'record_kind', 'stored_reconciliation_item',
+          'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+          'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+        jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+        'j102-fixture-key-r6', v_placeholder,
+        jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+          'reason_id', 'concurrent_change_not_characterized'));
+      raise exception 'R6: an item filed a version as current that the committed row is not at';
+    exception when serialization_failure then
+      if sqlerrm !~ 'j102_reconciliation_current_version_not_current' then raise; end if;
+    end;
+
+    -- R7. A STALE STATE SNAPSHOT. The item names the right version and SHOWS a
+    --     different one, which is the evidence half of the same lie.
+    begin
+      v_rec2 := jsonb_set(v_item, '{concurrent_change_evidence,current_state}',
+        v_assignment_state);
+      perform ops.j102_record_reconciliation_item(
+        jsonb_build_object(
+          'schema_version', v_env_schema, 'record_kind', 'stored_reconciliation_item',
+          'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+          'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+        jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+        'j102-fixture-key-r7', v_placeholder,
+        jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+          'reason_id', 'concurrent_change_not_characterized'));
+      raise exception 'R7: the state an item shows as current did not have to hash to the version it names';
+    exception when serialization_failure then
+      if sqlerrm !~ 'j102_reconciliation_state_evidence_stale' then raise; end if;
+    end;
+
+    -- R8. STALE HISTORY EVIDENCE. The tail no longer ends at the newest committed
+    --     event, so the changes a person is meant to review are not the changes
+    --     that happened.
+    begin
+      v_rec2 := jsonb_set(v_item, '{concurrent_change_evidence,history_tail}',
+        jsonb_build_array(jsonb_build_object(
+          'transition_id', 'open-assignment', 'event_kind', 'assignment_opened',
+          'recorded_by', v_actor, 'recorded_at', v_now, 'record_digest', v_lie)));
+      perform ops.j102_record_reconciliation_item(
+        jsonb_build_object(
+          'schema_version', v_env_schema, 'record_kind', 'stored_reconciliation_item',
+          'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+          'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+        jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+        'j102-fixture-key-r8', v_placeholder,
+        jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+          'reason_id', 'concurrent_change_not_characterized'));
+      raise exception 'R8: an item filed history evidence that is not the committed history';
+    exception when serialization_failure then
+      if sqlerrm !~ 'j102_reconciliation_history_evidence_stale' then raise; end if;
+    end;
+
+    -- R9. NO CONFLICT, NO ITEM. A base equal to the current version is a caller
+    --     nobody overtook, and an item for it is noise where a person looks.
+    begin
+      v_rec2 := jsonb_set(v_item, '{base_version_digest}', to_jsonb(v_asg_digest));
+      perform ops.j102_record_reconciliation_item(
+        jsonb_build_object(
+          'schema_version', v_env_schema, 'record_kind', 'stored_reconciliation_item',
+          'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+          'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+        jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+        'j102-fixture-key-r9', v_placeholder,
+        jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+          'reason_id', 'no_concurrent_movement'));
+      raise exception 'R9: a conflict item was filed for a subject nobody had moved';
+    exception when others then
+      if sqlerrm !~ 'j102_reconciliation_without_conflict' then raise; end if;
+    end;
+
+    -- R10. AND AN ITEM MAY NOT ARRIVE ALREADY RESOLVED, nor attributed to
+    --      somebody else.
+    begin
+      v_rec2 := jsonb_set(v_item, '{resolved_by_machine}', 'true'::jsonb);
+      perform ops.j102_record_reconciliation_item(
+        jsonb_build_object(
+          'schema_version', v_env_schema, 'record_kind', 'stored_reconciliation_item',
+          'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+          'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+        jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+        'j102-fixture-key-r10', v_placeholder,
+        jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+          'reason_id', 'concurrent_change_not_characterized'));
+      raise exception 'R10: a conflict was filed already resolved by a machine';
+    exception when insufficient_privilege then
+      if sqlerrm !~ 'j102_reconciliation_resolves_itself' then raise; end if;
+    end;
+    begin
+      v_rec2 := jsonb_set(v_item, '{proposed_by}', '"somebody-else"'::jsonb);
+      perform ops.j102_record_reconciliation_item(
+        jsonb_build_object(
+          'schema_version', v_env_schema, 'record_kind', 'stored_reconciliation_item',
+          'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+          'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+        jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+        'j102-fixture-key-r11', v_placeholder,
+        jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+          'reason_id', 'concurrent_change_not_characterized'));
+      raise exception 'R10: a conflict was attributed to an actor who did not raise it';
+    exception when insufficient_privilege then
+      if sqlerrm !~ 'j102_actor_injection_refused' then raise; end if;
+    end;
+
+    -- R11. AN EXTRA OPERAND is a row locked, compared and never consulted.
+    begin
+      perform ops.j102_record_reconciliation_item(
+        v_item_env,
+        jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest,
+                           'relationship:' || v_walk_rel_id,
+                             ops.j102_subject('relationship', v_walk_rel_id) ->> 'state_digest'),
+        'j102-fixture-key-r12', v_placeholder,
+        jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+          'reason_id', 'concurrent_change_not_characterized'));
+      raise exception 'R11: a conflict locked a subject it is not about';
+    exception when others then
+      if sqlerrm !~ 'j102_item_operand_set_mismatch' then raise; end if;
+    end;
+
+    -- ----------------------------------------------------------------------
+    -- R12-R15: THE LABELS. Everything above is about whether the item is BOUND
+    -- to the row. These four are about whether it is DESCRIBED honestly, which
+    -- is the other half of "visible reconciliation": a person reads this queue
+    -- and acts on what it says. On the shipped path conflict_kind and every
+    -- field_class are derived by the kernel and refused as caller input by the
+    -- store -- but this function is granted to carr_writer, and that caller is
+    -- exactly who these refusals are for.
+    -- ----------------------------------------------------------------------
+
+    -- R12. A CONFLICT KIND NOTHING FILES. Not a state bypass; a row in the queue
+    --      labelled with a category no evaluator in this slice produces.
+    begin
+      v_rec2 := jsonb_set(v_item, '{conflict_kind}', '"totally_fine_edit"'::jsonb);
+      perform ops.j102_record_reconciliation_item(
+        jsonb_build_object(
+          'schema_version', v_env_schema, 'record_kind', 'stored_reconciliation_item',
+          'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+          'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+        jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+        'j102-fixture-key-r13', v_placeholder,
+        jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+          'reason_id', 'concurrent_change_not_characterized'));
+      raise exception 'R12: a conflict was filed under a kind this slice never emits';
+    exception when invalid_parameter_value then
+      if sqlerrm !~ 'j102_item_conflict_kind_unregistered' then raise; end if;
+    end;
+
+    -- R13. A LIFECYCLE FIELD LABELLED ROUTINE. This is the original Q103 bypass
+    --      arriving one layer lower: `routine` is the class that buys automatic
+    --      merge, and a stored item carrying it would tell the next reader that
+    --      an assignment phase change was nothing much.
+    begin
+      v_rec2 := jsonb_set(v_item, '{incoming_edits}', jsonb_build_array(
+        jsonb_build_object('field', 'assignment_phase', 'value_digest', v_lie,
+          'field_class', 'routine', 'edited_by', v_actor, 'edited_at', v_now)));
+      perform ops.j102_record_reconciliation_item(
+        jsonb_build_object(
+          'schema_version', v_env_schema, 'record_kind', 'stored_reconciliation_item',
+          'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+          'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+        jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+        'j102-fixture-key-r14', v_placeholder,
+        jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+          'reason_id', 'concurrent_change_not_characterized'));
+      raise exception 'R13: a lifecycle field was filed labelled routine';
+    exception when insufficient_privilege then
+      if sqlerrm !~ 'j102_item_field_class_mismatch' then raise; end if;
+    end;
+
+    -- R14. AND THE OTHER SIDE IS CHECKED TOO, on a field policy has NOT
+    --      classified: silence is recorded as JSON null, and a caller cannot
+    --      upgrade it to a class by writing one down.
+    begin
+      v_rec2 := jsonb_set(v_item, '{concurrent_edits}', jsonb_build_array(
+        jsonb_build_object('field', 'internal_note', 'value_digest', v_lie,
+          'field_class', 'lifecycle', 'edited_by', v_actor, 'edited_at', v_now)));
+      perform ops.j102_record_reconciliation_item(
+        jsonb_build_object(
+          'schema_version', v_env_schema, 'record_kind', 'stored_reconciliation_item',
+          'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+          'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+        jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+        'j102-fixture-key-r15', v_placeholder,
+        jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+          'reason_id', 'concurrent_change_not_characterized'));
+      raise exception 'R14: an unclassified field was filed carrying a class';
+    exception when insufficient_privilege then
+      if sqlerrm !~ 'j102_item_field_class_mismatch' then raise; end if;
+    end;
+
+    -- R15. THE RESOLUTION FLAGS AS STRINGS. `->>` renders the string "false" and
+    --      the boolean false identically, so a text comparison alone accepted an
+    --      item whose flags are the wrong TYPE -- one that reads as correct here
+    --      and as something else to everything downstream.
+    begin
+      v_rec2 := jsonb_set(v_item, '{resolved_by_machine}', '"false"'::jsonb);
+      perform ops.j102_record_reconciliation_item(
+        jsonb_build_object(
+          'schema_version', v_env_schema, 'record_kind', 'stored_reconciliation_item',
+          'tenant', v_tenant, 'record', v_rec2, 'record_digest', ops.f01_digest_jsonb(v_rec2),
+          'domain_policy_digest', v_placeholder, 'decision_subset_digest', v_placeholder),
+        jsonb_build_object('assignment:' || v_walk_asg_id, v_asg_digest),
+        'j102-fixture-key-r16', v_placeholder,
+        jsonb_build_object('operation', 'record-lifecycle-reconciliation',
+          'reason_id', 'concurrent_change_not_characterized'));
+      raise exception 'R15: a resolution flag was accepted as a string';
+    exception when insufficient_privilege then
+      if sqlerrm !~ 'j102_reconciliation_resolves_itself' then raise; end if;
+    end;
+
+    -- AND EXACTLY TWO CONFLICTS EXIST: the one R1 filed and the distinct proposal
+    -- R4 filed. Every refusal above left nothing behind. The two rows that DID
+    -- land are checked for the properties a reader depends on, as stored values
+    -- rather than as receipt claims.
+    select count(*) into v_count from ops.j102_reconciliation_item where tenant = v_tenant;
+    if v_count <> 2 then
+      raise exception 'R: the reconciliation relation holds % rows and exactly 2 were filed',
+        v_count;
+    end if;
+    if exists (select 1 from ops.j102_reconciliation_item
+                where tenant = v_tenant
+                  and ((envelope -> 'record' -> 'visible') is distinct from 'true'::jsonb
+                    or (envelope -> 'record' -> 'applied') is distinct from 'false'::jsonb
+                    or (envelope -> 'record' -> 'resolved_by_machine')
+                         is distinct from 'false'::jsonb
+                    or not (ops.j102_admission_policy() -> 'reconciliation' -> 'conflict_kinds'
+                              ? conflict_kind))) then
+      raise exception 'R: a filed conflict is not visible, unapplied and unresolved, or carries an unregistered kind';
+    end if;
+    raise notice 'R1-R15 PROVED: the conflict writer is GOVERNED -- a retry replayed, a substituted payload refused, two distinct proposals both landed, a stale operand, a stale current version, a stale state snapshot and stale history evidence were each refused at the write boundary, and an unregistered conflict kind, a lifecycle field labelled routine, an unclassified field carrying a class and a string-typed resolution flag were each refused too. The two rows that landed are visible, unapplied and unresolved as JSON booleans.';
+
     -- AND NOTHING U1 OR U2 ATTEMPTED LANDED. Every one of them was a refusal, so
     -- the walk's own history is exactly what the walk appended.
     select count(*) into v_count from ops.j102_subject_event
@@ -3250,13 +3774,19 @@ begin
   end if;
 
   -- THE ONE LINE A READER SHOULD TAKE THE RUN'S MEANING FROM, and it says which
-  -- groups actually ran rather than only that nothing raised. U1, U2 and J4 live
-  -- inside the walk, so a run that skipped J proved none of them.
+  -- groups actually ran rather than only that nothing raised. U1, U2, J4 and the
+  -- WHOLE R GROUP live inside the walk, so a run that skipped J proved none of
+  -- them. S9 is structural and runs in every session, so it is enumerated on both
+  -- branches -- and it is worth being exact about what it does and does not
+  -- establish: S9 reads signatures, grants, constraints and function text. The
+  -- BEHAVIOUR of the conflict writer -- that a retry replays, that a stale
+  -- reading cannot be filed as current, that a mislabelled item is refused -- is
+  -- R's to prove, and R does not run without J.
   if v_walk_ok then
-    raise notice 'ALL RUNNABLE GROUPS PASSED (S1-S8, P0, A1-A12, I1, J, J4, U1, U2, B5, B6, B7, B9, B10, B16, M3, Q081). The transition writer still refuses to create its own primary subject (P0); the creation door refuses every state jump (I1) and every unread operand (J4c); the positive walk ran IN FULL and created % subjects and % events; U1 and U2 were then decided against that committed assignment and PROVED the target and event-detail checks. One arm is still unproven here and J4 names it: j102_required_context_not_met. Every row is about to roll back.',
+    raise notice 'ALL RUNNABLE GROUPS PASSED (S1-S9, P0, A1-A12, I1, J, J4, U1, U2, R1-R15, B5, B6, B7, B9, B10, B16, M3, Q081). The transition writer still refuses to create its own primary subject (P0); the creation door refuses every state jump (I1) and every unread operand (J4c); the positive walk ran IN FULL and created % subjects and % events; U1 and U2 were then decided against that committed assignment and PROVED the target and event-detail checks; and R1-R15 exercised the governed conflict writer against that committed assignment -- replay, substituted payload, two distinct proposals, three staleness lies, an unregistered conflict kind, two mislabelled field classes and a string-typed resolution flag. One arm is still unproven here and J4 names it: j102_required_context_not_met. Every row is about to roll back.',
       v_walk_subjects, v_walk_events;
   else
-    raise notice 'PARTIAL RUN (S1-S8, P0, A1-A12, I1, B5, B6, B7, B9, B10, B16, M3, Q081). GROUP J DID NOT RUN -- see its skip notice for the exact unmet prerequisite -- so U1, U2 and J4 did not run either and NOTHING here proves the target check, the event-detail check, the context resolution or any positive walk. The walk created % subjects and % events, which is what a run that stopped at the prospect leaves. Do not read this as a green J.',
+    raise notice 'PARTIAL RUN (S1-S9, P0, A1-A12, I1, B5, B6, B7, B9, B10, B16, M3, Q081). GROUP J DID NOT RUN -- see its skip notice for the exact unmet prerequisite -- so U1, U2, J4 and R1-R15 did not run either, and NOTHING here proves the target check, the event-detail check, the context resolution, any positive walk, or ANY BEHAVIOUR OF THE Q103 CONFLICT WRITER: not its idempotent replay, not its staleness bindings, not that two distinct proposals both land, and not that an unregistered conflict kind or a mislabelled field class is refused. S9 ran and is structural only -- it read the writer''s signature, its grants, its constraints and its text, which is not the same claim. The walk created % subjects and % events, which is what a run that stopped at the prospect leaves. Do not read this as a green J or a green R.',
       v_walk_subjects, v_walk_events;
   end if;
 end
