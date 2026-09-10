@@ -9,7 +9,11 @@ import readline from "node:readline";
 
 import { selectLocalClientCredential, tokenFileSecurityIssue } from "./local-client-auth.mjs";
 
-const ALLOWED = new Set(["claude-checkpoint", "claude-read-recovery", "claude-record-event"]);
+// Codex is opt-in; the existing Claude invocation and three-tool contract stay intact.
+const CODEX = process.argv.includes("--codex");
+const PROFILE = CODEX ? "codex-continuity" : "claude-continuity";
+const ALLOWED = new Set(CODEX ? ["codex-checkpoint", "codex-read-recovery"] :
+  ["claude-checkpoint", "claude-read-recovery", "claude-record-event"]);
 const TOKEN_FILE = process.env.CARR_MCP_ENV || path.join(os.homedir(), ".config/carr/mcp-tokens.env");
 const URL = process.env.CARR_MCP_URL || "https://api.doctorcre.com/mcp";
 const MAX_MESSAGE_BYTES = 2_000_000;
@@ -22,18 +26,31 @@ function credential() {
   }, process.getuid?.());
   if (issue) throw new Error(`refusing MCP token file: ${issue}`);
   const selected = selectLocalClientCredential(
-    { ...process.env, CARR_MCP_CLIENT_PROFILE: "claude-continuity" },
+    { ...process.env, CARR_MCP_CLIENT_PROFILE: PROFILE },
     fs.readFileSync(TOKEN_FILE, "utf8"),
   );
   if (!selected.token) throw new Error(`missing ${selected.tokenVariable} in secure token file`);
   return selected.token;
 }
 
+// PostgreSQL jsonb::text includes spaces after separators. Checkpoint fields
+// contain strings, arrays and objects; key ordering does not change their size.
+function storedStateJson(value) {
+  if (Array.isArray(value)) return `[${value.map(storedStateJson).join(", ")}]`;
+  if (value && typeof value === "object")
+    return `{${Object.entries(value).map(([key, item]) => `${JSON.stringify(key)}: ${storedStateJson(item)}`).join(", ")}}`;
+  return JSON.stringify(value);
+}
+
 async function forward(message, token) {
   if (message.method === "tools/call" && !ALLOWED.has(message.params?.name))
-    return { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "not_in_claude_continuity_profile" } };
+    return { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: CODEX ? "not_in_codex_continuity_profile" : "not_in_claude_continuity_profile" } };
+  if (CODEX && message.method === "tools/call" && message.params?.name === "codex-checkpoint" &&
+      Buffer.byteLength(storedStateJson(message.params.arguments?.state ?? {}), "utf8") > 24_000)
+    return { jsonrpc: "2.0", id: message.id, error: { code: -32602, message: "codex_continuity_payload_too_large" } };
   const response = await fetch(URL, {
     method: "POST",
+    ...(CODEX ? { signal: AbortSignal.timeout(30_000) } : {}),
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
     body: JSON.stringify(message),
   });
@@ -41,9 +58,10 @@ async function forward(message, token) {
   if (message.id === undefined) return null;
   const result = await response.json();
   if (message.method === "initialize" && result?.result) {
-    result.result.serverInfo = { name: "carr-continuity", version: "1" };
+    result.result.serverInfo = { name: CODEX ? "carr-codex-continuity" : "carr-continuity", version: "1" };
     result.result.instructions =
-      "Claude continuity only: record semantic milestones with claude-checkpoint using the " +
+      (CODEX ? "Codex continuity only: record semantic checkpoints with codex-checkpoint using the " :
+        "Claude continuity only: record semantic milestones with claude-checkpoint using the ") +
       "native activation binding and compare-and-swap expected_version. Never infer completion " +
       "from telemetry and never replay pending external effects.";
   }
