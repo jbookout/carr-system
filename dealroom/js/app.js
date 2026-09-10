@@ -7,16 +7,34 @@ import {
   receiptViews, receiptListHtml, receiptsSignature, receiptsAnnouncement,
   createFeedProgress, observeChangeBatch, createUndoState, performUndo,
 } from './change-receipts.mjs';
+import {
+  createBoardSync, batchTouchesBoard, resolveCurrentRow, SYNC_STATES, HEALTH,
+} from './board-sync.mjs';
 
 const POLL_MS = 1400;
+/**
+ * How long the board will go without ASKING the record layer again.
+ *
+ * Not a freshness guarantee and not a claim about the feed. The changes cursor
+ * can miss an event whose commit landed out of order with its recorded time, so
+ * a board that only re-reads on news can hold a wrong value indefinitely — this
+ * is the ceiling on that. It is a bound on how long we go without asking, never
+ * a bound on how old a value is: a slow or failed read extends staleness
+ * without limit, and the badge says so.
+ */
+const BOARD_REFRESH_MS = 15000;
 const CALL_MODE_URL = 'http://127.0.0.1:4682';
 const CALL_MODE_HEADER = { 'X-CARR-Call-Mode': 'deal-room-v1' };
 const state = {
-  client: null, selfActor: null, deals: new Map(), accounts: [], cursor: null,
+  client: null, selfActor: null, deals: new Map(), accounts: [],
+  // Every displayed value comes from a board snapshot this coordinator applied;
+  // the changes feed drives receipts, presence and capture, and asks for a new
+  // snapshot, but never writes a value. See board-sync.mjs.
+  boardSync: null,
   mode: 'fixture',
   workspace: 'team', accountId: null, filter: 'active', query: '', deepLinkMine: false,
   changed: new Set(), fieldBase: new Map(), presence: [], captureSessions: [],
-  confirms: [], review: null, pollTimer: null,
+  confirms: [], review: null, pollTimer: null, boardRefreshTimer: null,
   // Recent changes are session memory only: bounded, never stored, and never
   // a substitute for the deal's own Change history. The feed cursor starts at
   // the beginning of the log, so nothing is shown until it reaches the present.
@@ -91,16 +109,103 @@ function showToast(message, undoEventId = null) {
   showToast.timer = setTimeout(() => el.classList.remove('show'), undoEventId ? 7000 : 3200);
 }
 
-function setSync(ok, label = null) {
-  const el = $('#syncStatus');
-  el.classList.toggle('offline', !ok);
-  el.textContent = label || (ok
-    ? (state.mode === 'live' ? 'Live sync' : 'Fixture ready')
-    : (state.mode === 'live' ? 'Reconnecting' : 'Fixture unavailable'));
+function clockLabel(ms) {
+  const at = new Date(ms);
+  return `${String(at.getHours()).padStart(2,'0')}:${String(at.getMinutes()).padStart(2,'0')}:${String(at.getSeconds()).padStart(2,'0')}`;
 }
 
+/**
+ * Where the freshness sentence lives so a keyboard or a screen reader can get
+ * at it. `title` is hover-only, which makes it invisible to both.
+ *
+ * The badge becomes focusable and is DESCRIBED by a visually hidden sibling —
+ * a sibling, not a child, because #syncStatus is a live region and a timestamp
+ * changing inside it would be read out on every poll. Built once, from here,
+ * using the stylesheet's existing `.sr-only` and `:focus-visible`: no markup
+ * file changes and nothing about the layout moves.
+ *
+ * Known limit, named rather than papered over: this reaches assistive
+ * technology and the keyboard, not a SIGHTED touch user, who still has no way
+ * to summon the detail. That needs a visible disclosure in index.html/app.css,
+ * which is outside this unit.
+ */
+function syncDetailNode() {
+  const existing = $('#syncFreshness');
+  if (existing) return existing;
+  const badge = $('#syncStatus');
+  const node = document.createElement('span');
+  node.id = 'syncFreshness';
+  node.className = 'sr-only';
+  node.setAttribute('aria-live', 'off');
+  badge.insertAdjacentElement('afterend', node);
+  badge.setAttribute('tabindex', '0');
+  badge.setAttribute('aria-describedby', 'syncFreshness');
+  return node;
+}
+
+/**
+ * What is true of each read path, in a sentence each. The board and the feed
+ * are reported separately because they fail separately: a feed that answers
+ * says nothing about whether the values are current.
+ */
+function syncDetail(status) {
+  const at = status.last_read_at ? clockLabel(status.last_read_at) : null;
+  const board = status.board_health === HEALTH.OK
+    ? `Board values are from the last successful read at ${at}; they change when the next read succeeds.`
+    : status.board_health === HEALTH.RENDER_FAILED
+      ? `The last board snapshot could not be shown${status.board_error ? ` (${status.board_error})` : ''}, so what is on screen is older than the answer that arrived.`
+      : at
+        ? `The board could not be re-read${status.board_error ? ` (${status.board_error})` : ''}. Values are from the last successful read at ${at}.`
+        : 'No board read has succeeded yet in this session.';
+  const feed = status.feed_health === HEALTH.OK
+    ? 'The change feed answered on its last read.'
+    : status.feed_health === HEALTH.FAILED
+      ? `The change feed is not answering${status.feed_error ? ` (${status.feed_error})` : ''}, so new receipts and presence may be missing.`
+      : 'The change feed has not been read yet.';
+  return `${board} ${feed}`;
+}
+
+/**
+ * The connection badge, derived from the coordinator's two health signals. It
+ * says what is true of the READS — not that the screen matches the record
+ * layer, which no client can know.
+ */
+function setSync(status) {
+  const el = $('#syncStatus');
+  const live = state.mode === 'live';
+  const label = status.state === SYNC_STATES.OFFLINE ? 'Offline'
+    : status.state === SYNC_STATES.ERROR ? 'Board view error'
+    : status.state === SYNC_STATES.RECONNECTING ? (live ? 'Reconnecting' : 'Fixture unavailable')
+    : status.state === SYNC_STATES.READY ? (live ? 'Live sync' : 'Fixture ready')
+    : 'Syncing…';
+  el.classList.toggle('offline',
+    [SYNC_STATES.OFFLINE, SYNC_STATES.RECONNECTING, SYNC_STATES.ERROR].includes(status.state));
+  // role="status" is a live region: writing the same words again can read them
+  // out again, so the text moves only when it actually changed.
+  if (el.textContent !== label) el.textContent = label;
+  const detail = syncDetail(status);
+  el.title = detail;
+  syncDetailNode().textContent = detail;
+}
+
+/**
+ * Read the board authoritatively, then take one page of the changes feed.
+ *
+ * A failed read leaves the previous values on screen and says so in the badge —
+ * except on the very first load, where there is nothing to leave: an empty
+ * board would read as "no work records", which is a different claim from "the
+ * board could not be read", so that one is raised.
+ */
 async function loadHome() {
-  const home = await state.client.getBoard({ workspace:'all' });
+  const outcome = await state.boardSync.refreshBoard({ reason:'load-home' });
+  if (!outcome.applied && state.boardSync.status().snapshots === 0) {
+    throw outcome.error || new Error('The board did not answer.');
+  }
+  await pollOnce(true);
+  render();
+}
+
+function applyBoardSnapshot(home) {
   state.selfActor = home.actor || state.client.selfActor || state.selfActor;
   state.deals = new Map((home.deals || []).map((deal) => [deal.id, {
     workspace_kind: deal.account_client_id ? 'national_account' : 'team', ...deal,
@@ -109,66 +214,97 @@ async function loadHome() {
   for (const deal of state.deals.values()) if (!deal.last_review_at) state.changed.add(deal.id);
   $('#selfAvatar').textContent = state.selfActor === 'dell' ? 'D' : state.selfActor === 'joe' ? 'J' : '?';
   $('#selfAvatar').setAttribute('aria-label', `Signed in as ${actorName(state.selfActor)}`);
-  await pollOnce(true);
-  render();
 }
 
-async function pollOnce(initial = false) {
-  try {
-    const result = await state.client.getChanges(state.cursor);
-    state.cursor = result.cursor;
-    state.presence = result.presence || [];
-    state.captureSessions = result.capture_sessions || [];
-    renderCaptureStatus();
-    const batch = result.events || [];
-    state.feed = observeChangeBatch(state.feed, batch);
-    // Until the cursor reaches the present, these are pages of history, not
-    // news: no toast announces them and the panel stays closed.
-    const announce = !initial && state.feed.caught_up;
-    for (const event of batch) {
-      if (event.field) state.fieldBase.set(`${event.subject_id}|${event.field}`, event.id);
-      const deal = state.deals.get(event.subject_id);
-      if (!deal) continue;
-      if (!deal.last_review_at || String(event.recorded_at) > String(deal.last_review_at)) state.changed.add(deal.id);
-      if (event.field === 'attention') deal.attention = Boolean(event.new_value);
-      if (event.field === 'phase') deal.phase = event.new_value;
-      if (event.field === 'owner') deal.owner = event.new_value;
-      if (event.field === 'next_date') deal.next_date = event.new_value;
-      if (event.field === 'next_step') deal.next_step = event.new_value;
-      if (event.field === 'operating_state') {
-        const value = event.new_value || {};
-        deal.operating_state = value.state || 'active';
-        deal.parking_reason = value.reason || null;
-        deal.parking_note = value.note || null;
-      }
-      if (announce && event.actor === state.selfActor && REVERTIBLE_FIELDS.includes(event.field)) {
-        showToast(`${deal.name} updated`, event.id);
-      } else if (announce && event.actor !== state.selfActor && event.field) {
-        showToast(`${actorName(event.actor)} updated ${deal.name}`);
-      }
+async function pollOnce(initial = false, { force = false } = {}) {
+  const outcome = await state.boardSync.pollChanges({ force });
+  // Skipped (a poll was already open) or superseded (the answer stopped being
+  // current before it arrived). Neither is news and neither moves the cursor.
+  if (!outcome.applied) {
+    if (outcome.reason === 'read_failed') console.warn('Deal Room poll failed', outcome.error);
+    return;
+  }
+  const result = outcome.changes;
+  state.presence = result.presence || [];
+  state.captureSessions = result.capture_sessions || [];
+  renderCaptureStatus();
+  const batch = result.events || [];
+  state.feed = observeChangeBatch(state.feed, batch);
+  // Until the cursor reaches the present, these are pages of history, not
+  // news: no toast announces them and the panel stays closed.
+  const announce = !initial && state.feed.caught_up;
+  for (const event of batch) {
+    if (event.field) state.fieldBase.set(`${event.subject_id}|${event.field}`, event.id);
+    const deal = state.deals.get(event.subject_id);
+    if (!deal) continue;
+    if (!deal.last_review_at || String(event.recorded_at) > String(deal.last_review_at)) state.changed.add(deal.id);
+    // NO VALUE IS TAKEN FROM AN EVENT. The feed is an ascending cursor over the
+    // whole log, so an early page holds values that are months old; writing them
+    // onto a deal put history back on the board. What an event does is mark the
+    // record as changed, name the base for the next write, and — below — ask for
+    // a fresh authoritative snapshot.
+    if (announce && event.actor === state.selfActor && REVERTIBLE_FIELDS.includes(event.field)) {
+      showToast(`${deal.name} updated`, event.id);
+    } else if (announce && event.actor !== state.selfActor && event.field) {
+      showToast(`${actorName(event.actor)} updated ${deal.name}`);
     }
-    // Same events, kept instead of discarded once the toast fades. No second
-    // read: this is the batch the board just consumed.
-    state.receipts = ingestChangeEvents(state.receipts, batch, {
-      dealName: (dealId) => state.deals.get(dealId)?.name || null,
-      actorLabel: actorName,
-    });
-    renderReceipts();
-    if (state.client.getPendingConfirms) {
+  }
+  // News, not history: once the cursor is current, anything about a deal — including
+  // one this board has never seen, which is what a new record looks like to an
+  // empty board — is a reason to re-read the board. Requests coalesce into one
+  // read, so a burst of partner edits costs one refresh, not one per event.
+  if (state.feed.caught_up && batchTouchesBoard(batch)) state.boardSync.requestRefresh('change-feed');
+  // Same events, kept instead of discarded once the toast fades. No second
+  // read: this is the batch the board just consumed.
+  state.receipts = ingestChangeEvents(state.receipts, batch, {
+    dealName: (dealId) => state.deals.get(dealId)?.name || null,
+    actorLabel: actorName,
+  });
+  renderReceipts();
+  if (state.client.getPendingConfirms) {
+    // A separate read with a separate failure: a capture queue that will not
+    // answer says nothing about the board, so it leaves the last set of chips
+    // alone instead of claiming the connection is gone.
+    try {
       const pending = await state.client.getPendingConfirms();
       state.confirms = pending.proposals || [];
       renderConfirms();
+    } catch (error) {
+      console.warn('Deal Room confirm queue read failed', error);
     }
-    setSync(true);
-    if (!userIsEditing()) renderBoardOnly();
-  } catch (error) {
-    console.warn('Deal Room poll failed', error);
-    setSync(false);
   }
+  if (!userIsEditing()) renderBoardOnly();
 }
 
 function userIsEditing() {
   return Boolean(document.querySelector('dialog[open]') || document.activeElement?.matches('input,textarea,select'));
+}
+
+/**
+ * A full render that does not throw the keyboard on the floor.
+ *
+ * `userIsEditing` guards dialogs and form fields; a focused BUTTON is invisible
+ * to it, and the National Accounts home is nothing but buttons that
+ * `renderAccounts` replaces wholesale. That grid never used to re-render on its
+ * own — the poll only called `renderBoardOnly`, which returns immediately while
+ * the board section is hidden — but a snapshot now lands on a 15-second timer,
+ * so a card under the keyboard would be destroyed with no user action at all.
+ *
+ * The card is restored by its `data-account`, the same way an Undo button is
+ * restored by its event id after the receipts list is rebuilt: only what was
+ * taken is given back, the page is never scrolled to do it, and a card the
+ * board no longer returns is not replaced with a different one — focus stays
+ * where the browser put it rather than landing somewhere unrelated.
+ */
+function renderPreservingFocus() {
+  const grid = $('#accountGrid');
+  const active = document.activeElement;
+  const focused = grid && active && grid.contains(active)
+    ? active.closest('[data-account]')?.dataset.account || null
+    : null;
+  render();
+  if (!focused) return;
+  $(`[data-account="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
 }
 
 function workspaceDeals() {
@@ -742,6 +878,29 @@ function goToReceipts() {
 }
 
 /**
+ * A write the server has already confirmed, applied to the page.
+ *
+ * Four things happen together, and the order is the point:
+ *   1. the value lands on the CURRENT board row, looked up now — a row captured
+ *      before a snapshot arrived is no longer the object being rendered;
+ *   2. it is HELD, so a board read that was already open when the write was
+ *      confirmed cannot put the old value back when it answers;
+ *   3. the record is marked as changed for the delta filter;
+ *   4. a fresh authoritative read is REQUESTED, never awaited — acknowledgement
+ *      is immediate and the re-read follows it.
+ *
+ * @returns the live deal row, or null if the board does not hold it.
+ */
+function confirmLocalWrite(dealId, patch) {
+  const deal = state.deals.get(dealId) || null;
+  if (deal) Object.assign(deal, patch);
+  state.boardSync.noteLocalWrite(dealId, patch);
+  state.changed.add(dealId);
+  state.boardSync.requestRefresh('after-write');
+  return deal;
+}
+
+/**
  * One undo, one event, one in-flight request, one idempotency key.
  *
  * Nothing about the deal is changed here before the server answers, and the
@@ -773,9 +932,7 @@ async function patchField(dealId, field, value) {
   const result = await state.client.patchDealField({ deal:dealId, field, value,
     base_event_id:state.fieldBase.get(`${dealId}|${field}`) || null, idempotency_key:uuidv4() });
   if (result.status === 'conflict') return showConflict(result.conflict);
-  const deal = state.deals.get(dealId);
-  if (deal) deal[field] = value;
-  state.changed.add(dealId);
+  const deal = confirmLocalWrite(dealId, { [field]: value });
   renderBoardOnly();
   showToast(`${deal?.name || 'Deal'} updated`);
 }
@@ -784,15 +941,13 @@ async function patchOperatingState(dealId, value) {
   const result = await state.client.patchDealField({ deal:dealId, field:'operating_state', value,
     base_event_id:state.fieldBase.get(`${dealId}|operating_state`) || null, idempotency_key:uuidv4() });
   if (result.status === 'conflict') return showConflict(result.conflict);
-  const deal = state.deals.get(dealId);
-  if (deal) {
-    deal.operating_state = value.state;
-    deal.parking_reason = value.state === 'parked' ? value.reason : null;
-    deal.parking_note = value.state === 'parked' ? value.note || null : null;
-    deal.parked_at = value.state === 'parked' ? new Date().toISOString() : null;
-    deal.parked_by = value.state === 'parked' ? state.selfActor : null;
-  }
-  state.changed.add(dealId);
+  const deal = confirmLocalWrite(dealId, {
+    operating_state: value.state,
+    parking_reason: value.state === 'parked' ? value.reason : null,
+    parking_note: value.state === 'parked' ? value.note || null : null,
+    parked_at: value.state === 'parked' ? new Date().toISOString() : null,
+    parked_by: value.state === 'parked' ? state.selfActor : null,
+  });
   if ($('#dealDialog').open) $('#dealDialog').close();
   render();
   showToast(value.state === 'parked'
@@ -833,8 +988,8 @@ function nextStepForm(dealId) {
     onSubmit:async (data) => {
       const text = String(data.get('text') || '').trim();
       await state.client.setNextStep({ deal:dealId, text, next_date:data.get('next_date') || null, idempotency_key:uuidv4() });
-      deal.next_step = text; deal.next_date = data.get('next_date') || null; state.changed.add(dealId);
-      showToast(`Next step set on ${deal.name}`); renderBoardOnly();
+      const current = confirmLocalWrite(dealId, { next_step:text, next_date:data.get('next_date') || null });
+      showToast(`Next step set on ${current?.name || deal.name}`); renderBoardOnly();
     } });
 }
 
@@ -861,8 +1016,9 @@ function marketAgentForm(dealId) {
     onSubmit:async (data) => {
       await state.client.setMarketAgent({ deal:dealId, agent_name:data.get('agent_name'), market:data.get('market') || null,
         source:'partner stated in Deal Room', idempotency_key:uuidv4() });
-      deal.market_agent = data.get('agent_name'); if (data.get('market')) deal.market = data.get('market');
-      renderBoardOnly(); showToast(`Market agent saved on ${deal.name}`);
+      const current = confirmLocalWrite(dealId, { market_agent:data.get('agent_name'),
+        ...(data.get('market') ? { market:data.get('market') } : {}) });
+      renderBoardOnly(); showToast(`Market agent saved on ${current?.name || deal.name}`);
     } });
 }
 
@@ -967,7 +1123,13 @@ async function startAgenda() {
 function renderAgenda() {
   const review = state.review;
   if (!review) return;
-  const deal = review.deals[review.index];
+  // The agenda captured its set and its order when it started, and both are
+  // kept: a record does not join or leave the list mid-review. The VALUES are
+  // resolved now, because a snapshot has replaced every row object since —
+  // possibly several times, on the periodic read alone — and the captured copy
+  // would show the partner the phase and next step as they were at the start.
+  const captured = review.deals[review.index];
+  const deal = resolveCurrentRow(captured, state.deals);
   $('#agendaTitle').textContent = state.workspace === 'team' ? 'Team Book' : account()?.account_name || 'National account';
   $('#agendaProgress').textContent = `${Math.min(review.index + 1,review.deals.length)} of ${review.deals.length}`;
   $('#agendaMeter').max = review.deals.length;
@@ -1068,8 +1230,21 @@ function wireEvents() {
     localStorage.setItem('dealroom-color-assist', enabled ? 'on' : 'off');
     showToast(enabled ? 'Color-friendly view on · patterns and labels supplement color' : 'Color-friendly view off');
   };
-  window.addEventListener('online', () => { $('#offlineBanner').hidden=true; setSync(true); pollOnce(); });
-  window.addEventListener('offline', () => { $('#offlineBanner').hidden=false; setSync(false,'Offline'); });
+  // Coming back is not the same as being current: BOTH reads start again from
+  // scratch, and `force` supersedes whatever was left hanging when the
+  // connection went away rather than queueing behind it. Without the forced
+  // poll, a feed read that never answers would leave every later tick skipping
+  // as "already polling" for the rest of the session.
+  window.addEventListener('online', () => {
+    $('#offlineBanner').hidden = true;
+    state.boardSync.setOnline(true);
+    state.boardSync.refreshBoard({ reason:'reconnect', force:true });
+    pollOnce(false, { force:true });
+  });
+  window.addEventListener('offline', () => {
+    $('#offlineBanner').hidden = false;
+    state.boardSync.setOnline(false);
+  });
   document.addEventListener('keydown', (event) => { if (event.key==='/' && !event.target.matches('input,textarea,select')) { event.preventDefault(); $('#search').focus(); } });
 }
 
@@ -1092,11 +1267,33 @@ async function boot() {
   badge.title = identity.detail;
   badge.setAttribute('aria-label', identity.detail);
   state.client = await createClient(bootConfig.mode, bootConfig.options);
+  state.boardSync = createBoardSync({
+    readBoard: () => state.client.getBoard({ workspace:'all' }),
+    readChanges: (cursor) => state.client.getChanges(cursor),
+    // Only a snapshot that is still current reaches this callback, and it
+    // already carries any value a confirmed local write is holding.
+    applyBoard: (board) => { applyBoardSnapshot(board); if (!userIsEditing()) renderPreservingFocus(); },
+    onStatus: setSync,
+  });
   state.postCallClient = createPostCallClient({ loopbackUrl:CALL_MODE_URL,
     postHeaders:CALL_MODE_HEADER });
   wireEvents();
   await loadHome();
-  state.pollTimer = setInterval(() => pollOnce(), POLL_MS);
+  // A tick that arrives while the last poll is still open is dropped by the
+  // coordinator rather than run alongside it, so a slow answer cannot land
+  // after a newer one.
+  state.pollTimer = setInterval(() => {
+    pollOnce().catch((error) => console.error('Deal Room poll failed to render', error));
+  }, POLL_MS);
+  // The backstop for what the feed cannot promise. A change whose commit landed
+  // out of order with its recorded time can slip past the cursor, and a board
+  // that only re-reads on news would then hold that wrong value for as long as
+  // the page stayed open. This asks anyway. It coalesces with the feed-driven
+  // and post-write refreshes through the same single-read queue, so it adds one
+  // read per interval at most and none while another is already running.
+  state.boardRefreshTimer = setInterval(() => {
+    state.boardSync.requestRefresh('periodic');
+  }, BOARD_REFRESH_MS);
   state.callModeTimer = setInterval(() => {
     if (callModeActive()) renderCallMode();
   }, 250);
