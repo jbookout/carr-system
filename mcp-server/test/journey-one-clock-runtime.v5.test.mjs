@@ -24,14 +24,18 @@ import {
   JOURNEY_ONE_CLOCK_PROJECTION, JOURNEY_ONE_CLOCK_VERIFIED_BINDING,
   JOURNEY_ONE_DEADLINE_CONTRACT,
 } from "../src/journey-one-clock.v5.js";
-import { journeyOneClockScopeBinding } from "../src/journey-one-clock-store.v5.js";
+import {
+  journeyOneClockKeyForState, journeyOneClockScopeBinding,
+} from "../src/journey-one-clock-store.v5.js";
 import {
   JOURNEY_ONE_MINIMUM_COMPOSE_FIELDS, JOURNEY_ONE_MINIMUM_PROJECTION_INPUTS_SCHEMA,
 } from "../src/journey-one-clock-input-store.v5.js";
 import {
-  JOURNEY_ONE_CLOCK_ADVANCE_FIELDS, JOURNEY_ONE_CLOCK_COMPOSITION_BINDING_FACTS,
+  JOURNEY_ONE_CLOCK_ADVANCE_COMPOSED_FROM_FIELDS, JOURNEY_ONE_CLOCK_ADVANCE_FIELDS,
+  JOURNEY_ONE_CLOCK_ADVANCE_RECEIPT_FIELDS, JOURNEY_ONE_CLOCK_COMPOSITION_BINDING_FACTS,
   JOURNEY_ONE_CLOCK_COMPOSITION_PROOF_FACT, JOURNEY_ONE_CLOCK_DERIVED_NOT_SUPPLIED_FIELDS,
-  JOURNEY_ONE_CLOCK_RUNTIME_CANNOT_PROVE, JOURNEY_ONE_CLOCK_RUNTIME_DERIVED_COMPOSE_FIELDS,
+  JOURNEY_ONE_CLOCK_REPLAY_EFFECTS, JOURNEY_ONE_CLOCK_RUNTIME_CANNOT_PROVE,
+  JOURNEY_ONE_CLOCK_RUNTIME_DERIVED_COMPOSE_FIELDS,
   assertJourneyOneClockComputedFromComposition, createJourneyOneClockRuntime,
   journeyOneClockRuntimeIntegrationRequirements,
 } from "../src/journey-one-clock-runtime.v5.js";
@@ -122,6 +126,7 @@ function resultFixture(stateOver = {}, bindingOver = {}) {
       schema_version: "doctorcre-v5-journey-one-clock.v2",
       origin_receipt_digest: ORIGIN_DIGEST,
       origin_at: OBSERVED_AT,
+      origin_benchmark_manifest_digest: MANIFEST,
       current_benchmark_manifest_digest: MANIFEST,
       origin_receipt_ttl_policy_ms: MINIMUM_TTL,
       evaluated_at: AS_OF,
@@ -161,7 +166,7 @@ function resultFor(composition, stateOver = {}, bindingOver = {}) {
 // ---------------------------------------------------------------------------
 
 function doubles({ head = null, composition = compositionFixture(), result = resultFixture(),
-  scope = SCOPE, presented = null } = {}) {
+  scope = SCOPE, presented = null, recordedForKey = null, actor = "claude" } = {}) {
   const calls = [];
   const seen = {};
   const bound = journeyOneClockScopeBinding(scope);
@@ -171,9 +176,15 @@ function doubles({ head = null, composition = compositionFixture(), result = res
   };
   const clock = { evaluate(envelope) { calls.push("evaluate"); seen.envelope = envelope; return result; } };
   const clock_store = {
+    writer: { actor_id: actor, authority_class: "sponsored_agent" },
     clock_scope: { clock_scope_key: bound.clock_scope_key,
       clock_scope_ref: bound.clock_scope_ref, tenant: bound.tenant,
       scope: bound.scope, scope_identity: bound.scope_identity },
+    async readRecordedRevisionForKey(idempotency_key) {
+      calls.push("readRecordedRevisionForKey");
+      seen.readRecordedRevisionForKey = idempotency_key;
+      return recordedForKey ?? { exists: false };
+    },
     async readClockKeyForScope() {
       calls.push("readClockKeyForScope");
       return { clock_key: head === null ? null : head.clock_key };
@@ -198,6 +209,27 @@ const advanceArgs = (over = {}) => ({
   as_of: AS_OF, pauses: [], amendments: [], completion: null,
   completion_expectation: null, clock_ref: null,
   idempotency_key: "00000000-0000-4000-8000-000000000001", ...over,
+});
+
+/**
+ * What the store reports for a key that already wrote. The default is the
+ * revision `resultFixture()` describes, written as a creation by this seat — so
+ * a re-computation reproduces it and the advance replays.
+ */
+const recordedFixture = (over = {}) => ({
+  schema_version: "doctorcre-v5-journey-one-clock-request-readback.v1",
+  exists: true,
+  clock_key: journeyOneClockKeyForState(resultFixture().state),
+  clock_scope_key: SCOPE_KEY,
+  clock_scope_ref: SCOPE.scope_ref,
+  clock_scope_bound: true,
+  written_by_actor_id: "claude",
+  revision_ordinal: 0,
+  history_digest: D(90),
+  expected_prior_history_digest: null,
+  prior_history: null,
+  recorded_at: "2026-02-04T00:00:01.000Z",
+  ...over,
 });
 
 // ---------------------------------------------------------------------------
@@ -276,7 +308,11 @@ test("the history and the append prior are DERIVED from one read, never supplied
 test("one read of the head supplies BOTH the composed history and the compare-and-swap prior", async () => {
   const history = { schema_version: "doctorcre-v5-journey-one-clock.v2",
     origin_receipt_digest: ORIGIN_DIGEST, history_digest: D(91) };
+  // The composition carries that same head, because a composition that did not
+  // is refused by name — see the composed-history check below.
+  const composition = compositionFixture({ projection: { history: copy(history) } });
   const { runtime, seen, calls } = doubles({
+    composition, result: resultFor(composition),
     head: { clock_key: D(60), exists: true, history_digest: D(91),
       head_revision_ordinal: 3, history },
   });
@@ -290,9 +326,12 @@ test("one read of the head supplies BOTH the composed history and the compare-an
   assert.equal(advanced.composed_from.prior_history_digest, D(91));
   assert.equal(advanced.composed_from.prior_revision_ordinal, 3);
   assert.equal(advanced.created_clock, false);
-  // And the head was read exactly once, before the composition.
-  assert.deepEqual(calls.slice(0, 3), ["readClockKeyForScope", `read:${D(60)}`, "compose"]);
+  // And the order is fixed: the request read first — this key wrote nothing —
+  // then the head, exactly once, then the composition.
+  assert.deepEqual(calls.slice(0, 4),
+    ["readRecordedRevisionForKey", "readClockKeyForScope", `read:${D(60)}`, "compose"]);
   assert.equal(calls.filter(c => c.startsWith("read:")).length, 1);
+  assert.equal(seen.readRecordedRevisionForKey, advanceArgs().idempotency_key);
 });
 
 test("a scope holding no clock composes against a null history and creates", async () => {
@@ -306,6 +345,38 @@ test("a scope holding no clock composes against a null history and creates", asy
   assert.deepEqual(calls.filter(c => c.startsWith("read:")), []);
   assert.deepEqual(seen.compose.pauses, []);
   assert.deepEqual(Object.keys(seen.compose).sort(), [...JOURNEY_ONE_MINIMUM_COMPOSE_FIELDS]);
+});
+
+test("a composition carrying a history that is not the prior refuses before any write", async () => {
+  // The scope is re-checked on the returned artifact for a stated reason: the
+  // construction check was against the composer OBJECT. The same reasoning
+  // applies to the history, and this is that check — it turns "the composer
+  // forwards what it was handed" from a trusted-collaborator assumption into a
+  // structural one.
+  const head = { clock_key: D(60), exists: true, history_digest: D(91),
+    head_revision_ordinal: 0, history: { schema_version: "v2", history_digest: D(91) } };
+  for (const [label, composition] of [
+    ["a null history for a scope that holds a clock", compositionFixture()],
+    ["another revision's history", compositionFixture({ projection: {
+      history: { schema_version: "v2", history_digest: D(92) } } })],
+  ]) {
+    const { runtime, calls } = doubles({ head, composition });
+    await assert.rejects(runtime.advance(advanceArgs()), error => {
+      assert.equal(error.name, "JourneyOneClockRuntimeError");
+      assert.equal(error.code, "clock_runtime_composed_history_is_not_the_prior");
+      assert.equal(error.detail.invariant, "j1_clock_exact_prior_history_digest");
+      assert.equal(error.detail.expected_prior_history_digest, D(91));
+      assert.equal(error.detail.replaying_recorded_request, false);
+      return true;
+    }, label);
+    assert.ok(!calls.includes("evaluate"), `${label}: nothing is evaluated for it`);
+    assert.ok(!calls.includes("record"));
+  }
+  // And the honest case passes: a composition carrying exactly the head.
+  const honest = compositionFixture({ projection: { history: copy(head.history) } });
+  const { runtime } = doubles({ head, composition: honest, result: resultFor(honest) });
+  const advanced = await runtime.advance(advanceArgs());
+  assert.equal(advanced.composed_from.prior_history_digest, D(91));
 });
 
 test("a scope naming a clock the record layer cannot produce refuses rather than creating a second one", async () => {
@@ -370,6 +441,130 @@ test("the composed projection is presented as a copy, so a presentation cannot e
   assert.equal(composition.projection.tenant, ORGANIZATION_TENANT_ID);
   assert.equal(advanced.composition_binding.bound, true);
   assert.deepEqual(seen.envelope, { e: 1 });
+});
+
+// ---------------------------------------------------------------------------
+// 2b. The retry seam: a recorded request is replayed only to its own seat.
+// ---------------------------------------------------------------------------
+
+test("a store that cannot say what a key already wrote cannot be advanced through", () => {
+  const good = doubles();
+  const blind = { ...good.clock_store };
+  delete blind.readRecordedRevisionForKey;
+  assert.throws(() => createJourneyOneClockRuntime({
+    composer: good.composer, clock: good.clock, clock_store: blind,
+    present_projection: () => ({}), verifier_ref: VERIFIER_REF }),
+  error => {
+    assert.equal(error.code, "clock_runtime_request_read_required");
+    assert.equal(error.detail.invariant, "j1_clock_idempotency_key_binds_its_payload");
+    return true;
+  });
+  // And a store with no derived writer cannot compare a recorded seat to itself.
+  assert.throws(() => createJourneyOneClockRuntime({
+    composer: good.composer, clock: good.clock,
+    clock_store: { ...good.clock_store, writer: null },
+    present_projection: () => ({}), verifier_ref: VERIFIER_REF }),
+  error => {
+    assert.equal(error.code, "clock_writer_identity_unavailable");
+    return true;
+  });
+});
+
+test("a recorded request is re-computed against ITS OWN prior, not the head", async () => {
+  // The head has moved on — that is what a lost response looks like from here —
+  // and the retry must not compose against it.
+  const movedHead = { clock_key: D(60), exists: true, history_digest: D(91),
+    head_revision_ordinal: 3, history: { schema_version: "x", history_digest: D(91) } };
+  const { runtime, seen, calls } = doubles({ head: movedHead,
+    recordedForKey: recordedFixture() });
+  const replayed = await runtime.advance(advanceArgs());
+
+  // Composed against the RECORDED prior (a creation: null), never the head.
+  assert.equal(seen.compose.history, null);
+  assert.equal(replayed.composed_from.prior_source, "recorded_request_prior");
+  assert.equal(replayed.expected_prior_history_digest, null);
+  assert.equal(replayed.created_clock, true);
+  // NOTHING WAS WRITTEN, and the head was never even read.
+  assert.equal(replayed.replayed, true);
+  assert.equal(replayed.appended, false);
+  assert.equal(replayed.replayed_recorded_request, true);
+  assert.ok(!calls.includes("record"), "a replay appends nothing");
+  assert.ok(!calls.includes("readClockKeyForScope"),
+    "a retry is about the recorded prior, so the head is not consulted");
+  assert.deepEqual(replayed.effects, JOURNEY_ONE_CLOCK_REPLAY_EFFECTS);
+  assert.equal(replayed.effects.database_writes, 0);
+  assert.equal(replayed.effects.history_appended, false);
+  // The kernel still ran and the binding still held: a replay is checked, not
+  // trusted.
+  assert.equal(replayed.composition_binding.bound, true);
+  assert.equal(replayed.kernel_verdict.status, "running");
+  assert.equal(replayed.clock_key, journeyOneClockKeyForState(resultFixture().state));
+});
+
+test("a recorded request whose re-computation differs is a second request, not a retry", async () => {
+  const { runtime, calls } = doubles({
+    recordedForKey: recordedFixture({ history_digest: D(92) }) });
+  await assert.rejects(runtime.advance(advanceArgs()), error => {
+    assert.equal(error.code, "clock_idempotency_key_reused");
+    assert.equal(error.detail.invariant, "j1_clock_idempotency_key_binds_its_payload");
+    assert.equal(error.detail.recorded.history_digest, D(92));
+    assert.equal(error.detail.recomputed.history_digest, D(90));
+    return true;
+  });
+  assert.ok(!calls.includes("record"));
+});
+
+test("a recorded request is never replayed across scope or actor", async () => {
+  for (const [label, recorded, code] of [
+    ["another scope", recordedFixture({ clock_scope_key: D(55) }),
+      "clock_runtime_replay_scope_mismatch"],
+    ["a clock with no scope binding", recordedFixture({ clock_scope_key: null,
+      clock_scope_bound: false }), "clock_runtime_replay_scope_mismatch"],
+    ["another actor", recordedFixture({ written_by_actor_id: "codex" }),
+      "clock_runtime_replay_actor_mismatch"],
+  ]) {
+    const { runtime, calls } = doubles({ recordedForKey: recorded });
+    await assert.rejects(runtime.advance(advanceArgs()), error => {
+      assert.equal(error.name, "JourneyOneClockRuntimeError");
+      assert.equal(error.code, code);
+      return true;
+    }, label);
+    // Refused before anything was composed, evaluated or written: a stored
+    // success is never handed to a seat that did not produce it.
+    assert.deepEqual(calls, ["readRecordedRevisionForKey"], label);
+  }
+});
+
+test("a recorded request whose clock cannot be re-derived refuses rather than replaying", async () => {
+  const { runtime } = doubles({ recordedForKey: recordedFixture({ clock_key: D(56) }) });
+  await assert.rejects(runtime.advance(advanceArgs()), error => {
+    assert.equal(error.code, "clock_identity_mismatch");
+    assert.equal(error.detail.invariant, "j1_clock_identity_derived_from_origin");
+    return true;
+  });
+});
+
+test("the advance receipt carries exactly its declared shape, on both paths", async () => {
+  const written = await doubles().runtime.advance(advanceArgs());
+  const replayed = await doubles({ recordedForKey: recordedFixture() })
+    .runtime.advance(advanceArgs());
+  for (const [label, receipt] of [["appended", written], ["replayed", replayed]]) {
+    assert.deepEqual(Object.keys(receipt).sort(),
+      [...JOURNEY_ONE_CLOCK_ADVANCE_RECEIPT_FIELDS].sort(), label);
+    assert.deepEqual(Object.keys(receipt.composed_from).sort(),
+      [...JOURNEY_ONE_CLOCK_ADVANCE_COMPOSED_FROM_FIELDS].sort(), label);
+    assert.equal(receipt.schema_version, "doctorcre-v5-journey-one-clock-advance.v1");
+    assert.equal(receipt.durable_history_write_required, false, label);
+    assert.equal(receipt.deadline_accepted_by_record_layer, false, label);
+    assert.equal(receipt.authenticated_projection_verified_here, false, label);
+    assert.equal(Object.isFrozen(receipt), true, label);
+  }
+  // ONE KEY SET, TWO VALUE SETS: a consumer reads the same effects shape on
+  // either path and never an absent key it would take for false.
+  assert.deepEqual(Object.keys(written.effects).sort(), Object.keys(replayed.effects).sort());
+  assert.equal(written.effects.database_writes, 1);
+  assert.equal(written.appended, true);
+  assert.equal(replayed.appended, false);
 });
 
 // ---------------------------------------------------------------------------
@@ -528,6 +723,14 @@ test("the binding refuses a wrapper or a result it cannot read, rather than pass
     [resultFixture(), compositionFixture({ projection: { schema_version: "not-the-projection" } })],
     [{ state: null }, compositionFixture()],
     [{ state: {}, verified_binding: { schema_version: "wrong" } }, compositionFixture()],
+    // THE WRAPPER'S EVIDENCE IS REQUIRED, NOT DEFAULTED. This function is
+    // exported and callable outside the loop; a wrapper that omits the head
+    // admission digest used to yield `bound: true` reporting it as null, which
+    // reads as "the inventory had no head" rather than "nobody said".
+    [resultFixture(), compositionFixture({ head_admission_digest: undefined })],
+    [resultFixture(), compositionFixture({ head_admission_digest: "not-a-digest" })],
+    [resultFixture(), compositionFixture({ admission_count: undefined })],
+    [resultFixture(), compositionFixture({ admission_count: 0 })],
   ];
   for (const [result, composition] of bad) {
     assert.throws(() => assertJourneyOneClockComputedFromComposition(result, composition),
@@ -577,8 +780,22 @@ test("the descriptor says the loop cannot run here, and names what blocks it", (
   assert.equal(d.clock_started, false);
   assert.equal(d.effects.database_writes, 0);
   assert.ok(d.blocked_by.some(l => l.includes("proposed_not_issued")),
-    "the missing issuance producer is why no inventory exists");
-  assert.ok(d.blocked_by.some(l => l.includes("minimum_inventory_unavailable")));
+    "the missing issuance producer is why no PRODUCTION inventory exists");
+  // "No issued receipt" and "no receipt can be admitted" are different findings,
+  // and this file's own suites admit fixture receipts through the real rails.
+  assert.ok(d.not_runnable_means.includes("ISSUED"));
+  assert.ok(d.not_runnable_means.includes("fixture receipts"));
+  assert.ok(d.blocked_by.some(l => l.includes("a fixture receipt admitted by a suite")));
+  // The one requirement this loop imposes on a reader that has yet to land.
+  assert.ok(d.blocked_by.some(l => l.includes("CANONICALLY IDENTICAL")),
+    "a verifier that re-derives an equivalent projection would refuse every advance");
+  assert.ok(d.blocked_by.some(l => l.includes("Key order is free")));
+  // The retry semantics, stated where a reader looks for behaviour.
+  assert.ok(d.loop_notes.some(l => l.includes("IDEMPOTENT ACROSS SEQUENTIAL RETRIES")));
+  assert.ok(d.loop_notes.some(l => l.includes("EXACT prior")));
+  assert.ok(d.cannot_prove.some(l => l.includes("REPLAYED receipt describes the current head")));
+  assert.ok(d.starts_no_clock.includes("DECIDES no start"),
+    "the kernel starts a clock; a first advance is the write that files one");
   assert.ok(d.blocked_by.some(l => l.includes("journey-one-clock-authenticated-projection")));
   assert.ok(d.blocked_by.some(l => l.includes("numbered migration")),
     "no durable journal exists to advance against");

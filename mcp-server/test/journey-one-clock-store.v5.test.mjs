@@ -2063,6 +2063,145 @@ test("a recorder without a pre-write assertion is unchanged, and a non-function 
   }
 });
 
+// ---------------------------------------------------------------------------
+// 13. WHAT ONE IDEMPOTENCY KEY ALREADY WROTE, read without opening an append.
+// ---------------------------------------------------------------------------
+
+test("a key that wrote nothing reads as absent, and one that wrote reads back its own prior", async () => {
+  const { store } = newStore();
+  const unused = key();
+  const nothing = await store.readRecordedRevisionForKey(unused);
+  assert.equal(nothing.exists, false);
+  assert.equal(nothing.idempotency_key, unused);
+  assert.equal(nothing.effects.database_writes, 0, "asking is not writing");
+
+  // A CREATION: the prior is an explicit null, and the readback says so.
+  const first = run(snapshot());
+  const createdKey = key();
+  const created = await store.record({ state: copy(first.state),
+    expected_prior_history_digest: null, idempotency_key: createdKey, verifier_ref: VERIFIER });
+  const readCreated = await store.readRecordedRevisionForKey(createdKey);
+  assert.equal(readCreated.exists, true);
+  assert.equal(readCreated.clock_key, created.clock_key);
+  assert.equal(readCreated.history_digest, first.state.history_digest);
+  assert.equal(readCreated.expected_prior_history_digest, null);
+  assert.equal(readCreated.prior_history, null);
+  assert.equal(readCreated.revision_ordinal, 0);
+  assert.equal(readCreated.written_by_actor_id, ACTOR.slug);
+  assert.equal(readCreated.clock_scope_key, journeyOneClockScopeKey(SCOPE));
+  assert.equal(readCreated.clock_scope_bound, true);
+  // The revision is REBUILT and re-hashed, not copied out of a row.
+  assert.deepEqual(readCreated.history, copy(first.state));
+  assert.equal(journeyOneClockHistoryDigest(readCreated.history), first.state.history_digest);
+
+  // A LATER REVISION: the prior is the exact history it was written against, and
+  // it is rebuilt from its own rows rather than pointed at.
+  const advanced = snapshot(iso(Date.parse(ORIGIN) + 2 * DAY));
+  advanced.history = copy((await store.read(created.clock_key)).history);
+  const secondState = run(advanced).state;
+  const appendKey = key();
+  await store.record({ state: copy(secondState), idempotency_key: appendKey,
+    expected_prior_history_digest: first.state.history_digest, verifier_ref: VERIFIER });
+  const readAppended = await store.readRecordedRevisionForKey(appendKey);
+  assert.equal(readAppended.revision_ordinal, 1);
+  assert.equal(readAppended.history_digest, secondState.history_digest);
+  assert.equal(readAppended.expected_prior_history_digest, first.state.history_digest);
+  assert.deepEqual(readAppended.prior_history, copy(first.state));
+  assert.equal(journeyOneClockHistoryDigest(readAppended.prior_history),
+    readAppended.expected_prior_history_digest);
+  // TWO REVISIONS, AND ASKING ABOUT THEM ADDED NEITHER.
+  assert.equal((await store.read(created.clock_key)).revision_count, 2);
+  assert.equal(readAppended.effects.database_writes, 0);
+});
+
+test("the request read refuses a journal that cannot answer, rather than reporting absence", async () => {
+  const { journal } = newStore();
+  const blind = { durable: false, kind: "no-idempotency-read",
+    runAppend: (...a) => journal.runAppend(...a), readClock: (...a) => journal.readClock(...a),
+    readRevisions: (...a) => journal.readRevisions(...a),
+    readScopeBindings: (...a) => journal.readScopeBindings(...a),
+    bindScope: (...a) => journal.bindScope(...a) };
+  const store = createJourneyOneClockStore({ journal: blind, actor: ACTOR, clock_scope: SCOPE });
+  // "This journal cannot say" and "this key wrote nothing" are different
+  // findings, and a caller acting on the second would append a second revision.
+  await refuses(store.readRecordedRevisionForKey(key()), "clock_idempotency_read_unavailable");
+  await refuses(store.readRecordedRevisionForKey("not-a-uuid"), "invalid_uuid");
+});
+
+test("a recorded request whose prior is gone refuses instead of pointing at the head", async () => {
+  const { journal, store } = newStore();
+  const first = run(snapshot());
+  const createdKey = key(), appendKey = key();
+  const created = await store.record({ state: copy(first.state),
+    expected_prior_history_digest: null, idempotency_key: createdKey, verifier_ref: VERIFIER });
+  const advanced = snapshot(iso(Date.parse(ORIGIN) + 2 * DAY));
+  advanced.history = copy((await store.read(created.clock_key)).history);
+  await store.record({ state: copy(run(advanced).state), idempotency_key: appendKey,
+    expected_prior_history_digest: first.state.history_digest, verifier_ref: VERIFIER });
+
+  // A journal that can no longer produce the revision the CAS token names. The
+  // current head is not a substitute: re-computing against it would be the
+  // rebase this rail exists to refuse.
+  const lossy = createJourneyOneClockStore({ actor: ACTOR, clock_scope: SCOPE, journal: {
+    durable: false, kind: "lossy",
+    runAppend: (...a) => journal.runAppend(...a), readClock: (...a) => journal.readClock(...a),
+    readScopeBindings: (...a) => journal.readScopeBindings(...a),
+    bindScope: (...a) => journal.bindScope(...a),
+    readRevisionByIdempotencyKey: (...a) => journal.readRevisionByIdempotencyKey(...a),
+    async readRevisions(clockKey) {
+      return (await journal.readRevisions(clockKey)).filter(r => r.revision_ordinal !== 0);
+    },
+  } });
+  await refuses(lossy.readRecordedRevisionForKey(appendKey),
+    "clock_replay_prior_history_unavailable");
+});
+
+test("the request read is bound to this tenant and to intact rows", async () => {
+  const { journal, store } = newStore();
+  const first = run(snapshot());
+  const usedKey = key();
+  await store.record({ state: copy(first.state), expected_prior_history_digest: null,
+    idempotency_key: usedKey, verifier_ref: VERIFIER });
+
+  const edited = createJourneyOneClockStore({ actor: ACTOR, clock_scope: SCOPE, journal: {
+    durable: false, kind: "tampering-idempotency-read",
+    runAppend: (...a) => journal.runAppend(...a), readClock: (...a) => journal.readClock(...a),
+    readRevisions: (...a) => journal.readRevisions(...a),
+    readScopeBindings: (...a) => journal.readScopeBindings(...a),
+    bindScope: (...a) => journal.bindScope(...a),
+    async readRevisionByIdempotencyKey(k) {
+      const row = copy(await journal.readRevisionByIdempotencyKey(k));
+      row.scalars.status = "completed_on_time";
+      return row;
+    },
+  } });
+  await refuses(edited.readRecordedRevisionForKey(usedKey), "clock_readback_tampered");
+});
+
+test("evaluateAndBind is the write path's own order with the write left off", async () => {
+  const watch = watchedJournal();
+  const h = harness();
+  const store = createJourneyOneClockStore({
+    journal: watch.journal, actor: ACTOR, clock_scope: SCOPE });
+  const seen = [];
+  const recorder = createJourneyOneClockRecorder({ clock: h.clock, store, verifier_ref: VERIFIER,
+    assert_before_write: result => { seen.push(result.state.history_digest); } });
+  const p = snapshot();
+  const bound = recorder.evaluateAndBind(h.envelopeFor(p));
+  assert.equal(bound.result.state.history_digest, run(p).state.history_digest);
+  assert.equal(bound.clock_scope_key, store.clock_scope.clock_scope_key);
+  assert.deepEqual(seen, [run(p).state.history_digest], "the pre-write assertion still fires");
+  assert.deepEqual(watch.calls, [], "and nothing is read or written");
+  assert.equal(Object.isFrozen(bound), true);
+  // The same scope check refuses here too — it is one implementation.
+  const elsewhere = createJourneyOneClockStore({ journal: watch.journal, actor: ACTOR,
+    clock_scope: { ...SCOPE, benchmark_policy_digest: D(23) } });
+  assert.throws(() => createJourneyOneClockRecorder({ clock: h.clock, store: elsewhere,
+    verifier_ref: VERIFIER }).evaluateAndBind(h.envelopeFor(snapshot())),
+  e => e.code === "clock_scope_not_the_verified_binding");
+  assert.deepEqual(watch.calls, []);
+});
+
 test("the descriptor names the pre-write seam as something that can only refuse", () => {
   const contract = journeyOneClockStoreIntegrationRequirements().trusted_integration_contract;
   assert.ok(contract.optional_pre_write_assertion.includes("can only add a refusal"));

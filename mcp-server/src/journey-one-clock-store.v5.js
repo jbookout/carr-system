@@ -234,6 +234,13 @@ export const JOURNEY_ONE_CLOCK_HISTORY_ROWS_SCHEMA =
   "doctorcre-v5-journey-one-clock-history-rows.v1";
 export const JOURNEY_ONE_CLOCK_READBACK_SCHEMA =
   "doctorcre-v5-journey-one-clock-readback.v1";
+/**
+ * The readback of ONE REQUEST that already landed, addressed by its idempotency
+ * key. It is a read of rows this rail already holds — it opens no append, takes
+ * no lock, and grants nothing.
+ */
+export const JOURNEY_ONE_CLOCK_REPLAY_READBACK_SCHEMA =
+  "doctorcre-v5-journey-one-clock-request-readback.v1";
 export const JOURNEY_ONE_CLOCK_INTEGRATION_SCHEMA =
   "doctorcre-v5-journey-one-clock-store-integration.v1";
 
@@ -461,6 +468,7 @@ export const JOURNEY_ONE_CLOCK_STORE_CANNOT_PROVE = Object.freeze([
   "that a revision written by a direct holder of the writer bundle is a kernel computation rather than that writer's assertion; both are trusted writers and nothing recorded here tells them apart",
   "that the authoritative scope a STORED revision is bound to is the accepted scope of the projection the kernel actually read. Through createJourneyOneClockRecorder the kernel's own verified_binding for that computation is compared against the store's scope before anything is written; through a direct store.record() call or a direct SQL writer it is not, because doctorcre-v5-journey-one-clock.v2 carries no subject, candidate or policy digest and this rail never derives one from a stored history",
   "anything about deadline SUCCESS. A stored status is a recorded computation, never an acceptance of a deadline by this record layer",
+  "that a revision written through a recorder built WITHOUT an assert_before_write was bound to any composed projection. That seam is optional by construction, so a recorder without one checks the scope and nothing else; it is a third path, beside a direct record() call and a direct SQL writer, on which nothing ties the computation to an inventory this record layer read",
 ]);
 
 /**
@@ -1028,6 +1036,15 @@ export function assertJourneyOneClockAppendOnly(prior, next) {
 //     Idempotent for an exact repeat, and the point at which a second clock for
 //     one scope, or a clock rebound to a second scope, is refused. It is called
 //     inside the same serialized section as the append it belongs to.
+//   readRevisionByIdempotencyKey(idempotencyKey) -> revision row or null
+//     OPTIONAL, AND READ-ONLY. The same lookup runAppend already performs inside
+//     its serialized section, exposed on its own so a caller can ask "did this
+//     request already land?" WITHOUT opening a write. Both implementations here
+//     answer it from the row they already store — the reference journal from its
+//     idempotency map, the durable one from ops.j1_clock_revision_by_idempotency_key,
+//     which exists, is already granted to the reader bundle and is unchanged by
+//     this seam. A journal that does not implement it makes
+//     readRecordedRevisionForKey refuse BY NAME rather than answer "no".
 // ---------------------------------------------------------------------------
 
 /**
@@ -1096,6 +1113,10 @@ export function createEphemeralJourneyOneClockJournal({ now = Date.now } = {}) {
     },
     async readClock(clockKey) { return clocks.get(clockKey) ?? null; },
     async readRevisions(clockKey) { return [...(revisions.get(clockKey) ?? [])]; },
+    /** The same map runAppend consults, read without opening an append. */
+    async readRevisionByIdempotencyKey(idempotencyKey) {
+      return byIdempotency.get(idempotencyKey) ?? null;
+    },
     async readScopeBindings({ clockScopeKey = null, clockKey = null } = {}) {
       return {
         by_scope: clockScopeKey === null ? null : byScopeKey.get(clockScopeKey) ?? null,
@@ -1213,6 +1234,17 @@ export function createPostgresJourneyOneClockJournal({ query } = {}) {
     },
     async readRevisions(clockKey) {
       return (await one("select ops.j1_clock_revisions($1::text) as revisions", [clockKey]))?.revisions ?? [];
+    },
+    /**
+     * THE SAME FUNCTION runAppend CALLS, and no new one. It is `stable security
+     * definer`, is already granted to the reader bundle, and takes no lock: this
+     * is a read, and calling it outside the serialized section is exactly what
+     * makes it useful — it answers "did this request already land?" without
+     * opening a write. No schema, grant or SQL text changed for it.
+     */
+    async readRevisionByIdempotencyKey(idempotencyKey) {
+      return (await one("select ops.j1_clock_revision_by_idempotency_key($1::uuid) as revision",
+        [idempotencyKey]))?.revision ?? null;
     },
     async readScopeBindings({ clockScopeKey = null, clockKey = null } = {}) {
       return (await one("select ops.j1_clock_scope_bindings($1::text,$2::text) as bindings",
@@ -1405,6 +1437,103 @@ export function createJourneyOneClockStore({
         clock_scope_ref: scope.clock_scope_ref,
         clock_key: bindings?.by_scope?.clock_key ?? null,
         record_layer_cannot_prove: [...JOURNEY_ONE_CLOCK_STORE_CANNOT_PROVE],
+        effects: V5_NO_EFFECTS,
+      });
+    },
+
+    /**
+     * WHAT ONE IDEMPOTENCY KEY ALREADY WROTE, if anything. READ ONLY.
+     *
+     * WHY THIS EXISTS. `record()` learns a key was used only from INSIDE its
+     * serialized section, and by then it has already been handed a state that was
+     * computed against whatever the head is NOW. A caller retrying after a lost
+     * response therefore arrives with a legitimately different prior and meets
+     * `clock_idempotency_key_reused` — a true statement about the payload and a
+     * misleading one about the situation. This is the question asked BEFORE any
+     * of that: did this exact request already land, and what did it land against?
+     *
+     * IT ANSWERS AND DECIDES NOTHING. It does not compare a caller's intent, does
+     * not judge whether a retry is legitimate, and cannot be used to skip a write:
+     * the seat that retries has to RE-COMPUTE against the prior returned here and
+     * match the recorded history digest itself. Everything below is a validated
+     * read of rows that already exist — the revision is rebuilt from its own rows
+     * and re-hashed by the same `rebuild` every readback uses, so a tampered row
+     * refuses here exactly as it does there, and the prior it names is rebuilt the
+     * same way rather than believed.
+     *
+     * THE PRIOR IS THE POINT. `expected_prior_history_digest` is the CAS token the
+     * recorded revision was written under; the history it names is the ONLY
+     * history a faithful re-computation of that request can be made against. A
+     * recorded prior this rail cannot produce refuses BY NAME rather than being
+     * quietly replaced with the current head, which would be the rebase this whole
+     * rail exists to refuse.
+     */
+    async readRecordedRevisionForKey(idempotency_key) {
+      assertUuid(idempotency_key, "idempotency_key");
+      if (typeof journal.readRevisionByIdempotencyKey !== "function") {
+        refuse("clock_idempotency_read_unavailable",
+          "this journal cannot answer what one idempotency key already wrote without opening an append, so a request's outcome cannot be read back. The port method is optional and both journals in this module implement it; a journal without it refuses here rather than reporting 'no revision', which a caller would read as 'this request never landed'",
+          { invariant: "j1_clock_idempotency_key_binds_its_payload",
+            path: "journal.readRevisionByIdempotencyKey" });
+      }
+      const absent = () => deepFreeze({
+        schema_version: JOURNEY_ONE_CLOCK_REPLAY_READBACK_SCHEMA,
+        idempotency_key, tenant, exists: false,
+        record_layer_cannot_prove: [...JOURNEY_ONE_CLOCK_STORE_CANNOT_PROVE],
+        effects: V5_NO_EFFECTS,
+      });
+      const row = await journal.readRevisionByIdempotencyKey(idempotency_key);
+      if (!row) return absent();
+      if (!isPlainObject(row) || typeof row.clock_key !== "string") {
+        refuse("clock_readback_tampered",
+          "the revision this idempotency key names is not a revision row",
+          { invariant: "j1_clock_content_rebuilds_to_its_digest", idempotency_key });
+      }
+      if (row.tenant !== tenant) {
+        refuse("cross_tenant_clock_history",
+          "that request belongs to another tenant",
+          { invariant: "j1_clock_tenant_bound", stored: row.tenant, reading_as: tenant });
+      }
+      // REBUILT AND RE-HASHED, not believed: the same read a clock readback does.
+      const history = rebuild(row.clock_key, row);
+      const priorDigest = assertNullableDigestRef(
+        row.expected_prior_history_digest ?? null, "expected_prior_history_digest");
+      let prior = null;
+      if (priorDigest !== null) {
+        const revisions = await journal.readRevisions(row.clock_key);
+        const found = (Array.isArray(revisions) ? revisions : [])
+          .find(revision => revision?.history_digest === priorDigest) ?? null;
+        if (found === null) {
+          refuse("clock_replay_prior_history_unavailable",
+            "the recorded revision names a prior history this rail cannot produce, so the request it recorded cannot be re-computed against the history it was actually written against. The current head is not a substitute: computing against it would be the rebase this rail refuses",
+            { invariant: "j1_clock_exact_prior_history_digest",
+              clock_key: row.clock_key, expected_prior_history_digest: priorDigest });
+        }
+        prior = rebuild(row.clock_key, found);
+      }
+      const bound = (await journal.readScopeBindings({ clockKey: row.clock_key }))?.by_clock ?? null;
+      return deepFreeze({
+        schema_version: JOURNEY_ONE_CLOCK_REPLAY_READBACK_SCHEMA,
+        idempotency_key, tenant, exists: true,
+        clock_key: row.clock_key,
+        clock_ref: row.clock_ref ?? null,
+        clock_scope_bound: bound !== null,
+        clock_scope_key: bound?.clock_scope_key ?? null,
+        clock_scope_ref: bound?.clock_scope_ref ?? null,
+        revision_ordinal: row.revision_ordinal,
+        history_digest: row.history_digest,
+        expected_prior_history_digest: priorDigest,
+        recorded_at: row.recorded_at,
+        // The seat comparing an actor against this one is comparing two derived
+        // classes, not a claim: `written_by_actor_id` was derived from the LIVE
+        // actor at write time by deriveJourneyOneClockWriter and is never read
+        // back to decide anything here.
+        written_by_actor_id: row.provenance?.written_by_actor_id ?? row.written_by_actor_id ?? null,
+        provenance: copy(row.provenance ?? null),
+        history: copy(history),
+        prior_history: prior === null ? null : copy(prior),
+        record_layer_cannot_prove: [...JOURNEY_ONE_CLOCK_STORE_CANNOT_PROVE],
+        deadline_accepted_by_record_layer: false,
         effects: V5_NO_EFFECTS,
       });
     },
@@ -1840,24 +1969,42 @@ export function createJourneyOneClockRecorder({
       "a recorder writes, and every write is filed under the authoritative clock scope its store was constructed for; a store without one cannot be recorded through, because the kernel's verified binding would have nothing to be checked against",
       { invariant: "j1_clock_scope_binds_one_clock", path: "store.clock_scope" });
   }
+  /**
+   * EVALUATE AND CHECK, WITHOUT WRITING — and it is the same code the write path
+   * runs, not a copy of it. The kernel runs on its own terms, the scope is
+   * derived from its verified binding and compared, and any pre-write assertion
+   * fires; nothing is stored and no journal method is called.
+   *
+   * It exists because a seat that has established a request ALREADY LANDED still
+   * has to check that the re-computation is the same computation, and it must do
+   * that without appending. Splitting the order into a second implementation
+   * there is what rule a8c55a47 forbids, so the order stays here and the write is
+   * what is optional.
+   */
+  const evaluateAndBind = (envelope) => {
+    // The kernel runs FIRST and on its own terms. If it refuses, nothing is
+    // stored and its own error code travels unchanged: a caller who learns
+    // `origin_reset_or_rebase` from the kernel should see that code, not a
+    // second vocabulary for the same fact.
+    const result = clock.evaluate(envelope);
+    // AND THE SCOPE IT WAS JUDGED UNDER IS THE SCOPE IT IS FILED UNDER. This
+    // runs before store.record(), so a mismatch, a missing binding or a
+    // malformed one refuses with no journal call and no row written.
+    const clock_scope_key = assertVerifiedBindingMatchesScope(result, installed);
+    // AND ANY TRUSTED PRE-WRITE ASSERTION, in the same window: after the scope
+    // check, before the store is called. Its refusal travels unchanged, for the
+    // same reason the kernel's does — a caller who would learn
+    // `clock_computation_origin_not_in_composed_inventory` from the seat that
+    // holds the inventory should meet that code and not a second vocabulary.
+    // Nothing is read from its return value.
+    if (assert_before_write !== null) assert_before_write(result);
+    return Object.freeze({ result, clock_scope_key });
+  };
+
   return Object.freeze({
+    evaluateAndBind,
     async evaluateAndRecord({ envelope, expected_prior_history_digest, idempotency_key, clock_ref = null } = {}) {
-      // The kernel runs FIRST and on its own terms. If it refuses, nothing is
-      // stored and its own error code travels unchanged: a caller who learns
-      // `origin_reset_or_rebase` from the kernel should see that code, not a
-      // second vocabulary for the same fact.
-      const result = clock.evaluate(envelope);
-      // AND THE SCOPE IT WAS JUDGED UNDER IS THE SCOPE IT IS FILED UNDER. This
-      // runs before store.record(), so a mismatch, a missing binding or a
-      // malformed one refuses with no journal call and no row written.
-      const clock_scope_key = assertVerifiedBindingMatchesScope(result, installed);
-      // AND ANY TRUSTED PRE-WRITE ASSERTION, in the same window: after the scope
-      // check, before the store is called. Its refusal travels unchanged, for the
-      // same reason the kernel's does — a caller who would learn
-      // `clock_computation_origin_not_in_composed_inventory` from the seat that
-      // holds the inventory should meet that code and not a second vocabulary.
-      // Nothing is read from its return value.
-      if (assert_before_write !== null) assert_before_write(result);
+      const { result, clock_scope_key } = evaluateAndBind(envelope);
       const recorded = await store.record({
         state: copy(result.state), expected_prior_history_digest, idempotency_key,
         claimed_history_digest: result.state.history_digest, clock_ref, verifier_ref,
