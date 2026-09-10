@@ -550,9 +550,12 @@ comment on function ops.j1_minimum_admissions(text) is
 -- IT ANSWERS IN THE MODULE'S OWN READBACK SHAPE. The two homes are read side by
 -- side by anyone comparing them, so the schema version, the top-level tenant and
 -- the two sealed policy fields are here under the names the module's read()
--- uses, and the exists:false branch carries the same keys as the exists:true
--- one minus the content. The scope and its label also stay nested under
--- `inventory`, because that is the row this function actually read.
+-- uses, and the exists:false branch carries the module's exists:false key set
+-- exactly -- six keys, `effects` among them and `gate_admitted_by_record_layer`
+-- deliberately not, because an inventory that does not exist has admitted
+-- nothing to say `false` about. The scope and its label stay nested under
+-- `inventory` on the exists:true branch, because that is the row this function
+-- actually read.
 create or replace function ops.j1_minimum_history(p_clock_scope_key text)
 returns jsonb language plpgsql stable security definer
 set search_path = pg_catalog, ops, public
@@ -570,7 +573,17 @@ begin
       'tenant', 'carr-internal',
       'exists', false,
       'record_layer_cannot_prove', ops.j1_minimum_record_layer_cannot_prove(),
-      'gate_admitted_by_record_layer', false);
+      -- THE MODULE'S OWN exists:false KEY SET, EXACTLY. read() returns
+      -- {schema_version, clock_scope_key, tenant, exists, record_layer_cannot_
+      -- prove, effects} and nothing else -- no gate_admitted_by_record_layer,
+      -- because there is no inventory to say anything about. An earlier revision
+      -- carried that key here and no `effects`, so five of the six agreed while
+      -- the header claimed the branch matched; a claimed parity that is off by
+      -- one field is worse than no claim, because it is the reason nobody checks.
+      'effects', jsonb_build_object(
+        'creates_effect', false, 'database_writes', 0, 'network_calls', 0,
+        'provider_actions', 0, 'notifications', 0, 'schedules', 0,
+        'deployments', 0, 'activations', 0, 'acceptances', 0));
   end if;
   for v_row in
     select a.* from ops.j1_minimum_admission a

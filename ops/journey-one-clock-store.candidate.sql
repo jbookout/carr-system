@@ -609,6 +609,17 @@ comment on table ops.j1_clock_revision_event is
 -- ---------------------------------------------------------------------------
 -- APPEND-ONLY. There is no reset, no delete, no backdating and no replacement on
 -- this rail, and that is enforced rather than asserted.
+--
+-- TWO TRIGGERS PER RELATION, because UPDATE/DELETE and TRUNCATE are different
+-- events. A ROW-LEVEL TRIGGER NEVER SEES TRUNCATE -- it is a statement event --
+-- so a row-level-only posture would leave the header's claim that "update,
+-- delete and truncate are refused everywhere on this rail" true of every runtime
+-- bundle and FALSE of the table owner, from whom TRUNCATE cannot be revoked. The
+-- `revoke ... truncate` at the foot of this file is the grant half and does not
+-- bind the owner; this is the half that does. Same shape as
+-- ops/journey-one-clock-input-store.candidate.sql, ops/model-role-store.candidate.sql,
+-- ops/cre-lifecycle.candidate.sql and ops/document-derivative-registration.candidate.sql,
+-- which is the house pattern rather than a new one invented here.
 -- ---------------------------------------------------------------------------
 create or replace function ops.j1_clock_rows_immutable()
 returns trigger language plpgsql
@@ -616,12 +627,12 @@ set search_path = pg_catalog, ops
 as $$
 begin
   raise exception '[j1_clock_rows_are_append_only] Journey 1 clock rows are append-only: % is refused on ops.%',
-    tg_op, tg_table_name;
+    tg_op, tg_table_name using errcode = '42501';
 end;
 $$;
 
 comment on function ops.j1_clock_rows_immutable() is
-  'Refuses every update and delete on the Journey 1 clock storage tables. Carries the shared invariant id j1_clock_rows_are_append_only.';
+  'Refuses every update, delete and truncate on the Journey 1 clock storage tables. Carries the shared invariant id j1_clock_rows_are_append_only. It is installed twice per relation because a row-level trigger never sees TRUNCATE, and TRUNCATE cannot be revoked from the table owner.';
 
 do $$
 declare t text;
@@ -634,6 +645,11 @@ begin
     execute format(
       'create trigger %I before update or delete on ops.%I for each row execute function ops.j1_clock_rows_immutable()',
       t || '_append_only', t);
+    -- TRUNCATE is statement-level and BEFORE-only; there is no row to see.
+    execute format('drop trigger if exists %I on ops.%I', t || '_no_truncate', t);
+    execute format(
+      'create trigger %I before truncate on ops.%I for each statement execute function ops.j1_clock_rows_immutable()',
+      t || '_no_truncate', t);
   end loop;
 end $$;
 
