@@ -32910,9 +32910,9 @@
   ],
   "current_source_review": {
     "base_version": "v24",
-    "reason": "Codex continuity reference-manifest capacity hotfix over current main: re-digests only existing continuity handler, proxy, hook, and scoped config ingress rows from the merged tree; no ingress is added or removed; existing ingress only.",
+    "reason": "Codex continuity reference-manifest capacity hotfix over current main: re-digests only existing continuity handler, proxy, hook, and scoped config ingress rows from the corrected merged tree; no ingress is added or removed; existing ingress only.",
     "expected_count": 835,
-    "expected_sha256": "90f50393df15d2b9b6d2e664d5a30efeb9cfd67c670a133da4ceda330b1474f7",
+    "expected_sha256": "55fab950edfb0cd0ac21f662ac692c89871a4dcae3c41a59930a7cc15cd56a33",
     "upsert": [
       {
         "ingress_key": "mcp-tool:admit-engineering-slice",
@@ -33219,8 +33219,8 @@
         "operation": "ops/config-as-code.py",
         "effect_class": "administrative_mutation",
         "source_locator": "ops/config-as-code.py",
-        "schema_digest": "ea7d6eac981f4d286a653aed12d0aeacb9bb4df2aba3fc978f28cbd1b137adea",
-        "handler_digest": "ea7d6eac981f4d286a653aed12d0aeacb9bb4df2aba3fc978f28cbd1b137adea",
+        "schema_digest": "23581857bb4ae8afe3548877bc95100536a0a54cf9a5a3cfe7837834e7b23ae5",
+        "handler_digest": "23581857bb4ae8afe3548877bc95100536a0a54cf9a5a3cfe7837834e7b23ae5",
         "write": true,
         "human_only": false,
         "authority_only": true,
