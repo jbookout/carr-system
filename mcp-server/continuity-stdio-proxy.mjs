@@ -33,11 +33,20 @@ function credential() {
   return selected.token;
 }
 
+// PostgreSQL jsonb::text includes spaces after separators. Checkpoint fields
+// contain strings, arrays and objects; key ordering does not change their size.
+function storedStateJson(value) {
+  if (Array.isArray(value)) return `[${value.map(storedStateJson).join(", ")}]`;
+  if (value && typeof value === "object")
+    return `{${Object.entries(value).map(([key, item]) => `${JSON.stringify(key)}: ${storedStateJson(item)}`).join(", ")}}`;
+  return JSON.stringify(value);
+}
+
 async function forward(message, token) {
   if (message.method === "tools/call" && !ALLOWED.has(message.params?.name))
     return { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: CODEX ? "not_in_codex_continuity_profile" : "not_in_claude_continuity_profile" } };
   if (CODEX && message.method === "tools/call" && message.params?.name === "codex-checkpoint" &&
-      Buffer.byteLength(JSON.stringify(message.params.arguments?.state ?? {}), "utf8") > 24_000)
+      Buffer.byteLength(storedStateJson(message.params.arguments?.state ?? {}), "utf8") > 24_000)
     return { jsonrpc: "2.0", id: message.id, error: { code: -32602, message: "codex_continuity_payload_too_large" } };
   const response = await fetch(URL, {
     method: "POST",

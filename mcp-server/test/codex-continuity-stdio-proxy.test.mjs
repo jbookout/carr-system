@@ -45,6 +45,11 @@ test("Codex continuity stdio proxy keeps the bearer out of config and exposes tw
   let stdout = "", stderr = "";
   child.stdout.on("data", chunk => { stdout += chunk; });
   child.stderr.on("data", chunk => { stderr += chunk; });
+  const storageCliffState = { objective: "", next_action: "verify", progress: [{ text: "done" }] };
+  storageCliffState.objective = "a".repeat(23998 - Buffer.byteLength(JSON.stringify(storageCliffState)));
+  assert.equal(Buffer.byteLength(JSON.stringify(storageCliffState)), 23998);
+  // Four colons and two commas add six storage bytes; this copy is exactly 24KB.
+  const storageLimitState = { ...storageCliffState, objective: storageCliffState.objective.slice(4) };
   child.stdin.end([
     { jsonrpc: "2.0", id: 0, method: "initialize", params: {} },
     { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} },
@@ -53,6 +58,8 @@ test("Codex continuity stdio proxy keeps the bearer out of config and exposes tw
     { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "codex-read-recovery", arguments: {} } },
     { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "codex-checkpoint", arguments: { state: { objective: "é".repeat(12000) } } } },
     { jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "claude-checkpoint", arguments: {} } },
+    { jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "codex-checkpoint", arguments: { state: storageCliffState } } },
+    { jsonrpc: "2.0", id: 8, method: "tools/call", params: { name: "codex-checkpoint", arguments: { state: storageLimitState } } },
   ].map(value => JSON.stringify(value)).join("\n") + "\n" + "not-json\n" + "x".repeat(2_000_001) + "\n");
   const code = await new Promise(resolve => child.on("close", resolve));
   server.close();
@@ -70,7 +77,9 @@ test("Codex continuity stdio proxy keeps the bearer out of config and exposes tw
   assert.equal(responses[4].error.message, "continuity_proxy_failure");
   assert.equal(responses[5].error.message, "codex_continuity_payload_too_large");
   assert.equal(responses[6].error.message, "not_in_codex_continuity_profile");
-  assert.deepEqual(seen.map(message => message.id), [0, 1, 3, 4]);
+  assert.equal(responses[7].error.message, "codex_continuity_payload_too_large");
+  assert.equal(responses[8].result.content[0].text, "ok");
+  assert.deepEqual(seen.map(message => message.id), [0, 1, 3, 4, 8]);
   assert.doesNotMatch(stdout + stderr, /secret-codex|secret upstream|private\/path|mcp-tokens/);
 });
 
