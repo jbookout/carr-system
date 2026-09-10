@@ -571,8 +571,12 @@ function assertPolicyEvidenceScope(report, path) {
   for (const field of EVIDENCE_SCOPE_KEYS) {
     reportString(scope[field], `${at}.${field}`, { nullable: true });
   }
-  assertNotUnknownEnvironment(scope.environment, `${at}.environment`);
+  // An axis that observed NOTHING keeps the scope it was handed, sentinel and
+  // all: that scope is why it refused, and the refusal has to stay readable.
+  // Rejecting the report here would turn this module's own honest answer into an
+  // unreadable input.
   if (policy.state === "unobservable") return;
+  assertNotUnknownEnvironment(scope.environment, `${at}.environment`);
   // The tenant the payload cannot report: evidence that reports an epoch must
   // name one, or nothing binds that epoch to the tenant being asked about.
   reportString(scope.tenant, `${at}.tenant`);

@@ -540,6 +540,33 @@ test("a tampered epoch_state cannot ride an observed policy axis into an allow",
   );
 });
 
+test("policy evidence naming the unlabelled sentinel refuses legibly, and is not unreadable", async () => {
+  // The refusal has to survive the trip back through the evaluator: this module
+  // produced the report, so rejecting it as unreadable would hide its own answer.
+  for (const [label, source] of [
+    ["trusted", V5_TRUSTED_POLICY_EPOCH_SOURCES[0]],
+    ["untrusted", "release_doctrine_generation"],
+  ]) {
+    const { deployment, result } = await compare({
+      observation: {
+        source, status: policyStatus(), tenant: "carr-internal",
+        environment: V5_UNKNOWN_ENVIRONMENT_SENTINEL, deployment_ref: WORKER_VERSION_ID,
+      },
+    });
+
+    // The deployment itself is labelled; only the evidence is not.
+    assert.equal(deployment.environment, "production", label);
+    assert.equal(deployment.axes.policy.state, "unobservable", label);
+    assert.equal(deployment.axes.policy.evidence_scope.environment,
+      V5_UNKNOWN_ENVIRONMENT_SENTINEL, label);
+    assert.equal(result.decision, "refuse", label);
+    assert.notEqual(result.decision, "allow", label);
+    assert.equal(result.reason_id, "deployment_axis_unobservable", label);
+    assert.deepEqual(result.blocking_axes, ["policy"], label);
+    assert.equal(result.scope.state, "bound", label);
+  }
+});
+
 test("a normalized report cannot report an epoch whose evidence names no tenant", async () => {
   const client = matchingClient();
   const deployment = deploymentVersionReportFromRelease(await release(),
