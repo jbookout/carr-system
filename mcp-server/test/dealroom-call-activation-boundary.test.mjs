@@ -245,6 +245,13 @@ test("a recorder control left in a cached shell is disabled, hidden and never wi
   const link = doc.getElementById("callModeStandalone");
   assert.equal(link.getAttribute("href"), null,
     "a link to a local controller is an entrypoint too, and this workspace offers none");
+  // `hidden` on a stub is a property, not a rendering. The shipped stylesheet is
+  // what turns it into a real disappearance, so the rule is pinned here rather
+  // than assumed: without it the sweep would leave a visible, aria-hidden
+  // control on screen — worse than the state it set out to fix. Read only; the
+  // stylesheet is not this slice's to change.
+  assert.match(await file("dealroom/css/app.css"), /\[hidden\]\{display:none!important\}/,
+    "the sweep's hiding depends on this rule");
   assert.deepEqual(seen.reached, [], "pressing every retired control must reach nothing");
   assert.equal(seen.setInterval, 0);
   assert.equal(seen.setTimeout, 0);
@@ -269,9 +276,19 @@ test("the shipped markup carries an inactive Calls entrypoint and no recorder", 
 
   // Intuitive inactive messaging: what is off, and what was NOT taken away.
   assert.match(html, /Recording a call is not part of this release/);
-  assert.match(html, /cannot start a recording, stop one, or check whether one is running/);
+  assert.match(html, /cannot start a recording or stop one/);
   assert.match(html, /already recorded are untouched/);
-  assert.doesNotMatch(html, /coming soon|beta|enable|turn on Calls/i,
+  // The dialog must not overclaim in the other direction either. #captureStatus
+  // still reports a capture session the record layer knows about, so the dialog
+  // may not say this page cannot see one — it says where it will show up.
+  assert.doesNotMatch(html, /check whether one is running/,
+    "the shell can still be told about a capture it did not start");
+  assert.match(html, /If a recording is running somewhere else, its status still appears/);
+  // Present-release truth, and no roadmap this shell cannot keep.
+  assert.match(html, /Recording is not available in this release/);
+  assert.doesNotMatch(html, /later release|future release/i,
+    "the shell cannot promise a release it does not ship");
+  assert.doesNotMatch(html, /coming soon|in beta|enable Calls|turn on Calls/i,
     "an inactive surface must not read as a switch someone could find");
 
   // No recorder in the markup at all — not hidden, not disabled, absent.
@@ -310,6 +327,18 @@ test("the shell module holds no recorder path, and boots only inside its own pag
   assert.equal((app.match(/installCallsBoundary\(/g) || []).length, 2,
     "the definition and the one boot call site, and nothing else");
   assert.doesNotMatch(app, /closest\('\[data-call-mode-start\]'\)/);
+
+  // The sweep runs before anything that can fail. A boot that dies on sign-in or
+  // the network must not leave a cached page's recorder controls live, so this
+  // ordering is the guarantee and is pinned as one.
+  const bootBody = app.slice(app.indexOf("async function boot()"),
+    app.indexOf("/**\n * The shell starts itself"));
+  assert.notEqual(bootBody, "", "boot() body not found");
+  assert.ok(bootBody.indexOf("installCallsBoundary();") > -1
+    && bootBody.indexOf("installCallsBoundary();") < bootBody.indexOf("await createClient("),
+    "the retired-control sweep must precede client creation");
+  assert.doesNotMatch(app.slice(app.indexOf("function wireEvents"), app.indexOf("async function boot()")),
+    /installCallsBoundary\(\)/, "and it is not also wired from the listener setup");
 
   // Boot is conditional on the page, and on nothing a person or a query string
   // can set. No flag, no override, no backdoor.

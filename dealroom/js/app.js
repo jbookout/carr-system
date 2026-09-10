@@ -1236,9 +1236,6 @@ function wireEvents() {
   $('#agendaSkip').onclick = () => advanceAgenda('skipped');
   $('#agendaEnd').onclick = () => finishAgenda('completed');
   $('#agendaClose').onclick = () => finishAgenda('abandoned');
-  // The whole of Calls in this release: a control that explains its own absence,
-  // and a sweep for any recorder control a cached page may still be carrying.
-  installCallsBoundary();
   $('#themeButton').onclick = () => { document.body.classList.toggle('night'); localStorage.setItem('dealroom-theme',document.body.classList.contains('night')?'night':'light'); };
   $('#colorAssistButton').onclick = () => {
     const enabled = !document.body.classList.contains('color-assist');
@@ -1268,6 +1265,13 @@ function wireEvents() {
 }
 
 async function boot() {
+  // FIRST, ahead of every read that can fail. The whole of Calls in this
+  // release is a control that explains its own absence, plus a sweep for any
+  // recorder control a cached page is still carrying — and the sweep has to run
+  // even when the rest of boot does not. If sign-in or the network fails after
+  // this line, the failure is a shell that offers nothing; if it ran later, the
+  // same failure would leave a stale "Start weekly deal call" on screen.
+  installCallsBoundary();
   if (localStorage.getItem('dealroom-theme') === 'night') document.body.classList.add('night');
   if (localStorage.getItem('dealroom-color-assist') === 'on') {
     document.body.classList.add('color-assist');

@@ -28,6 +28,17 @@ test("Home asset is a dark, visual, responsive workstation with honest states", 
   assert.match(html, /href="\/leads"/);
   assert.match(html, /href="\/deals/);
   assert.match(html, />CALLS</);
+  // Calls are excluded from this release (V5-J101), so Home keeps the card and
+  // tells the truth on it. Scoped to the card itself: "Calls" also appears in
+  // the flow diagram's label and node, and neither is an affordance.
+  const callsCard = html.split("</a>").find((chunk) => chunk.includes("<h2>Calls</h2>")) || "";
+  assert.notEqual(callsCard, "", "Home still carries the Calls card");
+  assert.match(callsCard, /Calls are not part of this release\./);
+  assert.match(callsCard, /already recorded still reach the board\./);
+  assert.doesNotMatch(callsCard, /Call Mode|captur/i,
+    "the Calls card must not promise capture the Deal Room no longer offers");
+  assert.doesNotMatch(html, /Deal Room Call Mode/i,
+    "Home must not advertise a recorder this release does not have");
   assert.match(html, /href="\/system-work\.html"/);
   assert.match(html, /href="\/room\.html"/);
   assert.match(css, /--ink-0:#0/);
