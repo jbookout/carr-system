@@ -94,7 +94,7 @@ export async function buildRelease({ env, sql, verbCount, now = () => new Date()
   const schemaPromise = (async () => {
     try {
       const rows = await sql`
-        select count(*)::int as applied_count, max(filename) as highest_applied_migration,
+        select count(*)::int as applied_count, (max(filename collate "C") collate "default") as highest_applied_migration,
                'sha256:' || encode(public.digest(coalesce(string_agg(
                  convert_to(filename, 'UTF8') || decode('00', 'hex') ||
                  convert_to(sha256, 'UTF8') || decode('0a', 'hex'),

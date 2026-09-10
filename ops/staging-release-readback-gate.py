@@ -158,6 +158,44 @@ def check_worker_release_identity(cur) -> None:
           ok, detail)
 
 
+def check_worker_release_lettered_highwater(cur) -> None:
+    """Exercise the extracted Worker query against an ordinary/lettered pair.
+
+    The explicit C collation makes the result independent of the database's
+    default locale: bytewise `9999a...` follows `9999_...`.
+    """
+    query = worker_release_identity_query()
+    check("worker /release pins highest migration to C collation",
+          '(max(filename collate "C") collate "default")' in " ".join(query.split()))
+    cur.execute("savepoint worker_release_lettered_highwater")
+    try:
+        cur.execute("""insert into public.schema_migrations(filename,sha256) values
+                       ('9999_ordinary_highwater.sql', repeat('1',64)),
+                       ('9999a_lettered_highwater.sql', repeat('2',64))""")
+        cur.execute("""select count(*)::int,
+                              (max(filename collate "C") collate "default"),
+                              'sha256:' || encode(public.digest(coalesce(string_agg(
+                                convert_to(filename, 'UTF8') || decode('00', 'hex') ||
+                                convert_to(sha256, 'UTF8') || decode('0a', 'hex'),
+                                ''::bytea order by filename collate "C"), ''::bytea),
+                                'sha256'), 'hex')
+                         from public.schema_migrations""")
+        expected = one(cur)
+        cur.execute(query)
+        observed = one(cur)
+        check("worker /release query returns the C-collated optional-letter highwater",
+              observed == expected and observed[1] == '9999a_lettered_highwater.sql',
+              f"worker query returned {observed!r}, C reference is {expected!r}")
+    except Exception as exc:
+        cur.execute("rollback to savepoint worker_release_lettered_highwater")
+        check("worker /release query returns the C-collated optional-letter highwater",
+              False, f"worker /release optional-letter highwater query failed: {exc}")
+    else:
+        # The mixed highwater rows prove only the extracted query; later gate
+        # fixtures must observe the real migration ledger unchanged.
+        cur.execute("rollback to savepoint worker_release_lettered_highwater")
+    cur.execute("release savepoint worker_release_lettered_highwater")
+
 def seed_fixture(cur, prefix: str) -> dict:
     bind_live_schema_identity(cur)
     now = datetime.now(timezone.utc)
@@ -423,6 +461,7 @@ def main() -> int:
         ensure_authority_roles(cur)
         fixture = seed_fixture(cur, "main")
         check_worker_release_identity(cur)
+        check_worker_release_lettered_highwater(cur)
         attempt = uuid.uuid4()
         ids = [uuid.uuid4(),uuid.uuid4(),uuid.uuid4()]
         versions = [uuid.uuid4(),uuid.uuid4(),uuid.uuid4()]
