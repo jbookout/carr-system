@@ -1710,6 +1710,37 @@ function selectRoute({ request, qualifications, authenticated }) {
   if (new Set(qualificationIds).size !== qualificationIds.length) {
     fail("duplicate_entry", "two qualification records share one qualification_id");
   }
+  // TWO RECORDS FOR ONE EXACT ROUTE ARE AN AMBIGUOUS PROJECTION, NOT A CHOICE
+  // TO MAKE HERE. `matchQualification` takes the first exact match and the
+  // matched record's measured latency feeds the ranking, so two different
+  // records measured for the same task class, backend, model, version and
+  // effort would make both the reported reason and the selected route depend on
+  // the order the verifier happened to return them in.
+  //
+  // The two obvious repairs are both refusals of a different kind. "Latest
+  // measured_at wins" would invent a freshness authority this module was never
+  // granted — the record layer decides which measurement is current, and a
+  // clock skew or a backdated re-measurement would silently pick the wrong one.
+  // Dropping the older record would throw away a receipt that is still evidence
+  // of something. So the ambiguity is refused by name and the PRODUCER upstream
+  // chooses which measurement is authoritative before this module reads it;
+  // nothing is discarded here and no history is lost by refusing.
+  const byRouteTuple = new Map();
+  for (const record of checked) {
+    const tuple = [record.task_class, record.backend_key, record.model_key,
+      record.model_version, record.effort].join("|");
+    if (!byRouteTuple.has(tuple)) byRouteTuple.set(tuple, []);
+    byRouteTuple.get(tuple).push(record.qualification_id);
+  }
+  // Sorted, so the refusal a caller sees is a property of the SET of records
+  // rather than of the order they arrived in.
+  for (const [tuple, ids] of [...byRouteTuple.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+    if (ids.length > 1) {
+      fail("ambiguous_qualification_projection",
+        "two different qualification records are measured for one exact task-class/backend/model/version/effort route; which one is current is the producer's decision, and this module will not pick between them by array order or by inventing a latest-proof-wins rule",
+        { route_tuple: tuple, qualification_ids: [...ids].sort() });
+    }
+  }
 
   const common = {
     schema_version: V5_ROUTING_RESULT_SCHEMA_VERSION,
@@ -2057,14 +2088,34 @@ export function createModelRoutingGate({ authenticateQualifications, trusted_ver
           "the gate reads qualifications from its verifier; a caller may not supply them",
           { path: "request.qualifications" });
       }
-      // COPIED AND FROZEN BEFORE ANYTHING READS IT. The binding digest, the
-      // verifier and the selection must all see the same bytes; `request.job`
-      // and `request.local_node_states` are caller-supplied plain objects, so
-      // without this a verifier could bind digest to one request and cause
-      // selection over another. The policy and role are this module's own
-      // frozen products and are passed through by reference.
+      // Before re-deriving anything: an absent key is a `missing_field` naming
+      // that key, and stays one rather than becoming an `invalid_shape` from
+      // whichever re-derivation below happened to read it first.
+      assertRequiredKeys(request, REQUEST_REQUIRED, "request");
+      // CANONICALIZED, RE-DERIVED AND FROZEN BEFORE ANYTHING READS IT. The
+      // binding digest, the verifier and the selection must all see the same
+      // bytes, and ALL FOUR of these arrive as caller-supplied objects.
+      //
+      // The policy and the role are not exempt just because this module can
+      // produce them: `assertCompiledPolicy` and `assertSealedRole` admit any
+      // structurally valid look-alike by RE-DERIVATION rather than by object
+      // identity, so an ordinary caller may legitimately pass a mutable clone.
+      // Without this, a verifier could bind its digest over the role it was
+      // handed and then re-seal a weaker `minimum_strength_ref` onto that same
+      // object before `selectRoute` re-derives it — the one privilege records
+      // alone cannot reach, because a record never sets a floor. Re-deriving
+      // here replaces each input with this module's own deep-frozen product, so
+      // the required strength and the route table are fixed before the verifier
+      // is called and cannot move under it.
+      //
+      // Each is guarded on presence so a missing key still reports its own
+      // `missing_field` below rather than an `invalid_shape` from re-derivation,
+      // and each re-derivation returns a NEW object, so the caller's own policy,
+      // role, job and node states are left untouched and unfrozen.
       const safeRequest = Object.freeze({
         ...request,
+        ...(request.policy !== undefined ? { policy: assertCompiledPolicy(request.policy) } : {}),
+        ...(request.role !== undefined ? { role: assertSealedRole(request.role) } : {}),
         ...(request.job !== undefined ? { job: deepFreeze(copy(request.job)) } : {}),
         ...(request.local_node_states !== undefined
           ? { local_node_states: deepFreeze(copy(request.local_node_states)) }
@@ -2163,7 +2214,7 @@ export function v5ModelRoutingProjection() {
     // Named gaps. None of these is simulated, stubbed into a fake success, or
     // implied by any result this module returns.
     unimplemented_dependencies: [
-      "live route-qualification.v1 producer: no measured evaluation kernel exists in this repository, so every qualification record reaching this module today is a fixture",
+      "live route-qualification.v1 producer: no measured evaluation kernel exists in this repository, so every qualification record reaching this module today is a fixture. When one exists it must project exactly ONE current measurement per exact task-class/backend/model/version/effort route: two records for one route refuse here as an ambiguous projection rather than being resolved by a freshness rule this module has no authority to invent, and choosing the authoritative one — while retaining the superseded measurements as history — is the producer's job",
       "durable qualification and decision record store: this slice adds no table, no migration and no SQL integration",
       "model dispatch: V5-F06/V5-F07 own it; the adapter boundary fails closed",
       "live backend health source: local node state is a request input, never observed here",

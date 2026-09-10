@@ -281,6 +281,14 @@ const cloudQual = () => qualification({
   backend_key: "backend:cloud-gateway",
   measured_latency_ms_p95: 2400,
 });
+/** A measured record for the cheapest, weakest, under-strength route. */
+const weakQual = () => qualification({
+  qualification_id: "qual:fixture-weak",
+  backend_key: "backend:cloud-gateway",
+  model_key: "model:fixture-weak-d",
+  effort: "low",
+  measured_latency_ms_p95: 300,
+});
 const privateQual = () => qualification({
   qualification_id: "qual:fixture-private",
   task_class: "task:private-compute",
@@ -777,6 +785,55 @@ test("a qualification measured for a different task, model, version, effort or b
     "no_qualification_record");
 });
 
+test("two records for one exact route are an ambiguous projection, in either array order", () => {
+  // Exactly what a RE-MEASUREMENT produces: two different ids measured for the
+  // same task class, backend, model, version and effort. Whichever the verifier
+  // returned first would otherwise decide the reported reason, and its measured
+  // latency would decide the ranking.
+  const older = qualification({
+    qualification_id: "qual:fixture-local-older", expires_at: "2026-09-05T00:00:00.000Z",
+  });
+  const newer = qualification({ qualification_id: "qual:fixture-local-newer" });
+  const first = refuses(() => evaluate({ qualifications: [older, newer, cloudQual()] }),
+    "ambiguous_qualification_projection");
+  const second = refuses(() => evaluate({ qualifications: [newer, older, cloudQual()] }),
+    "ambiguous_qualification_projection");
+  // The same refusal and the same detail from both orders: the answer is a
+  // property of the SET of records, never of the order they arrived in.
+  assert.deepEqual(first.detail, second.detail);
+  assert.deepEqual(first.detail.qualification_ids,
+    ["qual:fixture-local-newer", "qual:fixture-local-older"]);
+  assert.equal(first.detail.route_tuple,
+    "task:deal-review|backend:mac-studio-local|model:fixture-strong-a|2026-01|high");
+  // The unauthenticated proposal path runs the same predicate, so nobody gets a
+  // different answer by asking offline.
+  refuses(() => proposeRoutePlan({
+    policy: compiled(), role: reviewerRole(), job: dealReviewJob(), now: NOW,
+    local_node_states: { "mac-studio": "available" },
+    qualifications: [newer, older],
+  }), "ambiguous_qualification_projection");
+  // And the projection says whose job it is to resolve, rather than this module
+  // inventing a latest-proof-wins rule or discarding the superseded record.
+  assert.ok(v5ModelRoutingProjection().unimplemented_dependencies.some(entry =>
+    entry.includes("exactly ONE current measurement per exact")));
+});
+
+test("a record differing in any one route field is not ambiguous and still routes", () => {
+  const differences = {
+    task_class: "task:private-compute",
+    backend_key: "backend:cloud-gateway",
+    model_key: "model:fixture-mid-b",
+    model_version: "2025-06",
+    effort: "standard",
+  };
+  for (const [field, value] of Object.entries(differences)) {
+    const other = qualification({ qualification_id: `qual:fixture-differs-${field}`, [field]: value });
+    const result = evaluate({ qualifications: [localQual(), other] });
+    assert.equal(result.decision, "route", `a record differing only in ${field} must not refuse`);
+    assert.equal(result.selected_route.route_key, "route:local-strong");
+  }
+});
+
 test("a qualification that did not cover the tools, data, risk or floors refuses", () => {
   assert.equal(
     reasonFor(evaluate({ qualifications: [qualification({ qualified_tool_ids: ["tool:something-else"] })] }),
@@ -1202,6 +1259,109 @@ test("the verifier and the selection read the same frozen request bytes", () => 
   assert.equal(Object.isFrozen(seen.job), true);
   assert.equal(Object.isFrozen(job), false);
   assert.equal(job.task_class, "task:deal-review");
+});
+
+test("the gate re-derives and freezes the policy and the role before the verifier sees them", () => {
+  // Mutable, structurally valid clones. Both are admitted by RE-DERIVATION
+  // rather than by object identity, so an ordinary caller may legitimately pass
+  // one — which is exactly why the gate cannot pass them through by reference.
+  const probe = probeGate();
+  const callerPolicy = clone(compiled());
+  const callerRole = clone(reviewerRole());
+  const callerJob = dealReviewJob();
+  const callerNodes = { "mac-studio": "available" };
+  let seen = null;
+  const result = createModelRoutingGate({
+    trusted_verifier_ids: [...TRUSTED_VERIFIER_IDS],
+    authenticateQualifications: request => {
+      seen = request;
+      assert.throws(() => { request.role.minimum_strength_ref = "strength:draft-grade"; }, TypeError);
+      assert.throws(() => { request.role.task_classes.push("task:private-compute"); }, TypeError);
+      assert.throws(() => { request.policy.source.routes[0].cost_components.base_cost_units = 0; }, TypeError);
+      assert.throws(() => { request.policy.strength_refs["strength:review-grade"] = "grade:fixture-draft"; },
+        TypeError);
+      return {
+        request_binding_digest: probe.requestBindingDigest(request),
+        qualifications: [localQual(), cloudQual()],
+      };
+    },
+  }).evaluate({
+    policy: callerPolicy, role: callerRole, job: callerJob, now: NOW, local_node_states: callerNodes,
+  });
+  assert.equal(result.decision, "route");
+  assert.equal(result.selected_route.route_key, "route:local-strong");
+  // All four inputs are this module's own frozen products, and none of them is
+  // the caller's object.
+  for (const key of ["policy", "role", "job", "local_node_states"]) {
+    assert.equal(Object.isFrozen(seen[key]), true, `request.${key} was not frozen`);
+  }
+  assert.notEqual(seen.policy, callerPolicy);
+  assert.notEqual(seen.role, callerRole);
+  assert.notEqual(seen.job, callerJob);
+  // ...and the caller's own objects are left exactly as they were handed over.
+  assert.equal(Object.isFrozen(callerPolicy), false);
+  assert.equal(Object.isFrozen(callerRole), false);
+  assert.equal(Object.isFrozen(callerJob), false);
+  assert.equal(callerRole.minimum_strength_ref, "strength:review-grade");
+  assert.equal(callerPolicy.source.routes[0].cost_components.base_cost_units, 4);
+
+  // And an absent key is still a `missing_field` naming that key, rather than
+  // an `invalid_shape` from whichever re-derivation read it first.
+  for (const key of ["policy", "role", "job", "now"]) {
+    const partial = {
+      policy: compiled(), role: reviewerRole(), job: dealReviewJob(), now: NOW,
+      local_node_states: { "mac-studio": "available" },
+    };
+    delete partial[key];
+    const error = refuses(() => gateWith([localQual()]).evaluate(partial), "missing_field");
+    assert.equal(error.detail.path, `request.${key}`);
+  }
+});
+
+test("a role the verifier re-seals after binding cannot move the strength the gate selected under", () => {
+  // The one privilege records alone could never reach: a record does not set a
+  // floor, but a role does. The verifier here takes the binding digest, then
+  // overwrites the caller's role object with a DIFFERENT, correctly re-sealed
+  // role before the selection re-derives it.
+  const swapMidVerification = replacement => {
+    const probe = probeGate();
+    const callerRole = clone(reviewerRole());
+    const result = createModelRoutingGate({
+      trusted_verifier_ids: [...TRUSTED_VERIFIER_IDS],
+      authenticateQualifications: request => {
+        const request_binding_digest = probe.requestBindingDigest(request);
+        Object.assign(callerRole, clone(replacement));
+        return {
+          request_binding_digest,
+          qualifications: [localQual(), cloudQual(), weakQual()],
+        };
+      },
+    }).evaluate({
+      policy: compiled(), role: callerRole, job: dealReviewJob(), now: NOW,
+      local_node_states: { "mac-studio": "available" },
+    });
+    return { result, callerRole };
+  };
+
+  // Downgrade: the swapped role asks for draft grade, and the cheapest, weakest
+  // route in the policy has a measured record waiting for exactly that floor.
+  const downgrade = swapMidVerification(reviewerRole({ minimum_strength_ref: "strength:draft-grade" }));
+  assert.equal(downgrade.callerRole.minimum_strength_ref, "strength:draft-grade");
+  assert.equal(downgrade.result.required_strength_ref, "strength:review-grade");
+  assert.equal(downgrade.result.required_strength_grade, "grade:fixture-review");
+  assert.equal(reasonFor(downgrade.result, "route:cloud-weak-cheap"), "below_required_strength");
+  assert.equal(downgrade.result.selected_route.route_key, "route:local-strong");
+  assert.ok(downgrade.result.selected_strength_rank >= downgrade.result.required_strength_rank);
+  assert.equal(downgrade.result.downgraded_from_required_strength, false);
+
+  // And the same in the direction this fixture makes visible at the decision
+  // level: a swapped-in unreachable floor would have turned a routed answer
+  // into an unavailable one, and does not.
+  const raise = swapMidVerification(reviewerRole({ minimum_strength_ref: "strength:frontier-grade" }));
+  assert.equal(raise.callerRole.minimum_strength_ref, "strength:frontier-grade");
+  assert.equal(raise.result.decision, "route");
+  assert.equal(raise.result.required_strength_ref, "strength:review-grade");
+  assert.equal(raise.result.selected_route.route_key, "route:local-strong");
 });
 
 test("a caller may not hand the gate its own qualifications", () => {
