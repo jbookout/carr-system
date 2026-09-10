@@ -455,7 +455,7 @@ function renderPendingWrites() {
   if (!node) return;
   const pending = unresolvedFieldWrites(state.fieldWrites);
   node.hidden = pending.length === 0;
-  const signature = pending.map((entry) => `${entry.cell}:${entry.attempts}`).join('|');
+  const signature = JSON.stringify(pending.map((entry) => [entry.cell, state.deals.get(entry.deal)?.name || '']));
   if (signature === state.pendingSignature) return;
   state.pendingSignature = signature;
   if (!pending.length) { node.innerHTML = ''; return; }
