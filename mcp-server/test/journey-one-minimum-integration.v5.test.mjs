@@ -688,8 +688,13 @@ function seamPause(originDigest, startsAt, endsAt, id = "one") {
 async function admittedSeam({ projection = minimumProjection(),
   scope = SEAM_SCOPE, admittedAt = CLOCK_AS_OF, acceptedManifest = manifest() } = {}) {
   const join = joinOnce(projection);
+  // The record layer's own instant, held in one settable place so a test can
+  // move it FORWARD and admit a later receipt into this same inventory. It is
+  // still the journal's clock and never a caller field: the store reads it, and
+  // nothing in an admission argument can name it.
+  const admissionClock = { at: admittedAt };
   const journal = createEphemeralJourneyOneMinimumAdmissionJournal(
-    { now: () => Date.parse(admittedAt) });
+    { now: () => Date.parse(admissionClock.at) });
   const inputs = createJourneyOneClockMinimumInputStore({ journal, actor: STORE_ACTOR,
     clock_scope: scope, accepted_minimum_policy: MINIMUM_POLICY });
   const admitted = await inputs.admit({
@@ -708,7 +713,7 @@ async function admittedSeam({ projection = minimumProjection(),
     completion: null,
     completion_expectation: { artifact_digest: KERNEL_ARTIFACT, fixture_set_digest: KERNEL_FIXTURES },
     pauses: [], amendments: [], history: null, ...args }));
-  return { join, inputs, admitted, composer, compose };
+  return { join, inputs, admitted, composer, compose, admissionClock };
 }
 
 test("the artifact A00 proposes keeps one identity through the inventory the kernel reads", async () => {
@@ -1443,6 +1448,62 @@ test("one key with a changed intent is refused, and the stored revision is not h
     });
   }
   assert.equal((await store.read(started.clock_key)).revision_count, 2);
+});
+
+test("a retry blocked by a LATER admission keeps the recorded revision and appends nothing", async () => {
+  // Replay works by re-composing, so it needs the inventory to still admit that
+  // composition. A receipt admitted after the request landed, at an instant
+  // after the request's own as_of, is the case where it cannot — and the whole
+  // point is that the caller must not read that as "my request failed".
+  const seam = await admittedSeam();
+  const { kernel, store } = recordingSeam();
+  const runtime = runtimeSeam({ composer: seam.composer, kernel, store });
+  const request = advanceArgs();
+  const landed = await runtime.advance(request);
+  assert.equal(landed.appended, true);
+
+  // A second, genuinely later admission into the SAME inventory.
+  const later = minimumProjection();
+  later.as_of = iso(Date.parse(AS_OF) + 3 * HOUR);
+  const second = joinOnce(later);
+  seam.admissionClock.at = iso(Date.parse(CLOCK_AS_OF) + 6 * HOUR);
+  const admitted = await seam.inputs.admit({
+    receipt: copy(second.proposed_receipt),
+    expected_prior_admission_digest: seam.admitted.admission_digest,
+    idempotency_key: uuid(),
+    claimed_receipt_digest: second.proposed_receipt_reference_digest,
+    source_ref: "safe:a00:second-proposed-minimum-receipt",
+  });
+  assert.equal(admitted.admitted_at, seam.admissionClock.at);
+  assert.equal((await seam.inputs.read()).admission_count, 2);
+  assert.ok(Date.parse(admitted.admitted_at) > Date.parse(request.as_of),
+    "the new admission must actually postdate the request, or this proves nothing");
+
+  // THE RETRY CANNOT BE RE-COMPOSED — and says so without ever implying the
+  // write did not land.
+  await assert.rejects(runtime.advance({ ...request }), error => {
+    assert.equal(error.name, "JourneyOneClockRuntimeError");
+    assert.equal(error.code, "clock_runtime_recorded_request_not_recomputable");
+    assert.equal(error.detail.request_landed, true);
+    assert.equal(error.detail.appended, false);
+    assert.equal(error.detail.recorded_clock_key, landed.clock_key);
+    assert.equal(error.detail.recorded_history_digest, landed.history_digest);
+    assert.equal(error.detail.recorded_revision_ordinal, landed.revision_ordinal);
+    assert.equal(error.detail.cause_code, "projection_as_of_precedes_admission");
+    assert.ok(error.message.includes("ALREADY LANDED"));
+    return true;
+  });
+
+  // NOTHING WAS APPENDED, and the recorded revision is still readable — the
+  // outcome is recoverable by reading, not by re-writing.
+  const readback = await store.read(landed.clock_key);
+  assert.equal(readback.revision_count, 1);
+  assert.equal(readback.history_digest, landed.history_digest);
+  const stillRecorded = await store.readRecordedRevisionForKey(request.idempotency_key);
+  assert.equal(stillRecorded.exists, true);
+  assert.equal(stillRecorded.history_digest, landed.history_digest);
+  assert.equal(stillRecorded.revision_ordinal, landed.revision_ordinal);
+  assert.equal(stillRecorded.prior_revision_ordinal, null, "it was the creation");
 });
 
 test("a recorded request is never replayed to another writing seat", async () => {

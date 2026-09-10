@@ -227,6 +227,7 @@ const recordedFixture = (over = {}) => ({
   revision_ordinal: 0,
   history_digest: D(90),
   expected_prior_history_digest: null,
+  prior_revision_ordinal: null,
   prior_history: null,
   recorded_at: "2026-02-04T00:00:01.000Z",
   ...over,
@@ -499,6 +500,65 @@ test("a recorded request is re-computed against ITS OWN prior, not the head", as
   assert.equal(replayed.composition_binding.bound, true);
   assert.equal(replayed.kernel_verdict.status, "running");
   assert.equal(replayed.clock_key, journeyOneClockKeyForState(resultFixture().state));
+});
+
+test("a replay of a LATER revision reports the prior ordinal the store derived", async () => {
+  // `null` on this field means "there was no prior" on the append path, so a
+  // replay of a later revision must not report it — the store carries the
+  // ordinal of the row it actually rebuilt, and this seat forwards that.
+  const priorHistory = { schema_version: "v2", history_digest: D(91) };
+  const composition = compositionFixture({ projection: { history: copy(priorHistory) } });
+  const { runtime } = doubles({ composition, result: resultFor(composition),
+    recordedForKey: recordedFixture({ revision_ordinal: 4,
+      expected_prior_history_digest: D(91), prior_revision_ordinal: 3, prior_history: priorHistory }) });
+  const replayed = await runtime.advance(advanceArgs());
+  assert.equal(replayed.replayed, true);
+  assert.equal(replayed.revision_ordinal, 4);
+  assert.equal(replayed.composed_from.prior_revision_ordinal, 3);
+  assert.equal(replayed.composed_from.prior_history_digest, D(91));
+  assert.equal(replayed.created_clock, false);
+  // And the derived scope flag is a comparison, not a literal.
+  assert.equal(replayed.clock_scope_matches_verified_binding, true);
+  assert.equal(replayed.clock_scope_key, SCOPE_KEY);
+});
+
+test("a retry that cannot be re-composed says the request LANDED, and names the cause", async () => {
+  // A composer refusal on the retry arm is indistinguishable, bare, from a first
+  // attempt with a bad as_of — and a caller reading it as failure re-keys and
+  // appends a second revision of work already filed.
+  const refusal = Object.assign(new Error("as_of precedes the latest admission"),
+    { name: "JourneyOneMinimumInputStoreError", code: "projection_as_of_precedes_admission" });
+  const recorded = recordedFixture({ revision_ordinal: 2,
+    expected_prior_history_digest: D(91), prior_revision_ordinal: 1,
+    prior_history: { schema_version: "v2", history_digest: D(91) } });
+  const { runtime, calls, composer } = doubles({ recordedForKey: recorded });
+  composer.compose = async () => { calls.push("compose"); throw refusal; };
+
+  await assert.rejects(runtime.advance(advanceArgs()), error => {
+    assert.equal(error.name, "JourneyOneClockRuntimeError");
+    assert.equal(error.code, "clock_runtime_recorded_request_not_recomputable");
+    assert.equal(error.detail.request_landed, true);
+    assert.equal(error.detail.appended, false);
+    assert.equal(error.detail.recorded_clock_key, recorded.clock_key);
+    assert.equal(error.detail.recorded_history_digest, recorded.history_digest);
+    assert.equal(error.detail.recorded_revision_ordinal, 2);
+    assert.equal(error.detail.recorded_expected_prior_history_digest, D(91));
+    assert.equal(error.detail.cause_code, "projection_as_of_precedes_admission");
+    assert.equal(error.detail.cause_name, "JourneyOneMinimumInputStoreError");
+    assert.ok(error.message.includes("ALREADY LANDED"));
+    return true;
+  });
+  assert.ok(!calls.includes("evaluate"));
+  assert.ok(!calls.includes("record"));
+
+  // ON A FIRST ATTEMPT THE SAME REFUSAL TRAVELS UNCHANGED: there is no recorded
+  // revision to name, and wrapping it would invent one.
+  const fresh = doubles();
+  fresh.composer.compose = async () => { throw refusal; };
+  await assert.rejects(fresh.runtime.advance(advanceArgs()), error => {
+    assert.equal(error.code, "projection_as_of_precedes_admission");
+    return true;
+  });
 });
 
 test("a recorded request whose re-computation differs is a second request, not a retry", async () => {

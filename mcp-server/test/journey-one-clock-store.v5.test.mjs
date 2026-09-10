@@ -2086,6 +2086,7 @@ test("a key that wrote nothing reads as absent, and one that wrote reads back it
   assert.equal(readCreated.history_digest, first.state.history_digest);
   assert.equal(readCreated.expected_prior_history_digest, null);
   assert.equal(readCreated.prior_history, null);
+  assert.equal(readCreated.prior_revision_ordinal, null, "a creation has no prior");
   assert.equal(readCreated.revision_ordinal, 0);
   assert.equal(readCreated.written_by_actor_id, ACTOR.slug);
   assert.equal(readCreated.clock_scope_key, journeyOneClockScopeKey(SCOPE));
@@ -2106,6 +2107,10 @@ test("a key that wrote nothing reads as absent, and one that wrote reads back it
   assert.equal(readAppended.revision_ordinal, 1);
   assert.equal(readAppended.history_digest, secondState.history_digest);
   assert.equal(readAppended.expected_prior_history_digest, first.state.history_digest);
+  // THE PRIOR IS THE REVISION BEFORE IT, taken by ordinal and then checked
+  // against the digest — a revision filed at N was refused unless its prior was
+  // the head, and the head of a clock holding N revisions is N-1.
+  assert.equal(readAppended.prior_revision_ordinal, 0);
   assert.deepEqual(readAppended.prior_history, copy(first.state));
   assert.equal(journeyOneClockHistoryDigest(readAppended.prior_history),
     readAppended.expected_prior_history_digest);
@@ -2154,6 +2159,29 @@ test("a recorded request whose prior is gone refuses instead of pointing at the 
   } });
   await refuses(lossy.readRecordedRevisionForKey(appendKey),
     "clock_replay_prior_history_unavailable");
+
+  // AND A ROW AT THAT ORDINAL CARRYING ANOTHER DIGEST IS THE SAME FINDING. The
+  // prior is taken by ordinal because the compare-and-swap decides it, and the
+  // digest is then checked against that row rather than searched for — a search
+  // would happily settle on some other revision that shares the digest.
+  const swapped = createJourneyOneClockStore({ actor: ACTOR, clock_scope: SCOPE, journal: {
+    durable: false, kind: "swapped-prior",
+    runAppend: (...a) => journal.runAppend(...a), readClock: (...a) => journal.readClock(...a),
+    readScopeBindings: (...a) => journal.readScopeBindings(...a),
+    bindScope: (...a) => journal.bindScope(...a),
+    readRevisionByIdempotencyKey: (...a) => journal.readRevisionByIdempotencyKey(...a),
+    async readRevisions(clockKey) {
+      const rows = copy(await journal.readRevisions(clockKey));
+      rows[0].history_digest = D(44);
+      return rows;
+    },
+  } });
+  await assert.rejects(swapped.readRecordedRevisionForKey(appendKey), error => {
+    assert.equal(error.code, "clock_replay_prior_history_unavailable");
+    assert.equal(error.detail.expected_prior_revision_ordinal, 0);
+    assert.equal(error.detail.found_prior_history_digest, D(44));
+    return true;
+  });
 });
 
 test("the request read is bound to this tenant and to intact rows", async () => {

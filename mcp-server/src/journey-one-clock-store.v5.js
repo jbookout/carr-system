@@ -1499,17 +1499,35 @@ export function createJourneyOneClockStore({
       const priorDigest = assertNullableDigestRef(
         row.expected_prior_history_digest ?? null, "expected_prior_history_digest");
       let prior = null;
+      let priorOrdinal = null;
       if (priorDigest !== null) {
+        // WHICH REVISION THE PRIOR IS, DERIVED FROM THE COMPARE-AND-SWAP RATHER
+        // THAN SEARCHED FOR. A revision filed at ordinal N was refused unless its
+        // prior digest was the head's, and a clock holding N revisions has its
+        // head at ordinal N-1 — ordinals are zero-based and contiguous, which
+        // read() asserts on every readback. So the prior is exactly N-1, and
+        // taking it by ordinal is what makes this exact: locating it by digest
+        // alone would pick the FIRST row carrying that digest, and two revisions
+        // of one clock can legitimately carry the same history digest.
+        // The digest is then checked against that row, so the ordinal rule is
+        // verified against the record rather than assumed over it.
+        const expectedOrdinal = Number.isSafeInteger(row.revision_ordinal)
+          ? row.revision_ordinal - 1 : -1;
         const revisions = await journal.readRevisions(row.clock_key);
-        const found = (Array.isArray(revisions) ? revisions : [])
-          .find(revision => revision?.history_digest === priorDigest) ?? null;
-        if (found === null) {
+        const found = expectedOrdinal < 0 ? null
+          : (Array.isArray(revisions) ? revisions : [])
+            .find(revision => revision?.revision_ordinal === expectedOrdinal) ?? null;
+        if (found === null || found.history_digest !== priorDigest) {
           refuse("clock_replay_prior_history_unavailable",
-            "the recorded revision names a prior history this rail cannot produce, so the request it recorded cannot be re-computed against the history it was actually written against. The current head is not a substitute: computing against it would be the rebase this rail refuses",
+            "the recorded revision names a prior history this rail cannot produce at the ordinal its compare-and-swap wrote it against, so the request it recorded cannot be re-computed against the history it was actually written against. The current head is not a substitute: computing against it would be the rebase this rail refuses",
             { invariant: "j1_clock_exact_prior_history_digest",
-              clock_key: row.clock_key, expected_prior_history_digest: priorDigest });
+              clock_key: row.clock_key, expected_prior_history_digest: priorDigest,
+              revision_ordinal: row.revision_ordinal,
+              expected_prior_revision_ordinal: expectedOrdinal < 0 ? null : expectedOrdinal,
+              found_prior_history_digest: found?.history_digest ?? null });
         }
         prior = rebuild(row.clock_key, found);
+        priorOrdinal = found.revision_ordinal;
       }
       const bound = (await journal.readScopeBindings({ clockKey: row.clock_key }))?.by_clock ?? null;
       return deepFreeze({
@@ -1523,6 +1541,11 @@ export function createJourneyOneClockStore({
         revision_ordinal: row.revision_ordinal,
         history_digest: row.history_digest,
         expected_prior_history_digest: priorDigest,
+        // The ordinal of the revision that prior digest names, read off the row
+        // this rail actually rebuilt rather than computed beside it. Null when
+        // the recorded revision was a creation, which is the same thing null
+        // means everywhere else on this rail: there was no prior.
+        prior_revision_ordinal: priorOrdinal,
         recorded_at: row.recorded_at,
         // The seat comparing an actor against this one is comparing two derived
         // classes, not a claim: `written_by_actor_id` was derived from the LIVE

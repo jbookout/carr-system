@@ -352,7 +352,7 @@ export const JOURNEY_ONE_CLOCK_RUNTIME_CANNOT_PROVE = Object.freeze([
   "that two different projections cannot produce one digest. The proof rests on the canonical JSON digest this repository already uses everywhere, over a value the kernel's own JSON gate has refused a hidden key, an exotic prototype, a lone surrogate or a non-JSON value in; it is as exact as sha256 and is not stronger than it",
   "that a REPLAYED receipt describes the current head. It describes the revision that request wrote, at the ordinal and prior it was written under; the head may have moved on since, and this seat does not read it to find out. A replay also appends nothing, which is why its effects report no database write",
   "that a retry is idempotent for anything but the SAME request. The recorded revision is replayed only when re-composing against its own exact prior, in this scope, as this writing seat, reproduces its recorded history digest; a changed as_of, a changed pause, a different actor or another scope is a different request and is refused rather than answered from the stored row",
-  "that every recorded request can still be re-computed. Replay works by re-composing, so it needs the inventory to still admit that composition: an admission accepted AFTER the request landed, whose admitted_at postdates the request's own as_of, makes the composer refuse `projection_as_of_precedes_admission` and the retry refuses with it. That fails closed — it reports that the request cannot be re-established here, never that it did not land — and the recorded revision is readable through the store's own readback either way",
+  "that every recorded request can still be re-computed. Replay works by re-composing, so it needs the inventory to still admit that composition: an admission accepted AFTER the request landed, whose admitted_at postdates the request's own as_of, makes the composer refuse `projection_as_of_precedes_admission`. On a retry that refusal is re-raised as `clock_runtime_recorded_request_not_recomputable`, CARRYING the recorded clock key, history digest, revision ordinal and the underlying cause_code, so it can never be read as 'the request did not land'. It fails closed, appends nothing, and the recorded revision stays readable through the store's own readback",
 ]);
 
 /** The repository's ordinary digest grammar, reused rather than widened. */
@@ -754,7 +754,7 @@ export function createJourneyOneClockRuntime({
       for (const field of JOURNEY_ONE_CLOCK_DERIVED_NOT_SUPPLIED_FIELDS) {
         if (Object.hasOwn(args, field)) {
           refuse("clock_runtime_history_is_derived",
-            `${field} is derived from this rail's own read of the head and is never supplied. The history a revision is computed against and the head it appends onto are one fact; two arguments for it are two chances to disagree, and the disagreement is a revision evaluated against a history that is not the one it swaps onto`,
+            `${field} is derived by this rail and is never supplied: from this scope's head on a first attempt, and from the exact prior a recorded request was written under on a retry. The history a revision is computed against and the prior it appends onto are one fact; two arguments for it are two chances to disagree, and the disagreement is a revision evaluated against a history that is not the one it swaps onto`,
             { invariant: "j1_clock_exact_prior_history_digest", path: `advance.${field}` });
         }
       }
@@ -823,17 +823,51 @@ export function createJourneyOneClockRuntime({
         }
       }
 
-      // 2. COMPOSE AGAINST THAT EXACT HEAD. The composer's own refusals travel
-      //    unchanged — a scope with no inventory refuses with
-      //    `minimum_inventory_unavailable`, which is the state of this repository.
-      const composition = await composer.compose({
-        as_of: args.as_of,
-        completion: args.completion,
-        completion_expectation: args.completion_expectation,
-        pauses: args.pauses,
-        amendments: args.amendments,
-        history: priorHistory === null ? null : copy(priorHistory),
-      });
+      // 2. COMPOSE AGAINST THAT EXACT PRIOR — this scope's head on a first
+      //    attempt, the recorded request's own prior on a retry. The composer's
+      //    own refusals travel unchanged on a first attempt: a scope with no
+      //    inventory refuses with `minimum_inventory_unavailable`, which is the
+      //    state of this repository.
+      //    ON A RETRY A COMPOSER REFUSAL IS RE-RAISED WITH THE RECORDED REVISION
+      //    ATTACHED. Replay works by re-composing, so it needs the inventory to
+      //    still admit that composition: an admission accepted after the request
+      //    landed, whose admitted_at postdates the request's own as_of, makes the
+      //    composer refuse `projection_as_of_precedes_admission`. Bare, that
+      //    error is indistinguishable from a first attempt with a bad as_of — and
+      //    a caller reading it as "my request failed" re-keys and appends a
+      //    second legitimate-looking revision, which is the exact hazard the
+      //    layer below separates by name. So the refusal carries what this seat
+      //    already knows: the request LANDED, here is the revision, here is why
+      //    it cannot be re-established. Nothing about failing closed changes.
+      let composition;
+      try {
+        composition = await composer.compose({
+          as_of: args.as_of,
+          completion: args.completion,
+          completion_expectation: args.completion_expectation,
+          pauses: args.pauses,
+          amendments: args.amendments,
+          history: priorHistory === null ? null : copy(priorHistory),
+        });
+      } catch (error) {
+        if (!retry) throw error;
+        refuse("clock_runtime_recorded_request_not_recomputable",
+          "this request ALREADY LANDED and its revision is recorded; it cannot be re-computed here, so this call can neither replay it nor append. The recorded revision is unchanged and readable, and re-sending this request under a NEW key would file a second revision of work that is already filed",
+          { invariant: "j1_clock_idempotency_key_binds_its_payload",
+            idempotency_key: args.idempotency_key,
+            request_landed: true,
+            appended: false,
+            recorded_clock_key: recorded.clock_key,
+            recorded_history_digest: recorded.history_digest,
+            recorded_revision_ordinal: recorded.revision_ordinal,
+            recorded_expected_prior_history_digest: recorded.expected_prior_history_digest,
+            recorded_at: recorded.recorded_at,
+            // The refusal underneath, by its own name, so the reason is readable
+            // without the caller having to guess which rail produced it.
+            cause_code: error?.code ?? null,
+            cause_name: error?.name ?? null,
+            cause_message: typeof error?.message === "string" ? error.message : null });
+      }
       // The scope is compared again on the composition itself, because the
       // construction-time check was against the composer OBJECT and this is the
       // artifact that will be filed.
@@ -857,7 +891,7 @@ export function createJourneyOneClockRuntime({
         ? null : composition.projection.history.history_digest ?? null;
       if (composedPriorDigest !== priorDigest) {
         refuse("clock_runtime_composed_history_is_not_the_prior",
-          "the projection was composed against a history that is not the prior this advance appends onto. The history a revision is computed against and the head it swaps onto are one fact, and this seat derives both from one read; a composition that carries a different one is not the artifact this advance asked for",
+          "the projection was composed against a history that is not the prior this advance appends onto. The history a revision is computed against and the prior it swaps onto are one fact, and this seat derives both from one read -- of this scope's head on a first attempt, of the recorded request's own prior on a retry; a composition that carries a different one is not the artifact this advance asked for",
           { invariant: "j1_clock_exact_prior_history_digest",
             expected_prior_history_digest: priorDigest,
             composed_history_digest: composedPriorDigest,
@@ -991,13 +1025,24 @@ export function createJourneyOneClockRuntime({
           head_admission_digest: composition.head_admission_digest,
           admission_count: composition.admission_count,
           prior_history_digest: priorDigest,
-          prior_revision_ordinal: head === null ? null : head.head_revision_ordinal,
+          // ONE MEANING ON BOTH PATHS: the ordinal of the revision this one was
+          // written onto, and null only when there was none. On the append path
+          // that is the head this call read; on a replay it is the ordinal the
+          // store derived for the recorded revision's own prior — from the row it
+          // rebuilt, not from arithmetic here.
+          prior_revision_ordinal: retry
+            ? recorded.prior_revision_ordinal ?? null
+            : (head === null ? null : head.head_revision_ordinal),
           // Where that prior came from: this scope's current head, or the exact
           // token the recorded request was written under.
           prior_source: retry ? "recorded_request_prior" : "current_scope_head",
         },
         composition_binding: binding,
-        clock_scope_matches_verified_binding: true,
+        // DERIVED FROM THE TWO KEYS, not asserted. It is earned on both paths —
+        // the recorder refuses before either arm returns — but a literal `true`
+        // is the shape a later refactor falsifies without anything noticing.
+        clock_scope_matches_verified_binding:
+          outcome.clock_scope_key === installed.clock_scope_key,
         // The kernel's own verdict, passed through unchanged and unre-decided.
         // On a replay it is the verdict of the RE-COMPUTATION, which had to
         // reproduce the recorded revision exactly to get here.
