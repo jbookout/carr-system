@@ -1006,6 +1006,62 @@ test("app.js answers a modal inside the modal, and never paints a replayed answe
     "still exactly one place that holds a value");
 });
 
+test("app.js keeps every unconfirmed change reachable, outside the filters that hide its row", async () => {
+  const app = await file("dealroom/js/app.js");
+
+  const node = app.slice(app.indexOf("function pendingWritesNode"), app.indexOf("function renderPendingWrites"));
+  assert.match(node, /const existing = \$\('#pendingWrites'\);\s*if \(existing\) return existing;/,
+    "built once, not on every render");
+  assert.match(node, /main\.insertAdjacentElement\('afterbegin', node\)/,
+    "above the workspace, so no filter, search or workspace switch can take it away");
+  assert.match(node, /node\.setAttribute\('role', 'status'\)/,
+    "a standing list, not an alert that re-announces on every poll");
+
+  const bar = app.slice(app.indexOf("function renderPendingWrites"), app.indexOf("function renderBoardOnly"));
+  assert.match(bar, /const pending = unresolvedFieldWrites\(state\.fieldWrites\);/,
+    "one state, read whole — no second store of what is outstanding");
+  assert.match(bar, /node\.hidden = pending\.length === 0;/, "and no bar when nothing is outstanding");
+  assert.match(bar, /Unconfirmed changes · \$\{pending\.length\}/,
+    "the count is the operations themselves, never a number kept alongside them");
+  assert.match(bar, /if \(signature === state\.pendingSignature\) return;/,
+    "rewritten only when the set changes, so the button under a finger survives a poll");
+  assert.match(bar, /const deal = state\.deals\.get\(entry\.deal\);\s*const name = deal\?\.name \|\| 'a record this board is not showing right now';/,
+    "a record the board does not hold is said to be that, not given a borrowed name");
+  assert.match(bar, /data-retry-write="\$\{esc\(entry\.cell\)\}"/, "the same deliberate retry, same key");
+  assert.match(bar, /data-open-deal="\$\{esc\(entry\.deal\)\}"/,
+    "and a way to reach the record itself when its row is filtered out");
+  assert.ok((bar.match(/esc\(/g) || []).length >= 5, "every rendered value is escaped");
+
+  // It is drawn before the board's own visibility is considered, because the
+  // accounts home hides the board section entirely.
+  const board = app.slice(app.indexOf("function renderBoardOnly"), app.indexOf("function renderStats"));
+  assert.ok(board.indexOf("renderPendingWrites();") < board.indexOf("$('#boardSection').hidden"),
+    "an unconfirmed change belongs to the page, not to whichever workspace is showing");
+  assert.equal((app.match(/renderPendingWrites\(\)/g) || []).length, 2,
+    "the definition and the one call site every render already passes through");
+
+  // And the sentence that sends a person to it names it.
+  const helper = await file("dealroom/js/field-write-reconciliation.mjs");
+  for (const reason of ["no_answer", "server_error", "unresolved"]) {
+    const line = helper.slice(helper.indexOf(`${reason}: '`), helper.indexOf("',", helper.indexOf(`${reason}: '`)));
+    assert.match(line, /Unconfirmed changes bar at the top of the page/, reason);
+  }
+});
+
+test("app.js swaps one dialog's contents instead of opening it twice", async () => {
+  const app = await file("dealroom/js/app.js");
+  const openForm = app.slice(app.indexOf("function openForm"), app.indexOf("function nextStepForm"));
+  // #formDialog is shared by every form, and the conflict chooser is raised FROM
+  // the park form while that dialog is still open. showModal() on an open dialog
+  // throws, and the exception landed on the error line the submit had just
+  // cleared — the chooser appeared with a browser message above it.
+  assert.match(openForm, /if \(!dialog\.open\) dialog\.showModal\(\);/);
+  assert.equal((openForm.match(/dialog\.showModal\(\)/g) || []).length, 1,
+    "one place opens it, and only when it is not already open");
+  assert.ok(openForm.indexOf("$('#dialogBody').innerHTML = body;") < openForm.indexOf("dialog.showModal()"),
+    "the body and the submit handler are replaced first, so the swap is complete before it is shown");
+});
+
 test("app.js is honest in the badge and refuses to show an empty board it never read", async () => {
   const app = await file("dealroom/js/app.js");
   const detail = app.slice(app.indexOf("function syncDetail("), app.indexOf("function setSync"));

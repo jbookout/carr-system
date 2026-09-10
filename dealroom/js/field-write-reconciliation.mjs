@@ -35,12 +35,13 @@
  *     bookkeeping about one request, exactly as `state.undo` and `state.fieldBase`
  *     already are.
  *   - an accepted answer is reported as SUPERSEDED when this cell's base moved
- *     while the request was out. A replay is truthful about an older operation,
- *     and a truthful old answer is still an old answer: if the feed has delivered
- *     an event for that cell since, the caller is told to leave the newer state
- *     alone and re-read rather than paint the request's value over it. The
- *     evidence is the caller's own two bases — no event id is invented, because
- *     the write's answer carries none.
+ *     while the request was out AND the event that moved it is not this
+ *     operation's own. A replay is truthful about an older operation, and a
+ *     truthful old answer is still an old answer: if something else landed on
+ *     that cell since, the caller is told to leave the newer state alone and
+ *     re-read rather than paint the request's value over it. The answer names
+ *     the event it committed, so this board's own write arriving on the feed is
+ *     recognised as itself instead of being reported as a partner's change.
  *
  * What it deliberately does NOT do: infer that a write landed because the feed
  * later showed a matching value. A partner can set the same value; equality is
@@ -72,11 +73,15 @@ const OUTCOME_SENTENCE = Object.freeze({
   // Three different things, said as three different sentences. Nothing came
   // back at all; something came back and it was the server failing; the server
   // decided, at the door, that this session may not make this change.
-  no_answer: 'could not be confirmed — nothing came back from the server. It may already be saved: retry it, or open the deal to check, before changing this cell again.',
-  server_error: 'could not be confirmed — the server reported an error instead of confirming it. It may already be saved: retry it, or open the deal to check, before changing this cell again.',
+  // These two name WHERE the control is. A sentence that tells a person to retry
+  // something has to point at something they can see: the row's own Retry button
+  // is hidden by a filter, a search or a workspace switch, so the one place that
+  // is always on screen — the Unconfirmed changes bar — is what they are sent to.
+  no_answer: 'could not be confirmed — nothing came back from the server. It may already be saved: send it again from the Unconfirmed changes bar at the top of the page, or open the deal to check, before changing this cell again.',
+  server_error: 'could not be confirmed — the server reported an error instead of confirming it. It may already be saved: send it again from the Unconfirmed changes bar at the top of the page, or open the deal to check, before changing this cell again.',
   unauthorized: 'was not saved — this session is not signed in, or is not allowed to change it. Sign in again, re-open the deal, and make the change from what it holds now.',
   key_reuse: 'was already sent under the same safety key for a different request, so the server refused it. Open the deal and check what it holds now.',
-  unresolved: 'has an earlier change that was never confirmed. Retry that one, or open the deal to check, before making a different change here.',
+  unresolved: 'has an earlier change that was never confirmed. Send that one again from the Unconfirmed changes bar at the top of the page, or open the deal to check, before making a different change here.',
   in_flight: 'is still being sent. Wait for the server to answer before changing it again.',
 });
 
@@ -252,23 +257,38 @@ export function classifyFieldWriteOutcome({ response = null, error = null } = {}
 }
 
 /**
- * Has the cell moved on since this request was built?
+ * Has the cell moved on since this request was built — and if it has, was it
+ * moved by someone else?
  *
- * The only evidence used is the base the caller's own changes feed has recorded
- * for that cell — the same value that would be sent as `base_event_id` by the
- * NEXT write. When it differs from the base this operation was built on, an
- * event for this cell landed while the request was out, so an accepted answer —
- * a replayed one above all — is no longer the newest word about it.
+ * Two pieces of evidence, and the second one only exists because the answer now
+ * carries it:
  *
- * What it deliberately does NOT claim: whose event it was, or what the cell now
- * holds. It is a "do not paint this value" signal, not a value. The authoritative
- * read is what says what the cell holds. Nothing here invents an event id: a
- * write's answer carries none, which is exactly why this compares the two bases
- * the client already has rather than the event the write made.
+ *   baseNow      the newest event the caller knows for this cell. When it is not
+ *                the base this request was built on, SOMETHING landed on that
+ *                cell while the request was out.
+ *   committedId  the event this very operation committed, named by the answer
+ *                (`applyDealRoomField` reads its own row back). When the cell's
+ *                newest event IS that event, the thing that moved the base was
+ *                this operation's own write arriving on the feed — which is not
+ *                a newer change to reconcile with, it is this change.
+ *
+ * Getting that second test wrong is a false sentence on the very path this
+ * module exists for: a lost answer, retried, replays, the feed has meanwhile
+ * delivered our own event, and the person would be told "the board has since
+ * seen a newer change to this cell" about their own edit — while the value on
+ * screen is exactly theirs, and the local apply is withheld for no reason.
+ *
+ * What it still does NOT claim: whose event a DIFFERENT newer id belongs to, or
+ * what the cell now holds. An unrecognised newer event is treated as a partner's
+ * and reconciled through an authoritative read, which is the safe reading of an
+ * id we cannot account for — including when the answer names no event at all,
+ * where this falls back to comparing the two bases exactly as it did before.
  */
-export function answerSupersededByFeed(request, baseNow) {
+export function answerSupersededByFeed(request, baseNow, committedId = null) {
   if (!request) return false;
-  return (baseNow ?? null) !== (request.base_event_id ?? null);
+  const now = baseNow ?? null;
+  if (committedId && committedId === now) return false;
+  return now !== (request.base_event_id ?? null);
 }
 
 /**
@@ -427,8 +447,11 @@ export async function performFieldWrite({ deal, field, value, base = null, baseN
   // Read the cell's base only NOW, and only for an accepted answer: an operation
   // that was refused or never answered has no value to withhold in the first
   // place, and an open conflict is already the server saying the cell moved.
+  // The answer's own committed event id is the third piece of evidence: without
+  // it, this operation's own event arriving on the feed reads as a partner's.
   const outcome = classified.status === 'ok'
-    ? { ...classified, superseded: answerSupersededByFeed(claim.request, baseNow ? baseNow() : (base ?? null)) }
+    ? { ...classified, superseded: answerSupersededByFeed(
+      claim.request, baseNow ? baseNow() : (base ?? null), classified.event_id ?? null) }
     : classified;
   const cell = cellKey(deal, field);
   setState(settleFieldWrite(getState(), cell, outcome));

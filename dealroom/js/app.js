@@ -63,6 +63,10 @@ const state = {
   // the beginning of the log, so nothing is shown until it reaches the present.
   receipts: [], undo: createUndoState(), feed: createFeedProgress(),
   receiptSignature: null, receiptFocus: null, receiptAnnounced: null,
+  // What the unconfirmed-changes bar last drew, so a poll does not rewrite it —
+  // a render memo, exactly like receiptSignature. The operations themselves live
+  // in fieldWrites and nowhere else.
+  pendingSignature: null,
   callMode: { state: 'idle' }, callModeTimer: null,
   postCallClient: null, postCallTimer: null,
   postCall: { status: 'idle', session: null, report: null, error: null,
@@ -416,7 +420,65 @@ function renderAccounts() {
     </button>`).join('') : '<div class="empty">No national accounts yet. Add the first portfolio when it is won.</div>';
 }
 
+/**
+ * Where an unconfirmed change can always be found.
+ *
+ * The row's own Retry is the natural place for one, and it is the place a filter,
+ * a search or a workspace switch takes away — so the sentence that says "send it
+ * again" was pointing at a control the person might not be able to see. This bar
+ * is the answer to that: one line per operation this page has not had an answer
+ * to, above the workspace, outside every filter, naming the actual record and the
+ * actual cell, carrying the SAME deliberate retry as everywhere else.
+ *
+ * Built here rather than in the markup, the way the freshness detail is: it is
+ * the one control whose existence depends on something having gone wrong.
+ */
+function pendingWritesNode() {
+  const existing = $('#pendingWrites');
+  if (existing) return existing;
+  const main = $('#main');
+  if (!main) return null;
+  const node = document.createElement('section');
+  node.id = 'pendingWrites';
+  node.className = 'parking-banner';
+  // A status region, not an alert: it is a standing list, and it is only rewritten
+  // when the set of unconfirmed operations actually changes — so a poll every
+  // 1.4 seconds neither re-announces it nor destroys the button under a finger.
+  node.setAttribute('role', 'status');
+  node.setAttribute('aria-label', 'Unconfirmed changes');
+  main.insertAdjacentElement('afterbegin', node);
+  return node;
+}
+
+function renderPendingWrites() {
+  const node = pendingWritesNode();
+  if (!node) return;
+  const pending = unresolvedFieldWrites(state.fieldWrites);
+  node.hidden = pending.length === 0;
+  const signature = pending.map((entry) => `${entry.cell}:${entry.attempts}`).join('|');
+  if (signature === state.pendingSignature) return;
+  state.pendingSignature = signature;
+  if (!pending.length) { node.innerHTML = ''; return; }
+  node.innerHTML = `<b>Unconfirmed changes · ${pending.length}</b>`
+    + pending.map((entry) => {
+      // The record as this board actually knows it. A deal the last snapshot did
+      // not return is not given a borrowed name: the cell is still nameable and
+      // the operation is still re-sendable, and Open record still reaches it,
+      // because a detail read asks the record layer by id.
+      const deal = state.deals.get(entry.deal);
+      const name = deal?.name || 'a record this board is not showing right now';
+      return `<span>${esc(fieldLabel(entry.field))} on ${esc(name)} — not confirmed
+        <button type="button" class="park-button" data-retry-write="${esc(entry.cell)}"
+          aria-label="Send the unconfirmed ${esc(fieldLabel(entry.field))} change on ${esc(name)} again">Send again</button>
+        <button type="button" class="park-button" data-open-deal="${esc(entry.deal)}"
+          aria-label="Open ${esc(name)} and check what it holds">Open record</button></span>`;
+    }).join('');
+}
+
 function renderBoardOnly() {
+  // Before the board's own visibility is considered: an unconfirmed change
+  // belongs to the page, not to whichever workspace or filter is showing.
+  renderPendingWrites();
   if ($('#boardSection').hidden) return;
   const deals = workspaceDeals();
   renderStats(deals);
@@ -1115,11 +1177,12 @@ function reportCellWrite(dealId, field, result, { surface = 'toast' } = {}) {
  * The server accepted this operation, and the board has since learned something
  * newer about the same cell.
  *
- * The request's value is NOT written to the row. A replayed answer is the
- * recorded result of an older operation, and this cell's base has already moved
- * past the one that operation was built on — so applying it, and HOLDING it
- * against the next snapshot the way confirmLocalWrite does, would put a stale
- * value on the board and then defend it against the truth.
+ * The request's value is NOT written to the row. This cell's base has moved past
+ * the one the operation was built on, to an event that operation did not commit —
+ * its own event arriving on the feed is recognised and does not come here — so
+ * applying the value, and HOLDING it against the next snapshot the way
+ * confirmLocalWrite does, would put a stale value on the board and then defend it
+ * against the truth.
  *
  * What happens instead is what the board does anywhere else it does not know:
  * mark the record changed, ask for an authoritative read, and say plainly which
@@ -1208,7 +1271,14 @@ function openForm({ eyebrow='Deal Room', title, submit='Save', body, onSubmit })
       $('#formError').hidden = false;
     } finally { button.disabled = false; }
   };
-  dialog.showModal();
+  // One dialog element serves every form, so a form raised FROM a form — the
+  // conflict chooser opened while the park form is still up — is a content
+  // swap, not a second opening. showModal() on an already-open dialog throws,
+  // and that exception used to land on the error line the submit handler had
+  // just cleared: the person got the conflict chooser with a browser message
+  // above it. The body and the submit handler are already replaced above; this
+  // only has to make the dialog visible when it is not.
+  if (!dialog.open) dialog.showModal();
   setTimeout(() => $('input,textarea,select', dialog)?.focus(), 0);
 }
 

@@ -62,9 +62,10 @@ const refusal = (payload) => () => {
 };
 
 test("a lost answer keeps the operation: the retry is the same request under the same key", async () => {
-  // The write commits, the answer never arrives, and the feed then moves this
-  // cell's base to the very event that write made. The retry must not notice.
-  const b = board([dropped(), ok({ replayed: true })]);
+  // The write commits as e1, the answer never arrives, and the feed then moves
+  // this cell's base to that very event. The retry must not notice — and must not
+  // mistake its own event, arriving on the feed, for a partner's newer change.
+  const b = board([dropped(), ok({ replayed: true, event_id: "e1" })]);
 
   const lost = await b.write("d1", "attention", true, "e0");
   assert.equal(lost.status, "unknown");
@@ -77,14 +78,59 @@ test("a lost answer keeps the operation: the retry is the same request under the
   assert.equal(retry.status, "ok", "the server replayed the stored answer");
   assert.equal(retry.replayed, true);
   assert.equal(retry.retry, true, "and the board knows this was the same operation");
-  assert.equal(retry.superseded, true,
-    "the request is unchanged, and the caller is told the cell moved rather than painting the value");
+  assert.equal(retry.event_id, "e1", "the replay names the event this operation committed");
+  assert.equal(retry.superseded, false,
+    "which is the event the base moved to, so nothing newer happened to this cell");
+  assert.equal(retry.message, null, "and the person is told nothing about a change that is their own");
 
   assert.equal(b.sent.length, 2);
   assert.deepEqual(b.sent[1], b.sent[0], "same key, same base, same value");
   assert.equal(b.sent[0].base_event_id, "e0", "the base is what was on screen, not what the feed says now");
   assert.equal(b.keys(), 1, "one intended action, one key");
   assert.deepEqual(b.state(), {}, "settled: the cell is clear for the next intent");
+});
+
+test("an answer is never superseded by the event it itself committed", async () => {
+  // Four shapes of the same moment, because the difference between them is the
+  // difference between a true sentence and a false one.
+
+  // 1. An ordinary write, no retry and no partner, whose round trip outlasts a
+  // poll: the feed delivers this write's own event while the request is still out.
+  let base = "e0";
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let writes = createFieldWriteState();
+  const delayed = performFieldWrite({
+    deal: "d1", field: "phase", value: "Legal", base,
+    baseNow: () => base,
+    getState: () => writes, setState: (next) => { writes = next; },
+    newKey: () => "key-1",
+    patch: async () => { await gate; return { status: "ok", ok: true, event_id: "e1" }; },
+  });
+  base = "e1";
+  release();
+  const own = await delayed;
+  assert.equal(own.superseded, false, "its own event is not a newer change to reconcile with");
+  assert.equal(own.message, null);
+
+  // 2. The lost-answer replay, which is the path this module exists for.
+  const replayed = board([dropped(), ok({ replayed: true, event_id: "e1" })], { baseNow: () => "e1" });
+  await replayed.write("d1", "owner", "dell", "e0");
+  const retry = await replayed.write("d1", "owner", "dell", "e1");
+  assert.equal(retry.superseded, false);
+
+  // 3. A genuine partner event, newer than ours, delivered while we were out.
+  const crossed = board([ok({ event_id: "e1" })], { baseNow: () => "e2" });
+  const overtaken = await crossed.write("d1", "attention", true, "e0");
+  assert.equal(overtaken.superseded, true, "an id this operation cannot account for is reconciled, not painted");
+  assert.match(overtaken.message, /newer change to this cell/);
+
+  // 4. An answer that names no event at all: the two bases are all the evidence
+  // there is, and the conservative reading stands.
+  const blind = board([ok()], { baseNow: () => "e9" });
+  const unnamed = await blind.write("d1", "next_date", "2026-10-01", "e0");
+  assert.equal(unnamed.event_id, null);
+  assert.equal(unnamed.superseded, true, "no id means no way to recognise our own, so re-read");
 });
 
 test("a second click while the first request is open sends nothing", async () => {
@@ -295,8 +341,9 @@ test("unresolved entries are per cell, and name the cell a retry belongs to", as
 });
 
 test("a delayed answer that lands after the feed moved is accepted but not painted", async () => {
-  // The FIRST answer, not a retry: the request is out, a partner's change to the
-  // same cell arrives on the feed, and only then does the server answer.
+  // The FIRST answer, not a retry: the request is out, a PARTNER's change to the
+  // same cell arrives on the feed, and only then does the server answer. Our own
+  // event is e1; the cell's newest is e2, which is not ours.
   let base = "e0";
   let release;
   const gate = new Promise((resolve) => { release = resolve; });
@@ -306,7 +353,7 @@ test("a delayed answer that lands after the feed moved is accepted but not paint
     baseNow: () => base,
     getState: () => writes, setState: (next) => { writes = next; },
     newKey: () => "key-1",
-    patch: async () => { await gate; return { status: "ok", ok: true }; },
+    patch: async () => { await gate; return { status: "ok", ok: true, event_id: "e1" }; },
   });
   base = "e2";
   release();
@@ -324,7 +371,8 @@ test("a replayed answer after a partner's newer change is superseded, for a cell
     ["operating_state", { state: "parked", reason: "client_paused", note: null }],
   ]) {
     let base = "e0";
-    const b = board([dropped(), ok({ replayed: true })], { baseNow: () => base });
+    // Our own write committed e1; the partner's later change is e7.
+    const b = board([dropped(), ok({ replayed: true, event_id: "e1" })], { baseNow: () => base });
 
     const lost = await b.write("d9", field, value, base);
     assert.equal(lost.status, "unknown", `${field}: the answer never came back`);
@@ -351,10 +399,18 @@ test("an answer whose cell has not moved says nothing and is applied as before",
   assert.equal(result.message, null, "a plain success is not narrated");
 });
 
-test("supersession is decided by the two bases the client already has, and nothing else", () => {
+test("supersession is decided by the bases the client has and the event the answer names", () => {
   const request = { deal: "d1", field: "phase", value: "Legal", base_event_id: "e1", idempotency_key: "k" };
   assert.equal(answerSupersededByFeed(request, "e1"), false);
   assert.equal(answerSupersededByFeed(request, "e2"), true);
+  // The third input: the event this operation committed. When the cell's newest
+  // event IS that one, the thing that moved the base was this write arriving.
+  assert.equal(answerSupersededByFeed(request, "e2", "e2"), false);
+  assert.equal(answerSupersededByFeed(request, "e2", "e3"), true,
+    "an id that is neither the base nor ours is someone else's, and is reconciled");
+  assert.equal(answerSupersededByFeed(request, "e2", null), true, "no id, no recognition: re-read");
+  assert.equal(answerSupersededByFeed({ ...request, base_event_id: null }, "e5", "e5"), false,
+    "including on a cell that had no history when the request was built");
   // A cell with no event seen yet: null on both sides is not movement, and the
   // first event this board hears about that cell is.
   assert.equal(answerSupersededByFeed({ ...request, base_event_id: null }, null), false);
@@ -585,8 +641,15 @@ test("a cell's base only ever moves forward, by the record layer's own ordering"
 test("the message names the cell when a toast has to, and speaks plainly when it does not", () => {
   const outcome = { status: "unknown", reason: "no_answer" };
   assert.equal(fieldWriteMessage(outcome, "Attention flag on Riverbank Dental"),
-    "Attention flag on Riverbank Dental could not be confirmed — nothing came back from the server. It may already be saved: retry it, or open the deal to check, before changing this cell again.");
+    "Attention flag on Riverbank Dental could not be confirmed — nothing came back from the server. It may already be saved: send it again from the Unconfirmed changes bar at the top of the page, or open the deal to check, before changing this cell again.");
   assert.match(fieldWriteMessage(outcome), /^This change could not be confirmed/);
+  // Every sentence that asks for a retry names a control that is actually on
+  // screen: the row's own button is hidden by a filter, a search or a workspace
+  // switch, and the bar is not.
+  for (const reason of ["no_answer", "server_error", "unresolved"]) {
+    assert.match(fieldWriteMessage({ status: "unknown", reason }),
+      /Unconfirmed changes bar at the top of the page/, reason);
+  }
   assert.equal(fieldWriteMessage({ status: "ok" }), null);
   assert.equal(fieldWriteMessage({ status: "conflict" }), null);
   assert.match(fieldWriteMessage({ status: "refused", reason: "declined", code: "parking_reason_required" }),
