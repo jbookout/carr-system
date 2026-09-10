@@ -69,15 +69,26 @@
 // refuses a proposed primary subject by name. Every transition prerequisite,
 // every evidence contract and every subject binding is exactly as it was.
 //
-// TWO CAPABILITIES REMAIN UNWIRED, AND THE LIST IS IN THE CODE. See
-// V5_J102_UNWIRED_CAPABILITIES below. Q103's visible reconciliation and its
-// ownership/freshness projection are not connected — the kernel evaluates both
-// and nothing here calls either. They are named as remaining source gaps, not
-// worked around, not stubbed, and not counted as done anywhere in this file.
-// Nothing in this module claims an executed end-to-end run: what landed is
-// source, and the positive walk it makes possible is exercised in the Node suite
-// against a scripted handle and written into the SQL fixture, which remains
-// unexecuted.
+// Q103'S TWO CALLERS ARE WIRED AT SOURCE. `record-lifecycle-reconciliation`
+// evaluates one concurrent edit against the version the caller decided against
+// and the version the DATABASE holds, and appends a visible unresolved item
+// through ops.j102_record_reconciliation_item; the `ownership_and_freshness` read
+// kind composes two EXISTING SQL reads and projects what they establish. Both are
+// described in V5_J102_WIRED_CONCURRENCY_CAPABILITIES with their exact residuals.
+//
+// WHAT REMAINS UNWIRED IS NOW TWO FACTS RATHER THAN TWO CALLERS. No relation in
+// this record layer records WHO OWNS a subject or WHAT AUTOMATION IS RUNNING
+// against it, so the projection reports both as UNKNOWN — which is the answer the
+// kernel was built to distinguish from "none" — and V5_J102_UNWIRED_CAPABILITIES
+// names each with the exact minimal change that would produce it. Neither is
+// stubbed, defaulted, or answered from a caller.
+//
+// WIRED AT SOURCE IS NOT REGISTERED AT RUNTIME, and this module makes only the
+// first claim. It touches no tools.js, no mutation registry and no generated
+// catalog; v5J102ToolRegistrations() is a DESCRIPTION and every entry still
+// carries its four false flags. Nothing here claims an executed end-to-end run:
+// the Node suite exercises these paths against a scripted handle, and the SQL
+// fixture remains unexecuted.
 //
 // WHAT THIS MODULE IS NOT. It registers nothing: v5J102ToolRegistrations() below
 // is a DESCRIPTION the parent may register from, and this file does not touch
@@ -101,11 +112,14 @@ import {
   V5_J102_EVIDENCE_LOADER,
   V5_J102_EVIDENCE_KINDS,
   V5_J102_INITIALIZATION_IDS,
+  V5_J102_MATERIAL_FIELD_CLASSES,
   V5_J102_PARTNER_AUTHORED_RECORD_KINDS,
   V5_J102_SUBJECT_KINDS,
   V5_J102_TRANSITION_IDS,
+  evaluateConcurrentEdit,
   evaluateLifecycleInitialization,
   evaluateLifecycleTransition,
+  projectOwnershipAndFreshness,
   projectSalesforceReference,
   v5J102DecisionSubsetDigest,
   v5J102EvidenceContract,
@@ -140,6 +154,7 @@ export const V5_J102_STORE_RECORD_KINDS = Object.freeze([
   "stored_salesforce_reference",
   "stored_correction_receipt",
   "stored_evidence_subject_link",
+  "stored_reconciliation_item",
 ]);
 
 export const V5_J102_OPERATIONS = Object.freeze([
@@ -166,6 +181,11 @@ export const V5_J102_OPERATIONS = Object.freeze([
   "record-deal-axis",
   "link-salesforce-reference",
   "record-lifecycle-correction",
+  // Q103's visible reconciliation. It evaluates one concurrent edit against the
+  // version the caller decided against and the version the database actually
+  // holds, and writes the resulting item where a person can find it. It advances
+  // no lifecycle state and resolves nothing.
+  "record-lifecycle-reconciliation",
 ]);
 
 /**
@@ -230,17 +250,64 @@ export const V5_J102_ABSENT_EVIDENCE_READERS = Object.freeze({
  * what deliberately did not.
  */
 export const V5_J102_UNWIRED_CAPABILITIES = Object.freeze([
+  // THE TWO ENTRIES THIS LIST USED TO CARRY WERE THE CALLERS. Both are built now
+  // — see V5_J102_WIRED_CONCURRENCY_CAPABILITIES below — and what is left is
+  // narrower and more exact: two FACTS ABOUT THE WORLD that no relation in this
+  // record layer holds, so no caller of any shape could report them honestly.
+  // Each names the exact minimal change that would produce it.
   Object.freeze({
-    capability: "reconciliation_runtime_integration",
-    missing_fact: "a caller that evaluates a concurrent edit and writes the resulting reconciliation item",
-    why: "The kernel's evaluateConcurrentEdit and the SQL writer ops.j102_record_reconciliation_item both exist and neither has a caller in shipped code. Q103's 'material conflicts reconcile visibly' is therefore NOT met end to end today, and no result of this module claims that it is.",
+    capability: "subject_ownership_authority",
+    missing_fact: "any authoritative record of WHICH PARTNER owns a lifecycle subject",
+    why: "Q103 asks every view to show the current owner. Nothing in this rail holds one: ops.j102_subject_current carries `updated_by`, which is who last WROTE the row, and reporting that as the owner would answer a different question with a confident-looking value. `read-cre-lifecycle` kind `ownership_and_freshness` therefore returns owner_slug null with owner_known false, and says so rather than filling it in.",
+    exact_minimal_change: "an owner column on ops.j102_subject_current (or a J102-scoped ownership relation) written by its own registered partner-authored writer, plus the field on the kernel's subject shape. Both are SQL and kernel-vocabulary changes and are Root's to schedule; this module invents neither.",
     produced_by: "not_produced_by_this_slice",
   }),
   Object.freeze({
-    capability: "ownership_and_freshness_exposure",
-    missing_fact: "a read kind that returns the kernel's ownership, freshness and active-automation projection",
-    why: "The kernel's projectOwnershipAndFreshness is pure and has no caller here, and `read-cre-lifecycle` exposes no kind that returns it. Q103's 'expose ownership, freshness, and active automation' is unmet at the record layer.",
+    capability: "active_automation_registry",
+    missing_fact: "any record of automation IN PROGRESS against a lifecycle subject",
+    why: "Q103 asks every view to show in-progress automation affecting the record. No relation here records a run against a subject, and an empty list would be the one wrong answer — 'nothing is running' and 'nobody asked' are different states, and the kernel is built to distinguish them. The read kind therefore returns active_automation null with active_automation_known false.",
+    exact_minimal_change: "a J102-scoped automation-run relation (automation_id, kind, subject, started_by, started_at, ended_at) with a reader, written by whatever schedules the runs. Until one exists the honest answer is unknown, and that is what is returned.",
     produced_by: "not_produced_by_this_slice",
+  }),
+]);
+
+/**
+ * WHAT Q103's TWO CALLERS NOW DO, and exactly what they still do not.
+ *
+ * These replace the two entries that used to sit in the unwired list. They are
+ * recorded here rather than deleted because a reader comparing revisions needs to
+ * see that the entries went away because the work landed, and needs the residuals
+ * in the same breath as the claim.
+ *
+ * NEITHER IS REGISTERED AT RUNTIME. `v5J102ToolRegistrations()` is still a
+ * DESCRIPTION: this module touches no tools.js, no mutation registry and no
+ * generated catalog, and the four false flags on every registration entry say so.
+ * "Wired at source" and "reachable by a partner in the product" are different
+ * claims and this registry makes only the first.
+ */
+export const V5_J102_WIRED_CONCURRENCY_CAPABILITIES = Object.freeze([
+  Object.freeze({
+    capability: "reconciliation_runtime_integration",
+    operation: "record-lifecycle-reconciliation",
+    kernel_entry_point: "evaluateConcurrentEdit",
+    sql_writer: "ops.j102_record_reconciliation_item",
+    what_it_does: "Claims its idempotency key before reading any state, loads the subject, takes the CURRENT version digest from the stored row rather than from the caller, stamps every incoming edit with the derived actor and the server instant, runs the kernel, and — when the kernel says reconcile — writes one visible item carrying both the caller's edits and the authoritative evidence of the other side: the current committed state and the tail of the append-only history that produced it.",
+    idempotency: "WRITER-CLAIMED, through the same ops.j102_claim_idempotency / ops.j102_settle_idempotency every sibling uses. A replay returns the stored outcome and writes nothing; the same key over DIFFERENT bytes refuses rather than substituting one conflict for another; and the key is bound to the actor, so it cannot be replayed by somebody else. THE EARLIER READ-BEFORE-WRITE DUPLICATE CHECK IS GONE AS A CORRECTNESS CLAIM — it was not atomic, two callers passed it simultaneously, and it could not distinguish a stale reading from a current one.",
+    distinct_proposals: "PRESERVED, deliberately. Two different edit sets against the same two version digests are two real conflicts and both land visibly: idempotency is keyed on the REQUEST, which covers the edits, and there is no unique index over the version pair — one would silently discard the second proposal.",
+    labels: "RE-DERIVED AT THE WRITE BOUNDARY, not accepted. `conflict_kind` and every edit's `field_class` are derived-only fields here, so no caller of this store supplies either — but ops.j102_record_reconciliation_item is granted to carr_writer, and a direct caller could otherwise file a visible item labelled with a conflict kind nothing emits, or a lifecycle field labelled `routine`, and the receipt derives its material and unclassified field lists from exactly those stored labels. The writer now checks both against ops.j102_admission_policy()'s transcription of V5_J102_CONFLICT_KINDS and V5_J102_FIELD_CLASS_REGISTRY, on BOTH preserved sides, and the relation restates the conflict vocabulary and the five subject kinds as CHECKs. It is a mislabelling refusal rather than a state bypass closed: an item still cannot merge, apply or resolve anything.",
+    staleness: "BOUND AT THE WRITE BOUNDARY, not at read time. The writer locks the subject in the established tier-2 order, compare-and-swaps it, and then requires the item's own `current_version_digest`, the state snapshot it shows and the newest row of its history evidence to match the committed subject and its committed history. A reading that went stale between the caller's read and the insert cannot be filed as a current fact.",
+    residual: "THE CONCURRENT EDIT SET IS NOT CHARACTERIZED, and the item says so. This layer can prove that the subject MOVED (the base digest is not the stored one) and can show what it moved TO and which transitions did it, but it cannot enumerate the other writer's field-level edits: ops.j102_subject exposes no prior_state_digest, so there is nothing to anchor a diff to. The kernel's own `concurrent_change_not_characterized` branch is exactly this case and reconciles visibly rather than merging on an absence, which is the conservative half of Q103 and not a gap in the integration.",
+    exact_minimal_change_for_the_residual: "surface `prior_state_digest` from ops.j102_subject (it is already inside the hashed envelope and CHECK-bound; the reader simply does not return it). With it, a base that equals the stored prior digest identifies the ONE transition that has run since, whose moved-field set is already declared in the admission map — turning an uncharacterized conflict into a characterized one for the single-step case. SQL change, Root's to schedule.",
+    registered_at_runtime: false,
+  }),
+  Object.freeze({
+    capability: "ownership_and_freshness_exposure",
+    operation: "read-cre-lifecycle",
+    read_kind: "ownership_and_freshness",
+    kernel_entry_point: "projectOwnershipAndFreshness",
+    what_it_does: "Composes two EXISTING SQL read kinds — `subject` and `subject_events` — and feeds the kernel only what those readbacks actually establish: the recomputed state digest, and the last material change taken from the newest row of the append-only history. The subject row's own updated_by/updated_at are cross-checked against that event, and a disagreement refuses rather than picking one.",
+    residual: "OWNER AND ACTIVE AUTOMATION ARE NOT SUPPLIED, because no relation holds either — see the two entries in V5_J102_UNWIRED_CAPABILITIES. The kernel reports owner_known false and active_automation_known false, which is the distinction it was built to make: unknown is not the same answer as none.",
+    registered_at_runtime: false,
   }),
 ]);
 
@@ -413,6 +480,20 @@ export const V5_J102_DERIVED_ONLY_FIELDS = deepFreeze([
   ...V5_J102_DEAL_AXES,
   "representation_basis", "selected_property_id", "active_lease_draft_target_id",
   "pending_deal_id", "cancellation_reason", "closing_date",
+  // Q103's OWN DERIVED FACTS. The owner, the freshness pair and the automation
+  // list are answers this layer reads off stored rows or does not have at all; a
+  // caller that could supply one would be answering the question the projection
+  // exists to answer. `edited_by` and `edited_at` are the same shape one level
+  // down: WHO made an edit and WHEN is the derived principal and the server
+  // clock, never the edit's own account of itself. `field_class` is refused for
+  // the reason the kernel removed it — labelling a lifecycle field `routine`
+  // bought the one merge branch that can silently overwrite another partner.
+  "owner_slug", "last_material_change_at", "last_material_change_by",
+  "active_automation", "automation_id",
+  "edited_by", "edited_at", "field_class",
+  "base_version_digest", "current_version_digest", "conflict_kind",
+  "incoming_edits", "concurrent_edits", "proposed_by", "resolved_by_machine",
+  "item_digest", "item_seq", "merged", "auto_merged_fields",
 ]);
 
 function assertNoAccessorsOrHiddenKeys(object, path) {
@@ -765,6 +846,25 @@ const CORRECTION_KEYS = Object.freeze([
   "corrected_fields", "reason",
 ]);
 
+// Q103's concurrent edit, as a caller may state it — and the three halves it may
+// NOT state.
+//
+// `subject_ref.expected_state_digest` IS the base version: the caller says which
+// version it decided against, in the same shape every other operation uses for
+// the same purpose. It is REQUIRED here, because a concurrent-edit question with
+// no base is not a question. The CURRENT version is read off the stored row and
+// is never a caller input.
+//
+// An edit names a FIELD and a VALUE DIGEST and nothing else. `edited_by` and
+// `edited_at` are the derived principal and the server clock; `field_class` is
+// derived by the kernel from its own registry, and was removed from that shape
+// precisely because a caller labelling a lifecycle field `routine` bought the one
+// branch that silently overwrites the other partner.
+const RECONCILIATION_KEYS = Object.freeze([
+  "schema_version", "idempotency_key", "subject_ref", "edits",
+]);
+const EDIT_REF_KEYS = Object.freeze(["field", "value_digest"]);
+
 const READ_SELECTOR_KEYS = Object.freeze([
   "kind", "subject_kind", "subject_id", "legacy_row_id", "opportunity_id",
 ]);
@@ -773,7 +873,23 @@ export const V5_J102_READ_KINDS = Object.freeze([
   "subject", "subject_events", "first_party_record", "evidence_subject_links",
   "salesforce_references", "correction_receipts", "reconciliation_items",
   "compatibility_view", "migration_shadow",
+  // Q103's second half. COMPOSED HERE rather than added to ops.j102_read, which
+  // is a closed vocabulary and would have needed a SQL change to gain a kind:
+  // this one is built from the two SQL read kinds that already exist, so the
+  // exposure lands without touching the candidate.
+  "ownership_and_freshness",
 ]);
+
+/**
+ * The read kinds this module ANSWERS ITSELF from other reads, rather than
+ * forwarding to ops.j102_read.
+ *
+ * Every kind outside this set is passed through verbatim and the database's own
+ * closed vocabulary decides it. A kind inside it never reaches ops.j102_read at
+ * all — which is exactly why it needs no SQL change — and is instead composed
+ * from readbacks that were each verified inside PostgreSQL.
+ */
+export const V5_J102_COMPOSED_READ_KINDS = Object.freeze(["ownership_and_freshness"]);
 
 /**
  * WHICH TRANSITION EACH WRITE OPERATION PERFORMS, and where the answer comes
@@ -936,6 +1052,16 @@ const OPERATION_SCHEMAS = deepFreeze({
     keys: CORRECTION_KEYS,
     required: ["idempotency_key", "subject_ref", "correction_record_id", "corrected_fields", "reason"],
   },
+  // NEITHER humanOnly NOR authorityOnly, deliberately. Raising a conflict is not
+  // an exercise of authority — it is the record layer noticing that two writers
+  // disagree, and both classes edit records. It RESOLVES nothing: the item lands
+  // unresolved and visible, `resolved_by_machine` is false in the kernel, in this
+  // module and as a CHECK on the relation, and no lifecycle state moves.
+  "record-lifecycle-reconciliation": {
+    write: true, humanOnly: false, authorityOnly: false, transition: null,
+    keys: RECONCILIATION_KEYS,
+    required: ["idempotency_key", "subject_ref", "edits"],
+  },
 });
 
 /** The closed caller schemas, for the parent's registration and for tests. */
@@ -988,6 +1114,8 @@ export function v5J102ToolRegistrations() {
       "Record one external Salesforce opportunity reference with its own name and phase and progressively link it; never sets DoctorCRE lifecycle state.",
     "record-lifecycle-correction":
       "Append one human, authority-held correction receipt with its reason and evidence; history is preserved and nothing is overwritten silently.",
+    "record-lifecycle-reconciliation":
+      "Judge one concurrent edit against the version the caller decided against and the version the database holds, and append a VISIBLE unresolved conflict item when they differ; it merges nothing, resolves nothing and moves no lifecycle state.",
   };
   const handlers = {
     "read-cre-lifecycle": "readCreLifecycle",
@@ -1008,6 +1136,7 @@ export function v5J102ToolRegistrations() {
     "record-deal-axis": "recordDealAxis",
     "link-salesforce-reference": "linkSalesforceReference",
     "record-lifecycle-correction": "recordLifecycleCorrection",
+    "record-lifecycle-reconciliation": "recordLifecycleReconciliation",
   };
   return deepFreeze(V5_J102_OPERATIONS.map(name => ({
     name,
@@ -1378,6 +1507,62 @@ export function storedSalesforceReferenceRecord({ reference, recorded_by, record
   };
 }
 
+/**
+ * One visible reconciliation item, as the relation must receive it.
+ *
+ * IT IS FLAT, AND THAT IS THE RELATION'S SHAPE RATHER THAN A CHOICE. Every other
+ * stored record in this module nests the kernel's answer under its own schema
+ * version; ops.j102_reconciliation_item instead reads `conflict_kind`,
+ * `base_version_digest`, `current_version_digest`, `subject_kind`, `subject_id`
+ * and `proposed_by` off the TOP LEVEL, and CHECK-binds `incoming_edits`,
+ * `concurrent_edits` and `resolved_by_machine` there too. So the kernel's item
+ * fields are carried BYTE FOR BYTE at the top level — including its own
+ * schema_version, which is accurate: this is that item — and this module adds
+ * exactly two kinds of key beside them.
+ *
+ * WHAT THIS MODULE ADDS, AND WHY EACH IS THE STORE'S FACT AND NOT THE KERNEL'S:
+ *
+ *   THE SUBJECT. evaluateConcurrentEdit is never told which record it is judging;
+ *   it compares two digests and two edit sets. Which subject those belong to is
+ *   the store's own validated reference, and the relation requires it — an item
+ *   that cannot say what it is about is not visible in any useful sense.
+ *
+ *   THE OTHER SIDE'S EVIDENCE. The kernel preserves both edit sets, and on the
+ *   uncharacterized branch the concurrent set is genuinely empty — this layer can
+ *   prove the subject MOVED and cannot enumerate whose field went where. What it
+ *   CAN show is authoritative and is shown instead of guessed: the committed
+ *   state as it stands now, and the tail of the append-only history that produced
+ *   it, each row naming its transition, its actor and its instant. A person
+ *   resolving this has the two versions and the changes between them.
+ */
+export function storedReconciliationItemRecord({
+  item, subject_kind, subject_id, current_state, history_tail, characterized,
+}) {
+  return {
+    ...item,
+    subject_kind,
+    subject_id,
+    // The store's own evidence, labelled as such so nothing here reads as part of
+    // the kernel's judgement.
+    concurrent_change_evidence: {
+      characterized,
+      why: characterized
+        ? "the concurrent edit set was supplied and judged"
+        : "this record layer can prove the subject moved and cannot enumerate the other writer's field edits: ops.j102_subject exposes no prior_state_digest to anchor a diff to, so the conflict is reported UNCHARACTERIZED and reconciles visibly rather than merging on an absence",
+      current_state,
+      current_state_source: "ops.j102_read.subject",
+      history_tail,
+      history_tail_source: "ops.j102_read.subject_events",
+      history_tail_is_complete: false,
+    },
+    // The three properties a reader of this row needs before acting on it, and
+    // the ones the relation itself CHECK-binds.
+    resolved_by_machine: false,
+    visible: true,
+    applied: false,
+  };
+}
+
 export function storedCorrectionReceiptRecord({
   subject_kind, subject_id, correction_record_id, corrected_fields, reason,
   prior_state_digest, corrected_by, corrected_at,
@@ -1716,6 +1901,64 @@ export function createCreLifecycleStore({ db } = {}) {
         linked_subject_kind: outcome.linked_subject_kind ?? null,
         sets_lifecycle_state: false, phase_label_is_doctorcre_state: false,
       });
+    } else if (operation === "record-lifecycle-reconciliation") {
+      // EVERYTHING HERE IS READ OFF WHAT LANDED, which is what makes a replay
+      // report the conflict that was filed rather than the one a fresh evaluation
+      // would raise now. The kernel's field-level judgement is not echoed from
+      // the diagnostics — it is recomputed from the STORED ITEM's own edits,
+      // whose `field_class` the kernel derived from its registry and hashed into
+      // the record, so the same answer comes back on the first call and on every
+      // replay of it.
+      const item = isPlainObject(outcome.readback?.record) ? outcome.readback.record : null;
+      const edits = Array.isArray(item?.incoming_edits) ? item.incoming_edits : [];
+      Object.assign(extra, {
+        subject_kind: outcome.subject_kind ?? null,
+        subject_id: outcome.subject_id ?? null,
+        conflict_kind: outcome.conflict_kind ?? null,
+        base_version_digest: outcome.base_version_digest ?? null,
+        current_version_digest: outcome.current_version_digest ?? null,
+        subject_moved: outcome.conflict_present === true,
+        item_seq: outcome.item_seq ?? null,
+        item_digest: outcome.item_digest ?? null,
+        reconciliation_item: item,
+        incoming_fields: edits.map(edit => edit.field).sort(),
+        // Q103's routine/material split, off the stored item rather than a fresh
+        // reading of the registry: a field policy has not classified is reported
+        // as unclassified, never as routine.
+        unclassified_fields: [...new Set(edits
+          .filter(edit => edit.field_class === null).map(edit => edit.field))].sort(),
+        material_incoming_fields: [...new Set(edits
+          .filter(edit => V5_J102_MATERIAL_FIELD_CLASSES.includes(edit.field_class))
+          .map(edit => edit.field))].sort(),
+        // WHAT THE DATABASE ENFORCED at the write boundary, reported rather than
+        // asserted here: the version this item calls current really was current,
+        // its state snapshot hashes to that version, and its history evidence
+        // ends at the newest committed event.
+        current_version_bound_to_committed_row:
+          outcome.current_version_bound_to_committed_row === true,
+        state_evidence_bound_to_committed_row:
+          outcome.state_evidence_bound_to_committed_row === true,
+        history_evidence_bound_to_committed_history:
+          outcome.history_evidence_bound_to_committed_history === true,
+        expected_state_digests: outcome.expected_state_digests ?? null,
+        // AND THE THREE PROPERTIES A PERSON READING THE CONFLICT NEEDS.
+        visible: outcome.visible === true,
+        applied: outcome.applied === true,
+        resolved_by_machine: outcome.resolved_by_machine === true,
+        merged: false,
+        auto_merged_fields: [],
+        last_writer_wins: false,
+        silent_overwrite: false,
+        advances_lifecycle_state: false,
+        concurrent_change_characterized: false,
+        distinct_proposals_collapsed: outcome.distinct_proposals_collapsed === true,
+        records_written: 1,
+        caller_reported_reason_id: outcome.caller_reported_reason_id ?? null,
+        caller_reported_reason_id_scope: outcome.caller_reported_reason_id_scope ?? null,
+        request_digest_scope: outcome.request_digest_scope ?? null,
+        committed_content_digest: outcome.committed_content_digest ?? null,
+        committed_content_digest_source: outcome.committed_content_digest_source ?? null,
+      });
     } else if (operation === "record-lifecycle-correction") {
       Object.assign(extra, {
         receipt_digest: outcome.receipt_digest,
@@ -1756,6 +1999,53 @@ export function createCreLifecycleStore({ db } = {}) {
         { subject_kind, subject_id });
     }
     return { state: stored.state, state_digest: stored.state_digest };
+  }
+
+  /**
+   * One verified subject readback WITH its provenance columns, through the read
+   * door rather than through ops.j102_subject.
+   *
+   * `loadSubject` above is the WRITE path's reader: it needs the state and the
+   * compare-and-swap digest and nothing else. Q103 needs two more columns —
+   * `updated_by` and `updated_at` — which ops.j102_read('subject') already
+   * returns and which nothing in this module read before. Both readers verify the
+   * same way: the digest is recomputed here, in JavaScript, from the state the
+   * database handed back, so a row that no longer hashes to its own claim is
+   * refused rather than reported as a fact about ownership.
+   */
+  async function readSubjectVerified(client, subject_kind, subject_id) {
+    const row = await one(client, "SELECT ops.j102_read($1::text, $2::jsonb) AS body",
+      ["subject", J({ subject_kind, subject_id })]);
+    const stored = parse(row?.body)?.body ?? null;
+    if (stored == null) return null;
+    if (stored.integrity !== "recomputed_from_committed_row") {
+      fail("readback_not_recomputed",
+        "the subject readback does not claim to have been recomputed from its committed bytes",
+        { subject_kind, subject_id, integrity: stored.integrity ?? null });
+    }
+    if (stored.state_digest !== digest(stored.state)) {
+      fail("corrupt_stored_subject",
+        "the stored subject no longer hashes to its recorded digest; it is refused, not repaired",
+        { subject_kind, subject_id });
+    }
+    return stored;
+  }
+
+  /**
+   * The append-only history of one subject, oldest first, as ops.j102_read
+   * returns it. Each element is a verified envelope readback, so the last element
+   * is the most recent lifecycle change and its `recorded_at` / `recorded_by` are
+   * the record layer's own account of when that change happened and who made it.
+   */
+  async function readSubjectEvents(client, subject_kind, subject_id) {
+    const row = await one(client, "SELECT ops.j102_read($1::text, $2::jsonb) AS body",
+      ["subject_events", J({ subject_kind, subject_id })]);
+    const body = parse(row?.body)?.body ?? [];
+    if (!Array.isArray(body)) {
+      fail("invalid_stored_history", "the subject history did not read back as a list",
+        { subject_kind, subject_id });
+    }
+    return body;
   }
 
   function evidenceProvenance(reader, now) {
@@ -2551,7 +2841,10 @@ export function createCreLifecycleStore({ db } = {}) {
         { registered: [...V5_J102_SUBJECT_KINDS] });
     }
     return withTransaction(async client => {
-      await openOperation(client, operation, principal);
+      const { now } = await openOperation(client, operation, principal);
+      if (V5_J102_COMPOSED_READ_KINDS.includes(selector.kind)) {
+        return readOwnershipAndFreshness(client, selector, principal, now);
+      }
       const row = await one(client, "SELECT ops.j102_read($1::text, $2::jsonb) AS body",
         [selector.kind, J(Object.fromEntries(
           READ_SELECTOR_KEYS.filter(k => k !== "kind" && selector[k] !== undefined)
@@ -2563,6 +2856,119 @@ export function createCreLifecycleStore({ db } = {}) {
         integrity: "recomputed_not_trusted",
         stale_fallback_permitted: false,
       });
+    });
+  }
+
+  /**
+   * Q103's second half: ownership, freshness and in-progress automation, from the
+   * rows the database actually holds.
+   *
+   * WHAT IS DERIVED AND WHAT IS ABSENT, because the difference is the whole point
+   * of this read:
+   *
+   *   state_digest      RECOMPUTED inside PostgreSQL from the committed bytes and
+   *                     recomputed again here from the state it returned.
+   *   last material     THE NEWEST ROW OF THE APPEND-ONLY HISTORY. Every writer in
+   *   change            this rail appends an event in the same transaction as the
+   *                     state it writes and stamps both from one instant, so the
+   *                     last event IS the last material change — and the subject
+   *                     row's own updated_by/updated_at are cross-checked against
+   *                     it rather than trusted beside it.
+   *   owner             ABSENT. Nothing here records which partner owns a subject.
+   *                     `updated_by` is who last WROTE the row and answering with
+   *                     it would be answering a different question confidently.
+   *   active automation ABSENT. No relation records a run against a subject, and
+   *                     an empty list is the one wrong answer: "nothing is
+   *                     running" and "nobody asked" are different states.
+   *
+   * Neither absent fact is supplied to the kernel AT ALL, so it reports
+   * `owner_known: false` and `active_automation_known: false` — the distinction it
+   * was built to make — and this answer names both missing facts from the
+   * unwired registry rather than restating them.
+   */
+  async function readOwnershipAndFreshness(client, selector, principal, now) {
+    const operation = "read-cre-lifecycle";
+    if (selector.subject_kind === undefined || selector.subject_kind === null ||
+        selector.subject_id === undefined || selector.subject_id === null) {
+      fail("missing_field",
+        "payload.selector.subject_kind and payload.selector.subject_id are required for an ownership read",
+        { kind: selector.kind });
+    }
+    const subject_kind = selector.subject_kind;
+    const subject_id = assertIdent(selector.subject_id, "payload.selector.subject_id");
+    const stored = await readSubjectVerified(client, subject_kind, subject_id);
+    if (stored == null) {
+      return result(operation, "refuse", "subject_not_found", {
+        actor_slug: principal.slug, kind: selector.kind,
+        subject_kind, subject_id, readback: null,
+      });
+    }
+    const events = await readSubjectEvents(client, subject_kind, subject_id);
+    const newest = events.length === 0 ? null : events[events.length - 1];
+    const change = newest === null ? null : newest.record;
+
+    // THE TWO ACCOUNTS MUST AGREE. The subject row and its newest history row are
+    // written in one transaction from one instant by every writer in this rail, so
+    // a disagreement is not a value to pick between — it is a record layer that
+    // cannot say when it last changed, and answering anyway would be the
+    // confident-looking wrong answer this whole read exists to avoid.
+    if (change !== null &&
+        (change.recorded_by !== stored.updated_by ||
+         Date.parse(change.recorded_at) !== Date.parse(stored.updated_at))) {
+      return result(operation, "refuse", "subject_history_disagrees_with_current_state", {
+        actor_slug: principal.slug, kind: selector.kind, subject_kind, subject_id,
+        current_updated_by: stored.updated_by, current_updated_at: stored.updated_at,
+        newest_event_recorded_by: change.recorded_by,
+        newest_event_recorded_at: change.recorded_at,
+        readback: null,
+      });
+    }
+
+    const projection = projectOwnershipAndFreshness({
+      tenant: ORGANIZATION_TENANT_ID,
+      subject_kind,
+      subject_id,
+      state_digest: stored.state_digest,
+      // SUPPLIED ONLY WHERE THE HISTORY ESTABLISHES IT. A subject with no events
+      // is a row this rail did not write; freshness is then genuinely unknown and
+      // the kernel says so rather than falling back to the row's own updated_at.
+      ...(change === null ? {} : {
+        last_material_change_at: change.recorded_at,
+        last_material_change_by: change.recorded_by,
+      }),
+      // `owner_slug` and `active_automation` are DELIBERATELY NOT PASSED. See the
+      // note above and the two entries in V5_J102_UNWIRED_CAPABILITIES.
+      now,
+    });
+
+    return result(operation, "allow", "ownership_and_freshness_projected_from_committed_rows", {
+      actor_slug: principal.slug,
+      kind: selector.kind,
+      readback: projection,
+      integrity: "recomputed_not_trusted",
+      stale_fallback_permitted: false,
+      // WHERE EACH FIELD CAME FROM, so a consumer can tell a derived answer from
+      // an absent one without reading this function.
+      derived_from: {
+        state_digest: "ops.j102_read.subject",
+        last_material_change: change === null
+          ? "no history rows exist for this subject" : "ops.j102_read.subject_events",
+        owner_slug: "not_produced_by_this_record_layer",
+        active_automation: "not_produced_by_this_record_layer",
+      },
+      history_events_read: events.length,
+      current_state_agrees_with_history: change !== null,
+      // The two facts this layer does not hold, taken from the registry rather
+      // than restated, so the read and the registry cannot drift.
+      missing_facts: V5_J102_UNWIRED_CAPABILITIES.map(entry => ({
+        fact: entry.missing_fact,
+        why: entry.why,
+        exact_minimal_change: entry.exact_minimal_change,
+        produced_by: entry.produced_by,
+      })),
+      owner_known: projection.owner_known,
+      freshness_known: projection.freshness_known,
+      active_automation_known: projection.active_automation_known,
     });
   }
 
@@ -2988,6 +3394,192 @@ export function createCreLifecycleStore({ db } = {}) {
     });
   }
 
+  // -- 16. record-lifecycle-reconciliation ----------------------------------
+
+  /**
+   * Q103's visible reconciliation, end to end at the record layer.
+   *
+   * ORDERED, and every step names whose fact it is:
+   *   1. Authenticate, validate the closed payload. An edit names a FIELD and a
+   *      VALUE DIGEST; who made it and when are derived, and its CLASS is the
+   *      kernel's to decide from its own registry.
+   *   2. Open the transaction and take the actor and the instant from the SERVER.
+   *   3. Load the subject through the verified read door. THE CURRENT VERSION
+   *      DIGEST IS THE STORED ONE — a caller supplying it would be choosing the
+   *      version its own edit is judged against, which is the whole question.
+   *   4. Run the KERNEL. It decides; nothing here second-guesses it, and nothing
+   *      here merges.
+   *   5. On `allow` there is nothing to reconcile and nothing is written.
+   *   6. On `reconcile`, gather the authoritative evidence of the other side —
+   *      the committed state and the tail of the history that produced it — and
+   *      append ONE visible item through ops.j102_record_reconciliation_item.
+   *
+   * WHAT THIS PATH DOES NOT DO, and each is a fact rather than an omission:
+   *
+   *   IT NEVER SUPPLIES A CONCURRENT EDIT SET. A caller's account of what the
+   *   other partner changed is precisely the thing that cannot be trusted, and
+   *   this layer cannot derive one: ops.j102_subject exposes no prior_state_digest
+   *   to anchor a diff to. So the kernel is told nothing about it and takes its
+   *   own `concurrent_change_not_characterized` branch, which reconciles visibly
+   *   rather than merging on an absence. The item records that it is
+   *   uncharacterized; it does not imply the other side made no edits.
+   *
+   *   IT AUTO-MERGES NOTHING, and cannot. The kernel's merge branch needs a
+   *   demonstrably non-overlapping, POLICY-CLASSIFIED, entirely routine edit set,
+   *   and it is unreachable twice over here: no concurrent set is supplied, and
+   *   the field-class registry registers no routine field at all.
+   *
+   *   IT DOES NOT DEDUPLICATE BY READING FIRST. An earlier revision looked for an
+   *   open item with the same subject, versions and conflict kind and returned it
+   *   instead of writing. That could not be a correctness claim: it was not
+   *   atomic, two callers passed it at the same instant, and it could not tell a
+   *   stale reading from a current one. Duplication is settled where it can be —
+   *   under the idempotency key, inside the writer — and the property that
+   *   survives is narrower and true: a RETRY of the same request replays, and two
+   *   DIFFERENT proposals against the same two versions are two real conflicts
+   *   and both stay visible.
+   *
+   *   AND IT CLAIMS NOTHING THE WRITER ENFORCES. The staleness bindings are the
+   *   writer's, under its own lock, at commit time: this layer sends the operand
+   *   it read and the evidence it gathered, and the receipt reports what the
+   *   database bound rather than what this function hoped.
+   */
+  async function recordLifecycleReconciliation(payload, context) {
+    const operation = "record-lifecycle-reconciliation";
+    const { principal, payload: request } = begin(operation, payload, context);
+    const raw = assertClosed(request.subject_ref, SUBJECT_REF_KEYS,
+      // THE BASE VERSION IS REQUIRED HERE, unlike everywhere else it is optional:
+      // a concurrent-edit question with no version to have decided against is not
+      // a question, and defaulting it to the stored digest would answer "no
+      // conflict" to every caller that forgot to say.
+      ["subject_kind", "subject_id", "expected_state_digest"], "payload.subject_ref");
+    if (!V5_J102_SUBJECT_KINDS.includes(raw.subject_kind)) {
+      fail("unknown_subject_kind", `"${String(raw.subject_kind)}" is not a registered subject kind`,
+        { path: "payload.subject_ref.subject_kind", registered: [...V5_J102_SUBJECT_KINDS] });
+    }
+    const subject_kind = raw.subject_kind;
+    const subject_id = assertIdent(raw.subject_id, "payload.subject_ref.subject_id");
+    const base_version_digest = assertDigestRef(raw.expected_state_digest,
+      "payload.subject_ref.expected_state_digest");
+
+    if (!Array.isArray(request.edits) || request.edits.length < 1 ||
+        request.edits.length > 256) {
+      fail("invalid_shape", "payload.edits must name between 1 and 256 edited fields",
+        { path: "payload.edits" });
+    }
+    const edits = request.edits.map((edit, i) => {
+      const path = `payload.edits[${i}]`;
+      assertClosed(edit, EDIT_REF_KEYS, EDIT_REF_KEYS, path);
+      return {
+        field: assertIdent(edit.field, `${path}.field`),
+        value_digest: assertDigestRef(edit.value_digest, `${path}.value_digest`),
+      };
+    });
+
+    return withTransaction(async client => {
+      const { now } = await openOperation(client, operation, principal);
+      // REPLAY FIRST, before any state is read, exactly as every other write
+      // operation here does. A settled key returns its stored outcome even though
+      // the subject has moved since, and a replay taken after the read would
+      // re-evaluate a conflict that was already filed.
+      const replay = await replayOutcome(client, operation, request, principal);
+      if (replay !== null) return replay;
+      const stored = await readSubjectVerified(client, subject_kind, subject_id);
+      if (stored == null) {
+        return result(operation, "refuse", "subject_not_found", {
+          actor_slug: principal.slug, subject_kind, subject_id,
+          records_written: 0, reconciliation_item: null, readback: null,
+        });
+      }
+      const current_version_digest = stored.state_digest;
+
+      const evaluated = evaluateConcurrentEdit({
+        tenant: ORGANIZATION_TENANT_ID,
+        base_version_digest,
+        // THE DATABASE'S ANSWER, not the caller's.
+        current_version_digest,
+        // The actor and the instant are stamped here; the caller stated only
+        // which field it edited and what the new value hashes to.
+        incoming: edits.map(edit => ({
+          ...edit, edited_by: principal.slug, edited_at: now,
+        })),
+        // `concurrent` is deliberately not supplied. See the note above.
+        actor: principal,
+      });
+
+      const base = {
+        actor_slug: principal.slug,
+        subject_kind, subject_id,
+        base_version_digest, current_version_digest,
+        subject_moved: base_version_digest !== current_version_digest,
+        incoming_fields: evaluated.incoming_fields,
+        merged: evaluated.merged === true,
+        auto_merged_fields: evaluated.auto_merged_fields ?? [],
+        last_writer_wins: false,
+        silent_overwrite: false,
+        resolved_by_machine: false,
+        advances_lifecycle_state: false,
+      };
+
+      if (evaluated.decision === "allow") {
+        // The ONLY reachable allow on this path: the subject has not moved, so
+        // there is no conflict to make visible and nothing is written. The
+        // auto-merge allow needs a concurrent set this layer never supplies AND a
+        // routine field the registry does not register.
+        if (evaluated.merged === true) {
+          fail("unexpected_auto_merge",
+            "the kernel auto-merged an edit this layer supplied no concurrent set for; the merge branch must stay unreachable here",
+            { subject_kind, subject_id, reason_id: evaluated.reason_id });
+        }
+        return result(operation, "allow", evaluated.reason_id, {
+          ...base, records_written: 0, reconciliation_item: null, readback: null,
+        });
+      }
+
+      // === RECONCILE: make the conflict visible ==============================
+      const events = await readSubjectEvents(client, subject_kind, subject_id);
+      const history_tail = events.slice(-5).map(entry => ({
+        transition_id: entry.record.transition_id,
+        event_kind: entry.record.event?.event_kind ?? null,
+        recorded_by: entry.record.recorded_by,
+        recorded_at: entry.record.recorded_at,
+        record_digest: entry.record_digest,
+      }));
+      const record = storedReconciliationItemRecord({
+        item: evaluated.reconciliation_item,
+        subject_kind, subject_id,
+        current_state: stored.state,
+        history_tail,
+        characterized: false,
+      });
+
+      // THE WRITER BINDS THE REST, and this call hands it what it needs to: the
+      // compare-and-swap operand for the one subject the conflict is about, the
+      // idempotency key and the request digest, and the kernel's diagnostic
+      // labelled as the caller's.
+      //
+      // THERE IS NO READ-BEFORE-WRITE DUPLICATE CHECK HERE ANY MORE. It could not
+      // be a correctness claim: two callers pass it at the same instant, and it
+      // could not tell a stale reading from a current one at all. Duplication is
+      // now settled where it can be — under the key, inside the writer — and the
+      // property it protects is narrower and true: a RETRY collapses, and two
+      // different proposals against the same two versions do not.
+      const envelope = storeEnvelope("stored_reconciliation_item", record,
+        { append_only: true, visible: true, resolved_by_machine: false });
+      const row = await one(client,
+        `SELECT ops.j102_record_reconciliation_item($1::jsonb, $2::jsonb,
+                                                    $3::text, $4::text, $5::jsonb) AS outcome`,
+        [J(envelope),
+         // The operand names exactly the subject this conflict is about, with the
+         // digest this call read. The writer re-reads it under its own lock and
+         // refuses if the row moved between the two.
+         J({ [`${subject_kind}:${subject_id}`]: current_version_digest }),
+         request.idempotency_key, requestDigest(operation, request, principal),
+         J({ operation, reason_id: evaluated.reason_id })]);
+      return resultFromOutcome(operation, parse(row.outcome), principal);
+    });
+  }
+
   return Object.freeze({
     readCreLifecycle,
     recordLifecycleFact,
@@ -3007,6 +3599,7 @@ export function createCreLifecycleStore({ db } = {}) {
     recordDealAxis,
     linkSalesforceReference,
     recordLifecycleCorrection,
+    recordLifecycleReconciliation,
   });
 }
 
@@ -3108,13 +3701,46 @@ for (const entry of V5_J102_OPEN_OWNER_QUESTIONS) {
 }
 
 // The unwired-capability registry has to stay a list of FACTS rather than a list
-// of intentions, so every entry must name the missing thing and its owner.
+// of intentions, so every entry must name the missing thing, its owner AND the
+// exact change that would produce it — an absence with no named remedy is how a
+// gap becomes permanent furniture.
 for (const entry of V5_J102_UNWIRED_CAPABILITIES) {
-  for (const key of ["capability", "missing_fact", "why", "produced_by"]) {
+  for (const key of ["capability", "missing_fact", "why", "produced_by", "exact_minimal_change"]) {
     if (typeof entry[key] !== "string" || entry[key].length === 0) {
       throw new V5J102StoreError("contract_self_check_failed",
         `the unwired-capability registry entry "${entry.capability}" does not name its ${key}`);
     }
+  }
+}
+
+// The wired-concurrency registry has to keep describing what actually shipped,
+// and — because "wired" is the claim most easily overstated — every entry must
+// name its residual and must NOT claim runtime registration, which this module
+// does not perform.
+for (const entry of V5_J102_WIRED_CONCURRENCY_CAPABILITIES) {
+  for (const key of ["capability", "operation", "kernel_entry_point", "what_it_does",
+    "residual"]) {
+    if (typeof entry[key] !== "string" || entry[key].length === 0) {
+      throw new V5J102StoreError("contract_self_check_failed",
+        `the wired-concurrency registry entry "${entry.capability}" does not state its ${key}`);
+    }
+  }
+  if (entry.registered_at_runtime !== false) {
+    throw new V5J102StoreError("contract_self_check_failed",
+      `"${entry.capability}" claims runtime registration, and this module registers nothing`);
+  }
+  if (!V5_J102_OPERATIONS.includes(entry.operation)) {
+    throw new V5J102StoreError("contract_self_check_failed",
+      `"${entry.capability}" names operation "${entry.operation}", which this store does not offer`);
+  }
+}
+
+// Every composed read kind is a registered read kind, or `read-cre-lifecycle`
+// would refuse it before reaching the branch that answers it.
+for (const kind of V5_J102_COMPOSED_READ_KINDS) {
+  if (!V5_J102_READ_KINDS.includes(kind)) {
+    throw new V5J102StoreError("contract_self_check_failed",
+      `the composed read kind "${kind}" is not a registered read kind`);
   }
 }
 
