@@ -33,18 +33,20 @@ import { digest } from "../src/artifact-trust.js";
 import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
 import {
   JOURNEY_ONE_CLOCK_PROJECTION, JOURNEY_ONE_CLOCK_SCHEMA, JOURNEY_ONE_DEADLINE_CONTRACT,
-  DEADLINE_GAP_SHIFTED, DEADLINE_OVERLAP_ORIGIN_OFFSET, DEADLINE_PLAIN,
-  createJourneyOneClock,
+  JOURNEY_ONE_CLOCK_VERIFIED_BINDING, DEADLINE_GAP_SHIFTED, DEADLINE_OVERLAP_ORIGIN_OFFSET,
+  DEADLINE_PLAIN, createJourneyOneClock,
 } from "../src/journey-one-clock.v5.js";
 import {
   JOURNEY_ONE_CLOCK_APPEND_INVARIANT_IDS, JOURNEY_ONE_CLOCK_COMPLETION_SEAL_FIELDS,
   JOURNEY_ONE_CLOCK_IDENTITY_DOMAIN_TAG, JOURNEY_ONE_CLOCK_ORIGIN_FIELDS,
   JOURNEY_ONE_CLOCK_SCOPE_DOMAIN_TAG, JOURNEY_ONE_CLOCK_SCOPE_FIELDS,
+  JOURNEY_ONE_CLOCK_SCOPE_IDENTITY_FIELDS,
   JOURNEY_ONE_CLOCK_STATE_FIELDS, JOURNEY_ONE_CLOCK_STORE_CANNOT_PROVE,
   createEphemeralJourneyOneClockJournal, createJourneyOneClockRecorder,
   createJourneyOneClockStore, createPostgresJourneyOneClockJournal,
   journeyOneClockHistoryDigest, journeyOneClockHistoryFromRows, journeyOneClockHistoryRows,
-  journeyOneClockKey, journeyOneClockKeyForState, journeyOneClockScopeKey,
+  journeyOneClockKey, journeyOneClockKeyForState, journeyOneClockScopeBinding,
+  journeyOneClockScopeKey,
   journeyOneClockStoreIntegrationRequirements, journeyOneClockStoreTools,
 } from "../src/journey-one-clock-store.v5.js";
 
@@ -162,6 +164,13 @@ const SCOPE = Object.freeze({
 /** A second accepted scope: a different program, and therefore a different clock. */
 const OTHER_SCOPE = Object.freeze({ ...SCOPE,
   benchmark_subject_digest: D(11), scope_ref: "safe:clock-scope:synthetic-journey-one-other" });
+/**
+ * THE SAME ACCEPTED SCOPE UNDER ANOTHER NAME. Every identity field is SCOPE's;
+ * only the human label differs. It must be the same scope, or "one scope, one
+ * clock" is really "one label, one clock" and a rename walks around it.
+ */
+const RELABELLED_SCOPE = Object.freeze({ ...SCOPE,
+  scope_ref: "safe:clock-scope:synthetic-journey-one-renamed" });
 
 function newStore({ now = Date.now, actor = ACTOR, clock_scope = SCOPE } = {}) {
   const journal = createEphemeralJourneyOneClockJournal({ now });
@@ -1124,16 +1133,32 @@ test("the integration descriptor names the missing authority narrowly and claims
   assert.ok(d.input_authority.scope.includes("not a claim about what exists outside it"));
   assert.ok(d.input_authority.why_unresolved.some(l => l.includes("NO CLOCK HAS BEEN STARTED")));
 
-  // THE ONE THING IT ASKS ANOTHER FILE FOR, stated as an exact read-only
-  // requirement rather than filled in with a policy invented here.
+  // THE ONE THING IT ASKED ANOTHER FILE FOR, now landed — and the surrounding
+  // authority is still missing, which the descriptor must keep saying.
   const ask = d.input_authority.read_only_kernel_projection_extension_required;
-  assert.equal(ask.resolved, false);
-  assert.ok(ask.why.includes("no subject_digest, candidate_digest or policy_digest"));
+  assert.equal(ask.resolved, true);
   assert.ok(ask.exact_requirement.includes("Read-only"));
   assert.ok(ask.exact_requirement.includes("adds no field to the hashed state"),
     "a field added to the state would rebase every stored clock");
+  assert.ok(ask.what_landed.includes("verified_binding"));
+  assert.ok(ask.what_landed.includes("BEFORE any journal read or write"));
+  assert.ok(ask.hashed_state_unchanged.includes("gained no field"));
+  assert.ok(ask.still_not_proved.some(l => l.includes("direct store.record()")),
+    "resolving the extension must not be read as closing the direct record path");
+  assert.ok(ask.still_not_proved.some(l => l.includes("has never been executed")));
   assert.ok(ask.explicitly_not_done_instead.some(l => l.includes("one-clock-per-tenant")),
     "the descriptor must say the invented policy was refused, not applied");
+  // The requirement AROUND it is still open: no reader, no producers.
+  assert.equal(d.input_authority.resolved, false);
+  assert.ok(d.input_authority.required_to_resolve.some(l => l.includes("authenticated projection reader")));
+  assert.ok(d.input_authority.why_unresolved.some(l => l.includes("No live producer")));
+
+  // The label defect, recorded beside it with what was and was not done.
+  const label = d.input_authority.scope_label_excluded_from_identity;
+  assert.equal(label.resolved, true);
+  assert.ok(label.defect.includes("scope_ref"));
+  assert.ok(label.fix.includes("doctorcre:j1-clock-scope:v2"));
+  assert.ok(label.nothing_was_rewritten.includes("never been applied"));
   assert.equal(d.clock_scope_binding_required_for_writes, true);
   assert.ok(d.storage_notes.some(l => l.includes("defends against a caller RENAMING a clock and against nothing else")),
     "the descriptor must not oversell the derived identity");
@@ -1153,7 +1178,8 @@ test("every shared append invariant is stated in both homes, and the one-home en
   // Rule a8c55a47: a duplicated operation needs something that COMPARES the two
   // copies. This is that comparison. It proves neither home dropped an entry. It
   // does NOT prove the SQL is correct — the SQL has never run.
-  assert.equal(JOURNEY_ONE_CLOCK_APPEND_INVARIANT_IDS.length, 16);
+  assert.equal(JOURNEY_ONE_CLOCK_APPEND_INVARIANT_IDS.length, 17);
+  assert.ok(JOURNEY_ONE_CLOCK_APPEND_INVARIANT_IDS.includes("j1_clock_scope_label_is_not_identity"));
   const invariants = journeyOneClockStoreIntegrationRequirements().append_invariants;
   for (const id of JOURNEY_ONE_CLOCK_APPEND_INVARIANT_IDS) {
     assert.ok(SQL.includes(id), `ops/journey-one-clock-store.candidate.sql never names ${id}`);
@@ -1361,11 +1387,16 @@ test("the postgres journal issues only the definer calls the candidate SQL defin
 
 test("the authoritative scope is an exact trusted binding, and it is not the origin", () => {
   const derived = journeyOneClockScopeKey(SCOPE);
+  // THE PREIMAGE IS THE SIX IDENTITY FIELDS, and the label is not one of them.
   assert.equal(derived, digest([JOURNEY_ONE_CLOCK_SCOPE_DOMAIN_TAG,
-    Object.fromEntries(JOURNEY_ONE_CLOCK_SCOPE_FIELDS.map(f => [f, SCOPE[f]]))]));
+    Object.fromEntries(JOURNEY_ONE_CLOCK_SCOPE_IDENTITY_FIELDS.map(f => [f, SCOPE[f]]))]));
+  assert.deepEqual([...JOURNEY_ONE_CLOCK_SCOPE_IDENTITY_FIELDS],
+    JOURNEY_ONE_CLOCK_SCOPE_FIELDS.filter(f => f !== "scope_ref"));
   const { store } = newStore();
   assert.equal(store.clock_scope.clock_scope_key, derived);
   assert.equal(store.clock_scope.clock_scope_ref, SCOPE.scope_ref);
+  assert.ok(!Object.hasOwn(store.clock_scope.scope_identity, "scope_ref"),
+    "the key's preimage must not carry the human label");
 
   // IT IS STABLE ACROSS ORIGINS, which is the whole point: two different origins
   // for one accepted scope address one scope and meet each other.
@@ -1519,4 +1550,312 @@ test("a write with no authoritative scope refuses, and a read needs none", async
   assert.equal(asked.effects.database_writes, 0);
   const empty = await newStore().store.readClockKeyForScope();
   assert.equal(empty.clock_key, null, "a null here is 'no clock in this record layer', not 'no clock'");
+});
+
+// ---------------------------------------------------------------------------
+// 10. THE SCOPE LABEL IS PROVENANCE AND NEVER IDENTITY.
+//
+// The key used to be hashed over all seven declared fields, including the human
+// scope_ref, while every comment beside it said that field carried no authority.
+// With the label inside the preimage, one accepted scope spelled two ways
+// produced two keys -- so "one scope, one clock" silently meant "one LABEL, one
+// clock", and a relabelled store could start a second clock for one program on a
+// fresh origin. These tests are that hole, from both sides.
+// ---------------------------------------------------------------------------
+
+/** A journal that records every call, so "no write" can be proved as "no call". */
+function watchedJournal({ now = Date.now } = {}) {
+  const inner = createEphemeralJourneyOneClockJournal({ now });
+  const calls = [];
+  const wrap = name => async (...args) => { calls.push(name); return inner[name](...args); };
+  return { calls, inner, journal: {
+    durable: false, kind: inner.kind,
+    runAppend: wrap("runAppend"), readClock: wrap("readClock"),
+    readRevisions: wrap("readRevisions"), readScopeBindings: wrap("readScopeBindings"),
+    bindScope: wrap("bindScope"),
+  } };
+}
+
+test("one accepted scope under two names is one scope, and two subjects are still two", () => {
+  // Identical identity fields, different label: ONE key.
+  assert.equal(journeyOneClockScopeKey(RELABELLED_SCOPE), journeyOneClockScopeKey(SCOPE));
+  assert.notEqual(RELABELLED_SCOPE.scope_ref, SCOPE.scope_ref);
+  // And the label is not lost: it travels beside the key as provenance.
+  const binding = journeyOneClockScopeBinding(RELABELLED_SCOPE);
+  assert.equal(binding.clock_scope_ref, RELABELLED_SCOPE.scope_ref);
+  assert.equal(binding.scope.scope_ref, RELABELLED_SCOPE.scope_ref);
+  assert.deepEqual(Object.keys(binding.scope_identity).sort(),
+    [...JOURNEY_ONE_CLOCK_SCOPE_IDENTITY_FIELDS]);
+  // MOVING A REAL IDENTITY FIELD STILL SEPARATES TWO PROGRAMS. Excluding the
+  // label narrows what addresses a scope; it does not merge scopes.
+  for (const field of JOURNEY_ONE_CLOCK_SCOPE_IDENTITY_FIELDS) {
+    if (field.endsWith("_gate_id") || field === "tenant") continue;
+    assert.notEqual(journeyOneClockScopeKey({ ...SCOPE, [field]: D(21) }),
+      journeyOneClockScopeKey(SCOPE), `${field} must still separate two accepted scopes`);
+  }
+  assert.notEqual(journeyOneClockScopeKey(OTHER_SCOPE), journeyOneClockScopeKey(SCOPE));
+});
+
+test("a relabelled scope cannot open a second clock for one program", async () => {
+  const watch = watchedJournal();
+  const store = createJourneyOneClockStore({ journal: watch.journal, actor: ACTOR, clock_scope: SCOPE });
+  const first = run(snapshot()).state;
+  await store.record({ state: copy(first), expected_prior_history_digest: null,
+    idempotency_key: key(), verifier_ref: VERIFIER });
+
+  // THE ATTACK: the same accepted scope under a new name, presenting a FRESH
+  // ORIGIN with no history. The origin derives a clock key this rail has never
+  // seen, so the compare-and-swap has nothing to refuse it with. Before the fix
+  // the relabelled scope hashed to a second key and this landed a second clock.
+  const renamed = createJourneyOneClockStore({
+    journal: watch.journal, actor: ACTOR, clock_scope: RELABELLED_SCOPE });
+  assert.equal(renamed.clock_scope.clock_scope_key, store.clock_scope.clock_scope_key);
+  const rebased = run(snapshot(iso(Date.parse(ORIGIN) + DAY), iso(Date.parse(ORIGIN) + DAY))).state;
+  const rebasedKey = journeyOneClockKeyForState(rebased);
+  await refuses(renamed.record({ state: copy(rebased), expected_prior_history_digest: null,
+    idempotency_key: key(), verifier_ref: VERIFIER }), "clock_scope_already_bound");
+
+  assert.equal((await store.read(rebasedKey)).exists, false, "no second clock was created");
+  assert.equal((await store.read(journeyOneClockKeyForState(first))).revision_count, 1);
+  // And a genuinely different accepted subject is still its own scope and its
+  // own clock: the fix refuses relabelling, not legitimate separation.
+  const elsewhere = createJourneyOneClockStore({
+    journal: watch.journal, actor: ACTOR, clock_scope: OTHER_SCOPE });
+  const landed = await elsewhere.record({ state: copy(rebased),
+    expected_prior_history_digest: null, idempotency_key: key(), verifier_ref: VERIFIER });
+  assert.equal(landed.revision_ordinal, 0);
+});
+
+test("the label a scope was bound under is recorded once and is never replaced", async () => {
+  const { journal, store } = newStore();
+  const first = run(snapshot()).state;
+  const clockKey = journeyOneClockKeyForState(first);
+  await store.record({ state: copy(first), expected_prior_history_digest: null,
+    idempotency_key: key(), verifier_ref: VERIFIER });
+
+  const p = snapshot(iso(Date.parse(ORIGIN) + 2 * DAY));
+  p.history = copy(first);
+  const next = run(p).state;
+
+  // The same clock, the same scope KEY, a different name for it. It is not
+  // identity, so it cannot address a second scope — and precisely because it is
+  // not identity, it must not silently overwrite the provenance either.
+  const renamed = createJourneyOneClockStore({ journal, actor: ACTOR, clock_scope: RELABELLED_SCOPE });
+  await refuses(renamed.record({ state: copy(next),
+    expected_prior_history_digest: first.history_digest,
+    idempotency_key: key(), verifier_ref: VERIFIER }), "clock_scope_label_changed");
+  const readback = await store.read(clockKey);
+  assert.equal(readback.revision_count, 1, "the refused relabelling stored nothing");
+  assert.equal(readback.clock_scope_ref, SCOPE.scope_ref);
+  // The same append under the name the scope was bound with lands normally.
+  await store.record({ state: copy(next), expected_prior_history_digest: first.history_digest,
+    idempotency_key: key(), verifier_ref: VERIFIER });
+  assert.equal((await store.read(clockKey)).revision_count, 2);
+});
+
+test("both homes state the label rule, and the candidate SQL hashes the six identity fields", () => {
+  // The SQL half of the same fix, read as text. It has still never been executed.
+  assert.ok(SQL.includes("'doctorcre:j1-clock-scope:v2'::text"),
+    "the domain tag is versioned on the SQL side too, because the published key changed");
+  // The preimage the SQL actually hashes, read out of the file: the six identity
+  // fields by name, and the label nowhere in it.
+  const preimage = /v_fields := jsonb_build_object\(([\s\S]*?)\);/.exec(SQL)[1];
+  for (const field of JOURNEY_ONE_CLOCK_SCOPE_IDENTITY_FIELDS) {
+    assert.ok(preimage.includes(`'${field}'`), `the SQL preimage drops ${field}`);
+  }
+  assert.ok(!preimage.includes("scope_ref"), "scope_ref must not be part of the SQL preimage");
+  // But it is still validated and still stored, because it is provenance.
+  assert.ok(SQL.includes("'scope_ref', ''"), "a scope with no label is still refused");
+  assert.ok(SQL.includes("p_clock_scope ->> 'scope_ref'"), "the label is still stored");
+  assert.ok(SQL.includes("[j1_clock_scope_label_is_not_identity]"),
+    "the SQL guard names the shared invariant on its refusal");
+  // The rollback-only proof fixture carries the same three assertions.
+  assert.ok(POSTGRES_PROOF.includes("relabelling an accepted scope produced a second scope key"));
+  assert.ok(POSTGRES_PROOF.includes("a relabelled scope opened a second clock for one program"));
+  assert.ok(POSTGRES_PROOF.includes("a bound scope was relabelled by a later write"));
+  assert.ok(POSTGRES_PROOF.includes("two different accepted subjects collapsed onto one scope key"));
+});
+
+// ---------------------------------------------------------------------------
+// 11. THE KERNEL'S VERIFIED BINDING, AND THE SCOPE THE STORE WRITES FOR.
+//
+// The kernel returns `verified_binding` beside its state: the three digests it
+// forced the accepted benchmark and every receipt to match, the tenant, and the
+// two gate ids the accepted deadline contract names. The recorder is the one
+// seat holding both that and the store's authoritative scope, so it compares
+// them — before any journal call at all.
+// ---------------------------------------------------------------------------
+
+function recorderOn(scope = SCOPE, journal = createEphemeralJourneyOneClockJournal()) {
+  const h = harness();
+  const store = createJourneyOneClockStore({ journal, actor: ACTOR, clock_scope: scope });
+  return { h, journal, store,
+    recorder: createJourneyOneClockRecorder({ clock: h.clock, store, verifier_ref: VERIFIER }) };
+}
+
+test("the recorder files a revision under the scope the kernel verified it against", async () => {
+  const { h, store, recorder } = recorderOn();
+  const p = snapshot();
+  const expected = run(p).state;
+
+  const result = await recorder.evaluateAndRecord({
+    envelope: h.envelopeFor(p), expected_prior_history_digest: null, idempotency_key: key() });
+  assert.equal(result.clock_scope_key, store.clock_scope.clock_scope_key);
+  assert.equal(result.clock_scope_matches_verified_binding, true);
+  // THE STORED HISTORY IS EXACTLY THE KERNEL'S, digest for digest and field for
+  // field. Nothing about the binding entered the hashed state.
+  assert.equal(result.history_digest, expected.history_digest);
+  const readback = await store.read(result.clock_key);
+  assert.deepEqual(readback.history, copy(expected));
+  assert.equal(readback.history_digest, expected.history_digest);
+  assert.equal(Object.keys(readback.history).length, JOURNEY_ONE_CLOCK_STATE_FIELDS.length);
+  assert.equal(journeyOneClockHistoryDigest(readback.history), expected.history_digest);
+  assert.equal(readback.clock_scope_key, journeyOneClockScopeKey(SCOPE));
+  assert.equal(readback.clock_scope_ref, SCOPE.scope_ref);
+});
+
+test("a store whose scope is not the verified one refuses before any journal call", async () => {
+  for (const [field, mutation] of [
+    ["benchmark_subject_digest", D(21)],
+    ["benchmark_candidate_digest", D(22)],
+    ["benchmark_policy_digest", D(23)],
+  ]) {
+    const watch = watchedJournal();
+    const { h, recorder } = recorderOn({ ...SCOPE, [field]: mutation }, watch.journal);
+    await assert.rejects(recorder.evaluateAndRecord({
+      envelope: h.envelopeFor(snapshot()), expected_prior_history_digest: null,
+      idempotency_key: key() }), error => {
+      assert.equal(error.code, "clock_scope_not_the_verified_binding");
+      assert.equal(error.detail.invariant, "j1_clock_scope_binds_one_clock");
+      assert.deepEqual(error.detail.differing_fields, [field]);
+      assert.notEqual(error.detail.store_clock_scope_key, error.detail.verified_clock_scope_key);
+      return true;
+    });
+    // NOT A READ, NOT A LOCK, NOT A ROW. The kernel ran; the record layer was
+    // never asked anything.
+    assert.deepEqual(watch.calls, [],
+      "the refusal must happen before the store touches the journal at all");
+    assert.equal(await watch.inner.readClock(journeyOneClockKeyForState(run(snapshot()).state)), null);
+  }
+});
+
+test("a missing or malformed verified binding refuses, with no bypass", async () => {
+  const real = copy(run(snapshot()));
+  const good = copy(real.verified_binding);
+  const without = copy(real); delete without.verified_binding;
+  const withBinding = value => ({ ...copy(without), verified_binding: value });
+
+  for (const [label, result, code] of [
+    ["absent", copy(without), "clock_verified_binding_unavailable"],
+    ["null", withBinding(null), "clock_verified_binding_unavailable"],
+    ["a string", withBinding("sha256:" + "aa".repeat(32)), "clock_verified_binding_malformed"],
+    ["an array", withBinding([good]), "clock_verified_binding_malformed"],
+    ["carrying an extra field", withBinding({ ...good, verified: true }), "clock_verified_binding_malformed"],
+    ["missing a field", withBinding({ ...good, policy_digest: undefined }), "clock_verified_binding_malformed"],
+    ["another schema", withBinding({ ...good, schema_version: "doctorcre-v5-something-else.v1" }),
+      "clock_verified_binding_malformed"],
+    ["an unhashed digest", withBinding({ ...good, subject_digest: "not-a-digest" }),
+      "clock_verified_binding_malformed"],
+    ["another gate", withBinding({ ...good, clock_terminus_gate_id: "some-other-gate-accepted" }),
+      "wrong_clock_scope_gate"],
+    ["another tenant", withBinding({ ...good, tenant: "someone-elses-tenant" }), "wrong_tenant"],
+  ]) {
+    // `missing a field` is spelled with an explicit undefined, so the key is
+    // present and the closed-shape check is doing the work a deletion would.
+    if (label === "missing a field") delete result.verified_binding.policy_digest;
+    const watch = watchedJournal();
+    const store = createJourneyOneClockStore({
+      journal: watch.journal, actor: ACTOR, clock_scope: SCOPE });
+    const recorder = createJourneyOneClockRecorder({
+      clock: { evaluate: () => result }, store, verifier_ref: VERIFIER });
+    await refuses(recorder.evaluateAndRecord({
+      envelope: {}, expected_prior_history_digest: null, idempotency_key: key() }), code);
+    assert.deepEqual(watch.calls, [], `${label}: nothing may be written for it`);
+  }
+  assert.equal(good.schema_version, JOURNEY_ONE_CLOCK_VERIFIED_BINDING);
+});
+
+test("a recorder cannot be built over a store with no authoritative scope", async () => {
+  const journal = createEphemeralJourneyOneClockJournal();
+  const unscoped = createJourneyOneClockStore({ journal, actor: ACTOR });
+  assert.throws(() => createJourneyOneClockRecorder({
+    clock: harness().clock, store: unscoped, verifier_ref: VERIFIER }),
+    e => e.code === "clock_scope_binding_required" &&
+      e.detail.invariant === "j1_clock_scope_binds_one_clock");
+  assert.equal(await journal.readClock(journeyOneClockKeyForState(run(snapshot()).state)), null);
+});
+
+test("the binding is read once off the kernel result and never off the caller", async () => {
+  // THE RESULT IS FROZEN, so a caller holding one cannot edit the binding it is
+  // about to be recorded under.
+  const real = run(snapshot());
+  assert.throws(() => { real.verified_binding.subject_digest = D(21); }, TypeError);
+  assert.equal(real.verified_binding.subject_digest, D(1));
+
+  // A BINDING THAT ANSWERS TWICE cannot pass validation as one value and be
+  // stored under another: each field is read exactly once into a snapshot.
+  let reads = 0;
+  const honest = copy(real.verified_binding);
+  const trick = { ...honest };
+  Object.defineProperty(trick, "subject_digest", { enumerable: true, configurable: true,
+    get() { reads += 1; return reads === 1 ? D(21) : honest.subject_digest; } });
+  const watch = watchedJournal();
+  const store = createJourneyOneClockStore({ journal: watch.journal, actor: ACTOR, clock_scope: SCOPE });
+  const twoFaced = createJourneyOneClockRecorder({
+    clock: { evaluate: () => ({ ...copy(real), verified_binding: trick }) }, store, verifier_ref: VERIFIER });
+  await refuses(twoFaced.evaluateAndRecord({ envelope: {},
+    expected_prior_history_digest: null, idempotency_key: key() }), "clock_scope_not_the_verified_binding");
+  assert.equal(reads, 1, "a second read is a second answer, so there is only ever one");
+  assert.deepEqual(watch.calls, []);
+
+  // AND THE CALL ARGUMENTS ARE NOT A CHANNEL FOR IT. A caller who supplies the
+  // scope's own binding beside a mismatched kernel is still refused: the value
+  // comes from the kernel result and from nowhere else.
+  const { h, recorder } = recorderOn({ ...SCOPE, benchmark_policy_digest: D(23) });
+  await refuses(recorder.evaluateAndRecord({ envelope: h.envelopeFor(snapshot()),
+    expected_prior_history_digest: null, idempotency_key: key(),
+    verified_binding: { ...honest, policy_digest: D(23) },
+    clock_scope: { ...SCOPE, benchmark_policy_digest: D(23) } }),
+    "clock_scope_not_the_verified_binding");
+});
+
+test("the existing compare-and-swap and idempotency are unchanged through the recorder", async () => {
+  const { h, store, recorder } = recorderOn();
+  const p = snapshot();
+  const shared = key();
+  const first = await recorder.evaluateAndRecord({
+    envelope: h.envelopeFor(p), expected_prior_history_digest: null, idempotency_key: shared });
+  assert.equal(first.revision_ordinal, 0);
+
+  // EXACT REPLAY, not a second write.
+  const replay = await recorder.evaluateAndRecord({
+    envelope: h.envelopeFor(p), expected_prior_history_digest: null, idempotency_key: shared });
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.history_digest, first.history_digest);
+  assert.equal((await store.read(first.clock_key)).revision_count, 1);
+
+  // A SECOND CREATION for a clock that already has history.
+  await refuses(recorder.evaluateAndRecord({ envelope: h.envelopeFor(p),
+    expected_prior_history_digest: null, idempotency_key: key() }), "clock_already_exists");
+
+  // A STALE PRIOR, and then the exact one.
+  const stored = (await store.read(first.clock_key)).history;
+  assert.equal(stored.history_digest, first.history_digest);
+  const advanced = snapshot(iso(Date.parse(ORIGIN) + 2 * DAY));
+  advanced.history = copy(stored);
+  await refuses(recorder.evaluateAndRecord({ envelope: h.envelopeFor(advanced),
+    expected_prior_history_digest: D(44), idempotency_key: key() }),
+    "clock_stale_prior_history_digest");
+  assert.equal((await store.read(first.clock_key)).revision_count, 1);
+
+  const appended = await recorder.evaluateAndRecord({ envelope: h.envelopeFor(advanced),
+    expected_prior_history_digest: first.history_digest, idempotency_key: key() });
+  assert.equal(appended.revision_ordinal, 1);
+  assert.equal(appended.clock_scope_key, store.clock_scope.clock_scope_key);
+  // The appended history is exactly what the kernel computed for it.
+  const expected = run(advanced).state;
+  const readback = await store.read(first.clock_key);
+  assert.equal(readback.history_digest, expected.history_digest);
+  assert.deepEqual(readback.history, copy(expected));
+  assert.equal(readback.revision_count, 2);
 });

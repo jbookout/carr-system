@@ -30,6 +30,11 @@
 //     its own — whether a stored history is still readable. That export adds no
 //     clause and softens none, and a pass from it is not an anti-rollback
 //     claim: see the note on the function itself.
+//     For the same reason each result carries `verified_binding` BESIDE the
+//     state: the state says nothing about the accepted scope it was judged
+//     under, so a store had no way to derive the scope it is writing for from
+//     the computation itself. It is a read-only restatement of facts already
+//     enforced here, outside the hashed state, and it authenticates nothing.
 //   * The terminus accepts exactly one rollout-component-receipt.v1 and checks
 //     `all_current_exact_distinct_pass` as an exact contract string rather than
 //     re-implementing it, so "distinct" does no work at arity one.
@@ -94,6 +99,32 @@ export const JOURNEY_ONE_CLOCK_SCHEMA = "doctorcre-v5-journey-one-clock.v2";
  */
 export const JOURNEY_ONE_CLOCK_LEGACY_SCHEMAS = Object.freeze(["doctorcre-v5-journey-one-clock.v1"]);
 export const JOURNEY_ONE_CLOCK_PROJECTION = "doctorcre-v5-journey-one-clock-projection.v2";
+/**
+ * THE VERIFIED BINDING PROJECTION, RETURNED BESIDE THE STATE AND NEVER INSIDE IT.
+ *
+ * A durable store has to know WHICH accepted scope the computation it is filing
+ * was judged under, and the v2 state carries none of it: the state is about one
+ * clock's history, not about the binding that clock was validated against. So a
+ * store could previously only COMPARE a scope it was handed at construction.
+ * This is that binding, read out of the projection evaluate() already
+ * authenticated and enforced — the three digests every receipt and the accepted
+ * benchmark had to match, the tenant, and the two gate ids the accepted deadline
+ * contract names.
+ *
+ * IT IS A PROJECTION, NOT A NEW POWER. It admits nothing, decides nothing and
+ * adds no clause; it restates facts this evaluation already refused to proceed
+ * without. It is deliberately OUTSIDE the hashed state — a field added to the
+ * state would change every history_digest and rebase every stored clock — and it
+ * is frozen with the rest of the result, so a reader cannot edit the binding it
+ * was just told was verified. A pass is not evidence about the RECORD: it says
+ * the installed verifier read these values, exactly as the header says.
+ */
+export const JOURNEY_ONE_CLOCK_VERIFIED_BINDING = "doctorcre-v5-journey-one-clock-verified-binding.v1";
+/** The closed field set of that projection, so a consumer can check it exactly. */
+export const JOURNEY_ONE_CLOCK_VERIFIED_BINDING_FIELDS = Object.freeze([
+  "candidate_digest", "clock_origin_gate_id", "clock_terminus_gate_id", "policy_digest",
+  "schema_version", "subject_digest", "tenant",
+]);
 export const JOURNEY_ONE_CLOCK_RULE_REF =
   "native-task:01a0869f-fe0d-7493-bda3-ab8b3c0d6683:user-turn:01a086d1-2f70-7a73-b0ea-14e68da841ca";
 /** The Chicago DST resolution convention below is decided, not inferred. */
@@ -865,6 +896,17 @@ export function createJourneyOneClock({ verifySnapshot } = {}) {
     state.pause_intervals = p.pauses.map(x => ({ pause_id: x.pause_id, ends_at: x.ends_at }));
     delete state.history_digest; state.history_digest = digest(state);
     return freeze({ schema_version: JOURNEY_ONE_CLOCK_SCHEMA, state,
+      // The verified binding, BESIDE the state. Every value here was enforced
+      // above — `b`'s three digests against the accepted benchmark and against
+      // every receipt read, the tenant against this kernel's own, and the two
+      // gate ids by `same(benchmark.deadline_contract, ...)`, which is why they
+      // are taken from the contract constant rather than from the projection.
+      // Nothing is added to `state`: doing so would rebase every stored history.
+      verified_binding: { schema_version: JOURNEY_ONE_CLOCK_VERIFIED_BINDING, tenant: p.tenant,
+        subject_digest: b.subject_digest, candidate_digest: b.candidate_digest,
+        policy_digest: b.policy_digest,
+        clock_origin_gate_id: JOURNEY_ONE_DEADLINE_CONTRACT.clock_origin_gate_id,
+        clock_terminus_gate_id: JOURNEY_ONE_DEADLINE_CONTRACT.clock_terminus_gate_id },
       // Success is claimable only by a clock that carries NO recorded miss. The
       // status can never spell `completed_on_time` after one, and the miss test
       // is stated here as well so the two can never drift into disagreement.
