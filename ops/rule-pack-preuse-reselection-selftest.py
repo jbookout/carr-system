@@ -459,8 +459,10 @@ class ReuseProbe:
 
     def __init__(self, handle):
         self._handle = handle
-        self.owned_fd = handle.fileno()
-        self.reused_fd = None
+        self.owned_fd: int = handle.fileno()
+        # Set only once the real context releases its descriptor, so the
+        # declared type has to admit both states.
+        self.reused_fd: int | None = None
 
     def __enter__(self):
         self._handle.__enter__()
@@ -499,9 +501,9 @@ with tempfile.TemporaryDirectory(prefix="rule-dedupe-fd-") as fd_temp_name:
     fd_temp = Path(fd_temp_name)
 
     def probing_fdopen(fd, *args, **kwargs):
-        probe = ReuseProbe(_real_fdopen(fd, *args, **kwargs))
-        PROBES.append(probe)
-        return probe
+        fd_probe = ReuseProbe(_real_fdopen(fd, *args, **kwargs))
+        PROBES.append(fd_probe)
+        return fd_probe
 
     # 1. Success. The write must land and no descriptor but its own may close.
     PROBES: list[ReuseProbe] = []
@@ -513,13 +515,15 @@ with tempfile.TemporaryDirectory(prefix="rule-dedupe-fd-") as fd_temp_name:
         os.fdopen = _real_fdopen
     check("the atomic write hands its temp descriptor to exactly one fdopen",
           len(PROBES) == 1, len(PROBES))
-    probe = PROBES[-1]
+    success_probe = PROBES[-1]
+    reused_after_success = success_probe.reused_fd
     check("the released temp descriptor is genuinely reused by an unrelated open",
-          probe.reused_fd == probe.owned_fd, (probe.owned_fd, probe.reused_fd))
+          reused_after_success == success_probe.owned_fd,
+          (success_probe.owned_fd, reused_after_success))
     check("a successful atomic write never closes the descriptor fdopen already owned",
-          descriptor_open(probe.reused_fd), probe.reused_fd)
-    if descriptor_open(probe.reused_fd):
-        os.close(probe.reused_fd)
+          descriptor_open(reused_after_success), reused_after_success)
+    if reused_after_success is not None and descriptor_open(reused_after_success):
+        os.close(reused_after_success)
     check("the atomic write still replaced the file with exactly the canonical bytes",
           target.read_bytes() == json.dumps(
               STATE_VALUE, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode() + b"\n",
@@ -537,7 +541,7 @@ with tempfile.TemporaryDirectory(prefix="rule-dedupe-fd-") as fd_temp_name:
     def failing_fsync(fd):
         raise OSError("simulated fsync failure")
 
-    write_error = None
+    write_error: OSError | None = None
     os.fdopen = probing_fdopen
     os.fsync = failing_fsync
     try:
@@ -549,14 +553,16 @@ with tempfile.TemporaryDirectory(prefix="rule-dedupe-fd-") as fd_temp_name:
         os.fsync = _real_fsync
     check("a failing atomic write still hands its descriptor to exactly one fdopen",
           len(PROBES) == 1, len(PROBES))
-    probe = PROBES[-1]
+    failure_probe = PROBES[-1]
+    reused_after_failure = failure_probe.reused_fd
     check("a write failure propagates rather than reporting a durable write",
           isinstance(write_error, OSError), write_error)
     check("a failed atomic write closes no descriptor twice either",
-          probe.reused_fd == probe.owned_fd and descriptor_open(probe.reused_fd),
-          (probe.owned_fd, probe.reused_fd))
-    if descriptor_open(probe.reused_fd):
-        os.close(probe.reused_fd)
+          reused_after_failure == failure_probe.owned_fd
+          and descriptor_open(reused_after_failure),
+          (failure_probe.owned_fd, reused_after_failure))
+    if reused_after_failure is not None and descriptor_open(reused_after_failure):
+        os.close(reused_after_failure)
     check("a failed atomic write leaves no temp file and no half-written target",
           not doomed.exists()
           and [entry.name for entry in fd_temp.iterdir()] == ["state.json"],
@@ -570,7 +576,7 @@ with tempfile.TemporaryDirectory(prefix="rule-dedupe-fd-") as fd_temp_name:
         CONSTRUCTION["fd"] = fd
         raise OSError("simulated fdopen failure")
 
-    construction_error = None
+    construction_error: OSError | None = None
     os.fdopen = refusing_fdopen
     try:
         dedupe._atomic(fd_temp / "unconstructed.json", STATE_VALUE)
