@@ -21,7 +21,8 @@ import {
   V5_F05_RULE_CLASSES,
   V5_F05_RELATIONS,
   V5_F05_UNKNOWN_FACT,
-  V5_F05_MAX_ENFORCEMENT_EVIDENCE_AGE_SECONDS,
+  V5_F05_DELIVERY_MODES,
+  V5_F05_CODE_ENFORCED_CONSTRAINT_MODE_EMITTED,
   V5_NO_EFFECTS,
   assertF05DecisionBinding,
   compileRuleUniverse,
@@ -56,13 +57,27 @@ const REVIEWED_DECISION_BINDING = Object.freeze({
 
 const NOW = "2026-09-09T12:00:00Z";
 const FRESH_EVIDENCE = "2026-09-09T11:00:00Z";
-const EXACTLY_AT_BOUND = "2026-09-08T12:00:00Z";
-const ONE_SECOND_PAST_BOUND = "2026-09-08T11:59:59Z";
+const A_DAY_BEFORE_NOW = "2026-09-08T12:00:00Z";
+const A_SECOND_MORE_THAN_A_DAY = "2026-09-08T11:59:59Z";
+const RETRIEVED = "2026-09-09T10:00:00Z";
+const DAY_IN_SECONDS = 86400;
 
 const code = fn => {
   try { fn(); } catch (error) { return error instanceof V5F05Error ? error.code : `not-a-V5F05Error:${error}`; }
   return "no-throw";
 };
+
+/**
+ * A rule's bounded typed source reference. Every mandatory rule must carry one:
+ * a control whose text has no named source cannot be told apart from text that
+ * arrived in an email.
+ */
+const prov = (source_record_id, ch) => ({
+  source_record_id,
+  source_version: 1,
+  source_content_digest: `sha256:${ch.repeat(64)}`,
+  retrieved_at: RETRIEVED,
+});
 
 const worktreeRule = () => ({
   rule_id: "worktree-first",
@@ -79,6 +94,9 @@ const worktreeRule = () => ({
   tests: ["check:worktree-isolated"],
   retirement: { behavior: "permanent_until_superseded" },
   relations: [{ relation: "supersedes", target_rule_id: "legacy-branching", target_version: 1 }],
+  // Every removing edge is bounded, not only an exception_to.
+  scoped_validity: { action: ["repo.commit"] },
+  provenance: prov("r-rule-worktree", "a"),
 });
 
 const legacyRule = () => ({
@@ -93,9 +111,12 @@ const legacyRule = () => ({
   binding_text: "Branch inside the shared checkout and coordinate by hand.",
   tests: ["check:legacy-branching"],
   retirement: { behavior: "superseded_only" },
+  provenance: prov("r-rule-legacy", "b"),
 });
 
-const noPhiRule = (evidence = { verified_at: FRESH_EVIDENCE, control_version: "7" }) => ({
+const noPhiRule = (evidence = { verified_at: FRESH_EVIDENCE, control_version: "7" },
+  { binding_text = "No PHI and no raw patient-level location may enter any payload, "
+    + "on any path, for any actor." } = {}) => ({
   rule_id: "no-phi",
   version: 2,
   rule_class: "code_enforced",
@@ -104,13 +125,18 @@ const noPhiRule = (evidence = { verified_at: FRESH_EVIDENCE, control_version: "7
   mandatory: true,
   trigger: {},
   control_effect: { control_key: "phi_payload", effect: "forbid" },
+  // A code_enforced rule may omit binding text under Q066 only if its resulting
+  // constraint can stand in for the rule. Nothing here verifies the evidence
+  // that would license that, so the text is what gets delivered and the fixture
+  // carries it; the no-text variant below is the refusal case.
+  ...(binding_text === null ? {} : { binding_text }),
   code_enforcement: {
     implementation_ref: "mcp-server/src/global-boundaries.v5.js:evaluatePrivacyBoundary",
     control_id: "global.no_phi",
     control_version: "7",
     resulting_constraint: "No PHI or raw patient-level location may enter any payload.",
     evidence: evidence === null ? null : {
-      verifier_id: "ops.ci",
+      verifier_id: evidence.verifier_id ?? "ops.ci",
       verified_at: evidence.verified_at,
       control_version: evidence.control_version,
       implementation_digest: `sha256:${"1".repeat(64)}`,
@@ -119,6 +145,7 @@ const noPhiRule = (evidence = { verified_at: FRESH_EVIDENCE, control_version: "7
   },
   tests: ["check:no-phi"],
   retirement: { behavior: "permanent_until_superseded" },
+  provenance: prov("r-rule-no-phi", "c"),
 });
 
 const sendGateRule = () => ({
@@ -133,6 +160,7 @@ const sendGateRule = () => ({
   binding_text: "A client-facing document is reviewed by a second seat before it is sent.",
   tests: ["check:client-send-review"],
   retirement: { behavior: "permanent_until_superseded" },
+  provenance: prov("r-rule-send-gate", "d"),
 });
 
 const sendGateExceptionRule = () => ({
@@ -174,6 +202,7 @@ const awayModeRule = () => ({
   control_effect: { control_key: "unattended_dispatch", effect: "forbid" },
   binding_text: "Away mode: unattended dispatch is off until Joe returns.",
   retirement: { behavior: "expires_at", expires_at: "2026-09-08T00:00:00Z" },
+  provenance: prov("r-rule-away-mode", "e"),
 });
 
 const basePolicy = () => ({
@@ -216,6 +245,11 @@ const derive = (policy, facts, extra = {}) => deriveRuleApplicability({
   facts,
   now: NOW,
   ...extra,
+});
+
+/** Derive against a universe OBJECT rather than a policy, for the forgery cases. */
+const deriveWith = (universe, facts = commitFacts()) => deriveRuleApplicability({
+  tenant: ORGANIZATION_TENANT_ID, universe, facts, now: NOW,
 });
 
 // ------------------------------------------- the reviewed decision binding
@@ -284,6 +318,10 @@ test("Q051 every required piece of rule metadata is required, one refusal each",
     ["missing_no_machine_control_reason", rule => { delete rule.no_machine_control_reason; },
       "client-review"],
     ["missing_code_enforcement", rule => { delete rule.code_enforcement; }, "no-phi"],
+    // Q050's per-rule source provenance, and the slot Q068 needs on the rule
+    // path: a mandatory rule with no named source is authority with no text of
+    // record behind it.
+    ["missing_rule_provenance", rule => { delete rule.provenance; }, "send-gate"],
   ];
   for (const [expected, mutate, rule_id] of cases) {
     const policy = basePolicy();
@@ -471,7 +509,7 @@ test("Q087 an exception whose own scope is unknown removes nothing and blocks", 
   assert.ok(receipt.effective.some(e => e.rule_id === "send-gate"));
   assert.deepEqual(receipt.pending_relations, [{
     rule_id: "send-gate-exception", relation: "exception_to", target_rule_id: "send-gate",
-    reason_id: "exception_scope_unknown", undecided_dimensions: ["environment"],
+    reason_id: "removal_scope_unknown", undecided_dimensions: ["environment"],
   }]);
   assert.equal(receipt.consequential_action_permitted, false);
   assert.ok(receipt.blocking_reasons.includes("relation_resolution_pending"));
@@ -503,8 +541,9 @@ test("Q087 a dangling, drifted, self or cyclic relation refuses at compile", () 
   assert.equal(code(() => compileRuleUniverse(self)), "self_relation");
 
   const cyclic = basePolicy();
-  cyclic.rules.find(r => r.rule_id === "legacy-branching").relations =
-    [{ relation: "overrides", target_rule_id: "worktree-first", target_version: 3 }];
+  const legacy = cyclic.rules.find(r => r.rule_id === "legacy-branching");
+  legacy.relations = [{ relation: "overrides", target_rule_id: "worktree-first", target_version: 3 }];
+  legacy.scoped_validity = { action: ["repo.commit"] };
   assert.equal(code(() => compileRuleUniverse(cyclic)), "relation_cycle");
 });
 
@@ -518,6 +557,7 @@ test("Q087 identical triggers that require and forbid one control refuse at comp
     binding_text: "Commit in the shared checkout.",
     tests: ["check:no-worktree"],
     retirement: { behavior: "permanent_until_superseded" },
+    provenance: prov("r-rule-no-worktree", "f"),
   });
   assert.equal(code(() => compileRuleUniverse(policy)), "unresolved_binding_conflict");
 });
@@ -533,6 +573,7 @@ test("Q087 a conflict that only appears at fact time refuses the receipt, and no
     binding_text: "Client sends are frozen during the migration window.",
     tests: ["check:send-freeze"],
     retirement: { behavior: "permanent_until_superseded" },
+    provenance: prov("r-rule-send-freeze", "7"),
   });
   const receipt = derive(policy, sendFacts());
   assert.equal(receipt.decision, "refuse");
@@ -546,10 +587,194 @@ test("Q087 a conflict that only appears at fact time refuses the receipt, and no
   assert.equal(receipt.read_only_exploration_permitted, false);
 });
 
-test("Q087 an exception with no scoped validity is a silent repeal and refuses", () => {
+test("Q087 a removing edge with no scoped validity is a silent repeal, whatever it is called", () => {
+  const exception = basePolicy();
+  delete exception.rules.find(r => r.rule_id === "send-gate-exception").scoped_validity;
+  assert.equal(code(() => compileRuleUniverse(exception)), "removing_edge_without_scoped_validity");
+
+  // The leg that used to compile: `overrides` and `supersedes` were bounded by
+  // nothing at all, so the word on the edge decided whether an unbounded repeal
+  // was refused. All three relations remove; all three now need a bound.
+  for (const relation of ["supersedes", "overrides"]) {
+    const policy = basePolicy();
+    const worktree = policy.rules.find(r => r.rule_id === "worktree-first");
+    worktree.relations = [{ relation, target_rule_id: "legacy-branching", target_version: 1 }];
+    delete worktree.scoped_validity;
+    assert.equal(code(() => compileRuleUniverse(policy)),
+      "removing_edge_without_scoped_validity", relation);
+  }
+
+  // ...and the mirror: a bound on a rule that removes nothing is unread policy.
+  const unused = basePolicy();
+  unused.rules.find(r => r.rule_id === "client-review").scoped_validity = { audience: ["client"] };
+  assert.equal(code(() => compileRuleUniverse(unused)), "unused_scoped_validity");
+});
+
+// --------------------- Q087/Q064 the removal channel that deleted controls
+//
+// The reviewer's reproduction, run exactly as filed. Before this correction it
+// compiled clean: a `preference` rule — the class Q051 forbids from being
+// mandatory because "prose must not claim enforcement code does not provide" —
+// held an `overrides` edge against a mandatory `code_enforced`-adjacent control
+// in a different scope owned by a different partner, with a universal trigger.
+// `send-gate` left the effective set, appeared in no blocking reason and in no
+// conflict, and the receipt read coverage_complete with
+// consequential_action_permitted true.
+//
+// Three independent holes composed, so the reproduction is peeled one layer at
+// a time and each layer must refuse on its own.
+
+const joePrefersNoReview = (overrides = {}) => ({
+  rule_id: "joe-prefers-no-review", version: 1,
+  rule_class: "preference", scope: "joe-personal", owner: "dell", mandatory: false,
+  trigger: {},                                   // universal
+  binding_text: "Joe does not want a second seat on his own sends.",
+  no_machine_control_reason: "Only a person can judge tone.",
+  retirement: { behavior: "permanent_until_superseded" },
+  relations: [{ relation: "overrides", target_rule_id: "send-gate", target_version: 1 }],
+  ...overrides,
+});
+
+test("Q087 the reviewer's preference-deletes-a-mandatory-control reproduction refuses", () => {
+  // Layer one: an unbounded removing edge.
+  const unbounded = basePolicy();
+  unbounded.rules.push(joePrefersNoReview());
+  assert.equal(code(() => compileRuleUniverse(unbounded)),
+    "removing_edge_without_scoped_validity");
+
+  // Layer two: bounded, but the class may not remove a mandatory control. Q051
+  // denies preference and scoped_judgment the power to REQUIRE; deleting is
+  // strictly stronger, so the same two classes are denied that too.
+  const bounded = basePolicy();
+  bounded.rules.push(joePrefersNoReview({ scoped_validity: { audience: ["client"] } }));
+  assert.equal(code(() => compileRuleUniverse(bounded)),
+    "removing_class_cannot_remove_mandatory_control");
+  for (const rule_class of ["preference", "scoped_judgment"]) {
+    const policy = basePolicy();
+    policy.rules.push(joePrefersNoReview({
+      rule_class, scoped_validity: { audience: ["client"] },
+    }));
+    assert.equal(code(() => compileRuleUniverse(policy)),
+      "removing_class_cannot_remove_mandatory_control", rule_class);
+  }
+
+  // Layer three: a removal-capable class, still owned elsewhere and scoped
+  // elsewhere. No dominance order is invented in either direction — it fails
+  // closed and names the seam that does not exist.
+  const crossOwner = basePolicy();
+  crossOwner.rules.push(joePrefersNoReview({
+    rule_id: "dell-workflow", rule_class: "workflow", owner: "dell", scope: "shared",
+    tests: ["check:dell-workflow"], scoped_validity: { audience: ["client"] },
+    provenance: prov("r-rule-dell", "f"),
+  }));
+  delete crossOwner.rules.at(-1).no_machine_control_reason;
+  assert.equal(code(() => compileRuleUniverse(crossOwner)), "missing_relation_authority");
+
+  const crossScope = basePolicy();
+  crossScope.rules.push(joePrefersNoReview({
+    rule_id: "joe-personal-workflow", rule_class: "workflow", owner: "joe", scope: "joe-personal",
+    tests: ["check:joe-personal-workflow"], scoped_validity: { audience: ["client"] },
+    provenance: prov("r-rule-joe-personal", "f"),
+  }));
+  delete crossScope.rules.at(-1).no_machine_control_reason;
+  const crossScopeError = (() => {
+    try { compileRuleUniverse(crossScope); } catch (error) { return error; }
+    return null;
+  })();
+  assert.equal(crossScopeError.code, "missing_relation_authority");
+  assert.equal(crossScopeError.detail.missing_seam, "no_relation_authority_grant_verifier");
+  assert.deepEqual(crossScopeError.detail.remover, { owner: "joe", scope: "joe-personal" });
+  assert.deepEqual(crossScopeError.detail.target, { owner: "joe", scope: "shared" });
+
+  // The named gap is disclosed rather than implied, so an authorized
+  // cross-scope supersession is visibly unrepresentable rather than silently
+  // absent.
+  assert.ok(ruleKernelIntegrationGaps()
+    .some(gap => gap.gap === "no_relation_authority_grant_verifier" && gap.landed === false));
+});
+
+test("Q087 a same-owner same-scope removal follows policy, inside its bound and nowhere else", () => {
+  // The positive: a workflow rule of the same owner and scope removes a
+  // mandatory control where its scoped validity matches...
   const policy = basePolicy();
-  delete policy.rules.find(r => r.rule_id === "send-gate-exception").scoped_validity;
-  assert.equal(code(() => compileRuleUniverse(policy)), "exception_without_scoped_validity");
+  policy.rules.push({
+    rule_id: "send-gate-superseded-by", version: 1, rule_class: "workflow",
+    scope: "shared", owner: "joe", mandatory: false,
+    trigger: { action: ["document.send"] },
+    binding_text: "Client sends to an internal audience no longer take a second seat.",
+    tests: ["check:send-gate-successor"],
+    retirement: { behavior: "permanent_until_superseded" },
+    relations: [{ relation: "supersedes", target_rule_id: "send-gate", target_version: 1 }],
+    scoped_validity: { environment: ["staging"] },
+    provenance: prov("r-rule-successor", "8"),
+  });
+
+  const inside = derive(policy, sendFacts({ environment: "staging" }));
+  assert.deepEqual(inside.superseded.map(e => e.rule_id), ["send-gate"]);
+  assert.ok(!inside.effective.some(e => e.rule_id === "send-gate"));
+
+  // ...and does NOT where it does not. The skipped edge is recorded, not erased.
+  const outside = derive(policy, sendFacts({ environment: "production" }));
+  assert.ok(outside.effective.some(e => e.rule_id === "send-gate"));
+  assert.deepEqual(outside.superseded, []);
+  const skipped = outside.skipped_relations.find(e => e.target_rule_id === "send-gate"
+    && e.rule_id === "send-gate-superseded-by");
+  assert.equal(skipped.reason_id, "removal_scope_not_matched");
+  assert.equal(skipped.mismatch.dimension, "environment");
+
+  // An unknown removal scope blocks rather than resolving either way.
+  const unknownFacts = sendFacts();
+  delete unknownFacts.environment;
+  const unknown = derive(policy, unknownFacts);
+  assert.ok(unknown.effective.some(e => e.rule_id === "send-gate"));
+  assert.ok(unknown.pending_relations.some(e => e.rule_id === "send-gate-superseded-by"
+    && e.reason_id === "removal_scope_unknown"));
+  assert.equal(unknown.consequential_action_permitted, false);
+});
+
+test("Q087 a supersession chain is one pass, and the edge that did not fire is in the receipt", () => {
+  // A supersedes B, B supersedes C. A removes B; B is then not standing, so
+  // B's removal of C never fires and C returns to the effective set. The
+  // direction is fail-safe — an extra control, never a missing one — and the
+  // point of this test is that the receipt SAYS so instead of erasing it.
+  const chain = () => ({
+    rule_class: "workflow", scope: "shared", owner: "joe", mandatory: false,
+    trigger: { action: ["document.send"] },
+    tests: ["check:chain"],
+    retirement: { behavior: "permanent_until_superseded" },
+    scoped_validity: { action: ["document.send"] },
+  });
+  const policy = basePolicy();
+  policy.rules.push(
+    { ...chain(), rule_id: "chain-a", version: 1, binding_text: "A, the newest.",
+      relations: [{ relation: "supersedes", target_rule_id: "chain-b", target_version: 1 }] },
+    { ...chain(), rule_id: "chain-b", version: 1, binding_text: "B, the middle.",
+      relations: [{ relation: "supersedes", target_rule_id: "chain-c", target_version: 1 }] },
+    { ...chain(), rule_id: "chain-c", version: 1, binding_text: "C, the oldest." },
+  );
+  // chain-c removes nothing, so it carries no bound; an unread bound refuses.
+  delete policy.rules.at(-1).scoped_validity;
+
+  const receipt = derive(policy, sendFacts());
+  assert.deepEqual(receipt.superseded.map(e => e.rule_id), ["chain-b"]);
+  assert.ok(receipt.effective.some(e => e.rule_id === "chain-c"));
+  assert.deepEqual(receipt.skipped_relations.filter(e => e.rule_id === "chain-b"), [{
+    rule_id: "chain-b", relation: "supersedes", target_rule_id: "chain-c",
+    reason_id: "remover_not_standing", remover_state: "superseded",
+  }]);
+  assert.equal(receipt.removal_is_single_pass_in_compiler_order, true);
+});
+
+test("Q087 an edge whose target is not effective is recorded rather than dropped", () => {
+  // send-gate-exception points at send-gate, which the commit facts rule out.
+  const receipt = derive(basePolicy(), commitFacts());
+  const skipped = receipt.skipped_relations
+    .find(e => e.rule_id === "send-gate-exception" && e.target_rule_id === "send-gate");
+  assert.equal(skipped.reason_id, "target_not_effective");
+  assert.equal(skipped.target_state, "not_applicable");
+  // Never a blocking reason: the direction is always an extra control.
+  assert.ok(!receipt.blocking_reasons.includes("relation_resolution_pending"));
+  assert.equal(receipt.consequential_action_permitted, true);
 });
 
 // ---------------------------------- Q066, what the model actually receives
@@ -565,53 +790,150 @@ test("Q066 an interpreted rule arrives with its full binding text, not its summa
   assert.equal(projected.estimated_tokens, estimateTokens(worktreeRule().binding_text));
 });
 
-test("Q066 a code-enforced control is delivered as its constraint, bound to the exact control", () => {
+// --------- Q066, code-enforcement evidence is a claim, and it says so
+//
+// `code_enforcement.evidence` is five strings supplied by whoever supplied the
+// rule. `verifier_id` is bound to no authority; `implementation_digest` and
+// `evidence_digest` are compared to nothing, because there is nothing here to
+// compare them to. So the kernel does NOT deliver a resulting constraint in
+// place of the rule on that basis. It delivers the full binding text and
+// stamps the caller's claim `evidence_verified_by_kernel: false`.
+
+const swapNoPhi = (policy, ...args) => {
+  policy.rules[policy.rules.findIndex(r => r.rule_id === "no-phi")] = noPhiRule(...args);
+  return policy;
+};
+
+test("Q066 a code_enforced rule is delivered as full binding text, never as a bare constraint", () => {
   const universe = compileRuleUniverse(basePolicy());
   const projected = projectRuleForModel({ universe, rule_id: "no-phi", now: NOW });
-  assert.equal(projected.mode, "code_enforced_constraint");
-  assert.equal(projected.binding_text, null);
-  assert.equal(projected.resulting_constraint,
+
+  assert.equal(projected.mode, "full_binding_text");
+  assert.equal(projected.reason_id, "model_interprets_this_rule");
+  assert.equal(projected.binding_text, noPhiRule().binding_text);
+  // The constraint is NOT the delivery. It rides in the claim, labelled.
+  assert.equal(projected.resulting_constraint, null);
+  assert.equal(projected.code_enforcement_claim.claimed_resulting_constraint,
     "No PHI or raw patient-level location may enter any payload.");
-  assert.equal(projected.enforced_control.control_id, "global.no_phi");
-  assert.equal(projected.enforced_control.control_version, "7");
-  assert.equal(projected.enforced_control.implementation_ref,
-    "mcp-server/src/global-boundaries.v5.js:evaluatePrivacyBoundary");
-  assert.equal(projected.enforced_control.evidence_age_seconds, 3600);
+  assert.equal(projected.code_enforcement_claim.control_id, "global.no_phi");
+  assert.equal(projected.code_enforcement_claim.evidence_age_seconds, 3600);
+
+  // The one fact a downstream reader must not lose.
+  assert.equal(projected.evidence_verified_by_kernel, false);
+  assert.equal(projected.code_enforcement_claim.evidence_verified_by_kernel, false);
+  assert.equal(projected.code_enforcement_claim.verifier_trusted_by_kernel, false);
+  assert.equal(V5_F05_CODE_ENFORCED_CONSTRAINT_MODE_EMITTED, false);
+  assert.ok(V5_F05_DELIVERY_MODES.includes("code_enforced_constraint"));
 });
 
-test("Q066 missing, stale or mismatched enforcement evidence fails closed", () => {
-  const missing = basePolicy();
-  missing.rules[missing.rules.findIndex(r => r.rule_id === "no-phi")] = noPhiRule(null);
-  const missingReceipt = derive(missing, commitFacts());
-  assert.equal(missingReceipt.decision, "refuse");
-  assert.deepEqual(missingReceipt.delivery_refusals,
-    [{ rule_id: "no-phi", reason_id: "code_enforcement_evidence_missing" }]);
-  assert.equal(missingReceipt.consequential_action_permitted, false);
+test("Q066 no delivery on any path carries the constraint-only mode", () => {
+  for (const facts of [commitFacts(), sendFacts()]) {
+    const receipt = derive(basePolicy(), facts, {
+      semantic_candidates: [{ rule_id: "no-phi", reason: "PHI came up in the thread" }],
+    });
+    assert.ok(receipt.delivery.every(entry => entry.mode !== "code_enforced_constraint"));
+    assert.ok(receipt.semantic_additions.every(e => e.mode !== "code_enforced_constraint"));
+    assert.equal(receipt.code_enforcement_evidence_verified_by_kernel, false);
+  }
+});
 
-  const stale = basePolicy();
-  stale.rules[stale.rules.findIndex(r => r.rule_id === "no-phi")] =
-    noPhiRule({ verified_at: ONE_SECOND_PAST_BOUND, control_version: "7" });
-  const staleDelivery = projectRuleForModel({
-    universe: compileRuleUniverse(stale), rule_id: "no-phi", now: NOW });
-  assert.equal(staleDelivery.mode, "refused");
-  assert.equal(staleDelivery.reason_id, "code_enforcement_evidence_stale");
-  assert.equal(staleDelivery.evidence_age_seconds, V5_F05_MAX_ENFORCEMENT_EVIDENCE_AGE_SECONDS + 1);
+test("Q066 a code_enforced rule with no binding text and no trusted verifier refuses", () => {
+  // The honest end of the fallback: with no verifier and no text, there is
+  // nothing deliverable, so it fails closed rather than shipping a constraint
+  // backed by an unverified claim.
+  const policy = swapNoPhi(basePolicy(),
+    { verified_at: FRESH_EVIDENCE, control_version: "7" }, { binding_text: null });
+  const receipt = derive(policy, commitFacts());
+  assert.equal(receipt.decision, "refuse");
+  assert.deepEqual(receipt.delivery_refusals,
+    [{ rule_id: "no-phi", reason_id: "code_enforcement_unverified_and_no_binding_text" }]);
+  assert.equal(receipt.consequential_action_permitted, false);
+  assert.equal(receipt.read_only_exploration_permitted, false);
 
-  const atBound = basePolicy();
-  atBound.rules[atBound.rules.findIndex(r => r.rule_id === "no-phi")] =
-    noPhiRule({ verified_at: EXACTLY_AT_BOUND, control_version: "7" });
-  assert.equal(projectRuleForModel({
-    universe: compileRuleUniverse(atBound), rule_id: "no-phi", now: NOW }).mode,
-    "code_enforced_constraint");
+  // And the gap text says exactly this, rather than the false claim it carried:
+  // it used to say every such rule "fails closed to binding text", which was
+  // wrong twice over — it refused rather than falling back, and any universe
+  // carrying fabricated evidence was delivered as a code_enforced_constraint.
+  const gap = ruleKernelIntegrationGaps().find(g => g.gap === "no_code_enforcement_verifier");
+  assert.ok(gap.what.includes("code_enforcement_unverified_and_no_binding_text"));
+  assert.ok(gap.what.includes("FULL BINDING TEXT"));
+  assert.ok(gap.what.includes("code_enforced_constraint is never emitted"));
+});
 
-  const drifted = basePolicy();
-  drifted.rules[drifted.rules.findIndex(r => r.rule_id === "no-phi")] =
-    noPhiRule({ verified_at: FRESH_EVIDENCE, control_version: "6" });
-  const driftedDelivery = projectRuleForModel({
-    universe: compileRuleUniverse(drifted), rule_id: "no-phi", now: NOW });
-  assert.equal(driftedDelivery.reason_id, "code_enforcement_evidence_version_mismatch");
-  assert.equal(driftedDelivery.declared_control_version, "7");
-  assert.equal(driftedDelivery.verified_control_version, "6");
+test("Q066 fabricated current evidence from an unknown verifier elides nothing", () => {
+  // The attack the old delivery rule admitted: anyone who can author the
+  // universe declares the rule code_enforced, attaches evidence dated a minute
+  // ago from a verifier of their choosing, and the model received ONLY the
+  // resulting constraint — never the rule. Now the binding text is delivered
+  // regardless, and the fabricated evidence is labelled as a claim.
+  const fabricated = swapNoPhi(basePolicy(), {
+    verifier_id: "verifier.attacker", verified_at: "2026-09-09T11:59:00Z", control_version: "7",
+  });
+  const projected = projectRuleForModel({
+    universe: compileRuleUniverse(fabricated), rule_id: "no-phi", now: NOW });
+
+  assert.equal(projected.mode, "full_binding_text");
+  assert.equal(projected.binding_text, noPhiRule().binding_text);
+  assert.equal(projected.code_enforcement_claim.verifier_id, "verifier.attacker");
+  // Internally consistent — and internal consistency is all that verdict is.
+  assert.equal(projected.code_enforcement_claim.internally_consistent, true);
+  assert.equal(projected.code_enforcement_claim.internal_consistency_reason_id,
+    "evidence_internally_consistent");
+  assert.equal(projected.code_enforcement_claim.evidence_verified_by_kernel, false);
+  assert.equal(projected.evidence_verified_by_kernel, false);
+});
+
+test("Q066 evidence age is the caller's policy or it is no policy, and never an assurance", () => {
+  const universeOf = evidence => compileRuleUniverse(swapNoPhi(basePolicy(), evidence));
+  const project = (evidence, policy) => projectRuleForModel({
+    universe: universeOf(evidence), rule_id: "no-phi", now: NOW,
+    ...(policy === undefined ? {} : { enforcement_evidence_policy: policy }),
+  });
+
+  // NO POLICY SUPPLIED: the age is reported and no verdict is drawn. The flat
+  // 86400-second window this module used to enforce was invented here and named
+  // in no settled decision.
+  const old = project({ verified_at: "2020-01-01T00:00:00Z", control_version: "7" });
+  assert.equal(old.mode, "full_binding_text");
+  assert.equal(old.code_enforcement_claim.internal_consistency_reason_id,
+    "evidence_internally_consistent");
+  assert.equal(old.code_enforcement_claim.max_evidence_age_seconds, null);
+  assert.equal(old.code_enforcement_claim.evidence_age_policy_supplied, false);
+
+  // POLICY SUPPLIED: the caller's own number, recorded with their name on it,
+  // and inclusive at the bound.
+  const policy = { max_evidence_age_seconds: DAY_IN_SECONDS };
+  const past = project({ verified_at: A_SECOND_MORE_THAN_A_DAY, control_version: "7" }, policy);
+  assert.equal(past.code_enforcement_claim.internal_consistency_reason_id,
+    "evidence_older_than_supplied_policy");
+  assert.equal(past.code_enforcement_claim.evidence_age_seconds, DAY_IN_SECONDS + 1);
+  assert.equal(past.code_enforcement_claim.evidence_age_policy_supplied, true);
+  // Past the caller's window is a DIAGNOSTIC, not a delivery failure: the
+  // binding text is still what the model gets, so nothing is withheld.
+  assert.equal(past.mode, "full_binding_text");
+
+  const atBound = project({ verified_at: A_DAY_BEFORE_NOW, control_version: "7" }, policy);
+  assert.equal(atBound.code_enforcement_claim.internal_consistency_reason_id,
+    "evidence_internally_consistent");
+
+  // The other three internal-consistency verdicts, kept apart.
+  assert.equal(project(null).code_enforcement_claim.internal_consistency_reason_id,
+    "evidence_absent");
+  assert.equal(project(null).code_enforcement_claim.evidence_present, false);
+  const drifted = project({ verified_at: FRESH_EVIDENCE, control_version: "6" });
+  assert.equal(drifted.code_enforcement_claim.internal_consistency_reason_id,
+    "evidence_control_version_mismatch");
+  assert.equal(drifted.code_enforcement_claim.control_version, "7");
+  assert.equal(drifted.code_enforcement_claim.verified_control_version, "6");
+  assert.equal(project({ verified_at: "2026-09-09T12:30:00Z", control_version: "7" })
+    .code_enforcement_claim.internal_consistency_reason_id, "evidence_from_the_future");
+
+  // And the receipt says which policy, if any, was in force.
+  const withPolicy = derive(basePolicy(), commitFacts(),
+    { enforcement_evidence_policy: policy });
+  assert.equal(withPolicy.enforcement_evidence_max_age_seconds, DAY_IN_SECONDS);
+  assert.equal(withPolicy.enforcement_evidence_age_policy_supplied, true);
+  assert.equal(derive(basePolicy(), commitFacts()).enforcement_evidence_max_age_seconds, null);
 });
 
 test("Q066 a caller cannot assert enforcement instead of evidencing it", () => {
@@ -647,7 +969,7 @@ test("the same universe and facts reproduce the same digests, byte for byte", ()
   assert.equal(compileRuleUniverse(reordered).universe_digest, first.universe_digest);
 });
 
-test("a hand-forged or edited compiled universe is refused, digest recomputed not trusted", () => {
+test("an edited compiled universe is refused, digest recomputed not trusted", () => {
   const compiled = compileRuleUniverse(basePolicy());
   const clone = structuredClone(compiled);
   assert.equal(requireCompiledUniverse(clone).universe_digest, compiled.universe_digest);
@@ -670,6 +992,121 @@ test("a hand-forged or edited compiled universe is refused, digest recomputed no
   assert.equal(code(() => requireCompiledUniverse(Object.create(compiled))), "invalid_shape");
 });
 
+// ------------- a SELF-REHASHED forgery, which is the case a digest cannot see
+//
+// digest() is an unkeyed sha256 over canonical JSON and it is exported, so the
+// forger below does exactly what the compiler does: builds the object it wants,
+// computes ruleUniversePreimage over it, and presents the pair. Every case here
+// passes the digest check. Each one used to reach deriveRuleApplicability and
+// decide a receipt; each one now fails on the invariant it broke, because the
+// universe is REDERIVED rather than believed.
+
+const forge = mutate => {
+  const forged = structuredClone(compileRuleUniverse(basePolicy()));
+  mutate(forged);
+  forged.universe_digest = digest(ruleUniversePreimage(forged));
+  return forged;
+};
+
+test("B2 a self-rehashed forged universe is refused: the digest is not the provenance", () => {
+  // The forger's own work passes the hash check, which is the whole point.
+  const untouched = forge(() => {});
+  assert.equal(untouched.universe_digest, compileRuleUniverse(basePolicy()).universe_digest);
+  assert.equal(requireCompiledUniverse(untouched).universe_digest, untouched.universe_digest);
+
+  // 1. A CYCLE. Two rules pointing at each other has no deterministic winner;
+  //    the removal walk would have resolved it in whatever order the forger
+  //    chose, which is precisely the nondeterminism Q087 exists to refuse.
+  const cyclic = forge(u => {
+    const legacy = u.rules.find(r => r.rule_id === "legacy-branching");
+    legacy.relations = [{ relation: "overrides", target_rule_id: "worktree-first",
+      target_version: 3 }];
+    legacy.scoped_validity = { action: ["repo.commit"] };
+    u.removal_order = ["legacy-branching", ...u.removal_order.filter(id => id !== "legacy-branching")];
+  });
+  assert.equal(code(() => requireCompiledUniverse(cyclic)), "relation_cycle");
+  assert.equal(code(() => deriveWith(cyclic)), "relation_cycle");
+
+  // 2. THE REMOVAL ORDER ITSELF, self-rehashed. Putting a target before its
+  //    remover flips which rule survives, and the order is caller-supplied data
+  //    the receipt reads without re-deriving.
+  const flipped = forge(u => { u.removal_order = [...u.removal_order].reverse(); });
+  assert.equal(code(() => requireCompiledUniverse(flipped)), "universe_not_canonically_compiled");
+
+  // 3. A MANDATORY JUDGMENT RULE. The class table's central Q051 invariant, and
+  //    it only ever ran inside compileRule.
+  const mandatoryPreference = forge(u => {
+    const tone = u.rules.find(r => r.rule_id === "client-review");
+    tone.mandatory = true;
+    tone.control_effect = { control_key: "tone", effect: "require" };
+    tone.provenance = prov("r-rule-tone", "9");
+  });
+  assert.equal(code(() => requireCompiledUniverse(mandatoryPreference)),
+    "judgment_rule_cannot_be_mandatory");
+
+  // 4. A MANDATORY RULE WITH A NULL CONTROL EFFECT. This one used to reach
+  //    `rule.control_effect.control_key` and throw a raw TypeError — outside
+  //    this module's own two-kinds-of-no contract. It is a V5F05Error now.
+  const nullControl = forge(u => {
+    u.rules.find(r => r.rule_id === "send-gate").control_effect = null;
+  });
+  assert.equal(code(() => requireCompiledUniverse(nullControl)), "missing_control_effect");
+  const nullControlError = (() => {
+    try { deriveWith(nullControl); } catch (error) { return error; }
+    return null;
+  })();
+  assert.ok(nullControlError instanceof V5F05Error);
+  assert.equal(nullControlError.code, "missing_control_effect");
+
+  // 5. A DANGLING EDGE, which the removal walk skipped in silence.
+  const dangling = forge(u => {
+    u.rules.find(r => r.rule_id === "worktree-first").relations =
+      [{ relation: "supersedes", target_rule_id: "never-existed", target_version: 1 }];
+  });
+  assert.equal(code(() => requireCompiledUniverse(dangling)), "dangling_relation");
+
+  // 6. THE B1 REPRODUCTION, fabricated straight into the compiled shape rather
+  //    than compiled: a preference deleting a mandatory control across owner
+  //    and scope, with the removal order the forger wants.
+  const repeal = forge(u => {
+    u.rules.push({
+      rule_id: "joe-prefers-no-review", version: 1, rule_class: "preference",
+      enforcement: "partner_preference", scope: "joe-personal", owner: "dell", mandatory: false,
+      trigger: {}, control_effect: null,
+      binding_text: "Joe does not want a second seat on his own sends.",
+      summary: null, code_enforcement: null, tests: [],
+      no_machine_control_reason: "Only a person can judge tone.",
+      retirement: { behavior: "permanent_until_superseded", expires_at: null },
+      relations: [{ relation: "overrides", target_rule_id: "send-gate", target_version: 1 }],
+      scoped_validity: null, provenance: null,
+    });
+    u.rules.sort((a, b) => (a.rule_id < b.rule_id ? -1 : 1));
+    u.removal_order = ["joe-prefers-no-review",
+      ...u.removal_order.filter(id => id !== "joe-prefers-no-review")];
+  });
+  assert.equal(code(() => requireCompiledUniverse(repeal)),
+    "removing_edge_without_scoped_validity");
+
+  // 7. A FORGED DERIVED FIELD. `enforcement` is computed from rule_class, so a
+  //    forger claiming code_control on a workflow rule changes nothing it can
+  //    rehash its way out of.
+  const forgedEnforcement = forge(u => {
+    u.rules.find(r => r.rule_id === "worktree-first").enforcement = "code_control";
+  });
+  assert.equal(code(() => requireCompiledUniverse(forgedEnforcement)),
+    "universe_not_canonically_compiled");
+});
+
+test("B2 an accessor inside a compiled universe cannot answer two reads differently", () => {
+  const compiled = structuredClone(compileRuleUniverse(basePolicy()));
+  let reads = 0;
+  Object.defineProperty(compiled.rules[0], "scope", {
+    get: () => (reads++ === 0 ? compiled.rules[1].scope : "anything"),
+    enumerable: true, configurable: true,
+  });
+  assert.equal(code(() => requireCompiledUniverse(compiled)), "accessor_property_refused");
+});
+
 test("an accessor, a prototype key or a symbol key is refused rather than read", () => {
   const accessor = basePolicy();
   Object.defineProperty(accessor.rules[0], "scope", {
@@ -684,6 +1121,23 @@ test("an accessor, a prototype key or a symbol key is refused rather than read",
   const symbolic = basePolicy();
   symbolic.rules[0][Symbol("hidden")] = true;
   assert.equal(code(() => compileRuleUniverse(symbolic)), "symbol_key_refused");
+
+  // A NON-ENUMERABLE own data property. The closed-key sweep read Object.keys
+  // while the accessor sweep read getOwnPropertyNames, so a field named
+  // `enforced` or `authority` could ride along unseen by the guard that exists
+  // to refuse exactly those names. Nothing read it — and "an unread field is an
+  // unenforced one" is this module's own standard, not an excuse.
+  for (const [key, expected] of [
+    ["enforced", "caller_assertion_field_refused"],
+    ["authority_grant", "caller_authority_field_refused"],
+    ["not_a_rule_field", "unknown_field"],
+  ]) {
+    const hidden = basePolicy();
+    Object.defineProperty(hidden.rules[0], key, {
+      value: true, enumerable: false, configurable: true, writable: true,
+    });
+    assert.equal(code(() => compileRuleUniverse(hidden)), expected, key);
+  }
 });
 
 test("a coverage receipt that was edited no longer hashes to its own digest", () => {
@@ -724,11 +1178,47 @@ test("the kernel projection is closed, hashed and states what it does not do", (
   assert.equal(preimage.model_resolves_conflicts, false);
   assert.deepEqual(preimage.fact_dimensions.map(d => d.dimension), [...V5_F05_FACT_DIMENSIONS]);
   assert.deepEqual(preimage.relations, [...V5_F05_RELATIONS]);
+
+  // What the corrections above state in the hashed projection rather than in a
+  // comment, so a consumer that reads only the digest still reads them.
+  assert.equal(preimage.removing_edge_requires_scoped_validity, true);
+  assert.equal(
+    preimage.removing_edge_requires_mandatory_capable_class_against_mandatory_target, true);
+  assert.equal(preimage.removing_edge_may_cross_owner_or_scope, false);
+  assert.equal(preimage.removal_is_single_pass_in_compiler_order, true);
+  assert.equal(preimage.code_enforced_constraint_mode_emitted, false);
+  assert.equal(preimage.code_enforcement_evidence_verified_by_kernel, false);
+  assert.equal(preimage.enforcement_evidence_age_policy_is_caller_supplied, true);
+  assert.equal(preimage.default_enforcement_evidence_max_age_seconds, null);
+  assert.equal(preimage.mandatory_rule_requires_source_provenance, true);
+  assert.equal(preimage.rule_taint_class_resolved_by_kernel, false);
+  assert.equal(preimage.write_gate_field, "consequential_action_permitted");
+});
+
+test("Q065 `decision` is not the write gate, and the receipt names the field that is", () => {
+  const facts = commitFacts();
+  delete facts.action;
+  const receipt = derive(basePolicy(), facts);
+  // Nothing hard-refused, so the decision reads allow...
+  assert.equal(receipt.decision, "allow");
+  assert.equal(receipt.read_only_exploration_permitted, true);
+  // ...while the field an admission call site must actually read says no.
+  assert.equal(receipt.consequential_action_permitted, false);
+  assert.equal(receipt.write_gate_field, "consequential_action_permitted");
+  assert.equal(receipt[receipt.write_gate_field], false);
 });
 
 test("the unbuilt runtime seams are named and fail closed", () => {
   const gaps = ruleKernelIntegrationGaps();
-  assert.ok(gaps.length >= 4);
+  assert.ok(gaps.length >= 6);
   assert.ok(gaps.every(gap => gap.landed !== true));
+  assert.deepEqual(gaps.map(gap => gap.gap).sort(), [
+    "no_action_admission_enforcement",
+    "no_code_enforcement_verifier",
+    "no_live_rule_store_reader",
+    "no_relation_authority_grant_verifier",
+    "no_rule_provenance_taint_resolver",
+    "no_rule_registry_persistence",
+  ]);
   assert.equal(code(() => assertRuleKernelIntegrationComplete()), "kernel_integration_incomplete");
 });

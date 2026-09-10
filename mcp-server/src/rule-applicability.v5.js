@@ -2,13 +2,25 @@
 // coverage receipt, the supersession/override/exception graph, and the binding
 // text vs code-enforced-constraint delivery rule.
 //
-// Four settled decisions live here — Q051 (where each kind of rule lives),
-// Q064 (applicability from typed facts plus a coverage receipt), Q066 (full
-// binding text for anything a model interprets) and Q087 (explicit relation
-// graph, no model conflict resolution). The other three of the slice's seven
-// (Q050, Q065, Q068) live in context-assembly.v5.js, which imports this file.
-// The settled-decision table for ALL SEVEN sits here because this is the lower
-// module and one home beats two copies.
+// Four settled decisions live here in full — Q051 (where each kind of rule
+// lives), Q064 (applicability from typed facts plus a coverage receipt), Q066
+// (full binding text for anything a model interprets) and Q087 (explicit
+// relation graph, no model conflict resolution).
+//
+// Q065 IS SPLIT AND THE DETERMINISTIC HALF IS HERE, not in the assembler: the
+// possibly-binding bucket, the never-omit rule on a possible binding
+// constraint, `read_only_exploration_permitted` and
+// `consequential_action_permitted` are all computed by deriveRuleApplicability
+// below. context-assembly.v5.js owns Q050 and Q068 outright, and owns the
+// budget and mode half of Q065. The settled-decision table for ALL SEVEN sits
+// here because this is the lower module and one home beats two copies.
+//
+// THE FIELD NAMED `decision` IS NOT THE WRITE GATE. A coverage receipt reads
+// `decision: "allow"` whenever nothing hard-refused, which includes the case
+// where facts are unknown and a possibly-binding rule is standing. The gate a
+// call site must read before a consequential write is
+// `consequential_action_permitted`, and `write_gate_field` says so in the
+// receipt rather than in a comment a caller never opens.
 //
 // WHAT IS CODE HERE AND WHAT MUST ARRIVE AS TYPED POLICY:
 //
@@ -177,10 +189,19 @@ function assertNoAccessorsOrHiddenKeys(object, path) {
   }
 }
 
-/** An open schema is a contract violation: an unread field is an unenforced one. */
+/**
+ * An open schema is a contract violation: an unread field is an unenforced one.
+ *
+ * OWN PROPERTY NAMES, not enumerable keys. A non-enumerable own data property
+ * named `enforced` or `authority` would otherwise slip past
+ * assertNoCallerAssertions while assertNoAccessorsOrHiddenKeys — which already
+ * walks getOwnPropertyNames — saw it. Nothing reads such a field today; the
+ * module's own doctrine is that an unread field is an unenforced one, and two
+ * guards disagreeing about what a key IS is how that doctrine rots.
+ */
 function assertClosedKeys(object, allowed, path) {
   assertNoAccessorsOrHiddenKeys(object, path);
-  const keys = Object.keys(object);
+  const keys = Object.getOwnPropertyNames(object);
   assertNoCallerAssertions(keys, path);
   for (const key of keys) {
     if (!allowed.includes(key)) {
@@ -342,6 +363,11 @@ export const V5_F05_GUARDS = Object.freeze({
   fail, isPlainObject, deepFreeze, snapshot,
   assertObject, assertArray, assertBoolean, assertSafeInteger,
   assertClosedKeys, assertRequiredKeys, assertNoAccessorsOrHiddenKeys,
+  // Exported on its own for the two sub-objects whose SHAPE belongs to S01 and
+  // must not be closed here — `actor` and `controls`. The assembler still has
+  // to sweep them for authority-injection and caller-assertion field names,
+  // because those two objects are exactly the ones that decide authority.
+  assertNoCallerAssertions,
   assertSafeText, assertExternalIdent, assertEnum, assertInstant,
   assertDigestRef, assertTenant,
 });
@@ -562,15 +588,34 @@ export const V5_F05_RETIREMENT_BEHAVIORS = deepFreeze([
 
 export const V5_F05_CONTROL_EFFECTS = deepFreeze(["require", "forbid"]);
 
+// ---------------------------------------------------------------------------
 // Q087. Three relations, all explicit, all directed remover -> target.
+//
+// ALL THREE REMOVE. `supersedes`, `overrides` and `exception_to` differ in what
+// they SAY and not in what they DO: each takes an otherwise-applicable rule out
+// of the effective set. So the three admission conditions below apply to every
+// one of them, not to exception_to alone.
+//
+//   1. BOUNDED SCOPE. A removing edge must carry a non-empty `scoped_validity`
+//      predicate. A rule with `trigger: {}` and an `overrides` edge is an
+//      unbounded repeal whatever the edge is called; refusing it only for
+//      exception_to left the other two as the same silent repeal by another
+//      name.
+//   2. A REMOVAL-CAPABLE CLASS AGAINST A MANDATORY TARGET. Removing a mandatory
+//      control is strictly stronger than declaring one, so a class that Q051
+//      forbids from BEING mandatory may not DELETE a mandatory rule either.
+//      Removal capability is mandatory capability; there is no second column to
+//      drift out of step with `may_be_mandatory`.
+//   3. NAMED AUTHORITY ACROSS OWNER OR SCOPE. A rule may remove another rule of
+//      the SAME owner and the SAME scope: that is one owner revising their own
+//      policy, which the compiler's other checks already validate. A rule
+//      owned by someone else, or scoped elsewhere, may NOT — and this module
+//      invents no dominance order to decide which of two owners wins. It fails
+//      closed with `missing_relation_authority` and names the missing seam:
+//      there is no verified grant that would let one owner or scope remove
+//      another's control. See ruleKernelIntegrationGaps().
+// ---------------------------------------------------------------------------
 export const V5_F05_RELATIONS = deepFreeze(["supersedes", "overrides", "exception_to"]);
-
-/**
- * How stale a code-enforcement verification may be before its rule falls back
- * to needing full binding text. Twenty-four hours: a control's evidence is a
- * measurement, and a measurement from last week does not describe today's code.
- */
-export const V5_F05_MAX_ENFORCEMENT_EVIDENCE_AGE_SECONDS = 86400;
 
 /** Deterministic token estimate. Declared so a budget decision is reproducible. */
 export const V5_F05_CHARS_PER_TOKEN_ESTIMATE = 4;
@@ -596,6 +641,7 @@ const RULE_KEYS = Object.freeze([
   "rule_id", "version", "rule_class", "scope", "owner", "mandatory",
   "trigger", "control_effect", "binding_text", "summary", "code_enforcement",
   "tests", "no_machine_control_reason", "retirement", "relations", "scoped_validity",
+  "provenance",
 ]);
 const RULE_REQUIRED = Object.freeze([
   "rule_id", "version", "rule_class", "scope", "owner", "mandatory", "trigger", "retirement",
@@ -608,6 +654,16 @@ const CODE_ENFORCEMENT_KEYS = Object.freeze([
 ]);
 const ENFORCEMENT_EVIDENCE_KEYS = Object.freeze([
   "verifier_id", "verified_at", "control_version", "implementation_digest", "evidence_digest",
+]);
+// Q050's per-rule source provenance and freshness, and the slot Q068 needs on
+// the RULE path. A BOUNDED TYPED REFERENCE and nothing else: an id, the version
+// and content digest that reference was read at, and when. There is no origin
+// or taint field here on purpose — a taint class a caller could type onto its
+// own rule is the laundering field this slice exists to refuse. The taint is
+// resolved by whoever holds the records, which is the assembler; this module
+// only guarantees the reference exists and is well formed.
+const RULE_PROVENANCE_KEYS = Object.freeze([
+  "source_record_id", "source_version", "source_content_digest", "retrieved_at",
 ]);
 
 /**
@@ -685,6 +741,21 @@ function compileCodeEnforcement(raw, path) {
     // closed, so "we never checked" and "we checked and it holds" stay apart.
     evidence: raw.evidence === undefined || raw.evidence === null
       ? null : compileEnforcementEvidence(raw.evidence, `${path}.evidence`),
+  };
+}
+
+function compileRuleProvenance(raw, path) {
+  assertObject(raw, path);
+  assertClosedKeys(raw, RULE_PROVENANCE_KEYS, path);
+  assertRequiredKeys(raw, RULE_PROVENANCE_KEYS, path);
+  assertInstant(raw.retrieved_at, `${path}.retrieved_at`);
+  return {
+    source_record_id: assertExternalIdent(raw.source_record_id, `${path}.source_record_id`,
+      { maxLength: 128 }),
+    source_version: assertSafeInteger(raw.source_version, `${path}.source_version`, { min: 1 }),
+    source_content_digest: assertDigestRef(raw.source_content_digest,
+      `${path}.source_content_digest`),
+    retrieved_at: raw.retrieved_at,
   };
 }
 
@@ -851,27 +922,43 @@ function compileRule(raw, index, seen, declared) {
       : (a.target_rule_id < b.target_rule_id ? -1 : 1)));
   }
 
-  const isException = relations.some(r => r.relation === "exception_to");
+  // EVERY relation removes, so every relation needs a bound. See the Q087
+  // header above: refusing an unbounded exception_to while admitting an
+  // unbounded overrides refused the word, not the act.
   let scoped_validity = null;
   if (raw.scoped_validity !== undefined && raw.scoped_validity !== null) {
     scoped_validity = compilePredicate(raw.scoped_validity, `${path}.scoped_validity`, declared);
   }
-  if (isException) {
+  if (relations.length > 0) {
     if (scoped_validity === null || Object.keys(scoped_validity).length === 0) {
-      fail("exception_without_scoped_validity",
-        `${path}.scoped_validity must bound an exception_to rule; an unbounded exception is a silent repeal`,
-        { path, rule_id });
+      fail("removing_edge_without_scoped_validity",
+        `${path}.scoped_validity must bound the ${relations.length} removing edge(s) on this rule; an unbounded ${relations[0].relation} is a silent repeal`,
+        { path, rule_id, relations: relations.map(r => r.relation) });
     }
   } else if (scoped_validity !== null) {
     fail("unused_scoped_validity",
-      `${path}.scoped_validity is only read for an exception_to rule`, { path });
+      `${path}.scoped_validity is only read for a rule that holds a removing relation`, { path });
+  }
+
+  // Q050 asks for per-rule source provenance and freshness; Q068 needs somewhere
+  // for the rule path to say where its text came from. A MANDATORY rule must
+  // carry it, because a mandatory rule is authority and unbound authority is the
+  // whole failure. A guidance rule may carry it and is checked when it does.
+  let provenance = null;
+  if (raw.provenance !== undefined && raw.provenance !== null) {
+    provenance = compileRuleProvenance(raw.provenance, `${path}.provenance`);
+  }
+  if (mandatory && provenance === null) {
+    fail("missing_rule_provenance",
+      `${path}.provenance is required for a mandatory rule; a control whose text has no source cannot be told apart from text that arrived in an email`,
+      { path, rule_id });
   }
 
   return {
     rule_id, version, rule_class, enforcement: shape.enforcement, scope, owner, mandatory,
     trigger, control_effect, binding_text, summary, code_enforcement, tests,
     no_machine_control_reason, retirement: { behavior, expires_at },
-    relations, scoped_validity,
+    relations, scoped_validity, provenance,
   };
 }
 
@@ -912,6 +999,7 @@ export function ruleUniversePreimage(compiled) {
       retirement: { ...rule.retirement },
       relations: rule.relations.map(r => ({ ...r })),
       scoped_validity: rule.scoped_validity === null ? null : { ...rule.scoped_validity },
+      provenance: rule.provenance === null ? null : { ...rule.provenance },
     })),
   };
 }
@@ -937,7 +1025,13 @@ function assertDeclaredIdentList(raw, path) {
  *   2. No cycle over the union of all three relation kinds. A cycle has no
  *      deterministic winner, and picking one would be the model's job by
  *      another name.
- *   3. No two mandatory rules with the SAME trigger and opposite effects on one
+ *   3. A removing edge against a MANDATORY target may only be held by a class
+ *      Q051 allows to be mandatory. A preference or a scoped judgment cannot
+ *      declare a control, so it cannot delete one either.
+ *   4. A removing edge must stay inside ONE owner and ONE scope. Crossing either
+ *      needs an authority this module has no verified mechanism to check, so it
+ *      fails closed rather than picking a winner between two owners.
+ *   5. No two mandatory rules with the SAME trigger and opposite effects on one
  *      control key unless a relation orders them. Identical triggers are the
  *      decidable case and belong at compile time; genuine fact-time overlap is
  *      caught by deriveRuleApplicability, which has the facts.
@@ -988,6 +1082,28 @@ function assertRelationGraph(rules) {
       if (state === WHITE) {
         colour.set(next, GREY);
         stack.push({ id: next, index: 0, path: [...frame.path, next] });
+      }
+    }
+  }
+
+  // Steps 3 and 4, after the cycle check so a cyclic graph still reports the
+  // cycle: an unresolvable graph is the more fundamental refusal.
+  for (const rule of rules) {
+    for (const relation of rule.relations) {
+      const target = byId.get(relation.target_rule_id);
+      if (target.mandatory && !RULE_CLASS_TABLE[rule.rule_class].may_be_mandatory) {
+        fail("removing_class_cannot_remove_mandatory_control",
+          `rule "${rule.rule_id}" is a ${rule.rule_class} rule and ${relation.relation} the mandatory rule "${target.rule_id}"; a class that may not declare a control may not delete one`,
+          { rule_id: rule.rule_id, rule_class: rule.rule_class, relation: relation.relation,
+            target_rule_id: target.rule_id });
+      }
+      if (rule.owner !== target.owner || rule.scope !== target.scope) {
+        fail("missing_relation_authority",
+          `rule "${rule.rule_id}" (owner "${rule.owner}", scope "${rule.scope}") ${relation.relation} "${target.rule_id}" (owner "${target.owner}", scope "${target.scope}"); removing another owner's or another scope's rule needs an authority this kernel has no verified way to check`,
+          { rule_id: rule.rule_id, relation: relation.relation, target_rule_id: target.rule_id,
+            remover: { owner: rule.owner, scope: rule.scope },
+            target: { owner: target.owner, scope: target.scope },
+            missing_seam: "no_relation_authority_grant_verifier" });
       }
     }
   }
@@ -1069,11 +1185,38 @@ const COMPILED_UNIVERSE_KEYS = Object.freeze([
 ]);
 
 /**
- * Accept only a universe this module compiled and nobody has edited since. The
- * digest is RECOMPUTED rather than trusted, so a hand-forged object carrying
- * `compiled: true` and a copied digest is refused: the bytes have to hash to
- * the claim. This is what stops a caller routing around compile-time graph
- * validation by fabricating the compiled shape directly.
+ * Accept only a universe whose contents ARE a canonical compilation.
+ *
+ * A DIGEST IS NOT PROVENANCE. `digest()` is an unkeyed sha256 over canonical
+ * JSON and it is exported, so any caller can build whatever object it likes,
+ * hash it itself, and present the pair. Recomputing the hash catches an edit
+ * made AFTER compilation and catches nothing at all about a fabrication, which
+ * is the case that matters: every compile-time invariant — the class table, the
+ * mandatory-control metadata, dangling and version-drifted edges, cycles, the
+ * removing-edge conditions, and the removal ORDER that decides which rule
+ * survives — only ever runs inside compileRuleUniverse.
+ *
+ * So the universe is REDERIVED. Its own rules are fed back through
+ * compileRuleUniverse and the result must be byte-identical. A forged cyclic
+ * graph, a hand-chosen removal order, a mandatory preference, a mandatory rule
+ * with a null control effect or a rule with no provenance now fails on the
+ * invariant it broke, whether or not the forger rehashed its work.
+ *
+ * WHY REDERIVATION AND NOT A PRIVATE BRAND. A module-private WeakSet or Symbol
+ * is the stronger primitive and it is unusable here: the assembler's own
+ * contract canonicalizes the whole request to BYTES and reads the JSON.parse of
+ * them, so a compiled universe reaching assembleContextManifest is always a
+ * fresh object with no identity to brand. A brand would have made the frozen-
+ * bytes path — the property this slice is built on — impossible to satisfy.
+ *
+ * ORDERED, cheapest first, so the error a caller sees names what they did:
+ *   1. Shape, closed keys and the digest, which is the ordinary
+ *      edited-after-compilation case and deserves its own reason.
+ *   2. Rederivation. Compile errors propagate with their own codes; a forged
+ *      universe fails on the invariant it broke.
+ *   3. The rederived digest must equal the presented one, which is what catches
+ *      a self-consistent forgery whose rules are individually legal but whose
+ *      removal order or derived fields are not the canonical ones.
  */
 export function requireCompiledUniverse(universe, path = "universe") {
   assertObject(universe, path);
@@ -1082,88 +1225,171 @@ export function requireCompiledUniverse(universe, path = "universe") {
   if (universe.compiled !== true || universe.schema_version !== V5_F05_UNIVERSE_SCHEMA_VERSION) {
     fail("universe_not_compiled", `${path} must be the output of compileRuleUniverse`, { path });
   }
-  assertDigestRef(universe.universe_digest, `${path}.universe_digest`);
-  const recomputed = digest(ruleUniversePreimage(universe));
-  if (recomputed !== universe.universe_digest) {
+  // ONE mutation-immune read, taken before any check. Every step below reads
+  // this copy, so an accessor buried in a rule cannot answer the digest check
+  // one way and the rederivation another.
+  const presented = snapshot(universe, path);
+  assertDigestRef(presented.universe_digest, `${path}.universe_digest`);
+  const recomputed = digest(ruleUniversePreimage(presented));
+  if (recomputed !== presented.universe_digest) {
     fail("universe_digest_mismatch",
       `${path} no longer hashes to its own digest; it was edited after compilation`,
-      { path, expected: universe.universe_digest, actual: recomputed });
+      { path, expected: presented.universe_digest, actual: recomputed });
   }
-  return universe;
+  assertArray(presented.rules, `${path}.rules`, { min: 1, max: 2048 });
+  const rederived = compileRuleUniverse({
+    schema_version: V5_F05_UNIVERSE_SCHEMA_VERSION,
+    universe_version: presented.universe_version,
+    tenant: presented.tenant,
+    completeness: presented.completeness,
+    declared_actions: presented.declared_actions,
+    declared_resource_classes: presented.declared_resource_classes,
+    // `enforcement` is DERIVED from rule_class by the compiler and is not an
+    // input; dropping it here is what makes a forged enforcement mechanism show
+    // up as a digest difference in step 3 rather than an unknown_field.
+    rules: presented.rules.map((rule, index) => {
+      const { enforcement: _derived, ...input } = assertObject(rule, `${path}.rules[${index}]`);
+      return input;
+    }),
+  });
+  if (rederived.universe_digest !== presented.universe_digest) {
+    fail("universe_not_canonically_compiled",
+      `${path} carries rules that do not compile to the universe it presents; a self-computed digest over a fabricated shape is not a compilation`,
+      { path, expected: rederived.universe_digest, actual: presented.universe_digest });
+  }
+  return presented;
 }
 
 // ---------------------------------------------------------------------------
 // Q066 — what a model actually receives for one rule.
 //
-// TWO MODES AND NO THIRD. A rule the model must INTERPRET arrives with its full
-// binding text. A control enforced completely in code may be represented by its
-// resulting constraint instead — but only against CURRENT verified evidence
-// that names the exact implementation, control and version. A summary is
-// navigation and never a mode.
+// ONE MODE IS REACHABLE TODAY AND THE SECOND IS DELIBERATELY NOT. A rule the
+// model must INTERPRET arrives with its full binding text. Q066 also settles
+// that a control enforced COMPLETELY IN CODE may be represented by its
+// resulting constraint instead — and that affordance is unreachable here,
+// because nothing this module can call establishes the antecedent.
 //
-// EVERY MISSING PIECE FAILS CLOSED, and the four refusals are kept apart on
-// purpose: no evidence at all, evidence older than the window, evidence about a
-// different control version, and a rule with neither text nor a code control
-// are four different problems with four different fixes.
+// WHY THE CONSTRAINT MODE IS NOT EMITTED. `code_enforcement.evidence` is five
+// strings supplied by the same caller that supplied the rule. The kernel can
+// check that they are internally consistent — that the evidence names the
+// control version the rule declares, that it is not dated in the future, that
+// it is no older than a window the CALLER supplied. It cannot check that any of
+// it happened. `verifier_id` is bound to no authority, and
+// `implementation_digest`/`evidence_digest` are compared to nothing, because
+// there is nothing here to compare them to. Delivering only a resulting
+// constraint on that basis would hand the model less than the rule while
+// telling the record the control was verified. So a code_enforced rule falls
+// back to its FULL BINDING TEXT, and refuses outright when it has none.
+//
+// The caller's claim is not discarded — it rides along as
+// `code_enforcement_claim`, stamped `evidence_verified_by_kernel: false`, so a
+// downstream reader gets the evidence AND the fact that nobody checked it. The
+// four internal-consistency verdicts are kept apart on purpose: absent
+// evidence, evidence about a different control version, evidence from the
+// future and evidence past the caller's own window are four different problems
+// with four different fixes.
 // ---------------------------------------------------------------------------
 
 export const V5_F05_DELIVERY_MODES = deepFreeze([
   "full_binding_text", "code_enforced_constraint", "refused",
 ]);
 
-function deliveryForRule(rule, now) {
+/**
+ * Q066's constraint-only mode is settled policy and is NOT emitted by this
+ * module. It stays in the vocabulary because the decision names it; the flag
+ * says, in the hashed kernel projection rather than in a comment, that no code
+ * path here produces it. A test asserts no delivery ever carries it.
+ */
+export const V5_F05_CODE_ENFORCED_CONSTRAINT_MODE_EMITTED = false;
+
+const ENFORCEMENT_EVIDENCE_POLICY_KEYS = Object.freeze(["max_evidence_age_seconds"]);
+
+/**
+ * How stale a code-enforcement verification may be before the receipt says so.
+ *
+ * THERE IS NO DEFAULT, deliberately. The window this module used to ship — a
+ * flat 86400 seconds — was invented here, is named in no settled decision, and
+ * was read downstream as policy. An UNSUPPLIED policy now yields an age and no
+ * verdict, which is the honest answer. A SUPPLIED one is the caller's own
+ * number, recorded in the receipt with the fact that they supplied it. Neither
+ * is a security assurance: the age of unverified evidence is a diagnostic about
+ * a claim, never a statement about the running system.
+ */
+function readEnforcementEvidencePolicy(raw, path) {
+  if (raw === undefined || raw === null) return null;
+  assertObject(raw, path);
+  assertClosedKeys(raw, ENFORCEMENT_EVIDENCE_POLICY_KEYS, path);
+  assertRequiredKeys(raw, ENFORCEMENT_EVIDENCE_POLICY_KEYS, path);
+  return assertSafeInteger(raw.max_evidence_age_seconds, `${path}.max_evidence_age_seconds`,
+    { min: 0, max: 315_360_000 });
+}
+
+/** The caller's enforcement claim, echoed with the fact that nobody verified it. */
+function codeEnforcementClaim(control, now, maxAgeSeconds) {
+  const base = {
+    implementation_ref: control.implementation_ref,
+    control_id: control.control_id,
+    control_version: control.control_version,
+    // Present so a reader can see what the caller says the control does. It is
+    // NOT the delivery: `binding_text` is, and this is why the delivered record
+    // keeps `resulting_constraint: null` at the top level.
+    claimed_resulting_constraint: control.resulting_constraint,
+    evidence_verified_by_kernel: false,
+    verifier_trusted_by_kernel: false,
+    max_evidence_age_seconds: maxAgeSeconds,
+    evidence_age_policy_supplied: maxAgeSeconds !== null,
+  };
+  if (control.evidence === null) {
+    return {
+      ...base, evidence_present: false, verifier_id: null, verified_at: null,
+      implementation_digest: null, evidence_digest: null, evidence_age_seconds: null,
+      internally_consistent: false, internal_consistency_reason_id: "evidence_absent",
+    };
+  }
+  const evidence = control.evidence;
+  const evidence_age_seconds = (now - Date.parse(evidence.verified_at)) / 1000;
+  let internal_consistency_reason_id = "evidence_internally_consistent";
+  if (evidence.control_version !== control.control_version) {
+    internal_consistency_reason_id = "evidence_control_version_mismatch";
+  } else if (evidence_age_seconds < 0) {
+    internal_consistency_reason_id = "evidence_from_the_future";
+  } else if (maxAgeSeconds !== null && evidence_age_seconds > maxAgeSeconds) {
+    internal_consistency_reason_id = "evidence_older_than_supplied_policy";
+  }
+  return {
+    ...base, evidence_present: true,
+    verifier_id: evidence.verifier_id,
+    verified_at: evidence.verified_at,
+    verified_control_version: evidence.control_version,
+    implementation_digest: evidence.implementation_digest,
+    evidence_digest: evidence.evidence_digest,
+    evidence_age_seconds,
+    internally_consistent: internal_consistency_reason_id === "evidence_internally_consistent",
+    internal_consistency_reason_id,
+  };
+}
+
+function deliveryForRule(rule, now, maxEvidenceAgeSeconds) {
   const base = {
     rule_id: rule.rule_id, version: rule.version, rule_class: rule.rule_class,
     mandatory: rule.mandatory, enforcement: rule.enforcement,
     summary_is_navigation_only: true, summary: rule.summary,
+    code_enforcement_claim: rule.code_enforcement === null
+      ? null : codeEnforcementClaim(rule.code_enforcement, now, maxEvidenceAgeSeconds),
   };
-  if (rule.rule_class === "code_enforced") {
-    const control = rule.code_enforcement;
-    if (control.evidence === null) {
-      return { ...base, mode: "refused", reason_id: "code_enforcement_evidence_missing",
-        binding_text: null, resulting_constraint: null, estimated_tokens: 0 };
-    }
-    if (control.evidence.control_version !== control.control_version) {
-      return { ...base, mode: "refused", reason_id: "code_enforcement_evidence_version_mismatch",
-        binding_text: null, resulting_constraint: null, estimated_tokens: 0,
-        declared_control_version: control.control_version,
-        verified_control_version: control.evidence.control_version };
-    }
-    const verifiedAt = Date.parse(control.evidence.verified_at);
-    const ageSeconds = (now - verifiedAt) / 1000;
-    if (ageSeconds < 0) {
-      return { ...base, mode: "refused", reason_id: "code_enforcement_evidence_from_the_future",
-        binding_text: null, resulting_constraint: null, estimated_tokens: 0 };
-    }
-    if (ageSeconds > V5_F05_MAX_ENFORCEMENT_EVIDENCE_AGE_SECONDS) {
-      return { ...base, mode: "refused", reason_id: "code_enforcement_evidence_stale",
-        binding_text: null, resulting_constraint: null, estimated_tokens: 0,
-        evidence_age_seconds: ageSeconds,
-        max_evidence_age_seconds: V5_F05_MAX_ENFORCEMENT_EVIDENCE_AGE_SECONDS };
-    }
-    return {
-      ...base, mode: "code_enforced_constraint", reason_id: "control_enforced_in_code",
-      binding_text: null,
-      resulting_constraint: control.resulting_constraint,
-      enforced_control: {
-        implementation_ref: control.implementation_ref,
-        control_id: control.control_id,
-        control_version: control.control_version,
-        verifier_id: control.evidence.verifier_id,
-        verified_at: control.evidence.verified_at,
-        implementation_digest: control.evidence.implementation_digest,
-        evidence_digest: control.evidence.evidence_digest,
-        evidence_age_seconds: ageSeconds,
-      },
-      estimated_tokens: estimateTokens(control.resulting_constraint),
-    };
-  }
-  // Compile already refuses a non-code rule with no binding text, so this is an
-  // invariant guard rather than a live path: it exists so a future edit to the
-  // class table cannot make an empty rule deliverable without failing here.
   if (rule.binding_text === null) {
-    return { ...base, mode: "refused", reason_id: "binding_text_missing",
-      binding_text: null, resulting_constraint: null, estimated_tokens: 0 };
+    // A code_enforced rule is allowed by the class table to carry no binding
+    // text, because Q066 lets a fully-code-enforced control be represented by
+    // its constraint. With no trusted verifier that representation is not
+    // available, so the rule has nothing deliverable and fails closed.
+    return {
+      ...base,
+      mode: "refused",
+      reason_id: rule.rule_class === "code_enforced"
+        ? "code_enforcement_unverified_and_no_binding_text"
+        : "binding_text_missing",
+      binding_text: null, resulting_constraint: null, estimated_tokens: 0,
+    };
   }
   return {
     ...base, mode: "full_binding_text", reason_id: "model_interprets_this_rule",
@@ -1172,23 +1398,30 @@ function deliveryForRule(rule, now) {
   };
 }
 
+const PROJECT_RULE_KEYS = Object.freeze([
+  "universe", "rule_id", "now", "enforcement_evidence_policy",
+]);
+
 /** Project one rule's model delivery on its own, for a caller that holds an id. */
 export function projectRuleForModel(request) {
   assertObject(request, "request");
-  assertClosedKeys(request, ["universe", "rule_id", "now"], "request");
+  assertClosedKeys(request, PROJECT_RULE_KEYS, "request");
   assertRequiredKeys(request, ["universe", "rule_id", "now"], "request");
   const universe = requireCompiledUniverse(request.universe, "request.universe");
   const now = assertInstant(request.now, "request.now");
+  const maxEvidenceAge = readEnforcementEvidencePolicy(request.enforcement_evidence_policy,
+    "request.enforcement_evidence_policy");
   const rule_id = assertExternalIdent(request.rule_id, "request.rule_id", { maxLength: 128 });
   const rule = universe.rules.find(entry => entry.rule_id === rule_id);
   if (rule === undefined) {
     fail("unknown_rule", `"${rule_id}" is not in this universe`, { rule_id });
   }
-  const projected = deliveryForRule(rule, now);
+  const projected = deliveryForRule(rule, now, maxEvidenceAge);
   return deepFreeze({
     schema_version: V5_F05_KERNEL_SCHEMA_VERSION,
     ...projected,
     delivered: projected.mode !== "refused",
+    evidence_verified_by_kernel: false,
     effects: V5_NO_EFFECTS,
   });
 }
@@ -1197,7 +1430,9 @@ export function projectRuleForModel(request) {
 // Q064 / Q065 / Q087 — the coverage receipt.
 // ---------------------------------------------------------------------------
 
-const DERIVE_KEYS = Object.freeze(["tenant", "universe", "facts", "semantic_candidates", "now"]);
+const DERIVE_KEYS = Object.freeze([
+  "tenant", "universe", "facts", "semantic_candidates", "now", "enforcement_evidence_policy",
+]);
 const SEMANTIC_CANDIDATE_KEYS = Object.freeze(["rule_id", "reason", "similarity"]);
 
 export const V5_F05_COVERAGE_BUCKETS = deepFreeze([
@@ -1325,10 +1560,16 @@ function coverageReceiptPreimage(receipt) {
  *      binding (a dimension it needs is unknown) or not applicable, with the
  *      dimension-level reason either way.
  *   5. Walk the relation graph in the compiler's removal order. A rule removes
- *      its targets only if it is itself applicable AND still standing; an
- *      exception removes its target only inside its scoped validity. A remover
- *      that is merely POSSIBLY binding removes nothing and is recorded as a
- *      pending relation instead — the target stays effective.
+ *      its targets only if it is itself applicable AND still standing, and only
+ *      inside its scoped validity. A remover that is merely POSSIBLY binding
+ *      removes nothing and is recorded as a pending relation instead — the
+ *      target stays effective. Every edge that did NOT fire is recorded in
+ *      `skipped_relations` with the reason, so a removal nobody applied is
+ *      visible rather than silent. This is ONE PASS in the compiler's order: a
+ *      remover that was itself removed earlier in the pass does not fire, so in
+ *      an A-supersedes-B-supersedes-C chain, C survives. The direction is
+ *      fail-safe — an extra control, never a missing one — and the skipped edge
+ *      is now in the receipt instead of being erased.
  *   6. Detect binding conflicts across the surviving mandatory set. Two rules
  *      requiring and forbidding one control key with no relation between them
  *      is refused; nothing here picks a winner.
@@ -1345,6 +1586,8 @@ export function deriveRuleApplicability(request) {
   assertTenant(request.tenant, "request.tenant");
   const universe = requireCompiledUniverse(request.universe, "request.universe");
   const now = assertInstant(request.now, "request.now");
+  const maxEvidenceAge = readEnforcementEvidencePolicy(request.enforcement_evidence_policy,
+    "request.enforcement_evidence_policy");
   const { known, unknown } = readFacts(request.facts, universe);
   const candidates = compileSemanticCandidates(request.semantic_candidates, universe);
 
@@ -1385,6 +1628,7 @@ export function deriveRuleApplicability(request) {
   const overridden = [];
   const suppressed_by_exception = [];
   const pending_relations = [];
+  const skipped_relations = [];
   const removedBy = new Map();
 
   for (const rule_id of universe.removal_order) {
@@ -1392,33 +1636,50 @@ export function deriveRuleApplicability(request) {
     if (rule.relations.length === 0) continue;
     const removerState = state.get(rule_id);
     for (const relation of rule.relations) {
+      const edge = { rule_id, relation: relation.relation,
+        target_rule_id: relation.target_rule_id };
       const targetState = state.get(relation.target_rule_id);
-      if (targetState !== "effective") continue;
-      if (removerState === "possibly_binding") {
-        pending_relations.push({
-          rule_id, relation: relation.relation, target_rule_id: relation.target_rule_id,
-          reason_id: "remover_applicability_unknown",
-        });
+      if (targetState !== "effective") {
+        // The target was retired, ruled out by the facts, or already removed by
+        // an earlier remover in this same pass. Recorded rather than dropped:
+        // an edge that pointed at a rule and never fired is a fact about this
+        // derivation, and Q087 is about supersession being explicit.
+        skipped_relations.push({ ...edge, reason_id: "target_not_effective",
+          target_state: targetState ?? null });
         continue;
       }
-      if (removerState !== "effective") continue;
-      if (relation.relation === "exception_to") {
-        const scope = matchPredicate(rule.scoped_validity, known);
-        if (scope.verdict === "undecided") {
-          pending_relations.push({
-            rule_id, relation: relation.relation, target_rule_id: relation.target_rule_id,
-            reason_id: "exception_scope_unknown",
-            undecided_dimensions: [...scope.undecided_dimensions],
-          });
-          continue;
-        }
-        if (scope.verdict === "no") continue; // outside the exception's scope; the target stands
+      if (removerState === "possibly_binding") {
+        pending_relations.push({ ...edge, reason_id: "remover_applicability_unknown" });
+        continue;
+      }
+      if (removerState !== "effective") {
+        // Includes the finite-supersession case: a remover that was itself
+        // superseded earlier in this pass does not fire, so its target returns
+        // to the effective set. Fail-safe, and no longer silent.
+        skipped_relations.push({ ...edge, reason_id: "remover_not_standing",
+          remover_state: removerState ?? null });
+        continue;
+      }
+      const scope = matchPredicate(rule.scoped_validity, known);
+      if (scope.verdict === "undecided") {
+        pending_relations.push({ ...edge, reason_id: "removal_scope_unknown",
+          undecided_dimensions: [...scope.undecided_dimensions] });
+        continue;
+      }
+      if (scope.verdict === "no") {
+        // Outside the removing edge's bounded validity; the target stands.
+        skipped_relations.push({ ...edge, reason_id: "removal_scope_not_matched",
+          mismatch: scope.mismatch });
+        continue;
       }
       state.set(relation.target_rule_id, relation.relation === "supersedes" ? "superseded"
         : relation.relation === "overrides" ? "overridden" : "suppressed_by_exception");
       removedBy.set(relation.target_rule_id, { by_rule_id: rule_id, relation: relation.relation });
     }
   }
+  skipped_relations.sort((a, b) => (a.rule_id === b.rule_id
+    ? (a.target_rule_id < b.target_rule_id ? -1 : 1)
+    : (a.rule_id < b.rule_id ? -1 : 1)));
 
   const effective = [];
   for (const entry of applicable) {
@@ -1455,7 +1716,7 @@ export function deriveRuleApplicability(request) {
   const delivery_refusals = [];
   for (const entry of [...effective, ...possibly_binding].sort((a, b) =>
     (a.rule_id < b.rule_id ? -1 : 1))) {
-    const projected = deliveryForRule(byId.get(entry.rule_id), now);
+    const projected = deliveryForRule(byId.get(entry.rule_id), now, maxEvidenceAge);
     const bucket = state.get(entry.rule_id) === "effective" ? "effective" : "possibly_binding";
     const record = { ...projected, bucket, omissible: false };
     delivery.push(record);
@@ -1474,7 +1735,7 @@ export function deriveRuleApplicability(request) {
         already_bound: true });
       continue;
     }
-    const projected = deliveryForRule(rule, now);
+    const projected = deliveryForRule(rule, now, maxEvidenceAge);
     semantic_additions.push({
       rule_id: candidate.rule_id, reason: candidate.reason, similarity: candidate.similarity,
       bucket: state.get(candidate.rule_id),
@@ -1484,6 +1745,7 @@ export function deriveRuleApplicability(request) {
       delivered_as: "guidance_only",
       mode: projected.mode, binding_text: projected.binding_text,
       resulting_constraint: projected.resulting_constraint,
+      code_enforcement_claim: projected.code_enforcement_claim,
       estimated_tokens: projected.estimated_tokens,
       omissible: true,
     });
@@ -1522,8 +1784,16 @@ export function deriveRuleApplicability(request) {
     universe_rule_ids: universe.rules.map(rule => rule.rule_id),
     effective, possibly_binding, not_applicable, retired,
     superseded, overridden, suppressed_by_exception, pending_relations,
+    // Edges that pointed at something and did not fire. Never blocking — the
+    // direction is always an extra control — but never erased either.
+    skipped_relations,
+    removal_is_single_pass_in_compiler_order: true,
     binding_conflicts,
     delivery, delivery_refusals,
+    // The one thing a reader must not misread about the delivery records above.
+    code_enforcement_evidence_verified_by_kernel: false,
+    enforcement_evidence_max_age_seconds: maxEvidenceAge,
+    enforcement_evidence_age_policy_supplied: maxEvidenceAge !== null,
     semantic_reinforcements, semantic_additions,
     semantic_may_remove_controls: false,
     model_resolves_conflicts: false,
@@ -1531,6 +1801,11 @@ export function deriveRuleApplicability(request) {
     consequential_action_permitted:
       coverage_complete && binding_conflicts.length === 0 && delivery_refusals.length === 0,
     read_only_exploration_permitted: !refused,
+    // `decision` above is NOT the write gate; this names the field that is, in
+    // the record rather than in a comment. A receipt can read allow while
+    // consequential_action_permitted is false, which is precisely Q065's
+    // marked read-only exploration.
+    write_gate_field: "consequential_action_permitted",
     blocking_reasons,
   };
   return deepFreeze({
@@ -1582,7 +1857,20 @@ export function v5F05RuleKernelPreimage() {
     control_effects: [...V5_F05_CONTROL_EFFECTS],
     retirement_behaviors: [...V5_F05_RETIREMENT_BEHAVIORS],
     delivery_modes: [...V5_F05_DELIVERY_MODES],
-    max_enforcement_evidence_age_seconds: V5_F05_MAX_ENFORCEMENT_EVIDENCE_AGE_SECONDS,
+    // What the relation graph admits, so a reader does not have to infer it
+    // from three separate refusals.
+    removing_edge_requires_scoped_validity: true,
+    removing_edge_requires_mandatory_capable_class_against_mandatory_target: true,
+    removing_edge_may_cross_owner_or_scope: false,
+    removal_is_single_pass_in_compiler_order: true,
+    // What this kernel does NOT establish about a code_enforced rule.
+    code_enforced_constraint_mode_emitted: V5_F05_CODE_ENFORCED_CONSTRAINT_MODE_EMITTED,
+    code_enforcement_evidence_verified_by_kernel: false,
+    enforcement_evidence_age_policy_is_caller_supplied: true,
+    default_enforcement_evidence_max_age_seconds: null,
+    mandatory_rule_requires_source_provenance: true,
+    rule_taint_class_resolved_by_kernel: false,
+    write_gate_field: "consequential_action_permitted",
     semantic_retrieval_may_remove_controls: false,
     model_resolves_conflicts: false,
   };
@@ -1632,8 +1920,29 @@ export function ruleKernelIntegrationGaps() {
     {
       gap: "no_code_enforcement_verifier",
       where: "ops/",
-      what: "nothing produces the enforcement evidence a code_enforced rule needs, so every"
-        + " such rule fails closed to binding text until a verifier exists",
+      what: "nothing produces or checks enforcement evidence; code_enforcement.evidence is"
+        + " caller-supplied and is echoed as an unverified claim, so a code_enforced rule is"
+        + " delivered as its FULL BINDING TEXT and refuses with"
+        + " code_enforcement_unverified_and_no_binding_text when it has none."
+        + " code_enforced_constraint is never emitted",
+      landed: false,
+    },
+    {
+      gap: "no_relation_authority_grant_verifier",
+      where: "mcp-server/src/rule-applicability.v5.js",
+      what: "a removing relation is admitted only within one owner and one scope; there is no"
+        + " verified grant mechanism that would let one owner or scope remove another's"
+        + " control, so a legitimate cross-scope supersession fails closed with"
+        + " missing_relation_authority and cannot be expressed at all",
+      landed: false,
+    },
+    {
+      gap: "no_rule_provenance_taint_resolver",
+      where: "mcp-server/src/rule-applicability.v5.js",
+      what: "a mandatory rule must name a source record, version and content digest, but this"
+        + " module holds no records and resolves none of it; whether that source is tainted"
+        + " is decided by the assembler against the manifest it was given, and by nothing at"
+        + " all for a caller that uses this kernel on its own",
       landed: false,
     },
   ]);
@@ -1656,7 +1965,8 @@ export function assertRuleKernelIntegrationComplete() {
 
 const ACCEPTED_KEY_LISTS = [
   UNIVERSE_KEYS, RULE_KEYS, CONTROL_EFFECT_KEYS, RETIREMENT_KEYS, RELATION_KEYS,
-  CODE_ENFORCEMENT_KEYS, ENFORCEMENT_EVIDENCE_KEYS, DERIVE_KEYS, SEMANTIC_CANDIDATE_KEYS,
+  CODE_ENFORCEMENT_KEYS, ENFORCEMENT_EVIDENCE_KEYS, RULE_PROVENANCE_KEYS,
+  ENFORCEMENT_EVIDENCE_POLICY_KEYS, PROJECT_RULE_KEYS, DERIVE_KEYS, SEMANTIC_CANDIDATE_KEYS,
   V5_F05_FACT_DIMENSIONS,
 ];
 

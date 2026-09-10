@@ -23,7 +23,7 @@ import {
   V5_F05_TAINT_CLASSES,
   V5_F05_EXTERNAL_ORIGINS,
   V5_F05_MAX_CORRECTION_NOTE_CHARS,
-  V5_F05_MAX_ATTESTATION_AGE_SECONDS,
+  V5_F05_PROJECTION_KINDS,
   V5_NO_EFFECTS,
   freezeAssemblyInput,
   assembleContextManifest,
@@ -66,6 +66,28 @@ const SPONSORED_AGENT = {
   client_id: "c1", sponsoring_human_slug: "joe", human_slug: "joe", sponsor_required: true,
 };
 
+/**
+ * A rule's bounded typed source reference, and the record it resolves to.
+ * A mandatory rule must carry one; the assembler resolves it against the
+ * records in THIS manifest, which is what closes the rule half of Q068.
+ */
+const ruleProv = (source_record_id, ch) => ({
+  source_record_id, source_version: 1, source_content_digest: sha(ch),
+  retrieved_at: OBSERVED,
+});
+const ruleSourceRecord = (record_id, ch) => ({
+  record_id, record_kind: "rule", version: 1, content_digest: sha(ch),
+  origin: "record_layer", derived_kind: "primary", derived_from: [], query_id: "q-deal",
+  observed_at: OBSERVED, estimated_tokens: 5, omissible: false, backs_control: true,
+  provenance: { source_id: "src-neon", retrieval_class: "typed_read" },
+});
+const ruleSourceRecords = () => ([
+  ruleSourceRecord("r-rule-no-phi", "c"),
+  ruleSourceRecord("r-rule-send-gate", "d"),
+  ruleSourceRecord("r-rule-tone", "e"),
+  ruleSourceRecord("r-rule-tour", "f"),
+]);
+
 const universePolicy = (overrides = {}) => ({
   schema_version: V5_F05_UNIVERSE_SCHEMA_VERSION,
   universe_version: 2,
@@ -79,6 +101,9 @@ const universePolicy = (overrides = {}) => ({
       version: 2, rule_class: "code_enforced", scope: "global", owner: "joe", mandatory: true,
       trigger: {},
       control_effect: { control_key: "phi_payload", effect: "forbid" },
+      // Carried, because nothing verifies the enforcement evidence below and a
+      // constraint alone is therefore not a delivery this slice may make.
+      binding_text: "No PHI and no raw patient-level location may enter any payload.",
       code_enforcement: {
         implementation_ref: "mcp-server/src/global-boundaries.v5.js:evaluatePrivacyBoundary",
         control_id: "global.no_phi",
@@ -91,6 +116,7 @@ const universePolicy = (overrides = {}) => ({
       },
       tests: ["check:no-phi"],
       retirement: { behavior: "permanent_until_superseded" },
+      provenance: ruleProv("r-rule-no-phi", "c"),
     },
     {
       rule_id: "client-send-gate",
@@ -101,6 +127,7 @@ const universePolicy = (overrides = {}) => ({
       summary: "second-seat review before a client send",
       tests: ["check:client-send-review"],
       retirement: { behavior: "permanent_until_superseded" },
+      provenance: ruleProv("r-rule-send-gate", "d"),
     },
     {
       rule_id: "tone-guidance",
@@ -109,6 +136,7 @@ const universePolicy = (overrides = {}) => ({
       binding_text: "Write to a client the way Joe would: plain, specific, no hedging.",
       no_machine_control_reason: "Only a reader applying context can tell plain from curt.",
       retirement: { behavior: "permanent_until_superseded" },
+      provenance: ruleProv("r-rule-tone", "e"),
     },
     {
       rule_id: "tour-doctrine",
@@ -117,6 +145,7 @@ const universePolicy = (overrides = {}) => ({
       binding_text: "A tour is planned around the client's day, not around the properties.",
       no_machine_control_reason: "Whether a day reads as considerate is not machine-checkable.",
       retirement: { behavior: "permanent_until_superseded" },
+      provenance: ruleProv("r-rule-tour", "f"),
     },
   ],
   ...overrides,
@@ -188,6 +217,13 @@ const records = () => ([
   },
 ]);
 
+/**
+ * The records a manifest must carry to resolve its rules' provenance, added to
+ * whatever records the case under test is about. `records()` stays exactly what
+ * the taint cases assert against.
+ */
+const withRuleSources = (base = records()) => [...base, ...ruleSourceRecords()];
+
 const request = (overrides = {}) => ({
   schema_version: V5_F05_MANIFEST_SCHEMA_VERSION,
   tenant: ORGANIZATION_TENANT_ID,
@@ -197,13 +233,23 @@ const request = (overrides = {}) => ({
   task: task(),
   controls: controls(),
   universe: compileRuleUniverse(universePolicy()),
-  records: records(),
+  records: withRuleSources(),
   sources: sources(),
   queries: queries(),
   ...overrides,
 });
 
-const assemble = (overrides = {}) => assembleContextManifest(freezeAssemblyInput(request(overrides)));
+const assemble = (overrides = {}) => assembleContextManifest(freezeAssemblyInput(request({
+  ...overrides,
+  ...(overrides.records === undefined ? {} : { records: withRuleSources(overrides.records) }),
+})));
+
+/**
+ * The same without the automatic merge, so a provenance case can control the
+ * record set exactly — including leaving a rule's source out of it.
+ */
+const assembleRaw = (overrides = {}) =>
+  assembleContextManifest(freezeAssemblyInput(request(overrides)));
 
 // -------------------------------------- Q050, the manifest that must work
 
@@ -235,7 +281,8 @@ test("Q050 a clean task assembles one reproducible manifest carrying every named
 
   // Records with ids, versions, digests, provenance and freshness.
   assert.deepEqual(manifest.records.map(r => r.record_id),
-    ["r-deal", "r-email", "r-email-summary", "r-email-vector"]);
+    ["r-deal", "r-email", "r-email-summary", "r-email-vector",
+      "r-rule-no-phi", "r-rule-send-gate", "r-rule-tone", "r-rule-tour"]);
   const deal = manifest.records.find(r => r.record_id === "r-deal");
   assert.equal(deal.version, 4);
   assert.equal(deal.content_digest, sha("3"));
@@ -254,9 +301,21 @@ test("Q050 a clean task assembles one reproducible manifest carrying every named
   assert.equal(gate.binding_text,
     "A client-facing document is reviewed by a second seat before it is sent.");
   assert.equal(gate.summary_is_navigation_only, true);
+  // A code_enforced rule arrives as its TEXT, with the caller's enforcement
+  // claim alongside it and the fact that nothing verified that claim.
   const phi = manifest.delivered_rules.find(r => r.rule_id === "no-phi");
-  assert.equal(phi.mode, "code_enforced_constraint");
-  assert.equal(phi.enforced_control.control_id, "global.no_phi");
+  assert.equal(phi.mode, "full_binding_text");
+  assert.equal(phi.binding_text, "No PHI and no raw patient-level location may enter any payload.");
+  assert.equal(phi.code_enforcement_claim.control_id, "global.no_phi");
+  assert.equal(phi.code_enforcement_claim.evidence_verified_by_kernel, false);
+  assert.equal(manifest.code_enforcement_evidence_verified_by_kernel, false);
+
+  // Every delivered rule's text is bound to a first-party record this manifest
+  // actually carries.
+  assert.deepEqual(manifest.rule_provenance.map(e => [e.rule_id, e.state]),
+    [["client-send-gate", "bound"], ["no-phi", "bound"], ["tone-guidance", "bound"]]);
+  assert.ok(manifest.rule_provenance.every(e => e.taint_class === "first_party_record_layer"));
+  assert.deepEqual(manifest.rule_provenance_violations, []);
 
   // Sources, omissions, budget and reproducible query identifiers.
   assert.deepEqual(manifest.unavailable_sources, []);
@@ -270,6 +329,9 @@ test("Q050 a clean task assembles one reproducible manifest carrying every named
   // And the whole thing hashes to its own digest.
   assert.equal(verifyContextManifest(manifest), true);
   assert.equal(manifest.record_attribution_written, false);
+  // `decision` is not the write gate; the manifest names the field that is.
+  assert.equal(manifest.write_gate_field, "consequential_action_permitted");
+  assert.equal(manifest[manifest.write_gate_field], true);
 });
 
 test("Q050 the same input reproduces the same manifest digest, byte for byte", () => {
@@ -579,12 +641,14 @@ test("Q068 a broken or forged lineage refuses rather than losing a taint", () =>
   dangling[2].derived_from = ["r-ghost"];
   assert.equal(code(() => compileTaintLineage(dangling)), "taint_lineage_dangling_parent");
 
+  // A cycle between two DERIVED records; a primary one cannot cite a parent at
+  // all, which the case below asserts separately.
   const cyclic = records();
-  cyclic[1].derived_from = ["r-email-vector"];
+  cyclic[2].derived_from = ["r-email-vector"];
   assert.equal(code(() => compileTaintLineage(cyclic)), "taint_lineage_cycle");
 
   const selfCycle = records();
-  selfCycle[1].derived_from = ["r-email"];
+  selfCycle[2].derived_from = ["r-email-summary"];
   assert.equal(code(() => compileTaintLineage(selfCycle)), "taint_lineage_self_reference");
 
   const forged = structuredClone(compileTaintLineage(records()));
@@ -595,40 +659,95 @@ test("Q068 a broken or forged lineage refuses rather than losing a taint", () =>
     "lineage_digest_mismatch");
 });
 
-// ------------------------- proposal versus authenticated runtime projection
+// ---------------- there is one projection kind, and it is a proposal
+//
+// The blocker this section was rewritten for: authenticateRuntimeProjection used
+// to return `projection_kind: "authenticated_runtime_projection"` on an
+// attestation whose verifier id was an arbitrary string and whose "signature"
+// was an unkeyed sha256 the CALLER computed over its own four fields, checked
+// against a caller-supplied clock. Every trust element sat inside the caller's
+// control, so the distinction the module was built around reduced to "did the
+// caller compute one more hash". The positive test below is the old positive
+// test, kept and inverted: the same call now returns a proposal.
 
-test("a verifier attestation over the exact input bytes authenticates the projection", () => {
-  const frozen = freezeAssemblyInput(request());
-  const manifest = assembleContextManifest(frozen);
+const attest = (manifest, overrides = {}) => {
   const attestation = {
     verifier_id: "verifier.hosted-ci",
     input_digest: manifest.input_digest,
     manifest_digest: manifest.manifest_digest,
     attested_at: "2026-09-09T11:58:00Z",
+    ...overrides,
   };
   attestation.attestation_digest = verifierAttestationDigest(attestation);
+  return attestation;
+};
 
-  const projection = authenticateRuntimeProjection({
-    manifest, input_bytes: frozen.input_bytes, attestation, now: NOW });
-  assert.equal(projection.decision, "allow");
-  assert.equal(projection.reason_id, "attestation_binds_exact_input_bytes");
-  assert.equal(projection.projection_kind, "authenticated_runtime_projection");
-  assert.equal(projection.verifier_id, "verifier.hosted-ci");
-  assert.equal(projection.authenticated_by_caller_boolean, false);
-  // The manifest itself never claimed to be authenticated.
-  assert.equal(manifest.projection_kind, "reproducible_proposal");
-});
-
-test("the verifier interface refuses a boolean, a stray hash and the wrong bytes", () => {
+test("an attestation over the exact bytes proves reproducibility, never authenticity", () => {
   const frozen = freezeAssemblyInput(request());
   const manifest = assembleContextManifest(frozen);
-  const good = {
-    verifier_id: "verifier.hosted-ci",
-    input_digest: manifest.input_digest,
-    manifest_digest: manifest.manifest_digest,
-    attested_at: "2026-09-09T11:58:00Z",
-  };
-  good.attestation_digest = verifierAttestationDigest(good);
+  const projection = authenticateRuntimeProjection({
+    manifest, input_bytes: frozen.input_bytes, attestation: attest(manifest), now: NOW });
+
+  assert.equal(projection.decision, "allow");
+  assert.equal(projection.reason_id, "attestation_internally_consistent");
+  assert.equal(projection.manifest_reproduced_from_input_bytes, true);
+
+  // The whole correction, in five fields.
+  assert.equal(projection.projection_kind, "reproducible_proposal");
+  assert.equal(projection.trust_anchor, null);
+  assert.equal(projection.authenticated, false);
+  assert.equal(projection.verifier_trusted, false);
+  assert.equal(projection.consequential_execution_permitted, false);
+  assert.equal(projection.execution_gap_id, "no_registered_verifier");
+
+  // The verifier id is recorded as a caller-supplied LABEL, not a credential.
+  assert.equal(projection.verifier_id, "verifier.hosted-ci");
+  assert.equal(projection.authenticated_by_caller_boolean, false);
+  assert.equal(manifest.projection_kind, "reproducible_proposal");
+  assert.deepEqual([...V5_F05_PROJECTION_KINDS], ["reproducible_proposal"]);
+});
+
+test("a self-minted, attacker-named or rehashed attestation never becomes authority", () => {
+  const frozen = freezeAssemblyInput(request());
+  const manifest = assembleContextManifest(frozen);
+
+  // Three shapes of the same forgery: an invented verifier id, an openly
+  // hostile one, and a caller re-minting the digest over its own fields. Every
+  // one of them is what the shipped positive test used to do, and every one of
+  // them now lands on the same proposal.
+  for (const verifier_id of ["verifier.hosted-ci", "verifier.attacker", "ops.ci"]) {
+    const projection = authenticateRuntimeProjection({
+      manifest, input_bytes: frozen.input_bytes,
+      attestation: attest(manifest, { verifier_id }), now: NOW });
+    assert.equal(projection.decision, "allow", verifier_id);
+    assert.equal(projection.projection_kind, "reproducible_proposal", verifier_id);
+    assert.equal(projection.authenticated, false, verifier_id);
+    assert.equal(projection.verifier_trusted, false, verifier_id);
+    assert.equal(projection.consequential_execution_permitted, false, verifier_id);
+    assert.equal(projection.trust_anchor, null, verifier_id);
+    assert.notEqual(projection.projection_kind, "authenticated_runtime_projection");
+  }
+
+  // No path in the module returns any other kind, and verifyContextManifest
+  // refuses an object wearing one.
+  const wearingIt = { ...manifest, projection_kind: "authenticated_runtime_projection" };
+  assert.equal(code(() => verifyContextManifest(wearingIt)), "unknown_projection_kind");
+
+  // The gap text is now true by construction, which is the property the module
+  // relies on everywhere else and had wrong at exactly this point.
+  const gap = contextAssemblyIntegrationGaps().find(g => g.gap === "no_registered_verifier");
+  assert.equal(gap.landed, false);
+  assert.ok(gap.what.includes("reproducible_proposal"));
+  assert.ok(gap.what.includes("trust_anchor null"));
+  assert.equal(v5F05ContextContractPreimage().authenticated_projection_emitted, false);
+  assert.equal(v5F05ContextContractPreimage().verifier_trust_configured, false);
+  assert.equal(v5F05ContextContractPreimage().consequential_execution_authorized_here, false);
+});
+
+test("the attestation interface refuses a boolean, a stray hash and the wrong bytes", () => {
+  const frozen = freezeAssemblyInput(request());
+  const manifest = assembleContextManifest(frozen);
+  const good = attest(manifest);
   const project = (attestation, extra = {}) => authenticateRuntimeProjection({
     manifest, input_bytes: frozen.input_bytes, attestation, now: NOW, ...extra });
 
@@ -636,7 +755,7 @@ test("the verifier interface refuses a boolean, a stray hash and the wrong bytes
   assert.equal(code(() => project({ ...good, authenticated: true })),
     "caller_assertion_field_refused");
 
-  // Bytes from a different request cannot authenticate this manifest.
+  // Bytes from a different request cannot bind this manifest.
   const otherBytes = freezeAssemblyInput(request({ mode: "read_only_exploration" })).input_bytes;
   assert.equal(authenticateRuntimeProjection({
     manifest, input_bytes: otherBytes, attestation: good, now: NOW }).reason_id,
@@ -647,20 +766,193 @@ test("the verifier interface refuses a boolean, a stray hash and the wrong bytes
     "attestation_digest_mismatch");
 
   // An attestation about some other input, correctly self-hashed, still refuses.
-  const elsewhere = { ...good, input_digest: sha("b") };
-  elsewhere.attestation_digest = verifierAttestationDigest(elsewhere);
-  assert.equal(project(elsewhere).reason_id, "attestation_input_mismatch");
+  assert.equal(project(attest(manifest, { input_digest: sha("b") })).reason_id,
+    "attestation_input_mismatch");
 
-  // Time bounds, both directions.
-  const stale = { ...good, attested_at: "2026-09-09T11:40:00Z" };
-  stale.attestation_digest = verifierAttestationDigest(stale);
-  const staleAnswer = project(stale);
-  assert.equal(staleAnswer.reason_id, "attestation_stale");
-  assert.equal(staleAnswer.max_age_seconds, V5_F05_MAX_ATTESTATION_AGE_SECONDS);
+  // Every refusal carries the same disclaimers as the allow.
+  const refusal = project({ ...good, attestation_digest: sha("0") });
+  assert.equal(refusal.projection_kind, "reproducible_proposal");
+  assert.equal(refusal.authenticated, false);
+  assert.equal(refusal.trust_anchor, null);
+});
 
-  const future = { ...good, attested_at: "2026-09-09T12:05:00Z" };
-  future.attestation_digest = verifierAttestationDigest(future);
-  assert.equal(project(future).reason_id, "attestation_not_yet_effective");
+test("attestation freshness is the caller's stated policy or it is no policy", () => {
+  const frozen = freezeAssemblyInput(request());
+  const manifest = assembleContextManifest(frozen);
+  const project = (attestation, extra = {}) => authenticateRuntimeProjection({
+    manifest, input_bytes: frozen.input_bytes, attestation, now: NOW, ...extra });
+  const twentyMinutesOld = attest(manifest, { attested_at: "2026-09-09T11:40:00Z" });
+
+  // NO POLICY: the invented 900-second window is gone. The age is reported and
+  // no verdict is drawn, because a caller-supplied clock cannot support one.
+  const unpoliced = project(twentyMinutesOld);
+  assert.equal(unpoliced.decision, "allow");
+  assert.equal(unpoliced.attestation_age_seconds, 1200);
+  assert.equal(unpoliced.max_attestation_age_seconds, null);
+  assert.equal(unpoliced.attestation_age_policy_supplied, false);
+
+  // POLICY SUPPLIED: the caller's own number, recorded with the answer.
+  const policed = project(twentyMinutesOld, { max_attestation_age_seconds: 900 });
+  assert.equal(policed.decision, "refuse");
+  assert.equal(policed.reason_id, "attestation_stale");
+  assert.equal(policed.max_age_seconds, 900);
+  assert.equal(policed.attestation_age_policy_supplied, true);
+  assert.equal(project(twentyMinutesOld, { max_attestation_age_seconds: 1200 }).decision, "allow");
+
+  // An attestation dated after `now` still refuses with no policy at all: that
+  // is internal inconsistency, not a freshness call.
+  assert.equal(project(attest(manifest, { attested_at: "2026-09-09T12:05:00Z" })).reason_id,
+    "attestation_not_yet_effective");
+
+  assert.equal(v5F05ContextContractPreimage().default_max_attestation_age_seconds, null);
+  assert.equal(v5F05ContextContractPreimage().attestation_age_policy_is_caller_supplied, true);
+});
+
+// -------------------- Q068 on the paths that used to be one field wide
+
+test("Q068 a derived record with no declared parent is refused, not labelled clean", () => {
+  // The cheapest laundering path there was: derived_kind "summary" plus
+  // origin "record_layer" plus an EMPTY derived_from was labelled
+  // first_party_record_layer, because the lineage walk had no parent to inherit
+  // taint from. One field turned an email summary into first-party content.
+  for (const derived_kind of ["extract", "summary", "embedding", "translation"]) {
+    const orphan = records();
+    orphan[2].derived_kind = derived_kind;
+    orphan[2].record_kind = derived_kind === "embedding" ? "embedding" : "summary";
+    orphan[2].derived_from = [];
+    assert.equal(code(() => compileTaintLineage(orphan)), "derived_record_without_lineage",
+      derived_kind);
+    assert.equal(code(() => assemble({ records: orphan })), "derived_record_without_lineage");
+  }
+
+  // The record KIND asserts a derivation too, and must agree with it.
+  const inconsistent = records();
+  inconsistent[2].derived_kind = "primary";
+  inconsistent[2].derived_from = [];
+  assert.equal(code(() => compileTaintLineage(inconsistent)),
+    "derived_kind_inconsistent_with_record_kind");
+
+  const embeddingAsExtract = records();
+  embeddingAsExtract[3].derived_kind = "extract";
+  assert.equal(code(() => compileTaintLineage(embeddingAsExtract)),
+    "derived_kind_inconsistent_with_record_kind");
+
+  // And the mirror: a primary record is not derived from anything.
+  const primaryWithParents = records();
+  primaryWithParents[1].derived_from = ["r-deal"];
+  assert.equal(code(() => compileTaintLineage(primaryWithParents)), "primary_record_with_lineage");
+
+  // The honest path still works and still inherits, which is the point.
+  const lineage = compileTaintLineage(records());
+  assert.equal(lineage.entries.find(e => e.record_id === "r-email-summary").taint_class,
+    "untrusted_parsed");
+});
+
+test("Q068 a rule's text is bound to a first-party record this manifest carries", () => {
+  // The rule path was not taint-checked at all: RULE_KEYS had no provenance
+  // slot, so text sourced from an email could be compiled into a universe and
+  // delivered as full_binding_text mandatory guidance, and the manifest gave a
+  // reader no way to tell.
+
+  // 1. TAINTED SOURCE. The rule's named source is the email itself.
+  const taintedSource = universePolicy();
+  taintedSource.rules.find(r => r.rule_id === "client-send-gate").provenance = {
+    source_record_id: "r-email", source_version: 1, source_content_digest: sha("4"),
+    retrieved_at: OBSERVED,
+  };
+  const tainted = assemble({ universe: compileRuleUniverse(taintedSource) });
+  assert.equal(tainted.decision, "refuse");
+  assert.equal(tainted.reason_id, "rule_provenance_not_trustworthy");
+  assert.deepEqual(tainted.rule_provenance_violations, [{
+    rule_id: "client-send-gate", mandatory: true, source_record_id: "r-email",
+    taint_class: "untrusted_external", reason_id: "untrusted_content_cannot_be_rule_text",
+  }]);
+  // A hard refusal, exactly like a tainted record wearing an authority kind.
+  assert.equal(tainted.read_only_exploration_permitted, false);
+
+  // Two generations out is still tainted; a summary of an email is not a
+  // cleaner email when it is a rule's source either.
+  const derivedSource = universePolicy();
+  derivedSource.rules.find(r => r.rule_id === "client-send-gate").provenance = {
+    source_record_id: "r-email-vector", source_version: 1, source_content_digest: sha("6"),
+    retrieved_at: OBSERVED,
+  };
+  assert.equal(assemble({ universe: compileRuleUniverse(derivedSource) }).reason_id,
+    "rule_provenance_not_trustworthy");
+
+  // 2. UNAVAILABLE SOURCE for a MANDATORY rule refuses: authority whose text
+  //    cannot be traced is not authority this manifest may carry. This is the
+  //    manifest with NO rule-source records at all.
+  const missing = assembleRaw({ records: records() });
+  assert.equal(missing.decision, "refuse");
+  assert.equal(missing.reason_id, "rule_provenance_not_trustworthy");
+  assert.deepEqual(missing.rule_provenance_violations.map(v => v.rule_id),
+    ["client-send-gate", "no-phi"]);
+  assert.ok(missing.rule_provenance_violations
+    .every(v => v.reason_id === "rule_provenance_record_not_in_manifest"));
+
+  // 3. UNAVAILABLE SOURCE for a GUIDANCE rule blocks the write and still
+  //    permits marked exploration: guidance is not authority, and Q065's ladder
+  //    does not convert uncertainty into a refusal.
+  const guidanceOnly = withRuleSources().filter(r => r.record_id !== "r-rule-tone");
+  const unbound = assembleRaw({ records: guidanceOnly });
+  assert.equal(unbound.decision, "refuse");
+  assert.equal(unbound.reason_id, "rule_provenance_unresolved");
+  assert.deepEqual(unbound.rule_provenance_violations, []);
+  assert.equal(unbound.read_only_exploration_permitted, true);
+  assert.deepEqual(unbound.rule_provenance.filter(e => e.state === "unresolved")
+    .map(e => e.rule_id), ["tone-guidance"]);
+  assert.equal(assembleRaw({ records: guidanceOnly, mode: "read_only_exploration" }).decision,
+    "allow");
+
+  // 4. DRIFTED SOURCE. The record moved on; the rule is bound to text that is
+  //    no longer what that record says.
+  const drifted = withRuleSources();
+  drifted.find(r => r.record_id === "r-rule-send-gate").version = 2;
+  const driftedManifest = assembleRaw({ records: drifted });
+  assert.equal(driftedManifest.reason_id, "rule_provenance_not_trustworthy");
+  assert.deepEqual(driftedManifest.rule_provenance_violations.map(v => v.reason_id),
+    ["rule_provenance_source_drifted"]);
+
+  const rehashed = withRuleSources();
+  rehashed.find(r => r.record_id === "r-rule-no-phi").content_digest = sha("9");
+  assert.equal(assembleRaw({ records: rehashed }).rule_provenance_violations[0].reason_id,
+    "rule_provenance_source_drifted");
+
+  // 5. The named gap says what this does NOT buy, rather than overclaiming.
+  const gap = contextAssemblyIntegrationGaps().find(g => g.gap === "no_rule_text_origin_proof");
+  assert.equal(gap.landed, false);
+  assert.ok(gap.what.includes("point clean"));
+});
+
+test("the two objects that decide authority are swept for authority-injection fields", () => {
+  // S01 owns the SHAPE of actor and controls, so this half does not close them
+  // — and that left them the only request sub-objects the caller-assertion
+  // sweep never saw, which is backwards: they are the two that decide
+  // authority.
+  assert.equal(code(() => assemble({ actor: { ...JOE, authority_class: "verified_partner" } })),
+    "caller_authority_field_refused");
+  assert.equal(code(() => assemble({ actor: { ...JOE, approved_by: "joe" } })),
+    "caller_authority_field_refused");
+  assert.equal(code(() => assemble({ actor: { ...JOE, verified: true } })),
+    "caller_assertion_field_refused");
+  assert.equal(code(() => assemble({ controls: { ...controls(), override: true } })),
+    "caller_authority_field_refused");
+  assert.equal(code(() => assemble({ controls: { ...controls(), trusted: true } })),
+    "caller_assertion_field_refused");
+
+  // The sweep reads own property names rather than enumerable keys, so a
+  // non-enumerable `enforced` cannot ride along either. It is unreachable
+  // THROUGH THIS ENTRY POINT — freezeAssemblyInput canonicalizes to bytes and a
+  // non-enumerable key never reaches them — which is why the case is proved
+  // against the kernel's live-object entry point instead of asserted here.
+
+  // And the legitimate S01 shapes still pass, which is what keeps this from
+  // being a check people route around.
+  assert.equal(assemble().authority_envelope.decision, "allow");
+  assert.equal(assemble({ actor: DELL, controls: controls({
+    deal_owner_slug: "dell", account_slug: "dell" }) }).authority_envelope.reason_id,
+    "ordinary_business_within_controls");
 });
 
 // ---------------------------------------------- the correction taxonomy
@@ -722,12 +1014,31 @@ test("the context contract is closed, hashed and states what it does not permit"
   assert.equal(preimage.declassification_supported, false);
   assert.equal(preimage.binding_constraint_may_be_omitted_for_tokens, false);
   assert.equal(preimage.external_content_may_instruct, false);
+
+  // What the corrections state in the hashed contract, so a consumer reading
+  // only the digest still reads them.
+  assert.deepEqual(preimage.projection_kinds, ["reproducible_proposal"]);
+  assert.equal(preimage.authenticated_projection_emitted, false);
+  assert.equal(preimage.trust_anchor_available, false);
+  assert.equal(preimage.code_enforcement_evidence_verified_by_kernel, false);
+  assert.equal(preimage.rule_provenance_required_for_mandatory_rule, true);
+  assert.equal(preimage.rule_provenance_resolved_against_manifest_records, true);
+  assert.equal(preimage.derived_record_requires_declared_parent, true);
+  assert.equal(preimage.write_gate_field, "consequential_action_permitted");
 });
 
 test("the unbuilt runtime seams are named and fail closed", () => {
   const gaps = contextAssemblyIntegrationGaps();
-  assert.ok(gaps.length >= 5);
+  assert.ok(gaps.length >= 6);
   assert.ok(gaps.every(gap => gap.landed !== true));
+  assert.deepEqual(gaps.map(gap => gap.gap).sort(), [
+    "no_connector_fixture_suite",
+    "no_correction_store",
+    "no_manifest_persistence",
+    "no_registered_verifier",
+    "no_retrieval_executor",
+    "no_rule_text_origin_proof",
+  ]);
   assert.equal(code(() => assertContextAssemblyIntegrationComplete()),
     "context_assembly_integration_incomplete");
 });

@@ -10,8 +10,14 @@
 // THREE THINGS THIS MODULE DELIBERATELY DOES NOT DO ITS OWN WAY:
 //   * AUTHORITY is not accepted, it is COMPUTED. The manifest calls S01's
 //     evaluateActorAuthority with the actor, the boundary action and the
-//     controls, and records the answer. There is no field a caller can set to
-//     say it is authorized.
+//     controls, and records the answer. No field a caller sets is READ as an
+//     authorization, and the two objects that feed S01 are swept for
+//     authority-injection and caller-assertion field names before they are
+//     passed on. To be exact about what that does and does not buy: S01's
+//     verified_partner test reads `actor.human` and `actor.slug`, both of which
+//     are inside the caller's own frozen bytes. That is acceptable for a
+//     REPRODUCIBLE PROPOSAL — which is all this module ever produces — and it
+//     is the reason nothing here is allowed to emit an authenticated kind.
 //   * TAINT uses F01's vocabulary (V5_F01_TAINT_CLASSES) rather than a second
 //     one. The two slices label different things and both labels are true at
 //     once: F01 says a Salesforce field may be the corporate SOURCE OF RECORD
@@ -31,12 +37,31 @@
 // own is not accepted anywhere: a hash proves two things match, never what
 // either of them says.
 //
-// TWO PROJECTIONS AND THEY ARE NOT THE SAME THING. assembleContextManifest
-// produces a REPRODUCIBLE PROPOSAL — pure, replayable by anyone holding the
-// bytes, and evidence of nothing about the running system.
-// authenticateRuntimeProjection produces an AUTHENTICATED RUNTIME PROJECTION,
-// and only against a verifier attestation that binds the exact input bytes and
-// the exact manifest digest. Nothing here authenticates anything by itself.
+// ONE PROJECTION KIND, AND IT IS A PROPOSAL. assembleContextManifest produces a
+// REPRODUCIBLE PROPOSAL — pure, replayable by anyone holding the bytes, and
+// evidence of nothing about the running system. authenticateRuntimeProjection
+// produces a reproducible proposal too, and that is the correction: it used to
+// stamp `projection_kind: "authenticated_runtime_projection"` on any attestation
+// whose caller-supplied fields hashed to a caller-computed digest.
+//
+// WHY THAT WAS WRONG AND WHY IT IS NOT COMING BACK UNTIL A VERIFIER DOES.
+// verifierAttestationDigest is an UNKEYED sha256 over four caller-supplied
+// fields and it is exported. `verifier_id` is an identifier bound to no
+// authority and checked against no list. So all three trust elements — who
+// verified, what the signature proves, and the clock it was measured against —
+// sat inside the caller's control, and the distinction the module is built
+// around reduced to "did the caller compute one more hash". Adding a
+// caller-supplied `trusted_verifiers` allowlist would not have fixed it: the
+// same caller supplies the list and the attestation.
+//
+// WHAT THE FUNCTION STILL DOES, and it is worth having. It re-derives the WHOLE
+// manifest from the presented bytes and refuses anything that does not
+// reproduce, and it checks that the attestation is internally consistent about
+// the bytes and the manifest it names. That answers "do these bytes canonically
+// produce this answer". It does not answer "did a trusted runtime verifier
+// witness this", so `trust_anchor` is null, `authenticated` is false, and
+// consequential execution authority is unavailable from this module by
+// construction. See contextAssemblyIntegrationGaps().
 //
 // The module is pure: no filesystem, no network, no database, no provider, no
 // scheduler, no environment and no clock. It writes no record, attributes
@@ -71,6 +96,7 @@ const {
   fail, deepFreeze, snapshot,
   assertObject, assertArray, assertBoolean, assertSafeInteger,
   assertClosedKeys, assertRequiredKeys, assertNoAccessorsOrHiddenKeys,
+  assertNoCallerAssertions,
   assertSafeText, assertExternalIdent, assertEnum, assertInstant,
   assertDigestRef, assertTenant,
 } = V5_F05_GUARDS;
@@ -83,8 +109,11 @@ export const V5_F05_LINEAGE_SCHEMA_VERSION = "doctorcre-v5-f05-taint-lineage.v1"
 
 export const V5_F05_MANIFEST_VERSION = 1;
 
-/** A verifier attestation older than this describes a system that has moved on. */
-export const V5_F05_MAX_ATTESTATION_AGE_SECONDS = 900;
+/**
+ * The only projection kind this module emits. `authenticated_runtime_projection`
+ * is not in the list because no code path produces it; a test asserts that.
+ */
+export const V5_F05_PROJECTION_KINDS = deepFreeze(["reproducible_proposal"]);
 
 // ---------------------------------------------------------------------------
 // Q068 — origins, derivation and taint.
@@ -118,6 +147,13 @@ export const V5_F05_RECORD_KINDS = deepFreeze([
 export const V5_F05_AUTHORITY_BEARING_RECORD_KINDS = deepFreeze([
   "rule", "authority_grant", "decision",
 ]);
+/**
+ * Kinds whose own NAME asserts a derivation. One of these must declare the
+ * matching `derived_kind`, and therefore must declare a parent — otherwise
+ * `record_kind: "summary"` plus `origin: "record_layer"` launders an email in
+ * one field.
+ */
+export const V5_F05_DERIVED_RECORD_KINDS = deepFreeze(["summary", "embedding"]);
 
 export const V5_F05_UNTRUSTED_FORBIDDEN_USES = deepFreeze([
   "authority_grant", "declassification", "policy_change", "recipient_change",
@@ -191,15 +227,41 @@ function compileRecord(raw, index, seen) {
   }
 
   assertInstant(raw.observed_at, `${path}.observed_at`);
+  const record_kind = assertEnum(raw.record_kind, V5_F05_RECORD_KINDS, `${path}.record_kind`,
+    "unknown_record_kind");
+  const derived_kind = assertEnum(raw.derived_kind, V5_F05_DERIVED_KINDS, `${path}.derived_kind`,
+    "unknown_derived_kind");
+
+  // The cheapest laundering path there was: a record declaring
+  // `derived_kind: "summary"` with `origin: "record_layer"` and an EMPTY
+  // derived_from was labelled first_party_record_layer, because the lineage walk
+  // has no parent to inherit taint from. A summary is a summary OF something; a
+  // derived record with no declared parent is refused rather than labelled
+  // clean. The same for the two record KINDS that assert derivation in their
+  // own name, and the same in reverse: a "primary" record cannot cite parents.
+  if (derived_kind !== "primary" && derived_from.length === 0) {
+    fail("derived_record_without_lineage",
+      `${path}.derived_kind is "${derived_kind}" and ${path}.derived_from is empty; a derived record with no parent cannot be told apart from clean first-party content`,
+      { path, record_id, derived_kind });
+  }
+  if (derived_kind === "primary" && derived_from.length > 0) {
+    fail("primary_record_with_lineage",
+      `${path}.derived_kind is "primary" but names ${derived_from.length} parent(s); a primary record is not derived from anything`,
+      { path, record_id });
+  }
+  if (V5_F05_DERIVED_RECORD_KINDS.includes(record_kind) && derived_kind !== record_kind) {
+    fail("derived_kind_inconsistent_with_record_kind",
+      `${path}.record_kind is "${record_kind}" but ${path}.derived_kind is "${derived_kind}"; a record kind that names a derivation must declare it`,
+      { path, record_id, record_kind, derived_kind });
+  }
+
   return {
     record_id,
-    record_kind: assertEnum(raw.record_kind, V5_F05_RECORD_KINDS, `${path}.record_kind`,
-      "unknown_record_kind"),
+    record_kind,
     version: assertSafeInteger(raw.version, `${path}.version`, { min: 1 }),
     content_digest: assertDigestRef(raw.content_digest, `${path}.content_digest`),
     origin: assertEnum(raw.origin, V5_F05_ORIGINS, `${path}.origin`, "unknown_origin"),
-    derived_kind: assertEnum(raw.derived_kind, V5_F05_DERIVED_KINDS, `${path}.derived_kind`,
-      "unknown_derived_kind"),
+    derived_kind,
     derived_from,
     query_id: assertExternalIdent(raw.query_id, `${path}.query_id`, { maxLength: 128 }),
     observed_at: raw.observed_at,
@@ -383,6 +445,7 @@ export function evaluateUntrustedUse(request) {
 const REQUEST_KEYS = Object.freeze([
   "schema_version", "tenant", "now", "mode", "actor", "task", "controls",
   "universe", "records", "sources", "queries", "semantic_candidates", "budget",
+  "enforcement_evidence_policy",
 ]);
 const REQUEST_REQUIRED = Object.freeze([
   "schema_version", "tenant", "now", "mode", "actor", "task", "universe",
@@ -531,6 +594,9 @@ function manifestPreimage(manifest) {
  *   5. Freshness is computed per record against `now`. A stale record that
  *      backs a mandatory control is a blocking reason.
  *   6. The coverage receipt is derived from the typed facts (Q064/Q065/Q087).
+ *   6b. Every DELIVERED rule's declared source is resolved against the records
+ *      above. Tainted or drifted rule text refuses; an unresolved source
+ *      refuses for a mandatory rule and blocks for a guidance one.
  *   7. The token budget is applied LAST and may only drop guidance and records
  *      the caller marked omissible that back no control. If the budget still
  *      cannot be met, the manifest refuses rather than dropping a possible
@@ -556,8 +622,16 @@ export function assembleContextManifest(frozen) {
   const queries = compileQueries(request.queries);
   const sources = compileSources(request.sources);
 
+  // `actor` and `controls` are S01's schemas, so this half does not CLOSE them
+  // — S01 closes `controls` on the ordinary-business path and owns the actor
+  // shape. It does sweep them, which is the part that was missing: these are
+  // the two objects that decide authority, and they were the only two request
+  // sub-objects the authority-injection and caller-assertion guard never saw.
+  // An `authority`, `approved_by` or `enforced` key riding along inert is still
+  // a field this slice has said it refuses.
   const actor = assertObject(request.actor, "request.actor");
   assertNoAccessorsOrHiddenKeys(actor, "request.actor");
+  assertNoCallerAssertions(Object.getOwnPropertyNames(actor), "request.actor");
   const actor_slug = typeof actor.slug === "string"
     ? assertSafeText(actor.slug, "request.actor.slug", { maxLength: 128 }) : null;
 
@@ -565,6 +639,7 @@ export function assembleContextManifest(frozen) {
   if (request.controls !== undefined && request.controls !== null) {
     controls = assertObject(request.controls, "request.controls");
     assertNoAccessorsOrHiddenKeys(controls, "request.controls");
+    assertNoCallerAssertions(Object.getOwnPropertyNames(controls), "request.controls");
   }
 
   let budget = null;
@@ -667,8 +742,99 @@ export function assembleContextManifest(frozen) {
     facts: task.facts,
     ...(request.semantic_candidates === undefined || request.semantic_candidates === null
       ? {} : { semantic_candidates: request.semantic_candidates }),
+    ...(request.enforcement_evidence_policy === undefined ||
+        request.enforcement_evidence_policy === null
+      ? {} : { enforcement_evidence_policy: request.enforcement_evidence_policy }),
     now: request.now,
   });
+
+  // Step 6b. Q068 on the RULE path.
+  //
+  // The taint boundary was enforced on records and absent on rules: nothing
+  // stopped text sourced from an email being compiled into a universe and
+  // delivered as full_binding_text mandatory guidance, and the manifest gave a
+  // reader no way to tell. The kernel now requires a mandatory rule to name the
+  // record, version and content digest its text came from; this is where that
+  // reference is RESOLVED, because this is the half that holds records.
+  //
+  // Four outcomes and they are kept apart: the source is present and clean
+  // (bound), present and tainted (a violation, and a hard refusal for exactly
+  // the reason a tainted record wearing record_kind "rule" is), present but at
+  // a different version or digest (a violation — a rule bound to a source that
+  // has moved on is not bound), and absent from this manifest (unresolved).
+  //
+  // WHAT IS IN SCOPE: the DELIVERED rules — everything effective or possibly
+  // binding, which is everything the model is told it must follow. Semantic
+  // additions are not checked here; they carry elevates_to_control: false,
+  // delivered_as: "guidance_only" and omissible: true, and are the one category
+  // the budget may drop. That boundary is a choice, and it is stated rather
+  // than left to be inferred from where the loop stops.
+  //
+  // WHAT THIS DOES NOT BUY, stated because it would be easy to overclaim: a
+  // caller that authors both the rule and the record can point a rule at a
+  // clean record whatever its text really was. This closes the LAUNDERING path
+  // — a legitimately-carried email being summarised into a control — and makes
+  // an unbound control visible. It is not a proof of origin, and no unkeyed
+  // structure here could be one.
+  const universeById = new Map(universe.rules.map(rule => [rule.rule_id, rule]));
+  const recordById = new Map(records.map(record => [record.record_id, record]));
+  const rule_provenance = [];
+  const rule_provenance_violations = [];
+  for (const delivered of coverage.delivery) {
+    const rule = universeById.get(delivered.rule_id);
+    const entry = {
+      rule_id: rule.rule_id, mandatory: rule.mandatory,
+      source_record_id: rule.provenance === null ? null : rule.provenance.source_record_id,
+      taint_class: null, state: "unresolved", reason_id: "rule_provenance_not_declared",
+    };
+    if (rule.provenance === null) {
+      // The kernel guarantees this cannot be a mandatory rule. A guidance rule
+      // with no declared source is recorded and blocks the write; it does not
+      // hard-refuse, because guidance is not authority and Q065's ladder says
+      // marked exploration survives uncertainty.
+      rule_provenance.push(entry);
+      continue;
+    }
+    const source = recordById.get(rule.provenance.source_record_id);
+    if (source === undefined) {
+      rule_provenance.push({ ...entry, reason_id: "rule_provenance_record_not_in_manifest" });
+      continue;
+    }
+    const taint = byTaint.get(source.record_id);
+    if (source.version !== rule.provenance.source_version ||
+        source.content_digest !== rule.provenance.source_content_digest) {
+      const drifted = { ...entry, taint_class: taint.taint_class, state: "drifted",
+        reason_id: "rule_provenance_source_drifted",
+        declared_version: rule.provenance.source_version, source_version: source.version,
+        declared_content_digest: rule.provenance.source_content_digest,
+        source_content_digest: source.content_digest };
+      rule_provenance.push(drifted);
+      rule_provenance_violations.push({ rule_id: rule.rule_id, mandatory: rule.mandatory,
+        source_record_id: source.record_id, reason_id: "rule_provenance_source_drifted" });
+      continue;
+    }
+    if (taint.tainted) {
+      const violation = { rule_id: rule.rule_id, mandatory: rule.mandatory,
+        source_record_id: source.record_id, taint_class: taint.taint_class,
+        reason_id: "untrusted_content_cannot_be_rule_text" };
+      rule_provenance.push({ ...entry, taint_class: taint.taint_class, state: "tainted",
+        reason_id: "untrusted_content_cannot_be_rule_text" });
+      rule_provenance_violations.push(violation);
+      continue;
+    }
+    rule_provenance.push({ ...entry, taint_class: taint.taint_class, state: "bound",
+      reason_id: "rule_provenance_bound_to_first_party_record" });
+  }
+  const rule_provenance_unresolved = rule_provenance.filter(e => e.state === "unresolved");
+  for (const entry of rule_provenance_unresolved) {
+    if (!entry.mandatory) continue;
+    // A MANDATORY rule whose source this manifest cannot show is authority with
+    // untraceable text. Unavailable authoritative provenance REFUSES; only
+    // guidance is allowed to stay merely blocked.
+    rule_provenance_violations.push({ rule_id: entry.rule_id, mandatory: true,
+      source_record_id: entry.source_record_id, reason_id: entry.reason_id });
+  }
+  rule_provenance_violations.sort((a, b) => (a.rule_id < b.rule_id ? -1 : 1));
 
   // Step 7. Budget. Guidance first, then omissible records, in id order, so two
   // callers holding the same input drop the same things.
@@ -711,17 +877,31 @@ export function assembleContextManifest(frozen) {
   if (sources.some(s => s.state === "conflicting")) blocking_reasons.push("source_conflict_unresolved");
   if (stale_control_records.length > 0) blocking_reasons.push("control_backing_record_stale");
   if (taint_violations.length > 0) blocking_reasons.push("untrusted_content_cannot_be_authority");
+  if (rule_provenance_violations.length > 0) blocking_reasons.push("rule_provenance_not_trustworthy");
+  if (rule_provenance_unresolved.length > 0) blocking_reasons.push("rule_provenance_unresolved");
   if (budget_exceeded) blocking_reasons.push("budget_cannot_omit_binding_constraint");
 
   const actorRefused = authority_envelope.reason_id === "actor_not_verified_partner";
   // A hard refusal is one where producing the manifest at all would be a
-  // fiction: an unknown principal, tainted content wearing authority, an
-  // unresolved conflict, a rule that would not deliver, or a budget that cannot
-  // be met without dropping a binding constraint. Everything else is
-  // UNCERTAINTY, which read-only exploration is allowed to see.
+  // fiction: an unknown principal, tainted content wearing authority, a rule
+  // whose own text is tainted or untraceable, an unresolved conflict, a rule
+  // that would not deliver, or a budget that cannot be met without dropping a
+  // binding constraint. Everything else is UNCERTAINTY, which read-only
+  // exploration is allowed to see.
+  //
+  // ON `rule_delivery_failed_closed` BEING HERE. This is stricter than Q065's
+  // ladder, which blocks consequential writes and permits marked exploration.
+  // It is kept, and the reason it is now defensible is that its trigger changed:
+  // it used to fire on evidence older than an invented 86400-second window, and
+  // it now fires only when a rule in the effective or possibly-binding set has
+  // NOTHING deliverable — a code_enforced rule with no binding text and no
+  // trusted verifier to license a constraint in its place. Exploring a task
+  // whose applicable rules cannot be shown at all is not marked uncertainty; it
+  // is a manifest that omits a binding constraint without saying which.
   const hardRefusals = [];
   if (actorRefused) hardRefusals.push("actor_not_verified_partner");
   if (taint_violations.length > 0) hardRefusals.push("untrusted_content_cannot_be_authority");
+  if (rule_provenance_violations.length > 0) hardRefusals.push("rule_provenance_not_trustworthy");
   if (coverage.binding_conflicts.length > 0) hardRefusals.push("unresolved_binding_conflict");
   if (coverage.delivery_refusals.length > 0) hardRefusals.push("rule_delivery_failed_closed");
   if (budget_exceeded) hardRefusals.push("budget_cannot_omit_binding_constraint");
@@ -776,6 +956,7 @@ export function assembleContextManifest(frozen) {
       superseded: coverage.superseded, overridden: coverage.overridden,
       suppressed_by_exception: coverage.suppressed_by_exception,
       pending_relations: coverage.pending_relations,
+      skipped_relations: coverage.skipped_relations,
       binding_conflicts: coverage.binding_conflicts,
       delivery_refusals: coverage.delivery_refusals,
       semantic_reinforcements: coverage.semantic_reinforcements,
@@ -783,10 +964,15 @@ export function assembleContextManifest(frozen) {
       coverage_complete: coverage.coverage_complete,
     },
     delivered_rules: deliveredRules,
+    // Carried up from the kernel so a reader of the manifest alone cannot take
+    // a delivered code_enforced rule's echoed claim for a verified control.
+    code_enforcement_evidence_verified_by_kernel: false,
     guidance: guidance,
     records: projectedRecords,
     taint_lineage: lineage.entries,
     taint_violations,
+    rule_provenance,
+    rule_provenance_violations,
     declassification_supported: false,
     queries,
     sources,
@@ -811,6 +997,11 @@ export function assembleContextManifest(frozen) {
     blocking_reasons,
     consequential_action_permitted,
     read_only_exploration_permitted,
+    // `decision` is not the write gate; this is. A manifest can read
+    // decision: "allow" in read-only exploration while a consequential write is
+    // refused, so an admission call site that reads `decision` reads the wrong
+    // field. Named in the record rather than in a comment.
+    write_gate_field: "consequential_action_permitted",
     record_attribution_written: false,
     model_resolves_conflicts: false,
   };
@@ -821,9 +1012,28 @@ export function assembleContextManifest(frozen) {
   });
 }
 
-/** Recompute a manifest's digest, so a hand-forged copy cannot pass as one. */
+/**
+ * Recompute a manifest's digest, so a hand-forged copy cannot pass as one.
+ *
+ * The schema version is asserted as well as the digest. Self-consistency alone
+ * is a weaker property than this function's name suggests — any object that
+ * hashes to its own `manifest_digest` would satisfy it — and this is exported,
+ * so it is checked here rather than only inside the one caller that re-derives.
+ * Re-derivation from the input bytes remains the property that actually binds a
+ * manifest to a request; see authenticateRuntimeProjection.
+ */
 export function verifyContextManifest(manifest) {
   assertObject(manifest, "manifest");
+  if (manifest.schema_version !== V5_F05_MANIFEST_SCHEMA_VERSION) {
+    fail("unknown_schema_version",
+      `manifest.schema_version must be "${V5_F05_MANIFEST_SCHEMA_VERSION}"`,
+      { expected: V5_F05_MANIFEST_SCHEMA_VERSION, actual: manifest.schema_version ?? null });
+  }
+  if (manifest.projection_kind !== "reproducible_proposal") {
+    fail("unknown_projection_kind",
+      `manifest.projection_kind must be "reproducible_proposal"; this module emits no other kind`,
+      { registered: [...V5_F05_PROJECTION_KINDS], actual: manifest.projection_kind ?? null });
+  }
   assertDigestRef(manifest.manifest_digest, "manifest.manifest_digest");
   const recomputed = digest(manifestPreimage(manifest));
   if (recomputed !== manifest.manifest_digest) {
@@ -834,7 +1044,19 @@ export function verifyContextManifest(manifest) {
 }
 
 // ---------------------------------------------------------------------------
-// The trusted-verifier interface.
+// The attestation interface, and what it is honestly for.
+//
+// THIS IS NOT A TRUST ANCHOR AND DOES NOT PRETEND TO BE ONE. It answers exactly
+// one question: do these bytes canonically re-derive this manifest, and does
+// this attestation say so about these same bytes? That is a REPRODUCIBILITY
+// check, and its answer is `reproducible_proposal` — the same kind
+// assembleContextManifest returns.
+//
+// The EXPORT NAME is the one the seam already has and is kept so a consumer's
+// import does not silently start resolving to something else; what it
+// establishes is `manifest_reproduced_from_input_bytes`, and every answer says
+// `authenticated: false` next to it. A caller that reads the name instead of
+// the fields is reading the wrong thing, which is why the fields exist.
 //
 // WHAT IT REFUSES TO ACCEPT, because each of these is a real bypass:
 //   * a caller boolean — `authenticated: true` is refused by name;
@@ -845,6 +1067,23 @@ export function verifyContextManifest(manifest) {
 //     OUTPUT here, never an input the attestation can define;
 //   * a mutable request — there is no path from an object to a projection,
 //     only from bytes.
+//
+// WHAT IT CANNOT REFUSE, which is why the authenticated kind is gone: a
+// self-minted credential. verifierAttestationDigest is exported and unkeyed, so
+// "verifier.attacker" hashing its own four fields produces exactly what
+// "verifier.hosted-ci" produces. A caller-supplied allowlist of verifier ids
+// would move the forgery one field left, not close it — the same caller
+// supplies the list. `verifier_id` is therefore recorded as a caller-supplied
+// LABEL, and `verifier_trusted: false` rides on every answer.
+//
+// FRESHNESS IS THE CALLER'S POLICY OR IT IS NOT A POLICY. The 900-second window
+// this function used to enforce was invented here and named in no settled
+// decision, and it was measured against a caller-supplied clock in the first
+// place. It is now an optional `max_attestation_age_seconds` the caller states
+// and the answer records. Unsupplied means the age is reported and no verdict
+// is drawn — which is honest, since nothing here can attest a clock either. An
+// attestation dated AFTER `now` still refuses, because that is internal
+// inconsistency rather than a policy call.
 // ---------------------------------------------------------------------------
 
 const ATTESTATION_KEYS = Object.freeze([
@@ -864,14 +1103,23 @@ export function verifierAttestationDigest(attestation) {
 }
 
 const RUNTIME_PROJECTION_KEYS = Object.freeze([
+  "manifest", "input_bytes", "attestation", "now", "max_attestation_age_seconds",
+]);
+const RUNTIME_PROJECTION_REQUIRED = Object.freeze([
   "manifest", "input_bytes", "attestation", "now",
 ]);
 
 export function authenticateRuntimeProjection(request) {
   assertObject(request, "request");
   assertClosedKeys(request, RUNTIME_PROJECTION_KEYS, "request");
-  assertRequiredKeys(request, RUNTIME_PROJECTION_KEYS, "request");
+  assertRequiredKeys(request, RUNTIME_PROJECTION_REQUIRED, "request");
   const now = assertInstant(request.now, "request.now");
+  const maxAttestationAgeSeconds =
+    request.max_attestation_age_seconds === undefined ||
+    request.max_attestation_age_seconds === null
+      ? null
+      : assertSafeInteger(request.max_attestation_age_seconds, "request.max_attestation_age_seconds",
+        { min: 0, max: 315_360_000 });
   if (typeof request.input_bytes !== "string" || request.input_bytes.length === 0) {
     fail("invalid_shape", "request.input_bytes must be the exact frozen bytes, as a string",
       { path: "request.input_bytes" });
@@ -879,13 +1127,22 @@ export function authenticateRuntimeProjection(request) {
   const manifest = assertObject(request.manifest, "request.manifest");
   verifyContextManifest(manifest);
 
+  // Every answer this function can give carries the same facts about what it
+  // did NOT establish, on the refusals as well as on the allow.
   const base = {
     schema_version: V5_F05_ATTESTATION_SCHEMA_VERSION,
     manifest_digest: manifest.manifest_digest,
     input_digest: manifest.input_digest,
     verifier_id: null,
     projection_kind: "reproducible_proposal",
+    trust_anchor: null,
+    authenticated: false,
+    verifier_trusted: false,
+    consequential_execution_permitted: false,
+    execution_gap_id: "no_registered_verifier",
     authenticated_by_caller_boolean: false,
+    max_attestation_age_seconds: maxAttestationAgeSeconds,
+    attestation_age_policy_supplied: maxAttestationAgeSeconds !== null,
     effects: V5_NO_EFFECTS,
   };
 
@@ -930,19 +1187,26 @@ export function authenticateRuntimeProjection(request) {
     return deepFreeze({ ...withVerifier, decision: "refuse", reason_id: "attestation_digest_mismatch",
       expected: recomputed });
   }
+  const attestation_age_seconds = (now - attestedAt) / 1000;
   if (attestedAt > now) {
-    return deepFreeze({ ...withVerifier, decision: "refuse", reason_id: "attestation_not_yet_effective" });
+    return deepFreeze({ ...withVerifier, decision: "refuse",
+      reason_id: "attestation_not_yet_effective", attestation_age_seconds });
   }
-  if ((now - attestedAt) / 1000 > V5_F05_MAX_ATTESTATION_AGE_SECONDS) {
+  if (maxAttestationAgeSeconds !== null && attestation_age_seconds > maxAttestationAgeSeconds) {
     return deepFreeze({ ...withVerifier, decision: "refuse", reason_id: "attestation_stale",
-      max_age_seconds: V5_F05_MAX_ATTESTATION_AGE_SECONDS });
+      attestation_age_seconds, max_age_seconds: maxAttestationAgeSeconds });
   }
+  // The allow, and it says in the record exactly what it means: the manifest
+  // re-derived from these bytes and the attestation is internally consistent
+  // about them. NOT that a trusted verifier witnessed anything. The kind stays
+  // `reproducible_proposal` and consequential execution stays unavailable.
   return deepFreeze({
     ...withVerifier,
     decision: "allow",
-    reason_id: "attestation_binds_exact_input_bytes",
-    projection_kind: "authenticated_runtime_projection",
+    reason_id: "attestation_internally_consistent",
+    manifest_reproduced_from_input_bytes: true,
     attested_at: attestation.attested_at,
+    attestation_age_seconds,
   });
 }
 
@@ -1079,9 +1343,11 @@ export function v5F05ContextContractPreimage() {
       source_evidence_digest: V5_F05_SETTLED_DECISIONS[decision_id].source_evidence_digest,
     })),
     modes: [...V5_F05_MODES],
+    projection_kinds: [...V5_F05_PROJECTION_KINDS],
     origins: [...V5_F05_ORIGINS],
     external_origins: [...V5_F05_EXTERNAL_ORIGINS],
     derived_kinds: [...V5_F05_DERIVED_KINDS],
+    derived_record_kinds: [...V5_F05_DERIVED_RECORD_KINDS],
     taint_classes: [...V5_F05_TAINT_CLASSES],
     tainted_classes: [...V5_F05_TAINTED_CLASSES],
     untrusted_forbidden_uses: [...V5_F05_UNTRUSTED_FORBIDDEN_USES],
@@ -1089,7 +1355,19 @@ export function v5F05ContextContractPreimage() {
     authority_bearing_record_kinds: [...V5_F05_AUTHORITY_BEARING_RECORD_KINDS],
     correction_kinds: [...V5_F05_CORRECTION_KINDS],
     max_correction_note_chars: V5_F05_MAX_CORRECTION_NOTE_CHARS,
-    max_attestation_age_seconds: V5_F05_MAX_ATTESTATION_AGE_SECONDS,
+    // What this module does NOT establish, hashed into the contract so a
+    // consumer cannot read a proposal as an authenticated runtime claim.
+    authenticated_projection_emitted: false,
+    trust_anchor_available: false,
+    verifier_trust_configured: false,
+    consequential_execution_authorized_here: false,
+    attestation_age_policy_is_caller_supplied: true,
+    default_max_attestation_age_seconds: null,
+    code_enforcement_evidence_verified_by_kernel: false,
+    rule_provenance_required_for_mandatory_rule: true,
+    rule_provenance_resolved_against_manifest_records: true,
+    derived_record_requires_declared_parent: true,
+    write_gate_field: "consequential_action_permitted",
     authority_is_computed_not_asserted: true,
     declassification_supported: false,
     binding_constraint_may_be_omitted_for_tokens: false,
@@ -1131,8 +1409,21 @@ export function contextAssemblyIntegrationGaps() {
     {
       gap: "no_registered_verifier",
       where: "mcp-server/src/",
-      what: "no component issues verifier attestations, so every projection stays a"
-        + " reproducible proposal until one exists",
+      what: "no component issues verifier attestations and no trusted-verifier registry or key"
+        + " exists, so authenticateRuntimeProjection returns projection_kind"
+        + " reproducible_proposal with trust_anchor null and authenticated false, and no"
+        + " projection here can authorize a consequential execution. The attestation seam"
+        + " proves reproducibility from bytes and nothing about the running system",
+      landed: false,
+    },
+    {
+      gap: "no_rule_text_origin_proof",
+      where: "mcp-server/src/context-assembly.v5.js",
+      what: "a mandatory rule's provenance is resolved against the records in THIS manifest, so"
+        + " a rule whose source is a tainted or drifted record refuses and an unresolved one"
+        + " blocks; a caller that authors both the rule and the record can still point clean"
+        + " provenance at text that came from somewhere else. Proving rule text origin needs"
+        + " the rule store this slice does not read",
       landed: false,
     },
     {
