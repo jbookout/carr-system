@@ -1576,6 +1576,25 @@ test("guard: the class export is really built, and the instance is read whole", 
     assert.equal(codes.has(code), true, `${code} was never constructed by the sweep`);
   }
 
+  // (2a) THE SWEPT SURFACE carries what was read, including the two properties a
+  //      spread cannot see. This is asserted on the surface the sweep actually
+  //      swept, not only on the instances kept beside it, because the surface is
+  //      what the per-token tests read.
+  const builtSurfaces = EXPORTED_VALUES
+    .filter(entry => entry.name === "V5R01Error" && entry.output?.built !== undefined)
+    .map(entry => entry.output.built);
+  assert.ok(builtSurfaces.length > 0, "no constructed surface reached the sweep");
+  for (const surface of builtSurfaces) {
+    assert.deepEqual(surface.built_own_property_names, ["code", "message", "name", "stack"],
+      "the swept surface does not carry every own property name of the instance");
+    assert.deepEqual(Object.keys(surface).filter(key => key.startsWith("own_")).sort(),
+      ["own_code", "own_message", "own_name"],
+      "the swept surface lost the non-enumerable message, which is what a spread does");
+    assert.equal(surface.built_stack_is_a_string, true);
+    assert.equal(typeof surface.built_message, "string");
+    assert.ok(surface.built_message.length > 10);
+  }
+
   // (2) AND (3) EVERY INSTANCE, READ WHOLE.
   for (const { at, instance } of CONSTRUCTED) {
     assert.equal(instance instanceof V5R01Error, true, at);
@@ -1786,31 +1805,75 @@ function hostileValues() {
   Object.defineProperty(throwingIndex, 0, {
     enumerable: true, configurable: true, get: thrower,
   });
+  // THE THIRD COLUMN IS THE FLOOR: must EVERY export that copies a caller value
+  // refuse this shape? A proxy that throws from a trap the copy performs must be
+  // refused by all of them. The ONE shape marked `false` is the object whose only
+  // hostile trap is `has`, and that is a fact about the copy rather than a gap in
+  // it: the copy asks `in` of an ARRAY INDEX and never of an object's key, so an
+  // object's `has` trap is never consulted and has nothing to answer. It is swept
+  // for a leak like everything else.
   return [
-    ["object proxy, every trap throws", new Proxy({}, everyTrap)],
-    ["array proxy, every trap throws", new Proxy([], everyTrap)],
-    ["revoked proxy, object target", revokedObject.proxy],
-    ["revoked proxy, array target", revokedArray.proxy],
-    ["getter throws Error(sentinel)", { get decision_ids() { throw new Error(CALLER_SENTINEL); } }],
-    ["array index getter throws Error(sentinel)", throwingIndex],
-    ["getter throws a hostile proxy", { get decision_ids() { throw hostileThrownValue(); } }],
+    ["object proxy, every trap throws", new Proxy({}, everyTrap), true],
+    ["array proxy, every trap throws", new Proxy([], everyTrap), true],
+    ["revoked proxy, object target", revokedObject.proxy, true],
+    ["revoked proxy, array target", revokedArray.proxy, true],
+    ["getter throws Error(sentinel)", { get decision_ids() { throw new Error(CALLER_SENTINEL); } }, true],
+    ["array index getter throws Error(sentinel)", throwingIndex, true],
+    ["getter throws a hostile proxy", { get decision_ids() { throw hostileThrownValue(); } }, true],
     ["ownKeys trap throws a hostile proxy", new Proxy({}, {
       ownKeys() { throw hostileThrownValue(); },
       getPrototypeOf() { throw hostileThrownValue(); },
-    })],
+    }), true],
     ["getPrototypeOf trap throws a string", new Proxy({}, {
       getPrototypeOf() { throw CALLER_SENTINEL; },
-    })],
+    }), true],
     ["getPrototypeOf trap throws a V5R01Error lookalike", new Proxy({}, {
       getPrototypeOf() {
         throw Object.assign(new Error(CALLER_SENTINEL),
           { code: "invalid_shape", name: "V5R01Error" });
       },
-    })],
+    }), true],
+    // ONE TRAP EACH, and these are the shapes that tell a guarded read from an
+    // unguarded one. A proxy that throws from EVERY trap is refused by the first
+    // operation anything performs on it, so it cannot distinguish a boundary from
+    // a prototype check that happens to run first. These can: each passes the
+    // prototype check and breaks exactly one later read.
+    ["object proxy, ownKeys throws only", new Proxy({}, { ownKeys: thrower }), true],
+    ["object proxy, get throws only", new Proxy({ a: 1 }, { get: thrower }), true],
+    ["object proxy, getOwnPropertyDescriptor throws only",
+      new Proxy({ a: 1 }, { getOwnPropertyDescriptor: thrower }), true],
+    ["array proxy, get throws only", new Proxy(["a"], { get: thrower }), true],
+    ["array proxy, has throws only", new Proxy(["a"], { has: thrower }), true],
+    ["object proxy, has throws only", new Proxy({ a: 1 }, { has: thrower }), false],
   ];
 }
 
 const HOSTILE_VALUES = hostileValues();
+
+/**
+ * THE ROSTER IS PINNED, because a probe list is a fixture and a fixture that
+ * quietly loses an entry reports a pass it did not earn. Losing the revoked ARRAY
+ * — the shape that produced the uncoded native TypeError — changed no count and no
+ * assertion until this list existed.
+ */
+const HOSTILE_LABELS = Object.freeze([
+  "object proxy, every trap throws",
+  "array proxy, every trap throws",
+  "revoked proxy, object target",
+  "revoked proxy, array target",
+  "getter throws Error(sentinel)",
+  "array index getter throws Error(sentinel)",
+  "getter throws a hostile proxy",
+  "ownKeys trap throws a hostile proxy",
+  "getPrototypeOf trap throws a string",
+  "getPrototypeOf trap throws a V5R01Error lookalike",
+  "object proxy, ownKeys throws only",
+  "object proxy, get throws only",
+  "object proxy, getOwnPropertyDescriptor throws only",
+  "array proxy, get throws only",
+  "array proxy, has throws only",
+  "object proxy, has throws only",
+]);
 
 /**
  * THE EXPORTS THAT COPY A CALLER VALUE, so a hostile one must refuse EVERY time.
@@ -1849,8 +1912,14 @@ test("guard: a hostile caller value leaves one coded refusal and no caller text"
       `${name} is on the refusal floor but is not exported any more`);
   }
 
+  assert.deepEqual(HOSTILE_VALUES.map(([label]) => label), [...HOSTILE_LABELS],
+    "the hostile roster lost or renamed a shape");
+  assert.equal(HOSTILE_VALUES.filter(([, , mustRefuse]) => mustRefuse).length,
+    HOSTILE_LABELS.length - 1, "every shape but the object has-trap is on the floor");
+
   const leaks = [];
   const refusedBy = new Map();
+  const refusedPairs = new Set();
   let refusals = 0;
   let answered = 0;
 
@@ -1890,6 +1959,7 @@ test("guard: a hostile caller value leaves one coded refusal and no caller text"
         }
         refusals += 1;
         refusedBy.set(name, (refusedBy.get(name) ?? 0) + 1);
+        refusedPairs.add(`${name}|${label}`);
         // ONE SHAPE OF THROW: a V5R01Error with a registered code. Not a native
         // TypeError off a revoked Proxy, not the caller's own Error, not a string.
         if (!(thrown instanceof V5R01Error)) {
@@ -1928,14 +1998,17 @@ test("guard: a hostile caller value leaves one coded refusal and no caller text"
   assert.deepEqual(leaks, [],
     "a caller's own exception, or its text, reached a consumer of this slice");
 
-  // THE FLOOR: every export that copies a caller value refused every hostile
-  // value in every form it was handed, which is what "the read happens behind the
-  // boundary" means in practice.
-  const formsPerValue = HOSTILE_VALUES.length;
+  // THE FLOOR, PAIR BY PAIR rather than by a count: every export that copies a
+  // caller value refused every shape that breaks an operation the copy performs.
+  // A count can be met by refusing one shape twice; a pair cannot.
+  const missing = [];
   for (const name of MUST_REFUSE_A_HOSTILE_VALUE) {
-    assert.ok((refusedBy.get(name) ?? 0) >= formsPerValue,
-      `${name} refused only ${refusedBy.get(name) ?? 0} of the hostile forms it was handed`);
+    for (const [label, , mustRefuse] of HOSTILE_VALUES) {
+      if (mustRefuse && !refusedPairs.has(`${name}|${label}`)) missing.push(`${name} | ${label}`);
+    }
   }
+  assert.deepEqual(missing, [],
+    "an export that copies a caller value accepted a shape whose own machinery throws");
   assert.ok(refusals > 400, `only ${refusals} refusals were provoked`);
   // The evaluators ANSWER rather than refuse, because they never look at the
   // request — which is the slice's claim, and means a hostile value never reaches
@@ -1945,7 +2018,11 @@ test("guard: a hostile caller value leaves one coded refusal and no caller text"
   // NOT VACUOUS (1): the hostile values really do carry the caller's sentence out
   // of an UNGUARDED read. This is the defect, reproduced, for each read the
   // previous round left bare.
-  const by = label => HOSTILE_VALUES.find(([name]) => name === label)[1];
+  const by = label => {
+    const found = HOSTILE_VALUES.find(([name]) => name === label);
+    assert.notEqual(found, undefined, `the hostile roster no longer carries "${label}"`);
+    return found[1];
+  };
   const unguardedReads = [
     ["Object.getPrototypeOf", () => Object.getPrototypeOf(by("object proxy, every trap throws"))],
     ["allowed.includes", () => by("object proxy, every trap throws").includes("a")],
@@ -1979,6 +2056,27 @@ test("guard: a hostile caller value leaves one coded refusal and no caller text"
     getPrototypeOf() { throw lookalike; },
   }), "path"), error => error instanceof V5R01Error
     && error.code === "invalid_shape" && !error.message.includes(CALLER_SENTINEL));
+
+  // NOT VACUOUS (5): THE READ INSIDE THE DECISION-BINDING CHECK IS BEHIND THE
+  // BOUNDARY, and this is the probe that can tell. A getter that answers three
+  // copies honestly and throws on the FOURTH read walks straight out of a raw
+  // `Array.isArray(binding.decision_ids)` in the pilot module — every guard before
+  // it has already been satisfied — and is a coded refusal here only because the
+  // fourth read is a copy too.
+  let lateReads = 0;
+  const lateThrower = {
+    get decision_ids() {
+      lateReads += 1;
+      if (lateReads <= 3) return [...V5_R01_SETTLED_DECISION_IDS];
+      throw new Error(CALLER_SENTINEL);
+    },
+  };
+  assert.throws(() => r01.assertR01DecisionBinding(lateThrower),
+    error => error instanceof V5R01Error && registered.has(error.code)
+      && !String(error.message).includes(CALLER_SENTINEL)
+      && !String(error.stack).includes(CALLER_SENTINEL));
+  assert.ok(lateReads >= 4,
+    `the entry point read the caller's getter only ${lateReads} times, so this proves nothing`);
 
   // AND AN HONEST VALUE IS UNTOUCHED: the boundary is a boundary, not a wall.
   assert.equal(vocabulary.assertObject({ a: 1 }, "path"), undefined);
