@@ -913,6 +913,11 @@ function isIdentifierShaped(text) {
 // own object. `deepFreeze` is module-private now; the rule that would have
 // caught it is P1 with no input test in front of it.
 //
+// The sweep does not RETAIN the input it handed each export, only what came
+// back, so an input-based exemption cannot be reintroduced by editing a
+// condition — it would have to re-plumb the input through the sweep first. That
+// is deliberate: the previous round's exemption was one `if` long.
+//
 // WHAT THIS DOES NOT CATCH, said plainly: a privileged word inside a sentence.
 // That gap is closed from a different direction by the byte-identity test — every
 // public evaluator's answer is byte-identical across every caller shape — so no
