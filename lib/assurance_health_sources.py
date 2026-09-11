@@ -94,11 +94,13 @@ def _workflow_identity(key: Any, version: Any) -> str:
     return f"{key}@v{version}"
 
 
-def _observation_records(surfaces: Any, key: str, version: int) -> tuple[list[dict], list[str]]:
+def _observation_records(surfaces: Any, key: Any, version: Any) -> tuple[
+        list[tuple[dict[str, Any], dict[str, Any]]], list[str]]:
     """Every readback this reading holds for one exact workflow identity."""
     if not isinstance(surfaces, list):
         return [], []
-    found, ids = [], []
+    found: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    ids: list[str] = []
     for surface in surfaces:
         if not isinstance(surface, dict):
             continue
@@ -114,7 +116,7 @@ def _observation_records(surfaces: Any, key: str, version: int) -> tuple[list[di
     return found, sorted(ids)
 
 
-def _controller_evidence(surfaces: Any, key: str, version: int, max_age_seconds: int,
+def _controller_evidence(surfaces: Any, key: Any, version: Any, max_age_seconds: int,
                          notes: list[str]) -> Any:
     found, ids = _observation_records(surfaces, key, version)
     if not found:

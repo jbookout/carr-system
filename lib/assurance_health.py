@@ -613,9 +613,9 @@ def assurance_health_row(*, scope: Any, workflow_truth: Any, evidence: Any,
 
     shared = _shared_identities(records)
     for slot, record in records.items():
-        state, reasons = _classify(record, bound=bound, now=instant, shared=shared)
+        state, record_reasons = _classify(record, bound=bound, now=instant, shared=shared)
         states[slot] = state
-        slot_reasons[slot].extend(reasons)
+        slot_reasons[slot].extend(record_reasons)
 
     # ORDERING COHERENCE. An accepted business outcome for a scope with no current
     # passing activation readback cannot have happened the way it claims; reporting
@@ -753,7 +753,7 @@ def assurance_health_row(*, scope: Any, workflow_truth: Any, evidence: Any,
             "this projection performs no activation, effect or notification"),
     }
 
-    row = {
+    row: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "observed_at": instant.isoformat(),
         "scope": {

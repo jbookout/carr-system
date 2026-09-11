@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -536,7 +537,8 @@ def workflow_truth_governance_checks(health) -> None:
 
     # Mutate the real F09 projection after constructing valid inputs.  Coercible
     # values must not borrow the healthy result of the integer version they mimic.
-    for bad_version in (True, False, 1.9, 1.0, "1", "01", None, [], {}, 0, -1, 2):
+    bad_versions: tuple[Any, ...] = (True, False, 1.9, 1.0, "1", "01", None, [], {}, 0, -1, 2)
+    for bad_version in bad_versions:
         truth = {**_truth(SCOPE), "workflow_version": bad_version}
         try:
             _row(truth=truth)
@@ -546,7 +548,8 @@ def workflow_truth_governance_checks(health) -> None:
         check(f"workflow truth version {bad_version!r} ({type(bad_version).__name__}) "
               "cannot join integer scope version 1", refused)
 
-    for bad_key in (None, 123, True, [], {}, "", " " + SCOPE["workflow_key"]):
+    bad_keys: tuple[Any, ...] = (None, 123, True, [], {}, "", " " + str(SCOPE["workflow_key"]))
+    for bad_key in bad_keys:
         try:
             _row(truth={**_truth(SCOPE), "workflow_key": bad_key})
             refused = False
@@ -816,7 +819,8 @@ def workflow_only_scope_checks(health) -> None:
           [r["scope"]["work_request_id"] for r in both["rows"]] == [None, "wr-a01-0001"],
           json.dumps([r["scope"]["work_request_id"] for r in both["rows"]]))
 
-    for bad in ("", "   ", 7, True, [], {}):
+    bad_identities: tuple[Any, ...] = ("", "   ", 7, True, [], {})
+    for bad in bad_identities:
         try:
             health.assurance_health_row(
                 scope={**WORKFLOW_ONLY, "work_request_id": bad},
