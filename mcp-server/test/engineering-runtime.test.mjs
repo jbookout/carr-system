@@ -1538,6 +1538,48 @@ test("a typed model step needs contracts, rationale and more than cost", () => {
   assert.doesNotThrow(() => requirePlan(v2Plan([measured]), EngineeringToolError));
 });
 
+// The oracle/fixture interface is a DECLARATION and not a binding, and that is
+// a decision stated in engineering-runtime.js beside FULL_DESIGN_REF_FIELDS,
+// not an oversight.  It is asserted here for the same reason the documented v1
+// divergences are asserted rather than described: a non-goal nothing tests is
+// indistinguishable from a gap, and the next reader has no way to tell which
+// one they are looking at.  What the contract buys instead of resolution is
+// exactness and permanence -- the names are pinned to the identifier regex, the
+// fixture list may not repeat or be empty, and every one of them is sealed into
+// plan_digest, so an accepted plan cannot be quietly re-pointed at a friendlier
+// oracle afterwards.
+test("a FULL slice's oracle and fixture refs are declared and sealed, never resolved", () => {
+  const unresolvable = v2Slice("slice:short", 1, { risk_class: "R4" });
+  assert.equal(classifyDesignDepth(unresolvable, EngineeringToolError), "full");
+  unresolvable.design_contract.full_design_refs.oracle_ref = "oracle:no-such-oracle-exists-anywhere";
+  unresolvable.design_contract.full_design_refs.fixture_refs = [
+    "fixture:no-such-fixture", "fixture:nor-this-one",
+  ];
+  assert.doesNotThrow(() => requirePlan(v2Plan([structuredClone(unresolvable)]), EngineeringToolError),
+    "nothing resolves an oracle_ref or a fixture_ref: naming one is the whole contract");
+
+  // Sealed, so the declaration is at least permanent.  Two plans that differ
+  // only in the oracle they name are two different plans.
+  const named = v2Plan([structuredClone(unresolvable)]);
+  const renamed = structuredClone(named);
+  renamed.slices[0].design_contract.full_design_refs.oracle_ref = "oracle:a-different-oracle";
+  refusesPlan(renamed, "re-pointing the oracle broke the seal it was accepted under");
+  assert.notEqual(reseal(renamed).plan_digest, named.plan_digest,
+    "the oracle a slice names is part of what its digest binds");
+
+  // Exact, so the declaration is checkable even though it is not resolvable.
+  for (const badOracle of ["not an id", " oracle:padded ", "", 7, null]) {
+    const row = structuredClone(unresolvable);
+    row.design_contract.full_design_refs.oracle_ref = badOracle;
+    refusesPlan(v2Plan([row]), `oracle_ref ${JSON.stringify(badOracle)}`);
+  }
+  for (const badFixtures of [["fixture:one", "fixture:one"], ["fixture:one", ""], "fixture:one", [7]]) {
+    const row = structuredClone(unresolvable);
+    row.design_contract.full_design_refs.fixture_refs = badFixtures;
+    refusesPlan(v2Plan([row]), `fixture_refs ${JSON.stringify(badFixtures)}`);
+  }
+});
+
 test("full depth requires the whole design envelope and short work stays governed", () => {
   const short = v2Slice();
   assert.doesNotThrow(() => requirePlan(v2Plan([structuredClone(short)]), EngineeringToolError));

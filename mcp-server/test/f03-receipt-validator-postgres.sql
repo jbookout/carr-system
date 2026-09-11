@@ -49,6 +49,11 @@
 --               companion.  A55 fails with "function ... does not exist" if
 --               candidate 1 is absent; that is the intended fail-closed signal.
 --
+--       Part A2 needs exactly what Part A needs and adds nothing: it calls one
+--               function, ops.engineering_receipt_design_contract_refusal, over
+--               cases generated from the shared JS/Python corpus rather than
+--               written here.  See the PART A2 banner above its \ir.
+--
 --       Part B  needs BOTH candidates for its engineering-slice-plan.v2 cases,
 --               because the replaced receipt seam calls
 --               ops.engineering_slice_plan_refusal(jsonb), which
@@ -871,6 +876,42 @@ begin
   if failures > 0 then raise exception 'PART A: % subset predicate cases did not match', failures; end if;
   raise notice 'PART A: 5 subset predicate cases matched';
 end $$;
+
+-- ===========================================================================
+-- PART A2 -- the SHARED corpus, generated, not hand-written.
+--
+-- Every case above was written here, which is the one thing they cannot prove:
+-- that this validator agrees with the two it must agree with.  A hand-written
+-- case table stays in step with the JS and Python corpus only for as long as
+-- somebody keeps it there, so on the day this fixture is finally run against a
+-- database it would have proved the candidate against a DIFFERENT set of cases
+-- than the validators it mirrors.
+--
+-- Part A2 is that missing binding.  Every case in the included file is derived
+-- from mcp-server/test/fixtures/f03-design-contract-parity.v1.json -- the same
+-- corpus f03-design-contract-parity.test.mjs replays through requirePlan and
+-- validate_engineering_slice_plan -- by
+-- mcp-server/test/f03-sql-corpus-generator.mjs.  A vector added to the corpus
+-- for JS and Python is automatically a case this leg must satisfy, with nothing
+-- to keep up to date by hand.  The included file is GENERATED and byte-checked
+-- against the corpus by that same JS suite, so editing it, or changing the
+-- corpus without regenerating, is caught in CI long before a database.
+--
+-- IT KEEPS PART A's SINGLE-CANDIDATE PROPERTY.  It calls exactly one function,
+-- ops.engineering_receipt_design_contract_refusal, which
+-- ops/f03-receipt-validator.candidate.sql installs.  It needs no companion
+-- candidate, no ledger table, no admission source and no execution lane.
+--
+-- WHAT IT DELIBERATELY DOES NOT ASSERT.  The corpus states its verdicts for a
+-- WHOLE PLAN and this seam validates ONE SLICE, so a corpus rejection is
+-- asserted here only where the rejection is structurally incapable of being a
+-- plan-level one.  The generated header lists the exact test, and every vector
+-- it excludes is named with its reason in f03_corpus_slice_excluded, counted at
+-- run time, and asserted in full against the whole-plan seam in
+-- mcp-server/test/f03-plan-ownership-validator-postgres.sql Part E.  Nothing is
+-- dropped; it moves to the seam that owns it.
+-- ===========================================================================
+\ir f03-design-contract-corpus-slice-postgres.generated.sql
 
 -- ===========================================================================
 -- PART B -- the seam itself, against a scratch execution lane.
