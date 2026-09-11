@@ -653,6 +653,21 @@ test("a withheld or excluded thread cannot become a draft or a proposal", () => 
   }
 });
 
+test("a hand-built read result claiming a withheld thread is still refused", () => {
+  // The mutation check found this one: every genuine non-read answer also carries
+  // `thread: null`, so the decision check looks redundant until a caller forges a
+  // result. It is the case the check exists for, and now the case the suite holds.
+  const b = binding();
+  const genuine = read({}, b);
+  const forged = { ...read({ relevance_state: "ambiguous" }, b), thread: genuine.thread };
+  assert.throws(() => draftCorrespondence({
+    binding: b, thread_read: forged, now: NOW, draft: draft(),
+  }), e => e.code === "work_from_non_readable_thread");
+  assert.throws(() => evaluateProposedFact({
+    binding: b, thread_read: forged, now: NOW, proposal: proposal(),
+  }), e => e.code === "work_from_non_readable_thread");
+});
+
 test("one partner's thread is not another partner's to draft from", () => {
   const joe = binding();
   const dell = binding({ partner_slug: "dell", account: DELL_ACCOUNT });
