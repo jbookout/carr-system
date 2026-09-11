@@ -49,6 +49,7 @@ import {
   V5_A02_GATE_CONCLUSIONS,
   V5_A02_GATE_ZERO_REASON_IDS,
   V5_A02_GATE_ZERO_PRODUCER_SEAM,
+  V5_A02_GATE_ZERO_PRODUCER_REGISTRATION,
   V5_A02_GATE_ZERO_OWED_SEAMS,
   V5_A02_PREDECESSOR_OUTCOME_READER_SEAM,
   V5_A02_SCHEDULER_READER_SEAM,
@@ -155,6 +156,7 @@ const EXPECTED_PUBLIC_EXPORTS = [
   "V5_A02_GATE_CONCLUSION_READER_SEAM",
   "V5_A02_GATE_ZERO_OWED_SEAMS",
   "V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS",
+  "V5_A02_GATE_ZERO_PRODUCER_REGISTRATION",
   "V5_A02_GATE_ZERO_PRODUCER_SEAM",
   "V5_A02_GATE_ZERO_REASON_IDS",
   "V5_A02_GATE_ZERO_SCHEMA_VERSION",
@@ -311,14 +313,48 @@ test("SURFACE: the Gate Zero outcome is not passable and carries no join", () =>
   }
 });
 
-test("SURFACE: r7 registers no producer contract, so every such field is null", () => {
+test("SURFACE: the producer contract is reported as RULED, never as read from r7", () => {
   const result = emitGateZeroOutcome(cleanJoin());
-  for (const field of ["producer_role", "oracle_ref", "output_schema_ref", "evidence_scope",
-    "produced_gate_id", "outcome_digest", "observed_at"]) {
+  // The five the 2026-09-11 ruling settled are reported, and each one matches
+  // the registration rather than a literal typed twice.
+  const entry = V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.registry_entry;
+  assert.equal(result.producer_role, entry.producer_role);
+  assert.equal(result.oracle_ref, entry.oracle_ref);
+  assert.equal(result.output_schema_ref, entry.output_schema_ref);
+  assert.equal(result.evidence_scope, entry.evidence_scope);
+  assert.equal(result.produced_gate_id, entry.produces_gate_ids[0]);
+  // And each one is reported beside the fact that r7 does not carry it.
+  assert.equal(result.producer_registration_status, "provisional");
+  assert.equal(result.producer_registration_decision_ref,
+    "20c83902-f150-4d59-beca-915c5c871f95");
+  assert.equal(result.r7_entry_present, false);
+  assert.equal(result.producer_registration.oracle_seat_bound, false);
+  // No run has happened, so no outcome exists to report.
+  for (const field of ["outcome_digest", "observed_at"])
     assert.equal(result[field], null, `${field} must be null, not invented`);
-  }
+  // The three fields the ruling could not settle stay null and stay named.
+  for (const field of ["consumes_gate_ids", "target_dag", "causal_phase"])
+    assert.equal(entry[field], null, `${field} is not knowable here and must stay null`);
+  assert.deepEqual(
+    V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.unresolved_without_r7.map(item => item.field).sort(),
+    ["causal_phase", "consumes_gate_ids", "produces_gate_ids[0]", "target_dag"]);
   assert.ok(result.undecided_governance_questions.includes(
     "which store an accepted predecessor outcome is read from"));
+  assert.ok(result.undecided_governance_questions.includes(
+    "whether r7 itself carries the registration, which today it does not"));
+});
+
+test("SURFACE: a ruled producer role does not make the gate passable", () => {
+  // The exact confusion this PR could have introduced: five fields stop being
+  // null, so a reader might take the gate for decided-and-therefore-runnable.
+  const result = emitGateZeroOutcome(cleanJoin());
+  assert.equal(result.passable, false);
+  assert.equal(result.producer_bound, false);
+  assert.equal(result.status, "unavailable");
+  assert.equal(result.decision, "refuse");
+  assert.equal(result.join, null);
+  assert.deepEqual(result.owed_seams, [...V5_A02_GATE_ZERO_OWED_SEAMS]);
+  assert.equal(v5A02GateZeroPolicyPreimage().gate_zero_passable, false);
 });
 
 test("SURFACE: every unavailable answer names the seams it is owed and binds none", () => {
@@ -393,10 +429,14 @@ test("ISOLATION: src holds no test-only entry, and none of it reaches the test t
     .map(([name]) => name);
   assert.deepEqual(offenders, [], "a production module reached into the test directory");
 
-  // And specifically: the public surface imports four modules, none of them this
-  // slice's classifiers.
+  // And specifically: the public surface imports five modules, none of them this
+  // slice's classifiers. The fifth is the producer registration, which is a
+  // frozen constant table and reaches nothing.
   assert.deepEqual(imports["gate-zero-assurance.v5.js"],
-    ["./artifact-trust.js", "./global-boundaries.v5.js", "./identity.js", "./benchmark-minimum.v5.js"]);
+    ["./artifact-trust.js", "./global-boundaries.v5.js", "./identity.js",
+      "./benchmark-minimum.v5.js", "./gate-zero-producer-registration.v5.js"]);
+  assert.deepEqual(imports["gate-zero-producer-registration.v5.js"],
+    ["./benchmark-minimum.v5.js"]);
 });
 
 /**
