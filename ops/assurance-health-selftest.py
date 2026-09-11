@@ -983,6 +983,34 @@ def source_adapter_checks() -> None:
           disabled_row["state"] == "disabled" and not disabled_row["green"],
           disabled_row["state"])
 
+    # EACH SCOPE'S EVIDENCE IS ITS OWN. Two workflows, two receipts, one of them
+    # outside the registry's window: each row must carry the receipt that binds
+    # IT, so a finding in one scope cannot travel to the other through the seam.
+    fenced = _reading(
+        keys=(("degrading", 1), ("unaffected", 1)),
+        surfaces=[_surface("degrading.launchd.v1", key="degrading", observed=OBSERVED),
+                  _surface("unaffected.launchd.v1", key="unaffected")],
+        owners={"degrading@v1": MANIFEST_OWNER, "unaffected@v1": MANIFEST_OWNER})
+    fenced_rows = {row["scope"]["workflow_key"]: row
+                   for row in sources.assurance_health_from_snapshot(
+                       fenced, now=NOW)["projection"]["rows"]}
+    PROJECTED.extend(fenced_rows.values())
+    for key in ("degrading", "unaffected"):
+        layer = fenced_rows[key]["evidence"]["controller_assessment"]
+        check(f"{key} carries the observation receipt that binds {key}, not another scope's",
+              layer["evidence_ref"] == f"observation-receipt:{key}.launchd.v1"
+              and layer["bound_scope"]["workflow_key"] == key, json.dumps(layer))
+    check("the stale receipt degrades only the scope it binds",
+          fenced_rows["degrading"]["evidence"]["controller_assessment"]["state"] == "stale"
+          and fenced_rows["unaffected"]["evidence"]["controller_assessment"]["state"]
+          == "passing",
+          json.dumps({k: v["evidence"]["controller_assessment"]["state"]
+                      for k, v in fenced_rows.items()}))
+    check("the unaffected scope keeps its own evidence-derived state, byte for byte",
+          fenced_rows["unaffected"]["state"] != "degraded"
+          and fenced_rows["degrading"]["state"] == "degraded",
+          json.dumps({k: v["state"] for k, v in fenced_rows.items()}))
+
     source = Path(sources.__file__).read_text(encoding="utf-8")
     check("the seam reads nothing itself: no file, process, socket or database route",
           not any(token in source for token in
