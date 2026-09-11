@@ -305,22 +305,24 @@ def assurance_health_census(reading: _WorkflowTruthReading) -> dict[str, _Any]:
     this parameter and nothing shaped like a handle passes for one.  Anything
     else is a ``TypeError``.  The instant is still this function's own.
 
-    AND THE CONTENTS COME FROM THE READER'S CAPTURE, NOT FROM THE HANDLE.  A
-    review took a handle the reader really had minted, replaced the payload
-    attribute behind it, and projected a complete forged census through this
-    entry -- every identity check passed, because the handle's provenance was
-    genuine and only its CONTENTS were the caller's.  A later review beat the
-    content digest that answered that, by installing a stateful mapping that
-    served authentic content to the verification traversal and forged content to
-    the render traversal.  Neither route exists now: the reader captures the
-    reading ONCE at mint into a private immutable value, the handle carries
-    nothing but an opaque key to it, and ``rendered()`` copies that captured
-    value.  This entry still calls the reader's own
-    ``verify_workflow_truth_reading`` first, which refuses with
-    ``READING_PAYLOAD_REPLACED`` when a genuinely minted handle is no longer
-    bound to the reading it was minted for -- but there is no longer a payload on
-    the handle for a caller to substitute, and no second traversal of anything a
-    caller can reach between the check and the projection.
+    AND THE CONTENTS COME FROM THE READER'S CAPTURE, NOT FROM THE HANDLE.  Four
+    reviews in a row got a forged census through this entry, and all four needed
+    the same thing: STATE ON THE HANDLE.  One replaced the payload attribute
+    through ``object.__setattr__``; one installed a stateful mapping that served
+    authentic content to the verification traversal and forged content to the
+    render traversal; one swapped the opaque string key the registry was reached
+    by, from inside that string's own ``__hash__``, so the entry verified and the
+    entry consumed were two different readings.  The handle now carries NOTHING --
+    empty ``__slots__``, refused ``__setattr__``, no field and no accessor -- and
+    the reader's registry is keyed by the handle OBJECT, so the only input to a
+    lookup is the object itself and there is nothing about it a caller can change
+    between the check and the projection.
+
+    This entry still calls the reader's own ``verify_workflow_truth_reading``
+    first, which refuses anything that is not a key in that registry with
+    ``READING_NOT_MINTED``.  (``READING_PAYLOAD_REPLACED`` is retired: it named a
+    genuinely minted handle re-pointed at another reading, which needed a key to
+    re-point, and the reader can no longer raise it.)
 
     Consuming the reading rather than repeating it is what makes a health run one
     moment: ``tools/health-check.py`` performs the F09 read once and renders both
@@ -332,12 +334,11 @@ def assurance_health_census(reading: _WorkflowTruthReading) -> dict[str, _Any]:
     reading is reported absent; it is never projected as an empty or a healthy
     census.
     """
-    # THE READER OWNS THE VERDICT, AND ITS REASON IDS.  Asking it once -- rather
-    # than testing the shape here and verifying there -- is what keeps a handle it
-    # minted that is no longer bound to its own reading (READING_PAYLOAD_REPLACED)
-    # distinguishable from anything else a caller passed (READING_NOT_MINTED),
-    # instead of both arriving as one undifferentiated TypeError.  Both ARE
-    # TypeErrors: WorkflowTruthReadingError subclasses it, so every caller that
+    # THE READER OWNS THE VERDICT, AND ITS REASON ID.  Asking it once -- rather
+    # than testing the shape here and verifying there -- is what keeps this seam
+    # from growing a second, differently-worded definition of "a reading", which
+    # is how the two halves of a door come to disagree.  The refusal is a
+    # TypeError: WorkflowTruthReadingError subclasses it, so every caller that
     # already refuses a non-reading with TypeError still does.
     try:
         _verify_workflow_truth_reading(reading)

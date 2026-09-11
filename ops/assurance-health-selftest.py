@@ -31,6 +31,7 @@ from __future__ import annotations
 import copy
 import itertools
 import json
+import pickle
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -1247,6 +1248,24 @@ def _raises_type_error(call) -> bool:
     return False
 
 
+def _raises_attribute_error(call) -> bool:
+    """True when this call refuses with AttributeError.
+
+    The handle declares no slots and no ``__dict__``, so the interpreter itself
+    refuses a write or a read of state on it before any code of this module's
+    runs -- and that refusal is an ``AttributeError``, not a ``TypeError``.  Both
+    are closed doors; they are told apart here so a probe cannot pass by having
+    hit the wrong one.
+    """
+    try:
+        call()
+    except AttributeError:
+        return True
+    except Exception:
+        return False
+    return False
+
+
 def _minted_reading(reader, sentinel: str):
     """Mint ONE reading hermetically and count the reads that produced it.
 
@@ -1291,7 +1310,7 @@ def _hypothetical(workflows: Any, *, now: Any = NOW) -> dict[str, Any]:
 
 
 def source_adapter_checks() -> None:
-    """The seam that binds this projection to the F09 census it reads itself.
+    """The seam that binds this projection to the ONE F09 reading the reader performed.
 
     WHAT THESE PIN.  EVERY layer is declared unread and named, never defaulted --
     the controller readback included, because reading the observation receipts is
@@ -1467,32 +1486,171 @@ def source_adapter_checks() -> None:
     # to pin that the seam read NOTHING -- no file, no process, no clock -- which
     # was true and was exactly the defect: a seam that reads nothing must be HANDED
     # a census, and a handed census is its caller's assertion about the control
-    # plane. The seam now performs the read, and what is pinned is WHICH read.
-    # THE INVERSION, TAKEN ONE STEP FURTHER. The seam no longer reads a SECOND
-    # time either: it consumes the one reading the F09 reader performed for this
-    # run, as an opaque handle that module minted. Everything below is
-    # behavioural -- a source grep cannot tell a closed door from a renamed one.
+    # plane. What is pinned now is WHICH reading it consumes, and the seam does
+    # not perform that reading itself: lib/control_plane_workflow_truth_reader
+    # performs exactly one per health run and the seam takes it as the opaque
+    # handle that module minted, so one run is one moment and a second read never
+    # happens here. Everything below is behavioural -- a source grep cannot tell a
+    # closed door from a renamed one.
     import lib.control_plane_workflow_truth_reader as reader
 
-    class _ForgedSubclass(reader.WorkflowTruthReading):
-        pass
+    # THE HANDLE CARRIES NO CALLER-VISIBLE STATE, and these probe that FIRST,
+    # because every refusal below rests on it.  Seven reviews failed on one class
+    # -- a caller could influence what a minted handle rendered -- and each round
+    # moved the lever a caller reaches for rather than removing it: the payload
+    # attribute, then a content digest re-derived over a still-reachable object,
+    # then an opaque string key a ``str`` subclass mutated inside its own
+    # ``__hash__``.  The class closes when there is nothing on the handle at all.
+    check("the handle class declares no slots, so it can hold no value",
+          reader.WorkflowTruthReading.__slots__ == (),
+          json.dumps(list(reader.WorkflowTruthReading.__slots__)))
+    zero_state = _minted_reading(reader, "ZERO-STATE-PROBE")[0]
+    state_writes = {
+        "setattr": lambda: setattr(zero_state, "_payload", {"available": True}),
+        "object.__setattr__": lambda: object.__setattr__(zero_state, "_key", "k"),
+        "delattr": lambda: delattr(zero_state, "_key"),
+        "object.__delattr__": lambda: object.__delattr__(zero_state, "_payload"),
+        "reading its __dict__": lambda: zero_state.__dict__,
+        "vars()": lambda: vars(zero_state),
+    }
+    landed = [label for label, write in state_writes.items()
+              if not _raises_type_error(write) and not _raises_attribute_error(write)]
+    check("no caller write or read reaches any state on a minted handle",
+          not landed, json.dumps(landed))
+    check("the handle exposes no public accessor a value could be read out of",
+          [name for name in dir(reader.WorkflowTruthReading)
+           if not name.startswith("__")] == ["rendered"],
+          json.dumps([name for name in dir(reader.WorkflowTruthReading)
+                      if not name.startswith("__")]))
+    check("the handle class refuses to be subclassed at class creation",
+          _raises_type_error(lambda: type(
+              "_ForgedSubclass", (reader.WorkflowTruthReading,), {})),
+          "WorkflowTruthReading can still be subclassed")
 
-    # The shell is seeded with a KEY, because a key is all a handle carries now.
-    # It is not a key the reader ever minted, and even a minted one would not
-    # help: the registry entry a key reaches must be the object that presented it.
+    # THE LAST WRITABLE THING AN INSTANCE HAD, and the one __slots__ does not
+    # stop.  ``object.__setattr__(handle, "__class__", forger)`` re-points METHOD
+    # DISPATCH on an object the reader really did mint: ``rendered()`` then runs
+    # the caller's code.  The A01 seam refuses afterwards because ``type()`` reads
+    # the real type -- but tools/health-check.py calls ``rendered()`` directly and
+    # would have printed the forgery, so a refusal at the seam alone is not the
+    # bar.  ``__class__`` is a property without a setter; the write itself fails.
+
+    class _DispatchForger:
+        __slots__ = ("__weakref__",)
+
+        def rendered(self) -> dict[str, Any]:
+            return _reading(keys=(("class-swap-forged", 1),),
+                            owners={"class-swap-forged@v1": MANIFEST_OWNER})
+
+    dispatch = _minted_reading(reader, "CLASS-SWAP-PROBE-READING")[0]
+    dispatch_baseline = dispatch.rendered()
+    class_writes = {
+        "object.__setattr__": lambda: object.__setattr__(
+            dispatch, "__class__", _DispatchForger),
+        "setattr": lambda: setattr(dispatch, "__class__", _DispatchForger),
+    }
+    swapped = [label for label, write in class_writes.items()
+               if not _raises_type_error(write) and not _raises_attribute_error(write)]
+    check("__class__ cannot be reassigned, so method dispatch cannot be re-pointed",
+          not swapped and type(dispatch) is reader.WorkflowTruthReading
+          and dispatch.rendered() == dispatch_baseline
+          and "class-swap-forged" not in json.dumps(dispatch.rendered(), default=str),
+          json.dumps(swapped))
+
+    # AND THE CAPTURE IS IMMUTABLE IN FACT, NOT BY INTERFACE.  A MappingProxyType
+    # is a read-only VIEW over a dict that still exists: one gc.get_referents()
+    # hop reaches the backing dict, writes through it, and the proxy then serves
+    # the write.  The capture is built from tuples, which have no backing anything,
+    # and this walks the whole captured object graph to prove it.
+    import gc
+
+    def _mutable_objects(value: Any) -> list[str]:
+        seen: set[int] = set()
+        found: list[str] = []
+
+        def walk(node: Any) -> None:
+            if id(node) in seen or isinstance(node, type):
+                return
+            seen.add(id(node))
+            if isinstance(node, (dict, list, set, bytearray)) or hasattr(node, "__dict__"):
+                found.append(type(node).__name__)
+            for referent in gc.get_referents(node):
+                walk(referent)
+
+        walk(value)
+        return sorted(set(found))
+
+    # Its own freshly minted handle, so this measures the CAPTURE rather than
+    # inheriting whatever the __class__ probe above left behind.
+    captured_entry = reader._entry(_minted_reading(reader, "CAPTURE-SCAN-READING")[0])
+    check("no mutable object is reachable anywhere inside a captured reading",
+          captured_entry is not None and _mutable_objects(captured_entry[0]) == [],
+          json.dumps(None if captured_entry is None
+                     else _mutable_objects(captured_entry[0])))
+
+    # The shell is an object.__new__ of the handle class and nothing more: there
+    # is no attribute left to seed it with, which is itself the point, and it is
+    # absent from the weak-keyed registry because it was never a key in it.
     shell = object.__new__(reader.WorkflowTruthReading)
-    object.__setattr__(shell, "_key", "forged-key-no-reader-ever-minted")
+    check("even a shell of the real class cannot be given state to carry",
+          _raises_attribute_error(
+              lambda: object.__setattr__(shell, "_key", "forged-key")),
+          "an unminted shell accepted an attribute")
+
+    class _LookAlikeHandle:
+        """Matches a genuine handle by ``__hash__``/``__eq__`` on purpose.
+
+        The registry is a ``WeakKeyDictionary``, and a weak reference hashes and
+        compares as its referent -- so a look-alike that answers equal to a real
+        handle would reach a real entry if the lookup began at the mapping.  It
+        begins at an exact-type test instead, and this is the probe for that.
+        """
+
+        __slots__ = ("__weakref__", "_twin")
+
+        def __init__(self, twin: Any) -> None:
+            self._twin = twin
+
+        def __hash__(self) -> int:
+            return hash(self._twin)
+
+        def __eq__(self, other: Any) -> bool:
+            return True
+
+        def rendered(self) -> dict[str, Any]:
+            return _reading(surfaces=[_surface("assurance-fabric-child.launchd.v1")])
+
+    class _StrSubclassHandle(str):
+        """A ``str`` subclass offered as the handle, with caller code in __hash__.
+
+        This is the seventh review's shape, pointed at the surface that replaced
+        the one it beat: there is no key read off a handle any more, so the only
+        way to present a mutating string is to present it AS the handle.
+        """
+
+        hashes = 0
+
+        def __hash__(self) -> int:
+            type(self).hashes += 1
+            return hash(str(self))
+
+    twin, _ = _minted_reading(reader, "LOOK-ALIKE-TWIN-READING")
+    look_alike = _LookAlikeHandle(twin)
+    str_handle = _StrSubclassHandle("forged-key-no-reader-ever-minted")
     forged_handles = {
         "a census dict": _reading(surfaces=[_surface("assurance-fabric-child.launchd.v1")]),
         "None": None,
         "an object.__new__ shell of the handle class": shell,
         "a handle-shaped duck type": type("Reading", (), {"rendered": lambda self: {
             "available": True, "census": {}, "surfaces": [], "owners": {}}})(),
+        "a look-alike whose __hash__ and __eq__ match a real handle": look_alike,
+        "a str subclass carrying caller code in __hash__": str_handle,
+        "a deep copy of a genuinely minted handle": copy.deepcopy(twin),
     }
     try:
-        forged_handles["a subclass minted with the private token"] = \
-            _ForgedSubclass(reader._MINT, "forged-key-no-reader-ever-minted")
-    except TypeError:
+        forged_handles["a pickle round-trip of a genuinely minted handle"] = \
+            pickle.loads(pickle.dumps(twin))
+    except Exception:
         pass
     accepted_forgeries = []
     for label, forged in forged_handles.items():
@@ -1505,9 +1663,17 @@ def source_adapter_checks() -> None:
         accepted_forgeries.append(label)
     check("the seam accepts no reading a caller built, whatever its shape or type",
           not accepted_forgeries, json.dumps(accepted_forgeries))
+    check("a look-alike that compares equal to a real handle reaches no entry",
+          reader.is_workflow_truth_reading(look_alike) is False
+          and _raises_type_error(lambda: reader.verify_workflow_truth_reading(look_alike)),
+          "a matching __hash__/__eq__ reached a genuine registry entry")
+    check("the handle a look-alike was built to match still renders its own reading",
+          "LOOK-ALIKE-TWIN-READING" in json.dumps(twin.rendered(), default=str),
+          json.dumps(twin.rendered(), default=str)[:200])
     check("the reader refuses to mint a reading from caller data",
-          _raises_type_error(lambda: reader.WorkflowTruthReading(
-              object(), "forged-key")), "the handle has a public constructor")
+          _raises_type_error(lambda: reader.WorkflowTruthReading(object()))
+          and _raises_type_error(lambda: reader.WorkflowTruthReading()),
+          "the handle has a public constructor")
     check("a handle that skipped the mint cannot hand out a reading",
           _raises_type_error(shell.rendered), "an unminted shell rendered a census")
     # THE CONTROL: a handle the reader actually minted IS accepted, so the
@@ -1532,25 +1698,25 @@ def source_adapter_checks() -> None:
           "the reader accepts caller input")
 
     # ---- THE MUTATED-HANDLE DOOR, AND THE TOCTOU BEHIND IT -----------------
-    # THE DEFECT THIS EXISTS FOR, IN TWO ROUNDS.  Every refusal above measures
-    # PROVENANCE: is this object one the reader minted?  A review answered yes --
-    # it took a handle the reader really had minted, replaced the payload behind
-    # it, and projected a complete forged census through the seam.  Identity
-    # passed because the provenance was genuine; only the CONTENTS were the
-    # caller's.  The answer to that was a content digest bound at mint and
-    # re-derived before each render -- and a second review beat THAT by
-    # installing a stateful mapping which served authentic content to the digest
-    # traversal and forged content to the render traversal.  Verify-then-read-
-    # again is two traversals of an object the caller still owns, and the gap
-    # between them is the door.
+    # THE DEFECT THIS EXISTS FOR, AS A CLASS RATHER THAN AS FOUR INSTANCES.  Every
+    # refusal above measures PROVENANCE: is this object one the reader minted?  A
+    # review answered yes -- it took a handle the reader really had minted,
+    # replaced the payload behind it, and projected a complete forged census
+    # through the seam.  The answer to that was a content digest bound at mint,
+    # and a review beat it with a stateful mapping that served authentic content
+    # to the digest traversal and forged content to the render traversal.  The
+    # answer to THAT was a private registry reached by an opaque string key, and a
+    # review beat it with a ``str`` subclass that swapped the key inside its own
+    # ``__hash__``, so the entry verified and the entry consumed were two
+    # different readings.
     #
-    # SO THE DOOR IS CLOSED BY THERE BEING NOTHING TO REPLACE.  The reader
-    # captures the reading ONCE at mint and the handle carries only an opaque key
-    # to that capture, so every render is a copy of the same captured value.
-    # These checks are the behavioural proof: each mutation is tried on a
-    # GENUINELY minted handle, and the bar is not merely that the seam refuses --
-    # it is that the handle STILL RENDERS THE ORIGINAL CAPTURE, byte for byte,
-    # and that nothing the mutation wrote ever appears in the seam's answer.
+    # THE ONE THING ALL FOUR NEEDED was state on the handle: an attribute to
+    # replace, or a value read off it that a lookup then trusted.  The handle now
+    # carries none, so these checks are the behavioural proof of the CLASS: each
+    # mutation is tried on a GENUINELY minted handle, and the bar is not merely
+    # that the seam refuses -- it is that the handle STILL RENDERS THE ORIGINAL
+    # CAPTURE, byte for byte, and that nothing the mutation wrote ever appears in
+    # the seam's answer.
     FORGED_KEY = "forged-by-mutation"
     honest = _reading(surfaces=[_surface("assurance-fabric-child.launchd.v1")])
     forged = _reading(keys=((FORGED_KEY, 1),), owners={f"{FORGED_KEY}@v1": MANIFEST_OWNER})
@@ -1569,10 +1735,9 @@ def source_adapter_checks() -> None:
 
         This is the shape that defeated "derive the digest, then go and read the
         payload again": it is honest while it is being verified and forged while
-        it is being rendered.  It is used two ways below -- installed on a minted
-        handle, and installed as the reader's own snapshot source -- and it
-        counts its reads, so "traversed exactly once" is measured rather than
-        asserted.
+        it is being rendered.  It is used two ways below -- offered to a minted
+        handle, and installed as the reader's own snapshot source -- and it counts
+        its reads, so "traversed exactly once" is measured rather than asserted.
         """
 
         def __init__(self) -> None:
@@ -1607,11 +1772,27 @@ def source_adapter_checks() -> None:
     def _installs_a_stateful_mapping_under_the_key_name(handle):
         object.__setattr__(handle, "_key", _StatefulForgery())
 
+    def _installs_a_str_subclass_where_a_key_used_to_live(handle):
+        # THE SEVENTH REVIEW'S SHAPE.  It needed a caller-visible ``_key`` that a
+        # registry lookup would read back; there is no such attribute to install
+        # one on, and this records that the write itself is the refusal.
+        object.__setattr__(handle, "_key", _StrSubclassHandle("swapped"))
+
+    def _repoints_the_handle_at_another_genuine_reading(handle):
+        object.__setattr__(handle, "_key", "another-readings-key")
+
     def _swaps_a_nested_mapping_after_minting(handle):
         rendered = handle.rendered()
         rendered["census"]["summary"] = copy.deepcopy(forged["census"]["summary"])
         rendered["census"]["rows"] = copy.deepcopy(forged["census"]["rows"])
         rendered["owners"][f"{FORGED_KEY}@v1"] = MANIFEST_OWNER
+
+    def _swaps_a_nested_mapping_twice_over(handle):
+        first = handle.rendered()
+        first["census"]["rows"] = copy.deepcopy(forged["census"]["rows"])
+        second = handle.rendered()
+        second["surfaces"] = copy.deepcopy(forged["surfaces"])
+        second["census"].setdefault("rows", []).extend(first["census"]["rows"])
 
     def _writes_a_key_of_what_it_was_handed(handle):
         handle.rendered()["census"] = copy.deepcopy(forged["census"])
@@ -1623,7 +1804,12 @@ def source_adapter_checks() -> None:
         "installing a stateful mapping as the payload": _installs_a_stateful_mapping,
         "installing a stateful mapping where the key lives":
             _installs_a_stateful_mapping_under_the_key_name,
+        "installing a str subclass where the key lives":
+            _installs_a_str_subclass_where_a_key_used_to_live,
+        "re-pointing the handle at another genuine reading":
+            _repoints_the_handle_at_another_genuine_reading,
         "swapping nested mappings after minting": _swaps_a_nested_mapping_after_minting,
+        "swapping nested mappings across two renders": _swaps_a_nested_mapping_twice_over,
         "writing a key of what the handle handed out": _writes_a_key_of_what_it_was_handed,
     }
     divergent, leaked, verdicts = [], [], {}
@@ -1660,14 +1846,19 @@ def source_adapter_checks() -> None:
     check("a genuinely minted handle whose contents were mutated never projects them",
           not leaked, json.dumps({"leaked": leaked, "verdicts": verdicts}))
     check("the sweep tried every replacement shape the reviews used",
-          len(forgery_attempts) == 6 and set(verdicts) == set(forgery_attempts),
+          len(forgery_attempts) == 9 and set(verdicts) == set(forgery_attempts),
           json.dumps(sorted(set(forgery_attempts) - set(verdicts))))
+    check("every state-bearing shape is refused at the WRITE, not at a later check",
+          all(verdicts[label].startswith("write refused")
+              for label in forgery_attempts
+              if label.startswith(("replacing", "assigning", "installing", "re-pointing"))),
+          json.dumps({label: verdicts[label] for label in forgery_attempts}))
 
-    # THE TOCTOU ITSELF, AT ITS SOURCE.  The mutations above install the stateful
-    # mapping where a caller can reach.  This installs it where the READER reads:
-    # the snapshot source itself answers differently on a second read.  One
-    # capture means there is no second read -- every render is the first answer,
-    # and the read counter proves each key was touched exactly once.
+    # THE TOCTOU ITSELF, AT ITS SOURCE.  The mutations above aim at the handle.
+    # This installs the stateful mapping where the READER reads: the snapshot
+    # source itself answers differently on a second read.  One capture means
+    # there is no second read -- every render is the first answer, and the read
+    # counter proves each key was touched exactly once.
     stateful_source = _StatefulForgery()
 
     def _stateful_snapshot() -> Any:
@@ -1692,42 +1883,53 @@ def source_adapter_checks() -> None:
           and FORGED_KEY not in json.dumps(projected, default=str),
           json.dumps(renders[0], default=str)[:200])
 
-    # AND THE BINDING IS STILL CHECKED BY IDENTITY, named rather than inferred: a
-    # handle re-pointed at ANOTHER genuine reading is refused under its own reason
-    # id, so the mint registry is reached through the handle that owns the entry
-    # and never through whatever key an object happens to be carrying.
-    repointed = _mint(honest)
+    # THE LOOKUP INPUT IS THE OBJECT, so two genuine handles cannot be crossed.
+    # There is no key to hand one handle that names the other's reading: the
+    # registry is reached by BEING the handle, and this pins that two readings
+    # minted in the same process stay their own.
+    own = _mint(honest)
     other = _mint(forged)
-    own_key = object.__getattribute__(repointed, "_key")
-    object.__setattr__(repointed, "_key", object.__getattribute__(other, "_key"))
-    reason_ids = []
-    for call in (repointed.rendered, lambda: sources.assurance_health_census(repointed)):
+    check("two genuine handles each render only their own reading",
+          own.rendered() == baseline
+          and FORGED_KEY in json.dumps(other.rendered(), default=str)
+          and FORGED_KEY not in json.dumps(own.rendered(), default=str),
+          json.dumps(own.rendered(), default=str)[:200])
+    check("a str subclass offered as a handle never runs inside a registry lookup",
+          reader.is_workflow_truth_reading(str_handle) is False
+          and _StrSubclassHandle.hashes == 0,
+          json.dumps({"hashes": _StrSubclassHandle.hashes}))
+
+    # ONE REFUSAL, ONE REASON ID.  The re-pointed-handle refusal
+    # (READING_PAYLOAD_REPLACED) existed only while a handle carried a key a
+    # caller could re-point.  It carries nothing now, so this module can no longer
+    # raise it, and the constant survives only so an importing consumer does not
+    # break.  A retired reason id that quietly kept firing would be worse than one
+    # that was deleted, so this pins that it fires for nothing at all.
+    retired = []
+    for label, value in list(forged_handles.items()) + [("a re-pointed handle", own)]:
         try:
-            call()
-        except TypeError as exc:
-            reason_ids.append(getattr(exc, "reason_id", type(exc).__name__))
-        else:
-            reason_ids.append("accepted")
-    check("rendered() and the seam both refuse a re-pointed handle by reason id",
-          reason_ids == [reader.READING_PAYLOAD_REPLACED, reader.READING_PAYLOAD_REPLACED],
-          json.dumps(reason_ids))
+            reader.verify_workflow_truth_reading(value)
+        except reader.WorkflowTruthReadingError as exc:
+            if exc.reason_id == reader.READING_PAYLOAD_REPLACED:
+                retired.append(label)
+    check("the retired payload-replaced reason id is raised by nothing",
+          not retired, json.dumps(retired))
     shell_reason = None
     try:
         shell.rendered()
     except TypeError as exc:
         shell_reason = getattr(exc, "reason_id", type(exc).__name__)
-    check("a handle the reader never minted refuses under the OTHER reason id",
+    check("a handle the reader never minted refuses under the not-minted reason id",
           shell_reason == reader.READING_NOT_MINTED, json.dumps(shell_reason))
-    # AND THE REFUSAL IS BOUND TO THE BINDING, NOT TO THE ACT OF WRITING: giving
-    # the handle its own key back makes the same object answer again, with the
-    # reading it was minted for and nothing the mutation wrote.
-    object.__setattr__(repointed, "_key", own_key)
-    restored = sources.assurance_health_census(repointed)
-    check("restoring the handle's own key restores its own reading",
-          restored.get("available") is True
-          and FORGED_KEY not in json.dumps(restored, default=str)
-          and repointed.rendered() == baseline,
-          json.dumps({k: v for k, v in restored.items() if k != "projection"})[:300])
+    # AND THE BINDING IS PERMANENT FOR THE LIFE OF THE HANDLE, because nothing
+    # about it can be written.  The handle that survived every mutation above
+    # answers again here, last, with the reading it was minted for and with
+    # nothing any attempt wrote -- so the sweep measured a door that stayed shut
+    # rather than a handle that had been killed along the way.
+    check("the swept handle still renders its own reading after every attempt",
+          own.rendered() == baseline
+          and sources.assurance_health_census(own).get("available") is True,
+          json.dumps(own.rendered(), default=str)[:300])
 
 
 def sources_public_surface_guard_checks(health) -> None:
