@@ -8,6 +8,11 @@ out/
 # so the link itself showed up as untracked in every worktree (2026-08-10).
 out
 mcp-server/.neon
+# ...and the ROOT one, which the Neon CLI writes beside it. 37 bytes, one
+# field, `orgId` — the Neon organisation this checkout talks to, not a
+# credential, and `neonctl` rewrites it on demand. Anchored so it ignores the
+# repo-root file only and leaves the line above doing its own job.
+/.neon
 _to_delete/
 *.bak-*
 
