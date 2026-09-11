@@ -844,6 +844,16 @@ test("a ledger carrying no provenance cannot reach a prompt decision", () => {
     "missing_field");
 });
 
+test("a provenance missing any one of its fields cannot reach a prompt decision", () => {
+  // The whole provenance object being absent is one case; a half-filled one is
+  // the case that would otherwise slip through as "close enough".
+  for (const field of ["class", "owner", "read_at"]) {
+    const provenance = { ...AUTHORITATIVE_PROVENANCE };
+    delete provenance[field];
+    throwsWithCode(() => prompt(observe(), { ...EMPTY_LEDGER, provenance }), "missing_field");
+  }
+});
+
 test("an unregistered ledger provenance class is refused by name", () => {
   throwsWithCode(
     () => prompt(observe(), {
@@ -1331,6 +1341,8 @@ test("the policy digest is stable and moves when a vocabulary moves", () => {
     "calendar_source_seam", "explicit_activation_intent",
     "refused_activation_intents", "model_seams", "recording_fragments",
     "model_widening_fragments", "required_read_operations",
+    "ledger_provenance_classes", "authoritative_ledger_provenance_class",
+    "prompt_ledger_owner_seam",
     "min_required_corroborating_signals", "production_outcome_steps",
   ]) {
     assert.ok(key in preimage, `${key} is missing from the policy preimage`);
