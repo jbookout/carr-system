@@ -195,6 +195,36 @@ const MODEL_STEP_FIELDS = Object.freeze([
   "input_contract_ref", "output_contract_ref", "rationale", "responsibility_class",
   "selection_basis", "step_ref",
 ]);
+// THE ORACLE AND FIXTURE REFS ARE A DECLARATION, NOT A BINDING, and that is a
+// decision rather than an omission.  All five names below are checked for shape
+// and uniqueness and NOTHING RESOLVES THEM: no code here asks whether
+// oracle_ref names a real oracle or whether a fixture_ref names a fixture that
+// exists.  A FULL slice may therefore seal an oracle nobody can run.
+//
+// WHY NOT RESOLVE THEM HERE.  requirePlan is one pure predicate over one input
+// and takes no connection, and it re-runs against the STORED append-only plan
+// row on every read path (sourcePlan, closureProjection, controllerPlan).  A
+// resolver would make an already registered passport unreadable the day its
+// referent was renamed, retired or moved, with nothing able to amend the
+// immutable row -- the same stranding the v1 divergences above refuse, except
+// arriving later and from outside the plan.  Resolution binds a moment; a
+// sealed plan binds forever, so the two cannot be the same check.
+//
+// WHY NOT RESOLVE THEM ELSEWHERE EITHER, yet.  There is no registry to resolve
+// against.  The only oracle registry in this tree is the A00 kernel's closed
+// MINIMUM_REQUIRED_MEMBERS set (benchmark-minimum.v5.js), whose refs are
+// gate-producer oracles bound to producer roles; a slice's oracle_ref lives in
+// a different namespace and no producer, table or manifest enumerates it.
+// Inventing one here would be a second authority over what an oracle is, which
+// is the excluded-scope item this slice must not violate.
+//
+// WHAT THAT LEAVES.  A FULL slice must NAME its oracle and at least one
+// fixture, exactly, uniquely, and permanently: the refs are sealed into
+// plan_digest, so a plan cannot be re-pointed at a friendlier oracle after
+// acceptance without breaking its own seal, and a reviewer reading the plan is
+// told precisely which oracle the producer claimed.  Binding those names to
+// resolvable objects needs a registry with an owner and a retirement rule, and
+// that is deliberately OUT OF SCOPE here; nothing below implements it.
 const FULL_DESIGN_REF_FIELDS = Object.freeze([
   "authority_envelope_ref", "design_interview_ref", "failure_model_ref", "fixture_refs", "oracle_ref",
 ]);
@@ -205,9 +235,19 @@ const SHORT_TEMPLATE_FIELDS = Object.freeze(["objective_summary", "template_ref"
 const RESERVED_CODE_RESPONSIBILITIES = new Set([
   "identity", "policy", "permissions", "state", "validation", "idempotency", "execution",
 ]);
-const TYPED_UNCERTAINTY_CLASSES = new Set([
+// THE ONE TYPED-UNCERTAINTY AUTHORITY, and the reason it is exported rather
+// than private.  A second consumer -- the V5-F04 model-routing adapter -- has
+// to speak this same closed vocabulary when it validates a typed proposal, and
+// it restated the six names instead, under a comment promising the two were one
+// set with nothing holding them there.  That is the "duplicate authorities"
+// shape this slice's own excluded scope refuses, so the vocabulary is written
+// once here and imported there.  The frozen list is the authority; the Set
+// below is derived from it and stays private, because membership is all this
+// module needs and an exported Set would be a mutable second handle on it.
+export const ENGINEERING_TYPED_UNCERTAINTY_CLASSES = Object.freeze([
   "classification", "extraction", "summarization", "ranking", "drafting", "disambiguation",
 ]);
+const TYPED_UNCERTAINTY_CLASSES = new Set(ENGINEERING_TYPED_UNCERTAINTY_CLASSES);
 // Q029.D1: cost may appear alongside a capability reason but never alone.
 const SELECTION_BASIS_VALUES = new Set([
   "typed_uncertainty", "capability_gain", "quality_gain", "adaptability_gain", "cost",
