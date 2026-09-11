@@ -35,6 +35,7 @@ became the system's own answer.
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import subprocess
@@ -42,7 +43,8 @@ import sys
 from datetime import datetime, timezone
 from typing import Any
 
-__all__ = ["SCHEMA_VERSION", "read_workflow_truth_snapshot"]
+__all__ = ["SCHEMA_VERSION", "WorkflowTruthReading", "is_workflow_truth_reading",
+           "read_workflow_truth_reading", "read_workflow_truth_snapshot"]
 
 SCHEMA_VERSION = "control-plane-workflow-truth-reader.v1"
 
@@ -191,3 +193,82 @@ def read_workflow_truth_snapshot() -> dict[str, Any]:
     if completion_error:
         result["completion_error"] = completion_error
     return result
+
+
+# ---------------------------------------------------------------------------
+# ONE READING, HANDED TO EVERY SECTION THAT RENDERS IT
+#
+# THE DEFECT THIS EXISTS FOR.  Two consumers each calling
+# ``read_workflow_truth_snapshot()`` perform TWO control-plane reads, so the
+# workflow-census section and the assurance-health section of one health run
+# could describe two different moments and be printed as one state of the world.
+# Passing the first reading to the second consumer as a plain dict would fix the
+# moment and reopen the door this module was split out to close: a dict is
+# composable, so "the reading" would once again be whatever the caller handed
+# over -- the exact route by which a review reproduced a healthy scope out of a
+# hand-written census.
+#
+# SO THE READING TRAVELS AS AN OPAQUE RECEIPT.  ``read_workflow_truth_reading()``
+# performs exactly one read and returns a handle this module minted.  The handle
+# holds a copy no caller can reach, hands out only copies, and is registered by
+# IDENTITY -- so a forged instance, a subclass, and an ``object.__new__`` shell
+# are all rejected by ``is_workflow_truth_reading`` no matter what they contain.
+# A caller cannot manufacture one; the only way to hold a reading is for this
+# module to have performed it.
+# ---------------------------------------------------------------------------
+_MINT = object()
+_MINTED: list["WorkflowTruthReading"] = []
+
+
+class WorkflowTruthReading:
+    """An opaque receipt for ONE reading THIS module performed.
+
+    There is no public constructor: ``__init__`` refuses without the
+    module-private mint token, and every accessor re-checks that this exact
+    object is in the mint registry, so bypassing ``__init__`` altogether gets a
+    refusal rather than a reading.  What it carries is never handed out by
+    reference -- ``rendered()`` returns a deep copy, so a consumer that mutates
+    what it printed cannot change what another consumer projects from.
+    """
+
+    __slots__ = ("_payload",)
+
+    def __init__(self, mint: Any, payload: dict[str, Any]) -> None:
+        if mint is not _MINT:
+            raise TypeError(
+                "a workflow-truth reading is minted by read_workflow_truth_reading(); "
+                "it cannot be constructed from caller-supplied data")
+        self._payload = payload
+
+    def rendered(self) -> dict[str, Any]:
+        """A private copy of this reading, for rendering or projection."""
+        if not is_workflow_truth_reading(self):
+            raise TypeError("this object was not minted by this module's reader")
+        return copy.deepcopy(self._payload)
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostic only
+        available = bool(self._payload.get("available")) \
+            if isinstance(self._payload, dict) else False
+        return f"<WorkflowTruthReading available={available}>"
+
+
+def is_workflow_truth_reading(value: Any) -> bool:
+    """True only for a handle minted here for a reading performed here.
+
+    Identity, not shape: ``value is minted`` cannot be satisfied by anything a
+    caller builds, whatever its type name, attributes or contents.
+    """
+    return type(value) is WorkflowTruthReading and any(value is minted for minted in _MINTED)
+
+
+def read_workflow_truth_reading() -> WorkflowTruthReading:
+    """Perform exactly ONE reading and hand it back as an opaque receipt.
+
+    Every consumer of a single health run takes its census from one of these, so
+    the sections of that run describe ONE moment.  A refused reading is minted
+    too -- the receipt then carries ``available=False`` with its reason, which is
+    what every consumer prints, rather than one section going silent.
+    """
+    handle = WorkflowTruthReading(_MINT, read_workflow_truth_snapshot())
+    _MINTED.append(handle)
+    return handle

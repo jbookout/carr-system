@@ -262,26 +262,37 @@ if "--tasks" in sys.argv:
     sys.exit(classify_tasks(sys.argv[_i + 1]))
 
 
-def _workflow_truth_snapshot():
-    """Read the clean-start workflow census for the Operations surface.
+def _workflow_truth_reading():
+    """Perform THE ONE V5-F09 reading this run renders every section from.
 
-    THE READING ITSELF LIVES IN lib/control_plane_workflow_truth_reader, and this
-    is a one-line delegation to it. It moved there so the A01 assurance-health
-    seam can perform the SAME read rather than be handed a census by whoever
-    called it: an adapter that ACCEPTS a census accepts its caller's assertion
-    about the control plane, and that was the exported route a review used to
-    reproduce a healthy scope out of a hand-written snapshot.
+    ONE RUN, ONE READING, ONE MOMENT. Two sections of this surface are projected
+    from the workflow census -- the F09 census itself and A01 assurance health --
+    and each used to call the reader, so one run performed two control-plane reads
+    and printed two moments as one state of the world. The reading is performed
+    here exactly once and travels to both as the reader's own opaque handle.
 
-    Reads only; it creates no job, no registry and no effect. UNAVAILABLE IS NOT
-    EMPTY -- every refusal comes back as available=False carrying its reason, and
-    the caller prints that rather than an empty census.
+    THE HANDLE, AND WHY IT IS NOT A DICT. lib/control_plane_workflow_truth_reader
+    mints a WorkflowTruthReading for a read IT performed and registers it by
+    object identity. Passing the census onward as a plain dict would fix the
+    moment and reopen the door that module was split out to close -- a dict is
+    composable, so "the reading" would again be whatever a caller handed over,
+    which is the exported route a review used to reproduce a healthy scope out of
+    a hand-written snapshot.
+
+    Returns (reading, rendered): the handle the assurance section consumes, and
+    the copy this file's own census section prints. Reads only; it creates no
+    job, no registry and no effect. UNAVAILABLE IS NOT EMPTY -- every refusal
+    comes back as available=False carrying its reason, and both sections print
+    that reason rather than an empty census.
     """
     try:
         sys.path.insert(0, REPO_ROOT)
-        from lib.control_plane_workflow_truth_reader import read_workflow_truth_snapshot
+        from lib.control_plane_workflow_truth_reader import read_workflow_truth_reading
     except Exception as exc:
-        return {"available": False, "reason": f"adapter unavailable ({type(exc).__name__}: {exc})"}
-    return read_workflow_truth_snapshot()
+        return None, {"available": False,
+                      "reason": f"adapter unavailable ({type(exc).__name__}: {exc})"}
+    reading = read_workflow_truth_reading()
+    return reading, reading.rendered()
 
 
 def _canonical_workflow_truth(snap):
@@ -363,14 +374,18 @@ def _canonical_workflow_truth(snap):
 def _canonical_assurance_health(snap):
     """Print the A01 assurance-health census and return rc.
 
-    THE CENSUS IS READ, NEVER SUPPLIED.  lib/assurance_health_sources performs
-    its own V5-F09 read through lib/control_plane_workflow_truth_reader -- the
-    same reader the workflow-truth section above renders from -- and its public
-    entry accepts no argument at all.  The ``snap`` this function is handed is
-    NOT that adapter's input: an adapter that accepts a census accepts its
-    caller's assertion about the control plane, and a review reproduced
-    ``{"state": "healthy", "green": true}`` through exactly that door before it
-    was closed.
+    THE CENSUS IS READ, NEVER SUPPLIED, AND READ ONCE FOR BOTH SECTIONS.  This
+    section projects THE SAME reading the workflow-truth section above printed:
+    lib/control_plane_workflow_truth_reader performed it once for this run and
+    handed back an opaque WorkflowTruthReading, which is what
+    ``lib/assurance_health_sources.assurance_health_census`` accepts and the only
+    thing it accepts.  The handle is registered by object identity in the reader,
+    so nothing a caller composes -- including anything carried in a --fixture
+    file, which is JSON and can hold no handle at all -- can be passed for one.
+    An adapter that accepts a census accepts its caller's assertion about the
+    control plane, and a review reproduced ``{"state": "healthy", "green": true}``
+    through exactly that door before it was closed; an adapter that reads a
+    SECOND time describes a second moment, which is the defect this shape closes.
 
     THE --fixture DOOR IS A TEST DOOR AND LABELS ITSELF AS ONE.  A fixture census
     still has to drive this section hermetically -- that is what proves the
@@ -408,8 +423,13 @@ def _canonical_assurance_health(snap):
         return _fixture_assurance_health(sources, snap)
 
     print("Assurance health — evidence-backed state per bound workflow scope")
+    reading = (snap or {}).get("workflow_reading")
+    if reading is None:
+        print("  -- assurance health   UNAVAILABLE — this run holds no F09 reading to "
+              "project; the workflow-truth section above carries the reason")
+        return 0
     try:
-        result = sources.assurance_health_census()
+        result = sources.assurance_health_census(reading)
     except Exception as exc:
         print(f"  -- assurance health   UNAVAILABLE — the read refused "
               f"({type(exc).__name__}: {exc})")
@@ -642,7 +662,12 @@ print(json.dumps({"registered": sorted(TARGETS), "rows": rows, "retired": retire
                     })
             snapshot["job_definitions"] = definitions
             snapshot["jobs"] = rows
-        snapshot["workflows"] = _workflow_truth_snapshot()
+        # ONE reading for both the census section and assurance health: the
+        # handle is what the A01 adapter consumes, the rendered copy is what the
+        # census section below prints. Neither section reads a second time.
+        reading, rendered = _workflow_truth_reading()
+        snapshot["workflow_reading"] = reading
+        snapshot["workflows"] = rendered
     if CANONICAL_SECTION == "all":
         # Built from the named constants rather than spelled inline, so the
         # acceptance and the query can never drift apart. Both values are fixed

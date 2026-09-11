@@ -1,10 +1,11 @@
 """Bind the A01 assurance-health projection to the F09 census this seam READS.
 
-WHAT THIS IS.  One public function, ``assurance_health_census()``, which takes no
-arguments, reads the V5-F09 workflow census from the control plane that owns it
-through ``lib/control_plane_workflow_truth_reader`` -- the same reader
-``tools/health-check.py --canonical`` renders its own F09 section from -- and
-projects the bound scopes ``lib/assurance_health`` turns into health states.
+WHAT THIS IS.  One public function, ``assurance_health_census(reading)``, whose
+one parameter accepts NOTHING a caller can build: the only value it takes is an
+opaque ``WorkflowTruthReading`` minted by ``lib/control_plane_workflow_truth_reader``
+for a read that module performed -- the same reader ``tools/health-check.py
+--canonical`` renders its own F09 section from.  It projects the bound scopes
+``lib/assurance_health`` turns into health states.
 
 THE CORRECTION THIS MODULE MOST RECENTLY TOOK, and it is the reason the shape
 changed.  This module used to export ``assurance_health_scopes(workflows)`` and
@@ -21,9 +22,19 @@ public and already answered.  A caller-supplied census is the caller's assertion
 about the control plane, exactly as a caller-supplied receipt is its assertion
 about a receipt store, and SHAPE IS NEVER AUTHORITY.
 
-SO THE ONLY CALLER INPUT IS THE REQUEST TO READ.  ``assurance_health_census()``
-has no parameter through which a census, a row, a clock or a path could arrive:
-it performs the read itself and takes its own instant.  The classification logic
+SO THE ONLY CALLER INPUT IS A READING THE READER ITSELF PERFORMED.  There is no
+parameter through which a census, a row, a clock or a path can arrive:
+``assurance_health_census`` accepts one argument and refuses with ``TypeError``
+unless it is a reading handle the reader minted, which no caller can manufacture
+-- the handle is registered by object identity, so a forged instance, a subclass
+and an ``object.__new__`` shell are all refused whatever they contain.  The
+instant is still this module's own.
+
+WHY IT TAKES THE READING RATHER THAN REPEATING IT.  This entry used to call the
+reader itself, which meant one ``tools/health-check.py`` run performed the F09
+read TWICE -- once for its workflow-census section and once here -- so the two
+sections could describe two different moments and be printed as one state of the
+world.  One run now performs one reading and both sections render from it.  The classification logic
 that turns a reading into scopes is module-private
 (``_assurance_health_scopes``, ``_project``), and the acceptance suite reaches it
 for fixture censuses ONLY through ``_would_be_assurance_health_if_authoritative``
@@ -90,7 +101,8 @@ from lib.control_plane_workflow_truth import (
     UNREADABLE as _UNREADABLE,
 )
 from lib.control_plane_workflow_truth_reader import (
-    read_workflow_truth_snapshot as _read_workflow_truth_snapshot,
+    WorkflowTruthReading as _WorkflowTruthReading,
+    is_workflow_truth_reading as _is_workflow_truth_reading,
 )
 
 SCHEMA_VERSION = "assurance-health-sources.v1"
@@ -276,21 +288,35 @@ def _project(workflows: _Any, *, now: _Any) -> dict[str, _Any]:
     }
 
 
-def assurance_health_census() -> dict[str, _Any]:
-    """Read the F09 census from the control plane and project assurance health.
+def assurance_health_census(reading: _WorkflowTruthReading) -> dict[str, _Any]:
+    """Project assurance health from ONE reading the F09 reader performed.
 
-    THE ONLY PUBLIC ENTRY, AND IT ACCEPTS NOTHING.  No census, no rows, no
-    surfaces, no owners, no clock, no path: the one caller input is the request
-    to read.  The reading is performed by
-    ``lib/control_plane_workflow_truth_reader.read_workflow_truth_snapshot`` --
-    the same one ``tools/health-check.py --canonical`` renders its F09 section
-    from -- and the instant is this function's own.
+    THE ONLY PUBLIC ENTRY, AND THE ONLY THING IT ACCEPTS IS A READING IT COULD
+    NOT HAVE BEEN GIVEN BY A CALLER.  ``reading`` must be a
+    ``WorkflowTruthReading`` minted by
+    ``lib/control_plane_workflow_truth_reader.read_workflow_truth_reading`` for a
+    read that module performed; the handle is registered by object identity, so
+    no census, row set, surface list, owner map, clock or path can arrive through
+    this parameter and nothing shaped like a handle passes for one.  Anything
+    else is a ``TypeError``.  The instant is still this function's own.
 
-    Returns ``{"available": False, "reason": ...}`` whenever the reading refused,
-    which is what a machine with no database tap gets.  An absent reading is
-    reported absent; it is never projected as an empty or a healthy census.
+    Consuming the reading rather than repeating it is what makes a health run one
+    moment: ``tools/health-check.py`` performs the F09 read once and renders both
+    its workflow-census section and its assurance-health section from that single
+    reading.
+
+    Returns ``{"available": False, "reason": ...}`` whenever the reading itself
+    refused, which is what a machine with no database tap gets.  An absent
+    reading is reported absent; it is never projected as an empty or a healthy
+    census.
     """
-    return _project(_read_workflow_truth_snapshot(), now=_datetime.now(_timezone.utc))
+    if not _is_workflow_truth_reading(reading):
+        raise TypeError(
+            "assurance_health_census accepts only a workflow-truth reading minted by "
+            "lib/control_plane_workflow_truth_reader.read_workflow_truth_reading(); "
+            f"{type(reading).__name__} is caller-supplied data, and a census a caller "
+            "composed is its assertion about the control plane, not a reading of it")
+    return _project(reading.rendered(), now=_datetime.now(_timezone.utc))
 
 
 def _would_be_assurance_health_if_authoritative(workflows: _Any, *, now: _Any) -> dict[str, _Any]:

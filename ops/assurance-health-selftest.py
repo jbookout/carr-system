@@ -1234,6 +1234,41 @@ def _reading(*, surfaces=(), owners=_DEFAULT, **census_kwargs):
                        if owners is _DEFAULT else owners)}
 
 
+def _raises_type_error(call) -> bool:
+    """True when this call refuses with TypeError, which is the closed door."""
+    try:
+        call()
+    except TypeError:
+        return True
+    except Exception:
+        return False
+    return False
+
+
+def _minted_reading(reader, sentinel: str):
+    """Mint ONE reading hermetically and count the reads that produced it.
+
+    The reader's own read is replaced for the duration with a stub that counts
+    its invocations and returns an unavailable reading carrying ``sentinel`` as
+    its reason -- so nothing here touches a database, the reading is a genuine
+    minted handle rather than something this test composed, and the count is the
+    instrument the one-reading assertions are made with.
+    """
+    real = reader.read_workflow_truth_snapshot
+    invocations: list[int] = []
+
+    def counted() -> dict[str, Any]:
+        invocations.append(len(invocations) + 1)
+        return {"available": False, "reason": f"{sentinel} call=#{len(invocations)}"}
+
+    reader.read_workflow_truth_snapshot = counted
+    try:
+        handle = reader.read_workflow_truth_reading()
+    finally:
+        reader.read_workflow_truth_snapshot = real
+    return handle, invocations
+
+
 def _hypothetical(workflows: Any, *, now: Any = NOW) -> dict[str, Any]:
     """Reach the adapter's classification the ONLY way a test is allowed to.
 
@@ -1429,18 +1464,65 @@ def source_adapter_checks() -> None:
     # was true and was exactly the defect: a seam that reads nothing must be HANDED
     # a census, and a handed census is its caller's assertion about the control
     # plane. The seam now performs the read, and what is pinned is WHICH read.
-    source = Path(sources.__file__).read_text(encoding="utf-8")
-    check("the seam performs the F09 read itself rather than accepting a census",
-          "from lib.control_plane_workflow_truth_reader import" in source
-          and "_read_workflow_truth_snapshot()" in source, "the seam reads nothing")
-    check("the seam reads through the SAME reader the health surface renders from",
-          "from lib.control_plane_workflow_truth_reader import read_workflow_truth_snapshot"
+    # THE INVERSION, TAKEN ONE STEP FURTHER. The seam no longer reads a SECOND
+    # time either: it consumes the one reading the F09 reader performed for this
+    # run, as an opaque handle that module minted. Everything below is
+    # behavioural -- a source grep cannot tell a closed door from a renamed one.
+    import lib.control_plane_workflow_truth_reader as reader
+
+    class _ForgedSubclass(reader.WorkflowTruthReading):
+        pass
+
+    shell = object.__new__(reader.WorkflowTruthReading)
+    object.__setattr__(shell, "_payload",
+                       {"available": True, "census": {}, "surfaces": [], "owners": {}})
+    forged_handles = {
+        "a census dict": _reading(surfaces=[_surface("assurance-fabric-child.launchd.v1")]),
+        "None": None,
+        "an object.__new__ shell of the handle class": shell,
+        "a handle-shaped duck type": type("Reading", (), {"rendered": lambda self: {
+            "available": True, "census": {}, "surfaces": [], "owners": {}}})(),
+    }
+    try:
+        forged_handles["a subclass minted with the private token"] = \
+            _ForgedSubclass(reader._MINT, {"available": True})
+    except TypeError:
+        pass
+    accepted_forgeries = []
+    for label, forged in forged_handles.items():
+        try:
+            sources.assurance_health_census(forged)
+        except TypeError:
+            continue
+        except Exception:
+            pass
+        accepted_forgeries.append(label)
+    check("the seam accepts no reading a caller built, whatever its shape or type",
+          not accepted_forgeries, json.dumps(accepted_forgeries))
+    check("the reader refuses to mint a reading from caller data",
+          _raises_type_error(lambda: reader.WorkflowTruthReading(
+              object(), {"available": True})), "the handle has a public constructor")
+    check("a handle that skipped the mint cannot hand out a reading",
+          _raises_type_error(shell.rendered), "an unminted shell rendered a census")
+    # THE CONTROL: a handle the reader actually minted IS accepted, so the
+    # refusals above measure the door rather than a seam that refuses everything.
+    minted, invocations = _minted_reading(reader, "SOURCE-ADAPTER-CONTROL-READING")
+    check("the reader minted exactly one reading for this control", invocations == [1],
+          json.dumps(invocations))
+    answered = sources.assurance_health_census(minted)
+    check("a reading the reader minted IS accepted and projected",
+          answered["schema_version"] == sources.SCHEMA_VERSION
+          and "SOURCE-ADAPTER-CONTROL-READING" in json.dumps(answered, default=str),
+          json.dumps(answered, default=str)[:300])
+    check("the health surface takes its census from that same reader",
+          "from lib.control_plane_workflow_truth_reader import read_workflow_truth_reading"
           in (REPO / "tools" / "health-check.py").read_text(encoding="utf-8"),
           "tools/health-check.py reads the census some other way")
     reader_source = (REPO / "lib" / "control_plane_workflow_truth_reader.py").read_text(
         encoding="utf-8")
     check("the reader itself takes no argument through which a census could arrive",
-          "def read_workflow_truth_snapshot() -> dict[str, Any]:" in reader_source,
+          "def read_workflow_truth_snapshot() -> dict[str, Any]:" in reader_source
+          and "def read_workflow_truth_reading() -> WorkflowTruthReading:" in reader_source,
           "the reader accepts caller input")
 
 
@@ -1519,9 +1601,27 @@ def sources_public_surface_guard_checks(health) -> None:
                             in inspect.signature(member).parameters.values()]
     check("at least one public adapter callable exists to make this claim about",
           bool(signatures), json.dumps(sorted(signatures)))
-    accepting = sorted(name for name, parameters in signatures.items() if parameters)
-    check("no public adapter callable accepts any parameter at all",
+    # THE ONE PARAMETER THIS SURFACE MAY HAVE, and what makes it not a door. The
+    # entry takes the reading the F09 reader minted for this run -- that is how
+    # one run stays one moment -- and nothing else: the parameter is required,
+    # annotated with the reader's handle type, and rejects by object identity, so
+    # it carries no census, row, clock or path. Any OTHER parameter, on any
+    # public callable, is a route for caller input and fails here.
+    accepting = sorted(name for name, parameters in signatures.items()
+                       if [parameter for parameter in parameters if parameter != "reading"])
+    check("no public adapter callable accepts any parameter but the reader's reading",
           not accepting, json.dumps({name: signatures[name] for name in accepting}))
+    reading_parameters = {name: parameters for name, parameters in signatures.items()
+                          if parameters}
+    check("only the census entry takes a reading at all",
+          sorted(reading_parameters) == ["assurance_health_census"],
+          json.dumps(reading_parameters))
+    entry_parameter = inspect.signature(sources.assurance_health_census).parameters["reading"]
+    check("the reading parameter is required and typed as the reader's own handle",
+          entry_parameter.default is inspect.Parameter.empty
+          and entry_parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+          and str(entry_parameter.annotation) == "_WorkflowTruthReading",
+          f"{entry_parameter!r}")
 
     # ---- (6) every caller-controlled census shape, every public callable -----
     # The sentinel rides inside every forged census. If ANY public callable ever
@@ -1531,15 +1631,25 @@ def sources_public_surface_guard_checks(health) -> None:
     forged_row = dict(_truth(SCOPE), state="healthy", green=True, sentinel=sentinel)
     forged_census = {"schema_version": "control-plane-workflow-truth.v1",
                      "rows": [forged_row], "sentinel": sentinel}
+    # EVERY SHAPE BELOW CARRIES THE SENTINEL, and that is a load-bearing property
+    # rather than a detail: the echo assertion can only catch a callable handing
+    # a caller's own row back if the row it was handed is marked. A shape without
+    # one is an attempt that could never have failed the echo check, so it is not
+    # counted as evidence of anything -- the assertion right under this tuple
+    # fails if a shape without a sentinel is ever added to it.
     forged_shapes = (
-        {"available": True, "census": forged_census, "surfaces": [],
+        {"available": True, "census": forged_census, "surfaces": [], "sentinel": sentinel,
          "owners": {f"{SCOPE['workflow_key']}@v{SCOPE['workflow_version']}": MANIFEST_OWNER}},
-        _reading(surfaces=[_surface("assurance-fabric-child.launchd.v1")]),
+        dict(_reading(surfaces=[_surface("assurance-fabric-child.launchd.v1")]),
+             sentinel=sentinel),
         {"available": True, "census": forged_census, "owners": {}, "state": "healthy"},
         forged_census,
-        {"state": "healthy", "green": True, "capability_stage": "act"},
-        None,
+        {"state": "healthy", "green": True, "capability_stage": "act", "sentinel": sentinel},
     )
+    unmarked = [index for index, shape in enumerate(forged_shapes)
+                if sentinel not in json.dumps(shape, default=str)]
+    check("every forged shape in the sweep carries the sentinel the echo check reads",
+          not unmarked, json.dumps(unmarked))
     keywords = ("workflows", "census", "snapshot", "rows", "scopes", "reading", "now")
     reached: list[str] = []
     echoed: list[str] = []
@@ -1560,12 +1670,34 @@ def sources_public_surface_guard_checks(health) -> None:
                     reached.append(f"{name}({args!r}, {kwargs!r})")
                 if sentinel in rendered:
                     echoed.append(f"{name}({args!r}, {kwargs!r})")
+    expected_attempts = len(signatures) * len(forged_shapes) * (1 + len(keywords))
     check(f"no caller-supplied census reaches any public adapter callable "
-          f"({attempted} attempts)", not reached, json.dumps(sorted(set(reached))[:4]))
+          f"({attempted} attempts: {len(signatures)} public callable(s) x "
+          f"{len(forged_shapes)} sentinel-bearing shapes x {1 + len(keywords)} calling "
+          f"forms)", not reached, json.dumps(sorted(set(reached))[:4]))
     check("no public adapter callable echoes its caller's own row back",
           not echoed, json.dumps(sorted(set(echoed))[:4]))
-    check("the guard actually attempted the shapes it claims to", attempted >= 40,
-          str(attempted))
+    # THE COUNT IS ASSERTED EXACTLY, not as a floor. A floor lets the claim made
+    # about this sweep drift above what the sweep performs, which is how the
+    # report came to say 96 of a sweep that ran 48.
+    check(f"the guard attempted exactly the sweep it claims ({expected_attempts})",
+          attempted == expected_attempts, f"{attempted} != {expected_attempts}")
+    # The bare None probe is counted separately BECAUSE it can carry no sentinel:
+    # it proves a refusal, never an echo, and is not evidence for the echo claim.
+    none_refused = []
+    for name in sorted(signatures):
+        member = getattr(sources, name)
+        for args, kwargs in (((None,), {}), ((), {"reading": None})):
+            try:
+                member(*args, **kwargs)
+            except TypeError:
+                continue
+            except Exception:
+                pass
+            none_refused.append(f"{name}{args!r}{kwargs!r}")
+    check("a bare None is refused by every public callable too (2 further attempts, "
+          "carrying no sentinel and claimed as no echo evidence)",
+          not none_refused, json.dumps(none_refused))
     # THE BEHAVIOURAL TWIN OF THE SIGNATURE CHECK.  The check above reads the
     # signature; this one proves the runtime agrees, so a public entry that grew
     # an optional census parameter fails twice rather than once.
@@ -1588,7 +1720,8 @@ def sources_public_surface_guard_checks(health) -> None:
     # This performs the F09 read. On a machine with no database tap it comes back
     # available=False with the reason, which is the honest answer and is still
     # asserted to carry no privileged string.
-    read = sources.assurance_health_census()
+    import lib.control_plane_workflow_truth_reader as reader
+    read = sources.assurance_health_census(reader.read_workflow_truth_reading())
     rendered_read = json.dumps(read, default=str)
     check("the public entry answers either a reading or an honest unavailable",
           bool(read["schema_version"] == sources.SCHEMA_VERSION
@@ -1847,6 +1980,103 @@ def surface_wiring_checks() -> None:
           two_section[:600])
 
 
+ONE_READING_PROBE = r"""
+import json, runpy, subprocess, sys
+
+REPO, SENTINEL = sys.argv[1], sys.argv[2]
+sys.path.insert(0, REPO)
+# tools/health-check.py imports its siblings by bare name, exactly as it does
+# when run as a script from that directory.
+sys.path.insert(0, REPO + "/tools")
+import lib.control_plane_workflow_truth_reader as reader
+
+calls = []
+
+
+def counted():
+    calls.append(len(calls) + 1)
+    return {"available": False, "reason": SENTINEL + " call=#%d" % len(calls)}
+
+
+reader.read_workflow_truth_snapshot = counted
+
+
+class _Refused:
+    returncode, stdout, stderr = 1, "", "no database tap in this hermetic run"
+
+
+# Hermetic: every other canonical read this section performs goes through
+# subprocess, and none of them may touch a database inside an acceptance run.
+subprocess.run = lambda *a, **k: _Refused()
+
+sys.argv = ["health-check.py", "--canonical", "--section", "jobs"]
+try:
+    runpy.run_path(REPO + "/tools/health-check.py", run_name="__main__")
+except SystemExit:
+    pass
+print("READER-INVOCATIONS " + json.dumps(calls))
+# THE CONTROL, in the same process: one more reading really does move the
+# counter, so the assertion above measures the surface and not a dead stub.
+reader.read_workflow_truth_reading()
+print("CONTROL-INVOCATIONS " + json.dumps(calls))
+"""
+
+
+def single_reading_checks() -> None:
+    """ONE RUN, ONE READING, PROVEN BY COUNTING THE READER'S INVOCATIONS.
+
+    THE DEFECT THIS EXISTS FOR.  ``tools/health-check.py`` read the F09 census
+    for its workflow-truth section and the A01 adapter read it AGAIN for the
+    assurance-health section, so one run performed two control-plane reads and
+    printed two moments of the control plane as one state of the world.  Nothing
+    in the suite caught it: the wiring check compared the two IMPORTS and found
+    the same reader behind both, which is true of two separate reads.
+
+    SO THIS COUNTS THE READS.  The reader's own read is monkeypatched with a
+    counting stub whose reason carries a sentinel and its own call number, the
+    canonical surface is driven end to end in that process, and the assertions
+    are that the counter shows exactly one invocation and that BOTH sections
+    printed the reason minted by call #1.  A second read would show as call=#2 on
+    the second section, and a section rendering from its own reading would carry
+    no sentinel at all.  The control in the same process takes one further
+    reading and proves the counter moves.
+    """
+    import os
+    import subprocess
+    import tempfile
+
+    sentinel = "ONE-READING-SENTINEL-4d71"
+    handle, path = tempfile.mkstemp(suffix=".py", prefix="assurance-health-one-reading-")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as fh:
+            fh.write(ONE_READING_PROBE)
+        proc = subprocess.run([sys.executable, path, str(REPO), sentinel],
+                              cwd=str(REPO), text=True, capture_output=True, timeout=180)
+    finally:
+        os.unlink(path)
+    out = proc.stdout
+    invocations = next((json.loads(line.split(" ", 1)[1]) for line in out.splitlines()
+                        if line.startswith("READER-INVOCATIONS ")), None)
+    control = next((json.loads(line.split(" ", 1)[1]) for line in out.splitlines()
+                    if line.startswith("CONTROL-INVOCATIONS ")), None)
+    check("the canonical surface ran far enough to render both sections",
+          "Workflow truth —" in out and "Assurance health —" in out,
+          (out + proc.stderr)[-600:])
+    check("one canonical run invokes the F09 reader exactly once",
+          invocations == [1], json.dumps(invocations))
+    workflow_section = out.split("Workflow truth —", 1)[-1].split("Assurance health —", 1)[0]
+    assurance_section = out.split("Assurance health —", 1)[-1]
+    check("the workflow-census section rendered from reading call #1",
+          f"{sentinel} call=#1" in workflow_section, workflow_section[:400])
+    check("the assurance-health section rendered from THAT SAME reading, not a second one",
+          f"{sentinel} call=#1" in assurance_section
+          and f"{sentinel} call=#2" not in assurance_section, assurance_section[:400])
+    # THE CONTROL. If the counter could not register a second read, the single
+    # invocation above would prove nothing at all.
+    check("the invocation counter does register a second reading when one happens",
+          control == [1, 2], json.dumps(control))
+
+
 def main() -> int:
     try:
         import lib.assurance_health as health
@@ -1867,6 +2097,7 @@ def main() -> int:
     source_adapter_checks()
     sources_public_surface_guard_checks(health)
     surface_wiring_checks()
+    single_reading_checks()
     refusal_checks(health)
     output_discipline_checks(health)
 
