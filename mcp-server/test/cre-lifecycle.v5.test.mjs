@@ -55,6 +55,7 @@ import {
   v5J102PolicyDigest,
   v5J102Projection,
   v5J102TransitionContract,
+  v5J102TransitionTruthTable,
 } from "../src/cre-lifecycle.v5.js";
 
 // --- synthetic fixtures ----------------------------------------------------
@@ -2128,4 +2129,392 @@ test("Journey 1 from its FIRST row: initialization feeds the existing transition
   assert.equal(submitted.creates_deal, false, "no LOI submission creates a Deal");
   assert.equal(submitted.proposed_state.assignment.open_negotiation_count, 1);
   assert.equal(submitted.proposed_state.property_negotiation.negotiation_state, "loi_submitted");
+});
+
+// --- THE TRANSITION TRUTH TABLE --------------------------------------------
+//
+// The suite above is organised by DECISION and proves the cases somebody thought
+// to write down. This section proves the rest: every value each of the four
+// ordered guards can be shown, on every transition, driven through the real
+// evaluator.
+//
+// THE TABLE IS NOT ALLOWED TO BE ITS OWN WITNESS. Two things keep it honest.
+// The guard-to-refusal map below is written out as LITERALS here, so the table's
+// own mapping and the evaluator's answer are both compared against a third copy
+// that a drift in either would not move. And the three totals are frozen as
+// numbers, computed by hand from the vocabularies rather than read off the
+// function, so a vocabulary or a transition that grows fails here and is
+// re-counted deliberately instead of being absorbed.
+//
+// THE BASELINES BELOW ARE BUILT FROM THE FIXTURES AT THE TOP OF THIS FILE and
+// from nothing the truth table says. Each is one request that ALLOWS: the cell
+// every guard admits. Every case here is that baseline with exactly ONE value
+// moved, so a refusal can only be the guard under test.
+
+const GUARD_REFUSAL = Object.freeze({
+  subject_kind: "subject_kind_mismatch",
+  actor_class: "actor_class_not_permitted",
+  prerequisite: "prerequisite_not_met",
+  instrument_kind: "instrument_kind_not_permitted",
+  required_evidence: "required_evidence_absent",
+});
+
+// Hand-counted from the vocabularies: 14 transitions x 5 subject kinds = 70,
+// 14 x 2 actor classes = 28, 67 prerequisite cells over the axes the fourteen
+// transitions name, 8 instrument cells on the two transitions that declare
+// instrument kinds, and 14 x 17 evidence kinds = 238. 70 + 28 + 67 + 8 + 238 =
+// 411, of which 14 + 25 + 24 + 4 + 15 = 82 admit. The evidence half admits 15
+// rather than 14 because establish-client-and-engagement declares two
+// single-kind alternatives and either one alone satisfies it.
+const EXPECTED_CELLS = 411;
+const EXPECTED_ADMITTING = 82;
+const EXPECTED_REFUSING = 329;
+
+const SUBJECT_FIXTURE = Object.freeze({
+  relationship, engagement, assignment,
+  property_negotiation: negotiation, deal,
+});
+
+const BASELINE = Object.freeze({
+  "establish-client-and-engagement": {
+    subject: relationship(),
+    evidence: [documentEvidence("signed_engagement_letter")],
+    declared: { new_subject_id: "eng-synthetic-1" },
+  },
+  "open-assignment": {
+    subject: assignment({ assignment_phase: "search" }),
+    related: { relationship: client(), engagement: engagement() },
+    evidence: [recordEvidence("search_initiation")],
+    declared: { mandate_scope: "search" },
+  },
+  "record-loi-submission": {
+    subject: negotiation({ negotiation_state: "loi_drafted" }),
+    related: { assignment: assignment({ assignment_phase: "search" }) },
+    evidence: [documentEvidence("submitted_loi")],
+  },
+  "record-loi-acceptance": {
+    subject: negotiation({ negotiation_state: "loi_submitted" }),
+    evidence: [artifactEvidence("counterparty_loi_acceptance")],
+  },
+  "commit-winning-property": {
+    subject: assignment({ assignment_phase: "search" }),
+    related: { property_negotiation: negotiation({ negotiation_state: "loi_accepted" }) },
+    evidence: [recordEvidence("winner_selection_commitment")],
+    declared: { instrument_kind: "lease", new_deal_id: "deal-synthetic-1" },
+  },
+  "record-lease-execution": {
+    subject: deal({ instrument_kind: "lease" }),
+    evidence: [documentEvidence("executed_lease")],
+  },
+  "record-purchase-contract-execution": {
+    subject: deal({ instrument_kind: "purchase" }),
+    evidence: [documentEvidence("signed_purchase_contract")],
+  },
+  "record-diligence-outcome": {
+    subject: deal({ instrument_kind: "purchase", execution_state: "executed",
+      diligence_state: "in_progress" }),
+    evidence: [recordEvidence("diligence_outcome")],
+    declared: { diligence_result: "satisfied" },
+  },
+  "record-deal-closing": {
+    subject: deal({ execution_state: "executed" }),
+    evidence: [recordEvidence("final_closing_settlement", { closing_date: T.late })],
+  },
+  "cancel-pending-deal": {
+    subject: deal(),
+    related: {
+      assignment: assignment({ assignment_phase: "committed", open_negotiation_count: 2,
+        selected_property_id: "prop-synthetic-1",
+        active_lease_draft_target_id: "prop-synthetic-1",
+        pending_deal_id: "deal-synthetic-1" }),
+      engagement: engagement(),
+      relationship: client(),
+    },
+    evidence: [recordEvidence("deal_failure_record",
+      { reason: "synthetic fixture: terms could not be agreed" })],
+    declared: { return_phase: "negotiation" },
+  },
+  "record-commission-agreement": {
+    subject: deal(),
+    evidence: [documentEvidence("commission_agreement")],
+  },
+  "record-invoice-issued": {
+    subject: deal(),
+    evidence: [recordEvidence("invoice_issued")],
+  },
+  "record-payment": {
+    subject: deal(),
+    // "paid" moves the state from BOTH admitted payment states, so the one
+    // baseline serves both prerequisite cells without the fixture choosing a
+    // level per cell — which would make the fixture, not the guard, the thing
+    // deciding whether the call allows.
+    evidence: [recordEvidence("payment_received")],
+    declared: { payment_level: "paid" },
+  },
+  "record-completion": {
+    subject: deal(),
+    evidence: [recordEvidence("completion_recorded")],
+  },
+});
+
+/**
+ * ONE WELL-FORMED RECORD OF EVERY REGISTERED EVIDENCE KIND, so the evidence half
+ * of the table is driven with records the evaluator can READ.
+ *
+ * A malformed record throws a contract violation instead of returning a refusal,
+ * and a cell driven by a throw would prove nothing about the guard under test —
+ * so the two kinds that carry an extra required field carry it here. Nothing
+ * else is tuned: the binding, the document states and the author class are left
+ * at their fixture defaults, because the required-evidence guard is decided
+ * before any of them is read and a cell that needed them tuned would be a cell
+ * measuring something other than what it says.
+ */
+const EVIDENCE_FIXTURE = Object.freeze({
+  approved_representation_equivalent: () => approvalEvidence("approved_representation_equivalent"),
+  commission_agreement: () => documentEvidence("commission_agreement"),
+  completion_recorded: () => recordEvidence("completion_recorded"),
+  counterparty_loi_acceptance: () => artifactEvidence("counterparty_loi_acceptance"),
+  deal_failure_record: () => recordEvidence("deal_failure_record",
+    { reason: "synthetic fixture: terms could not be agreed" }),
+  diligence_outcome: () => recordEvidence("diligence_outcome"),
+  executed_lease: () => documentEvidence("executed_lease"),
+  final_closing_settlement: () => recordEvidence("final_closing_settlement",
+    { closing_date: T.late }),
+  invoice_issued: () => recordEvidence("invoice_issued"),
+  manual_correction: () => recordEvidence("manual_correction",
+    { reason: "synthetic fixture: a correction nobody is performing here" }),
+  multi_target_exception_approval: () => approvalEvidence("multi_target_exception_approval"),
+  payment_received: () => recordEvidence("payment_received"),
+  search_initiation: () => recordEvidence("search_initiation"),
+  signed_engagement_letter: () => documentEvidence("signed_engagement_letter"),
+  signed_purchase_contract: () => documentEvidence("signed_purchase_contract"),
+  submitted_loi: () => documentEvidence("submitted_loi"),
+  winner_selection_commitment: () => recordEvidence("winner_selection_commitment"),
+});
+
+/** The baseline request for one transition, with exactly one value moved. */
+const drive = (transition_id,
+  { subject_over = null, subject = null, actor = PARTNER, evidence = null } = {}) => {
+  const baseline = BASELINE[transition_id];
+  return evaluate({
+    transition_id,
+    actor,
+    subject: subject ?? (subject_over === null
+      ? baseline.subject : { ...baseline.subject, ...subject_over }),
+    ...(baseline.related === undefined ? {} : { related: baseline.related }),
+    evidence: evidence ?? baseline.evidence,
+    ...(baseline.declared === undefined ? {} : { declared: baseline.declared }),
+  });
+};
+
+test("the truth table enumerates every guard of every transition, and the totals are the hand count", () => {
+  const table = v5J102TransitionTruthTable();
+  assert.equal(table.cell_count, EXPECTED_CELLS);
+  assert.equal(table.admitting_cell_count, EXPECTED_ADMITTING);
+  assert.equal(table.refusing_cell_count, EXPECTED_REFUSING);
+  assert.equal(table.cells.length, EXPECTED_CELLS);
+  assert.deepEqual(table.guard_order,
+    ["subject_kind", "actor_class", "prerequisite", "instrument_kind", "required_evidence"]);
+
+  // Every transition is in the table, and every cell's declared refusal is the
+  // one this file writes out independently.
+  assert.deepEqual([...new Set(table.cells.map(c => c.transition_id))].sort(),
+    [...V5_J102_TRANSITION_IDS]);
+  for (const cell of table.cells) {
+    assert.equal(cell.refusal_reason_id,
+      cell.guard_admits ? null : GUARD_REFUSAL[cell.guard],
+      `${cell.transition_id}/${cell.guard}/${cell.value}`);
+    // A prerequisite cell carries its axis's position and nothing else does, so
+    // the ordering the evaluator depends on is readable off the cell.
+    assert.equal(cell.axis_position === null, cell.guard !== "prerequisite",
+      `${cell.transition_id}/${cell.guard} axis_position`);
+  }
+
+  // The cells enumerate the WHOLE registered vocabulary each guard reads, not a
+  // sample of it, and that is checked per transition rather than in aggregate.
+  for (const id of V5_J102_TRANSITION_IDS) {
+    const contract = v5J102TransitionContract(id);
+    const own = table.cells.filter(c => c.transition_id === id);
+    assert.deepEqual(own.filter(c => c.guard === "subject_kind").map(c => c.value),
+      ["relationship", "engagement", "assignment", "property_negotiation", "deal"],
+      `${id} enumerates every subject kind`);
+    assert.deepEqual(own.filter(c => c.guard === "actor_class").map(c => c.value),
+      ["verified_partner", "sponsored_agent"], `${id} enumerates every actor class`);
+    assert.deepEqual(
+      [...new Set(own.filter(c => c.guard === "prerequisite").map(c => c.axis))],
+      Object.keys(contract.prerequisites), `${id} enumerates every prerequisite axis, in order`);
+    assert.deepEqual(own.filter(c => c.guard === "instrument_kind").map(c => c.value),
+      contract.instrument_kinds === null ? [] : ["lease", "purchase", "renewal", "amendment"],
+      `${id} enumerates every instrument kind, or declares none`);
+    assert.deepEqual(own.filter(c => c.guard === "required_evidence").map(c => c.value),
+      [...V5_J102_EVIDENCE_KINDS], `${id} enumerates every registered evidence kind`);
+    // And the kinds it ADMITS are exactly the alternatives it declares as a
+    // single record — the whole of what "supplied alone" can satisfy.
+    assert.deepEqual(
+      own.filter(c => c.guard === "required_evidence" && c.guard_admits).map(c => c.value).sort(),
+      contract.required_evidence_alternatives.filter(set => set.length === 1)
+        .map(set => set[0]).sort(),
+      `${id} admits exactly its single-record evidence alternatives`);
+    // The admitted values ARE the contract's declared lists, cell by cell.
+    for (const [axis, permitted] of Object.entries(contract.prerequisites)) {
+      assert.deepEqual(
+        own.filter(c => c.guard === "prerequisite" && c.axis === axis && c.guard_admits)
+          .map(c => c.value),
+        permitted, `${id} admits exactly the declared ${axis} states`);
+    }
+  }
+});
+
+test("every baseline the truth table is driven from is a real ALLOW", () => {
+  // WITHOUT THIS, EVERY REFUSAL BELOW WOULD BE FREE. A baseline that refused for
+  // its own reasons would make each perturbed case refuse too, and a truth table
+  // driven from it would report a matrix of correct-looking answers that proved
+  // nothing about the guards.
+  assert.deepEqual(Object.keys(BASELINE).sort(), [...V5_J102_TRANSITION_IDS]);
+  for (const id of V5_J102_TRANSITION_IDS) {
+    const answer = drive(id);
+    assert.equal(answer.decision, "allow",
+      `${id} baseline must allow (got ${answer.reason_id})`);
+  }
+});
+
+test("the truth table's REFUSING cells all refuse, for the stated guard and no other", () => {
+  const table = v5J102TransitionTruthTable();
+  const refusing = table.cells.filter(c => !c.guard_admits);
+  assert.equal(refusing.length, EXPECTED_REFUSING);
+
+  for (const cell of refusing) {
+    const contract = v5J102TransitionContract(cell.transition_id);
+    const where = `${cell.transition_id}/${cell.guard}/${cell.axis}=${cell.value}`;
+    const answer =
+      cell.guard === "subject_kind"
+        ? drive(cell.transition_id, { subject: SUBJECT_FIXTURE[cell.value]() })
+        : cell.guard === "actor_class"
+          ? drive(cell.transition_id, { actor: cell.value === "verified_partner" ? PARTNER : AGENT })
+          : cell.guard === "required_evidence"
+            ? drive(cell.transition_id, { evidence: [EVIDENCE_FIXTURE[cell.value]()] })
+            : drive(cell.transition_id, { subject_over: { [cell.axis]: cell.value } });
+
+    assert.equal(answer.decision, "refuse", where);
+    assert.equal(answer.reason_id, GUARD_REFUSAL[cell.guard], where);
+    assert.equal(answer.transition_id, cell.transition_id, where);
+
+    // AND THE REFUSAL NAMES THE THING THAT CAUSED IT. A guard that refused with
+    // the right reason_id but the wrong axis, the wrong observed value or
+    // somebody else's permitted list would pass a reason-only assertion while
+    // telling a reader of the refusal something false.
+    if (cell.guard === "subject_kind") {
+      assert.equal(answer.subject_kind, cell.value, where);
+      assert.equal(answer.expected_subject_kind, contract.subject_kind, where);
+    }
+    if (cell.guard === "actor_class") {
+      assert.equal(answer.actor_authorization_class, cell.value, where);
+      assert.deepEqual(answer.permitted_actor_classes, contract.permitted_actor_classes, where);
+    }
+    if (cell.guard === "prerequisite") {
+      assert.equal(answer.unmet_axis, cell.axis, where);
+      assert.equal(answer.observed, cell.value, where);
+      assert.deepEqual(answer.permitted, contract.prerequisites[cell.axis], where);
+    }
+    if (cell.guard === "instrument_kind") {
+      assert.equal(answer.instrument_kind, cell.value, where);
+      assert.deepEqual(answer.permitted_instrument_kinds, contract.instrument_kinds, where);
+    }
+    if (cell.guard === "required_evidence") {
+      assert.deepEqual(answer.supplied_evidence_kinds, [cell.value], where);
+      assert.deepEqual(answer.required_evidence_alternatives,
+        contract.required_evidence_alternatives, where);
+    }
+  }
+});
+
+test("the truth table's ADMITTING cells are admitted, guard by guard, all the way to allow", () => {
+  const table = v5J102TransitionTruthTable();
+  const admitting = table.cells.filter(c => c.guard_admits);
+  assert.equal(admitting.length, EXPECTED_ADMITTING);
+
+  for (const cell of admitting) {
+    const where = `${cell.transition_id}/${cell.guard}/${cell.axis}=${cell.value}`;
+    const answer =
+      cell.guard === "subject_kind"
+        ? drive(cell.transition_id)
+        : cell.guard === "actor_class"
+          ? drive(cell.transition_id, { actor: cell.value === "verified_partner" ? PARTNER : AGENT })
+          : cell.guard === "required_evidence"
+            ? drive(cell.transition_id, { evidence: [EVIDENCE_FIXTURE[cell.value]()] })
+            : drive(cell.transition_id, { subject_over: { [cell.axis]: cell.value } });
+    // The whole call allows. This is the stronger claim of the two available —
+    // "the guard did not fire" would also be satisfied by a refusal from a LATER
+    // check, and a table whose admitting half only proved that could hide a
+    // transition that admits a state it can never actually act on.
+    assert.equal(answer.decision, "allow",
+      `${where} must allow (got ${answer.reason_id})`);
+  }
+});
+
+test("a prerequisite refusal names the FIRST unmet axis, in the declared order", () => {
+  // The evaluator returns on the first unmet axis, so a multi-axis transition
+  // with two axes out of range must name the earlier one. record-deal-closing
+  // declares deal_state, then execution_state, then closing_state.
+  const contract = v5J102TransitionContract("record-deal-closing");
+  assert.deepEqual(Object.keys(contract.prerequisites),
+    ["deal_state", "execution_state", "closing_state"]);
+
+  const bothWrong = drive("record-deal-closing",
+    { subject_over: { deal_state: "cancelled", execution_state: "unexecuted" } });
+  assert.equal(bothWrong.reason_id, "prerequisite_not_met");
+  assert.equal(bothWrong.unmet_axis, "deal_state");
+
+  // With the first axis back in range the SECOND one answers, which is what
+  // makes the per-cell drive above meaningful: each cell is reached only because
+  // every earlier axis is held admitted.
+  const secondWrong = drive("record-deal-closing",
+    { subject_over: { execution_state: "unexecuted" } });
+  assert.equal(secondWrong.reason_id, "prerequisite_not_met");
+  assert.equal(secondWrong.unmet_axis, "execution_state");
+});
+
+test("the four guards decide BEFORE evidence, so a guard refusal is never an evidence refusal", () => {
+  // The order is load-bearing for the whole table: if evidence were read first,
+  // every refusing cell above would have to carry a valid evidence set for a
+  // subject it is not about, and the refusal a reader saw would name the wrong
+  // thing. Driven with evidence that is valid for the transition but bound to
+  // ANOTHER deal, a guard-refusing subject still refuses on the guard.
+  const strangerEvidence = [recordEvidence("final_closing_settlement",
+    { closing_date: T.late }, { subject_id: "deal-synthetic-stranger" })];
+  const answer = evaluateLifecycleTransition({
+    tenant: ORGANIZATION_TENANT_ID, actor: PARTNER, now: NOW,
+    transition_id: "record-deal-closing",
+    subject: deal({ deal_state: "cancelled", execution_state: "executed" }),
+    evidence: strangerEvidence,
+  });
+  assert.equal(answer.reason_id, "prerequisite_not_met");
+  assert.equal(answer.unmet_axis, "deal_state");
+
+  // And with the guard satisfied the SAME request refuses on the binding, which
+  // proves the evidence really was unacceptable and the guard really did answer
+  // first rather than the two agreeing by luck.
+  const bound = evaluateLifecycleTransition({
+    tenant: ORGANIZATION_TENANT_ID, actor: PARTNER, now: NOW,
+    transition_id: "record-deal-closing",
+    subject: deal({ execution_state: "executed" }),
+    evidence: strangerEvidence,
+  });
+  assert.equal(bound.reason_id, "evidence_not_bound_to_subject");
+});
+
+test("every guard the table declares is live in both directions", () => {
+  // The module's own load-time check refuses a guard that admits everything or
+  // refuses everything. This is that invariant stated where a reader of the
+  // suite can see it, and it is not vacuous: each of the four is exercised in
+  // both directions by the two suites above.
+  const table = v5J102TransitionTruthTable();
+  for (const guard of table.guard_order) {
+    const own = table.cells.filter(c => c.guard === guard);
+    assert.ok(own.some(c => c.guard_admits), `${guard} admits some value`);
+    assert.ok(own.some(c => !c.guard_admits), `${guard} refuses some value`);
+  }
+  // And the reviewable projection carries the matrix, so the whole table is
+  // readable without executing the evaluator.
+  assert.equal(v5J102Projection().transition_truth_table.cell_count, EXPECTED_CELLS);
 });
