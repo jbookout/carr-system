@@ -341,59 +341,176 @@ def workflow_truth_checks(manifest) -> None:
     health_truth_checks(live)
 
 
-def health_truth_checks(live) -> None:
-    """Operations health renders the SAME projection, and never calls enabled operational."""
-    health = REPO / "tools" / "health-check.py"
+# The hermetic health-surface harness, and it is why this file is still
+# database-free.  ``tools/health-check.py`` reaches the control plane through
+# ``tools/db-tap.py`` in a subprocess; this probe runs the real surface in a
+# child interpreter with ``subprocess.run`` rebound, so the tap either refuses or
+# answers with rows this test composed, and nothing here touches a database.
+#
+# Rebinding a module's function from outside is exactly what the 2026-09-11
+# amendment puts OUT of scope as a threat (no Python module can defend against a
+# caller that rewrites its code in-process) -- which is precisely what makes it a
+# legitimate TEST instrument: it is the only way to put chosen rows in front of a
+# route whose whole design is that it accepts no input.
+_HEALTH_PROBE = r"""
+import json, runpy, subprocess, sys
+
+REPO, fixture, tap = sys.argv[1], sys.argv[2], sys.argv[3]
+sys.path.insert(0, REPO)
+sys.path.insert(0, REPO + "/tools")
+
+ROWS = None if tap == "-" else tap
+
+
+class _Refused:
+    returncode, stdout, stderr = 1, "", "no database tap in this hermetic run"
+
+
+class _Answered:
+    returncode, stderr = 0, ""
+
+    def __init__(self, stdout):
+        self.stdout = stdout
+
+
+def _run(*args, **kwargs):
+    statement = kwargs.get("input") or ""
+    if ROWS is not None and "acceptance_rows" in statement:
+        return _Answered(ROWS + "\n")
+    return _Refused()
+
+
+subprocess.run = _run
+sys.argv = ["health-check.py", "--section", "jobs", "--fixture", fixture]
+code = 0
+try:
+    runpy.run_path(REPO + "/tools/health-check.py", run_name="__main__")
+except SystemExit as exc:
+    code = int(exc.code or 0)
+print("PROBE_EXIT=%d" % code)
+"""
+
+
+def _health_surface(fixture: dict, *, tap_rows: dict | None = None) -> tuple[int, str]:
+    """Run the real health surface hermetically; return (exit code, output)."""
     with tempfile.TemporaryDirectory(prefix="workflow-truth-health-") as td:
-        carried = Path(td) / "carried.json"
-        carried.write_text(json.dumps({
-            "observed_at": NOW, "exports": None, "errors": [],
-            "job_definitions": [], "jobs": [],
-            "workflows": {"available": True, "census": live},
-        }), encoding="utf-8")
-        proc = subprocess.run([sys.executable, str(health), "--section", "jobs",
-                               "--fixture", str(carried)],
-                              cwd=REPO, text=True, capture_output=True, timeout=90)
-        check("health renders the clean-start census without calling a chosen state a failure",
-              proc.returncode == 0 and "Workflow truth" in proc.stdout
-              and "evidence-backed operational" in proc.stdout
-              and "false-operational" in proc.stdout,
-              proc.stdout + proc.stderr)
-        check("health separates evidence-run eligibility from operational",
-              "evidence-run eligible only (shadow is not operation)" in proc.stdout,
-              proc.stdout)
+        fixture_path = Path(td) / "fixture.json"
+        fixture_path.write_text(json.dumps(fixture), encoding="utf-8")
+        probe_path = Path(td) / "probe.py"
+        probe_path.write_text(_HEALTH_PROBE, encoding="utf-8")
+        proc = subprocess.run(
+            [sys.executable, str(probe_path), str(REPO), str(fixture_path),
+             "-" if tap_rows is None else json.dumps(tap_rows)],
+            cwd=REPO, text=True, capture_output=True, timeout=120)
+    out = proc.stdout + proc.stderr
+    code = 0
+    for line in out.splitlines():
+        if line.startswith("PROBE_EXIT="):
+            code = int(line.split("=", 1)[1])
+    return code, out
 
-        conflicted = json.loads(json.dumps(live))
-        conflicted["rows"][0]["state"] = "conflict"
-        conflicted["rows"][0]["reasons"] = ["shadow_acceptance evidence is conflicting"]
-        conflicted["summary"]["states"]["conflict"] = 1
-        conflict_fixture = Path(td) / "conflict.json"
-        conflict_fixture.write_text(json.dumps({
-            "observed_at": NOW, "exports": None, "errors": [],
-            "job_definitions": [], "jobs": [],
-            "workflows": {"available": True, "census": conflicted},
-        }), encoding="utf-8")
-        proc = subprocess.run([sys.executable, str(health), "--section", "jobs",
-                               "--fixture", str(conflict_fixture)],
-                              cwd=REPO, text=True, capture_output=True, timeout=90)
-        check("contradictory workflow evidence is the one condition that turns health red",
-              proc.returncode == 1
-              and "CANONICAL_FINDING workflow_truth_conflict" in proc.stdout,
-              proc.stdout + proc.stderr)
 
-        missing = Path(td) / "missing.json"
-        missing.write_text(json.dumps({
-            "observed_at": NOW, "exports": None, "errors": [],
+def _carried(census) -> dict:
+    return {"observed_at": NOW, "exports": None, "errors": [],
             "job_definitions": [], "jobs": [],
-            "workflows": {"available": False, "reason": "no database tap on this machine"},
-        }), encoding="utf-8")
-        proc = subprocess.run([sys.executable, str(health), "--section", "jobs",
-                               "--fixture", str(missing)],
-                              cwd=REPO, text=True, capture_output=True, timeout=90)
-        check("an unavailable census is printed as unavailable, never as an empty census",
-              proc.returncode == 0 and "UNAVAILABLE" in proc.stdout
-              and "no database tap on this machine" in proc.stdout,
-              proc.stdout + proc.stderr)
+            "workflows": {"available": True, "census": census}}
+
+
+def health_truth_checks(live) -> None:
+    """What the health surface owes this slice after the tenth and twelfth rounds.
+
+    TWO OF THE THREE CHECKS HERE WERE REWRITTEN IN THE TWELFTH CORRECTION
+    (2026-09-11), and the reason is a deliberate behaviour change, not a stale
+    assertion.  THE TENTH round deleted the census DISPLAY route from
+    ``tools/health-check.py``: that section printed a census, a printed census is
+    read as a report of the control plane by anybody looking at ``run.sh health``,
+    and the census it printed could be composed by whoever shared the process (or,
+    on this path, whoever wrote the fixture).  So the two checks that asserted the
+    surface still PRINTS ``evidence-backed operational``, ``false-operational``
+    and ``evidence-run eligible only`` out of a caller's census now assert the
+    opposite of what they did: that a caller's census reaches no line of it.  The
+    distinction those lines used to carry is checked where it is now decided, in
+    the adapter's own rows.
+
+    THE THIRD CHECK KEEPS ITS NAME AND ITS MEANING, because the twelfth
+    correction RESTORED the behaviour it names.  The tenth round removed health's
+    only red signal on contradictory workflow evidence along with the census
+    route, which the eleventh round filed as defect 26c1e6d8.  The alarm is back
+    as a module-private route in ``tools/health-check.py`` that takes no argument
+    and reads the store's own rows; so this check now proves it end to end against
+    seeded rows AND proves that the fixture door cannot reach it.
+    """
+    # ---- a caller's census reaches no line of the surface --------------------
+    code, out = _health_surface(_carried(live))
+    check("a caller's census cannot make the health surface print a census",
+          code == 0 and "Workflow truth" in out
+          and "census route deleted" in out
+          and not any(token in out for token in
+                      ("evidence-backed operational", "false-operational",
+                       "evidence-run eligible only")),
+          out)
+
+    # ---- the distinction that section used to print, where it is decided -----
+    eligible = [row for row in live["rows"]
+                if row["state"] in ("enabled_shadow_only", "enabled_canary_eligible")]
+    check("health separates evidence-run eligibility from operational",
+          bool(eligible)
+          and all(row["operational"] is False and row["state"] != "operational"
+                  for row in eligible)
+          and live["summary"]["states"]["operational"] == 0,
+          json.dumps({"eligible": len(eligible),
+                      "states": live["summary"]["states"]}))
+
+    # ---- the alarm, end to end, on rows this test composed -------------------
+    contradictory = {
+        "acceptance_rows": [
+            {"workflow_key": "seeded-subject", "workflow_version": 1,
+             "mode": "shadow", "status": "accepted"},
+            {"workflow_key": "seeded-subject", "workflow_version": 1,
+             "mode": "shadow", "status": "rejected"}],
+        "schedule_rows": []}
+    consistent = {
+        "acceptance_rows": [
+            {"workflow_key": "seeded-subject", "workflow_version": 1,
+             "mode": "shadow", "status": "accepted"}],
+        "schedule_rows": [
+            {"workflow_key": "seeded-subject", "workflow_version": 1,
+             "surface_id": "seeded-subject.launchd.v1", "scheduler_state": "enabled"}]}
+    red_code, red_out = _health_surface(_carried(live), tap_rows=contradictory)
+    clean_code, clean_out = _health_surface(_carried(live), tap_rows=consistent)
+    conflicted = deepcopy(live)
+    conflicted["rows"][0]["state"] = "conflict"
+    conflicted["rows"][0]["reasons"] = ["shadow_acceptance evidence is conflicting"]
+    conflicted["summary"]["states"]["conflict"] = 1
+    fixture_code, fixture_out = _health_surface(_carried(conflicted),
+                                                tap_rows=consistent)
+    check("contradictory workflow evidence is the one condition that turns health red",
+          red_code == 1
+          and "CANONICAL_FINDING workflow_truth_conflict" in red_out
+          and "acceptance/seeded-subject@v1/shadow" in red_out
+          and clean_code == 0
+          and "CANONICAL_FINDING workflow_truth_conflict" not in clean_out
+          and "NOT RED" in clean_out
+          # and a CONTRADICTORY CENSUS IN THE FIXTURE reaches none of it: the
+          # alarm reads the store, so a caller can no more mint red than green.
+          and fixture_code == 0
+          and "CANONICAL_FINDING workflow_truth_conflict" not in fixture_out,
+          json.dumps({"red": red_code, "clean": clean_code,
+                      "fixture": fixture_code}) + red_out + clean_out)
+
+    # ---- an unreachable tap is never an all-clear ---------------------------
+    code, out = _health_surface(_carried(live))
+    check("an unreachable store makes the alarm unavailable, never not-red",
+          code == 0 and "workflow contradiction alarm   UNAVAILABLE" in out
+          and "store_unreachable" in out and "NOT RED" not in out, out)
+
+    missing: dict = {"observed_at": NOW, "exports": None, "errors": [],
+                     "job_definitions": [], "jobs": [],
+                     "workflows": {"available": False,
+                                   "reason": "no database tap on this machine"}}
+    code, out = _health_surface(missing)
+    check("an unavailable census is printed as unavailable, never as an empty census",
+          code == 0 and "UNAVAILABLE" in out, out)
 
 
 def main() -> int:
