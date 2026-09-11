@@ -305,9 +305,9 @@ def assurance_health_census(reading: _WorkflowTruthReading) -> dict[str, _Any]:
     this parameter and nothing shaped like a handle passes for one.  Anything
     else is a ``TypeError``.  The instant is still this function's own.
 
-    AND THE CONTENTS COME FROM THE READER'S CAPTURE, NOT FROM THE HANDLE.  Four
-    reviews in a row got a forged census through this entry, and all four needed
-    the same thing: STATE ON THE HANDLE.  One replaced the payload attribute
+    AND THE CONTENTS COME FROM THE READER'S CAPTURE, NOT FROM THE HANDLE.  Every
+    review that got a forged census through this entry needed the same thing:
+    STATE ON THE HANDLE.  One replaced the payload attribute
     through ``object.__setattr__``; one installed a stateful mapping that served
     authentic content to the verification traversal and forged content to the
     render traversal; one swapped the opaque string key the registry was reached

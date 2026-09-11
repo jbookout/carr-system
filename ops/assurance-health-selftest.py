@@ -1698,7 +1698,7 @@ def source_adapter_checks() -> None:
           "the reader accepts caller input")
 
     # ---- THE MUTATED-HANDLE DOOR, AND THE TOCTOU BEHIND IT -----------------
-    # THE DEFECT THIS EXISTS FOR, AS A CLASS RATHER THAN AS FOUR INSTANCES.  Every
+    # THE DEFECT THIS EXISTS FOR, AS A CLASS RATHER THAN AS A LIST OF INSTANCES.  Every
     # refusal above measures PROVENANCE: is this object one the reader minted?  A
     # review answered yes -- it took a handle the reader really had minted,
     # replaced the payload behind it, and projected a complete forged census
@@ -1710,7 +1710,7 @@ def source_adapter_checks() -> None:
     # ``__hash__``, so the entry verified and the entry consumed were two
     # different readings.
     #
-    # THE ONE THING ALL FOUR NEEDED was state on the handle: an attribute to
+    # THE ONE THING EVERY ROUND NEEDED was state on the handle: an attribute to
     # replace, or a value read off it that a lookup then trusted.  The handle now
     # carries none, so these checks are the behavioural proof of the CLASS: each
     # mutation is tried on a GENUINELY minted handle, and the bar is not merely

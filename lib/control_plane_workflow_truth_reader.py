@@ -368,9 +368,13 @@ class WorkflowTruthReading(_WeakReferenceable):
 
     __slots__ = ()
 
-    @property
+    @property  # type: ignore[misc]  # read-only on purpose; see the note below
     def __class__(self) -> Any:
         """Read-only, and it is the LAST piece of writable state an instance had.
+
+        The ``type: ignore`` is the point rather than a wart: mypy objects that a
+        read-only property cannot override ``object.__class__``, which is
+        read-write, and making it read-only is exactly the correction.
 
         ``object.__setattr__(handle, "__class__", SomeForger)`` is a write that
         ``__slots__`` does not stop -- the layouts are compatible -- and it
