@@ -107,10 +107,7 @@ import {
   V5_R01_SEAM_REFS,
   V5R01Error,
   assertArity,
-  assertClosedKeys,
   assertExactStringSet,
-  assertObject,
-  assertRequiredKeys,
 } from "./rollout-pilot-r01.vocabulary.v5.js";
 
 /**
@@ -326,13 +323,21 @@ export const V5_R01_DECISIONS_WITHOUT_SETTLED_TEXT = deepFreeze(V5_R01_SETTLED_D
  * with no code on it. `assertExactStringSet` takes the HOLDER and the key, copies
  * it, and compares the copy against the list this module passes in: the expected
  * set still belongs to this file, and no caller value ever crosses back into it.
+ *
+ * AND THE FIVE STEPS ARE NOW ALSO ONE CALL, which is the sixth re-review's first
+ * finding. Four validators behind one boundary is still four boundaries: this
+ * function used to hand the CALLER'S OWN OBJECT to `assertObject`,
+ * `assertClosedKeys`, `assertRequiredKeys` and `assertExactStringSet` in turn, and
+ * each of those took its own copy. The reviewer's Proxy answered `ownKeys` with
+ * nothing for the first two copies and with the real decision set for the last
+ * two; every check passed against the copy it held, this function returned
+ * successfully, and no single observed object had satisfied all four. A binding
+ * is a statement about ONE object, so it is checked against one copy, taken once,
+ * at one entry — see the entry layer in the vocabulary module.
  */
 export function assertR01DecisionBinding(...args) {
   assertArity(args, 1, "assertR01DecisionBinding");
   const [binding] = args;
-  assertObject(binding, "binding");
-  assertClosedKeys(binding, ["decision_ids"], "binding");
-  assertRequiredKeys(binding, ["decision_ids"], "binding");
   assertExactStringSet(binding, "decision_ids", V5_R01_SETTLED_DECISION_IDS,
     "decision_binding_mismatch");
 }

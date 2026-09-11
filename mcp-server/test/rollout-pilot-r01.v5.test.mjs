@@ -2083,25 +2083,24 @@ test("guard: a hostile caller value leaves one coded refusal and no caller text"
     && error.code === "invalid_shape" && !error.message.includes(CALLER_SENTINEL));
 
   // NOT VACUOUS (5): THE READ INSIDE THE DECISION-BINDING CHECK IS BEHIND THE
-  // BOUNDARY, and this is the probe that can tell. A getter that answers three
-  // copies honestly and throws on the FOURTH read walks straight out of a raw
-  // `Array.isArray(binding.decision_ids)` in the pilot module — every guard before
-  // it has already been satisfied — and is a coded refusal here only because the
-  // fourth read is a copy too.
-  let lateReads = 0;
-  const lateThrower = {
+  // BOUNDARY, and this is the probe that can tell. The entry takes ONE copy now,
+  // so the read that can walk a caller's sentence out is the FIRST one: a getter
+  // that throws on it reaches a raw `Array.isArray(binding.decision_ids)` in the
+  // pilot module unguarded, and is a coded refusal here only because that first
+  // read happens inside the copy.
+  let bindingReads = 0;
+  const firstThrower = {
     get decision_ids() {
-      lateReads += 1;
-      if (lateReads <= 3) return [...V5_R01_SETTLED_DECISION_IDS];
+      bindingReads += 1;
       throw new Error(CALLER_SENTINEL);
     },
   };
-  assert.throws(() => r01.assertR01DecisionBinding(lateThrower),
+  assert.throws(() => r01.assertR01DecisionBinding(firstThrower),
     error => error instanceof V5R01Error && registered.has(error.code)
       && !String(error.message).includes(CALLER_SENTINEL)
       && !String(error.stack).includes(CALLER_SENTINEL));
-  assert.ok(lateReads >= 4,
-    `the entry point read the caller's getter only ${lateReads} times, so this proves nothing`);
+  assert.equal(bindingReads, 1,
+    `the entry point read the caller's getter ${bindingReads} times; one entry takes one copy`);
 
   // AND AN HONEST VALUE IS UNTOUCHED: the boundary is a boundary, not a wall.
   assert.equal(vocabulary.assertObject({ a: 1 }, "path"), undefined);
@@ -2158,14 +2157,22 @@ test("guard: the caller copy narrows what the validators accept, and never widen
   assert.equal(vocabulary.assertExactStringSet(settling, "decision_ids",
     V5_R01_SETTLED_DECISION_IDS, "decision_binding_mismatch"), undefined);
   assert.equal(reads, 1, "the validator read the caller's getter more than once");
-  // ACROSS the four validators the public entry point runs, a getter that answers
-  // differently each time is refused rather than accepted — each takes its own
-  // copy, and a refusal is a refusal whichever read it drew.
+  // AND THE PUBLIC ENTRY POINT TAKES THAT COPY ONCE. This assertion was the
+  // sixth re-review's first finding written down as an expectation: it used to
+  // require `reads > 1` — that the entry RE-COPY — which is the multi-snapshot
+  // bypass stated as a requirement. A getter that answers differently each time
+  // is read once here and refused on what that one read returned.
   reads = 0;
-  assert.throws(() => r01.assertR01DecisionBinding(settling),
-    error => error instanceof V5R01Error
-      && vocabulary.V5_R01_ERROR_CODES.includes(error.code));
-  assert.ok(reads > 1, "the entry point did not re-copy, so this proves nothing");
+  assert.equal(r01.assertR01DecisionBinding(settling), undefined);
+  assert.equal(reads, 1,
+    `the entry point copied the caller's object ${reads} times; a composite takes one copy`);
+  // AND THE VERDICT IS THE ONE OBSERVED VALUE'S. Wound forward so the first and
+  // only read returns the getter's SECOND answer, the same object is refused —
+  // which is what "the verdict is drawn from the copy" means, and what four
+  // independent copies of four different answers could never say.
+  reads = 1;
+  assert.throws(() => r01.assertR01DecisionBinding(settling), refusal("invalid_shape"));
+  assert.equal(reads, 2, "the second call read the getter more than once");
   // A PROTOTYPE-BEARING object is not a plain object, so an inherited field can
   // never stand in for an own one.
   const inherited = Object.create({ decision_ids: [...V5_R01_SETTLED_DECISION_IDS] });
@@ -2912,4 +2919,350 @@ test("guard: every exclusion carries a stated basis a reader can argue with", ()
     assert.equal(typeof row.basis, "string", row.origin);
     assert.ok(row.basis.length > 20, row.origin);
   }
+});
+
+// ---------------------------------------------------------------------------
+// ONE SNAPSHOT PER ENTRY, MEASURED RATHER THAN ARRANGED.
+// ---------------------------------------------------------------------------
+
+/**
+ * THE SIXTH RE-REVIEW'S FIRST FINDING, AND THE INSTRUMENT THAT CATCHES IT.
+ *
+ * `assertR01DecisionBinding` used to hand the caller's own object to four
+ * validators in turn, each of which copied it independently. The reviewer built a
+ * Proxy that answered `ownKeys` with nothing for the first two copies and with
+ * the real decision set for the last two: every check passed against the copy IT
+ * held, the composite returned successfully, and NO SINGLE OBSERVED OBJECT had
+ * ever satisfied all four.
+ *
+ * A test that only re-ran the reviewer's chameleon would be a test of one shape.
+ * The property is a class property, so it is measured as one: a counting Proxy
+ * stands in every declared argument position of every exported callable of all
+ * three modules, and the traps that READ it — `ownKeys`, and `get` per key — are
+ * counted per call and checked against a declared table.
+ *
+ * WHY A TABLE RATHER THAN "ALWAYS ONE". Two exported shapes honestly read
+ * nothing, and a blanket "exactly one" would have to be weakened to accommodate
+ * them, which is how a real second copy would later slip through:
+ *
+ *   THE EVALUATORS never look at a request at all — that is this slice's whole
+ *   claim, proved separately by the hostile-value sweep — so their declared
+ *   position is 0 and a 1 there is a regression in the opposite direction.
+ *
+ *   `assertArity` POSITION 0 is the rest tail of a function that has promised not
+ *   to examine what is in it. It reads the tail's LENGTH under `reflecting` and
+ *   never traverses it, so a plain-object Proxy is not even length-read: 0.
+ *
+ * Every other position is 1, and the table must cover exactly the callables with
+ * a declared argument, so a new export cannot be added without declaring what it
+ * reads.
+ */
+const READS_PER_DECLARED_POSITION = Object.freeze({
+  "rollout-pilot-r01.v5.js#assertR01DecisionBinding": [1],
+  "rollout-pilot-r01.v5.js#evaluatePilotDay": [0],
+  "rollout-pilot-r01.v5.js#evaluatePilotRun": [0],
+  "rollout-pilot-r01.v5.js#evaluateRecoveryDrill": [0],
+  "onboarding-flow-r01.v5.js#evaluateBetaOperability": [0],
+  "onboarding-flow-r01.v5.js#evaluatePerSliceDellReview": [0],
+  "onboarding-flow-r01.v5.js#onboardingProgressStatus": [0],
+  "rollout-pilot-r01.vocabulary.v5.js#assertArity": [0, 1, 1],
+  "rollout-pilot-r01.vocabulary.v5.js#assertArray": [1, 1, 1],
+  "rollout-pilot-r01.vocabulary.v5.js#assertBoolean": [1, 1],
+  "rollout-pilot-r01.vocabulary.v5.js#assertCalendarDate": [1, 1],
+  "rollout-pilot-r01.vocabulary.v5.js#assertClosedKeys": [1, 1, 1],
+  "rollout-pilot-r01.vocabulary.v5.js#assertEnum": [1, 1, 1],
+  "rollout-pilot-r01.vocabulary.v5.js#assertExactStringSet": [1, 1, 1, 1],
+  "rollout-pilot-r01.vocabulary.v5.js#assertInternalRef": [1, 1, 1],
+  "rollout-pilot-r01.vocabulary.v5.js#assertObject": [1, 1],
+  "rollout-pilot-r01.vocabulary.v5.js#assertRequiredKeys": [1, 1, 1],
+  "rollout-pilot-r01.vocabulary.v5.js#assertSafeText": [1, 1, 1],
+  "rollout-pilot-r01.vocabulary.v5.js#calendarDayOrdinal": [1],
+  "rollout-pilot-r01.vocabulary.v5.js#calendarWeekday": [1],
+  "rollout-pilot-r01.vocabulary.v5.js#fail": [1],
+  // THE CLASS reads nothing off its argument: `typeof` runs no trap and a WeakMap
+  // lookup is identity, so an unregistered code is refused without being read.
+  // It is re-exported by both public modules, and each re-export is swept as the
+  // consumer of that module sees it rather than assumed to be the same function.
+  "rollout-pilot-r01.vocabulary.v5.js#V5R01Error": [0],
+  "rollout-pilot-r01.v5.js#V5R01Error": [0],
+  "onboarding-flow-r01.v5.js#V5R01Error": [0],
+});
+
+/** A stand-in that records every read performed on it, by trap and by key. */
+function countingCallerObject() {
+  const tally = { ownKeys: 0, get: [], descriptors: 0, prototypes: 0, has: 0 };
+  const target = { decision_ids: [...V5_R01_SETTLED_DECISION_IDS] };
+  const proxy = new Proxy(target, {
+    ownKeys(on) { tally.ownKeys += 1; return Reflect.ownKeys(on); },
+    get(on, key, receiver) { tally.get.push(String(key)); return Reflect.get(on, key, receiver); },
+    getOwnPropertyDescriptor(on, key) {
+      tally.descriptors += 1;
+      return Reflect.getOwnPropertyDescriptor(on, key);
+    },
+    getPrototypeOf(on) { tally.prototypes += 1; return Reflect.getPrototypeOf(on); },
+    has(on, key) { tally.has += 1; return Reflect.has(on, key); },
+  });
+  return { proxy, tally };
+}
+
+/** The benign filler for each position, so only the counted one is exotic. */
+const COUNTED_BENIGN_ARGUMENTS = Object.freeze([
+  { decision_ids: [...V5_R01_SETTLED_DECISION_IDS] }, "decision_ids",
+  [...V5_R01_SETTLED_DECISION_IDS], "decision_binding_mismatch",
+]);
+
+function declaredArityOf(moduleName, name) {
+  if (name === "V5R01Error") return 1;
+  const declared = vocabulary.V5_R01_DECLARED_ARITIES[name];
+  return typeof declared === "number" ? declared : null;
+}
+
+test("guard: every entry copies each caller argument exactly once, and no validator re-copies", () => {
+  // THE TABLE COVERS EXACTLY THE CALLABLES THAT TAKE AN ARGUMENT, so a new export
+  // cannot be added without declaring what it reads.
+  const withArguments = [];
+  for (const [moduleName, surface] of SWEPT_SRC_MODULES) {
+    for (const [name, exported] of Object.entries(surface)) {
+      if (typeof exported !== "function") continue;
+      const arity = declaredArityOf(moduleName, name);
+      assert.notEqual(arity, null, `${moduleName}#${name} declares no arity`);
+      if (arity > 0) withArguments.push(`${moduleName}#${name}`);
+    }
+  }
+  assert.deepEqual(withArguments.sort(), Object.keys(READS_PER_DECLARED_POSITION).sort(),
+    "an export that takes an argument is missing from the read table, or the table names one that is gone");
+
+  const wrong = [];
+  for (const [moduleName, surface] of SWEPT_SRC_MODULES) {
+    for (const [name, exported] of Object.entries(surface)) {
+      if (typeof exported !== "function") continue;
+      const at = `${moduleName}#${name}`;
+      const expected = READS_PER_DECLARED_POSITION[at];
+      if (expected === undefined) continue;
+      const construct = isClass(exported);
+      for (let position = 0; position < expected.length; position += 1) {
+        const { proxy, tally } = countingCallerObject();
+        const args = COUNTED_BENIGN_ARGUMENTS.slice(0, expected.length);
+        args[position] = proxy;
+        try {
+          if (construct) new exported(...args); else exported(...args);
+        } catch (thrown) {
+          // A refusal is an ordinary outcome here; the reads are what is measured.
+          assert.equal(thrown instanceof V5R01Error, true,
+            `${at} argument ${position} raised something this slice did not write`);
+        }
+        if (tally.ownKeys !== expected[position]) {
+          wrong.push(`${at} argument ${position}: ownKeys read ${tally.ownKeys} times, expected ${expected[position]}`);
+        }
+        if (tally.get.length !== expected[position]) {
+          wrong.push(`${at} argument ${position}: get read ${tally.get.length} times, expected ${expected[position]}`);
+        }
+        // THE CLASS INVARIANT, stated separately from the table: no caller object
+        // is observed twice, and no key of it is read twice, whatever the row says.
+        assert.ok(tally.ownKeys <= 1, `${at} argument ${position} copied more than once`);
+        assert.deepEqual([...new Set(tally.get)].sort(), [...tally.get].sort(),
+          `${at} argument ${position} read one key more than once`);
+      }
+    }
+  }
+  assert.deepEqual(wrong, [], "an entry did not take exactly one copy of its caller argument");
+});
+
+test("guard: the chameleon that passed the four-copy composite is refused by the one-copy entry", () => {
+  // THE REVIEWER'S OWN SHAPE. It answers `ownKeys` with nothing for the first two
+  // copies and with the real decision set for the last two, so under a composite
+  // that copied four times every check passed against a different object and
+  // `assertR01DecisionBinding` returned successfully with `ownKeys_reads: 4`.
+  let copies = 0;
+  const settled = Object.freeze([...V5_R01_SETTLED_DECISION_IDS]);
+  const chameleon = new Proxy({}, {
+    ownKeys() { copies += 1; return copies > 2 ? ["decision_ids"] : []; },
+    getOwnPropertyDescriptor() {
+      return { value: [...settled], writable: true, enumerable: true, configurable: true };
+    },
+    get() { return [...settled]; },
+    getPrototypeOf() { return Object.prototype; },
+  });
+
+  assert.throws(() => assertR01DecisionBinding(chameleon),
+    error => error instanceof V5R01Error
+      && vocabulary.V5_R01_ERROR_CODES.includes(error.code));
+  assert.equal(copies, 1,
+    `the entry took ${copies} copies; the chameleon needs more than one to work`);
+
+  // NOT VACUOUS: the same Proxy, asked four times the way the old composite asked
+  // it, really does hand out a valid binding on the copies after the second. This
+  // is the bypass reproduced, so the assertion above is a fact about the fix.
+  copies = 0;
+  assert.deepEqual(Object.keys(chameleon), []);
+  assert.deepEqual(Object.keys(chameleon), []);
+  assert.deepEqual(Object.keys(chameleon), ["decision_ids"]);
+  assert.deepEqual(Object.keys(chameleon), ["decision_ids"]);
+  assert.equal(copies, 4);
+  assert.deepEqual(chameleon.decision_ids, [...settled]);
+
+  // AND AN HONEST BINDING STILL PASSES, read once.
+  let honestCopies = 0;
+  const honest = new Proxy({ decision_ids: [...settled] }, {
+    ownKeys(on) { honestCopies += 1; return Reflect.ownKeys(on); },
+  });
+  assert.equal(assertR01DecisionBinding(honest), undefined);
+  assert.equal(honestCopies, 1);
+});
+
+// ---------------------------------------------------------------------------
+// A REFUSAL CARRIES NO FRAME OF THE CALLER'S.
+// ---------------------------------------------------------------------------
+
+/**
+ * THE SIXTH RE-REVIEW'S SECOND FINDING. `super(...)` captures the frames that led
+ * to the constructor, and those frames are the CALLER'S: the reviewer invoked
+ * every export through a computed method named `allow::CALLER_SENTINEL` and read
+ * that exact caller-written text back off `error.stack` on all 34 unique exported
+ * callables. A function name is caller-controlled memory just as much as an
+ * argument is, and the constructor test before this one checked sentinels
+ * supplied as ARGUMENTS, which is a different door.
+ *
+ * The stack is replaced with this module's own two words now, installed as a data
+ * property rather than assigned, so there is no lazy accessor left for a caller's
+ * `Error.prepareStackTrace` to run through. Both of the caller's overrides are
+ * exercised below anyway — they are out of scope under the 2026-09-11 amendment
+ * as interpreter-level mutation, and they are cheap to cover, so they are covered
+ * rather than argued about.
+ */
+function invokeThroughCallerFrame(exported, args, construct) {
+  const caller = {
+    [CALLER_SENTINEL](callee, callArgs, asConstructor) {
+      return asConstructor ? new callee(...callArgs) : callee(...callArgs);
+    },
+  };
+  return caller[CALLER_SENTINEL](exported, args, construct);
+}
+
+function callerFrameLeaks() {
+  const leaks = [];
+  let surfaced = 0;
+  for (const [moduleName, surface] of SWEPT_SRC_MODULES) {
+    for (const [name, exported] of Object.entries(surface)) {
+      if (typeof exported !== "function") continue;
+      const at = `${moduleName}#${name}`;
+      const construct = isClass(exported);
+      const argumentLists = [[], ["invalid_shape"], [{ a: 1 }, "path"],
+        [{ a: 1 }, ["a"], "path"], [{ a: 1 }, "a", ["a"], "invalid_shape"]];
+      for (const args of argumentLists) {
+        let thrown;
+        try {
+          const returned = invokeThroughCallerFrame(exported, args, construct);
+          if (JSON.stringify(returned ?? null).includes("CALLER_SENTINEL")) {
+            leaks.push(`${at} returned the caller's frame name`);
+          }
+          if (construct) thrown = returned;
+        } catch (caught) {
+          thrown = caught;
+        }
+        if (thrown === undefined) continue;
+        surfaced += 1;
+        const parts = [String(thrown?.stack), String(thrown?.message), String(thrown?.code),
+          String(thrown?.name)];
+        for (const key of Object.getOwnPropertyNames(thrown ?? {})) {
+          parts.push(String(thrown[key]));
+        }
+        for (const part of parts) {
+          if (part.includes(CALLER_SENTINEL)) leaks.push(`${at} carried the caller frame sentinel`);
+          if (part.includes("CALLER_SENTINEL")) leaks.push(`${at} carried the frame marker`);
+        }
+        if (thrown instanceof V5R01Error) {
+          if (thrown.stack !== `${thrown.name}: ${thrown.message}`) {
+            leaks.push(`${at} stack is not this module's own two words: ${thrown.stack}`);
+          }
+        }
+      }
+    }
+  }
+  return { leaks, surfaced };
+}
+
+test("guard: no refusal carries a frame of the caller's, under any stack hook", () => {
+  // NOT VACUOUS FIRST: a native error raised through the same computed method
+  // really does carry that method's name on its stack. This is the defect, live.
+  const control = (() => {
+    try {
+      invokeThroughCallerFrame(() => { throw new TypeError("plain"); }, [], false);
+      return null;
+    } catch (caught) { return caught; }
+  })();
+  assert.equal(String(control.stack).includes(CALLER_SENTINEL), true,
+    "a caller's frame name does not reach a native stack here, so this test proves nothing");
+
+  const plain = callerFrameLeaks();
+  assert.ok(plain.surfaced > 30, `only ${plain.surfaced} refusals were surfaced`);
+  assert.deepEqual(plain.leaks, [], "a caller's own frame name reached a consumer of this slice");
+
+  // THE CALLER'S `Error.prepareStackTrace`, which formats a lazily-read stack.
+  const savedPrepare = Error.prepareStackTrace;
+  const savedCapture = Error.captureStackTrace;
+  const savedLimit = Error.stackTraceLimit;
+  let underPrepare;
+  let underCapture;
+  let prepareControl;
+  let captureControl;
+  try {
+    Error.stackTraceLimit = 100;
+    Error.prepareStackTrace = () => CALLER_SENTINEL;
+    prepareControl = (() => {
+      try { invokeThroughCallerFrame(() => { throw new TypeError("plain"); }, [], false); return null; }
+      catch (caught) { return String(caught.stack); }
+    })();
+    underPrepare = callerFrameLeaks();
+    Error.prepareStackTrace = savedPrepare;
+
+    Error.captureStackTrace = (holder) => { holder.stack = CALLER_SENTINEL; };
+    captureControl = (() => {
+      const holder = {};
+      Error.captureStackTrace(holder);
+      return String(holder.stack);
+    })();
+    underCapture = callerFrameLeaks();
+  } finally {
+    Error.prepareStackTrace = savedPrepare;
+    Error.captureStackTrace = savedCapture;
+    Error.stackTraceLimit = savedLimit;
+  }
+
+  assert.equal(prepareControl, CALLER_SENTINEL,
+    "the prepareStackTrace override did not take, so that half proves nothing");
+  assert.equal(captureControl, CALLER_SENTINEL,
+    "the captureStackTrace override did not take, so that half proves nothing");
+  assert.deepEqual(underPrepare.leaks, [],
+    "a caller's prepareStackTrace reached this slice's refusals");
+  assert.deepEqual(underCapture.leaks, [],
+    "a caller's captureStackTrace reached this slice's refusals");
+  assert.ok(underPrepare.surfaced > 30);
+  assert.ok(underCapture.surfaced > 30);
+});
+
+test("guard: all 54 registered codes construct, carrying four own properties and this module's stack", () => {
+  assert.equal(vocabulary.V5_R01_ERROR_CODES.length, 54,
+    "the registered code set changed size; the roster or the arity table moved");
+  const stacks = new Set();
+  for (const code of vocabulary.V5_R01_ERROR_CODES) {
+    const error = invokeThroughCallerFrame(V5R01Error, [code], true);
+    assert.deepEqual(Object.getOwnPropertyNames(error).sort(),
+      ["code", "message", "name", "stack"], `${code} carries an unexpected own property`);
+    assert.equal(error.code, code);
+    assert.equal(error.name, "V5R01Error");
+    assert.equal(typeof error.message, "string");
+    assert.equal(error.stack, `V5R01Error: ${error.message}`, `${code} carries a captured stack`);
+    assert.equal(error.stack.includes(CALLER_SENTINEL), false);
+    assert.equal(Object.isFrozen(error), true, `${code} is not frozen`);
+    const descriptor = Object.getOwnPropertyDescriptor(error, "stack");
+    assert.equal(Object.hasOwn(descriptor, "value"), true,
+      `${code} left stack as an accessor, so a caller's hook still has a door`);
+    assert.equal(descriptor.writable, false);
+    assert.equal(descriptor.configurable, false);
+    stacks.add(error.stack);
+  }
+  // Every code has its own fixed message, so every stack is distinct: a single
+  // shared constant would be a message table that had collapsed.
+  assert.equal(stacks.size, 54, "two codes share a stack, so two share a message");
 });

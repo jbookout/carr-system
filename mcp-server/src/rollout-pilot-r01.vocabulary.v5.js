@@ -238,6 +238,31 @@ export class V5R01Error extends Error {
     super(V5_R01_FIXED_MESSAGES[code]);
     this.name = "V5R01Error";
     this.code = code;
+    // THE STACK IS THIS MODULE'S TWO WORDS, AND THE SIXTH RE-REVIEW'S SECOND
+    // FINDING IS WHY. `super(...)` captures the frames that led here, and the
+    // frames that led here are the CALLER'S: the reviewer invoked every export
+    // through a computed method named `allow::CALLER_SENTINEL` and read that
+    // exact caller-written text back off `error.stack` on all 34 callables. A
+    // function name is caller-controlled memory just as much as an argument is,
+    // and the previous round froze the captured stack rather than replacing it,
+    // which preserved the leak instead of closing it.
+    //
+    // So the stack is REPLACED with the name and the fixed message — two strings
+    // this module wrote — and it is installed as a DATA property rather than
+    // assigned. Assignment goes through V8's own `stack` setter and leaves an
+    // accessor in place; `defineProperty` removes the accessor, so there is no
+    // getter left for `Error.prepareStackTrace` to run through and nothing lazy
+    // for a caller's override to reach. `Error.captureStackTrace` is never called
+    // by this module, so an override of it has nothing to intercept either.
+    //
+    // The own-property set is unchanged — `code`, `message`, `name`, `stack` —
+    // because the property being replaced is one the engine had already put there.
+    Object.defineProperty(this, "stack", {
+      value: `${this.name}: ${this.message}`,
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    });
     V5_R01_REFUSAL_CODES.set(this, code);
     Object.freeze(this);
   }
@@ -259,7 +284,7 @@ export class V5R01Error extends Error {
 export function fail(...args) {
   if (args.length > 1) throw new V5R01Error("fail_takes_no_extra_argument");
   if (args.length !== 1) throw new V5R01Error("invalid_shape");
-  throw new V5R01Error(args[0]);
+  throw new V5R01Error(ingest(args[0]));
 }
 
 /**
@@ -289,7 +314,11 @@ function assertArgumentShape(wellFormed) {
 
 export function assertArity(...args) {
   if (args.length > 3) throw new V5R01Error("assertArity_takes_no_extra_argument");
-  const [received, declared, name] = args;
+  const [received] = args;
+  // THE OTHER TWO ARE SNAPSHOTTED LIKE ANY OTHER CALLER ARGUMENT, once each, so
+  // this function obeys the entry-layer rule below for every position it reads.
+  const declared = ingest(args[1]);
+  const name = ingest(args[2]);
   // IT COUNTS, AND IT DOES NOT INGEST. Every internal caller hands its own rest
   // tail, whose ELEMENTS may be anything at all — and this is the one validator
   // that must not traverse them, because the evaluators call it on a request they
@@ -473,7 +502,44 @@ function deepFreeze(value) {
 }
 
 /** An open schema is an unenforced one: an unread field is a field nobody checked. */
+
+const UNSAFE_TEXT =
+  /[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/u;
+const INTERNAL_REF = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$/;
+const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+// ---------------------------------------------------------------------------
+// THE CHECKS. Snapshot in; a throw or nothing out. NOT ONE OF THEM COPIES.
+// ---------------------------------------------------------------------------
+
 /**
+ * ONE SNAPSHOT PER ENTRY, and this is the sixth re-review's first finding taken
+ * as a class rather than as one call site.
+ *
+ * The previous round put the copy inside each validator, which reads as defence
+ * in depth and is the opposite. `assertR01DecisionBinding` handed the CALLER'S
+ * OWN OBJECT to four validators in turn, so four independent copies were taken of
+ * a thing that can answer differently each time it is asked — and the reviewer
+ * built exactly that: a Proxy whose `ownKeys` returned nothing for the first two
+ * copies and the real decision set for the last two. Every individual check
+ * passed against the copy IT had taken, the composite returned successfully, and
+ * NO SINGLE OBSERVED OBJECT had ever satisfied all four. Four honest copies of
+ * four different objects are not a validation of one object.
+ *
+ * The split below is the fix, and it is structural rather than careful:
+ *
+ *   THE CHECKS (this section) take a snapshot and never call `ingest`. They are
+ *   module-private, so there is no route by which a caller value can reach one.
+ *
+ *   THE ENTRY LAYER (the section after it) is the ONLY code in this slice that
+ *   calls `ingest`. Each exported function snapshots each of its declared
+ *   arguments exactly once, at entry, and passes only the frozen snapshot down.
+ *
+ * A composite is therefore a sequence of checks over ONE copy, which is the only
+ * shape in which "this object satisfies all four" is a true sentence. The suite
+ * measures it with a counting Proxy rather than trusting the arrangement: every
+ * export, every argument position, `ownKeys` and `get` counted per call.
+ *
  * THE VALIDATORS RETURN NOTHING, DELIBERATELY.
  *
  * They used to return the value they had just checked, which reads as a
@@ -483,11 +549,7 @@ function deepFreeze(value) {
  * `assertInternalRef("allow")` returned `"allow"`. A validator's whole job is to
  * throw; the caller already has the value.
  */
-export function assertClosedKeys(...args) {
-  assertArity(args, 3, "assertClosedKeys");
-  const [rawObject, rawAllowed, path] = args;
-  const object = ingest(rawObject);
-  const allowed = ingest(rawAllowed);
+function checkClosedKeys(object, allowed, path) {
   assertArgumentShape(isPlainObject(object) && Array.isArray(allowed) && typeof path === "string");
   for (const key of Object.keys(object)) {
     if (!allowed.includes(key)) {
@@ -496,29 +558,19 @@ export function assertClosedKeys(...args) {
   }
 }
 
-export function assertRequiredKeys(...args) {
-  assertArity(args, 3, "assertRequiredKeys");
-  const [rawObject, rawRequired, path] = args;
-  const object = ingest(rawObject);
-  const required = ingest(rawRequired);
+function checkRequiredKeys(object, required, path) {
   assertArgumentShape(isPlainObject(object) && Array.isArray(required) && typeof path === "string");
   for (const key of required) {
     if (!Object.hasOwn(object, key)) fail("missing_field");
   }
 }
 
-export function assertObject(...args) {
-  assertArity(args, 2, "assertObject");
-  const [rawValue, path] = args;
+function checkObject(value, path) {
   assertArgumentShape(typeof path === "string");
-  if (!isPlainObject(ingest(rawValue))) fail("invalid_shape");
+  if (!isPlainObject(value)) fail("invalid_shape");
 }
 
-export function assertArray(...args) {
-  assertArity(args, 3, "assertArray");
-  const [rawValue, path, rawOptions = {}] = args;
-  const value = ingest(rawValue);
-  const options = ingest(rawOptions);
+function checkArray(value, path, options) {
   assertArgumentShape(typeof path === "string" && isPlainObject(options));
   const { min = 0, max = 512 } = options;
   if (!Array.isArray(value)) fail("invalid_shape");
@@ -530,16 +582,7 @@ export function assertArray(...args) {
   }
 }
 
-const UNSAFE_TEXT =
-  /[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/u;
-const INTERNAL_REF = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$/;
-const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
-
-export function assertSafeText(...args) {
-  assertArity(args, 3, "assertSafeText");
-  const [rawValue, path, rawOptions = {}] = args;
-  const value = ingest(rawValue);
-  const options = ingest(rawOptions);
+function checkSafeText(value, path, options) {
   assertArgumentShape(typeof path === "string" && isPlainObject(options));
   const { maxLength = 512 } = options;
   if (typeof value !== "string" || value.length === 0) {
@@ -556,31 +599,24 @@ export function assertSafeText(...args) {
   }
 }
 
-export function assertInternalRef(...args) {
-  assertArity(args, 3, "assertInternalRef");
-  const [rawValue, path, rawOptions = {}] = args;
-  const value = ingest(rawValue);
-  const options = ingest(rawOptions);
+function checkInternalRef(value, path, options) {
   assertArgumentShape(typeof path === "string" && isPlainObject(options));
   const { maxLength = 255 } = options;
-  assertSafeText(value, path, { maxLength });
+  // THE CHECK, NOT THE EXPORT. Calling `assertSafeText` here would have been a
+  // second copy of a value already copied — the very defect this section closes,
+  // committed internally instead of across a module boundary.
+  checkSafeText(value, path, { maxLength });
   if (!INTERNAL_REF.test(value)) {
     fail("invalid_reference");
   }
 }
 
-export function assertBoolean(...args) {
-  assertArity(args, 2, "assertBoolean");
-  const [rawValue, path] = args;
+function checkBoolean(value, path) {
   assertArgumentShape(typeof path === "string");
-  if (typeof ingest(rawValue) !== "boolean") fail("invalid_shape");
+  if (typeof value !== "boolean") fail("invalid_shape");
 }
 
-export function assertEnum(...args) {
-  assertArity(args, 3, "assertEnum");
-  const [rawValue, rawAllowed, path] = args;
-  const value = ingest(rawValue);
-  const allowed = ingest(rawAllowed);
+function checkEnum(value, allowed, path) {
   assertArgumentShape(Array.isArray(allowed) && typeof path === "string");
   // A SNAPSHOT OF AN EXOTIC VALUE IS EQUAL TO NOTHING, deliberately: two
   // different Proxies are not the same registered value, and a registered value
@@ -591,32 +627,42 @@ export function assertEnum(...args) {
 }
 
 /**
- * AN EXACT SET OF STRINGS HELD AT ONE KEY of a caller's object.
+ * A CLOSED RECORD WHOSE ONE FIELD HOLDS AN EXACT SET OF STRINGS.
  *
- * THIS EXISTS BECAUSE OF WHERE THE READ HAS TO HAPPEN. `assertR01DecisionBinding`
- * is the only check in this slice that must compare caller VALUES against a
- * module's own list, and the fifth re-review found it doing so with a bare
- * `Array.isArray(binding.decision_ids)` — a property read on a caller's Proxy,
- * performed in the module that owns the expected set rather than behind the
- * boundary. Moving the comparison here means the hostile-value guard has exactly
- * one home: the owner passes its expected list IN and gets a throw or nothing
- * back, and no caller value ever crosses back out to it.
+ * THIS IS THE WHOLE COMPOSITE, IN ONE CHECK, OVER ONE COPY. It used to be the
+ * exact-set comparison alone, with the holder's shape and its closed key set
+ * proved by three separate exported validators that the caller's object was
+ * handed to one after another — three more copies, three more chances for a
+ * chameleon to answer differently. The shape questions and the set question are
+ * asked here now, in the order they were asked before, so each still has its own
+ * refusal and the codes a consumer branches on are unchanged:
+ *
+ *   1. the holder is a plain object                     -> invalid_shape
+ *   2. it carries no field but `key`                    -> unknown_field
+ *   3. it carries `key`                                 -> missing_field
+ *   4. that field is an array                           -> invalid_shape
+ *   5. every element is a string, the count matches, the elements are distinct,
+ *      and the sorted elements equal the expected list one index at a time
+ *                                                       -> mismatchCode
+ *
+ * Step 5 is element-wise and joins nothing: a separator is not a delimiter unless
+ * the thing being separated cannot contain it, and an arbitrary caller string can
+ * contain anything.
  *
  * `mismatchCode` must be a registered code, so a caller cannot mint a refusal by
  * naming one; `fail` would refuse it anyway, and the check is explicit here.
  */
-export function assertExactStringSet(...args) {
-  assertArity(args, 4, "assertExactStringSet");
-  const [rawObject, key, rawExpected, mismatchCode] = args;
-  const object = ingest(rawObject);
-  const expected = ingest(rawExpected);
+function checkClosedExactStringSet(object, key, expected, mismatchCode) {
   assertArgumentShape(isPlainObject(object) && typeof key === "string"
     && Array.isArray(expected) && typeof mismatchCode === "string"
     && V5_R01_ERROR_CODE_SET.has(mismatchCode));
-  const declared = Object.hasOwn(object, key) ? object[key] : undefined;
+  for (const declaredKey of Object.keys(object)) {
+    if (declaredKey !== key) fail("unknown_field");
+  }
+  if (!Object.hasOwn(object, key)) fail("missing_field");
+  const declared = object[key];
   if (!Array.isArray(declared)) fail("invalid_shape");
-  // EACH STEP HAS ITS OWN REFUSAL, and none of them joins anything: a separator
-  // is not a delimiter unless the thing being separated cannot contain it.
+  // EACH STEP HAS ITS OWN REFUSAL, and none of them joins anything.
   for (const id of declared) {
     if (typeof id !== "string") fail(mismatchCode);
   }
@@ -635,12 +681,9 @@ export function assertExactStringSet(...args) {
  * which would quietly turn one impossible day into a real one in the middle of a
  * run-length count. The round-trip is the check.
  */
-export function assertCalendarDate(...args) {
-  assertArity(args, 2, "assertCalendarDate");
-  const [rawValue, path] = args;
-  const value = ingest(rawValue);
+function checkCalendarDate(value, path) {
   assertArgumentShape(typeof path === "string");
-  assertSafeText(value, path, { maxLength: 10 });
+  checkSafeText(value, path, { maxLength: 10 });
   const match = ISO_DATE.exec(value);
   if (!match) fail("invalid_date");
   const [, y, m, d] = match;
@@ -652,20 +695,107 @@ export function assertCalendarDate(...args) {
 }
 
 /** Days since the epoch, so "the next calendar day" is subtraction and not parsing. */
-export function calendarDayOrdinal(...args) {
-  assertArity(args, 1, "calendarDayOrdinal");
-  const date = ingest(args[0]);
+function dayOrdinalOf(date) {
   if (typeof date !== "string" || !ISO_DATE.test(date)) fail("invalid_date");
   const [y, m, d] = date.split("-").map(Number);
   return Math.round(Date.UTC(y, m - 1, d) / 86400000);
 }
 
-/** 0 = Sunday … 6 = Saturday, computed from the same ordinal. */
+/** 0 = Sunday through 6 = Saturday, computed from the same ordinal. */
+function weekdayOf(date) {
+  if (typeof date !== "string" || !ISO_DATE.test(date)) fail("invalid_date");
+  return (((dayOrdinalOf(date) + 4) % 7) + 7) % 7;
+}
+
+// ---------------------------------------------------------------------------
+// THE ENTRY LAYER. `ingest` is called here and NOWHERE else in this slice.
+// ---------------------------------------------------------------------------
+//
+// Each wrapper does three things in this order and nothing else: count the
+// arguments, snapshot each declared argument exactly once, hand the snapshots to
+// a check. A reader looking for a second copy has one short section to read.
+//
+// `assertArity` is the one function above this line that takes a caller value,
+// and it is the documented exception for the reason stated at its own definition:
+// it is handed the rest tail of a function that has promised not to examine what
+// is in it, so it reads the tail's LENGTH under `reflecting` and never traverses
+// it. The two arguments it does look at are snapshotted like any others.
+
+export function assertClosedKeys(...args) {
+  assertArity(args, 3, "assertClosedKeys");
+  const [rawObject, rawAllowed, rawPath] = args;
+  checkClosedKeys(ingest(rawObject), ingest(rawAllowed), ingest(rawPath));
+}
+
+export function assertRequiredKeys(...args) {
+  assertArity(args, 3, "assertRequiredKeys");
+  const [rawObject, rawRequired, rawPath] = args;
+  checkRequiredKeys(ingest(rawObject), ingest(rawRequired), ingest(rawPath));
+}
+
+export function assertObject(...args) {
+  assertArity(args, 2, "assertObject");
+  const [rawValue, rawPath] = args;
+  checkObject(ingest(rawValue), ingest(rawPath));
+}
+
+export function assertArray(...args) {
+  assertArity(args, 3, "assertArray");
+  const [rawValue, rawPath, rawOptions = {}] = args;
+  checkArray(ingest(rawValue), ingest(rawPath), ingest(rawOptions));
+}
+
+export function assertSafeText(...args) {
+  assertArity(args, 3, "assertSafeText");
+  const [rawValue, rawPath, rawOptions = {}] = args;
+  checkSafeText(ingest(rawValue), ingest(rawPath), ingest(rawOptions));
+}
+
+export function assertInternalRef(...args) {
+  assertArity(args, 3, "assertInternalRef");
+  const [rawValue, rawPath, rawOptions = {}] = args;
+  checkInternalRef(ingest(rawValue), ingest(rawPath), ingest(rawOptions));
+}
+
+export function assertBoolean(...args) {
+  assertArity(args, 2, "assertBoolean");
+  const [rawValue, rawPath] = args;
+  checkBoolean(ingest(rawValue), ingest(rawPath));
+}
+
+export function assertEnum(...args) {
+  assertArity(args, 3, "assertEnum");
+  const [rawValue, rawAllowed, rawPath] = args;
+  checkEnum(ingest(rawValue), ingest(rawAllowed), ingest(rawPath));
+}
+
+/**
+ * THE ONE ENTRY `assertR01DecisionBinding` USES, for the reason above: a
+ * composite that calls four entries takes four copies, so the composite is one
+ * entry and one copy. The owner still passes its expected list IN and gets a
+ * throw or nothing back; no caller value crosses back out to it.
+ */
+export function assertExactStringSet(...args) {
+  assertArity(args, 4, "assertExactStringSet");
+  const [rawObject, rawKey, rawExpected, rawMismatchCode] = args;
+  checkClosedExactStringSet(ingest(rawObject), ingest(rawKey), ingest(rawExpected),
+    ingest(rawMismatchCode));
+}
+
+export function assertCalendarDate(...args) {
+  assertArity(args, 2, "assertCalendarDate");
+  const [rawValue, rawPath] = args;
+  checkCalendarDate(ingest(rawValue), ingest(rawPath));
+}
+
+export function calendarDayOrdinal(...args) {
+  assertArity(args, 1, "calendarDayOrdinal");
+  return dayOrdinalOf(ingest(args[0]));
+}
+
 export function calendarWeekday(...args) {
   assertArity(args, 1, "calendarWeekday");
-  const date = ingest(args[0]);
-  if (typeof date !== "string" || !ISO_DATE.test(date)) fail("invalid_date");
-  return (((calendarDayOrdinal(date) + 4) % 7) + 7) % 7;
+  return weekdayOf(ingest(args[0]));
 }
 
 /**
