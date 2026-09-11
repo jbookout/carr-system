@@ -920,13 +920,18 @@ function containsToken(text, token) {
  * register is not a module in this repository and nothing it owns can be
  * resolved here, so its targets and acceptance children could never satisfy
  * condition (1) — they are provenance in a source comment now rather than
- * strings on a surface claiming a verification this slice cannot perform. What
- * is left is ONE owner and one exempted string, `evaluateReadContinuity`, which
- * really is exported by global-boundaries.v5.js and is checked to be on every
- * run. The machinery did not survive because it was worth hardening; it survived
- * because deleting it would mean a drill fault could no longer name the S01 seam
- * that defines its behaviour, which is the one thing the standing rule requires
- * an honestly-deferred fault to say.
+ * strings on a surface claiming a verification this slice cannot perform.
+ *
+ * THE SECOND PASS ASKED WHETHER ANY OF THIS IS STILL NEEDED, and the answer was
+ * measured rather than argued: running the sweep with the skip deleted outright
+ * reports exactly ONE distinct string, `evaluateReadContinuity`, S01's own export
+ * standing as the s01_seam of three drill faults. Three quotations survive, the
+ * other two carry no privileged token and would not notice the deletion, and a
+ * test below pins both facts. So the machinery did not survive because it was
+ * worth hardening. It survived because deleting it would force this slice either
+ * to misquote S01 or to stop naming the seam that defines a fault's behaviour,
+ * which is the one thing the standing rule requires an honestly deferred fault
+ * to say.
  */
 const QUOTATION_OWNERS = new Map([[vocabulary.V5_R01_S01_MODULE, boundaries]]);
 
@@ -1743,6 +1748,37 @@ test("guard: every quotation resolves in an allowlisted owner module", () => {
       assert.equal(quotedTexts.has(key), false, `${entry.at} uses a quoted identifier as a key`);
     }
   }
+});
+
+test("guard: the exemption covers exactly one string, and deleting it would cost the seam", () => {
+  // THE DELIBERATE SECOND PASS, MEASURED RATHER THAN ARGUED. The correction asked
+  // whether any exemption machinery is still needed once the closed union is
+  // pinned, and preferred deleting it to hardening it. Run with the skip deleted,
+  // the sweep reports exactly one distinct string: `evaluateReadContinuity`,
+  // S01's own export, standing as the s01_seam of three drill faults.
+  const quoted = new Set();
+  for (const entry of EXPORTED_VALUES) {
+    for (const { quotation } of everyQuotation(entry.output, entry.at)) {
+      quoted.add(`${quotation.quoted_from}#${quotation.identifier}`);
+    }
+  }
+  const s01 = vocabulary.V5_R01_S01_MODULE;
+  assert.deepEqual([...quoted].sort(), [
+    `${s01}#evaluateActorAuthority`,
+    `${s01}#evaluateLocalPlatform`,
+    `${s01}#evaluateReadContinuity`,
+  ], "the quotation set grew; every new entry needs its own review");
+
+  // OF THOSE THREE, THE SKIP ONLY SAVES ONE. The other two carry no privileged
+  // token at all and would survive the machinery's deletion untouched, which is
+  // what answers the second pass: the whole exemption exists for
+  // `evaluateReadContinuity`, and the cost of deleting it is that three drill
+  // faults stop naming the S01 seam that defines their behaviour.
+  const loadBearing = [...quoted].filter(entry =>
+    PRIVILEGED_TOKENS.some(token => containsToken(entry.split("#")[1], token)));
+  assert.deepEqual(loadBearing, [`${s01}#evaluateReadContinuity`]);
+  assert.equal(findingsIn({ plain: "evaluateReadContinuity" }, "read").length, 1);
+  assert.deepEqual(findingsIn({ plain: "evaluateLocalPlatform" }, "read"), []);
 });
 
 test("guard: a name this slice minted in a quotation's shape is swept, not skipped", () => {
