@@ -1313,7 +1313,9 @@ export function evaluateReleaseEligibility(request, stateHolder = null) {
     blocking_check: blocking,
     check_states: states,
     // An allow here records that the clause is satisfied. It merges nothing and
-    // deploys nothing; the Deployment Controller remains the only door.
+    // deploys nothing. The door it is written for is the Deployment Controller,
+    // which this repository does not have yet -- see the seam census in the
+    // header rather than reading this as a claim that the door exists.
     performs_merge: false,
     performs_deployment: false,
     decided_by: "deterministic_controller",
