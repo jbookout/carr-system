@@ -9,12 +9,14 @@
 // privileged outcome under any name. The surface is also asserted INDIFFERENT to
 // its input: every shape produces byte-identical output, so there is no field a
 // caller could reach for. Plus a parser-backed scan (V8's own ESM parser, via
-// vm.SourceTextModule in a child process — not a regex) proving no production
-// module imports the classifier entry.
+// vm.SourceTextModule in a child process — not a regex) proving that src/ holds
+// no test-only entry at all and that no module in src/ names a specifier under
+// ../test/.
 //
-// HALF B, THE CLASSIFIERS. The three deterministic clauses, proved clause by
-// clause through `gate-zero-classifiers.v5.testonly.js`, the dedicated test-only
-// entry. Their answers are conditional by name
+// HALF B, THE CLAUSES. The three deterministic clauses, proved clause by clause
+// through `./gate-zero-classifiers.v5.testhelper.mjs` — a helper in THIS
+// directory, not a module in src/, so a production import of it is impossible
+// rather than merely absent. Their answers are conditional by name
 // (`would_satisfy_if_authoritative`, `would_be_green_if_authoritative`,
 // `would_join_exactly_if_authoritative`) because no authoritative
 // predecessor-outcome, scheduler or gate-conclusion reader exists to make them
@@ -26,7 +28,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
@@ -65,7 +67,7 @@ import {
   classifySchedulerCanary,
   classifyGateGraph,
   classifyGateZeroJoin,
-} from "../src/gate-zero-classifiers.v5.testonly.js";
+} from "./gate-zero-classifiers.v5.testhelper.mjs";
 
 const AS_OF = "2026-09-11T18:00:00Z";
 
@@ -374,18 +376,22 @@ function moduleImports(directory) {
   return JSON.parse(run.stdout);
 }
 
-test("ISOLATION: no production module imports the classifier test-only entry", () => {
+test("ISOLATION: src holds no test-only entry, and none of it reaches the test tree", () => {
   const directory = fileURLToPath(new URL("../src", import.meta.url));
+  const strays = readdirSync(directory).filter(name => /\.(testonly|testhelper)\./.test(name));
+  assert.deepEqual(strays, [], "a test-only entry is sitting in the production source directory");
+
   const imports = moduleImports(directory);
   // The parser must have seen this slice at all, or the scan proves nothing.
   assert.ok(Object.hasOwn(imports, "gate-zero-assurance.v5.js"));
-  assert.ok(Object.hasOwn(imports, "gate-zero-classifiers.v5.testonly.js"));
   assert.ok(Object.keys(imports).length > 100, "every module in src must have been parsed");
 
   const offenders = Object.entries(imports)
-    .filter(([, specifiers]) => specifiers.some(one => one.includes(".testonly.")))
+    .filter(([, specifiers]) => specifiers.some(one =>
+      one.includes("/test/") || one.startsWith("../test") ||
+      one.includes(".testonly.") || one.includes(".testhelper.")))
     .map(([name]) => name);
-  assert.deepEqual(offenders, [], "a production module reached the classifier entry");
+  assert.deepEqual(offenders, [], "a production module reached into the test directory");
 
   // And specifically: the public surface imports four modules, none of them this
   // slice's classifiers.
@@ -393,9 +399,59 @@ test("ISOLATION: no production module imports the classifier test-only entry", (
     ["./artifact-trust.js", "./global-boundaries.v5.js", "./identity.js", "./benchmark-minimum.v5.js"]);
 });
 
-test("ISOLATION: the classifier entry answers only in the conditional", () => {
+/**
+ * The same privileged words, checked as VALUES ONLY. The public sweep also flags
+ * any `would_` FIELD, which is right there and wrong here — a clause answers in
+ * `would_` fields by design. What a clause may never do is put one of the words
+ * a consumer acts on into a value, under any field name at all.
+ */
+function privilegedValueFindings(value, path = "$", found = []) {
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => privilegedValueFindings(entry, `${path}[${index}]`, found));
+    return found;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const [key, entry] of Object.entries(value))
+      privilegedValueFindings(entry, `${path}.${key}`, found);
+    return found;
+  }
+  if (typeof value === "string" && CLAUSE_PRIVILEGED_VALUES.has(value)) found.push(`${path} === ${value}`);
+  return found;
+}
+
+/** The words a consumer would act on, as VALUES, for the clause sweep below. */
+const CLAUSE_PRIVILEGED_VALUES = new Set([
+  ...PRIVILEGED_VALUES, "joins_exactly", "coverage_complete", "ok", "covered", "activated",
+]);
+
+test("VOCABULARY: no clause answer contains a privileged word as a value", () => {
+  // The sibling half of this slice answered `would_derive_state_if_authoritative:
+  // "operational"` — a conditional field with the privileged word sitting inside
+  // it — and a reviewer was right that the value is what a consumer reads. These
+  // clauses answer in booleans under `would_*` names and carry no such value; the
+  // sweep is here so a later edit cannot introduce one unnoticed.
+  const answers = [
+    classifyGateGraph(cleanGates()),
+    classifyGateZeroJoin(cleanJoin()),
+    classifySchedulerCanary(cleanCanary(), cleanReadback(), SCHEDULER_OUTCOME_DIGEST),
+  ];
+  for (const stepRef of V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS)
+    answers.push(classifyPredecessorObservation(observation(stepRef, "sweep"),
+      { step_ref: stepRef, as_of_ms: Date.parse(AS_OF) }));
+  for (const conclusion of V5_A02_GATE_CONCLUSIONS)
+    answers.push(classifyGateGraph([
+      { gate_id: "root", conclusion, depends_on: [] },
+      { gate_id: "leaf", conclusion: "success", depends_on: ["root"] },
+    ]));
+  assert.ok(answers.length >= 8, "the clause sweep must cover the clause domain");
+  for (const answer of answers)
+    assert.deepEqual(privilegedValueFindings(answer), [],
+      `${answer.classification ?? "clause"} answered with a privileged word`);
+});
+
+test("ISOLATION: the clause helper answers only in the conditional", () => {
   const source = readFileSync(
-    fileURLToPath(new URL("../src/gate-zero-classifiers.v5.testonly.js", import.meta.url)), "utf8");
+    fileURLToPath(new URL("./gate-zero-classifiers.v5.testhelper.mjs", import.meta.url)), "utf8");
   // No privileged result field is even spelled in the classifier's returns.
   for (const forbidden of ["decision:", "green:", "joins_exactly:", "passable:", "ok:"])
     assert.equal(source.includes(`\n    ${forbidden}`), false,
@@ -800,7 +856,7 @@ test("POLICY: every reason either half can answer with is registered", () => {
   };
   const publicCitations = citations("../src/gate-zero-assurance.v5.js");
   assert.ok(publicCitations.length >= 3, "the public surface must cite its own refusals");
-  const classifierCitations = citations("../src/gate-zero-classifiers.v5.testonly.js");
+  const classifierCitations = citations("./gate-zero-classifiers.v5.testhelper.mjs");
   assert.ok(classifierCitations.length >= 10, "the clauses must cite their own refusals");
   for (const id of [...publicCitations, ...classifierCitations])
     assert.ok(V5_A02_GATE_ZERO_REASON_IDS.includes(id), `${id} is not registered`);

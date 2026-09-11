@@ -5,21 +5,24 @@
 // enumerated from the module namespace, swept with every caller-controlled
 // input shape — clean fixtures, every rule state, every enforcement mechanism,
 // every fallback kind, and the shapes that simply assert the answer — and
-// asserted never to produce `operational`, `active`, `allow` or
-// `coverage_complete` under any name. The surface is also asserted INDIFFERENT
-// to its input: every shape produces byte-identical output. Plus a
-// parser-backed scan (V8's own ESM parser via vm.SourceTextModule in a child
-// process, not a regex) proving no production module imports the classifier
-// entry.
+// asserted never to produce `operational`, `active`, `allow`, `green`,
+// `joins_exactly` or `coverage_complete` under any name. The surface is also
+// asserted INDIFFERENT to its input: every shape produces byte-identical output.
+// Plus a parser-backed scan (V8's own ESM parser via vm.SourceTextModule in a
+// child process, not a regex) proving that src/ holds no test-only entry at all
+// and that no module in src/ names a specifier under ../test/.
 //
-// HALF B, THE CLASSIFIERS, through `lifecycle-classifiers.v5.testonly.js`, the
-// dedicated test-only entry. Their answers are conditional by name
-// (`would_derive_state_if_authoritative`, `would_permit_if_authoritative`,
-// `would_be_covered_if_authoritative`) because no authoritative workflow, rule,
-// control, test or receipt reader exists to make them anything else. The
-// positive case comes first on purpose: a clause that only ever refuses cannot
-// be told apart from a broken one, so every negative is a single NAMED mutation
-// of one clean request that satisfies.
+// HALF B, THE CLAUSES, through `./lifecycle-classifiers.v5.testhelper.mjs` — a
+// helper in THIS directory, not a module in src/, so no production import of it
+// is possible rather than merely absent. Their answers are conditional twice
+// over: conditional FIELD NAMES (`would_derive_state_token_if_authoritative`,
+// `would_permit_if_authoritative`, `would_be_covered_if_authoritative`) and a
+// conditional VALUE vocabulary — `would_be_operational_if_authoritative`, never
+// `operational`. That second half is the correction a reviewer asked for twice:
+// a conditional field name with `operational` sitting inside it is still one
+// property read away from a consumer acting on it. The positive case comes first
+// on purpose: a clause that only ever refuses cannot be told apart from a broken
+// one, so every negative is a single NAMED mutation of one clean request.
 //
 // Two suites prove that a vocabulary was READ rather than invented: one reads
 // db/schema.sql and asserts the eleven workflow lifecycle states match
@@ -31,7 +34,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
@@ -50,6 +53,8 @@ import {
   V5_A02_LIFECYCLE_REASON_IDS,
   V5_A02_LIFECYCLE_OWED_SEAMS,
   V5_A02_WORKFLOW_LIFECYCLE_STATES,
+  V5_A02_CONDITIONAL_WORKFLOW_STATE_TOKENS,
+  V5_A02_CONDITIONAL_RULE_STATE_TOKENS,
   V5_A02_WORKFLOW_DIMENSIONS,
   V5_A02_MANDATORY_PROOF_DIMENSIONS,
   V5_A02_WORKFLOW_KINDS,
@@ -81,10 +86,22 @@ import {
   classifyWorkflowLifecycle,
   classifyRuleTransition,
   classifyRuleEnforcementCoverage,
-} from "../src/lifecycle-classifiers.v5.testonly.js";
+} from "./lifecycle-classifiers.v5.testhelper.mjs";
 
 const AS_OF = "2026-09-11T18:00:00Z";
 const IMPLEMENTATION_DIGEST = `sha256:${"d".repeat(64)}`;
+
+/**
+ * The two conditional vocabularies, keyed by the state each token stands for, so
+ * a fixture reads `WF.operational` and still hands the clause a token. Built by
+ * index from the published arrays — and the test below pins the spelling of the
+ * two tokens that matter literally, so this construction cannot drift into
+ * agreeing with a broken vocabulary.
+ */
+const keyed = (states, tokens) =>
+  Object.freeze(Object.fromEntries(states.map((state, index) => [state, tokens[index]])));
+const WF = keyed(V5_A02_WORKFLOW_LIFECYCLE_STATES, V5_A02_CONDITIONAL_WORKFLOW_STATE_TOKENS);
+const RS = keyed(V5_A02_RULE_STATES, V5_A02_CONDITIONAL_RULE_STATE_TOKENS);
 
 function cleanEvidence(overrides = {}) {
   return {
@@ -101,7 +118,7 @@ function cleanComplexWorkflow() {
     required_dimensions: [...V5_A02_WORKFLOW_DIMENSIONS],
     disposition: "none",
     evidence: cleanEvidence(),
-    claimed_state: "operational",
+    claimed_state_token: WF.operational,
   };
 }
 
@@ -112,7 +129,7 @@ function cleanShortWorkflow() {
     required_dimensions: V5_A02_WORKFLOW_DIMENSIONS.filter(dim => dim !== "artifact"),
     disposition: "none",
     evidence: cleanEvidence(),
-    claimed_state: "operational",
+    claimed_state_token: WF.operational,
   };
 }
 
@@ -136,8 +153,8 @@ function cleanTransition(overrides = {}) {
     rule_id: "a02-example-rule",
     rule_class: "code_enforced",
     mandatory: true,
-    from_state: "shadow",
-    to_state: "active",
+    from_state_token: RS.shadow,
+    to_state_token: RS.active,
     review: { proposer_actor_id: "claude", reviewer_actor_id: "joe" },
     tests: [{ test_ref: "test:gate-zero-assurance", result: "pass" }],
     shadow_window: {
@@ -158,24 +175,24 @@ function cleanCoverage() {
     as_of: AS_OF,
     rules: [
       {
-        rule_id: "code-rule", version: 3, rule_class: "code_enforced", state: "active",
+        rule_id: "code-rule", version: 3, rule_class: "code_enforced", state_token: RS.active,
         mandatory: true, binding_text_present: false,
         control: cleanControl(), fallback: cleanFallback(),
       },
       {
-        rule_id: "workflow-rule", version: 1, rule_class: "workflow", state: "active",
+        rule_id: "workflow-rule", version: 1, rule_class: "workflow", state_token: RS.active,
         mandatory: true, binding_text_present: true,
         control: { ...cleanControl("workflow_definition"), control_id: "light-path" },
         fallback: { kind: "documented_manual_procedure", ref: "fallback:manual-serialized-merge" },
       },
       {
-        rule_id: "judgment-rule", version: 2, rule_class: "scoped_judgment", state: "active",
+        rule_id: "judgment-rule", version: 2, rule_class: "scoped_judgment", state_token: RS.active,
         mandatory: false, binding_text_present: true,
         control: { ...cleanControl("model_judgment"), control_id: "voice-review" },
         fallback: { kind: "escalate_to_verified_partner", ref: "fallback:ask-joe" },
       },
       {
-        rule_id: "retired-rule", version: 9, rule_class: "preference", state: "retired",
+        rule_id: "retired-rule", version: 9, rule_class: "preference", state_token: RS.retired,
         mandatory: false, binding_text_present: true, control: null, fallback: null,
       },
     ],
@@ -194,6 +211,8 @@ function cleanCoverage() {
 const EXPECTED_PUBLIC_EXPORTS = [
   "V5_A02_ACCEPTANCE_RECEIPT_READER_SEAM",
   "V5_A02_CLASS_ENFORCEMENT_MECHANISM",
+  "V5_A02_CONDITIONAL_RULE_STATE_TOKENS",
+  "V5_A02_CONDITIONAL_WORKFLOW_STATE_TOKENS",
   "V5_A02_CONTROL_IMPLEMENTATION_READER_SEAM",
   "V5_A02_DECISION_IDS",
   "V5_A02_FALLBACK_KINDS",
@@ -233,8 +252,28 @@ const PRIVILEGED_TRUE_KEYS = new Set([
 ]);
 const PRIVILEGED_VALUES = new Set([
   "allow", "allowed", "green", "pass", "passed", "passable", "operational", "active",
-  "activated", "covered", "coverage_complete",
+  "activated", "covered", "coverage_complete", "joins_exactly",
 ]);
+
+/**
+ * The same words, checked as VALUES ONLY. The sweep above also flags any
+ * `would_` FIELD on the public surface, which is right there and wrong for the
+ * clauses — a clause answers in `would_` fields by design. What a clause may
+ * never do is put one of these words in a value, under any field name at all.
+ */
+function privilegedValueFindings(value, path = "$", found = []) {
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => privilegedValueFindings(entry, `${path}[${index}]`, found));
+    return found;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const [key, entry] of Object.entries(value))
+      privilegedValueFindings(entry, `${path}.${key}`, found);
+    return found;
+  }
+  if (typeof value === "string" && PRIVILEGED_VALUES.has(value)) found.push(`${path} === ${value}`);
+  return found;
+}
 
 /** Every string, key and boolean in a returned value, walked to the leaves. */
 function privilegedFindings(value, path = "$", found = []) {
@@ -276,6 +315,8 @@ function callerControlledShapes() {
   }
   for (const claimed of V5_A02_WORKFLOW_LIFECYCLE_STATES)
     shapes.push({ ...cleanComplexWorkflow(), claimed_state: claimed });
+  for (const token of V5_A02_CONDITIONAL_WORKFLOW_STATE_TOKENS)
+    shapes.push({ ...cleanComplexWorkflow(), claimed_state_token: token });
   // The shapes that try to say the answer outright.
   shapes.push({ ...cleanComplexWorkflow(), derived_state: "operational", decision: "allow" });
   shapes.push({ coverage_complete: true, activated: true, state: "active" });
@@ -401,26 +442,56 @@ function moduleImports(directory) {
   return JSON.parse(run.stdout);
 }
 
-test("ISOLATION: no production module imports the classifier test-only entry", () => {
+test("ISOLATION: src holds no test-only entry, so there is nothing to import", () => {
+  // The first correction renamed the classifier's FIELDS and left the module in
+  // src/. A module in src/ is importable by everything in src/, whatever it is
+  // called, so the route is now closed by where the file lives rather than by
+  // what it is named.
+  const directory = fileURLToPath(new URL("../src", import.meta.url));
+  const entries = readdirSync(directory)
+    .filter(name => /\.(testonly|testhelper)\./.test(name));
+  assert.deepEqual(entries, [], "a test-only entry is sitting in the production source directory");
+});
+
+test("ISOLATION: no module in src names a specifier under the test directory", () => {
   const directory = fileURLToPath(new URL("../src", import.meta.url));
   const imports = moduleImports(directory);
   assert.ok(Object.hasOwn(imports, "lifecycle-assurance.v5.js"));
-  assert.ok(Object.hasOwn(imports, "lifecycle-classifiers.v5.testonly.js"));
+  assert.ok(Object.hasOwn(imports, "gate-zero-assurance.v5.js"));
   assert.ok(Object.keys(imports).length > 100, "every module in src must have been parsed");
 
   const offenders = Object.entries(imports)
-    .filter(([, specifiers]) => specifiers.some(one => one.includes(".testonly.")))
+    .filter(([, specifiers]) => specifiers.some(one =>
+      one.includes("/test/") || one.startsWith("../test") ||
+      one.includes(".testonly.") || one.includes(".testhelper.")))
     .map(([name]) => name);
-  assert.deepEqual(offenders, [], "a production module reached the classifier entry");
+  assert.deepEqual(offenders, [], "a production module reached into the test directory");
 
   assert.deepEqual(imports["lifecycle-assurance.v5.js"],
     ["./artifact-trust.js", "./global-boundaries.v5.js", "./identity.js",
       "./gate-zero-assurance.v5.js"]);
 });
 
-test("ISOLATION: the classifier entry answers only in the conditional", () => {
+test("ISOLATION: no public export maps a conditional token back to a state", () => {
+  // The token vocabulary is published; the reversal is not. `stateFromConditional
+  // Token` is module-private in lifecycle-assurance.v5.js and appears on no
+  // namespace, so a consumer holding a token has no function to turn it into the
+  // state it stands for.
+  for (const name of Object.keys(surface))
+    assert.ok(!/(FromConditionalToken|fromConditionalToken|TOKEN_TO_STATE)/.test(name),
+      `${name} would reverse the conditional vocabulary on the public surface`);
+  // And a caller who holds a token gets nothing back for it: handing one to the
+  // public surface still answers unavailable, with no privileged word in it.
+  for (const [name, fn] of PUBLIC_FUNCTIONS_OVER_CALLER_INPUT) {
+    const result = fn({ claimed_state_token: WF.operational, state_token: RS.active });
+    assert.equal(result.status, "unavailable", name);
+    assert.deepEqual(privilegedValueFindings(result), [], name);
+  }
+});
+
+test("ISOLATION: the clause helper answers only in the conditional", () => {
   const source = readFileSync(
-    fileURLToPath(new URL("../src/lifecycle-classifiers.v5.testonly.js", import.meta.url)), "utf8");
+    fileURLToPath(new URL("./lifecycle-classifiers.v5.testhelper.mjs", import.meta.url)), "utf8");
   for (const forbidden of ["decision:", "derived_state:", "coverage_complete:", "activated:"])
     assert.equal(source.includes(`\n    ${forbidden}`), false,
       `${forbidden} is a privileged result field`);
@@ -434,6 +505,81 @@ test("ISOLATION: the classifier entry answers only in the conditional", () => {
     assert.equal(result.evidence_source, V5_A02_CLASSIFIER_EVIDENCE_SOURCE);
     assert.equal(Object.hasOwn(result, "decision"), false);
   }
+});
+
+test("VOCABULARY: a token is not a state, and the two privileged ones are pinned", () => {
+  // Pinned literally, because everything else in this file builds tokens from
+  // the published arrays — and a vocabulary that only ever agrees with itself
+  // would pass a rename of the very words this correction is about.
+  assert.equal(WF.operational, "would_be_operational_if_authoritative");
+  assert.equal(RS.active, "would_be_active_if_authoritative");
+  assert.equal(V5_A02_CONDITIONAL_WORKFLOW_STATE_TOKENS.length,
+    V5_A02_WORKFLOW_LIFECYCLE_STATES.length);
+  assert.equal(V5_A02_CONDITIONAL_RULE_STATE_TOKENS.length, V5_A02_RULE_STATES.length);
+  for (const token of [...V5_A02_CONDITIONAL_WORKFLOW_STATE_TOKENS,
+    ...V5_A02_CONDITIONAL_RULE_STATE_TOKENS]) {
+    assert.ok(token.startsWith("would_be_") && token.endsWith("_if_authoritative"), token);
+    assert.equal(V5_A02_WORKFLOW_LIFECYCLE_STATES.includes(token), false, token);
+    assert.equal(V5_A02_RULE_STATES.includes(token), false, token);
+    assert.equal(PRIVILEGED_VALUES.has(token), false, token);
+  }
+});
+
+test("VOCABULARY: no clause answer contains a privileged word as a value", () => {
+  // The whole clause domain, not one fixture: this is the assertion the second
+  // review round asked for, and it fails on the previous implementation, which
+  // returned the string "operational" from classifyWorkflowLifecycleState.
+  const answers = [
+    classifyWorkflowLifecycle(cleanComplexWorkflow()),
+    classifyWorkflowLifecycle(cleanShortWorkflow()),
+    classifyRuleTransition(cleanTransition()),
+    classifyRuleEnforcementCoverage(cleanCoverage()),
+  ];
+  for (const disposition of ["canceled", "none", "superseded"])
+    for (const present of [false, true])
+      for (const evidence of [cleanEvidence(), cleanEvidence({ has_conflict: true }),
+        cleanEvidence({ has_stale: true }), cleanEvidence({ has_blocker: true }),
+        cleanEvidence({ has_canonical: false }), cleanEvidence({ has_activation: false }),
+        cleanEvidence({ has_readback: false }), cleanEvidence({ has_telemetry: false }),
+        cleanEvidence({ has_artifact: false, has_canonical: false, has_activation: false })])
+        answers.push(classifyWorkflowLifecycleState(evidence, disposition, present));
+  for (const from of V5_A02_RULE_STATES)
+    for (const to of V5_A02_RULE_STATES)
+      answers.push(classifyRuleTransition(cleanTransition({
+        from_state_token: RS[from], to_state_token: RS[to],
+        retirement: to === "retired"
+          ? { behavior: "permanent_until_superseded", successor_rule_id: null } : null,
+      })));
+  for (const state of V5_A02_RULE_STATES)
+    for (const mechanism of V5_F05_ENFORCEMENT_MECHANISMS)
+      answers.push(classifyRuleEnforcementCoverage({
+        as_of: AS_OF,
+        rules: [{
+          rule_id: "sweep-rule", version: 1, rule_class: "code_enforced",
+          state_token: RS[state], mandatory: false, binding_text_present: true,
+          control: cleanControl(mechanism), fallback: cleanFallback(),
+        }],
+      }));
+  assert.ok(answers.length >= 100, "the clause sweep must cover the clause domain");
+  for (const answer of answers)
+    assert.deepEqual(privilegedValueFindings(answer), [],
+      `${answer.classification ?? "state"} answered with a privileged word`);
+});
+
+test("VOCABULARY: a bare state is not accepted as a claim or as an edge", () => {
+  // The inverse of the sweep: the words are not merely absent from the answers,
+  // they are unreadable as INPUT, so no caller can even phrase the question in
+  // the privileged vocabulary.
+  assert.throws(() => classifyWorkflowLifecycle({
+    ...cleanComplexWorkflow(), claimed_state_token: "operational" }),
+  error => error instanceof V5BoundaryError && error.code === "unknown_enum_member");
+  assert.throws(() => classifyRuleTransition(cleanTransition({ to_state_token: "active" })),
+    error => error instanceof V5BoundaryError && error.code === "unknown_enum_member");
+  assert.throws(() => classifyRuleEnforcementCoverage({
+    ...cleanCoverage(),
+    rules: [{ rule_id: "r", version: 1, rule_class: "code_enforced", state_token: "active",
+      mandatory: false, binding_text_present: true, control: cleanControl(), fallback: cleanFallback() }],
+  }), error => error instanceof V5BoundaryError && error.code === "unknown_enum_member");
 });
 
 // ===========================================================================
@@ -452,9 +598,13 @@ test("WORKFLOW: the eleven states match ops.completion_projection in its own ord
   assert.deepEqual([...V5_A02_WORKFLOW_LIFECYCLE_STATES], stated);
 });
 
-test("WORKFLOW: a complete complex workflow would derive the finished state", () => {
+test("WORKFLOW: a complete complex workflow would derive the finished token", () => {
   const result = classifyWorkflowLifecycle(cleanComplexWorkflow());
-  assert.equal(result.would_derive_state_if_authoritative, "operational");
+  // The token, spelled out: not `operational`, which is the word a consumer
+  // would act on and which no function in this repository may answer with.
+  assert.equal(result.would_derive_state_token_if_authoritative,
+    "would_be_operational_if_authoritative");
+  assert.equal(Object.hasOwn(result, "would_derive_state_if_authoritative"), false);
   assert.equal(result.would_permit_if_authoritative, true);
   assert.equal(result.reason_id, null);
   assert.deepEqual(result.effects, V5_NO_EFFECTS);
@@ -464,7 +614,8 @@ test("WORKFLOW: a complete short workflow finishes without a build artifact", ()
   const request = cleanShortWorkflow();
   request.evidence.has_artifact = false;
   const result = classifyWorkflowLifecycle(request);
-  assert.equal(result.would_derive_state_if_authoritative, "operational");
+  assert.equal(result.would_derive_state_token_if_authoritative,
+    "would_be_operational_if_authoritative");
   assert.equal(result.would_permit_if_authoritative, true);
 });
 
@@ -478,7 +629,7 @@ test("WORKFLOW: canonical is structurally undroppable under F09's own derivation
         const state = classifyWorkflowLifecycleState(
           cleanEvidence({ has_canonical: false, has_activation: activation,
             has_readback: readback, has_telemetry: telemetry }), "none", true);
-        assert.equal(state.would_derive_state_if_authoritative, "built_unmerged",
+        assert.equal(state.would_derive_state_token_if_authoritative, WF.built_unmerged,
           `activation=${activation} readback=${readback} telemetry=${telemetry}`);
       }
 });
@@ -491,7 +642,7 @@ test("WORKFLOW: a short workflow may not drop a proof dimension to finish", () =
   assert.equal(result.would_permit_if_authoritative, false);
   assert.equal(result.reason_id, "short_workflow_drops_proof_dimension");
   assert.deepEqual(result.proof_dimensions_dropped, ["telemetry"]);
-  assert.equal(result.would_derive_state_if_authoritative, "active_unproven",
+  assert.equal(result.would_derive_state_token_if_authoritative, WF.active_unproven,
     "F09's own projection answers active_unproven, never operational");
 });
 
@@ -515,8 +666,8 @@ test("WORKFLOW: the claimed state never wins over the derived one", () => {
   const request = cleanComplexWorkflow();
   request.evidence.has_telemetry = false;
   const result = classifyWorkflowLifecycle(request);
-  assert.equal(result.claimed_state_cited, "operational");
-  assert.equal(result.would_derive_state_if_authoritative, "active_unproven");
+  assert.equal(result.claimed_state_token_cited, WF.operational);
+  assert.equal(result.would_derive_state_token_if_authoritative, WF.active_unproven);
   assert.equal(result.claim_matches_derivation, false);
   assert.equal(result.would_permit_if_authoritative, false);
   assert.equal(result.reason_id, "workflow_state_claim_not_derived");
@@ -527,36 +678,37 @@ test("WORKFLOW: no claimed state reaches a finished derivation without the proof
   // Every caller-controlled claim, against evidence that is missing readback.
   const request = cleanComplexWorkflow();
   request.evidence.has_readback = false;
-  for (const claimed of V5_A02_WORKFLOW_LIFECYCLE_STATES) {
-    const result = classifyWorkflowLifecycle({ ...request, claimed_state: claimed });
-    assert.equal(result.would_derive_state_if_authoritative, "active_unproven", `claimed ${claimed}`);
+  for (const claimed of V5_A02_CONDITIONAL_WORKFLOW_STATE_TOKENS) {
+    const result = classifyWorkflowLifecycle({ ...request, claimed_state_token: claimed });
+    assert.equal(result.would_derive_state_token_if_authoritative, WF.active_unproven,
+      `claimed ${claimed}`);
   }
 });
 
 test("WORKFLOW: the precedence order decides, and conflicting beats everything", () => {
-  const derived = (evidence, disposition, present) =>
-    classifyWorkflowLifecycleState(evidence, disposition, present).would_derive_state_if_authoritative;
+  const derived = (evidence, disposition, present) => classifyWorkflowLifecycleState(
+    evidence, disposition, present).would_derive_state_token_if_authoritative;
   const evidence = cleanEvidence({ has_conflict: true, has_blocker: true, has_stale: true });
-  assert.equal(derived(evidence, "canceled", true), "conflicting");
+  assert.equal(derived(evidence, "canceled", true), WF.conflicting);
   assert.equal(derived(cleanEvidence({ has_stale: true, has_blocker: true }), "none", true),
-    "unknown_stale");
-  assert.equal(derived(cleanEvidence({ has_blocker: true }), "none", true), "blocked");
+    WF.unknown_stale);
+  assert.equal(derived(cleanEvidence({ has_blocker: true }), "none", true), WF.blocked);
 });
 
 test("WORKFLOW: each intermediate state is reachable from its own evidence", () => {
-  const derived = (evidence, disposition, present) =>
-    classifyWorkflowLifecycleState(evidence, disposition, present).would_derive_state_if_authoritative;
+  const derived = (evidence, disposition, present) => classifyWorkflowLifecycleState(
+    evidence, disposition, present).would_derive_state_token_if_authoritative;
   const cases = [
-    ["planned", cleanEvidence({ has_artifact: false, has_canonical: false, has_activation: false })],
-    ["built_unmerged", cleanEvidence({ has_canonical: false, has_activation: false })],
-    ["merged_unactivated", cleanEvidence({ has_activation: false })],
-    ["active_unproven", cleanEvidence({ has_readback: false })],
+    [WF.planned, cleanEvidence({ has_artifact: false, has_canonical: false, has_activation: false })],
+    [WF.built_unmerged, cleanEvidence({ has_canonical: false, has_activation: false })],
+    [WF.merged_unactivated, cleanEvidence({ has_activation: false })],
+    [WF.active_unproven, cleanEvidence({ has_readback: false })],
   ];
   for (const [expected, evidence] of cases)
     assert.equal(derived(evidence, "none", true), expected);
-  assert.equal(derived(cleanEvidence(), "none", false), "partially_built");
-  assert.equal(derived(cleanEvidence(), "canceled", true), "canceled");
-  assert.equal(derived(cleanEvidence(), "superseded", true), "superseded");
+  assert.equal(derived(cleanEvidence(), "none", false), WF.partially_built);
+  assert.equal(derived(cleanEvidence(), "canceled", true), WF.canceled);
+  assert.equal(derived(cleanEvidence(), "superseded", true), WF.superseded);
 });
 
 test("WORKFLOW: an unknown field is unreadable", () => {
@@ -594,18 +746,20 @@ test("RULE: shadow -> active with full evidence would be permitted", () => {
 });
 
 test("RULE: an edge outside the ladder is refused and names what is permitted", () => {
-  const result = classifyRuleTransition(cleanTransition({ from_state: "proposed", to_state: "active" }));
+  const result = classifyRuleTransition(
+    cleanTransition({ from_state_token: RS.proposed, to_state_token: RS.active }));
   assert.equal(result.reason_id, "rule_state_transition_not_permitted");
-  assert.deepEqual(result.detail.permitted, ["retired", "reviewed"]);
+  assert.deepEqual(result.detail.permitted, [RS.retired, RS.reviewed]);
+  assert.deepEqual(result.permitted_to_state_tokens_from, [RS.retired, RS.reviewed]);
 });
 
 test("RULE: a retired rule cannot walk back to active", () => {
-  const result = classifyRuleTransition(cleanTransition({ from_state: "retired", to_state: "active" }));
+  const result = classifyRuleTransition(cleanTransition({ from_state_token: RS.retired, to_state_token: RS.active }));
   assert.equal(result.reason_id, "rule_state_transition_not_permitted");
 });
 
 test("RULE: activation is reversible — active -> shadow is an edge and is flagged", () => {
-  const result = classifyRuleTransition(cleanTransition({ from_state: "active", to_state: "shadow" }));
+  const result = classifyRuleTransition(cleanTransition({ from_state_token: RS.active, to_state_token: RS.shadow }));
   assert.equal(result.would_permit_if_authoritative, true);
   assert.equal(result.reversible_activation_edge, true);
   assert.equal(classifyRuleTransition(cleanTransition()).reversible_activation_edge, false);
@@ -613,20 +767,20 @@ test("RULE: activation is reversible — active -> shadow is an edge and is flag
 
 test("RULE: the proposer may not be the reviewer", () => {
   const result = classifyRuleTransition(cleanTransition({
-    from_state: "proposed", to_state: "reviewed",
+    from_state_token: RS.proposed, to_state_token: RS.reviewed,
     review: { proposer_actor_id: "claude", reviewer_actor_id: "claude" },
   }));
   assert.equal(result.reason_id, "rule_reviewer_not_independent");
 });
 
 test("RULE: proposed -> reviewed with an independent reviewer would be permitted", () => {
-  const result = classifyRuleTransition(cleanTransition({ from_state: "proposed", to_state: "reviewed" }));
+  const result = classifyRuleTransition(cleanTransition({ from_state_token: RS.proposed, to_state_token: RS.reviewed }));
   assert.equal(result.would_permit_if_authoritative, true);
 });
 
 test("RULE: a rule cannot be tested by no test", () => {
   const result = classifyRuleTransition(cleanTransition({
-    from_state: "reviewed", to_state: "tested", tests: [],
+    from_state_token: RS.reviewed, to_state_token: RS.tested, tests: [],
   }));
   assert.equal(result.reason_id, "rule_tests_absent");
 });
@@ -634,7 +788,7 @@ test("RULE: a rule cannot be tested by no test", () => {
 test("RULE: a failing or skipped test does not make a rule tested", () => {
   for (const result of ["fail", "skipped"]) {
     const answer = classifyRuleTransition(cleanTransition({
-      from_state: "reviewed", to_state: "tested",
+      from_state_token: RS.reviewed, to_state_token: RS.tested,
       tests: [{ test_ref: "test:one", result: "pass" }, { test_ref: "test:two", result }],
     }));
     assert.equal(answer.reason_id, "rule_tests_not_passing", result);
@@ -644,7 +798,7 @@ test("RULE: a failing or skipped test does not make a rule tested", () => {
 
 test("RULE: shadow observation needs a shadow window", () => {
   const result = classifyRuleTransition(cleanTransition({
-    from_state: "tested", to_state: "shadow", shadow_window: null,
+    from_state_token: RS.tested, to_state_token: RS.shadow, shadow_window: null,
   }));
   assert.equal(result.reason_id, "shadow_window_absent");
 });
@@ -685,22 +839,22 @@ test("RULE: a non-mandatory judgment rule may satisfy the clause on a judgment c
 
 test("RULE: retirement states a behaviour, and superseded_only names its successor", () => {
   const withoutBehaviour = classifyRuleTransition(cleanTransition({
-    from_state: "active", to_state: "retired", retirement: null,
+    from_state_token: RS.active, to_state_token: RS.retired, retirement: null,
   }));
   assert.equal(withoutBehaviour.reason_id, "rule_retirement_successor_absent");
   const withoutSuccessor = classifyRuleTransition(cleanTransition({
-    from_state: "active", to_state: "retired",
+    from_state_token: RS.active, to_state_token: RS.retired,
     retirement: { behavior: "superseded_only", successor_rule_id: null },
   }));
   assert.equal(withoutSuccessor.reason_id, "rule_retirement_successor_absent");
   const complete = classifyRuleTransition(cleanTransition({
-    from_state: "active", to_state: "retired",
+    from_state_token: RS.active, to_state_token: RS.retired,
     retirement: { behavior: "superseded_only", successor_rule_id: "a02-successor-rule" },
   }));
   assert.equal(complete.would_permit_if_authoritative, true);
   for (const behavior of V5_F05_RETIREMENT_BEHAVIORS) {
     const answer = classifyRuleTransition(cleanTransition({
-      from_state: "active", to_state: "retired",
+      from_state_token: RS.active, to_state_token: RS.retired,
       retirement: { behavior, successor_rule_id: behavior === "superseded_only" ? "a02-successor-rule" : null },
     }));
     assert.equal(answer.would_permit_if_authoritative, true, behavior);
@@ -780,7 +934,7 @@ test("COVERAGE: every unmapped shape refuses, across the whole caller domain", (
       const result = classifyRuleEnforcementCoverage({
         as_of: AS_OF,
         rules: [{
-          rule_id: "sweep-rule", version: 1, rule_class: ruleClass, state: "active",
+          rule_id: "sweep-rule", version: 1, rule_class: ruleClass, state_token: RS.active,
           mandatory: false, binding_text_present: true,
           control: cleanControl(mechanism), fallback: cleanFallback(),
         }],
@@ -796,12 +950,13 @@ test("COVERAGE: a non-active rule owes no control and is reported out of scope",
     const result = classifyRuleEnforcementCoverage({
       as_of: AS_OF,
       rules: [{
-        rule_id: "sweep-rule", version: 1, rule_class: "code_enforced", state,
+        rule_id: "sweep-rule", version: 1, rule_class: "code_enforced", state_token: RS[state],
         mandatory: true, binding_text_present: true, control: null, fallback: null,
       }],
     });
     assert.equal(result.active_rule_count, 0, state);
     assert.equal(result.out_of_scope_rules.length, 1, state);
+    assert.equal(result.out_of_scope_rules[0].state_token, RS[state], state);
   }
 });
 
@@ -862,7 +1017,7 @@ test("POLICY: every reason either half can answer with is registered", () => {
   };
   const publicCitations = citations("../src/lifecycle-assurance.v5.js");
   assert.ok(publicCitations.length >= 4, "the public surface must cite its own refusals");
-  const classifierCitations = citations("../src/lifecycle-classifiers.v5.testonly.js");
+  const classifierCitations = citations("./lifecycle-classifiers.v5.testhelper.mjs");
   assert.ok(classifierCitations.length >= 10, "the clauses must cite their own refusals");
   for (const id of [...publicCitations, ...classifierCitations])
     assert.ok(V5_A02_LIFECYCLE_REASON_IDS.includes(id), `${id} is not registered`);

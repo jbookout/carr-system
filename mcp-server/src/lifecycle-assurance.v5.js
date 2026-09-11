@@ -30,14 +30,25 @@
 // answer, no caller can smuggle authority in through one. `request_read: false`
 // says so in every result.
 //
-// WHERE THE REAL DECISION LOGIC LIVES. The lifecycle clauses are implemented and
-// proved clause by clause, and kept MODULE-PRIVATE to this surface: they live in
-// lifecycle-classifiers.v5.testonly.js, which this file does not import, which
-// no production module imports, and which answers only in the conditional
-// (`would_derive_state_if_authoritative`, `would_permit_if_authoritative`,
-// `would_be_covered_if_authoritative`). lifecycle-assurance.v5.test.mjs proves
-// the isolation with a parser-backed import scan and proves this surface with a
-// sweep over every caller-controlled shape.
+// WHERE THE SHAPE LOGIC LIVES, AND WHY IT IS NOT IN src/ AT ALL. The lifecycle
+// clauses are worth proving clause by clause, but a clause that can be IMPORTED
+// is a clause a consumer can read an answer out of, whatever its file is called.
+// So they do not live in this directory: they live in
+// mcp-server/test/lifecycle-classifiers.v5.testhelper.mjs, beside the test that
+// is their only caller. No module in src/ can reach them — src/ holds no
+// test-only entry at all, and lifecycle-assurance.v5.test.mjs proves both halves
+// of that with a parser-backed import scan (no `.testonly.` file exists here,
+// and no src module imports anything under ../test/).
+//
+// AND THEY ANSWER IN A VOCABULARY NO CONSUMER CAN ACT ON. The helper never
+// yields a lifecycle state: it yields the conditional TOKENS this module
+// publishes — `would_be_operational_if_authoritative`,
+// `would_be_active_if_authoritative`, one per state — which are not states and
+// are not accepted anywhere as one. THE ONE PLACE A TOKEN BECOMES A STATE is
+// `stateFromConditionalToken` below: module-private, not exported, and reached
+// only through `readWorkflowStateFromAuthority`, which answers unavailable
+// because the workflow-state reader seam is bound to null and nothing exported
+// by this module can bind it.
 //
 // NOTHING HERE INVENTS A VOCABULARY IT COULD READ INSTEAD.
 //
@@ -160,6 +171,30 @@ export const V5_A02_WORKFLOW_LIFECYCLE_STATES = deepFreeze([
   "partially_built", "operational",
 ]);
 
+/**
+ * THE CONDITIONAL TOKEN FOR A STATE, and the reason this module has one.
+ *
+ * `operational` and `active` are states a consumer ACTS ON: a caller who reads
+ * either out of a function has been told a workflow is finished or a rule is
+ * switched on. No function in this repository can know that — there is no
+ * workflow-state reader and no rule registry — so nothing here, on any surface,
+ * public or test-only, may answer with one of those words.
+ *
+ * What the shape logic answers with instead is the token: not `operational` but
+ * `would_be_operational_if_authoritative`, which is a statement about a SHAPE
+ * and reads as one wherever it lands. The two vocabularies below are that
+ * translation, published so the clauses cite them rather than spelling a token
+ * themselves, and they are deliberately NOT the states: a consumer who tries to
+ * match a token against a lifecycle state gets no match, which is the point.
+ */
+function conditionalStateToken(state) {
+  return `would_be_${state}_if_authoritative`;
+}
+
+/** The eleven workflow tokens, parallel to the states and in the same order. */
+export const V5_A02_CONDITIONAL_WORKFLOW_STATE_TOKENS =
+  deepFreeze(V5_A02_WORKFLOW_LIFECYCLE_STATES.map(conditionalStateToken));
+
 /** The positive evidence dimensions a workflow accumulates, C-sorted. */
 export const V5_A02_WORKFLOW_DIMENSIONS = deepFreeze([
   "activation", "artifact", "canonical", "intent", "readback", "telemetry",
@@ -206,6 +241,10 @@ export const V5_A02_WORKFLOW_DISPOSITIONS = deepFreeze(["canceled", "none", "sup
 export const V5_A02_RULE_STATES = deepFreeze([
   "proposed", "reviewed", "tested", "shadow", "active", "retired",
 ]);
+
+/** The six rule tokens, parallel to the rule states and in the same order. */
+export const V5_A02_CONDITIONAL_RULE_STATE_TOKENS =
+  deepFreeze(V5_A02_RULE_STATES.map(conditionalStateToken));
 
 /**
  * The permitted edges, as an explicit table rather than a rule about a rule.
@@ -319,6 +358,55 @@ function seamsOwed(seams) {
   return deepFreeze(seams.map(seam => ({ seam, bound: false })));
 }
 
+// ---------------------------------------------------------------------------
+// THE ONE PLACE A CONDITIONAL TOKEN COULD EVER BECOME A STATE.
+//
+// Both functions below are module-private. They are not exported, they are not
+// on the namespace object, and no argument of any exported function reaches
+// them — so there is no route from a consumer to either one. That is the whole
+// mechanism: the translation exists, it is written down, and it is behind a
+// seam this module binds to null and exposes no setter for.
+// ---------------------------------------------------------------------------
+
+/** token -> state, for both vocabularies. Private, and the only such table. */
+const CONDITIONAL_TOKEN_TO_STATE = Object.freeze(Object.fromEntries([
+  ...V5_A02_WORKFLOW_LIFECYCLE_STATES.map((state, index) =>
+    [V5_A02_CONDITIONAL_WORKFLOW_STATE_TOKENS[index], state]),
+  ...V5_A02_RULE_STATES.map((state, index) =>
+    [V5_A02_CONDITIONAL_RULE_STATE_TOKENS[index], state]),
+]));
+
+function stateFromConditionalToken(token) {
+  return Object.hasOwn(CONDITIONAL_TOKEN_TO_STATE, token)
+    ? CONDITIONAL_TOKEN_TO_STATE[token] : null;
+}
+
+/**
+ * WHAT AN AUTHORITATIVE READING WOULD BE, AND WHY IT IS UNAVAILABLE.
+ *
+ * Ordered questions, so a second reader reaches the same verdict:
+ *   1. Is a workflow-state reader bound at this seam? It is not: the bindings
+ *      object is a module-private frozen object of nulls, and no exported
+ *      function of this module writes to it. Answer: unavailable, and the two
+ *      questions below are not asked.
+ *   2. (When a ruling binds one.) What token did the reader's own derivation
+ *      yield? Whatever it is, it is a token, not a state.
+ *   3. Does this policy know that token? Only then does the token become a
+ *      state, HERE, and nowhere else in this repository.
+ *
+ * Today every call returns `{ available: false, state: null }`, which is what
+ * makes `readWorkflowLifecycle` answer `unavailable` for every caller.
+ */
+function readWorkflowStateFromAuthority() {
+  const reader = boundSeam(V5_A02_WORKFLOW_STATE_READER_SEAM, "readWorkflow");
+  if (reader === null)
+    return { available: false, state: null, because: "no workflow-state reader is bound" };
+  const state = stateFromConditionalToken(reader.readWorkflow());
+  return state === null
+    ? { available: false, state: null, because: "the bound reader answered a token this policy does not publish" }
+    : { available: true, state, because: null };
+}
+
 /** The one shape every unavailable answer on this surface has. */
 function unavailable(answer, reasonId, because, seams, extra) {
   return deepFreeze({
@@ -355,6 +443,9 @@ function unavailable(answer, reasonId, because, seams, extra) {
  * asserts them has described a workflow rather than shown one.
  */
 export function readWorkflowLifecycle() {
+  // The private authority path is asked, and it is the only thing asked: no
+  // field of any request reaches it, and it answers unavailable.
+  const authority = readWorkflowStateFromAuthority();
   return unavailable(
     "workflow_lifecycle",
     "workflow_state_reader_unavailable",
@@ -362,7 +453,9 @@ export function readWorkflowLifecycle() {
     [V5_A02_WORKFLOW_STATE_READER_SEAM, V5_A02_TEST_RESULT_READER_SEAM],
     // The vocabularies are EXPORTED CONSTANTS, not fields of this answer: an
     // unavailable answer recites nothing a caller could mistake for a reading.
-    { workflow_state_reader_bound: boundSeam(V5_A02_WORKFLOW_STATE_READER_SEAM, "readWorkflow") !== null });
+    // `workflow_state_reader_bound` is the private path's own answer, so the
+    // field cannot drift from the seam it reports on.
+    { workflow_state_reader_bound: authority.available });
 }
 
 // ---------------------------------------------------------------------------
@@ -480,6 +573,11 @@ export function v5A02LifecyclePolicyPreimage() {
     tenant: ORGANIZATION_TENANT_ID,
     decision_ids: [...V5_A02_DECISION_IDS],
     workflow_lifecycle_states_in_precedence_order: [...V5_A02_WORKFLOW_LIFECYCLE_STATES],
+    // The tokens the shape logic answers in. Sealed here so a later edit cannot
+    // quietly reintroduce a bare state as an answer vocabulary.
+    conditional_workflow_state_tokens: [...V5_A02_CONDITIONAL_WORKFLOW_STATE_TOKENS],
+    conditional_rule_state_tokens: [...V5_A02_CONDITIONAL_RULE_STATE_TOKENS],
+    conditional_token_to_state_is_module_private: true,
     workflow_dimensions: [...V5_A02_WORKFLOW_DIMENSIONS].sort(),
     workflow_kinds: [...V5_A02_WORKFLOW_KINDS].sort(),
     workflow_proof_dimensions: [...V5_A02_MANDATORY_PROOF_DIMENSIONS].sort(),

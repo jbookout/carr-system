@@ -1,10 +1,16 @@
-// V5-A02 WORKFLOW AND RULE LIFECYCLE CLASSIFIERS — THE TEST-ONLY ENTRY.
+// V5-A02 WORKFLOW AND RULE LIFECYCLE CLAUSES — A TEST HELPER, NOT A MODULE.
 //
-// READ THIS FIRST, BECAUSE THE FILE NAME IS THE CONTRACT. Nothing in this file
-// is part of the lifecycle public surface. `lifecycle-assurance.v5.js` does not
-// import it, no production module imports it, and
-// lifecycle-assurance.v5.test.mjs proves that with a parser-backed import scan
-// rather than a promise. The only importer is the test file.
+// READ THIS FIRST, BECAUSE ITS LOCATION IS THE CONTRACT. This file is not in
+// mcp-server/src/. It is in the test directory, beside the one test that
+// imports it, and it is named `.testhelper.mjs` so `npm test`'s own glob
+// (`test/*.test.js test/*.test.mjs`) does not even collect it as a suite. An
+// earlier version of this file DID sit in src/ under a `.testonly.js` name, and
+// a reviewer was right that the name was doing work the filesystem was not: a
+// module in src/ is importable by anything in src/, whatever it calls itself.
+// The route is now closed by construction — there is no test-only entry in src/
+// at all — and lifecycle-assurance.v5.test.mjs proves it two ways with a real
+// ESM parser: no `.testonly.` file exists in src/, and no module in src/ names
+// any specifier under `../test/`.
 //
 // WHY IT EXISTS AT ALL. The lifecycle clauses V5-A02's concrete_output and
 // checkable_done name are real and worth proving clause by clause:
@@ -17,18 +23,36 @@
 //   3. enforcement coverage — every active rule mapping to a control that
 //      actually enforces it, plus a fallback, or being LISTED as unmapped.
 //
-// WHAT THEY ARE NOT. There is NO authoritative workflow-state reader, NO rule
-// registry reader, NO control-implementation reader, NO test-result reader and
-// NO acceptance-receipt reader in this repository. A caller object carrying
-// evidence booleans, a reviewer id, a test result, a control digest or a
-// verifier id is a DESCRIPTION of those facts, not the facts, so nothing here
-// may answer `operational`, `active`, `allow` or `coverage_complete` about
-// anything. Every answer is conditional and says so in its own field name:
+// WHAT THEY ARE NOT, AND WHAT THEY MAY NOT SAY. There is NO authoritative
+// workflow-state reader, NO rule registry reader, NO control-implementation
+// reader, NO test-result reader and NO acceptance-receipt reader in this
+// repository. A caller object carrying evidence booleans, a reviewer id, a test
+// result, a control digest or a verifier id is a DESCRIPTION of those facts, not
+// the facts. So these clauses do not answer `operational`, `active`, `allow`,
+// `coverage_complete`, `green` or `joins_exactly` about anything — not as a
+// field, and NOT AS A VALUE UNDER A CONDITIONAL FIELD NAME, which was the second
+// half of the same reviewer's finding: renaming the field left the privileged
+// word itself sitting in the result, one property read away from a consumer.
 //
-//   would_derive_state_if_authoritative   — what the evidence SHAPE derives to
-//   would_permit_if_authoritative         — whether the edge and its evidence
-//                                           shape would satisfy the clause
-//   would_be_covered_if_authoritative     — whether the rule set SHAPE is covered
+// SO THE VOCABULARY ITSELF IS CONDITIONAL, IN BOTH DIRECTIONS. These clauses
+// speak only in the tokens lifecycle-assurance.v5.js publishes —
+// `would_be_operational_if_authoritative`, `would_be_active_if_authoritative`,
+// one per state — as their INPUT claim vocabulary and as their answers:
+//
+//   would_derive_state_token_if_authoritative — the token the evidence SHAPE
+//                                               derives to
+//   would_permit_if_authoritative             — whether the edge and its
+//                                               evidence shape would satisfy
+//   would_be_covered_if_authoritative         — whether the rule set SHAPE is
+//                                               covered
+//
+// THE ONE DIRECTION THAT IS MISSING HERE ON PURPOSE. This file maps states to
+// tokens (`TOKEN.operational`), never tokens to states. Nothing in it can turn
+// a token back into a state, because that translation belongs to exactly one
+// place: the module-private `stateFromConditionalToken` in
+// lifecycle-assurance.v5.js, behind a workflow-state reader seam bound to null.
+// A token that escaped this file into a consumer is therefore not a state, does
+// not match any state, and has no function anywhere that would convert it.
 //
 // Every result also carries `is_not_authority: true` and
 // `evidence_source: "caller_supplied_shapes_not_authority"`.
@@ -37,22 +61,24 @@
 // states and their precedence are V5-F09's, out of `ops.completion_projection`;
 // the six rule classes, six enforcement mechanisms and three retirement
 // behaviours are V5-F05's, imported rather than retyped; the class/mechanism
-// pairing and every other list come from lifecycle-assurance.v5.js, which holds
-// them as the slice's public vocabulary.
+// pairing, the two token vocabularies and every other list come from
+// lifecycle-assurance.v5.js, which holds them as the slice's public vocabulary.
 //
 // Every function is PURE — no filesystem, no network, no database, no clock, no
 // environment. Contract violations throw V5BoundaryError; classification
 // answers are returned.
 
-import { V5BoundaryError, V5_NO_EFFECTS } from "./global-boundaries.v5.js";
-import { ORGANIZATION_TENANT_ID } from "./identity.js";
+import { V5BoundaryError, V5_NO_EFFECTS } from "../src/global-boundaries.v5.js";
+import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
 import {
   V5_F05_ENFORCEMENT_MECHANISMS,
   V5_F05_RETIREMENT_BEHAVIORS,
   V5_F05_RULE_CLASSES,
-} from "./rule-applicability.v5.js";
+} from "../src/rule-applicability.v5.js";
 import {
   V5_A02_CLASS_ENFORCEMENT_MECHANISM,
+  V5_A02_CONDITIONAL_RULE_STATE_TOKENS,
+  V5_A02_CONDITIONAL_WORKFLOW_STATE_TOKENS,
   V5_A02_FALLBACK_KINDS,
   V5_A02_LIFECYCLE_POLICY_VERSION,
   V5_A02_LIFECYCLE_REASON_IDS,
@@ -67,10 +93,33 @@ import {
   V5_A02_WORKFLOW_DISPOSITIONS,
   V5_A02_WORKFLOW_KINDS,
   V5_A02_WORKFLOW_LIFECYCLE_STATES,
-} from "./lifecycle-assurance.v5.js";
+} from "../src/lifecycle-assurance.v5.js";
 
 /** Said on every result, so an escaped value still reads as "not authority". */
 export const V5_A02_CLASSIFIER_EVIDENCE_SOURCE = "caller_supplied_shapes_not_authority";
+
+/**
+ * STATE -> TOKEN, and only that direction, for both ladders. Built by index from
+ * the two parallel vocabularies the public module publishes, so a state that
+ * gained a token here without gaining one there would throw on the first read
+ * rather than quietly answer `undefined`.
+ */
+function tokenTable(states, tokens) {
+  if (states.length !== tokens.length)
+    throw new V5BoundaryError("token_vocabulary_mismatch",
+      "every state must have exactly one conditional token",
+      { states: states.length, tokens: tokens.length });
+  return Object.freeze(Object.fromEntries(states.map((state, index) => [state, tokens[index]])));
+}
+
+/** `TOKEN.operational` is a token. There is no table here that reverses it. */
+const TOKEN = tokenTable(V5_A02_WORKFLOW_LIFECYCLE_STATES, V5_A02_CONDITIONAL_WORKFLOW_STATE_TOKENS);
+const RULE_TOKEN = tokenTable(V5_A02_RULE_STATES, V5_A02_CONDITIONAL_RULE_STATE_TOKENS);
+
+/** The ladder, re-keyed into token space once, so no clause below holds a state. */
+const RULE_TOKEN_TRANSITIONS = Object.freeze(Object.fromEntries(
+  V5_A02_RULE_STATES.map(state =>
+    [RULE_TOKEN[state], Object.freeze(V5_A02_RULE_TRANSITIONS[state].map(to => RULE_TOKEN[to]))])));
 
 const REF = /^[a-z][a-z0-9-]*:[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
@@ -186,15 +235,19 @@ const WORKFLOW_EVIDENCE_FIELDS = Object.freeze([
 ]);
 const WORKFLOW_REQUEST_FIELDS = Object.freeze([
   "workflow_ref", "workflow_kind", "required_dimensions", "disposition",
-  "evidence", "claimed_state",
+  "evidence", "claimed_state_token",
 ]);
 
 /**
  * The eleven-way derivation, in F09's precedence order, over the nine observed
- * booleans and the disposition. The answer comes back as
- * `would_derive_state_if_authoritative` rather than as a bare state string, so a
- * value that escaped this file could not be mistaken for a reading of a
- * workflow.
+ * booleans and the disposition.
+ *
+ * WHAT IT ANSWERS WITH, and this is the whole correction: a conditional TOKEN,
+ * never a state. `would_be_operational_if_authoritative` is not `operational`,
+ * does not equal it, and no function in this repository outside the private path
+ * in lifecycle-assurance.v5.js can turn one into the other. A value that escaped
+ * this file into a consumer is therefore inert twice over — under a conditional
+ * field name AND as a word no consumer matches on.
  *
  * `everyRequiredPresent` is supplied rather than recomputed here so the caller's
  * DECLARED requirement set is what decides `partially_built` versus the finished
@@ -208,25 +261,26 @@ export function classifyWorkflowLifecycleState(evidence, disposition, everyRequi
   bool(everyRequiredPresent, "everyRequiredPresent");
 
   return deepFreeze({
-    would_derive_state_if_authoritative: deriveState(evidence, disposition, everyRequiredPresent),
+    would_derive_state_token_if_authoritative:
+      deriveStateToken(evidence, disposition, everyRequiredPresent),
     is_not_authority: true,
     evidence_source: V5_A02_CLASSIFIER_EVIDENCE_SOURCE,
   });
 }
 
-function deriveState(evidence, disposition, everyRequiredPresent) {
-  if (evidence.has_conflict) return "conflicting";
-  if (disposition === "canceled") return "canceled";
-  if (disposition === "superseded") return "superseded";
-  if (evidence.has_stale) return "unknown_stale";
-  if (evidence.has_blocker) return "blocked";
-  if (evidence.has_intent && !evidence.has_artifact && !evidence.has_canonical) return "planned";
-  if (evidence.has_artifact && !evidence.has_canonical) return "built_unmerged";
-  if (evidence.has_canonical && !evidence.has_activation) return "merged_unactivated";
+function deriveStateToken(evidence, disposition, everyRequiredPresent) {
+  if (evidence.has_conflict) return TOKEN.conflicting;
+  if (disposition === "canceled") return TOKEN.canceled;
+  if (disposition === "superseded") return TOKEN.superseded;
+  if (evidence.has_stale) return TOKEN.unknown_stale;
+  if (evidence.has_blocker) return TOKEN.blocked;
+  if (evidence.has_intent && !evidence.has_artifact && !evidence.has_canonical) return TOKEN.planned;
+  if (evidence.has_artifact && !evidence.has_canonical) return TOKEN.built_unmerged;
+  if (evidence.has_canonical && !evidence.has_activation) return TOKEN.merged_unactivated;
   if (evidence.has_activation && (!evidence.has_readback || !evidence.has_telemetry))
-    return "active_unproven";
-  if (!everyRequiredPresent) return "partially_built";
-  return "operational";
+    return TOKEN.active_unproven;
+  if (!everyRequiredPresent) return TOKEN.partially_built;
+  return TOKEN.operational;
 }
 
 /**
@@ -244,8 +298,10 @@ function deriveState(evidence, disposition, everyRequiredPresent) {
  *   4. Does that state reach the finished one without readback and telemetry?
  *      (Unreachable by construction, and asserted anyway — a derivation that
  *      could reach it would be the defect.)
- *   5. Does the caller's claimed state match the derived one? The claim is
- *      CITED, never honoured.
+ *   5. Does the caller's claimed token match the derived one? The claim is
+ *      CITED, never honoured — and it is made in the same conditional token
+ *      vocabulary the answer uses, so a caller cannot even SPELL a lifecycle
+ *      state at this boundary, let alone be believed about one.
  */
 export function classifyWorkflowLifecycle(request) {
   exact(object(request, "request"), WORKFLOW_REQUEST_FIELDS, "request");
@@ -254,9 +310,10 @@ export function classifyWorkflowLifecycle(request) {
   sortedUnique(request.required_dimensions, "request.required_dimensions",
     (value, path) => member(value, V5_A02_WORKFLOW_DIMENSIONS, path));
   const disposition = member(request.disposition, V5_A02_WORKFLOW_DISPOSITIONS, "request.disposition");
-  const claimed = member(request.claimed_state, V5_A02_WORKFLOW_LIFECYCLE_STATES, "request.claimed_state");
-  // The last state in F09's precedence order, named as F09 names it.
-  const finished = "operational";
+  const claimed = member(request.claimed_state_token, V5_A02_CONDITIONAL_WORKFLOW_STATE_TOKENS,
+    "request.claimed_state_token");
+  // The token for the last state in F09's precedence order. Not the state.
+  const finished = TOKEN.operational;
 
   const declared = new Set(request.required_dimensions);
   const droppedProof = V5_A02_MANDATORY_PROOF_DIMENSIONS.filter(dim => !declared.has(dim));
@@ -277,7 +334,7 @@ export function classifyWorkflowLifecycle(request) {
 
   const everyRequiredPresent = request.required_dimensions.every(dimensionPresent);
   const derived = classifyWorkflowLifecycleState(
-    request.evidence, disposition, everyRequiredPresent).would_derive_state_if_authoritative;
+    request.evidence, disposition, everyRequiredPresent).would_derive_state_token_if_authoritative;
 
   const unmet = request.required_dimensions.filter(dim => !dimensionPresent(dim));
   const finishedWithoutProof = derived === finished &&
@@ -298,10 +355,10 @@ export function classifyWorkflowLifecycle(request) {
     workflow_kind: kind,
     would_permit_if_authoritative: reasonId === null,
     reason_id: reasonId === null ? null : reason(reasonId),
-    // The DERIVED state is the state. `claimed_state_cited` is echoed so a
-    // mismatch is legible, never so it can win.
-    would_derive_state_if_authoritative: derived,
-    claimed_state_cited: claimed,
+    // The DERIVED token is the answer. `claimed_state_token_cited` is echoed so
+    // a mismatch is legible, never so it can win.
+    would_derive_state_token_if_authoritative: derived,
+    claimed_state_token_cited: claimed,
     claim_matches_derivation: claimed === derived,
     required_dimensions: [...request.required_dimensions],
     expected_required_dimensions: expected,
@@ -310,7 +367,7 @@ export function classifyWorkflowLifecycle(request) {
     required_dimensions_unmet_by_evidence: unmet.sort(),
     proof_dimensions: [...V5_A02_MANDATORY_PROOF_DIMENSIONS],
     proof_dimensions_dropped: droppedProof,
-    state_precedence: [...V5_A02_WORKFLOW_LIFECYCLE_STATES],
+    state_token_precedence: [...V5_A02_CONDITIONAL_WORKFLOW_STATE_TOKENS],
     caller_stated_state_honoured: false,
     is_not_authority: true,
     evidence_source: V5_A02_CLASSIFIER_EVIDENCE_SOURCE,
@@ -334,7 +391,7 @@ const SHADOW_FIELDS = Object.freeze(["window_ref", "opened_at", "closed_at", "mi
 const MISS_FIELDS = Object.freeze(["miss_ref", "disposition"]);
 const RETIREMENT_FIELDS = Object.freeze(["behavior", "successor_rule_id"]);
 const TRANSITION_FIELDS = Object.freeze([
-  "rule_id", "rule_class", "mandatory", "from_state", "to_state",
+  "rule_id", "rule_class", "mandatory", "from_state_token", "to_state_token",
   "review", "tests", "shadow_window", "control", "fallback", "retirement",
 ]);
 
@@ -382,8 +439,13 @@ export function classifyRuleTransition(request) {
   pattern(request.rule_id, IDENTIFIER, "malformed_identifier", "request.rule_id");
   member(request.rule_class, V5_F05_RULE_CLASSES, "request.rule_class");
   bool(request.mandatory, "request.mandatory");
-  const from = member(request.from_state, V5_A02_RULE_STATES, "request.from_state");
-  const to = member(request.to_state, V5_A02_RULE_STATES, "request.to_state");
+  // TOKENS on the way in as well as on the way out: the edge being asked about
+  // is itself conditional on a rule registry that does not exist, so `active`
+  // is not a word this boundary accepts or returns.
+  const from = member(request.from_state_token, V5_A02_CONDITIONAL_RULE_STATE_TOKENS,
+    "request.from_state_token");
+  const to = member(request.to_state_token, V5_A02_CONDITIONAL_RULE_STATE_TOKENS,
+    "request.to_state_token");
 
   if (request.review !== null) {
     exact(object(request.review, "request.review"), REVIEW_FIELDS, "request.review");
@@ -432,11 +494,11 @@ export function classifyRuleTransition(request) {
     detail: {},
   };
 
-  if (!V5_A02_RULE_TRANSITIONS[from].includes(to)) {
+  if (!RULE_TOKEN_TRANSITIONS[from].includes(to)) {
     outcome = wouldNotPermit("rule_state_transition_not_permitted",
       `${from} -> ${to} is not an edge of the rule lifecycle`,
-      { from_state: from, to_state: to, permitted: [...V5_A02_RULE_TRANSITIONS[from]] });
-  } else if (to === "reviewed") {
+      { from_state_token: from, to_state_token: to, permitted: [...RULE_TOKEN_TRANSITIONS[from]] });
+  } else if (to === RULE_TOKEN.reviewed) {
     if (request.review === null)
       outcome = wouldNotPermit("rule_reviewer_not_independent",
         "review states no reviewer at all", { rule_id: request.rule_id });
@@ -444,7 +506,7 @@ export function classifyRuleTransition(request) {
       outcome = wouldNotPermit("rule_reviewer_not_independent",
         "the proposer may not be the reviewer",
         { actor_id: request.review.proposer_actor_id });
-  } else if (to === "tested") {
+  } else if (to === RULE_TOKEN.tested) {
     const tests = request.tests ?? [];
     if (tests.length === 0)
       outcome = wouldNotPermit("rule_tests_absent",
@@ -455,11 +517,11 @@ export function classifyRuleTransition(request) {
         outcome = wouldNotPermit("rule_tests_not_passing",
           "every named test must have passed", { not_passing: notPassing });
     }
-  } else if (to === "shadow") {
+  } else if (to === RULE_TOKEN.shadow) {
     if (request.shadow_window === null)
       outcome = wouldNotPermit("shadow_window_absent",
         "shadow observation needs a shadow window", { rule_id: request.rule_id });
-  } else if (to === "active") {
+  } else if (to === RULE_TOKEN.active) {
     // Shadow misses are checked FIRST, because the catalog excludes "shadow
     // misses without disposition" from what may count, and an undisposed miss
     // is an open question about the very control being switched on.
@@ -482,7 +544,7 @@ export function classifyRuleTransition(request) {
       outcome = wouldNotPermit("mandatory_rule_without_machine_control",
         "a mandatory rule enforced only by judgment or preference denies nothing",
         { rule_id: request.rule_id, enforcement_mechanism: control.enforcement_mechanism });
-  } else if (to === "retired") {
+  } else if (to === RULE_TOKEN.retired) {
     if (request.retirement === null)
       outcome = wouldNotPermit("rule_retirement_successor_absent",
         "retirement states no behaviour", { rule_id: request.rule_id });
@@ -499,14 +561,14 @@ export function classifyRuleTransition(request) {
     classification: "rule_lifecycle_transition_shape",
     tenant: ORGANIZATION_TENANT_ID,
     rule_id: request.rule_id,
-    from_state: from,
-    to_state: to,
+    from_state_token: from,
+    to_state_token: to,
     would_permit_if_authoritative: outcome.would_permit_if_authoritative,
     reason_id: outcome.reason_id,
     note: outcome.note,
     detail: deepFreeze(outcome.detail),
-    permitted_transitions_from: [...V5_A02_RULE_TRANSITIONS[from]],
-    reversible_activation_edge: from === "active" && to === "shadow",
+    permitted_to_state_tokens_from: [...RULE_TOKEN_TRANSITIONS[from]],
+    reversible_activation_edge: from === RULE_TOKEN.active && to === RULE_TOKEN.shadow,
     // Satisfying the clause records that the clause is satisfied. It moves no
     // rule, and no function in this system can.
     performs_transition: false,
@@ -523,7 +585,7 @@ export function classifyRuleTransition(request) {
 // ---------------------------------------------------------------------------
 
 const COVERAGE_RULE_FIELDS = Object.freeze([
-  "rule_id", "version", "rule_class", "state", "mandatory",
+  "rule_id", "version", "rule_class", "state_token", "mandatory",
   "binding_text_present", "control", "fallback",
 ]);
 const COVERAGE_REQUEST_FIELDS = Object.freeze(["as_of", "rules"]);
@@ -536,8 +598,10 @@ function classAdmitsMechanism(ruleClass, mechanism) {
  * The coverage clause over a whole rule set SHAPE.
  *
  * ORDERED QUESTIONS per rule, so two readers reach the same verdict:
- *   1. Is the rule ACTIVE? If not it is out of scope and is
- *      reported as such — a proposed or retired rule owes no control.
+ *   1. Does the rule's declared token say it would be the switched-on one? If
+ *      not it is out of scope and is reported as such — a rule that would be
+ *      proposed or retired owes no control.  Tokens again, not states: the
+ *      caller describes a rule set, and nothing here reads one.
  *   2. Does it name a control at all? If its only claim is that its binding text
  *      exists, it is UNMAPPED with `rule_presence_is_not_enforcement`. This is
  *      the catalog's excluded "rule presence as enforcement proof", enforced.
@@ -560,7 +624,7 @@ export function classifyRuleEnforcementCoverage(request) {
   instant(request.as_of, "request.as_of");
   list(request.rules, "request.rules");
 
-  // "active" is the switched-on state; every other state owes no control.
+  // The switched-on token; every other token owes no control.
   const seen = new Set();
   const mapped = [];
   const unmapped = [];
@@ -573,7 +637,7 @@ export function classifyRuleEnforcementCoverage(request) {
     if (!Number.isInteger(rule.version) || rule.version < 1)
       fail("not_an_integer", `${path}.version must be a positive integer`, { path });
     member(rule.rule_class, V5_F05_RULE_CLASSES, `${path}.rule_class`);
-    member(rule.state, V5_A02_RULE_STATES, `${path}.state`);
+    member(rule.state_token, V5_A02_CONDITIONAL_RULE_STATE_TOKENS, `${path}.state_token`);
     bool(rule.mandatory, `${path}.mandatory`);
     bool(rule.binding_text_present, `${path}.binding_text_present`);
     const control = validateControl(rule.control, `${path}.control`);
@@ -583,8 +647,9 @@ export function classifyRuleEnforcementCoverage(request) {
     if (seen.has(key)) fail("duplicate_rule", `${path} repeats ${key}`, { path, rule: key });
     seen.add(key);
 
-    if (rule.state !== "active") {
-      outOfScope.push(deepFreeze({ rule_id: rule.rule_id, version: rule.version, state: rule.state }));
+    if (rule.state_token !== RULE_TOKEN.active) {
+      outOfScope.push(deepFreeze({
+        rule_id: rule.rule_id, version: rule.version, state_token: rule.state_token }));
       return;
     }
 

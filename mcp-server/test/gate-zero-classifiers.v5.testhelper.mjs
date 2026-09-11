@@ -41,9 +41,9 @@
 //     schemas, unknown enum members, malformed digests and cyclic graphs are
 //     not classification questions: the shape cannot be read at all.
 
-import { digest } from "./artifact-trust.js";
-import { V5BoundaryError, V5_NO_EFFECTS } from "./global-boundaries.v5.js";
-import { ORGANIZATION_TENANT_ID } from "./identity.js";
+import { digest } from "../src/artifact-trust.js";
+import { V5BoundaryError, V5_NO_EFFECTS } from "../src/global-boundaries.v5.js";
+import { ORGANIZATION_TENANT_ID } from "../src/identity.js";
 import {
   GATE_ZERO_STEP_REF,
   V5_A02_ACCEPTANCE_STATES,
@@ -55,7 +55,7 @@ import {
   V5_A02_OBSERVATION_STATES,
   V5_A02_POLICY_VERSION,
   V5_A02_SCHEDULER_STEP_REF,
-} from "./gate-zero-assurance.v5.js";
+} from "../src/gate-zero-assurance.v5.js";
 
 /** Said on every result, so an escaped value still reads as "not authority". */
 export const V5_A02_CLASSIFIER_EVIDENCE_SOURCE = "caller_supplied_shapes_not_authority";
