@@ -280,14 +280,6 @@ DEFINITION_ONLY: dict[str, str] = {
         "the repo-hygiene janitor plans branch, worktree and cache cleanup; its "
         "gate is a separately reviewed live-effect packet, so the definition is "
         "written down and left uninstalled until that packet is approved",
-    "com.carr.canonical-fast-forward.plist":
-        "the canonical fast-forward moves the shared checkout's branch; its gate "
-        "is Joe's activation ruling on WR-000040 AC-FRESH, which also fixes the "
-        "cadence, so the definition is written down and left uninstalled",
-    "com.carr.canonical-dirty-watchdog.plist":
-        "the canonical dirty watchdog pages on tracked dirt and staleness; it is "
-        "deliberately a SEPARATE agent from the fast-forward so it still alarms "
-        "when that agent never fires, and it activates in the same ruling",
 }
 
 # A LaunchAgent that invokes this installer cannot unload its own label and
