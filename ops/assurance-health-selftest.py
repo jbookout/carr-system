@@ -990,6 +990,81 @@ def source_adapter_checks() -> None:
                    "open(", "requests.", "datetime.now")), "an import would make it a reader")
 
 
+def surface_wiring_checks() -> None:
+    """The health surface itself, driven hermetically through its own fixture door.
+
+    A projection nothing reads is not wired to anything.  This drives the real
+    ``tools/health-check.py`` canonical reader against a fixture snapshot -- no
+    database, no network, no clock of ours -- and pins that the section prints
+    evidence-backed states, names the layers this surface does not read, and
+    never reports a green scope out of a reading that cannot contain one.
+    """
+    import os
+    import subprocess
+    import tempfile
+    from datetime import datetime, timezone
+    from lib.control_plane_workflow_truth import workflow_truth
+
+    now = datetime.now(timezone.utc).isoformat()
+    surfaces = [{"workflow_key": "assurance-fabric-child", "workflow_version": 1,
+                 "surface_id": "assurance-fabric-child.launchd.v1",
+                 "locator": "com.carr.assurance-fabric-child", "scheduler_kind": "launchd",
+                 "duplicate_group": None, "disable_receipt_ref": None,
+                 "observation": {"scheduler_state": "enabled", "observed_at": now}}]
+    census = workflow_truth(
+        declarations=[{"key": "assurance-fabric-child", "version": 1, "enabled": True,
+                       "legacy_schedule": {"provider": "none", "status": "disabled"}},
+                      {"key": "ownerless-workflow", "version": 1, "enabled": True,
+                       "legacy_schedule": {"provider": "none", "status": "disabled"}}],
+        definitions=[{"key": "assurance-fabric-child", "version": 1, "enabled": True,
+                      "execution_contract": {}, "legacy_disabled_at": None}],
+        acceptances=[{"workflow_key": "assurance-fabric-child", "workflow_version": 1,
+                      "mode": "shadow", "status": "accepted"}],
+        surfaces=surfaces, completion={}, observation_max_age_seconds=900, now=now)
+    snapshot = {"errors": [], "workflows": {
+        "available": True, "census": census, "surfaces": surfaces,
+        "owners": {"assurance-fabric-child@v1": "ops.job dispatcher"}}}
+
+    # OUTSIDE THE REPOSITORY ON PURPOSE: a selftest that writes into the tree it
+    # is invoked in is the exact thing ops/selftest-git-isolation-check.py exists
+    # to catch, and a shared fixture path would cross-wire concurrent CI runs.
+    handle, path = tempfile.mkstemp(suffix=".json", prefix="assurance-health-surface-")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as fh:
+            json.dump(snapshot, fh)
+        proc = subprocess.run(
+            [sys.executable, str(REPO / "tools/health-check.py"), "--canonical",
+             "--section", "jobs", "--fixture", path],
+            cwd=str(REPO), text=True, capture_output=True, timeout=120)
+    finally:
+        os.unlink(path)
+    out = proc.stdout
+
+    check("the canonical health surface prints an assurance-health section at all",
+          "Assurance health — evidence-backed state per bound workflow scope" in out,
+          out[-400:])
+    check("the section reports a bound scope and no green one",
+          "1 bound scope(s)" in out and "; 0 green" in out, out[-400:])
+    check("a workflow whose owner the manifest never declared is named, not projected",
+          "UNPROJECTABLE ownerless-workflow@v1" in out
+          and "inventory.owner" in out, out[-400:])
+    check("the layers this surface does not read are printed as the gap they are",
+          all(slot in out for slot in
+              ("artifact_assessment", "execution_assessment", "candidate_outcome_oracle",
+               "activation_readback"))
+          and "NOT READ BY THIS SURFACE" in out, out[-400:])
+    check("the unbindable outcome layer is named on the surface, not silently dropped",
+          "UNBINDABLE ON THIS CENSUS" in out and "actual_business_outcome" in out, out[-400:])
+    # Scoped to THIS section's own findings on purpose: the fixture carries no job
+    # ledger, so the surrounding jobs section reports its own absence and the
+    # process rc belongs to that, not to assurance health.
+    check("a reading that holds no failure records no assurance-health finding",
+          "CANONICAL_FINDING assurance_health_failed" not in out
+          and "CANONICAL_FINDING assurance_health_degraded" not in out, out[-400:])
+    check("no scope reached a healthy label on a reading that cannot contain one",
+          " 0 healthy" in out and "1 unknown" in out, out[-400:])
+
+
 def main() -> int:
     try:
         import lib.assurance_health as health
@@ -1006,6 +1081,7 @@ def main() -> int:
     scope_identity_checks(health)
     workflow_only_scope_checks(health)
     source_adapter_checks()
+    surface_wiring_checks()
     refusal_checks(health)
     output_discipline_checks(health)
 

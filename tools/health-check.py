@@ -390,7 +390,18 @@ def _workflow_truth_snapshot():
     except Exception as exc:
         return {"available": False,
                 "reason": f"workflow truth refused the inputs ({type(exc).__name__}: {exc})"}
-    result = {"available": True, "census": census}
+    # The A01 assurance-health seam binds scopes out of THIS reading, so the two
+    # inputs it needs beside the census travel with it: the surfaces whose
+    # observation receipts are the one controller readback this surface holds,
+    # and the owner each workflow declares for itself in the checked-in manifest.
+    # Neither is a second reading; both were read above.
+    owners = {}
+    for declared in manifest.get("workflows", []):
+        owner = ((declared.get("inventory") or {}).get("owner")
+                 if isinstance(declared.get("inventory"), dict) else None)
+        if isinstance(owner, str) and owner.strip():
+            owners[f"{declared.get('key')}@v{declared.get('version')}"] = owner
+    result = {"available": True, "census": census, "surfaces": surfaces, "owners": owners}
     if completion_error:
         result["completion_error"] = completion_error
     return result
@@ -470,6 +481,81 @@ def _canonical_workflow_truth(snap):
     if conflicts:
         return 1
     return 0
+
+
+def _canonical_assurance_health(snap):
+    """Print the A01 assurance-health census and return rc.
+
+    EVERY LABEL ON THIS LINE TRACES TO EVIDENCE THIS READING ACTUALLY HELD, or it
+    says so.  The projection is fed by lib/assurance_health_sources, which hands
+    each of the six layers over as read, absent or explicitly UNREAD -- so the
+    states below are derived from named facts and the layers this surface does
+    not read are printed as the gap they are, rather than passing silently.
+
+    RED ONLY WHERE THE FINDINGS THEMSELVES WITHDREW EVERYTHING (rule bd4a6d22).
+    unknown, disabled and not-yet-operational are evidence-backed states, not
+    faults, and are carried with their counts.  A degraded scope is a real
+    finding and is printed and recorded as one; only a failed scope -- where the
+    findings alone withdrew every capability -- turns this surface red.
+    """
+    print("Assurance health — evidence-backed state per bound workflow scope")
+    workflows = snap.get("workflows")
+    if workflows is None:
+        print("  -- assurance health   NOT IN SNAPSHOT (this reader supplied no census)")
+        return 0
+    try:
+        sys.path.insert(0, REPO_ROOT)
+        from lib.assurance_health_sources import assurance_health_from_snapshot
+    except Exception as exc:
+        print(f"  -- assurance health   UNAVAILABLE — seam unavailable "
+              f"({type(exc).__name__}: {exc})")
+        return 0
+    try:
+        result = assurance_health_from_snapshot(workflows, now=datetime.now(timezone.utc))
+    except Exception as exc:
+        print(f"  -- assurance health   UNAVAILABLE — projection refused this reading "
+              f"({type(exc).__name__}: {exc})")
+        return 0
+    if not result.get("available"):
+        print(f"  -- assurance health   UNAVAILABLE — {result.get('reason', 'unstated')}")
+        return 0
+
+    projection = result["projection"]
+    summary = projection["summary"]
+    states = summary["states"]
+    print(f"  {summary['scopes']} bound scope(s): "
+          + ", ".join(f"{states.get(state, 0)} {state}" for state in projection["states"])
+          + f"; {summary['green']} green")
+    for entry in result.get("unprojectable", []):
+        print(f"  -- UNPROJECTABLE {entry['workflow']} — {entry['reason']}")
+    rc = 0
+    for row in projection["rows"]:
+        scope = row["scope"]
+        identity = f"{scope['workflow_key']} v{scope['workflow_version']}"
+        if row["state"] == "failed":
+            detail = f"{identity} FAILED: {row['state_reason']}"
+            print(f"  ⚠︎ {detail}")
+            _canonical_finding("assurance_health_failed", detail)
+            rc = 1
+        elif row["state"] == "degraded":
+            detail = f"{identity} DEGRADED: {row['state_reason']}"
+            print(f"  ⚠︎ {detail}")
+            _canonical_finding("assurance_health_degraded", detail)
+    unbindable = sorted({slot for row in projection["rows"]
+                         for slot, layer in row["evidence"].items()
+                         if layer["state"] == "unbindable"})
+    if unbindable:
+        print("  -- UNBINDABLE ON THIS CENSUS " + ", ".join(unbindable) +
+              " — the workflow census carries no Work Request identity, so this layer has "
+              "nothing to join through and no scope read here can reach act capability")
+    unread = sorted({slot for row in projection["rows"]
+                     for slot, layer in row["evidence"].items()
+                     if layer["state"] == "unreadable"})
+    if unread:
+        print("  -- NOT READ BY THIS SURFACE " + ", ".join(unread) +
+              " — no scope can be shown healthy until an authoritative reading of each "
+              "reaches this census; an unread layer is never counted as passing")
+    return rc
 
 
 def _canonical_snapshot():
@@ -944,6 +1030,8 @@ def _canonical_health():
                 print(f"  OK {len(live_jobs)} live job(s), every due window present; "
                       "no terminal failure, stuck state, or unreceipted success")
         if _canonical_workflow_truth(snap):
+            rc = 1
+        if _canonical_assurance_health(snap):
             rc = 1
 
     if CANONICAL_SECTION in ("all", "registry"):
