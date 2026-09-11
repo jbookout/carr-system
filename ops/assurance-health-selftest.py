@@ -1059,7 +1059,8 @@ def public_surface_guard_checks(health) -> None:
                     bound.add(target.id)
                     if target.id == "__all__" and isinstance(node.value, (ast.List, ast.Tuple)):
                         declared_all = [element.value for element in node.value.elts
-                                        if isinstance(element, ast.Constant)]
+                                        if isinstance(element, ast.Constant)
+                                        and isinstance(element.value, str)]
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             bound.add(node.target.id)
 
