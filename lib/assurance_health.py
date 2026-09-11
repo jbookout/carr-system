@@ -14,14 +14,14 @@ from the acceptance suite only through ``_test_only_hypothetical_row`` at the
 foot of this module, whose verdict comes back under
 ``would_be_healthy_if_authoritative`` -- a hypothetical, never a label.
 
-THE PUBLIC SURFACE IS ``assurance_health_row`` / ``assurance_health``, and it
-admits evidence only from a registered evidence owner (``EVIDENCE_OWNERS``).
+THE PUBLIC SURFACE IS ``_assurance_health_row`` / ``_assurance_health``, and it
+admits evidence only from a registered evidence owner (``_EVIDENCE_OWNERS``).
 THAT REGISTRY IS EMPTY, and emptily on purpose: admitting evidence means READING
 the store that owns it, this module reads nothing, and the F09 adapter it
 consumes reads nothing either -- so there is no route in this repository by
 which any of the six layers could be admitted.  Every value a caller supplies is
 reported ``unreadable`` with the durable seam it is owed
-(``OWED_EVIDENCE_OWNER_SEAMS``) named, ``passing`` is therefore unreachable on
+(``_OWED_EVIDENCE_OWNER_SEAMS``) named, ``passing`` is therefore unreachable on
 every layer, and ``act`` and green are unreachable by construction rather than
 by convention.  A surface driven by this module can say what it does not know;
 it cannot say a scope is healthy.
@@ -74,11 +74,11 @@ WHAT IT DELIBERATELY IS NOT.
 * It never guesses a degradation stage.  The act/draft/read/unavailable ladder is
   a fixed table of capability requirements evaluated against supplied evidence.
 
-FAIL-CLOSED, AND THE TWO KINDS OF ABSENCE.  ``UNREADABLE`` (reused from F09)
+FAIL-CLOSED, AND THE TWO KINDS OF ABSENCE.  ``_UNREADABLE`` (reused from F09)
 means "the read did not happen or failed"; ``None`` means "the read happened and
 there is genuinely no evidence".  They are different facts and are reported
 differently, and neither is ever green.  A malformed input raises
-``AssuranceHealthContractError`` rather than being guessed at: the caller owns
+``_AssuranceHealthContractError`` rather than being guessed at: the caller owns
 mapping an absent row onto ``None``, and this module owns identities,
 distinctness, currentness, precedence, scope and state.
 
@@ -106,59 +106,60 @@ DISPLAY PRECEDENCE, most conservative first, evaluated in this exact order:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any
+# EVERY IMPORT IS ALIASED PRIVATE, for the reason ``lib/assurance_health_sources``
+# already carries: an imported name is a PUBLIC name of the importing module, so
+# an unaliased ``UNREADABLE`` or ``datetime`` would put a name this module does
+# not own onto the surface a sweep must clear.
+from datetime import datetime as _datetime, timezone as _timezone
+from typing import Any as _Any
 
 from lib.control_plane_workflow_truth import (  # the ONE workflow authority (V5-F09)
-    SCHEMA_VERSION as WORKFLOW_TRUTH_SCHEMA_VERSION,
-    STATES as WORKFLOW_TRUTH_STATES,
-    UNREADABLE,
-    completion_subject_key,
+    SCHEMA_VERSION as _WORKFLOW_TRUTH_SCHEMA_VERSION,
+    STATES as _WORKFLOW_TRUTH_STATES,
+    UNREADABLE as _UNREADABLE,
+    completion_subject_key as _completion_subject_key,
 )
 
 SCHEMA_VERSION = "assurance-health.v1"
 
-# THE PUBLIC SURFACE, EXHAUSTIVELY.  Everything absent from this list is module
-# private, and the two names that decide a label -- ``_label_predicate_row`` and
-# ``_label_predicate`` -- are deliberately among the absent: a predicate that
-# turns six caller-supplied shapes into ``healthy`` is a direct-green route
-# whatever it is called, so it is not exported, not importable as part of this
-# surface, and reachable from the suite only through the test-only hook at the
-# foot of this module, which returns its verdict under a hypothetical name.
-# ``ops/assurance-health-selftest.py :: public_surface_guard_checks`` parses this
-# file with ``ast`` and fails if either name becomes public again.
+# THE PUBLIC SURFACE, EXHAUSTIVELY, AND IT CARRIES NO STATE AT ALL.
+#
+# WHAT CHANGED IN THE ELEVENTH CORRECTION, AND WHY.  This module used to export
+# twenty-six names: the whole domain vocabulary (``DISPLAY_STATES``,
+# ``GREEN_STATE``, ``CAPABILITY_STAGES``, the evidence states and bases) plus
+# ``assurance_health_row`` and ``assurance_health``, the two callables that turn
+# caller-supplied scopes, workflow truth and evidence into ``{"state":
+# "healthy", "green": true}``.  The standing authority rule forbids exactly that
+# shape: "no exported function may return the privileged outcome from caller
+# input, under ANY name".  A review's fresh traversal of this module's exported
+# values found thirty-three privileged hits -- ``healthy``, ``read``, ``pass``,
+# ``passing``, ``operational``, ``green`` -- and the exported route reproduced
+# green from a hand-written bundle.
+#
+# THE FIX IS NOT AN ALLOWLIST AND NOT A RENAME.  The domain vocabulary moved
+# behind module-private names (the table below), and so did both projection
+# entry points.  What is left public is one schema identifier, which is a string
+# no caller can turn into an outcome and which carries no word from the
+# privileged union.  This is deliberately STRONGER than the opaque-token option
+# the correction offered: a token is still a value a consumer could learn to
+# treat as green, whereas a surface with no state on it has nothing to learn.
+#
+# WHO READS THE PRIVATE NAMES, because "private" here means private to the
+# surface and not unreachable: ``lib/assurance_health_sources`` imports the four
+# it needs under its own underscored aliases, and the acceptance suite reaches
+# the classifier only through ``_test_only_hypothetical_row`` /
+# ``_test_only_hypothetical_census``, whose answers come back under
+# ``would_be_*_if_authoritative`` names.  ``ops/assurance-health-selftest.py ::
+# public_surface_guard_checks`` parses this file with ``ast`` and fails if any of
+# it becomes public again; ``closed_union_sweep_checks`` records each private
+# name against the consumer that reads it, one by one, with no blanket clause.
 __all__ = [
     "SCHEMA_VERSION",
-    "DISPLAY_STATES",
-    "GREEN_STATE",
-    "CAPABILITY_STAGES",
-    "PREACTIVATION_SLOTS",
-    "POSTACTIVATION_SLOTS",
-    "EVIDENCE_SLOTS",
-    "SCOPE_IDENTITY_FIELDS",
-    "REQUIRED_SCOPE_IDENTITY_FIELDS",
-    "OPTIONAL_SCOPE_IDENTITY_FIELDS",
-    "SLOT_REQUIRED_SCOPE_IDENTITY",
-    "EVIDENCE_STATUSES",
-    "EVIDENCE_STATES",
-    "INDETERMINATE_EVIDENCE_STATES",
-    "UNEARNED_EVIDENCE_STATES",
-    "DETERMINATE_NONPASS_EVIDENCE_STATES",
-    "EVIDENCE_BASES",
-    "SLOT_ADMISSIBLE_BASES",
-    "SLOT_REQUIRED_FIELDS",
-    "SLOT_REQUIREMENT",
-    "EVIDENCE_OWNERS",
-    "OWED_EVIDENCE_OWNER_SEAMS",
-    "AssuranceHealthContractError",
-    "scope_identity",
-    "assurance_health_row",
-    "assurance_health",
 ]
 
 # The six display states, exactly as the settled contract names them.  There is no
 # seventh, and only one of them is green.
-DISPLAY_STATES = (
+_DISPLAY_STATES = (
     "healthy",
     "degraded",
     "failed",
@@ -166,20 +167,20 @@ DISPLAY_STATES = (
     "disabled",
     "not-yet-operational",
 )
-GREEN_STATE = "healthy"
+_GREEN_STATE = "healthy"
 
 # The scoped degradation ladder.  A failure walks DOWN this ladder and stops; it
 # never jumps, and it never leaves the bound scope.
-CAPABILITY_STAGES = ("act", "draft", "read", "unavailable")
+_CAPABILITY_STAGES = ("act", "draft", "read", "unavailable")
 
-PREACTIVATION_SLOTS = (
+_PREACTIVATION_SLOTS = (
     "artifact_assessment",
     "execution_assessment",
     "controller_assessment",
     "candidate_outcome_oracle",
 )
-POSTACTIVATION_SLOTS = ("activation_readback", "actual_business_outcome")
-EVIDENCE_SLOTS = PREACTIVATION_SLOTS + POSTACTIVATION_SLOTS
+_POSTACTIVATION_SLOTS = ("activation_readback", "actual_business_outcome")
+_EVIDENCE_SLOTS = _PREACTIVATION_SLOTS + _POSTACTIVATION_SLOTS
 
 # The exact identity a scope is bound by.  Identities only: adding a label-shaped
 # field here is what "no name/title heuristic" forbids.
@@ -192,22 +193,22 @@ EVIDENCE_SLOTS = PREACTIVATION_SLOTS + POSTACTIVATION_SLOTS
 # scope may therefore be bound by workflow identity alone; the only consequence,
 # and it is the correct one, is that ``actual_business_outcome`` then has no
 # admissible join, so act capability and green are unreachable for it.
-SCOPE_IDENTITY_FIELDS = ("workflow_key", "workflow_version", "work_request_id")
-REQUIRED_SCOPE_IDENTITY_FIELDS = ("workflow_key", "workflow_version")
-OPTIONAL_SCOPE_IDENTITY_FIELDS = ("work_request_id",)
+_SCOPE_IDENTITY_FIELDS = ("workflow_key", "workflow_version", "work_request_id")
+_REQUIRED_SCOPE_IDENTITY_FIELDS = ("workflow_key", "workflow_version")
+_OPTIONAL_SCOPE_IDENTITY_FIELDS = ("work_request_id",)
 
 # The exact scope identity each layer must be able to join through.  A layer whose
 # required identity the scope does not carry is ``unbindable``: it is not a
 # finding against the scope, and it is never a pass.
-SLOT_REQUIRED_SCOPE_IDENTITY = {"actual_business_outcome": "work_request_id"}
+_SLOT_REQUIRED_SCOPE_IDENTITY = {"actual_business_outcome": "work_request_id"}
 
 # What a source can say about its own evidence.  Anything else is refused.
-EVIDENCE_STATUSES = ("pass", "fail", "skipped", "untested", "error", "conflicting")
+_EVIDENCE_STATUSES = ("pass", "fail", "skipped", "untested", "error", "conflicting")
 
 # Ordered most-conservative first: the first condition that holds wins, so a
 # contradiction, a refused substitute or an expiry can never be outranked by the
 # record's own claim to pass.
-EVIDENCE_STATES = (
+_EVIDENCE_STATES = (
     "unreadable",          # the caller could not read the source
     "missing",             # read, and there is genuinely no evidence
     "mismatched",          # evidence exists but binds a different exact scope
@@ -227,16 +228,16 @@ EVIDENCE_STATES = (
 # "missing" and "unbindable" belong to neither class: they are the two absences
 # that "not-yet-operational" is allowed to describe, and neither is a finding on
 # its own.  Neither is ever green either -- both block the act stage.
-INDETERMINATE_EVIDENCE_STATES = ("unreadable", "mismatched", "conflicting", "indistinct")
-UNEARNED_EVIDENCE_STATES = ("missing", "unbindable")
-DETERMINATE_NONPASS_EVIDENCE_STATES = (
+_INDETERMINATE_EVIDENCE_STATES = ("unreadable", "mismatched", "conflicting", "indistinct")
+_UNEARNED_EVIDENCE_STATES = ("missing", "unbindable")
+_DETERMINATE_NONPASS_EVIDENCE_STATES = (
     "refused_substitute", "failed", "error", "skipped", "untested", "self_attested", "stale",
 )
 
 # Every basis a caller may declare.  The forbidden ones are IN this vocabulary on
 # purpose: an unnamed basis is a malformed input, while a named-but-inadmissible
 # basis must be reported as the exact refusal it is.
-EVIDENCE_BASES = (
+_EVIDENCE_BASES = (
     "independent_artifact_review",
     "attempt_receipt_execution_evidence",
     "controller_readback",
@@ -253,7 +254,7 @@ EVIDENCE_BASES = (
     "candidate_outcome_pass",
 )
 
-SLOT_ADMISSIBLE_BASES = {
+_SLOT_ADMISSIBLE_BASES = {
     "artifact_assessment": ("independent_artifact_review",),
     "execution_assessment": ("attempt_receipt_execution_evidence",),
     "controller_assessment": ("controller_readback",),
@@ -265,7 +266,7 @@ SLOT_ADMISSIBLE_BASES = {
 # The exact binding each layer must carry, drawn from the records that already
 # prove these edges (0451 assurance extensions, 0303 attempt/activation, the
 # activation-reliability evaluation plan, 0179 sourced outcome feedback).
-SLOT_REQUIRED_FIELDS = {
+_SLOT_REQUIRED_FIELDS = {
     "artifact_assessment": ("repository_commit_sha", "repository_tree_sha", "reviewer_fact_id"),
     "execution_assessment": ("attempt_id", "envelope_digest", "plan_hash"),
     "controller_assessment": ("controller_state", "readback_source", "readback_at"),
@@ -280,7 +281,7 @@ _VERSION_MAP_FIELDS = ("component_versions",)
 
 # What the bound owner must obtain to clear a non-passing slot.  These are
 # requirements, not effects: nothing here is performed.
-SLOT_REQUIREMENT = {
+_SLOT_REQUIREMENT = {
     "artifact_assessment":
         "a current independently reviewed artifact assessment bound to the exact "
         "repository commit and tree of this scope",
@@ -312,8 +313,8 @@ _STAGE_REQUIREMENTS = (
 )
 
 # What a failure took away, given the highest stage the failure alone still allows.
-_STAGE_DOWN_TO = {stage: list(CAPABILITY_STAGES[:index])
-                  for index, stage in enumerate(CAPABILITY_STAGES)}
+_STAGE_DOWN_TO = {stage: list(_CAPABILITY_STAGES[:index])
+                  for index, stage in enumerate(_CAPABILITY_STAGES)}
 
 # F09 states this projection reads as authoritative dispositions of the workflow
 # itself.  Nothing else in this module decides these three facts.
@@ -326,58 +327,58 @@ _WORKFLOW_TRUTH_PUBLIC_FIELDS = (
 )
 
 
-class AssuranceHealthContractError(ValueError):
+class _AssuranceHealthContractError(ValueError):
     """A caller supplied an input this projection refuses to guess at."""
 
 
-def _utc(value: Any, *, field: str) -> datetime:
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+def _utc(value: _Any, *, field: str) -> _datetime:
+    if isinstance(value, _datetime):
+        return value if value.tzinfo else value.replace(tzinfo=_timezone.utc)
     if not isinstance(value, str) or not value.strip():
-        raise AssuranceHealthContractError(f"{field} must be an ISO-8601 instant")
+        raise _AssuranceHealthContractError(f"{field} must be an ISO-8601 instant")
     try:
-        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        parsed = _datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
     except ValueError as exc:
-        raise AssuranceHealthContractError(f"{field} is not an ISO-8601 instant: {exc}") from exc
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        raise _AssuranceHealthContractError(f"{field} is not an ISO-8601 instant: {exc}") from exc
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=_timezone.utc)
 
 
-def _require_mapping(value: Any, *, field: str) -> dict[str, Any]:
+def _require_mapping(value: _Any, *, field: str) -> dict[str, _Any]:
     if not isinstance(value, dict):
-        raise AssuranceHealthContractError(f"{field} must be an object")
+        raise _AssuranceHealthContractError(f"{field} must be an object")
     return value
 
 
-def _require_text(value: Any, *, field: str) -> str:
+def _require_text(value: _Any, *, field: str) -> str:
     if not isinstance(value, str) or not value.strip():
-        raise AssuranceHealthContractError(f"{field} must be a non-empty string")
+        raise _AssuranceHealthContractError(f"{field} must be a non-empty string")
     return value
 
 
-def _require_refs(value: Any, *, field: str) -> list[str]:
+def _require_refs(value: _Any, *, field: str) -> list[str]:
     """Existing incident/recovery references, echoed exactly or not at all."""
     if value is None:
         return []
     if not isinstance(value, (list, tuple)):
-        raise AssuranceHealthContractError(f"{field} must be a list of existing evidence refs")
+        raise _AssuranceHealthContractError(f"{field} must be a list of existing evidence refs")
     return [_require_text(item, field=f"{field}[]") for item in value]
 
 
-def scope_identity(scope: Any, *, field: str = "scope") -> dict[str, Any]:
+def _scope_identity(scope: _Any, *, field: str = "scope") -> dict[str, _Any]:
     """The exact identity a scope or an evidence record binds.
 
     Identities only.  There is deliberately no route by which a human label could
     stand in for one of these values.
     """
     mapping = _require_mapping(scope, field=field)
-    missing = [name for name in REQUIRED_SCOPE_IDENTITY_FIELDS if name not in mapping]
+    missing = [name for name in _REQUIRED_SCOPE_IDENTITY_FIELDS if name not in mapping]
     if missing:
-        raise AssuranceHealthContractError(
+        raise _AssuranceHealthContractError(
             f"{field} is missing the exact scope-binding identities {sorted(missing)}; "
             "an unbound record is refused, never joined by any other field")
     version = mapping["workflow_version"]
     if not isinstance(version, int) or isinstance(version, bool) or version <= 0:
-        raise AssuranceHealthContractError(f"{field}.workflow_version must be a positive integer")
+        raise _AssuranceHealthContractError(f"{field}.workflow_version must be a positive integer")
     # Absent and explicitly null are the same fact: this scope is not bound to a
     # Work Request.  Anything else present must be an exact identity -- an empty
     # or non-string value is refused rather than quietly read as unbound, because
@@ -392,16 +393,16 @@ def scope_identity(scope: Any, *, field: str = "scope") -> dict[str, Any]:
     }
 
 
-def _component_versions(value: Any, *, field: str) -> list[str]:
+def _component_versions(value: _Any, *, field: str) -> list[str]:
     if not isinstance(value, dict) or not value:
-        raise AssuranceHealthContractError(
+        raise _AssuranceHealthContractError(
             f"{field} must be a non-empty object of component name to version")
     return sorted(f"{_require_text(name, field=field)}="
                   f"{_require_text(version, field=f'{field}.{name}')}"
                   for name, version in value.items())
 
 
-def _evidence_record(slot: str, value: Any) -> dict[str, Any]:
+def _evidence_record(slot: str, value: _Any) -> dict[str, _Any]:
     """Validate one supplied evidence mapping into its exact, public identity.
 
     Only the fields named here are ever carried into the projection, so a caller
@@ -412,21 +413,21 @@ def _evidence_record(slot: str, value: Any) -> dict[str, Any]:
 
     layer = _require_text(supplied.get("layer"), field=f"evidence[{slot}].layer")
     if layer != slot:
-        raise AssuranceHealthContractError(
+        raise _AssuranceHealthContractError(
             f"evidence declaring layer {layer!r} cannot fill the {slot!r} slot: "
             "no layer may be inferred from another")
 
     basis = _require_text(supplied.get("basis"), field=f"evidence[{slot}].basis")
-    if basis not in EVIDENCE_BASES:
-        raise AssuranceHealthContractError(
+    if basis not in _EVIDENCE_BASES:
+        raise _AssuranceHealthContractError(
             f"evidence[{slot}].basis {basis!r} is outside the closed vocabulary")
 
     status = supplied.get("status")
-    if status not in EVIDENCE_STATUSES:
-        raise AssuranceHealthContractError(
-            f"evidence[{slot}].status must be one of {EVIDENCE_STATUSES}")
+    if status not in _EVIDENCE_STATUSES:
+        raise _AssuranceHealthContractError(
+            f"evidence[{slot}].status must be one of {_EVIDENCE_STATUSES}")
 
-    record: dict[str, Any] = {
+    record: dict[str, _Any] = {
         "slot": slot,
         "layer": layer,
         "basis": basis,
@@ -444,9 +445,9 @@ def _evidence_record(slot: str, value: Any) -> dict[str, Any]:
         # without the expiry its own source defines is refused rather than treated
         # as current forever.
         "expires_at": _utc(supplied.get("expires_at"), field=f"evidence[{slot}].expires_at"),
-        "scope": scope_identity(supplied.get("scope"), field=f"evidence[{slot}].scope"),
+        "scope": _scope_identity(supplied.get("scope"), field=f"evidence[{slot}].scope"),
     }
-    for name in SLOT_REQUIRED_FIELDS[slot]:
+    for name in _SLOT_REQUIRED_FIELDS[slot]:
         field = f"evidence[{slot}].{name}"
         if name in _INSTANT_FIELDS:
             record[name] = _utc(supplied.get(name), field=field)
@@ -457,7 +458,7 @@ def _evidence_record(slot: str, value: Any) -> dict[str, Any]:
     return record
 
 
-def _classify(record: dict[str, Any], *, bound: dict[str, Any], now: datetime,
+def _classify(record: dict[str, _Any], *, bound: dict[str, _Any], now: _datetime,
               shared: dict[str, list[str]]) -> tuple[str, list[str]]:
     """Classify one validated record.  Every condition that holds is reported."""
     slot = record["slot"]
@@ -471,7 +472,7 @@ def _classify(record: dict[str, Any], *, bound: dict[str, Any], now: datetime,
             f":v{record['scope']['workflow_version']} / work request "
             f"{record['scope']['work_request_id']}, which is not this bound scope")
 
-    required_identity = SLOT_REQUIRED_SCOPE_IDENTITY.get(slot)
+    required_identity = _SLOT_REQUIRED_SCOPE_IDENTITY.get(slot)
     if required_identity is not None and bound.get(required_identity) is None:
         flags.add("unbindable")
         reasons.append(
@@ -480,7 +481,7 @@ def _classify(record: dict[str, Any], *, bound: dict[str, Any], now: datetime,
 
     for name in ("observed_at",) + _INSTANT_FIELDS:
         instant = record.get(name)
-        if isinstance(instant, datetime) and instant > now:
+        if isinstance(instant, _datetime) and instant > now:
             flags.add("conflicting")
             reasons.append(f"{slot}: {name} is after the projection instant")
 
@@ -488,11 +489,11 @@ def _classify(record: dict[str, Any], *, bound: dict[str, Any], now: datetime,
         flags.add("conflicting")
         reasons.append(f"{slot}: the source reports contradictory evidence")
 
-    if record["basis"] not in SLOT_ADMISSIBLE_BASES[slot]:
+    if record["basis"] not in _SLOT_ADMISSIBLE_BASES[slot]:
         flags.add("refused_substitute")
         reasons.append(
             f"{slot}: {record['basis']} is refused as a substitute for this layer; "
-            f"only {list(SLOT_ADMISSIBLE_BASES[slot])} can fill it")
+            f"only {list(_SLOT_ADMISSIBLE_BASES[slot])} can fill it")
 
     if record["evaluator_identity"] == record["subject_identity"]:
         flags.add("self_attested")
@@ -518,13 +519,13 @@ def _classify(record: dict[str, Any], *, bound: dict[str, Any], now: datetime,
         flags.add(status_state)
         reasons.append(f"{slot}: the source reports {record['status']}")
 
-    for state in EVIDENCE_STATES:
+    for state in _EVIDENCE_STATES:
         if state in flags:
             return state, reasons
     return "passing", reasons
 
 
-def _shared_identities(records: dict[str, dict[str, Any]]) -> dict[str, list[str]]:
+def _shared_identities(records: dict[str, dict[str, _Any]]) -> dict[str, list[str]]:
     """Slots that collide on an exact evidence ref or digest.
 
     Two layers holding one identity is not two facts; it is one fact counted
@@ -542,15 +543,15 @@ def _shared_identities(records: dict[str, dict[str, Any]]) -> dict[str, list[str
     return shared
 
 
-def _public_evidence(slot: str, state: str, record: dict[str, Any] | None,
-                     reasons: list[str]) -> dict[str, Any]:
-    layer_class = "preactivation" if slot in PREACTIVATION_SLOTS else "postactivation"
-    public: dict[str, Any] = {
+def _public_evidence(slot: str, state: str, record: dict[str, _Any] | None,
+                     reasons: list[str]) -> dict[str, _Any]:
+    layer_class = "preactivation" if slot in _PREACTIVATION_SLOTS else "postactivation"
+    public: dict[str, _Any] = {
         "slot": slot,
         "layer_class": layer_class,
         "state": state,
         "present": record is not None,
-        "requirement": SLOT_REQUIREMENT[slot],
+        "requirement": _SLOT_REQUIREMENT[slot],
         "reasons": sorted(set(reasons)),
     }
     if record is None:
@@ -566,40 +567,40 @@ def _public_evidence(slot: str, state: str, record: dict[str, Any] | None,
         "expires_at": record["expires_at"].isoformat(),
         "bound_scope": dict(record["scope"]),
     })
-    for name in SLOT_REQUIRED_FIELDS[slot]:
+    for name in _SLOT_REQUIRED_FIELDS[slot]:
         value = record[name]
-        public[name] = value.isoformat() if isinstance(value, datetime) else value
+        public[name] = value.isoformat() if isinstance(value, _datetime) else value
     return public
 
 
-def _workflow_truth_facts(workflow_truth: Any, bound: dict[str, Any]) -> tuple[
-        dict[str, Any] | None, dict[str, Any]]:
+def _workflow_truth_facts(workflow_truth: _Any, bound: dict[str, _Any]) -> tuple[
+        dict[str, _Any] | None, dict[str, _Any]]:
     """Read F09's projected row.  This module derives no workflow truth of its own."""
-    if workflow_truth is UNREADABLE:
+    if workflow_truth is _UNREADABLE:
         return None, {"state": None, "indeterminate": True, "not_enabled": False,
                       "readable": False, "coherent": False, "enabled": False,
                       "live_admissible": False}
     row = _require_mapping(workflow_truth, field="workflow_truth")
-    if row.get("schema_version") != WORKFLOW_TRUTH_SCHEMA_VERSION:
-        raise AssuranceHealthContractError(
+    if row.get("schema_version") != _WORKFLOW_TRUTH_SCHEMA_VERSION:
+        raise _AssuranceHealthContractError(
             "workflow_truth must be a row projected by lib/control_plane_workflow_truth "
-            f"({WORKFLOW_TRUTH_SCHEMA_VERSION}); this projection builds no second "
+            f"({_WORKFLOW_TRUTH_SCHEMA_VERSION}); this projection builds no second "
             "workflow, status or receipt registry")
     state = row.get("state")
-    if state not in WORKFLOW_TRUTH_STATES:
-        raise AssuranceHealthContractError(
+    if state not in _WORKFLOW_TRUTH_STATES:
+        raise _AssuranceHealthContractError(
             f"workflow_truth.state {state!r} is outside the F09 vocabulary")
     key = _require_text(row.get("workflow_key"), field="workflow_truth.workflow_key")
     version = row.get("workflow_version")
     if not isinstance(version, int) or isinstance(version, bool) or version <= 0:
-        raise AssuranceHealthContractError(
+        raise _AssuranceHealthContractError(
             "workflow_truth.workflow_version must be a positive integer")
     if key != bound["workflow_key"] or version != bound["workflow_version"]:
-        raise AssuranceHealthContractError(
+        raise _AssuranceHealthContractError(
             "workflow_truth row does not bind the exact scope being projected")
     modes = row.get("admissible_modes")
     if not isinstance(modes, list):
-        raise AssuranceHealthContractError("workflow_truth.admissible_modes must be a list")
+        raise _AssuranceHealthContractError("workflow_truth.admissible_modes must be a list")
     facts = {
         "state": state,
         "indeterminate": state in _TRUTH_INDETERMINATE,
@@ -614,9 +615,9 @@ def _workflow_truth_facts(workflow_truth: Any, bound: dict[str, Any]) -> tuple[
     return row, facts
 
 
-def _label_predicate_row(*, scope: Any, workflow_truth: Any, evidence: Any,
-                         now: Any,
-                         unreadable_reasons: Any = None) -> dict[str, Any]:
+def _label_predicate_row(*, scope: _Any, workflow_truth: _Any, evidence: _Any,
+                         now: _Any,
+                         unreadable_reasons: _Any = None) -> dict[str, _Any]:
     """THE PURE LABEL PREDICATE. NOT WIRED, AND NOT A ROUTE TO A DISPLAYED LABEL.
 
     This is the decision logic alone: a total function from one exactly bound
@@ -626,14 +627,14 @@ def _label_predicate_row(*, scope: Any, workflow_truth: Any, evidence: Any,
     green shape, which is the only way to prove the ladder actually requires all
     six layers -- and nothing that renders a label to a human may call it.
 
-    The wired entry points are ``assurance_health_row`` and ``assurance_health``
+    The wired entry points are ``_assurance_health_row`` and ``_assurance_health``
     below: they admit evidence only from a registered evidence owner and hand
-    everything else here as ``UNREADABLE``, so no caller-supplied shape reaches
+    everything else here as ``_UNREADABLE``, so no caller-supplied shape reaches
     ``passing`` on a layer this repository does not own.
 
     ``workflow_truth`` is one row from ``lib.control_plane_workflow_truth`` (or
-    ``UNREADABLE``).  ``evidence`` must name every one of the six slots
-    explicitly: a caller that did not read a layer says so with ``UNREADABLE``
+    ``_UNREADABLE``).  ``evidence`` must name every one of the six slots
+    explicitly: a caller that did not read a layer says so with ``_UNREADABLE``
     rather than inheriting a permissive default.  ``unreadable_reasons`` lets the
     wired caller say WHY a layer is unread, in place of the generic reason.
     """
@@ -644,7 +645,7 @@ def _label_predicate_row(*, scope: Any, workflow_truth: Any, evidence: Any,
                 _require_text(reason, field=f"unreadable_reasons[{slot}]")
             for slot, reason in _require_mapping(
                 unreadable_reasons, field="unreadable_reasons").items()}
-    bound = scope_identity(scope)
+    bound = _scope_identity(scope)
     scope_mapping = _require_mapping(scope, field="scope")
     owner = _require_text(scope_mapping.get("owner"), field="scope.owner")
     incident_refs = _require_refs(scope_mapping.get("incident_refs"), field="scope.incident_refs")
@@ -652,25 +653,26 @@ def _label_predicate_row(*, scope: Any, workflow_truth: Any, evidence: Any,
     instant = _utc(now, field="now")
 
     supplied = _require_mapping(evidence, field="evidence")
-    unnamed = sorted(set(supplied) - set(EVIDENCE_SLOTS))
+    unnamed = sorted(set(supplied) - set(_EVIDENCE_SLOTS))
     if unnamed:
-        raise AssuranceHealthContractError(
+        raise _AssuranceHealthContractError(
             f"evidence carries slots outside the closed set: {unnamed}")
-    absent = [slot for slot in EVIDENCE_SLOTS if slot not in supplied]
+    absent = [slot for slot in _EVIDENCE_SLOTS if slot not in supplied]
     if absent:
-        raise AssuranceHealthContractError(
+        raise _AssuranceHealthContractError(
             f"evidence must name every layer explicitly; {absent} were not supplied. "
-            "Pass UNREADABLE for a layer that could not be read and None for a layer "
+            "Pass lib.control_plane_workflow_truth.UNREADABLE for a layer that could "
+            "not be read and None for a layer "
             "that was read and has no evidence")
 
     truth_row, truth = _workflow_truth_facts(workflow_truth, bound)
 
-    records: dict[str, dict[str, Any]] = {}
+    records: dict[str, dict[str, _Any]] = {}
     states: dict[str, str] = {}
-    slot_reasons: dict[str, list[str]] = {slot: [] for slot in EVIDENCE_SLOTS}
-    for slot in EVIDENCE_SLOTS:
+    slot_reasons: dict[str, list[str]] = {slot: [] for slot in _EVIDENCE_SLOTS}
+    for slot in _EVIDENCE_SLOTS:
         value = supplied[slot]
-        if value is UNREADABLE:
+        if value is _UNREADABLE:
             states[slot] = "unreadable"
             slot_reasons[slot].append(
                 unread_reason_for.get(slot, f"{slot}: the caller could not read this layer"))
@@ -683,7 +685,7 @@ def _label_predicate_row(*, scope: Any, workflow_truth: Any, evidence: Any,
             # the join it cannot make rather than the claim it makes.
             records[slot] = _evidence_record(slot, value)
 
-    for slot, required_identity in SLOT_REQUIRED_SCOPE_IDENTITY.items():
+    for slot, required_identity in _SLOT_REQUIRED_SCOPE_IDENTITY.items():
         if slot in records or bound.get(required_identity) is not None:
             continue
         states[slot] = "unbindable"
@@ -713,7 +715,7 @@ def _label_predicate_row(*, scope: Any, workflow_truth: Any, evidence: Any,
         "workflow_enabled": truth["enabled"],
         "workflow_live_admissible": truth["live_admissible"],
     }
-    capability_inputs.update({slot: states[slot] == "passing" for slot in EVIDENCE_SLOTS})
+    capability_inputs.update({slot: states[slot] == "passing" for slot in _EVIDENCE_SLOTS})
 
     def _stage(inputs: dict[str, bool]) -> str:
         for name, requirements in _STAGE_REQUIREMENTS:
@@ -722,20 +724,20 @@ def _label_predicate_row(*, scope: Any, workflow_truth: Any, evidence: Any,
         return "unavailable"
 
     stage = _stage(capability_inputs)
-    stage_index = CAPABILITY_STAGES.index(stage)
-    retained = list(CAPABILITY_STAGES[stage_index:-1])
-    withdrawn = list(CAPABILITY_STAGES[:stage_index])
+    stage_index = _CAPABILITY_STAGES.index(stage)
+    retained = list(_CAPABILITY_STAGES[stage_index:-1])
+    withdrawn = list(_CAPABILITY_STAGES[:stage_index])
 
     requirements_of = dict(_STAGE_REQUIREMENTS)
     blocking_next = ([] if stage == "act" else
                      sorted(requirement
-                            for requirement in requirements_of[CAPABILITY_STAGES[stage_index - 1]]
+                            for requirement in requirements_of[_CAPABILITY_STAGES[stage_index - 1]]
                             if not capability_inputs[requirement]))
     blocking_act = sorted(requirement for requirement in requirements_of["act"]
                           if not capability_inputs[requirement])
 
-    indeterminate = sorted(slot for slot in EVIDENCE_SLOTS
-                           if states[slot] in INDETERMINATE_EVIDENCE_STATES)
+    indeterminate = sorted(slot for slot in _EVIDENCE_SLOTS
+                           if states[slot] in _INDETERMINATE_EVIDENCE_STATES)
 
     # CAPABILITY LOST TO AN UNREAD LAYER IS NOT CAPABILITY A FAILURE TOOK AWAY.
     # A false red is the same defect as a false green wearing the other colour:
@@ -746,14 +748,14 @@ def _label_predicate_row(*, scope: Any, workflow_truth: Any, evidence: Any,
     # the failure; the reported capability_stage stays the conservative one.
     attributable_stage = _stage({**capability_inputs,
                                  **{slot: True for slot in indeterminate}})
-    determinate_nonpass = sorted(slot for slot in EVIDENCE_SLOTS
-                                 if states[slot] in DETERMINATE_NONPASS_EVIDENCE_STATES)
-    missing = sorted(slot for slot in EVIDENCE_SLOTS if states[slot] == "missing")
-    unbindable = sorted(slot for slot in EVIDENCE_SLOTS if states[slot] == "unbindable")
-    preactivation_passing = all(states[slot] == "passing" for slot in PREACTIVATION_SLOTS)
+    determinate_nonpass = sorted(slot for slot in _EVIDENCE_SLOTS
+                                 if states[slot] in _DETERMINATE_NONPASS_EVIDENCE_STATES)
+    missing = sorted(slot for slot in _EVIDENCE_SLOTS if states[slot] == "missing")
+    unbindable = sorted(slot for slot in _EVIDENCE_SLOTS if states[slot] == "unbindable")
+    preactivation_passing = all(states[slot] == "passing" for slot in _PREACTIVATION_SLOTS)
 
     reasons: list[str] = []
-    for slot in EVIDENCE_SLOTS:
+    for slot in _EVIDENCE_SLOTS:
         reasons.extend(slot_reasons[slot])
 
     # ---- display state, most conservative predicate first --------------------
@@ -785,13 +787,13 @@ def _label_predicate_row(*, scope: Any, workflow_truth: Any, evidence: Any,
                 "currently be shown to hold")
     elif not determinate_nonpass and not indeterminate and (
             not truth["live_admissible"]
-            or any(states[slot] in UNEARNED_EVIDENCE_STATES for slot in POSTACTIVATION_SLOTS)):
+            or any(states[slot] in _UNEARNED_EVIDENCE_STATES for slot in _POSTACTIVATION_SLOTS)):
         state = "not-yet-operational"
         state_reason = (
             "nothing failed and nothing is operational yet: "
             + ("the F09 evidence ladder has not admitted live execution"
                if not truth["live_admissible"] else
-               f"{sorted(slot for slot in POSTACTIVATION_SLOTS if states[slot] in UNEARNED_EVIDENCE_STATES)} "
+               f"{sorted(slot for slot in _POSTACTIVATION_SLOTS if states[slot] in _UNEARNED_EVIDENCE_STATES)} "
                "has no evidence the bound scope can yet carry"))
     elif stage == "act":
         state = "healthy"
@@ -805,11 +807,11 @@ def _label_predicate_row(*, scope: Any, workflow_truth: Any, evidence: Any,
             f"missing={missing}); no state is claimed")
     reasons.append(state_reason)
 
-    if state != GREEN_STATE and stage == "act":  # pragma: no cover - guards a future edit
-        raise AssuranceHealthContractError(
+    if state != _GREEN_STATE and stage == "act":  # pragma: no cover - guards a future edit
+        raise _AssuranceHealthContractError(
             "full act capability must be reported as healthy or not at all")
-    if state == GREEN_STATE and not all(states[slot] == "passing" for slot in EVIDENCE_SLOTS):
-        raise AssuranceHealthContractError(  # pragma: no cover - guards a future edit
+    if state == _GREEN_STATE and not all(states[slot] == "passing" for slot in _EVIDENCE_SLOTS):
+        raise _AssuranceHealthContractError(  # pragma: no cover - guards a future edit
             "healthy requires every layer to be passing")
 
     impact = {
@@ -824,8 +826,8 @@ def _label_predicate_row(*, scope: Any, workflow_truth: Any, evidence: Any,
     recovery = {
         "owner": owner,
         "required_evidence": [
-            {"slot": slot, "evidence_state": states[slot], "requirement": SLOT_REQUIREMENT[slot]}
-            for slot in EVIDENCE_SLOTS if states[slot] != "passing"],
+            {"slot": slot, "evidence_state": states[slot], "requirement": _SLOT_REQUIREMENT[slot]}
+            for slot in _EVIDENCE_SLOTS if states[slot] != "passing"],
         "incident_refs": incident_refs,
         "recovery_refs": recovery_refs,
         "authority_path": (
@@ -833,17 +835,17 @@ def _label_predicate_row(*, scope: Any, workflow_truth: Any, evidence: Any,
             "this projection performs no activation, effect or notification"),
     }
 
-    row: dict[str, Any] = {
+    row: dict[str, _Any] = {
         "schema_version": SCHEMA_VERSION,
         "observed_at": instant.isoformat(),
         "scope": {
             **bound,
-            "completion_subject_key": completion_subject_key(
+            "completion_subject_key": _completion_subject_key(
                 bound["workflow_key"], bound["workflow_version"]),
             "owner": owner,
         },
         "state": state,
-        "green": state == GREEN_STATE,
+        "green": state == _GREEN_STATE,
         "state_reason": state_reason,
         "capability_stage": stage,
         "capabilities_retained": retained,
@@ -855,7 +857,7 @@ def _label_predicate_row(*, scope: Any, workflow_truth: Any, evidence: Any,
              **{name: truth_row.get(name) for name in _WORKFLOW_TRUTH_PUBLIC_FIELDS}}),
         "evidence": {slot: _public_evidence(slot, states[slot], records.get(slot),
                                             slot_reasons[slot])
-                     for slot in EVIDENCE_SLOTS},
+                     for slot in _EVIDENCE_SLOTS},
         "preactivation_receipts_passing": preactivation_passing,
         "indeterminate_layers": indeterminate,
         "failing_layers": determinate_nonpass,
@@ -867,21 +869,21 @@ def _label_predicate_row(*, scope: Any, workflow_truth: Any, evidence: Any,
         "reasons": sorted(set(reasons)),
     }
 
-    if row["state"] not in DISPLAY_STATES:  # pragma: no cover - guards a future edit
-        raise AssuranceHealthContractError(
+    if row["state"] not in _DISPLAY_STATES:  # pragma: no cover - guards a future edit
+        raise _AssuranceHealthContractError(
             f"state {row['state']!r} is outside the closed vocabulary")
-    if row["capability_stage"] not in CAPABILITY_STAGES:  # pragma: no cover
-        raise AssuranceHealthContractError(
+    if row["capability_stage"] not in _CAPABILITY_STAGES:  # pragma: no cover
+        raise _AssuranceHealthContractError(
             f"capability stage {row['capability_stage']!r} is outside the closed vocabulary")
     for slot, public in row["evidence"].items():  # pragma: no cover
-        if public["state"] not in EVIDENCE_STATES:
-            raise AssuranceHealthContractError(
+        if public["state"] not in _EVIDENCE_STATES:
+            raise _AssuranceHealthContractError(
                 f"{slot} evidence state {public['state']!r} is outside the vocabulary")
     return row
 
 
-def _label_predicate(*, scopes: Any, now: Any,
-                     unreadable_reasons: Any = None) -> dict[str, Any]:
+def _label_predicate(*, scopes: _Any, now: _Any,
+                     unreadable_reasons: _Any = None) -> dict[str, _Any]:
     """THE PURE LABEL PREDICATE over a census. NOT WIRED (see the row predicate).
 
     Each entry is ``{"scope": ..., "workflow_truth": ..., "evidence": ...}``.  Rows
@@ -890,7 +892,7 @@ def _label_predicate(*, scopes: Any, now: Any,
     """
     instant = _utc(now, field="now")
     if not isinstance(scopes, list):
-        raise AssuranceHealthContractError("scopes must be a list of bound scope bundles")
+        raise _AssuranceHealthContractError("scopes must be a list of bound scope bundles")
 
     rows = []
     seen: set[tuple[str, int, str]] = set()
@@ -898,12 +900,12 @@ def _label_predicate(*, scopes: Any, now: Any,
         bundle = _require_mapping(entry, field="scope bundle")
         for name in ("scope", "workflow_truth", "evidence"):
             if name not in bundle:
-                raise AssuranceHealthContractError(f"scope bundle is missing {name!r}")
-        identity = scope_identity(bundle["scope"])
+                raise _AssuranceHealthContractError(f"scope bundle is missing {name!r}")
+        identity = _scope_identity(bundle["scope"])
         key = (identity["workflow_key"], identity["workflow_version"],
                identity["work_request_id"])
         if key in seen:
-            raise AssuranceHealthContractError(
+            raise _AssuranceHealthContractError(
                 f"scope {key} is bound twice; one exact scope has one projected state")
         seen.add(key)
         rows.append(_label_predicate_row(
@@ -920,9 +922,9 @@ def _label_predicate(*, scopes: Any, now: Any,
     summary = {
         "scopes": len(rows),
         "states": {state: sum(1 for row in rows if row["state"] == state)
-                   for state in DISPLAY_STATES},
+                   for state in _DISPLAY_STATES},
         "capability_stages": {stage: sum(1 for row in rows if row["capability_stage"] == stage)
-                              for stage in CAPABILITY_STAGES},
+                              for stage in _CAPABILITY_STAGES},
         "green": sum(1 for row in rows if row["green"]),
         # KEYED ON THE IDENTITY EVERY SCOPE ACTUALLY HAS. A workflow-only scope
         # carries no Work Request identity, and a census of them is the normal
@@ -937,9 +939,9 @@ def _label_predicate(*, scopes: Any, now: Any,
     return {
         "schema_version": SCHEMA_VERSION,
         "observed_at": instant.isoformat(),
-        "states": list(DISPLAY_STATES),
-        "capability_stages": list(CAPABILITY_STAGES),
-        "evidence_slots": list(EVIDENCE_SLOTS),
+        "states": list(_DISPLAY_STATES),
+        "capability_stages": list(_CAPABILITY_STAGES),
+        "evidence_slots": list(_EVIDENCE_SLOTS),
         "workflow_truth_source": "lib/control_plane_workflow_truth.py",
         "rows": rows,
         "summary": summary,
@@ -961,9 +963,9 @@ def _label_predicate(*, scopes: Any, now: Any,
 #
 #     A LAYER IS PASSING ONLY IF A REGISTERED EVIDENCE OWNER IN THIS REPOSITORY
 #     ADMITTED IT.  Everything else -- every mapping, flag, holder or object a
-#     caller can construct -- is UNREADABLE, with the owed seam named.
+#     caller can construct -- is _UNREADABLE, with the owed seam named.
 #
-# AND THERE ARE NO REGISTERED EVIDENCE OWNERS.  ``EVIDENCE_OWNERS`` is empty, and
+# AND THERE ARE NO REGISTERED EVIDENCE OWNERS.  ``_EVIDENCE_OWNERS`` is empty, and
 # that is the honest state of this repository rather than an oversight.  An
 # admission function can only stand on a READ THIS MODULE PERFORMED: a receipt
 # object handed in by a caller is the caller's assertion about a store, not the
@@ -983,16 +985,16 @@ def _label_predicate(*, scopes: Any, now: Any,
 # passing`` from data a caller wrote by hand.  Shape was standing in for
 # authority.  So that admission function is gone rather than renamed: until a
 # reader inside this seam performs the read itself, the controller layer -- like
-# the other five -- is UNREADABLE, and the surface prints what it does not know.
+# the other five -- is _UNREADABLE, and the surface prints what it does not know.
 
 # slot -> the authoritative source that owns it and the function that admits it.
 # EMPTY BY CONSTRUCTION: see above.  A future entry here is an admission point,
 # so adding one means adding a read this module performs, not a shape it trusts.
-EVIDENCE_OWNERS: dict[str, str] = {}
+_EVIDENCE_OWNERS: dict[str, str] = {}
 
 # slot -> the durable evidence-owner seam that is OWED before it could ever pass.
 # Naming it is the difference between an honest gap and a silent one.
-OWED_EVIDENCE_OWNER_SEAMS: dict[str, str] = {
+_OWED_EVIDENCE_OWNER_SEAMS: dict[str, str] = {
     "artifact_assessment":
         "a durable independent-artifact-review store that can be read back by "
         "repository commit and tree and that verifies the reviewer identity",
@@ -1017,32 +1019,32 @@ OWED_EVIDENCE_OWNER_SEAMS: dict[str, str] = {
 }
 
 
-def _admitted_only(evidence: Any) -> tuple[dict[str, Any], dict[str, str]]:
+def _admitted_only(evidence: _Any) -> tuple[dict[str, _Any], dict[str, str]]:
     """Reduce a caller's evidence mapping to what a registered owner admitted.
 
     Returns the evidence the predicate may see, plus the reason each downgraded
-    layer is unreadable.  ``UNREADABLE`` and ``None`` pass through unchanged --
+    layer is unreadable.  ``_UNREADABLE`` and ``None`` pass through unchanged --
     they are the caller's own honest statements about a read, not claims about a
-    receipt -- and EVERY OTHER VALUE becomes ``UNREADABLE``, because no evidence
+    receipt -- and EVERY OTHER VALUE becomes ``_UNREADABLE``, because no evidence
     owner is registered and therefore nothing is admissible.  A mapping, a dict
     subclass, a flag, an object wearing an admitted shape and a receipt this
     module itself once minted are all the same thing here: a caller's assertion.
     """
     supplied = _require_mapping(evidence, field="evidence")
-    admitted: dict[str, Any] = {}
+    admitted: dict[str, _Any] = {}
     reasons: dict[str, str] = {}
     for slot, value in supplied.items():
-        if value is UNREADABLE or value is None:
+        if value is _UNREADABLE or value is None:
             admitted[slot] = value
             continue
-        admitted[slot] = UNREADABLE
-        owner = EVIDENCE_OWNERS.get(slot)
-        if owner:  # pragma: no cover - EVIDENCE_OWNERS is empty by construction
+        admitted[slot] = _UNREADABLE
+        owner = _EVIDENCE_OWNERS.get(slot)
+        if owner:  # pragma: no cover - _EVIDENCE_OWNERS is empty by construction
             reasons[slot] = (
                 f"{slot}: supplied evidence is not authority — this layer has an evidence "
                 f"owner ({owner}) and only that owner's own reading can make it readable")
             continue
-        owed = OWED_EVIDENCE_OWNER_SEAMS.get(slot, "a durable store that owns this fact")
+        owed = _OWED_EVIDENCE_OWNER_SEAMS.get(slot, "a durable store that owns this fact")
         reasons[slot] = (
             f"{slot}: supplied evidence is not authority — this layer has no evidence "
             f"owner in this repository that could verify its refs, digest, evaluator "
@@ -1050,8 +1052,8 @@ def _admitted_only(evidence: Any) -> tuple[dict[str, Any], dict[str, str]]:
     return admitted, reasons
 
 
-def assurance_health_row(*, scope: Any, workflow_truth: Any, evidence: Any,
-                         now: Any) -> dict[str, Any]:
+def _assurance_health_row(*, scope: _Any, workflow_truth: _Any, evidence: _Any,
+                         now: _Any) -> dict[str, _Any]:
     """THE PUBLIC single-scope projection.  There is no other way in.
 
     Identical to the module-private predicate except that evidence no registered
@@ -1067,16 +1069,16 @@ def assurance_health_row(*, scope: Any, workflow_truth: Any, evidence: Any,
     return row
 
 
-def assurance_health(*, scopes: Any, now: Any) -> dict[str, Any]:
+def _assurance_health(*, scopes: _Any, now: _Any) -> dict[str, _Any]:
     """THE PUBLIC census projection.  There is no other way in."""
     if not isinstance(scopes, list):
-        raise AssuranceHealthContractError("scopes must be a list of bound scope bundles")
+        raise _AssuranceHealthContractError("scopes must be a list of bound scope bundles")
     admitted_scopes = []
     reasons: dict[str, str] = {}
     for entry in scopes:
         bundle = _require_mapping(entry, field="scope bundle")
         if "evidence" not in bundle:
-            raise AssuranceHealthContractError("scope bundle is missing 'evidence'")
+            raise _AssuranceHealthContractError("scope bundle is missing 'evidence'")
         admitted, row_reasons = _admitted_only(bundle["evidence"])
         reasons.update(row_reasons)
         admitted_scopes.append({**bundle, "evidence": admitted})
@@ -1087,7 +1089,7 @@ def assurance_health(*, scopes: Any, now: Any) -> dict[str, Any]:
     return projection
 
 
-def _refuse_unowned_green(row: dict[str, Any]) -> None:
+def _refuse_unowned_green(row: dict[str, _Any]) -> None:
     """Green on the public surface requires six OWNED passing layers.
 
     Unreachable while NO layer has an owner, and stated as an invariant anyway:
@@ -1095,13 +1097,13 @@ def _refuse_unowned_green(row: dict[str, Any]) -> None:
     raised refusal is the only honest thing to print in its place.
     """
     unowned_passing = sorted(
-        slot for slot in EVIDENCE_SLOTS
-        if row["evidence"][slot]["state"] == "passing" and slot not in EVIDENCE_OWNERS)
+        slot for slot in _EVIDENCE_SLOTS
+        if row["evidence"][slot]["state"] == "passing" and slot not in _EVIDENCE_OWNERS)
     if unowned_passing:  # pragma: no cover - no admission point exists for any slot
-        raise AssuranceHealthContractError(
+        raise _AssuranceHealthContractError(
             f"{unowned_passing} reached passing with no registered evidence owner")
     if row["green"] or row["capability_stage"] == "act":  # pragma: no cover - same
-        raise AssuranceHealthContractError(
+        raise _AssuranceHealthContractError(
             "a public assurance-health row reached green without six owned passing layers")
 
 
@@ -1124,17 +1126,17 @@ def _refuse_unowned_green(row: dict[str, Any]) -> None:
 #      to a human may read that key, and nothing in this repository does.
 
 
-def _test_only_hypothetical_row(*, scope: Any, workflow_truth: Any, evidence: Any,
-                                now: Any,
-                                unreadable_reasons: Any = None) -> dict[str, Any]:
+def _test_only_hypothetical_row(*, scope: _Any, workflow_truth: _Any, evidence: _Any,
+                                now: _Any,
+                                unreadable_reasons: _Any = None) -> dict[str, _Any]:
     """TEST-ONLY. What the label logic WOULD say if these shapes were authority."""
     return {"would_be_healthy_if_authoritative": _label_predicate_row(
         scope=scope, workflow_truth=workflow_truth, evidence=evidence, now=now,
         unreadable_reasons=unreadable_reasons)}
 
 
-def _test_only_hypothetical_census(*, scopes: Any, now: Any,
-                                   unreadable_reasons: Any = None) -> dict[str, Any]:
+def _test_only_hypothetical_census(*, scopes: _Any, now: _Any,
+                                   unreadable_reasons: _Any = None) -> dict[str, _Any]:
     """TEST-ONLY. The same hypothetical over a census of bound scopes."""
     return {"would_be_healthy_if_authoritative": _label_predicate(
         scopes=scopes, now=now, unreadable_reasons=unreadable_reasons)}

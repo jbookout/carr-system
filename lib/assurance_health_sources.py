@@ -124,11 +124,15 @@ from __future__ import annotations
 from datetime import datetime as _datetime, timezone as _timezone
 from typing import Any as _Any
 
+# The domain module's own surface is one schema id now (its eleventh-correction
+# note says why), so these four names are its module-private bindings, imported
+# under the same names they carry there.  ``closed_union_sweep_checks`` records
+# this file as their consumer, name by name.
 from lib.assurance_health import (
-    EVIDENCE_SLOTS as _EVIDENCE_SLOTS,
-    OWED_EVIDENCE_OWNER_SEAMS as _OWED_EVIDENCE_OWNER_SEAMS,
-    AssuranceHealthContractError as _AssuranceHealthContractError,
-    assurance_health as _assurance_health,
+    _EVIDENCE_SLOTS,
+    _OWED_EVIDENCE_OWNER_SEAMS,
+    _AssuranceHealthContractError,
+    _assurance_health,
 )
 from lib.control_plane_workflow_truth import (
     SCHEMA_VERSION as _WORKFLOW_TRUTH_SCHEMA_VERSION,

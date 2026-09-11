@@ -32,7 +32,9 @@ import copy
 import itertools
 import json
 import pickle
+import re
 import sys
+import types
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
@@ -135,10 +137,10 @@ SLOT_BINDING = {
 
 def _ev(slot, *, scope=SCOPE, status="pass", expires=CURRENT_UNTIL, observed=OBSERVED,
         **overrides):
-    from lib.assurance_health import SLOT_ADMISSIBLE_BASES
+    from lib.assurance_health import _SLOT_ADMISSIBLE_BASES
     record = {
         "layer": slot,
-        "basis": SLOT_ADMISSIBLE_BASES[slot][0],
+        "basis": _SLOT_ADMISSIBLE_BASES[slot][0],
         "status": status,
         "evidence_ref": f"ref:{slot}:0001",
         "evidence_digest": f"digest:{slot}:0001",
@@ -154,8 +156,8 @@ def _ev(slot, *, scope=SCOPE, status="pass", expires=CURRENT_UNTIL, observed=OBS
 
 
 def _evidence(scope=SCOPE, **overrides):
-    from lib.assurance_health import EVIDENCE_SLOTS
-    bundle = {slot: _ev(slot, scope=scope) for slot in EVIDENCE_SLOTS}
+    from lib.assurance_health import _EVIDENCE_SLOTS
+    bundle = {slot: _ev(slot, scope=scope) for slot in _EVIDENCE_SLOTS}
     bundle.update(overrides)
     return bundle
 
@@ -238,9 +240,9 @@ def display_state_checks(health) -> None:
 
     observed_states = {row["state"] for row in PROJECTED}
     check("all six display states are reachable and no seventh exists",
-          observed_states == set(health.DISPLAY_STATES),
-          f"missing={sorted(set(health.DISPLAY_STATES) - observed_states)} "
-          f"extra={sorted(observed_states - set(health.DISPLAY_STATES))}")
+          observed_states == set(health._DISPLAY_STATES),
+          f"missing={sorted(set(health._DISPLAY_STATES) - observed_states)} "
+          f"extra={sorted(observed_states - set(health._DISPLAY_STATES))}")
 
     # DETERMINISM. Same inputs, same bytes -- and the order a caller happened to
     # build its evidence mapping in is not an input.
@@ -279,7 +281,7 @@ def never_green_matrix_checks(health) -> None:
     greens: list[str] = []
     misclassified: list[str] = []
     cells = 0
-    for slot in health.EVIDENCE_SLOTS:
+    for slot in health._EVIDENCE_SLOTS:
         for label, (value, expected) in degradations(slot).items():
             cells += 1
             row = _row(evidence=_evidence(**{slot: value}))
@@ -317,12 +319,12 @@ def preactivation_chain_checks(health) -> None:
     healthy = _row()
     identities = [(healthy["evidence"][slot]["evidence_ref"],
                    healthy["evidence"][slot]["evidence_digest"])
-                  for slot in health.EVIDENCE_SLOTS]
+                  for slot in health._EVIDENCE_SLOTS]
     check("the six layers carry six distinct exact evidence identities",
-          len(set(identities)) == len(health.EVIDENCE_SLOTS))
+          len(set(identities)) == len(health._EVIDENCE_SLOTS))
 
     non_blocking: list[str] = []
-    for slot in health.PREACTIVATION_SLOTS:
+    for slot in health._PREACTIVATION_SLOTS:
         for label, value in (("absent", None),
                              ("failed", _ev(slot, status="fail")),
                              ("mismatched", _ev(slot, scope=UNRELATED))):
@@ -416,7 +418,7 @@ def actual_outcome_separation_checks(health) -> None:
     try:
         _row(evidence=_evidence(actual_business_outcome=_ev("candidate_outcome_oracle")))
         cross_layer_refused = False
-    except health.AssuranceHealthContractError:
+    except health._AssuranceHealthContractError:
         cross_layer_refused = True
     check("a candidate-outcome receipt handed to the outcome slot is refused outright: "
           "no layer is ever inferred from another",
@@ -510,7 +512,7 @@ def workflow_truth_governance_checks(health) -> None:
         SCHEMA_VERSION as F09_SCHEMA_VERSION, UNREADABLE)
 
     check("the workflow authority is the delivered F09 adapter, not a local copy",
-          health.WORKFLOW_TRUTH_SCHEMA_VERSION == F09_SCHEMA_VERSION)
+          health._WORKFLOW_TRUTH_SCHEMA_VERSION == F09_SCHEMA_VERSION)
 
     conflicting = _row(truth=_truth(SCOPE, extra_acceptances=[
         {"workflow_key": SCOPE["workflow_key"], "workflow_version": 1,
@@ -544,7 +546,7 @@ def workflow_truth_governance_checks(health) -> None:
     try:
         _row(truth=forged)
         second_registry_refused = False
-    except health.AssuranceHealthContractError:
+    except health._AssuranceHealthContractError:
         second_registry_refused = True
     check("a workflow row from anywhere but the F09 adapter is refused, so no second "
           "workflow/status registry can grow here",
@@ -553,7 +555,7 @@ def workflow_truth_governance_checks(health) -> None:
     try:
         _row(truth=_truth(UNRELATED))
         wrong_row_refused = False
-    except health.AssuranceHealthContractError:
+    except health._AssuranceHealthContractError:
         wrong_row_refused = True
     check("a workflow truth row for a different workflow is refused, never joined",
           wrong_row_refused)
@@ -567,7 +569,7 @@ def workflow_truth_governance_checks(health) -> None:
         try:
             _row(truth=truth)
             refused = False
-        except health.AssuranceHealthContractError:
+        except health._AssuranceHealthContractError:
             refused = True
         check(f"workflow truth version {bad_version!r} ({type(bad_version).__name__}) "
               "cannot join integer scope version 1", refused)
@@ -577,7 +579,7 @@ def workflow_truth_governance_checks(health) -> None:
         try:
             _row(truth={**_truth(SCOPE), "workflow_key": bad_key})
             refused = False
-        except health.AssuranceHealthContractError:
+        except health._AssuranceHealthContractError:
             refused = True
         check(f"workflow truth key {bad_key!r} cannot join a different scope", refused)
 
@@ -588,7 +590,7 @@ def workflow_truth_governance_checks(health) -> None:
 def scope_identity_checks(health) -> None:
     """Exact identities only: no name, label or title ever participates in a join."""
     check("a scope is bound by exact identities and nothing else",
-          health.SCOPE_IDENTITY_FIELDS
+          health._SCOPE_IDENTITY_FIELDS
           == ("workflow_key", "workflow_version", "work_request_id"))
 
     labelled = _row(
@@ -625,7 +627,7 @@ def scope_identity_checks(health) -> None:
             {"scope": SCOPE, "workflow_truth": _truth(SCOPE), "evidence": _evidence()},
         ], now=NOW)
         duplicate_refused = False
-    except health.AssuranceHealthContractError:
+    except health._AssuranceHealthContractError:
         duplicate_refused = True
     check("one exact scope has exactly one projected state; a doubly bound scope is refused",
           duplicate_refused)
@@ -643,7 +645,7 @@ def refusal_checks(health) -> None:
     accepted: list[str] = []
     for label, kwargs in (
         ("evidence that does not name every layer explicitly",
-         {"evidence": {slot: _ev(slot) for slot in health.PREACTIVATION_SLOTS}}),
+         {"evidence": {slot: _ev(slot) for slot in health._PREACTIVATION_SLOTS}}),
         ("an evidence slot outside the closed set",
          {"evidence": {**_evidence(), "vibes_assessment": _ev("artifact_assessment")}}),
         ("an evidence status outside the closed set",
@@ -687,7 +689,7 @@ def refusal_checks(health) -> None:
     ):
         try:
             _row(**kwargs)
-        except health.AssuranceHealthContractError:
+        except health._AssuranceHealthContractError:
             continue
         except Exception as exc:  # a refusal must be the declared contract error
             accepted.append(f"{label} raised {type(exc).__name__}")
@@ -718,13 +720,13 @@ def output_discipline_checks(health) -> None:
     healthy = _row()
     check("the canonical row always exposes state, scope, owner and every layer's "
           "identity and currentness",
-          set(healthy["evidence"]) == set(health.EVIDENCE_SLOTS)
+          set(healthy["evidence"]) == set(health._EVIDENCE_SLOTS)
           and healthy["scope"]["owner"] == SCOPE["owner"]
           and healthy["scope"]["completion_subject_key"]
           == "workflow:assurance-fabric-child:v1"
           and all(healthy["evidence"][slot]["expires_at"] == CURRENT_UNTIL
                   and healthy["evidence"][slot]["observed_at"] == OBSERVED
-                  for slot in health.EVIDENCE_SLOTS))
+                  for slot in health._EVIDENCE_SLOTS))
     check("no state is authored: healthy is a derived label with its derivation printed",
           bool(healthy["state_reason"]) and bool(healthy["reasons"])
           and healthy["workflow_truth"]["source"]
@@ -732,12 +734,12 @@ def output_discipline_checks(health) -> None:
 
     outside: list[str] = []
     for projected in PROJECTED:
-        if projected["state"] not in health.DISPLAY_STATES:
+        if projected["state"] not in health._DISPLAY_STATES:
             outside.append(f"state={projected['state']}")
-        if projected["capability_stage"] not in health.CAPABILITY_STAGES:
+        if projected["capability_stage"] not in health._CAPABILITY_STAGES:
             outside.append(f"stage={projected['capability_stage']}")
         for slot, public in projected["evidence"].items():
-            if public["state"] not in health.EVIDENCE_STATES:
+            if public["state"] not in health._EVIDENCE_STATES:
                 outside.append(f"{slot}={public['state']}")
         if projected["green"] != (projected["state"] == "healthy"):
             outside.append("green disagrees with state")
@@ -806,7 +808,7 @@ def workflow_only_scope_checks(health) -> None:
           outcome["state"] == "unbindable" and outcome.get("status") == "pass",
           json.dumps(outcome))
     check("a workflow-only scope is never green however good its other evidence is",
-          row["state"] != health.GREEN_STATE and not row["green"], row["state"])
+          row["state"] != health._GREEN_STATE and not row["green"], row["state"])
     check("a workflow-only scope with five passing layers is not-yet-operational",
           row["state"] == "not-yet-operational", row["state_reason"])
     check("act capability is unreachable without the Work Request join",
@@ -853,7 +855,7 @@ def workflow_only_scope_checks(health) -> None:
                 workflow_truth=_truth(WORKFLOW_ONLY), evidence=_evidence(WORKFLOW_ONLY),
                 now=NOW)
             refused = False
-        except health.AssuranceHealthContractError:
+        except health._AssuranceHealthContractError:
             refused = True
         check(f"a malformed Work Request identity {bad!r} is refused, never coerced to unbound",
               refused)
@@ -899,9 +901,9 @@ def workflow_only_scope_checks(health) -> None:
           == ["assurance-fabric-child@v1", "assurance-fabric-child@v1/wr-a01-0001"])
 
     check("unbindable is a declared evidence state that is not a passing one",
-          "unbindable" in health.EVIDENCE_STATES
-          and "unbindable" not in health.DETERMINATE_NONPASS_EVIDENCE_STATES
-          and "unbindable" not in health.INDETERMINATE_EVIDENCE_STATES)
+          "unbindable" in health._EVIDENCE_STATES
+          and "unbindable" not in health._DETERMINATE_NONPASS_EVIDENCE_STATES
+          and "unbindable" not in health._INDETERMINATE_EVIDENCE_STATES)
 
 
 def caller_evidence_is_never_authority_checks(health) -> None:
@@ -917,18 +919,18 @@ def caller_evidence_is_never_authority_checks(health) -> None:
     unreachable rather than merely undocumented.
     """
     check("no layer has an evidence owner in this repository",
-          health.EVIDENCE_OWNERS == {}, json.dumps(health.EVIDENCE_OWNERS))
+          health._EVIDENCE_OWNERS == {}, json.dumps(health._EVIDENCE_OWNERS))
     check("every layer names the seam that is owed before it could ever pass",
-          all(slot in health.OWED_EVIDENCE_OWNER_SEAMS for slot in health.EVIDENCE_SLOTS)
-          and all(health.OWED_EVIDENCE_OWNER_SEAMS[slot].strip()
-                  for slot in health.EVIDENCE_SLOTS),
-          json.dumps(sorted(health.OWED_EVIDENCE_OWNER_SEAMS)))
+          all(slot in health._OWED_EVIDENCE_OWNER_SEAMS for slot in health._EVIDENCE_SLOTS)
+          and all(health._OWED_EVIDENCE_OWNER_SEAMS[slot].strip()
+                  for slot in health._EVIDENCE_SLOTS),
+          json.dumps(sorted(health._OWED_EVIDENCE_OWNER_SEAMS)))
     check("the controller layer's owed seam names a READ, not a shape to trust",
           "ops.legacy_schedule_observation_receipt"
-          in health.OWED_EVIDENCE_OWNER_SEAMS["controller_assessment"]
+          in health._OWED_EVIDENCE_OWNER_SEAMS["controller_assessment"]
           and "tools/health-check.py"
-          in health.OWED_EVIDENCE_OWNER_SEAMS["controller_assessment"],
-          health.OWED_EVIDENCE_OWNER_SEAMS["controller_assessment"])
+          in health._OWED_EVIDENCE_OWNER_SEAMS["controller_assessment"],
+          health._OWED_EVIDENCE_OWNER_SEAMS["controller_assessment"])
 
     # ---- every caller-controlled shape, for every slot ----------------------
     far_future = "2099-01-01T00:00:00+00:00"
@@ -962,17 +964,17 @@ def caller_evidence_is_never_authority_checks(health) -> None:
 
     forged_green: list[str] = []
     forged_passing: list[str] = []
-    for slot in health.EVIDENCE_SLOTS:
+    for slot in health._EVIDENCE_SLOTS:
         for label, shape in caller_shapes(slot):
             bundle = _evidence()
             bundle[slot] = shape
             try:
-                row = health.assurance_health_row(
+                row = health._assurance_health_row(
                     scope=SCOPE, workflow_truth=_truth(SCOPE), evidence=bundle, now=NOW)
-            except health.AssuranceHealthContractError:
+            except health._AssuranceHealthContractError:
                 continue  # a refusal is an acceptable non-green outcome
             PROJECTED.append(row)
-            if row["green"] or row["state"] == health.GREEN_STATE \
+            if row["green"] or row["state"] == health._GREEN_STATE \
                     or row["capability_stage"] == "act":
                 forged_green.append(label)
             if row["evidence"][slot]["state"] == "passing":
@@ -982,22 +984,22 @@ def caller_evidence_is_never_authority_checks(health) -> None:
     check("no caller-controlled evidence shape reaches green or act capability",
           not forged_green, json.dumps(forged_green[:4]))
 
-    # ---- the whole bundle at once, through both public entry points ---------
-    whole = health.assurance_health_row(
+    # ---- the whole bundle at once, through both projection entry points -----
+    whole = health._assurance_health_row(
         scope=SCOPE, workflow_truth=_truth(SCOPE), evidence=_evidence(), now=NOW)
     PROJECTED.append(whole)
     check("six perfectly shaped caller-supplied receipts are unreadable, never passing",
           all(whole["evidence"][slot]["state"] == "unreadable"
-              for slot in health.EVIDENCE_SLOTS)
+              for slot in health._EVIDENCE_SLOTS)
           and not whole["green"] and whole["capability_stage"] == "unavailable",
           json.dumps({slot: whole["evidence"][slot]["state"]
-                      for slot in health.EVIDENCE_SLOTS}))
+                      for slot in health._EVIDENCE_SLOTS}))
     check("each unreadable reason names the owed seam rather than a generic absence",
           all(any("no evidence owner" in reason
                   for reason in whole["evidence"][slot]["reasons"])
-              for slot in health.EVIDENCE_SLOTS),
+              for slot in health._EVIDENCE_SLOTS),
           json.dumps(whole["evidence"]["controller_assessment"]["reasons"]))
-    census = health.assurance_health(scopes=[
+    census = health._assurance_health(scopes=[
         {"scope": SCOPE, "workflow_truth": _truth(SCOPE), "evidence": _evidence()},
         {"scope": WORKFLOW_ONLY, "workflow_truth": _truth(WORKFLOW_ONLY),
          "evidence": _evidence(WORKFLOW_ONLY)}], now=NOW)
@@ -1071,6 +1073,48 @@ def _module_bindings(path: Path) -> tuple[set[str], list[str]]:
     return bound, declared_all
 
 
+def _probe_public_callables(namespace: Any, names: list[str],
+                            shapes: dict[str, tuple[Any, ...]]) -> tuple[int, list[str]]:
+    """Call every callable of ``names`` on ``namespace`` with every caller shape.
+
+    Returns the number of calls made and the calls whose returned value rendered a
+    privileged outcome.  It is a FUNCTION rather than a loop inside one guard so
+    that the same probe can be pointed at a control namespace -- one that DOES
+    publish a route reaching healthy -- and shown to catch it.  A probe that has
+    never caught anything is not evidence that there is nothing to catch.
+    """
+    import inspect
+
+    reached: list[str] = []
+    called = 0
+    for name in sorted(set(names)):
+        member = getattr(namespace, name, None)
+        if not callable(member) or inspect.isclass(member):
+            continue
+        try:
+            signature = inspect.signature(member)
+        except (TypeError, ValueError):  # pragma: no cover - builtins have none
+            continue
+        options = []
+        for parameter in signature.parameters.values():
+            if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
+                continue
+            options.append([(parameter.name, value)
+                            for value in shapes.get(parameter.name, (None, "healthy"))])
+        if not options:
+            continue
+        for combination in itertools.product(*options):
+            called += 1
+            try:
+                returned = member(**dict(combination))
+            except Exception:
+                continue  # a refusal is an acceptable non-privileged outcome
+            rendered = json.dumps(returned, default=str)
+            if any(token in rendered for token in PRIVILEGED_OUTCOME_TOKENS):
+                reached.append(f"{name}({', '.join(key for key, _ in combination)})")
+    return called, reached
+
+
 def public_surface_guard_checks(health) -> None:
     """PARSER-BACKED. The public names of the module, read out of its own syntax.
 
@@ -1124,7 +1168,23 @@ def public_surface_guard_checks(health) -> None:
         check(f"{name} is module-private and unexported",
               name.startswith("_") and name in bound and name not in declared_all)
 
-    # ---- every public callable, every caller-controlled shape ---------------
+    # ---- what is left public, and every caller-controlled shape ------------
+    #
+    # THE ELEVENTH CORRECTION IS PINNED HERE.  The domain module used to export
+    # twenty-six names, and a review's traversal of those exported values found
+    # thirty-three privileged hits in them.  They are module-private now, so this
+    # guard asserts the export list is exactly one clean schema identifier -- and
+    # then still runs the caller-shape probe over whatever IS public, because an
+    # assertion about a list is not an assertion about behaviour.
+    check("the domain module exports exactly one name, a schema identifier, and it "
+          "carries no word of the privileged union",
+          sorted(declared_all) == ["SCHEMA_VERSION"]
+          and public - {"annotations"} == {"SCHEMA_VERSION"}
+          and not any(word in health.SCHEMA_VERSION.lower()
+                      for word in PRIVILEGED_WORD_UNION),
+          json.dumps({"declared": sorted(declared_all), "public": sorted(public),
+                      "value": health.SCHEMA_VERSION}))
+
     privileged = PRIVILEGED_OUTCOME_TOKENS
     perfect_evidence = _evidence()
     perfect_bundle = {"scope": SCOPE, "workflow_truth": _truth(SCOPE),
@@ -1139,43 +1199,33 @@ def public_surface_guard_checks(health) -> None:
                            {"schema_version": "assurance-health.v1", "state": "healthy"}),
         "evidence": (perfect_evidence,
                      {slot: dict(_ev(slot), state="passing", admitted=True)
-                      for slot in health.EVIDENCE_SLOTS},
-                     {slot: "passing" for slot in health.EVIDENCE_SLOTS}),
+                      for slot in health._EVIDENCE_SLOTS},
+                     {slot: "passing" for slot in health._EVIDENCE_SLOTS}),
         "now": (NOW,),
         "field": ("scope",),
     }
 
-    reached: list[str] = []
-    called = 0
-    for name in sorted(set(declared_all) | public):
-        member = getattr(health, name, None)
-        if not callable(member) or inspect.isclass(member):
-            continue
-        try:
-            signature = inspect.signature(member)
-        except (TypeError, ValueError):  # pragma: no cover - builtins have none
-            continue
-        options = []
-        for parameter in signature.parameters.values():
-            if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
-                continue
-            options.append([(parameter.name, value)
-                            for value in shapes.get(parameter.name, (None, "healthy"))])
-        if not options:
-            continue
-        for combination in itertools.product(*options):
-            called += 1
-            try:
-                returned = member(**dict(combination))
-            except Exception:
-                continue  # a refusal is an acceptable non-privileged outcome
-            rendered = json.dumps(returned, default=str)
-            if any(token in rendered for token in privileged):
-                reached.append(f"{name}({', '.join(key for key, _ in combination)})")
+    called, reached = _probe_public_callables(
+        health, sorted(set(declared_all) | public), shapes)
     check(f"no public callable yields a privileged outcome from any caller shape "
           f"({called} calls)", not reached, json.dumps(sorted(set(reached))[:4]))
-    check("the guard actually exercised the public callables it claims to",
-          called >= 20, str(called))
+
+    # THE CONTROL FOR THE PROBE ITSELF, and it is the answer to "a probe that
+    # calls nothing proves nothing".  The same function is pointed at a namespace
+    # that publishes the module-private hypothetical row builder under the name
+    # this module used to export.  That route DOES reach healthy from these
+    # caller shapes, the probe catches it, and so the empty result above is a
+    # measurement rather than an absence of measurement.
+    control_namespace = types.SimpleNamespace(
+        assurance_health_row=health._test_only_hypothetical_row,
+        assurance_health=health._test_only_hypothetical_census)
+    control_called, control_reached = _probe_public_callables(
+        control_namespace, ["assurance_health_row", "assurance_health"], shapes)
+    check(f"the probe is live: a namespace that DOES publish a route to healthy is "
+          f"caught by it ({control_called} calls, {len(control_reached)} privileged)",
+          control_called >= 20 and bool(control_reached),
+          json.dumps({"calls": control_called,
+                      "reached": sorted(set(control_reached))[:4]}))
 
     # THE CONTROL. The same shapes, through the module-private classifier, DO
     # reach healthy -- which is what makes the assertion above a measurement of
@@ -1978,15 +2028,30 @@ def _outcome_scalars(value: Any, key: str | None = None,
     """
     out = [] if out is None else out
     if isinstance(value, Mapping):
+        if not value:
+            out.append((key, None))  # an empty mapping still HAS the key above it
         for mapping_key, item in value.items():
-            _outcome_scalars(item, str(mapping_key), out)
+            # THE PATH, not the innermost key alone.  ``{"verified": {"deep": "x"}}``
+            # used to arrive as key ``deep`` and the ``verified`` above it was
+            # simply gone, so a privileged key with a mapping under it was
+            # invisible however deep the sweep went.
+            child = str(mapping_key) if key is None else f"{key}.{mapping_key}"
+            _outcome_scalars(item, child, out)
     elif isinstance(value, (list, tuple, set)):
+        if not value:
+            out.append((key, None))
         for item in value:
             _outcome_scalars(item, key, out)
     elif isinstance(value, bool) or isinstance(value, str):
         out.append((key, value))
     elif value is None or isinstance(value, (int, float)):
-        pass
+        # THE ELEVENTH CORRECTION.  These used to be dropped, which silently
+        # dropped their KEY as well -- so ``{"verified": None}`` and
+        # ``{"verified": 1}`` were invisible to a sweep whose whole subject is
+        # what a consumer can read.  The value carries no word; the key does, and
+        # the key is kept.  ``_word_hits`` reads a non-string scalar for its key
+        # alone.
+        out.append((key, value))
     else:
         out.append((key, repr(value)))
     return out
@@ -1996,17 +2061,27 @@ def _word_hits(scalars: list[tuple[str | None, Any]], word: str) -> list[str]:
     """Every privileged appearance of ``word``, exact form and substring form.
 
     The decision procedure, per scalar, in order, WITH NO EXEMPTION AT ANY STEP:
-      1. a boolean ``True`` whose KEY equals or contains the word is a privileged
-         outcome -- ``{"green": true}`` says green whatever the key is called;
-      2. a string that EQUALS the word (case-insensitively) is the exact form;
-      3. a string that CONTAINS the word is the substring form;
-      4. anything else is not a hit.
+      1. a KEY that equals or contains the word is a privileged outcome, WHATEVER
+         its value is and whatever type that value has;
+      2. a string VALUE that equals the word (case-insensitively) is the exact form;
+      3. a string VALUE that contains the word is the substring form;
+      4. a non-string value contributes no word of its own -- its key was already
+         read at step 1.
+
+    WHY STEP 1 NO LONGER ASKS WHAT THE VALUE IS.  It used to read the key only
+    when the value was boolean ``True``, and the tenth cut's "nested key coverage"
+    was therefore vacuous: ``{"verified": "neutral"}`` and ``{"verified": false}``
+    both produced zero hits, so the only mutation the suite could actually fail on
+    was a string LEAF.  A consumer does not read a key conditionally -- a
+    ``verified`` key is a claim about verification whether it is set to ``false``,
+    to ``"neutral"``, to ``None`` or to a handle whose repr says nothing.  The key
+    is the claim; the value is the value.
     """
     hits = []
     for key, scalar in scalars:
-        if isinstance(scalar, bool):
-            if scalar is True and key and word in key.lower():
-                hits.append(f"exact-key {key}=True")
+        if key and word in key.lower():
+            hits.append(f"key {key}={scalar!r:.60}")
+        if not isinstance(scalar, str) or isinstance(scalar, bool):
             continue
         low = scalar.lower()
         if low == word:
@@ -2020,9 +2095,14 @@ def _pattern_hits(scalars: list[tuple[str | None, Any]], pattern: str) -> list[s
     import re
 
     expression = re.compile(pattern, re.IGNORECASE)
-    return [f"{key}={scalar[:60]!r}" for key, scalar in scalars
+    hits = [f"{key}={scalar[:60]!r}" for key, scalar in scalars
             if isinstance(scalar, str) and not isinstance(scalar, bool)
             and expression.search(scalar)]
+    # Keys, on the same footing as ``_word_hits`` reads them: a key named
+    # ``would_be_green_if_authoritative`` is the same claim as a value spelling it.
+    hits += [f"key {key}" for key, _ in scalars
+             if isinstance(key, str) and expression.search(key)]
+    return hits
 
 
 # THE HERMETIC RUN OF THE REAL CONSUMER, used by the sweep and by
@@ -2185,6 +2265,7 @@ def closed_union_sweep_checks() -> None:
     """
     import inspect
 
+    import lib.assurance_health as domain
     import lib.assurance_health_sources as sources
     import lib.control_plane_workflow_truth_reader as reader
 
@@ -2214,13 +2295,15 @@ def closed_union_sweep_checks() -> None:
 
     observed: list[tuple[str, str | None, Any]] = []
     exports: list[tuple[str, Any]] = []
-    for module in (sources, reader):
+    for module in (domain, sources, reader):
         for name in sorted(n for n in dir(module) if not n.startswith("_")):
             if name == "annotations":
                 continue  # bound by `from __future__ import annotations`, not a value
             exports.append((f"{module.__name__}.{name}", getattr(module, name)))
-    check("the sweep found every public name of both modules, data values included",
+    check("the sweep found every public name of ALL THREE modules, data values "
+          "included",
           sorted(label for label, _ in exports) == [
+              "lib.assurance_health.SCHEMA_VERSION",
               "lib.assurance_health_sources.LABEL_ROUTE_ANSWER",
               "lib.assurance_health_sources.SCHEMA_VERSION",
               "lib.assurance_health_sources.assurance_health_census",
@@ -2228,6 +2311,70 @@ def closed_union_sweep_checks() -> None:
               "lib.control_plane_workflow_truth_reader.SCHEMA_VERSION",
               "lib.control_plane_workflow_truth_reader.workflow_truth_census"],
           json.dumps(sorted(label for label, _ in exports)))
+
+    # ---- THE DOMAIN MODULE'S PRIVATE VOCABULARY, NAME BY NAME, WITH ITS
+    # ---- CONSUMER.  NOT AN ALLOWLIST: NOTHING HERE IS EXEMPTED FROM ANYTHING.
+    #
+    # The eleventh correction's rule: where the domain module legitimately carries
+    # domain states as strings, they do not get an exemption from the closed
+    # union -- they come off the public surface.  They did.  This table is the
+    # receipt for that move, and it fails in BOTH directions: a name that is still
+    # public fails (the sweep above would also carry its words), and a name whose
+    # named consumer has stopped importing it fails too, because a private name
+    # nobody reads is dead code wearing a justification.
+    DOMAIN_PRIVATE_CONSUMERS = {
+        "_DISPLAY_STATES": "ops/assurance-health-selftest.py",
+        "_GREEN_STATE": "ops/assurance-health-selftest.py",
+        "_CAPABILITY_STAGES": "ops/assurance-health-selftest.py",
+        "_EVIDENCE_STATES": "ops/assurance-health-selftest.py",
+        "_INDETERMINATE_EVIDENCE_STATES": "ops/assurance-health-selftest.py",
+        "_DETERMINATE_NONPASS_EVIDENCE_STATES": "ops/assurance-health-selftest.py",
+        "_EVIDENCE_OWNERS": "ops/assurance-health-selftest.py",
+        "_PREACTIVATION_SLOTS": "ops/assurance-health-selftest.py",
+        "_SCOPE_IDENTITY_FIELDS": "ops/assurance-health-selftest.py",
+        "_SLOT_ADMISSIBLE_BASES": "ops/assurance-health-selftest.py",
+        "_WORKFLOW_TRUTH_SCHEMA_VERSION": "ops/assurance-health-selftest.py",
+        "_assurance_health_row": "ops/assurance-health-selftest.py",
+        "_EVIDENCE_SLOTS": "lib/assurance_health_sources.py",
+        "_OWED_EVIDENCE_OWNER_SEAMS": "lib/assurance_health_sources.py",
+        "_AssuranceHealthContractError": "lib/assurance_health_sources.py",
+        "_assurance_health": "lib/assurance_health_sources.py",
+    }
+    domain_bound, domain_all = _module_bindings(REPO / "lib" / "assurance_health.py")
+
+    def _reference_count(text: str, name: str) -> int:
+        """How many times ``name`` is really REFERENCED in ``text``.
+
+        Word-bounded, and not preceded by a word character, so ``_assurance_health``
+        is not counted inside ``_assurance_health_scopes``.  The table above lives
+        in this file, so for this file's own entries the reference form asked for
+        is the attribute one (``health._NAME``); a name that appeared only as a
+        key of that table would otherwise certify itself.
+        """
+        return len(re.findall(r"(?<![\w])" + re.escape(name) + r"\b", text))
+
+    for private_name, consumer in sorted(DOMAIN_PRIVATE_CONSUMERS.items()):
+        consumer_text = (REPO / consumer).read_text(encoding="utf-8")
+        references = (_reference_count(consumer_text, "health." + private_name)
+                      + _reference_count(consumer_text, "import " + private_name)
+                      if consumer.endswith("assurance-health-selftest.py")
+                      else _reference_count(consumer_text, private_name))
+        check(f"{private_name} is module-private, unexported, and really read by "
+              f"{consumer}",
+              private_name.startswith("_") and private_name in domain_bound
+              and private_name not in domain_all
+              and not hasattr(domain, private_name[1:])
+              and references >= (1 if consumer.endswith("selftest.py") else 2),
+              json.dumps({"bound": private_name in domain_bound,
+                          "exported": private_name in domain_all,
+                          "public_twin": hasattr(domain, private_name[1:]),
+                          "references_in_consumer": references}))
+    check("every privileged word the domain module carries is carried privately: "
+          "no public name of it survives beyond the schema id",
+          {name for name in domain_bound if not name.startswith("_")}
+          == {"SCHEMA_VERSION", "annotations"},
+          json.dumps(sorted(name for name in domain_bound
+                            if not name.startswith("_"))))
 
     calls = returned = 0
     for label, member in exports:
@@ -2298,9 +2445,31 @@ def closed_union_sweep_checks() -> None:
         control = _outcome_scalars({"state": word, word: True,
                                     "note": f"prefix-{word}-suffix"})
         detected = _word_hits(control, word)
+
+        # THE KEY-COVERAGE CONTROLS, AND WHY THEY ARE PART OF THIS CHECK.  The
+        # tenth cut's nested-key coverage was vacuous: the recursion kept the
+        # innermost key only, and the key was read only when its value was boolean
+        # ``True``.  A review mutated the suite with ``{"verified": "neutral"}``
+        # and ``{"verified": false}`` and got ZERO failures out of either -- only a
+        # string leaf could fail it.  Both of those are the first two shapes here,
+        # and every one of these must be detected or this word's check fails, so
+        # the coverage cannot go quietly dead again.
+        key_controls = {
+            "nested string value": {"outer": {word: "neutral"}},
+            "nested false value": {"outer": {word: False}},
+            "nested null value": {"outer": {word: None}},
+            "nested zero value": {"outer": {word: 0}},
+            "nested mapping value": {"outer": [{word: {"deep": "x"}}]},
+            "nested empty mapping": {"outer": {word: {}}},
+            "nested opaque handle": {"outer": {word: object()}},
+        }
+        undetected = sorted(label for label, shape in key_controls.items()
+                            if not _word_hits(_outcome_scalars(shape), word))
         check(f"no swept surface carries the privileged word {word!r}, exact or "
-              f"substring", not hits and len(detected) >= 3,
-              json.dumps({"hits": hits[:4], "control_detected": detected}))
+              f"substring, and every key-bearing shape of it is detectable",
+              not hits and len(detected) >= 3 and not undetected,
+              json.dumps({"hits": hits[:4], "control_detected": detected,
+                          "undetected_key_shapes": undetected}))
 
     for label, pattern in PRIVILEGED_WORD_PATTERNS:
         hits = _pattern_hits(scalars, pattern)
