@@ -1,13 +1,43 @@
-// DoctorCRE v5 slice V5-A02, half two: WORKFLOW LIFECYCLE AND RULE DELIVERY
-// ASSURANCE — the complex/short workflow lifecycle checks, the rule
-// proposed -> reviewed -> tested/shadow -> active -> retired transitions, and
-// the enforcement-plus-fallback coverage of every active rule.
+// DoctorCRE v5 slice V5-A02, half two: THE WORKFLOW AND RULE LIFECYCLE PUBLIC
+// SURFACE — and, like half one, it is a surface that cannot say yes.
 //
-// THIS IS THE OTHER HALF OF V5-A02. gate-zero-assurance.v5.js owns the Gate
-// Zero join and the non-green propagation graph. This file owns the two
-// lifecycles the catalog's concrete_output names beside it, and the third
-// checkable_done item: "every active rule maps to enforceable control and
-// fallback".
+// WHAT THIS FILE MAY NOT DECIDE, said first because it is the whole point.
+//
+// (1) ACTIVATION. The catalog's excluded_scope for V5-A02 begins "product
+// activation", and no activation controller with a reversible, receipted,
+// durable transition record exists in this repository.
+//
+// (2) EVERY FACT AN ANSWER WOULD STAND ON. There is no authoritative workflow
+// -state reader, no rule registry reader, no control-implementation reader, no
+// test-result reader and no acceptance-receipt reader here either. A caller
+// object carrying `has_telemetry: true`, a reviewer id, a passing test, a
+// control digest and a verifier id is a DESCRIPTION of those facts. A public
+// function that turned that description into `operational`, `active`, `allow`
+// or `coverage_complete: true` would be handing out authority nothing in this
+// system holds — the exact defect the V5-A02 review of PR 985 named, and the
+// thing the standing rule learned from nine review rounds on 2026-09-11 forbids
+// under ANY name, including a "predicate", "fixture" or "unwired" variant.
+//
+// SO THE PUBLIC SURFACE IS THIS, and it is the whole of it:
+//
+//   readWorkflowLifecycle        -> status "unavailable", naming the reader owed
+//   readRuleLifecycleTransition  -> status "unavailable", naming the readers owed
+//   readRuleEnforcementCoverage  -> status "unavailable", naming the readers owed
+//   emitRuleActivation           -> activated false, for every caller on every
+//                                   input, embedding NO transition verdict
+//
+// NONE OF THE FOUR READS ITS REQUEST. If no field of the request can change the
+// answer, no caller can smuggle authority in through one. `request_read: false`
+// says so in every result.
+//
+// WHERE THE REAL DECISION LOGIC LIVES. The lifecycle clauses are implemented and
+// proved clause by clause, and kept MODULE-PRIVATE to this surface: they live in
+// lifecycle-classifiers.v5.testonly.js, which this file does not import, which
+// no production module imports, and which answers only in the conditional
+// (`would_derive_state_if_authoritative`, `would_permit_if_authoritative`,
+// `would_be_covered_if_authoritative`). lifecycle-assurance.v5.test.mjs proves
+// the isolation with a parser-backed import scan and proves this surface with a
+// sweep over every caller-controlled shape.
 //
 // NOTHING HERE INVENTS A VOCABULARY IT COULD READ INSTEAD.
 //
@@ -28,37 +58,17 @@
 //     "rule proposed -> reviewed -> tested/shadow -> active -> retired
 //     transitions and enforcement coverage".
 //
-// THE TWO EXCLUSIONS ARE ENFORCED, NOT DOCUMENTED. The catalog's excluded_scope
-// for V5-A02 reads "product activation", "rule presence as enforcement proof"
-// and "shadow misses without disposition". Each has a named refusal below:
-//
-//   product activation                 -> V5_A02_RULE_ACTIVATION_SEAM is null;
-//                                         emitRuleActivation cannot return an
-//                                         activation for any caller on any input.
-//   rule presence as enforcement proof  -> `rule_presence_is_not_enforcement`. A
-//                                         rule that names only its own binding
-//                                         text is UNMAPPED, however well written.
-//   shadow misses without disposition   -> `shadow_miss_without_disposition`. A
-//                                         shadow window with an undisposed miss
-//                                         cannot advance a rule to active.
-//
-// A CALLER-SUPPLIED FACT IS NEVER AUTHORITY. A caller may DECLARE what it
-// observed; it may not declare the conclusion. `deriveWorkflowLifecycleState`
-// computes the state from the evidence and `evaluateWorkflowLifecycle` refuses a
-// claimed state that the evidence does not produce, rather than believing the
-// claim. There is no `verified`, `enforced_trust_me`, `waived`, `approved_by_me`
-// or controller-injection field anywhere below, and a closed schema refuses one.
-//
-// EVERY FUNCTION IS PURE — no filesystem, no network, no database, no clock, no
-// environment. Every evaluation that depends on time takes `as_of` from its
-// caller. `V5_NO_EFFECTS` rides on every result.
+// THE TWO REMAINING EXCLUSIONS ARE ENFORCED IN THE CLAUSES, NOT DOCUMENTED:
+// `rule_presence_is_not_enforcement` (a rule that names only its own binding
+// text is UNMAPPED, however well written) and `shadow_miss_without_disposition`
+// (a shadow window with an undisposed miss cannot advance a rule). Both reasons
+// are registered here and cited by the classifiers.
 //
 // TWO KINDS OF NO, inherited unchanged from global-boundaries.v5.js:
-//   * A POLICY ANSWER is RETURNED — `decision` is "allow" or "refuse" with a
-//     stable `reason_id`. A coverage answer that lists unmapped rules is an
-//     ANSWER the caller records, not an exception.
-//   * A CONTRACT VIOLATION THROWS V5BoundaryError. Unknown fields, open schemas,
-//     unknown enum members and unreachable transitions are not policy questions.
+//   * A POLICY ANSWER is RETURNED — `decision` is "refuse" with a stable
+//     `reason_id`. On this surface there is no allow at all.
+//   * A CONTRACT VIOLATION THROWS V5BoundaryError. Handing a controller in as a
+//     second argument is not a policy question.
 //
 // DECISION BINDING. Q017.D1, Q036.D1, Q067.D1 and Q086.D1, carried in
 // V5_A02_DECISION_IDS by gate-zero-assurance.v5.js and re-exported here so both
@@ -68,22 +78,17 @@
 import { canonicalJson, digest } from "./artifact-trust.js";
 import { V5BoundaryError, V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 import { ORGANIZATION_TENANT_ID } from "./identity.js";
-import {
-  V5_F05_ENFORCEMENT_MECHANISMS,
-  V5_F05_RETIREMENT_BEHAVIORS,
-  V5_F05_RULE_CLASSES,
-} from "./rule-applicability.v5.js";
 import { V5_A02_DECISION_IDS } from "./gate-zero-assurance.v5.js";
 
 export { V5_A02_DECISION_IDS, V5_NO_EFFECTS };
 
 export const V5_A02_LIFECYCLE_SCHEMA_VERSION = "doctorcre-v5-a02-lifecycle-assurance.v1";
-export const V5_A02_LIFECYCLE_POLICY_VERSION = 1;
 
-const REF = /^[a-z][a-z0-9-]*:[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/;
-const DIGEST = /^sha256:[0-9a-f]{64}$/;
-const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
-const IDENTIFIER = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+/**
+ * 2, not 1: version 1 answered from caller-supplied evidence objects. This
+ * version answers `unavailable` and names what it is owed.
+ */
+export const V5_A02_LIFECYCLE_POLICY_VERSION = 2;
 
 function deepFreeze(value) {
   if (Array.isArray(value)) { value.forEach(deepFreeze); return Object.freeze(value); }
@@ -101,88 +106,22 @@ function fail(code, message, detail) {
   throw new V5BoundaryError(code, message, detail);
 }
 
-function object(value, path) {
-  if (!isPlainObject(value)) fail("not_an_object", `${path} must be a plain object`, { path });
-  return value;
-}
-
-function closed(value, allowed, path) {
-  object(value, path);
-  for (const key of Object.keys(value))
-    if (!allowed.includes(key))
-      fail("unknown_field", `${path}.${key} is not a field this module reads`,
-        { path, key, allowed: [...allowed].sort() });
-  return value;
-}
-
-function exact(value, allowed, path) {
-  closed(value, allowed, path);
-  for (const key of allowed)
-    if (!Object.hasOwn(value, key))
-      fail("missing_field", `${path}.${key} is required`, { path, key });
-  return value;
-}
-
-function str(value, path) {
-  if (typeof value !== "string" || value.length === 0)
-    fail("not_a_string", `${path} must be a non-empty string`, { path });
-  return value;
-}
-
-function pattern(value, re, code, path) {
-  str(value, path);
-  if (!re.test(value)) fail(code, `${path} is malformed`, { path, value });
-  return value;
-}
-
-function instant(value, path) {
-  str(value, path);
-  if (!ISO_INSTANT.test(value) || Number.isNaN(Date.parse(value)))
-    fail("malformed_instant", `${path} must be a UTC ISO-8601 instant`, { path, value });
-  return Date.parse(value);
-}
-
-function member(value, allowed, path) {
-  str(value, path);
-  if (!allowed.includes(value))
-    fail("unknown_enum_member", `${path} is not a member this module knows`,
-      { path, value, allowed: [...allowed].sort() });
-  return value;
-}
-
-function bool(value, path) {
-  if (typeof value !== "boolean") fail("not_a_boolean", `${path} must be a boolean`, { path });
-  return value;
-}
-
-function list(value, path) {
-  if (!Array.isArray(value)) fail("not_an_array", `${path} must be an array`, { path });
-  return value;
-}
-
-function sortedUnique(values, path, validate) {
-  list(values, path);
-  values.forEach((value, index) => validate(value, `${path}[${index}]`));
-  for (let index = 1; index < values.length; index += 1) {
-    if (values[index] === values[index - 1])
-      fail("duplicate_member", `${path} repeats ${values[index]}`, { path, value: values[index] });
-    if (values[index] < values[index - 1])
-      fail("unsorted_list", `${path} must be C-sorted`, { path, at: index });
-  }
-  return values;
-}
-
 // ---------------------------------------------------------------------------
-// Every refusal this module can answer with. Closed, so a reason is checkable.
+// Every refusal this half can answer with — the public surface's
+// reader-unavailable reasons, and the clause reasons the module-private
+// classifiers cite. Closed, so a reason is checkable.
 // ---------------------------------------------------------------------------
 
 export const V5_A02_LIFECYCLE_REASON_IDS = deepFreeze([
+  "acceptance_receipt_reader_unavailable",
   "active_rule_fallback_absent",
   "active_rule_control_unmapped",
+  "control_implementation_reader_unavailable",
   "mandatory_rule_without_machine_control",
   "rule_activation_seam_unavailable",
   "rule_control_mechanism_not_for_class",
   "rule_presence_is_not_enforcement",
+  "rule_registry_reader_unavailable",
   "rule_retirement_successor_absent",
   "rule_reviewer_not_independent",
   "rule_state_transition_not_permitted",
@@ -191,9 +130,11 @@ export const V5_A02_LIFECYCLE_REASON_IDS = deepFreeze([
   "shadow_miss_without_disposition",
   "shadow_window_absent",
   "short_workflow_drops_proof_dimension",
+  "test_result_reader_unavailable",
   "workflow_operational_without_proof",
   "workflow_required_dimension_missing",
   "workflow_state_claim_not_derived",
+  "workflow_state_reader_unavailable",
 ].sort());
 
 function reason(id) {
@@ -203,13 +144,14 @@ function reason(id) {
 }
 
 // ---------------------------------------------------------------------------
-// WORKFLOW LIFECYCLE. V5-F09's eleven states, in V5-F09's precedence order.
+// WORKFLOW LIFECYCLE VOCABULARY. V5-F09's eleven states, in F09's precedence
+// order.
 //
 // The order is load-bearing and is NOT alphabetical: `ops.completion_projection`
 // picks the FIRST applicable possibility in this order, so `conflicting` beats
 // `blocked` beats `planned`, and `operational` is last because it is only
 // reached when nothing earlier applies. Reordering this list changes what the
-// checker says a workflow IS.
+// clause says a workflow IS.
 // ---------------------------------------------------------------------------
 
 export const V5_A02_WORKFLOW_LIFECYCLE_STATES = deepFreeze([
@@ -256,130 +198,9 @@ export const V5_A02_SHORT_WORKFLOW_DROPPABLE = deepFreeze(["artifact"]);
 /** The workflow's terminal disposition, when it has one. */
 export const V5_A02_WORKFLOW_DISPOSITIONS = deepFreeze(["canceled", "none", "superseded"]);
 
-const WORKFLOW_EVIDENCE_FIELDS = Object.freeze([
-  "has_activation", "has_artifact", "has_blocker", "has_canonical", "has_conflict",
-  "has_intent", "has_readback", "has_stale", "has_telemetry",
-]);
-const WORKFLOW_REQUEST_FIELDS = Object.freeze([
-  "workflow_ref", "workflow_kind", "required_dimensions", "disposition",
-  "evidence", "claimed_state",
-]);
-
-/**
- * The eleven-way derivation, in F09's precedence order. Pure: it reads the nine
- * observed booleans and the disposition, and nothing else.
- *
- * `everyRequiredPresent` is supplied rather than recomputed here so the caller's
- * DECLARED requirement set is what decides `partially_built` versus
- * `operational` — which is precisely why the requirement set itself is validated
- * first, by evaluateWorkflowLifecycle.
- */
-export function deriveWorkflowLifecycleState(evidence, disposition, everyRequiredPresent) {
-  exact(object(evidence, "evidence"), WORKFLOW_EVIDENCE_FIELDS, "evidence");
-  for (const key of WORKFLOW_EVIDENCE_FIELDS) bool(evidence[key], `evidence.${key}`);
-  member(disposition, V5_A02_WORKFLOW_DISPOSITIONS, "disposition");
-  bool(everyRequiredPresent, "everyRequiredPresent");
-
-  if (evidence.has_conflict) return "conflicting";
-  if (disposition === "canceled") return "canceled";
-  if (disposition === "superseded") return "superseded";
-  if (evidence.has_stale) return "unknown_stale";
-  if (evidence.has_blocker) return "blocked";
-  if (evidence.has_intent && !evidence.has_artifact && !evidence.has_canonical) return "planned";
-  if (evidence.has_artifact && !evidence.has_canonical) return "built_unmerged";
-  if (evidence.has_canonical && !evidence.has_activation) return "merged_unactivated";
-  if (evidence.has_activation && (!evidence.has_readback || !evidence.has_telemetry))
-    return "active_unproven";
-  if (!everyRequiredPresent) return "partially_built";
-  return "operational";
-}
-
-/**
- * The complex/short lifecycle check.
- *
- * Ordered questions, so a second reader reaches the same verdict:
- *   1. Does the declared requirement set keep both proof dimensions?  If not,
- *      `short_workflow_drops_proof_dimension` — answered before the state is
- *      derived, because a shortened requirement set would otherwise make
- *      `operational` come out true.
- *   2. Is the declared set legal for the declared kind? A complex workflow
- *      declaring fewer than all six, or a short one dropping anything but
- *      `canonical`, is `workflow_required_dimension_missing`.
- *   3. What state does the evidence DERIVE to?
- *   4. Does that state claim `operational` without readback and telemetry?
- *      (Unreachable by construction, and asserted anyway — a derivation that
- *      could reach it would be the defect.)
- *   5. Does the caller's claimed state match the derived one?
- */
-export function evaluateWorkflowLifecycle(request) {
-  exact(object(request, "request"), WORKFLOW_REQUEST_FIELDS, "request");
-  pattern(request.workflow_ref, REF, "malformed_ref", "request.workflow_ref");
-  const kind = member(request.workflow_kind, V5_A02_WORKFLOW_KINDS, "request.workflow_kind");
-  sortedUnique(request.required_dimensions, "request.required_dimensions",
-    (value, path) => member(value, V5_A02_WORKFLOW_DIMENSIONS, path));
-  const disposition = member(request.disposition, V5_A02_WORKFLOW_DISPOSITIONS, "request.disposition");
-  const claimed = member(request.claimed_state, V5_A02_WORKFLOW_LIFECYCLE_STATES, "request.claimed_state");
-
-  const declared = new Set(request.required_dimensions);
-  const droppedProof = V5_A02_MANDATORY_PROOF_DIMENSIONS.filter(dim => !declared.has(dim));
-  const expected = kind === "complex"
-    ? [...V5_A02_WORKFLOW_DIMENSIONS]
-    : V5_A02_WORKFLOW_DIMENSIONS.filter(dim => !V5_A02_SHORT_WORKFLOW_DROPPABLE.includes(dim));
-  const missingRequired = expected.filter(dim => !declared.has(dim));
-  const overDeclared = [...declared].filter(dim => !expected.includes(dim)).sort();
-
-  const dimensionPresent = dim => ({
-    activation: request.evidence?.has_activation,
-    artifact: request.evidence?.has_artifact,
-    canonical: request.evidence?.has_canonical,
-    intent: request.evidence?.has_intent,
-    readback: request.evidence?.has_readback,
-    telemetry: request.evidence?.has_telemetry,
-  })[dim] === true;
-
-  const everyRequiredPresent = request.required_dimensions.every(dimensionPresent);
-  const derived = deriveWorkflowLifecycleState(request.evidence, disposition, everyRequiredPresent);
-
-  const unmet = request.required_dimensions.filter(dim => !dimensionPresent(dim));
-  const operationalWithoutProof = derived === "operational" &&
-    V5_A02_MANDATORY_PROOF_DIMENSIONS.some(dim => !dimensionPresent(dim));
-
-  let reasonId = null;
-  if (droppedProof.length > 0) reasonId = "short_workflow_drops_proof_dimension";
-  else if (missingRequired.length > 0 || overDeclared.length > 0) reasonId = "workflow_required_dimension_missing";
-  else if (operationalWithoutProof) reasonId = "workflow_operational_without_proof";
-  else if (claimed !== derived) reasonId = "workflow_state_claim_not_derived";
-
-  return deepFreeze({
-    schema_version: V5_A02_LIFECYCLE_SCHEMA_VERSION,
-    policy_version: V5_A02_LIFECYCLE_POLICY_VERSION,
-    answer: "workflow_lifecycle",
-    tenant: ORGANIZATION_TENANT_ID,
-    workflow_ref: request.workflow_ref,
-    workflow_kind: kind,
-    decision: reasonId === null ? "allow" : "refuse",
-    reason_id: reasonId === null ? null : reason(reasonId),
-    // The DERIVED state is the state. `claimed_state` is echoed so a mismatch is
-    // legible, never so it can win.
-    derived_state: derived,
-    claimed_state: claimed,
-    claim_matches_derivation: claimed === derived,
-    required_dimensions: [...request.required_dimensions],
-    expected_required_dimensions: expected,
-    required_dimensions_missing_from_declaration: missingRequired,
-    required_dimensions_over_declared: overDeclared,
-    required_dimensions_unmet_by_evidence: unmet.sort(),
-    proof_dimensions: [...V5_A02_MANDATORY_PROOF_DIMENSIONS],
-    proof_dimensions_dropped: droppedProof,
-    state_precedence: [...V5_A02_WORKFLOW_LIFECYCLE_STATES],
-    caller_stated_state_honoured: false,
-    decided_by: "deterministic_checker",
-    effects: V5_NO_EFFECTS,
-  });
-}
-
 // ---------------------------------------------------------------------------
-// RULE LIFECYCLE. proposed -> reviewed -> tested/shadow -> active -> retired.
+// RULE LIFECYCLE VOCABULARY.
+// proposed -> reviewed -> tested/shadow -> active -> retired.
 // ---------------------------------------------------------------------------
 
 export const V5_A02_RULE_STATES = deepFreeze([
@@ -422,377 +243,6 @@ export const V5_A02_MACHINE_ENFORCEMENT_MECHANISMS = deepFreeze([
   "behavioral_test", "code_control", "runtime_state_flag", "workflow_definition",
 ]);
 
-const CONTROL_FIELDS = Object.freeze([
-  "control_id", "control_ref", "enforcement_mechanism",
-  "implementation_digest", "verifier_id", "verified_at",
-]);
-const FALLBACK_FIELDS = Object.freeze(["kind", "ref"]);
-const REVIEW_FIELDS = Object.freeze(["proposer_actor_id", "reviewer_actor_id"]);
-const TEST_FIELDS = Object.freeze(["test_ref", "result"]);
-const SHADOW_FIELDS = Object.freeze(["window_ref", "opened_at", "closed_at", "misses"]);
-const MISS_FIELDS = Object.freeze(["miss_ref", "disposition"]);
-const RETIREMENT_FIELDS = Object.freeze(["behavior", "successor_rule_id"]);
-const TRANSITION_FIELDS = Object.freeze([
-  "rule_id", "rule_class", "mandatory", "from_state", "to_state",
-  "review", "tests", "shadow_window", "control", "fallback", "retirement",
-]);
-
-function refusedTransition(reasonId, note, detail) {
-  return { ok: false, reason_id: reason(reasonId), note, detail: detail ?? {} };
-}
-
-function validateControl(control, path) {
-  if (control === null) return null;
-  exact(object(control, path), CONTROL_FIELDS, path);
-  pattern(control.control_id, IDENTIFIER, "malformed_identifier", `${path}.control_id`);
-  pattern(control.control_ref, REF, "malformed_ref", `${path}.control_ref`);
-  member(control.enforcement_mechanism, V5_F05_ENFORCEMENT_MECHANISMS, `${path}.enforcement_mechanism`);
-  pattern(control.implementation_digest, DIGEST, "malformed_digest", `${path}.implementation_digest`);
-  str(control.verifier_id, `${path}.verifier_id`);
-  instant(control.verified_at, `${path}.verified_at`);
-  return control;
-}
-
-function validateFallback(fallback, path) {
-  if (fallback === null) return null;
-  exact(object(fallback, path), FALLBACK_FIELDS, path);
-  member(fallback.kind, V5_A02_FALLBACK_KINDS, `${path}.kind`);
-  pattern(fallback.ref, REF, "malformed_ref", `${path}.ref`);
-  return fallback;
-}
-
-/**
- * One transition, as a PURE PREDICATE. It says whether the edge is permitted and
- * whether the evidence the TARGET state demands is present. It moves nothing:
- * only emitRuleActivation could, and it cannot.
- *
- * Evidence owed per target state, each with its own refusal:
- *   reviewed -> an independent reviewer (not the proposer)
- *   tested   -> a named behavioural test that PASSED
- *   shadow   -> a closed shadow window, every miss carrying a disposition
- *   active   -> an enforceable control AND a fallback; and for a MANDATORY rule
- *               that control must be machine control
- *   retired  -> a retirement behaviour, plus a successor when the behaviour is
- *               `superseded_only`
- */
-export function evaluateRuleTransition(request) {
-  exact(object(request, "request"), TRANSITION_FIELDS, "request");
-  pattern(request.rule_id, IDENTIFIER, "malformed_identifier", "request.rule_id");
-  member(request.rule_class, V5_F05_RULE_CLASSES, "request.rule_class");
-  bool(request.mandatory, "request.mandatory");
-  const from = member(request.from_state, V5_A02_RULE_STATES, "request.from_state");
-  const to = member(request.to_state, V5_A02_RULE_STATES, "request.to_state");
-
-  if (request.review !== null) {
-    exact(object(request.review, "request.review"), REVIEW_FIELDS, "request.review");
-    str(request.review.proposer_actor_id, "request.review.proposer_actor_id");
-    str(request.review.reviewer_actor_id, "request.review.reviewer_actor_id");
-  }
-  if (request.tests !== null) {
-    list(request.tests, "request.tests");
-    request.tests.forEach((test, index) => {
-      const path = `request.tests[${index}]`;
-      exact(object(test, path), TEST_FIELDS, path);
-      pattern(test.test_ref, REF, "malformed_ref", `${path}.test_ref`);
-      member(test.result, ["fail", "pass", "skipped"], `${path}.result`);
-    });
-  }
-  if (request.shadow_window !== null) {
-    const path = "request.shadow_window";
-    exact(object(request.shadow_window, path), SHADOW_FIELDS, path);
-    pattern(request.shadow_window.window_ref, REF, "malformed_ref", `${path}.window_ref`);
-    instant(request.shadow_window.opened_at, `${path}.opened_at`);
-    if (request.shadow_window.closed_at !== null) instant(request.shadow_window.closed_at, `${path}.closed_at`);
-    list(request.shadow_window.misses, `${path}.misses`);
-    request.shadow_window.misses.forEach((miss, index) => {
-      const at = `${path}.misses[${index}]`;
-      exact(object(miss, at), MISS_FIELDS, at);
-      pattern(miss.miss_ref, REF, "malformed_ref", `${at}.miss_ref`);
-      if (miss.disposition !== null)
-        member(miss.disposition, V5_A02_SHADOW_MISS_DISPOSITIONS, `${at}.disposition`);
-    });
-  }
-  const control = validateControl(request.control, "request.control");
-  const fallback = validateFallback(request.fallback, "request.fallback");
-  if (request.retirement !== null) {
-    const path = "request.retirement";
-    exact(object(request.retirement, path), RETIREMENT_FIELDS, path);
-    member(request.retirement.behavior, V5_F05_RETIREMENT_BEHAVIORS, `${path}.behavior`);
-    if (request.retirement.successor_rule_id !== null)
-      pattern(request.retirement.successor_rule_id, IDENTIFIER, "malformed_identifier",
-        `${path}.successor_rule_id`);
-  }
-
-  let outcome = { ok: true, reason_id: null, note: `${from} -> ${to} permitted with its evidence`, detail: {} };
-
-  if (!V5_A02_RULE_TRANSITIONS[from].includes(to)) {
-    outcome = refusedTransition("rule_state_transition_not_permitted",
-      `${from} -> ${to} is not an edge of the rule lifecycle`,
-      { from_state: from, to_state: to, permitted: [...V5_A02_RULE_TRANSITIONS[from]] });
-  } else if (to === "reviewed") {
-    if (request.review === null)
-      outcome = refusedTransition("rule_reviewer_not_independent",
-        "review states no reviewer at all", { rule_id: request.rule_id });
-    else if (request.review.reviewer_actor_id === request.review.proposer_actor_id)
-      outcome = refusedTransition("rule_reviewer_not_independent",
-        "the proposer may not be the reviewer",
-        { actor_id: request.review.proposer_actor_id });
-  } else if (to === "tested") {
-    const tests = request.tests ?? [];
-    if (tests.length === 0)
-      outcome = refusedTransition("rule_tests_absent",
-        "a rule cannot be tested by no test", { rule_id: request.rule_id });
-    else {
-      const notPassing = tests.filter(test => test.result !== "pass").map(test => test.test_ref).sort();
-      if (notPassing.length > 0)
-        outcome = refusedTransition("rule_tests_not_passing",
-          "every named test must have passed", { not_passing: notPassing });
-    }
-  } else if (to === "shadow") {
-    if (request.shadow_window === null)
-      outcome = refusedTransition("shadow_window_absent",
-        "shadow observation needs a shadow window", { rule_id: request.rule_id });
-  } else if (to === "active") {
-    // Shadow misses are checked FIRST, because the catalog excludes "shadow
-    // misses without disposition" from what may count, and an undisposed miss
-    // is an open question about the very control being switched on.
-    const misses = request.shadow_window?.misses ?? [];
-    const undisposed = misses.filter(miss => miss.disposition === null).map(miss => miss.miss_ref).sort();
-    if (undisposed.length > 0)
-      outcome = refusedTransition("shadow_miss_without_disposition",
-        "a shadow miss nobody dispositioned is an open question, not evidence",
-        { undisposed });
-    else if (control === null)
-      outcome = refusedTransition("active_rule_control_unmapped",
-        "an active rule must map to a control that actually enforces it",
-        { rule_id: request.rule_id });
-    else if (fallback === null)
-      outcome = refusedTransition("active_rule_fallback_absent",
-        "an active rule must say what happens when its control is unavailable",
-        { rule_id: request.rule_id, control_id: control.control_id });
-    else if (request.mandatory &&
-      !V5_A02_MACHINE_ENFORCEMENT_MECHANISMS.includes(control.enforcement_mechanism))
-      outcome = refusedTransition("mandatory_rule_without_machine_control",
-        "a mandatory rule enforced only by judgment or preference denies nothing",
-        { rule_id: request.rule_id, enforcement_mechanism: control.enforcement_mechanism });
-  } else if (to === "retired") {
-    if (request.retirement === null)
-      outcome = refusedTransition("rule_retirement_successor_absent",
-        "retirement states no behaviour", { rule_id: request.rule_id });
-    else if (request.retirement.behavior === "superseded_only" &&
-      request.retirement.successor_rule_id === null)
-      outcome = refusedTransition("rule_retirement_successor_absent",
-        "a superseded_only retirement must name the rule that supersedes it",
-        { rule_id: request.rule_id });
-  }
-
-  return deepFreeze({
-    schema_version: V5_A02_LIFECYCLE_SCHEMA_VERSION,
-    policy_version: V5_A02_LIFECYCLE_POLICY_VERSION,
-    answer: "rule_lifecycle_transition",
-    tenant: ORGANIZATION_TENANT_ID,
-    rule_id: request.rule_id,
-    from_state: from,
-    to_state: to,
-    decision: outcome.ok ? "allow" : "refuse",
-    reason_id: outcome.reason_id,
-    note: outcome.note,
-    detail: deepFreeze(outcome.detail),
-    permitted_transitions_from: [...V5_A02_RULE_TRANSITIONS[from]],
-    reversible_activation: from === "active" && to === "shadow",
-    // An allow records that the clause is satisfied. It moves no rule.
-    performs_transition: false,
-    decided_by: "deterministic_checker",
-    effects: V5_NO_EFFECTS,
-  });
-}
-
-// ---------------------------------------------------------------------------
-// THE RULE ACTIVATION SEAM, NAMED BY THIS MODULE.
-// ---------------------------------------------------------------------------
-
-/**
- * The seam an activation would be performed through. A NAME, not a port: no
- * exported function accepts a controller as an argument and this module exports
- * no way to bind one.
- */
-export const V5_A02_RULE_ACTIVATION_SEAM = "seam:rule-registry-activation-controller";
-
-/**
- * Bound to null. The catalog's excluded_scope for V5-A02 begins "product
- * activation", and no activation controller with a reversible, receipted,
- * durable transition record exists in this repository for this seam to read.
- */
-const V5_A02_RULE_ACTIVATION_CONTROLLER = null;
-
-function ruleActivationController() {
-  const controller = V5_A02_RULE_ACTIVATION_CONTROLLER;
-  return isPlainObject(controller) && typeof controller.activate === "function" ? controller : null;
-}
-
-/**
- * THE ONLY FUNCTION THAT COULD ACTIVATE A RULE, AND IT CANNOT.
- *
- * One argument, and the arity IS the boundary. The answer is fixed for every
- * caller on every input: `activated: false`, naming the seam it is owed. The
- * deterministic transition predicate still runs and is still reported, because
- * an honest refusal says what it read.
- */
-export function emitRuleActivation(request) {
-  // eslint-disable-next-line prefer-rest-params -- the arity IS the boundary.
-  if (arguments.length > 1)
-    fail("rule_activation_controller_is_not_an_argument",
-      "emitRuleActivation takes one request; the activation controller is bound by this module",
-      { arguments_received: arguments.length, required_seam: V5_A02_RULE_ACTIVATION_SEAM });
-
-  const transition = evaluateRuleTransition(request);
-  return deepFreeze({
-    schema_version: V5_A02_LIFECYCLE_SCHEMA_VERSION,
-    policy_version: V5_A02_LIFECYCLE_POLICY_VERSION,
-    answer: "rule_activation",
-    tenant: ORGANIZATION_TENANT_ID,
-    rule_id: transition.rule_id,
-    activated: false,
-    decision: "refuse",
-    reason_id: reason("rule_activation_seam_unavailable"),
-    activation_seam: V5_A02_RULE_ACTIVATION_SEAM,
-    controller_bound: ruleActivationController() !== null,
-    controller_is_caller_supplied: false,
-    transition,
-    decided_by: "deterministic_checker",
-    effects: V5_NO_EFFECTS,
-  });
-}
-
-// ---------------------------------------------------------------------------
-// ENFORCEMENT COVERAGE — checkable_done 3.
-// "Every active rule maps to enforceable control and fallback."
-// ---------------------------------------------------------------------------
-
-const COVERAGE_RULE_FIELDS = Object.freeze([
-  "rule_id", "version", "rule_class", "state", "mandatory",
-  "binding_text_present", "control", "fallback",
-]);
-const COVERAGE_REQUEST_FIELDS = Object.freeze(["as_of", "rules"]);
-
-/**
- * The coverage answer over a whole rule set.
- *
- * ORDERED QUESTIONS per rule, so two readers reach the same verdict:
- *   1. Is the rule ACTIVE? If not it is out of scope and is reported as such —
- *      a proposed or retired rule owes no control.
- *   2. Does it name a control at all? If its only claim is that its binding text
- *      exists, it is UNMAPPED with `rule_presence_is_not_enforcement`. This is
- *      the catalog's excluded "rule presence as enforcement proof", enforced.
- *   3. Does the control's mechanism belong to the rule's class family? A
- *      code_enforced rule whose control is a partner preference is not enforced
- *      by that control.
- *   4. Is the rule mandatory with a non-machine control? Unmapped.
- *   5. Does it name a fallback? Without one, nobody knows what happens when the
- *      control is unavailable, and an unavailable control silently becomes no
- *      control.
- *
- * An unmapped rule is LISTED, with its reason, rather than hidden: the answer
- * refuses while the list is non-empty and still says exactly which rules and
- * why. `coverage_complete` is derived from that list and from nothing a caller
- * can set.
- */
-export function evaluateRuleEnforcementCoverage(request) {
-  exact(object(request, "request"), COVERAGE_REQUEST_FIELDS, "request");
-  instant(request.as_of, "request.as_of");
-  list(request.rules, "request.rules");
-
-  const seen = new Set();
-  const mapped = [];
-  const unmapped = [];
-  const outOfScope = [];
-
-  request.rules.forEach((rule, index) => {
-    const path = `request.rules[${index}]`;
-    exact(object(rule, path), COVERAGE_RULE_FIELDS, path);
-    pattern(rule.rule_id, IDENTIFIER, "malformed_identifier", `${path}.rule_id`);
-    if (!Number.isInteger(rule.version) || rule.version < 1)
-      fail("not_an_integer", `${path}.version must be a positive integer`, { path });
-    member(rule.rule_class, V5_F05_RULE_CLASSES, `${path}.rule_class`);
-    member(rule.state, V5_A02_RULE_STATES, `${path}.state`);
-    bool(rule.mandatory, `${path}.mandatory`);
-    bool(rule.binding_text_present, `${path}.binding_text_present`);
-    const control = validateControl(rule.control, `${path}.control`);
-    const fallback = validateFallback(rule.fallback, `${path}.fallback`);
-
-    const key = `${rule.rule_id}@${rule.version}`;
-    if (seen.has(key)) fail("duplicate_rule", `${path} repeats ${key}`, { path, rule: key });
-    seen.add(key);
-
-    if (rule.state !== "active") {
-      outOfScope.push(deepFreeze({ rule_id: rule.rule_id, version: rule.version, state: rule.state }));
-      return;
-    }
-
-    const record = {
-      rule_id: rule.rule_id, version: rule.version, rule_class: rule.rule_class,
-      mandatory: rule.mandatory,
-      control_id: control?.control_id ?? null,
-      control_ref: control?.control_ref ?? null,
-      enforcement_mechanism: control?.enforcement_mechanism ?? null,
-      fallback_kind: fallback?.kind ?? null,
-      fallback_ref: fallback?.ref ?? null,
-    };
-
-    if (control === null) {
-      unmapped.push(deepFreeze({
-        ...record,
-        reason_id: reason(rule.binding_text_present
-          ? "rule_presence_is_not_enforcement"
-          : "active_rule_control_unmapped"),
-      }));
-      return;
-    }
-    if (!classAdmitsMechanism(rule.rule_class, control.enforcement_mechanism)) {
-      unmapped.push(deepFreeze({ ...record, reason_id: reason("rule_control_mechanism_not_for_class") }));
-      return;
-    }
-    if (rule.mandatory && !V5_A02_MACHINE_ENFORCEMENT_MECHANISMS.includes(control.enforcement_mechanism)) {
-      unmapped.push(deepFreeze({ ...record, reason_id: reason("mandatory_rule_without_machine_control") }));
-      return;
-    }
-    if (fallback === null) {
-      unmapped.push(deepFreeze({ ...record, reason_id: reason("active_rule_fallback_absent") }));
-      return;
-    }
-    mapped.push(deepFreeze(record));
-  });
-
-  const complete = unmapped.length === 0;
-  const blocking = complete ? null : unmapped[0].reason_id;
-
-  return deepFreeze({
-    schema_version: V5_A02_LIFECYCLE_SCHEMA_VERSION,
-    policy_version: V5_A02_LIFECYCLE_POLICY_VERSION,
-    answer: "rule_enforcement_coverage",
-    tenant: ORGANIZATION_TENANT_ID,
-    as_of: request.as_of,
-    decision: complete ? "allow" : "refuse",
-    reason_id: blocking,
-    // Derived from the unmapped list and from nothing a caller can set. An
-    // EMPTY active set is complete only in the trivial sense, and the counts
-    // beside it say so rather than letting "0 unmapped" read as coverage.
-    coverage_complete: complete,
-    active_rule_count: mapped.length + unmapped.length,
-    mapped_count: mapped.length,
-    unmapped_count: unmapped.length,
-    mapped_rules: deepFreeze(mapped),
-    // Listed, not hidden. This is the "or is listed as unmapped" half.
-    unmapped_rules: deepFreeze(unmapped),
-    out_of_scope_rules: deepFreeze(outOfScope),
-    fallback_kinds: [...V5_A02_FALLBACK_KINDS],
-    machine_enforcement_mechanisms: [...V5_A02_MACHINE_ENFORCEMENT_MECHANISMS],
-    caller_stated_coverage: false,
-    decided_by: "deterministic_checker",
-    effects: V5_NO_EFFECTS,
-  });
-}
-
 /**
  * V5-F05's class table decides which mechanism belongs to which class. F05 does
  * not export the table itself, so the pairing is restated here as the
@@ -801,7 +251,7 @@ export function evaluateRuleEnforcementCoverage(request) {
  * exports appears here exactly once — so a class or mechanism added there
  * cannot pass unnoticed here.
  */
-const CLASS_MECHANISM = deepFreeze({
+export const V5_A02_CLASS_ENFORCEMENT_MECHANISM = deepFreeze({
   code_enforced: "code_control",
   workflow: "workflow_definition",
   test: "behavioral_test",
@@ -810,11 +260,214 @@ const CLASS_MECHANISM = deepFreeze({
   runtime_state: "runtime_state_flag",
 });
 
-function classAdmitsMechanism(ruleClass, mechanism) {
-  return CLASS_MECHANISM[ruleClass] === mechanism;
+// ---------------------------------------------------------------------------
+// THE SEAMS, NAMED BY THIS MODULE.
+//
+// Each is a NAME, not a port: no exported function accepts a controller or a
+// reader as an argument and this module exports no way to bind one.
+// ---------------------------------------------------------------------------
+
+/** The seam an activation would be performed through. */
+export const V5_A02_RULE_ACTIVATION_SEAM = "seam:rule-registry-activation-controller";
+
+/** Where a workflow's own lifecycle evidence could be read from. Nothing today. */
+export const V5_A02_WORKFLOW_STATE_READER_SEAM = "seam:workflow-state-reader";
+
+/** Where a rule, its version and its state could be read from. Nothing today. */
+export const V5_A02_RULE_REGISTRY_READER_SEAM = "seam:rule-registry-reader";
+
+/** Where a control could be checked against the code it names. Nothing today. */
+export const V5_A02_CONTROL_IMPLEMENTATION_READER_SEAM = "seam:control-implementation-reader";
+
+/** Where a named test's real result could be read from. Nothing today. */
+export const V5_A02_TEST_RESULT_READER_SEAM = "seam:test-result-reader";
+
+/** Where a human acceptance receipt could be read from. Nothing today. */
+export const V5_A02_ACCEPTANCE_RECEIPT_READER_SEAM = "seam:acceptance-receipt-reader";
+
+/** Everything this half is owed before any of its answers could be yes. */
+export const V5_A02_LIFECYCLE_OWED_SEAMS = deepFreeze([
+  V5_A02_ACCEPTANCE_RECEIPT_READER_SEAM,
+  V5_A02_CONTROL_IMPLEMENTATION_READER_SEAM,
+  V5_A02_RULE_ACTIVATION_SEAM,
+  V5_A02_RULE_REGISTRY_READER_SEAM,
+  V5_A02_TEST_RESULT_READER_SEAM,
+  V5_A02_WORKFLOW_STATE_READER_SEAM,
+].sort());
+
+/**
+ * The bindings: all null, because none of these exist. When a ruling records
+ * one, this object is the single place it binds and the four functions below
+ * are the clauses it will be read through.
+ */
+const V5_A02_LIFECYCLE_BINDINGS = Object.freeze({
+  [V5_A02_RULE_ACTIVATION_SEAM]: null,
+  [V5_A02_WORKFLOW_STATE_READER_SEAM]: null,
+  [V5_A02_RULE_REGISTRY_READER_SEAM]: null,
+  [V5_A02_CONTROL_IMPLEMENTATION_READER_SEAM]: null,
+  [V5_A02_TEST_RESULT_READER_SEAM]: null,
+  [V5_A02_ACCEPTANCE_RECEIPT_READER_SEAM]: null,
+});
+
+/** The bound holder for a seam, or null when it is unavailable. Takes no input. */
+function boundSeam(seam, method) {
+  const holder = V5_A02_LIFECYCLE_BINDINGS[seam];
+  return isPlainObject(holder) && typeof holder[method] === "function" ? holder : null;
 }
 
-export const V5_A02_CLASS_ENFORCEMENT_MECHANISM = CLASS_MECHANISM;
+function seamsOwed(seams) {
+  return deepFreeze(seams.map(seam => ({ seam, bound: false })));
+}
+
+/** The one shape every unavailable answer on this surface has. */
+function unavailable(answer, reasonId, because, seams, extra) {
+  return deepFreeze({
+    schema_version: V5_A02_LIFECYCLE_SCHEMA_VERSION,
+    policy_version: V5_A02_LIFECYCLE_POLICY_VERSION,
+    answer,
+    tenant: ORGANIZATION_TENANT_ID,
+    status: "unavailable",
+    decision: "refuse",
+    reason_id: reason(reasonId),
+    unavailable_because: because,
+    owed_seams: [...seams].sort(),
+    seams_bound: seamsOwed([...seams].sort()),
+    // No field of any request can change any field of this answer.
+    request_read: false,
+    caller_evidence_admitted: false,
+    decided_by: "no_authoritative_reader",
+    model_judgment_admitted: false,
+    effects: V5_NO_EFFECTS,
+    ...extra,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// The complex/short workflow lifecycle check.
+// ---------------------------------------------------------------------------
+
+/**
+ * What a workflow lifecycle reading would need and cannot get.
+ *
+ * The nine evidence booleans F09's projection derives a state from would have
+ * to be read from the workflow itself — its merge, its activation, its readback
+ * and its telemetry. Nothing here can read any of them, and a caller who
+ * asserts them has described a workflow rather than shown one.
+ */
+export function readWorkflowLifecycle() {
+  return unavailable(
+    "workflow_lifecycle",
+    "workflow_state_reader_unavailable",
+    "no authoritative reader of workflow activation, readback or telemetry exists, so a lifecycle state can only be asserted by its caller",
+    [V5_A02_WORKFLOW_STATE_READER_SEAM, V5_A02_TEST_RESULT_READER_SEAM],
+    // The vocabularies are EXPORTED CONSTANTS, not fields of this answer: an
+    // unavailable answer recites nothing a caller could mistake for a reading.
+    { workflow_state_reader_bound: boundSeam(V5_A02_WORKFLOW_STATE_READER_SEAM, "readWorkflow") !== null });
+}
+
+// ---------------------------------------------------------------------------
+// The rule lifecycle ladder.
+// ---------------------------------------------------------------------------
+
+/**
+ * What a rule lifecycle transition reading would need and cannot get.
+ *
+ * The ladder's own clauses are deterministic, but every fact they stand on — a
+ * rule's current state, who reviewed it, whether its named test really passed,
+ * whether its control exists — belongs to a registry, a test runner and a
+ * receipt store that this repository does not have.
+ */
+export function readRuleLifecycleTransition() {
+  return unavailable(
+    "rule_lifecycle_transition",
+    "rule_registry_reader_unavailable",
+    "no rule registry, test-result or acceptance-receipt reader exists, so a transition's evidence can only be asserted by its caller",
+    [V5_A02_RULE_REGISTRY_READER_SEAM, V5_A02_TEST_RESULT_READER_SEAM,
+      V5_A02_ACCEPTANCE_RECEIPT_READER_SEAM],
+    {
+      performs_transition: false,
+      rule_registry_reader_bound: boundSeam(V5_A02_RULE_REGISTRY_READER_SEAM, "readRule") !== null,
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Enforcement coverage — checkable_done 3.
+// ---------------------------------------------------------------------------
+
+/**
+ * What an enforcement coverage reading would need and cannot get.
+ *
+ * "Every active rule maps to enforceable control and fallback" is a statement
+ * about the live rule set and the live code. Answering it needs the rule
+ * registry to enumerate what is active and a control-implementation reader to
+ * confirm that each named control is the code it claims to be — a supplied
+ * `implementation_digest` is a claim about a file, not a reading of one.
+ */
+export function readRuleEnforcementCoverage() {
+  return unavailable(
+    "rule_enforcement_coverage",
+    "control_implementation_reader_unavailable",
+    "no rule registry and no control-implementation reader exist, so coverage can only be asserted by its caller",
+    [V5_A02_RULE_REGISTRY_READER_SEAM, V5_A02_CONTROL_IMPLEMENTATION_READER_SEAM,
+      V5_A02_TEST_RESULT_READER_SEAM],
+    {
+      control_implementation_reader_bound:
+        boundSeam(V5_A02_CONTROL_IMPLEMENTATION_READER_SEAM, "readControl") !== null,
+    });
+}
+
+// ---------------------------------------------------------------------------
+// The privileged path, and the refusal that stands where it would be.
+// ---------------------------------------------------------------------------
+
+/**
+ * THE ONLY FUNCTION THAT COULD ACTIVATE A RULE, AND IT CANNOT.
+ *
+ * One argument, and the arity IS the boundary. The answer is fixed for every
+ * caller on every input: `activated: false`, naming every seam it is owed.
+ *
+ * AND IT CARRIES NO TRANSITION VERDICT. The earlier version of this file ran the
+ * transition predicate and returned it beside the refusal, so a clean caller
+ * fixture produced `transition.decision: "allow"` inside a refusal — a verdict
+ * reachable from nothing but caller input. The honest answer is that the
+ * transition cannot be evaluated at all until a rule registry exists to say what
+ * state the rule is actually in.
+ */
+export function emitRuleActivation(request) {
+  // eslint-disable-next-line no-unused-vars, prefer-rest-params -- the arity IS
+  // the boundary, and the request is deliberately not read.
+  if (arguments.length > 1)
+    fail("rule_activation_controller_is_not_an_argument",
+      "emitRuleActivation takes one request; the activation controller is bound by this module",
+      { arguments_received: arguments.length, required_seam: V5_A02_RULE_ACTIVATION_SEAM });
+
+  return unavailable(
+    "rule_activation",
+    "rule_activation_seam_unavailable",
+    "no activation controller exists, and no rule registry exists to say what state a rule is in",
+    [...V5_A02_LIFECYCLE_OWED_SEAMS],
+    {
+      decision_ids: [...V5_A02_DECISION_IDS],
+      // FIXED. Not derived from a transition, not derived from the request, not
+      // derivable by any caller.
+      activated: false,
+      not_activated_because: "activation controller undecided, and no authoritative rule, control, test or receipt reader exists",
+      activation_seam: V5_A02_RULE_ACTIVATION_SEAM,
+      controller_bound: boundSeam(V5_A02_RULE_ACTIVATION_SEAM, "activate") !== null,
+      controller_is_caller_supplied: false,
+      performs_transition: false,
+      // The transition fields a consumer would need. Null because there is no
+      // transition to report, not because this one happened to fail.
+      transition: null,
+      transition_unavailable_because: "no rule registry reader exists to read the rule's current state or its evidence",
+      undecided_governance_questions: deepFreeze([
+        "which controller performs a rule activation",
+        "what a reversible activation records so it can be undone",
+        "which store an active rule and its version are read from",
+        "how a control is checked against the code it names",
+      ]),
+    });
+}
 
 // ---------------------------------------------------------------------------
 // The closed, versioned policy preimage and its digest.
@@ -840,10 +493,14 @@ export function v5A02LifecyclePolicyPreimage() {
     fallback_kinds: [...V5_A02_FALLBACK_KINDS].sort(),
     machine_enforcement_mechanisms: [...V5_A02_MACHINE_ENFORCEMENT_MECHANISMS].sort(),
     class_enforcement_mechanism: Object.fromEntries(
-      Object.keys(CLASS_MECHANISM).sort().map(key => [key, CLASS_MECHANISM[key]])),
+      Object.keys(V5_A02_CLASS_ENFORCEMENT_MECHANISM).sort()
+        .map(key => [key, V5_A02_CLASS_ENFORCEMENT_MECHANISM[key]])),
     reason_ids: [...V5_A02_LIFECYCLE_REASON_IDS].sort(),
+    owed_seams: [...V5_A02_LIFECYCLE_OWED_SEAMS],
     rule_activation_seam: V5_A02_RULE_ACTIVATION_SEAM,
     rule_activation_controller_bound: false,
+    authoritative_readers_bound: false,
+    public_surface_answers: "unavailable",
   };
 }
 
