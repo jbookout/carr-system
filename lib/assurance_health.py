@@ -842,8 +842,15 @@ def assurance_health(*, scopes: Any, now: Any) -> dict[str, Any]:
         "capability_stages": {stage: sum(1 for row in rows if row["capability_stage"] == stage)
                               for stage in CAPABILITY_STAGES},
         "green": sum(1 for row in rows if row["green"]),
-        "degraded_scopes": sorted(row["scope"]["work_request_id"] for row in rows
-                                  if row["state"] in ("degraded", "failed")),
+        # KEYED ON THE IDENTITY EVERY SCOPE ACTUALLY HAS. A workflow-only scope
+        # carries no Work Request identity, and a census of them is the normal
+        # case on a real surface -- naming the list by an absent field made two
+        # degraded scopes unsortable against each other.
+        "degraded_scopes": sorted(
+            f"{row['scope']['workflow_key']}@v{row['scope']['workflow_version']}"
+            + (f"/{row['scope']['work_request_id']}"
+               if row["scope"]["work_request_id"] else "")
+            for row in rows if row["state"] in ("degraded", "failed")),
     }
     return {
         "schema_version": SCHEMA_VERSION,

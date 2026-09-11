@@ -477,7 +477,10 @@ def scoped_degradation_checks(health) -> None:
           and projection["summary"]["states"]["degraded"] == 1
           and projection["summary"]["states"]["healthy"] == 1
           and projection["summary"]["green"] == 1
-          and projection["summary"]["degraded_scopes"] == ["wr-a01-0001"])
+          # Named by workflow AND Work Request: a bare Work Request id does not say
+          # which workflow degraded, and a workflow-only scope has no such id at all.
+          and projection["summary"]["degraded_scopes"]
+          == ["assurance-fabric-child@v1/wr-a01-0001"])
 
 
 def workflow_truth_governance_checks(health) -> None:
@@ -1014,6 +1017,24 @@ def source_adapter_checks() -> None:
           fenced_rows["unaffected"]["state"] != "degraded"
           and fenced_rows["degrading"]["state"] == "degraded",
           json.dumps({k: v["state"] for k, v in fenced_rows.items()}))
+
+    # TWO UNBOUND SCOPES, BOTH DEGRADED. The live census binds every scope by
+    # workflow identity alone, so the summary cannot key its degraded list on a
+    # Work Request identity that is absent from all of them.
+    both_stale = _reading(
+        keys=(("degrading", 1), ("also-degrading", 1)),
+        surfaces=[_surface("degrading.launchd.v1", key="degrading", observed=OBSERVED),
+                  _surface("also-degrading.launchd.v1", key="also-degrading",
+                           observed=OBSERVED)],
+        owners={"degrading@v1": MANIFEST_OWNER, "also-degrading@v1": MANIFEST_OWNER})
+    many = sources.assurance_health_from_snapshot(both_stale, now=NOW)
+    check("a census of unbound scopes summarises without an identity to sort on",
+          many["available"] is True, json.dumps(many.get("reason", "")))
+    if many["available"]:
+        PROJECTED.extend(many["projection"]["rows"])
+        listed = many["projection"]["summary"]["degraded_scopes"]
+        check("both degraded scopes are named in the summary by their own identity",
+              listed == ["also-degrading@v1", "degrading@v1"], json.dumps(listed))
 
     source = Path(sources.__file__).read_text(encoding="utf-8")
     check("the seam reads nothing itself: no file, process, socket or database route",
