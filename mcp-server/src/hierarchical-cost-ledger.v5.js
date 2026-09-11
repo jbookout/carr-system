@@ -1275,14 +1275,23 @@ export function applyOperations(ledger, operations) {
  *      and hands back the result WITHOUT installing it — the outcome the
  *      caller would get, the ledger it would produce, and the version and
  *      state digest of the base it assumed.
- *   2. `commitPrepared(current, prepared)` installs it only while `current` is
- *      still that exact base. Otherwise nothing is installed and the caller
- *      gets a `version_conflict` refusal naming both versions.
- *   3. `recomputeCommit(current, prepared)` is the loser's only honest move:
- *      compute the same step again against what actually committed. The second
- *      answer can differ from the first — that is the point. A reservation
- *      that fitted the old headroom meets `ceiling_exceeded` against the new
- *      one; a conversion of a reservation somebody else just converted meets
+ *   2. A cell opened by `openLedgerCell` OWNS the value, and `cell.commit(
+ *      prepared)` is the only point at which anything is installed. The cell
+ *      checks the proposal's base against the version and state digest it is
+ *      actually holding, rederives the step itself rather than trusting the
+ *      ledger it was handed, and replaces the held value exclusively — the
+ *      read, the decision and the replacement are one synchronous step. A
+ *      proposal computed against a base the cell has moved off is refused
+ *      `version_conflict` naming both versions; a proposal whose rederived
+ *      result does not match what it carries is refused
+ *      `prepared_commit_mismatch`. There is no commit point that takes the
+ *      current value as an argument, because a caller-supplied current value
+ *      is not an admission point at all.
+ *   3. `cell.recompute(prepared)` is the loser's only honest move: compute the
+ *      same step again against what actually committed. The second answer can
+ *      differ from the first — that is the point. A reservation that fitted
+ *      the old headroom meets `ceiling_exceeded` against the new one; a
+ *      conversion of a reservation somebody else just converted meets
  *      `reservation_not_open`.
  *
  * WHY BOTH A VERSION AND A DIGEST. The version alone cannot tell two different
@@ -1290,9 +1299,11 @@ export function applyOperations(ledger, operations) {
  * never install onto another. The digest pins the exact state; the version is
  * what a human reads in the refusal.
  *
- * WHAT THIS IS NOT. Both writers here still share one in-memory value inside
- * one process. This is a real admission boundary against a stale base — the
- * thing that was missing — and it is not durable serialization. Two processes
+ * WHAT THIS IS NOT. ONE cell in ONE process, holding one in-memory value: the
+ * boundary is only as wide as that cell, and two writers are admitted against
+ * each other only because they go through the same one. This is a real
+ * admission boundary against a stale or a doctored proposal — the thing that
+ * was missing — and it is not durable serialization. Two processes
  * against a stored ledger need a row lock or a serializable transaction to
  * supply this same single admission point, and that gap stays named on the
  * projection rather than quietly closed by this section.
