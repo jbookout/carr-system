@@ -52,9 +52,11 @@ import {
   V5_J201_CONSUMER_GATES,
   V5_J201_CORROBORATING_SIGNAL_KINDS,
   V5_J201_DEVICE_STATES,
+  V5_J201_AUTHORITATIVE_LEDGER_PROVENANCE_CLASS,
   V5_J201_EVIDENCE_CLASS,
   V5_J201_EXPLICIT_ACTIVATION_INTENT,
   V5_J201_KERNEL_PRODUCTION_OUTCOME_STEP,
+  V5_J201_LEDGER_PROVENANCE_CLASSES,
   V5_J201_MIN_REQUIRED_CORROBORATING_SIGNALS,
   V5_J201_MODEL_SEAMS,
   V5_J201_MODEL_WIDENING_FRAGMENTS,
@@ -66,6 +68,7 @@ import {
   V5_J201_PRESENCE_STATES,
   V5_J201_PRODUCTION_OUTCOME_STEPS,
   V5_J201_PROMPT_DECISIONS,
+  V5_J201_PROMPT_LEDGER_OWNER_SEAM,
   V5_J201_PROMPT_SCHEMA_VERSION,
   V5_J201_READ_CONTRACT_SCHEMA_VERSION,
   V5_J201_RECONCILIATION_DISPOSITIONS,
@@ -194,10 +197,20 @@ function observe(overrides = {}) {
   return keep(evaluateMeetingObservation(request));
 }
 
+// A ledger is only worth reading if the caller can say where it came from.
+// This fixture stands in for what a durable owner would hand the kernel; the
+// kernel itself owns no ledger, and the tests below say so out loud.
+const AUTHORITATIVE_PROVENANCE = Object.freeze({
+  class: V5_J201_AUTHORITATIVE_LEDGER_PROVENANCE_CLASS,
+  owner: "test-only-durable-prompt-ledger-owner",
+  read_at: "2026-09-11T15:09:00Z",
+});
+
 const EMPTY_LEDGER = Object.freeze({
   prompted_meeting_keys: [],
   dismissed_meeting_keys: [],
   active_meeting_keys: [],
+  provenance: { ...AUTHORITATIVE_PROVENANCE },
 });
 
 function prompt(observation, ledger = EMPTY_LEDGER) {
@@ -743,7 +756,7 @@ test("the exported meeting key matches the one detection computes", () => {
 // checkable_done 2 — detection prompts once and never records.
 // ---------------------------------------------------------------------------
 
-test("the first prompt for a meeting fires exactly once", () => {
+test("the first prompt fires once against a given authoritative ledger", () => {
   const observation = observe();
   const first = prompt(observation);
   assert.equal(first.decision, "prompt_once");
@@ -755,6 +768,97 @@ test("the first prompt for a meeting fires exactly once", () => {
   });
   assert.equal(second.decision, "suppress_already_prompted");
   assert.equal(second.prompt_shown, false);
+});
+
+test("once-only lives in the ledger owner, and this kernel says so", () => {
+  // THE HONEST STATEMENT, and the reason the checkable_done item is partial:
+  // this kernel keeps no state. Handed a second FRESH ledger for the same
+  // meeting it prompts again, because nothing here remembers the first prompt.
+  // Once-only is therefore a property of whoever owns the ledger durably, and
+  // the gaps projection refuses to claim otherwise.
+  const observation = observe();
+  assert.equal(prompt(observation).decision, "prompt_once");
+  assert.equal(prompt(observation).decision, "prompt_once");
+
+  const gaps = meetingModeGaps();
+  assert.equal(gaps.once_only_prompt_enforced_here, false);
+  assert.equal(gaps.once_only_prompt_reason_id,
+    "the_prompt_ledger_is_owned_by_a_durable_store_this_slice_does_not_contain");
+  assert.equal(gaps.required_prompt_ledger_provenance_class,
+    V5_J201_AUTHORITATIVE_LEDGER_PROVENANCE_CLASS);
+  assert.equal(gaps.seams.prompt_ledger_owner, V5_J201_PROMPT_LEDGER_OWNER_SEAM);
+  assert.ok(gaps.not_built_here.some(line => /durable.*prompt ledger|prompt ledger.*durable/.test(line)),
+    JSON.stringify(gaps.not_built_here));
+});
+
+test("a ledger the caller cannot prove authoritative refuses instead of prompting", () => {
+  const observation = observe();
+  const result = prompt(observation, {
+    ...EMPTY_LEDGER,
+    provenance: { ...AUTHORITATIVE_PROVENANCE, class: "caller_supplied_unproven" },
+  });
+  assert.equal(result.decision, "refuse_unproven_prompt_ledger");
+  assert.equal(result.prompt_shown, false);
+  assert.equal(result.reason_id, "prompt_ledger_provenance_is_not_authoritative");
+  assert.equal(result.ledger_provenance_class, "caller_supplied_unproven");
+  assert.equal(result.required_ledger_provenance_class,
+    V5_J201_AUTHORITATIVE_LEDGER_PROVENANCE_CLASS);
+  assert.equal(result.prompt_ledger_owner_seam, V5_J201_PROMPT_LEDGER_OWNER_SEAM);
+});
+
+test("an unproven ledger refuses even when it would have suppressed anyway", () => {
+  // The refusal is about provenance, not about the answer it would have given:
+  // a ledger nobody can vouch for cannot suppress either.
+  const observation = observe();
+  const result = prompt(observation, {
+    ...EMPTY_LEDGER,
+    prompted_meeting_keys: [observation.meeting_key],
+    provenance: { ...AUTHORITATIVE_PROVENANCE, class: "caller_supplied_unproven" },
+  });
+  assert.equal(result.decision, "refuse_unproven_prompt_ledger");
+});
+
+test("every registered ledger provenance class is exercised and only one is authoritative", () => {
+  const seen = new Map();
+  const observation = observe();
+  for (const cls of V5_J201_LEDGER_PROVENANCE_CLASSES) {
+    const result = prompt(observation, {
+      ...EMPTY_LEDGER, provenance: { ...AUTHORITATIVE_PROVENANCE, class: cls },
+    });
+    seen.set(cls, result.decision !== "refuse_unproven_prompt_ledger");
+  }
+  assert.deepEqual([...seen.keys()].sort(), [...V5_J201_LEDGER_PROVENANCE_CLASSES].sort());
+  assert.deepEqual(
+    [...seen.entries()].filter(([, accepted]) => accepted).map(([cls]) => cls),
+    [V5_J201_AUTHORITATIVE_LEDGER_PROVENANCE_CLASS]);
+});
+
+test("a ledger carrying no provenance cannot reach a prompt decision", () => {
+  throwsWithCode(
+    () => evaluateActivationPrompt({
+      tenant: TENANT, now: NOW, observation: observe(),
+      prompt_ledger: {
+        prompted_meeting_keys: [], dismissed_meeting_keys: [], active_meeting_keys: [],
+      },
+    }),
+    "missing_field");
+});
+
+test("an unregistered ledger provenance class is refused by name", () => {
+  throwsWithCode(
+    () => prompt(observe(), {
+      ...EMPTY_LEDGER, provenance: { ...AUTHORITATIVE_PROVENANCE, class: "trust_me" },
+    }),
+    "unknown_ledger_provenance_class");
+});
+
+test("a ledger read after now is refused", () => {
+  throwsWithCode(
+    () => prompt(observe(), {
+      ...EMPTY_LEDGER,
+      provenance: { ...AUTHORITATIVE_PROVENANCE, read_at: "2026-09-11T15:11:00Z" },
+    }),
+    "ledger_read_after_now");
 });
 
 test("a dismissal suppresses further prompts and names the one way back", () => {
@@ -809,7 +913,7 @@ test("a prompt cannot be built from something that is not an observation result"
 });
 
 test("EVERY registered prompt decision reports prompt_shown truthfully", () => {
-  // Exactly one of the five registered decisions may show a prompt. The others
+  // Exactly one of the registered decisions may show a prompt. The others
   // are suppressions, and a suppression that showed a prompt would be the bug.
   const shown = new Map();
   const observation = observe();
@@ -821,8 +925,12 @@ test("EVERY registered prompt decision reports prompt_shown truthfully", () => {
   shown.set("suppress_already_active",
     prompt(observation, { ...EMPTY_LEDGER, active_meeting_keys: [observation.meeting_key] }).prompt_shown);
   shown.set("suppress_not_observed", prompt(observe({ corroborating_signals: [] })).prompt_shown);
+  shown.set("refuse_unproven_prompt_ledger",
+    prompt(observation, {
+      ...EMPTY_LEDGER, provenance: { ...AUTHORITATIVE_PROVENANCE, class: "caller_supplied_unproven" },
+    }).prompt_shown);
   assert.deepEqual([...shown.keys()].sort(), [...V5_J201_PROMPT_DECISIONS].sort());
-  assert.deepEqual([...shown.values()], [true, false, false, false, false]);
+  assert.deepEqual([...shown.values()], [true, false, false, false, false, false]);
 });
 
 test("no field naming audio can reach any entry point", () => {
@@ -1146,6 +1254,30 @@ test("full v5 is unreachable and the five outstanding outcomes are named", () =>
   // reading that produced "five" can be checked instead of trusted.
   assert.equal(gaps.excluded_from_the_five, V5_J201_KERNEL_PRODUCTION_OUTCOME_STEP);
   assert.ok(!gaps.outstanding_production_outcome_steps.includes(V5_J201_KERNEL_PRODUCTION_OUTCOME_STEP));
+});
+
+test("the gap list names the deferred admission of the meeting record-link candidate", () => {
+  // toMeetingRecordLinkCandidate projects the shape and stops there. The
+  // governed admission and write that would put it in the business records is
+  // somebody else's slice, and the gap list has to say so by name rather than
+  // leaving `admitted_here: false` as the only trace.
+  const gaps = meetingModeGaps();
+  const named = gaps.not_built_here.filter(
+    line => /record.link candidate/.test(line) && /admission|admit/.test(line) && /write/.test(line));
+  assert.equal(named.length, 1, JSON.stringify(gaps.not_built_here));
+  assert.ok(/record-source-authority\.v5\.js/.test(named[0]), named[0]);
+
+  // And the thing the gap is about is really deferred, in the same run.
+  const candidate = keep(toMeetingRecordLinkCandidate({
+    tenant: TENANT, observation: observe(),
+    evidence_ref: "evidence:test-only-0009",
+    content_digest: `sha256:${"c".repeat(64)}`,
+    byte_length: 64,
+    observed_at: "2026-09-11T15:05:00Z",
+  }));
+  assert.equal(candidate.decision, "candidate");
+  assert.equal(candidate.admitted_here, false);
+  assert.equal(candidate.admitting_module, "record-source-authority.v5.js");
 });
 
 test("meetingModeGaps takes no argument through which a caller could argue to yes", () => {

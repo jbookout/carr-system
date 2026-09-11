@@ -409,9 +409,48 @@ export const V5_J201_OBSERVATION_DECISIONS = deepFreeze([
 
 /** The closed answer set of evaluateActivationPrompt. */
 export const V5_J201_PROMPT_DECISIONS = deepFreeze([
-  "prompt_once", "suppress_already_active", "suppress_already_prompted",
-  "suppress_dismissed", "suppress_not_observed",
+  "prompt_once", "refuse_unproven_prompt_ledger", "suppress_already_active",
+  "suppress_already_prompted", "suppress_dismissed", "suppress_not_observed",
 ]);
+
+/**
+ * WHERE A PROMPT LEDGER CAME FROM, and why the kernel has to be told.
+ *
+ * "Prompt once" (Q074.D1, Q088.D1) is a statement about a meeting's whole life,
+ * not about one call. This module is a pure kernel: it holds no state between
+ * calls, so it CANNOT enforce once-only on its own — handed a second empty
+ * ledger for the same meeting it would prompt again, and no amount of care
+ * inside this file changes that. The honest response is to make the dependency
+ * part of the contract instead of assuming it: the caller must say where the
+ * ledger came from, and a ledger nobody can vouch for gets a refusal rather
+ * than a prompt.
+ *
+ *   authoritative_durable_store — read out of the durable owner of this
+ *     tenant's prompt ledger, immediately before this call. Only this class
+ *     can produce `prompt_once` or a suppression.
+ *   caller_supplied_unproven — assembled in memory, reconstructed, defaulted,
+ *     or of unknown origin. Refuses: an unproven empty ledger is exactly the
+ *     shape that would re-prompt a meeting a partner already dismissed.
+ *
+ * The durable owner itself is NOT built here; it is named as a seam below and
+ * in `meetingModeGaps().not_built_here`, and `meetingModeGaps()` reports
+ * `once_only_prompt_enforced_here: false` so no reader can take this file for
+ * the enforcement.
+ */
+export const V5_J201_LEDGER_PROVENANCE_CLASSES = deepFreeze([
+  "authoritative_durable_store", "caller_supplied_unproven",
+]);
+
+/** The one provenance class whose ledger this module will act on. */
+export const V5_J201_AUTHORITATIVE_LEDGER_PROVENANCE_CLASS = "authoritative_durable_store";
+
+/**
+ * Where the durable prompt-ledger owner will live. A seam, for the same reason
+ * as the other two: "this slice does not own the ledger" must not read as "no
+ * ledger owner is needed", and it must not read as a decision that came back no.
+ */
+export const V5_J201_PROMPT_LEDGER_OWNER_SEAM =
+  "step:v5-j201-durable-prompt-ledger-owner";
 
 /** The closed answer set of reconcileMeetingObservations. */
 export const V5_J201_RECONCILIATION_DISPOSITIONS = deepFreeze([
@@ -1237,7 +1276,9 @@ export function reconcileMeetingObservations(request) {
 
 const PROMPT_LEDGER_KEYS = Object.freeze([
   "prompted_meeting_keys", "dismissed_meeting_keys", "active_meeting_keys",
+  "provenance",
 ]);
+const LEDGER_PROVENANCE_KEYS = Object.freeze(["class", "owner", "read_at"]);
 const PROMPT_REQUEST_KEYS = Object.freeze(["tenant", "now", "observation", "prompt_ledger"]);
 
 function assertKeyList(value, path) {
@@ -1253,18 +1294,33 @@ function assertKeyList(value, path) {
 /**
  * Decide whether to raise the one-tap Meeting Mode prompt.
  *
- * ORDERED, and the order is the answer to "prompts once":
+ * WHAT THIS FUNCTION DOES NOT DO, said first because the opposite is the easy
+ * thing to believe: it does not enforce once-only across calls. It is stateless.
+ * The ledger is the authority on what has already been prompted, dismissed or
+ * activated, and THE CALLER MUST PASS THE AUTHORITATIVE ONE — read from the
+ * durable owner named in V5_J201_PROMPT_LEDGER_OWNER_SEAM, which this slice does
+ * not contain. A ledger whose provenance is not
+ * `authoritative_durable_store` is refused rather than believed, so the missing
+ * owner shows up as a refusal at runtime instead of as a silently re-fired
+ * prompt.
+ *
+ * ORDERED:
  *   1. Readable, closed, tenant-bound; no field may name audio.
  *   2. The observation must be an `observe_meeting` answer from
  *      evaluateMeetingObservation. Any other decision suppresses with
  *      `suppress_not_observed`, so a withheld or refused detection cannot leak
- *      a prompt.
- *   3. Already active: suppress. A running session does not re-ask.
- *   4. Dismissed: suppress. Q074.D1 is explicit that a dismissal suppresses
+ *      a prompt. This runs first because it consults no ledger at all.
+ *   3. The ledger's provenance must be authoritative. An unproven ledger cannot
+ *      prompt AND cannot suppress: `refuse_unproven_prompt_ledger` is the whole
+ *      answer, because a ledger nobody can vouch for is evidence of nothing in
+ *      either direction.
+ *   4. Already active: suppress. A running session does not re-ask.
+ *   5. Dismissed: suppress. Q074.D1 is explicit that a dismissal suppresses
  *      repeat prompts for that meeting unless manually reopened, and "manually
  *      reopened" is a human action this module does not model and cannot infer.
- *   5. Already prompted: suppress. This is the clause itself.
- *   6. Otherwise prompt, exactly once.
+ *   6. Already prompted: suppress. This is the once-only clause, and it is only
+ *      as durable as the ledger it was handed.
+ *   7. Otherwise prompt.
  *
  * NOTHING IN THIS FUNCTION CAN START ANYTHING. Its most permissive answer is
  * "show a human a button", and the result says so in `records_audio: false` and
@@ -1276,7 +1332,7 @@ export function evaluateActivationPrompt(request) {
   assertClosedKeys(request, PROMPT_REQUEST_KEYS, "request");
   assertRequiredKeys(request, PROMPT_REQUEST_KEYS, "request");
   assertTenant(request.tenant, "request.tenant");
-  assertInstant(request.now, "request.now");
+  const now = assertInstant(request.now, "request.now");
 
   const observation = assertObject(request.observation, "request.observation");
   if (observation.schema_version !== V5_J201_OBSERVATION_SCHEMA_VERSION) {
@@ -1292,6 +1348,19 @@ export function evaluateActivationPrompt(request) {
   const prompted = assertKeyList(ledger.prompted_meeting_keys, "request.prompt_ledger.prompted_meeting_keys");
   const dismissed = assertKeyList(ledger.dismissed_meeting_keys, "request.prompt_ledger.dismissed_meeting_keys");
   const active = assertKeyList(ledger.active_meeting_keys, "request.prompt_ledger.active_meeting_keys");
+
+  const provenance = assertObject(ledger.provenance, "request.prompt_ledger.provenance");
+  assertClosedKeys(provenance, LEDGER_PROVENANCE_KEYS, "request.prompt_ledger.provenance");
+  assertRequiredKeys(provenance, LEDGER_PROVENANCE_KEYS, "request.prompt_ledger.provenance");
+  const provenance_class = assertEnum(provenance.class, V5_J201_LEDGER_PROVENANCE_CLASSES,
+    "request.prompt_ledger.provenance.class", "unknown_ledger_provenance_class");
+  assertSafeText(provenance.owner, "request.prompt_ledger.provenance.owner", { maxLength: 255 });
+  const read_at = assertInstant(provenance.read_at, "request.prompt_ledger.provenance.read_at");
+  if (read_at > now) {
+    fail("ledger_read_after_now",
+      "request.prompt_ledger.provenance.read_at is after request.now",
+      { path: "request.prompt_ledger.provenance.read_at" });
+  }
 
   const answer = fields => deepFreeze({
     schema_version: V5_J201_PROMPT_SCHEMA_VERSION,
@@ -1314,6 +1383,18 @@ export function evaluateActivationPrompt(request) {
   }
   if (meeting_key === null) {
     fail("invalid_observation", "request.observation carries no meeting_key", {});
+  }
+  if (provenance_class !== V5_J201_AUTHORITATIVE_LEDGER_PROVENANCE_CLASS) {
+    // Not a suppression and not a prompt. An unproven ledger decides nothing,
+    // and saying so names the owner this slice still owes.
+    return answer({
+      decision: "refuse_unproven_prompt_ledger",
+      reason_id: "prompt_ledger_provenance_is_not_authoritative",
+      prompt_shown: false,
+      ledger_provenance_class: provenance_class,
+      required_ledger_provenance_class: V5_J201_AUTHORITATIVE_LEDGER_PROVENANCE_CLASS,
+      prompt_ledger_owner_seam: V5_J201_PROMPT_LEDGER_OWNER_SEAM,
+    });
   }
   if (active.includes(meeting_key)) {
     return answer({ decision: "suppress_already_active", reason_id: "meeting_mode_already_active", prompt_shown: false });
@@ -1687,6 +1768,12 @@ export function meetingModeGaps() {
   return deepFreeze({
     schema_version: V5_J201_PROJECTION_SCHEMA_VERSION,
     full_v5_ready: false,
+    // Stated rather than implied: this stateless kernel cannot make "prompt
+    // once" true by itself, and does not claim to.
+    once_only_prompt_enforced_here: false,
+    once_only_prompt_reason_id:
+      "the_prompt_ledger_is_owned_by_a_durable_store_this_slice_does_not_contain",
+    required_prompt_ledger_provenance_class: V5_J201_AUTHORITATIVE_LEDGER_PROVENANCE_CLASS,
     full_v5_reason_id: "governed_production_outcomes_are_not_producible_from_source",
     outstanding_production_outcome_steps: [...V5_J201_PRODUCTION_OUTCOME_STEPS],
     excluded_from_the_five: V5_J201_KERNEL_PRODUCTION_OUTCOME_STEP,
@@ -1697,11 +1784,14 @@ export function meetingModeGaps() {
       "any Calendar, presence or audio-session reader; this module reads typed observations only",
       "the prompt surface, the notes surface and the Call Mode user interface",
       "persistence for the prompt ledger, the session, notes, tasks or follow-ups",
+      "the durable, authoritative owner of the prompt ledger that makes \"prompt once\" true across calls, processes and restarts; without it this kernel can only refuse a ledger it cannot trust",
+      "the governed admission and write of the meeting record-link candidate into the business records; toMeetingRecordLinkCandidate projects the F01 artifact shape and returns admitted_here false, and record-source-authority.v5.js is the module that admits it",
       "the governed record write that creates a follow-up from an accepted proposal",
       "any recording, transcription or audio retention, which stay refused behind their own seam",
     ],
     seams: {
       calendar_source: V5_J201_CALENDAR_SOURCE_SEAM,
+      prompt_ledger_owner: V5_J201_PROMPT_LEDGER_OWNER_SEAM,
       recording_policy: V5_J201_RECORDING_POLICY_SEAM,
     },
     recording: V5_J201_RECORDING_STATE,
@@ -1731,6 +1821,9 @@ export function v5J201PolicyPreimage() {
     affirmative_signal_state: { ...AFFIRMATIVE_SIGNAL_STATE },
     observation_decisions: [...V5_J201_OBSERVATION_DECISIONS],
     prompt_decisions: [...V5_J201_PROMPT_DECISIONS],
+    ledger_provenance_classes: [...V5_J201_LEDGER_PROVENANCE_CLASSES],
+    authoritative_ledger_provenance_class: V5_J201_AUTHORITATIVE_LEDGER_PROVENANCE_CLASS,
+    prompt_ledger_owner_seam: V5_J201_PROMPT_LEDGER_OWNER_SEAM,
     reconciliation_dispositions: [...V5_J201_RECONCILIATION_DISPOSITIONS],
     mode_states: [...V5_J201_MODE_STATES],
     binding_decisions: [...V5_J201_BINDING_DECISIONS],
