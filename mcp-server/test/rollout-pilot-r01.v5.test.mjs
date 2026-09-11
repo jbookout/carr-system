@@ -1797,9 +1797,20 @@ function hostileValues() {
     has: thrower, get: thrower, ownKeys: thrower, getPrototypeOf: thrower,
     getOwnPropertyDescriptor: thrower, set: thrower, deleteProperty: thrower,
   };
+  // THE TWO REVOKED HANDLES ARE CHECKED BEFORE THEY ARE REVOKED, because after
+  // revocation they are indistinguishable from outside — every operation throws,
+  // including the one that would report the target's kind. So a swapped target
+  // would be unobservable later, and the self-check is the only place it can be
+  // caught. It fires at module load.
   const revokedObject = Proxy.revocable({}, {});
+  if (Array.isArray(revokedObject.proxy)) {
+    throw new Error("the revoked-object probe was built over an array target");
+  }
   revokedObject.revoke();
   const revokedArray = Proxy.revocable([], {});
+  if (!Array.isArray(revokedArray.proxy)) {
+    throw new Error("the revoked-array probe was built over an object target");
+  }
   revokedArray.revoke();
   const throwingIndex = [];
   Object.defineProperty(throwingIndex, 0, {
@@ -1916,6 +1927,20 @@ test("guard: a hostile caller value leaves one coded refusal and no caller text"
     "the hostile roster lost or renamed a shape");
   assert.equal(HOSTILE_VALUES.filter(([, , mustRefuse]) => mustRefuse).length,
     HOSTILE_LABELS.length - 1, "every shape but the object has-trap is on the floor");
+  // AND EACH LABEL IS CHECKED AGAINST ITS SHAPE, because a label is not a fixture.
+  // Swapping an array-target proxy for an object one keeps the name, keeps the
+  // count, and silently costs the probe the whole array path — which is the path
+  // the uncoded native TypeError came out of. The two revoked handles cannot be
+  // checked here, because revocation makes the target's kind unobservable; they
+  // are checked at construction instead, in `hostileValues` above.
+  for (const [label, value] of HOSTILE_VALUES) {
+    if (label.startsWith("revoked ")) {
+      assert.throws(() => Array.isArray(value), TypeError, `${label} is not revoked`);
+      continue;
+    }
+    assert.equal(Array.isArray(value), label.startsWith("array "),
+      `${label} does not have the target kind its name claims`);
+  }
 
   const leaks = [];
   const refusedBy = new Map();
