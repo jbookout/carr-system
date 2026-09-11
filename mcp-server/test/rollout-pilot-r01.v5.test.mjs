@@ -991,6 +991,35 @@ test("guard: no export of either public surface is named for a classifier", () =
     [...onboarding.V5_R01_ONBOARDING_PUBLIC_SURFACE].sort());
 });
 
+test("guard: every exported validator returns nothing, so none can launder a value", () => {
+  // A MUTATION FOUND THIS GAP RATHER THAN A REVIEW. The validators were made void
+  // because an exported function handing a caller's own string back out is an
+  // export returning caller input — but the per-word sweep could not catch a
+  // validator echoing "allow", since the rule there is that the word must be one
+  // the caller did NOT supply, and that caller supplied it. So the property gets
+  // its own test: these functions throw or they return undefined, and there is no
+  // third outcome.
+  const validators = Object.entries(vocabulary)
+    .filter(([name, value]) => name.startsWith("assert") && typeof value === "function");
+  assert.ok(validators.length >= 8, "the validator set must not have quietly emptied");
+
+  const arguments_ = [
+    ["allow", "path"], ["pass", "path"], ["2026-09-07", "path"], [true, "path"],
+    [{}, "path"], [[], "path"], [0, "path"], [null, "path"],
+    [[...V5_R01_FAILURE_ORIGIN_KEYS], "path"],
+    ["partner_device_or_credential", [...V5_R01_FAILURE_ORIGIN_KEYS], "path"],
+    [{ a: 1 }, ["a"], "path"],
+  ];
+  for (const [name, validator] of validators) {
+    for (const args of arguments_) {
+      let returned;
+      try { returned = validator(...args); } catch { continue; }
+      assert.equal(returned, undefined,
+        `${name} returned ${JSON.stringify(returned)} instead of nothing`);
+    }
+  }
+});
+
 test("guard: no evaluator accepts a store, ledger, calendar or observer as a second argument", () => {
   const holder = { readEntry: () => day(), readReceipt: () => drill() };
   for (const [name, evaluator] of EVALUATOR_MATRIX) {
