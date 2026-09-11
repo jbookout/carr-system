@@ -34,6 +34,7 @@ purpose, to the exact artifact that proved why.
 
 import atexit
 import contextlib
+import inspect
 import json
 import os
 import pathlib
@@ -739,31 +740,45 @@ TEST_FILE_NAME = re.compile(r"""
       | .*_test\.py                  # foo_test.py
     )$""", re.VERBOSE)
 
-# Not source. Pruned by name, which is a fail-OPEN direction and is why the
-# list is short, conventional, and stated rather than inferred: out/ is
-# gitignored scratch every class writes to, .claude/ holds sibling worktrees
-# whose files are not this tree's, and the rest are installed or generated.
+# Not source. Pruned BY NAME and by name only: out/ is gitignored scratch every
+# class writes to, .claude/ holds sibling worktrees whose files are not this
+# tree's, and the rest are installed, cached or generated.
+#
+# THE NAMES ARE THE WHOLE LIST, 2026-09-11. The walk also pruned every directory
+# whose name began with a dot, which is a category and not a name, and a
+# category prunes things nobody decided to prune. A tracked .github/test_foo.py
+# would have been neither collected by a loop in ci.sh nor excused in writing
+# below — the exact third state this check exists to make impossible, reappearing
+# inside the check itself. Adding a dot-directory to this set is a decision
+# someone makes once and a reader can see; matching the shape of a name is not.
+# .claude/ is therefore listed explicitly rather than caught by its dot, and
+# test_the_walk_prunes_named_roots_only holds the distinction from both sides.
 UNWALKED_DIRS = frozenset({
     "node_modules", ".venv", "venv", "__pycache__", "out", "_inputs",
-    ".mypy_cache", ".pytest_cache", "dist", "build", ".git",
+    ".mypy_cache", ".pytest_cache", "dist", "build", ".git", ".claude",
 })
 
 
-def _test_shaped_files():
+def _test_shaped_files(tree=None):
     """Every test-shaped file in the tree, at any depth. The depth is the point.
 
     os.walk does not follow symlinks, which is deliberate here: out/ is a
     symlink to the canonical checkout's out/ in every worktree, and following
     it would walk another tree's files into this assertion.
+
+    `tree` exists so the pruning rule above can be driven against a fixture
+    directory rather than only against this repository. A walk asserted only
+    over the real tree can only be checked against what happens to be in it
+    today, which is how the dot-directory hole below survived review.
     """
+    tree = pathlib.Path(tree) if tree is not None else REPO
     found = set()
-    for root, dirs, files in os.walk(REPO):
-        dirs[:] = sorted(d for d in dirs
-                         if d not in UNWALKED_DIRS and not d.startswith("."))
+    for root, dirs, files in os.walk(tree):
+        dirs[:] = sorted(d for d in dirs if d not in UNWALKED_DIRS)
         for name in files:
             if TEST_FILE_NAME.match(name):
                 found.add(pathlib.Path(root, name)
-                          .relative_to(REPO).as_posix())
+                          .relative_to(tree).as_posix())
     return found
 
 
@@ -851,6 +866,64 @@ def test_every_test_file_in_the_tree_is_collected():
     print(f"        reach: {len(on_disk)} test files in the tree, "
           f"{len(on_disk & collected)} collected by ci.sh, "
           f"{len(UNCOLLECTED_BY_DECISION)} excused by name")
+
+
+def test_the_walk_prunes_named_roots_only():
+    """A tracked test under a dot-directory must be REACHED, not silently dropped.
+
+    THE HOLE THIS CLOSES. The walk above used to prune `d.startswith(".")` as
+    well as the named set, and a category is not a name. Nothing in this tree
+    decided that .github/ holds no tests; the prune simply swallowed every
+    directory whose name began with a dot. A tracked .github/test_foo.py would
+    then have been in none of the three states this whole section is built on —
+    not collected by a loop in ci.sh, not excused in UNCOLLECTED_BY_DECISION,
+    and not named as missing — which is the third state, uncollected and
+    unexplained, reappearing inside the check written to make it impossible.
+
+    DRIVEN AGAINST A FIXTURE TREE, NOT THIS ONE. The repository holds no
+    dot-directory test file today, so the real tree cannot tell a correct prune
+    from a blanket one: both give the same answer here and now. The fixture is a
+    real `git init` with the file really added to the index, so the case is
+    literally the review's shape — a TRACKED test under a dot-directory — and
+    the .git/ the prune must still skip is a real .git/ rather than a prop.
+
+    BOTH SIDES, because a walk that pruned nothing would also pass the half
+    above: every named root is planted with a test-shaped file too, and each one
+    must stay out of the result.
+    """
+    with tempfile.TemporaryDirectory(prefix="ci-selftest-walk-") as td:
+        tree = pathlib.Path(td)
+        subprocess.run(["git", "init", "-q"], cwd=tree, check=True,
+                       capture_output=True, env=scrubbed_env())
+
+        reachable = ["tools/test_control.py", ".github/test_planted_dot_dir.py",
+                     ".github/workflows/test_nested_dot_dir.py"]
+        pruned = [f"{d}/test_planted.py" for d in sorted(UNWALKED_DIRS)]
+        for rel in reachable + pruned:
+            path = tree / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# fixture\n", encoding="utf-8")
+        # TRACKED, not merely present: `git add` on the dot-directory file is
+        # what makes this the case the review named. -f because a repo-level
+        # ignore rule must not be what decides the outcome either.
+        subprocess.run(["git", "add", "-f", *reachable], cwd=tree, check=True,
+                       capture_output=True, env=scrubbed_env())
+        tracked = subprocess.run(["git", "ls-files"], cwd=tree, check=True,
+                                 capture_output=True, text=True,
+                                 env=scrubbed_env()).stdout.split()
+        check("the fixture's dot-directory test really is tracked",
+              ".github/test_planted_dot_dir.py" in tracked, f"{tracked}")
+
+        found = _test_shaped_files(tree)
+
+    for rel in reachable:
+        check(f"the walk reaches {rel}", rel in found, f"found: {sorted(found)}")
+    still_pruned = sorted(rel for rel in pruned if rel in found)
+    check("every name in UNWALKED_DIRS is still pruned",
+          not still_pruned, f"walked into: {', '.join(still_pruned)}")
+    check("the prune set is named roots, with no shape rule behind it",
+          "startswith" not in inspect.getsource(_test_shaped_files),
+          "a category prune is back; a dot-directory test would go silent again")
 
 
 def test_gates_treats_only_78_as_not_configured():
@@ -1273,6 +1346,7 @@ def main():
                test_no_env_claims_a_production_hostname,
                test_mypy_pin_acceptance_is_narrow,
                test_every_test_file_in_the_tree_is_collected,
+               test_the_walk_prunes_named_roots_only,
                test_push_floor_fails_when_a_touched_gates_paired_selftest_fails,
                test_the_paired_move_still_fires_on_a_real_gate_and_selftest_pair,
                test_the_paired_move_no_longer_invents_a_gate_that_does_not_exist,
