@@ -44,7 +44,20 @@ JANITOR = REPO_ROOT / "tools" / "repo-hygiene-janitor.py"
 LIBRARY = REPO_ROOT / "lib" / "canonical_freshness.py"
 
 sys.path.insert(0, str(REPO_ROOT / "lib"))
+sys.path.insert(0, str(REPO_ROOT / "ops"))
 import canonical_freshness as freshness  # noqa: E402
+from git_env import GIT_LOCATION_VARS, fixture_env  # noqa: E402
+
+# THE AMBIENT ENVIRONMENT IS PART OF THIS FIXTURE, because git reads GIT_DIR
+# before it reads the directory it was given and every git hook exports it. The
+# in-process cases below call the library directly, and the library builds its
+# own git calls from the ambient environment — as it must, since in production
+# it is talking to a real checkout and has no fixture to scrub for. So the scrub
+# happens here, once, to the environment every child git will inherit.
+# ops/ci.sh already does this before invoking the suite; doing it again makes
+# the file safe to run by hand, under a hook, from anywhere.
+for _var in GIT_LOCATION_VARS:
+    os.environ.pop(_var, None)
 
 OK = freshness.OK
 REFUSED_TRACKED_DIRT = freshness.REFUSED_TRACKED_DIRT
@@ -63,18 +76,31 @@ UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
 CRITERION_ID_RE = re.compile(r"^[A-Z][A-Z0-9-]{1,63}$")
 
 
+def fixture_git_env(cwd=None):
+    """ops/git_env.py's fixture environment, plus this file's broader sweep.
+
+    `fixture_env()` drops every variable git consults before the working
+    directory and points config discovery at /dev/null, which is the part that
+    matters and the part that must not be re-implemented here — a scrub list in
+    two places is a scrub list that drifts, silently, into modifying the wrong
+    repository. The extra pass keeps this file's original wider rule (any other
+    GIT_* the environment carries goes too) without discarding the two variables
+    `fixture_env()` deliberately SETS.
+    """
+    env = fixture_env()
+    deliberate = {"GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL"}
+    for key in [k for k in env if k.startswith("GIT_") and k not in deliberate]:
+        env.pop(key)
+    if cwd is not None:
+        env["HOME"] = str(cwd)
+    return env
+
+
 def git(cwd, *args, when=None):
-    env = dict(os.environ)
-    # Every git fixture gets its own scrubbed environment; the ambient one on a
-    # developer machine carries GIT_DIR, GIT_WORK_TREE and author identity that
-    # would leak into the fixture.
-    for key in list(env):
-        if key.startswith("GIT_"):
-            env.pop(key)
+    env = fixture_git_env(cwd)
     env.update({
         "GIT_AUTHOR_NAME": "fixture", "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
         "GIT_COMMITTER_NAME": "fixture", "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
-        "HOME": str(cwd),
     })
     if when is not None:
         env["GIT_AUTHOR_DATE"] = when
@@ -85,6 +111,9 @@ def git(cwd, *args, when=None):
 
 def run_command(repo, *args):
     """The real entrypoint, not the library: the plist will invoke this path."""
+    # os.environ was scrubbed of git's location variables at import, so the
+    # janitor — and the library it loads — cannot be redirected out of the
+    # fixture by a hook that exported GIT_DIR.
     env = dict(os.environ)
     env["HOME"] = str(repo)
     return subprocess.run([sys.executable, str(JANITOR), "--repository", str(repo), *args],
@@ -118,7 +147,7 @@ class Fixture:
 
         self.clone = self.root / "canonical"
         subprocess.run(["git", "clone", "--quiet", str(self.origin), str(self.clone)],
-                       check=True, capture_output=True)
+                       env=fixture_git_env(self.root), check=True, capture_output=True)
         self.pager_log = self.root / "pager-argv.txt"
 
     def advance_origin(self, n=1):
@@ -199,7 +228,7 @@ class FailingObservationGit(freshness._Git):
         if args and args[0] in self.FAILING:
             return subprocess.run(
                 ["git", "-C", str(self.repository / "not-a-repository"), *args],
-                capture_output=True, text=True)
+                env=fixture_git_env(self.repository), capture_output=True, text=True)
         return super().__call__(*args)
 
 
