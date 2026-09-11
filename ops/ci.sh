@@ -207,30 +207,8 @@ trap 'rm -rf "$LOGDIR"' EXIT
 # failing check CANNOT name itself: each is a demand to edit a DIFFERENT file
 # from the one that went red. Everything else already names its own remedy in
 # its own output, and repeating it here would only teach people to scroll past.
-#
-# THE *-selftest.py CASE IS SCOPED TO A GATE THAT EXISTS, 2026-09-10. It used to
-# fire on the NAME SHAPE alone, and the name shape is not the pairing: only 31 of
-# the 314 ops/*-selftest.py suites have a hooks/<base>.py, so on 283 of them this
-# line named a co-change against a gate that is not in the tree. That is not a
-# harmless extra sentence. This class runs EVERY selftest on every push, whatever
-# the commit touched, so a red one here means "this suite failed" and the only
-# honest move is its own captured output. On 2026-09-10 a reviewer read three suites
-# that had failed for a missing mcp-server/node_modules, was told by this line to
-# go and co-change their gates, and spent a correction round looking for a
-# pairing violation that did not exist -- the exact retry loop the block above
-# was written to end, inverted into a wrong-direction loop.
-#
-# THE PAIRING RULE ITSELF IS UNTOUCHED AND IS NOT HERE. It is ENFORCED in the
-# push floor's gate-impact closure, which runs ops/<base>-selftest.py for
-# each touched hooks/<base>.py and fails the push when it goes red. This function
-# prints hints after a class has already failed; it decides nothing. The narrowed
-# predicate is exactly the claim the sentence already makes -- "the gate of the
-# same name" -- so a genuine pair still gets the message and an absent gate is no
-# longer invented. ops/ci-selftest.py holds three cases on this: the message still
-# fires for a real pair, it no longer names an absent gate, and the floor's
-# enforcement still turns a push red when a touched gate's selftest fails.
 gates_name_the_move() {  # gates_name_the_move <failed check names...>
-  local named=0 f gate_of
+  local named=0 f
   for f in "$@"; do
     case "$f" in
       gate-integrity)
@@ -246,14 +224,8 @@ gates_name_the_move() {  # gates_name_the_move <failed check names...>
           "add '# doctrine: <slug>' to the mechanism you ADDED, naming its section in the doctrine store (a slug, never a file path — the markdown renders were retired 2026-08-19)" >&2
         named=1 ;;
       *-selftest.py)
-        # The predicate: the gate of the same name is ON DISK. Without it the
-        # sentence below names a file nobody can open. `continue` leaves `named`
-        # alone, so an unpaired suite falls through to the default line, which
-        # points at the one place its remedy actually is -- its own output.
-        gate_of="hooks/${f%-selftest.py}.py"
-        [ -f "$gate_of" ] || continue
         printf '        \033[36mTHE MOVE\033[0m  %s\n' \
-          "$f is the PAIRED suite for $gate_of: a gate and its selftest change in the same commit, or the pair has stopped meaning anything" >&2
+          "$f is the PAIRED suite for the gate of the same name: a gate and its selftest change in the same commit, or the pair has stopped meaning anything" >&2
         named=1 ;;
     esac
   done
