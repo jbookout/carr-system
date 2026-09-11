@@ -2100,8 +2100,12 @@ def _pattern_hits(scalars: list[tuple[str | None, Any]], pattern: str) -> list[s
             and expression.search(scalar)]
     # Keys, on the same footing as ``_word_hits`` reads them: a key named
     # ``would_be_green_if_authoritative`` is the same claim as a value spelling it.
+    # Per PATH SEGMENT, because the two patterns are anchored differently: keys
+    # arrive as ``outer.would_be_green_if_authoritative`` and ``^would_`` must
+    # still find the segment it names.
     hits += [f"key {key}" for key, _ in scalars
-             if isinstance(key, str) and expression.search(key)]
+             if isinstance(key, str)
+             and any(expression.search(segment) for segment in key.split("."))]
     return hits
 
 
@@ -2474,10 +2478,20 @@ def closed_union_sweep_checks() -> None:
     for label, pattern in PRIVILEGED_WORD_PATTERNS:
         hits = _pattern_hits(scalars, pattern)
         control = _outcome_scalars({"state": "would_be_green_if_authoritative"})
-        check(f"no swept surface carries a string matching {label}",
-              not hits and bool(_pattern_hits(control, pattern)),
-              json.dumps({"hits": hits[:4], "control_detected":
-                          _pattern_hits(control, pattern)}))
+        # The KEY control, on the same footing the word checks now use: a nested
+        # key spelling the pattern is the same claim as a value spelling it, and
+        # without this control the key half of ``_pattern_hits`` could go dead
+        # without the suite noticing.
+        key_control = _outcome_scalars(
+            {"outer": {"would_be_green_if_authoritative": False},
+             "inner": {"state_if_authoritative": None}})
+        check(f"no swept surface carries a string matching {label}, as a value or "
+              f"as a key",
+              not hits and bool(_pattern_hits(control, pattern))
+              and bool(_pattern_hits(key_control, pattern)),
+              json.dumps({"hits": hits[:4],
+                          "control_detected": _pattern_hits(control, pattern),
+                          "key_control_detected": _pattern_hits(key_control, pattern)}))
 
 
 def sources_public_surface_guard_checks(health) -> None:
