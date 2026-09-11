@@ -1865,6 +1865,54 @@ function importSpecifiers(source) {
 }
 
 /**
+ * The source as esbuild's printer writes it back: comments gone, strings kept.
+ *
+ * The transform is a full parse and a full print, so what comes out is code and
+ * only code. A `require` in a comment — the shape that made a raw-text scan
+ * useless — is not in the output at all, and every form the parser understood is,
+ * spelled the way the engine reads it rather than the way it was typed.
+ */
+function printedCode(source) {
+  return esbuild.transformSync(source, {
+    loader: "js",
+    format: "esm",
+    platform: "neutral",
+    minify: false,
+    minifyIdentifiers: false,
+    minifySyntax: false,
+    minifyWhitespace: false,
+    legalComments: "none",
+    logLevel: "silent",
+    logLimit: 0,
+  }).code;
+}
+
+/**
+ * Whether a source so much as NAMES `require`.
+ *
+ * The fourth review found `require?.("node:https")`: esbuild emits no import
+ * record for an optionally-called require, so the call site was invisible to the
+ * counting above and the closed-set assertion below stayed green with a forbidden
+ * module loaded. Enumerating that form would have left `globalThis.require`,
+ * `const r = require`, and whatever the fifth review thought of next.
+ *
+ * So the question asked here is categorical rather than formal. The module under
+ * test is an ES module. It has no legitimate use of `require` in ANY form, so the
+ * identifier is banned outright and no call shape has to be anticipated: a word
+ * bounded `require` anywhere in the printed code fails, whether it is called,
+ * optionally called, aliased, or read off a global.
+ *
+ * The one thing this over-reports is a `require` inside a string literal, which is
+ * the same safe direction the counting above chose deliberately: a false alarm is
+ * a review, a missed door is a hole in the allow-list. `createRequire` is NOT
+ * over-reported — no word boundary precedes its `require` — and it is closed by
+ * the specifier check instead, since it is an import before it is a call.
+ */
+function namesRequire(source) {
+  return /\brequire\b/.test(printedCode(source));
+}
+
+/**
  * The names a source file binds out of one specifier — the IMPORTED names, not the
  * local aliases, because it is the imported name that says what was taken.
  *
@@ -2013,6 +2061,12 @@ const FORBIDDEN_PACKAGES = [
   "http", "https", "net", "tls", "dgram", "child_process",
 ];
 
+/**
+ * The specifiers that hand an ES module a working `require`, and so would let one
+ * reach every forbidden package above without naming any of them.
+ */
+const COMMONJS_BRIDGE_SPECIFIERS = ["node:module", "module"];
+
 test("J103 imports a closed set of modules, and no send-capable client is in it", () => {
   const specifiers = importSpecifiers(J103_SOURCE);
   assert.deepEqual(specifiers, [
@@ -2039,6 +2093,60 @@ test("J103 imports a closed set of modules, and no send-capable client is in it"
     .replace(/"smtp"/g, "");
   assert.ok(!OUTBOUND_CAPABILITY.test(withoutRefusals),
     "J103 must hold no outbound capability of its own");
+
+  // And the CommonJS door is shut categorically rather than shape by shape: an ES
+  // module that never names `require` and never imports the bridge that mints one
+  // cannot reach a forbidden package by any call form, enumerated or not.
+  assert.ok(!namesRequire(J103_SOURCE),
+    "J103 is an ES module; `require` has no legitimate use in it, in any form");
+  for (const bridge of COMMONJS_BRIDGE_SPECIFIERS) {
+    assert.ok(!specifiers.includes(bridge),
+      `J103 must not import ${bridge}: createRequire mints the require it otherwise lacks`);
+  }
+  assert.ok(!specifiers.includes("createRequire"),
+    "J103 must not so much as name createRequire");
+});
+
+test("no call form reaches CommonJS from J103, including the ones nobody enumerated", () => {
+  // The fourth review's counterexample first. Optional-call require emits no import
+  // record, so the call-site counting cannot see it; naming the identifier is what
+  // catches it, and the same answer covers the shapes nobody has thought of yet.
+  for (const evasion of [
+    'const h = require?.("node:https");',
+    'globalThis.require("node:https");',
+    'const r = require; r("node:https");',
+    'const h = (0, require)("node:https");',
+  ]) {
+    assert.ok(namesRequire(evasion), `${evasion} must be caught by naming require`);
+  }
+
+  // createRequire is the door that reaches CommonJS WITHOUT the token `require`
+  // ever standing alone, so the token check honestly says no and the specifier
+  // check says yes. Both halves are asserted, so neither can quietly stop working.
+  const bridged = [
+    'import { createRequire } from "node:module";',
+    "const r = createRequire(import.meta.url);",
+    'r("node:https");',
+  ].join("\n");
+  assert.ok(!namesRequire(bridged),
+    "createRequire reaches CommonJS without naming require; the specifier must catch it");
+  const bridgedSpecifiers = importSpecifiers(bridged);
+  assert.ok(bridgedSpecifiers.includes("node:module"), bridgedSpecifiers.join(", "));
+  assert.ok(bridgedSpecifiers.includes("createRequire"), bridgedSpecifiers.join(", "));
+  assert.ok(COMMONJS_BRIDGE_SPECIFIERS.some(bridge => bridgedSpecifiers.includes(bridge)));
+
+  // A mention is not a use: the check reads printed code, and comments are not code.
+  assert.ok(!namesRequire('// require("node:https");\nexport const a = 1;'),
+    "a require in a comment is not a call site");
+  assert.ok(!namesRequire('/* require("node:https") */ export const b = 2;'),
+    "a require in a block comment is not a call site");
+  // `required` is not `require`, so the module's own vocabulary does not false-alarm.
+  assert.ok(!namesRequire("export const c = requiredFields;"),
+    "a longer identifier that merely starts with require is not require");
+
+  // And the real module passes, which is the whole point: the ban costs it nothing.
+  assert.ok(!namesRequire(J103_SOURCE));
+  assert.ok(printedCode(J103_SOURCE).length > 1000, "the printer really ran over the module");
 });
 
 test("nothing callable crosses the seam from the one provider-named module J103 imports", () => {
