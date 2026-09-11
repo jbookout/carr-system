@@ -27,6 +27,8 @@ const STRICT_TOOLS = memoryTools({ withEnvelope: strictEnvelope, writeEvent, Too
 const KEY = "0297aaaa-0000-4000-8000-000000000001";
 const MEMORY_ID = "02970000-0000-4000-8000-000000000010";
 const SUCCESSOR_ID = "02970000-0000-4000-8000-000000000011";
+const JOE_ACTOR_ID = "02970000-0000-4000-8000-0000000000a0";
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 test("memory kernel exposes observe, recall, promote, correct, and forget", () => {
   for (const name of ["observe-memory", "recall-memory", "promote-memory", "correct-memory", "forget-memory"])
@@ -48,6 +50,7 @@ test("observe derives personal scope from the verified sponsor and stores proven
   const client = { query: async (sql, params) => {
     statements.push({ sql, params });
     if (/resolve_memory_plan_anchor/.test(sql)) return { rows: [{ plan_id: "02970000-0000-4000-8000-000000000001", work_request_id: "wr-1", work_request_version: 3 }] };
+    if (/select id from actor where slug=/.test(sql)) return { rows: [{ id: JOE_ACTOR_ID }] };
     if (/insert into memory_item/.test(sql)) return { rows: [{ id: "memory-1", version: 1, status: "candidate", scope: "personal" }] };
     if (/insert into memory_evidence/.test(sql)) return { rows: [{ id: "evidence-1" }] };
     return { rows: [] };
@@ -58,8 +61,14 @@ test("observe derives personal scope from the verified sponsor and stores proven
       plan_id: "02970000-0000-4000-8000-000000000001",
       evidence: { source_type: "conversation", source_ref: "turn-1", observation: "Joe corrected a verbose draft" } });
   assert.equal(out.ok, true);
+  const lookup = statements.find(s => /select id from actor where slug=/.test(s.sql));
+  assert.equal(lookup.params[0], "joe", "the owner slug still comes from the verified sponsor, never from args");
   const item = statements.find(s => /insert into memory_item/.test(s.sql));
-  assert.equal(item.params[8], "joe", "personal owner comes from verified sponsor, not args");
+  // owner_actor_id is a uuid column. Asserting the SLUG here is what let the
+  // personal-scope bug ship: the mock client never type-checks, so "joe" in a
+  // uuid parameter looked correct in tests and died at the real driver.
+  assert.equal(item.params[8], JOE_ACTOR_ID, "personal owner is the sponsor's ACTOR ID, not their slug");
+  assert.match(item.params[8], UUID_SHAPE, "owner_actor_id must be uuid-shaped");
   assert.match(item.sql, /organization_tenant_id/);
   assert.match(item.sql, /work_request_id/);
   assert.match(item.sql, /plan_id/);
@@ -67,6 +76,41 @@ test("observe derives personal scope from the verified sponsor and stores proven
   const evidence = statements.find(s => /insert into memory_evidence/.test(s.sql));
   assert.equal(evidence.params[1], "conversation");
   assert.equal(evidence.params[2], "turn-1");
+});
+
+test("observe names an unprovisioned sponsor instead of writing a null owner", async () => {
+  const client = { query: async (sql) => {
+    if (/select id from actor where slug=/.test(sql)) return { rows: [] };
+    if (/insert into memory_item/.test(sql)) throw new Error("must not insert without a resolved owner");
+    return { rows: [] };
+  } };
+  await assert.rejects(() => TOOLS["observe-memory"].handler(client,
+    { id: "runtime", slug: "codex", human: false, sponsoring_human_slug: "joe", sponsor_required: true },
+    { idempotency_key: KEY, kind: "preference", statement: "x", scope: "personal",
+      evidence: { source_type: "conversation", observation: "y" } }),
+    error => error.payload?.error === "actor_not_provisioned" && error.payload?.slug === "joe");
+});
+
+test("observe leaves a shared memory unowned and never looks an owner up", async () => {
+  const statements = [];
+  const client = { query: async (sql, params) => {
+    statements.push({ sql, params });
+    if (/insert into memory_item/.test(sql)) return { rows: [{ id: "memory-2", version: 1, status: "candidate", scope: "shared" }] };
+    if (/insert into memory_evidence/.test(sql)) return { rows: [{ id: "evidence-2" }] };
+    return { rows: [] };
+  } };
+  const out = await TOOLS["observe-memory"].handler(client,
+    { id: "runtime", slug: "codex", human: false, sponsoring_human_slug: "joe", sponsor_required: true },
+    { idempotency_key: KEY, kind: "preference", statement: "Shared voice note", scope: "shared",
+      evidence: { source_type: "conversation", observation: "z" } });
+  assert.equal(out.ok, true);
+  // Matched on the whole statement, not a substring: the memory_item insert
+  // carries its own `(select id from actor where slug=$10)` for the OBSERVER,
+  // so a substring match here passes for the wrong reason.
+  assert.equal(statements.some(s => /^\s*select id from actor where slug=/i.test(s.sql)), false,
+    "a shared memory resolves no owner");
+  const item = statements.find(s => /insert into memory_item/.test(s.sql));
+  assert.equal(item.params[8], null, "shared scope stores a null owner_actor_id");
 });
 
 test("observe rejects a caller authority field and invalid memory kind before DB use", async () => {
