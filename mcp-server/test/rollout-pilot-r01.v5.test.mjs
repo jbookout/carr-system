@@ -3378,10 +3378,20 @@ test("guard: all 55 registered codes construct, carrying four own properties and
         assert.deepEqual(callerTextOn(surfaced), [],
           `${at} carried text the caller wrote`);
         assert.equal(Object.isFrozen(surfaced), true, `${at} is not frozen`);
-        // EVERY own property is a NON-WRITABLE, NON-CONFIGURABLE DATA property,
-        // which is the second half of the fix: `defineProperty` consults no
-        // inherited setter, so even a bypass of the refusal above runs no code of
-        // the caller's while a refusal is being built.
+        // EVERY own property is a DATA property, which is the second half of the
+        // fix: `defineProperty` consults no inherited setter, so even a bypass of
+        // the refusal above runs no code of the caller's while a refusal is being
+        // built, and no accessor of anyone's is left behind on the result.
+        //
+        // THE DATA-PROPERTY CLAIM IS THE SENSITIVE ONE and it is the one this
+        // loop is here for: `Object.freeze` cannot turn an accessor into a data
+        // property, so installing `name` as a getter fails here and nowhere else.
+        // `writable` and `configurable` are asserted beside it as the frozen
+        // state they describe, but they are carried by the freeze rather than by
+        // the descriptors — flipping both descriptor flags changes nothing
+        // observable, and it is `Object.isFrozen` above that catches a lost
+        // freeze. Saying so here is cheaper than a reader mistaking these two
+        // lines for a check on the constructor's descriptor literals.
         for (const key of Object.getOwnPropertyNames(surfaced)) {
           const own = Object.getOwnPropertyDescriptor(surfaced, key);
           assert.equal(Object.hasOwn(own, "value"), true, `${at}: ${key} is an accessor`);
