@@ -32,6 +32,7 @@ import copy
 import itertools
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -1273,10 +1274,12 @@ def _minted_reading(reader, sentinel: str):
 def _hypothetical(workflows: Any, *, now: Any = NOW) -> dict[str, Any]:
     """Reach the adapter's classification the ONLY way a test is allowed to.
 
-    ``lib.assurance_health_sources`` exports one callable and it accepts nothing:
-    it reads the F09 census itself, because an adapter that accepts a census
+    ``lib.assurance_health_sources`` exports one callable and the one value it
+    accepts is an opaque reading handle the F09 reader minted for a read THAT
+    MODULE performed -- never a census, because an adapter that accepts a census
     accepts its caller's assertion about the control plane.  This suite cannot
-    read a control plane, so it drives the classification through the module's
+    read a control plane and cannot mint a handle, so it drives the
+    classification through the module's
     UNEXPORTED hook, which returns its answer under
     ``would_be_census_if_authoritative`` -- a name no consumer can read as a
     state any surface holds.  ``sources_public_surface_guard_checks`` parses the
@@ -1474,9 +1477,11 @@ def source_adapter_checks() -> None:
     class _ForgedSubclass(reader.WorkflowTruthReading):
         pass
 
+    # The shell is seeded with a KEY, because a key is all a handle carries now.
+    # It is not a key the reader ever minted, and even a minted one would not
+    # help: the registry entry a key reaches must be the object that presented it.
     shell = object.__new__(reader.WorkflowTruthReading)
-    object.__setattr__(shell, "_payload",
-                       {"available": True, "census": {}, "surfaces": [], "owners": {}})
+    object.__setattr__(shell, "_key", "forged-key-no-reader-ever-minted")
     forged_handles = {
         "a census dict": _reading(surfaces=[_surface("assurance-fabric-child.launchd.v1")]),
         "None": None,
@@ -1486,7 +1491,7 @@ def source_adapter_checks() -> None:
     }
     try:
         forged_handles["a subclass minted with the private token"] = \
-            _ForgedSubclass(reader._MINT, {"available": True})
+            _ForgedSubclass(reader._MINT, "forged-key-no-reader-ever-minted")
     except TypeError:
         pass
     accepted_forgeries = []
@@ -1502,7 +1507,7 @@ def source_adapter_checks() -> None:
           not accepted_forgeries, json.dumps(accepted_forgeries))
     check("the reader refuses to mint a reading from caller data",
           _raises_type_error(lambda: reader.WorkflowTruthReading(
-              object(), {"available": True})), "the handle has a public constructor")
+              object(), "forged-key")), "the handle has a public constructor")
     check("a handle that skipped the mint cannot hand out a reading",
           _raises_type_error(shell.rendered), "an unminted shell rendered a census")
     # THE CONTROL: a handle the reader actually minted IS accepted, so the
@@ -1526,22 +1531,26 @@ def source_adapter_checks() -> None:
           and "def read_workflow_truth_reading() -> WorkflowTruthReading:" in reader_source,
           "the reader accepts caller input")
 
-    # ---- THE MUTATED-HANDLE DOOR, WHICH IDENTITY ALONE LEFT OPEN -----------
-    # THE DEFECT THIS EXISTS FOR.  Every refusal above measures PROVENANCE: is
-    # this object one the reader minted?  A review answered yes -- it took a
-    # handle the reader really had minted, replaced the payload behind it, and
-    # projected a complete forged census through the seam.  Identity passed
-    # because the provenance was genuine; only the CONTENTS were the caller's.
-    # The checks above could not have caught it, because none of them mutates a
-    # handle the reader minted.
+    # ---- THE MUTATED-HANDLE DOOR, AND THE TOCTOU BEHIND IT -----------------
+    # THE DEFECT THIS EXISTS FOR, IN TWO ROUNDS.  Every refusal above measures
+    # PROVENANCE: is this object one the reader minted?  A review answered yes --
+    # it took a handle the reader really had minted, replaced the payload behind
+    # it, and projected a complete forged census through the seam.  Identity
+    # passed because the provenance was genuine; only the CONTENTS were the
+    # caller's.  The answer to that was a content digest bound at mint and
+    # re-derived before each render -- and a second review beat THAT by
+    # installing a stateful mapping which served authentic content to the digest
+    # traversal and forged content to the render traversal.  Verify-then-read-
+    # again is two traversals of an object the caller still owns, and the gap
+    # between them is the door.
     #
-    # SO EACH MUTATION IS TRIED ON A GENUINE HANDLE, and the bar is that the
-    # forged contents never reach the seam's answer.  There are two honest ways
-    # for that to hold and both are accepted here: the write itself is refused
-    # because the reading is deep-immutable, or the write lands through
-    # ``object.__setattr__`` and the seam refuses the handle because the content
-    # digest bound at mint no longer matches.  What is NOT accepted is the seam
-    # answering with anything the mutation wrote.
+    # SO THE DOOR IS CLOSED BY THERE BEING NOTHING TO REPLACE.  The reader
+    # captures the reading ONCE at mint and the handle carries only an opaque key
+    # to that capture, so every render is a copy of the same captured value.
+    # These checks are the behavioural proof: each mutation is tried on a
+    # GENUINELY minted handle, and the bar is not merely that the seam refuses --
+    # it is that the handle STILL RENDERS THE ORIGINAL CAPTURE, byte for byte,
+    # and that nothing the mutation wrote ever appears in the seam's answer.
     FORGED_KEY = "forged-by-mutation"
     honest = _reading(surfaces=[_surface("assurance-fabric-child.launchd.v1")])
     forged = _reading(keys=((FORGED_KEY, 1),), owners={f"{FORGED_KEY}@v1": MANIFEST_OWNER})
@@ -1555,29 +1564,73 @@ def source_adapter_checks() -> None:
         finally:
             reader.read_workflow_truth_snapshot = real
 
-    def _writes_a_key(handle):
-        handle._payload["census"] = forged["census"]
+    class _StatefulForgery(Mapping):
+        """Authentic on the FIRST read of a key, forged on every read after it.
 
-    def _replaces_the_attribute(handle):
+        This is the shape that defeated "derive the digest, then go and read the
+        payload again": it is honest while it is being verified and forged while
+        it is being rendered.  It is used two ways below -- installed on a minted
+        handle, and installed as the reader's own snapshot source -- and it
+        counts its reads, so "traversed exactly once" is measured rather than
+        asserted.
+        """
+
+        def __init__(self) -> None:
+            self.reads: dict[str, int] = {}
+
+        def __getitem__(self, key):
+            self.reads[key] = self.reads.get(key, 0) + 1
+            return (honest if self.reads[key] == 1 else forged)[key]
+
+        def __iter__(self):
+            return iter(honest)
+
+        def __len__(self) -> int:
+            return len(honest)
+
+    baseline_handle = _mint(honest)
+    baseline = baseline_handle.rendered()
+    check("the control: a minted handle renders the reading the reader performed",
+          baseline.get("available") is True
+          and FORGED_KEY not in json.dumps(baseline, default=str),
+          json.dumps(baseline, default=str)[:200])
+
+    def _replaces_the_payload_attribute(handle):
         object.__setattr__(handle, "_payload", reader._frozen(forged))
 
-    def _swaps_a_nested_mapping(handle):
-        handle._payload["census"]["summary"] = forged["census"]["summary"]
-
-    def _assigns_the_attribute(handle):
+    def _assigns_the_payload_attribute(handle):
         handle._payload = forged
 
-    mutations = {
-        "writing a key of a minted reading in place": _writes_a_key,
-        "replacing the payload with object.__setattr__": _replaces_the_attribute,
-        "swapping a nested mapping inside the census": _swaps_a_nested_mapping,
-        "assigning the payload attribute outright": _assigns_the_attribute,
+    def _installs_a_stateful_mapping(handle):
+        object.__setattr__(handle, "_payload", _StatefulForgery())
+
+    def _installs_a_stateful_mapping_under_the_key_name(handle):
+        object.__setattr__(handle, "_key", _StatefulForgery())
+
+    def _swaps_a_nested_mapping_after_minting(handle):
+        rendered = handle.rendered()
+        rendered["census"]["summary"] = copy.deepcopy(forged["census"]["summary"])
+        rendered["census"]["rows"] = copy.deepcopy(forged["census"]["rows"])
+        rendered["owners"][f"{FORGED_KEY}@v1"] = MANIFEST_OWNER
+
+    def _writes_a_key_of_what_it_was_handed(handle):
+        handle.rendered()["census"] = copy.deepcopy(forged["census"])
+
+    forgery_attempts = {
+        "replacing the payload attribute with object.__setattr__":
+            _replaces_the_payload_attribute,
+        "assigning the payload attribute outright": _assigns_the_payload_attribute,
+        "installing a stateful mapping as the payload": _installs_a_stateful_mapping,
+        "installing a stateful mapping where the key lives":
+            _installs_a_stateful_mapping_under_the_key_name,
+        "swapping nested mappings after minting": _swaps_a_nested_mapping_after_minting,
+        "writing a key of what the handle handed out": _writes_a_key_of_what_it_was_handed,
     }
-    leaked, verdicts = [], {}
-    for label, mutate in mutations.items():
+    divergent, leaked, verdicts = [], [], {}
+    for label, mutate in forgery_attempts.items():
         handle = _mint(honest)
-        # THE PER-CASE CONTROL: this handle answers BEFORE the mutation, so a
-        # refusal afterwards measures the mutation and not a dead handle.
+        # THE PER-CASE CONTROL: this handle answers BEFORE the mutation, so what
+        # is measured afterwards is the mutation and not a dead handle.
         before = sources.assurance_health_census(handle)
         if before.get("available") is not True:
             leaked.append(f"{label} (control: the honest handle did not project)")
@@ -1588,40 +1641,92 @@ def source_adapter_checks() -> None:
         except Exception as exc:
             verdicts[label] = f"write refused ({type(exc).__name__})"
         try:
+            after_rendered = handle.rendered()
+        except TypeError as exc:
+            verdicts[label] += f"; rendered() refused ({getattr(exc, 'reason_id', 'TypeError')})"
+            after_rendered = None
+        if after_rendered is not None and after_rendered != baseline:
+            divergent.append(f"{label}: {verdicts[label]}")
+        try:
             after = sources.assurance_health_census(handle)
         except TypeError as exc:
             verdicts[label] += f"; seam refused ({getattr(exc, 'reason_id', 'TypeError')})"
             continue
         if FORGED_KEY in json.dumps(after, default=str):
             leaked.append(f"{label}: {verdicts[label]}; the seam projected the forgery")
+    check("every replacement attempt still renders the reading captured at mint, "
+          "identically",
+          not divergent, json.dumps(divergent))
     check("a genuinely minted handle whose contents were mutated never projects them",
-          not leaked, json.dumps(leaked))
-    check("each mutation of a minted reading is refused at the write or at the seam",
-          all("refused" in verdict for verdict in verdicts.values()),
-          json.dumps(verdicts))
-    # THE DIGEST IS THE THING THAT BINDS, named rather than inferred: a replaced
-    # payload refuses under its own reason id, not as an incidental TypeError.
-    replaced = _mint(honest)
-    object.__setattr__(replaced, "_payload", reader._frozen(forged))
+          not leaked, json.dumps({"leaked": leaked, "verdicts": verdicts}))
+    check("the sweep tried every replacement shape the reviews used",
+          len(forgery_attempts) == 6 and set(verdicts) == set(forgery_attempts),
+          json.dumps(sorted(set(forgery_attempts) - set(verdicts))))
+
+    # THE TOCTOU ITSELF, AT ITS SOURCE.  The mutations above install the stateful
+    # mapping where a caller can reach.  This installs it where the READER reads:
+    # the snapshot source itself answers differently on a second read.  One
+    # capture means there is no second read -- every render is the first answer,
+    # and the read counter proves each key was touched exactly once.
+    stateful_source = _StatefulForgery()
+
+    def _stateful_snapshot() -> Any:
+        """Deliberately NOT a dict: the reader must capture whatever it is handed."""
+        return stateful_source
+
+    real_snapshot = reader.read_workflow_truth_snapshot
+    reader.read_workflow_truth_snapshot = _stateful_snapshot
+    try:
+        captured = reader.read_workflow_truth_reading()
+    finally:
+        reader.read_workflow_truth_snapshot = real_snapshot
+    renders = [captured.rendered() for _ in range(3)]
+    projected = sources.assurance_health_census(captured)
+    check("a stateful reading source is traversed exactly once, at mint",
+          all(render == renders[0] for render in renders)
+          and renders[0] == copy.deepcopy(honest)
+          and set(stateful_source.reads.values()) == {1},
+          json.dumps({"reads": stateful_source.reads}))
+    check("neither a render nor the seam ever sees the stateful source's second answer",
+          FORGED_KEY not in json.dumps(renders, default=str)
+          and FORGED_KEY not in json.dumps(projected, default=str),
+          json.dumps(renders[0], default=str)[:200])
+
+    # AND THE BINDING IS STILL CHECKED BY IDENTITY, named rather than inferred: a
+    # handle re-pointed at ANOTHER genuine reading is refused under its own reason
+    # id, so the mint registry is reached through the handle that owns the entry
+    # and never through whatever key an object happens to be carrying.
+    repointed = _mint(honest)
+    other = _mint(forged)
+    own_key = object.__getattribute__(repointed, "_key")
+    object.__setattr__(repointed, "_key", object.__getattribute__(other, "_key"))
     reason_ids = []
-    for call in (replaced.rendered, lambda: sources.assurance_health_census(replaced)):
+    for call in (repointed.rendered, lambda: sources.assurance_health_census(repointed)):
         try:
             call()
         except TypeError as exc:
             reason_ids.append(getattr(exc, "reason_id", type(exc).__name__))
         else:
             reason_ids.append("accepted")
-    check("rendered() and the seam both refuse a replaced payload by reason id",
+    check("rendered() and the seam both refuse a re-pointed handle by reason id",
           reason_ids == [reader.READING_PAYLOAD_REPLACED, reader.READING_PAYLOAD_REPLACED],
           json.dumps(reason_ids))
-    # AND THE DIGEST IS NOT MERELY DECORATIVE: restoring the exact contents the
-    # reader read makes the same handle answer again, so the refusal above is
-    # bound to the CONTENTS and not to the fact that anything was written at all.
-    object.__setattr__(replaced, "_payload", reader._frozen(copy.deepcopy(honest)))
-    restored = sources.assurance_health_census(replaced)
-    check("the digest tracks contents, not the act of writing: restored contents project",
-          restored.get("available") is True and FORGED_KEY not in json.dumps(
-              restored, default=str),
+    shell_reason = None
+    try:
+        shell.rendered()
+    except TypeError as exc:
+        shell_reason = getattr(exc, "reason_id", type(exc).__name__)
+    check("a handle the reader never minted refuses under the OTHER reason id",
+          shell_reason == reader.READING_NOT_MINTED, json.dumps(shell_reason))
+    # AND THE REFUSAL IS BOUND TO THE BINDING, NOT TO THE ACT OF WRITING: giving
+    # the handle its own key back makes the same object answer again, with the
+    # reading it was minted for and nothing the mutation wrote.
+    object.__setattr__(repointed, "_key", own_key)
+    restored = sources.assurance_health_census(repointed)
+    check("restoring the handle's own key restores its own reading",
+          restored.get("available") is True
+          and FORGED_KEY not in json.dumps(restored, default=str)
+          and repointed.rendered() == baseline,
           json.dumps({k: v for k, v in restored.items() if k != "projection"})[:300])
 
 
@@ -1643,8 +1748,10 @@ def sources_public_surface_guard_checks(health) -> None:
     public name carries a classifier, admission, fixture, snapshot or scopes
     shape.  (3) The two retired entry points are gone from the module under any
     name.  (4) The private classification names exist, start with an underscore
-    and are unexported.  (5) NO PUBLIC CALLABLE ACCEPTS A PARAMETER AT ALL, which
-    is the structural form of "the only caller input is the request to read".
+    and are unexported.  (5) NO PUBLIC CALLABLE ACCEPTS ANY PARAMETER
+    BUT THE READER'S OWN READING HANDLE -- required, typed, and refused unless
+    the reader minted it -- which is the structural form of "the only caller
+    input is the request to read, and the reading that request produced".
     (6) Every caller-controlled census shape is pushed at every public callable
     positionally and under every plausible keyword, and neither the privileged
     strings nor the caller's own sentinel value ever come back.  (7) The public
@@ -1862,9 +1969,10 @@ def surface_wiring_checks() -> None:
     ``tools/health-check.py`` canonical reader against a fixture snapshot -- no
     database, no network, no clock of ours.
 
-    AND THE DOOR NOW SAYS WHAT IT IS.  The adapter reads the F09 census itself and
-    accepts none from a caller, so a fixture can no longer reach the read path at
-    all: under ``--fixture`` the surface announces on its first line that nothing
+    AND THE DOOR NOW SAYS WHAT IT IS.  The adapter takes only the reading the F09
+    reader minted and accepts no census from a caller, and a --fixture file is
+    JSON and can hold no handle, so a fixture can no longer reach the read path
+    at all: under ``--fixture`` the surface announces on its first line that nothing
     below was read, reaches the adapter's unexported hook, and renders EVERY state
     as ``would-be-<state>-if-authoritative``.  These checks pin that labelling as
     hard as they pin the counts -- a test door that prints an unhedged state is

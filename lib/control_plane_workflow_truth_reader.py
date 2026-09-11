@@ -11,9 +11,11 @@ A01 assurance-health adapter was reachable through exactly that door.
 
 So the reading moved here, where both consumers reach the SAME one:
 
-  * ``tools/health-check.py`` renders the F09 census section from it;
-  * ``lib/assurance_health_sources`` binds assurance-health scopes from it,
-    performing the read itself rather than accepting a census argument.
+  * ``tools/health-check.py`` performs it once per run and renders the F09
+    census section from it;
+  * ``lib/assurance_health_sources`` binds assurance-health scopes from THAT
+    SAME reading, which it takes as the opaque handle this module minted --
+    never as a census argument a caller composed.
 
 WHAT IT READS, and nothing else.  Two checked-in configuration files
 (``ops/config/control-plane-workflows.v1.json`` for the declarations and each
@@ -38,6 +40,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -220,42 +223,57 @@ def read_workflow_truth_snapshot() -> dict[str, Any]:
 # matter what they contain.  A caller cannot manufacture one; the only way to
 # hold a reading is for this module to have performed it.
 #
-# AND IDENTITY ALONE WAS NOT ENOUGH, which is the correction this block most
-# recently took.  A review took a GENUINELY MINTED handle -- one that passed
-# every identity check because it really was minted here -- replaced its
-# ``_payload`` through ``object.__setattr__``, and projected a complete forged
-# census through the A01 adapter as if this module had read it.  Identity proved
-# the handle's provenance and said nothing about its CONTENTS, so the door the
-# mint closed was reopened one attribute assignment later.
+# AND IDENTITY ALONE WAS NOT ENOUGH.  A review took a GENUINELY MINTED handle --
+# one that passed every identity check because it really was minted here --
+# replaced its payload attribute through ``object.__setattr__``, and projected a
+# complete forged census through the A01 adapter as if this module had read it.
+# Identity proved the handle's PROVENANCE and said nothing about its CONTENTS, so
+# the door the mint closed was reopened one attribute assignment later.
 #
-# THE CONTENTS ARE NOW BOUND TO THE HANDLE AT MINT TIME.  Three separate
-# measures, because each one alone has a way around it:
+# NOR WAS A CONTENT DIGEST, and that is the correction this block takes NOW.
+# Binding a sha256 of the payload at mint and re-deriving it before every render
+# does check the contents -- but the check and the render are two SEPARATE
+# traversals of an object a caller can still reach.  A review replaced the
+# payload with a STATEFUL mapping that served authentic content while the digest
+# was being derived and forged content while the census was being rendered; it
+# passed verification on its way to projecting the forgery.  Every answer of the
+# form "verify it, then go and read it again" has that shape, and adding a third
+# traversal would only move the gap.
 #
-#   1. THE PAYLOAD IS DEEP-IMMUTABLE.  What the handle holds is frozen on the way
-#      in -- every mapping becomes a ``MappingProxyType``, every sequence a
-#      tuple, all the way down -- so no consumer can reach into a nested dict or
-#      list of the reading and edit it in place.  ``rendered()`` thaws a fresh
-#      mutable copy for its caller, so what a consumer prints or projects from is
-#      still its own and still cannot write back.
-#   2. THE HANDLE ITSELF IS FROZEN.  It is a frozen, slotted dataclass: ordinary
-#      attribute assignment raises, and there is no ``__dict__`` to grow a second
-#      payload beside the first.
-#   3. THE CONTENT DIGEST IS THE ONE THAT ACTUALLY BINDS, because 1 and 2 are
-#      both reachable through ``object.__setattr__``.  At mint time a sha256 over
-#      the canonical form of the payload is recorded in a MODULE-PRIVATE registry
-#      keyed by the handle's object id -- deliberately NOT on the handle, where
-#      whoever replaced the payload would simply replace the digest beside it.
-#      ``rendered()`` and every consumer re-derive the digest from the payload the
-#      handle is holding NOW and refuse with ``READING_PAYLOAD_REPLACED`` if it
-#      differs from the one bound at mint.  The registry holds a strong reference
-#      to each handle, so a minted id can never be reused by a later object.
+# SO THE CONTENTS ARE CAPTURED ONCE AND THE HANDLE NEVER HOLDS THEM.
+# ``read_workflow_truth_reading()`` traverses the snapshot EXACTLY ONCE, into a
+# private deep-immutable value -- a ``MappingProxyType`` over dicts built from
+# that single traversal, a tuple for every sequence, all the way down -- and
+# records ``key -> (handle, captured value, digest of that captured value)`` in a
+# MODULE-PRIVATE registry.  The handle itself carries nothing but the opaque key.
+#
+# WHAT THAT BUYS, and it is structural rather than one more check: there is no
+# payload attribute to replace, because there is no payload attribute; there is
+# no second traversal of a caller-reachable object to serve different content to,
+# because ``rendered()`` and the A01 adapter thaw their fresh mutable copy out of
+# the CAPTURED value in the registry and out of nothing else.  A stateful mapping
+# installed anywhere a caller can reach -- on the handle, or inside the snapshot
+# source itself -- is simply never read a second time.  The digest is recorded as
+# the identity of what was read, not as the thing standing between a caller and a
+# forgery.
+#
+# THE HANDLE IS STILL A PROVENANCE RECEIPT, and that is still checked by IDENTITY.
+# The registry entry reached through a handle's key must be THAT handle, so a
+# forged instance, a subclass, an ``object.__new__`` shell and a genuine handle
+# whose key was reassigned to another reading's are all refused.  The registry
+# holds a strong reference to every handle it minted, so an entry outlives its
+# caller and a key can never come to name something a caller built.
 # ---------------------------------------------------------------------------
 _MINT = object()
 
-# id(handle) -> (handle, digest-at-mint).  The handle is kept in the value, not
-# merely keyed by, so the object stays alive for the process and its id can never
-# be recycled onto something a caller built.
-_MINTED: dict[int, tuple["WorkflowTruthReading", str]] = {}
+# opaque key -> (handle, captured reading, digest of that captured reading).
+#
+# THE CAPTURED READING LIVES HERE AND NOWHERE ELSE.  It is deliberately not an
+# attribute of the handle: an attribute is a place a caller can write, and every
+# forgery this module has taken went through one.  The handle is kept in the
+# entry as well as reached through it, so identity has something to compare
+# against and the object stays alive for the life of the process.
+_MINTED: dict[str, tuple["WorkflowTruthReading", Any, str]] = {}
 
 READING_NOT_MINTED = "workflow_truth_reading_not_minted"
 READING_PAYLOAD_REPLACED = "workflow_truth_reading_payload_replaced"
@@ -276,7 +294,13 @@ class WorkflowTruthReadingError(TypeError):
 
 
 def _frozen(value: Any) -> Any:
-    """The deep-immutable form of a reading: proxies for mappings, tuples for lists."""
+    """Capture a reading, ONCE, as a deep-immutable value.
+
+    Proxies for mappings, tuples for sequences, all the way down.  This is the
+    single traversal of whatever the snapshot came back as: a source that would
+    answer differently on a second read never gets one, because everything
+    downstream reads the value this returns.
+    """
     if isinstance(value, Mapping):
         return MappingProxyType({key: _frozen(item) for key, item in value.items()})
     if isinstance(value, (list, tuple)):
@@ -285,7 +309,11 @@ def _frozen(value: Any) -> Any:
 
 
 def _thawed(value: Any) -> Any:
-    """A fresh mutable copy, for a consumer to render or project from."""
+    """A fresh mutable copy OF THE CAPTURED READING, to render or project from.
+
+    A consumer that mutates what it was handed changes nothing: the captured
+    value it was copied from is immutable and lives in the mint registry.
+    """
     if isinstance(value, Mapping):
         return {key: _thawed(item) for key, item in value.items()}
     if isinstance(value, tuple):
@@ -311,18 +339,20 @@ class WorkflowTruthReading:
 
     There is no public constructor: ``__init__`` refuses without the
     module-private mint token, which is an ``InitVar`` and is therefore never
-    stored on the instance for a holder to read back off it.  Every accessor
-    re-checks BOTH that this exact object is in the mint registry AND that what
-    it is holding still digests to what was read, so neither bypassing
-    ``__init__`` nor replacing the payload afterwards yields a reading.
+    stored on the instance for a holder to read back off it.
 
-    What it carries is never handed out by reference -- ``rendered()`` returns a
-    fresh mutable copy, so a consumer that mutates what it printed cannot change
-    what another consumer projects from.
+    IT HOLDS NO CONTENTS AT ALL.  Its one field is an opaque key into the
+    module-private mint registry, where the reading captured at mint time lives.
+    ``rendered()`` thaws its copy from THAT captured value, so there is no
+    attribute on this object through which a caller could substitute a reading,
+    and nothing is traversed a second time between verifying a handle and
+    rendering it.  Every accessor re-checks that the entry the key reaches is
+    THIS object, so neither bypassing ``__init__`` nor re-pointing the key
+    afterwards yields a reading.
     """
 
     _mint: InitVar[Any]
-    _payload: Any
+    _key: str
 
     def __post_init__(self, _mint: Any) -> None:
         if _mint is not _MINT:
@@ -331,63 +361,107 @@ class WorkflowTruthReading:
                 "it cannot be constructed from caller-supplied data")
 
     def rendered(self) -> dict[str, Any]:
-        """A private copy of this reading, for rendering or projection."""
-        verify_workflow_truth_reading(self)
-        return _thawed(self._payload)
+        """A private mutable copy of the reading captured for this handle."""
+        return _thawed(_captured_reading(self))
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostic only
-        payload = getattr(self, "_payload", None)
-        available = bool(payload.get("available")) if isinstance(payload, Mapping) else False
+        try:
+            captured = _captured_reading(self)
+        except WorkflowTruthReadingError:
+            return "<WorkflowTruthReading unbound>"
+        available = bool(captured.get("available")) if isinstance(captured, Mapping) else False
         return f"<WorkflowTruthReading available={available}>"
 
 
-def is_workflow_truth_reading(value: Any) -> bool:
-    """True only for a handle minted here for a reading performed here.
+def _mint_entry(value: Any) -> tuple["WorkflowTruthReading", Any, str] | None:
+    """The mint entry this object is bound to right now, or ``None``.
 
-    Identity, not shape: the registry entry must be THIS object, which nothing a
-    caller builds can satisfy, whatever its type name, attributes or contents.
-    It says nothing about the contents -- ``verify_workflow_truth_reading`` is
-    what binds those, and every consumer calls it.
+    Identity, not shape: the entry reached through the handle's own key must be
+    THIS object, which nothing a caller builds can satisfy, whatever its type
+    name, attributes or contents -- and which a genuine handle re-pointed at
+    another reading's key cannot satisfy either.
     """
     if type(value) is not WorkflowTruthReading:
-        return False
-    entry = _MINTED.get(id(value))
-    return entry is not None and entry[0] is value
+        return None
+    try:
+        key = object.__getattribute__(value, "_key")
+    except AttributeError:
+        return None
+    if not isinstance(key, str):
+        return None
+    entry = _MINTED.get(key)
+    if entry is None or entry[0] is not value:
+        return None
+    return entry
+
+
+def _minted_digest(value: Any) -> str | None:
+    """The digest of the reading this object was minted for, whatever key it now carries.
+
+    It is what separates a handle this module never minted from one it did mint
+    and which is no longer bound to its own reading -- two different refusals
+    with two different reason ids.
+    """
+    for handle, _captured, digest in _MINTED.values():
+        if handle is value:
+            return digest
+    return None
+
+
+def is_workflow_truth_reading(value: Any) -> bool:
+    """True only for a handle minted here, still bound to the reading it was minted for.
+
+    Identity, not shape.  It cannot be answered incorrectly by contents, because
+    a handle carries none: what it is bound to is the captured reading in the
+    mint registry, which no caller can reach or replace.
+    """
+    return _mint_entry(value) is not None
 
 
 def verify_workflow_truth_reading(value: Any) -> None:
-    """Refuse unless ``value`` is a minted handle STILL holding what was read.
+    """Refuse unless ``value`` is a handle STILL bound to the reading it was minted for.
 
     The decision procedure, in order, and each step has its own reason id:
 
-      1. Is this object one this module minted?  If not, ``READING_NOT_MINTED``.
-      2. Does the payload it is holding right now digest to the digest bound at
-         mint?  If not, ``READING_PAYLOAD_REPLACED`` -- the provenance is real and
-         the contents are not, which is exactly the forgery identity alone let
-         through.
+      1. Does this object's own key reach a mint entry holding THIS object?  Then
+         it is a reading, and the contents it renders are the ones captured at
+         mint -- there is nothing further to check, because there is nothing
+         else it can render.
+      2. Otherwise, was this exact object ever minted here?  If it was, its key
+         no longer names its own reading: ``READING_PAYLOAD_REPLACED``.  The
+         provenance is real and the binding is not, which is the forgery identity
+         alone let through.
+      3. Otherwise ``READING_NOT_MINTED``: whatever it is shaped like, this
+         module never read it.
 
-    Returns ``None`` on success; it hands back no payload, so no caller can
-    mistake the check for the reading.
+    Returns ``None`` on success; it hands back no reading, so no caller can
+    mistake the check for the contents.
     """
-    if not is_workflow_truth_reading(value):
-        raise WorkflowTruthReadingError(
-            READING_NOT_MINTED,
-            "a workflow-truth reading is minted by read_workflow_truth_reading(); "
-            f"{type(value).__name__} is caller-supplied data")
-    bound = _MINTED[id(value)][1]
-    try:
-        current = _content_digest(object.__getattribute__(value, "_payload"))
-    except AttributeError:
+    if _mint_entry(value) is not None:
+        return
+    bound = _minted_digest(value)
+    if bound is not None:
         raise WorkflowTruthReadingError(
             READING_PAYLOAD_REPLACED,
-            "this handle is no longer holding the reading it was minted for") from None
-    if current != bound:
-        raise WorkflowTruthReadingError(
-            READING_PAYLOAD_REPLACED,
-            "this handle was minted for a reading whose contents digested to "
-            f"{bound[:12]}, and it is now holding contents that digest to "
-            f"{current[:12]}; a replaced payload is caller-supplied data wearing a "
-            "genuine receipt, and it is refused for the same reason a forged handle is")
+            "this handle was minted for a reading whose contents digest to "
+            f"{bound[:12]}, and it is no longer bound to that reading; a handle "
+            "pointed at something else is caller-supplied data wearing a genuine "
+            "receipt, and it is refused for the same reason a forged handle is")
+    raise WorkflowTruthReadingError(
+        READING_NOT_MINTED,
+        "a workflow-truth reading is minted by read_workflow_truth_reading(); "
+        f"{type(value).__name__} is caller-supplied data")
+
+
+def _captured_reading(value: Any) -> Any:
+    """The immutable reading captured at mint for ``value``.  MODULE-PRIVATE.
+
+    Private because handing the captured value out by reference is the one thing
+    that would let a consumer's copy and another consumer's copy be the same
+    object.  Everything public goes through ``_thawed``.
+    """
+    verify_workflow_truth_reading(value)
+    return _MINTED[object.__getattribute__(value, "_key")][1]
 
 
 def read_workflow_truth_reading() -> WorkflowTruthReading:
@@ -397,8 +471,14 @@ def read_workflow_truth_reading() -> WorkflowTruthReading:
     the sections of that run describe ONE moment.  A refused reading is minted
     too -- the receipt then carries ``available=False`` with its reason, which is
     what every consumer prints, rather than one section going silent.
+
+    THE SNAPSHOT IS TRAVERSED EXACTLY ONCE, here, into the captured value the
+    registry holds.  The digest is taken from that captured value rather than
+    from the snapshot, so the thing digested and the thing every consumer renders
+    are the same object and cannot diverge between the two acts.
     """
-    payload = _frozen(read_workflow_truth_snapshot())
-    handle = WorkflowTruthReading(_MINT, payload)
-    _MINTED[id(handle)] = (handle, _content_digest(payload))
+    captured = _frozen(read_workflow_truth_snapshot())
+    key = secrets.token_hex(16)
+    handle = WorkflowTruthReading(_MINT, key)
+    _MINTED[key] = (handle, captured, _content_digest(captured))
     return handle

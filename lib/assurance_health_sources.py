@@ -103,7 +103,7 @@ from lib.control_plane_workflow_truth import (
 )
 from lib.control_plane_workflow_truth_reader import (
     WorkflowTruthReading as _WorkflowTruthReading,
-    is_workflow_truth_reading as _is_workflow_truth_reading,
+    WorkflowTruthReadingError as _WorkflowTruthReadingError,
     verify_workflow_truth_reading as _verify_workflow_truth_reading,
 )
 
@@ -206,8 +206,9 @@ def _assurance_health_scopes(workflows: _Any) -> dict[str, _Any]:
 
     Private because its ``workflow_truth`` output is its input row travelling
     onward: a caller that could reach this could choose what the projection then
-    classifies.  ``assurance_health_census`` supplies it a reading it performed
-    itself, and nothing else supplies it at all.
+    classifies.  What it is given is the reading the F09 reader performed --
+    ``assurance_health_census`` thaws it out of the handle that reader minted --
+    and nothing else supplies it at all.
 
     Returns ``{"available": False, "reason": ...}`` when the reading itself is
     absent -- an unavailable reading is reported as unavailable and never as an
@@ -304,15 +305,22 @@ def assurance_health_census(reading: _WorkflowTruthReading) -> dict[str, _Any]:
     this parameter and nothing shaped like a handle passes for one.  Anything
     else is a ``TypeError``.  The instant is still this function's own.
 
-    AND PROVENANCE IS RE-CHECKED AGAINST CONTENTS, NOT ONLY AGAINST IDENTITY.  A
-    review took a handle the reader really had minted, replaced its payload
-    through ``object.__setattr__``, and projected a complete forged census
-    through this entry -- every identity check passed, because the handle's
-    provenance was genuine and only its CONTENTS were the caller's.  So this
-    entry re-verifies the reading through the reader's own
-    ``verify_workflow_truth_reading``, which re-derives the content digest the
-    reader bound at mint time and refuses with ``READING_PAYLOAD_REPLACED`` if
-    what the handle is holding is no longer what was read.
+    AND THE CONTENTS COME FROM THE READER'S CAPTURE, NOT FROM THE HANDLE.  A
+    review took a handle the reader really had minted, replaced the payload
+    attribute behind it, and projected a complete forged census through this
+    entry -- every identity check passed, because the handle's provenance was
+    genuine and only its CONTENTS were the caller's.  A later review beat the
+    content digest that answered that, by installing a stateful mapping that
+    served authentic content to the verification traversal and forged content to
+    the render traversal.  Neither route exists now: the reader captures the
+    reading ONCE at mint into a private immutable value, the handle carries
+    nothing but an opaque key to it, and ``rendered()`` copies that captured
+    value.  This entry still calls the reader's own
+    ``verify_workflow_truth_reading`` first, which refuses with
+    ``READING_PAYLOAD_REPLACED`` when a genuinely minted handle is no longer
+    bound to the reading it was minted for -- but there is no longer a payload on
+    the handle for a caller to substitute, and no second traversal of anything a
+    caller can reach between the check and the projection.
 
     Consuming the reading rather than repeating it is what makes a health run one
     moment: ``tools/health-check.py`` performs the F09 read once and renders both
@@ -324,15 +332,25 @@ def assurance_health_census(reading: _WorkflowTruthReading) -> dict[str, _Any]:
     reading is reported absent; it is never projected as an empty or a healthy
     census.
     """
-    if not _is_workflow_truth_reading(reading):
-        raise TypeError(
+    # THE READER OWNS THE VERDICT, AND ITS REASON IDS.  Asking it once -- rather
+    # than testing the shape here and verifying there -- is what keeps a handle it
+    # minted that is no longer bound to its own reading (READING_PAYLOAD_REPLACED)
+    # distinguishable from anything else a caller passed (READING_NOT_MINTED),
+    # instead of both arriving as one undifferentiated TypeError.  Both ARE
+    # TypeErrors: WorkflowTruthReadingError subclasses it, so every caller that
+    # already refuses a non-reading with TypeError still does.
+    try:
+        _verify_workflow_truth_reading(reading)
+    except _WorkflowTruthReadingError as exc:
+        raise _WorkflowTruthReadingError(
+            exc.reason_id,
             "assurance_health_census accepts only a workflow-truth reading minted by "
             "lib/control_plane_workflow_truth_reader.read_workflow_truth_reading(); "
             f"{type(reading).__name__} is caller-supplied data, and a census a caller "
-            "composed is its assertion about the control plane, not a reading of it")
-    # Identity says this handle came from the reader; the digest says it is still
-    # holding what the reader read. Both, in that order, or nothing is projected.
-    _verify_workflow_truth_reading(reading)
+            f"composed is its assertion about the control plane, not a reading of it "
+            f"({exc})") from None
+    # What the handle then renders is the reader's single capture, which this
+    # module never had a way to reach and a caller never had a way to write.
     return _project(reading.rendered(), now=_datetime.now(_timezone.utc))
 
 
