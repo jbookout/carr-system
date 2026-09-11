@@ -682,6 +682,22 @@ test("decisions: the slice binds exactly its six catalog decisions", () => {
   assert.throws(() => assertR01DecisionBinding({
     decision_ids: [...V5_R01_SETTLED_DECISION_IDS, "Q999.D1"] }),
   error => error instanceof V5R01Error && error.code === "decision_binding_mismatch");
+
+  // THE HOLDER IS CLOSED, AND ITS ONE FIELD IS REQUIRED. A binding that names the
+  // six ids and carries a seventh field has brought something else in with it; a
+  // binding that names nothing is not a binding. Each has its own refusal, and
+  // neither was asserted through this entry before the composite became one
+  // check — the shape questions were proved only on the validators underneath it.
+  assert.throws(() => assertR01DecisionBinding({
+    decision_ids: [...V5_R01_SETTLED_DECISION_IDS], observer: "an outside observer" }),
+  error => error instanceof V5R01Error && error.code === "unknown_field",
+  "a seventh field rode in beside the six ids");
+  assert.throws(() => assertR01DecisionBinding({}),
+    error => error instanceof V5R01Error && error.code === "missing_field",
+    "a binding that names no decision set was accepted");
+  assert.throws(() => assertR01DecisionBinding({ decision_ids: "Q009.D1" }),
+    error => error instanceof V5R01Error && error.code === "invalid_shape",
+    "a bare string was accepted where the set belongs");
 });
 
 test("decisions: a binding is checked element by element, never as one joined string", () => {
