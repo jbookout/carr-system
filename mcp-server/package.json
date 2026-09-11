@@ -11,6 +11,7 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "esbuild": "0.28.1",
     "neonctl": "^2.38.5",
     "pg": "8.13.1",
     "wrangler": "^4.115.0"
