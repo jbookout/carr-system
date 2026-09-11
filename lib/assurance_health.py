@@ -1000,11 +1000,11 @@ OWED_EVIDENCE_OWNER_SEAMS: dict[str, str] = {
         "a durable attempt-receipt store that verifies the envelope digest and "
         "plan hash against the attempt it claims",
     "controller_assessment":
-        "a reader inside this seam that itself queries "
-        "ops.legacy_schedule_observation_receipt and verifies the receipt it read; "
-        "lib/control_plane_workflow_truth projects rows its own caller read, and "
-        "the one real query lives in tools/health-check.py, so a readback reaching "
-        "this module is an argument rather than a reading",
+        "a surface that VERIFIES a reading of ops.legacy_schedule_observation_receipt "
+        "as the live state of that scheduler; lib/control_plane_workflow_truth_reader "
+        "does query that table and tools/health-check.py renders what it read, but "
+        "reading a receipt row is not the same act as vouching that it is current, and "
+        "a readback reaching this module is still an argument rather than that vouching",
     "candidate_outcome_oracle":
         "a durable preactivation candidate-outcome oracle store that verifies the "
         "governed data, environment, comparator, component versions and its own TTL",

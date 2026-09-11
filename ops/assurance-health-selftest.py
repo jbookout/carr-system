@@ -1022,29 +1022,31 @@ def caller_evidence_is_never_authority_checks(health) -> None:
           not minting, json.dumps(minting))
 
 
-def public_surface_guard_checks(health) -> None:
-    """PARSER-BACKED. The public names of the module, read out of its own syntax.
+# THE PRIVILEGED STRINGS IN THEIR DECISIVE FORM, shared by both surface guards so
+# the two halves of this surface are probed for the same thing.  A bare "passing"
+# also occurs inside prose ("a current passing receipt ... is required"), and a
+# bare "act" inside ``capabilities_withdrawn``, which is the OPPOSITE of the
+# privileged outcome -- so the probe looks for each one exactly where it decides
+# something.  Each guard ends with a control proving the probe really fires.
+PRIVILEGED_OUTCOME_TOKENS = ('"state": "healthy"', '"state": "passing"',
+                             '"capability_stage": "act"', '"green": true')
 
-    WHY A PARSER AND NOT A REGEX.  The claim being made is about the module's
+
+def _module_bindings(path: Path) -> tuple[set[str], list[str]]:
+    """The top-level names a module BINDS and the ones it EXPORTS, read by parser.
+
+    WHY A PARSER AND NOT A REGEX.  The claim these guards make is about a module's
     PUBLIC SURFACE, and that is a syntactic fact: which top-level names it binds,
     and which of them ``__all__`` exports.  A regex over the text can be fooled by
     a name inside a docstring, a comment or a string, in either direction -- and a
-    guard that can be fooled is worse than none, because it reports green.  So
-    this parses ``lib/assurance_health.py`` with ``ast`` and reads the bindings.
+    guard that can be fooled is worse than none, because it reports green.
 
-    WHAT IT FORBIDS, exactly: no public name may be a route that turns
-    caller-controlled input into a privileged outcome.  Two checks carry that.
-    (1) The classifier and every admission-shaped name must be absent from both
-    ``__all__`` and the module's non-underscore top-level bindings.  (2) Every
-    public callable is CALLED with caller-controlled shapes, and the privileged
-    strings must not appear anywhere in what comes back.
+    One reader, used by both surface guards, so the two halves of this surface
+    cannot be judged by two different definitions of "public".
     """
     import ast
-    import inspect
 
-    source = (REPO / "lib" / "assurance_health.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     bound: set[str] = set()
     declared_all: list[str] = []
     for node in tree.body:
@@ -1063,6 +1065,36 @@ def public_surface_guard_checks(health) -> None:
                                         and isinstance(element.value, str)]
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             bound.add(node.target.id)
+    return bound, declared_all
+
+
+def public_surface_guard_checks(health) -> None:
+    """PARSER-BACKED. The public names of the module, read out of its own syntax.
+
+    WHY A PARSER AND NOT A REGEX.  The claim being made is about the module's
+    PUBLIC SURFACE, and that is a syntactic fact: which top-level names it binds,
+    and which of them ``__all__`` exports.  A regex over the text can be fooled by
+    a name inside a docstring, a comment or a string, in either direction -- and a
+    guard that can be fooled is worse than none, because it reports green.  So
+    this parses ``lib/assurance_health.py`` with ``ast`` and reads the bindings.
+
+    IT READS EXACTLY ONE FILE, AND THAT WAS ITS OWN DEFECT ONCE.  This surface is
+    two modules -- the domain and its adapter -- and a guard bound to one half
+    reported green while ``lib/assurance_health_sources`` exported a route that
+    handed a caller's own census row back as ``workflow_truth``.  The adapter's
+    half is guarded by ``sources_public_surface_guard_checks`` below, through the
+    same parser and the same probe.
+
+    WHAT IT FORBIDS, exactly: no public name may be a route that turns
+    caller-controlled input into a privileged outcome.  Two checks carry that.
+    (1) The classifier and every admission-shaped name must be absent from both
+    ``__all__`` and the module's non-underscore top-level bindings.  (2) Every
+    public callable is CALLED with caller-controlled shapes, and the privileged
+    strings must not appear anywhere in what comes back.
+    """
+    import inspect
+
+    bound, declared_all = _module_bindings(REPO / "lib" / "assurance_health.py")
 
     check("the module declares an explicit public export list",
           bool(declared_all), json.dumps(declared_all))
@@ -1090,13 +1122,7 @@ def public_surface_guard_checks(health) -> None:
               name.startswith("_") and name in bound and name not in declared_all)
 
     # ---- every public callable, every caller-controlled shape ---------------
-    # THE PRIVILEGED STRINGS IN THEIR DECISIVE FORM.  A bare "passing" also occurs
-    # inside prose ("a current passing receipt ... is required"), and a bare "act"
-    # inside ``capabilities_withdrawn``, which is the OPPOSITE of the privileged
-    # outcome -- so the probe looks for each one exactly where it decides
-    # something.  The control at the end of this function proves the probe fires.
-    privileged = ('"state": "healthy"', '"state": "passing"',
-                  '"capability_stage": "act"', '"green": true')
+    privileged = PRIVILEGED_OUTCOME_TOKENS
     perfect_evidence = _evidence()
     perfect_bundle = {"scope": SCOPE, "workflow_truth": _truth(SCOPE),
                       "evidence": perfect_evidence}
@@ -1208,18 +1234,37 @@ def _reading(*, surfaces=(), owners=_DEFAULT, **census_kwargs):
                        if owners is _DEFAULT else owners)}
 
 
+def _hypothetical(workflows: Any, *, now: Any = NOW) -> dict[str, Any]:
+    """Reach the adapter's classification the ONLY way a test is allowed to.
+
+    ``lib.assurance_health_sources`` exports one callable and it accepts nothing:
+    it reads the F09 census itself, because an adapter that accepts a census
+    accepts its caller's assertion about the control plane.  This suite cannot
+    read a control plane, so it drives the classification through the module's
+    UNEXPORTED hook, which returns its answer under
+    ``would_be_census_if_authoritative`` -- a name no consumer can read as a
+    state any surface holds.  ``sources_public_surface_guard_checks`` parses the
+    module and fails the moment that hook becomes public.
+    """
+    import lib.assurance_health_sources as sources
+    return sources._would_be_assurance_health_if_authoritative(
+        workflows, now=now)["would_be_census_if_authoritative"]
+
+
 def source_adapter_checks() -> None:
-    """The seam that binds this projection to a reading a health surface already has.
+    """The seam that binds this projection to the F09 census it reads itself.
 
     WHAT THESE PIN.  EVERY layer is declared unread and named, never defaulted --
-    the controller readback included, because a scheduler observation entry inside
-    a caller-supplied snapshot is the caller's assertion and not a reading.  No
-    reading that passes through this seam can produce a green or even a degraded
-    row: there is nothing here that could become a determinate fact about a scope.
+    the controller readback included, because reading the observation receipts is
+    not the same act as vouching that one of them is the live state of that
+    scheduler.  No reading that passes through this seam can produce a green or
+    even a degraded row: there is nothing here that could become a determinate
+    fact about a scope.  Every census below is a FIXTURE, so every one of them is
+    driven through the unexported hook rather than the public entry.
     """
     import lib.assurance_health_sources as sources
 
-    unavailable = sources.assurance_health_from_snapshot(
+    unavailable = _hypothetical(
         {"available": False, "reason": "control-plane rows unreadable (OperationalError)"},
         now=NOW)
     check("an unavailable reading is reported unavailable, never as an empty census",
@@ -1227,12 +1272,12 @@ def source_adapter_checks() -> None:
           and "OperationalError" in unavailable["reason"], json.dumps(unavailable))
     for bad, label in ((None, "no reading at all"), ({}, "an empty reading"),
                        ({"available": True, "census": {"rows": []}}, "a census from nowhere")):
-        result = sources.assurance_health_from_snapshot(bad, now=NOW)
+        result = _hypothetical(bad, now=NOW)
         check(f"{label} is refused rather than projected",
               result["available"] is False, json.dumps(result))
 
     reading = _reading(surfaces=[_surface("assurance-fabric-child.launchd.v1")])
-    projected = sources.assurance_health_from_snapshot(reading, now=NOW)
+    projected = _hypothetical(reading, now=NOW)
     check("a reading with one exact controller readback projects a bound scope",
           projected["available"] and projected["projection"]["summary"]["scopes"] == 1,
           json.dumps(projected.get("reason", "")))
@@ -1268,7 +1313,7 @@ def source_adapter_checks() -> None:
               any(note.startswith(f"{slot}:") and "would come from" in note for note in notes),
               json.dumps(notes))
 
-    none_read = sources.assurance_health_from_snapshot(_reading(), now=NOW)
+    none_read = _hypothetical(_reading(), now=NOW)
     absent = none_read["projection"]["rows"][0]["evidence"]["controller_assessment"]
     PROJECTED.append(none_read["projection"]["rows"][0])
     check("a reading holding no receipt is unread too, and says it held none",
@@ -1277,7 +1322,7 @@ def source_adapter_checks() -> None:
                   for note in none_read["input_notes"]["assurance-fabric-child@v1"]),
           absent["state"])
 
-    two = sources.assurance_health_from_snapshot(_reading(surfaces=[
+    two = _hypothetical(_reading(surfaces=[
         _surface("assurance-fabric-child.launchd.v1"),
         _surface("assurance-fabric-child.launchd.v2")]), now=NOW)
     ambiguous = two["projection"]["rows"][0]["evidence"]["controller_assessment"]
@@ -1293,7 +1338,7 @@ def source_adapter_checks() -> None:
     # NO SUPPLIED RECEIPT MOVES A LABEL, in either direction. A receipt inside the
     # registry's own window and one two hours outside it produce the same row,
     # because neither was read by anything that could vouch for it.
-    stale = sources.assurance_health_from_snapshot(
+    stale = _hypothetical(
         _reading(surfaces=[_surface("assurance-fabric-child.launchd.v1",
                                     observed=OBSERVED)]), now=NOW)
     stale_row = stale["projection"]["rows"][0]
@@ -1313,7 +1358,7 @@ def source_adapter_checks() -> None:
           and not any("withdrew" in reason for reason in stale_row["reasons"]),
           json.dumps(stale_row["reasons"]))
 
-    ownerless = sources.assurance_health_from_snapshot(
+    ownerless = _hypothetical(
         _reading(surfaces=[_surface("assurance-fabric-child.launchd.v1")], owners={}), now=NOW)
     check("a workflow with no declared owner is reported unprojectable, not given one",
           ownerless["projection"]["summary"]["scopes"] == 0
@@ -1321,7 +1366,7 @@ def source_adapter_checks() -> None:
           and "inventory.owner" in ownerless["unprojectable"][0]["reason"],
           json.dumps(ownerless["unprojectable"]))
 
-    disabled = sources.assurance_health_from_snapshot(
+    disabled = _hypothetical(
         _reading(enabled=False, surfaces=[_surface("assurance-fabric-child.launchd.v1")]),
         now=NOW)
     disabled_row = disabled["projection"]["rows"][0]
@@ -1339,10 +1384,10 @@ def source_adapter_checks() -> None:
                   _surface("unaffected.launchd.v1", key="unaffected")],
         owners={"degrading@v1": MANIFEST_OWNER, "unaffected@v1": MANIFEST_OWNER})
     fenced_rows = {row["scope"]["workflow_key"]: row
-                   for row in sources.assurance_health_from_snapshot(
+                   for row in _hypothetical(
                        fenced, now=NOW)["projection"]["rows"]}
     PROJECTED.extend(fenced_rows.values())
-    fenced_notes = sources.assurance_health_from_snapshot(fenced, now=NOW)["input_notes"]
+    fenced_notes = _hypothetical(fenced, now=NOW)["input_notes"]
     for key in ("degrading", "unaffected"):
         check(f"{key}'s notes name the receipt that binds {key}, not another scope's",
               any(f"{key}.launchd.v1" in note for note in fenced_notes[f"{key}@v1"])
@@ -1369,7 +1414,7 @@ def source_adapter_checks() -> None:
                   _surface("also-degrading.launchd.v1", key="also-degrading",
                            observed=OBSERVED)],
         owners={"degrading@v1": MANIFEST_OWNER, "also-degrading@v1": MANIFEST_OWNER})
-    many = sources.assurance_health_from_snapshot(both_stale, now=NOW)
+    many = _hypothetical(both_stale, now=NOW)
     check("a census of unbound scopes summarises without an identity to sort on",
           many["available"] is True, json.dumps(many.get("reason", "")))
     if many["available"]:
@@ -1379,23 +1424,205 @@ def source_adapter_checks() -> None:
         check("two Work Request-less scopes sort against each other without an identity",
               ordered == ["also-degrading@v1", "degrading@v1"], json.dumps(ordered))
 
+    # THE INVERTED ASSERTION, and the inversion is the correction. This suite used
+    # to pin that the seam read NOTHING -- no file, no process, no clock -- which
+    # was true and was exactly the defect: a seam that reads nothing must be HANDED
+    # a census, and a handed census is its caller's assertion about the control
+    # plane. The seam now performs the read, and what is pinned is WHICH read.
     source = Path(sources.__file__).read_text(encoding="utf-8")
-    check("the seam reads nothing itself: no file, process, socket or database route",
-          not any(token in source for token in
-                  ("import os", "import subprocess", "import socket", "import psycopg",
-                   "open(", "requests.", "datetime.now")), "an import would make it a reader")
+    check("the seam performs the F09 read itself rather than accepting a census",
+          "from lib.control_plane_workflow_truth_reader import" in source
+          and "_read_workflow_truth_snapshot()" in source, "the seam reads nothing")
+    check("the seam reads through the SAME reader the health surface renders from",
+          "from lib.control_plane_workflow_truth_reader import read_workflow_truth_snapshot"
+          in (REPO / "tools" / "health-check.py").read_text(encoding="utf-8"),
+          "tools/health-check.py reads the census some other way")
+    reader_source = (REPO / "lib" / "control_plane_workflow_truth_reader.py").read_text(
+        encoding="utf-8")
+    check("the reader itself takes no argument through which a census could arrive",
+          "def read_workflow_truth_snapshot() -> dict[str, Any]:" in reader_source,
+          "the reader accepts caller input")
+
+
+def sources_public_surface_guard_checks(health) -> None:
+    """PARSER-BACKED, for the ADAPTER half of this surface.
+
+    THE DEFECT THIS EXISTS FOR.  ``public_surface_guard_checks`` parses
+    ``lib/assurance_health.py`` and only that file.  While it reported green,
+    ``lib/assurance_health_sources`` had no ``__all__`` at all and exported
+    ``assurance_health_scopes(workflows)``, which validated a caller's census
+    schema and each row's key and version and then returned THE CALLER'S OWN ROW
+    back as ``workflow_truth``.  A review fed it a hand-written census and
+    reproduced ``{"state": "healthy", "green": true, "capability_stage": "act"}``
+    through that exported function.  A guard bound to one file of a two-file
+    surface certifies the half it reads and says nothing about the other.
+
+    WHAT IT PINS, in order.  (1) The module declares ``__all__`` and its public
+    names are EXACTLY that list -- nothing is public by accident here.  (2) No
+    public name carries a classifier, admission, fixture, snapshot or scopes
+    shape.  (3) The two retired entry points are gone from the module under any
+    name.  (4) The private classification names exist, start with an underscore
+    and are unexported.  (5) NO PUBLIC CALLABLE ACCEPTS A PARAMETER AT ALL, which
+    is the structural form of "the only caller input is the request to read".
+    (6) Every caller-controlled census shape is pushed at every public callable
+    positionally and under every plausible keyword, and neither the privileged
+    strings nor the caller's own sentinel value ever come back.  (7) The public
+    entry is called for real -- it performs the F09 read -- and its answer
+    carries no privileged string either.  (8) A control proves the probe fires.
+    """
+    import inspect
+
+    import lib.assurance_health_sources as sources
+
+    bound, declared_all = _module_bindings(REPO / "lib" / "assurance_health_sources.py")
+    check("the adapter declares an explicit public export list",
+          bool(declared_all), json.dumps(declared_all))
+    public = {name for name in bound if not name.startswith("_")}
+    check("every exported adapter name is actually bound at module level",
+          not sorted(set(declared_all) - bound),
+          json.dumps(sorted(set(declared_all) - bound)))
+    imported_public = {name for name in dir(sources) if not name.startswith("_")}
+    check("the parser and the imported adapter agree on the public names",
+          public == imported_public, json.dumps(sorted(public ^ imported_public)))
+    # STRICTER THAN THE DOMAIN HALF ON PURPOSE: every import in this module is
+    # aliased under an underscore, so its public surface is its export list
+    # exactly and a new public name cannot arrive by accident. ``annotations`` is
+    # the one unavoidable exception -- ``from __future__ import annotations``
+    # binds it and there is no aliased form of that statement.
+    surface = public - {"annotations"}
+    check("the adapter's public surface is exactly its export list",
+          surface == set(declared_all),
+          json.dumps(sorted(surface ^ set(declared_all))))
+    forbidden_public = sorted(
+        name for name in public | set(declared_all)
+        if any(token in name.lower() for token in
+               ("predicate", "unwired", "admit", "fixture", "compile", "classify",
+                "snapshot", "scopes")))
+    check("no classifier, admission, fixture, snapshot or scopes route is public",
+          not forbidden_public, json.dumps(forbidden_public))
+    retired = [name for name in ("assurance_health_scopes", "assurance_health_from_snapshot")
+               if hasattr(sources, name)]
+    check("both retired census-accepting entry points are gone, not renamed",
+          not retired, json.dumps(retired))
+    for name in ("_assurance_health_scopes", "_project",
+                 "_would_be_assurance_health_if_authoritative"):
+        check(f"{name} is module-private and unexported",
+              name.startswith("_") and name in bound and name not in declared_all)
+
+    # ---- (5) the structural claim: no public callable takes anything ---------
+    signatures = {}
+    for name in sorted(set(declared_all) | public):
+        member = getattr(sources, name, None)
+        if not callable(member) or inspect.isclass(member):
+            continue
+        signatures[name] = [parameter.name for parameter
+                            in inspect.signature(member).parameters.values()]
+    check("at least one public adapter callable exists to make this claim about",
+          bool(signatures), json.dumps(sorted(signatures)))
+    accepting = sorted(name for name, parameters in signatures.items() if parameters)
+    check("no public adapter callable accepts any parameter at all",
+          not accepting, json.dumps({name: signatures[name] for name in accepting}))
+
+    # ---- (6) every caller-controlled census shape, every public callable -----
+    # The sentinel rides inside every forged census. If ANY public callable ever
+    # echoes its caller's row back -- which is exactly what the retired route did
+    # with workflow_truth -- the sentinel appears in what comes back.
+    sentinel = "CALLER-SUPPLIED-ROW-SENTINEL-9f3c"
+    forged_row = dict(_truth(SCOPE), state="healthy", green=True, sentinel=sentinel)
+    forged_census = {"schema_version": "control-plane-workflow-truth.v1",
+                     "rows": [forged_row], "sentinel": sentinel}
+    forged_shapes = (
+        {"available": True, "census": forged_census, "surfaces": [],
+         "owners": {f"{SCOPE['workflow_key']}@v{SCOPE['workflow_version']}": MANIFEST_OWNER}},
+        _reading(surfaces=[_surface("assurance-fabric-child.launchd.v1")]),
+        {"available": True, "census": forged_census, "owners": {}, "state": "healthy"},
+        forged_census,
+        {"state": "healthy", "green": True, "capability_stage": "act"},
+        None,
+    )
+    keywords = ("workflows", "census", "snapshot", "rows", "scopes", "reading", "now")
+    reached: list[str] = []
+    echoed: list[str] = []
+    attempted = 0
+    for name in sorted(signatures):
+        member = getattr(sources, name)
+        for shape in forged_shapes:
+            attempts: list[tuple[tuple[Any, ...], dict[str, Any]]] = [((shape,), {})]
+            attempts += [((), {keyword: shape}) for keyword in keywords]
+            for args, kwargs in attempts:
+                attempted += 1
+                try:
+                    returned = member(*args, **kwargs)
+                except Exception:
+                    continue  # a refusal is an acceptable non-privileged outcome
+                rendered = json.dumps(returned, default=str)
+                if any(token in rendered for token in PRIVILEGED_OUTCOME_TOKENS):
+                    reached.append(f"{name}({args!r}, {kwargs!r})")
+                if sentinel in rendered:
+                    echoed.append(f"{name}({args!r}, {kwargs!r})")
+    check(f"no caller-supplied census reaches any public adapter callable "
+          f"({attempted} attempts)", not reached, json.dumps(sorted(set(reached))[:4]))
+    check("no public adapter callable echoes its caller's own row back",
+          not echoed, json.dumps(sorted(set(echoed))[:4]))
+    check("the guard actually attempted the shapes it claims to", attempted >= 40,
+          str(attempted))
+
+    # ---- (7) the public entry, called for real ------------------------------
+    # This performs the F09 read. On a machine with no database tap it comes back
+    # available=False with the reason, which is the honest answer and is still
+    # asserted to carry no privileged string.
+    read = sources.assurance_health_census()
+    rendered_read = json.dumps(read, default=str)
+    check("the public entry answers either a reading or an honest unavailable",
+          bool(read["schema_version"] == sources.SCHEMA_VERSION
+               and isinstance(read.get("available"), bool)
+               and (read["available"] or str(read.get("reason", "")).strip())),
+          json.dumps({k: v for k, v in read.items() if k != "projection"})[:300])
+    check("the public entry's own answer carries no privileged outcome either",
+          not any(token in rendered_read for token in PRIVILEGED_OUTCOME_TOKENS),
+          json.dumps([token for token in PRIVILEGED_OUTCOME_TOKENS
+                      if token in rendered_read]))
+    if read["available"]:
+        check("a real reading renders no green scope and no healthy scope",
+              read["projection"]["summary"]["green"] == 0
+              and read["projection"]["summary"]["states"]["healthy"] == 0,
+              json.dumps(read["projection"]["summary"]["states"]))
+
+    # ---- (8) THE CONTROL ----------------------------------------------------
+    # The same probe over the domain module's private hook DOES find every
+    # privileged string, which is what makes the assertions above a measurement
+    # of these public surfaces rather than of a probe that never fires.
+    control = health._test_only_hypothetical_row(
+        scope=SCOPE, workflow_truth=_truth(SCOPE), evidence=_evidence(),
+        now=NOW)["would_be_healthy_if_authoritative"]
+    rendered_control = json.dumps(control, default=str)
+    check("the adapter probe detects every privileged string when one is really there",
+          all(token in rendered_control for token in PRIVILEGED_OUTCOME_TOKENS),
+          json.dumps([token for token in PRIVILEGED_OUTCOME_TOKENS
+                      if token not in rendered_control]))
+    # And the sentinel probe fires too: a dict that really does carry the caller's
+    # row renders the sentinel, so "not echoed" above is a measurement.
+    check("the echo probe detects a caller's own row when one is really echoed",
+          sentinel in json.dumps({"workflow_truth": forged_row}, default=str))
 
 
 def surface_wiring_checks() -> None:
-    """The health surface itself, driven hermetically through its own fixture door.
+    """The health surface itself, driven hermetically through its own TEST DOOR.
 
-    A projection nothing reads is not wired to anything.  This drives the real
+    A projection nothing reads is not wired to anything, so this drives the real
     ``tools/health-check.py`` canonical reader against a fixture snapshot -- no
-    database, no network, no clock of ours -- and pins that the section prints
-    evidence-backed states, names the layers this surface does not read, and
-    never reports a green scope out of a reading that cannot contain one.
+    database, no network, no clock of ours.
+
+    AND THE DOOR NOW SAYS WHAT IT IS.  The adapter reads the F09 census itself and
+    accepts none from a caller, so a fixture can no longer reach the read path at
+    all: under ``--fixture`` the surface announces on its first line that nothing
+    below was read, reaches the adapter's unexported hook, and renders EVERY state
+    as ``would-be-<state>-if-authoritative``.  These checks pin that labelling as
+    hard as they pin the counts -- a test door that prints an unhedged state is
+    the same defect as an adapter that accepts a census, one surface further out.
     """
     import os
+    import re
     import subprocess
     import tempfile
     from datetime import datetime, timedelta, timezone
@@ -1436,13 +1663,20 @@ def surface_wiring_checks() -> None:
         os.unlink(path)
     out = proc.stdout
 
+    check("a fixture-fed run announces on its first line that it read nothing",
+          out.startswith("FIXTURE-DERIVED RUN — --fixture ")
+          and "no line of it is evidence of health" in out, out[:300])
     check("the canonical health surface prints an assurance-health section at all",
-          "Assurance health — evidence-backed state per bound workflow scope" in out,
-          out[-400:])
-    check("the section reports a bound scope and no green one",
-          "1 bound scope(s)" in out and "; 0 green" in out, out[-400:])
+          "Assurance health — FIXTURE-DERIVED HYPOTHETICAL, NOT A READING (test door)"
+          in out, out[-400:])
+    check("the section says the adapter did not read the control plane",
+          "the adapter did NOT read the control plane" in out
+          and "no finding is recorded from it" in out, out[-600:])
+    check("the section reports a bound scope and no would-be-green one",
+          "1 bound scope(s) WOULD BE" in out
+          and "; 0 would-be-green-if-authoritative" in out, out[-400:])
     check("a workflow whose owner the manifest never declared is named, not projected",
-          "UNPROJECTABLE ownerless-workflow@v1" in out
+          "WOULD BE UNPROJECTABLE ownerless-workflow@v1" in out
           and "inventory.owner" in out, out[-400:])
     check("the layers this surface does not read are printed as the gap they are",
           all(slot in out for slot in
@@ -1457,8 +1691,21 @@ def surface_wiring_checks() -> None:
     check("a reading that holds no failure records no assurance-health finding",
           "CANONICAL_FINDING assurance_health_failed" not in out
           and "CANONICAL_FINDING assurance_health_degraded" not in out, out[-400:])
+    summary_line = next(line for line in out.splitlines() if "bound scope(s)" in line)
     check("no scope reached a healthy label on a reading that cannot contain one",
-          " 0 healthy" in out and "1 unknown" in out, out[-400:])
+          "0 would-be-healthy-if-authoritative" in summary_line
+          and "1 would-be-unknown-if-authoritative" in summary_line, summary_line)
+    # THE LABELLING ASSERTION, and it is the point of keeping this door at all.
+    # Every count on the summary line is hedged; not one bare state name survives
+    # on it, so no reader and no grep can lift a health claim out of a fixture.
+    check("the fixture summary states every count as an explicit hypothetical",
+          "WOULD BE:" in summary_line
+          and all(f"would-be-{state}-if-authoritative" in summary_line
+                  for state in ("healthy", "degraded", "failed", "unknown", "disabled",
+                                "not-yet-operational", "green"))
+          and not re.search(r"\d+ (?:healthy|green|degraded|failed|unknown|disabled)",
+                            summary_line),
+          summary_line)
 
     # INJECTION ON THE REAL SURFACE, AND WHAT IT MAY NOT DO. One workflow's
     # controller readback is pushed outside the registry's own observation window
@@ -1504,7 +1751,8 @@ def surface_wiring_checks() -> None:
 
     check("an injected receipt cannot degrade a scope on the real surface",
           "degrading v1 DEGRADED" not in section
-          and "unaffected v1 DEGRADED" not in section, section[:600])
+          and "unaffected v1 DEGRADED" not in section
+          and "WOULD BE DEGRADED IF AUTHORITATIVE" not in section, section[:600])
     # PRINTED, not recorded: _canonical_finding writes one stdout line and there
     # is no record-layer seam behind it.  The claim is kept exactly that size --
     # and here the line is not printed at all, because nothing was evidenced.
@@ -1512,8 +1760,9 @@ def surface_wiring_checks() -> None:
           "CANONICAL_FINDING assurance_health_degraded" not in section
           and "CANONICAL_FINDING assurance_health_failed" not in section, section[:600])
     check("both scopes are carried as unknown rather than dropped or guessed at",
-          "2 bound scope(s): 0 healthy, 0 degraded, 0 failed, 2 unknown" in section,
-          section[:600])
+          "2 bound scope(s) WOULD BE: 0 would-be-healthy-if-authoritative, "
+          "0 would-be-degraded-if-authoritative, 0 would-be-failed-if-authoritative, "
+          "2 would-be-unknown-if-authoritative" in section, section[:600])
     check("the surface names the controller layer as one it did not read",
           "NOT READ BY THIS SURFACE" in section
           and "controller_assessment" in section, section[:600])
@@ -1567,15 +1816,18 @@ def surface_wiring_checks() -> None:
           "assurance health   UNAVAILABLE" not in two_section
           and "TypeError" not in two_section, two_section[:600])
     check("both workflow-only scopes are counted on the surface",
-          "2 bound scope(s): 0 healthy, 0 degraded, 0 failed, 2 unknown" in two_section,
-          two_section[:600])
+          "2 bound scope(s) WOULD BE: 0 would-be-healthy-if-authoritative, "
+          "0 would-be-degraded-if-authoritative, 0 would-be-failed-if-authoritative, "
+          "2 would-be-unknown-if-authoritative" in two_section, two_section[:600])
     # The census-level row sort is the half of that defect this surface still
     # exercises: two rows, both with work_request_id None, ordered against each
     # other. The summary's degraded LIST is the other half, and it is driven with
     # two genuinely degraded scopes in workflow_only_scope_checks.
     check("the summary was computed over both unbound rows rather than refused",
-          "; 0 green" in two_section
-          and "0 disabled, 0 not-yet-operational" in two_section, two_section[:600])
+          "; 0 would-be-green-if-authoritative" in two_section
+          and "0 would-be-disabled-if-authoritative, "
+              "0 would-be-not-yet-operational-if-authoritative" in two_section,
+          two_section[:600])
 
 
 def main() -> int:
@@ -1596,6 +1848,7 @@ def main() -> int:
     caller_evidence_is_never_authority_checks(health)
     public_surface_guard_checks(health)
     source_adapter_checks()
+    sources_public_surface_guard_checks(health)
     surface_wiring_checks()
     refusal_checks(health)
     output_discipline_checks(health)

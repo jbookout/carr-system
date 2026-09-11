@@ -262,149 +262,26 @@ if "--tasks" in sys.argv:
     sys.exit(classify_tasks(sys.argv[_i + 1]))
 
 
-def _workflow_truth_query_python():
-    venv = os.path.join(REPO_ROOT, ".venv/bin/python")
-    return venv if os.path.exists(venv) else sys.executable
-
-
-def _workflow_truth_json(sql, timeout=120):
-    """Run one single-column JSON read through the canonical tap.
-
-    The tap sets ON_ERROR_STOP, so each read that may legitimately refuse gets
-    its own call: a Completion Register read without a server-derived tenant
-    must not abort the workflow rows beside it.
-    """
-    proc = subprocess.run(
-        [_workflow_truth_query_python(),
-         os.path.join(REPO_ROOT, "tools/db-tap.py"), "sql", "/dev/stdin"],
-        input=sql, cwd=REPO_ROOT, text=True, capture_output=True, timeout=timeout,
-        env={k: v for k, v in os.environ.items() if k != "CARR_VAULT"},
-    )
-    if proc.returncode:
-        raise RuntimeError((proc.stderr or "").strip().splitlines()[-1]
-                           if (proc.stderr or "").strip() else "query failed")
-    for line in reversed(proc.stdout.splitlines()):
-        line = line.strip()
-        if line.startswith("{"):
-            return json.loads(line)
-    raise RuntimeError("no JSON row returned")
-
-
 def _workflow_truth_snapshot():
-    """Project the clean-start workflow census for the Operations surface.
+    """Read the clean-start workflow census for the Operations surface.
 
-    THIS RENDERS THE SAME PROJECTION THE CONTROL-PLANE CENSUS RENDERS, through
-    the same pure adapter, so the two surfaces cannot drift into two opinions.
-    Reads only; it creates no job, no registry and no effect.
+    THE READING ITSELF LIVES IN lib/control_plane_workflow_truth_reader, and this
+    is a one-line delegation to it. It moved there so the A01 assurance-health
+    seam can perform the SAME read rather than be handed a census by whoever
+    called it: an adapter that ACCEPTS a census accepts its caller's assertion
+    about the control plane, and that was the exported route a review used to
+    reproduce a healthy scope out of a hand-written snapshot.
 
-    UNAVAILABLE IS NOT EMPTY. Every failure below returns available=False with
-    the reason, and the caller prints that rather than an empty census. It does
-    NOT join snapshot["errors"], because a machine without a database tap or
-    without a server-derived completion tenant has an ABSENT reading, not a
-    failed pipeline, and rule bd4a6d22 forbids printing a chosen state as a
-    permanent failure.
+    Reads only; it creates no job, no registry and no effect. UNAVAILABLE IS NOT
+    EMPTY -- every refusal comes back as available=False carrying its reason, and
+    the caller prints that rather than an empty census.
     """
     try:
         sys.path.insert(0, REPO_ROOT)
-        from lib.control_plane_workflow_truth import UNREADABLE, workflow_truth
+        from lib.control_plane_workflow_truth_reader import read_workflow_truth_snapshot
     except Exception as exc:
         return {"available": False, "reason": f"adapter unavailable ({type(exc).__name__}: {exc})"}
-    try:
-        with open(os.path.join(REPO_ROOT, "ops/config/control-plane-workflows.v1.json"),
-                  encoding="utf-8") as fh:
-            manifest = json.load(fh)
-        with open(os.path.join(REPO_ROOT, "ops/config/control-plane-scheduler-cutover.v1.json"),
-                  encoding="utf-8") as fh:
-            registry = json.load(fh)
-        max_age = int(registry["observation_max_age_seconds"])
-    except Exception as exc:
-        return {"available": False,
-                "reason": f"checked-in registry unreadable ({type(exc).__name__}: {exc})"}
-
-    rows_sql = """select json_build_object(
-      'definitions', coalesce((select json_agg(json_build_object(
-           'key',d.key,'version',d.version,'enabled',d.enabled,
-           'execution_contract',d.execution_contract,'legacy_schedule',d.legacy_schedule,
-           'legacy_disabled_at',d.legacy_disabled_at)
-         order by d.key,d.version) from ops.job_definition d),'[]'::json),
-      'acceptances', coalesce((select json_agg(json_build_object(
-           'workflow_key',a.workflow_key,'workflow_version',a.workflow_version,
-           'mode',a.mode,'status',a.status)
-         order by a.workflow_key,a.workflow_version,a.mode,a.status)
-         from ops.workflow_acceptance a),'[]'::json),
-      'disable_receipts', coalesce((select json_object_agg(r.surface_id,r.receipt_ref)
-         from ops.legacy_schedule_disable_receipt r),'{}'::json),
-      'observations', coalesce((select json_object_agg(o.surface_id, json_build_object(
-           'scheduler_state',o.scheduler_state,'observed_at',o.observed_at))
-         from (select distinct on (surface_id) surface_id,scheduler_state,observed_at
-                 from ops.legacy_schedule_observation_receipt
-                order by surface_id,observed_at desc,id desc) o),'{}'::json)
-    )::text"""
-    try:
-        payload = _workflow_truth_json(rows_sql)
-    except Exception as exc:
-        return {"available": False,
-                "reason": f"control-plane rows unreadable ({type(exc).__name__}: {exc})"}
-
-    # 0431 derives the tenant from a server setting and RAISES without one. A
-    # separate call keeps that refusal from aborting the rows above, and the
-    # refusal is reported as unreadable completion evidence, never as none.
-    completion_sql = """select coalesce((select json_object_agg(p.stable_key, json_build_object(
-        'lifecycle_state',p.lifecycle_state,
-        'first_path', exists(select 1 from ops.completion_current_observation o
-                              where o.subject_id=p.subject_id
-                                and o.observation_kind='workflow_trigger'
-                                and o.authority_class='authoritative'
-                                and o.expires_at>now())))
-      from ops.completion_projection p),'{}'::json)::text"""
-    completion_error = None
-    try:
-        completion = _workflow_truth_json(completion_sql)
-    except Exception as exc:
-        completion = UNREADABLE
-        completion_error = f"{type(exc).__name__}: {exc}"
-
-    surfaces = []
-    for surface in registry.get("surfaces", []):
-        surface_id = str(surface["surface_id"])
-        surfaces.append({
-            "workflow_key": str(surface["workflow_key"]),
-            "workflow_version": int(surface["workflow_version"]),
-            "surface_id": surface_id,
-            "locator": str(surface["locator"]),
-            "scheduler_kind": str(surface["scheduler_kind"]),
-            "duplicate_group": surface.get("duplicate_group"),
-            "disable_receipt_ref": (payload.get("disable_receipts") or {}).get(surface_id),
-            "observation": (payload.get("observations") or {}).get(surface_id),
-        })
-    try:
-        census = workflow_truth(
-            declarations=manifest.get("workflows", []),
-            definitions=payload.get("definitions", []),
-            acceptances=payload.get("acceptances", []),
-            surfaces=surfaces,
-            completion=completion,
-            observation_max_age_seconds=max_age,
-            now=datetime.now(timezone.utc),
-        )
-    except Exception as exc:
-        return {"available": False,
-                "reason": f"workflow truth refused the inputs ({type(exc).__name__}: {exc})"}
-    # The A01 assurance-health seam binds scopes out of THIS reading, so the two
-    # inputs it needs beside the census travel with it: the surfaces whose
-    # observation receipts are the one controller readback this surface holds,
-    # and the owner each workflow declares for itself in the checked-in manifest.
-    # Neither is a second reading; both were read above.
-    owners = {}
-    for declared in manifest.get("workflows", []):
-        owner = ((declared.get("inventory") or {}).get("owner")
-                 if isinstance(declared.get("inventory"), dict) else None)
-        if isinstance(owner, str) and owner.strip():
-            owners[f"{declared.get('key')}@v{declared.get('version')}"] = owner
-    result = {"available": True, "census": census, "surfaces": surfaces, "owners": owners}
-    if completion_error:
-        result["completion_error"] = completion_error
-    return result
+    return read_workflow_truth_snapshot()
 
 
 def _canonical_workflow_truth(snap):
@@ -486,13 +363,30 @@ def _canonical_workflow_truth(snap):
 def _canonical_assurance_health(snap):
     """Print the A01 assurance-health census and return rc.
 
-    NO LABEL ON THIS LINE CLAIMS EVIDENCE THIS READING DID NOT HOLD.  The
-    projection is fed by lib/assurance_health_sources, and today every one of the
-    six layers is handed over as explicitly UNREAD: none of them has an evidence
-    owner that could verify a receipt, so the states below are what this surface
-    can honestly derive from F09 workflow truth alone -- unknown, disabled -- with
-    every unread layer printed as the gap it is rather than passing silently.  A
-    healthy scope is unreachable here by construction, and that is the point.
+    THE CENSUS IS READ, NEVER SUPPLIED.  lib/assurance_health_sources performs
+    its own V5-F09 read through lib/control_plane_workflow_truth_reader -- the
+    same reader the workflow-truth section above renders from -- and its public
+    entry accepts no argument at all.  The ``snap`` this function is handed is
+    NOT that adapter's input: an adapter that accepts a census accepts its
+    caller's assertion about the control plane, and a review reproduced
+    ``{"state": "healthy", "green": true}`` through exactly that door before it
+    was closed.
+
+    THE --fixture DOOR IS A TEST DOOR AND LABELS ITSELF AS ONE.  A fixture census
+    still has to drive this section hermetically -- that is what proves the
+    section is wired to anything at all -- so under --fixture the reading is
+    replaced by the adapter's unexported test hook and EVERY line is printed as a
+    hypothetical: the states are rendered as would-be-<state>-if-authoritative,
+    no CANONICAL_FINDING is emitted, and the section can never turn this process
+    red.  Nothing a fixture says is evidence, and nothing it says is healthy.
+
+    NO LABEL ON THE READ LINE CLAIMS EVIDENCE THE READING DID NOT HOLD.  Today
+    every one of the six layers comes back explicitly UNREAD: none of them has an
+    evidence owner that could verify a receipt, so the states below are what this
+    surface can honestly derive from F09 workflow truth alone -- unknown,
+    disabled -- with every unread layer printed as the gap it is rather than
+    passing silently.  A healthy scope is unreachable here by construction, and
+    that is the point.
 
     RED ONLY WHERE THE FINDINGS THEMSELVES WITHDREW EVERYTHING (rule bd4a6d22).
     unknown, disabled and not-yet-operational are evidence-backed states, not
@@ -502,22 +396,22 @@ def _canonical_assurance_health(snap):
     recorded; only a failed scope -- where the findings alone withdrew every
     capability -- turns this surface red.
     """
-    print("Assurance health — evidence-backed state per bound workflow scope")
-    workflows = snap.get("workflows")
-    if workflows is None:
-        print("  -- assurance health   NOT IN SNAPSHOT (this reader supplied no census)")
-        return 0
     try:
         sys.path.insert(0, REPO_ROOT)
-        from lib.assurance_health_sources import assurance_health_from_snapshot
+        import lib.assurance_health_sources as sources
     except Exception as exc:
+        print("Assurance health — evidence-backed state per bound workflow scope")
         print(f"  -- assurance health   UNAVAILABLE — seam unavailable "
               f"({type(exc).__name__}: {exc})")
         return 0
+    if CANONICAL_FIXTURE:
+        return _fixture_assurance_health(sources, snap)
+
+    print("Assurance health — evidence-backed state per bound workflow scope")
     try:
-        result = assurance_health_from_snapshot(workflows, now=datetime.now(timezone.utc))
+        result = sources.assurance_health_census()
     except Exception as exc:
-        print(f"  -- assurance health   UNAVAILABLE — projection refused this reading "
+        print(f"  -- assurance health   UNAVAILABLE — the read refused "
               f"({type(exc).__name__}: {exc})")
         return 0
     if not result.get("available"):
@@ -545,6 +439,12 @@ def _canonical_assurance_health(snap):
             detail = f"{identity} DEGRADED: {row['state_reason']}"
             print(f"  ⚠︎ {detail}")
             _canonical_finding("assurance_health_degraded", detail)
+    _print_assurance_layer_gaps(projection)
+    return rc
+
+
+def _print_assurance_layer_gaps(projection):
+    """Name the layers this projection could not bind or could not read."""
     unbindable = sorted({slot for row in projection["rows"]
                          for slot, layer in row["evidence"].items()
                          if layer["state"] == "unbindable"})
@@ -559,16 +459,75 @@ def _canonical_assurance_health(snap):
         print("  -- NOT READ BY THIS SURFACE " + ", ".join(unread) +
               " — no scope can be shown healthy until an authoritative reading of each "
               "reaches this census; an unread layer is never counted as passing")
-    return rc
+
+
+def _fixture_assurance_health(sources, snap):
+    """The --fixture test door, which prints hypotheticals and returns 0.
+
+    A fixture census is the caller's assertion, so this door reaches the
+    adapter's UNEXPORTED test hook rather than its public entry, prints every
+    state under a would-be-<state>-if-authoritative name, records no finding, and
+    cannot turn this process red.  Its output is deliberately unusable as a
+    health claim: there is no line in it that says a scope is healthy or green.
+    """
+    print("Assurance health — FIXTURE-DERIVED HYPOTHETICAL, NOT A READING (test door)")
+    print("  -- --fixture supplied this census, so the adapter did NOT read the control "
+          "plane. Every line below is what the projection WOULD say IF this fixture were "
+          "authoritative; none of it is evidence, no scope in it is healthy or green, and "
+          "no finding is recorded from it.")
+    workflows = (snap or {}).get("workflows")
+    if workflows is None:
+        print("  -- assurance health   NOT IN FIXTURE (this fixture supplied no census)")
+        return 0
+    try:
+        hypothetical = sources._would_be_assurance_health_if_authoritative(
+            workflows, now=datetime.now(timezone.utc))["would_be_census_if_authoritative"]
+    except Exception as exc:
+        print(f"  -- assurance health   UNAVAILABLE — the projection refused this fixture "
+              f"({type(exc).__name__}: {exc})")
+        return 0
+    if not hypothetical.get("available"):
+        print(f"  -- assurance health   UNAVAILABLE — {hypothetical.get('reason', 'unstated')}")
+        return 0
+
+    projection = hypothetical["projection"]
+    summary = projection["summary"]
+    states = summary["states"]
+    print(f"  {summary['scopes']} bound scope(s) WOULD BE: "
+          + ", ".join(f"{states.get(state, 0)} would-be-{state}-if-authoritative"
+                      for state in projection["states"])
+          + f"; {summary['green']} would-be-green-if-authoritative")
+    for entry in hypothetical.get("unprojectable", []):
+        print(f"  -- WOULD BE UNPROJECTABLE {entry['workflow']} — {entry['reason']}")
+    for row in projection["rows"]:
+        scope = row["scope"]
+        identity = f"{scope['workflow_key']} v{scope['workflow_version']}"
+        if row["state"] in ("failed", "degraded"):
+            print(f"  ⚠︎ {identity} WOULD BE {row['state'].upper()} IF AUTHORITATIVE: "
+                  f"{row['state_reason']} — a fixture evidences nothing, so this is "
+                  "printed and no finding is recorded")
+    _print_assurance_layer_gaps(projection)
+    return 0
 
 
 def _canonical_snapshot():
-    """Read canonical database/control-plane evidence, never a Drive render."""
+    """Read canonical database/control-plane evidence, never a Drive render.
+
+    --fixture IS A TEST DOOR AND THE OUTPUT SAYS SO ON ITS FIRST LINE. A fixture
+    is composed by whoever passes it, so a run fed from one is reporting that
+    caller's assertion, not a reading of anything. The banner below is printed
+    before any section so no line of a fixture-fed run can be mistaken for
+    evidence, and the assurance-health section additionally renders every state
+    it derives as an explicit would-be-<state>-if-authoritative hypothetical.
+    """
     if CANONICAL_FIXTURE:
         with open(CANONICAL_FIXTURE, encoding="utf-8") as fh:
             value = json.load(fh)
         if not isinstance(value, dict):
             raise ValueError("canonical health fixture must be an object")
+        print(f"FIXTURE-DERIVED RUN — --fixture {CANONICAL_FIXTURE} supplied this "
+              "snapshot; nothing below was read from the control plane and no line "
+              "of it is evidence of health.")
         return value
 
     snapshot = {"exports": None, "job_definitions": None, "jobs": None,
