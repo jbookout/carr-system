@@ -1,11 +1,13 @@
 // DoctorCRE v5 slice V5-A03 — the closed vocabularies of independent
 // complete-set review and bounded adjudication.
 //
-// These sit in their own file for one reason: the public evaluator module and
-// the internal classifier both decide against them, and a vocabulary defined
-// twice is two vocabularies that agree until the day they do not. Putting them
-// here also keeps the import graph acyclic — public imports internal, and both
-// import this, which imports nothing from either.
+// These sit in their own file for one reason: the public unavailable surface
+// and the test-only classifiers both name them, and a vocabulary defined twice
+// is two vocabularies that agree until the day they do not. Putting them here
+// also keeps the import graph acyclic — this file imports nothing, the public
+// module imports this, and the test-only classifier entry imports both. The
+// public module does NOT import the classifiers, and nothing in mcp-server/src
+// may: that is proved by a parser-backed scan, not by this comment.
 //
 // EVERY LIST HERE IS DERIVED FROM SETTLED DECISION TEXT, not from taste, and
 // the deriving sentence is quoted beside it. Each one is in the A03 policy
@@ -172,11 +174,13 @@ export const V5_DETERMINISTIC_ONLY_DECISIONS = deepFreeze([
 ]);
 
 // ---------------------------------------------------------------------------
-// The check orders. Each list is the order its evaluator runs clauses in, and
-// the FIRST clause that blocks is the reported answer; the rest are
-// "not_reached". The store/registry/ledger clause is LAST in every list on
-// purpose: a caller whose own description is self-inconsistent is told that,
-// rather than being handed a missing-seam refusal that hides a real defect.
+// The clause orders. Each list is the order the TEST-ONLY classifier for that
+// decision runs its clauses in, and the FIRST clause that blocks is the
+// classifier's answer. The public surface runs NONE of them: it reads no
+// request, so it reports the whole order as defined and none of it as
+// evaluated. The store/registry/ledger clause is LAST in every list because a
+// classifier reading a self-inconsistent description should name that rather
+// than the missing seam.
 // ---------------------------------------------------------------------------
 
 export const V5_ROUTING_CHECKS = deepFreeze([
@@ -190,7 +194,7 @@ export const V5_FINDING_SET_CHECKS = deepFreeze([
 ]);
 
 export const V5_ROUND_BOUND_CHECKS = deepFreeze([
-  "round_reopened_after_adjudication", "round_limit", "prior_round_batch_regression", "round_drift",
+  "round_reopened_after_adjudication", "round_limit", "round_drift", "prior_round_batch_regression",
   "review_round_ledger",
 ]);
 
@@ -198,9 +202,6 @@ export const V5_ADJUDICATION_CHECKS = deepFreeze([
   "adjudicator_role", "adjudicator_separation", "rounds_before_adjudication", "disputed_set_empty",
   "bounded_adjudication_receipt_store",
 ]);
-
-/** A clause is satisfied, refused, or was never reached. Nothing else. */
-export const V5_CHECK_STATES = deepFreeze(["not_reached", "refused", "satisfied"]);
 
 // ---------------------------------------------------------------------------
 // THE SEAMS. Each is a NAME, not a port. No evaluator in this slice accepts a

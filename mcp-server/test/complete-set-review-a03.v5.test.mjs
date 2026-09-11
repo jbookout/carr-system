@@ -3,49 +3,60 @@
 //
 // Three kinds of test live here and they are not interchangeable:
 //
-//   CLAUSE tests prove the deterministic content — that a missing dimension,
-//   a maker reviewing itself, a narrowed review scope, a third round and an
-//   adjudicator who is a party to the dispute are each caught, by the clause
-//   that names them, before anything else.
+//   SURFACE tests prove the honest unavailable — that each of the five public
+//   functions answers `unavailable` naming the seam it is owed, for every
+//   caller on every input, with no affirmative sub-result anywhere in the
+//   answer, and that the answers are BYTE-IDENTICAL across every caller shape.
+//   If no field of a request can change any field of an answer, then no caller
+//   can smuggle authority in through one.
 //
-//   REFUSAL tests prove the honest unavailable — that every composed evaluator
-//   refuses on every input because its authoritative holder does not exist, and
-//   names the seam it is owed rather than guessing.
+//   CLAUSE tests prove the deterministic content — that a missing dimension, a
+//   maker reviewing itself, a narrowed review scope, a third round, a drifting
+//   history, an adjudicator who is a party and a forged receipt are each caught
+//   by the clause that names them. They run against the TEST-ONLY classifier
+//   entry, which production cannot import.
 //
-//   GUARD tests prove the standing rule: no caller-supplied label, fixture or
-//   injected holder is authority. They sweep the whole public export surface
-//   against caller-controlled input and assert the privileged outcome never
-//   comes back, and they use NODE'S OWN MODULE PARSER (vm.SourceTextModule),
-//   not a regex, to prove the internal classifier is unreachable through the
-//   public surface and imported by nothing else in the tree.
+//   GUARD tests prove the standing rule: no caller-supplied label, fixture,
+//   receipt or injected holder is authority. They sweep the whole public export
+//   surface against caller-controlled input and assert the privileged outcome
+//   never comes back, and they use NODE'S OWN MODULE PARSER
+//   (vm.SourceTextModule), not a regex, to prove no module under mcp-server/src
+//   can reach the classifiers at all.
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { readdirSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-import { canonicalJson, digest } from "../src/artifact-trust.js";
+import { digest } from "../src/artifact-trust.js";
 import { V5BoundaryError } from "../src/global-boundaries.v5.js";
 import * as a03 from "../src/complete-set-review-a03.v5.js";
 import {
   V5_A03_CLASSIFICATIONS,
+  V5_A03_CLASSIFIER_EVIDENCE_SOURCE,
+  V5_A03_CLAUSE_REASONS,
   classifyAdjudicationIfAuthoritative,
+  classifyAdjudicationReceiptIfAuthoritative,
   classifyFindingSetIfAuthoritative,
   classifyRoundIfAuthoritative,
   classifyRoutingIfAuthoritative,
-} from "../src/complete-set-review-a03.internal.v5.js";
+  detectRoundRegressions,
+  reviewDimensionGap,
+  reviewRoundObligation,
+  roleSeparationCollisions,
+} from "./complete-set-review-a03-classifiers.v5.testhelper.mjs";
 
 const {
-  V5_A03_DECISION_IDS, V5_A03_REASON_IDS, V5_A03_SCHEMA_VERSION, V5_A03_SEAMS,
-  V5_A03_SETTLED_DECISIONS, V5_ADJUDICATION_CHECKS, V5_ADJUDICATION_OUTCOMES,
-  V5_ADJUDICATION_RECEIPT_KIND, V5_ADJUDICATOR_ROLE, V5_FINDING_SET_CHECKS,
-  V5_MAX_REVIEW_ROUNDS, V5_NON_REVIEWER_ROLES, V5_OPPOSING_ROLE_PAIRS, V5_REVIEW_DIMENSIONS,
+  V5_A03_DECISION_IDS, V5_A03_PUBLIC_REASON_IDS, V5_A03_REASON_IDS, V5_A03_SCHEMA_VERSION,
+  V5_A03_SEAMS, V5_A03_SETTLED_DECISIONS, V5_ADJUDICATION_CHECKS, V5_ADJUDICATION_OUTCOMES,
+  V5_ADJUDICATION_RECEIPT_KIND, V5_ADJUDICATOR_ROLE, V5_FINDING_SET_CHECKS, V5_MAX_REVIEW_ROUNDS,
+  V5_NON_REVIEWER_ROLES, V5_NO_EFFECTS, V5_OPPOSING_ROLE_PAIRS, V5_REVIEW_DIMENSIONS,
   V5_ROUND_BOUND_CHECKS, V5_ROUND_REGRESSION_CLASSES, V5_ROUTING_CHECKS,
-  assertA03DecisionBinding, detectRoundRegressions, evaluateAdjudication,
-  evaluateFindingSetCompleteness, evaluateReviewRoundAdmission, evaluateReviewRouting,
-  reviewDimensionGap, reviewRoundObligation, roleSeparationCollisions,
-  v5A03PolicyCanonicalBytes, v5A03PolicyDigest, v5A03PolicyPreimage, verifyAdjudicationReceipt,
+  assertA03DecisionBinding, readBoundedAdjudication, readFindingSetCompleteness,
+  readReviewRoundAdmission, readReviewRoutingAdmission, v5A03PolicyCanonicalBytes,
+  v5A03PolicyDigest, v5A03PolicyPreimage, verifyAdjudicationReceipt,
 } = a03;
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -168,9 +179,9 @@ function receiptBinding(overrides = {}) {
   };
 }
 
-/** The reason a result gave, plus the clause that produced it. */
-function blocked(result) {
-  return { reason_id: result.reason_id, blocking_check: result.blocking_check };
+/** The clause a classifier blocked on, plus the reason it gave. */
+function blockedAt(result) {
+  return { blocking_clause: result.blocking_clause, reason_id: result.reason_id };
 }
 
 // ---------------------------------------------------------------------------
@@ -178,503 +189,141 @@ function blocked(result) {
 // ---------------------------------------------------------------------------
 
 test("binding: the five catalog decisions are carried verbatim with their evidence digests", () => {
-  assert.deepEqual(V5_A03_DECISION_IDS, ["Q028.D1", "Q042.D1", "Q107.D1", "Q113.D1", "Q154.D1"]);
-  assert.match(V5_A03_SETTLED_DECISIONS["Q042.D1"].settled_requirement,
-    /at most two full rounds, then stronger adjudication and pass, fail, or quarantine/);
-  assert.match(V5_A03_SETTLED_DECISIONS["Q107.D1"].settled_requirement,
-    /no role may certify or weaken its own work/);
-  for (const id of V5_A03_DECISION_IDS)
-    assert.match(V5_A03_SETTLED_DECISIONS[id].source_evidence_digest, /^[0-9a-f]{64}$/);
-});
-
-test("binding: a caller whose decision subset drifted is refused in both directions", () => {
-  const exactBinding = { decisions: Object.fromEntries(V5_A03_DECISION_IDS
-    .map(id => [id, { ...V5_A03_SETTLED_DECISIONS[id] }])) };
-  assert.equal(assertA03DecisionBinding(exactBinding), true);
-
-  const missing = { decisions: { ...exactBinding.decisions } };
-  delete missing.decisions["Q154.D1"];
-  assert.throws(() => assertA03DecisionBinding(missing),
-    error => error instanceof V5BoundaryError && error.code === "decision_binding_drift" &&
-      error.detail.missing.includes("Q154.D1"));
-
-  const extra = { decisions: { ...exactBinding.decisions, "Q999.D1": { settled_requirement: "x", source_evidence_digest: "0".repeat(64) } } };
-  assert.throws(() => assertA03DecisionBinding(extra),
-    error => error.detail.extra.includes("Q999.D1"));
-
-  const reworded = { decisions: { ...exactBinding.decisions,
-    "Q042.D1": { ...exactBinding.decisions["Q042.D1"], settled_requirement: "allow as many rounds as needed" } } };
-  assert.throws(() => assertA03DecisionBinding(reworded),
-    error => error.detail.decision_id === "Q042.D1");
-});
-
-test("policy: the digest is deterministic and moves when any closed vocabulary moves", () => {
-  assert.equal(v5A03PolicyDigest(), v5A03PolicyDigest());
-  assert.equal(v5A03PolicyCanonicalBytes(), canonicalJson(v5A03PolicyPreimage()));
-  const preimage = v5A03PolicyPreimage();
-  for (const key of ["review_dimensions", "opposing_role_pairs", "reason_ids", "routing_checks",
-    "round_regression_classes", "adjudication_outcomes"]) {
-    const moved = { ...preimage, [key]: [...preimage[key]].slice(1) };
-    assert.notEqual(digest(moved), v5A03PolicyDigest(), `${key} is not in the policy preimage`);
+  assert.deepEqual([...V5_A03_DECISION_IDS], ["Q028.D1", "Q042.D1", "Q107.D1", "Q113.D1", "Q154.D1"]);
+  for (const id of V5_A03_DECISION_IDS) {
+    const entry = V5_A03_SETTLED_DECISIONS[id];
+    assert.equal(typeof entry.settled_requirement, "string");
+    assert.match(entry.source_evidence_digest, /^[0-9a-f]{64}$/);
+    assert.equal(Object.isFrozen(entry), true);
   }
-  assert.equal(preimage.max_review_rounds, 2);
-  assert.notEqual(digest({ ...preimage, max_review_rounds: 3 }), v5A03PolicyDigest());
 });
 
-test("policy: the reason vocabulary is sorted, unique, and every reason is reachable", () => {
-  assert.deepEqual([...V5_A03_REASON_IDS].sort(), [...V5_A03_REASON_IDS]);
-  assert.equal(new Set(V5_A03_REASON_IDS).size, V5_A03_REASON_IDS.length);
+test("binding: agreement is silence, and drift is refused in both directions", () => {
+  const held = { decisions: Object.fromEntries(V5_A03_DECISION_IDS
+    .map(id => [id, { ...V5_A03_SETTLED_DECISIONS[id] }])) };
+  // No affirmative return value: a consumer has nothing here to mistake for a
+  // clearance. It throws, or it says nothing at all.
+  assert.equal(assertA03DecisionBinding(held), undefined);
+
+  const dropped = { decisions: { ...held.decisions } };
+  delete dropped.decisions["Q107.D1"];
+  assert.throws(() => assertA03DecisionBinding(dropped),
+    error => error instanceof V5BoundaryError && error.code === "decision_binding_drift");
+
+  const added = { decisions: { ...held.decisions, "Q999.D1": { settled_requirement: "x",
+    source_evidence_digest: "0".repeat(64) } } };
+  assert.throws(() => assertA03DecisionBinding(added),
+    error => error instanceof V5BoundaryError && error.code === "decision_binding_drift");
+
+  const reworded = { decisions: { ...held.decisions,
+    "Q042.D1": { ...held.decisions["Q042.D1"], settled_requirement: "allow three rounds" } } };
+  assert.throws(() => assertA03DecisionBinding(reworded),
+    error => error instanceof V5BoundaryError && error.code === "decision_binding_drift");
+});
+
+test("policy: the preimage is a vocabulary identity and carries no answer", () => {
+  const preimage = v5A03PolicyPreimage();
+  assert.equal(digest(preimage), v5A03PolicyDigest());
+  assert.deepEqual(JSON.parse(v5A03PolicyCanonicalBytes()), JSON.parse(JSON.stringify(preimage)));
+  for (const key of ["decision", "status", "answer", "ok", "reason_id"])
+    assert.equal(key in preimage, false, `${key} is an answer field and does not belong in a policy identity`);
+  assert.equal(preimage.public_surface_answers, "unavailable");
+  assert.equal(preimage.authoritative_holders_bound, false);
+
+  // The ONLY privileged words anywhere in the preimage sit inside two closed
+  // vocabularies, where the settled text put them: Q042.D1's three adjudication
+  // outcomes, and the two answers a reviewer may give for a dimension. Anywhere
+  // else the word would be an answer wearing a vocabulary's clothes.
+  const VOCABULARY_KEYS = ["adjudication_outcomes", "review_states"];
+  const stray = [];
+  for (const [key, value] of Object.entries(preimage)) {
+    if (VOCABULARY_KEYS.includes(key)) continue;
+    for (const found of stringValues(value))
+      if (PRIVILEGED_VALUES.has(found)) stray.push(`${key} = ${found}`);
+  }
+  assert.deepEqual(stray, []);
+  assert.deepEqual([...preimage.adjudication_outcomes], ["fail", "pass", "quarantine"]);
+  assert.deepEqual([...preimage.review_states], ["changes_required", "passed"]);
+});
+
+test("policy: the reason vocabulary is sorted, unique, and the public subset is the seam reasons", () => {
+  assert.deepEqual([...V5_A03_REASON_IDS], [...new Set(V5_A03_REASON_IDS)].sort());
+  assert.deepEqual([...V5_A03_PUBLIC_REASON_IDS], [...V5_A03_PUBLIC_REASON_IDS].sort());
+  for (const id of V5_A03_PUBLIC_REASON_IDS) {
+    assert.equal(V5_A03_REASON_IDS.includes(id), true, id);
+    assert.match(id, /_unavailable$/, "every reason the public surface may give names a missing seam");
+  }
+  assert.equal(V5_A03_PUBLIC_REASON_IDS.length, 4);
 });
 
 test("policy: the eleven review dimensions are exactly Q154.D1's list", () => {
   assert.deepEqual([...V5_REVIEW_DIMENSIONS], ["architecture", "business", "context", "cost",
     "migration", "operations", "product", "repository", "resilience", "security", "sequencing"]);
-  assert.equal(V5_REVIEW_DIMENSIONS.length, 11);
+  assert.deepEqual([...V5_REVIEW_DIMENSIONS], [...V5_REVIEW_DIMENSIONS].sort());
 });
 
 // ---------------------------------------------------------------------------
-// Review routing — Q154.D1 and Q107.D1.
+// THE PUBLIC SURFACE. Five functions, five unavailable answers, no exceptions.
 // ---------------------------------------------------------------------------
 
-test("routing: a complete, separated, fresh routing still refuses — the registry does not exist", () => {
-  const result = evaluateReviewRouting(routingRequest());
-  assert.equal(result.decision, "refuse");
-  assert.equal(result.reason_id, "reviewer_identity_registry_unavailable");
-  assert.equal(result.blocking_check, "reviewer_identity_registry");
-  assert.equal(result.registry_bound, false);
-  assert.equal(result.reviewers_entitled, false);
-  assert.equal(result.state_holder_is_caller_supplied, false);
-  assert.equal(result.reviewer_identity_registry_seam, V5_A03_SEAMS.reviewer_identity_registry);
-  // The four deterministic clauses really ran and really passed; the refusal is
-  // the missing seam alone, not a clause failing quietly behind it.
-  assert.deepEqual(result.checks_satisfied,
-    ["dimension_coverage", "reviewer_role_separation", "duty_role_separation", "fresh_context"]);
-  assert.deepEqual(result.checks_not_reached, []);
-  assert.equal(Object.isFrozen(result), true);
-  assert.equal(result.effects.creates_effect, false);
-});
-
-test("routing: a dimension nobody reviewed is named, and later clauses are not reached", () => {
-  const assignments = routingRequest().assignments.filter(a => a.dimension !== "security");
-  const result = evaluateReviewRouting(routingRequest({ assignments }));
-  assert.deepEqual(blocked(result),
-    { reason_id: "review_dimension_coverage_incomplete", blocking_check: "dimension_coverage" });
-  assert.deepEqual(result.check_states.dimension_coverage.detail.missing, ["security"]);
-  assert.deepEqual(result.checks_not_reached,
-    ["reviewer_role_separation", "duty_role_separation", "fresh_context", "reviewer_identity_registry"]);
-  assert.equal(result.check_states.reviewer_identity_registry.state, "not_reached");
-});
-
-test("routing: reviewing one dimension twice is not reviewing eleven", () => {
-  const assignments = routingRequest().assignments
-    .filter(a => a.dimension !== "cost")
-    .concat([{ dimension: "security", reviewer_identity_ref: "actor:reviewer-security-2",
-      reviewer_session_ref: "session:review-security-2", context_binding: "fresh" }]);
-  const result = evaluateReviewRouting(routingRequest({ assignments }));
-  assert.equal(result.blocking_check, "dimension_coverage");
-  assert.deepEqual(result.check_states.dimension_coverage.detail.missing, ["cost"]);
-  assert.deepEqual(result.check_states.dimension_coverage.detail.duplicated, ["security"]);
-});
-
-test("routing: the maker may not review its own work, in any dimension", () => {
-  const assignments = routingRequest().assignments.map(a => (a.dimension === "repository"
-    ? { ...a, reviewer_identity_ref: ROLE_IDENTITIES.builder } : a));
-  const result = evaluateReviewRouting(routingRequest({ assignments }));
-  assert.deepEqual(blocked(result),
-    { reason_id: "reviewer_not_role_separated", blocking_check: "reviewer_role_separation" });
-  assert.deepEqual(result.check_states.reviewer_role_separation.detail.collisions,
-    [{ pair: ["builder", "reviewer"], identity_ref: "actor:builder" }]);
-});
-
-test("routing: the architect may not certify its own design", () => {
-  const assignments = routingRequest().assignments.map(a => (a.dimension === "architecture"
-    ? { ...a, reviewer_identity_ref: ROLE_IDENTITIES.architect } : a));
-  const result = evaluateReviewRouting(routingRequest({ assignments }));
-  assert.equal(result.reason_id, "reviewer_not_role_separated");
-  assert.deepEqual(result.check_states.reviewer_role_separation.detail.collisions[0].pair,
-    ["architect", "reviewer"]);
-});
-
-test("routing: the releaser may not be a reviewer — the checkable_done clause verbatim", () => {
-  const assignments = routingRequest().assignments.map(a => (a.dimension === "operations"
-    ? { ...a, reviewer_identity_ref: ROLE_IDENTITIES.deployment_controller } : a));
-  const result = evaluateReviewRouting(routingRequest({ assignments }));
-  assert.equal(result.reason_id, "reviewer_not_role_separated");
-  assert.deepEqual(result.check_states.reviewer_role_separation.detail.collisions[0].pair,
-    ["deployment_controller", "reviewer"]);
-});
-
-test("routing: one identity holding two opposing duties is caught duty-to-duty", () => {
-  const result = evaluateReviewRouting(routingRequest({
-    role_identities: { adjudicator: ROLE_IDENTITIES.builder } }));
-  assert.deepEqual(blocked(result),
-    { reason_id: "duties_not_role_separated", blocking_check: "duty_role_separation" });
-  assert.deepEqual(result.check_states.duty_role_separation.detail.collisions,
-    [{ pair: ["adjudicator", "builder"], identity_ref: "actor:builder" }]);
-});
-
-test("routing: the builder may not verify its own merge or promote its own artifact", () => {
-  for (const role of ["integration_controller", "deployment_controller", "program_controller"]) {
-    const result = evaluateReviewRouting(routingRequest({
-      role_identities: { [role]: ROLE_IDENTITIES.builder } }));
-    assert.equal(result.reason_id, "duties_not_role_separated", role);
-    assert.deepEqual(result.check_states.duty_role_separation.detail.collisions[0].pair,
-      ["builder", role].sort(), role);
-  }
-});
-
-test("routing: the separation matrix is the accepted one, not 'everything must differ'", () => {
-  // Q107.D1's recommendation is explicit that a model may hold several roles;
-  // only OPPOSING ones are refused. These two pairs are deliberately absent
-  // from the matrix, so an honest routing that shares them must not refuse.
-  for (const shared of [
-    { architect: ROLE_IDENTITIES.builder },
-    { deployment_controller: ROLE_IDENTITIES.integration_controller },
-  ]) {
-    const result = evaluateReviewRouting(routingRequest({ role_identities: shared }));
-    assert.equal(result.blocking_check, "reviewer_identity_registry",
-      `${JSON.stringify(shared)} is not an opposing pair and must not refuse on separation`);
-  }
-});
-
-test("routing: a reviewer sitting in the maker's session is not a second opinion", () => {
-  const assignments = routingRequest().assignments.map(a => (a.dimension === "context"
-    ? { ...a, reviewer_session_ref: "session:maker" } : a));
-  const result = evaluateReviewRouting(routingRequest({ assignments }));
-  assert.deepEqual(blocked(result),
-    { reason_id: "review_context_not_fresh", blocking_check: "fresh_context" });
-  assert.deepEqual(result.check_states.fresh_context.detail.dimensions, ["context"]);
-});
-
-test("routing: a context inherited from the maker is refused even from a new session", () => {
-  const assignments = routingRequest().assignments.map(a => (a.dimension === "cost"
-    ? { ...a, context_binding: "inherited_from_maker" } : a));
-  const result = evaluateReviewRouting(routingRequest({ assignments }));
-  assert.equal(result.reason_id, "review_context_not_fresh");
-  assert.deepEqual(result.check_states.fresh_context.detail.dimensions, ["cost"]);
-});
-
-test("routing: an unreadable request fails closed rather than deciding", () => {
-  assert.throws(() => evaluateReviewRouting({ ...routingRequest(), extra: 1 }),
-    error => error instanceof V5BoundaryError && error.code === "unknown_field");
-  const missingRole = routingRequest();
-  delete missingRole.role_identities.program_controller;
-  assert.throws(() => evaluateReviewRouting(missingRole),
-    error => error.code === "missing_field");
-  assert.throws(() => evaluateReviewRouting(routingRequest({
-    assignments: [{ dimension: "governance", reviewer_identity_ref: "actor:x",
-      reviewer_session_ref: "session:x", context_binding: "fresh" }] })),
-  error => error.code === "unknown_enum_member");
-  assert.throws(() => evaluateReviewRouting(routingRequest({ delivered_set_digest: "short" })),
-    error => error.code === "malformed_digest");
-});
-
-// ---------------------------------------------------------------------------
-// Complete finding set — Q113.D1 and Q154.D1.
-// ---------------------------------------------------------------------------
-
-test("finding set: a complete, whole-set, pre-repair enumeration still refuses", () => {
-  const result = evaluateFindingSetCompleteness(findingSetRequest());
-  assert.equal(result.decision, "refuse");
-  assert.equal(result.reason_id, "complete_finding_set_registry_unavailable");
-  assert.equal(result.blocking_check, "complete_finding_set_registry");
-  assert.equal(result.batch_repair_admitted, false);
-  assert.equal(result.registry_bound, false);
-  assert.equal(result.finding_registry_seam, V5_A03_SEAMS.complete_finding_set_registry);
-  assert.deepEqual(result.checks_satisfied,
-    ["dimension_submission", "complete_set_scope", "enumeration_before_repair"]);
-});
-
-test("finding set: a dimension that reported nothing is a hole, not a clean review", () => {
-  const submissions = findingSetRequest().submissions.map(s => (s.dimension === "resilience"
-    ? { ...s, state: "absent", finding_refs: [] } : s));
-  const result = evaluateFindingSetCompleteness(findingSetRequest({ submissions }));
-  assert.deepEqual(blocked(result),
-    { reason_id: "finding_set_dimension_absent", blocking_check: "dimension_submission" });
-  assert.deepEqual(result.check_states.dimension_submission.detail.absent, ["resilience"]);
-  assert.equal(result.dimensions_submitted.includes("resilience"), false);
-});
-
-test("finding set: a reviewer who read a narrower set produced a narrower review", () => {
-  // The clause this whole slice turns on. A subset review reads as complete and
-  // is not, and no count of findings reveals it — so the digest does.
-  const submissions = findingSetRequest().submissions.map(s => (s.dimension === "security"
-    ? { ...s, reviewed_set_digest: OTHER_SET_DIGEST } : s));
-  const result = evaluateFindingSetCompleteness(findingSetRequest({ submissions }));
-  assert.deepEqual(blocked(result),
-    { reason_id: "review_scope_narrower_than_delivered_set", blocking_check: "complete_set_scope" });
-  assert.deepEqual(result.check_states.complete_set_scope.detail.dimensions, ["security"]);
-});
-
-test("finding set: findings enumerated after repair began are the spiral Q042 refuses", () => {
-  const submissions = findingSetRequest().submissions.map(s => (s.dimension === "product"
-    ? { ...s, enumerated_before_repair: false } : s));
-  const result = evaluateFindingSetCompleteness(findingSetRequest({ submissions }));
-  assert.deepEqual(blocked(result),
-    { reason_id: "finding_set_enumerated_after_repair", blocking_check: "enumeration_before_repair" });
-  assert.deepEqual(result.check_states.enumeration_before_repair.detail.dimensions, ["product"]);
-});
-
-test("finding set: a missing dimension and a duplicate are both reported by the same clause", () => {
-  const base = findingSetRequest().submissions;
-  const submissions = base.filter(s => s.dimension !== "migration")
-    .concat([{ ...base[0] }]);
-  const result = evaluateFindingSetCompleteness(findingSetRequest({ submissions }));
-  assert.equal(result.blocking_check, "dimension_submission");
-  assert.deepEqual(result.check_states.dimension_submission.detail.missing, ["migration"]);
-  assert.deepEqual(result.check_states.dimension_submission.detail.duplicated, ["architecture"]);
-});
-
-test("finding set: an unsorted or repeating finding list is a shape error, never sorted for you", () => {
-  const submissions = findingSetRequest().submissions.map(s => (s.dimension === "business"
-    ? { ...s, finding_refs: ["finding:b", "finding:a"] } : s));
-  assert.throws(() => evaluateFindingSetCompleteness(findingSetRequest({ submissions })),
-    error => error instanceof V5BoundaryError && error.code === "unsorted_list");
-  const repeated = findingSetRequest().submissions.map(s => (s.dimension === "business"
-    ? { ...s, finding_refs: ["finding:a", "finding:a"] } : s));
-  assert.throws(() => evaluateFindingSetCompleteness(findingSetRequest({ submissions: repeated })),
-    error => error.code === "duplicate_member");
-});
-
-// ---------------------------------------------------------------------------
-// The round bound — Q042.D1.
-// ---------------------------------------------------------------------------
-
-test("round: a third round cannot silently continue", () => {
-  const result = evaluateReviewRoundAdmission(roundRequest({
-    requested_round_ordinal: 3,
-    history: [historyEntry(), historyEntry({ round_ordinal: 2, state: "changes_required",
-      post_repair_artifact_digest: "d".repeat(64) })],
-  }));
-  assert.deepEqual(blocked(result),
-    { reason_id: "review_round_limit_exhausted", blocking_check: "round_limit" });
-  assert.equal(result.within_round_limit, false);
-  assert.equal(result.required_transition, "stronger_adjudication");
-  assert.equal(result.round_admitted, false);
-  assert.equal(result.round_limit, 2);
-});
-
-test("round: a second round with a clean history still refuses — there is no ledger", () => {
-  const result = evaluateReviewRoundAdmission(roundRequest());
-  assert.equal(result.decision, "refuse");
-  assert.equal(result.reason_id, "review_round_ledger_unavailable");
-  assert.equal(result.blocking_check, "review_round_ledger");
-  assert.equal(result.ledger_bound, false);
-  assert.equal(result.round_admitted, false);
-  assert.equal(result.within_round_limit, true);
-  assert.equal(result.required_transition, "independent_review_round");
-});
-
-test("round: a dispute adjudication closed does not reopen as another round", () => {
-  const result = evaluateReviewRoundAdmission(roundRequest({ adjudication_recorded: true }));
-  assert.deepEqual(blocked(result), {
-    reason_id: "review_round_reopened_after_adjudication",
-    blocking_check: "round_reopened_after_adjudication",
-  });
-});
-
-test("round: round two without round one's batch repair and regression is refused", () => {
-  const result = evaluateReviewRoundAdmission(roundRequest({ history: [] }));
-  assert.deepEqual(blocked(result), {
-    reason_id: "prior_round_batch_regression_absent",
-    blocking_check: "prior_round_batch_regression",
-  });
-  assert.deepEqual(result.check_states.prior_round_batch_regression.detail.missing_rounds, [1]);
-});
-
-test("round: a finding marked resolved and reported again is a repair that did not take", () => {
-  const history = [
-    historyEntry({ round_ordinal: 1, finding_refs: ["finding:one"], resolved_finding_refs: ["finding:one"] }),
-    historyEntry({ round_ordinal: 2, finding_refs: ["finding:one"] }),
-  ];
-  const result = evaluateReviewRoundAdmission(roundRequest({ requested_round_ordinal: 2, history }));
-  assert.deepEqual(blocked(result),
-    { reason_id: "review_round_drift_detected", blocking_check: "round_drift" });
-  assert.deepEqual(result.check_states.round_drift.detail.fired, ["repeated_finding"]);
-  assert.deepEqual(result.drift_detected.repeated_finding, ["finding:one"]);
-});
-
-test("round: a repair that restores an already-rejected tree is going round, not forward", () => {
-  const reverted = "e".repeat(64);
-  const history = [
-    historyEntry({ round_ordinal: 1, state: "changes_required", post_repair_artifact_digest: reverted }),
-    historyEntry({ round_ordinal: 2, state: "passed", post_repair_artifact_digest: reverted }),
-  ];
-  const result = evaluateReviewRoundAdmission(roundRequest({ requested_round_ordinal: 2, history }));
-  assert.equal(result.reason_id, "review_round_drift_detected");
-  assert.deepEqual(result.drift_detected.circular_reversion, [reverted]);
-});
-
-test("round: a reviewer giving both answers for one dimension is unstable, not decisive", () => {
-  const history = [
-    historyEntry({ round_ordinal: 1, state: "changes_required" }),
-    historyEntry({ round_ordinal: 2, state: "passed", post_repair_artifact_digest: "f".repeat(64) }),
-  ];
-  const result = evaluateReviewRoundAdmission(roundRequest({ requested_round_ordinal: 2, history }));
-  assert.equal(result.reason_id, "review_round_drift_detected");
-  assert.deepEqual(result.drift_detected.reviewer_instability,
-    ["actor:reviewer-architecture|architecture"]);
-});
-
-test("round: a regression that stopped running a check is a fix that weakened the test", () => {
-  const history = [
-    historyEntry({ round_ordinal: 1, reviewer_identity_ref: "actor:reviewer-a" }),
-    historyEntry({ round_ordinal: 2, reviewer_identity_ref: "actor:reviewer-b",
-      post_repair_artifact_digest: "f".repeat(64),
-      regression: { suite_ref: "suite:unit", checks_executed: ["alpha"] } }),
-  ];
-  const result = evaluateReviewRoundAdmission(roundRequest({ requested_round_ordinal: 2, history }));
-  assert.equal(result.reason_id, "review_round_drift_detected");
-  assert.deepEqual(result.drift_detected.test_weakening, ["suite:unit|beta"]);
-});
-
-test("round: the obligation at each ordinal is the accepted bound, and nothing else", () => {
-  assert.deepEqual(reviewRoundObligation(1), { ordinal: 1, round_limit: 2, within_round_limit: true,
-    required_transition: "independent_review_round" });
-  assert.deepEqual(reviewRoundObligation(2), { ordinal: 2, round_limit: 2, within_round_limit: true,
-    required_transition: "independent_review_round" });
-  assert.deepEqual(reviewRoundObligation(3), { ordinal: 3, round_limit: 2, within_round_limit: false,
-    required_transition: "stronger_adjudication" });
-  assert.equal(reviewRoundObligation(0).within_round_limit, false);
-});
-
-test("round: the four drift detectors are silent on a clean history", () => {
-  const clean = detectRoundRegressions([historyEntry()]);
-  for (const name of V5_ROUND_REGRESSION_CLASSES) assert.deepEqual(clean[name], [], name);
-});
-
-// ---------------------------------------------------------------------------
-// Bounded adjudication — Q042.D1 step 4 and Q028.D1.
-// ---------------------------------------------------------------------------
-
-test("adjudication: a well-formed dispute still refuses, and no outcome is ever returned", () => {
-  const result = evaluateAdjudication(adjudicationRequest());
-  assert.equal(result.decision, "refuse");
-  assert.equal(result.reason_id, "bounded_adjudication_receipt_store_unavailable");
-  assert.equal(result.blocking_check, "bounded_adjudication_receipt_store");
-  assert.equal(result.adjudicated_outcome, null);
-  assert.equal(result.disposition_recorded, false);
-  assert.equal(result.outcome_is_caller_stated, false);
-  assert.equal(result.store_bound, false);
-  assert.equal(result.adjudication_receipt_store_seam, V5_A03_SEAMS.bounded_adjudication_receipt_store);
-  assert.deepEqual(result.checks_satisfied,
-    ["adjudicator_role", "adjudicator_separation", "rounds_before_adjudication", "disputed_set_empty"]);
-});
-
-test("adjudication: the adjudicator may not be anyone in the dispute", () => {
-  for (const [field, role] of [["maker_identity_ref", "builder"],
-    ["releaser_identity_ref", "deployment_controller"]]) {
-    const request = adjudicationRequest();
-    const result = evaluateAdjudication({ ...request, adjudicator_identity_ref: request[field] });
-    assert.deepEqual(blocked(result), {
-      reason_id: "adjudicator_is_a_party_to_the_dispute", blocking_check: "adjudicator_separation",
-    }, field);
-    assert.deepEqual(result.check_states.adjudicator_separation.detail.also_a_party_as, [role], field);
-  }
-  const asReviewer = evaluateAdjudication(adjudicationRequest({
-    adjudicator_identity_ref: "actor:reviewer-security" }));
-  assert.equal(asReviewer.reason_id, "adjudicator_is_a_party_to_the_dispute");
-  assert.deepEqual(asReviewer.check_states.adjudicator_separation.detail.also_a_party_as, ["reviewer"]);
-});
-
-test("adjudication: only the accepted stronger-adjudicator role adjudicates", () => {
-  const result = evaluateAdjudication(adjudicationRequest({ adjudicator_role: "peer_reviewer" }));
-  assert.deepEqual(blocked(result),
-    { reason_id: "adjudicator_role_unknown", blocking_check: "adjudicator_role" });
-  assert.equal(result.adjudicator_role_required, "stronger_adjudicator");
-});
-
-test("adjudication: reaching for a judge before the review bound is spent is refused", () => {
-  const result = evaluateAdjudication(adjudicationRequest({ rounds_completed: 1 }));
-  assert.deepEqual(blocked(result),
-    { reason_id: "adjudication_before_round_limit", blocking_check: "rounds_before_adjudication" });
-  assert.equal(result.rounds_completed, 1);
-});
-
-test("adjudication: there is nothing to adjudicate without a named disagreement", () => {
-  const result = evaluateAdjudication(adjudicationRequest({ disputed_finding_refs: [] }));
-  assert.deepEqual(blocked(result),
-    { reason_id: "adjudication_disputed_set_empty", blocking_check: "disputed_set_empty" });
-  assert.equal(result.disputed_finding_count, 0);
-});
-
-// ---------------------------------------------------------------------------
-// The receipt verifier.
-// ---------------------------------------------------------------------------
-
-test("receipt: a well-formed receipt verifies, and its outcome is deliberately not echoed", () => {
-  const body = receiptBody();
-  const result = verifyAdjudicationReceipt(V5_ADJUDICATION_RECEIPT_KIND,
-    receiptRefFor(body), body, receiptBinding());
-  assert.equal(result.ok, true);
-  assert.equal(result.reason_id, null);
-  // The whole point: verifying the bytes is not reading the verdict.
-  assert.equal(JSON.stringify(result).includes("quarantine"), false);
-  assert.equal("outcome" in result, false);
-  assert.equal("body" in result, false);
-});
-
-test("receipt: every way a forged or mismatched receipt fails is named", () => {
-  const body = receiptBody();
-  const ref = receiptRefFor(body);
-  const binding = receiptBinding();
-  const cases = [
-    ["adjudication_receipt_not_content_addressed", "adjudication-receipt:named-not-hashed", body],
-    ["adjudication_receipt_unresolvable", ref, null],
-    ["adjudication_receipt_digest_mismatch", ref, receiptBody({ rounds_completed: 5 })],
-  ];
-  for (const [reasonId, receiptRef, receiptBodyValue] of cases) {
-    const result = verifyAdjudicationReceipt(V5_ADJUDICATION_RECEIPT_KIND, receiptRef,
-      receiptBodyValue, binding);
-    assert.equal(result.ok, false, reasonId);
-    assert.equal(result.reason_id, reasonId);
-  }
-
-  const wrongKind = receiptBody({ kind: "review" });
-  assert.equal(verifyAdjudicationReceipt(V5_ADJUDICATION_RECEIPT_KIND, receiptRefFor(wrongKind),
-    wrongKind, binding).reason_id, "adjudication_receipt_kind_mismatch");
-
-  const otherChange = receiptBody({ change_ref: "change:something-else" });
-  assert.equal(verifyAdjudicationReceipt(V5_ADJUDICATION_RECEIPT_KIND, receiptRefFor(otherChange),
-    otherChange, binding).reason_id, "adjudication_receipt_bound_to_other_change");
-
-  const otherSet = receiptBody({ delivered_set_digest: OTHER_SET_DIGEST });
-  assert.equal(verifyAdjudicationReceipt(V5_ADJUDICATION_RECEIPT_KIND, receiptRefFor(otherSet),
-    otherSet, binding).reason_id, "adjudication_receipt_bound_to_other_delivered_set");
-
-  const openOutcome = receiptBody({ outcome: "needs_more_thought" });
-  assert.equal(verifyAdjudicationReceipt(V5_ADJUDICATION_RECEIPT_KIND, receiptRefFor(openOutcome),
-    openOutcome, binding).reason_id, "adjudication_receipt_outcome_unknown");
-
-  const selfSigned = receiptBody({ adjudicator_identity_ref: "actor:builder" });
-  assert.equal(verifyAdjudicationReceipt(V5_ADJUDICATION_RECEIPT_KIND, receiptRefFor(selfSigned),
-    selfSigned, binding).reason_id, "adjudication_receipt_adjudicator_is_a_party");
-});
-
-test("receipt: the outcome vocabulary is closed to pass, fail and quarantine", () => {
-  assert.deepEqual([...V5_ADJUDICATION_OUTCOMES], ["fail", "pass", "quarantine"]);
-  for (const outcome of V5_ADJUDICATION_OUTCOMES) {
-    const body = receiptBody({ outcome });
-    assert.equal(verifyAdjudicationReceipt(V5_ADJUDICATION_RECEIPT_KIND, receiptRefFor(body),
-      body, receiptBinding()).ok, true, outcome);
-  }
-});
-
-// ---------------------------------------------------------------------------
-// GUARDS. A caller-supplied label, fixture or holder is never authority.
-// ---------------------------------------------------------------------------
-
-/** Every request shape a caller controls, in its honest form. */
-const EVALUATOR_MATRIX = [
-  ["evaluateReviewRouting", evaluateReviewRouting, routingRequest],
-  ["evaluateFindingSetCompleteness", evaluateFindingSetCompleteness, findingSetRequest],
-  ["evaluateReviewRoundAdmission", evaluateReviewRoundAdmission, roundRequest],
-  ["evaluateAdjudication", evaluateAdjudication, adjudicationRequest],
+const EXPECTED_PUBLIC_EXPORTS = [
+  "V5_A03_DECISION_IDS",
+  "V5_A03_POLICY_VERSION",
+  "V5_A03_PUBLIC_REASON_IDS",
+  "V5_A03_REASON_IDS",
+  "V5_A03_SCHEMA_VERSION",
+  "V5_A03_SEAMS",
+  "V5_A03_SETTLED_DECISIONS",
+  "V5_ADJUDICATION_CHECKS",
+  "V5_ADJUDICATION_OUTCOMES",
+  "V5_ADJUDICATION_RECEIPT_KIND",
+  "V5_ADJUDICATION_RECEIPT_STORE_SEAM",
+  "V5_ADJUDICATOR_ROLE",
+  "V5_COMPLETE_FINDING_SET_REGISTRY_SEAM",
+  "V5_CONTEXT_BINDINGS",
+  "V5_DETERMINISTIC_ONLY_DECISIONS",
+  "V5_FINDING_SET_CHECKS",
+  "V5_MAX_REVIEW_ROUNDS",
+  "V5_MODEL_PERMITTED_ROLES",
+  "V5_NON_REVIEWER_ROLES",
+  "V5_NO_EFFECTS",
+  "V5_OPPOSING_ROLE_PAIRS",
+  "V5_REVIEWER_IDENTITY_REGISTRY_SEAM",
+  "V5_REVIEW_DIMENSIONS",
+  "V5_REVIEW_ROLES",
+  "V5_REVIEW_ROUND_LEDGER_SEAM",
+  "V5_REVIEW_STATES",
+  "V5_ROUND_BOUND_CHECKS",
+  "V5_ROUND_REGRESSION_CLASSES",
+  "V5_ROUND_TRANSITIONS",
+  "V5_ROUTING_CHECKS",
+  "V5_SUBMISSION_STATES",
+  "assertA03DecisionBinding",
+  "readBoundedAdjudication",
+  "readFindingSetCompleteness",
+  "readReviewRoundAdmission",
+  "readReviewRoutingAdmission",
+  "v5A03PolicyCanonicalBytes",
+  "v5A03PolicyDigest",
+  "v5A03PolicyPreimage",
+  "verifyAdjudicationReceipt",
 ];
 
-const PRIVILEGED_VALUES = new Set(["allow", "allowed", "approved", "commit", "complete", "completed",
-  "covered", "drafted", "healthy", "independent", "pass", "passed", "passing", "proposed", "prompt",
-  "queued", "read", "release", "released", "suppress"]);
+/** The words a consumer would act on. None may come back from this surface. */
+const PRIVILEGED_TRUE_KEYS = new Set([
+  "ok", "allow", "allowed", "approved", "verified", "receipt_verified", "receipt_resolved",
+  "reviewers_entitled", "identities_separated_by_construction", "batch_repair_admitted",
+  "round_admitted", "adjudication_admitted", "disposition_recorded", "within_round_limit",
+  "outcome_is_caller_stated", "receipt_is_caller_supplied", "registry_bound", "ledger_bound",
+  "store_bound", "request_read", "caller_evidence_admitted", "model_judgment_admitted",
+  "state_holder_is_caller_supplied", "performs_routing", "performs_repair", "performs_adjudication",
+  "satisfied", "complete", "covered",
+]);
+
+const PRIVILEGED_VALUES = new Set(["active", "allow", "allowed", "approved", "commit", "complete",
+  "completed", "covered", "drafted", "green", "healthy", "independent", "operational", "pass",
+  "passable", "passed", "passing", "proposed", "prompt", "queued", "read", "release", "released",
+  "satisfied", "suppress"]);
 
 function stringValues(value, out = []) {
   if (typeof value === "string") out.push(value);
@@ -684,111 +333,621 @@ function stringValues(value, out = []) {
   return out;
 }
 
-test("guard: no evaluator returns a privileged outcome, on any caller-controlled input", () => {
-  // The inputs below include every shape the clause tests above drive through,
-  // plus the honest one. None of them contains a privileged token, so any
-  // privileged word in a result would be one the MODULE produced.
-  const inputs = [
-    evaluateReviewRouting(routingRequest()),
-    evaluateReviewRouting(routingRequest({ role_identities: { adjudicator: ROLE_IDENTITIES.builder } })),
-    evaluateReviewRouting(routingRequest({ assignments: [] })),
-    evaluateFindingSetCompleteness(findingSetRequest()),
-    evaluateFindingSetCompleteness(findingSetRequest({ submissions: [] })),
-    evaluateReviewRoundAdmission(roundRequest()),
-    evaluateReviewRoundAdmission(roundRequest({ requested_round_ordinal: 9 })),
-    evaluateAdjudication(adjudicationRequest()),
-    evaluateAdjudication(adjudicationRequest({ rounds_completed: 0 })),
+/** Every string, key and boolean in a returned value, walked to the leaves. */
+function privilegedFindings(value, at = "$", found = []) {
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => privilegedFindings(entry, `${at}[${index}]`, found));
+    return found;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const [key, entry] of Object.entries(value)) {
+      const where = `${at}.${key}`;
+      if (entry === true && PRIVILEGED_TRUE_KEYS.has(key)) found.push(`${where} === true`);
+      if (key.startsWith("would_")) found.push(`${where} is a classifier field on the public surface`);
+      privilegedFindings(entry, where, found);
+    }
+    return found;
+  }
+  if (typeof value === "string" && PRIVILEGED_VALUES.has(value)) found.push(`${at} === ${value}`);
+  return found;
+}
+
+/**
+ * Every caller-controlled shape this surface could ever be handed, including the
+ * reviewer's reproduction: a receipt a party wrote about its own dispute. If
+ * none of them changes the answer, none of them is authority.
+ */
+function callerControlledShapes() {
+  const selfMade = receiptBody({ outcome: "pass", adjudicator_identity_ref: "actor:builder" });
+  return [
+    routingRequest(),
+    routingRequest({ assignments: [] }),
+    routingRequest({ role_identities: { adjudicator: ROLE_IDENTITIES.builder } }),
+    findingSetRequest(),
+    findingSetRequest({ submissions: [] }),
+    roundRequest(),
+    roundRequest({ requested_round_ordinal: 3 }),
+    roundRequest({ requested_round_ordinal: 9, adjudication_recorded: true }),
+    adjudicationRequest(),
+    adjudicationRequest({ rounds_completed: 0 }),
+    // The receipt path's old arguments, now just another caller shape.
+    { kind: V5_ADJUDICATION_RECEIPT_KIND, receipt_ref: receiptRefFor(selfMade), body: selfMade,
+      binding: receiptBinding({ party_identity_refs: ["actor:reviewer-architecture"] }) },
+    selfMade,
+    // And the shapes that try to say the answer outright.
+    { verified: true, decision: "allow", ok: true, outcome: "pass", round_admitted: true },
+    { adjudicated_outcome: "pass", disposition_recorded: true },
+    {}, null, undefined, "allow", 1, true, [],
   ];
-  for (const result of inputs) {
-    for (const value of stringValues(result))
-      assert.equal(PRIVILEGED_VALUES.has(value), false,
-        `${result.answer} returned the privileged value ${JSON.stringify(value)}`);
-    assert.equal(result.decision, "refuse");
-    assert.equal(result.model_judgment_admitted, false);
-    assert.equal(result.state_holder_is_caller_supplied, false);
-    assert.equal(result.performs_adjudication, false);
-    assert.equal(Object.isFrozen(result), true);
+}
+
+const PUBLIC_ANSWERS = [
+  ["readReviewRoutingAdmission", readReviewRoutingAdmission, "reviewer_identity_registry_unavailable"],
+  ["readFindingSetCompleteness", readFindingSetCompleteness, "complete_finding_set_registry_unavailable"],
+  ["readReviewRoundAdmission", readReviewRoundAdmission, "review_round_ledger_unavailable"],
+  ["readBoundedAdjudication", readBoundedAdjudication, "bounded_adjudication_receipt_store_unavailable"],
+  ["verifyAdjudicationReceipt", verifyAdjudicationReceipt, "bounded_adjudication_receipt_store_unavailable"],
+];
+
+test("surface: the public export list is exactly the unavailable surface", () => {
+  assert.deepEqual(Object.keys(a03).sort(), EXPECTED_PUBLIC_EXPORTS);
+  for (const name of Object.keys(a03)) {
+    assert.equal(/^(classify|evaluate|derive)/.test(name), false,
+      `${name} is a classifier name on the public surface`);
+    assert.equal(name.includes("would_"), false, name);
+    assert.equal(name.includes("Internal"), false, name);
   }
 });
 
-test("guard: stuffing privileged labels into every field does not produce a privileged decision", () => {
-  // A caller that calls itself "pass" gets its own word echoed back inside the
-  // refusal detail, and NOT in any field a consumer decides from.
-  const DECISION_KEYS = ["decision", "reason_id", "adjudicated_outcome", "required_transition",
-    "blocking_check", "answer"];
-  const stuffed = [
-    evaluateReviewRouting(routingRequest({
-      role_identities: { builder: "actor:pass", architect: "actor:allow" },
-      maker_session_ref: "session:complete" })),
-    evaluateAdjudication(adjudicationRequest({ adjudicator_role: "pass",
-      adjudicator_identity_ref: "actor:allow" })),
-    evaluateReviewRoundAdmission(roundRequest({ history: [historyEntry({
-      reviewer_identity_ref: "actor:independent" })] })),
-  ];
-  for (const result of stuffed) {
-    for (const key of DECISION_KEYS)
-      if (key in result)
-        assert.equal(PRIVILEGED_VALUES.has(result[key]), false,
-          `${result.answer}.${key} came back privileged`);
-    assert.equal(result.decision, "refuse");
-    assert.equal(result.adjudicated_outcome ?? null, null);
-  }
-  for (const flag of ["reviewers_entitled", "batch_repair_admitted", "round_admitted",
-    "disposition_recorded", "registry_bound", "ledger_bound", "store_bound"]) {
-    for (const result of stuffed) if (flag in result) assert.equal(result[flag], false, flag);
+test("surface: every answer is unavailable, names its seam, and admits no caller evidence", () => {
+  for (const [name, fn, reasonId] of PUBLIC_ANSWERS) {
+    const result = fn(routingRequest());
+    assert.equal(result.status, "unavailable", name);
+    assert.equal(result.decision, "refuse", name);
+    assert.equal(result.reason_id, reasonId, name);
+    assert.equal(V5_A03_PUBLIC_REASON_IDS.includes(result.reason_id), true, name);
+    assert.equal(result.request_read, false, name);
+    assert.equal(result.caller_evidence_admitted, false, name);
+    assert.equal(result.decided_by, "no_authoritative_reader", name);
+    assert.equal(result.clause_evaluation_is_test_only, true, name);
+    assert.deepEqual(result.clauses_evaluated, [], name);
+    assert.equal(result.owed_seams.length > 0, true, name);
+    for (const entry of result.seams_bound) assert.equal(entry.bound, false, name);
+    assert.deepEqual(result.effects, V5_NO_EFFECTS, name);
+    assert.equal(Object.isFrozen(result), true, name);
   }
 });
 
-test("guard: no evaluator accepts a store, holder, registry or ledger as a second argument", () => {
+test("surface: no caller-controlled shape produces a privileged outcome", () => {
+  const shapes = callerControlledShapes();
+  assert.equal(shapes.length >= 20, true, "the sweep must cover the caller-controlled domain");
+  for (const [name, fn] of PUBLIC_ANSWERS) {
+    for (const shape of shapes) {
+      const result = fn(shape);
+      assert.deepEqual(privilegedFindings(result), [],
+        `${name} leaked a privileged outcome for ${String(JSON.stringify(shape)).slice(0, 90)}`);
+      assert.equal(result.decision, "refuse", name);
+    }
+  }
+});
+
+test("surface: the answer is byte-identical across every caller shape", () => {
+  for (const [name, fn] of PUBLIC_ANSWERS) {
+    const first = digest(fn(routingRequest()));
+    for (const shape of callerControlledShapes())
+      assert.equal(digest(fn(shape)), first, `${name} answered differently for a caller shape`);
+    assert.equal(digest(fn()), first, `${name} answered differently for no argument at all`);
+  }
+});
+
+test("surface: routing never reports identities separated, and never entitles a reviewer", () => {
+  const result = readReviewRoutingAdmission(routingRequest());
+  assert.equal(result.answer, "review_routing_admission");
+  assert.equal(result.reviewers_entitled, false);
+  assert.equal(result.identities_separated_by_construction, false);
+  assert.equal(result.dimensions_assigned, null, "a caller's assignment list is not read back");
+  assert.deepEqual([...result.dimensions_required], [...V5_REVIEW_DIMENSIONS]);
+  assert.equal(result.reviewer_identity_registry_seam, V5_A03_SEAMS.reviewer_identity_registry);
+});
+
+test("surface: the finding set never unlocks a batch repair and reads no regression", () => {
+  const result = readFindingSetCompleteness(findingSetRequest());
+  assert.equal(result.batch_repair_admitted, false);
+  assert.equal(result.regression_evidence_read, null);
+  assert.equal(result.dimensions_submitted, null);
+  assert.equal(result.finding_registry_seam, V5_A03_SEAMS.complete_finding_set_registry);
+});
+
+test("surface: no round is admitted, and no caller's ordinal is read back", () => {
+  for (const shape of [roundRequest(), roundRequest({ requested_round_ordinal: 1 }),
+    roundRequest({ requested_round_ordinal: 3 })]) {
+    const result = readReviewRoundAdmission(shape);
+    assert.equal(result.round_admitted, false);
+    assert.equal(result.requested_round_ordinal, null);
+    assert.equal(result.within_round_limit, null);
+    assert.equal(result.required_transition, null);
+    assert.equal(result.drift_detected, null);
+    assert.equal(result.round_limit, V5_MAX_REVIEW_ROUNDS);
+    assert.deepEqual([...result.drift_detectors], [...V5_ROUND_REGRESSION_CLASSES]);
+  }
+});
+
+test("surface: adjudication records no disposition and states no outcome, ever", () => {
+  for (const shape of callerControlledShapes()) {
+    const result = readBoundedAdjudication(shape);
+    assert.equal(result.adjudicated_outcome, null);
+    assert.equal(result.disposition_recorded, false);
+    assert.equal(result.adjudication_admitted, false);
+    assert.equal(result.outcome_is_caller_stated, false);
+  }
+});
+
+test("surface: a self-made receipt is not verified — the PR 987 reproduction", () => {
+  // The reviewer's exact construction: a party writes a receipt about its own
+  // dispute, signs an outcome, hashes its own bytes, cites the hash, and omits
+  // itself from the party list. The old surface answered
+  // `{"ok":true,...,"the receipt is well-formed and binds this dispute"}`.
+  const body = receiptBody({ outcome: "pass", adjudicator_identity_ref: "actor:builder" });
+  const result = verifyAdjudicationReceipt({
+    kind: V5_ADJUDICATION_RECEIPT_KIND,
+    receipt_ref: receiptRefFor(body),
+    body,
+    binding: receiptBinding({ party_identity_refs: ["actor:reviewer-architecture"] }),
+  });
+  assert.equal("ok" in result, false, "there is no ok field to read as a verification");
+  assert.equal(result.status, "unavailable");
+  assert.equal(result.receipt_verified, false);
+  assert.equal(result.receipt_resolved, false);
+  assert.equal(result.adjudicated_outcome, null);
+  assert.equal(result.reason_id, "bounded_adjudication_receipt_store_unavailable");
+  assert.equal(result.owed_seams.includes(V5_A03_SEAMS.bounded_adjudication_receipt_store), true);
+  // And the outcome the body carried is nowhere in the answer.
+  assert.equal(stringValues(result).includes("pass"), false);
+});
+
+test("surface: no holder, ledger, store or receipt body is accepted as a second argument", () => {
   const forged = { resolveReviewerEntitlement: () => true, resolveFindingSet: () => true,
     resolveRoundHistory: () => [], resolveReceipt: () => receiptBody() };
-  for (const [name, evaluator, fixture] of EVALUATOR_MATRIX) {
-    assert.throws(() => evaluator(fixture(), forged),
+  for (const [name, fn] of PUBLIC_ANSWERS) {
+    assert.throws(() => fn(routingRequest(), forged),
       error => error instanceof V5BoundaryError && error.code.endsWith("_is_not_an_argument"),
       `${name} accepted a caller-supplied holder`);
   }
+  // And specifically the old four-argument receipt call, which no longer has a
+  // shape that reaches an answer.
+  assert.throws(
+    () => verifyAdjudicationReceipt(V5_ADJUDICATION_RECEIPT_KIND, receiptRefFor(receiptBody()),
+      receiptBody(), receiptBinding()),
+    error => error instanceof V5BoundaryError &&
+      error.code === "adjudication_receipt_is_not_an_argument");
 });
 
-test("guard: the public surface exports no classifier and no conditional classification", () => {
-  const exported = Object.keys(a03).sort();
-  for (const name of exported) {
-    assert.equal(name.startsWith("classify"), false, `${name} is a classifier on the public surface`);
-    assert.equal(name.includes("Internal"), false, name);
+// ---------------------------------------------------------------------------
+// CLAUSES — routing. Test-only entry; none of this is reachable from production.
+// ---------------------------------------------------------------------------
+
+test("routing clause: a complete, separated, fresh routing is conditional and nothing more", () => {
+  const result = classifyRoutingIfAuthoritative(routingRequest());
+  assert.equal(result.classification, "would_be_routable_if_authoritative");
+  assert.equal(result.blocking_clause, null);
+  assert.equal(result.is_not_authority, true);
+  assert.equal(result.evidence_source, V5_A03_CLASSIFIER_EVIDENCE_SOURCE);
+});
+
+test("routing clause: a dimension nobody reviewed is named", () => {
+  const assignments = routingRequest().assignments.filter(a => a.dimension !== "security");
+  const result = classifyRoutingIfAuthoritative(routingRequest({ assignments }));
+  assert.deepEqual(blockedAt(result),
+    { blocking_clause: "dimension_coverage", reason_id: "review_dimension_coverage_incomplete" });
+  assert.deepEqual([...result.detail.missing], ["security"]);
+});
+
+test("routing clause: reviewing one dimension twice is not reviewing eleven", () => {
+  const assignments = routingRequest().assignments
+    .map(a => (a.dimension === "security" ? { ...a, dimension: "architecture" } : a));
+  const result = classifyRoutingIfAuthoritative(routingRequest({ assignments }));
+  assert.equal(result.blocking_clause, "dimension_coverage");
+  assert.deepEqual([...result.detail.duplicated], ["architecture"]);
+  assert.deepEqual([...result.detail.missing], ["security"]);
+});
+
+test("routing clause: the maker may not review its own work, in any dimension", () => {
+  for (const dimension of V5_REVIEW_DIMENSIONS) {
+    const assignments = routingRequest().assignments.map(a =>
+      (a.dimension === dimension ? { ...a, reviewer_identity_ref: ROLE_IDENTITIES.builder } : a));
+    const result = classifyRoutingIfAuthoritative(routingRequest({ assignments }));
+    assert.deepEqual(blockedAt(result),
+      { blocking_clause: "reviewer_role_separation", reason_id: "reviewer_not_role_separated" });
+    assert.deepEqual(result.detail.collisions.map(c => c.pair.join("/")), ["builder/reviewer"]);
   }
-  assert.equal(exported.includes("V5_A03_CLASSIFICATIONS"), false);
-  // And the classifications themselves are conditional by construction.
-  for (const value of Object.values(V5_A03_CLASSIFICATIONS))
-    assert.equal(value === "would_refuse" || value.endsWith("_if_authoritative"), true, value);
 });
 
-test("guard: the internal classifiers answer only in the conditional", () => {
-  const clean = [
+test("routing clause: the architect may not certify its own design, and the releaser may not review", () => {
+  for (const [identity, pair] of [[ROLE_IDENTITIES.architect, "architect/reviewer"],
+    [ROLE_IDENTITIES.deployment_controller, "deployment_controller/reviewer"],
+    [ROLE_IDENTITIES.adjudicator, "adjudicator/reviewer"],
+    [ROLE_IDENTITIES.program_controller, "program_controller/reviewer"]]) {
+    const assignments = routingRequest().assignments
+      .map((a, index) => (index ? a : { ...a, reviewer_identity_ref: identity }));
+    const result = classifyRoutingIfAuthoritative(routingRequest({ assignments }));
+    assert.equal(result.blocking_clause, "reviewer_role_separation", pair);
+    assert.deepEqual(result.detail.collisions.map(c => c.pair.join("/")), [pair]);
+  }
+});
+
+test("routing clause: one identity holding two opposing duties is caught duty-to-duty", () => {
+  for (const [role, pair] of [["integration_controller", "builder/integration_controller"],
+    ["deployment_controller", "builder/deployment_controller"],
+    ["program_controller", "builder/program_controller"],
+    ["adjudicator", "adjudicator/builder"]]) {
+    const result = classifyRoutingIfAuthoritative(
+      routingRequest({ role_identities: { [role]: ROLE_IDENTITIES.builder } }));
+    assert.deepEqual(blockedAt(result),
+      { blocking_clause: "duty_role_separation", reason_id: "duties_not_role_separated" }, pair);
+    assert.equal(result.detail.collisions.some(c => c.pair.join("/") === pair), true, pair);
+  }
+});
+
+test("routing clause: the separation matrix is the accepted one, not 'everything must differ'", () => {
+  // Q107.D1's recommendation is explicit that only OPPOSING roles are forbidden,
+  // so these two must NOT block — a matrix that refused them would make honest
+  // routings fail and would be a separation nobody settled.
+  for (const overrides of [{ architect: ROLE_IDENTITIES.builder },
+    { deployment_controller: ROLE_IDENTITIES.integration_controller }]) {
+    const result = classifyRoutingIfAuthoritative(routingRequest({ role_identities: overrides }));
+    assert.equal(result.blocking_clause, null, JSON.stringify(overrides));
+    assert.equal(result.classification, V5_A03_CLASSIFICATIONS.routing);
+  }
+});
+
+test("routing clause: a reviewer in the maker's session, or carrying the maker's context, is not fresh", () => {
+  for (const patch of [{ reviewer_session_ref: "session:maker" },
+    { context_binding: "inherited_from_maker" }]) {
+    const assignments = routingRequest().assignments
+      .map((a, index) => (index ? a : { ...a, ...patch }));
+    const result = classifyRoutingIfAuthoritative(routingRequest({ assignments }));
+    assert.deepEqual(blockedAt(result),
+      { blocking_clause: "fresh_context", reason_id: "review_context_not_fresh" });
+    assert.deepEqual([...result.detail.dimensions], ["architecture"]);
+  }
+});
+
+test("routing clause: an unreadable request fails closed rather than deciding", () => {
+  const cases = [
+    [{ ...routingRequest(), surprise: true }, "unknown_field"],
+    [{ ...routingRequest(), change_ref: "not a ref" }, "malformed_ref"],
+    [{ ...routingRequest(), delivered_set_digest: "short" }, "malformed_digest"],
+    [routingRequest({ assignments: [{ dimension: "astrology", reviewer_identity_ref: "actor:x",
+      reviewer_session_ref: "session:x", context_binding: "fresh" }] }), "unknown_enum_member"],
+    [{ ...routingRequest(), maker_session_ref: undefined }, "not_a_string"],
+  ];
+  for (const [request, code] of cases)
+    assert.throws(() => classifyRoutingIfAuthoritative(request),
+      error => error instanceof V5BoundaryError && error.code === code, code);
+});
+
+// ---------------------------------------------------------------------------
+// CLAUSES — the complete finding set.
+// ---------------------------------------------------------------------------
+
+test("finding-set clause: a complete, whole-set, pre-repair enumeration is conditional", () => {
+  const result = classifyFindingSetIfAuthoritative(findingSetRequest());
+  assert.equal(result.classification, "would_be_whole_set_scoped_if_authoritative");
+  assert.equal(result.blocking_clause, null);
+});
+
+test("finding-set clause: a dimension that reported nothing is a hole, not a clean review", () => {
+  const submissions = findingSetRequest().submissions
+    .map((s, index) => (index ? s : { ...s, state: "absent", finding_refs: [] }));
+  const result = classifyFindingSetIfAuthoritative(findingSetRequest({ submissions }));
+  assert.deepEqual(blockedAt(result),
+    { blocking_clause: "dimension_submission", reason_id: "finding_set_dimension_absent" });
+  assert.deepEqual([...result.detail.absent], ["architecture"]);
+});
+
+test("finding-set clause: a reviewer who read a narrower set produced a narrower review", () => {
+  const submissions = findingSetRequest().submissions
+    .map((s, index) => (index ? s : { ...s, reviewed_set_digest: OTHER_SET_DIGEST }));
+  const result = classifyFindingSetIfAuthoritative(findingSetRequest({ submissions }));
+  assert.deepEqual(blockedAt(result),
+    { blocking_clause: "complete_set_scope", reason_id: "review_scope_narrower_than_delivered_set" });
+  assert.deepEqual([...result.detail.dimensions], ["architecture"]);
+});
+
+test("finding-set clause: findings enumerated after repair began are the spiral Q042 refuses", () => {
+  const submissions = findingSetRequest().submissions
+    .map((s, index) => (index ? s : { ...s, enumerated_before_repair: false }));
+  const result = classifyFindingSetIfAuthoritative(findingSetRequest({ submissions }));
+  assert.deepEqual(blockedAt(result),
+    { blocking_clause: "enumeration_before_repair", reason_id: "finding_set_enumerated_after_repair" });
+});
+
+test("finding-set clause: a missing dimension and a duplicate are reported by the same clause", () => {
+  const submissions = findingSetRequest().submissions
+    .map(s => (s.dimension === "security" ? { ...s, dimension: "architecture" } : s));
+  const result = classifyFindingSetIfAuthoritative(findingSetRequest({ submissions }));
+  assert.equal(result.blocking_clause, "dimension_submission");
+  assert.deepEqual([...result.detail.missing], ["security"]);
+  assert.deepEqual([...result.detail.duplicated], ["architecture"]);
+});
+
+test("finding-set clause: an unsorted or repeating finding list is a shape error, never sorted for you", () => {
+  const unsorted = findingSetRequest().submissions
+    .map((s, index) => (index ? s : { ...s, finding_refs: ["finding:b", "finding:a"] }));
+  assert.throws(() => classifyFindingSetIfAuthoritative(findingSetRequest({ submissions: unsorted })),
+    error => error instanceof V5BoundaryError && error.code === "unsorted_list");
+  const repeated = findingSetRequest().submissions
+    .map((s, index) => (index ? s : { ...s, finding_refs: ["finding:a", "finding:a"] }));
+  assert.throws(() => classifyFindingSetIfAuthoritative(findingSetRequest({ submissions: repeated })),
+    error => error instanceof V5BoundaryError && error.code === "duplicate_member");
+});
+
+// ---------------------------------------------------------------------------
+// CLAUSES — the round bound.
+// ---------------------------------------------------------------------------
+
+test("round clause: a third round cannot silently continue", () => {
+  const result = classifyRoundIfAuthoritative(roundRequest({ requested_round_ordinal: 3,
+    history: [historyEntry(), historyEntry({ round_ordinal: 2 })] }));
+  assert.deepEqual(blockedAt(result),
+    { blocking_clause: "round_limit", reason_id: "review_round_limit_exhausted" });
+  assert.equal(result.detail.required_transition, "stronger_adjudication");
+  assert.equal(result.detail.round_limit, V5_MAX_REVIEW_ROUNDS);
+});
+
+test("round clause: round two's batch repair and regression are UNREADABLE, not satisfied", () => {
+  // The PR 987 defect: one arbitrary history entry carrying the prior ordinal
+  // used to satisfy this clause. Q042.D1 wants the prior round's complete
+  // finding set, its repair as one batch, and a regression bound to that batch.
+  // None of the three is in a history a caller wrote.
+  for (const history of [
+    [historyEntry()],
+    [historyEntry({ regression: { suite_ref: "suite:unit", checks_executed: [] } })],
+    [],
+  ]) {
+    const result = classifyRoundIfAuthoritative(roundRequest({ history }));
+    assert.deepEqual(blockedAt(result), { blocking_clause: "prior_round_batch_regression",
+      reason_id: "prior_round_batch_regression_unreadable" }, JSON.stringify(history));
+    assert.equal(result.detail.required_seam, "seam:review-round-ledger");
+    assert.equal(result.detail.unreadable_facts.length, 3);
+  }
+});
+
+test("round clause: only a first round with a clean history is conditionally within the bound", () => {
+  const result = classifyRoundIfAuthoritative(roundRequest({ requested_round_ordinal: 1, history: [] }));
+  assert.equal(result.classification, "would_be_within_bound_if_authoritative");
+  assert.equal(result.blocking_clause, null);
+});
+
+test("round clause: a dispute adjudication closed does not reopen as another round", () => {
+  const result = classifyRoundIfAuthoritative(roundRequest({ adjudication_recorded: true,
+    requested_round_ordinal: 1, history: [] }));
+  assert.deepEqual(blockedAt(result), { blocking_clause: "round_reopened_after_adjudication",
+    reason_id: "review_round_reopened_after_adjudication" });
+});
+
+test("round clause: a finding marked resolved and reported again is a repair that did not take", () => {
+  const result = classifyRoundIfAuthoritative(roundRequest({ history: [
+    historyEntry({ finding_refs: ["finding:one"], resolved_finding_refs: ["finding:one"] }),
+    historyEntry({ round_ordinal: 2, finding_refs: ["finding:one"],
+      post_repair_artifact_digest: "d".repeat(64) }),
+  ] }));
+  assert.deepEqual(blockedAt(result),
+    { blocking_clause: "round_drift", reason_id: "review_round_drift_detected" });
+  assert.deepEqual([...result.detail.fired], ["repeated_finding"]);
+  assert.deepEqual([...result.detail.regressions.repeated_finding], ["finding:one"]);
+});
+
+test("round clause: a repair that restores an already-rejected tree is going round, not forward", () => {
+  const result = classifyRoundIfAuthoritative(roundRequest({ history: [
+    historyEntry({ post_repair_artifact_digest: "e".repeat(64) }),
+    historyEntry({ round_ordinal: 2, state: "passed", finding_refs: [],
+      reviewer_identity_ref: "actor:reviewer-two",
+      post_repair_artifact_digest: "e".repeat(64) }),
+  ] }));
+  assert.equal(result.blocking_clause, "round_drift");
+  assert.deepEqual([...result.detail.fired], ["circular_reversion"]);
+});
+
+test("round clause: a reviewer giving both answers for one dimension is unstable, not decisive", () => {
+  const result = classifyRoundIfAuthoritative(roundRequest({ history: [
+    historyEntry({ finding_refs: [] , state: "passed" }),
+    historyEntry({ round_ordinal: 2, state: "changes_required", finding_refs: [],
+      post_repair_artifact_digest: "f".repeat(64) }),
+  ] }));
+  assert.equal(result.blocking_clause, "round_drift");
+  assert.deepEqual([...result.detail.fired], ["reviewer_instability"]);
+});
+
+test("round clause: test weakening is a ROUND-to-ROUND shrink, not an entry-to-entry one", () => {
+  // THE DEFECT THIS REPLACES: two dimensions in the SAME round reporting
+  // different partitions of one suite used to read as weakening, because the
+  // comparison was entry to entry and each entry's list replaced the baseline.
+  const sameRound = [
+    historyEntry({ dimension: "architecture", regression: { suite_ref: "suite:unit",
+      checks_executed: ["alpha", "beta"] } }),
+    historyEntry({ dimension: "security", reviewer_identity_ref: "actor:reviewer-security",
+      regression: { suite_ref: "suite:unit", checks_executed: ["gamma"] } }),
+  ];
+  assert.deepEqual([...detectRoundRegressions(sameRound).test_weakening], [],
+    "two dimensions splitting one round's suite is not a weakened test");
+
+  // AND THE CASE THAT MUST STILL FIRE: the next round's aggregate is smaller
+  // than the previous round's aggregate for a suite both rounds ran.
+  const shrinking = [
+    ...sameRound,
+    historyEntry({ round_ordinal: 2, dimension: "architecture", finding_refs: [],
+      post_repair_artifact_digest: "1".repeat(64),
+      regression: { suite_ref: "suite:unit", checks_executed: ["alpha", "gamma"] } }),
+  ];
+  assert.deepEqual([...detectRoundRegressions(shrinking).test_weakening], ["suite:unit|beta"]);
+  const blocked = classifyRoundIfAuthoritative(roundRequest({ history: shrinking }));
+  assert.equal(blocked.blocking_clause, "round_drift");
+  assert.deepEqual([...blocked.detail.fired], ["test_weakening"]);
+});
+
+test("round clause: the obligation at each ordinal is the accepted bound, and nothing else", () => {
+  assert.deepEqual({ ...reviewRoundObligation(1) }, { ordinal: 1, round_limit: 2,
+    within_round_limit: true, required_transition: "independent_review_round",
+    is_not_authority: true, evidence_source: V5_A03_CLASSIFIER_EVIDENCE_SOURCE });
+  assert.equal(reviewRoundObligation(2).within_round_limit, true);
+  assert.equal(reviewRoundObligation(3).within_round_limit, false);
+  assert.equal(reviewRoundObligation(3).required_transition, "stronger_adjudication");
+  assert.equal(reviewRoundObligation(0).within_round_limit, false);
+});
+
+test("round clause: the four drift detectors are silent on a clean history", () => {
+  const clean = detectRoundRegressions([historyEntry(),
+    historyEntry({ round_ordinal: 2, state: "passed", finding_refs: [], resolved_finding_refs: ["finding:one"],
+      reviewer_identity_ref: "actor:reviewer-two", post_repair_artifact_digest: "2".repeat(64) })]);
+  for (const name of V5_ROUND_REGRESSION_CLASSES) assert.deepEqual([...clean[name]], [], name);
+  assert.equal(clean.is_not_authority, true);
+});
+
+// ---------------------------------------------------------------------------
+// CLAUSES — bounded adjudication and the receipt shape.
+// ---------------------------------------------------------------------------
+
+test("adjudication clause: a well-formed dispute is conditional, and states no outcome", () => {
+  const result = classifyAdjudicationIfAuthoritative(adjudicationRequest());
+  assert.equal(result.classification, "would_be_adjudicable_if_authoritative");
+  assert.equal("outcome" in result, false);
+  assert.equal("adjudicated_outcome" in result, false);
+});
+
+test("adjudication clause: the adjudicator may not be anyone in the dispute", () => {
+  for (const [identity, as] of [["actor:builder", "builder"], ["actor:releaser", "deployment_controller"],
+    ["actor:reviewer-security", "reviewer"]]) {
+    const result = classifyAdjudicationIfAuthoritative(
+      adjudicationRequest({ adjudicator_identity_ref: identity }));
+    assert.deepEqual(blockedAt(result), { blocking_clause: "adjudicator_separation",
+      reason_id: "adjudicator_is_a_party_to_the_dispute" }, identity);
+    assert.deepEqual([...result.detail.also_a_party_as], [as]);
+  }
+});
+
+test("adjudication clause: only the accepted stronger-adjudicator role adjudicates", () => {
+  for (const role of ["peer", "reviewer", "stronger", "pass"]) {
+    const result = classifyAdjudicationIfAuthoritative(adjudicationRequest({ adjudicator_role: role }));
+    assert.deepEqual(blockedAt(result),
+      { blocking_clause: "adjudicator_role", reason_id: "adjudicator_role_unknown" }, role);
+  }
+});
+
+test("adjudication clause: reaching for a judge before the bound is spent, or with nothing in dispute", () => {
+  const early = classifyAdjudicationIfAuthoritative(adjudicationRequest({ rounds_completed: 1 }));
+  assert.deepEqual(blockedAt(early),
+    { blocking_clause: "rounds_before_adjudication", reason_id: "adjudication_before_round_limit" });
+  const empty = classifyAdjudicationIfAuthoritative(adjudicationRequest({ disputed_finding_refs: [] }));
+  assert.deepEqual(blockedAt(empty),
+    { blocking_clause: "disputed_set_empty", reason_id: "adjudication_disputed_set_empty" });
+});
+
+test("receipt clause: a well-shaped receipt is only ever SHAPED like one", () => {
+  const body = receiptBody();
+  const result = classifyAdjudicationReceiptIfAuthoritative(V5_ADJUDICATION_RECEIPT_KIND,
+    receiptRefFor(body), body, receiptBinding());
+  assert.equal(result.classification, "would_be_verifiable_if_authoritative");
+  assert.equal(result.is_not_authority, true);
+  // The outcome the body carried is not echoed back, even here.
+  assert.equal(stringValues(result).includes("quarantine"), false);
+  assert.equal("ok" in result, false);
+});
+
+test("receipt clause: every way a forged or mismatched receipt fails is named", () => {
+  const binding = receiptBinding();
+  const body = receiptBody();
+  const cases = [
+    ["adjudication-receipt:not-a-digest", body, "receipt_content_addressed"],
+    ["receipt:" + digest(body).slice(7), body, "receipt_content_addressed"],
+    [receiptRefFor(body), null, "receipt_resolvable"],
+    [receiptRefFor(body), receiptBody({ rounds_completed: 7 }), "receipt_digest"],
+    [receiptRefFor(receiptBody({ kind: "review" })), receiptBody({ kind: "review" }), "receipt_kind"],
+    [receiptRefFor(receiptBody({ change_ref: "change:other" })), receiptBody({ change_ref: "change:other" }),
+      "receipt_change_binding"],
+    [receiptRefFor(receiptBody({ delivered_set_digest: OTHER_SET_DIGEST })),
+      receiptBody({ delivered_set_digest: OTHER_SET_DIGEST }), "receipt_delivered_set_binding"],
+    [receiptRefFor(receiptBody({ outcome: "maybe" })), receiptBody({ outcome: "maybe" }),
+      "receipt_outcome_vocabulary"],
+    [receiptRefFor(receiptBody({ adjudicator_identity_ref: "actor:builder" })),
+      receiptBody({ adjudicator_identity_ref: "actor:builder" }), "receipt_adjudicator_separation"],
+  ];
+  for (const [receiptRef, value, clause] of cases) {
+    const result = classifyAdjudicationReceiptIfAuthoritative(V5_ADJUDICATION_RECEIPT_KIND,
+      receiptRef, value, binding);
+    assert.deepEqual(blockedAt(result),
+      { blocking_clause: clause, reason_id: V5_A03_CLAUSE_REASONS[clause] }, clause);
+  }
+  assert.deepEqual([...V5_ADJUDICATION_OUTCOMES], ["fail", "pass", "quarantine"]);
+});
+
+// ---------------------------------------------------------------------------
+// GUARDS.
+// ---------------------------------------------------------------------------
+
+test("guard: every classifier answers in the conditional and carries no privileged value", () => {
+  const answers = [
     classifyRoutingIfAuthoritative(routingRequest()),
+    classifyRoutingIfAuthoritative(routingRequest({ assignments: [] })),
     classifyFindingSetIfAuthoritative(findingSetRequest()),
+    classifyRoundIfAuthoritative(roundRequest({ requested_round_ordinal: 1, history: [] })),
     classifyRoundIfAuthoritative(roundRequest()),
     classifyAdjudicationIfAuthoritative(adjudicationRequest()),
+    // A caller that calls its own role "pass" must not see that word anywhere in
+    // the answer: a privileged word in a result is indistinguishable from one
+    // the module produced.
+    classifyAdjudicationIfAuthoritative(adjudicationRequest({ adjudicator_role: "pass" })),
+    classifyRoutingIfAuthoritative(routingRequest({ maker_session_ref: "session:pass",
+      role_identities: { builder: "actor:allow" } })),
+    classifyAdjudicationReceiptIfAuthoritative(V5_ADJUDICATION_RECEIPT_KIND,
+      receiptRefFor(receiptBody()), receiptBody(), receiptBinding()),
   ];
-  const expected = [V5_A03_CLASSIFICATIONS.routing, V5_A03_CLASSIFICATIONS.findingSet,
-    V5_A03_CLASSIFICATIONS.round, V5_A03_CLASSIFICATIONS.adjudication];
-  clean.forEach((result, index) => {
-    assert.equal(result.classification, expected[index]);
-    assert.equal(result.blocking_clause, null);
-    for (const value of stringValues(result))
-      assert.equal(PRIVILEGED_VALUES.has(value), false, value);
-  });
+  for (const answer of answers) {
+    assert.equal(answer.classification === V5_A03_CLASSIFICATIONS.refuse ||
+      answer.classification.startsWith("would_be_"), true, answer.classification);
+    assert.equal(answer.classification === "would_refuse" ||
+      answer.classification.endsWith("_if_authoritative"), true, answer.classification);
+    assert.equal(answer.is_not_authority, true);
+    assert.equal(answer.evidence_source, V5_A03_CLASSIFIER_EVIDENCE_SOURCE);
+    assert.equal(Object.isFrozen(answer), true);
+    for (const value of stringValues(answer))
+      assert.equal(PRIVILEGED_VALUES.has(value), false,
+        `${answer.classification} answered with the privileged word ${value}`);
+  }
+  for (const value of Object.values(V5_A03_CLASSIFICATIONS))
+    assert.equal(value === "would_refuse" || /^would_be_.*_if_authoritative$/.test(value), true, value);
 });
 
-test("guard: the internal classifier is unreachable through the public surface — parsed, not grepped", () => {
-  // Node's own ES-module parser, via vm.SourceTextModule, which exposes the
-  // real import specifiers of each source file. A regex over the text would be
-  // fooled by a comment, a string or an unusual line break; this is the same
-  // parse the runtime performs.
+test("guard: the privileged sweep would catch a leak — the detector is not vacuous", () => {
+  // A mutation check on the check itself: if privilegedFindings cannot see a
+  // planted value, every sweep above proves nothing.
+  assert.deepEqual(privilegedFindings({ outcome: "pass" }), ["$.outcome === pass"]);
+  assert.deepEqual(privilegedFindings({ ok: true }), ["$.ok === true"]);
+  assert.deepEqual(privilegedFindings({ would_be_fine: 1 }),
+    ["$.would_be_fine is a classifier field on the public surface"]);
+  assert.deepEqual(privilegedFindings({ nested: [{ decision: "allow" }] }),
+    ["$.nested[0].decision === allow"]);
+});
+
+test("guard: no test-only entry sits in the production source directory", () => {
+  const directory = path.join(REPO_ROOT, "mcp-server/src");
+  const strays = readdirSync(directory).filter(name => /\.(testonly|testhelper)\./.test(name));
+  assert.deepEqual(strays, [], "a test-only entry is sitting in the production source directory");
+  // And the file this slice's classifiers used to live in is gone, not renamed.
+  assert.equal(readdirSync(directory).includes("complete-set-review-a03.internal.v5.js"), false);
+});
+
+test("guard: production cannot reach the classifiers — parsed, not grepped", () => {
+  // Node's own ES-module parser, via vm.SourceTextModule, which exposes the real
+  // import specifiers of each source file. A regex over the text would be fooled
+  // by a comment, a string or an unusual line break; this is the same parse the
+  // runtime performs.
   const script = `
     import { readdirSync, readFileSync, statSync } from "node:fs";
     import path from "node:path";
     import vm from "node:vm";
     const root = process.env.A03_REPO_ROOT;
-    const internal = "complete-set-review-a03.internal.v5.js";
+    const helper = "complete-set-review-a03-classifiers.v5.testhelper.mjs";
     const roots = ["mcp-server/src", "mcp-server/test", "control-room", "workspace", "tools"];
     const files = [];
     const walk = dir => {
@@ -803,38 +962,47 @@ test("guard: the internal classifier is unreachable through the public surface �
     };
     for (const dir of roots) walk(path.join(root, dir));
     const importers = [];
+    const srcReachingTest = [];
     let parsed = 0;
+    let srcParsed = 0;
     for (const file of files) {
       let record;
       try { record = new vm.SourceTextModule(readFileSync(file, "utf8"), { identifier: file }); }
       catch { continue; }
       parsed += 1;
-      if (record.dependencySpecifiers.some(spec => spec.endsWith(internal)))
-        importers.push(path.relative(root, file));
+      const relative = path.relative(root, file);
+      const specifiers = record.dependencySpecifiers;
+      if (specifiers.some(spec => spec.endsWith(helper))) importers.push(relative);
+      if (relative.startsWith("mcp-server/src/")) {
+        srcParsed += 1;
+        if (specifiers.some(spec => spec.includes("/test/") || spec.startsWith("../test") ||
+            spec.includes(".testhelper.") || spec.includes(".testonly.")))
+          srcReachingTest.push(relative);
+      }
     }
-    console.log(JSON.stringify({ importers: importers.sort(), parsed }));
+    console.log(JSON.stringify({ importers: importers.sort(), srcReachingTest: srcReachingTest.sort(),
+      parsed, srcParsed }));
   `;
   const output = execFileSync(process.execPath,
     ["--experimental-vm-modules", "--input-type=module", "--eval", script],
     { env: { ...process.env, A03_REPO_ROOT: REPO_ROOT }, encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"] });
-  const { importers, parsed } = JSON.parse(output.trim().split("\n").pop());
+  const { importers, srcReachingTest, parsed, srcParsed } = JSON.parse(output.trim().split("\n").pop());
 
   // The sweep is only worth anything if it actually parsed the tree.
   assert.equal(parsed > 100, true, `only ${parsed} modules parsed`);
-  // Exactly two importers: the public module (which does not re-export the
-  // classifiers) and this test file. Anything else would be a consumer reaching
-  // past the public surface for the conditional answer.
-  assert.deepEqual(importers, [
-    "mcp-server/src/complete-set-review-a03.v5.js",
-    "mcp-server/test/complete-set-review-a03.v5.test.mjs",
-  ]);
+  assert.equal(srcParsed > 50, true, `only ${srcParsed} production modules parsed`);
+  // No production module reaches into the test tree by ANY route, not just this
+  // helper: that is the property "internal" in a filename never had.
+  assert.deepEqual(srcReachingTest, []);
+  // And the classifier entry has exactly one importer: this test file.
+  assert.deepEqual(importers, ["mcp-server/test/complete-set-review-a03.v5.test.mjs"]);
 });
 
-test("guard: the parsed export names of the public module carry no classifier", () => {
-  // Same parser, now LINKED against the real files on disk rather than stubs,
-  // so the export names come from Node resolving the module graph exactly as
-  // the runtime would. No fallback: if the link fails, the guard fails.
+test("guard: the parsed export names of the public module are the runtime surface", () => {
+  // Same parser, now LINKED against the real files on disk rather than stubs, so
+  // the export names come from Node resolving the module graph exactly as the
+  // runtime would. No fallback: if the link fails, the guard fails.
   const script = `
     import { readFileSync } from "node:fs";
     import path from "node:path";
@@ -872,51 +1040,56 @@ test("guard: the parsed export names of the public module carry no classifier", 
     encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   const names = JSON.parse(output.trim().split("\n").pop());
 
+  assert.deepEqual(names, EXPECTED_PUBLIC_EXPORTS, "the parsed surface is the declared surface");
   assert.deepEqual(names, Object.keys(a03).sort(), "the parsed surface is the runtime surface");
-  for (const name of names) assert.equal(name.startsWith("classify"), false, name);
-  assert.equal(names.includes("evaluateReviewRouting"), true);
-  assert.equal(names.includes("V5_A03_CLASSIFICATIONS"), false);
+  for (const name of names) {
+    assert.equal(/^(classify|evaluate|derive)/.test(name), false, name);
+    assert.equal(name.startsWith("normalize"), false, name);
+  }
+  for (const gone of ["reviewDimensionGap", "roleSeparationCollisions", "detectRoundRegressions",
+    "reviewRoundObligation", "V5_A03_CLASSIFICATIONS", "V5_CHECK_STATES"])
+    assert.equal(names.includes(gone), false, `${gone} is still on the public surface`);
 });
 
-test("guard: every reason this module may give is produced by something here", () => {
+test("guard: every reason this slice may give is produced by something here", () => {
   const produced = new Set();
   const collect = result => { if (result?.reason_id) produced.add(result.reason_id); };
-  const assignments = routingRequest().assignments;
 
-  collect(evaluateReviewRouting(routingRequest()));
-  collect(evaluateReviewRouting(routingRequest({ assignments: assignments.slice(1) })));
-  collect(evaluateReviewRouting(routingRequest({
-    assignments: assignments.map((a, i) => (i ? a : { ...a, reviewer_identity_ref: ROLE_IDENTITIES.builder })) })));
-  collect(evaluateReviewRouting(routingRequest({ role_identities: { adjudicator: ROLE_IDENTITIES.builder } })));
-  collect(evaluateReviewRouting(routingRequest({
-    assignments: assignments.map((a, i) => (i ? a : { ...a, context_binding: "inherited_from_maker" })) })));
+  for (const [, fn] of PUBLIC_ANSWERS) collect(fn(routingRequest()));
+
+  const assignments = routingRequest().assignments;
+  collect(classifyRoutingIfAuthoritative(routingRequest({ assignments: assignments.slice(1) })));
+  collect(classifyRoutingIfAuthoritative(routingRequest({ assignments: assignments
+    .map((a, i) => (i ? a : { ...a, reviewer_identity_ref: ROLE_IDENTITIES.builder })) })));
+  collect(classifyRoutingIfAuthoritative(
+    routingRequest({ role_identities: { adjudicator: ROLE_IDENTITIES.builder } })));
+  collect(classifyRoutingIfAuthoritative(routingRequest({ assignments: assignments
+    .map((a, i) => (i ? a : { ...a, context_binding: "inherited_from_maker" })) })));
 
   const submissions = findingSetRequest().submissions;
-  collect(evaluateFindingSetCompleteness(findingSetRequest()));
-  collect(evaluateFindingSetCompleteness(findingSetRequest({ submissions: submissions.slice(1) })));
-  collect(evaluateFindingSetCompleteness(findingSetRequest({
-    submissions: submissions.map((s, i) => (i ? s : { ...s, reviewed_set_digest: OTHER_SET_DIGEST })) })));
-  collect(evaluateFindingSetCompleteness(findingSetRequest({
-    submissions: submissions.map((s, i) => (i ? s : { ...s, enumerated_before_repair: false })) })));
+  collect(classifyFindingSetIfAuthoritative(findingSetRequest({ submissions: submissions.slice(1) })));
+  collect(classifyFindingSetIfAuthoritative(findingSetRequest({ submissions: submissions
+    .map((s, i) => (i ? s : { ...s, reviewed_set_digest: OTHER_SET_DIGEST })) })));
+  collect(classifyFindingSetIfAuthoritative(findingSetRequest({ submissions: submissions
+    .map((s, i) => (i ? s : { ...s, enumerated_before_repair: false })) })));
 
-  collect(evaluateReviewRoundAdmission(roundRequest()));
-  collect(evaluateReviewRoundAdmission(roundRequest({ requested_round_ordinal: 3 })));
-  collect(evaluateReviewRoundAdmission(roundRequest({ adjudication_recorded: true })));
-  collect(evaluateReviewRoundAdmission(roundRequest({ history: [] })));
-  collect(evaluateReviewRoundAdmission(roundRequest({ history: [
+  collect(classifyRoundIfAuthoritative(roundRequest()));
+  collect(classifyRoundIfAuthoritative(roundRequest({ requested_round_ordinal: 3 })));
+  collect(classifyRoundIfAuthoritative(roundRequest({ adjudication_recorded: true })));
+  collect(classifyRoundIfAuthoritative(roundRequest({ history: [
     historyEntry({ finding_refs: ["finding:one"], resolved_finding_refs: ["finding:one"] }),
     historyEntry({ round_ordinal: 2, finding_refs: ["finding:one"],
       post_repair_artifact_digest: "9".repeat(64) })] })));
 
-  collect(evaluateAdjudication(adjudicationRequest()));
-  collect(evaluateAdjudication(adjudicationRequest({ adjudicator_role: "peer" })));
-  collect(evaluateAdjudication(adjudicationRequest({ adjudicator_identity_ref: "actor:builder" })));
-  collect(evaluateAdjudication(adjudicationRequest({ rounds_completed: 0 })));
-  collect(evaluateAdjudication(adjudicationRequest({ disputed_finding_refs: [] })));
+  collect(classifyAdjudicationIfAuthoritative(adjudicationRequest({ adjudicator_role: "peer" })));
+  collect(classifyAdjudicationIfAuthoritative(
+    adjudicationRequest({ adjudicator_identity_ref: "actor:builder" })));
+  collect(classifyAdjudicationIfAuthoritative(adjudicationRequest({ rounds_completed: 0 })));
+  collect(classifyAdjudicationIfAuthoritative(adjudicationRequest({ disputed_finding_refs: [] })));
 
-  const body = receiptBody();
   const binding = receiptBinding();
-  for (const [receiptRef, receiptValue] of [
+  const body = receiptBody();
+  for (const [receiptRef, value] of [
     ["adjudication-receipt:not-a-digest", body],
     [receiptRefFor(body), null],
     [receiptRefFor(body), receiptBody({ rounds_completed: 7 })],
@@ -927,32 +1100,36 @@ test("guard: every reason this module may give is produced by something here", (
     [receiptRefFor(receiptBody({ outcome: "maybe" })), receiptBody({ outcome: "maybe" })],
     [receiptRefFor(receiptBody({ adjudicator_identity_ref: "actor:builder" })),
       receiptBody({ adjudicator_identity_ref: "actor:builder" })],
-  ]) collect(verifyAdjudicationReceipt(V5_ADJUDICATION_RECEIPT_KIND, receiptRef, receiptValue, binding));
+  ]) collect(classifyAdjudicationReceiptIfAuthoritative(V5_ADJUDICATION_RECEIPT_KIND, receiptRef,
+    value, binding));
 
   assert.deepEqual([...produced].sort(), [...V5_A03_REASON_IDS],
     "a reason nothing can produce is a reason nobody can act on");
 });
 
-test("guard: every declared check order is exercised and every clause can block", () => {
+test("guard: every declared clause order ends at the seam it is owed", () => {
   for (const order of [V5_ROUTING_CHECKS, V5_FINDING_SET_CHECKS, V5_ROUND_BOUND_CHECKS,
     V5_ADJUDICATION_CHECKS]) {
     assert.equal(new Set(order).size, order.length);
-    // The holder clause is LAST in every order, so a caller whose own
-    // description is self-inconsistent hears that instead of the missing seam.
     assert.match(order[order.length - 1], /_registry$|_ledger$|_store$/);
     assert.equal(order.slice(0, -1).some(check => /_registry$|_ledger$|_store$/.test(check)), false);
   }
+  // Drift runs BEFORE the unreadable prior-round clause, so a caller whose
+  // history is visibly drifting hears that rather than the missing ledger.
+  assert.equal(V5_ROUND_BOUND_CHECKS.indexOf("round_drift") <
+    V5_ROUND_BOUND_CHECKS.indexOf("prior_round_batch_regression"), true);
   assert.deepEqual([...V5_NON_REVIEWER_ROLES].sort(), [...V5_NON_REVIEWER_ROLES]);
   assert.equal(V5_OPPOSING_ROLE_PAIRS.length, 9);
   for (const pair of V5_OPPOSING_ROLE_PAIRS) assert.deepEqual([...pair].sort(), [...pair]);
 });
 
 test("clause predicates: a gap report and a collision list are facts, not clearances", () => {
-  assert.deepEqual(reviewDimensionGap([...V5_REVIEW_DIMENSIONS]), { missing: [], duplicated: [] });
-  assert.deepEqual(reviewDimensionGap(["architecture", "architecture"]).duplicated, ["architecture"]);
+  assert.deepEqual({ ...reviewDimensionGap([...V5_REVIEW_DIMENSIONS]) }, { missing: [], duplicated: [] });
+  assert.deepEqual([...reviewDimensionGap(["architecture", "architecture"]).duplicated], ["architecture"]);
   assert.equal(reviewDimensionGap([]).missing.length, 11);
   assert.deepEqual(roleSeparationCollisions(ROLE_IDENTITIES, ["actor:reviewer-x"]), []);
-  assert.deepEqual(roleSeparationCollisions(ROLE_IDENTITIES, [ROLE_IDENTITIES.builder]),
-    [{ pair: ["builder", "reviewer"], identity_ref: "actor:builder" }]);
+  assert.deepEqual(roleSeparationCollisions(ROLE_IDENTITIES, [ROLE_IDENTITIES.builder])
+    .map(entry => ({ pair: [...entry.pair], identity_ref: entry.identity_ref })),
+  [{ pair: ["builder", "reviewer"], identity_ref: "actor:builder" }]);
   assert.equal(V5_A03_SCHEMA_VERSION, "doctorcre-v5-complete-set-review.v1");
 });
