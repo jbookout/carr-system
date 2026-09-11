@@ -926,6 +926,130 @@ def test_the_walk_prunes_named_roots_only():
           "a category prune is back; a dot-directory test would go silent again")
 
 
+# ------------------------------------- 5b. what a failing gate is allowed to print
+#
+# fail_tail() prints a CHILD PROCESS'S captured output into the CI log. The
+# window was widened on 2026-09-11 from twelve lines to the whole log under 200
+# lines, because the failing line of a 32-check suite sat above a twelve-line
+# tail and two hosted rounds were spent unable to read it. Widening the window
+# widened the exposure with it: arbitrary child stdout, into a log that outlives
+# the run and that more people can read than can read the tree.
+#
+# So both halves are asserted here — the window, which is the feature, and the
+# redaction, which is what the feature costs if it is missing. The redaction is
+# ops/ci-secret-scan.py's own --redact filter over its own PATTERNS list; these
+# cases prove the wiring, and the scanner's pattern list stays the one place a
+# shape is declared.
+
+# A real github-token shape, present in this file ON PURPOSE so the assertions
+# below are about a string the scanner genuinely matches rather than a stand-in
+# that only looks like one. It is inert: 36 characters counting up.
+FIXTURE_TOKEN = "ghp_0123456789abcdefghijklmnopqrstuvwxyz"  # ci-secret-scan: allow — inert redaction fixture
+
+
+def _fail_tail(log_path, py=None):
+    """Drive ci.sh's REAL fail_tail(), lifted from its source.
+
+    Lifted, not restated, for the reason this file keeps rediscovering: a copy
+    of the body here would be a second contract, and a second contract drifts.
+    The function needs only $PY and a log path, so bash can run the shipped
+    bytes with cwd=REPO — which is what makes `ops/ci-secret-scan.py` resolve.
+    """
+    src = CI.read_text(encoding="utf-8")
+    start = src.index("fail_tail() {")
+    fn = src[start:src.index("\n# ------", start)]
+    p = subprocess.run(
+        ["bash", "-c", f'PY={shlex.quote(py or sys.executable)}\n{fn}\nfail_tail '
+                       f'{shlex.quote(str(log_path))}'],
+        cwd=str(REPO), capture_output=True, text=True, timeout=120)
+    return ANSI.sub("", (p.stdout or "") + (p.stderr or ""))
+
+
+def test_a_failing_gates_output_is_printed_whole_when_it_is_short():
+    """The short branch: under 200 lines, the reader gets the whole log.
+
+    This is the half the widening bought. A suite that prints one ok line per
+    check and fails in the middle is unreadable through a tail, and that is not
+    a hypothetical: it cost two hosted CI rounds on this very branch.
+    """
+    with tempfile.TemporaryDirectory(prefix="ci-selftest-failtail-") as td:
+        log = pathlib.Path(td) / "gate-short.log"
+        lines = [f"ok check {i}" for i in range(1, 31)]
+        lines[4] = f"FAIL check 5: token={FIXTURE_TOKEN} leaked into the log"
+        log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        out = _fail_tail(log)
+
+    printed = [ln for ln in out.splitlines() if ln.strip()]
+    check("a short log is printed whole, not tailed",
+          len(printed) == 30, f"{len(printed)} lines: {printed[:3]}")
+    check("the first line of a short log reaches the reader",
+          "ok check 1" in out, out[:400])
+    check("and so does the last", "ok check 30" in out, out[-400:])
+    check("the failing line is inside the window",
+          "FAIL check 5" in out, out[:400])
+    check("a token-shaped string in a short log is MASKED",
+          FIXTURE_TOKEN not in out, "the raw credential reached the CI log")
+    check("and the mask says what was removed, so the line stays diagnosable",
+          "<redacted:github-token:40 chars>" in out, out[:400])
+
+
+def test_a_long_failing_gate_log_is_tailed_and_still_redacted():
+    """The long branch: 80 lines off the end, and the same masking.
+
+    Both properties are asserted against the SAME log, because they can fail
+    independently: a tail that redacts nothing publishes the credential, and a
+    redactor wired only into the short branch looks correct on every test that
+    never gets past 200 lines.
+    """
+    with tempfile.TemporaryDirectory(prefix="ci-selftest-failtail-") as td:
+        log = pathlib.Path(td) / "gate-long.log"
+        lines = [f"ok check {i}" for i in range(1, 251)]
+        lines[2] = f"early line 3: token={FIXTURE_TOKEN} above the window"
+        lines[244] = f"FAIL check 245: token={FIXTURE_TOKEN} inside the window"
+        log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        out = _fail_tail(log)
+
+    printed = [ln for ln in out.splitlines() if ln.strip()]
+    check("a long log is tailed to 80 lines", len(printed) == 80,
+          f"{len(printed)} lines")
+    check("the tail starts where 80 lines from the end starts",
+          "ok check 171" in out, out[:300])
+    check("and does not reach back past it",
+          "ok check 170" not in out, out[:300])
+    check("the failing line inside the window is printed",
+          "FAIL check 245" in out, out[-400:])
+    check("a token-shaped string inside the tail is MASKED",
+          FIXTURE_TOKEN not in out, "the raw credential reached the CI log")
+    check("the mask names the shape and the length",
+          "<redacted:github-token:40 chars>" in out, out[-400:])
+    check("the line above the window is not printed at all",
+          "early line 3" not in out, out[:300])
+
+
+def test_fail_tail_withholds_the_window_when_it_cannot_redact():
+    """FAIL-CLOSED. No redactor, no print — and the log path instead.
+
+    The tempting failure direction is the other one: print raw when the filter
+    is unavailable, on the grounds that a diagnosis matters more. That reasoning
+    publishes a credential to avoid an inconvenience, and it is the shape a
+    reviewer cannot see in a green run. Driven by pointing $PY at an interpreter
+    that does not exist, which is the same condition as a broken or deleted
+    scanner from this function's side.
+    """
+    with tempfile.TemporaryDirectory(prefix="ci-selftest-failtail-") as td:
+        log = pathlib.Path(td) / "gate-noredactor.log"
+        log.write_text(f"FAIL: token={FIXTURE_TOKEN}\nsecond line\n", encoding="utf-8")
+        out = _fail_tail(log, py=str(pathlib.Path(td) / "no-such-interpreter"))
+
+    check("no part of the log is printed when redaction is unavailable",
+          "second line" not in out, out)
+    check("and least of all the credential", FIXTURE_TOKEN not in out, out)
+    check("the reader is told the window was withheld",
+          "WITHHELD" in out, out)
+    check("and where the captured log actually is",
+          str(log) in out, out)
+
+
 def test_gates_treats_only_78_as_not_configured():
     """Exit 78 in the gates loop must mean "not configured", and nothing else.
 
@@ -1350,6 +1474,9 @@ def main():
                test_push_floor_fails_when_a_touched_gates_paired_selftest_fails,
                test_the_paired_move_still_fires_on_a_real_gate_and_selftest_pair,
                test_the_paired_move_no_longer_invents_a_gate_that_does_not_exist,
+               test_a_failing_gates_output_is_printed_whole_when_it_is_short,
+               test_a_long_failing_gate_log_is_tailed_and_still_redacted,
+               test_fail_tail_withholds_the_window_when_it_cannot_redact,
                test_gates_treats_only_78_as_not_configured,
                test_gates_selftests_have_a_process_group_watchdog,
                test_push_floor_defers_the_gates_class_instead_of_running_it,

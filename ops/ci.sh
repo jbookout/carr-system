@@ -308,11 +308,35 @@ inherited_abort() {  # inherited_abort <check-name> <cmd...> -- never returns if
 # the window -- a hosted-Linux-only red whose cause was unreadable from the log,
 # through two full CI rounds. Whole log when it is short enough to read, else the
 # last 80 lines. Nothing else about failure handling changes.
+#
+# AND IT IS REDACTED, because widening the window widened the exposure with it.
+# This prints a CHILD PROCESS'S captured stdout and stderr -- up to a whole gate
+# log -- into a CI log that outlives the run and that more people can read than
+# can read the tree. Twelve lines of that was already a hole; eighty, or the
+# whole file, is a bigger one. The redaction is ops/ci-secret-scan.py's own
+# --redact filter over its own PATTERNS list, NOT a pattern set written here: a
+# second list drifts from the first, and the drift is invisible because each
+# side looks correct alone. A pattern added to the scanner now protects this
+# print too, with nothing to remember.
+#
+# FAIL-CLOSED, and this is the one place that trade goes that way. If the filter
+# cannot run, the window is WITHHELD and the log path is named instead. Printing
+# unredacted child output because the redactor was missing would publish the
+# credential to argue that a diagnosis is more important than not publishing it;
+# the log is still on disk and the reader is told exactly where.
 fail_tail() {  # fail_tail <logfile>
-  local log="$1" lines
+  local log="$1" lines window
   lines="$(wc -l < "$log" 2>/dev/null | tr -d ' ')"
   [ -n "$lines" ] || lines=0
-  if [ "$lines" -lt 200 ]; then cat "$log" >&2; else tail -80 "$log" >&2; fi
+  window="$(mktemp)"
+  if [ "$lines" -lt 200 ]; then cat "$log" >"$window" 2>/dev/null
+  else tail -80 "$log" >"$window" 2>/dev/null; fi
+  if "$PY" ops/ci-secret-scan.py --redact <"$window" >"$window.redacted" 2>/dev/null; then
+    cat "$window.redacted" >&2
+  else
+    printf '        %s\n' "gate output WITHHELD: ops/ci-secret-scan.py --redact could not run, and unredacted child output is never printed. The captured log is at $log." >&2
+  fi
+  rm -f "$window" "$window.redacted"
 }
 
 # ---------------------------------------------------------------- unit
