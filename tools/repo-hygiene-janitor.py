@@ -1355,42 +1355,47 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _load_canonical_freshness(module_path: Path | None = None):
-    """WR-000040's freshness machinery, loaded by path for the same reason the
-    R09 module is: it is deliberately not an entrypoint and has no package home.
+def _load_module_by_path(name: str, module_path: Path, description: str):
+    """Import a sibling module that is deliberately NOT an entrypoint.
 
-    Relative to THIS file, so a worktree reads its own copy rather than whatever
-    a possibly-stale canonical tree happens to hold — which matters more here
-    than anywhere else in this file, since the staleness of that tree is the
-    very thing being measured."""
+    Two of this command's collaborators — R09's isolation module and WR-000040's
+    freshness machinery — carry no shebang and no main guard on purpose, so that
+    ops/scac-mutation-inventory.mjs does not read them as new SCAC ingress rows
+    in a sealed inventory. The price of that choice is that neither has a package
+    home and both must be loaded by path; this function is that loading, written
+    once, so the two callers below differ only in WHICH module they name.
+
+    Every path is resolved relative to THIS file rather than to the canonical
+    checkout: a worktree must read its own copy rather than whatever a possibly
+    stale canonical tree happens to hold. For the freshness module that is not a
+    nicety — the staleness of that tree is the very thing it measures.
+    """
     import importlib.util
 
-    module_path = module_path or (Path(__file__).resolve().parents[1] / "lib"
-                                  / "canonical_freshness.py")
-    spec = importlib.util.spec_from_file_location("canonical_freshness", module_path)
+    spec = importlib.util.spec_from_file_location(name, module_path)
     if spec is None or spec.loader is None:
-        raise JanitorRefusal(f"canonical freshness module unreadable: {module_path}")
+        raise JanitorRefusal(f"{description} unreadable: {module_path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_canonical_freshness(module_path: Path | None = None):
+    """WR-000040's freshness machinery."""
+    return _load_module_by_path(
+        "canonical_freshness",
+        module_path or (Path(__file__).resolve().parents[1] / "lib"
+                        / "canonical_freshness.py"),
+        "canonical freshness module")
 
 
 def _load_r09_module(module_path: Path | None = None):
-    """R09's isolation module, loaded by path because it is deliberately not an
-    entrypoint and has no package home."""
-    import importlib.util
-
-    # Relative to THIS file, not to the canonical checkout: R09 and this janitor
-    # ship in the same repository, and a worktree must read its own copy rather
-    # than whatever a possibly-stale canonical tree happens to hold.
-    module_path = module_path or (Path(__file__).resolve().parent / "room-bridge"
-                                  / "worktree_runtime_isolation.py")
-    spec = importlib.util.spec_from_file_location("worktree_runtime_isolation", module_path)
-    if spec is None or spec.loader is None:
-        raise JanitorRefusal(f"R09 isolation module unreadable: {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    """R09's worktree isolation module."""
+    return _load_module_by_path(
+        "worktree_runtime_isolation",
+        module_path or (Path(__file__).resolve().parent / "room-bridge"
+                        / "worktree_runtime_isolation.py"),
+        "R09 isolation module")
 
 
 class R09EntrantReader:

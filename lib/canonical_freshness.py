@@ -15,25 +15,68 @@ inherited that.
 WHY IT IS A LIBRARY AND NOT TWO SCRIPTS, which is a fact about this repository
 rather than a style preference. ops/scac-mutation-inventory.mjs discovers a SCAC
 ingress from the git index: `isScriptEntrypoint` counts any tracked file with a
-shebang, and any .py whose source carries a `__main__` guard. Two new
-executable scripts would have been two new rows in a SEALED inventory whose
-review overlay (`current_source_review`) can only re-digest ingresses it already
-knows — `assertCurrentSourceInventoryMatchesFixture` throws "unknown ingress" on
-an added key. A new row therefore costs a whole registry successor. This module
+shebang, and any .py whose source carries a main guard. Two new executable
+scripts would have been two new rows in a SEALED inventory whose review overlay
+(`current_source_review`) can only re-digest ingresses it already knows —
+`assertCurrentSourceInventoryMatchesFixture` throws "unknown ingress" on an
+added key. A new row therefore costs a whole registry successor. This module
 carries NO shebang and NO such guard on purpose: it is reached only through
 tools/repo-hygiene-janitor.py, which is already an inventoried ingress, so the
 machinery lands against one already-registered row. That is the same shape
 tools/room-bridge/worktree_runtime_isolation.py already uses, and the janitor
 already knows how to load such a module by path.
 
+── AN UNOBSERVED FACT IS NOT A CLEAN ONE ────────────────────────────────────
+
+THE RULE THIS MODULE IS BUILT AROUND, and the one its first revision got wrong:
+a git command that FAILS produces no measurement, and the absence of a
+measurement must never be spelled the same way as a good one. `_Git.out` used to
+take a `default=`, so a failed `git status` came back as the empty string and
+read as ZERO tracked modifications, a failed `git rev-list` came back as the
+word "unknown", and a failed `git log` came back as age zero. A repository whose
+state could not be read at all therefore looked exactly like a clean, current
+one, and the watchdog returned OK about it.
+
+So there are three states here, not two, and every caller must name which it is
+acting on: OBSERVED-AND-FINE, OBSERVED-AND-WRONG, and UNOBSERVED. `_Git.out`
+returns None for the third and has no `default=` parameter to convert it into
+the first. The fast-forward treats UNOBSERVED as FAILED, because a job that
+cannot prove the tree holds nobody's edit has not earned the right to move the
+branch. The watchdog treats it as an ALARM in its own right, with its own code
+and its own named commands, because "I could not look" is a page-worthy fact
+about the machine that is supposed to be looking.
+
+── CANONICAL MEANS main, AND THAT IS CHECKED, NOT ASSUMED ───────────────────
+
+Both modes are about ONE branch. "Keep canonical within one day of origin/main"
+is a statement about main; measuring `HEAD..origin/main` from some other branch
+answers a different question and calls the answer freshness. Worse, a feature
+branch that happens to be a clean ancestor of origin/main fast-forwards
+SUCCESSFULLY — the job would quietly drag somebody's branch onto main's tip,
+report OK, and leave the actual main exactly as stale as it found it.
+
+So: `fast_forward` refuses unless the checked-out branch is exactly `main`, and
+`watchdog` alarms when it is not. A detached HEAD reads as the branch name
+"HEAD", which is not `main`, and is refused by the same test rather than by a
+special case.
+
 ── THE PROPERTY fast_forward() MUST HOLD ────────────────────────────────────
 
 IT NEVER DESTROYS ANYTHING. The only git command that moves the branch is
 `git merge --ff-only`, which fails rather than rewriting history, and it is not
-reached at all unless the tree is clean of TRACKED modifications. No reset, no
-checkout of a path, no clean, no stash — a fast-forward that had to discard
-something to succeed would be the exact failure this job is supposed to page
-about.
+reached at all unless the tree is on main and clean of TRACKED modifications.
+No reset, no checkout of a path, no clean, no stash — a fast-forward that had to
+discard something to succeed would be the exact failure this job is supposed to
+page about.
+
+THE GUARD IS SAMPLED TWICE, once before the fetch and once in the instant before
+the merge, and that is not belt-and-braces. A fetch is a network round trip:
+seconds, sometimes longer. A single sample taken before it is a statement about
+the tree as it WAS, and the merge acts on the tree as it IS. Somebody starting
+an edit in canonical while the fetch is in flight is the ordinary case, not an
+exotic one, and `git merge --ff-only` will happily overwrite an unstaged
+modification to a file the fast-forward touches. So `_preflight` runs again with
+nothing between it and the merge.
 
 TRACKED DIRT ONLY, which is the accepted plan's wording and not a softening.
 Untracked paths are a separate settlement question: WR-000040's AC-CLEAN routes
@@ -49,12 +92,13 @@ lives inside the freshness job is silent in the one failure that matters most �
 the job never fired at all. launchd drops an agent whose plist is unloaded,
 whose program is missing, or whose machine slept through every window, and it
 says nothing. So `watchdog()` reaches its verdict from the repository alone and
-never calls `fast_forward()` or reads anything it wrote. Sharing a module with
+never calls the fast-forward or reads anything it wrote. Sharing a module with
 the job it watches does not weaken that; calling it would, and a test asserts
 the call is absent.
 
-WHAT IT PAGES ON: tracked dirt; staleness past the AC-FRESH bar; canonical
-holding commits origin/main does not have; and an unverifiable fetch.
+WHAT IT PAGES ON: an unobservable repository; tracked dirt; canonical sitting on
+a branch other than main; staleness past the AC-FRESH bar; canonical holding
+commits origin/main does not have; and an unverifiable fetch.
 WHAT IT DOES NOT PAGE ON, deliberately: untracked paths. AC-CLEAN routes those
 to Joe for a per-path ruling, and a watchdog that paged daily about four paths
 awaiting a human decision would train its reader to ignore it. They are COUNTED
@@ -92,9 +136,19 @@ REFUSED_TRACKED_DIRT = 3
 REFUSED_AHEAD = 4
 FAILED = 5
 ALARM = 6
+REFUSED_WRONG_BRANCH = 7
 BAD_REPOSITORY = 64
 
 DEFAULT_MAX_AGE_HOURS = 24
+
+# The one branch both modes are about. See the header: measuring freshness from
+# anywhere else answers a different question and calls the answer freshness.
+CANONICAL_BRANCH = "main"
+
+# How an absent measurement is SPELLED in reports and in the page. It is a word
+# a reader cannot mistake for a number, and it is never the value logic branches
+# on — logic branches on None, which no default can manufacture.
+UNOBSERVED = "unobserved"
 
 # The verb's own caps, copied from mcp-server/src/work-request-intake.js so a
 # page is never rejected for length. situation is capped at 1000 there; 900
@@ -121,9 +175,17 @@ class _Git:
         return subprocess.run(["git", "-C", str(self.repository), *args],
                               capture_output=True, text=True)
 
-    def out(self, *args: str, default: str = "") -> str:
+    def out(self, *args: str) -> str | None:
+        """The command's trimmed stdout, or None when the command FAILED.
+
+        THERE IS DELIBERATELY NO `default=`. A default is how a failed
+        observation becomes a measurement, and every false green this module is
+        capable of producing came from exactly that conversion. None is not a
+        value; it is the absence of one, and each caller has to say out loud
+        what the absence means for it.
+        """
         done = self(*args)
-        return done.stdout.strip() if done.returncode == 0 else default
+        return done.stdout.strip() if done.returncode == 0 else None
 
 
 def _is_checkout(repository: Path) -> bool:
@@ -131,18 +193,82 @@ def _is_checkout(repository: Path) -> bool:
     return (repository / ".git").exists()
 
 
-def _counts(git: _Git) -> dict[str, Any]:
-    tracked = [line for line in git.out("status", "--porcelain",
-                                        "--untracked-files=no").splitlines() if line]
-    untracked = [line for line in git.out("status", "--porcelain",
-                                          "--untracked-files=normal").splitlines()
-                 if line.startswith("??")]
-    return {"tracked": tracked, "untracked": untracked}
+def _counts(git: _Git) -> dict[str, list[str] | None]:
+    """Tracked and untracked paths, or None for either that could not be read.
+
+    None is not an empty list. An empty list means git looked and found nothing;
+    None means git could not look, and a caller that renders the two the same
+    way reports a broken repository as a clean one.
+    """
+    tracked = git.out("status", "--porcelain", "--untracked-files=no")
+    untracked = git.out("status", "--porcelain", "--untracked-files=normal")
+    return {
+        "tracked": None if tracked is None
+        else [line for line in tracked.splitlines() if line],
+        "untracked": None if untracked is None
+        else [line for line in untracked.splitlines() if line.startswith("??")],
+    }
+
+
+def _count_text(paths: list[str] | None) -> Any:
+    return UNOBSERVED if paths is None else len(paths)
+
+
+def _commit_count(raw: str | None) -> int | None:
+    """`git rev-list --count` as an integer, or None when it was not observed.
+
+    Output that is not a plain number is treated as not observed too: a count
+    this module cannot parse is a count it does not have.
+    """
+    return int(raw) if raw is not None and raw.isdigit() else None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # The fast-forward.
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def _preflight(git: _Git, *, when: str, out: TextIO, err: TextIO) -> int | None:
+    """The whole permission to move the branch, in one place, so it can be asked
+    TWICE — before the fetch and again with nothing between it and the merge.
+
+    Returns an exit code when the branch must not move, and None when it may.
+    Every refusal here is a refusal to act, never a step toward acting anyway.
+    """
+    branch = git.out("rev-parse", "--abbrev-ref", "HEAD")
+    if branch is None:
+        print(f"canonical-fast-forward: FAILED ({when}) — could not read the checked-out "
+              f"branch, so this job cannot prove it is on {CANONICAL_BRANCH}", file=err)
+        return FAILED
+
+    state = _counts(git)
+    print(f"canonical-fast-forward: {when}: branch={branch} "
+          f"tracked_modified={_count_text(state['tracked'])} "
+          f"untracked={_count_text(state['untracked'])}", file=out)
+
+    if branch != CANONICAL_BRANCH:
+        print(f"canonical-fast-forward: REFUSED — canonical is on {branch!r}, not "
+              f"{CANONICAL_BRANCH}.", file=err)
+        print("canonical-fast-forward: AC-FRESH is about main. Fast-forwarding another "
+              "branch onto main's tip would succeed, report OK, and leave main exactly as "
+              "stale as it was.", file=err)
+        return REFUSED_WRONG_BRANCH
+
+    if state["tracked"] is None:
+        print(f"canonical-fast-forward: FAILED ({when}) — could not read `git status`, so "
+              f"this job cannot prove the tree holds nobody's edit", file=err)
+        return FAILED
+
+    if state["tracked"]:
+        print(f"canonical-fast-forward: REFUSED — {len(state['tracked'])} tracked path(s) "
+              f"modified in canonical ({when}).", file=err)
+        print("canonical-fast-forward: those are somebody's edit. Land or discard them; "
+              "this job will not.", file=err)
+        for line in state["tracked"]:
+            print(line, file=err)
+        return REFUSED_TRACKED_DIRT
+
+    return None
 
 
 def fast_forward(repository: str | Path, *, dry_run: bool = False,
@@ -153,43 +279,35 @@ def fast_forward(repository: str | Path, *, dry_run: bool = False,
         return BAD_REPOSITORY
     git = _Git(repository)
 
-    branch = git.out("rev-parse", "--abbrev-ref", "HEAD", default="unknown")
-    print(f"canonical-fast-forward: repository={repository} branch={branch}", file=out)
+    print(f"canonical-fast-forward: repository={repository}", file=out)
 
-    # Tracked dirt first, BEFORE the fetch: a job that refuses should refuse
-    # cheaply, and a fetch on a dirty tree invites the temptation to "just tidy".
-    state = _counts(git)
-    print(f"canonical-fast-forward: tracked_modified={len(state['tracked'])} "
-          f"untracked={len(state['untracked'])}", file=out)
-
-    if state["tracked"]:
-        print(f"canonical-fast-forward: REFUSED — {len(state['tracked'])} tracked path(s) "
-              f"modified in canonical.", file=err)
-        print("canonical-fast-forward: those are somebody's edit. Land or discard them; "
-              "this job will not.", file=err)
-        for line in state["tracked"]:
-            print(line, file=err)
-        return REFUSED_TRACKED_DIRT
+    # Branch and tracked dirt first, BEFORE the fetch: a job that refuses should
+    # refuse cheaply, and a fetch on a dirty tree invites the temptation to
+    # "just tidy".
+    refusal = _preflight(git, when="before fetch", out=out, err=err)
+    if refusal is not None:
+        return refusal
 
     if git("fetch", "--quiet", "origin", "main").returncode != 0:
         print("canonical-fast-forward: FAILED — could not fetch origin/main", file=err)
         return FAILED
 
-    behind = git.out("rev-list", "--count", "HEAD..origin/main", default="unknown")
-    ahead = git.out("rev-list", "--count", "origin/main..HEAD", default="unknown")
-    print(f"canonical-fast-forward: behind={behind} ahead={ahead}", file=out)
-    if behind == "unknown" or ahead == "unknown":
+    behind = _commit_count(git.out("rev-list", "--count", "HEAD..origin/main"))
+    ahead = _commit_count(git.out("rev-list", "--count", "origin/main..HEAD"))
+    print(f"canonical-fast-forward: behind={behind if behind is not None else UNOBSERVED} "
+          f"ahead={ahead if ahead is not None else UNOBSERVED}", file=out)
+    if behind is None or ahead is None:
         print("canonical-fast-forward: FAILED — could not compare against origin/main", file=err)
         return FAILED
 
-    if int(ahead) != 0:
+    if ahead != 0:
         print(f"canonical-fast-forward: REFUSED — canonical is {ahead} commit(s) AHEAD of "
               f"origin/main.", file=err)
         print("canonical-fast-forward: a fast-forward cannot represent that, and this job "
               "never rewrites.", file=err)
         return REFUSED_AHEAD
 
-    if int(behind) == 0:
+    if behind == 0:
         print("canonical-fast-forward: already current with origin/main", file=out)
         return OK
 
@@ -198,14 +316,23 @@ def fast_forward(repository: str | Path, *, dry_run: bool = False,
               file=out)
         return OK
 
+    # The second sample, with nothing between it and the merge. The fetch above
+    # took real time, and `merge --ff-only` will overwrite an unstaged edit to a
+    # file it advances — so the tree that is merged has to be the tree that was
+    # checked, not the tree that was checked a network round trip ago.
+    refusal = _preflight(git, when="before merge", out=out, err=err)
+    if refusal is not None:
+        return refusal
+
     merged = git("merge", "--ff-only", "origin/main")
     if merged.returncode != 0:
         print("canonical-fast-forward: FAILED — ff-only merge refused", file=err)
         print(merged.stderr.strip(), file=err)
         return FAILED
 
-    head = git.out("rev-parse", "--short", "HEAD", default="unknown")
-    print(f"canonical-fast-forward: fast-forwarded {behind} commit(s) to {head}", file=out)
+    head = git.out("rev-parse", "--short", "HEAD")
+    print(f"canonical-fast-forward: fast-forwarded {behind} commit(s) to "
+          f"{head or UNOBSERVED}", file=out)
     return OK
 
 
@@ -223,23 +350,35 @@ def page_payload(facts: Mapping[str, Any], reasons: Sequence[str], *,
     shape. A fresh idempotency_key is minted PER RUN rather than derived from
     the facts: two runs that observe the same dirty tree are two observations,
     and collapsing them onto one key would silently drop the second.
+
+    THE MEASUREMENTS COME BEFORE THE PROSE because `situation` is capped, and a
+    page truncated to its adjectives is worth less than one truncated to its
+    numbers. Whatever the cap eats, it eats the explanation, never the facts.
     """
     codes = ", ".join(sorted(facts["codes"])) or "unclassified"
     title = f"Canonical checkout freshness alarm: {codes}"[:TITLE_CAP]
-    measurements = (f"tracked_modified={facts['tracked_modified']} "
+    measurements = (f"branch={facts['branch']} "
+                    f"tracked_modified={facts['tracked_modified']} "
                     f"untracked={facts['untracked']} behind={facts['behind']} "
                     f"ahead={facts['ahead']} head_age_hours={facts['head_age_hours']} "
                     f"bar={facts['max_age_hours']}h repository={facts['repository']}")
-    situation = (f"WR-000040 AC-FRESH. {' '.join(reasons)} Measured: {measurements}."
+    situation = (f"WR-000040 AC-FRESH. Measured: {measurements}. {' '.join(reasons)}"
                  )[:SITUATION_CAP]
     desired = (
-        "Canonical returns to a state the freshness job can keep: no tracked modification "
-        "in the shared checkout, and HEAD within the AC-FRESH bar of origin/main. Whoever "
-        "owns the tracked edits lands or discards them — this job never will, because a "
-        "fast-forward bought with somebody's edit is the failure it exists to report. "
-        "Untracked paths are listed for context only and stay for Joe's AC-CLEAN ruling."
+        "Canonical returns to a state the freshness job can keep: readable by git, checked "
+        f"out on {CANONICAL_BRANCH}, no tracked modification in the shared checkout, and "
+        "HEAD within the AC-FRESH bar of origin/main. Whoever owns the tracked edits lands "
+        "or discards them — this job never will, because a fast-forward bought with "
+        "somebody's edit is the failure it exists to report. Untracked paths are listed for "
+        "context only and stay for Joe's AC-CLEAN ruling."
     )[:DESIRED_OUTCOME_CAP]
     criteria = [
+        {"id": "CANONICAL-OBSERVABLE",
+         "text": ("`git status`, `git rev-list` and `git log` all succeed in the canonical "
+                  "checkout, so its state is measured rather than assumed.")[:CRITERION_TEXT_CAP]},
+        {"id": "CANONICAL-ON-MAIN",
+         "text": (f"`git rev-parse --abbrev-ref HEAD` in the canonical checkout prints "
+                  f"exactly `{CANONICAL_BRANCH}`.")[:CRITERION_TEXT_CAP]},
         {"id": "CANONICAL-CLEAN",
          "text": ("`git status --porcelain --untracked-files=no` in the canonical checkout "
                   "prints nothing.")[:CRITERION_TEXT_CAP]},
@@ -304,46 +443,73 @@ def watchdog(repository: str | Path, *, max_age_hours: int = DEFAULT_MAX_AGE_HOU
     git = _Git(repository)
 
     fetch_ok = git("fetch", "--quiet", "origin", "main").returncode == 0
+    branch = git.out("rev-parse", "--abbrev-ref", "HEAD")
     state = _counts(git)
-    behind = git.out("rev-list", "--count", "HEAD..origin/main", default="unknown")
-    ahead = git.out("rev-list", "--count", "origin/main..HEAD", default="unknown")
+    behind = _commit_count(git.out("rev-list", "--count", "HEAD..origin/main"))
+    ahead = _commit_count(git.out("rev-list", "--count", "origin/main..HEAD"))
 
     # Age of the tip canonical is sitting on, which is what "within one day"
     # means: not when the job last ran, but how old the code in the tree is.
-    head_epoch = int(git.out("log", "-1", "--format=%ct", "HEAD", default="0") or 0)
-    age_hours = int((now() - head_epoch) // 3600) if head_epoch else 0
+    head_stamp = git.out("log", "-1", "--format=%ct", "HEAD")
+    head_epoch = int(head_stamp) if head_stamp is not None and head_stamp.isdigit() else None
+    age_hours = int((now() - head_epoch) // 3600) if head_epoch is not None else None
 
     codes: list[str] = []
     facts: dict[str, Any] = {
         "repository": str(repository),
-        "tracked_modified": len(state["tracked"]),
-        "untracked": len(state["untracked"]),
-        "behind": behind,
-        "ahead": ahead,
-        "head_age_hours": age_hours,
+        "branch": branch if branch is not None else UNOBSERVED,
+        "tracked_modified": _count_text(state["tracked"]),
+        "untracked": _count_text(state["untracked"]),
+        "behind": behind if behind is not None else UNOBSERVED,
+        "ahead": ahead if ahead is not None else UNOBSERVED,
+        "head_age_hours": age_hours if age_hours is not None else UNOBSERVED,
         "max_age_hours": max_age_hours,
         "codes": codes,
     }
 
     print(f"canonical-dirty-watchdog: repository={repository}", file=out)
-    print(f"canonical-dirty-watchdog: tracked_modified={facts['tracked_modified']} "
-          f"untracked={facts['untracked']} behind={behind} ahead={ahead} "
-          f"head_age_hours={age_hours}", file=out)
+    print(f"canonical-dirty-watchdog: branch={facts['branch']} "
+          f"tracked_modified={facts['tracked_modified']} "
+          f"untracked={facts['untracked']} behind={facts['behind']} ahead={facts['ahead']} "
+          f"head_age_hours={facts['head_age_hours']}", file=out)
     if state["untracked"]:
         print("canonical-dirty-watchdog: untracked paths (reported, not alarmed — "
               "AC-CLEAN is Joe's ruling):", file=out)
         for line in state["untracked"]:
             print(f"  {line}", file=out)
 
+    # WHAT COULD NOT BE LOOKED AT, named command by command. This is first
+    # because every number below it is conditional on it: a watchdog that cannot
+    # read the repository knows nothing about the repository, and "nothing" has
+    # to page rather than pass.
+    unobserved: list[str] = []
+    if branch is None:
+        unobserved.append("`git rev-parse --abbrev-ref HEAD`")
+    if state["tracked"] is None or state["untracked"] is None:
+        unobserved.append("`git status --porcelain`")
+    if behind is None or ahead is None:
+        unobserved.append("`git rev-list --count` against origin/main")
+    if age_hours is None:
+        unobserved.append("`git log -1 --format=%ct HEAD`")
+
     reasons: list[str] = []
-    if facts["tracked_modified"]:
+    if unobserved:
+        codes.append("unobserved")
+        reasons.append(f"Could not observe {', '.join(unobserved)} in canonical, so its "
+                       f"state is UNKNOWN — which is not the same as clean.")
+    if state["tracked"]:
         codes.append("tracked-dirt")
-        reasons.append(f"{facts['tracked_modified']} tracked path(s) modified in a tree no "
+        reasons.append(f"{len(state['tracked'])} tracked path(s) modified in a tree no "
                        f"session may edit.")
-    if ahead != "unknown" and int(ahead) != 0:
+    if branch is not None and branch != CANONICAL_BRANCH:
+        codes.append("wrong-branch")
+        reasons.append(f"Canonical is on {branch!r}, not {CANONICAL_BRANCH}, so nothing here "
+                       f"is a statement about main's freshness and the fast-forward cannot "
+                       f"run.")
+    if ahead is not None and ahead != 0:
         codes.append("ahead-of-origin")
         reasons.append(f"Canonical is {ahead} commit(s) ahead of origin/main.")
-    if age_hours > max_age_hours and behind != "unknown" and int(behind) != 0:
+    if age_hours is not None and behind is not None and age_hours > max_age_hours and behind != 0:
         codes.append("stale")
         reasons.append(f"Canonical HEAD is {age_hours}h old and {behind} commit(s) behind "
                        f"origin/main, past the {max_age_hours}h bar.")
@@ -352,12 +518,12 @@ def watchdog(repository: str | Path, *, max_age_hours: int = DEFAULT_MAX_AGE_HOU
         reasons.append("Could not fetch origin/main, so freshness is unverifiable.")
 
     if not reasons:
-        print(f"canonical-dirty-watchdog: OK — no tracked dirt, within {max_age_hours}h of "
-              f"origin/main", file=out)
+        print(f"canonical-dirty-watchdog: OK — on {CANONICAL_BRANCH}, no tracked dirt, "
+              f"within {max_age_hours}h of origin/main", file=out)
         return OK
 
     print(f"canonical-dirty-watchdog: ALARM — {' '.join(reasons)}", file=err)
-    for line in state["tracked"]:
+    for line in state["tracked"] or []:
         print(line, file=err)
 
     if page:

@@ -7,6 +7,14 @@ drives the real command against them. Nothing here mocks git, because the
 properties under test are properties of git's behaviour: that `merge --ff-only`
 refuses a diverged branch, and that a modified tracked file survives a run.
 
+THE TWO CASES THAT CANNOT BE STAGED BY A FIXTURE ALONE — a git command that
+fails while the fetch succeeds, and an edit that arrives DURING the fetch — swap
+the module's `_Git` wrapper for a subclass of it. Neither subclass fakes a
+result: the failing one runs the same real git against a path that is not a
+repository, so the nonzero exit is git's own, and the racing one writes a real
+file into the real fixture at the real moment. What is substituted is when
+things happen, never what git says about them.
+
 The cases that matter are the negatives. A fast-forward job that works on a
 clean tree proves very little; one that provably declines to touch a dirty one,
 and provably leaves the edit intact afterwards, is the whole safety argument.
@@ -20,6 +28,7 @@ handed, so the assertions are about the ACTUAL payload rather than about the
 code that builds it.
 """
 import contextlib
+import io
 import json
 import os
 import re
@@ -40,6 +49,8 @@ import canonical_freshness as freshness  # noqa: E402
 OK = freshness.OK
 REFUSED_TRACKED_DIRT = freshness.REFUSED_TRACKED_DIRT
 REFUSED_AHEAD = freshness.REFUSED_AHEAD
+REFUSED_WRONG_BRANCH = freshness.REFUSED_WRONG_BRANCH
+FAILED = freshness.FAILED
 ALARM = freshness.ALARM
 
 # The verb's registered contract, restated here from
@@ -154,6 +165,59 @@ def run_watchdog_with_pager(fixture, *args, exit_code=0, stdout='{"ok":true}'):
                           capture_output=True, text=True)
 
 
+@contextlib.contextmanager
+def git_wrapper(cls):
+    """Run the library with a different `_Git` subclass for the duration.
+
+    Deliberately not a mocking library: `cls` must be a real subclass that still
+    shells out to real git, so every assertion downstream is still an assertion
+    about git's behaviour.
+    """
+    assert issubclass(cls, freshness._Git)
+    original = freshness._Git
+    freshness._Git = cls
+    try:
+        yield
+    finally:
+        freshness._Git = original
+
+
+class FailingObservationGit(freshness._Git):
+    """Real git, really failing, for the three observation commands.
+
+    `status`, `rev-list` and `log` are run against a path that is not a
+    repository, so they exit nonzero for git's own reasons. `fetch` is left
+    alone and succeeds against the real fixture — which is precisely the shape
+    the false green needed: the observations fail, the fetch does not, and the
+    first revision of this module read the failures as zero dirt, an unknown
+    count and age zero, then returned OK.
+    """
+
+    FAILING = ("status", "rev-list", "log")
+
+    def __call__(self, *args):
+        if args and args[0] in self.FAILING:
+            return subprocess.run(
+                ["git", "-C", str(self.repository / "not-a-repository"), *args],
+                capture_output=True, text=True)
+        return super().__call__(*args)
+
+
+class EditDuringFetchGit(freshness._Git):
+    """Somebody starts editing canonical while the fetch is in flight.
+
+    The edit is a real write to the real fixture, made at the real moment the
+    fast-forward is waiting on the network. A guard sampled only before the
+    fetch cannot see it, and `merge --ff-only` would overwrite it.
+    """
+
+    def __call__(self, *args):
+        if args and args[0] == "fetch":
+            (self.repository / "tracked.txt").write_text(
+                "somebody started editing during the fetch\n")
+        return super().__call__(*args)
+
+
 class CanonicalFreshnessTests(unittest.TestCase):
     def setUp(self):
         self.stack = contextlib.ExitStack()
@@ -218,6 +282,83 @@ class CanonicalFreshnessTests(unittest.TestCase):
         self.assertEqual(result.returncode, OK, result.stderr)
         self.assertEqual(self.fx.head(self.fx.clone), before)
 
+    def test_fast_forward_refuses_a_branch_that_is_not_main(self):
+        """AC-FRESH is about main, and a feature branch is the dangerous case.
+
+        A clean feature branch that is an ancestor of origin/main fast-forwards
+        SUCCESSFULLY. Nothing errors, the job reports OK, somebody's branch has
+        silently been dragged onto main's tip — and main itself is exactly as
+        stale as it was before the job ran.
+        """
+        self.fx.advance_origin(2)
+        git(self.fx.clone, "checkout", "--quiet", "-b", "feature-branch")
+        before = self.fx.head(self.fx.clone)
+
+        result = run_command(self.fx.clone, "--canonical-freshness", "fast-forward")
+
+        self.assertEqual(result.returncode, REFUSED_WRONG_BRANCH,
+                         result.stdout + result.stderr)
+        self.assertIn("not main", result.stderr)
+        # Both halves: the feature branch did not move, and neither did main.
+        self.assertEqual(self.fx.head(self.fx.clone), before)
+        self.assertEqual(
+            git(self.fx.clone, "rev-parse", "main").stdout.strip(), before)
+        self.assertNotEqual(before, self.fx.head(self.fx.origin))
+
+    def test_fast_forward_refuses_a_detached_head(self):
+        """The boundary case of "exactly main": a detached HEAD reads as the
+        branch name "HEAD", which is not main, and needs no special case."""
+        self.fx.advance_origin(1)
+        before = self.fx.head(self.fx.clone)
+        git(self.fx.clone, "checkout", "--quiet", "--detach", before)
+
+        result = run_command(self.fx.clone, "--canonical-freshness", "fast-forward")
+
+        self.assertEqual(result.returncode, REFUSED_WRONG_BRANCH,
+                         result.stdout + result.stderr)
+        self.assertEqual(self.fx.head(self.fx.clone), before)
+
+    def test_a_failed_observation_never_reads_as_a_clean_tree(self):
+        """The fast-forward half of the false-green defect.
+
+        `git status` fails; the fetch would succeed. A default that turned the
+        failure into an empty string made this look like a clean tree, and the
+        job went on to move the branch on the strength of a measurement it never
+        took. It has to FAIL instead: not knowing whether the tree holds
+        somebody's edit is not the same as knowing it does not.
+        """
+        self.fx.advance_origin(2)
+        before = self.fx.head(self.fx.clone)
+        out, err = io.StringIO(), io.StringIO()
+
+        with git_wrapper(FailingObservationGit):
+            code = freshness.fast_forward(self.fx.clone, out=out, err=err)
+
+        self.assertEqual(code, FAILED, out.getvalue() + err.getvalue())
+        self.assertIn("could not read `git status`", err.getvalue())
+        self.assertEqual(self.fx.head(self.fx.clone), before)
+
+    def test_an_edit_arriving_during_the_fetch_still_refuses(self):
+        """The clean-tree guard is a measurement, not a prediction.
+
+        The tree is clean when the job looks, and somebody starts editing while
+        the fetch is in flight. A guard sampled only before the fetch cannot see
+        that, and `merge --ff-only` would overwrite the edit — the exact
+        destruction this command exists to refuse.
+        """
+        self.fx.advance_origin(2)
+        before = self.fx.head(self.fx.clone)
+        out, err = io.StringIO(), io.StringIO()
+
+        with git_wrapper(EditDuringFetchGit):
+            code = freshness.fast_forward(self.fx.clone, out=out, err=err)
+
+        self.assertEqual(code, REFUSED_TRACKED_DIRT, out.getvalue() + err.getvalue())
+        self.assertIn("before merge", err.getvalue())
+        self.assertEqual(self.fx.head(self.fx.clone), before)
+        self.assertEqual((self.fx.clone / "tracked.txt").read_text(),
+                         "somebody started editing during the fetch\n")
+
     # -- the watchdog ---------------------------------------------------------
 
     def test_watchdog_is_quiet_on_a_clean_current_tree(self):
@@ -260,6 +401,50 @@ class CanonicalFreshnessTests(unittest.TestCase):
                              "--no-page", "--max-age-hours", "24")
         self.assertEqual(result.returncode, ALARM, result.stdout + result.stderr)
         self.assertIn("behind origin/main", result.stderr)
+
+    def test_watchdog_alarms_when_canonical_is_not_on_main(self):
+        """A checkout parked on a feature branch is not a fresh canonical, and
+        the fast-forward cannot run against it — so the watchdog has to say so
+        rather than measure main's freshness from somewhere that is not main."""
+        git(self.fx.clone, "checkout", "--quiet", "-b", "feature-branch")
+        result = run_command(self.fx.clone, "--canonical-freshness", "watchdog", "--no-page")
+        self.assertEqual(result.returncode, ALARM, result.stdout + result.stderr)
+        self.assertIn("not main", result.stderr)
+        self.assertIn("branch=feature-branch", result.stdout)
+
+    def test_watchdog_pages_when_it_could_not_observe_the_repository(self):
+        """The watchdog half of the false-green defect, and the worse half.
+
+        `status`, `rev-list` and `log` all fail; the FETCH SUCCEEDS, so the one
+        condition that used to alarm on an unreadable repository does not fire.
+        With failures rendered as defaults the watchdog saw zero dirt, an
+        unknown count and age zero, found nothing to say, and returned OK about
+        a repository it had been unable to look at at all.
+
+        The page is captured through the injected pager so the assertion is
+        about the payload the verb would receive, not about the log line.
+        """
+        paged = []
+        out, err = io.StringIO(), io.StringIO()
+
+        def capture(payload):
+            paged.append(payload)
+            return True, "captured"
+
+        with git_wrapper(FailingObservationGit):
+            code = freshness.watchdog(self.fx.clone, out=out, err=err, pager=capture)
+
+        self.assertEqual(code, ALARM, out.getvalue() + err.getvalue())
+        self.assertIn("UNKNOWN", err.getvalue())
+        self.assertIn("`git status --porcelain`", err.getvalue())
+        self.assertEqual(len(paged), 1)
+        self.assertEqual(set(paged[0]), REPORT_PROBLEM_FIELDS)
+        self.assertIn("unobserved", paged[0]["title"])
+        # The absent measurements are SPELLED as absent in the durable record,
+        # never as zeroes somebody could act on.
+        self.assertIn("tracked_modified=unobserved", paged[0]["situation"])
+        self.assertIn("behind=unobserved", paged[0]["situation"])
+        self.assertIn("head_age_hours=unobserved", paged[0]["situation"])
 
     def test_watchdog_does_not_read_the_fast_forward_job(self):
         """Independence, checked as a property of the source rather than a claim.
