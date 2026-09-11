@@ -42,6 +42,8 @@ your fault" about a defect that IS their fault.
 
 EVERY UNCERTAINTY RESOLVES TO "CANNOT TELL", never to "inherited". No merge
 base, a shallow clone, a check that did not exist at the merge base, a check
+ops/ci.sh only started COLLECTING on this branch (see newly_collected: it fails
+at the base, but main has never run it, so the failure is not main's), a check
 that declined to run there (exit 78), a command that could not be executed
 (126/127), a timeout, a worktree that would not materialise — all of them exit
 2, and ops/ci.sh carries on with its normal full run. The failure mode of this
@@ -58,6 +60,7 @@ Exit 2  CANNOT TELL — refused to answer; the caller must behave as it did befo
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import os
 import re
 import shutil
@@ -120,6 +123,78 @@ def check_file_of(cmd: list[str], repo: str) -> str | None:
         if os.path.isfile(cand) and cand.startswith(repo + os.sep):
             return os.path.relpath(cand, repo)
     return None
+
+
+def collection_globs(ci_sh: str) -> list[str]:
+    """The selftest collection patterns, read out of ops/ci.sh's own source.
+
+    Deliberately derived rather than restated, for the reason
+    ops/ci-selftest.py's collection invariant already gives: a copy of the globs
+    here would be a second contract to keep in sync, which is the same failure
+    one level up. Shell variables (`$eligible`) name no path and are dropped.
+    """
+    patterns: list[str] = []
+    for match in re.finditer(r"for t in ([^;]+); do", ci_sh):
+        patterns += [p for p in match.group(1).split() if "$" not in p]
+    return patterns
+
+
+def glob_collects(pattern: str, rel: str) -> bool:
+    """Shell-glob semantics: `*` matches inside a path segment, never across /.
+
+    fnmatch alone would translate `*` to `.*` and let `tools/test_*.py` swallow
+    `tools/room-bridge/test_x.py` — the exact file the base does NOT collect,
+    and the one case this has to get right.
+    """
+    parts, path = pattern.split("/"), rel.split("/")
+    return len(parts) == len(path) and all(
+        fnmatch.fnmatchcase(segment, part) for part, segment in zip(parts, path))
+
+
+def newly_collected(repo: str, mb: str, rel: str) -> str | None:
+    """Refusal text if THIS BRANCH is what makes ops/ci.sh run <rel>, else None.
+
+    2026-09-10. A branch that widened ci.sh's collection globs to reach
+    tools/<subdir>/test_*.py was told, run after run, "INHERITED FROM MAIN —
+    wait for main to go green" about a suite main's own globs had never
+    collected once. Every word of that was unactionable: main was green, the
+    canary had nothing to name, no merge freeze was going to lift, and the
+    branch could not merge. The re-run was not wrong about the exit code — the
+    suite really did exit 1 at the merge base — it was wrong about whose break
+    that is. A check nothing on main runs cannot be a break inherited FROM main,
+    and the branch that starts running it is the only place it can be diagnosed.
+
+    This is the guard above it one step later: a check this branch ADDED cannot
+    have failed at the merge base, and a check this branch newly COLLECTED is
+    that same case with the file already sitting in the tree.
+
+    DELIBERATELY NARROW, because the cost of over-reaching here is the mechanism
+    quietly switching itself off. It refuses only when NO glob at the merge base
+    collects the check AND one in this tree does — that is, only when the
+    branch's own change to ci.sh is what makes the check run at all. Everything
+    ci.sh invokes by name rather than by glob (hooks/gate-integrity.py, the
+    inventory checks) is collected by neither side and keeps its verdict, a
+    check both sides collect keeps its verdict, and a ci.sh that cannot be read
+    on either side yields no opinion rather than a refusal.
+    """
+    rc, base_ci = git(repo, "show", f"{mb}:ops/ci.sh")
+    if rc != 0:
+        return None
+    try:
+        with open(os.path.join(repo, "ops", "ci.sh"), encoding="utf-8") as handle:
+            head_ci = handle.read()
+    except OSError:
+        return None
+    base_globs, head_globs = collection_globs(base_ci), collection_globs(head_ci)
+    if not base_globs or not head_globs:
+        return None
+    if any(glob_collects(p, rel) for p in base_globs):
+        return None
+    if not any(glob_collects(p, rel) for p in head_globs):
+        return None
+    return (f"this branch is what makes {rel} run — no collection glob in "
+            f"ops/ci.sh at the merge base matches it, so main has never run it "
+            f"once and a failure there is not main's to fix — diagnose it here")
 
 
 def missing_replay_prerequisite(repo: str, tree: str, output: str) -> str | None:
@@ -217,6 +292,13 @@ def main() -> int:
     if rel and git(repo, "cat-file", "-e", f"{mb}:{rel}")[0] != 0:
         return refuse(f"{rel} does not exist at the merge base — this branch added it")
 
+    # A check the merge base never RAN cannot be a break inherited from main,
+    # even when it does fail there. See newly_collected() for the case.
+    if rel:
+        never_ran_on_main = newly_collected(repo, mb, rel)
+        if never_ran_on_main:
+            return refuse(never_ran_on_main)
+
     tmp = tempfile.mkdtemp(prefix=f"carr-mergebase-{os.getpid()}-")
     tree = os.path.join(tmp, "base")
     try:
@@ -258,7 +340,11 @@ def main() -> int:
               f"merge freeze holds until it is fixed — then re-run this check.")
         print(f"  If you mean to be the one who fixes it, fix it ON MAIN in its own change; "
               f"a fix smuggled into this branch merges a second unrelated thing.")
-        tail = replay_output.strip().splitlines()[-6:]
+        # Wide enough to carry the failing assertion itself, not just the runner's
+        # closing summary: at six lines the FAIL line of a suite that fails only on
+        # the hosted runner never once reached the log, and the case below it could
+        # not be diagnosed from any run.
+        tail = replay_output.strip().splitlines()[-60:]
         for line in tail:
             print(f"    | {line}")
         return INHERITED
