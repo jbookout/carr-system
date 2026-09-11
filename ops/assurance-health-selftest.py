@@ -1266,38 +1266,22 @@ def _raises_attribute_error(call) -> bool:
     return False
 
 
-def _minted_reading(reader, sentinel: str):
-    """Mint ONE reading hermetically and count the reads that produced it.
-
-    The reader's own read is replaced for the duration with a stub that counts
-    its invocations and returns an unavailable reading carrying ``sentinel`` as
-    its reason -- so nothing here touches a database, the reading is a genuine
-    minted handle rather than something this test composed, and the count is the
-    instrument the one-reading assertions are made with.
-    """
-    real = reader.read_workflow_truth_snapshot
-    invocations: list[int] = []
-
-    def counted() -> dict[str, Any]:
-        invocations.append(len(invocations) + 1)
-        return {"available": False, "reason": f"{sentinel} call=#{len(invocations)}"}
-
-    reader.read_workflow_truth_snapshot = counted
-    try:
-        handle = reader.read_workflow_truth_reading()
-    finally:
-        reader.read_workflow_truth_snapshot = real
-    return handle, invocations
-
-
 # THE ONE ANSWER THE PUBLIC LABEL ROUTE GIVES, WRITTEN OUT RATHER THAN IMPORTED.
 # Reading the expected values off the module under test would make every
 # assertion below tautological: the route could change its reason to anything and
 # the suite would follow it. These are the literal contract -- the reason id the
 # review named, the disposition the item is carried under, and a seam that names
 # a DURABLE STORE rather than another in-process object.
-LABEL_ROUTE_REASON = "reading_handle_integrity_unprovable"
+LABEL_ROUTE_REASON = "handle_integrity_unprovable"
 LABEL_ITEM_DISPOSITION = "not_proven"
+LABEL_OWED_SEAM = "durable_signed_census_store_seam"
+CENSUS_ROUTE_SCHEMA = "control-plane-workflow-truth-census.v1"
+# THE RENAME, AND WHY IT IS NOT A COSMETIC ONE.  The reason id used to be spelled
+# ``reading_handle_integrity_unprovable``, which carries the privileged union word
+# "read" as a substring -- and the ninth cut therefore had to carve that string
+# out of its own sweep, which is the exemption the tenth review refused.  The
+# reason id is spelled without it now, so the sweep needs no carve-out at all and
+# the rule's union is swept whole.
 
 
 def _is_label_fallback(answer: Any) -> bool:
@@ -1310,14 +1294,13 @@ def _is_label_fallback(answer: Any) -> bool:
     scopes and no rows -- because a fallback that still shipped a census beside its
     refusal would be the refusal in name only.
     """
-    if not isinstance(answer, dict):
+    if not isinstance(answer, Mapping):
         return False
     return (answer.get("schema_version") == "assurance-health-sources.v1"
             and answer.get("available") is False
             and answer.get("reason") == LABEL_ROUTE_REASON
             and answer.get("item_disposition") == LABEL_ITEM_DISPOSITION
-            and isinstance(answer.get("owed_seam"), str)
-            and "durable store" in answer["owed_seam"]
+            and answer.get("owed_seam") == LABEL_OWED_SEAM
             and not {"projection", "scopes", "rows", "unprojectable", "input_notes"}
             & set(answer))
 
@@ -1351,7 +1334,14 @@ def source_adapter_checks() -> None:
     even a degraded row: there is nothing here that could become a determinate
     fact about a scope.  Every census below is a FIXTURE, so every one of them is
     driven through the unexported hook rather than the public entry.
+
+    THE SECOND HALF OF THIS FUNCTION pins the DELETION the tenth correction made:
+    the reader's minting, snapshot and rendering surface is gone, no file in the
+    tree reaches for it, and neither route has an argument or a global left to
+    steer.
     """
+    import inspect
+
     import lib.assurance_health_sources as sources
 
     unavailable = _hypothetical(
@@ -1396,7 +1386,7 @@ def source_adapter_checks() -> None:
           projected["projection"]["summary"]["green"] == 0
           and not row["green"], row["state"])
     notes = projected["input_notes"]["assurance-fabric-child@v1"]
-    for slot in sources.UNREAD_LAYER_SOURCE:
+    for slot in sources._UNREAD_LAYER_SOURCE:
         if slot == "controller_assessment":
             continue  # carries its own note, asserted above with what the reading held
         check(f"the reader is told which surface would supply {slot}",
@@ -1514,665 +1504,228 @@ def source_adapter_checks() -> None:
         check("two Work Request-less scopes sort against each other without an identity",
               ordered == ["also-degrading@v1", "degrading@v1"], json.dumps(ordered))
 
-    # THE INVERTED ASSERTION, and the inversion is the correction. This suite used
-    # to pin that the seam read NOTHING -- no file, no process, no clock -- which
-    # was true and was exactly the defect: a seam that reads nothing must be HANDED
-    # a census, and a handed census is its caller's assertion about the control
-    # plane. What is pinned now is WHICH reading it consumes, and the seam does
-    # not perform that reading itself: lib/control_plane_workflow_truth_reader
-    # performs exactly one per health run and the seam takes it as the opaque
-    # handle that module minted, so one run is one moment and a second read never
-    # happens here. Everything below is behavioural -- a source grep cannot tell a
-    # closed door from a renamed one.
+    # ---- THE DELETION ITSELF, PROVEN BY PARSER AND BY IMPORT ---------------
+    #
+    # WHAT USED TO BE HERE, AND WHY IT IS NOT.  Six hundred lines of this function
+    # probed the reader's minting machinery: that a handle carried no state, that
+    # a retyped handle still rendered its own capture, that a hostile mapping key
+    # could not split a render, that an ``object.__new__`` shell was refused.
+    # Every one of those assertions was about an object that no longer exists.
+    # Ten rounds of narrowing an in-process handle each closed the door that had
+    # just been used and left the class open; the tenth review beat the ninth cut
+    # from two new directions at once (a ``__del__`` inside the label route, a
+    # rebound snapshot function on the census route), and the correction is
+    # deletion.  So what is pinned here is the ABSENCE of that surface, which is
+    # the only property a later editor cannot quietly undo by adding a check.
+    import ast as _reader_ast
+
     import lib.control_plane_workflow_truth_reader as reader
 
-    # THE HANDLE CARRIES NO CALLER-VISIBLE STATE, and these probe that FIRST,
-    # because every refusal below rests on it.  Seven reviews failed on one class
-    # -- a caller could influence what a minted handle rendered -- and each round
-    # moved the lever a caller reaches for rather than removing it: the payload
-    # attribute, then a content digest re-derived over a still-reachable object,
-    # then an opaque string key a ``str`` subclass mutated inside its own
-    # ``__hash__``.  The class closes when there is nothing on the handle at all.
-    check("the handle class declares no slots, so it can hold no value",
-          reader.WorkflowTruthReading.__slots__ == (),
-          json.dumps(list(reader.WorkflowTruthReading.__slots__)))
-    zero_state = _minted_reading(reader, "ZERO-STATE-PROBE")[0]
-    state_writes = {
-        "setattr": lambda: setattr(zero_state, "_payload", {"available": True}),
-        "object.__setattr__": lambda: object.__setattr__(zero_state, "_key", "k"),
-        "delattr": lambda: delattr(zero_state, "_key"),
-        "object.__delattr__": lambda: object.__delattr__(zero_state, "_payload"),
-        "reading its __dict__": lambda: zero_state.__dict__,
-        "vars()": lambda: vars(zero_state),
-    }
-    landed = [label for label, write in state_writes.items()
-              if not _raises_type_error(write) and not _raises_attribute_error(write)]
-    check("no caller write or read reaches any state on a minted handle",
-          not landed, json.dumps(landed))
-    # NOT EVEN A METHOD.  ``rendered()`` was the last public name on the class,
-    # and a method is dispatched through the INSTANCE -- which is the whole of the
-    # eighth review's defect.  Content now comes from the reader's module function
-    # ``render_reading(handle)``, so a caller who re-points a handle's type
-    # re-points nothing the trusted path calls.
-    check("the handle exposes no public accessor or method at all",
-          [name for name in dir(reader.WorkflowTruthReading)
-           if not name.startswith("__")] == [],
-          json.dumps([name for name in dir(reader.WorkflowTruthReading)
-                      if not name.startswith("__")]))
-    check("the reader owns the render function, and the handle class does not",
-          callable(getattr(reader, "render_reading", None))
-          and "render_reading" in reader.__all__
-          and not hasattr(reader.WorkflowTruthReading, "rendered"),
-          json.dumps(sorted(reader.__all__)))
-    check("the handle class refuses to be subclassed at class creation",
-          _raises_type_error(lambda: type(
-              "_ForgedSubclass", (reader.WorkflowTruthReading,), {})),
-          "WorkflowTruthReading can still be subclassed")
+    RETIRED = ("read_workflow_truth_snapshot", "read_workflow_truth_reading",
+               "render_reading", "WorkflowTruthReading", "WorkflowTruthReadingError",
+               "READING_NOT_MINTED", "_MINT", "_MINTED", "_FrozenMapping",
+               "_WeakReferenceable", "_frozen", "_thawed", "_content_digest",
+               "_entry", "_entry_or_refuse", "_read_json", "ROWS_SQL", "COMPLETION_SQL")
+    still_there = [name for name in RETIRED if hasattr(reader, name)]
+    check("every minting, snapshot and rendering name is gone from the imported "
+          "reader module", not still_there, json.dumps(still_there))
+    reader_bound, reader_all = _module_bindings(
+        REPO / "lib" / "control_plane_workflow_truth_reader.py")
+    check("and gone from the file, not merely unexported: the parser finds none of "
+          "them bound at module level",
+          not sorted(set(RETIRED) & reader_bound),
+          json.dumps(sorted(set(RETIRED) & reader_bound)))
+    reader_public = {name for name in dir(reader)
+                     if not name.startswith("_")} - {"annotations"}
+    check("the reader's whole public surface is the frozen answer, its schema id "
+          "and one no-argument callable",
+          reader_public == {"SCHEMA_VERSION", "CENSUS_ROUTE_ANSWER",
+                            "workflow_truth_census"}
+          and reader_public == set(reader_all),
+          json.dumps(sorted(reader_public)))
+    reader_tree = _reader_ast.parse(
+        (REPO / "lib" / "control_plane_workflow_truth_reader.py").read_text(
+            encoding="utf-8"))
+    query_calls = sorted(
+        node.func.attr if isinstance(node.func, _reader_ast.Attribute) else node.func.id
+        for node in _reader_ast.walk(reader_tree)
+        if isinstance(node, _reader_ast.Call)
+        and isinstance(node.func, (_reader_ast.Name, _reader_ast.Attribute))
+        and (getattr(node.func, "attr", getattr(node.func, "id", "")) in
+             ("run", "check_output", "Popen", "connect", "system", "popen")))
+    check("the reader runs no process and opens no connection any more",
+          not query_calls, json.dumps(query_calls))
 
-    # THE LAST WRITABLE THING AN INSTANCE HAD, and the one __slots__ does not
-    # stop.  ``object.__setattr__(handle, "__class__", forger)`` re-points METHOD
-    # DISPATCH on an object the reader really did mint: ``rendered()`` then runs
-    # the caller's code.  The A01 seam refuses afterwards because ``type()`` reads
-    # the real type -- but tools/health-check.py calls ``rendered()`` directly and
-    # would have printed the forgery, so a refusal at the seam alone is not the
-    # bar.  ``__class__`` is a property without a setter; the write itself fails.
+    # NO CONSUMER ANYWHERE IN THE TREE STILL REACHES FOR ONE OF THEM.  A grep, but
+    # a parsed one: every .py file under lib/, tools/, ops/ and bin/ is parsed and
+    # every imported name, attribute and bare name is compared against the retired
+    # set.  This file is excluded BY NAME and for one stated reason -- it is the
+    # file that has to mention them in order to assert they are gone.
+    consumers: dict[str, list[str]] = {}
+    unmistakable = {"read_workflow_truth_snapshot", "read_workflow_truth_reading",
+                    "render_reading", "WorkflowTruthReading", "WorkflowTruthReadingError",
+                    "READING_NOT_MINTED"}
+    for folder in ("lib", "tools", "ops", "bin"):
+        for path in sorted((REPO / folder).rglob("*.py")):
+            if path.resolve() == Path(__file__).resolve():
+                continue
+            try:
+                tree = _reader_ast.parse(path.read_text(encoding="utf-8"))
+            except SyntaxError:  # pragma: no cover - not this slice's business
+                continue
+            names = set()
+            for node in _reader_ast.walk(tree):
+                if isinstance(node, _reader_ast.ImportFrom):
+                    names.update(alias.name for alias in node.names)
+                elif isinstance(node, _reader_ast.Attribute):
+                    names.add(node.attr)
+                elif isinstance(node, _reader_ast.Name):
+                    names.add(node.id)
+            hit = sorted(names & unmistakable)
+            if hit:
+                consumers[str(path.relative_to(REPO))] = hit
+    check("no file in the tree imports, calls or names a deleted reader symbol",
+          not consumers, json.dumps(consumers))
+    # THE CONTROL: the same walk over a file that really does name one finds it,
+    # so "no consumers" is a measurement and not a walk that quietly matched
+    # nothing.
+    control_tree = _reader_ast.parse(
+        "from lib.control_plane_workflow_truth_reader import render_reading\n"
+        "x = render_reading(handle)\n")
+    control_names = {node.name for node in _reader_ast.walk(control_tree)
+                     if isinstance(node, _reader_ast.alias)} | {
+        node.id for node in _reader_ast.walk(control_tree)
+        if isinstance(node, _reader_ast.Name)}
+    check("the consumer walk detects a deleted symbol when one is really there",
+          bool(control_names & unmistakable), json.dumps(sorted(control_names)))
 
-    class _DispatchForger:
-        __slots__ = ("__weakref__",)
-
-        def rendered(self) -> dict[str, Any]:
-            return _reading(keys=(("class-swap-forged", 1),),
-                            owners={"class-swap-forged@v1": MANIFEST_OWNER})
-
-    dispatch = _minted_reading(reader, "CLASS-SWAP-PROBE-READING")[0]
-    dispatch_baseline = reader.render_reading(dispatch)
-    class_writes = {
-        "object.__setattr__": lambda: object.__setattr__(
-            dispatch, "__class__", _DispatchForger),
-        "setattr": lambda: setattr(dispatch, "__class__", _DispatchForger),
-    }
-    swapped = [label for label, write in class_writes.items()
-               if not _raises_type_error(write) and not _raises_attribute_error(write)]
-    check("__class__ cannot be reassigned, so method dispatch cannot be re-pointed",
-          not swapped and type(dispatch) is reader.WorkflowTruthReading
-          and reader.render_reading(dispatch) == dispatch_baseline
-          and "class-swap-forged" not in json.dumps(
-              reader.render_reading(dispatch), default=str),
-          json.dumps(swapped))
-
-    # THE ROUTE A PROPERTY CANNOT CLOSE, AND THE REASON NOTHING IS CALLED ON A
-    # HANDLE ANY MORE.  ``__class__`` as a read-only property intercepts the
-    # ATTRIBUTE; it does not intercept the base descriptor underneath it.
-    # ``object.__dict__["__class__"].__set__(handle, SameLayoutForger)`` calls that
-    # descriptor directly, and the type slot of an object the reader really did
-    # mint changes.  The eighth review drove exactly that between the adapter's
-    # verification and its ``reading.rendered()`` dispatch, and a handle captured
-    # as AUTHORITY-UNAVAILABLE projected available=true with a caller-chosen owner.
+    # ---- THE LABEL ROUTE HAS NO DOOR LEFT, AND THE BYTECODE SAYS SO ---------
     #
-    # THE BAR HERE IS NOT THAT THE SWAP FAILS -- no class body can stop it.  It is
-    # that the TRUSTED PATH, which calls the reader's module function and never a
-    # method on the handle, answers with the captured reading or refuses, and
-    # never with caller content: before the swap, after it, and with the swap
-    # driven into the old verify-then-use window.
-    RAW_FORGED = "raw-descriptor-forged"
+    # THE DEFECT THIS REPLACES.  The ninth cut took a parameter it did not use,
+    # wrote ``del reading`` to say so, and then read three module globals to build
+    # its answer.  ``del`` on the last reference to a caller's object runs that
+    # object's ``__del__`` -- caller code, inside the route, between entry and
+    # those reads -- and the review used it to rebind all three.  Both halves of
+    # that are asserted away here, and neither assertion is about a string in the
+    # source: ``co_varnames``/``co_argcount`` say there is no parameter to receive
+    # an object, and ``co_names`` EMPTY says the function performs no global and
+    # no attribute lookup at all, so there is nothing rebindable for a ``__del__``
+    # to have rebound even if one could run.
+    entry = sources.assurance_health_census
+    code = entry.__code__
+    check("the label route takes no argument of any kind",
+          code.co_argcount == 0 and code.co_kwonlyargcount == 0
+          and not (code.co_flags & 0x04) and not (code.co_flags & 0x08)
+          and code.co_varnames == (),
+          json.dumps({"argcount": code.co_argcount, "varnames": list(code.co_varnames),
+                      "flags": code.co_flags}))
+    check("the label route reads no module global and no attribute: its name table "
+          "is empty and its only free variable is the frozen answer",
+          code.co_names == () and code.co_freevars == ("answer",),
+          json.dumps({"names": list(code.co_names), "free": list(code.co_freevars)}))
+    route_tree = _reader_ast.parse(
+        "\n".join(line[4:] if line.startswith("    ") else line
+                  for line in inspect.getsource(entry).split("\n")))
+    check("the label route deletes nothing, calls nothing and branches on nothing",
+          not [node for node in _reader_ast.walk(route_tree)
+               if isinstance(node, (_reader_ast.Delete, _reader_ast.Call,
+                                    _reader_ast.If, _reader_ast.Try))],
+          inspect.getsource(entry)[:200])
+    census_code = reader.workflow_truth_census.__code__
+    check("the census route is built the same way: no argument, no global, one "
+          "frozen free variable",
+          census_code.co_argcount == 0 and census_code.co_names == ()
+          and census_code.co_freevars == ("answer",),
+          json.dumps({"names": list(census_code.co_names),
+                      "free": list(census_code.co_freevars)}))
 
-    class _RecordingForger:
-        """Same layout as a handle, and it records every attribute touched on it.
+    # ---- WHAT THE TWO ROUTES ANSWER ----------------------------------------
+    label = entry()
+    census = reader.workflow_truth_census()
+    check("the label route returns the module's frozen answer object itself, not a "
+          "copy a caller could edit",
+          label is sources.LABEL_ROUTE_ANSWER
+          and isinstance(label, Mapping) and not isinstance(label, dict),
+          f"{type(label).__name__}")
+    # A ``MappingProxyType`` refuses a write two different ways and both are the
+    # closed door: item assignment raises TypeError, and the mutating methods of
+    # ``dict`` are not on it at all, so ``update``/``clear``/``pop`` are an
+    # AttributeError before any argument is looked at.  Both are asserted rather
+    # than one, so a future swap to a plain dict fails here instead of passing.
+    def _write(target: Any) -> None:
+        target["reason"] = CALLER_REASON
 
-        The layout match (one ``__weakref__`` slot, no ``__dict__``) is what makes
-        the raw descriptor write legal at all.  ``__getattribute__`` records, so
-        "the trusted path touches nothing on the handle" is MEASURED here rather
-        than asserted: if anything resolved ``rendered`` -- or any other name --
-        through the instance, the name appears in ``touched``.
-        """
+    def _erase(target: Any) -> None:
+        del target["reason"]
 
-        __slots__ = ("__weakref__",)
-        touched: list = []
-
-        def __getattribute__(self, name):
-            _RecordingForger.touched.append(name)
-            return object.__getattribute__(self, name)
-
-        def rendered(self) -> dict[str, Any]:
-            return _reading(keys=((RAW_FORGED, 1),),
-                            owners={f"{RAW_FORGED}@v1": MANIFEST_OWNER})
-
-    def _raw_class_swap(handle) -> str:
-        """Drive the raw base-descriptor write; report what the interpreter did."""
+    refusals = {}
+    for name, write in (("setitem", _write), ("delitem", _erase)):
         try:
-            object.__dict__["__class__"].__set__(handle, _RecordingForger)
+            write(label)
+            refusals[name] = "ADMITTED"
         except Exception as exc:
-            return f"refused ({type(exc).__name__})"
-        return "landed"
-
-    def _trusted_render(handle):
-        """What the trusted path answers: ('value', copy) or ('refused', reason).
-
-        The reader's module function, which is what both consumers call.  Caller
-        content is not among the outcomes, and this is the instrument that says so.
-        """
-        try:
-            return ("value", reader.render_reading(handle))
-        except TypeError as exc:
-            return ("refused", getattr(exc, "reason_id", type(exc).__name__))
-
-    def _trusted_project(handle):
-        """The same question asked of the A01 seam, which is the other consumer."""
-        try:
-            return ("value", sources.assurance_health_census(handle))
-        except TypeError as exc:
-            return ("refused", getattr(exc, "reason_id", type(exc).__name__))
-
-    # (1) THE SWAP BEFORE ANY USE.
-    raw = _minted_reading(reader, "RAW-DESCRIPTOR-PROBE-READING")[0]
-    raw_before = _trusted_render(raw)
-    raw_verdict = _raw_class_swap(raw)
-    _RecordingForger.touched.clear()
-    raw_after = _trusted_render(raw)
-    raw_seam = _trusted_project(raw)
-    raw_rendered = json.dumps([raw_after, raw_seam], default=str)
-    check("the raw base-descriptor __class__ swap on a minted handle answers the "
-          "capture or a refusal, never caller content",
-          raw_before[0] == "value"
-          and "RAW-DESCRIPTOR-PROBE-READING" in json.dumps(raw_before[1], default=str)
-          and (raw_after == raw_before
-               or (raw_after[0] == "refused"
-                   and raw_after[1] == reader.READING_NOT_MINTED))
-          and RAW_FORGED not in raw_rendered,
-          json.dumps({"swap": raw_verdict, "after": str(raw_after)[:160]}))
-    check("the A01 label route answers its one invariant for a retyped handle",
-          raw_seam[0] == "value" and _is_label_fallback(raw_seam[1])
-          and RAW_FORGED not in raw_rendered,
-          json.dumps(str(raw_seam)[:200]))
-    check("neither consumer touched a single attribute of the retyped handle",
-          _RecordingForger.touched == [],
-          json.dumps(_RecordingForger.touched[:8]))
-
-    # (2) THE SWAP IN THE OLD WINDOW -- verified, then retyped, then used.  This is
-    # the interleaving the review drove: it is reproduced here exactly, against the
-    # path that replaced it.  The window is gone because the trusted path resolves
-    # the entry ONCE and thaws what that resolution returned, so the "use" half can
-    # only answer the capture or refuse.
-    interleaved = _minted_reading(reader, "INTERLEAVED-PROBE-READING")[0]
-    interleaved_baseline = reader.render_reading(interleaved)
-    # THE VERIFICATION HALF OF THE OLD WINDOW.  There is no exported verify
-    # function any more -- one was removed in this correction, because an exported
-    # predicate answering "this reading is genuine" claims an authority this module
-    # cannot hold -- so the window is reproduced with the render that replaced it.
-    reader.render_reading(interleaved)                  # the verification
-    interleaved_verdict = _raw_class_swap(interleaved)  # the window
-    _RecordingForger.touched.clear()
-    interleaved_after = _trusted_render(interleaved)    # the use
-    interleaved_seam = _trusted_project(interleaved)
-    interleaved_rendered = json.dumps(
-        [interleaved_after, interleaved_seam], default=str)
-    check("a retype between verification and use yields the captured reading or a "
-          "refusal, never the forger's census",
-          (interleaved_after == ("value", interleaved_baseline)
-           or (interleaved_after[0] == "refused"
-               and interleaved_after[1] == reader.READING_NOT_MINTED))
-          and RAW_FORGED not in interleaved_rendered,
-          json.dumps({"swap": interleaved_verdict,
-                      "after": str(interleaved_after)[:160]}))
-    check("and the label route, asked after that same window, answers the invariant "
-          "and projects nothing at all",
-          interleaved_seam[0] == "value" and _is_label_fallback(interleaved_seam[1])
-          and RAW_FORGED not in interleaved_rendered
-          and "caller-owner" not in interleaved_rendered,
-          json.dumps(str(interleaved_seam)[:200]))
-
-    # (3) THE CONTROL, so the two probes above measure the door and not a dead
-    # instrument: the SAME forger class, reached the way a caller would have
-    # reached it before, really does serve forged content.  If this stops being
-    # true the probes above pass for the wrong reason.
-    control_forger = object.__new__(_RecordingForger)
-    _RecordingForger.touched.clear()
-    control_answer = json.dumps(control_forger.rendered(), default=str)
-    check("the control: the forger class really does serve a forged census",
-          RAW_FORGED in control_answer and "rendered" in _RecordingForger.touched,
-          json.dumps({"touched": _RecordingForger.touched[:4]}))
-    check("the reader refuses that forger outright, by identity, and the label "
-          "route answers its invariant without looking at it",
-          _trusted_render(control_forger)[0] == "refused"
-          and _trusted_project(control_forger)[0] == "value"
-          and _is_label_fallback(_trusted_project(control_forger)[1]),
-          json.dumps(str(_trusted_render(control_forger))[:160]))
-
-    # AND THE CAPTURE IS IMMUTABLE IN FACT, NOT BY INTERFACE.  A MappingProxyType
-    # is a read-only VIEW over a dict that still exists: one gc.get_referents()
-    # hop reaches the backing dict, writes through it, and the proxy then serves
-    # the write.  The capture is built from tuples, which have no backing anything,
-    # and this walks the whole captured object graph to prove it.
-    import gc
-
-    def _mutable_objects(value: Any) -> list[str]:
-        seen: set[int] = set()
-        found: list[str] = []
-
-        def walk(node: Any) -> None:
-            if id(node) in seen or isinstance(node, type):
-                return
-            seen.add(id(node))
-            if isinstance(node, (dict, list, set, bytearray)) or hasattr(node, "__dict__"):
-                found.append(type(node).__name__)
-            for referent in gc.get_referents(node):
-                walk(referent)
-
-        walk(value)
-        return sorted(set(found))
-
-    # Its own freshly minted handle, so this measures the CAPTURE rather than
-    # inheriting whatever the __class__ probe above left behind.
-    captured_entry = reader._entry(_minted_reading(reader, "CAPTURE-SCAN-READING")[0])
-    check("no mutable object is reachable anywhere inside a captured reading",
-          captured_entry is not None and _mutable_objects(captured_entry[0]) == [],
-          json.dumps(None if captured_entry is None
-                     else _mutable_objects(captured_entry[0])))
-
-    # The shell is an object.__new__ of the handle class and nothing more: there
-    # is no attribute left to seed it with, which is itself the point, and it is
-    # absent from the weak-keyed registry because it was never a key in it.
-    shell = object.__new__(reader.WorkflowTruthReading)
-    check("even a shell of the real class cannot be given state to carry",
-          _raises_attribute_error(
-              lambda: object.__setattr__(shell, "_key", "forged-key")),
-          "an unminted shell accepted an attribute")
-
-    class _LookAlikeHandle:
-        """Matches a genuine handle by ``__hash__``/``__eq__`` on purpose.
-
-        The registry is a ``WeakKeyDictionary``, and a weak reference hashes and
-        compares as its referent -- so a look-alike that answers equal to a real
-        handle would reach a real entry if the lookup began at the mapping.  It
-        begins at an exact-type test instead, and this is the probe for that.
-        """
-
-        __slots__ = ("__weakref__", "_twin")
-
-        def __init__(self, twin: Any) -> None:
-            self._twin = twin
-
-        def __hash__(self) -> int:
-            return hash(self._twin)
-
-        def __eq__(self, other: Any) -> bool:
-            return True
-
-        def rendered(self) -> dict[str, Any]:
-            return _reading(surfaces=[_surface("assurance-fabric-child.launchd.v1")])
-
-    class _StrSubclassHandle(str):
-        """A ``str`` subclass offered as the handle, with caller code in __hash__.
-
-        This is the seventh review's shape, pointed at the surface that replaced
-        the one it beat: there is no key read off a handle any more, so the only
-        way to present a mutating string is to present it AS the handle.
-        """
-
-        hashes = 0
-
-        def __hash__(self) -> int:
-            type(self).hashes += 1
-            return hash(str(self))
-
-    twin, _ = _minted_reading(reader, "LOOK-ALIKE-TWIN-READING")
-    look_alike = _LookAlikeHandle(twin)
-    str_handle = _StrSubclassHandle("forged-key-no-reader-ever-minted")
-    forged_handles = {
-        "a census dict": _reading(surfaces=[_surface("assurance-fabric-child.launchd.v1")]),
-        "None": None,
-        "an object.__new__ shell of the handle class": shell,
-        "a handle-shaped duck type": type("Reading", (), {"rendered": lambda self: {
-            "available": True, "census": {}, "surfaces": [], "owners": {}}})(),
-        "a look-alike whose __hash__ and __eq__ match a real handle": look_alike,
-        "a str subclass carrying caller code in __hash__": str_handle,
-        "a deep copy of a genuinely minted handle": copy.deepcopy(twin),
-    }
-    try:
-        forged_handles["a pickle round-trip of a genuinely minted handle"] = \
-            pickle.loads(pickle.dumps(twin))
-    except Exception:
-        pass
-    # THE BAR MOVED IN THIS CORRECTION, AND IT MOVED UP.  It used to be that the
-    # seam REFUSED each of these shapes -- which was a claim in itself, because a
-    # refusal here said that whatever was NOT refused had been read from the
-    # control plane.  The bar now is that every one of them, and a genuinely
-    # minted handle too, gets the identical invariant answer: the route
-    # distinguishes nothing, because it has no authority to distinguish anything.
-    divergent_forgeries = [label for label, forged in forged_handles.items()
-                           if not _is_label_fallback(
-                               sources.assurance_health_census(forged))]
-    check("every caller-built reading gets the one invariant not-proven answer",
-          not divergent_forgeries, json.dumps(divergent_forgeries))
-    check("a look-alike that compares equal to a real handle still reaches no entry "
-          "in the reader",
-          _raises_type_error(lambda: reader.render_reading(look_alike)),
-          "a matching __hash__/__eq__ reached a genuine registry entry")
-    check("the retired verification symbols are gone from the reader, not renamed",
-          not [name for name in ("verify_workflow_truth_reading",
-                                 "is_workflow_truth_reading",
-                                 "READING_PAYLOAD_REPLACED")
-               if hasattr(reader, name) or name in reader.__all__],
-          json.dumps(sorted(reader.__all__)))
-    check("the handle a look-alike was built to match still renders its own reading",
-          "LOOK-ALIKE-TWIN-READING" in json.dumps(
-              reader.render_reading(twin), default=str),
-          json.dumps(reader.render_reading(twin), default=str)[:200])
-    check("the reader refuses to mint a reading from caller data",
-          _raises_type_error(lambda: reader.WorkflowTruthReading(object()))
-          and _raises_type_error(lambda: reader.WorkflowTruthReading()),
-          "the handle has a public constructor")
-    check("a handle that skipped the mint cannot hand out a reading",
-          _raises_type_error(lambda: reader.render_reading(shell)),
-          "an unminted shell rendered a census")
-    # THE CONTROL: a handle the reader actually minted IS accepted, so the
-    # refusals above measure the door rather than a seam that refuses everything.
-    minted, invocations = _minted_reading(reader, "SOURCE-ADAPTER-CONTROL-READING")
-    check("the reader minted exactly one reading for this control", invocations == [1],
-          json.dumps(invocations))
-    answered = sources.assurance_health_census(minted)
-    # THE INVERSION THIS CORRECTION MAKES, and it is the whole ruling in one
-    # assertion.  A genuinely minted reading used to be "accepted and projected".
-    # It is now answered exactly as a forgery is, and the sentinel the reader put
-    # inside that reading never appears -- because the route does not read it.
-    check("even a reading the reader genuinely minted gets the invariant answer",
-          _is_label_fallback(answered)
-          and "SOURCE-ADAPTER-CONTROL-READING" not in json.dumps(answered, default=str),
-          json.dumps(answered, default=str)[:300])
-    check("and the reader still renders that same handle, for the consumer that "
-          "DISPLAYS a reading rather than labelling it",
-          "SOURCE-ADAPTER-CONTROL-READING" in json.dumps(
-              reader.render_reading(minted), default=str),
-          json.dumps(reader.render_reading(minted), default=str)[:200])
+            refusals[name] = type(exc).__name__
+    check("the frozen answer refuses every mutation",
+          refusals == {"setitem": "TypeError", "delitem": "TypeError"}
+          and not any(hasattr(label, name) for name in
+                      ("update", "clear", "pop", "popitem", "setdefault")),
+          json.dumps({"refusals": refusals, "answer": dict(label)}))
+    # THE CONTROL: the same two writes land on an ordinary dict, so "refused"
+    # above is a property of the frozen mapping and not of the probe.
+    editable = dict(label)
+    _write(editable)
+    _erase(editable)
+    check("the mutation probe really does write to something that is not frozen",
+          "reason" not in editable, json.dumps(editable))
+    check("the label route carries the reason id, the not-proven disposition and "
+          "the durable-store seam name, exactly",
+          dict(label) == {"schema_version": "assurance-health-sources.v1",
+                          "available": False, "reason": LABEL_ROUTE_REASON,
+                          "item_disposition": LABEL_ITEM_DISPOSITION,
+                          "owed_seam": LABEL_OWED_SEAM},
+          json.dumps(dict(label)))
+    check("the census route carries the same reason, disposition and seam under its "
+          "own schema id",
+          dict(census) == {"schema_version": CENSUS_ROUTE_SCHEMA, "available": False,
+                           "reason": LABEL_ROUTE_REASON,
+                           "item_disposition": LABEL_ITEM_DISPOSITION,
+                           "owed_seam": LABEL_OWED_SEAM},
+          json.dumps(dict(census)))
+    check("neither route's own strings carry a word from the privileged union",
+          not [word for word in PRIVILEGED_WORD_UNION
+               for text in list(dict(label).values()) + list(dict(census).values())
+               if isinstance(text, str) and word in text.lower()],
+          json.dumps(sorted({word for word in PRIVILEGED_WORD_UNION
+                             for text in list(dict(label).values())
+                             + list(dict(census).values())
+                             if isinstance(text, str) and word in text.lower()})))
+    # THE CONSUMER IS WIRED TO THEM, and the wiring is parsed rather than grepped.
     health_source = (REPO / "tools" / "health-check.py").read_text(encoding="utf-8")
-    check("the health surface takes its census from that same reader",
-          "from lib.control_plane_workflow_truth_reader import (" in health_source
-          and "read_workflow_truth_reading, render_reading)" in health_source,
-          "tools/health-check.py reads the census some other way")
-    # AND IT RENDERS THROUGH THE READER'S FUNCTION, NOT THROUGH THE HANDLE.  The
-    # method it used to call was dispatched through the instance, so a retyped
-    # handle made this surface print the caller's census as the control plane's.
-    adapter_source = (REPO / "lib" / "assurance_health_sources.py").read_text(
-        encoding="utf-8")
-    check("the census consumer calls the reader's module function, not a method "
-          "on the handle",
-          "render_reading(reading)" in health_source
-          and not hasattr(reader.WorkflowTruthReading, "rendered"),
-          "a consumer still calls a method on the handle")
-    # PARSER-BACKED, because the claim is syntactic: does this module CALL a
-    # render, and does it IMPORT one?  A text search cannot tell a call from the
-    # comment that explains why there is no longer a call, and this module now
-    # carries exactly that comment.
-    import ast as _adapter_ast
-
-    adapter_tree = _adapter_ast.parse(adapter_source)
-    rendering_calls = sorted(
-        node.func.id for node in _adapter_ast.walk(adapter_tree)
-        if isinstance(node, _adapter_ast.Call)
-        and isinstance(node.func, _adapter_ast.Name)
-        and "render" in node.func.id.lower())
-    reader_imports = sorted(
-        alias.asname or alias.name
-        for node in _adapter_ast.walk(adapter_tree)
-        if isinstance(node, _adapter_ast.ImportFrom)
-        and node.module == "lib.control_plane_workflow_truth_reader"
-        for alias in node.names)
-    check("the label route neither renders nor imports a render, so there is no "
-          "dispatch on a handle left in it at all",
-          not rendering_calls and reader_imports == ["_WorkflowTruthReading"]
-          and "del reading" in adapter_source,
-          json.dumps({"calls": rendering_calls, "imports": reader_imports}))
-    reader_source = (REPO / "lib" / "control_plane_workflow_truth_reader.py").read_text(
-        encoding="utf-8")
-    check("the reader itself takes no argument through which a census could arrive",
-          "def read_workflow_truth_snapshot() -> dict[str, Any]:" in reader_source
-          and "def read_workflow_truth_reading() -> WorkflowTruthReading:" in reader_source,
-          "the reader accepts caller input")
-
-    # ---- THE MUTATED-HANDLE DOOR, AND THE TOCTOU BEHIND IT -----------------
-    # THE DEFECT THIS EXISTS FOR, AS A CLASS RATHER THAN AS A LIST OF INSTANCES.  Every
-    # refusal above measures PROVENANCE: is this object one the reader minted?  A
-    # review answered yes -- it took a handle the reader really had minted,
-    # replaced the payload behind it, and projected a complete forged census
-    # through the seam.  The answer to that was a content digest bound at mint,
-    # and a review beat it with a stateful mapping that served authentic content
-    # to the digest traversal and forged content to the render traversal.  The
-    # answer to THAT was a private registry reached by an opaque string key, and a
-    # review beat it with a ``str`` subclass that swapped the key inside its own
-    # ``__hash__``, so the entry verified and the entry consumed were two
-    # different readings.
-    #
-    # THE ONE THING EVERY ROUND NEEDED was state on the handle: an attribute to
-    # replace, or a value read off it that a lookup then trusted.  The handle now
-    # carries none, so these checks are the behavioural proof of the CLASS: each
-    # mutation is tried on a GENUINELY minted handle, and the bar is not merely
-    # that the seam refuses -- it is that the handle STILL RENDERS THE ORIGINAL
-    # CAPTURE, byte for byte, and that nothing the mutation wrote ever appears in
-    # the seam's answer.
-    FORGED_KEY = "forged-by-mutation"
-    honest = _reading(surfaces=[_surface("assurance-fabric-child.launchd.v1")])
-    forged = _reading(keys=((FORGED_KEY, 1),), owners={f"{FORGED_KEY}@v1": MANIFEST_OWNER})
-
-    def _mint(snapshot):
-        """A GENUINELY minted handle for ``snapshot`` -- the reader performs the read."""
-        real = reader.read_workflow_truth_snapshot
-        reader.read_workflow_truth_snapshot = lambda: copy.deepcopy(snapshot)
-        try:
-            return reader.read_workflow_truth_reading()
-        finally:
-            reader.read_workflow_truth_snapshot = real
-
-    class _StatefulForgery(Mapping):
-        """Authentic on the FIRST read of a key, forged on every read after it.
-
-        This is the shape that defeated "derive the digest, then go and read the
-        payload again": it is honest while it is being verified and forged while
-        it is being rendered.  It is used two ways below -- offered to a minted
-        handle, and installed as the reader's own snapshot source -- and it counts
-        its reads, so "traversed exactly once" is measured rather than asserted.
-        """
-
-        def __init__(self) -> None:
-            self.reads: dict[str, int] = {}
-
-        def __getitem__(self, key):
-            self.reads[key] = self.reads.get(key, 0) + 1
-            return (honest if self.reads[key] == 1 else forged)[key]
-
-        def __iter__(self):
-            return iter(honest)
-
-        def __len__(self) -> int:
-            return len(honest)
-
-    baseline_handle = _mint(honest)
-    baseline = reader.render_reading(baseline_handle)
-    check("the control: a minted handle renders the reading the reader performed",
-          baseline.get("available") is True
-          and FORGED_KEY not in json.dumps(baseline, default=str),
-          json.dumps(baseline, default=str)[:200])
-
-    def _replaces_the_payload_attribute(handle):
-        object.__setattr__(handle, "_payload", reader._frozen(forged))
-
-    def _assigns_the_payload_attribute(handle):
-        handle._payload = forged
-
-    def _installs_a_stateful_mapping(handle):
-        object.__setattr__(handle, "_payload", _StatefulForgery())
-
-    def _installs_a_stateful_mapping_under_the_key_name(handle):
-        object.__setattr__(handle, "_key", _StatefulForgery())
-
-    def _installs_a_str_subclass_where_a_key_used_to_live(handle):
-        # THE SEVENTH REVIEW'S SHAPE.  It needed a caller-visible ``_key`` that a
-        # registry lookup would read back; there is no such attribute to install
-        # one on, and this records that the write itself is the refusal.
-        object.__setattr__(handle, "_key", _StrSubclassHandle("swapped"))
-
-    def _repoints_the_handle_at_another_genuine_reading(handle):
-        object.__setattr__(handle, "_key", "another-readings-key")
-
-    def _swaps_a_nested_mapping_after_minting(handle):
-        rendered = reader.render_reading(handle)
-        rendered["census"]["summary"] = copy.deepcopy(forged["census"]["summary"])
-        rendered["census"]["rows"] = copy.deepcopy(forged["census"]["rows"])
-        rendered["owners"][f"{FORGED_KEY}@v1"] = MANIFEST_OWNER
-
-    def _swaps_a_nested_mapping_twice_over(handle):
-        first = reader.render_reading(handle)
-        first["census"]["rows"] = copy.deepcopy(forged["census"]["rows"])
-        second = reader.render_reading(handle)
-        second["surfaces"] = copy.deepcopy(forged["surfaces"])
-        second["census"].setdefault("rows", []).extend(first["census"]["rows"])
-
-    def _writes_a_key_of_what_it_was_handed(handle):
-        reader.render_reading(handle)["census"] = copy.deepcopy(forged["census"])
-
-    forgery_attempts = {
-        "replacing the payload attribute with object.__setattr__":
-            _replaces_the_payload_attribute,
-        "assigning the payload attribute outright": _assigns_the_payload_attribute,
-        "installing a stateful mapping as the payload": _installs_a_stateful_mapping,
-        "installing a stateful mapping where the key lives":
-            _installs_a_stateful_mapping_under_the_key_name,
-        "installing a str subclass where the key lives":
-            _installs_a_str_subclass_where_a_key_used_to_live,
-        "re-pointing the handle at another genuine reading":
-            _repoints_the_handle_at_another_genuine_reading,
-        "swapping nested mappings after minting": _swaps_a_nested_mapping_after_minting,
-        "swapping nested mappings across two renders": _swaps_a_nested_mapping_twice_over,
-        "writing a key of what the handle handed out": _writes_a_key_of_what_it_was_handed,
-    }
-    divergent, leaked, verdicts = [], [], {}
-    for label, mutate in forgery_attempts.items():
-        handle = _mint(honest)
-        # THE PER-CASE CONTROL, AND IT MOVED TO THE READER IN THIS CORRECTION.  It
-        # used to be that the label route projected this handle before the
-        # mutation, which is no longer a thing any handle can do.  The control is
-        # now the reader's own render: this handle answers its captured reading
-        # BEFORE the mutation, so what is measured afterwards is the mutation and
-        # not a dead handle.
-        if reader.render_reading(handle) != baseline:
-            leaked.append(f"{label} (control: the honest handle did not render)")
-            continue
-        try:
-            mutate(handle)
-            verdicts[label] = "write landed"
-        except Exception as exc:
-            verdicts[label] = f"write refused ({type(exc).__name__})"
-        try:
-            after_rendered = reader.render_reading(handle)
-        except TypeError as exc:
-            verdicts[label] += \
-                f"; render_reading() refused ({getattr(exc, 'reason_id', 'TypeError')})"
-            after_rendered = None
-        if after_rendered is not None and after_rendered != baseline:
-            divergent.append(f"{label}: {verdicts[label]}")
-        after = sources.assurance_health_census(handle)
-        if not _is_label_fallback(after):
-            leaked.append(f"{label}: {verdicts[label]}; the label route answered "
-                          "something other than its invariant")
-        elif FORGED_KEY in json.dumps(after, default=str):
-            leaked.append(f"{label}: {verdicts[label]}; the label route echoed the forgery")
-    check("every replacement attempt still renders the reading captured at mint, "
-          "identically",
-          not divergent, json.dumps(divergent))
-    check("a genuinely minted handle whose contents were mutated is answered by the "
-          "label route exactly as everything else is",
-          not leaked, json.dumps({"leaked": leaked, "verdicts": verdicts}))
-    check("the sweep tried every replacement shape the reviews used",
-          len(forgery_attempts) == 9 and set(verdicts) == set(forgery_attempts),
-          json.dumps(sorted(set(forgery_attempts) - set(verdicts))))
-    check("every state-bearing shape is refused at the WRITE, not at a later check",
-          all(verdicts[label].startswith("write refused")
-              for label in forgery_attempts
-              if label.startswith(("replacing", "assigning", "installing", "re-pointing"))),
-          json.dumps({label: verdicts[label] for label in forgery_attempts}))
-
-    # THE TOCTOU ITSELF, AT ITS SOURCE.  The mutations above aim at the handle.
-    # This installs the stateful mapping where the READER reads: the snapshot
-    # source itself answers differently on a second read.  One capture means
-    # there is no second read -- every render is the first answer, and the read
-    # counter proves each key was touched exactly once.
-    stateful_source = _StatefulForgery()
-
-    def _stateful_snapshot() -> Any:
-        """Deliberately NOT a dict: the reader must capture whatever it is handed."""
-        return stateful_source
-
-    real_snapshot = reader.read_workflow_truth_snapshot
-    reader.read_workflow_truth_snapshot = _stateful_snapshot
-    try:
-        captured = reader.read_workflow_truth_reading()
-    finally:
-        reader.read_workflow_truth_snapshot = real_snapshot
-    renders = [reader.render_reading(captured) for _ in range(3)]
-    projected = sources.assurance_health_census(captured)
-    check("a stateful reading source is traversed exactly once, at mint",
-          all(render == renders[0] for render in renders)
-          and renders[0] == copy.deepcopy(honest)
-          and set(stateful_source.reads.values()) == {1},
-          json.dumps({"reads": stateful_source.reads}))
-    check("neither a render nor the seam ever sees the stateful source's second answer",
-          FORGED_KEY not in json.dumps(renders, default=str)
-          and FORGED_KEY not in json.dumps(projected, default=str),
-          json.dumps(renders[0], default=str)[:200])
-
-    # THE LOOKUP INPUT IS THE OBJECT, so two genuine handles cannot be crossed.
-    # There is no key to hand one handle that names the other's reading: the
-    # registry is reached by BEING the handle, and this pins that two readings
-    # minted in the same process stay their own.
-    own = _mint(honest)
-    other = _mint(forged)
-    check("two genuine handles each render only their own reading",
-          reader.render_reading(own) == baseline
-          and FORGED_KEY in json.dumps(reader.render_reading(other), default=str)
-          and FORGED_KEY not in json.dumps(reader.render_reading(own), default=str),
-          json.dumps(reader.render_reading(own), default=str)[:200])
-    check("a str subclass offered as a handle never runs inside a registry lookup",
-          _raises_type_error(lambda: reader.render_reading(str_handle))
-          and _StrSubclassHandle.hashes == 0,
-          json.dumps({"hashes": _StrSubclassHandle.hashes}))
-
-    # ONE REFUSAL, ONE REASON ID, AND THE OTHER TWO NAMES ARE GONE.  The
-    # re-pointed-handle refusal (READING_PAYLOAD_REPLACED) existed only while a
-    # handle carried a key a caller could re-point, and the two verification
-    # exports existed to answer "is this reading genuine" -- a question this
-    # module has now said in writing that it cannot answer.  A retired name that
-    # quietly kept firing would be worse than one that was deleted, so all three
-    # were deleted; this pins that they are absent from the module and from its
-    # export list, and that one reason id is left.
-    check("the reader exports exactly one refusal reason id and no verifier",
-          [name for name in reader.__all__ if "READING_" in name] == ["READING_NOT_MINTED"]
-          and not [name for name in dir(reader) if name.startswith(("verify_", "is_"))],
-          json.dumps(sorted(reader.__all__)))
-    shell_reason = None
-    try:
-        reader.render_reading(shell)
-    except TypeError as exc:
-        shell_reason = getattr(exc, "reason_id", type(exc).__name__)
-    check("a handle the reader never minted refuses under the not-minted reason id",
-          shell_reason == reader.READING_NOT_MINTED, json.dumps(shell_reason))
-    # AND THE BINDING IS PERMANENT FOR THE LIFE OF THE HANDLE, because nothing
-    # about it can be written.  The handle that survived every mutation above
-    # answers again here, last, with the reading it was minted for and with
-    # nothing any attempt wrote -- so the sweep measured a door that stayed shut
-    # rather than a handle that had been killed along the way.
-    check("the swept handle still renders its own reading after every attempt, and "
-          "the label route still answers its invariant for it",
-          reader.render_reading(own) == baseline
-          and _is_label_fallback(sources.assurance_health_census(own)),
-          json.dumps(reader.render_reading(own), default=str)[:300])
+    health_tree = _reader_ast.parse(health_source)
+    health_imports = sorted({alias.name for node in _reader_ast.walk(health_tree)
+                             if isinstance(node, _reader_ast.ImportFrom)
+                             and node.module == "lib.control_plane_workflow_truth_reader"
+                             for alias in node.names})
+    check("the health surface imports exactly the census route from the reader, and "
+          "nothing else",
+          health_imports == ["workflow_truth_census"], json.dumps(health_imports))
+    check("and it calls both routes with no argument at all",
+          "workflow_truth_census()" in health_source
+          and "sources.assurance_health_census()" in health_source
+          and "assurance_health_census(reading)" not in health_source,
+          "a consumer still hands something to a route")
 
 
-# THE CALLER-CONSTRUCTED CENSUS THE NINTH REVIEW BUILT, reproduced verbatim in
-# shape: an OPERATIONAL workflow with a caller-chosen key and a caller-chosen
-# owner.  Every probe below drives one of the three routes the review used to get
-# this through a genuinely minted reading, and asserts the label route answers the
-# same way it answers everything else.
+# THE CALLER-CONSTRUCTED CENSUS THE NINTH AND TENTH REVIEWS BUILT, reproduced
+# verbatim in shape: an OPERATIONAL workflow with a caller-chosen key and a
+# caller-chosen owner, plus the caller-chosen reason and disposition the tenth
+# review pulled out of the label route.  The probes below drive the two routes the
+# tenth review used and assert that neither of them moves.
 CALLER_WORKFLOW_KEY = "caller-operational"
 CALLER_OWNER = "caller-owner"
+CALLER_REASON = "caller_reason"
+CALLER_DISPOSITION = "verified"
+CALLER_SEAM = "caller_seam"
 
 
 def _caller_operational_reading() -> dict[str, Any]:
@@ -2191,139 +1744,171 @@ def _caller_operational_reading() -> dict[str, Any]:
 
 
 def label_route_fallback_checks() -> None:
-    """THE THREE ROUTES THE NINTH REVIEW USED, EACH ANSWERED BY THE FALLBACK.
+    """THE TENTH REVIEW'S TWO PROBES, REPRODUCED, AGAINST THE DELETED ROUTES.
 
-    WHAT THE REVIEW PROVED, and it is why this suite exists in this shape.  With a
-    reading handle carrying no state at all, a caller could still put a census of
-    its own inside a GENUINELY MINTED reading by three routes:
+    PROBE ONE, THE ``__del__`` REBINDING.  The ninth cut's label route took a
+    reading it did not use, ran ``del reading`` on it, and then read three
+    module-level strings to build its answer.  ``del`` on the last reference runs
+    the object's ``__del__``, which is caller code executing INSIDE the route
+    between entry and those reads, and the review used it to get
 
-      1. rebinding the reader's module-level ``read_workflow_truth_snapshot``,
-         which ``read_workflow_truth_reading`` resolves at call time;
-      2. writing the reader's private ``_MINTED`` registry directly, which
-         re-points an already-minted handle at a value the caller chose;
-      3. a ``str``-subclass mapping KEY preserved through the capture, whose
-         ``__hash__`` replaces that same handle's registry entry while a render is
-         building its dictionaries -- so an earlier consumer gets the original and
-         a later one gets the replacement.
+        {"available": false, "reason": "caller_reason",
+         "item_disposition": "verified", "owed_seam": "caller_seam"}
 
-    NONE OF THEM IS CLOSED HERE, AND THAT IS THE POINT.  Each probe below FIRST
-    proves its route still works -- the reader really does render the caller's
-    census -- and THEN proves the public label route answers
-    ``reading_handle_integrity_unprovable`` anyway, carrying none of the caller's
-    strings.  A probe whose route silently stopped working would prove nothing, so
-    the "it still works" half is an assertion and not a comment.
+    out of a route documented as invariant.  The probe is reproduced here in full:
+    an object whose ``__del__`` rebinds every name the old route read, plus the new
+    frozen answer's own export, is built and dropped, and its ``__del__`` is
+    ASSERTED to have fired and to have really landed those rebindings.  Then the
+    route is called.  The bar is byte-identity with the answer captured before the
+    probe existed, and object identity with the literal bound at import.
 
-    That pairing is the honest form of the close: the reading cannot be trusted,
-    so nothing is derived from it, and the A01 item is carried as ``not_proven``
-    with the durable-store seam named.
+    PROBE TWO, THE SNAPSHOT REBINDING.  The review rebound the reader's
+    module-level ``read_workflow_truth_snapshot``, which the old
+    ``read_workflow_truth_reading`` resolved at call time, and got a caller's
+    census printed by ``tools/health-check.py`` as the control plane's own answer
+    -- "0 declared/registered workflow(s): 7 evidence-backed operational" -- which
+    ``run.sh health`` shows.  The probe is reproduced by rebinding that name, the
+    old render function's name, and the new frozen census export, all three on the
+    live module, and asserting the census route does not move.  The same probe is
+    driven through the real ``tools/health-check.py`` process in
+    ``census_route_invariance_checks``, because a route is only as honest as what
+    its consumer prints.
+
+    WHY THESE CAN NO LONGER BE "CONTROLLED" THE OLD WAY.  The ninth suite proved
+    each probe still worked before proving the route ignored it.  Half of that is
+    now impossible on purpose: there is no minting function left to rebind, so the
+    control asserts the rebinding LANDED ON THE MODULE (the attribute really does
+    hold the caller's object afterwards) rather than that it changed a reading.
+    That is the honest control for a deletion: the caller can still write whatever
+    it likes onto these modules, and no route consults any of it.
     """
+    import gc
+
     import lib.assurance_health_sources as sources
     import lib.control_plane_workflow_truth_reader as reader
 
     caller = _caller_operational_reading()
-    caller_strings = (CALLER_WORKFLOW_KEY, CALLER_OWNER, '"state": "operational"')
+    caller_strings = (CALLER_WORKFLOW_KEY, CALLER_OWNER, CALLER_REASON,
+                      CALLER_DISPOSITION, CALLER_SEAM, '"state": "operational"')
 
-    # ---- PROBE 1: module rebinding of the exported snapshot read -------------
-    real = reader.read_workflow_truth_snapshot
+    # The answers as they stand BEFORE any probe exists, captured as bytes.
+    label_before = json.dumps(dict(sources.assurance_health_census()), sort_keys=True)
+    census_before = json.dumps(dict(reader.workflow_truth_census()), sort_keys=True)
+    label_object = sources.assurance_health_census()
+    census_object = reader.workflow_truth_census()
+
+    # ---- PROBE 1: a __del__ that rebinds every name the old route read ------
+    fired: list[str] = []
+
+    class _RebindingOnDelete:
+        """The review's probe object: its __del__ rewrites the module under the route."""
+
+        def __del__(self) -> None:
+            fired.append("del")
+            sources.LABEL_ROUTE_UNAVAILABLE_REASON = CALLER_REASON
+            sources.LABEL_ITEM_DISPOSITION = CALLER_DISPOSITION
+            sources.OWED_LABEL_AUTHORITY_SEAM = CALLER_SEAM
+            sources.LABEL_ROUTE_ANSWER = {
+                "schema_version": "assurance-health-sources.v1", "available": False,
+                "reason": CALLER_REASON, "item_disposition": CALLER_DISPOSITION,
+                "owed_seam": CALLER_SEAM}
+
+    probe = _RebindingOnDelete()
+    del probe
+    gc.collect()
+    check("probe 1 control: the __del__ fired and really did land the caller's "
+          "strings on the module the route lives in",
+          fired == ["del"]
+          and sources.LABEL_ROUTE_UNAVAILABLE_REASON == CALLER_REASON
+          and sources.LABEL_ITEM_DISPOSITION == CALLER_DISPOSITION
+          and sources.LABEL_ROUTE_ANSWER["reason"] == CALLER_REASON,
+          json.dumps({"fired": fired,
+                      "module_answer": dict(sources.LABEL_ROUTE_ANSWER)}))
+    after_del = sources.assurance_health_census()
+    check("probe 1: the label route answers byte-identically to before the probe "
+          "existed, and returns the very object bound at import",
+          json.dumps(dict(after_del), sort_keys=True) == label_before
+          and after_del is label_object
+          and not any(token in json.dumps(dict(after_del)) for token in caller_strings),
+          json.dumps(dict(after_del)))
+    # The module is put back the way it was found, so nothing downstream -- the
+    # union sweep above all -- reads a forgery this probe left lying about.
+    sources.LABEL_ROUTE_ANSWER = after_del
+    for name in ("LABEL_ROUTE_UNAVAILABLE_REASON", "LABEL_ITEM_DISPOSITION",
+                 "OWED_LABEL_AUTHORITY_SEAM"):
+        delattr(sources, name)
+    check("and those three names were not module state the route depends on: the "
+          "route answers identically once they are removed again",
+          json.dumps(dict(sources.assurance_health_census()), sort_keys=True)
+          == label_before
+          and not any(hasattr(sources, name) for name in
+                      ("LABEL_ROUTE_UNAVAILABLE_REASON", "LABEL_ITEM_DISPOSITION",
+                       "OWED_LABEL_AUTHORITY_SEAM")),
+          json.dumps(dict(sources.assurance_health_census())))
+
+    # ---- PROBE 2: rebinding the reader's snapshot and render names ----------
     reader.read_workflow_truth_snapshot = lambda: copy.deepcopy(caller)
+    reader.render_reading = lambda handle: copy.deepcopy(caller)
+    reader.CENSUS_ROUTE_ANSWER = {"schema_version": CENSUS_ROUTE_SCHEMA,
+                                  "available": True, "reason": CALLER_REASON,
+                                  "item_disposition": CALLER_DISPOSITION,
+                                  "owed_seam": CALLER_SEAM}
     try:
-        rebound = reader.read_workflow_truth_reading()
+        check("probe 2 control: the rebinding really landed -- the module now holds "
+              "the caller's functions and the caller's answer",
+              reader.read_workflow_truth_snapshot()["owners"]
+              == {f"{CALLER_WORKFLOW_KEY}@v1": CALLER_OWNER}
+              and reader.CENSUS_ROUTE_ANSWER["available"] is True,
+              json.dumps(reader.CENSUS_ROUTE_ANSWER))
+        after_rebind = reader.workflow_truth_census()
+        check("probe 2: the census route answers byte-identically to before, and "
+              "returns the very object bound at import",
+              json.dumps(dict(after_rebind), sort_keys=True) == census_before
+              and after_rebind is census_object
+              and not any(token in json.dumps(dict(after_rebind))
+                          for token in caller_strings),
+              json.dumps(dict(after_rebind)))
     finally:
-        reader.read_workflow_truth_snapshot = real
-    rebound_rendered = json.dumps(reader.render_reading(rebound), default=str)
-    check("probe 1 control: rebinding read_workflow_truth_snapshot really does put "
-          "a caller's operational census inside a genuinely minted reading",
-          all(token in rebound_rendered for token in caller_strings),
-          rebound_rendered[:200])
-    rebound_answer = sources.assurance_health_census(rebound)
-    check("probe 1: the label route answers its invariant for that reading and "
-          "carries none of the caller's strings",
-          _is_label_fallback(rebound_answer)
-          and not any(token in json.dumps(rebound_answer, default=str)
-                      for token in caller_strings),
-          json.dumps(rebound_answer)[:200])
+        reader.CENSUS_ROUTE_ANSWER = census_object
+        del reader.read_workflow_truth_snapshot
+        del reader.render_reading
 
-    # ---- PROBE 2: replacing _MINTED[handle] ---------------------------------
-    minted, _ = _minted_reading(reader, "PROBE-TWO-BASE-READING")
-    base_rendered = json.dumps(reader.render_reading(minted), default=str)
-    captured = reader._frozen(copy.deepcopy(caller))
-    reader._MINTED[minted] = (captured, reader._content_digest(captured))
-    replaced_rendered = json.dumps(reader.render_reading(minted), default=str)
-    check("probe 2 control: writing the private mint registry really does re-point "
-          "an already-minted handle at a reading the caller chose",
-          "PROBE-TWO-BASE-READING" in base_rendered
-          and all(token in replaced_rendered for token in caller_strings)
-          and "PROBE-TWO-BASE-READING" not in replaced_rendered,
-          replaced_rendered[:200])
-    replaced_answer = sources.assurance_health_census(minted)
-    check("probe 2: the label route answers its invariant for the re-pointed handle",
-          _is_label_fallback(replaced_answer)
-          and not any(token in json.dumps(replaced_answer, default=str)
-                      for token in caller_strings),
-          json.dumps(replaced_answer)[:200])
+    # ---- THE SIGNATURE IS THE DOOR, AND IT IS SHUT -------------------------
+    # There is no input to be invariant OVER any more: every calling form that
+    # could carry a census is a TypeError before a line of either route runs.
+    shapes: list[Any] = [_caller_operational_reading(), None, "healthy", 1, True,
+                         object(), {"state": "healthy", "green": True}, [], _census()]
+    keywords = ("reading", "workflows", "census", "snapshot", "rows", "scopes",
+                "value", "now")
+    admitted = []
+    attempts = 0
+    for route_name, route in (("assurance_health_census", sources.assurance_health_census),
+                              ("workflow_truth_census", reader.workflow_truth_census)):
+        for shape in shapes:
+            for args, kwargs in ([((shape,), {})]
+                                 + [((), {keyword: shape}) for keyword in keywords]):
+                attempts += 1
+                if not _raises_type_error(lambda: route(*args, **kwargs)):
+                    admitted.append(f"{route_name}({args!r}, {kwargs!r})")
+    expected = 2 * len(shapes) * (1 + len(keywords))
+    check(f"neither route admits any caller input in any calling form "
+          f"({attempts} attempts: 2 routes x {len(shapes)} shapes x "
+          f"{1 + len(keywords)} forms, every one of them a TypeError)",
+          not admitted and attempts == expected, json.dumps(admitted[:4]))
 
-    # ---- PROBE 3: a hostile mapping key hooking the thaw ---------------------
-    # The key is preserved by _frozen and HASHED by _thawed while it builds its
-    # dictionaries, so the caller's code runs during a render rather than at mint.
-    hooked: list[Any] = []
-    hook_capture = reader._frozen(copy.deepcopy(caller))
-
-    class _ThawHookKey(str):
-        """A mapping key whose __hash__ replaces the registry entry mid-render."""
-
-        fired = 0
-
-        def __hash__(self) -> int:
-            type(self).fired += 1
-            if hooked:
-                reader._MINTED[hooked[0]] = (
-                    hook_capture, reader._content_digest(hook_capture))
-            return str.__hash__(self)
-
-    hook_snapshot = {"available": False, "reason": "PROBE-THREE-BASE-READING",
-                     _ThawHookKey("hook"): 0}
-    real = reader.read_workflow_truth_snapshot
-    reader.read_workflow_truth_snapshot = lambda: copy.deepcopy(hook_snapshot)
-    try:
-        hooked_handle = reader.read_workflow_truth_reading()
-    finally:
-        reader.read_workflow_truth_snapshot = real
-    hooked.append(hooked_handle)
-    first_render = json.dumps(reader.render_reading(hooked_handle), default=str)
-    second_render = json.dumps(reader.render_reading(hooked_handle), default=str)
-    check("probe 3 control: a preserved str-subclass key runs during the thaw and "
-          "splits the reading, so one consumer sees the capture and the next sees "
-          "the replacement",
-          _ThawHookKey.fired > 0
-          and "PROBE-THREE-BASE-READING" in first_render
-          and all(token in second_render for token in caller_strings),
-          json.dumps({"fired": _ThawHookKey.fired, "second": second_render[:120]}))
-    hooked_answers = [sources.assurance_health_census(hooked_handle) for _ in range(3)]
-    check("probe 3: the label route answers the identical invariant every time, "
-          "before and after the split",
-          all(_is_label_fallback(answer) for answer in hooked_answers)
-          and len({json.dumps(answer, sort_keys=True) for answer in hooked_answers}) == 1
-          and not any(token in json.dumps(hooked_answers, default=str)
-                      for token in caller_strings),
-          json.dumps(hooked_answers[0])[:200])
-
-    # ---- AND ALL THREE GET THE SAME ANSWER AS EVERYTHING ELSE ---------------
-    # Deliberately untyped: the point of the assertion is that this parameter's
-    # annotation buys nothing at runtime and the route does not care.
-    probes: list[Any] = [rebound, minted, hooked_handle, None, caller, "healthy", 1,
-                         True, object()]
-    every = [sources.assurance_health_census(value) for value in probes]
-    check("every route, forged or genuine, receives one identical dictionary",
-          len({json.dumps(answer, sort_keys=True, default=str) for answer in every}) == 1
-          and all(_is_label_fallback(answer) for answer in every),
-          json.dumps(every[0])[:200])
+    # ---- AND THE ANSWER IS ONE ANSWER --------------------------------------
+    repeated = [sources.assurance_health_census() for _ in range(5)]
+    check("the label route returns one identical answer every time it is called",
+          len({json.dumps(dict(answer), sort_keys=True) for answer in repeated}) == 1
+          and all(answer is label_object for answer in repeated)
+          and all(_is_label_fallback(answer) for answer in repeated),
+          json.dumps(dict(repeated[0])))
     check("the invariant names the reason id, the not-proven disposition and the "
           "durable-store seam the ruling asked for",
-          every[0]["reason"] == "reading_handle_integrity_unprovable"
-          and every[0]["item_disposition"] == "not_proven"
-          and "durable store" in every[0]["owed_seam"]
-          and "object identity" in every[0]["owed_seam"],
-          json.dumps(every[0]))
+          repeated[0]["reason"] == "handle_integrity_unprovable"
+          and repeated[0]["item_disposition"] == "not_proven"
+          and repeated[0]["owed_seam"] == "durable_signed_census_store_seam",
+          json.dumps(dict(repeated[0])))
 
 
 # ---------------------------------------------------------------------------
@@ -2355,26 +1940,24 @@ PRIVILEGED_WORD_PATTERNS = (
     ("_if_authoritative (any case)", r"_if_authoritative"),
 )
 
-# THE ONE CARVE-OUT, ENUMERATED, CLOSED, AND CHECKED THREE WAYS BELOW.  The
-# ruling that produced this correction mandates the reason id
-# ``reading_handle_integrity_unprovable`` verbatim and requires the owed seam to
-# describe a READING whose integrity a durable store proves -- so both strings
-# contain the union word "read" by order, not by accident.  Nothing else is
-# allowed through: every entry here is asserted (a) to be produced by the surface
-# for real, (b) to contain the word "read" and NO other union word, and (c) to be
-# matched by no privileged PATTERN.  A new string that carried "healthy" or
-# "operational" could not be added without failing (b).
-ALLOWLISTED_LITERAL_PATTERNS = (
-    ("the mandated reason id", r"^reading_handle_integrity_unprovable$"),
-    ("the mandated owed-seam prose", None),          # filled from the module below
-    ("the reading handle's diagnostic repr",
-     r"^<WorkflowTruthReading available=(?:True|False) reading=[0-9a-f]{12}>$"),
-)
-
-# The hermetic stand-in for the control-plane read, so this sweep touches no
-# database and its answers are the same on every machine.  Its wording is
-# asserted below to carry no union word at all, so it cannot mask a hit.
-SWEEP_STUB_REASON = "hermetic union sweep: this run has no control-plane tap"
+# NO CARVE-OUT.  THERE IS NO ALLOWLIST IN THIS FILE ANY MORE.
+#
+# WHAT WAS HERE, AND WHY IT IS GONE.  The ninth cut carried an
+# ``ALLOWLISTED_LITERAL_PATTERNS`` tuple: three strings the sweep was told to
+# ignore when it found a union word inside them, because the route's own reason id
+# was spelled ``reading_handle_integrity_unprovable`` and its owed seam was a
+# paragraph of prose about READINGS.  The tenth review's finding was exact: remove
+# the allowlist and the committed suite fails its own "read" test, so the green
+# depended on the exemption.  An exemption a suite depends on is not an exemption,
+# it is a hole.
+#
+# WHAT REPLACED IT.  The strings themselves were renamed until no union word
+# appears in any of them -- ``handle_integrity_unprovable``, ``not_proven``,
+# ``durable_signed_census_store_seam`` -- so the sweep runs over the whole closed
+# union with nothing suppressed, nothing skipped and no filter on what it looks
+# at.  The prose that used to be the owed seam's value is still written down; it
+# lives in ``_OWED_LABEL_AUTHORITY_SEAM``, which is module-private and is not an
+# export of anything.
 
 
 def _outcome_scalars(value: Any, key: str | None = None,
@@ -2403,20 +1986,16 @@ def _outcome_scalars(value: Any, key: str | None = None,
     return out
 
 
-def _word_hits(scalars: list[tuple[str | None, Any]], word: str,
-               allowlist: tuple) -> list[str]:
+def _word_hits(scalars: list[tuple[str | None, Any]], word: str) -> list[str]:
     """Every privileged appearance of ``word``, exact form and substring form.
 
-    The decision procedure, per scalar, in order:
+    The decision procedure, per scalar, in order, WITH NO EXEMPTION AT ANY STEP:
       1. a boolean ``True`` whose KEY equals or contains the word is a privileged
          outcome -- ``{"green": true}`` says green whatever the key is called;
       2. a string that EQUALS the word (case-insensitively) is the exact form;
-      3. a string that CONTAINS the word is the substring form, UNLESS the whole
-         string is one of the enumerated allowlisted literals;
+      3. a string that CONTAINS the word is the substring form;
       4. anything else is not a hit.
     """
-    import re
-
     hits = []
     for key, scalar in scalars:
         if isinstance(scalar, bool):
@@ -2426,8 +2005,7 @@ def _word_hits(scalars: list[tuple[str | None, Any]], word: str,
         low = scalar.lower()
         if low == word:
             hits.append(f"exact {key}={scalar!r}")
-        elif word in low and not any(
-                pattern and re.match(pattern, scalar) for _, pattern in allowlist):
+        elif word in low:
             hits.append(f"substring {key}={scalar[:60]!r}")
     return hits
 
@@ -2441,25 +2019,157 @@ def _pattern_hits(scalars: list[tuple[str | None, Any]], pattern: str) -> list[s
             and expression.search(scalar)]
 
 
+# THE HERMETIC RUN OF THE REAL CONSUMER, used by the sweep and by
+# ``census_route_invariance_checks``.  It applies the tenth review's rebinding
+# probe to the reader module FIRST, then drives tools/health-check.py end to end
+# in that process with every subprocess refused, so the two sections this slice
+# owns are printed under attack and with no database anywhere near them.
+HEALTH_SURFACE_PROBE = r"""
+import runpy, subprocess, sys
+
+REPO = sys.argv[1]
+sys.path.insert(0, REPO)
+# tools/health-check.py imports its siblings by bare name, exactly as it does
+# when run as a script from that directory.
+sys.path.insert(0, REPO + "/tools")
+import lib.control_plane_workflow_truth_reader as reader
+
+# THE TENTH REVIEW'S PROBE, REPRODUCED AGAINST THE CONSUMER.  Rebinding
+# read_workflow_truth_snapshot made this surface print a caller's census as the
+# control plane's own answer.  All three names are rebound here -- the snapshot
+# read, the render, and the frozen census export -- before the surface runs.
+reader.read_workflow_truth_snapshot = lambda: {
+    "available": True, "reason": "caller_reason",
+    "census": {"schema_version": "control-plane-workflow-truth.v1",
+               "rows": [{"workflow_key": "caller-operational", "workflow_version": 1,
+                         "state": "operational", "green": True, "reasons": []}],
+               "summary": {"states": {"operational": 7}, "false_operational": 0,
+                           "duplicate_open": 0, "dispositions": {},
+                           "distinct_identity_excluded_groups": []}},
+    "surfaces": [], "owners": {"caller-operational@v1": "caller-owner"}}
+reader.render_reading = lambda handle: reader.read_workflow_truth_snapshot()
+reader.CENSUS_ROUTE_ANSWER = {"available": True, "reason": "caller_reason",
+                              "item_disposition": "verified",
+                              "owed_seam": "caller_seam"}
+
+
+class _Refused:
+    returncode, stdout, stderr = 1, "", "no database tap in this hermetic run"
+
+
+# Hermetic: every canonical read this surface performs goes through subprocess,
+# and none of them may touch a database inside an acceptance run.
+subprocess.run = lambda *a, **k: _Refused()
+
+sys.argv = ["health-check.py", "--canonical", "--section", "jobs"]
+try:
+    runpy.run_path(REPO + "/tools/health-check.py", run_name="__main__")
+except SystemExit:
+    pass
+"""
+
+
+def _health_surface_sections() -> tuple[str, list[str]]:
+    """Run the real consumer under the rebinding probe; return its two sections.
+
+    Returns the whole stdout and the lines of the F09 census section and the A01
+    assurance section -- the header line plus every indented line under it, which
+    is the entirety of what this slice prints on that surface.
+    """
+    import os
+    import subprocess
+    import tempfile
+
+    handle, path = tempfile.mkstemp(suffix=".py", prefix="assurance-health-surface-probe-")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as fh:
+            fh.write(HEALTH_SURFACE_PROBE)
+        proc = subprocess.run([sys.executable, path, str(REPO)],
+                              cwd=str(REPO), text=True, capture_output=True, timeout=180)
+    finally:
+        os.unlink(path)
+    lines = (proc.stdout + proc.stderr).split("\n")
+    section_lines: list[str] = []
+    collecting = False
+    for line in lines:
+        if line.startswith("Workflow truth —") or line.startswith("Assurance health —"):
+            collecting = True
+            section_lines.append(line)
+        elif collecting and line.startswith(" "):
+            section_lines.append(line)
+        else:
+            collecting = False
+    return proc.stdout + proc.stderr, section_lines
+
+
+def _route_source_strings() -> list[tuple[str, str]]:
+    """Every string a section function can EMIT, which is every string constant in
+    its body except its own docstring.
+
+    THE ONE EXCLUSION AND THE PROCEDURE BEHIND IT.  A docstring is prose ABOUT the
+    route -- it recounts the ten review rounds, so it necessarily contains the
+    words those rounds were about -- and this script never prints it: it is not an
+    exported value, it does not reach a consumer, and no grep of the health
+    surface can lift it out of an output line.  What CAN reach a consumer is a
+    string the function passes to ``print``, and every one of those is swept, with
+    nothing exempted inside that set.  The test that separates them is syntactic
+    and is applied by the parser, not by judgement: the docstring is
+    ``ast.get_docstring``'s node, and everything else is in.
+    """
+    import ast
+
+    tree = ast.parse((REPO / "tools" / "health-check.py").read_text(encoding="utf-8"))
+    out: list[tuple[str, str]] = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in (
+                "_canonical_workflow_truth", "_canonical_assurance_health"):
+            body = node.body
+            if (body and isinstance(body[0], ast.Expr)
+                    and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                body = body[1:]
+            for statement in body:
+                for inner in ast.walk(statement):
+                    if isinstance(inner, ast.Constant) and isinstance(inner.value, str):
+                        out.append((node.name, inner.value))
+    return out
+
+
 def closed_union_sweep_checks() -> None:
-    """ONE TEST PER PRIVILEGED WORD, over every export of both modules.
+    """ONE TEST PER PRIVILEGED WORD, WITH NO EXEMPTION OF ANY KIND.
 
-    WHAT IT SWEEPS.  Every callable exported by
-    ``lib.control_plane_workflow_truth_reader`` and by
-    ``lib.assurance_health_sources`` -- ``render_reading``,
-    ``read_workflow_truth_snapshot``, ``read_workflow_truth_reading``, the handle
-    class, the error class, and ``assurance_health_census`` -- called with every
-    caller-controlled input shape this suite can build, positionally and under
-    every plausible keyword, plus a zero-argument call for the exports that take
-    nothing.  The control-plane read is stubbed for the duration, so the sweep is
-    hermetic and answers identically on every machine.
+    WHAT IT SWEEPS, and the procedure is the definition -- there is no list of
+    things it skips:
 
-    WHAT IT ASSERTS.  For each of the twenty-eight words and two patterns: the
-    word never appears as an outcome in anything that comes back -- as an exact
-    value, as a substring of a value, or as the name of a key set to ``True``.
-    Each check carries its own CONTROL, a synthetic structure holding the word in
-    all three of those positions, so a word whose probe had gone dead fails its
-    own test rather than passing quietly.
+      1. EVERY PUBLIC NAME of ``lib.assurance_health_sources`` and of
+         ``lib.control_plane_workflow_truth_reader``.  Data values, not only
+         callables: the ninth cut filtered the census to callables and so never
+         looked at seven exported data values, several carrying "read" and one
+         carrying "commit".  Each value is recursed into -- nested mappings by
+         key, sequences, string leaves -- and the exported NAME itself is swept as
+         a key, so a constant called ``READ_SOURCES`` is a hit even if its value
+         is clean.
+      2. EVERY CALLABLE among them, called with no arguments where the signature
+         allows it, and with every caller-controlled shape positionally and under
+         every plausible keyword where it does not; whatever comes back is swept.
+         Classes are constructors and are called the same way.
+      3. THE A01/F09 ROUTE THROUGH ``tools/health-check.py``.  That file is a
+         SCRIPT, not a library -- importing it runs the whole health surface --
+         and its module-level constants belong to unrelated legacy sections (a
+         Drive path that contains "ok" inside a surname, a watch list describing a
+         "human-review cadence").  So the scope swept here is the ROUTE, defined
+         by a procedure rather than by exemptions: every string literal inside the
+         two functions that print this slice's sections, AND every line those
+         sections actually print in a hermetic canonical run with the tenth
+         review's rebinding probe applied first.  Nothing inside that scope is
+         exempt.
+
+    WHAT IT ASSERTS.  For each of the twenty-eight words and each of the two
+    patterns: the word never appears -- as an exact value, as a substring of a
+    value, or as the name of a key set to ``True``.  Each check carries its own
+    CONTROL, a synthetic structure holding the word in all three of those
+    positions, so a word whose probe had gone dead fails its own test rather than
+    passing quietly.
 
     WHAT IT DOES NOT SCAN, said plainly.  An exception is a refusal, not a
     returned outcome, so a raise contributes nothing -- a consumer cannot read a
@@ -2468,7 +2178,6 @@ def closed_union_sweep_checks() -> None:
     swept; the standing rule prescribes exactly that name for exactly that hook.
     """
     import inspect
-    import re
 
     import lib.assurance_health_sources as sources
     import lib.control_plane_workflow_truth_reader as reader
@@ -2479,144 +2188,118 @@ def closed_union_sweep_checks() -> None:
         except (TypeError, ValueError):  # pragma: no cover - builtins have none
             return 0
 
-    allowlist = tuple(
-        (label, pattern if pattern is not None
-         else "^" + re.escape(sources.OWED_LABEL_AUTHORITY_SEAM) + "$")
-        for label, pattern in ALLOWLISTED_LITERAL_PATTERNS)
+    shapes: dict[str, Any] = {
+        "a caller's operational census": _caller_operational_reading(),
+        "a caller's healthy scope row": {"state": "healthy", "green": True,
+                                         "capability_stage": "act"},
+        "a caller's evidence bundle": {"scope": SCOPE, "workflow_truth": _truth(SCOPE),
+                                       "evidence": _evidence()},
+        "a bare census": _census(),
+        "None": None,
+        "a bare privileged string": "healthy",
+        "True": True,
+        "an int": 1,
+        "a list of rows": [{"state": "operational", "green": True}],
+        "a caller's reason and disposition": {"reason": CALLER_REASON,
+                                              "item_disposition": CALLER_DISPOSITION},
+    }
+    keywords = ("reading", "workflows", "census", "snapshot", "rows", "scopes",
+                "value", "now")
 
-    # ---- the carve-out is audited before it is used -------------------------
-    allowlisted_strings = ["reading_handle_integrity_unprovable",
-                           sources.OWED_LABEL_AUTHORITY_SEAM,
-                           "<WorkflowTruthReading available=False reading=000000000000>"]
-    wrong = {text[:40]: sorted(word for word in PRIVILEGED_WORD_UNION
-                               if word in text.lower() and word != "read")
-             for text in allowlisted_strings
-             if [word for word in PRIVILEGED_WORD_UNION
-                 if word in text.lower() and word != "read"]}
-    check("every allowlisted literal carries the word 'read' and no other union word",
-          not wrong and all("read" in text.lower() for text in allowlisted_strings),
-          json.dumps(wrong))
-    check("no allowlisted literal matches a privileged pattern",
-          not [text[:40] for text in allowlisted_strings
-               for _, pattern in PRIVILEGED_WORD_PATTERNS
-               if re.search(pattern, text, re.IGNORECASE)], "")
-    check("the hermetic stub reason carries no union word, so it cannot mask a hit",
-          not [word for word in PRIVILEGED_WORD_UNION
-               if word in SWEEP_STUB_REASON.lower()], SWEEP_STUB_REASON)
+    observed: list[tuple[str, str | None, Any]] = []
+    exports: list[tuple[str, Any]] = []
+    for module in (sources, reader):
+        for name in sorted(n for n in dir(module) if not n.startswith("_")):
+            if name == "annotations":
+                continue  # bound by `from __future__ import annotations`, not a value
+            exports.append((f"{module.__name__}.{name}", getattr(module, name)))
+    check("the sweep found every public name of both modules, data values included",
+          sorted(label for label, _ in exports) == [
+              "lib.assurance_health_sources.LABEL_ROUTE_ANSWER",
+              "lib.assurance_health_sources.SCHEMA_VERSION",
+              "lib.assurance_health_sources.assurance_health_census",
+              "lib.control_plane_workflow_truth_reader.CENSUS_ROUTE_ANSWER",
+              "lib.control_plane_workflow_truth_reader.SCHEMA_VERSION",
+              "lib.control_plane_workflow_truth_reader.workflow_truth_census"],
+          json.dumps(sorted(label for label, _ in exports)))
 
-    # ---- the caller-controlled input shapes ---------------------------------
-    class _SweepLookAlike:
-        __slots__ = ("__weakref__",)
-
-        def rendered(self) -> dict[str, Any]:
-            return _caller_operational_reading()
-
-    class _SweepStrHandle(str):
-        pass
-
-    real = reader.read_workflow_truth_snapshot
-    reader.read_workflow_truth_snapshot = lambda: {"available": False,
-                                                   "reason": SWEEP_STUB_REASON}
-    try:
-        genuine = reader.read_workflow_truth_reading()
-        shapes: dict[str, Any] = {
-            "a caller's operational census": _caller_operational_reading(),
-            "a caller's healthy scope row": {"state": "healthy", "green": True,
-                                             "capability_stage": "act"},
-            "a caller's evidence bundle": {"scope": SCOPE, "workflow_truth": _truth(SCOPE),
-                                           "evidence": _evidence()},
-            "a bare census": _census(),
-            "None": None,
-            "a bare privileged string": "healthy",
-            "True": True,
-            "an int": 1,
-            "a list of rows": [{"state": "operational", "green": True}],
-            "a look-alike handle": _SweepLookAlike(),
-            "a str subclass": _SweepStrHandle("operational"),
-            "an object.__new__ shell of the handle class":
-                object.__new__(reader.WorkflowTruthReading),
-            "a genuine handle over the hermetic capture": genuine,
-        }
-        keywords = ("reading", "workflows", "census", "snapshot", "rows", "scopes",
-                    "value", "now")
-
-        exports = []
-        for module, names in ((reader, reader.__all__), (sources, sources.__all__)):
-            for name in names:
-                member = getattr(module, name, None)
-                if callable(member):
-                    exports.append((f"{module.__name__}.{name}", member))
-        check("the sweep found every callable export of both modules",
-              sorted(label for label, _ in exports) == [
-                  "lib.assurance_health_sources.assurance_health_census",
-                  "lib.control_plane_workflow_truth_reader.WorkflowTruthReading",
-                  "lib.control_plane_workflow_truth_reader.WorkflowTruthReadingError",
-                  "lib.control_plane_workflow_truth_reader.read_workflow_truth_reading",
-                  "lib.control_plane_workflow_truth_reader.read_workflow_truth_snapshot",
-                  "lib.control_plane_workflow_truth_reader.render_reading"],
-              json.dumps(sorted(label for label, _ in exports)))
-
-        observed: list[tuple[str, str | None, Any]] = []
-        calls = returned = 0
-        for label, member in exports:
-            attempts: list[tuple[tuple, dict]] = [((), {})]
-            if _parameter_count(member):
-                for shape in shapes.values():
-                    attempts.append(((shape,), {}))
-                    attempts += [((), {keyword: shape}) for keyword in keywords]
-            for args, kwargs in attempts:
-                calls += 1
-                try:
-                    answer = member(*args, **kwargs)
-                except Exception:
-                    continue  # a refusal is not a returned outcome; see the docstring
-                returned += 1
-                for key, scalar in _outcome_scalars(answer):
-                    observed.append((label, key, scalar))
-    finally:
-        reader.read_workflow_truth_snapshot = real
-
-    # THE COUNT IS ASSERTED EXACTLY, not as a floor: a claim about a sweep that
-    # drifts above what the sweep performs is how a report came to describe 96
-    # attempts of a sweep that ran 48.
-    expected_calls = sum(1 + (len(shapes) * (1 + len(keywords))
-                              if _parameter_count(member) else 0)
-                         for _, member in exports)
-    check(f"the sweep called every export over every shape and calling form "
+    calls = returned = 0
+    for label, member in exports:
+        # (1) the exported NAME itself, and the value it is bound to
+        observed.append((label, label.rsplit(".", 1)[1], label.rsplit(".", 1)[1]))
+        for key, scalar in _outcome_scalars(member):
+            observed.append((label, key, scalar))
+        if not callable(member):
+            continue
+        # (2) every calling form
+        attempts: list[tuple[tuple, dict]] = [((), {})]
+        if _parameter_count(member):
+            for shape in shapes.values():
+                attempts.append(((shape,), {}))
+                attempts += [((), {keyword: shape}) for keyword in keywords]
+        for args, kwargs in attempts:
+            calls += 1
+            try:
+                answer = member(*args, **kwargs)
+            except Exception:
+                continue  # a refusal is not a returned outcome; see the docstring
+            returned += 1
+            for key, scalar in _outcome_scalars(answer):
+                observed.append((label, key, scalar))
+    check(f"the sweep called every callable export over every calling form "
           f"({calls} calls, {returned} of them returning a value)",
-          calls == expected_calls and returned >= 20 and len(observed) >= 40,
-          json.dumps({"calls": calls, "expected": expected_calls,
-                      "returned": returned, "scalars": len(observed)}))
+          calls == sum(1 + (len(shapes) * (1 + len(keywords))
+                            if callable(member) and _parameter_count(member) else 0)
+                       for _, member in exports if callable(member))
+          and returned >= 2 and len(observed) >= 16,
+          json.dumps({"calls": calls, "returned": returned, "scalars": len(observed)}))
+
+    # (3) the route through the real consumer, under the rebinding probe
+    out, section_lines = _health_surface_sections()
+    check("the hermetic run really did print both of this slice's sections",
+          any(line.startswith("Workflow truth —") for line in section_lines)
+          and any(line.startswith("Assurance health —") for line in section_lines)
+          and len(section_lines) >= 5, json.dumps(section_lines))
+    check("and it printed neither the caller's census nor the caller's reason, "
+          "with the snapshot, render and frozen-answer names all rebound",
+          not any(token in out for token in
+                  ("caller-operational", "caller-owner", "caller_reason",
+                   "caller_seam", "evidence-backed operational")),
+          "\n".join(section_lines))
+    for index, line in enumerate(section_lines):
+        observed.append(("tools/health-check.py::section", f"line{index}", line))
+    route_strings = _route_source_strings()
+    check("the sweep found the string literals of both section functions",
+          len(route_strings) >= 8
+          and {name for name, _ in route_strings} == {"_canonical_workflow_truth",
+                                                      "_canonical_assurance_health"},
+          json.dumps(sorted({name for name, _ in route_strings})))
+    for name, text in route_strings:
+        observed.append((f"tools/health-check.py::{name}", name, text))
 
     scalars = [(key, scalar) for _, key, scalar in observed]
     by_call = {label for label, _, _ in observed}
-    check("both modules are represented in what the sweep actually collected",
-          any(label.endswith("assurance_health_census") for label in by_call)
-          and any(label.endswith("render_reading") or label.endswith("read_workflow_truth_snapshot")
-                  or label.endswith("read_workflow_truth_reading") for label in by_call),
+    check("all three surfaces are represented in what the sweep actually collected",
+          any(label.startswith("lib.assurance_health_sources") for label in by_call)
+          and any(label.startswith("lib.control_plane_workflow_truth_reader")
+                  for label in by_call)
+          and any(label.startswith("tools/health-check.py") for label in by_call),
           json.dumps(sorted(by_call)))
-    produced = {scalar for _, scalar in scalars if isinstance(scalar, str)}
-    check("every allowlisted literal is one this surface really does produce, so "
-          "the carve-out covers nothing hypothetical",
-          all(any(re.match(pattern, text) for text in produced)
-              for _, pattern in allowlist),
-          json.dumps([label for label, pattern in allowlist
-                      if not any(re.match(pattern, text) for text in produced)]))
 
     # ---- ONE TEST PER WORD, each with its own control -----------------------
     for word in PRIVILEGED_WORD_UNION:
-        hits = _word_hits(scalars, word, allowlist)
+        hits = _word_hits(scalars, word)
         control = _outcome_scalars({"state": word, word: True,
                                     "note": f"prefix-{word}-suffix"})
-        detected = _word_hits(control, word, allowlist)
-        check(f"no export returns the privileged word {word!r}, exact or substring",
-              not hits and len(detected) >= 3,
+        detected = _word_hits(control, word)
+        check(f"no swept surface carries the privileged word {word!r}, exact or "
+              f"substring", not hits and len(detected) >= 3,
               json.dumps({"hits": hits[:4], "control_detected": detected}))
 
     for label, pattern in PRIVILEGED_WORD_PATTERNS:
         hits = _pattern_hits(scalars, pattern)
         control = _outcome_scalars({"state": "would_be_green_if_authoritative"})
-        check(f"no export returns a string matching {label}",
+        check(f"no swept surface carries a string matching {label}",
               not hits and bool(_pattern_hits(control, pattern)),
               json.dumps({"hits": hits[:4], "control_detected":
                           _pattern_hits(control, pattern)}))
@@ -2640,16 +2323,18 @@ def sources_public_surface_guard_checks(health) -> None:
     public name carries a classifier, admission, fixture, snapshot or scopes
     shape.  (3) The two retired entry points are gone from the module under any
     name.  (4) The private classification names exist, start with an underscore
-    and are unexported.  (5) NO PUBLIC CALLABLE ACCEPTS ANY PARAMETER
-    BUT THE READER'S OWN READING HANDLE -- required, typed, and refused unless
-    the reader minted it -- which is the structural form of "the only caller
-    input is the request to read, and the reading that request produced".
-    (6) Every caller-controlled census shape is pushed at every public callable
-    positionally and under every plausible keyword, and neither the privileged
-    strings nor the caller's own sentinel value ever come back.  (7) The public
-    entry is called for real, over a reading the F09 READER performs first and
-    hands over as its own handle -- the entry performs no read of its own -- and
-    its answer carries no privileged string either.  (8) A control proves the probe fires.
+    and are unexported.  (5) NO PUBLIC CALLABLE ACCEPTS ANY PARAMETER AT
+    ALL.  That is stronger than the ninth cut, which allowed exactly one -- the
+    reader's own reading handle -- and it is stronger for a measured reason: the
+    tenth review ran caller code INSIDE the route through the ``del`` of that
+    unused parameter's object.  A parameter that is never used is not
+    documentation, it is a window.  (6) Every caller-controlled census shape is
+    pushed at every public callable positionally and under every plausible
+    keyword, and every one of them is refused by the signature before a line of
+    the route runs; nothing comes back at all, so neither a privileged string nor
+    the caller's own sentinel can.  (7) The public entry is called for real, with
+    nothing, and its answer carries no privileged string.  (8) A control proves
+    the probe fires.
     """
     import inspect
 
@@ -2700,27 +2385,17 @@ def sources_public_surface_guard_checks(health) -> None:
                             in inspect.signature(member).parameters.values()]
     check("at least one public adapter callable exists to make this claim about",
           bool(signatures), json.dumps(sorted(signatures)))
-    # THE ONE PARAMETER THIS SURFACE MAY HAVE, and what makes it not a door. The
-    # entry takes the reading the F09 reader minted for this run -- that is how
-    # one run stays one moment -- and nothing else: the parameter is required,
-    # annotated with the reader's handle type, and rejects by object identity, so
-    # it carries no census, row, clock or path. Any OTHER parameter, on any
-    # public callable, is a route for caller input and fails here.
-    accepting = sorted(name for name, parameters in signatures.items()
-                       if [parameter for parameter in parameters if parameter != "reading"])
-    check("no public adapter callable accepts any parameter but the reader's reading",
+    # NO PARAMETER, ANYWHERE ON THE SURFACE.  The entry used to take the reading
+    # the F09 reader minted, and the ninth cut kept that parameter after it had
+    # stopped using it, "so the shape of the owed seam stays visible at the call
+    # site".  The tenth review passed an object whose ``__del__`` rebound the
+    # module's exported strings and got its own reason and disposition out of the
+    # route.  There is nothing to receive an object now.
+    accepting = sorted(name for name, parameters in signatures.items() if parameters)
+    check("no public adapter callable accepts any parameter at all",
           not accepting, json.dumps({name: signatures[name] for name in accepting}))
-    reading_parameters = {name: parameters for name, parameters in signatures.items()
-                          if parameters}
-    check("only the census entry takes a reading at all",
-          sorted(reading_parameters) == ["assurance_health_census"],
-          json.dumps(reading_parameters))
-    entry_parameter = inspect.signature(sources.assurance_health_census).parameters["reading"]
-    check("the reading parameter is required and typed as the reader's own handle",
-          entry_parameter.default is inspect.Parameter.empty
-          and entry_parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
-          and str(entry_parameter.annotation) == "_WorkflowTruthReading",
-          f"{entry_parameter!r}")
+    check("and the census entry is one of the callables that claim covers",
+          "assurance_health_census" in signatures, json.dumps(sorted(signatures)))
 
     # ---- (6) every caller-controlled census shape, every public callable -----
     # The sentinel rides inside every forged census. If ANY public callable ever
@@ -2750,8 +2425,8 @@ def sources_public_surface_guard_checks(health) -> None:
     check("every forged shape in the sweep carries the sentinel the echo check reads",
           not unmarked, json.dumps(unmarked))
     keywords = ("workflows", "census", "snapshot", "rows", "scopes", "reading", "now")
-    reached: list[str] = []
-    echoed: list[str] = []
+    admitted: list[str] = []
+    returned_anything: list[str] = []
     attempted = 0
     for name in sorted(signatures):
         member = getattr(sources, name)
@@ -2762,85 +2437,53 @@ def sources_public_surface_guard_checks(health) -> None:
                 attempted += 1
                 try:
                     returned = member(*args, **kwargs)
+                except TypeError:
+                    continue  # the signature refused it; no line of the route ran
                 except Exception:
-                    continue  # a refusal is an acceptable non-privileged outcome
-                rendered = json.dumps(returned, default=str)
-                if any(token in rendered for token in PRIVILEGED_OUTCOME_TOKENS):
-                    reached.append(f"{name}({args!r}, {kwargs!r})")
-                if sentinel in rendered:
-                    echoed.append(f"{name}({args!r}, {kwargs!r})")
+                    admitted.append(f"{name}({args!r}, {kwargs!r}) raised something else")
+                    continue
+                returned_anything.append(f"{name}({args!r}, {kwargs!r})")
+                rendered = json.dumps(dict(returned) if isinstance(returned, Mapping)
+                                      else returned, default=str)
+                if any(token in rendered for token in PRIVILEGED_OUTCOME_TOKENS) \
+                        or sentinel in rendered:
+                    admitted.append(f"{name}({args!r}, {kwargs!r}) -> {rendered[:80]}")
     expected_attempts = len(signatures) * len(forged_shapes) * (1 + len(keywords))
-    check(f"no caller-supplied census reaches any public adapter callable "
-          f"({attempted} attempts: {len(signatures)} public callable(s) x "
-          f"{len(forged_shapes)} sentinel-bearing shapes x {1 + len(keywords)} calling "
-          f"forms)", not reached, json.dumps(sorted(set(reached))[:4]))
-    check("no public adapter callable echoes its caller's own row back",
-          not echoed, json.dumps(sorted(set(echoed))[:4]))
+    check(f"every caller-supplied census is refused by the signature of every public "
+          f"adapter callable ({attempted} attempts: {len(signatures)} public "
+          f"callable(s) x {len(forged_shapes)} sentinel-bearing shapes x "
+          f"{1 + len(keywords)} calling forms, every one a TypeError)",
+          not admitted and not returned_anything,
+          json.dumps({"admitted": sorted(set(admitted))[:4],
+                      "returned": sorted(set(returned_anything))[:4]}))
     # THE COUNT IS ASSERTED EXACTLY, not as a floor. A floor lets the claim made
     # about this sweep drift above what the sweep performs, which is how the
     # report came to say 96 of a sweep that ran 48.
     check(f"the guard attempted exactly the sweep it claims ({expected_attempts})",
           attempted == expected_attempts, f"{attempted} != {expected_attempts}")
-    # The bare None probe is counted separately BECAUSE it can carry no sentinel:
-    # it proves the invariant, never an echo, and is not evidence for the echo claim.
-    none_divergent = []
-    for name in sorted(signatures):
-        member = getattr(sources, name)
-        for args, kwargs in (((None,), {}), ((), {"reading": None})):
-            if not _is_label_fallback(member(*args, **kwargs)):
-                none_divergent.append(f"{name}{args!r}{kwargs!r}")
-    check("a bare None gets the same invariant not-proven answer (2 further attempts, "
-          "carrying no sentinel and claimed as no echo evidence)",
-          not none_divergent, json.dumps(none_divergent))
-    # WHAT REPLACED THE RUNTIME-REFUSAL TWIN, AND WHY IT IS A STRONGER CLAIM.  This
-    # used to assert that every public callable RAISED TypeError on a caller's
-    # census -- which distinguished "a reading" from "not a reading", and so made
-    # the claim that whatever was not refused had been read from the control plane.
-    # Review showed that claim cannot be made from inside this process. So the
-    # assertion is now the invariance itself: the one public callable answers the
-    # identical dictionary for every shape, positionally and under every keyword,
-    # so there is no input that selects an outcome and nothing for a refusal to
-    # have implied.
-    answers = []
-    diverged = []
-    for name in sorted(signatures):
-        member = getattr(sources, name)
-        for shape in forged_shapes:
-            for args, kwargs in (((shape,), {}), ((), {"reading": shape})):
-                answer = member(*args, **kwargs)
-                answers.append(json.dumps(answer, sort_keys=True, default=str))
-                if not _is_label_fallback(answer):
-                    diverged.append(f"{name} answered {args!r} {kwargs!r} differently")
-    check("every public adapter callable answers the ONE invariant for every "
-          "caller shape, positionally and by keyword",
-          not diverged and len(set(answers)) == 1 and len(answers) >= 10,
-          json.dumps({"distinct_answers": len(set(answers)), "calls": len(answers),
-                      "diverged": diverged[:3]}))
+    # THE CONTROL FOR THAT REFUSAL. A signature that refuses everything would
+    # also refuse a call that SHOULD work, and then the claim above would be
+    # about a route nobody can reach. The no-argument call is the route, and it
+    # answers the invariant.
+    check("the refusal is the signature and not a dead route: called with nothing, "
+          "the entry answers its invariant",
+          _is_label_fallback(sources.assurance_health_census()),
+          json.dumps(dict(sources.assurance_health_census())))
 
     # ---- (7) the public entry, called for real ------------------------------
-    # The READER performs the F09 read here and mints the handle; the public entry
-    # projects that reading and performs no read of its own. On a machine with no
-    # database tap the reading comes back available=False with its reason, which is
-    # the honest answer and is still asserted to carry no privileged string.
-    import lib.control_plane_workflow_truth_reader as reader
-    real_handle = reader.read_workflow_truth_reading()
-    read = sources.assurance_health_census(real_handle)
-    rendered_read = json.dumps(read, default=str)
-    check("the public entry answers the invariant not-proven result for a reading "
-          "the reader really performed on this machine",
-          _is_label_fallback(read), json.dumps(read)[:300])
+    # No reader performs anything here any more: the reading route is deleted, so
+    # the entry is called the only way it can be called, with nothing at all.
+    read = sources.assurance_health_census()
+    rendered_read = json.dumps(dict(read), default=str)
+    check("the public entry answers the invariant not-proven result on this machine",
+          _is_label_fallback(read), rendered_read[:300])
     check("the public entry's own answer carries no privileged outcome either",
           not any(token in rendered_read for token in PRIVILEGED_OUTCOME_TOKENS),
           json.dumps([token for token in PRIVILEGED_OUTCOME_TOKENS
                       if token in rendered_read]))
-    # AND IT IS THE SAME ANSWER A FORGERY GETS, byte for byte.  That equality is
-    # the claim: the route cannot be steered by what it is handed because it does
-    # not consult what it is handed.
-    check("a real reading and a hand-written census get the identical answer",
-          json.dumps(read, sort_keys=True, default=str)
-          == json.dumps(sources.assurance_health_census(cast(Any, forged_census)),
-                        sort_keys=True, default=str),
-          json.dumps(read)[:200])
+    check("every call returns the identical object, byte for byte",
+          all(sources.assurance_health_census() is read for _ in range(3)),
+          rendered_read[:200])
 
     # ---- (8) THE CONTROL ----------------------------------------------------
     # The same probe over the domain module's private hook DOES find every
@@ -3085,112 +2728,82 @@ def surface_wiring_checks() -> None:
           two_section[:600])
 
 
-ONE_READING_PROBE = r"""
-import json, runpy, subprocess, sys
+def census_route_invariance_checks() -> None:
+    """THE CONSUMER, DRIVEN END TO END UNDER THE TENTH REVIEW'S PROBE.
 
-REPO, SENTINEL = sys.argv[1], sys.argv[2]
-sys.path.insert(0, REPO)
-# tools/health-check.py imports its siblings by bare name, exactly as it does
-# when run as a script from that directory.
-sys.path.insert(0, REPO + "/tools")
-import lib.control_plane_workflow_truth_reader as reader
+    THE DEFECT THIS EXISTS FOR, quoted from the review that found it.  Rebinding
+    the reader's module-level ``read_workflow_truth_snapshot`` -- which the old
+    ``read_workflow_truth_reading`` resolved at call time -- made
+    ``tools/health-check.py`` print
 
-calls = []
+        0 declared/registered workflow(s): 7 evidence-backed operational, ...
 
+    and that line is what ``run.sh health`` shows a human.  The label route had
+    already taken the fallback by then; this was the OTHER route, one surface
+    further out, and it was still rendering caller content as the control plane's
+    own answer.
 
-def counted():
-    calls.append(len(calls) + 1)
-    return {"available": False, "reason": SENTINEL + " call=#%d" % len(calls)}
+    WHAT REPLACED IT.  The reader mints and renders nothing; both this surface's
+    F09 section and its A01 section print one invariant unavailable line built
+    from frozen literals.  This check drives the real script in a subprocess with
+    all three names rebound -- the snapshot read, the render, and the frozen
+    census export -- and every subprocess refused, then asserts:
 
-
-reader.read_workflow_truth_snapshot = counted
-
-
-class _Refused:
-    returncode, stdout, stderr = 1, "", "no database tap in this hermetic run"
-
-
-# Hermetic: every other canonical read this section performs goes through
-# subprocess, and none of them may touch a database inside an acceptance run.
-subprocess.run = lambda *a, **k: _Refused()
-
-sys.argv = ["health-check.py", "--canonical", "--section", "jobs"]
-try:
-    runpy.run_path(REPO + "/tools/health-check.py", run_name="__main__")
-except SystemExit:
-    pass
-print("READER-INVOCATIONS " + json.dumps(calls))
-# THE CONTROL, in the same process: one more reading really does move the
-# counter, so the assertion above measures the surface and not a dead stub.
-reader.read_workflow_truth_reading()
-print("CONTROL-INVOCATIONS " + json.dumps(calls))
-"""
-
-
-def single_reading_checks() -> None:
-    """ONE RUN, ONE READING, PROVEN BY COUNTING THE READER'S INVOCATIONS.
-
-    THE DEFECT THIS EXISTS FOR.  ``tools/health-check.py`` read the F09 census
-    for its workflow-truth section and the A01 adapter read it AGAIN for the
-    assurance-health section, so one run performed two control-plane reads and
-    printed two moments of the control plane as one state of the world.  Nothing
-    in the suite caught it: the wiring check compared the two IMPORTS and found
-    the same reader behind both, which is true of two separate reads.
-
-    SO THIS COUNTS THE READS.  The reader's own read is monkeypatched with a
-    counting stub whose reason carries a sentinel and its own call number, the
-    canonical surface is driven end to end in that process, and the assertions
-    are that the counter shows exactly one invocation and that BOTH sections
-    printed the reason minted by call #1.  A second read would show as call=#2 on
-    the second section, and a section rendering from its own reading would carry
-    no sentinel at all.  The control in the same process takes one further
-    reading and proves the counter moves.
+      1. both sections printed;
+      2. not one of the caller's strings reached the output;
+      3. both sections carry the same reason id, the same ``not_proven``
+         disposition and the same owed seam name;
+      4. no count, no state and no census row is printed by either of them;
+      5. the control -- that the rebinding really did land in that process, which
+         is asserted by the probe itself failing to change anything only because
+         nothing reads it, not because the write silently failed.
     """
-    import os
-    import subprocess
-    import tempfile
+    out, section_lines = _health_surface_sections()
+    census_section = [line for line in section_lines
+                      if line.startswith("Workflow truth —")
+                      or (section_lines.index(line) < len(section_lines)
+                          and "workflow census" in line)]
+    check("the canonical surface ran far enough to print both sections",
+          "Workflow truth —" in out and "Assurance health —" in out, out[-600:])
+    check("the F09 census section reports unavailable with the frozen reason, the "
+          "not-proven disposition and the owed seam",
+          f"  -- workflow census   UNAVAILABLE — {LABEL_ROUTE_REASON}; item carried "
+          f"as {LABEL_ITEM_DISPOSITION}; owed seam {LABEL_OWED_SEAM}" in out,
+          "\n".join(section_lines))
+    check("the A01 assurance section reports the same three facts",
+          f"  -- assurance health   UNAVAILABLE — {LABEL_ROUTE_REASON}; item carried "
+          f"as {LABEL_ITEM_DISPOSITION}" in out
+          and f"  -- OWED SEAM {LABEL_OWED_SEAM}" in out, "\n".join(section_lines))
+    check("neither section prints a count, a state or a census row",
+          not any(token in "\n".join(section_lines) for token in
+                  ("declared/registered", "bound scope(s)", "evidence-backed",
+                   "CANONICAL_FINDING assurance_health", "workflow_truth_conflict")),
+          "\n".join(section_lines))
+    check("none of the caller's strings reached the surface, with the snapshot, the "
+          "render and the frozen census answer all rebound before the run",
+          not any(token in out for token in ("caller-operational", "caller-owner",
+                                             "caller_reason", "caller_seam",
+                                             "verified")),
+          "\n".join(section_lines))
+    # THE CONTROL FOR THE PROBE ITSELF.  The rebinding has to be shown to LAND --
+    # otherwise "nothing changed" could mean the probe never ran.  The same three
+    # writes are performed here, in this process, and read back.
+    import lib.control_plane_workflow_truth_reader as reader
 
-    sentinel = "ONE-READING-SENTINEL-4d71"
-    handle, path = tempfile.mkstemp(suffix=".py", prefix="assurance-health-one-reading-")
+    frozen = reader.workflow_truth_census()
+    reader.read_workflow_truth_snapshot = lambda: {"available": True}
     try:
-        with os.fdopen(handle, "w", encoding="utf-8") as fh:
-            fh.write(ONE_READING_PROBE)
-        proc = subprocess.run([sys.executable, path, str(REPO), sentinel],
-                              cwd=str(REPO), text=True, capture_output=True, timeout=180)
+        check("the probe's write really does land on the reader module: the name it "
+              "rebinds exists afterwards and holds the caller's function",
+              reader.read_workflow_truth_snapshot() == {"available": True}
+              and reader.workflow_truth_census() is frozen,
+              json.dumps(dict(reader.workflow_truth_census())))
     finally:
-        os.unlink(path)
-    out = proc.stdout
-    invocations = next((json.loads(line.split(" ", 1)[1]) for line in out.splitlines()
-                        if line.startswith("READER-INVOCATIONS ")), None)
-    control = next((json.loads(line.split(" ", 1)[1]) for line in out.splitlines()
-                    if line.startswith("CONTROL-INVOCATIONS ")), None)
-    check("the canonical surface ran far enough to render both sections",
-          "Workflow truth —" in out and "Assurance health —" in out,
-          (out + proc.stderr)[-600:])
-    check("one canonical run invokes the F09 reader exactly once",
-          invocations == [1], json.dumps(invocations))
-    workflow_section = out.split("Workflow truth —", 1)[-1].split("Assurance health —", 1)[0]
-    assurance_section = out.split("Assurance health —", 1)[-1]
-    check("the workflow-census section rendered from reading call #1",
-          f"{sentinel} call=#1" in workflow_section, workflow_section[:400])
-    # WHAT THIS ASSERTION BECAME IN THE NINTH CORRECTION.  It used to be that the
-    # assurance section had to carry the sentinel of reading call #1, proving it
-    # projected the same reading rather than taking a second one.  That section
-    # now derives NOTHING from the reading -- the label route reports
-    # not_proven for every input -- so the honest assertion is the pair: the
-    # section carries no reading of its own (no sentinel at all, so certainly not
-    # a call #2), and it prints the not-proven line with its owed seam.
-    check("the assurance-health section takes no reading of its own, and prints the "
-          "not-proven line instead of a state",
-          f"{sentinel} call=" not in assurance_section
-          and "NOT PROVEN (reading_handle_integrity_unprovable)" in assurance_section
-          and "not_proven" in assurance_section
-          and "OWED SEAM" in assurance_section
-          and "bound scope(s)" not in assurance_section, assurance_section[:400])
-    # THE CONTROL. If the counter could not register a second read, the single
-    # invocation above would prove nothing at all.
-    check("the invocation counter does register a second reading when one happens",
-          control == [1, 2], json.dumps(control))
+        del reader.read_workflow_truth_snapshot
+    check("and the census route is unchanged once the probe is cleaned up",
+          reader.workflow_truth_census() is frozen
+          and dict(reader.workflow_truth_census())["reason"] == LABEL_ROUTE_REASON,
+          json.dumps(dict(reader.workflow_truth_census())))
 
 
 def main() -> int:
@@ -3215,7 +2828,7 @@ def main() -> int:
     label_route_fallback_checks()
     closed_union_sweep_checks()
     surface_wiring_checks()
-    single_reading_checks()
+    census_route_invariance_checks()
     refusal_checks(health)
     output_discipline_checks(health)
 

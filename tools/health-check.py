@@ -262,200 +262,97 @@ if "--tasks" in sys.argv:
     sys.exit(classify_tasks(sys.argv[_i + 1]))
 
 
-def _workflow_truth_reading():
-    """Perform THE ONE V5-F09 reading this run renders every section from.
+def _canonical_workflow_truth():
+    """Print the F09 workflow-census section, WHICH IS UNAVAILABLE, and print
+    nothing else.
 
-    ONE RUN, ONE READING, ONE MOMENT. Two sections of this surface are projected
-    from the workflow census -- the F09 census itself and A01 assurance health --
-    and each used to call the reader, so one run performed two control-plane reads
-    and printed two moments as one state of the world. The reading is performed
-    here exactly once and travels to both as the reader's own opaque handle.
+    WHAT THIS SECTION USED TO DO, AND THE DEFECT THAT ENDED IT.  It performed the
+    V5-F09 control-plane read through ``lib/control_plane_workflow_truth_reader``
+    and printed the census it got back -- how many workflows are declared, how
+    many are evidence-backed, which ones conflict.  The reader resolved its own
+    module-level snapshot function at call time, so a caller sharing the process
+    rebound that name and this section printed the caller's census as the control
+    plane's own answer, under ``run.sh health``.  A reviewer did exactly that and
+    got a summary line of its own choosing out of this surface.
 
-    THE HANDLE, AND WHY IT IS NOT A DICT. lib/control_plane_workflow_truth_reader
-    mints a WorkflowTruthReading for a read IT performed and registers it by
-    object identity. Passing the census onward as a plain dict would fix the
-    moment and reopen the door that module was split out to close -- a dict is
-    composable, so "the reading" would again be whatever a caller handed over,
-    which is the exported route a review used to reproduce a healthy scope out of
-    a hand-written snapshot.
+    SO THE ROUTE WAS DELETED RATHER THAN HARDENED.  The reader mints nothing and
+    renders nothing any more; it exports one frozen unavailable answer built from
+    string literals at import time, and this section prints it.  There is no
+    branch here, no input, and no state to print: the same three-part line, every
+    run, whatever anybody has done to any module in this process.
 
-    Returns (reading, rendered): the handle the assurance section consumes, and
-    the copy this file's own census section prints. Reads only; it creates no
-    job, no registry and no effect. UNAVAILABLE IS NOT EMPTY -- every refusal
-    comes back as available=False carrying its reason, and both sections print
-    that reason rather than an empty census.
+    WHY THE WHOLE SECTION RATHER THAN THE LABEL ONLY.  The A01 label route is what
+    converts a census into a state, and it reported not-proven one round earlier.
+    But this section DISPLAYS a census, and a displayed census is read as a report
+    of the control plane by anybody looking at ``run.sh health`` -- which is the
+    same authority, one surface out.  Both routes on this slice say the same
+    thing now: nothing here can be proven.
     """
+    print("Workflow truth — census route deleted; this surface derives nothing")
     try:
         sys.path.insert(0, REPO_ROOT)
-        from lib.control_plane_workflow_truth_reader import (
-            read_workflow_truth_reading, render_reading)
-    except Exception as exc:
-        return None, {"available": False,
-                      "reason": f"adapter unavailable ({type(exc).__name__}: {exc})"}
-    reading = read_workflow_truth_reading()
-    # NOTHING IS CALLED ON THE HANDLE. render_reading is the reader's own module
-    # function: it resolves the registry entry once, by object identity, and thaws
-    # that capture. The handle used to carry a rendered() method, and a method is
-    # dispatched through the instance -- so a raw base-descriptor write to
-    # __class__ re-pointed it on a genuinely minted handle and this surface would
-    # have printed the caller's census as the control plane's own answer.
-    return reading, render_reading(reading)
+        from lib.control_plane_workflow_truth_reader import workflow_truth_census
+    except Exception:
+        # Deliberately no exception text: this line is swept for privileged words
+        # by ops/assurance-health-selftest.py, and a traceback is caller content.
+        print("  -- workflow census   UNAVAILABLE — the census route module is absent")
+        return
+    census = workflow_truth_census()
+    print(f"  -- workflow census   UNAVAILABLE — {census['reason']}; item carried as "
+          f"{census['item_disposition']}; owed seam {census['owed_seam']}")
 
 
-def _canonical_workflow_truth(snap):
-    """Print the workflow census and return rc.
+def _canonical_assurance_health():
+    """Print the A01 assurance-health item, WHICH IS NOT PROVEN, and print nothing
+    else.
 
-    ENABLED IS NOT OPERATIONAL, and this surface says so in three separate
-    columns: how many workflows are merely declared/configured, how many are
-    only eligible for an evidence RUN, and how many are evidence-backed
-    operational. A shadow-eligible workflow is counted in the middle column and
-    never in the last.
-
-    RED ONLY ON CONTRADICTION. A clean start that has not happened yet is a
-    chosen state, so false-operational, duplicate and hold rows are carried on
-    the line with their counts (rule bd4a6d22) instead of turning health red
-    every day. Authoritative evidence that CONTRADICTS ITSELF is a real fault
-    and is the one condition that fails.
-    """
-    workflows = snap.get("workflows")
-    print("Workflow truth — clean-start census over the governed lifecycle")
-    if workflows is None:
-        print("  -- workflow census   NOT IN SNAPSHOT (this reader supplied no census)")
-        return 0
-    if not isinstance(workflows, dict) or not workflows.get("available"):
-        reason = (workflows or {}).get("reason", "unstated") if isinstance(workflows, dict) \
-            else "malformed census section"
-        print(f"  -- workflow census   UNAVAILABLE — {reason}")
-        return 0
-    census = workflows.get("census") or {}
-    rows = census.get("rows") or []
-    summary = census.get("summary") or {}
-    states = summary.get("states") or {}
-    operational = int(states.get("operational", 0))
-    evidence_run_only = sum(int(states.get(name, 0)) for name in
-                            ("enabled_shadow_only", "enabled_canary_eligible"))
-    live_eligible_unproven = int(states.get("enabled_live_eligible", 0))
-    declared_only = sum(int(states.get(name, 0)) for name in
-                        ("unregistered", "declared_disabled", "undeclared"))
-    conflicts = [row for row in rows if row.get("state") == "conflict"]
-    unknown = [row for row in rows if row.get("state") == "unknown"]
-    print(f"  {len(rows)} declared/registered workflow(s): "
-          f"{operational} evidence-backed operational, "
-          f"{live_eligible_unproven} live-admissible without operational evidence, "
-          f"{evidence_run_only} evidence-run eligible only (shadow is not operation), "
-          f"{declared_only} declared/configured but not admitted")
-    if workflows.get("completion_error"):
-        print(f"  -- completion evidence UNREADABLE — {workflows['completion_error']}")
-    for row in conflicts:
-        detail = (f"{row.get('workflow_key')} v{row.get('workflow_version')} "
-                  f"CONFLICTING evidence: {'; '.join(row.get('reasons') or []) or 'unstated'}")
-        print(f"  ⚠︎ {detail}")
-        _canonical_finding("workflow_truth_conflict", detail)
-    if unknown:
-        print(f"  -- UNKNOWN {len(unknown)} workflow(s) whose authoritative input could not be "
-              f"read; held for disposition rather than assumed healthy")
-    carried = []
-    if int(summary.get("false_operational", 0)):
-        carried.append(f"{summary['false_operational']} false-operational "
-                       "(enabled without the acceptance its live tier requires)")
-    if int(summary.get("duplicate_open", 0)):
-        carried.append(f"{summary['duplicate_open']} in an open duplicate scheduler group")
-    holds = int((summary.get("dispositions") or {}).get("hold_for_disposition", 0))
-    if holds:
-        carried.append(f"{holds} held for disposition")
-    if carried:
-        print("  -- CARRIED " + "; ".join(carried) +
-              " — requested dispositions only; a native scheduler still changes "
-              "through ops.disable_legacy_schedule with Joe authority")
-    excluded = summary.get("distinct_identity_excluded_groups") or []
-    if excluded:
-        print("  -- ENFORCED distinct-identity exclusion for duplicate_group(s) "
-              + ", ".join(excluded) +
-              " — ops.enqueue_job admits one identity per canonical slot in a group "
-              "and refuses the rest, including concurrent callers")
-    if conflicts:
-        return 1
-    return 0
-
-
-def _canonical_assurance_health(snap):
-    """Print the A01 assurance-health item, WHICH IS NOT PROVEN, and return 0.
-
-    THERE IS NO STATE ON THIS SECTION, AND THAT IS THE FINDING.  Nine review
+    THERE IS NO STATE ON THIS SECTION, AND THAT IS THE FINDING.  Ten review
     rounds tried to derive a health label for each bound workflow scope out of the
     F09 reading, and each round closed the exact forgery route it was shown and
     left the class open: a caller-supplied census, a caller-supplied receipt, a
     payload attribute on the reading handle, a stateful mapping honest during
     verification and forged during rendering, an opaque registry key swapped
     inside its own ``__hash__``, a raw base-descriptor write to ``__class__``,
-    and finally -- against a handle carrying no state at all -- rebinding the
-    reader's own snapshot function, writing its private mint registry, and a
-    hostile mapping key running caller code during the thaw.
+    rebinding the reader's own snapshot function, writing its private mint
+    registry, a hostile mapping key running caller code during the thaw, and
+    finally a ``__del__`` that rebound the label route's own exported strings
+    while it was building its answer.
 
-    So the label route took the stated fallback instead of a tenth narrowing.
-    ``lib/assurance_health_sources.assurance_health_census`` returns
-    ``available=False`` with reason ``reading_handle_integrity_unprovable`` for
-    every input, and this section prints that, the ``not_proven`` disposition, and
-    the durable-store seam that is owed before a state could honestly be printed
-    here.  What is missing is an OWNER for "this reading is the one the control
-    plane served"; an object in this process cannot be that owner.
+    SO THE ROUTE WAS DELETED RATHER THAN NARROWED AGAIN.
+    ``lib/assurance_health_sources.assurance_health_census`` now takes NO
+    ARGUMENT and returns one frozen mapping built from string literals at import
+    time: ``available=False``, reason ``handle_integrity_unprovable``, disposition
+    ``not_proven``, and the short name of the durable-store seam that is owed.
+    This section prints those three facts and nothing else.  What is missing is an
+    OWNER for "this census is the one the control plane served"; an object in this
+    process cannot be that owner.
 
-    THE SECTION ABOVE IS UNAFFECTED, and the difference is the point: the
-    workflow-truth section DISPLAYS the F09 reading it was handed, which is a
-    report of what was read, while this section would have CONVERTED it into a
-    state, which is a claim about the world.  Only the second one needs an
-    authority it does not have.
+    THE SECTION ABOVE SAYS THE SAME THING NOW, and that is the tenth correction:
+    the workflow-truth section DISPLAYED a census, which a reader of ``run.sh
+    health`` takes as a report of the control plane, so a forged census reached
+    the same authority one surface further out.  Both routes report unavailable.
 
-    THE --fixture DOOR IS A TEST DOOR AND LABELS ITSELF AS ONE.  A fixture census
-    still has to drive this section hermetically -- that is what proves the
-    section is wired to anything at all -- so under --fixture the reading is
-    replaced by the adapter's unexported test hook and EVERY line is printed as a
-    hypothetical: the states are rendered as would-be-<state>-if-authoritative,
-    no CANONICAL_FINDING is emitted, and the section can never turn this process
-    red.  Nothing a fixture says is evidence, and nothing it says is healthy.
+    THE --fixture DOOR IS A TEST DOOR, LABELS ITSELF AS ONE, AND IS A DIFFERENT
+    FUNCTION.  It is called instead of this one when --fixture is given, reaches
+    the adapter's unexported test hook, and prints every state as an explicit
+    would-be-<state>-if-authoritative hypothetical.  Nothing it says is evidence,
+    nothing it says is healthy, and no finding is recorded from it.
     """
     try:
         sys.path.insert(0, REPO_ROOT)
         import lib.assurance_health_sources as sources
-    except Exception as exc:
-        print("Assurance health — NOT PROVEN: no owner exists for the fact this "
-              "would rest on")
-        print(f"  -- assurance health   UNAVAILABLE — seam unavailable "
-              f"({type(exc).__name__}: {exc})")
-        return 0
-    if CANONICAL_FIXTURE:
-        return _fixture_assurance_health(sources, snap)
-
-    print("Assurance health — NOT PROVEN: no owner exists for the fact this would rest on")
-    reading = (snap or {}).get("workflow_reading")
-    try:
-        result = sources.assurance_health_census(reading)
-    except Exception as exc:
-        print(f"  -- assurance health   UNAVAILABLE — the label route refused "
-              f"({type(exc).__name__}: {exc})")
-        return 0
-    if not result.get("available"):
-        # THE EXPECTED PATH, EVERY RUN. The route answers the same way whatever it
-        # is handed, including when this run holds no reading at all, so there is
-        # nothing to branch on here and no case in which a state is printed.
-        print(f"  -- assurance health   NOT PROVEN ({result.get('reason', 'unstated')}) — "
-              f"this item is carried as "
-              f"{result.get('item_disposition', sources.LABEL_ITEM_DISPOSITION)}, not as "
-              f"unread and not as healthy")
-        print(f"  -- OWED SEAM {result.get('owed_seam', sources.OWED_LABEL_AUTHORITY_SEAM)}")
-        return 0
-
-    # UNREACHABLE BY CONSTRUCTION, AND DELETED RATHER THAN LEFT STANDING. The
-    # branch that printed "<n> bound scope(s): ... ; <n> green" and recorded
-    # assurance_health_failed / assurance_health_degraded findings lived here. The
-    # route above can no longer return available=True, so that code could only
-    # have been dead code carrying live state names -- which is the shape a grep,
-    # a screenshot or a later editor reads as a health claim this surface makes.
-    # The projection it printed still exists, module-private, in
-    # lib/assurance_health_sources; the day a durable store can prove a reading,
-    # this consumer is rewritten against that store rather than resurrected.
-    raise AssertionError(
-        "unreachable: assurance_health_census reports not_proven for every input")
+    except Exception:
+        # No exception text on this line either: it is swept for privileged words.
+        print("Assurance health — NOT PROVEN; no owner exists for the fact a label "
+              "would need")
+        print("  -- assurance health   UNAVAILABLE — the label route module is absent")
+        return
+    result = sources.assurance_health_census()
+    print("Assurance health — NOT PROVEN; no owner exists for the fact a label would "
+          "need")
+    print(f"  -- assurance health   UNAVAILABLE — {result['reason']}; item carried as "
+          f"{result['item_disposition']}")
+    print(f"  -- OWED SEAM {result['owed_seam']}")
 
 
 def _print_assurance_layer_gaps(projection):
@@ -476,7 +373,7 @@ def _print_assurance_layer_gaps(projection):
               "reaches this census; an unread layer is never counted as passing")
 
 
-def _fixture_assurance_health(sources, snap):
+def _fixture_assurance_health(snap):
     """The --fixture test door, which prints hypotheticals and returns 0.
 
     A fixture census is the caller's assertion, so this door reaches the
@@ -485,6 +382,9 @@ def _fixture_assurance_health(sources, snap):
     cannot turn this process red.  Its output is deliberately unusable as a
     health claim: there is no line in it that says a scope is healthy or green.
     """
+    sys.path.insert(0, REPO_ROOT)
+    import lib.assurance_health_sources as sources
+
     print("Assurance health — FIXTURE-DERIVED HYPOTHETICAL, NOT A READING (test door)")
     print("  -- --fixture supplied this census, so the adapter did NOT read the control "
           "plane. Every line below is what the projection WOULD say IF this fixture were "
@@ -657,12 +557,12 @@ print(json.dumps({"registered": sorted(TARGETS), "rows": rows, "retired": retire
                     })
             snapshot["job_definitions"] = definitions
             snapshot["jobs"] = rows
-        # ONE reading for both the census section and assurance health: the
-        # handle is what the A01 adapter consumes, the rendered copy is what the
-        # census section below prints. Neither section reads a second time.
-        reading, rendered = _workflow_truth_reading()
-        snapshot["workflow_reading"] = reading
-        snapshot["workflows"] = rendered
+        # NO F09 READING IS PERFORMED HERE ANY MORE. This run used to carry one
+        # reading and hand it to two sections; the route that produced it is
+        # deleted (see _canonical_workflow_truth), so the canonical snapshot holds
+        # no census at all and both sections print their invariant unavailable
+        # line. A --fixture file still supplies "workflows" for the fixture door,
+        # which is a test door and says so on its first line.
     if CANONICAL_SECTION == "all":
         # Built from the named constants rather than spelled inline, so the
         # acceptance and the query can never drift apart. Both values are fixed
@@ -1012,10 +912,15 @@ def _canonical_health():
             else:
                 print(f"  OK {len(live_jobs)} live job(s), every due window present; "
                       "no terminal failure, stuck state, or unreceipted success")
-        if _canonical_workflow_truth(snap):
-            rc = 1
-        if _canonical_assurance_health(snap):
-            rc = 1
+        # NEITHER SECTION CAN TURN THIS PROCESS RED, and neither returns a code:
+        # both report that their route cannot be proven, which is a standing fact
+        # about this repository rather than a fault of today's run. The fixture
+        # door is the one caller-fed path and it is labelled as a test door.
+        _canonical_workflow_truth()
+        if CANONICAL_FIXTURE:
+            _fixture_assurance_health(snap)
+        else:
+            _canonical_assurance_health()
 
     if CANONICAL_SECTION in ("all", "registry"):
         print("Registry integrity — canonical v_export_leads")
