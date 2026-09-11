@@ -1573,7 +1573,7 @@ def source_adapter_checks() -> None:
                 tree = _reader_ast.parse(path.read_text(encoding="utf-8"))
             except SyntaxError:  # pragma: no cover - not this slice's business
                 continue
-            names = set()
+            names: set[str] = set()
             for node in _reader_ast.walk(tree):
                 if isinstance(node, _reader_ast.ImportFrom):
                     names.update(alias.name for alias in node.names)
@@ -1805,13 +1805,17 @@ def label_route_fallback_checks() -> None:
 
         def __del__(self) -> None:
             fired.append("del")
-            sources.LABEL_ROUTE_UNAVAILABLE_REASON = CALLER_REASON
-            sources.LABEL_ITEM_DISPOSITION = CALLER_DISPOSITION
-            sources.OWED_LABEL_AUTHORITY_SEAM = CALLER_SEAM
-            sources.LABEL_ROUTE_ANSWER = {
+            # setattr rather than dotted assignment for one reason: three of these
+            # names no longer exist on the module, which is the point of the probe,
+            # and mypy is right to say so. The write is identical at runtime --
+            # this is exactly what the tenth review's __del__ did.
+            setattr(sources, "LABEL_ROUTE_UNAVAILABLE_REASON", CALLER_REASON)
+            setattr(sources, "LABEL_ITEM_DISPOSITION", CALLER_DISPOSITION)
+            setattr(sources, "OWED_LABEL_AUTHORITY_SEAM", CALLER_SEAM)
+            setattr(sources, "LABEL_ROUTE_ANSWER", {
                 "schema_version": "assurance-health-sources.v1", "available": False,
                 "reason": CALLER_REASON, "item_disposition": CALLER_DISPOSITION,
-                "owed_seam": CALLER_SEAM}
+                "owed_seam": CALLER_SEAM})
 
     probe = _RebindingOnDelete()
     del probe
@@ -1819,8 +1823,8 @@ def label_route_fallback_checks() -> None:
     check("probe 1 control: the __del__ fired and really did land the caller's "
           "strings on the module the route lives in",
           fired == ["del"]
-          and sources.LABEL_ROUTE_UNAVAILABLE_REASON == CALLER_REASON
-          and sources.LABEL_ITEM_DISPOSITION == CALLER_DISPOSITION
+          and getattr(sources, "LABEL_ROUTE_UNAVAILABLE_REASON") == CALLER_REASON
+          and getattr(sources, "LABEL_ITEM_DISPOSITION") == CALLER_DISPOSITION
           and sources.LABEL_ROUTE_ANSWER["reason"] == CALLER_REASON,
           json.dumps({"fired": fired,
                       "module_answer": dict(sources.LABEL_ROUTE_ANSWER)}))
@@ -1847,16 +1851,18 @@ def label_route_fallback_checks() -> None:
           json.dumps(dict(sources.assurance_health_census())))
 
     # ---- PROBE 2: rebinding the reader's snapshot and render names ----------
-    reader.read_workflow_truth_snapshot = lambda: copy.deepcopy(caller)
-    reader.render_reading = lambda handle: copy.deepcopy(caller)
-    reader.CENSUS_ROUTE_ANSWER = {"schema_version": CENSUS_ROUTE_SCHEMA,
-                                  "available": True, "reason": CALLER_REASON,
-                                  "item_disposition": CALLER_DISPOSITION,
-                                  "owed_seam": CALLER_SEAM}
+    # Same reason for setattr here: these two names are DELETED, and writing them
+    # onto the module anyway is the probe.
+    setattr(reader, "read_workflow_truth_snapshot", lambda: copy.deepcopy(caller))
+    setattr(reader, "render_reading", lambda handle: copy.deepcopy(caller))
+    setattr(reader, "CENSUS_ROUTE_ANSWER",
+            {"schema_version": CENSUS_ROUTE_SCHEMA, "available": True,
+             "reason": CALLER_REASON, "item_disposition": CALLER_DISPOSITION,
+             "owed_seam": CALLER_SEAM})
     try:
         check("probe 2 control: the rebinding really landed -- the module now holds "
               "the caller's functions and the caller's answer",
-              reader.read_workflow_truth_snapshot()["owners"]
+              getattr(reader, "read_workflow_truth_snapshot")()["owners"]
               == {f"{CALLER_WORKFLOW_KEY}@v1": CALLER_OWNER}
               and reader.CENSUS_ROUTE_ANSWER["available"] is True,
               json.dumps(reader.CENSUS_ROUTE_ANSWER))
@@ -1869,9 +1875,9 @@ def label_route_fallback_checks() -> None:
                           for token in caller_strings),
               json.dumps(dict(after_rebind)))
     finally:
-        reader.CENSUS_ROUTE_ANSWER = census_object
-        del reader.read_workflow_truth_snapshot
-        del reader.render_reading
+        setattr(reader, "CENSUS_ROUTE_ANSWER", census_object)
+        delattr(reader, "read_workflow_truth_snapshot")
+        delattr(reader, "render_reading")
 
     # ---- THE SIGNATURE IS THE DOOR, AND IT IS SHUT -------------------------
     # There is no input to be invariant OVER any more: every calling form that
@@ -2791,15 +2797,15 @@ def census_route_invariance_checks() -> None:
     import lib.control_plane_workflow_truth_reader as reader
 
     frozen = reader.workflow_truth_census()
-    reader.read_workflow_truth_snapshot = lambda: {"available": True}
+    setattr(reader, "read_workflow_truth_snapshot", lambda: {"available": True})
     try:
         check("the probe's write really does land on the reader module: the name it "
               "rebinds exists afterwards and holds the caller's function",
-              reader.read_workflow_truth_snapshot() == {"available": True}
+              getattr(reader, "read_workflow_truth_snapshot")() == {"available": True}
               and reader.workflow_truth_census() is frozen,
               json.dumps(dict(reader.workflow_truth_census())))
     finally:
-        del reader.read_workflow_truth_snapshot
+        delattr(reader, "read_workflow_truth_snapshot")
     check("and the census route is unchanged once the probe is cleaned up",
           reader.workflow_truth_census() is frozen
           and dict(reader.workflow_truth_census())["reason"] == LABEL_ROUTE_REASON,
