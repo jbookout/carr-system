@@ -1865,18 +1865,44 @@ function importSpecifiers(source) {
 }
 
 /**
- * The source as esbuild's printer writes it back: comments gone, strings kept.
+ * The runtime doors an ES module could use to reach a forbidden package without
+ * ever writing an `import`, each mapped to a token that cannot occur in source.
+ *
+ * The key is the thing esbuild's `define` rewrites and the value is what it
+ * rewrites it to, so finding the token in the output is proof that the source
+ * REFERENCED the name. `define` substitutes identifier references only: it never
+ * touches a string, a comment, a property name, or an identifier a local binding
+ * shadows. That is exactly the identifier-level question a text scan could not
+ * answer, asked of the parser that already read the file.
+ *
+ * `process.getBuiltinModule` is on the list because the fifth review found it:
+ * `process.getBuiltinModule("node:" + "https")` hands back `https` with no import
+ * record, no `require`, and no `createRequire` — invisible to every other check
+ * here. `Function` and `eval` are on it because each compiles a fresh scope in
+ * which `require` is spelled at runtime and so is never spelled in the source.
+ */
+const FORBIDDEN_RUNTIME_DEFINES = {
+  require: "__J103_FORBIDDEN_REQUIRE__",
+  "globalThis.require": "__J103_FORBIDDEN_REQUIRE__",
+  "process.getBuiltinModule": "__J103_FORBIDDEN_BUILTIN__",
+  Function: "__J103_FORBIDDEN_FUNCTION__",
+  eval: "__J103_FORBIDDEN_EVAL__",
+  "import.meta.resolve": "__J103_FORBIDDEN_RESOLVE__",
+};
+
+/**
+ * The source as esbuild's printer writes it back, with every forbidden runtime
+ * name rewritten to its token: comments gone, strings untouched.
  *
  * The transform is a full parse and a full print, so what comes out is code and
- * only code. A `require` in a comment — the shape that made a raw-text scan
- * useless — is not in the output at all, and every form the parser understood is,
- * spelled the way the engine reads it rather than the way it was typed.
+ * only code, spelled the way the engine reads it rather than the way it was typed.
  */
 function printedCode(source) {
   return esbuild.transformSync(source, {
     loader: "js",
     format: "esm",
     platform: "neutral",
+    define: FORBIDDEN_RUNTIME_DEFINES,
     minify: false,
     minifyIdentifiers: false,
     minifySyntax: false,
@@ -1888,28 +1914,38 @@ function printedCode(source) {
 }
 
 /**
- * Whether a source so much as NAMES `require`.
+ * Which forbidden runtime names a source actually REFERENCES, by name.
  *
  * The fourth review found `require?.("node:https")`: esbuild emits no import
  * record for an optionally-called require, so the call site was invisible to the
- * counting above and the closed-set assertion below stayed green with a forbidden
- * module loaded. Enumerating that form would have left `globalThis.require`,
- * `const r = require`, and whatever the fifth review thought of next.
+ * counting above. The fifth review found two more — a `require` inside a string
+ * literal that a text scan called a hit, and `process.getBuiltinModule` that no
+ * check saw at all. Both are answered the same way: ask the parser which
+ * identifiers the source binds to, and no call shape has to be anticipated.
+ * Called, optionally called, aliased, read off a global, or reached through a
+ * compiled scope — each one is an identifier reference, and each one is rewritten.
  *
- * So the question asked here is categorical rather than formal. The module under
- * test is an ES module. It has no legitimate use of `require` in ANY form, so the
- * identifier is banned outright and no call shape has to be anticipated: a word
- * bounded `require` anywhere in the printed code fails, whether it is called,
- * optionally called, aliased, or read off a global.
+ * What this deliberately does NOT claim: a name a local binding shadows is not
+ * rewritten, because such a name is that local, not the runtime door. And a
+ * capability handed to the module at runtime — a function on a passed-in object —
+ * is not lexical and is not visible here at all; that is the authority rule's job.
  *
- * The one thing this over-reports is a `require` inside a string literal, which is
- * the same safe direction the counting above chose deliberately: a false alarm is
- * a review, a missed door is a hole in the allow-list. `createRequire` is NOT
- * over-reported — no word boundary precedes its `require` — and it is closed by
- * the specifier check instead, since it is an import before it is a call.
+ * `createRequire` is not on the list: it reaches CommonJS without the token
+ * `require` ever standing alone, and it is an import before it is a call, so the
+ * specifier check closes it.
  */
+function forbiddenRuntimeNames(source) {
+  const printed = printedCode(source);
+  const found = new Set();
+  for (const [name, token] of Object.entries(FORBIDDEN_RUNTIME_DEFINES)) {
+    if (printed.includes(token)) found.add(name);
+  }
+  return [...found].sort();
+}
+
+/** Whether a source REFERENCES `require` as an identifier, in any call form. */
 function namesRequire(source) {
-  return /\brequire\b/.test(printedCode(source));
+  return forbiddenRuntimeNames(source).some(name => name.endsWith("require"));
 }
 
 /**
@@ -2094,11 +2130,16 @@ test("J103 imports a closed set of modules, and no send-capable client is in it"
   assert.ok(!OUTBOUND_CAPABILITY.test(withoutRefusals),
     "J103 must hold no outbound capability of its own");
 
-  // And the CommonJS door is shut categorically rather than shape by shape: an ES
-  // module that never names `require` and never imports the bridge that mints one
-  // cannot reach a forbidden package by any call form, enumerated or not.
-  assert.ok(!namesRequire(J103_SOURCE),
-    "J103 is an ES module; `require` has no legitimate use in it, in any form");
+  // And the runtime doors are shut by name rather than shape by shape. What this
+  // asserts is LEXICAL, and only that: the module's own text contains no import,
+  // no `require`, no `createRequire`, no `process.getBuiltinModule`, no
+  // Function-constructor and no `eval` route to a sending client or a provider
+  // write. It does NOT assert that nothing reachable from this module can send —
+  // a capability handed to J103 at runtime, as a function on a passed-in object,
+  // is invisible to any reading of the source. That case is governed by the
+  // authority rule and its own tests, not by this guard.
+  assert.deepEqual(forbiddenRuntimeNames(J103_SOURCE), [],
+    "J103 is an ES module; none of the runtime doors to CommonJS has a use in it");
   for (const bridge of COMMONJS_BRIDGE_SPECIFIERS) {
     assert.ok(!specifiers.includes(bridge),
       `J103 must not import ${bridge}: createRequire mints the require it otherwise lacks`);
@@ -2107,44 +2148,58 @@ test("J103 imports a closed set of modules, and no send-capable client is in it"
     "J103 must not so much as name createRequire");
 });
 
-test("no call form reaches CommonJS from J103, including the ones nobody enumerated", () => {
-  // The fourth review's counterexample first. Optional-call require emits no import
-  // record, so the call-site counting cannot see it; naming the identifier is what
-  // catches it, and the same answer covers the shapes nobody has thought of yet.
-  for (const evasion of [
-    'const h = require?.("node:https");',
-    'globalThis.require("node:https");',
-    'const r = require; r("node:https");',
-    'const h = (0, require)("node:https");',
-  ]) {
-    assert.ok(namesRequire(evasion), `${evasion} must be caught by naming require`);
+test("no runtime door reaches CommonJS from J103, including the ones nobody enumerated", () => {
+  // Each review's counterexample, and the answer to all of them is the same: the
+  // parser is asked which IDENTIFIERS the source references, so no call shape has
+  // to be anticipated. Optional-call require emits no import record; a global read
+  // is not a call at all; getBuiltinModule builds its specifier at runtime; and
+  // Function and eval spell `require` in a scope that does not exist until then.
+  const doors = [
+    ['const h = require?.("node:https");', "require"],
+    ['globalThis.require("node:https");', "globalThis.require"],
+    ["const r = require; r(\"node:https\");", "require"],
+    ['const h = (0, require)("node:https");', "require"],
+    ['process.getBuiltinModule("node:" + "https");', "process.getBuiltinModule"],
+    ['new Function("return require")();', "Function"],
+    ['eval("require");', "eval"],
+    ['import.meta.resolve("node:https");', "import.meta.resolve"],
+  ];
+  for (const [evasion, door] of doors) {
+    assert.ok(forbiddenRuntimeNames(evasion).includes(door),
+      `${evasion} must be caught by naming ${door}`);
   }
 
   // createRequire is the door that reaches CommonJS WITHOUT the token `require`
-  // ever standing alone, so the token check honestly says no and the specifier
+  // ever standing alone, so the name check honestly says no and the specifier
   // check says yes. Both halves are asserted, so neither can quietly stop working.
   const bridged = [
     'import { createRequire } from "node:module";',
     "const r = createRequire(import.meta.url);",
     'r("node:https");',
   ].join("\n");
-  assert.ok(!namesRequire(bridged),
+  assert.deepEqual(forbiddenRuntimeNames(bridged), [],
     "createRequire reaches CommonJS without naming require; the specifier must catch it");
   const bridgedSpecifiers = importSpecifiers(bridged);
   assert.ok(bridgedSpecifiers.includes("node:module"), bridgedSpecifiers.join(", "));
   assert.ok(bridgedSpecifiers.includes("createRequire"), bridgedSpecifiers.join(", "));
   assert.ok(COMMONJS_BRIDGE_SPECIFIERS.some(bridge => bridgedSpecifiers.includes(bridge)));
 
-  // A mention is not a use: the check reads printed code, and comments are not code.
-  assert.ok(!namesRequire('// require("node:https");\nexport const a = 1;'),
-    "a require in a comment is not a call site");
-  assert.ok(!namesRequire('/* require("node:https") */ export const b = 2;'),
-    "a require in a block comment is not a call site");
-  // `required` is not `require`, so the module's own vocabulary does not false-alarm.
-  assert.ok(!namesRequire("export const c = requiredFields;"),
-    "a longer identifier that merely starts with require is not require");
+  // The false positives the fifth review found, which is what identifier-level
+  // buys over a text scan: a mention is not a use, in a comment OR in a string.
+  for (const mention of [
+    '// require("node:https");\nexport const a = 1;',
+    '/* require("node:https") */ export const b = 2;',
+    'export const note = "require";',
+    'export const label = `a ${1} require`;',
+    'export const key = { require: 1 }.require;',
+    "export const c = requiredFields;",
+  ]) {
+    assert.deepEqual(forbiddenRuntimeNames(mention), [],
+      `${mention} names no runtime door; it only spells one`);
+  }
 
   // And the real module passes, which is the whole point: the ban costs it nothing.
+  assert.deepEqual(forbiddenRuntimeNames(J103_SOURCE), []);
   assert.ok(!namesRequire(J103_SOURCE));
   assert.ok(printedCode(J103_SOURCE).length > 1000, "the printer really ran over the module");
 });
