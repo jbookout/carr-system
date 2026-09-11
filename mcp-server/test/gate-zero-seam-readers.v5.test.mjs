@@ -476,9 +476,20 @@ async function sweepEveryInvocation(label, namespace) {
     for (const caller of privilegedCallers())
       for (const argument of [undefined, ...hostileArguments()]) {
         await assertNothingRawEscapes(`${at}<-${caller.name}`, () => caller(value, argument));
-        if (isConstructor(value))
+        if (isConstructor(value)) {
           await assertNothingRawEscapes(`${at}<-new`,
             () => Reflect.construct(value, [argument, argument, argument]));
+          // A FOREIGN new.target, and a subclass, which is the same question
+          // asked the way a consumer would ask it. A type whose fields are read
+          // as facts has to refuse to be extended, and its refusal is a value
+          // leaving an exported callable like any other.
+          await assertNothingRawEscapes(`${at}<-foreign-new-target`,
+            () => Reflect.construct(value, [argument, argument, argument], Object));
+          await assertNothingRawEscapes(`${at}<-subclass`, () => {
+            const Extended = class extends value {};
+            return Reflect.construct(Extended, [argument, argument, argument]);
+          });
+        }
       }
   }
 }
@@ -500,6 +511,38 @@ test("SWEEP: the sweep itself catches a privileged outcome when one is planted",
     "a gate seam name pasted into a new value must still be caught");
   assert.ok(privilegedFindings({ note: V5_A02_SCHEDULER_STEP_REF }).length > 0);
   assert.throws(() => assertSwept("planted", { conclusion: "green" }));
+});
+
+test("SURFACE: every exported callable of all three modules is a guarded one", () => {
+  // THE STRUCTURAL HALF OF INVARIANT (2), and it is here because the behavioural
+  // half cannot reach all of it. The ruling lookup has no throwing path today —
+  // `Object.hasOwn` on a frozen literal and a pattern over a string — so removing
+  // its boundary changes nothing any input can observe, and a guard that no test
+  // can see removed is a guard that quietly goes away. The invariant is that
+  // EVERY export passes through one, whether today's implementation needs it or
+  // not, so the invariant is what is checked.
+  const stores_ = readFileSync(join(SRC, STORES_FILE), "utf8");
+  const readers_ = readFileSync(join(SRC, READERS_FILE), "utf8");
+  const rulings_ = readFileSync(join(SRC, RULINGS_FILE), "utf8");
+
+  // Each module declares exactly one boundary, and it catches everything.
+  for (const [name, source] of [["stores", stores_], ["readers", readers_]])
+    assert.equal((source.match(/^function guarded\(/gm) ?? []).length, 1,
+      `${name} has no single guarded boundary, or has more than one`);
+
+  // Every fetcher and every reader is that boundary applied to a private
+  // implementation — never the implementation exported directly.
+  const guardedExports = source => [...source.matchAll(/^export const (\w+) =\s*\n?\s*([\s\S]{0,40})/gm)]
+    .map(([, name, tail]) => [name, tail.trimStart().startsWith("guarded(")]);
+  const storeExports = guardedExports(stores_);
+  assert.deepEqual(storeExports.filter(([name]) => name.startsWith("fetch")).map(([, ok]) => ok),
+    [true, true, true], "a store fetcher is exported without its boundary");
+  assert.deepEqual(guardedExports(readers_).filter(([name]) => name.startsWith("read"))
+    .map(([, ok]) => ok), [true, true, true], "a reader is exported without its boundary");
+
+  // And the ruling lookup, whose boundary no input can reach, is asserted whole.
+  assert.ok(/export function seamRulingRef\(cardRef\) \{\s*try \{\s*return seamRulingRefOf\(cardRef\);\s*\} catch \{\s*return null;\s*\}\s*\}/
+    .test(rulings_), "the ruling lookup is exported without its boundary");
 });
 
 test("SURFACE: the export list of all three modules is exactly enumerated", () => {
@@ -713,18 +756,22 @@ function sweepClassConstructor(at, classUnderTest) {
   assertNothingRaw(`${at}.called-without-new`, called);
   sweepConstruction(at, classUnderTest);
 
+  // AND THE REFUSAL IS SWEPT, not merely counted. Both of these used to be
+  // caught and discarded — the assertion was that the construction did not
+  // succeed, and nothing was asked about what came back instead. What came back
+  // was the engine's TypeError, whose stack is the caller's frames.
   class Subclass extends classUnderTest {
     constructor() { super("github:checks", "the query did not finish"); }
   }
   let subclassed = "refused";
-  try { subclassed = new Subclass(); } catch { /* refused, which is the point */ }
+  try { subclassed = new Subclass(); } catch (thrown) { assertNothingRaw(`${at}.subclass`, thrown); }
   assert.equal(subclassed, "refused", `${at} can be subclassed`);
 
   let foreign = "refused";
   try {
     foreign = Reflect.construct(classUnderTest,
       ["github:checks", "the query did not finish"], Object);
-  } catch { /* refused */ }
+  } catch (thrown) { assertNothingRaw(`${at}.foreign-new-target`, thrown); }
   assert.equal(foreign, "refused", `${at} accepts a foreign new.target`);
 }
 
@@ -1498,6 +1545,31 @@ test("RULED: with the real stores and nothing configured, every seam reports unr
   } finally {
     for (const [name, value] of Object.entries(saved))
       if (value !== undefined) process.env[name] = value;
+  }
+});
+
+test("STORES: a query that addresses no row says so, and does not say it broke", async () => {
+  // The guarded boundary answers anything it cannot recognize with the generic
+  // `the call did not finish`, which is right — and it is also why the specific
+  // refusals underneath it have to be asserted by name. Without this, the inner
+  // refusal could go back to a native TypeError and nothing would notice: the
+  // boundary would catch it and the sweep would pass.
+  const saved = saveEnv(STORE_CREDENTIALS);
+  process.env.DATABASE_URL_READER = "postgres://nothing/at-all";
+  process.env.GITHUB_TOKEN = "a-token-this-test-wrote";
+  const notAddressed = "the query did not address a row";
+  try {
+    for (const [name, fetcher, query] of [
+      ["predecessor", stores.fetchPredecessorOutcomeRows, {}],
+      ["ledger", stores.fetchSchedulerLedgerRows, { serviceKey: "carr-fleet-sync" }],
+      ["checks", stores.fetchCheckConclusionRows, { headSha: "a".repeat(40) }],
+    ])
+      for (const shape of [undefined, null, query, { ...query, extra: 1 }])
+        await assert.rejects(() => fetcher(shape),
+          error => error instanceof stores.SeamStoreUnreachable && error.because === notAddressed,
+          `${name} answered a query that addressed no row with something else`);
+  } finally {
+    restoreEnv(saved);
   }
 });
 
