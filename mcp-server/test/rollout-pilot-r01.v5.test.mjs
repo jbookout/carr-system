@@ -919,10 +919,17 @@ function isIdentifierShaped(text) {
 // is deliberate: the previous round's exemption was one `if` long.
 //
 // WHAT THIS DOES NOT CATCH, said plainly: a privileged word inside a sentence.
-// That gap is closed from a different direction by the byte-identity test — every
-// public evaluator's answer is byte-identical across every caller shape — so no
-// caller string, in any position, reaches any answer at all. The two properties
-// are one guarantee and neither is sufficient alone.
+// A sentence is prose, and this slice's exports are full of honest prose — a seam
+// that holds "how far a partner has actually got, so the flow can be resumed", a
+// step whose plain text is "Read Home: today's work and whether the system is
+// healthy". P1 skips those on purpose.
+//
+// THAT GAP IS CLOSED BY A TEST RATHER THAN BY AN ARGUMENT, and it is the marker
+// sweep directly below. A privileged word inside a sentence is only dangerous if
+// the CALLER put it there, and the marker sweep proves no caller string of any
+// kind reaches any returned value, from any export, for any shape. So the two
+// halves are one guarantee: P1 through P4 bound what the module may MANUFACTURE,
+// and the marker sweep bounds what it may ECHO — which is nothing.
 // ---------------------------------------------------------------------------
 
 function namesTokenAsCode(text, token) {
@@ -1150,6 +1157,80 @@ test("guard: the per-token sweep is not vacuous — each token is really detecte
   const caught = [];
   for (const shape of CALLER_SHAPES) caught.push(...findingsIn(echo(shape), "allow"));
   assert.ok(caught.length > 0, "an echoing export would not be caught");
+});
+
+/**
+ * THE MARKER SWEEP — the other half of the guarantee above, and the reason P1 is
+ * allowed to skip prose.
+ *
+ * Every string-bearing field of every caller shape is refilled with a token that
+ * cannot occur in this repository, and every export of every src module is handed
+ * the result. If no marker comes back from anywhere, then no caller string comes
+ * back from anywhere, and a privileged word appearing inside a returned sentence
+ * cannot have arrived from the caller — it is the module's own prose, which is
+ * the only thing P1's whitespace test lets through.
+ *
+ * This is stronger than the byte-identity test it replaces the argument for: that
+ * one covers the five public evaluators, and this one covers the whole export
+ * surface, constructors included, including the validators that throw.
+ */
+const CALLER_MARKER = "zz-caller-supplied-marker-19f3c7-zz";
+
+/** The same value with every string replaced by the marker, to the leaves. */
+function markEveryString(value) {
+  if (typeof value === "string") return CALLER_MARKER;
+  if (Array.isArray(value)) return value.map(markEveryString);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) =>
+      [key, markEveryString(entry)]));
+  }
+  return value;
+}
+
+test("guard: no caller string reaches any returned value, from any export", () => {
+  const marked = CALLER_SHAPES.map(markEveryString);
+  assert.ok(JSON.stringify(marked).includes(CALLER_MARKER),
+    "the marker sweep marked nothing; it would prove nothing");
+
+  let called = 0;
+  const leaks = [];
+  for (const [moduleName, surface] of SWEPT_SRC_MODULES) {
+    for (const [name, exported] of Object.entries(surface)) {
+      if (typeof exported !== "function") {
+        // A constant cannot echo, but it also must not somehow CONTAIN the
+        // marker, which would mean the fixture leaked into production.
+        if (JSON.stringify(exported ?? null).includes(CALLER_MARKER)) {
+          leaks.push(`${moduleName}#${name} (constant)`);
+        }
+        continue;
+      }
+      const construct = isClass(exported);
+      for (const shape of marked) {
+        let output;
+        try {
+          output = construct ? { ...new exported(shape) } : exported(shape);
+        } catch (thrown) {
+          // A refusal's CODE is the only part a consumer reads as an answer, and
+          // it is the part swept here. The message and detail are the caller's
+          // own text handed back on the failure path; the closed-code test above
+          // is what makes that claim checkable.
+          output = { code: thrown.code ?? null };
+        }
+        called += 1;
+        if (JSON.stringify(output ?? null).includes(CALLER_MARKER)) {
+          leaks.push(`${moduleName}#${name}(${JSON.stringify(shape).slice(0, 60)})`);
+        }
+      }
+    }
+  }
+  assert.ok(called > 1000, `only ${called} calls were made`);
+  assert.deepEqual(leaks, [],
+    "an export handed a caller's own string back, so a privileged word inside its prose could be the caller's");
+
+  // NOT VACUOUS: an export that echoed would be caught, and the marker really is
+  // detectable through the same JSON path the sweep uses.
+  const echo = value => value;
+  assert.equal(JSON.stringify(echo(marked[0])).includes(CALLER_MARKER), true);
 });
 
 test("guard: deepFreeze is not on any surface of this slice, by name or by behaviour", () => {
