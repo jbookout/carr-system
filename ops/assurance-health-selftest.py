@@ -997,11 +997,12 @@ def caller_evidence_is_never_authority_checks(health) -> None:
               surface_id="assurance-fabric-child.launchd.v1",
               scheduler_state="totally-fine", observed_at=OBSERVED,
               observation_max_age_seconds=MAX_AGE).record["status"] == "error")
-    refused_rows = ({}, {"schema_version": "not-f09"},
-                    dict(seen, evidence={"native_schedule": "missing"}),
-                    dict(seen, evidence={"native_schedule": "not_required"}),
-                    dict(seen, evidence={"native_schedule": "conflicting"}),
-                    _census()["rows"][0])
+    refused_rows: tuple[dict[str, Any], ...] = (
+        {}, {"schema_version": "not-f09"},
+        dict(seen, evidence={"native_schedule": "missing"}),
+        dict(seen, evidence={"native_schedule": "not_required"}),
+        dict(seen, evidence={"native_schedule": "conflicting"}),
+        _census()["rows"][0])
     corroboration_refused = 0
     for row_shape in refused_rows:
         try:
