@@ -34,6 +34,7 @@ purpose, to the exact artifact that proved why.
 
 import atexit
 import contextlib
+import inspect
 import json
 import os
 import pathlib
@@ -187,9 +188,9 @@ def _recover_stale_journal():
     restored = _restore_from_journal(data)
     SEED_JOURNAL.unlink(missing_ok=True)
     # THE SHAPE OF THIS OUTPUT IS LOAD-BEARING, not decoration. ops/ci.sh's
-    # gates class runs each suite quietly and, on failure, prints only
-    # `tail -12` of its log. So a recovery and a genuinely broken check reach
-    # the terminal looking identical, and telling them apart is the difference
+    # gates class runs each suite quietly and, on failure, prints the whole of
+    # a short log or its last 80 lines. So a recovery and a genuinely broken
+    # check reach the terminal looking identical, and telling them apart is the difference
     # between a thirty-second re-run and another evening like 2026-08-13. The
     # banner is repeated at the END as well as the start, because the tail is
     # what gets shown, and the last line is the ACTION rather than the diagnosis.
@@ -661,31 +662,161 @@ def test_mypy_pin_acceptance_is_narrow():
           "the constant and the pin must move together, or the acceptance is a guess")
 
 
+# --------------------------------------------- test files outside the reach
+#
+# THE SKIP LIST IS PART OF THE CHECK, not a config file somewhere else. A
+# test-shaped file has exactly two honest states: collected by a loop in
+# ci.sh, or excused here in writing. The third state — uncollected and
+# unexplained — is what produced this check and then survived inside it, and
+# it is indistinguishable from coverage by every means except a stopwatch.
+# Keeping the excuse beside the assertion means a reviewer reads the reason
+# in the same glance as the thing it excuses.
+#
+# EVERY ENTRY IS A DECISION SOMEONE MADE ON PURPOSE. Four assertions below
+# stop this from decaying into a blanket suppressor: an entry naming a file
+# that no longer exists fails, an entry naming a file that IS collected fails,
+# an entry with a thin reason fails, and the reach assertion itself fails if
+# the walk stops going deep.
+UNCOLLECTED_BY_DECISION = {
+    "tools/room-bridge/test_claude_desk_live.py":
+        "LIVE, and deliberately not offline. Its own docstring says it asserts "
+        "against no mock: it boots a REAL Claude Code session on a labelled "
+        "socket and dispatches a task into it. That spends model quota and "
+        "needs a working desk on the machine, so a merge gate is the wrong "
+        "caller — a hosted runner would either hang or pass for the wrong "
+        "reason. Run it by hand when the dispatch path changes.",
+    "tools/room-bridge/test_codex_live_live.py":
+        "LIVE, and it costs money. It boots a real Codex app-server and drives "
+        "two dispatches through it; the docstring states it 'costs a small "
+        "amount of Codex credit'. Measured here 2026-09-10: run offline with "
+        "no server reachable it does not fail, it HANGS, and it was still "
+        "hanging when the 13 other room-bridge suites had finished. A suite "
+        "that hangs in a pooled gate burns the per-suite timeout and aborts "
+        "the remaining gate selftests behind it. Run it by hand.",
+    "docs/frontier-finding/breakglass_selftest.py":
+        "Needs a disposable local PostgreSQL cluster, which it stands up "
+        "itself (WR-000046 Artifact C harness). The gates class is repository "
+        "content only — no machine state, no database — and local initdb is "
+        "unavailable on Joe's Mac ('shmget: Operation not permitted'). Its "
+        "database coverage belongs to the migration class, not this one.",
+    "pipelines/doctrine_load_test.py":
+        "Not a unit suite: it is the P6 preflight LOAD BAR. It requires "
+        "DATABASE_URL for the runtime reader role against the production "
+        "store, drives 20 concurrent sessions, and runs for 15 minutes by "
+        "default. Network, database and wall-clock all disqualify it from a "
+        "merge gate; it is run deliberately before a release.",
+    "tools/dictation-rig/tests/test_call_mode.py":
+        "Offline and correct, but not evaluated by this unit — it is a "
+        "unittest package under tools/dictation-rig/tests/ that this lane did "
+        "not run or vouch for. Named here so it is a known gap with an owner "
+        "rather than an invisible one; collecting it is a follow-up that must "
+        "run it first. Same status as tools/partner-line/tests/test_watch.py.",
+    "tools/partner-line/tests/test_watch.py":
+        "Offline and correct, but not evaluated by this unit — see the "
+        "tools/dictation-rig entry. Its docstring claims no live socket and no "
+        "network, so it is a good candidate to collect; this lane owned "
+        "ops/ci.sh and ops/ci-selftest.py only and did not run it.",
+    "tools/doc-convo/bin/test-brain-stream.sh":
+        "Not evaluated by this unit. It lives in a bin/ directory beside the "
+        "convo server rather than in a tests/ directory, and the three "
+        "doc-convo shell tests appear to drive a running server. Named here as "
+        "a known gap; collecting them owes a run first.",
+    "tools/doc-convo/bin/test-convo-server.sh":
+        "Not evaluated by this unit — see the test-brain-stream.sh entry.",
+    "tools/doc-convo/bin/test-streaming.sh":
+        "Not evaluated by this unit — see the test-brain-stream.sh entry.",
+}
+
+# What any reader of this tree would call a test file, in every naming style
+# the repo actually uses: the hyphen form the script convention produces, the
+# underscore form pytest's default discovery produces, the gate form, and the
+# _test.py suffix form. Over-inclusive on purpose — a name this matches that
+# is not a test costs one line on the list above, and that line is cheaper
+# than the silence it replaces.
+TEST_FILE_NAME = re.compile(r"""
+    ^(?:
+        test[-_].*\.(?:py|sh)        # test-foo.py, test_foo.py, test-foo.sh
+      | .*[-_]selftest\.(?:py|sh)    # foo-selftest.py, breakglass_selftest.py
+      | .*_test\.py                  # foo_test.py
+    )$""", re.VERBOSE)
+
+# Not source. Pruned BY NAME and by name only: out/ is gitignored scratch every
+# class writes to, .claude/ holds sibling worktrees whose files are not this
+# tree's, and the rest are installed, cached or generated.
+#
+# THE NAMES ARE THE WHOLE LIST, 2026-09-11. The walk also pruned every directory
+# whose name began with a dot, which is a category and not a name, and a
+# category prunes things nobody decided to prune. A tracked .github/test_foo.py
+# would have been neither collected by a loop in ci.sh nor excused in writing
+# below — the exact third state this check exists to make impossible, reappearing
+# inside the check itself. Adding a dot-directory to this set is a decision
+# someone makes once and a reader can see; matching the shape of a name is not.
+# .claude/ is therefore listed explicitly rather than caught by its dot, and
+# test_the_walk_prunes_named_roots_only holds the distinction from both sides.
+UNWALKED_DIRS = frozenset({
+    "node_modules", ".venv", "venv", "__pycache__", "out", "_inputs",
+    ".mypy_cache", ".pytest_cache", "dist", "build", ".git", ".claude",
+})
+
+
+def _test_shaped_files(tree=None):
+    """Every test-shaped file in the tree, at any depth. The depth is the point.
+
+    os.walk does not follow symlinks, which is deliberate here: out/ is a
+    symlink to the canonical checkout's out/ in every worktree, and following
+    it would walk another tree's files into this assertion.
+
+    `tree` exists so the pruning rule above can be driven against a fixture
+    directory rather than only against this repository. A walk asserted only
+    over the real tree can only be checked against what happens to be in it
+    today, which is how the dot-directory hole below survived review.
+    """
+    tree = pathlib.Path(tree) if tree is not None else REPO
+    found = set()
+    for root, dirs, files in os.walk(tree):
+        dirs[:] = sorted(d for d in dirs if d not in UNWALKED_DIRS)
+        for name in files:
+            if TEST_FILE_NAME.match(name):
+                found.add(pathlib.Path(root, name)
+                          .relative_to(tree).as_posix())
+    return found
+
+
 def test_every_test_file_in_the_tree_is_collected():
     """A test the collector's glob does not match is not a passing test — it is
     no test at all, and it sits in the tree looking exactly like coverage.
 
     ops/ci.sh collects with shell globs, and those globs have been narrower than
-    the tree twice. Shell tests under tools/ were "collected by nobody and
-    executed by nothing" until a second loop was added for them. Then three
+    the tree three times now. Shell tests under tools/ were "collected by nobody
+    and executed by nothing" until a second loop was added for them. Then three
     underscore-named Python tests — test_validate_exact_recovery_source,
     test_staging_recovery_rehearsal and test_displacement_turn_filter — never
     executed once between being committed and 2026-08-27, because the Python
     loop globbed only tools/test-*.py.
 
-    Renaming those three would fix the files that exist today and leave the trap
-    armed: test_foo.py is what pytest's own default convention produces, so the
-    next one arrives by habit. This asserts the invariant instead — every
-    test-shaped file in the tree is matched by some loop in ci.sh — so the glob
-    and the tree cannot drift apart again without a red run saying so.
+    THE THIRD TIME WAS THIS CHECK ITSELF, found 2026-09-10. It asserted the
+    invariant against a tree it enumerated with `(REPO/"tools").glob(...)` and
+    `(REPO/"ops").glob(...)` — two directory globs, ONE LEVEL DEEP, the very
+    shape of the defect it existed to catch. tools/room-bridge/ held fifteen
+    test files and dealroom/test four; every one of them was matched by no loop
+    in ci.sh, and this assertion could not see a single one, because a file one
+    directory deeper was not in the set it compared. It passed, every run,
+    reporting an invariant it was not measuring. A checker that reports green
+    having examined nothing is the same defect one level up, and this repository
+    has been bitten by that exact shape before.
 
-    Deliberately derived from ci.sh's source rather than restating its patterns
-    here: a copy of the globs would be a second contract to keep in sync, which
-    is the same failure one level up."""
+    So the tree side is now a real walk to any depth, and the depth is asserted
+    below rather than assumed — a walk that silently flattens back to one level
+    fails here instead of going quiet. The ci.sh side is still derived from
+    ci.sh's source rather than restated here, because a copy of the globs would
+    be a second contract to keep in sync, which is the same failure again."""
     ci = (REPO / "ops" / "ci.sh").read_text()
     patterns: list[str] = []
     for m in re.finditer(r"for t in ([^;]+); do", ci):
-        patterns += m.group(1).split()
+        # Shell tokens only. A loop over "$eligible" or a line continuation
+        # contributes nothing to expand, and must not reach Path.glob.
+        patterns += [tok for tok in m.group(1).split()
+                     if re.fullmatch(r"[A-Za-z0-9_./*?\[\]-]+", tok)]
     check("ci.sh's selftest collection globs are readable from source",
           len(patterns) >= 2, f"found: {patterns}")
     if not patterns:
@@ -695,17 +826,228 @@ def test_every_test_file_in_the_tree_is_collected():
     for pat in patterns:
         collected |= {p.relative_to(REPO).as_posix() for p in REPO.glob(pat)}
 
-    # What any reader of the tree would call a test, in either naming style.
-    on_disk = {p.relative_to(REPO).as_posix() for p in (
-        list((REPO / "tools").glob("test[-_]*.py"))
-        + list((REPO / "tools").glob("test[-_]*.sh"))
-        + list((REPO / "ops").glob("*[-_]selftest.py")))}
+    on_disk = _test_shaped_files()
     check("the tree still contains test files to collect", on_disk,
           "an empty set would make the assertion below vacuously true")
 
-    missed = sorted(on_disk - collected)
-    check("every test file in the tree is collected by a loop in ci.sh",
-          not missed, f"never executed: {', '.join(missed)}")
+    # THE MUTATION GUARD ON THIS CHECK. The bug being fixed was an enumeration
+    # that stopped at one directory level while claiming to describe the tree.
+    # Nothing about a passing run distinguishes that from a correct one unless
+    # the depth is asserted, so it is asserted: the tree really does hold test
+    # files three and four directories down, and a walk that cannot see them is
+    # broken no matter how green the line above reads.
+    depths = {name.count("/") + 1 for name in on_disk}
+    check("the walk reaches test files nested below the top two levels",
+          max(depths, default=0) >= 3,
+          f"deepest test file found is {max(depths, default=0)} levels — "
+          f"tools/room-bridge/ (3) and tools/*/tests/ (4) exist, so a maximum "
+          f"of 2 means this enumeration flattened and is measuring nothing")
+
+    stale = sorted(p for p in UNCOLLECTED_BY_DECISION if p not in on_disk)
+    check("every skip-list entry names a file that exists", not stale,
+          f"gone or renamed, so the entry protects nothing: {', '.join(stale)}")
+
+    contradicted = sorted(p for p in UNCOLLECTED_BY_DECISION if p in collected)
+    check("no skip-list entry excuses a file ci.sh already collects",
+          not contradicted,
+          f"collected AND excused, so the reason is fiction: "
+          f"{', '.join(contradicted)}")
+
+    thin = sorted(p for p, why in UNCOLLECTED_BY_DECISION.items()
+                  if len(why.strip()) < 60)
+    check("every skip-list entry states a real reason", not thin,
+          f"a reason too short to be one: {', '.join(thin)}")
+
+    missed = sorted(on_disk - collected - set(UNCOLLECTED_BY_DECISION))
+    check("every test file in the tree is collected by a loop in ci.sh "
+          "or excused by name in UNCOLLECTED_BY_DECISION",
+          not missed,
+          f"never executed and never excused: {', '.join(missed)}")
+    print(f"        reach: {len(on_disk)} test files in the tree, "
+          f"{len(on_disk & collected)} collected by ci.sh, "
+          f"{len(UNCOLLECTED_BY_DECISION)} excused by name")
+
+
+def test_the_walk_prunes_named_roots_only():
+    """A tracked test under a dot-directory must be REACHED, not silently dropped.
+
+    THE HOLE THIS CLOSES. The walk above used to prune `d.startswith(".")` as
+    well as the named set, and a category is not a name. Nothing in this tree
+    decided that .github/ holds no tests; the prune simply swallowed every
+    directory whose name began with a dot. A tracked .github/test_foo.py would
+    then have been in none of the three states this whole section is built on —
+    not collected by a loop in ci.sh, not excused in UNCOLLECTED_BY_DECISION,
+    and not named as missing — which is the third state, uncollected and
+    unexplained, reappearing inside the check written to make it impossible.
+
+    DRIVEN AGAINST A FIXTURE TREE, NOT THIS ONE. The repository holds no
+    dot-directory test file today, so the real tree cannot tell a correct prune
+    from a blanket one: both give the same answer here and now. The fixture is a
+    real `git init` with the file really added to the index, so the case is
+    literally the review's shape — a TRACKED test under a dot-directory — and
+    the .git/ the prune must still skip is a real .git/ rather than a prop.
+
+    BOTH SIDES, because a walk that pruned nothing would also pass the half
+    above: every named root is planted with a test-shaped file too, and each one
+    must stay out of the result.
+    """
+    with tempfile.TemporaryDirectory(prefix="ci-selftest-walk-") as td:
+        tree = pathlib.Path(td)
+        subprocess.run(["git", "init", "-q"], cwd=tree, check=True,
+                       capture_output=True, env=scrubbed_env())
+
+        reachable = ["tools/test_control.py", ".github/test_planted_dot_dir.py",
+                     ".github/workflows/test_nested_dot_dir.py"]
+        pruned = [f"{d}/test_planted.py" for d in sorted(UNWALKED_DIRS)]
+        for rel in reachable + pruned:
+            path = tree / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# fixture\n", encoding="utf-8")
+        # TRACKED, not merely present: `git add` on the dot-directory file is
+        # what makes this the case the review named. -f because a repo-level
+        # ignore rule must not be what decides the outcome either.
+        subprocess.run(["git", "add", "-f", *reachable], cwd=tree, check=True,
+                       capture_output=True, env=scrubbed_env())
+        tracked = subprocess.run(["git", "ls-files"], cwd=tree, check=True,
+                                 capture_output=True, text=True,
+                                 env=scrubbed_env()).stdout.split()
+        check("the fixture's dot-directory test really is tracked",
+              ".github/test_planted_dot_dir.py" in tracked, f"{tracked}")
+
+        found = _test_shaped_files(tree)
+
+    for rel in reachable:
+        check(f"the walk reaches {rel}", rel in found, f"found: {sorted(found)}")
+    still_pruned = sorted(rel for rel in pruned if rel in found)
+    check("every name in UNWALKED_DIRS is still pruned",
+          not still_pruned, f"walked into: {', '.join(still_pruned)}")
+    check("the prune set is named roots, with no shape rule behind it",
+          "startswith" not in inspect.getsource(_test_shaped_files),
+          "a category prune is back; a dot-directory test would go silent again")
+
+
+# ------------------------------------- 5b. what a failing gate is allowed to print
+#
+# fail_tail() prints a CHILD PROCESS'S captured output into the CI log. The
+# window was widened on 2026-09-11 from twelve lines to the whole log under 200
+# lines, because the failing line of a 32-check suite sat above a twelve-line
+# tail and two hosted rounds were spent unable to read it. Widening the window
+# widened the exposure with it: arbitrary child stdout, into a log that outlives
+# the run and that more people can read than can read the tree.
+#
+# So both halves are asserted here — the window, which is the feature, and the
+# redaction, which is what the feature costs if it is missing. The redaction is
+# ops/ci-secret-scan.py's own --redact filter over its own PATTERNS list; these
+# cases prove the wiring, and the scanner's pattern list stays the one place a
+# shape is declared.
+
+# A real github-token shape, present in this file ON PURPOSE so the assertions
+# below are about a string the scanner genuinely matches rather than a stand-in
+# that only looks like one. It is inert: 36 characters counting up.
+FIXTURE_TOKEN = "ghp_0123456789abcdefghijklmnopqrstuvwxyz"  # ci-secret-scan: allow — inert redaction fixture
+
+
+def _fail_tail(log_path, py=None):
+    """Drive ci.sh's REAL fail_tail(), lifted from its source.
+
+    Lifted, not restated, for the reason this file keeps rediscovering: a copy
+    of the body here would be a second contract, and a second contract drifts.
+    The function needs only $PY and a log path, so bash can run the shipped
+    bytes with cwd=REPO — which is what makes `ops/ci-secret-scan.py` resolve.
+    """
+    src = CI.read_text(encoding="utf-8")
+    start = src.index("fail_tail() {")
+    fn = src[start:src.index("\n# ------", start)]
+    p = subprocess.run(
+        ["bash", "-c", f'PY={shlex.quote(py or sys.executable)}\n{fn}\nfail_tail '
+                       f'{shlex.quote(str(log_path))}'],
+        cwd=str(REPO), capture_output=True, text=True, timeout=120)
+    return ANSI.sub("", (p.stdout or "") + (p.stderr or ""))
+
+
+def test_a_failing_gates_output_is_printed_whole_when_it_is_short():
+    """The short branch: under 200 lines, the reader gets the whole log.
+
+    This is the half the widening bought. A suite that prints one ok line per
+    check and fails in the middle is unreadable through a tail, and that is not
+    a hypothetical: it cost two hosted CI rounds on this very branch.
+    """
+    with tempfile.TemporaryDirectory(prefix="ci-selftest-failtail-") as td:
+        log = pathlib.Path(td) / "gate-short.log"
+        lines = [f"ok check {i}" for i in range(1, 31)]
+        lines[4] = f"FAIL check 5: token={FIXTURE_TOKEN} leaked into the log"
+        log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        out = _fail_tail(log)
+
+    printed = [ln for ln in out.splitlines() if ln.strip()]
+    check("a short log is printed whole, not tailed",
+          len(printed) == 30, f"{len(printed)} lines: {printed[:3]}")
+    check("the first line of a short log reaches the reader",
+          "ok check 1" in out, out[:400])
+    check("and so does the last", "ok check 30" in out, out[-400:])
+    check("the failing line is inside the window",
+          "FAIL check 5" in out, out[:400])
+    check("a token-shaped string in a short log is MASKED",
+          FIXTURE_TOKEN not in out, "the raw credential reached the CI log")
+    check("and the mask says what was removed, so the line stays diagnosable",
+          "<redacted:github-token:40 chars>" in out, out[:400])
+
+
+def test_a_long_failing_gate_log_is_tailed_and_still_redacted():
+    """The long branch: 80 lines off the end, and the same masking.
+
+    Both properties are asserted against the SAME log, because they can fail
+    independently: a tail that redacts nothing publishes the credential, and a
+    redactor wired only into the short branch looks correct on every test that
+    never gets past 200 lines.
+    """
+    with tempfile.TemporaryDirectory(prefix="ci-selftest-failtail-") as td:
+        log = pathlib.Path(td) / "gate-long.log"
+        lines = [f"ok check {i}" for i in range(1, 251)]
+        lines[2] = f"early line 3: token={FIXTURE_TOKEN} above the window"
+        lines[244] = f"FAIL check 245: token={FIXTURE_TOKEN} inside the window"
+        log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        out = _fail_tail(log)
+
+    printed = [ln for ln in out.splitlines() if ln.strip()]
+    check("a long log is tailed to 80 lines", len(printed) == 80,
+          f"{len(printed)} lines")
+    check("the tail starts where 80 lines from the end starts",
+          "ok check 171" in out, out[:300])
+    check("and does not reach back past it",
+          "ok check 170" not in out, out[:300])
+    check("the failing line inside the window is printed",
+          "FAIL check 245" in out, out[-400:])
+    check("a token-shaped string inside the tail is MASKED",
+          FIXTURE_TOKEN not in out, "the raw credential reached the CI log")
+    check("the mask names the shape and the length",
+          "<redacted:github-token:40 chars>" in out, out[-400:])
+    check("the line above the window is not printed at all",
+          "early line 3" not in out, out[:300])
+
+
+def test_fail_tail_withholds_the_window_when_it_cannot_redact():
+    """FAIL-CLOSED. No redactor, no print — and the log path instead.
+
+    The tempting failure direction is the other one: print raw when the filter
+    is unavailable, on the grounds that a diagnosis matters more. That reasoning
+    publishes a credential to avoid an inconvenience, and it is the shape a
+    reviewer cannot see in a green run. Driven by pointing $PY at an interpreter
+    that does not exist, which is the same condition as a broken or deleted
+    scanner from this function's side.
+    """
+    with tempfile.TemporaryDirectory(prefix="ci-selftest-failtail-") as td:
+        log = pathlib.Path(td) / "gate-noredactor.log"
+        log.write_text(f"FAIL: token={FIXTURE_TOKEN}\nsecond line\n", encoding="utf-8")
+        out = _fail_tail(log, py=str(pathlib.Path(td) / "no-such-interpreter"))
+
+    check("no part of the log is printed when redaction is unavailable",
+          "second line" not in out, out)
+    check("and least of all the credential", FIXTURE_TOKEN not in out, out)
+    check("the reader is told the window was withheld",
+          "WITHHELD" in out, out)
+    check("and where the captured log actually is",
+          str(log) in out, out)
 
 
 def test_gates_treats_only_78_as_not_configured():
@@ -801,10 +1143,28 @@ FIXTURE_RANGE = "CI-SELFTEST-FLOOR-FIXTURE-RANGE"
 FLOOR_BUDGET_SECONDS = 60
 
 
-def _push_floor_body():
-    """check_pushfloor()'s source, which is where the expensive path is visible."""
+def _ci_function_body(name, until):
+    """One shell function's source out of ops/ci.sh, anchored on its DEFINITION.
+
+    The anchors are "\\n<name>() {" and not the bare name, and that is not
+    fussiness -- it is a defect this file walked into on 2026-09-10. The slice
+    used to start at the first occurrence of the string "check_pushfloor()"
+    anywhere in ci.sh, so a COMMENT added above that mentioned the function by
+    name moved the window over the wrong region of the file. Two cases then
+    asserted about text they were never pointed at, and the one that failed said
+    "check_pushfloor calls check_gates" -- a sentence that sends the reader to
+    look for a call that is not there. That is the same shape as the message this
+    correction round was spent on: a check reporting confidently about something
+    it was not actually measuring.
+    """
     src = CI.read_text(encoding="utf-8")
-    return src[src.index("check_pushfloor()"):src.index("check_dependency()")]
+    start = src.index(f"\n{name}() {{")
+    return src[start:src.index(f"\n{until}() {{", start)]
+
+
+def _push_floor_body():
+    """The push floor's source, which is where the expensive path is visible."""
+    return _ci_function_body("check_pushfloor", "check_dependency")
 
 
 @contextlib.contextmanager
@@ -893,8 +1253,7 @@ def test_strict_still_owns_the_gates_class():
     class from a file ops/ci.sh runs inside that class. test_class_table_is_complete
     independently proves `gates` is still a real class with a check_ behind it.
     """
-    body = CI.read_text(encoding="utf-8")
-    body = body[body.index("check_pushfloor()"):body.index("check_dependency()")]
+    body = _ci_function_body("check_pushfloor", "check_dependency")
 
     check("the deferral only fires on a class-scoped (--only) run",
           '[ -n "$ONLY" ]' in body, "guard missing — hosted would defer too")
@@ -919,6 +1278,10 @@ def main():
                test_no_env_claims_a_production_hostname,
                test_mypy_pin_acceptance_is_narrow,
                test_every_test_file_in_the_tree_is_collected,
+               test_the_walk_prunes_named_roots_only,
+               test_a_failing_gates_output_is_printed_whole_when_it_is_short,
+               test_a_long_failing_gate_log_is_tailed_and_still_redacted,
+               test_fail_tail_withholds_the_window_when_it_cannot_redact,
                test_gates_treats_only_78_as_not_configured,
                test_gates_selftests_have_a_process_group_watchdog,
                test_push_floor_defers_the_gates_class_instead_of_running_it,

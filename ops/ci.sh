@@ -230,7 +230,7 @@ gates_name_the_move() {  # gates_name_the_move <failed check names...>
     esac
   done
   [ "$named" = "1" ] || printf '        \033[36mTHE MOVE\033[0m  %s\n' \
-    "each check above names its own remedy in its output — read the 12-line tail, not just this summary line" >&2
+    "each check above names its own remedy in its output — read the failing check's own output above, not just this summary line" >&2
 }
 
 INHERIT_ASKED=0
@@ -250,7 +250,15 @@ inherited_abort() {  # inherited_abort <check-name> <cmd...> -- never returns if
     printf '        \033[33mattribution\033[0m  %s\n' "$verdict" >&2
     return 0
   fi
-  [ "$rc" -eq 0 ] || return 0         # 2 = cannot tell; behave exactly as before
+  if [ "$rc" -ne 0 ]; then
+    # rc=2 is "cannot tell", and it used to return in silence -- so a run that
+    # took this path looked exactly like a run where the probe never fired, and
+    # the widened replay tail that rc=0/rc=1 print was never reached. The full
+    # run still proceeds, unchanged; it just says why no attribution appears.
+    printf '        \033[33mattribution\033[0m  %s\n' \
+      "the inherited-from-main probe could not tell whether main fails $name too; no attribution, the full run proceeds" >&2
+    return 0
+  fi
   bad gates "INHERITED FROM MAIN: $name"
   echo "$verdict" >&2
   echo
@@ -262,6 +270,45 @@ inherited_abort() {  # inherited_abort <check-name> <cmd...> -- never returns if
   echo "main is broken, and merging onto a broken main is what this refuses to do."
   echo "Classes after gates were not run; they are not worth computing on this base."
   exit 1
+}
+
+# A FAILING GATE'S OUTPUT IS THE DIAGNOSIS, so print enough of it to contain the
+# failing line. `tail -12` was narrower than the suites this class reports on:
+# tools/room-bridge/test_engineering_dispatch_adapter_unit.py prints one ok line
+# per check across 32 checks, so on 2026-09-11 the twelve-line window showed the
+# last eleven ok lines and the exclusion summary while the FAIL itself sat above
+# the window -- a hosted-Linux-only red whose cause was unreadable from the log,
+# through two full CI rounds. Whole log when it is short enough to read, else the
+# last 80 lines. Nothing else about failure handling changes.
+#
+# AND IT IS REDACTED, because widening the window widened the exposure with it.
+# This prints a CHILD PROCESS'S captured stdout and stderr -- up to a whole gate
+# log -- into a CI log that outlives the run and that more people can read than
+# can read the tree. Twelve lines of that was already a hole; eighty, or the
+# whole file, is a bigger one. The redaction is ops/ci-secret-scan.py's own
+# --redact filter over its own PATTERNS list, NOT a pattern set written here: a
+# second list drifts from the first, and the drift is invisible because each
+# side looks correct alone. A pattern added to the scanner now protects this
+# print too, with nothing to remember.
+#
+# FAIL-CLOSED, and this is the one place that trade goes that way. If the filter
+# cannot run, the window is WITHHELD and the log path is named instead. Printing
+# unredacted child output because the redactor was missing would publish the
+# credential to argue that a diagnosis is more important than not publishing it;
+# the log is still on disk and the reader is told exactly where.
+fail_tail() {  # fail_tail <logfile>
+  local log="$1" lines window
+  lines="$(wc -l < "$log" 2>/dev/null | tr -d ' ')"
+  [ -n "$lines" ] || lines=0
+  window="$(mktemp)"
+  if [ "$lines" -lt 200 ]; then cat "$log" >"$window" 2>/dev/null
+  else tail -80 "$log" >"$window" 2>/dev/null; fi
+  if "$PY" ops/ci-secret-scan.py --redact <"$window" >"$window.redacted" 2>/dev/null; then
+    cat "$window.redacted" >&2
+  else
+    printf '        %s\n' "gate output WITHHELD: ops/ci-secret-scan.py --redact could not run, and unredacted child output is never printed. The captured log is at $log." >&2
+  fi
+  rm -f "$window" "$window.redacted"
 }
 
 # ---------------------------------------------------------------- unit
@@ -529,8 +576,22 @@ PYEOF
   # the git-isolation selftest and the class-level tree fingerprint enforce
   # that — and each still runs under the same per-suite timeout helper.
   # Pool width: hosted runners have 4 vCPUs; CARR_CI_GATE_JOBS overrides.
+  # SUBDIRECTORIES ARE NOT REACHED BY A ONE-LEVEL GLOB, and that is how
+  # tools/room-bridge/ came to hold fifteen test files that no loop in this
+  # file matched. Twelve *_unit.py suites and test_activation_reliability.py
+  # pass on this interpreter today and had never been asked at a merge gate;
+  # they are named below. The two *_live.py suites are NOT collected on
+  # purpose: they boot a real Claude desk and a real Codex app-server, and
+  # ops/ci-selftest.py's UNCOLLECTED_BY_DECISION carries the written reason
+  # for each. Widening this line is the fix for today; the durable half is
+  # that selftest, which now WALKS the tree at any depth and fails on any
+  # test-shaped file that neither a glob here nor that list accounts for. So
+  # the next tools/somewhere/deeper/test_x.py turns a gate red asking to be
+  # decided, rather than sitting in the tree looking like coverage.
   local eligible=""
-  for t in ops/*-selftest.py tools/test-*.py tools/test_*.py; do
+  for t in ops/*-selftest.py tools/test-*.py tools/test_*.py \
+           tools/room-bridge/test_*_unit.py \
+           tools/room-bridge/test_activation_reliability.py; do
     [ -f "$t" ] || continue
     local base; base="$(basename "$t")"
     local why; why="$(excluded_reason "$base")"
@@ -585,7 +646,7 @@ PYEOF
         "$base" "$(tail -1 "$LOGDIR/gate-$base.log" 2>/dev/null)" >&2
     elif [ "$grc" -ne 0 ]; then
       inherited_abort "$base" "$PY" "$t"
-      failures="$failures $base"; tail -12 "$LOGDIR/gate-$base.log" >&2
+      failures="$failures $base"; fail_tail "$LOGDIR/gate-$base.log"
     fi
   done
 
@@ -596,7 +657,7 @@ PYEOF
   # Some things under test here ARE shell (mcp-server/smoke-reads.sh), and a
   # Python wrapper around them would only shell out to the same script.
   # Everything else is identical to the loop above: same exclusion scope, same
-  # counting, same captured log and same 12-line tail on failure.
+  # counting, same captured log and the same fail_tail print on failure.
   if [ "$gates_timed_out" -eq 0 ]; then for t in tools/test-*.sh tools/test_*.sh; do
     [ -f "$t" ] || continue
     local sbase; sbase="$(basename "$t")"
@@ -619,7 +680,7 @@ PYEOF
       break
     elif [ "$grc" -ne 0 ]; then
       inherited_abort "$sbase" "$t"
-      failures="$failures $sbase"; tail -12 "$LOGDIR/gate-$sbase.log" >&2
+      failures="$failures $sbase"; fail_tail "$LOGDIR/gate-$sbase.log"
     fi
   done; fi
   # gate-integrity is the baseline check itself: a gate edited without a
