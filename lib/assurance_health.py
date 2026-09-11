@@ -73,7 +73,10 @@ DISPLAY PRECEDENCE, most conservative first, evaluated in this exact order:
 
     1. unknown              authoritative workflow truth is indeterminate
     2. disabled             F09 says the definition exists and is not enabled
-    3. failed               a determinate non-pass withdrew even read capability
+    3. failed               a determinate non-pass withdrew even read capability,
+                            and it did so BY ITSELF -- capability that is missing
+                            only because a layer could not be read is unproven,
+                            not withdrawn, and never reported as failed
     4. degraded             a determinate non-pass withdrew act and/or draft
     5. not-yet-operational  nothing failed, and the scope has not yet earned live
                             admission or has no accepted outcome evidence yet
@@ -249,6 +252,10 @@ _STAGE_REQUIREMENTS = (
                "artifact_assessment", "execution_assessment", "controller_assessment")),
     ("read", ("workflow_readable", "workflow_coherent", "artifact_assessment")),
 )
+
+# What a failure took away, given the highest stage the failure alone still allows.
+_STAGE_DOWN_TO = {stage: list(CAPABILITY_STAGES[:index])
+                  for index, stage in enumerate(CAPABILITY_STAGES)}
 
 # F09 states this projection reads as authoritative dispositions of the workflow
 # itself.  Nothing else in this module decides these three facts.
@@ -628,11 +635,13 @@ def assurance_health_row(*, scope: Any, workflow_truth: Any, evidence: Any,
     }
     capability_inputs.update({slot: states[slot] == "passing" for slot in EVIDENCE_SLOTS})
 
-    stage = "unavailable"
-    for name, requirements in _STAGE_REQUIREMENTS:
-        if all(capability_inputs[requirement] for requirement in requirements):
-            stage = name
-            break
+    def _stage(inputs: dict[str, bool]) -> str:
+        for name, requirements in _STAGE_REQUIREMENTS:
+            if all(inputs[requirement] for requirement in requirements):
+                return name
+        return "unavailable"
+
+    stage = _stage(capability_inputs)
     stage_index = CAPABILITY_STAGES.index(stage)
     retained = list(CAPABILITY_STAGES[stage_index:-1])
     withdrawn = list(CAPABILITY_STAGES[:stage_index])
@@ -647,6 +656,16 @@ def assurance_health_row(*, scope: Any, workflow_truth: Any, evidence: Any,
 
     indeterminate = sorted(slot for slot in EVIDENCE_SLOTS
                            if states[slot] in INDETERMINATE_EVIDENCE_STATES)
+
+    # CAPABILITY LOST TO AN UNREAD LAYER IS NOT CAPABILITY A FAILURE TOOK AWAY.
+    # A false red is the same defect as a false green wearing the other colour:
+    # both report something the evidence does not say.  So the stage is computed
+    # a second time with every INDETERMINATE layer granted, and the difference
+    # between the two answers is exactly the capability that is unproven rather
+    # than withdrawn.  Only what survives that counterfactual is attributed to
+    # the failure; the reported capability_stage stays the conservative one.
+    attributable_stage = _stage({**capability_inputs,
+                                 **{slot: True for slot in indeterminate}})
     determinate_nonpass = sorted(slot for slot in EVIDENCE_SLOTS
                                  if states[slot] in DETERMINATE_NONPASS_EVIDENCE_STATES)
     missing = sorted(slot for slot in EVIDENCE_SLOTS if states[slot] == "missing")
@@ -668,7 +687,7 @@ def assurance_health_row(*, scope: Any, workflow_truth: Any, evidence: Any,
         # Any evidence finding stays visible in evidence/reasons below.
         state = "disabled"
         state_reason = "F09 authoritative workflow truth reports the definition is not enabled"
-    elif determinate_nonpass and stage == "unavailable":
+    elif determinate_nonpass and attributable_stage == "unavailable":
         state = "failed"
         state_reason = (
             f"a current exactly bound non-pass in {determinate_nonpass} withdrew every "
@@ -677,7 +696,13 @@ def assurance_health_row(*, scope: Any, workflow_truth: Any, evidence: Any,
         state = "degraded"
         state_reason = (
             f"a current exactly bound non-pass in {determinate_nonpass} withdrew "
-            f"{withdrawn} capability; {retained} remains")
+            f"{_STAGE_DOWN_TO[attributable_stage]} capability; {attributable_stage} is what "
+            "the failure itself leaves standing")
+        if stage != attributable_stage:
+            state_reason += (
+                f". Capability below {attributable_stage} is unproven rather than withdrawn: "
+                f"{indeterminate} could not be read, so {retained} is what this scope can "
+                "currently be shown to hold")
     elif not determinate_nonpass and not indeterminate and (
             not truth["live_admissible"]
             or any(states[slot] in UNEARNED_EVIDENCE_STATES for slot in POSTACTIVATION_SLOTS)):
@@ -756,6 +781,7 @@ def assurance_health_row(*, scope: Any, workflow_truth: Any, evidence: Any,
         "failing_layers": determinate_nonpass,
         "missing_layers": missing,
         "unbindable_layers": unbindable,
+        "capability_stage_attributable_to_findings": attributable_stage,
         "impact": impact,
         "recovery": recovery,
         "reasons": sorted(set(reasons)),

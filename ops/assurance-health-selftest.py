@@ -834,6 +834,162 @@ def workflow_only_scope_checks(health) -> None:
           and "unbindable" not in health.INDETERMINATE_EVIDENCE_STATES)
 
 
+MANIFEST_OWNER = "ops.job dispatcher"
+
+
+def _census(*, enabled=True, surfaces=(), keys=(("assurance-fabric-child", 1),),
+            shadow="accepted", canary="accepted", now=NOW):
+    """One census from the real V5-F09 projection; this suite invents no census."""
+    from lib.control_plane_workflow_truth import workflow_truth
+    declarations, definitions, acceptances = [], [], []
+    for key, version in keys:
+        declarations.append({"key": key, "version": version, "enabled": enabled,
+                             "legacy_schedule": {"provider": "none", "status": "disabled"}})
+        definitions.append({"key": key, "version": version, "enabled": enabled,
+                            "execution_contract": {}, "legacy_disabled_at": None})
+        for mode, status in (("shadow", shadow), ("canary", canary)):
+            if status:
+                acceptances.append({"workflow_key": key, "workflow_version": version,
+                                    "mode": mode, "status": status})
+    return workflow_truth(
+        declarations=declarations, definitions=definitions, acceptances=acceptances,
+        surfaces=list(surfaces), completion={}, observation_max_age_seconds=MAX_AGE, now=now)
+
+
+# Five minutes before the projection instant, so it is inside the registry's own
+# 900-second observation window; OBSERVED (one hour back) is outside it and is
+# used deliberately for the stale case below.
+CURRENT_OBSERVED = "2026-09-09T11:55:00+00:00"
+
+
+def _surface(surface_id, *, key="assurance-fabric-child", version=1,
+             scheduler_state="enabled", observed=CURRENT_OBSERVED):
+    surface = {"workflow_key": key, "workflow_version": version, "surface_id": surface_id,
+               "locator": f"com.carr.{surface_id}", "scheduler_kind": "launchd",
+               "duplicate_group": None, "disable_receipt_ref": None, "observation": None}
+    if scheduler_state is not None:
+        surface["observation"] = {"scheduler_state": scheduler_state, "observed_at": observed}
+    return surface
+
+
+def _reading(*, surfaces=(), owners=_DEFAULT, **census_kwargs):
+    census = _census(surfaces=surfaces, **census_kwargs)
+    return {"available": True, "census": census, "surfaces": list(surfaces),
+            "owners": ({"assurance-fabric-child@v1": MANIFEST_OWNER}
+                       if owners is _DEFAULT else owners)}
+
+
+def source_adapter_checks() -> None:
+    """The seam that binds this projection to a reading a health surface already has.
+
+    WHAT THESE PIN.  A layer the reading did not contain is declared unread and
+    named, never defaulted; the one layer it genuinely contains is admitted only
+    under an exact identity; and no reading that passes through this seam can
+    produce a green row, because the census carries no Work Request identity and
+    five of the six layers are honestly absent from it.
+    """
+    import lib.assurance_health_sources as sources
+
+    unavailable = sources.assurance_health_from_snapshot(
+        {"available": False, "reason": "control-plane rows unreadable (OperationalError)"},
+        now=NOW)
+    check("an unavailable reading is reported unavailable, never as an empty census",
+          unavailable["available"] is False
+          and "OperationalError" in unavailable["reason"], json.dumps(unavailable))
+    for bad, label in ((None, "no reading at all"), ({}, "an empty reading"),
+                       ({"available": True, "census": {"rows": []}}, "a census from nowhere")):
+        result = sources.assurance_health_from_snapshot(bad, now=NOW)
+        check(f"{label} is refused rather than projected",
+              result["available"] is False, json.dumps(result))
+
+    reading = _reading(surfaces=[_surface("assurance-fabric-child.launchd.v1")])
+    projected = sources.assurance_health_from_snapshot(reading, now=NOW)
+    check("a reading with one exact controller readback projects a bound scope",
+          projected["available"] and projected["projection"]["summary"]["scopes"] == 1,
+          json.dumps(projected.get("reason", "")))
+    row = projected["projection"]["rows"][0]
+    PROJECTED.append(row)
+    controller = row["evidence"]["controller_assessment"]
+    check("the controller layer traces to the exact observation receipt that supplied it",
+          controller["state"] == "passing"
+          and controller["evidence_ref"] == "observation-receipt:assurance-fabric-child.launchd.v1"
+          and controller["controller_state"] == "enabled",
+          json.dumps(controller))
+    check("its expiry is the registry's own observation window, not one invented here",
+          controller["expires_at"].startswith("2026-09-09T12:10:00"), controller["expires_at"])
+    for slot in ("artifact_assessment", "execution_assessment", "candidate_outcome_oracle",
+                 "activation_readback"):
+        check(f"{slot} is declared unread by this surface rather than defaulted",
+              row["evidence"][slot]["state"] == "unreadable", row["evidence"][slot]["state"])
+    check("the business outcome layer is unbindable: the census carries no Work Request",
+          row["evidence"]["actual_business_outcome"]["state"] == "unbindable",
+          row["evidence"]["actual_business_outcome"]["state"])
+    check("no reading that reaches this surface can render green",
+          projected["projection"]["summary"]["green"] == 0
+          and not row["green"], row["state"])
+    notes = projected["input_notes"]["assurance-fabric-child@v1"]
+    for slot in sources.UNREAD_LAYER_SOURCE:
+        check(f"the reader is told which surface would supply {slot}",
+              any(note.startswith(f"{slot}:") and "would come from" in note for note in notes),
+              json.dumps(notes))
+
+    none_read = sources.assurance_health_from_snapshot(_reading(), now=NOW)
+    absent = none_read["projection"]["rows"][0]["evidence"]["controller_assessment"]
+    PROJECTED.append(none_read["projection"]["rows"][0])
+    check("no observation receipt is an ABSENT controller layer, not an unread one",
+          absent["state"] == "missing" and absent["present"] is False, absent["state"])
+
+    two = sources.assurance_health_from_snapshot(_reading(surfaces=[
+        _surface("assurance-fabric-child.launchd.v1"),
+        _surface("assurance-fabric-child.launchd.v2")]), now=NOW)
+    ambiguous = two["projection"]["rows"][0]["evidence"]["controller_assessment"]
+    PROJECTED.append(two["projection"]["rows"][0])
+    check("two receipts for one workflow are not silently reduced to one controller fact",
+          ambiguous["state"] == "unreadable", ambiguous["state"])
+    check("the ambiguity names both surface identities rather than picking one",
+          all(surface_id in " ".join(two["input_notes"]["assurance-fabric-child@v1"])
+              for surface_id in ("assurance-fabric-child.launchd.v1",
+                                 "assurance-fabric-child.launchd.v2")),
+          json.dumps(two["input_notes"]))
+
+    stale = sources.assurance_health_from_snapshot(
+        _reading(surfaces=[_surface("assurance-fabric-child.launchd.v1",
+                                    observed=OBSERVED)]), now=NOW)
+    stale_row = stale["projection"]["rows"][0]
+    PROJECTED.append(stale_row)
+    check("a readback older than the registry's own window is stale, never current",
+          stale_row["evidence"]["controller_assessment"]["state"] == "stale",
+          stale_row["evidence"]["controller_assessment"]["state"])
+    check("a stale controller readback degrades this scope and never renders green",
+          stale_row["state"] == "degraded" and not stale_row["green"], stale_row["state"])
+    check("capability lost to UNREAD layers is reported as unproven, not as withdrawn",
+          any("unproven rather than withdrawn" in reason for reason in stale_row["reasons"]),
+          json.dumps(stale_row["reasons"]))
+
+    ownerless = sources.assurance_health_from_snapshot(
+        _reading(surfaces=[_surface("assurance-fabric-child.launchd.v1")], owners={}), now=NOW)
+    check("a workflow with no declared owner is reported unprojectable, not given one",
+          ownerless["projection"]["summary"]["scopes"] == 0
+          and len(ownerless["unprojectable"]) == 1
+          and "inventory.owner" in ownerless["unprojectable"][0]["reason"],
+          json.dumps(ownerless["unprojectable"]))
+
+    disabled = sources.assurance_health_from_snapshot(
+        _reading(enabled=False, surfaces=[_surface("assurance-fabric-child.launchd.v1")]),
+        now=NOW)
+    disabled_row = disabled["projection"]["rows"][0]
+    PROJECTED.append(disabled_row)
+    check("a disabled workflow is disabled on this surface too, and disabled is not green",
+          disabled_row["state"] == "disabled" and not disabled_row["green"],
+          disabled_row["state"])
+
+    source = Path(sources.__file__).read_text(encoding="utf-8")
+    check("the seam reads nothing itself: no file, process, socket or database route",
+          not any(token in source for token in
+                  ("import os", "import subprocess", "import socket", "import psycopg",
+                   "open(", "requests.", "datetime.now")), "an import would make it a reader")
+
+
 def main() -> int:
     try:
         import lib.assurance_health as health
@@ -849,6 +1005,7 @@ def main() -> int:
     workflow_truth_governance_checks(health)
     scope_identity_checks(health)
     workflow_only_scope_checks(health)
+    source_adapter_checks()
     refusal_checks(health)
     output_discipline_checks(health)
 
