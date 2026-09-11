@@ -1875,16 +1875,26 @@ function importSpecifiers(source) {
  * shadows. That is exactly the identifier-level question a text scan could not
  * answer, asked of the parser that already read the file.
  *
- * The list is ROOTS, not routes, because chasing routes is endless: the fifth
- * review found `process.getBuiltinModule("node:" + "https")` and the sixth found
- * `globalThis.process.getBuiltinModule(...)` reaching the same place around a
- * define that named only the bare form. Every such route has to start at one of a
- * small closed set of names — the host object (`process`), the global object by
- * any of its spellings (`globalThis`, `global`, `window`, `self`), the CommonJS
- * loader (`require`), the compilers that mint a fresh scope (`Function`, `eval`,
- * `WebAssembly`), and the transports (`Worker`, `fetch`, `XMLHttpRequest`,
- * `WebSocket`). J103 is a pure kernel: it decides, it does not touch the host. So
- * the roots are banned outright and no route off them has to be enumerated.
+ * The list names ROOTS rather than call shapes, because enumerating shapes is
+ * endless: the fifth review found `process.getBuiltinModule("node:" + "https")`
+ * and the sixth found `globalThis.process.getBuiltinModule(...)` reaching the
+ * same place around a define that named only the bare form. Banning the root
+ * identifier catches every shape written off that root at its first identifier,
+ * whatever it reaches for next. The set is the host object (`process`), the
+ * global object by any of its spellings (`globalThis`, `global`, `window`,
+ * `self`), the CommonJS loader (`require`), the compilers that mint a fresh
+ * scope (`Function`, `eval`, `WebAssembly`), and the transports (`Worker`,
+ * `fetch`, `XMLHttpRequest`, `WebSocket`). J103 is a pure kernel: it decides, it
+ * does not touch the host, so it has no honest use for any of them.
+ *
+ * What this buys is a LEXICAL invariant and nothing more. It is not a capability
+ * sandbox, and it does not claim that every route to the host begins at a listed
+ * name. Reflective routes that name none of them exist — `[].filter.constructor`
+ * reaches the Function constructor without the identifier `Function`, and
+ * comparable prototype and getter walks reach further — and they are outside this
+ * guard's scope by design. Non-lexical reachability, including a capability
+ * handed to J103 at runtime, is governed by the authority rule and its own tests,
+ * not by this list.
  *
  * The two dotted entries are kept alongside their roots so the door tests can name
  * the precise route a review found; esbuild matches the longer key first.
@@ -2173,9 +2183,12 @@ test("J103 references no forbidden root identifier, in any call shape", () => {
   // to be anticipated. Optional-call require emits no import record; a global read
   // is not a call at all; getBuiltinModule builds its specifier at runtime; and
   // Function and eval spell `require` in a scope that does not exist until then.
-  // Banning the ROOTS is what ends the shape-by-shape chase: a route that starts
-  // at `globalThis` or `self` is caught at its first identifier, whatever it
-  // reaches for next.
+  // Banning the ROOTS ends the shape-by-shape chase for anything written off a
+  // listed name: a route that starts at `globalThis` or `self` is caught at its
+  // first identifier, whatever it reaches for next. It does not end reachability
+  // as such — a reflective route naming no listed identifier, such as
+  // `[].filter.constructor`, is out of this guard's lexical scope and is governed
+  // by the authority rule and its own tests.
   const doors = [
     ['const h = require?.("node:https");', "require"],
     ['globalThis.require("node:https");', "globalThis.require"],
