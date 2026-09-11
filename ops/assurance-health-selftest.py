@@ -1002,7 +1002,7 @@ def surface_wiring_checks() -> None:
     import os
     import subprocess
     import tempfile
-    from datetime import datetime, timezone
+    from datetime import datetime, timedelta, timezone
     from lib.control_plane_workflow_truth import workflow_truth
 
     now = datetime.now(timezone.utc).isoformat()
@@ -1063,6 +1063,57 @@ def surface_wiring_checks() -> None:
           and "CANONICAL_FINDING assurance_health_degraded" not in out, out[-400:])
     check("no scope reached a healthy label on a reading that cannot contain one",
           " 0 healthy" in out and "1 unknown" in out, out[-400:])
+
+    # FAILURE INJECTION ON THE REAL SURFACE. One workflow's controller readback is
+    # pushed outside the registry's own observation window; the other's is left
+    # current. Exactly one scope may move.
+    stale_at = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    injected_surfaces = [
+        dict(surfaces[0], surface_id="degrading.launchd.v1", workflow_key="degrading",
+             observation={"scheduler_state": "enabled", "observed_at": stale_at}),
+        dict(surfaces[0], surface_id="unaffected.launchd.v1", workflow_key="unaffected",
+             observation={"scheduler_state": "enabled", "observed_at": now}),
+    ]
+    injected_census = workflow_truth(
+        declarations=[{"key": key, "version": 1, "enabled": True,
+                       "legacy_schedule": {"provider": "none", "status": "disabled"}}
+                      for key in ("degrading", "unaffected")],
+        definitions=[{"key": key, "version": 1, "enabled": True,
+                      "execution_contract": {}, "legacy_disabled_at": None}
+                     for key in ("degrading", "unaffected")],
+        acceptances=[{"workflow_key": key, "workflow_version": 1,
+                      "mode": "shadow", "status": "accepted"}
+                     for key in ("degrading", "unaffected")],
+        surfaces=injected_surfaces, completion={}, observation_max_age_seconds=900, now=now)
+    injected = {"errors": [], "workflows": {
+        "available": True, "census": injected_census, "surfaces": injected_surfaces,
+        "owners": {"degrading@v1": "ops.job dispatcher",
+                   "unaffected@v1": "ops.job dispatcher"}}}
+    handle, path = tempfile.mkstemp(suffix=".json", prefix="assurance-health-injected-")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as fh:
+            json.dump(injected, fh)
+        injected_proc = subprocess.run(
+            [sys.executable, str(REPO / "tools/health-check.py"), "--canonical",
+             "--section", "jobs", "--fixture", path],
+            cwd=str(REPO), text=True, capture_output=True, timeout=120)
+    finally:
+        os.unlink(path)
+    section = injected_proc.stdout.split("Assurance health —", 1)[-1]
+
+    check("an injected failure degrades the scope it was injected into",
+          "degrading v1 DEGRADED" in section, section[:600])
+    check("the degraded scope is recorded as a finding, not only printed",
+          "CANONICAL_FINDING assurance_health_degraded" in section
+          and "degrading v1" in section, section[:600])
+    check("the unaffected scope keeps its own evidence-derived state",
+          "unaffected v1 DEGRADED" not in section
+          and "unaffected v1 FAILED" not in section, section[:600])
+    check("exactly one of the two bound scopes moved",
+          "2 bound scope(s): 0 healthy, 1 degraded, 0 failed, 1 unknown" in section,
+          section[:600])
+    check("the surface says which layer's evidence withdrew the capability",
+          "controller_assessment" in section, section[:600])
 
 
 def main() -> int:
