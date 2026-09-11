@@ -9,11 +9,21 @@
 //
 // PART B, THE PUBLIC SURFACE, AND THE SWEEP HAS NO EXEMPTIONS. The export list
 // of all three modules is exactly enumerated. EVERY export is swept — constants
-// by value, and callables by CALLING them, with no argument and with each
-// hostile argument, and sweeping what comes back or what they throw. The sweep
-// looks for the closed union of privileged words as exact value, as token, AND
-// as raw substring; for any `would_*` or `*_if_authoritative` key; and for the
-// boolean `true` anywhere at all, under any key.
+// by value, callables by CALLING them, and CONSTRUCTORS BY CONSTRUCTING THEM,
+// with no argument and with each hostile argument in each position, and sweeping
+// what comes back or what they throw. The sweep looks for the closed union of
+// privileged words as exact value, as token, AND as raw substring; for any
+// `would_*` or `*_if_authoritative` key; and for the boolean `true` anywhere at
+// all, under any key.
+//
+// THE NAMED EXEMPTION THAT USED TO SIT HERE IS DELETED. An earlier draft swept
+// `SeamStoreUnreachable` by constructing it with its OWN closed reasons and a
+// well-formed store ref, which is the one input shape that could never leak, and
+// skipped it otherwise. Under that exemption the constructor interpolated and
+// retained whatever a caller handed it — a store ref, a reason, and the whole
+// `cause` object — and the sweep never saw it. It is now constructed with the
+// same hostile arguments as everything else, and its own properties, message,
+// stack and cause are swept in turn.
 //
 // THE STRING ALLOWLIST THE EARLIER DRAFT CARRIED IS DELETED. It existed because
 // the reader module reused the gate's own seam names and reason ids verbatim,
@@ -238,7 +248,6 @@ const EXPECTED_EXPORTS = Object.freeze({
   ],
   rulings: ["seamRulingRef"],
   stores: [
-    "SEAM_STORE_UNREACHABLE_REASONS",
     "SeamStoreUnreachable",
     "fetchCheckConclusionRows",
     "fetchPredecessorOutcomeRows",
@@ -394,6 +403,163 @@ function hostileQueries() {
   ];
 }
 
+/**
+ * Values handed to an exported callable in EVERY argument position, including
+ * the positions a constructor reads. hostileQueries() builds query OBJECTS,
+ * which is the shape the three fetchers take; a constructor takes bare strings,
+ * so the privileged words themselves are arguments here, alongside the object
+ * shapes the amendment of 2026-09-11 puts in scope: a Proxy, a revoked Proxy, a
+ * throwing getter, a throwing toString, a Symbol and an Error.
+ */
+function hostileArguments() {
+  const throwingCoercion = {
+    toString() { throw new Error(`${HOSTILE_MARKER}-tostring`); },
+    valueOf() { throw new Error(`${HOSTILE_MARKER}-valueof`); },
+  };
+  const revocable = Proxy.revocable({ because: HOSTILE_MARKER }, {});
+  revocable.revoke();
+  return [
+    undefined, null, 0, -1, true, false,
+    HOSTILE_MARKER,
+    `${HOSTILE_MARKER}: the checks source answer did not parse`,
+    "the query did not finish ",
+    ...PRIVILEGED_WORDS,
+    "would_allow_if_authoritative",
+    "the gate is green and the run is ok",
+    Symbol(`${HOSTILE_MARKER}-symbol`),
+    throwingCoercion,
+    revocable.proxy,
+    new Error(`${HOSTILE_MARKER}-cause`),
+    { because: "green", store_ref: "allow", message: HOSTILE_MARKER, stack: HOSTILE_MARKER },
+    ["allow", HOSTILE_MARKER],
+    ...hostileQueries(),
+  ];
+}
+
+/**
+ * Argument lists for a constructor: each hostile value alone, in every position
+ * at once, and behind a well-formed prefix — because a leak that needs the first
+ * argument to be valid is still a leak, and the earlier special case only ever
+ * tried the all-valid list.
+ */
+function constructorArgumentLists() {
+  const lists = [[]];
+  for (const hostile of hostileArguments()) {
+    lists.push([hostile], [hostile, hostile], [hostile, hostile, hostile]);
+    lists.push(["github:checks", hostile, hostile]);
+    lists.push(["github:checks", "the query did not finish", hostile]);
+  }
+  return lists;
+}
+
+/**
+ * Two structural questions, asked of a value without invoking it.
+ *
+ * EVERY ORDINARY FUNCTION IS A CONSTRUCTOR — that is the trap the first draft of
+ * this sweep fell into. `Reflect.construct` accepts `seamRulingRef` as happily
+ * as it accepts a class, so "is it constructible" cannot be the branch on its
+ * own. What separates a class is its `prototype`: the engine installs it
+ * non-writable on a class and writable on a function, and nothing in this file
+ * has to trust a name or a `toString` to see it.
+ */
+function isConstructor(value) {
+  try {
+    Reflect.construct(String, [], value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isClassConstructor(value) {
+  const descriptor = Object.getOwnPropertyDescriptor(value, "prototype");
+  return isConstructor(value) && descriptor !== undefined && descriptor.writable === false;
+}
+
+/**
+ * One constructed object, against the whole contract this surface owes, in the
+ * order a failure is most informative:
+ *
+ *   1. THE CAUSE IS NOT KEPT. A retained `cause` is the caller's whole object,
+ *      handed back under a standard name.
+ *   2. NOTHING THE CALLER WROTE, AND NO WORD OF THE CLOSED UNION, in the name,
+ *      the message, the stack, the cause or any own property.
+ *   3. THE SHAPE. Every own property is a non-writable, non-configurable DATA
+ *      property — an accessor under one of these names runs caller code on
+ *      every read, and a configurable property can become one afterwards — and
+ *      an object carrying any own property at all is frozen, so nothing can be
+ *      written over what it says.
+ */
+function assertSweptConstructed(at, built) {
+  assert.ok(built !== null && typeof built === "object", `${at} did not construct an object`);
+  const keys = Reflect.ownKeys(built);
+
+  assert.ok(!Object.hasOwn(built, "cause"), `${at} carries an own cause`);
+  assert.equal(built.cause, undefined, `${at} retained the caller's cause`);
+
+  for (const key of ["name", "message", "stack", "cause"])
+    assertSwept(`${at}.${key}`, built[key] ?? null);
+  for (const key of keys) assertSwept(`${at}.own.${String(key)}`, built[key]);
+  const readable = `${built.name}|${built.message}|${built.stack}|${safeLabel({ ...built })}`;
+  assert.ok(!readable.includes(HOSTILE_MARKER), `${at} leaked caller text: ${readable.slice(0, 200)}`);
+
+  for (const key of keys) {
+    const where = `${at}.${String(key)}`;
+    assert.ok(typeof key !== "symbol", `${where} is a symbol-keyed own property`);
+    const descriptor = Object.getOwnPropertyDescriptor(built, key);
+    assert.ok(Object.hasOwn(descriptor, "value"), `${where} is an accessor, not a data property`);
+    assert.equal(descriptor.writable, false, `${where} is writable`);
+    assert.equal(descriptor.configurable, false, `${where} is configurable`);
+  }
+  if (keys.length > 0) assert.ok(Object.isFrozen(built), `${at} is not frozen`);
+}
+
+/** Constructed with no argument, and with every hostile value in every position. */
+function sweepConstruction(at, constructorUnderTest) {
+  for (const argumentList of constructorArgumentLists()) {
+    let built;
+    try {
+      built = Reflect.construct(constructorUnderTest, argumentList);
+    } catch (error) {
+      // A REFUSAL IS SWEPT TOO, and it may not quote the argument it refused:
+      // the constructor that shipped threw ``${because} is not a registered
+      // store-unreachable reason``, which handed a privileged word straight back
+      // out of an exported callable.
+      assertSwept(`${at}.throw.message`, error?.message ?? null);
+      assertSwept(`${at}.throw.because`, error?.because ?? null);
+      assert.ok(!String(error?.message ?? "").includes(HOSTILE_MARKER),
+        `${at} quoted the caller back in its own refusal`);
+      continue;
+    }
+    assertSweptConstructed(`${at}.new[${argumentList.length}]`, built);
+  }
+}
+
+/**
+ * A class, swept the two ways a class can be reached: constructed directly, and
+ * constructed as somebody else's base. A SUBCLASS RUNS ITS OWN CONSTRUCTOR
+ * AFTER THIS ONE and its instance passes `instanceof`, so a type whose fields a
+ * consumer reads as facts has to refuse to be one.
+ */
+function sweepClassConstructor(at, classUnderTest) {
+  assert.throws(() => classUnderTest(), TypeError, `${at} is callable without new`);
+  sweepConstruction(at, classUnderTest);
+
+  class Subclass extends classUnderTest {
+    constructor() { super("github:checks", "the query did not finish"); }
+  }
+  let subclassed = "refused";
+  try { subclassed = new Subclass(); } catch { /* refused, which is the point */ }
+  assert.equal(subclassed, "refused", `${at} can be subclassed`);
+
+  let foreign = "refused";
+  try {
+    foreign = Reflect.construct(classUnderTest,
+      ["github:checks", "the query did not finish"], Object);
+  } catch { /* refused */ }
+  assert.equal(foreign, "refused", `${at} accepts a foreign new.target`);
+}
+
 test("SWEEP: every export of every seam module, constants and callables alike", async () => {
   const saved = {};
   for (const name of ["DATABASE_URL_READER", "GITHUB_TOKEN", "GITHUB_REPOSITORY"]) {
@@ -405,19 +571,14 @@ test("SWEEP: every export of every seam module, constants and callables alike", 
       for (const [name, value] of Object.entries(namespace)) {
         const at = `${label}.${name}`;
         if (typeof value !== "function") { assertSwept(at, value); continue; }
-        // A CALLABLE IS SWEPT BY CALLING IT — with no argument, and with every
-        // hostile shape — and what it returns or throws is swept in turn. A
-        // constructor is swept by constructing it with its own closed reasons.
-        if (name === "SeamStoreUnreachable") {
-          for (const because of stores.SEAM_STORE_UNREACHABLE_REASONS) {
-            const error = new value("github:checks", because);
-            assertSwept(`${at}.message`, error.message);
-            assertSwept(`${at}.because`, error.because);
-            assertSwept(`${at}.store_ref`, error.store_ref);
-          }
-          assert.throws(() => new value("github:checks", "because I said so"), TypeError);
-          continue;
-        }
+        // EVERY WAY AN EXPORT CAN BE INVOKED IS SWEPT, and the branch is a
+        // structural question about the value rather than its name: there is no
+        // exempt export here. A class is constructed and asserted uncallable —
+        // the engine refuses the call before any line of the module runs, and
+        // that sentence is the engine's, not this surface's. An ordinary
+        // function is constructible too, so it is BOTH constructed and called.
+        if (isClassConstructor(value)) { sweepClassConstructor(at, value); continue; }
+        if (isConstructor(value)) sweepConstruction(at, value);
         for (const argument of [undefined, ...hostileQueries()]) {
           let outcome;
           try {
@@ -437,6 +598,223 @@ test("SWEEP: every export of every seam module, constants and callables alike", 
     for (const [name, value] of Object.entries(saved))
       if (value !== undefined) process.env[name] = value;
   }
+});
+
+test("STORE ERROR: the error carries registered codes only, and nothing the caller wrote", () => {
+  const registered = "the query did not finish";
+  const carried = new stores.SeamStoreUnreachable("github:checks", registered,
+    new Error(`${HOSTILE_MARKER}-underlying`));
+  assert.equal(carried.store_ref, "github:checks");
+  assert.equal(carried.because, registered);
+  assert.equal(carried.message, `github:checks: ${registered}`);
+  assert.equal(carried.stack, `SeamStoreUnreachable: github:checks: ${registered}`,
+    "the stack is a caller's frames again");
+  assert.equal(carried.cause, undefined, "the underlying cause is retained again");
+  assert.equal(carried.cause_kind, "an-error");
+
+  // AN UNREGISTERED ARGUMENT IS REPLACED, NOT QUOTED. The old constructor threw
+  // a TypeError reciting the word it had just refused, which is how a privileged
+  // string left an exported callable.
+  const refused = new stores.SeamStoreUnreachable("allow", "green", { ok: true });
+  assert.equal(refused.store_ref, "a-store-this-file-does-not-serve");
+  assert.equal(refused.because, "the reason this store was unreachable is not a registered one");
+  assert.equal(refused.message,
+    "a-store-this-file-does-not-serve: the reason this store was unreachable is not a registered one");
+  assert.equal(refused.cause, undefined);
+  assert.equal(refused.cause_kind, "not-an-error");
+  assertSwept("refused", refused);
+  assertSwept("refused.message", refused.message);
+  assertSwept("refused.stack", refused.stack);
+
+  // A revoked Proxy as the cause: the prototype walk throws, and the answer to
+  // that is this file's own code rather than the engine's sentence.
+  const revocable = Proxy.revocable({}, {});
+  revocable.revoke();
+  assert.equal(new stores.SeamStoreUnreachable("github:checks", registered, revocable.proxy).cause_kind,
+    "undetermined");
+
+  // And no field can be replaced after the fact.
+  assert.throws(() => { refused.because = registered; }, TypeError);
+  assert.throws(() => Object.defineProperty(refused, "because", { value: registered }), TypeError);
+  assert.throws(() => Object.defineProperty(refused, "stack", { get: () => HOSTILE_MARKER }), TypeError);
+});
+
+test("STORE ERROR: a setter on the prototype chain cannot stand in for a field", () => {
+  // The fields are installed with defineProperty rather than assigned, and the
+  // difference is only visible when something is listening: a plain
+  // `this.store_ref = store` would call a setter Error.prototype happened to
+  // carry, the own property would never be installed, and every read of the
+  // field would return whatever that setter's partner getter wanted to say.
+  //
+  // Planting one here is a MEASUREMENT, not a threat model — the amendment of
+  // 2026-09-11 puts mutation of an intrinsic out of scope as an attack — and it
+  // is what makes "installed as data properties" an observable requirement
+  // rather than one that assigning-and-freezing satisfies by accident.
+  const assigned = [];
+  const fields = ["store_ref", "because", "cause_kind"];
+  for (const key of fields)
+    Object.defineProperty(Error.prototype, key, {
+      configurable: true,
+      set(value) { assigned.push(value); },
+      get() { return `${HOSTILE_MARKER}-from-the-prototype`; },
+    });
+  try {
+    const error = new stores.SeamStoreUnreachable("github:checks", "the query did not finish");
+    assert.deepEqual(assigned, [], "a field was assigned through a prototype setter");
+    for (const key of fields) assert.ok(Object.hasOwn(error, key), `${key} is not an own property`);
+    assert.equal(error.store_ref, "github:checks");
+    assert.equal(error.because, "the query did not finish");
+    assert.equal(error.cause_kind, "none");
+    assertSweptConstructed("prototype-setter", error);
+  } finally {
+    for (const key of fields) delete Error.prototype[key];
+  }
+  assert.equal(Object.hasOwn(Error.prototype, "store_ref"), false, "the plant was not removed");
+});
+
+test("SWEEP CONTROL: each assertion the constructor sweep makes has been seen to fail", () => {
+  // A sweep nobody has seen fail is a sweep nobody has tested, and this one is
+  // new. SEVEN PLANTS, each differing from the shipped class in exactly ONE way,
+  // so no working assertion can cover for a broken one. Plant 1 is the code this
+  // correction replaced, verbatim; the other six isolate one clause each.
+  const REASONS = Object.freeze(["the query did not finish", "the checks source was not reachable",
+    "the reason this store was unreachable is not a registered one"]);
+  const TOKENS = Object.freeze(["github:checks", "a-store-this-file-does-not-serve"]);
+  const fixed = (storeRef, because) => [
+    TOKENS.includes(storeRef) ? storeRef : "a-store-this-file-does-not-serve",
+    REASONS.includes(because) ? because : "the reason this store was unreachable is not a registered one",
+  ];
+  const install = (target, key, value, enumerable) =>
+    Object.defineProperty(target, key, { value, writable: false, enumerable, configurable: false });
+  const text = value => (typeof value === "string" ? value : "an argument of another type");
+
+  // 1 — the constructor that shipped, exactly as the re-review found it.
+  class Interpolating extends Error {
+    constructor(storeRef, because, cause) {
+      super(`${storeRef}: ${because}`, cause === undefined ? undefined : { cause });
+      this.name = "SeamStoreUnreachable";
+      this.store_ref = storeRef;
+      this.because = because;
+    }
+  }
+
+  // 2 — right shape, right filter, and it still echoes the caller's strings.
+  class EchoesCaller extends Error {
+    constructor(storeRef, because) {
+      if (new.target !== EchoesCaller) throw new TypeError("final");
+      const message = `${text(storeRef)}: ${text(because)}`;
+      super(message);
+      install(this, "name", "SeamStoreUnreachable", false);
+      install(this, "message", message, false);
+      install(this, "stack", `SeamStoreUnreachable: ${message}`, false);
+      install(this, "store_ref", text(storeRef), true);
+      install(this, "because", text(because), true);
+      Object.freeze(this);
+    }
+  }
+
+  // 3 — refuses an unregistered reason by quoting it back, which is what the
+  // old TypeError did and what made a privileged word leave the module.
+  class QuotesTheRefusal extends Error {
+    constructor(storeRef, because) {
+      if (new.target !== QuotesTheRefusal) throw new TypeError("final");
+      if (!REASONS.includes(because))
+        throw new TypeError(`${String(because)} is not a registered store-unreachable reason`);
+      const [store, reason] = fixed(storeRef, because);
+      super(`${store}: ${reason}`);
+      install(this, "name", "SeamStoreUnreachable", false);
+      install(this, "message", `${store}: ${reason}`, false);
+      install(this, "stack", `SeamStoreUnreachable: ${store}: ${reason}`, false);
+      install(this, "store_ref", store, true);
+      install(this, "because", reason, true);
+      Object.freeze(this);
+    }
+  }
+
+  // 4 — filters both arguments, and hands the third one back untouched.
+  class KeepsCause extends Error {
+    constructor(storeRef, because, cause) {
+      if (new.target !== KeepsCause) throw new TypeError("final");
+      const [store, reason] = fixed(storeRef, because);
+      super(`${store}: ${reason}`, cause === undefined ? undefined : { cause });
+      install(this, "name", "SeamStoreUnreachable", false);
+      install(this, "message", `${store}: ${reason}`, false);
+      install(this, "stack", `SeamStoreUnreachable: ${store}: ${reason}`, false);
+      install(this, "store_ref", store, true);
+      install(this, "because", reason, true);
+      Object.freeze(this);
+    }
+  }
+
+  // 5 — a REAL engine stack: a list of the caller's file paths and frame names,
+  // bytes this module did not write, swept like any other unfixed text.
+  class EngineStack extends Error {
+    constructor(storeRef, because) {
+      if (new.target !== EngineStack) throw new TypeError("final");
+      const [store, reason] = fixed(storeRef, because);
+      super(`${store}: ${reason}`);
+      const engineStack = this.stack;
+      install(this, "name", "SeamStoreUnreachable", false);
+      install(this, "message", `${store}: ${reason}`, false);
+      install(this, "stack", engineStack, false);
+      install(this, "store_ref", store, true);
+      install(this, "because", reason, true);
+      Object.freeze(this);
+    }
+  }
+
+  // 6 — every value it yields is registered; the SHAPE is the defect, because an
+  // accessor runs code that is not this module's on every read of the field.
+  class AccessorField extends Error {
+    constructor(storeRef, because) {
+      if (new.target !== AccessorField) throw new TypeError("final");
+      const [store, reason] = fixed(storeRef, because);
+      super(`${store}: ${reason}`);
+      install(this, "name", "SeamStoreUnreachable", false);
+      install(this, "message", `${store}: ${reason}`, false);
+      install(this, "stack", `SeamStoreUnreachable: ${store}: ${reason}`, false);
+      install(this, "store_ref", store, true);
+      Object.defineProperty(this, "because", { get: () => reason, enumerable: true });
+      Object.freeze(this);
+    }
+  }
+
+  // 7 — everything above it, minus the `new.target` check.
+  class Subclassable extends Error {
+    constructor(storeRef, because) {
+      const [store, reason] = fixed(storeRef, because);
+      super(`${store}: ${reason}`);
+      install(this, "name", "SeamStoreUnreachable", false);
+      install(this, "message", `${store}: ${reason}`, false);
+      install(this, "stack", `SeamStoreUnreachable: ${store}: ${reason}`, false);
+      install(this, "store_ref", store, true);
+      install(this, "because", reason, true);
+      Object.freeze(this);
+    }
+  }
+
+  for (const [label, plant] of [["interpolating", Interpolating], ["echoes-caller", EchoesCaller],
+    ["quotes-the-refusal", QuotesTheRefusal], ["keeps-cause", KeepsCause],
+    ["engine-stack", EngineStack], ["accessor-field", AccessorField],
+    ["subclassable", Subclassable]])
+    assert.throws(() => sweepClassConstructor(`control.${label}`, plant), undefined,
+      `the sweep passed the ${label} plant, so the assertion it is planted against proves nothing`);
+
+  // The calibration: the shipped class goes through the same function untouched.
+  assert.doesNotThrow(() => sweepClassConstructor("control.shipped", stores.SeamStoreUnreachable));
+
+  // And the structural branch is what routes an export, so the routing is checked
+  // too: the class takes the class path and nothing else on these three surfaces
+  // does, while an ordinary exported function is still constructible and must
+  // therefore be swept both ways.
+  assert.equal(isClassConstructor(stores.SeamStoreUnreachable), true);
+  for (const callable of [stores.fetchPredecessorOutcomeRows, stores.fetchSchedulerLedgerRows,
+    stores.fetchCheckConclusionRows, readers.readGateConclusionEvidence,
+    readers.readPredecessorOutcomeEvidence, readers.readSchedulerCanaryEvidence,
+    rulings.seamRulingRef])
+    assert.equal(isClassConstructor(callable), false);
+  assert.equal(isConstructor(rulings.seamRulingRef), true,
+    "an ordinary function is constructible, and the sweep must not assume otherwise");
 });
 
 test("HOSTILE: no hostile query throws out of a reader, and none of its bytes come back", async () => {

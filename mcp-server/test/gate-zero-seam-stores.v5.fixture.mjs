@@ -32,7 +32,12 @@
 // Re-declared, not imported: substituting the module file means the copied
 // reader must get its error class and its closed reason set from HERE, and the
 // test asserts the real module's export names are all present below.
-export const SEAM_STORE_UNREACHABLE_REASONS = Object.freeze([
+// MODULE-PRIVATE, exactly as in the real store module, and for the same reason:
+// the substituted reader reads `.because` straight into an answer, so the set it
+// can come back with has to be a set nothing outside this file can enumerate or
+// extend. Neither name is exported, so the export-parity check in the test still
+// sees this file's surface as the real module's.
+const REGISTERED_REASONS = Object.freeze([
   "the checks source answer did not parse",
   "the checks source credentials are not configured in this process",
   "the checks source refused the request",
@@ -40,16 +45,48 @@ export const SEAM_STORE_UNREACHABLE_REASONS = Object.freeze([
   "the database client is not available in this process",
   "the connection target for this store is not configured in this process",
   "the query did not finish",
-].sort());
+  "the reason this store was unreachable is not a registered one",
+]);
+
+const REGISTERED_STORE_TOKENS = Object.freeze([
+  "record-layer:work-request-outcome-feedback",
+  "control-plane:ops.service+ops.run",
+  "github:checks",
+  "a-store-this-file-does-not-serve",
+]);
+
+function own(target, key, value, enumerable) {
+  Object.defineProperty(target, key, { value, writable: false, enumerable, configurable: false });
+}
+
+function causeKind(cause) {
+  try {
+    if (cause === undefined || cause === null) return "none";
+    if (cause instanceof SeamStoreUnreachable) return "a-seam-store-that-was-unreachable";
+    if (cause instanceof Error) return "an-error";
+    return "not-an-error";
+  } catch {
+    return "undetermined";
+  }
+}
 
 export class SeamStoreUnreachable extends Error {
   constructor(storeRef, because, cause) {
-    super(`${storeRef}: ${because}`, cause === undefined ? undefined : { cause });
-    if (!SEAM_STORE_UNREACHABLE_REASONS.includes(because))
-      throw new TypeError(`${because} is not a registered store-unreachable reason`);
-    this.name = "SeamStoreUnreachable";
-    this.store_ref = storeRef;
-    this.because = because;
+    if (new.target !== SeamStoreUnreachable)
+      throw new TypeError("this error type is final and cannot be extended");
+    const store = REGISTERED_STORE_TOKENS.includes(storeRef)
+      ? storeRef : "a-store-this-file-does-not-serve";
+    const reason = REGISTERED_REASONS.includes(because)
+      ? because : "the reason this store was unreachable is not a registered one";
+    const message = `${store}: ${reason}`;
+    super(message);
+    own(this, "name", "SeamStoreUnreachable", false);
+    own(this, "message", message, false);
+    own(this, "stack", `SeamStoreUnreachable: ${message}`, false);
+    own(this, "store_ref", store, true);
+    own(this, "because", reason, true);
+    own(this, "cause_kind", causeKind(cause), true);
+    Object.freeze(this);
   }
 }
 

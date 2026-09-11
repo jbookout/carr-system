@@ -33,33 +33,116 @@
 // Worker bundle never pulls it in through this module's import graph.
 
 /**
- * WHY `because` IS A CLOSED SET AND NOT THE UNDERLYING MESSAGE. A reader puts
- * this string straight into its answer, and an upstream message is text nobody
- * in this file controls: a driver error can carry a fragment of a DSN, a host
- * name, or a word the privileged-word sweep closes over. So the reason a store
- * was unreachable is one of the phrases below, and the real cause travels as
- * `error.cause` for a human reading a log — never into an answer.
+ * THE TWO CLOSED REGISTRIES, AND WHY NEITHER IS EXPORTED.
+ *
+ * A reader puts this error's `because` straight into its answer, so every byte
+ * of it has to be a byte this file wrote. An upstream driver message is text
+ * nobody here controls — it can carry a fragment of a DSN, a host name, or a
+ * word the privileged-word sweep closes over. A CALLER'S argument is worse:
+ * this class is exported, so anything can construct it with anything.
+ *
+ * So the constructor is a FILTER, not a formatter. `storeRef` and `because` are
+ * looked up in the frozen registries below BY IDENTITY, and the error carries
+ * the registered value that matched — never the argument. An unregistered
+ * argument is not quoted back in a complaint about itself, which is the escape
+ * the ninth review round found: it is replaced by the registered unknown-store
+ * token and the registered not-a-registered-reason phrase, so the refusal is
+ * still a refusal and still says nothing the caller wrote.
+ *
+ * Neither registry is exported. A consumer that wants to know what this file
+ * can say reads this file; an importer that could enumerate the set could
+ * assemble a message out of it and hand it back in.
  */
 import { ORGANIZATION_TENANT_ID } from "./identity.js";
 
-export const SEAM_STORE_UNREACHABLE_REASONS = Object.freeze([
-  "the checks source answer did not parse",
-  "the checks source credentials are not configured in this process",
-  "the checks source refused the request",
-  "the checks source was not reachable",
-  "the database client is not available in this process",
-  "the connection target for this store is not configured in this process",
-  "the query did not finish",
-].sort());
+const STORE_TOKENS = Object.freeze({
+  predecessorOutcome: "record-layer:work-request-outcome-feedback",
+  schedulerLedger: "control-plane:ops.service+ops.run",
+  checkConclusion: "github:checks",
+  unregistered: "a-store-this-file-does-not-serve",
+});
+
+const UNREACHABLE_REASONS = Object.freeze({
+  answerDidNotParse: "the checks source answer did not parse",
+  credentialsNotConfigured: "the checks source credentials are not configured in this process",
+  sourceRefused: "the checks source refused the request",
+  sourceNotReachable: "the checks source was not reachable",
+  clientNotAvailable: "the database client is not available in this process",
+  targetNotConfigured: "the connection target for this store is not configured in this process",
+  queryDidNotFinish: "the query did not finish",
+  notRegistered: "the reason this store was unreachable is not a registered one",
+});
+
+const REGISTERED_STORE_TOKENS = Object.freeze(Object.values(STORE_TOKENS));
+const REGISTERED_REASONS = Object.freeze(Object.values(UNREACHABLE_REASONS));
+
+/**
+ * THE UNDERLYING CAUSE IS DROPPED, NOT CARRIED. An earlier draft kept it on
+ * `error.cause` "for a human reading a log", and that is precisely how a
+ * caller-supplied object reached the public surface: `new SeamStoreUnreachable(
+ * anything, anything, { ok: true })` handed its own third argument straight
+ * back. What survives instead is one of the four codes below, decided by
+ * `instanceof` against this module's own type and the intrinsic Error — a
+ * boolean question, so nothing the cause holds can answer it with text.
+ *
+ * The check is wrapped because `instanceof` is not a safe read: a Proxy's
+ * getPrototypeOf trap runs during the prototype walk and can throw whatever the
+ * caller wrote. A throw there is answered by the unknown code, in this file.
+ */
+const CAUSE_KINDS = Object.freeze({
+  none: "none",
+  seamStore: "a-seam-store-that-was-unreachable",
+  error: "an-error",
+  other: "not-an-error",
+  unknown: "undetermined",
+});
+
+function causeKind(cause) {
+  try {
+    if (cause === undefined || cause === null) return CAUSE_KINDS.none;
+    if (cause instanceof SeamStoreUnreachable) return CAUSE_KINDS.seamStore;
+    if (cause instanceof Error) return CAUSE_KINDS.error;
+    return CAUSE_KINDS.other;
+  } catch {
+    return CAUSE_KINDS.unknown;
+  }
+}
+
+/**
+ * Every own property is installed as a NON-WRITABLE, NON-CONFIGURABLE DATA
+ * property, and the finished error is frozen. A plain assignment would run a
+ * setter if one were ever planted on the prototype chain, and a configurable
+ * property can be redefined as an accessor afterwards; neither is available
+ * here. `enumerable` says only whether the field belongs in a serialization —
+ * the three facts do, `name`/`message`/`stack` keep Error's convention.
+ */
+function own(target, key, value, enumerable) {
+  Object.defineProperty(target, key, { value, writable: false, enumerable, configurable: false });
+}
 
 export class SeamStoreUnreachable extends Error {
   constructor(storeRef, because, cause) {
-    super(`${storeRef}: ${because}`, cause === undefined ? undefined : { cause });
-    if (!SEAM_STORE_UNREACHABLE_REASONS.includes(because))
-      throw new TypeError(`${because} is not a registered store-unreachable reason`);
-    this.name = "SeamStoreUnreachable";
-    this.store_ref = storeRef;
-    this.because = because;
+    // SUBCLASSING IS REFUSED, BEFORE ANY WORK HAPPENS. A subclass runs its own
+    // constructor after this one and can install anything it likes — including
+    // the caller's text under these exact names — while still passing an
+    // `instanceof` check. `new.target` is the only moment that is visible.
+    if (new.target !== SeamStoreUnreachable)
+      throw new TypeError("this error type is final and cannot be extended");
+    const store = REGISTERED_STORE_TOKENS.includes(storeRef) ? storeRef : STORE_TOKENS.unregistered;
+    const reason = REGISTERED_REASONS.includes(because) ? because : UNREACHABLE_REASONS.notRegistered;
+    const message = `${store}: ${reason}`;
+    super(message);
+    own(this, "name", "SeamStoreUnreachable", false);
+    own(this, "message", message, false);
+    // THE STACK IS A FIXED STRING, and that is deliberate rather than lazy. A
+    // real stack is a list of file paths and function names from the CALLER'S
+    // frames — text this file did not write, which is exactly what may not
+    // travel on this surface. Where the store was and why is already here.
+    own(this, "stack", `SeamStoreUnreachable: ${message}`, false);
+    own(this, "store_ref", store, true);
+    own(this, "because", reason, true);
+    own(this, "cause_kind", causeKind(cause), true);
+    Object.freeze(this);
   }
 }
 
@@ -107,12 +190,12 @@ function configured(name, storeRef, because) {
  */
 async function readOnlyStatements(storeRef, statements) {
   const connectionString = configured("DATABASE_URL_READER", storeRef,
-    "the connection target for this store is not configured in this process");
+    UNREACHABLE_REASONS.targetNotConfigured);
   let pg;
   try {
     ({ default: pg } = await import("pg"));
   } catch (cause) {
-    throw new SeamStoreUnreachable(storeRef, "the database client is not available in this process", cause);
+    throw new SeamStoreUnreachable(storeRef, UNREACHABLE_REASONS.clientNotAvailable, cause);
   }
   const pool = new pg.Pool({ connectionString, max: 1, statement_timeout: 15000 });
   try {
@@ -128,7 +211,7 @@ async function readOnlyStatements(storeRef, statements) {
     }
   } catch (cause) {
     if (cause instanceof SeamStoreUnreachable) throw cause;
-    throw new SeamStoreUnreachable(storeRef, "the query did not finish", cause);
+    throw new SeamStoreUnreachable(storeRef, UNREACHABLE_REASONS.queryDidNotFinish, cause);
   } finally {
     await pool.end().catch(() => {});
   }
@@ -174,7 +257,7 @@ async function readOnlyStatements(storeRef, statements) {
  * on it. Nothing is invented to fill a row the store did not have.
  */
 export async function fetchPredecessorOutcomeRows(query) {
-  const storeRef = "record-layer:work-request-outcome-feedback";
+  const storeRef = STORE_TOKENS.predecessorOutcome;
   const workRequestRef = addressed(query, "workRequestRef");
   const [receipts, cards, pending] = await readOnlyStatements(storeRef, [
     { text: `select r.feedback_hash as accepted_feedback_hash, r.accepted_at
@@ -236,7 +319,7 @@ export async function fetchPredecessorOutcomeRows(query) {
  * presentation choice; the reader compares instants and never trusts position.
  */
 export async function fetchSchedulerLedgerRows(query) {
-  const storeRef = "control-plane:ops.service+ops.run";
+  const storeRef = STORE_TOKENS.schedulerLedger;
   const serviceKey = addressed(query, "serviceKey");
   const canaryRunKey = addressed(query, "canaryRunKey");
   const [rows] = await readOnlyStatements(storeRef, [{ text: `
@@ -273,10 +356,10 @@ export async function fetchSchedulerLedgerRows(query) {
  * repository whose checks it controls.
  */
 export async function fetchCheckConclusionRows(query) {
-  const storeRef = "github:checks";
+  const storeRef = STORE_TOKENS.checkConclusion;
   const headSha = addressed(query, "headSha");
   const checkName = addressed(query, "checkName");
-  const missing = "the checks source credentials are not configured in this process";
+  const missing = UNREACHABLE_REASONS.credentialsNotConfigured;
   const token = configured("GITHUB_TOKEN", storeRef, missing);
   const repository = configured("GITHUB_REPOSITORY", storeRef, missing);
   const url = `https://api.github.com/repos/${repository}/commits/${headSha}/check-runs`
@@ -292,16 +375,16 @@ export async function fetchCheckConclusionRows(query) {
       },
     });
   } catch (cause) {
-    throw new SeamStoreUnreachable(storeRef, "the checks source was not reachable", cause);
+    throw new SeamStoreUnreachable(storeRef, UNREACHABLE_REASONS.sourceNotReachable, cause);
   }
   if (!response.ok)
-    throw new SeamStoreUnreachable(storeRef, "the checks source refused the request",
+    throw new SeamStoreUnreachable(storeRef, UNREACHABLE_REASONS.sourceRefused,
       new Error(`http ${response.status}`));
   let body;
   try {
     body = await response.json();
   } catch (cause) {
-    throw new SeamStoreUnreachable(storeRef, "the checks source answer did not parse", cause);
+    throw new SeamStoreUnreachable(storeRef, UNREACHABLE_REASONS.answerDidNotParse, cause);
   }
   const runs = Array.isArray(body?.check_runs) ? body.check_runs : [];
   return {
