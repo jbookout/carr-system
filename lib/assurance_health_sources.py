@@ -19,29 +19,31 @@ UNREAD, NEVER DEFAULTED.  The canonical health snapshot reads the control-plane
 workflow rows, the scheduler observation receipts and the Completion Register.
 It does NOT read independent artifact reviews, attempt receipts, candidate
 outcome oracles, activation readbacks or accepted outcome feedback.  Each of
-those five is therefore handed to the projection as ``UNREADABLE`` together with
-the name of the surface that would have to supply it -- so the resulting row can
+those is therefore handed to the projection as ``UNREADABLE`` together with the
+name of the surface that would have to supply it -- so the resulting row can
 reach ``unknown``, ``disabled`` or ``not-yet-operational`` and can never reach
 green.  That is the point: the gap becomes a named gap instead of a silence.
 
-THE ONE LAYER THIS READING GENUINELY CARRIES is the controller readback, and it
-is admitted under a decision procedure rather than a judgement:
+AND THE CONTROLLER READBACK IS ONE OF THEM, which is the correction this module
+most recently took.  An earlier cut treated the scheduler observation receipts in
+the snapshot as the one layer the reading "genuinely carried", and handed them to
+an admission function in ``lib/assurance_health`` that minted passing controller
+evidence from them.  A review then reproduced ``controller_assessment: passing``
+from a snapshot written by hand: nothing in that chain was a read, because THIS
+MODULE READS NOTHING AND ITS CALLER SUPPLIES THE SNAPSHOT.  The shape of an F09
+row was standing in for the authority of the store behind it.
+
+So the decision procedure is now the same one every other layer gets, and it
+still distinguishes the cases a reader needs to see:
 
   1. Collect the registered scheduler surfaces of the exact workflow identity
      that carry BOTH a ``scheduler_state`` and an ``observed_at``.
-  2. Zero -- the read happened and there is no receipt: hand over ``None``
-     (genuinely absent), which is not the same fact as an unread layer.
-  3. More than one -- two receipts are two identities, and one controller
-     assessment needs one: hand over ``UNREADABLE`` naming both surface ids.
-     Picking either would be the cross-layer guessing this slice removes.
-  4. Exactly one -- hand its two facts (scheduler state, observed_at) and the
-     registry's OWN ``observation_max_age_seconds`` to the domain's registered
-     evidence owner, ``admit_scheduler_observation_receipt``.  THIS MODULE DOES
-     NOT BUILD THE RECORD: the owner derives the basis, status, refs, digest,
-     evaluator identity and expiry itself, and refuses any readback the
-     authoritative census did not itself classify as seen.  So nothing this
-     adapter says about a receipt -- and nothing its caller says -- can make a
-     layer passing; only the authoritative reading can.
+  2. Whatever the count, hand the layer over as ``UNREADABLE``: no evidence owner
+     for it exists in this repository, so nothing here can make it current.
+  3. Say in the notes WHAT this reading held -- no receipt, exactly one, or two
+     that would have been ambiguous anyway -- and name the seam that is owed
+     before any of them could become evidence.  The count is diagnostic, and it
+     is never the difference between unread and passing.
 
 WHAT IT REFUSES TO INVENT.  An owner is read from the checked-in workflow
 manifest (``inventory.owner``); a workflow that declares none is reported as
@@ -57,8 +59,8 @@ from typing import Any
 
 from lib.assurance_health import (
     EVIDENCE_SLOTS,
+    OWED_EVIDENCE_OWNER_SEAMS,
     AssuranceHealthContractError,
-    admit_scheduler_observation_receipt,
     assurance_health,
 )
 from lib.control_plane_workflow_truth import (
@@ -86,6 +88,10 @@ UNREAD_LAYER_SOURCE = {
     "actual_business_outcome":
         "an accepted sourced outcome-feedback receipt joined through a Work Request "
         "identity; the canonical health snapshot reads no outcome-feedback surface",
+    "controller_assessment":
+        "a reading of ops.legacy_schedule_observation_receipt performed by whoever "
+        "admits it; the snapshot's observation entries are supplied to this module, "
+        "and a supplied receipt is its caller's assertion rather than a reading",
 }
 
 
@@ -115,41 +121,27 @@ def _observation_records(surfaces: Any, key: Any, version: Any) -> tuple[
     return found, sorted(ids)
 
 
-def _controller_evidence(surfaces: Any, key: Any, version: Any, max_age_seconds: int,
-                         truth_row: Any, notes: list[str]) -> Any:
-    found, ids = _observation_records(surfaces, key, version)
-    if not found:
-        notes.append(
-            "controller_assessment: this reading holds no scheduler observation receipt for "
-            "this workflow; the layer is absent, not unread")
-        return None
-    if len(found) > 1:
-        notes.append(
-            f"controller_assessment: {len(found)} scheduler observation receipts "
-            f"({', '.join(ids)}) each bind this workflow; one controller assessment needs one "
-            "exact identity, and choosing between them here would be a guess")
-        return UNREADABLE
+def _controller_evidence(surfaces: Any, key: Any, version: Any,
+                         notes: list[str]) -> Any:
+    """Always UNREAD, and specific about what this reading actually held.
 
-    surface, observation = found[0]
-    surface_id = str(surface.get("surface_id"))
-    # ADMISSION, NOT CONSTRUCTION.  This module does not build the evidence record:
-    # it hands the receipt's own two facts and the registry's own window to the
-    # domain's single registered evidence owner, which derives the basis, status,
-    # refs, digest, evaluator identity and expiry itself and refuses a readback the
-    # authoritative census never classified.  Nothing this adapter could say about
-    # a receipt can make it pass.
-    try:
-        return admit_scheduler_observation_receipt(
-            workflow_truth_row=truth_row,
-            surface_id=surface_id,
-            scheduler_state=observation["scheduler_state"],
-            observed_at=observation["observed_at"],
-            observation_max_age_seconds=int(max_age_seconds))
-    except (AssuranceHealthContractError, TypeError, ValueError) as exc:
-        notes.append(
-            f"controller_assessment: {surface_id} carries an observation the evidence owner "
-            f"would not admit ({exc}); an unadmitted readback is unread, never current")
-        return UNREADABLE
+    There is no evidence owner for this layer in this repository, so no count of
+    receipts in a caller-supplied snapshot can make it current.  What the count
+    still earns is an accurate note: a reader learns whether the snapshot held no
+    receipt, one, or two that no admission could have chosen between.
+    """
+    _, ids = _observation_records(surfaces, key, version)
+    if not ids:
+        held = "this reading holds no scheduler observation receipt for this workflow"
+    elif len(ids) == 1:
+        held = f"this reading holds one scheduler observation receipt ({ids[0]})"
+    else:
+        held = (f"this reading holds {len(ids)} scheduler observation receipts "
+                f"({', '.join(ids)}), which one controller assessment could not have "
+                "chosen between in any case")
+    notes.append(f"controller_assessment: {held}; it is UNREAD, not current — "
+                 f"{OWED_EVIDENCE_OWNER_SEAMS['controller_assessment']}")
+    return UNREADABLE
 
 
 def _owner(owners: Any, key: str, version: int) -> str | None:
@@ -181,14 +173,6 @@ def assurance_health_scopes(workflows: Any) -> dict[str, Any]:
     if not isinstance(rows, list):
         return {"available": False, "reason": "the workflow census carries no rows"}
 
-    # The census carries the registry's own window. Reading it from there rather
-    # than from the caller keeps one declared freshness window in the system.
-    max_age = census.get("observation_max_age_seconds")
-    if not isinstance(max_age, int) or isinstance(max_age, bool) or max_age <= 0:
-        return {"available": False,
-                "reason": "the census carries no observation_max_age_seconds; this module "
-                          "defines no freshness window of its own"}
-
     surfaces = workflows.get("surfaces")
     owners = workflows.get("owners")
 
@@ -208,12 +192,16 @@ def assurance_health_scopes(workflows: Any) -> dict[str, Any]:
                           "inventory.owner for this workflow, and an owner is never invented"})
             continue
         row_notes: list[str] = []
-        evidence: dict[str, Any] = {
-            slot: UNREADABLE for slot in EVIDENCE_SLOTS if slot in UNREAD_LAYER_SOURCE}
+        # EVERY layer is unread on this surface, so every slot is named and none
+        # is defaulted.  The controller layer gets its own note because this
+        # reading may actually be holding receipts that still are not evidence.
+        evidence: dict[str, Any] = {slot: UNREADABLE for slot in EVIDENCE_SLOTS}
         for slot, source in UNREAD_LAYER_SOURCE.items():
+            if slot == "controller_assessment":
+                continue
             row_notes.append(f"{slot}: not read by this surface — it would come from {source}")
         evidence["controller_assessment"] = _controller_evidence(
-            surfaces, key, version, max_age, row, row_notes)
+            surfaces, key, version, row_notes)
         scopes.append({
             # No work_request_id: the census carries none, so this is a workflow-only
             # scope and its business-outcome layer is unbindable by construction.

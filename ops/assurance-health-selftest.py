@@ -28,6 +28,7 @@ fail rather than paper over it.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import sys
 from pathlib import Path
@@ -162,21 +163,29 @@ _DEFAULT = object()
 
 
 def _row(scope=SCOPE, truth=_DEFAULT, evidence=_DEFAULT, now=NOW):
-    """One row from the PURE LABEL PREDICATE, which is not the wired surface.
+    """One verdict from the MODULE-PRIVATE label logic, through the test-only hook.
 
-    Fixture-shaped evidence is exactly what the predicate exists to be tested
-    against -- including the six-passing shape, which is the only way to prove
-    the ladder really requires all six layers.  The wired entry points admit
-    none of it, and ``caller_evidence_is_never_authority_checks`` pins that.
+    THE ONLY DOOR TO THE CLASSIFIER.  The predicate is not exported and is not in
+    ``lib.assurance_health.__all__``; this suite reaches it through
+    ``_test_only_hypothetical_row``, whose answer comes back under
+    ``would_be_healthy_if_authoritative`` because that is what it is -- what the
+    ladder WOULD say if these fixture shapes were evidence an owner had admitted.
+    No public callable in that module will produce this answer from these shapes,
+    and ``public_surface_guard_checks`` parses the file to keep it that way.
+
+    Fixture-shaped evidence is exactly what the ladder must be tested against --
+    including the six-passing shape, which is the only way to prove it really
+    requires all six layers.
     """
-    from lib.assurance_health import unwired_label_predicate_row
-    row = unwired_label_predicate_row(
+    from lib.assurance_health import _test_only_hypothetical_row
+    row = _test_only_hypothetical_row(
         scope=scope,
         workflow_truth=_truth(scope) if truth is _DEFAULT else truth,
         evidence=_evidence(scope) if evidence is _DEFAULT else evidence,
-        now=now)
+        now=now)["would_be_healthy_if_authoritative"]
     PROJECTED.append(row)
     return row
+
 
 
 def display_state_checks(health) -> None:
@@ -420,7 +429,9 @@ def actual_outcome_separation_checks(health) -> None:
 
 def scoped_degradation_checks(health) -> None:
     """One workflow walks the ladder; an unrelated bound scope does not move."""
-    from lib.assurance_health import unwired_label_predicate as assurance_health
+    from lib.assurance_health import _test_only_hypothetical_census
+    def assurance_health(**kwargs):
+        return _test_only_hypothetical_census(**kwargs)["would_be_healthy_if_authoritative"]
 
     def project(**failing):
         bundles = [
@@ -602,7 +613,9 @@ def scope_identity_checks(health) -> None:
           wrong_request["evidence"]["actual_business_outcome"]["state"] == "mismatched"
           and wrong_request["green"] is False)
 
-    from lib.assurance_health import unwired_label_predicate as assurance_health
+    from lib.assurance_health import _test_only_hypothetical_census
+    def assurance_health(**kwargs):
+        return _test_only_hypothetical_census(**kwargs)["would_be_healthy_if_authoritative"]
     try:
         assurance_health(scopes=[
             {"scope": SCOPE, "workflow_truth": _truth(SCOPE), "evidence": _evidence()},
@@ -817,11 +830,11 @@ def workflow_only_scope_checks(health) -> None:
           joined["evidence"]["artifact_assessment"]["state"] == "mismatched",
           joined["evidence"]["artifact_assessment"]["state"])
 
-    both = health.unwired_label_predicate(scopes=[
+    both = health._test_only_hypothetical_census(scopes=[
         {"scope": WORKFLOW_ONLY, "workflow_truth": _truth(WORKFLOW_ONLY),
          "evidence": _evidence(WORKFLOW_ONLY)},
         {"scope": SCOPE, "workflow_truth": _truth(SCOPE), "evidence": _evidence(SCOPE)},
-    ], now=NOW)
+    ], now=NOW)["would_be_healthy_if_authoritative"]
     PROJECTED.extend(both["rows"])
     check("the same workflow bound with and without a Work Request is two scopes",
           both["summary"]["scopes"] == 2, json.dumps(both["summary"]))
@@ -832,7 +845,7 @@ def workflow_only_scope_checks(health) -> None:
     bad_identities: tuple[Any, ...] = ("", "   ", 7, True, [], {})
     for bad in bad_identities:
         try:
-            health.unwired_label_predicate_row(
+            health._test_only_hypothetical_row(
                 scope={**WORKFLOW_ONLY, "work_request_id": bad},
                 workflow_truth=_truth(WORKFLOW_ONLY), evidence=_evidence(WORKFLOW_ONLY),
                 now=NOW)
@@ -842,6 +855,46 @@ def workflow_only_scope_checks(health) -> None:
         check(f"a malformed Work Request identity {bad!r} is refused, never coerced to unbound",
               refused)
 
+    # TWO DEGRADED WORKFLOW-ONLY SCOPES, THROUGH THE LABEL LOGIC ITSELF.
+    #
+    # THE DEFECT THIS PINS.  The summary listed its degraded scopes by
+    # ``work_request_id``, which every scope the live census binds leaves absent.
+    # One degraded scope never compared anything, so every fixture stayed green
+    # while the first census carrying two of them raised TypeError on ``None <
+    # None`` inside the projection -- which the adapter does not catch.  The
+    # assertion has to carry TWO of them, and it lives here rather than on the
+    # health surface because no reading that surface can perform is determinate
+    # enough to degrade a scope at all: it has no admitted evidence to fail.
+    other_workflow_only = {"workflow_key": "also-degrading", "workflow_version": 1,
+                           "owner": "assurance_fabric_child_owner"}
+    degraded_pair = health._test_only_hypothetical_census(scopes=[
+        {"scope": WORKFLOW_ONLY, "workflow_truth": _truth(WORKFLOW_ONLY),
+         "evidence": _evidence(WORKFLOW_ONLY, controller_assessment=_ev(
+             "controller_assessment", scope=WORKFLOW_ONLY, status="fail"))},
+        {"scope": other_workflow_only, "workflow_truth": _truth(other_workflow_only),
+         "evidence": _evidence(other_workflow_only, controller_assessment=_ev(
+             "controller_assessment", scope=other_workflow_only, status="fail"))},
+    ], now=NOW)["would_be_healthy_if_authoritative"]
+    PROJECTED.extend(degraded_pair["rows"])
+    check("two degraded scopes with no Work Request identity are both projected",
+          degraded_pair["summary"]["scopes"] == 2
+          and degraded_pair["summary"]["states"]["degraded"] == 2,
+          json.dumps(degraded_pair["summary"]["states"]))
+    check("the degraded list orders and names both by the identity they actually have",
+          degraded_pair["summary"]["degraded_scopes"]
+          == ["also-degrading@v1", "assurance-fabric-child@v1"],
+          json.dumps(degraded_pair["summary"]["degraded_scopes"]))
+    check("a Work Request-bound scope keeps its id in the same degraded list",
+          health._test_only_hypothetical_census(scopes=[
+              {"scope": WORKFLOW_ONLY, "workflow_truth": _truth(WORKFLOW_ONLY),
+               "evidence": _evidence(WORKFLOW_ONLY, controller_assessment=_ev(
+                   "controller_assessment", scope=WORKFLOW_ONLY, status="fail"))},
+              {"scope": SCOPE, "workflow_truth": _truth(SCOPE),
+               "evidence": _evidence(SCOPE, controller_assessment=_ev(
+                   "controller_assessment", status="fail"))},
+          ], now=NOW)["would_be_healthy_if_authoritative"]["summary"]["degraded_scopes"]
+          == ["assurance-fabric-child@v1", "assurance-fabric-child@v1/wr-a01-0001"])
+
     check("unbindable is a declared evidence state that is not a passing one",
           "unbindable" in health.EVIDENCE_STATES
           and "unbindable" not in health.DETERMINATE_NONPASS_EVIDENCE_STATES
@@ -849,33 +902,30 @@ def workflow_only_scope_checks(health) -> None:
 
 
 def caller_evidence_is_never_authority_checks(health) -> None:
-    """THE EXHAUSTIVE UNREACHABILITY MATRIX for the WIRED projection.
+    """THE EXHAUSTIVE UNREACHABILITY MATRIX for the PUBLIC surface.
 
     A caller-supplied label, class string, flag, receipt object or injected
     holder is never authority.  ``lib/assurance_health`` owns the label logic and
-    owns no evidence: five of its six layers have NO evidence owner anywhere in
+    owns no evidence: NOT ONE of its six layers has an evidence owner anywhere in
     this repository, so there is no admission point through which a caller could
-    make one of them passing, whatever it passes in.  This iterates every
-    caller-controlled input shape the wired entry points accept and asserts the
+    make any of them passing, whatever it passes in.  This iterates every
+    caller-controlled input shape the public entry points accept and asserts the
     privileged outcomes -- ``passing``, ``healthy``/green and ``act`` -- are
     unreachable rather than merely undocumented.
     """
-    ownerless = [slot for slot in health.EVIDENCE_SLOTS
-                 if slot not in health.EVIDENCE_OWNERS]
-    check("five of the six layers have no evidence owner in this repository",
-          sorted(ownerless) == ["activation_readback", "actual_business_outcome",
-                                "artifact_assessment", "candidate_outcome_oracle",
-                                "execution_assessment"],
-          json.dumps(sorted(ownerless)))
-    check("the one owned layer names the authoritative source that owns it",
-          set(health.EVIDENCE_OWNERS) == {"controller_assessment"}
-          and "legacy_schedule_observation_receipt"
-          in health.EVIDENCE_OWNERS["controller_assessment"],
-          json.dumps(health.EVIDENCE_OWNERS))
-    check("every ownerless layer names the seam that is owed before it can pass",
-          all(slot in health.OWED_EVIDENCE_OWNER_SEAMS for slot in ownerless)
-          and all(health.OWED_EVIDENCE_OWNER_SEAMS[slot].strip() for slot in ownerless),
+    check("no layer has an evidence owner in this repository",
+          health.EVIDENCE_OWNERS == {}, json.dumps(health.EVIDENCE_OWNERS))
+    check("every layer names the seam that is owed before it could ever pass",
+          all(slot in health.OWED_EVIDENCE_OWNER_SEAMS for slot in health.EVIDENCE_SLOTS)
+          and all(health.OWED_EVIDENCE_OWNER_SEAMS[slot].strip()
+                  for slot in health.EVIDENCE_SLOTS),
           json.dumps(sorted(health.OWED_EVIDENCE_OWNER_SEAMS)))
+    check("the controller layer's owed seam names a READ, not a shape to trust",
+          "ops.legacy_schedule_observation_receipt"
+          in health.OWED_EVIDENCE_OWNER_SEAMS["controller_assessment"]
+          and "tools/health-check.py"
+          in health.OWED_EVIDENCE_OWNER_SEAMS["controller_assessment"],
+          health.OWED_EVIDENCE_OWNER_SEAMS["controller_assessment"])
 
     # ---- every caller-controlled shape, for every slot ----------------------
     far_future = "2099-01-01T00:00:00+00:00"
@@ -884,7 +934,7 @@ def caller_evidence_is_never_authority_checks(health) -> None:
         """An injected holder wearing the admitted shape.  Shape is not authority."""
         def __init__(self, slot, record):
             self.slot = slot
-            self.owner = health.EVIDENCE_OWNERS.get("controller_assessment", "")
+            self.owner = "receipt-producer:ops.legacy_schedule_observation_receipt"
             self.record = record
 
     class _EvidenceDict(dict):
@@ -897,7 +947,7 @@ def caller_evidence_is_never_authority_checks(health) -> None:
         yield f"{slot}: a record whose expiry is decades away", _ev(slot, expires=far_future)
         yield (f"{slot}: a record naming this repository's own admission function",
                _ev(slot, evaluator_identity="lib/assurance_health.admit_evidence"))
-        yield (f"{slot}: a record claiming the owned layer's evaluator identity",
+        yield (f"{slot}: a record claiming the retired admission path's evaluator",
                _ev(slot, evaluator_identity=
                    "receipt-producer:ops.legacy_schedule_observation_receipt"))
         yield (f"{slot}: a record carrying an extra admitted/verified flag",
@@ -922,15 +972,14 @@ def caller_evidence_is_never_authority_checks(health) -> None:
             if row["green"] or row["state"] == health.GREEN_STATE \
                     or row["capability_stage"] == "act":
                 forged_green.append(label)
-            if row["evidence"][slot]["state"] == "passing" \
-                    and slot not in health.EVIDENCE_OWNERS:
+            if row["evidence"][slot]["state"] == "passing":
                 forged_passing.append(label)
-    check("no caller-controlled evidence shape reaches passing on an ownerless layer",
+    check("no caller-controlled evidence shape reaches passing on any layer",
           not forged_passing, json.dumps(forged_passing[:4]))
     check("no caller-controlled evidence shape reaches green or act capability",
           not forged_green, json.dumps(forged_green[:4]))
 
-    # ---- the whole bundle at once, through both wired entry points ----------
+    # ---- the whole bundle at once, through both public entry points ---------
     whole = health.assurance_health_row(
         scope=SCOPE, workflow_truth=_truth(SCOPE), evidence=_evidence(), now=NOW)
     PROJECTED.append(whole)
@@ -940,9 +989,8 @@ def caller_evidence_is_never_authority_checks(health) -> None:
           and not whole["green"] and whole["capability_stage"] == "unavailable",
           json.dumps({slot: whole["evidence"][slot]["state"]
                       for slot in health.EVIDENCE_SLOTS}))
-    check("each unreadable reason names the owed seam, or the owner that alone admits it",
-          all(any(("no evidence owner" if slot not in health.EVIDENCE_OWNERS
-                   else "only that owner's admission") in reason
+    check("each unreadable reason names the owed seam rather than a generic absence",
+          all(any("no evidence owner" in reason
                   for reason in whole["evidence"][slot]["reasons"])
               for slot in health.EVIDENCE_SLOTS),
           json.dumps(whole["evidence"]["controller_assessment"]["reasons"]))
@@ -956,76 +1004,162 @@ def caller_evidence_is_never_authority_checks(health) -> None:
           and census["summary"]["states"]["healthy"] == 0,
           json.dumps(census["summary"]["states"]))
 
-    # ---- the admitted holder itself has no public constructor ---------------
-    refused = []
-    for args, kwargs in ((("controller_assessment", _ev("controller_assessment")), {}),
-                         ((), {"slot": "controller_assessment",
-                               "record": _ev("controller_assessment")}),
-                         ((object(), "controller_assessment", "owner",
-                           _ev("controller_assessment")), {})):
-        try:
-            health.AdmittedEvidence(*args, **kwargs)  # type: ignore[call-arg]
-            refused.append(False)
-        except (health.AssuranceHealthContractError, TypeError):
-            refused.append(True)
-    check("AdmittedEvidence cannot be constructed by a caller at all",
-          all(refused), json.dumps(refused))
+    # ---- the retired admission path is gone, not renamed --------------------
+    # THE DEFECT THIS PINS.  This module used to export an admission function
+    # that minted a PASSING controller record out of an F09-SHAPED ROW its caller
+    # supplied, and a review reproduced ``controller_assessment: passing`` from a
+    # hand-written census.  Nothing in that chain was a read.  A rename would have
+    # left the route open, so the function and its holder were removed.
+    retired = [name for name in
+               ("admit_scheduler_observation_receipt", "AdmittedEvidence",
+                "admit_evidence", "admit")
+               if hasattr(health, name)]
+    check("no admission function survives anywhere on the module, under any name",
+          not retired, json.dumps(retired))
+    minting = [name for name in dir(health)
+               if not name.startswith("_") and "admit" in name.lower()]
+    check("nothing named like an admission point is reachable on the module",
+          not minting, json.dumps(minting))
 
-    # ---- the one owned layer derives every field it asserts ------------------
-    # The census row this admission stands on is built by the real F09 projection
-    # from the same observation receipt, so the corroboration below is the
-    # authoritative reading's, not a restatement of the caller's.
-    seen = _census(surfaces=[_surface("assurance-fabric-child.launchd.v1",
-                                      observed=OBSERVED)])["rows"][0]
-    check("the census row this admission stands on saw the receipt itself",
-          seen["evidence"]["native_schedule"] in ("observed", "stale"),
-          seen["evidence"]["native_schedule"])
-    record = health.admit_scheduler_observation_receipt(
-        workflow_truth_row=seen, surface_id="assurance-fabric-child.launchd.v1",
-        scheduler_state="enabled", observed_at=OBSERVED,
-        observation_max_age_seconds=MAX_AGE).record
-    check("the owned layer derives its ref, digest, evaluator, basis, status and expiry",
-          record["evidence_ref"] == "observation-receipt:assurance-fabric-child.launchd.v1"
-          and record["basis"] == "controller_readback"
-          and record["status"] == "pass"
-          and record["evaluator_identity"].startswith("receipt-producer:")
-          and record["expires_at"].startswith("2026-09-09T11:15:00"),
-          json.dumps(record))
-    check("a scheduler state outside the provider vocabulary is never a pass",
-          health.admit_scheduler_observation_receipt(
-              workflow_truth_row=seen,
-              surface_id="assurance-fabric-child.launchd.v1",
-              scheduler_state="totally-fine", observed_at=OBSERVED,
-              observation_max_age_seconds=MAX_AGE).record["status"] == "error")
-    refused_rows: tuple[dict[str, Any], ...] = (
-        {}, {"schema_version": "not-f09"},
-        dict(seen, evidence={"native_schedule": "missing"}),
-        dict(seen, evidence={"native_schedule": "not_required"}),
-        dict(seen, evidence={"native_schedule": "conflicting"}),
-        _census()["rows"][0])
-    corroboration_refused = 0
-    for row_shape in refused_rows:
+
+def public_surface_guard_checks(health) -> None:
+    """PARSER-BACKED. The public names of the module, read out of its own syntax.
+
+    WHY A PARSER AND NOT A REGEX.  The claim being made is about the module's
+    PUBLIC SURFACE, and that is a syntactic fact: which top-level names it binds,
+    and which of them ``__all__`` exports.  A regex over the text can be fooled by
+    a name inside a docstring, a comment or a string, in either direction -- and a
+    guard that can be fooled is worse than none, because it reports green.  So
+    this parses ``lib/assurance_health.py`` with ``ast`` and reads the bindings.
+
+    WHAT IT FORBIDS, exactly: no public name may be a route that turns
+    caller-controlled input into a privileged outcome.  Two checks carry that.
+    (1) The classifier and every admission-shaped name must be absent from both
+    ``__all__`` and the module's non-underscore top-level bindings.  (2) Every
+    public callable is CALLED with caller-controlled shapes, and the privileged
+    strings must not appear anywhere in what comes back.
+    """
+    import ast
+    import inspect
+
+    source = (REPO / "lib" / "assurance_health.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    bound: set[str] = set()
+    declared_all: list[str] = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bound.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    bound.add(target.id)
+                    if target.id == "__all__" and isinstance(node.value, (ast.List, ast.Tuple)):
+                        declared_all = [element.value for element in node.value.elts
+                                        if isinstance(element, ast.Constant)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            bound.add(node.target.id)
+
+    check("the module declares an explicit public export list",
+          bool(declared_all), json.dumps(declared_all))
+    public = {name for name in bound if not name.startswith("_")}
+    check("every exported name is actually bound at module level",
+          not sorted(set(declared_all) - bound),
+          json.dumps(sorted(set(declared_all) - bound)))
+    check("the parser and the imported module agree on the public names",
+          public == {name for name in dir(health) if not name.startswith("_")},
+          json.dumps(sorted(public
+                            ^ {name for name in dir(health) if not name.startswith("_")})))
+
+    # THE FORBIDDEN ROUTES, by the shape of what they do rather than by one name:
+    # anything that classifies caller shapes into a label, and anything that
+    # admits caller shapes as evidence.
+    forbidden_public = sorted(
+        name for name in public | set(declared_all)
+        if any(token in name.lower() for token in
+               ("predicate", "unwired", "admit", "fixture", "compile", "classify")))
+    check("no classifier, admission, fixture or compile route is public",
+          not forbidden_public, json.dumps(forbidden_public))
+    for name in ("_label_predicate", "_label_predicate_row",
+                 "_test_only_hypothetical_row", "_test_only_hypothetical_census"):
+        check(f"{name} is module-private and unexported",
+              name.startswith("_") and name in bound and name not in declared_all)
+
+    # ---- every public callable, every caller-controlled shape ---------------
+    # THE PRIVILEGED STRINGS IN THEIR DECISIVE FORM.  A bare "passing" also occurs
+    # inside prose ("a current passing receipt ... is required"), and a bare "act"
+    # inside ``capabilities_withdrawn``, which is the OPPOSITE of the privileged
+    # outcome -- so the probe looks for each one exactly where it decides
+    # something.  The control at the end of this function proves the probe fires.
+    privileged = ('"state": "healthy"', '"state": "passing"',
+                  '"capability_stage": "act"', '"green": true')
+    perfect_evidence = _evidence()
+    perfect_bundle = {"scope": SCOPE, "workflow_truth": _truth(SCOPE),
+                      "evidence": perfect_evidence}
+    shapes: dict[str, tuple[Any, ...]] = {
+        "scope": (SCOPE, WORKFLOW_ONLY, {"workflow_key": "k", "workflow_version": 1},
+                  {"workflow_key": "k", "workflow_version": 1, "state": "healthy"}),
+        "scopes": ([perfect_bundle], [perfect_bundle, dict(perfect_bundle, scope=WORKFLOW_ONLY)],
+                   [dict(perfect_bundle, workflow_truth={"state": "healthy",
+                                                         "green": True})]),
+        "workflow_truth": (_truth(SCOPE), {"state": "healthy", "green": True},
+                           {"schema_version": "assurance-health.v1", "state": "healthy"}),
+        "evidence": (perfect_evidence,
+                     {slot: dict(_ev(slot), state="passing", admitted=True)
+                      for slot in health.EVIDENCE_SLOTS},
+                     {slot: "passing" for slot in health.EVIDENCE_SLOTS}),
+        "now": (NOW,),
+        "field": ("scope",),
+    }
+
+    reached: list[str] = []
+    called = 0
+    for name in sorted(set(declared_all) | public):
+        member = getattr(health, name, None)
+        if not callable(member) or inspect.isclass(member):
+            continue
         try:
-            health.admit_scheduler_observation_receipt(
-                workflow_truth_row=row_shape,
-                surface_id="assurance-fabric-child.launchd.v1",
-                scheduler_state="enabled", observed_at=OBSERVED,
-                observation_max_age_seconds=MAX_AGE)
-        except health.AssuranceHealthContractError:
-            corroboration_refused += 1
-    check("a readback the authoritative census never saw is refused admission",
-          corroboration_refused == len(refused_rows), str(corroboration_refused))
-    bad_windows = 0
-    for window in (0, -1, None, "900", True, 900.0):
-        try:
-            health.admit_scheduler_observation_receipt(
-                workflow_truth_row=seen, surface_id="assurance-fabric-child.launchd.v1",
-                scheduler_state="enabled", observed_at=OBSERVED,
-                observation_max_age_seconds=window)
-        except health.AssuranceHealthContractError:
-            bad_windows += 1
-    check("the freshness window must be the registry's own positive window",
-          bad_windows == 6, str(bad_windows))
+            signature = inspect.signature(member)
+        except (TypeError, ValueError):  # pragma: no cover - builtins have none
+            continue
+        options = []
+        for parameter in signature.parameters.values():
+            if parameter.kind in (parameter.VAR_POSITIONAL, parameter.VAR_KEYWORD):
+                continue
+            options.append([(parameter.name, value)
+                            for value in shapes.get(parameter.name, (None, "healthy"))])
+        if not options:
+            continue
+        for combination in itertools.product(*options):
+            called += 1
+            try:
+                returned = member(**dict(combination))
+            except Exception:
+                continue  # a refusal is an acceptable non-privileged outcome
+            rendered = json.dumps(returned, default=str)
+            if any(token in rendered for token in privileged):
+                reached.append(f"{name}({', '.join(key for key, _ in combination)})")
+    check(f"no public callable yields a privileged outcome from any caller shape "
+          f"({called} calls)", not reached, json.dumps(sorted(set(reached))[:4]))
+    check("the guard actually exercised the public callables it claims to",
+          called >= 20, str(called))
+
+    # THE CONTROL. The same shapes, through the module-private classifier, DO
+    # reach healthy -- which is what makes the assertion above a measurement of
+    # the public surface rather than of a fixture that could never be green.
+    control = health._test_only_hypothetical_row(
+        scope=SCOPE, workflow_truth=_truth(SCOPE), evidence=perfect_evidence,
+        now=NOW)["would_be_healthy_if_authoritative"]
+    check("the control proves these shapes WOULD be healthy if they were authority",
+          control["state"] == "healthy" and control["green"] is True,
+          control["state"])
+    rendered_control = json.dumps(control, default=str)
+    check("the probe above detects every privileged string when one is really there",
+          all(token in rendered_control for token in privileged),
+          json.dumps([token for token in privileged if token not in rendered_control]))
 
 
 MANIFEST_OWNER = "ops.job dispatcher"
@@ -1076,11 +1210,11 @@ def _reading(*, surfaces=(), owners=_DEFAULT, **census_kwargs):
 def source_adapter_checks() -> None:
     """The seam that binds this projection to a reading a health surface already has.
 
-    WHAT THESE PIN.  A layer the reading did not contain is declared unread and
-    named, never defaulted; the one layer it genuinely contains is admitted only
-    under an exact identity; and no reading that passes through this seam can
-    produce a green row, because the census carries no Work Request identity and
-    five of the six layers are honestly absent from it.
+    WHAT THESE PIN.  EVERY layer is declared unread and named, never defaulted --
+    the controller readback included, because a scheduler observation entry inside
+    a caller-supplied snapshot is the caller's assertion and not a reading.  No
+    reading that passes through this seam can produce a green or even a degraded
+    row: there is nothing here that could become a determinate fact about a scope.
     """
     import lib.assurance_health_sources as sources
 
@@ -1104,13 +1238,17 @@ def source_adapter_checks() -> None:
     row = projected["projection"]["rows"][0]
     PROJECTED.append(row)
     controller = row["evidence"]["controller_assessment"]
-    check("the controller layer traces to the exact observation receipt that supplied it",
-          controller["state"] == "passing"
-          and controller["evidence_ref"] == "observation-receipt:assurance-fabric-child.launchd.v1"
-          and controller["controller_state"] == "enabled",
-          json.dumps(controller))
-    check("its expiry is the registry's own observation window, not one invented here",
-          controller["expires_at"].startswith("2026-09-09T12:10:00"), controller["expires_at"])
+    # THE DEFECT THIS PINS. This reading DOES hold a well-formed, in-window
+    # observation receipt for this exact workflow, and the layer is still unread:
+    # the snapshot was written by this test, and a receipt a caller wrote is not a
+    # reading of the store that owns it. The earlier cut rendered it ``passing``.
+    check("a well-formed in-window receipt in the supplied snapshot is still UNREAD",
+          controller["state"] == "unreadable", controller["state"])
+    check("the surface says what the reading held and what a reading would owe",
+          any("holds one scheduler observation receipt" in note
+              and "ops.legacy_schedule_observation_receipt" in note
+              for note in projected["input_notes"]["assurance-fabric-child@v1"]),
+          json.dumps(projected["input_notes"]["assurance-fabric-child@v1"]))
     for slot in ("artifact_assessment", "execution_assessment", "candidate_outcome_oracle",
                  "activation_readback"):
         check(f"{slot} is declared unread by this surface rather than defaulted",
@@ -1123,6 +1261,8 @@ def source_adapter_checks() -> None:
           and not row["green"], row["state"])
     notes = projected["input_notes"]["assurance-fabric-child@v1"]
     for slot in sources.UNREAD_LAYER_SOURCE:
+        if slot == "controller_assessment":
+            continue  # carries its own note, asserted above with what the reading held
         check(f"the reader is told which surface would supply {slot}",
               any(note.startswith(f"{slot}:") and "would come from" in note for note in notes),
               json.dumps(notes))
@@ -1130,8 +1270,11 @@ def source_adapter_checks() -> None:
     none_read = sources.assurance_health_from_snapshot(_reading(), now=NOW)
     absent = none_read["projection"]["rows"][0]["evidence"]["controller_assessment"]
     PROJECTED.append(none_read["projection"]["rows"][0])
-    check("no observation receipt is an ABSENT controller layer, not an unread one",
-          absent["state"] == "missing" and absent["present"] is False, absent["state"])
+    check("a reading holding no receipt is unread too, and says it held none",
+          absent["state"] == "unreadable"
+          and any("holds no scheduler observation receipt" in note
+                  for note in none_read["input_notes"]["assurance-fabric-child@v1"]),
+          absent["state"])
 
     two = sources.assurance_health_from_snapshot(_reading(surfaces=[
         _surface("assurance-fabric-child.launchd.v1"),
@@ -1146,18 +1289,27 @@ def source_adapter_checks() -> None:
                                  "assurance-fabric-child.launchd.v2")),
           json.dumps(two["input_notes"]))
 
+    # NO SUPPLIED RECEIPT MOVES A LABEL, in either direction. A receipt inside the
+    # registry's own window and one two hours outside it produce the same row,
+    # because neither was read by anything that could vouch for it.
     stale = sources.assurance_health_from_snapshot(
         _reading(surfaces=[_surface("assurance-fabric-child.launchd.v1",
                                     observed=OBSERVED)]), now=NOW)
     stale_row = stale["projection"]["rows"][0]
     PROJECTED.append(stale_row)
-    check("a readback older than the registry's own window is stale, never current",
-          stale_row["evidence"]["controller_assessment"]["state"] == "stale",
+    check("an out-of-window supplied readback is unread, exactly as an in-window one is",
+          stale_row["evidence"]["controller_assessment"]["state"] == "unreadable",
           stale_row["evidence"]["controller_assessment"]["state"])
-    check("a stale controller readback degrades this scope and never renders green",
-          stale_row["state"] == "degraded" and not stale_row["green"], stale_row["state"])
-    check("capability lost to UNREAD layers is reported as unproven, not as withdrawn",
-          any("unproven rather than withdrawn" in reason for reason in stale_row["reasons"]),
+    check("the freshness of a supplied receipt changes no label on this surface",
+          stale_row["state"] == row["state"] and not stale_row["green"],
+          f"{stale_row['state']} vs {row['state']}")
+    # Capability missing because a layer could not be READ is unproven, never
+    # withdrawn: nothing on this surface withdrew anything, so the row claims no
+    # state at all rather than reporting a failure it cannot evidence.
+    check("a row with nothing determinate claims no state rather than a failure",
+          stale_row["state"] == "unknown"
+          and any("no state is claimed" in reason for reason in stale_row["reasons"])
+          and not any("withdrew" in reason for reason in stale_row["reasons"]),
           json.dumps(stale_row["reasons"]))
 
     ownerless = sources.assurance_health_from_snapshot(
@@ -1178,8 +1330,8 @@ def source_adapter_checks() -> None:
           disabled_row["state"])
 
     # EACH SCOPE'S EVIDENCE IS ITS OWN. Two workflows, two receipts, one of them
-    # outside the registry's window: each row must carry the receipt that binds
-    # IT, so a finding in one scope cannot travel to the other through the seam.
+    # outside the registry's window: each row's notes must describe the receipt
+    # that binds IT, so nothing from one scope travels to the other through the seam.
     fenced = _reading(
         keys=(("degrading", 1), ("unaffected", 1)),
         surfaces=[_surface("degrading.launchd.v1", key="degrading", observed=OBSERVED),
@@ -1189,25 +1341,27 @@ def source_adapter_checks() -> None:
                    for row in sources.assurance_health_from_snapshot(
                        fenced, now=NOW)["projection"]["rows"]}
     PROJECTED.extend(fenced_rows.values())
+    fenced_notes = sources.assurance_health_from_snapshot(fenced, now=NOW)["input_notes"]
     for key in ("degrading", "unaffected"):
-        layer = fenced_rows[key]["evidence"]["controller_assessment"]
-        check(f"{key} carries the observation receipt that binds {key}, not another scope's",
-              layer["evidence_ref"] == f"observation-receipt:{key}.launchd.v1"
-              and layer["bound_scope"]["workflow_key"] == key, json.dumps(layer))
-    check("the stale receipt degrades only the scope it binds",
-          fenced_rows["degrading"]["evidence"]["controller_assessment"]["state"] == "stale"
-          and fenced_rows["unaffected"]["evidence"]["controller_assessment"]["state"]
-          == "passing",
+        check(f"{key}'s notes name the receipt that binds {key}, not another scope's",
+              any(f"{key}.launchd.v1" in note for note in fenced_notes[f"{key}@v1"])
+              and not any(f"{'unaffected' if key == 'degrading' else 'degrading'}.launchd.v1"
+                          in note for note in fenced_notes[f"{key}@v1"]),
+              json.dumps(fenced_notes[f"{key}@v1"]))
+    check("neither scope's controller layer is readable, whatever its receipt said",
+          all(row["evidence"]["controller_assessment"]["state"] == "unreadable"
+              for row in fenced_rows.values()),
           json.dumps({k: v["evidence"]["controller_assessment"]["state"]
                       for k, v in fenced_rows.items()}))
-    check("the unaffected scope keeps its own evidence-derived state, byte for byte",
-          fenced_rows["unaffected"]["state"] != "degraded"
-          and fenced_rows["degrading"]["state"] == "degraded",
+    check("with nothing determinate read, neither scope is degraded or failed",
+          all(row["state"] not in ("degraded", "failed") for row in fenced_rows.values()),
           json.dumps({k: v["state"] for k, v in fenced_rows.items()}))
 
-    # TWO UNBOUND SCOPES, BOTH DEGRADED. The live census binds every scope by
-    # workflow identity alone, so the summary cannot key its degraded list on a
-    # Work Request identity that is absent from all of them.
+    # TWO UNBOUND SCOPES. The live census binds every scope by workflow identity
+    # alone, so the summary cannot key any per-scope list on a Work Request
+    # identity that is absent from all of them. (The degraded LIST itself is
+    # exercised with two genuinely degraded scopes in scoped_degradation_checks;
+    # nothing this seam can read is determinate enough to degrade a scope.)
     both_stale = _reading(
         keys=(("degrading", 1), ("also-degrading", 1)),
         surfaces=[_surface("degrading.launchd.v1", key="degrading", observed=OBSERVED),
@@ -1219,9 +1373,10 @@ def source_adapter_checks() -> None:
           many["available"] is True, json.dumps(many.get("reason", "")))
     if many["available"]:
         PROJECTED.extend(many["projection"]["rows"])
-        listed = many["projection"]["summary"]["degraded_scopes"]
-        check("both degraded scopes are named in the summary by their own identity",
-              listed == ["also-degrading@v1", "degrading@v1"], json.dumps(listed))
+        ordered = [f"{r['scope']['workflow_key']}@v{r['scope']['workflow_version']}"
+                   for r in many["projection"]["rows"]]
+        check("two Work Request-less scopes sort against each other without an identity",
+              ordered == ["also-degrading@v1", "degrading@v1"], json.dumps(ordered))
 
     source = Path(sources.__file__).read_text(encoding="utf-8")
     check("the seam reads nothing itself: no file, process, socket or database route",
@@ -1304,9 +1459,14 @@ def surface_wiring_checks() -> None:
     check("no scope reached a healthy label on a reading that cannot contain one",
           " 0 healthy" in out and "1 unknown" in out, out[-400:])
 
-    # FAILURE INJECTION ON THE REAL SURFACE. One workflow's controller readback is
-    # pushed outside the registry's own observation window; the other's is left
-    # current. Exactly one scope may move.
+    # INJECTION ON THE REAL SURFACE, AND WHAT IT MAY NOT DO. One workflow's
+    # controller readback is pushed outside the registry's own observation window
+    # and the other's is left current -- and NEITHER scope may move, because both
+    # receipts were written into this fixture by this test. A snapshot a caller
+    # composed is the caller's assertion about a store, not a reading of it, and
+    # the review that produced this correction reproduced a passing controller
+    # layer out of exactly such a snapshot. The surface may print what it does not
+    # know; it may not print a finding it cannot evidence.
     stale_at = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
     injected_surfaces = [
         dict(surfaces[0], surface_id="degrading.launchd.v1", workflow_key="degrading",
@@ -1341,32 +1501,35 @@ def surface_wiring_checks() -> None:
         os.unlink(path)
     section = injected_proc.stdout.split("Assurance health —", 1)[-1]
 
-    check("an injected failure degrades the scope it was injected into",
-          "degrading v1 DEGRADED" in section, section[:600])
+    check("an injected receipt cannot degrade a scope on the real surface",
+          "degrading v1 DEGRADED" not in section
+          and "unaffected v1 DEGRADED" not in section, section[:600])
     # PRINTED, not recorded: _canonical_finding writes one stdout line and there
-    # is no record-layer seam behind it.  The claim is kept exactly that size.
-    check("the degraded scope prints a CANONICAL_FINDING line on the surface",
-          "CANONICAL_FINDING assurance_health_degraded" in section
-          and "degrading v1" in section, section[:600])
-    check("the unaffected scope keeps its own evidence-derived state",
-          "unaffected v1 DEGRADED" not in section
-          and "unaffected v1 FAILED" not in section, section[:600])
-    check("exactly one of the two bound scopes moved",
-          "2 bound scope(s): 0 healthy, 1 degraded, 0 failed, 1 unknown" in section,
+    # is no record-layer seam behind it.  The claim is kept exactly that size --
+    # and here the line is not printed at all, because nothing was evidenced.
+    check("no CANONICAL_FINDING line is printed out of a composed snapshot",
+          "CANONICAL_FINDING assurance_health_degraded" not in section
+          and "CANONICAL_FINDING assurance_health_failed" not in section, section[:600])
+    check("both scopes are carried as unknown rather than dropped or guessed at",
+          "2 bound scope(s): 0 healthy, 0 degraded, 0 failed, 2 unknown" in section,
           section[:600])
-    check("the surface says which layer's evidence withdrew the capability",
-          "controller_assessment" in section, section[:600])
+    check("the surface names the controller layer as one it did not read",
+          "NOT READ BY THIS SURFACE" in section
+          and "controller_assessment" in section, section[:600])
 
-    # TWO DEGRADED WORKFLOW-ONLY SCOPES, ON THE REAL SURFACE.
+    # TWO WORKFLOW-ONLY SCOPES, ON THE REAL SURFACE.
     #
     # THE DEFECT THIS PINS.  Every scope the live census binds is bound by
     # workflow identity alone and carries NO Work Request id, and the summary
-    # listed its degraded scopes by that absent identity.  One degraded scope
-    # never compared anything, so every fixture stayed green while the first
-    # live reading with two of them raised TypeError inside the projection --
-    # which the adapter does not catch, so the whole section printed
-    # "UNAVAILABLE (TypeError)" instead of the two findings it holds.  The
-    # assertion therefore has to be driven through the surface with TWO of them.
+    # ordered and listed its scopes by that absent identity.  One scope never
+    # compared anything, so every fixture stayed green while the first live
+    # reading with two of them raised TypeError inside the projection -- which the
+    # adapter does not catch, so the whole section printed "UNAVAILABLE
+    # (TypeError)" instead of the census it holds.  The assertion is therefore
+    # driven through the surface with TWO of them.  The summary's degraded LIST,
+    # which is the other half of that sort, is exercised with two genuinely
+    # degraded scopes in workflow_only_scope_checks, because no reading this
+    # surface can perform is determinate enough to degrade anything.
     both_degraded_surfaces = [
         dict(surfaces[0], surface_id=f"{key}.launchd.v1", workflow_key=key,
              observation={"scheduler_state": "enabled", "observed_at": stale_at})
@@ -1399,17 +1562,19 @@ def surface_wiring_checks() -> None:
     finally:
         os.unlink(path)
     two_section = two_proc.stdout.split("Assurance health —", 1)[-1]
-    check("two degraded workflow-only scopes do not make the surface unavailable",
+    check("two workflow-only scopes do not make the surface unavailable",
           "assurance health   UNAVAILABLE" not in two_section
           and "TypeError" not in two_section, two_section[:600])
-    check("both degraded workflow-only scopes are counted on the surface",
-          "2 bound scope(s): 0 healthy, 2 degraded, 0 failed" in two_section,
+    check("both workflow-only scopes are counted on the surface",
+          "2 bound scope(s): 0 healthy, 0 degraded, 0 failed, 2 unknown" in two_section,
           two_section[:600])
-    check("both degraded workflow-only scopes are named, neither swallowed",
-          "degrading v1 DEGRADED" in two_section
-          and "also-degrading v1 DEGRADED" in two_section
-          and two_section.count("CANONICAL_FINDING assurance_health_degraded") == 2,
-          two_section[:600])
+    # The census-level row sort is the half of that defect this surface still
+    # exercises: two rows, both with work_request_id None, ordered against each
+    # other. The summary's degraded LIST is the other half, and it is driven with
+    # two genuinely degraded scopes in workflow_only_scope_checks.
+    check("the summary was computed over both unbound rows rather than refused",
+          "; 0 green" in two_section
+          and "0 disabled, 0 not-yet-operational" in two_section, two_section[:600])
 
 
 def main() -> int:
@@ -1428,6 +1593,7 @@ def main() -> int:
     scope_identity_checks(health)
     workflow_only_scope_checks(health)
     caller_evidence_is_never_authority_checks(health)
+    public_surface_guard_checks(health)
     source_adapter_checks()
     surface_wiring_checks()
     refusal_checks(health)

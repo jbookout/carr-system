@@ -486,17 +486,21 @@ def _canonical_workflow_truth(snap):
 def _canonical_assurance_health(snap):
     """Print the A01 assurance-health census and return rc.
 
-    EVERY LABEL ON THIS LINE TRACES TO EVIDENCE THIS READING ACTUALLY HELD, or it
-    says so.  The projection is fed by lib/assurance_health_sources, which hands
-    each of the six layers over as read, absent or explicitly UNREAD -- so the
-    states below are derived from named facts and the layers this surface does
-    not read are printed as the gap they are, rather than passing silently.
+    NO LABEL ON THIS LINE CLAIMS EVIDENCE THIS READING DID NOT HOLD.  The
+    projection is fed by lib/assurance_health_sources, and today every one of the
+    six layers is handed over as explicitly UNREAD: none of them has an evidence
+    owner that could verify a receipt, so the states below are what this surface
+    can honestly derive from F09 workflow truth alone -- unknown, disabled -- with
+    every unread layer printed as the gap it is rather than passing silently.  A
+    healthy scope is unreachable here by construction, and that is the point.
 
     RED ONLY WHERE THE FINDINGS THEMSELVES WITHDREW EVERYTHING (rule bd4a6d22).
     unknown, disabled and not-yet-operational are evidence-backed states, not
     faults, and are carried with their counts.  A degraded scope is a real
-    finding and is printed and recorded as one; only a failed scope -- where the
-    findings alone withdrew every capability -- turns this surface red.
+    finding and is PRINTED as one -- _canonical_finding writes a single stdout
+    line and there is no record-layer seam behind it, so nothing here is
+    recorded; only a failed scope -- where the findings alone withdrew every
+    capability -- turns this surface red.
     """
     print("Assurance health — evidence-backed state per bound workflow scope")
     workflows = snap.get("workflows")

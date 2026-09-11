@@ -6,17 +6,25 @@ and the owner/evidence/impact/recovery a reader needs to act.  It reads nothing,
 writes nothing, holds no authority, performs no effect, and stores no state.
 
 AND BECAUSE IT HOLDS NO AUTHORITY, IT IS SPLIT IN TWO.  The label logic is a
-PURE PREDICATE (``unwired_label_predicate_row`` / ``unwired_label_predicate``),
-unit-tested against fixture shapes and explicitly NOT WIRED to any surface: it
+MODULE-PRIVATE PREDICATE (``_label_predicate_row`` / ``_label_predicate``): it
 decides what evidence MEANS and verifies no receipt, so a caller that handed it
 six well-shaped dictionaries would be authoring a health label rather than
-reading one.  The WIRED surface is ``assurance_health_row`` /
-``assurance_health``, and it admits evidence only from a registered evidence
-owner (see EVIDENCE_OWNERS at the foot of this module).  Exactly one owner
-exists today and it owns one of the six layers; the other five name the durable
-seam they are still owed, are reported ``unreadable``, and therefore cannot
-reach ``passing`` -- which makes ``act`` and green unreachable on the wired
-surface by construction rather than by convention.
+reading one.  It is therefore not exported, not in ``__all__``, and reachable
+from the acceptance suite only through ``_test_only_hypothetical_row`` at the
+foot of this module, whose verdict comes back under
+``would_be_healthy_if_authoritative`` -- a hypothetical, never a label.
+
+THE PUBLIC SURFACE IS ``assurance_health_row`` / ``assurance_health``, and it
+admits evidence only from a registered evidence owner (``EVIDENCE_OWNERS``).
+THAT REGISTRY IS EMPTY, and emptily on purpose: admitting evidence means READING
+the store that owns it, this module reads nothing, and the F09 adapter it
+consumes reads nothing either -- so there is no route in this repository by
+which any of the six layers could be admitted.  Every value a caller supplies is
+reported ``unreadable`` with the durable seam it is owed
+(``OWED_EVIDENCE_OWNER_SEAMS``) named, ``passing`` is therefore unreachable on
+every layer, and ``act`` and green are unreachable by construction rather than
+by convention.  A surface driven by this module can say what it does not know;
+it cannot say a scope is healthy.
 
 THE SIX EVIDENCE SLOTS ARE SIX SEPARATE FACTS, and the whole point of this module
 is that none of them is ever derived from another (Q043):
@@ -98,11 +106,10 @@ DISPLAY PRECEDENCE, most conservative first, evaluated in this exact order:
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from lib.control_plane_workflow_truth import (  # the ONE workflow authority (V5-F09)
-    NATIVE_SCHEDULER_STATES,
     SCHEMA_VERSION as WORKFLOW_TRUTH_SCHEMA_VERSION,
     STATES as WORKFLOW_TRUTH_STATES,
     UNREADABLE,
@@ -110,6 +117,44 @@ from lib.control_plane_workflow_truth import (  # the ONE workflow authority (V5
 )
 
 SCHEMA_VERSION = "assurance-health.v1"
+
+# THE PUBLIC SURFACE, EXHAUSTIVELY.  Everything absent from this list is module
+# private, and the two names that decide a label -- ``_label_predicate_row`` and
+# ``_label_predicate`` -- are deliberately among the absent: a predicate that
+# turns six caller-supplied shapes into ``healthy`` is a direct-green route
+# whatever it is called, so it is not exported, not importable as part of this
+# surface, and reachable from the suite only through the test-only hook at the
+# foot of this module, which returns its verdict under a hypothetical name.
+# ``ops/assurance-health-selftest.py :: public_surface_guard_checks`` parses this
+# file with ``ast`` and fails if either name becomes public again.
+__all__ = [
+    "SCHEMA_VERSION",
+    "DISPLAY_STATES",
+    "GREEN_STATE",
+    "CAPABILITY_STAGES",
+    "PREACTIVATION_SLOTS",
+    "POSTACTIVATION_SLOTS",
+    "EVIDENCE_SLOTS",
+    "SCOPE_IDENTITY_FIELDS",
+    "REQUIRED_SCOPE_IDENTITY_FIELDS",
+    "OPTIONAL_SCOPE_IDENTITY_FIELDS",
+    "SLOT_REQUIRED_SCOPE_IDENTITY",
+    "EVIDENCE_STATUSES",
+    "EVIDENCE_STATES",
+    "INDETERMINATE_EVIDENCE_STATES",
+    "UNEARNED_EVIDENCE_STATES",
+    "DETERMINATE_NONPASS_EVIDENCE_STATES",
+    "EVIDENCE_BASES",
+    "SLOT_ADMISSIBLE_BASES",
+    "SLOT_REQUIRED_FIELDS",
+    "SLOT_REQUIREMENT",
+    "EVIDENCE_OWNERS",
+    "OWED_EVIDENCE_OWNER_SEAMS",
+    "AssuranceHealthContractError",
+    "scope_identity",
+    "assurance_health_row",
+    "assurance_health",
+]
 
 # The six display states, exactly as the settled contract names them.  There is no
 # seventh, and only one of them is green.
@@ -569,9 +614,9 @@ def _workflow_truth_facts(workflow_truth: Any, bound: dict[str, Any]) -> tuple[
     return row, facts
 
 
-def unwired_label_predicate_row(*, scope: Any, workflow_truth: Any, evidence: Any,
-                                now: Any,
-                                unreadable_reasons: Any = None) -> dict[str, Any]:
+def _label_predicate_row(*, scope: Any, workflow_truth: Any, evidence: Any,
+                         now: Any,
+                         unreadable_reasons: Any = None) -> dict[str, Any]:
     """THE PURE LABEL PREDICATE. NOT WIRED, AND NOT A ROUTE TO A DISPLAYED LABEL.
 
     This is the decision logic alone: a total function from one exactly bound
@@ -835,8 +880,8 @@ def unwired_label_predicate_row(*, scope: Any, workflow_truth: Any, evidence: An
     return row
 
 
-def unwired_label_predicate(*, scopes: Any, now: Any,
-                            unreadable_reasons: Any = None) -> dict[str, Any]:
+def _label_predicate(*, scopes: Any, now: Any,
+                     unreadable_reasons: Any = None) -> dict[str, Any]:
     """THE PURE LABEL PREDICATE over a census. NOT WIRED (see the row predicate).
 
     Each entry is ``{"scope": ..., "workflow_truth": ..., "evidence": ...}``.  Rows
@@ -861,7 +906,7 @@ def unwired_label_predicate(*, scopes: Any, now: Any,
             raise AssuranceHealthContractError(
                 f"scope {key} is bound twice; one exact scope has one projected state")
         seen.add(key)
-        rows.append(unwired_label_predicate_row(
+        rows.append(_label_predicate_row(
             scope=bundle["scope"], workflow_truth=bundle["workflow_truth"],
             evidence=bundle["evidence"], now=instant,
             unreadable_reasons=unreadable_reasons))
@@ -902,7 +947,7 @@ def unwired_label_predicate(*, scopes: Any, now: Any,
 
 
 # =============================================================================
-# THE WIRED PROJECTION — evidence enters only through a registered owner
+# THE PUBLIC SURFACE — evidence enters only through a registered evidence owner
 # =============================================================================
 #
 # WHY THIS SECTION EXISTS.  Everything above is a PREDICATE: it decides what a
@@ -918,20 +963,32 @@ def unwired_label_predicate(*, scopes: Any, now: Any,
 #     ADMITTED IT.  Everything else -- every mapping, flag, holder or object a
 #     caller can construct -- is UNREADABLE, with the owed seam named.
 #
-# Exactly ONE evidence owner exists today, and it owns exactly one of the six
-# layers.  The other five have no owner anywhere in this repository, so there is
-# no admission point for them at all: ``passing`` is unreachable for them, and
-# because ``act``/``healthy`` require all six, green is unreachable through this
-# surface by construction rather than by convention.
+# AND THERE ARE NO REGISTERED EVIDENCE OWNERS.  ``EVIDENCE_OWNERS`` is empty, and
+# that is the honest state of this repository rather than an oversight.  An
+# admission function can only stand on a READ THIS MODULE PERFORMED: a receipt
+# object handed in by a caller is the caller's assertion about a store, not the
+# store.  Every candidate route was checked and each one ends at a caller:
+#
+#   * this module is pure by contract -- it opens no file, runs no process and
+#     holds no database route, which is what makes its verdicts reproducible;
+#   * ``lib/control_plane_workflow_truth`` (V5-F09) is the only workflow
+#     authority, and it too "reads nothing, writes nothing, holds no authority":
+#     its rows are projections of rows ITS caller read;
+#   * the one real read of ``ops.legacy_schedule_observation_receipt`` in this
+#     repository is a SQL query inside ``tools/health-check.py``, whose result
+#     reaches this module as an argument like any other.
+#
+# An earlier cut of this module admitted a controller readback from an F09-SHAPED
+# ROW passed in by its caller, and a review reproduced ``controller_assessment:
+# passing`` from data a caller wrote by hand.  Shape was standing in for
+# authority.  So that admission function is gone rather than renamed: until a
+# reader inside this seam performs the read itself, the controller layer -- like
+# the other five -- is UNREADABLE, and the surface prints what it does not know.
 
-# slot -> the authoritative source that owns it and the admission function.
-EVIDENCE_OWNERS: dict[str, str] = {
-    "controller_assessment":
-        "ops.legacy_schedule_observation_receipt, read through the canonical "
-        "control-plane census (lib/control_plane_workflow_truth) and admitted by "
-        "admit_scheduler_observation_receipt(); every field this layer asserts is "
-        "derived from the receipt and the registry's own window, never supplied",
-}
+# slot -> the authoritative source that owns it and the function that admits it.
+# EMPTY BY CONSTRUCTION: see above.  A future entry here is an admission point,
+# so adding one means adding a read this module performs, not a shape it trusts.
+EVIDENCE_OWNERS: dict[str, str] = {}
 
 # slot -> the durable evidence-owner seam that is OWED before it could ever pass.
 # Naming it is the difference between an honest gap and a silent one.
@@ -942,6 +999,12 @@ OWED_EVIDENCE_OWNER_SEAMS: dict[str, str] = {
     "execution_assessment":
         "a durable attempt-receipt store that verifies the envelope digest and "
         "plan hash against the attempt it claims",
+    "controller_assessment":
+        "a reader inside this seam that itself queries "
+        "ops.legacy_schedule_observation_receipt and verifies the receipt it read; "
+        "lib/control_plane_workflow_truth projects rows its own caller read, and "
+        "the one real query lives in tools/health-check.py, so a readback reaching "
+        "this module is an argument rather than a reading",
     "candidate_outcome_oracle":
         "a durable preactivation candidate-outcome oracle store that verifies the "
         "governed data, environment, comparator, component versions and its own TTL",
@@ -953,102 +1016,6 @@ OWED_EVIDENCE_OWNER_SEAMS: dict[str, str] = {
         "acceptance receipt and joins through an exact Work Request identity",
 }
 
-_ADMISSION = object()
-
-
-class AdmittedEvidence:
-    """One evidence record a registered owner in this repository admitted.
-
-    THERE IS NO PUBLIC CONSTRUCTOR.  Instances are minted only by the admission
-    functions below, each of which DERIVES the record's basis, status, refs,
-    digest, evaluator identity and expiry from its authoritative source -- so no
-    caller-supplied string reaches any field the label logic reads.  Constructing
-    one directly, or handing the wired projection an object that merely wears
-    this shape, is refused: shape is not authority.
-    """
-
-    __slots__ = ("slot", "owner", "record")
-
-    def __init__(self, token: Any, slot: str, owner: str, record: dict[str, Any]) -> None:
-        if token is not _ADMISSION:
-            raise AssuranceHealthContractError(
-                "AdmittedEvidence has no public constructor; evidence reaches the wired "
-                "projection only through a registered evidence-owner admission function")
-        self.slot = slot
-        self.owner = owner
-        self.record = record
-
-
-# The identity that writes a scheduler observation receipt.  A constant, so the
-# evaluator of this evidence can never silently become the subject it assessed.
-_OBSERVATION_RECEIPT_PRODUCER = "receipt-producer:ops.legacy_schedule_observation_receipt"
-
-
-def admit_scheduler_observation_receipt(
-        *, workflow_truth_row: Any, surface_id: Any, scheduler_state: Any,
-        observed_at: Any, observation_max_age_seconds: Any) -> AdmittedEvidence:
-    """Admit the ONE controller readback this repository actually owns.
-
-    THE DECISION PROCEDURE, in order:
-
-      1. ``workflow_truth_row`` must be a row projected by the F09 census.  A row
-         of any other shape is not the authority this admission stands on.
-      2. That row's OWN native-schedule evidence must say the census SAW a
-         scheduler observation for this workflow (``observed`` or ``stale``).  A
-         receipt the authoritative census never classified is refused, so a
-         surface entry injected beside the census cannot become evidence.
-      3. Every field the label logic reads is then DERIVED here -- the basis is
-         fixed, the status comes from whether the provider's own vocabulary
-         contains the observed state, the ref and digest from the receipt's own
-         surface identity and instant, the evaluator from the receipt producer,
-         and the expiry from ``observed_at`` plus the registry's own window.
-
-    The caller supplies only what the receipt itself says.  It cannot assert that
-    this evidence passes, who evaluated it, or how long it stays current.
-    """
-    row = _require_mapping(workflow_truth_row, field="workflow_truth_row")
-    if row.get("schema_version") != WORKFLOW_TRUTH_SCHEMA_VERSION:
-        raise AssuranceHealthContractError(
-            "a controller readback is admitted only against a row projected by "
-            f"lib/control_plane_workflow_truth ({WORKFLOW_TRUTH_SCHEMA_VERSION})")
-    census_evidence = row.get("evidence")
-    native = (census_evidence.get("native_schedule")
-              if isinstance(census_evidence, dict) else None)
-    if native not in ("observed", "stale"):
-        raise AssuranceHealthContractError(
-            f"the authoritative census classified this workflow's scheduler evidence as "
-            f"{native!r}; a readback it never saw is not admissible as controller evidence")
-    identity = _require_text(surface_id, field="surface_id")
-    state = _require_text(scheduler_state, field="scheduler_state")
-    observed = _utc(observed_at, field="observed_at")
-    if not isinstance(observation_max_age_seconds, int) \
-            or isinstance(observation_max_age_seconds, bool) \
-            or observation_max_age_seconds <= 0:
-        raise AssuranceHealthContractError(
-            "observation_max_age_seconds must be the registry's own positive window; "
-            "this module defines no freshness window of its own")
-    record = {
-        "layer": "controller_assessment",
-        "basis": "controller_readback",
-        # DERIVED, never supplied: a readback that came back with a state the
-        # provider's own vocabulary declares is a completed reading; anything
-        # else did not complete, and says so.
-        "status": "pass" if state in NATIVE_SCHEDULER_STATES else "error",
-        "evidence_ref": f"observation-receipt:{identity}",
-        "evidence_digest": f"observation-receipt:{identity}@{observed.isoformat()}",
-        "evaluator_identity": _OBSERVATION_RECEIPT_PRODUCER,
-        "subject_identity": f"scheduler-surface:{identity}",
-        "observed_at": observed.isoformat(),
-        "expires_at": (observed + timedelta(seconds=observation_max_age_seconds)).isoformat(),
-        "scope": {"workflow_key": row.get("workflow_key"),
-                  "workflow_version": row.get("workflow_version")},
-        "controller_state": state,
-        "readback_source": f"ops.legacy_schedule_observation_receipt:{identity}",
-        "readback_at": observed.isoformat(),
-    }
-    return AdmittedEvidence(_ADMISSION, "controller_assessment",
-                            EVIDENCE_OWNERS["controller_assessment"], record)
-
 
 def _admitted_only(evidence: Any) -> tuple[dict[str, Any], dict[str, str]]:
     """Reduce a caller's evidence mapping to what a registered owner admitted.
@@ -1056,7 +1023,10 @@ def _admitted_only(evidence: Any) -> tuple[dict[str, Any], dict[str, str]]:
     Returns the evidence the predicate may see, plus the reason each downgraded
     layer is unreadable.  ``UNREADABLE`` and ``None`` pass through unchanged --
     they are the caller's own honest statements about a read, not claims about a
-    receipt -- and every other value becomes ``UNREADABLE``.
+    receipt -- and EVERY OTHER VALUE becomes ``UNREADABLE``, because no evidence
+    owner is registered and therefore nothing is admissible.  A mapping, a dict
+    subclass, a flag, an object wearing an admitted shape and a receipt this
+    module itself once minted are all the same thing here: a caller's assertion.
     """
     supplied = _require_mapping(evidence, field="evidence")
     admitted: dict[str, Any] = {}
@@ -1065,43 +1035,40 @@ def _admitted_only(evidence: Any) -> tuple[dict[str, Any], dict[str, str]]:
         if value is UNREADABLE or value is None:
             admitted[slot] = value
             continue
-        if isinstance(value, AdmittedEvidence):
-            if value.slot != slot:
-                raise AssuranceHealthContractError(
-                    f"evidence admitted for {value.slot!r} cannot fill the {slot!r} slot")
-            admitted[slot] = value.record
-            continue
         admitted[slot] = UNREADABLE
-        owed = OWED_EVIDENCE_OWNER_SEAMS.get(slot)
+        owner = EVIDENCE_OWNERS.get(slot)
+        if owner:  # pragma: no cover - EVIDENCE_OWNERS is empty by construction
+            reasons[slot] = (
+                f"{slot}: supplied evidence is not authority — this layer has an evidence "
+                f"owner ({owner}) and only that owner's own reading can make it readable")
+            continue
+        owed = OWED_EVIDENCE_OWNER_SEAMS.get(slot, "a durable store that owns this fact")
         reasons[slot] = (
             f"{slot}: supplied evidence is not authority — this layer has no evidence "
             f"owner in this repository that could verify its refs, digest, evaluator "
-            f"identity, status or expiry, so it is unread until one exists"
-            + (f" ({owed})" if owed else "")) if owed else (
-            f"{slot}: supplied evidence is not authority — this layer has an evidence "
-            f"owner ({EVIDENCE_OWNERS.get(slot, 'none')}) and only that owner's "
-            f"admission can make it readable")
+            f"identity, status or expiry, so it is unread until one exists ({owed})")
     return admitted, reasons
 
 
 def assurance_health_row(*, scope: Any, workflow_truth: Any, evidence: Any,
                          now: Any) -> dict[str, Any]:
-    """THE WIRED single-scope projection.  Use this, not the predicate.
+    """THE PUBLIC single-scope projection.  There is no other way in.
 
-    Identical to ``unwired_label_predicate_row`` except that evidence which no
-    registered owner admitted is reported ``unreadable`` with the owed seam
-    named, so no caller-supplied shape can reach ``passing``, ``act`` or green.
+    Identical to the module-private predicate except that evidence no registered
+    owner admitted is reported ``unreadable`` with the owed seam named -- and no
+    owner is registered, so every supplied record is unreadable and no
+    caller-supplied shape can reach ``passing``, ``act`` or green.
     """
     admitted, reasons = _admitted_only(evidence)
-    row = unwired_label_predicate_row(scope=scope, workflow_truth=workflow_truth,
-                                      evidence=admitted, now=now,
-                                      unreadable_reasons=reasons)
+    row = _label_predicate_row(scope=scope, workflow_truth=workflow_truth,
+                               evidence=admitted, now=now,
+                               unreadable_reasons=reasons)
     _refuse_unowned_green(row)
     return row
 
 
 def assurance_health(*, scopes: Any, now: Any) -> dict[str, Any]:
-    """THE WIRED census projection.  Use this, not the predicate."""
+    """THE PUBLIC census projection.  There is no other way in."""
     if not isinstance(scopes, list):
         raise AssuranceHealthContractError("scopes must be a list of bound scope bundles")
     admitted_scopes = []
@@ -1113,26 +1080,61 @@ def assurance_health(*, scopes: Any, now: Any) -> dict[str, Any]:
         admitted, row_reasons = _admitted_only(bundle["evidence"])
         reasons.update(row_reasons)
         admitted_scopes.append({**bundle, "evidence": admitted})
-    projection = unwired_label_predicate(scopes=admitted_scopes, now=now,
-                                         unreadable_reasons=reasons)
+    projection = _label_predicate(scopes=admitted_scopes, now=now,
+                                  unreadable_reasons=reasons)
     for row in projection["rows"]:
         _refuse_unowned_green(row)
     return projection
 
 
 def _refuse_unowned_green(row: dict[str, Any]) -> None:
-    """Green on the wired surface requires six OWNED passing layers.
+    """Green on the public surface requires six OWNED passing layers.
 
-    Unreachable while five of the six layers have no owner, and stated as an
-    invariant anyway: this is the exact outcome a future edit must not reopen by
-    accident, and a raised refusal is the only honest thing to print in its place.
+    Unreachable while NO layer has an owner, and stated as an invariant anyway:
+    this is the exact outcome a future edit must not reopen by accident, and a
+    raised refusal is the only honest thing to print in its place.
     """
     unowned_passing = sorted(
         slot for slot in EVIDENCE_SLOTS
         if row["evidence"][slot]["state"] == "passing" and slot not in EVIDENCE_OWNERS)
-    if unowned_passing:  # pragma: no cover - no admission point exists for these slots
+    if unowned_passing:  # pragma: no cover - no admission point exists for any slot
         raise AssuranceHealthContractError(
             f"{unowned_passing} reached passing with no registered evidence owner")
     if row["green"] or row["capability_stage"] == "act":  # pragma: no cover - same
         raise AssuranceHealthContractError(
-            "a wired assurance-health row reached green without six owned passing layers")
+            "a public assurance-health row reached green without six owned passing layers")
+
+
+# =============================================================================
+# THE TEST-ONLY HOOK — not public, and it returns a hypothetical, not a label
+# =============================================================================
+#
+# The acceptance suite has to exercise the label logic against fixture shapes,
+# INCLUDING the six-passing shape, because that is the only way to prove the
+# ladder really requires all six layers.  Exporting a predicate to make that
+# possible would put a direct-green route back on the public surface under a new
+# name, so the suite reaches the classifier here instead.  Two properties make
+# this not a route:
+#
+#   1. neither hook is in ``__all__``, and both are underscore-private, so no
+#      consumer imports them as part of this module's surface; and
+#   2. the verdict comes back under ``would_be_healthy_if_authoritative`` -- a
+#      question about a hypothetical world in which the supplied shapes were
+#      admitted by an owner that does not exist.  Nothing that renders a state
+#      to a human may read that key, and nothing in this repository does.
+
+
+def _test_only_hypothetical_row(*, scope: Any, workflow_truth: Any, evidence: Any,
+                                now: Any,
+                                unreadable_reasons: Any = None) -> dict[str, Any]:
+    """TEST-ONLY. What the label logic WOULD say if these shapes were authority."""
+    return {"would_be_healthy_if_authoritative": _label_predicate_row(
+        scope=scope, workflow_truth=workflow_truth, evidence=evidence, now=now,
+        unreadable_reasons=unreadable_reasons)}
+
+
+def _test_only_hypothetical_census(*, scopes: Any, now: Any,
+                                   unreadable_reasons: Any = None) -> dict[str, Any]:
+    """TEST-ONLY. The same hypothetical over a census of bound scopes."""
+    return {"would_be_healthy_if_authoritative": _label_predicate(
+        scopes=scopes, now=now, unreadable_reasons=unreadable_reasons)}
