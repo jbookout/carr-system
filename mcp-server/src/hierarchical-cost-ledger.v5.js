@@ -51,21 +51,24 @@
 //      is not a retry at all and THROWS, so an id reused by accident cannot
 //      quietly shadow a different intent.
 //
-//   5. A RACE IS SETTLED BY A COMPARE-AND-SWAP, NOT BY LUCK AND NOT BY THE
-//      ORDER A TEST HAPPENS TO CHOOSE. Every ledger value has a VERSION — the
-//      number of distinct operations it has applied — and a state digest.
-//      A concurrent writer computes its commit against a NAMED base
-//      (`prepareCommit`) and then offers it (`commitPrepared`); the ledger
-//      admits that commit only while it is still standing on that exact base.
-//      Two commits computed from one base therefore produce exactly one
-//      landing and one `version_conflict`, and the loser must recompute
-//      against what actually committed — which is where it meets the ceiling
-//      it would otherwise have talked its way past. That is a property of the
-//      ledger, not of a serial permutation. What it still does not prove is
-//      stated on the projection: both writers here share one in-memory value
-//      in one process, and a durable store would need a row lock or a
-//      serializable transaction to supply the same single admission point
-//      across processes.
+//   5. A RACE IS SETTLED BY A CELL THAT OWNS THE LEDGER, NOT BY THE ORDER A
+//      TEST HAPPENS TO CHOOSE AND NOT BY A CALLER CHECKING ITSELF. Every
+//      ledger value has a VERSION — the number of distinct operations it has
+//      applied — and a state digest. A concurrent writer computes its commit
+//      against a NAMED base (`prepareCommit`) and then offers it to the CELL
+//      that holds the ledger (`openLedgerCell`). The cell is the only thing
+//      that can admit a commit: it admits one only while it is still standing
+//      on that exact base, it REDERIVES the transition from its own value
+//      rather than installing the one the proposal carries, and it replaces
+//      its value in one synchronous step. Two commits computed from one base
+//      therefore produce exactly one landing and one `version_conflict`, and
+//      the loser must recompute against what actually committed — which is
+//      where it meets the ceiling it would otherwise have talked its way past.
+//      That is a property of the ledger, not of a serial permutation and not
+//      of a well-behaved caller. What it still does not prove is stated on the
+//      projection: both writers here share ONE cell in ONE process, and a
+//      durable store would need a row lock or a serializable transaction to
+//      supply the same single admission point across processes.
 //
 //   6. OVERDRAWN IS NOT NETTED AWAY BY A SIBLING. A node that breaches its own
 //      ceiling marks every ancestor overdrawn, and a reservation is denied when
@@ -123,6 +126,7 @@ export const V5_LEDGER_REFUSAL_REASONS = Object.freeze([
   "duplicate_reservation_id",
   "duplicate_vendor_charge",
   "liability_not_open",
+  "prepared_commit_mismatch",
   "reservation_not_open",
   "version_conflict",
 ]);
@@ -1395,54 +1399,141 @@ function assertPreparedCommit(prepared) {
   }
   assertClosedKeys(prepared, PREPARED_COMMIT_KEYS, "prepared");
   assertRequiredKeys(prepared, PREPARED_COMMIT_KEYS, "prepared");
+  // The INSIDE of a prepared commit, not only its outer shape. A commit is an
+  // ordinary value: a caller can hold one, copy it and edit the copy, so every
+  // field the cell reads is checked here. None of this makes the proposal
+  // TRUSTWORTHY — the cell rederives the whole transition rather than
+  // believing it — it only makes a malformed commit THROW at the boundary
+  // instead of being answered as though it were merely a stale one.
+  if (V5_LEDGER_OPERATIONS[prepared.kind] === undefined) {
+    fail("unknown_operation_kind", "prepared.kind is not a registered ledger operation",
+      { path: "prepared.kind", value: prepared.kind,
+        registered: [...V5_LEDGER_OPERATION_KINDS] });
+  }
+  assertObject(prepared.operation, "prepared.operation");
+  assertRef(prepared.operation.operation_id, "prepared.operation.operation_id");
+  if (!Number.isInteger(prepared.base_version) || prepared.base_version < 0) {
+    fail("invalid_shape", "prepared.base_version must be a count of applied operations",
+      { path: "prepared.base_version", value: prepared.base_version });
+  }
+  if (typeof prepared.base_state_digest !== "string") {
+    fail("invalid_shape", "prepared.base_state_digest must be a state digest",
+      { path: "prepared.base_state_digest" });
+  }
+  assertObject(prepared.outcome, "prepared.outcome");
+  assertLedger(prepared.next_ledger);
   return prepared;
 }
 
-/**
- * Install a prepared commit if — and only if — the ledger is still standing on
- * the base it was computed from.
- *
- * A conflict is a REFUSAL, not a throw, and the same shape every other refusal
- * takes: a stale base is a fact about the ledger, and the caller's answer to it
- * is `recomputeCommit`, not an exception.
- */
-export function commitPrepared(ledger, prepared) {
-  assertLedger(ledger);
-  assertPreparedCommit(prepared);
-  const currentVersion = ledgerVersion(ledger);
-  const currentStateDigest = ledgerStateDigest(ledger);
-  if (currentVersion !== prepared.base_version
-    || currentStateDigest !== prepared.base_state_digest) {
-    return {
-      committed: false,
-      ledger,
-      outcome: outcome({
-        accepted: false,
-        reason_id: "version_conflict",
-        operation_id: prepared.operation.operation_id,
-        kind: prepared.kind,
-        base_version: prepared.base_version,
-        current_version: currentVersion,
-        base_state_digest: prepared.base_state_digest,
-        current_state_digest: currentStateDigest,
-      }),
-    };
-  }
-  return { committed: true, ledger: prepared.next_ledger, outcome: prepared.outcome };
+function conflictOutcome(reasonId, prepared, fields) {
+  return outcome({
+    accepted: false,
+    reason_id: reasonId,
+    operation_id: prepared.operation.operation_id,
+    kind: prepared.kind,
+    base_version: prepared.base_version,
+    ...fields,
+  });
 }
 
 /**
- * Recompute a conflicted commit against the base that actually committed.
+ * THE CELL IS THE ADMISSION POINT, and it is the only one.
  *
- * The same step, a new base, and therefore possibly a different answer. This is
- * the whole of the losing caller's protocol and it is deliberately explicit: a
- * loop that hid the second answer would hide the refusal the conflict exists to
+ * A prepared commit is a proposal and nothing more: it is computed against a
+ * base that the ledger may already have left, and it is a value its holder can
+ * edit. Neither of those is a defect in the proposal — they are what a
+ * concurrent caller's answer IS. What they mean is that a proposal cannot be
+ * allowed to admit itself. So a cell OWNS the current ledger value, and:
+ *
+ *   - `cell.commit(prepared)` admits a proposal only while the cell is still
+ *     standing on the exact base the proposal names, by version AND by state
+ *     digest, and otherwise returns `version_conflict` and installs nothing;
+ *   - it then REDERIVES the whole transition from its own current value and
+ *     the proposal's operation, and installs THAT. `prepared.next_ledger` and
+ *     `prepared.outcome` are never installed and never believed: they are
+ *     compared against the rederivation, and a proposal that disagrees with it
+ *     is refused `prepared_commit_mismatch`;
+ *   - the read of the held value, the decision, and the replacement are one
+ *     synchronous step with no await and no yield between them, so no second
+ *     caller can interleave: two proposals from one base produce exactly one
+ *     landing and one refusal, whichever is offered first.
+ *
+ * The loser's only honest move is `cell.recompute(prepared)`: the same step
+ * against what actually committed. The second answer can differ from the first
+ * — that is the entire point — and it is deliberately not wrapped in a retry
+ * loop, because a loop would swallow the refusal the conflict exists to
  * produce.
+ *
+ * WHY BOTH A VERSION AND A DIGEST. A version alone cannot tell two different
+ * ledgers of the same age apart, and a commit computed against one lineage must
+ * never install onto another. The digest pins the exact state; the version is
+ * what a human reads in the refusal.
+ *
+ * WHAT THIS IS NOT. ONE cell in ONE process, holding one in-memory value. This
+ * is a real admission boundary against a stale or a doctored proposal — the
+ * thing that was missing — and it is not durable serialization. Two processes
+ * against a stored ledger need a row lock or a serializable transaction to
+ * supply this same single admission point, and that gap stays named on the
+ * projection rather than quietly closed by this section.
  */
-export function recomputeCommit(ledger, prepared) {
+export function openLedgerCell(ledger) {
   assertLedger(ledger);
-  assertPreparedCommit(prepared);
-  return prepareCommit(ledger, { kind: prepared.kind, operation: copy(prepared.operation) });
+  let held = ledger;
+
+  return Object.freeze({
+    /** The value the cell is standing on right now. */
+    read() { return held; },
+
+    version() { return ledgerVersion(held); },
+
+    stateDigest() { return ledgerStateDigest(held); },
+
+    /** Compute a proposal against the cell's current value, installing nothing. */
+    prepare(step) { return prepareCommit(held, step); },
+
+    /** The loser's protocol: the same step again, against what actually committed. */
+    recompute(prepared) {
+      assertPreparedCommit(prepared);
+      return prepareCommit(held, { kind: prepared.kind, operation: copy(prepared.operation) });
+    },
+
+    commit(prepared) {
+      assertPreparedCommit(prepared);
+      // From here to the assignment is one synchronous step.
+      const current = held;
+      const currentVersion = ledgerVersion(current);
+      const currentStateDigest = ledgerStateDigest(current);
+      if (currentVersion !== prepared.base_version
+        || currentStateDigest !== prepared.base_state_digest) {
+        return {
+          committed: false,
+          ledger: current,
+          outcome: conflictOutcome("version_conflict", prepared, {
+            current_version: currentVersion,
+            base_state_digest: prepared.base_state_digest,
+            current_state_digest: currentStateDigest,
+          }),
+        };
+      }
+      const rederived = V5_LEDGER_OPERATIONS[prepared.kind](current, prepared.operation);
+      const rederivedStateDigest = ledgerStateDigest(rederived.ledger);
+      const proposedStateDigest = ledgerStateDigest(prepared.next_ledger);
+      if (rederivedStateDigest !== proposedStateDigest
+        || digest(copy(rederived.outcome)) !== digest(copy(prepared.outcome))) {
+        return {
+          committed: false,
+          ledger: current,
+          outcome: conflictOutcome("prepared_commit_mismatch", prepared, {
+            current_version: currentVersion,
+            proposed_state_digest: proposedStateDigest,
+            rederived_state_digest: rederivedStateDigest,
+          }),
+        };
+      }
+      held = rederived.ledger;
+      return { committed: true, ledger: held, outcome: rederived.outcome };
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1667,6 +1758,9 @@ export function v5CostLedgerProjection() {
     commit_names_the_base_it_was_computed_from: true,
     stale_base_commit_can_be_admitted: false,
     two_commits_from_one_base_can_both_land: false,
+    commit_admission_point_is_a_cell_that_owns_the_ledger: true,
+    a_caller_supplied_next_ledger_can_be_installed: false,
+    a_commit_is_rederived_before_it_is_installed: true,
     sibling_headroom_absorbs_an_overage: false,
     negative_amount_accepted: false,
     // The effect class, said plainly so nobody reads a vendor reference as a bill.
@@ -1674,7 +1768,7 @@ export function v5CostLedgerProjection() {
     external_payment_reachable_here: false,
     unimplemented_dependencies: [
       "a durable store: this ledger lives in a JavaScript value and nothing it records survives the process; the tables and the migration it would need are stated in the slice's author report under migration_owed and are deliberately NOT written here, because the migration-number frontier is a serialized surface owned by one writer at a time",
-      "a durable cross-process serialization boundary: the compare-and-swap above is real — a commit names the version and state digest of the base it was computed from, and the ledger admits exactly one commit per base, so a caller holding a stale read is refused rather than quietly granted a second claim on one headroom — but both callers are still two readers of ONE in-memory value inside ONE process; two processes against the durable store above need a row lock or a serializable transaction to supply the same single admission point, and no test in this repository can stand in for that",
+      "a durable cross-process serialization boundary: the compare-and-swap above is real — the ledger cell OWNS the current value, a commit names the version and state digest of the base it was computed from, the cell admits exactly one commit per base and rederives the transition from its own value rather than installing the one it was handed, so a caller holding a stale read or a doctored proposal is refused rather than quietly granted a second claim on one headroom — but both callers are still two holders of ONE cell inside ONE process; two processes against the durable store above need a row lock or a serializable transaction to supply the same single admission point, and no test in this repository can stand in for that",
       "an incident opener: Q142.D1 requires an overdrawn hierarchy to open an incident, and this module can only REPORT that requirement on its projection — opening one is the record layer's open-incident verb, which is authority-bound and unreachable from a pure module",
       "an authority amendment path: raising a ceiling means a new scope-tree version from whoever holds the authority; this module recompiles a tree it is handed and has no way to tell an authorised amendment from an edited fixture",
       "a vendor charge feed: every actual and liability here arrives on an argument, so the ledger cannot tell a real provider charge from a typed-in one and never claims to",

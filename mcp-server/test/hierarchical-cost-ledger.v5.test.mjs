@@ -48,13 +48,13 @@ import {
   ledgerVersion,
   ledgerStateDigest,
   prepareCommit,
-  commitPrepared,
-  recomputeCommit,
+  openLedgerCell,
   projectLedger,
   assertLedgerConservation,
   v5CostLedgerPreimage,
   v5CostLedgerProjection,
 } from "../src/hierarchical-cost-ledger.v5.js";
+import * as ledgerModule from "../src/hierarchical-cost-ledger.v5.js";
 
 function refuses(fn, code) {
   try {
@@ -303,13 +303,20 @@ test("ORDER: the portfolio ceiling binds even when every slice and child has roo
   assertLedgerConservation(run.ledger);
 });
 
-// --- fixture 1b: the race — two callers, one base ---------------------------
+// --- fixture 1b: the race — two callers, one base, one cell -----------------
 //
 // THE CASE AN ORDERING CANNOT EXPRESS. Above, each operation saw the ledger the
 // one before it produced. Here both callers read the SAME ledger, each computes
 // a complete answer against it, and only then do they try to commit. Both
 // computations say yes — that is not a bug, it is what a stale read looks like
 // — and the whole question is whether the LEDGER lets both of them land.
+//
+// EVERY COMMIT BELOW IS OFFERED TO THE SAME CELL, and that is the point of the
+// fixture rather than an incidental detail. A fixture that handed the winner's
+// ledger to the second commit itself would be doing the ledger's job for it:
+// the serialization would live in the test, and an implementation with no
+// admission point of its own would pass. The cell owns the value; a caller can
+// only offer.
 
 function reserveStep(id, nodeId, amount) {
   return { kind: "reserve", operation: reserveOp(id, nodeId, amount) };
@@ -329,9 +336,10 @@ function convertStep(id, reservationId, amount) {
 test("RACE: two reservations computed from ONE base — exactly one commit lands", () => {
   // slice:a04 ceiling 300. Two reservations of 200 cannot both fit, and both
   // callers are about to be told, correctly and uselessly, that theirs does.
-  const base = fresh();
-  const first = prepareCommit(base, reserveStep("first", A04, 200));
-  const second = prepareCommit(base, reserveStep("second", A04, 200));
+  const cell = openLedgerCell(fresh());
+  const base = cell.read();
+  const first = cell.prepare(reserveStep("first", A04, 200));
+  const second = cell.prepare(reserveStep("second", A04, 200));
 
   assert.equal(first.outcome.accepted, true);
   assert.equal(second.outcome.accepted, true,
@@ -340,18 +348,19 @@ test("RACE: two reservations computed from ONE base — exactly one commit lands
   assert.equal(second.base_version, first.base_version);
   assert.equal(second.base_state_digest, first.base_state_digest,
     "the two callers really did compute against the same base");
-  assert.equal(ledgerVersion(base), 0, "preparing installs nothing");
+  assert.equal(cell.version(), 0, "preparing installs nothing");
+  assert.equal(cell.read(), base, "the cell is still standing on the base, by identity");
   assert.deepEqual(projectLedger(base).open_reservation_ids, [],
     "the base a commit was computed from is untouched by computing it");
 
-  // Both are now offered to the ledger. This is the step the old fixture had
-  // no way to take, because it never held two answers computed from one base.
-  const landed = commitPrepared(base, first);
-  const lost = commitPrepared(landed.ledger, second);
+  // Both are now offered to THE SAME CELL. Neither caller passes a ledger and
+  // neither caller can: the cell holds the only one there is.
+  const landed = cell.commit(first);
+  const lost = cell.commit(second);
 
   assert.equal(landed.committed, true);
   assert.equal(lost.committed, false,
-    "the second commit was computed from a base the ledger has already left");
+    "the second commit was computed from a base the cell has already left");
   assert.equal([landed, lost].filter(result => result.committed).length, 1,
     "exactly one of two commits from one base may land");
   assert.equal(lost.outcome.reason_id, "version_conflict");
@@ -360,28 +369,29 @@ test("RACE: two reservations computed from ONE base — exactly one commit lands
   assert.equal(lost.outcome.current_version, 1);
   assert.equal(lost.outcome.operation_id, "op:second");
   assert.equal(lost.ledger, landed.ledger, "a conflicted commit installs nothing at all");
-  assert.deepEqual(projectLedger(lost.ledger).open_reservation_ids, ["res:first"]);
-  assertLedgerConservation(lost.ledger);
+  assert.equal(cell.read(), landed.ledger, "and the cell still holds what the winner installed");
+  assert.deepEqual(projectLedger(cell.read()).open_reservation_ids, ["res:first"]);
+  assertLedgerConservation(cell.read());
 
   // The loser's only honest move: compute the same step again, against what
   // actually committed. The answer is different, and the difference is the
   // point — this is the acceptance the serial fixture could never withdraw.
-  const retried = recomputeCommit(lost.ledger, second);
+  const retried = cell.recompute(second);
   assert.equal(retried.base_version, 1);
   assert.equal(retried.outcome.accepted, false);
   assert.equal(retried.outcome.reason_id, "ceiling_exceeded");
   assert.equal(retried.outcome.binding_node_id, A04);
   assert.equal(retried.outcome.available_units, 100);
 
-  const settled = commitPrepared(lost.ledger, retried);
+  const settled = cell.commit(retried);
   assert.equal(settled.committed, true,
     "a refusal is a decision the ledger made and it commits like any other");
-  assert.deepEqual(projectLedger(settled.ledger).open_reservation_ids, ["res:first"]);
-  assert.equal(node(settled.ledger, A04).rolled_up.committed_units, 200);
-  assert.ok(node(settled.ledger, A04).rolled_up.committed_units <= 300);
-  assert.equal(ledgerVersion(settled.ledger), 2,
+  assert.deepEqual(projectLedger(cell.read()).open_reservation_ids, ["res:first"]);
+  assert.equal(node(cell.read(), A04).rolled_up.committed_units, 200);
+  assert.ok(node(cell.read(), A04).rolled_up.committed_units <= 300);
+  assert.equal(cell.version(), 2,
     "two operations were applied: one acceptance and one refusal");
-  assertLedgerConservation(settled.ledger);
+  assertLedgerConservation(cell.read());
 });
 
 test("RACE: whichever of the two reservations is offered first, the other loses the same way", () => {
@@ -389,19 +399,20 @@ test("RACE: whichever of the two reservations is offered first, the other loses 
   // earlier-prepared commit rather than the earlier-COMMITTED one would pass
   // the fixture above and fail this one.
   for (const [winnerId, loserId] of [["first", "second"], ["second", "first"]]) {
-    const base = fresh();
-    const winner = prepareCommit(base, reserveStep(winnerId, A04, 200));
-    const loser = prepareCommit(base, reserveStep(loserId, A04, 200));
+    const cell = openLedgerCell(fresh());
+    const winner = cell.prepare(reserveStep(winnerId, A04, 200));
+    const loser = cell.prepare(reserveStep(loserId, A04, 200));
 
-    const landed = commitPrepared(base, winner);
-    const conflicted = commitPrepared(landed.ledger, loser);
+    const landed = cell.commit(winner);
+    const conflicted = cell.commit(loser);
     assert.equal(landed.committed, true, `${winnerId} was offered first and must land`);
     assert.equal(conflicted.committed, false);
     assert.equal(conflicted.outcome.reason_id, "version_conflict");
 
-    const retried = recomputeCommit(conflicted.ledger, loser);
+    const retried = cell.recompute(loser);
     assert.equal(retried.outcome.reason_id, "ceiling_exceeded");
-    const final = commitPrepared(conflicted.ledger, retried).ledger;
+    cell.commit(retried);
+    const final = cell.read();
     assert.deepEqual(projectLedger(final).open_reservation_ids, [`res:${winnerId}`],
       "the reservation that committed is the one that is held, by identity");
     assert.equal(node(final, A04).rolled_up.committed_units, 200);
@@ -410,64 +421,138 @@ test("RACE: whichever of the two reservations is offered first, the other loses 
 });
 
 test("RACE: two conversions of ONE reservation computed from one base book the charge once", () => {
-  let base = fresh();
-  ({ ledger: base } = reserve(base, reserveOp("a", A04, 100)));
+  let opened = fresh();
+  ({ ledger: opened } = reserve(opened, reserveOp("a", A04, 100)));
+  const cell = openLedgerCell(opened);
   // Two settlement callers, each with its own conversion id and its own vendor
   // reference, so nothing but the commit boundary can tell them apart: the
   // duplicate-vendor-charge guard does not fire and the reservation is open in
   // both of their views.
-  const alpha = prepareCommit(base, convertStep("alpha", "res:a", 90));
-  const beta = prepareCommit(base, convertStep("beta", "res:a", 95));
+  const alpha = cell.prepare(convertStep("alpha", "res:a", 90));
+  const beta = cell.prepare(convertStep("beta", "res:a", 95));
   assert.equal(alpha.outcome.accepted, true);
   assert.equal(beta.outcome.accepted, true,
     "both callers compute a valid conversion of the same open reservation — this is the double count, one commit away");
 
-  const landed = commitPrepared(base, alpha);
-  const lost = commitPrepared(landed.ledger, beta);
+  const landed = cell.commit(alpha);
+  const lost = cell.commit(beta);
   assert.equal(landed.committed, true);
   assert.equal(lost.committed, false);
   assert.equal(lost.outcome.reason_id, "version_conflict");
   assert.equal(lost.outcome.base_version, 1);
   assert.equal(lost.outcome.current_version, 2);
 
-  const retried = recomputeCommit(lost.ledger, beta);
+  const retried = cell.recompute(beta);
   assert.equal(retried.outcome.accepted, false);
   assert.equal(retried.outcome.reason_id, "reservation_not_open",
     "recomputed against what committed, the second settlement has nothing left to convert");
-  const settled = commitPrepared(lost.ledger, retried);
-  assert.equal(settled.committed, true);
+  assert.equal(cell.commit(retried).committed, true);
 
-  const a04 = node(settled.ledger, A04);
+  const a04 = node(cell.read(), A04);
   assert.equal(a04.rolled_up.actual_units, 90, "the charge is booked exactly once");
   assert.equal(a04.rolled_up.incurred_units, 90);
   assert.equal(a04.rolled_up.reservation_outstanding_units, 0);
   assert.equal(a04.rolled_up.committed_units, 90);
-  assert.equal(node(settled.ledger, PORTFOLIO).rolled_up.actual_units, 90,
+  assert.equal(node(cell.read(), PORTFOLIO).rolled_up.actual_units, 90,
     "and once at every ancestor, not once per caller");
-  assert.deepEqual(assertLedgerConservation(settled.ledger).conversion_ids, ["conv:alpha"],
+  assert.deepEqual(assertLedgerConservation(cell.read()).conversion_ids, ["conv:alpha"],
     "one conversion id exists, so the log cannot carry a second release or a second actual");
 });
 
 test("RACE: whichever conversion is offered first is the one that is booked", () => {
   for (const [winnerId, winnerAmount, loserId] of [["alpha", 90, "beta"], ["beta", 95, "alpha"]]) {
-    let base = fresh();
-    ({ ledger: base } = reserve(base, reserveOp("a", A04, 100)));
-    const winner = prepareCommit(base, convertStep(winnerId, "res:a", winnerAmount));
-    const loser = prepareCommit(base, convertStep(loserId, "res:a", winnerId === "alpha" ? 95 : 90));
+    let opened = fresh();
+    ({ ledger: opened } = reserve(opened, reserveOp("a", A04, 100)));
+    const cell = openLedgerCell(opened);
+    const winner = cell.prepare(convertStep(winnerId, "res:a", winnerAmount));
+    const loser = cell.prepare(convertStep(loserId, "res:a", winnerId === "alpha" ? 95 : 90));
 
-    const landed = commitPrepared(base, winner);
-    const conflicted = commitPrepared(landed.ledger, loser);
+    const landed = cell.commit(winner);
+    const conflicted = cell.commit(loser);
+    assert.equal(landed.committed, true);
     assert.equal(conflicted.committed, false);
     assert.equal(conflicted.outcome.reason_id, "version_conflict");
 
-    const retried = recomputeCommit(conflicted.ledger, loser);
+    const retried = cell.recompute(loser);
     assert.equal(retried.outcome.reason_id, "reservation_not_open");
-    const final = commitPrepared(conflicted.ledger, retried).ledger;
+    cell.commit(retried);
+    const final = cell.read();
     assert.equal(node(final, A04).rolled_up.actual_units, winnerAmount,
       "the amount booked is the one that committed, not the larger or the first prepared");
     assert.equal(node(final, A04).rolled_up.reservation_outstanding_units, 0);
     assertLedgerConservation(final);
   }
+});
+
+// --- fixture 1c: a proposal is not trusted, it is rederived ------------------
+//
+// A prepared commit is an ordinary value and its holder can edit it. These
+// fixtures hand the cell proposals that are internally dishonest — the base
+// they name is genuinely current, so the compare-and-swap has nothing to catch
+// — and prove the cell still refuses them, because it recomputes the whole
+// transition from its own value and compares.
+
+function doctor(prepared, overrides) {
+  return Object.freeze({ ...prepared, ...overrides });
+}
+
+test("ADVERSARIAL: a proposal whose next_ledger is its own base is refused, not committed empty", () => {
+  const cell = openLedgerCell(fresh());
+  const honest = cell.prepare(reserveStep("first", A04, 200));
+  // The proposal now says: accept this 200-unit reservation, and the ledger it
+  // produces is the base. A commit that installed what it was handed would
+  // answer `committed: true`, record no entry and leave the version at zero —
+  // after which a second 200-unit proposal from that same base would commit
+  // too, and 400 units would be accepted under a 300-unit ceiling.
+  const doctored = doctor(honest, { next_ledger: cell.read() });
+  const refused = cell.commit(doctored);
+
+  assert.equal(refused.committed, false, "a proposal the ledger cannot rederive never commits");
+  assert.equal(refused.outcome.accepted, false);
+  assert.equal(refused.outcome.reason_id, "prepared_commit_mismatch");
+  assert.equal(refused.outcome.operation_id, "op:first");
+  assert.notEqual(refused.outcome.proposed_state_digest, refused.outcome.rederived_state_digest);
+  assert.equal(cell.version(), 0, "nothing was applied, so nothing advanced");
+  assert.equal(cell.read().entries.length, 0);
+  assert.deepEqual(projectLedger(cell.read()).open_reservation_ids, []);
+
+  // The honest proposal, which names the same still-current base, still lands.
+  const landed = cell.commit(honest);
+  assert.equal(landed.committed, true);
+  assert.equal(cell.version(), 1);
+  assert.deepEqual(projectLedger(cell.read()).open_reservation_ids, ["res:first"]);
+  assertLedgerConservation(cell.read());
+});
+
+test("ADVERSARIAL: a proposal whose recorded outcome disagrees with the rederived one is refused", () => {
+  const cell = openLedgerCell(fresh());
+  const fits = cell.prepare(reserveStep("fits", A04, 100));
+  const breaches = cell.prepare(reserveStep("breaches", A04, 400));
+  assert.equal(breaches.outcome.accepted, false);
+  assert.equal(breaches.outcome.reason_id, "ceiling_exceeded");
+
+  // Same operation and same base, and the ledger it proposes is the right one
+  // — a refusal is applied like any other decision — so only the ANSWER has
+  // been swapped, for one that says the 400 units were accepted. The ledger
+  // halves match and the outcome halves do not.
+  const doctored = doctor(breaches, { outcome: fits.outcome });
+  const refused = cell.commit(doctored);
+  assert.equal(refused.committed, false);
+  assert.equal(refused.outcome.reason_id, "prepared_commit_mismatch");
+  assert.equal(refused.outcome.proposed_state_digest, refused.outcome.rederived_state_digest,
+    "the proposed ledger was honest; the answer attached to it was not");
+  assert.equal(cell.version(), 0);
+  assert.equal(node(cell.read(), A04).rolled_up.committed_units, 0);
+
+  // And the same operation, offered with the answer it actually produces, is
+  // admitted — as a refusal, which is what it always was.
+  const settled = cell.commit(breaches);
+  assert.equal(settled.committed, true);
+  assert.equal(settled.outcome.accepted, false);
+  assert.equal(settled.outcome.reason_id, "ceiling_exceeded");
+  assert.equal(cell.version(), 1);
+  assert.equal(node(cell.read(), A04).rolled_up.committed_units, 0);
+  assertLedgerConservation(cell.read());
 });
 
 test("COMMIT: a version counts applied operations, not entries, and a replay does not advance it", () => {
@@ -491,44 +576,67 @@ test("COMMIT: a version counts applied operations, not entries, and a replay doe
 });
 
 test("COMMIT: a commit from a different lineage of the same age is refused, not installed", () => {
-  // Both ledgers have applied exactly one operation, so a version check alone
+  // Both cells have applied exactly one operation, so a version check alone
   // would wave this through. The state digest is what stops it.
-  const { ledger: hereLedger } = reserve(fresh(), reserveOp("here", A04, 50));
-  const { ledger: elsewhere } = reserve(fresh(), reserveOp("elsewhere", A05, 50));
-  assert.equal(ledgerVersion(hereLedger), ledgerVersion(elsewhere));
-  assert.notEqual(ledgerStateDigest(hereLedger), ledgerStateDigest(elsewhere));
+  const here = openLedgerCell(reserve(fresh(), reserveOp("here", A04, 50)).ledger);
+  const elsewhere = openLedgerCell(reserve(fresh(), reserveOp("elsewhere", A05, 50)).ledger);
+  assert.equal(here.version(), elsewhere.version());
+  assert.notEqual(here.stateDigest(), elsewhere.stateDigest());
 
-  const prepared = prepareCommit(elsewhere, reserveStep("stranger", A05, 10));
-  const result = commitPrepared(hereLedger, prepared);
+  const prepared = elsewhere.prepare(reserveStep("stranger", A05, 10));
+  const result = here.commit(prepared);
   assert.equal(result.committed, false);
   assert.equal(result.outcome.reason_id, "version_conflict");
   assert.equal(result.outcome.base_version, result.outcome.current_version,
     "same age, different lineage — the version agreed and the digest did not");
   assert.notEqual(result.outcome.base_state_digest, result.outcome.current_state_digest);
-  assert.deepEqual(projectLedger(result.ledger).open_reservation_ids, ["res:here"]);
+  assert.deepEqual(projectLedger(here.read()).open_reservation_ids, ["res:here"]);
 });
 
 test("COMMIT: a prepared commit is a value, and re-offering it to its own base is refused after it lands", () => {
-  const base = fresh();
-  const prepared = prepareCommit(base, reserveStep("a", A04, 100));
-  const landed = commitPrepared(base, prepared);
+  const cell = openLedgerCell(fresh());
+  const prepared = cell.prepare(reserveStep("a", A04, 100));
+  const landed = cell.commit(prepared);
   assert.equal(landed.committed, true);
   // Offering the same prepared commit again against the ledger it produced is a
   // stale base like any other. The idempotency gate is a separate guard and
   // this must not be allowed to depend on it.
-  const again = commitPrepared(landed.ledger, prepared);
+  const again = cell.commit(prepared);
   assert.equal(again.committed, false);
   assert.equal(again.outcome.reason_id, "version_conflict");
-  assert.equal(node(landed.ledger, A04).rolled_up.reservation_outstanding_units, 100);
-  assertLedgerConservation(landed.ledger);
+  assert.equal(node(cell.read(), A04).rolled_up.reservation_outstanding_units, 100);
+  assertLedgerConservation(cell.read());
 });
 
 test("COMMIT: a malformed commit throws rather than being treated as a conflict", () => {
-  const base = fresh();
-  refuses(() => commitPrepared(base, { base_version: 0 }), "invalid_shape");
-  refuses(() => prepareCommit(base, { kind: "settle_invoice", operation: {} }),
+  const cell = openLedgerCell(fresh());
+  const honest = cell.prepare(reserveStep("a", A04, 100));
+  refuses(() => cell.commit({ base_version: 0 }), "invalid_shape");
+  refuses(() => cell.commit(doctor(honest, { kind: "settle_invoice" })), "unknown_operation_kind");
+  refuses(() => cell.commit(doctor(honest, { operation: {} })), "invalid_reference");
+  refuses(() => cell.commit(doctor(honest, { next_ledger: {} })), "invalid_shape");
+  refuses(() => cell.commit(doctor(honest, { base_version: "0" })), "invalid_shape");
+  refuses(() => prepareCommit(cell.read(), { kind: "settle_invoice", operation: {} }),
     "unknown_operation_kind");
-  refuses(() => prepareCommit(base, { kind: "reserve" }), "missing_field");
+  refuses(() => prepareCommit(cell.read(), { kind: "reserve" }), "missing_field");
+  assert.equal(cell.version(), 0, "a throw is not a commit either");
+});
+
+test("COMMIT: nothing outside the cell can install a ledger value", () => {
+  // The single-writer functions return a ledger to their caller and always
+  // will — that is the whole of the sequencing interface. What must not exist
+  // anywhere is a second thing that can answer `committed: true`, because a
+  // second admission point is the same defect as none.
+  const cell = openLedgerCell(fresh());
+  const committers = Object.entries(ledgerModule)
+    .filter(([, value]) => typeof value === "function")
+    .filter(([name]) => /commit/i.test(name) && name !== "openLedgerCell");
+  assert.deepEqual(committers.map(([name]) => name).sort(), ["prepareCommit"],
+    "prepareCommit computes and installs nothing; commitPrepared is gone");
+  assert.equal(prepareCommit(cell.read(), reserveStep("a", A04, 10)).committed, undefined,
+    "a preparation is not a commit and does not carry the word");
+  assert.throws(() => { cell.commit = () => ({ committed: true }); }, TypeError,
+    "the cell's admission point cannot be replaced by its caller");
 });
 
 // --- fixture 2: cancel -----------------------------------------------------
@@ -1224,9 +1332,13 @@ test("SHAPE: every refusal reason a fixture can produce is inside the closed lis
     vendor_reference: "INV-OVER", incurred_at: AT,
   }));
   collect(reserve(ledger, reserveOp("z", A04, 1)).outcome);
-  // A commit computed against a base the ledger has already left.
+  // A commit computed against a base the cell has already left, and a commit
+  // whose proposal the cell cannot rederive.
+  const cell = openLedgerCell(ledger);
   const stale = prepareCommit(fresh(), { kind: "reserve", operation: reserveOp("stale", A04, 1) });
-  collect(commitPrepared(ledger, stale).outcome);
+  collect(cell.commit(stale).outcome);
+  const current = cell.prepare({ kind: "reserve", operation: reserveOp("doctored", A05, 1) });
+  collect(cell.commit({ ...current, next_ledger: cell.read() }).outcome);
 
   assert.deepEqual([...produced].sort(), [...V5_LEDGER_REFUSAL_REASONS]);
 });
@@ -1257,6 +1369,9 @@ test("PROJECTION: the honest boundary and the effect class are stated, not impli
   assert.equal(projection.commit_names_the_base_it_was_computed_from, true);
   assert.equal(projection.stale_base_commit_can_be_admitted, false);
   assert.equal(projection.two_commits_from_one_base_can_both_land, false);
+  assert.equal(projection.commit_admission_point_is_a_cell_that_owns_the_ledger, true);
+  assert.equal(projection.a_caller_supplied_next_ledger_can_be_installed, false);
+  assert.equal(projection.a_commit_is_rederived_before_it_is_installed, true);
   assert.ok(projection.unimplemented_dependencies.some(gap =>
     gap.includes("durable cross-process serialization boundary")),
   "the in-memory compare-and-swap must not be allowed to read as durable serialization");
