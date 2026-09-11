@@ -1865,8 +1865,8 @@ function importSpecifiers(source) {
 }
 
 /**
- * The runtime doors an ES module could use to reach a forbidden package without
- * ever writing an `import`, each mapped to a token that cannot occur in source.
+ * The runtime names this module is forbidden to reference, each mapped to a token
+ * that cannot occur in source.
  *
  * The key is the thing esbuild's `define` rewrites and the value is what it
  * rewrites it to, so finding the token in the output is proof that the source
@@ -1875,18 +1875,36 @@ function importSpecifiers(source) {
  * shadows. That is exactly the identifier-level question a text scan could not
  * answer, asked of the parser that already read the file.
  *
- * `process.getBuiltinModule` is on the list because the fifth review found it:
- * `process.getBuiltinModule("node:" + "https")` hands back `https` with no import
- * record, no `require`, and no `createRequire` — invisible to every other check
- * here. `Function` and `eval` are on it because each compiles a fresh scope in
- * which `require` is spelled at runtime and so is never spelled in the source.
+ * The list is ROOTS, not routes, because chasing routes is endless: the fifth
+ * review found `process.getBuiltinModule("node:" + "https")` and the sixth found
+ * `globalThis.process.getBuiltinModule(...)` reaching the same place around a
+ * define that named only the bare form. Every such route has to start at one of a
+ * small closed set of names — the host object (`process`), the global object by
+ * any of its spellings (`globalThis`, `global`, `window`, `self`), the CommonJS
+ * loader (`require`), the compilers that mint a fresh scope (`Function`, `eval`,
+ * `WebAssembly`), and the transports (`Worker`, `fetch`, `XMLHttpRequest`,
+ * `WebSocket`). J103 is a pure kernel: it decides, it does not touch the host. So
+ * the roots are banned outright and no route off them has to be enumerated.
+ *
+ * The two dotted entries are kept alongside their roots so the door tests can name
+ * the precise route a review found; esbuild matches the longer key first.
  */
 const FORBIDDEN_RUNTIME_DEFINES = {
+  process: "__J103_FORBIDDEN_PROCESS__",
+  globalThis: "__J103_FORBIDDEN_GLOBALTHIS__",
+  global: "__J103_FORBIDDEN_GLOBAL__",
+  window: "__J103_FORBIDDEN_WINDOW__",
+  self: "__J103_FORBIDDEN_SELF__",
   require: "__J103_FORBIDDEN_REQUIRE__",
-  "globalThis.require": "__J103_FORBIDDEN_REQUIRE__",
-  "process.getBuiltinModule": "__J103_FORBIDDEN_BUILTIN__",
   Function: "__J103_FORBIDDEN_FUNCTION__",
   eval: "__J103_FORBIDDEN_EVAL__",
+  WebAssembly: "__J103_FORBIDDEN_WEBASSEMBLY__",
+  Worker: "__J103_FORBIDDEN_WORKER__",
+  fetch: "__J103_FORBIDDEN_FETCH__",
+  XMLHttpRequest: "__J103_FORBIDDEN_XHR__",
+  WebSocket: "__J103_FORBIDDEN_WEBSOCKET__",
+  "globalThis.require": "__J103_FORBIDDEN_REQUIRE__",
+  "process.getBuiltinModule": "__J103_FORBIDDEN_BUILTIN__",
   "import.meta.resolve": "__J103_FORBIDDEN_RESOLVE__",
 };
 
@@ -2130,16 +2148,17 @@ test("J103 imports a closed set of modules, and no send-capable client is in it"
   assert.ok(!OUTBOUND_CAPABILITY.test(withoutRefusals),
     "J103 must hold no outbound capability of its own");
 
-  // And the runtime doors are shut by name rather than shape by shape. What this
-  // asserts is LEXICAL, and only that: the module's own text contains no import,
-  // no `require`, no `createRequire`, no `process.getBuiltinModule`, no
-  // Function-constructor and no `eval` route to a sending client or a provider
-  // write. It does NOT assert that nothing reachable from this module can send —
-  // a capability handed to J103 at runtime, as a function on a passed-in object,
-  // is invisible to any reading of the source. That case is governed by the
-  // authority rule and its own tests, not by this guard.
+  // And the runtime roots are shut by name. What this asserts is LEXICAL, and
+  // exactly this much: the compiled module contains no import outside the closed
+  // allow-list above, no dynamic import and no `createRequire`, and no reference
+  // to any identifier in FORBIDDEN_RUNTIME_DEFINES — `process`, `globalThis`,
+  // `global`, `window`, `self`, `require`, `Function`, `eval`, `WebAssembly`,
+  // `Worker`, `fetch`, `XMLHttpRequest`, `WebSocket`. It does NOT assert that
+  // nothing reachable from this module can send — a capability handed to J103 at
+  // runtime, as a function on a passed-in object, is invisible to any reading of
+  // the source. That case is governed by the authority rule and its own tests.
   assert.deepEqual(forbiddenRuntimeNames(J103_SOURCE), [],
-    "J103 is an ES module; none of the runtime doors to CommonJS has a use in it");
+    "J103 is a pure kernel; no forbidden root identifier has a use in it");
   for (const bridge of COMMONJS_BRIDGE_SPECIFIERS) {
     assert.ok(!specifiers.includes(bridge),
       `J103 must not import ${bridge}: createRequire mints the require it otherwise lacks`);
@@ -2148,18 +2167,30 @@ test("J103 imports a closed set of modules, and no send-capable client is in it"
     "J103 must not so much as name createRequire");
 });
 
-test("no runtime door reaches CommonJS from J103, including the ones nobody enumerated", () => {
+test("J103 references no forbidden root identifier, in any call shape", () => {
   // Each review's counterexample, and the answer to all of them is the same: the
   // parser is asked which IDENTIFIERS the source references, so no call shape has
   // to be anticipated. Optional-call require emits no import record; a global read
   // is not a call at all; getBuiltinModule builds its specifier at runtime; and
   // Function and eval spell `require` in a scope that does not exist until then.
+  // Banning the ROOTS is what ends the shape-by-shape chase: a route that starts
+  // at `globalThis` or `self` is caught at its first identifier, whatever it
+  // reaches for next.
   const doors = [
     ['const h = require?.("node:https");', "require"],
     ['globalThis.require("node:https");', "globalThis.require"],
     ["const r = require; r(\"node:https\");", "require"],
     ['const h = (0, require)("node:https");', "require"],
     ['process.getBuiltinModule("node:" + "https");', "process.getBuiltinModule"],
+    ['globalThis.process.getBuiltinModule("node:https");', "globalThis"],
+    ["const p = self.process;", "self"],
+    ["const p = window.process;", "window"],
+    ["const p = global.process;", "global"],
+    ["fetch(endpoint);", "fetch"],
+    ['new Worker("./w.js");', "Worker"],
+    ["new WebSocket(endpoint);", "WebSocket"],
+    ["new XMLHttpRequest();", "XMLHttpRequest"],
+    ["WebAssembly.compile(bytes);", "WebAssembly"],
     ['new Function("return require")();', "Function"],
     ['eval("require");', "eval"],
     ['import.meta.resolve("node:https");', "import.meta.resolve"],
@@ -2193,6 +2224,8 @@ test("no runtime door reaches CommonJS from J103, including the ones nobody enum
     'export const label = `a ${1} require`;',
     'export const key = { require: 1 }.require;',
     "export const c = requiredFields;",
+    "export const d = { self: 1, process: 2, window: 3 };",
+    "export const e = (function (process) { return process; })(1);",
   ]) {
     assert.deepEqual(forbiddenRuntimeNames(mention), [],
       `${mention} names no runtime door; it only spells one`);
