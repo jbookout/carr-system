@@ -7549,36 +7549,47 @@ export async function executeRegisteredTool(client, actor, name, args = {}) {
   const tool = TOOLS[name];
   if (!tool) throw new ToolError({ error: "unknown_tool", name });
   assertNoCallerAuthorityFields(args);
+  // HUMAN-ONLY IS ENFORCED HERE, AND THIS IS THE ONLY PLACE THAT ENFORCES IT
+  // (2026-09-11, WR-000021 criterion FLAG-TELLS-THE-TRUTH). Between 2026-08-26
+  // and today the flag was a label. Joe's ruling dc57f62d retired the refusal
+  // that stood on this line, and his complaint was exact: the SAME verb
+  // answered differently through two doors, succeeding through the connector
+  // and returning authority_connection_unavailable through `./run.sh call`.
+  // THAT half of the fix stands untouched — partner-authority.js still admits
+  // joe-local and dell-local, authorityOnly is not narrowed here, and both
+  // doors still reach all 220 verbs that are not humanOnly.
+  //
+  // WHAT BRINGS THE GATE BACK is a verb whose entire product meaning is the
+  // human act. accept-portfolio-revision records a partner accepting the
+  // DoctorCRE v5 constitution; ops.portfolio_accept_revision derives the
+  // acceptor from the authenticated authority session, so an agent invoking it
+  // over its sponsor's authority connection mints a receipt saying Joe
+  // accepted when Joe never did. A signature a machine can write is not a
+  // signature, and the ledger has no second field that would show the
+  // difference (WR-000021's three facts).
+  //
+  // STRICTER THAN THE REFUSAL IT REPLACES, deliberately. The old one admitted
+  // a verified partner OR any sponsored Codex/Claude session, so it would not
+  // have stopped this either. The test is now the one the flag always claimed:
+  // the server-derived actor class must be `verified_partner`, the only class
+  // identity.js gives an authenticated human partner. probe_agent,
+  // review_agent, sponsored_agent and unsponsored_agent are all refused,
+  // whichever connection they hold — an agent cannot reach a humanOnly verb by
+  // holding its sponsor's authority DSN.
+  //
+  // TWELVE VERBS carry the flag today. test/human-only-dispatch.test.mjs
+  // enumerates them FROM THE REGISTRY rather than from a list written by hand,
+  // so a thirteenth cannot be added without its coverage arriving with it.
+  if (tool.humanOnly === true) {
+    const actorClass = authorizationClassForActor(actor);
+    if (actorClass !== "verified_partner")
+      throw new ToolError({ error: "human_only_verb_requires_verified_partner",
+        verb: name, actor_class: actorClass,
+        hint: "this verb records a human act and refuses every agent class, sponsored or not, " +
+              "on every connection. Report what you would have done and let an interactive " +
+              "partner session run it." });
+  }
   await assertRegisteredToolInput(name, tool, args);
-  // RETIRED 2026-08-26 BY JOE'S RULING, and the flag is kept only as a label.
-  // His words: "Nothing is human only from now on. I don't want anything to be
-  // human only in this entire system. I'm so sick of the roadblocks. I'm
-  // literally telling you to do things and I'm getting blocked bc it's human
-  // only. It doesn't make any sense."
-  //
-  // WHAT THE REFUSAL ACTUALLY DID, because it was thinner than it read. It
-  // admitted a verified partner OR any sponsored Codex/Claude session, so an
-  // agent session of Joe's was never turned away by it — review-and-triage,
-  // marked HUMAN-ONLY, went through the connector the same hour this was
-  // written and the ledger recorded actor_slug 'joe'. What it DID refuse was
-  // the local-token door: `./run.sh call <verb>` authenticates as a machine
-  // actor and got authority_connection_unavailable. Same verb, two doors,
-  // opposite answers — that inconsistency is what read as senseless, and it is
-  // why removing this alone was not the whole fix.
-  //
-  // WHAT THIS GIVES UP, stated once so nobody rediscovers it as a surprise.
-  // Two of the forty-four verbs carry real commitment: new-deal writes a deal
-  // into a partner's book, and approve-rule admits a rule that then binds every
-  // future session. Memory correction is a third class. An agent can now do all
-  // of them unsupervised. Joe was told this explicitly before ruling and ruled
-  // anyway; it reopens if an agent-made deal or rule admission ever has to be
-  // reversed. Logged as decision dc57f62d with the full rationale.
-  //
-  // NOT IN SCOPE: the credentialed break-glass path (CARR_BREAK_GLASS with
-  // db-tap) stays separately receipted and outside this change, and the
-  // database grants that stop the job role writing ops.incident.resolved_at
-  // are untouched. Those are enforced elsewhere and were never this gate.
-  void canExercisePartnerAuthority;
   // TYPE COERCION AT THE CHOKE POINT (loop 353, 2026-08-13). See
   // coerceArgsToSchema above for what this fixes and why it is here rather than
   // in the seventeen handlers that would otherwise each need to remember. It
