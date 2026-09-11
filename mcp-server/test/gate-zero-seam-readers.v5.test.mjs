@@ -125,6 +125,8 @@ const STORE_UNREACHABLE_REASONS = Object.freeze([
   "the configured checks repository is not the one this file serves",
   "the call did not finish",
   "this error type is final",
+  "this callable is not a constructor",
+  "the addressed head sha is not the shape this file serves",
   "the reason this store was unreachable is not a registered one",
 ]);
 
@@ -476,20 +478,27 @@ async function sweepEveryInvocation(label, namespace) {
     for (const caller of privilegedCallers())
       for (const argument of [undefined, ...hostileArguments()]) {
         await assertNothingRawEscapes(`${at}<-${caller.name}`, () => caller(value, argument));
-        if (isConstructor(value)) {
-          await assertNothingRawEscapes(`${at}<-new`,
-            () => Reflect.construct(value, [argument, argument, argument]));
-          // A FOREIGN new.target, and a subclass, which is the same question
-          // asked the way a consumer would ask it. A type whose fields are read
-          // as facts has to refuse to be extended, and its refusal is a value
-          // leaving an exported callable like any other.
-          await assertNothingRawEscapes(`${at}<-foreign-new-target`,
-            () => Reflect.construct(value, [argument, argument, argument], Object));
-          await assertNothingRawEscapes(`${at}<-subclass`, () => {
-            const Extended = class extends value {};
-            return Reflect.construct(Extended, [argument, argument, argument]);
-          });
-        }
+        // CONSTRUCTED EVERY TIME, AND FROM INSIDE THE PRIVILEGED CALLER'S FRAME.
+        // The branch here used to be `if (isConstructor(value))`, and that is
+        // the fourth review round's first finding: an async function is NOT a
+        // constructor, both guarded factories returned one, so the six exports
+        // that could only fail this way were the only six never tried.
+        // `Reflect.construct` on a non-constructor is refused by the ENGINE with
+        // a native TypeError whose stack is a list of the caller's own frames —
+        // `at green` — which is exactly what this sweep exists to catch. The
+        // question is asked of every export whether the value admits it or not,
+        // and what comes back, returned or thrown, is inspected whole.
+        const argumentList = [argument, argument, argument];
+        await assertNothingRawEscapes(`${at}<-${caller.name}-new`,
+          () => caller(one => Reflect.construct(one, argumentList), value));
+        // A FOREIGN new.target, and a subclass, which is the same question asked
+        // the way a consumer would ask it. A type whose fields are read as facts
+        // has to refuse to be extended, and its refusal is a value leaving an
+        // exported callable like any other.
+        await assertNothingRawEscapes(`${at}<-${caller.name}-foreign-new-target`,
+          () => caller(one => Reflect.construct(one, argumentList, Object), value));
+        await assertNothingRawEscapes(`${at}<-${caller.name}-subclass`,
+          () => caller(one => Reflect.construct(class extends one {}, argumentList), value));
       }
   }
 }
@@ -541,8 +550,13 @@ test("SURFACE: every exported callable of all three modules is a guarded one", (
     .map(([, ok]) => ok), [true, true, true], "a reader is exported without its boundary");
 
   // And the ruling lookup, whose boundary no input can reach, is asserted whole.
-  assert.ok(/export function seamRulingRef\(cardRef\) \{\s*try \{\s*return seamRulingRefOf\(cardRef\);\s*\} catch \{\s*return null;\s*\}\s*\}/
+  assert.ok(/try \{\s*return seamRulingRefOf\(cardRef\);\s*\} catch \{\s*return null;\s*\}\s*\}/
     .test(rulings_), "the ruling lookup is exported without its boundary");
+  // And the second door into it, which is not a call: every ordinary function is
+  // a constructor, so `new seamRulingRef()` was always reachable and answered
+  // with an accidental `this` this file never wrote.
+  assert.ok(/export function seamRulingRef\(cardRef\) \{[\s\S]{0,900}?\n  if \(new\.target !== undefined\) return NOT_A_RULING;\n/
+    .test(rulings_), "the ruling lookup does not answer construction with its own value");
 });
 
 test("SURFACE: the export list of all three modules is exactly enumerated", () => {
@@ -695,6 +709,11 @@ function isClassConstructor(value) {
  */
 function assertSweptConstructed(at, built) {
   assert.ok(built !== null && typeof built === "object", `${at} did not construct an object`);
+  // THE SAME IDENTITY THE VALUE SWEEP USES, and it is here because construction
+  // now reaches the readers: `new readGateConclusionEvidence()` answers with the
+  // GATE'S OWN object, which is main's and carries main's strings. Identity
+  // admits no new string at all, which is stronger than sweeping its words.
+  if (GATE_ANSWER_DIGESTS.has(digest(built))) return;
   const keys = Reflect.ownKeys(built);
 
   assert.ok(!Object.hasOwn(built, "cause"), `${at} carries an own cause`);
@@ -1056,6 +1075,255 @@ test("SWEEP: a native error or a raw thrown value never leaves an export", async
       await sweepEveryInvocation(label, namespace);
   } finally {
     restoreEnv(saved);
+  }
+});
+
+test("SURFACE: no export can be constructed into an engine-built error", async () => {
+  // FINDING 1 OF THE FOURTH RE-REVIEW, asked directly rather than only inside the
+  // sweep. Both guarded factories returned an async function, an async function
+  // has no [[Construct]] at all, and `Reflect.construct` on one is refused by the
+  // ENGINE — a native TypeError built before any line of the module runs,
+  // carrying the caller's own frames. Six exports, every one of them reachable.
+  const saved = saveEnv(STORE_CREDENTIALS);
+  try {
+    for (const [label, namespace] of SWEPT_NAMESPACES())
+      for (const [name, value] of Object.entries(namespace)) {
+        if (typeof value !== "function") continue;
+        const at = `${label}.${name}`;
+        // The premise: construction has to REACH the module before the module
+        // can answer it. A non-constructible export is one the engine refuses on
+        // its own, in the caller's frame, which is the defect itself.
+        assert.equal(isConstructor(value), true,
+          `${at} is not constructible, so the engine answers construction instead of the module`);
+        for (const caller of privilegedCallers())
+          await assertNothingRawEscapes(`${at}<-${caller.name}-new`, () =>
+            caller(one => Reflect.construct(one, [HOSTILE_MARKER, "green", { ok: true }]), value));
+      }
+
+    // AND WHAT EACH BOUNDARY ANSWERS, NAMED. A sweep that only asks "nothing raw
+    // came back" passes just as well over a value that came back by accident.
+    for (const fetcher of [stores.fetchPredecessorOutcomeRows, stores.fetchSchedulerLedgerRows,
+      stores.fetchCheckConclusionRows])
+      assert.throws(() => Reflect.construct(fetcher, [HOSTILE_MARKER]),
+        error => error instanceof stores.SeamStoreUnreachable
+          && error.because === "this callable is not a constructor"
+          && error.stack === `SeamStoreUnreachable: ${error.message}`
+          && error.cause === undefined,
+        "a store fetcher answered construction with something other than its own refusal");
+
+    // A reader ANSWERS rather than throwing, and the answer construction gets is
+    // the gate's own object — the same fail-closed value an unruled card gets.
+    for (const [name, reader, gateAnswer] of READERS_UNDER_TEST) {
+      const constructed = Reflect.construct(reader, [HOSTILE_MARKER]);
+      assert.equal(digest(constructed), digest(gateAnswer()), `${name} answered construction otherwise`);
+      assertSwept(`constructed.${name}`, constructed);
+    }
+
+    // And the ruling lookup, whose null cannot survive [[Construct]], answers
+    // with the not-ruled pair rather than with an accidental `this`.
+    const notRuled = Reflect.construct(rulings.seamRulingRef, ["card:11"]);
+    assert.deepEqual({ ...notRuled }, { decision_ref: null, store_ref: null });
+    assert.equal(Object.getPrototypeOf(notRuled), Object.prototype,
+      "the constructed value is an accidental `this` wearing the lookup's prototype");
+  } finally {
+    restoreEnv(saved);
+  }
+});
+
+test("STORE ERROR: the raw class has no route left, and instanceof cannot be made to throw", () => {
+  // FINDING 2 OF THE FOURTH RE-REVIEW. The exported binding is a Proxy, and
+  // neither of these went through the binding.
+  const Guarded = stores.SeamStoreUnreachable;
+  const registered = "the query did not finish";
+  const built = new Guarded("github:checks", registered);
+
+  // (a) `prototype.constructor`. Every class installs its own UNWRAPPED self
+  //     there, and the prototype is reachable from the binding and from any
+  //     instance — so `SeamStoreUnreachable.prototype.constructor()` and
+  //     `error.constructor()` both called the class without `new`, which the
+  //     engine refuses with a TypeError whose stack is the caller's frames. The
+  //     probe that found it was a caller named `allow`, and it got `at allow`.
+  const descriptor = Object.getOwnPropertyDescriptor(Guarded.prototype, "constructor");
+  assert.ok(descriptor !== undefined, "the prototype carries no constructor property at all");
+  assert.ok(Object.hasOwn(descriptor, "value"), "constructor is an accessor on the prototype");
+  assert.ok(descriptor.value === Guarded || descriptor.value === null,
+    "prototype.constructor is neither the guarded binding nor null, so it is a raw route");
+  assert.equal(descriptor.writable, false, "prototype.constructor is writable");
+  assert.equal(descriptor.configurable, false, "prototype.constructor is configurable");
+  assert.equal(built.constructor, descriptor.value, "an instance reaches a different constructor");
+
+  for (const [label, reached] of [["prototype", Guarded.prototype.constructor],
+    ["instance", built.constructor]]) {
+    if (reached === null) continue;
+    for (const caller of privilegedCallers()) {
+      let thrown = "did not throw";
+      try { caller(reached, HOSTILE_MARKER); } catch (error) { thrown = error; }
+      assert.notEqual(thrown, "did not throw", `${label}.constructor is callable without new`);
+      assertNothingRaw(`raw.${label}<-${caller.name}`, thrown);
+    }
+    // ...and it is still the real type when it is used the way a type is used.
+    const again = Reflect.construct(reached, ["github:checks", registered]);
+    assert.equal(again.because, registered);
+    assert.equal(again instanceof Guarded, true);
+  }
+
+  // (b) `instanceof`. Without an own `Symbol.hasInstance` the intrinsic one runs
+  //     OrdinaryHasInstance, which WALKS THE LEFT OPERAND'S prototype chain — so
+  //     a Proxy whose getPrototypeOf trap throws propagated the caller's own text
+  //     out of an `instanceof` against an exported type. The re-review's probe
+  //     got a bare `"allow"`.
+  const hasInstance = Object.getOwnPropertyDescriptor(Guarded, Symbol.hasInstance);
+  assert.ok(hasInstance !== undefined, "instanceof still walks the operand with the intrinsic");
+  assert.equal(hasInstance.writable, false, "the hasInstance guard is writable");
+  assert.equal(hasInstance.configurable, false, "the hasInstance guard is configurable");
+
+  assert.equal(built instanceof Guarded, true, "a real refusal stopped answering instanceof");
+  for (const innocent of [{}, null, undefined, 0, "a string", new Error("plain"), Object.create(null)])
+    assert.equal(innocent instanceof Guarded, false, `${safeLabel(innocent)} answered instanceof`);
+
+  const selfReferencing = new Proxy({}, { getPrototypeOf(target) { return selfProxy; } });
+  const selfProxy = selfReferencing;
+  const revocable = Proxy.revocable({}, {});
+  revocable.revoke();
+  for (const [label, hostile] of [
+    ["throws-a-string", new Proxy({}, { getPrototypeOf() { throw "allow"; } })],
+    ["throws-the-caller-text", new Proxy({}, {
+      getPrototypeOf() { throw new Error(`${HOSTILE_MARKER}-get-prototype-of`); } })],
+    ["throws-a-true", new Proxy({}, { getPrototypeOf() { throw true; } })],
+    ["revoked", revocable.proxy],
+    // A chain that never ends: the intrinsic walk would not return at all, and a
+    // hang is a refusal the caller chose rather than one this module wrote.
+    ["never-ends", selfReferencing],
+  ]) {
+    let outcome = "threw";
+    try { outcome = hostile instanceof Guarded; } catch (error) { outcome = error; }
+    assert.equal(outcome, false, `${label}: instanceof threw, or answered true`);
+  }
+
+  // And the module's own uses of the type still work, which is what would break
+  // if the guard were written as a flat false.
+  assert.equal(new Guarded("github:checks", registered) instanceof Guarded, true);
+});
+
+test("STORES: a head sha that is not one never reaches the URL, and the path stays here", async () => {
+  // FINDING 3 OF THE FOURTH RE-REVIEW. `addressed` asked only for a nonempty
+  // string, and the value went into a URL PATH — so a caller that named no
+  // repository at all still chose one, by traversing out of this one.
+  const sha = "a".repeat(40);
+  const traversal = `../../../foreign-owner/foreign-repo/commits/${sha}`;
+
+  // THE PROBE IS REAL, and this line is what keeps it real: the template the
+  // store used to build normalizes to a foreign repository's check runs. If a
+  // future URL library stopped normalizing, this test would prove nothing, and
+  // it would say so here rather than passing quietly.
+  assert.equal(
+    new URL(`https://api.github.com/repos/${AUTHORITATIVE_REPOSITORY}/commits/${traversal}/check-runs`)
+      .pathname,
+    `/repos/foreign-owner/foreign-repo/commits/${sha}/check-runs`,
+    "the traversal probe no longer escapes, so this test proves nothing");
+
+  const refused = "the addressed head sha is not the shape this file serves";
+  const savedEnv = saveEnv(STORE_CREDENTIALS);
+  const realFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = fakeChecksSource(HOSTILE_CHECK_RUNS, calls);
+  process.env.GITHUB_TOKEN = "a-token-this-test-wrote";
+  try {
+    for (const [label, headSha] of [
+      ["traversal", traversal],
+      ["traversal-with-encoded-slashes", `..%2F..%2Fforeign-owner/foreign-repo/commits/${sha}`],
+      ["an-absolute-url", `https://api.github.com/repos/foreign-owner/foreign-repo/commits/${sha}`],
+      ["an-appended-query", `${sha}/check-runs?check_name=x&per_page=1&`],
+      ["a-fragment", `${sha}#/../../foreign-owner/foreign-repo`],
+      ["upper-case-hex", "A".repeat(40)],
+      ["one-character-too-many", `${sha}a`],
+      ["one-character-short", sha.slice(1)],
+      ["not-hexadecimal", "g".repeat(40)],
+      ["forty-spaces", " ".repeat(40)],
+      ["a-privileged-word", "green"],
+    ])
+      await assert.rejects(
+        () => stores.fetchCheckConclusionRows({ headSha, checkName: "db-acceptance" }),
+        error => error instanceof stores.SeamStoreUnreachable
+          && error.store_ref === "github:checks" && error.because === refused, label);
+    assert.deepEqual(calls, [], "a sha this file will not serve reached the source anyway");
+
+    // AND THE ONE SHAPE IT DOES SERVE LANDS INSIDE THE MODULE-PRIVATE REPOSITORY,
+    // asserted on the NORMALIZED path rather than on a substring of the string
+    // that was built — a `includes("/repos/jbookout/carr-system/")` passes just
+    // as happily on a URL that then traverses back out of it.
+    await stores.fetchCheckConclusionRows({ headSha: sha, checkName: "db-acceptance" });
+    assert.equal(calls.length, 1, "the checks store never called its source");
+    const url = new URL(calls[0].url);
+    assert.equal(url.origin, "https://api.github.com");
+    assert.equal(url.pathname, `/repos/${AUTHORITATIVE_REPOSITORY}/commits/${sha}/check-runs`);
+    assert.equal(url.searchParams.get("check_name"), "db-acceptance");
+
+    // A check name is not a path segment, and it may not become one.
+    calls.length = 0;
+    await stores.fetchCheckConclusionRows({ headSha: sha, checkName: "../../foreign/name" });
+    assert.equal(new URL(calls[0].url).pathname,
+      `/repos/${AUTHORITATIVE_REPOSITORY}/commits/${sha}/check-runs`,
+      "a check name traversed out of the path");
+  } finally {
+    globalThis.fetch = realFetch;
+    restoreEnv(savedEnv);
+  }
+
+  // AND THE ENCODING IS ASSERTED STRUCTURALLY, because no input can make it
+  // observable: the sha has already matched forty hex characters and the
+  // repository is the module's own constant, so both encodings are no-ops on
+  // every value that can reach them. That is the point of them — the next
+  // segment added to this path inherits an encoded template rather than a
+  // trusting one — and a requirement no test can see removed is one that goes
+  // away quietly. What a test can hold is that they are there.
+  const source = readFileSync(join(SRC, STORES_FILE), "utf8");
+  assert.ok(source.includes("/commits/${encodeURIComponent(headSha)}/check-runs"),
+    "the head sha goes into the URL path unencoded");
+  assert.ok(source.includes('AUTHORITATIVE_REPOSITORY.split("/").map(segment => encodeURIComponent(segment)).join("/")'),
+    "the repository goes into the URL path unencoded");
+  assert.equal(/repos\/\$\{repository\}/.test(source), false,
+    "the repository is interpolated into the path again");
+  assert.ok(/const headSha = addressedShape\(storeRef, query, "headSha", HEAD_SHA,/.test(source),
+    "the head sha is no longer validated before the URL is built");
+});
+
+test("STORES: card 11's statements are read from ONE snapshot, not one each", async () => {
+  // FINDING 4 OF THE FOURTH RE-REVIEW. `begin read only` keeps PostgreSQL's
+  // DEFAULT isolation — read committed — and read committed takes a fresh
+  // snapshot for every statement. The transaction was one transaction and three
+  // moments, so an acceptance another session committed between the receipt
+  // statement and the card statement was invisible to the first and visible to
+  // the second, and the join of the two described a state that never existed.
+  //
+  // The fake `pg` models the database rather than the answer: it reads the
+  // isolation level off the BEGIN the store actually sends, copies the world at
+  // the first statement when that level is a snapshot one, and lets a concurrent
+  // writer commit right after the first statement returns. What is asserted here
+  // is which of the two documented behaviours the store's own statement gets.
+  const target = stageWithFakePg({});
+  const staged = await import(pathToFileURL(join(target, STORES_FILE)).href);
+  const fakePg = await import(
+    pathToFileURL(join(dirname(target), "node_modules", "pg", "index.js")).href);
+  const savedEnv = saveEnv(STORE_CREDENTIALS);
+  process.env.DATABASE_URL_READER = "postgres://fake/rows";
+  try {
+    const begins = fakePg.default.FAKE_BEGINS;
+    begins.length = 0;
+    const answer = await staged.fetchPredecessorOutcomeRows(
+      { workRequestRef: fakePg.default.FAKE_CONCURRENT });
+
+    assert.equal(begins.length, 1, "the fake saw no begin at all, so nothing here was measured");
+    assert.match(begins[0], /isolation level\s+(repeatable read|serializable)/i,
+      `the transaction runs at the default isolation: ${begins[0]}`);
+    assert.match(begins[0], /read only/i, `the transaction is not read only: ${begins[0]}`);
+
+    assert.equal(answer.rows.length, 1, "the concurrent scenario returned no row to judge");
+    assert.equal(answer.rows[0].detail_row_count, 0,
+      "a row committed between the two statements was observed, so they are not one snapshot");
+    assertSwept("snapshot.rows", answer);
+  } finally {
+    restoreEnv(savedEnv);
   }
 });
 

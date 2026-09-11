@@ -100,6 +100,8 @@ const UNREACHABLE_REASONS = Object.freeze({
   foreignRepository: "the configured checks repository is not the one this file serves",
   callDidNotFinish: "the call did not finish",
   typeIsFinal: "this error type is final",
+  notConstructable: "this callable is not a constructor",
+  shaNotAddressed: "the addressed head sha is not the shape this file serves",
   notRegistered: "the reason this store was unreachable is not a registered one",
 });
 
@@ -209,6 +211,62 @@ export const SeamStoreUnreachable = new Proxy(SeamStoreUnreachableType, {
 });
 
 /**
+ * THE TWO ROUTES BACK TO THE RAW CLASS, CLOSED. The proxy above guards the
+ * BINDING; neither of these went through the binding, and the fourth review
+ * round reached both.
+ *
+ * (1) `prototype.constructor`. Every class installs its own unwrapped self
+ *     there, and the prototype is reachable from the binding and from any
+ *     instance — so `SeamStoreUnreachable.prototype.constructor()` and
+ *     `error.constructor()` both called the CLASS without `new`, which the
+ *     engine refuses with a TypeError whose stack is the caller's own frames. A
+ *     caller function named `allow` got `at allow` back. It is redefined as the
+ *     guarded binding, so both spellings land on the `apply` trap instead, and
+ *     a legitimate `new error.constructor(...)` still works through `construct`.
+ *
+ * (2) `instanceof`. Without an own `Symbol.hasInstance` the intrinsic one runs
+ *     OrdinaryHasInstance, which WALKS THE LEFT OPERAND'S PROTOTYPE CHAIN — and
+ *     a Proxy whose getPrototypeOf trap throws propagates the caller's own text
+ *     out of `x instanceof SeamStoreUnreachable`, a bare `"allow"` in the probe
+ *     that found this. The walk is done here instead, inside a try: a hostile
+ *     left operand answers false, and nothing it throws leaves.
+ *
+ * Both are non-writable, non-configurable data properties, and the prototype is
+ * frozen afterwards so neither can be redefined back.
+ */
+/**
+ * AND THE WALK IS BOUNDED, which the intrinsic one is not. A Proxy over an
+ * extensible target may answer its own getPrototypeOf trap with ITSELF, and an
+ * unbounded chain walk over that never returns — a hang is a refusal a caller
+ * chose, and this file does not hand one out. A chain longer than this is not a
+ * chain that reaches this type.
+ */
+const PROTOTYPE_WALK_LIMIT = 100;
+
+function seamStoreInstance(value) {
+  try {
+    if (value === null || (typeof value !== "object" && typeof value !== "function")) return false;
+    let walked = Reflect.getPrototypeOf(value);
+    for (let step = 0; step < PROTOTYPE_WALK_LIMIT; step += 1) {
+      if (walked === null || walked === undefined) return false;
+      if (walked === SeamStoreUnreachableType.prototype) return true;
+      walked = Reflect.getPrototypeOf(walked);
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+Object.defineProperty(SeamStoreUnreachableType.prototype, "constructor", {
+  value: SeamStoreUnreachable, writable: false, enumerable: false, configurable: false,
+});
+Object.defineProperty(SeamStoreUnreachableType, Symbol.hasInstance, {
+  value: seamStoreInstance, writable: false, enumerable: false, configurable: false,
+});
+Object.freeze(SeamStoreUnreachableType.prototype);
+
+/**
  * THE ONE GUARDED BOUNDARY, applied to every export of this module in one place
  * at the bottom of the file. Invariant (2) of the header lives here.
  *
@@ -230,15 +288,40 @@ function isOwnRefusal(value) {
   }
 }
 
+/**
+ * AND THE BOUNDARY COVERS `new`, NOT ONLY THE CALL. The fourth review round's
+ * first finding, and it is a fact about the LANGUAGE rather than about this
+ * code: an async function has no [[Construct]] at all, so `Reflect.construct`
+ * on one is refused by the ENGINE with a native TypeError — built before a line
+ * of this file runs, carrying the caller's own frames, `at green` among them.
+ * A try/catch inside the function cannot see it, because the function never
+ * starts.
+ *
+ * So the exported value is a Proxy whose CONSTRUCT TRAP is this module's own
+ * refusal, and its target is a plain function rather than an async one — a
+ * proxy is only a constructor when its target is, and a proxy over an async
+ * function would be refused by the same engine path with the same native error.
+ * The plain function returns the async work as a promise, so every caller sees
+ * exactly what it saw before; `new` now reaches a registered refusal with a
+ * fixed stack, and `Reflect.construct` with a foreign new.target or a subclass
+ * reaches the same trap.
+ */
 function guarded(storeRef, call) {
-  return async function guardedStoreCall(query) {
-    try {
-      return await call(query);
-    } catch (thrown) {
-      if (isOwnRefusal(thrown)) throw thrown;
-      throw new SeamStoreUnreachableType(storeRef, UNREACHABLE_REASONS.callDidNotFinish);
-    }
-  };
+  function guardedStoreCall(query) {
+    return (async () => {
+      try {
+        return await call(query);
+      } catch (thrown) {
+        if (isOwnRefusal(thrown)) throw thrown;
+        throw new SeamStoreUnreachableType(storeRef, UNREACHABLE_REASONS.callDidNotFinish);
+      }
+    })();
+  }
+  return new Proxy(guardedStoreCall, {
+    construct() {
+      throw new SeamStoreUnreachableType(storeRef, UNREACHABLE_REASONS.notConstructable);
+    },
+  });
 }
 
 /**
@@ -267,6 +350,26 @@ function addressed(storeRef, query, key) {
   const value = cell(query, key);
   if (typeof value !== "string" || value.length === 0)
     throw new SeamStoreUnreachableType(storeRef, UNREACHABLE_REASONS.queryNotAddressed);
+  return value;
+}
+
+/**
+ * An addressed value that also has to be the SHAPE this file will serve, refused
+ * with its own registered reason when it is not.
+ *
+ * THIS IS NOT THE READER'S CHECK REPEATED FOR TIDINESS. The reader validates
+ * `headSha` against the same pattern, and the reader is not the only caller:
+ * this module is exported, so the fetcher can be called by anything with
+ * anything. The fourth review round supplied
+ * `../../../foreign-owner/foreign-repo/commits/<40 hex>` — a nonempty string,
+ * which is all `addressed` ever asked — and the path it was interpolated into
+ * NORMALIZED to a foreign repository's check runs. The repository binding above
+ * was bypassed without ever naming a repository. A value that goes into a URL
+ * PATH is validated by the file that builds the URL.
+ */
+function addressedShape(storeRef, query, key, pattern, because) {
+  const value = addressed(storeRef, query, key);
+  if (!pattern.test(value)) throw new SeamStoreUnreachableType(storeRef, because);
   return value;
 }
 
@@ -314,10 +417,27 @@ function instantText(value) {
 }
 
 /**
- * Several statements, ONE read-only transaction, one pool, closed before
- * returning. One transaction because the clauses compare facts to each other: a
- * receipt read at one instant and a card read at another could disagree, and a
- * reader that joined two instants would be reporting a state that never existed.
+ * Several statements, ONE read-only transaction AT ONE SNAPSHOT, one pool,
+ * closed before returning. One transaction because the clauses compare facts to
+ * each other: a receipt read at one instant and a card read at another could
+ * disagree, and a reader that joined two instants would be reporting a state
+ * that never existed.
+ *
+ * AND A TRANSACTION IS NOT A SNAPSHOT, which is the fourth review round's fourth
+ * finding. `begin read only` keeps PostgreSQL's DEFAULT isolation, READ
+ * COMMITTED, and read committed takes a NEW snapshot for every statement — so
+ * an acceptance committed by another session between card 11's first statement
+ * and its second was visible to the second and not the first, and the join of
+ * the two described a state the database never held. Read-only forbids this
+ * transaction from writing; it says nothing about what it sees.
+ *
+ * REPEATABLE READ is the weakest level that fixes one snapshot for the whole
+ * transaction — taken at the first statement and held to the commit — which is
+ * exactly the property the derivations assume. SERIALIZABLE would do as well and
+ * costs more: with no writes here there is no serialization anomaly to prevent,
+ * so nothing is bought by the stronger level. A read-only repeatable-read
+ * transaction cannot raise a serialization failure either, so there is no retry
+ * path to write and none is pretended.
  */
 async function readOnlyStatements(storeRef, statements) {
   const connectionString = configured("DATABASE_URL_READER", storeRef,
@@ -332,7 +452,7 @@ async function readOnlyStatements(storeRef, statements) {
   try {
     const client = await pool.connect();
     try {
-      await client.query("begin read only");
+      await client.query("begin isolation level repeatable read, read only");
       const results = [];
       for (const { text, params } of statements) results.push((await client.query(text, params)).rows);
       await client.query("commit");
@@ -526,10 +646,21 @@ async function schedulerLedgerRows(query) {
  */
 const AUTHORITATIVE_REPOSITORY = "jbookout/carr-system";
 
+/**
+ * THE SAME CONSTANT, IN THE FORM A URL PATH TAKES IT: each segment encoded on
+ * its own, so the only unencoded `/` in the path is one this file wrote. The
+ * constant cannot carry anything that needs escaping today — it is two literal
+ * words — and that is exactly why the encoding is applied to the whole path
+ * rather than to the sha alone: `${repository}/${headSha}` was a template that
+ * TRUSTED its parts, and the next part added to it would have been trusted too.
+ */
+const AUTHORITATIVE_REPOSITORY_PATH =
+  AUTHORITATIVE_REPOSITORY.split("/").map(segment => encodeURIComponent(segment)).join("/");
+
 /** Every place a repository could be named from outside this file. */
 const REPOSITORY_FIELDS = Object.freeze(["repository", "repo", "owner", "GITHUB_REPOSITORY"]);
 
-function authoritativeRepository(query) {
+function refuseAForeignRepository(query) {
   const env = globalThis.process?.env;
   const named = REPOSITORY_FIELDS.map(field =>
     field === "GITHUB_REPOSITORY" ? cell(env, field) : cell(query, field));
@@ -540,7 +671,6 @@ function authoritativeRepository(query) {
       throw new SeamStoreUnreachableType(STORE_TOKENS.checkConclusion,
         UNREACHABLE_REASONS.foreignRepository);
   }
-  return AUTHORITATIVE_REPOSITORY;
 }
 
 /**
@@ -560,11 +690,22 @@ function authoritativeRepository(query) {
  */
 async function checkConclusionRows(query) {
   const storeRef = STORE_TOKENS.checkConclusion;
-  const headSha = addressed(storeRef, query, "headSha");
+  // VALIDATED BEFORE ANYTHING IS BUILT OUT OF IT, and refused with its own
+  // registered reason rather than with the generic not-addressed one, so a
+  // reader can tell a query that named no commit from one that named something
+  // that is not a commit id at all.
+  const headSha = addressedShape(storeRef, query, "headSha", HEAD_SHA,
+    UNREACHABLE_REASONS.shaNotAddressed);
   const checkName = addressed(storeRef, query, "checkName");
-  const repository = authoritativeRepository(query);
+  refuseAForeignRepository(query);
   const token = configured("GITHUB_TOKEN", storeRef, UNREACHABLE_REASONS.credentialsNotConfigured);
-  const url = `https://api.github.com/repos/${repository}/commits/${headSha}/check-runs`
+  // EVERY SEGMENT ENCODED, INCLUDING THE ONES THAT CANNOT NEED IT. `headSha` has
+  // already matched forty hex characters, and the repository is this file's own
+  // constant — so both encodings are no-ops today, and they are what keeps the
+  // path's shape a property of this line rather than of a validation somewhere
+  // above it.
+  const url = `https://api.github.com/repos/${AUTHORITATIVE_REPOSITORY_PATH}`
+    + `/commits/${encodeURIComponent(headSha)}/check-runs`
     + `?check_name=${encodeURIComponent(checkName)}&per_page=100`;
   let response;
   try {

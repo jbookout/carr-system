@@ -720,14 +720,36 @@ async function gateConclusionEvidence(query) {
 // at all.
 // ---------------------------------------------------------------------------
 
+// AND THE BOUNDARY HAS TO COVER `new`, WHICH AN async FUNCTION CANNOT. The
+// fourth review round's first finding, and it is a fact about the language
+// rather than about this code: an async function has no [[Construct]] at all,
+// so `Reflect.construct` on one is refused by the ENGINE — a native TypeError,
+// built before any line of this module runs, carrying the caller's own frames
+// with `at green` among them. No try/catch inside the function can see that,
+// because the function never starts.
+//
+// So the exported value is a Proxy whose CONSTRUCT TRAP answers, and its target
+// is a plain function rather than an async one — a proxy is a constructor only
+// when its target is, and a proxy over an async function is refused by the same
+// engine path with the same native error. The plain function returns the async
+// work as a promise, so every caller sees exactly what it saw before.
+//
+// WHAT THE TRAP ANSWERS IS THE GATE'S OWN ANSWER, not a thrown refusal, because
+// the contract above is that a reader ANSWERS: `new readGateConclusionEvidence()`
+// now gets the identical object an unruled card gets, which is this surface's
+// fail-closed value. Nothing is thrown, so there is no stack to leak by the
+// construction door either.
 function guarded(gateAnswer, read) {
-  return async function guardedRead(query) {
-    try {
-      return await read(query);
-    } catch {
-      return gateAnswer();
-    }
-  };
+  function guardedRead(query) {
+    return (async () => {
+      try {
+        return await read(query);
+      } catch {
+        return gateAnswer();
+      }
+    })();
+  }
+  return new Proxy(guardedRead, { construct() { return gateAnswer(); } });
 }
 
 export const readPredecessorOutcomeEvidence =

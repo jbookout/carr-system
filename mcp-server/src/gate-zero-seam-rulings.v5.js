@@ -128,7 +128,18 @@ function seamRulingRefOf(cardRef) {
  * this lookup can say when it cannot say anything, and it is the fail-closed
  * answer: a null here shuts the seam.
  */
+const NOT_A_RULING = Object.freeze({ decision_ref: null, store_ref: null });
+
 export function seamRulingRef(cardRef) {
+  // CONSTRUCTED, NOT CALLED. Every ordinary function is a constructor, so
+  // `new seamRulingRef()` has always been reachable from anywhere — and what it
+  // answered was an accidental `this`, an object this file never wrote, whose
+  // prototype is this function's. `null`, the fail-closed answer, is not
+  // expressible through [[Construct]]: the language returns `this` for any
+  // non-object. So the not-ruled PAIR is returned instead, frozen and carrying
+  // the same two nulls a caller would have to read before it could act, and the
+  // answer is this module's own value either way.
+  if (new.target !== undefined) return NOT_A_RULING;
   try {
     return seamRulingRefOf(cardRef);
   } catch {

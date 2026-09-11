@@ -52,6 +52,44 @@ const THROWS = Object.freeze({
   "throw-a-native": () => { const absent = null; return absent.green; },
 });
 
+/**
+ * THE CONCURRENT-ACCEPTANCE SCENARIO, and it is the only part of this fake that
+ * models the DATABASE rather than a row.
+ *
+ * Card 11 reads three statements and compares their rows to each other. Under
+ * PostgreSQL's default READ COMMITTED every statement takes its own snapshot, so
+ * an acceptance another session commits between the first statement and the
+ * second is invisible to the first and visible to the second — and the join of
+ * the two describes a state the database never held. Under REPEATABLE READ (or
+ * SERIALIZABLE) the snapshot is taken at the FIRST statement of the transaction
+ * and held to the commit, so the same write is not observed at all.
+ *
+ * That is exactly what is modelled here: `begin` is inspected for an isolation
+ * level, the first statement of a snapshot-isolated transaction copies the live
+ * world, and a writer commits into the live world right after the first
+ * statement returns. The fake is not asserting the fix — it is being a database
+ * that has one documented behaviour under one BEGIN and another under the other,
+ * and the test asks which one the store's own statement gets.
+ */
+const CONCURRENT = "WR-CONCURRENT-ACCEPTANCE";
+
+/** Every `begin` this fake has been given, in order, for the test to read back. */
+const BEGINS = [];
+
+/** The live world the concurrent writer commits into. One per pool. */
+const LIVE = { detail_committed: false };
+
+function concurrentRowsFor(text, view) {
+  if (text.includes("acceptance_receipt"))
+    return [{ accepted_feedback_hash: ACCEPTED_HASH, accepted_at: T0 }];
+  if (text.includes("work_request_card"))
+    return [{
+      outcome_feedback: view.detail_committed ? { feedback_hash: ACCEPTED_HASH } : null,
+      outcome_feedback_history: [],
+    }];
+  return [];
+}
+
 /** The connection string that makes the POOL ITSELF throw, before any query. */
 const POOL_THROWS = "postgres://fake/pool-throws-a-raw-value";
 /** The connection string that makes `end()` throw, after the rows are read. */
@@ -122,8 +160,32 @@ function rowsFor(text, params) {
 }
 
 class Client {
+  constructor() {
+    this.snapshotIsolated = false;
+    this.snapshot = null;
+  }
+
   async query(text, params) {
-    return { rows: rowsFor(String(text), params) };
+    const sql = String(text);
+    if (/^\s*(begin|start\s+transaction)/i.test(sql)) {
+      BEGINS.push(sql);
+      this.snapshotIsolated = /isolation\s+level\s+(repeatable\s+read|serializable)/i.test(sql);
+      this.snapshot = null;
+      return { rows: [] };
+    }
+    if (/^\s*(commit|rollback|end)\b/i.test(sql)) return { rows: [] };
+    const addressedValue = Array.isArray(params) ? params[0] : undefined;
+    if (addressedValue === CONCURRENT) {
+      // The snapshot is taken at the FIRST statement, the way repeatable read
+      // takes it, and every later statement of that transaction reads the copy.
+      if (this.snapshot === null) this.snapshot = { detail_committed: LIVE.detail_committed };
+      const rows = concurrentRowsFor(sql, this.snapshotIsolated ? this.snapshot : LIVE);
+      // ...and the other session commits its acceptance right here, between this
+      // statement and the next one.
+      LIVE.detail_committed = true;
+      return { rows };
+    }
+    return { rows: rowsFor(sql, params) };
   }
 
   release() {}
@@ -132,6 +194,8 @@ class Client {
 class Pool {
   constructor(config) {
     this.connectionString = config?.connectionString ?? "";
+    // Each call starts from a world in which nothing has been accepted yet.
+    LIVE.detail_committed = false;
     if (this.connectionString === POOL_THROWS) throw "allow";
   }
 
@@ -147,6 +211,9 @@ class Pool {
 
 module.exports = {
   Pool,
+  FAKE_BEGINS: BEGINS,
+  FAKE_CONCURRENT: CONCURRENT,
+  FAKE_ACCEPTED_HASH_CONCURRENT: ACCEPTED_HASH,
   FAKE_MARKER: MARKER,
   FAKE_ACCEPTED_HASH: ACCEPTED_HASH,
   FAKE_UNPATTERNED: UNPATTERNED,
