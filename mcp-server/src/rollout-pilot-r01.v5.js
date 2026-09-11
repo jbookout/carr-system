@@ -108,9 +108,9 @@ import {
   V5R01Error,
   assertArity,
   assertClosedKeys,
+  assertExactStringSet,
   assertObject,
   assertRequiredKeys,
-  fail,
 } from "./rollout-pilot-r01.vocabulary.v5.js";
 
 /**
@@ -317,6 +317,15 @@ export const V5_R01_DECISIONS_WITHOUT_SETTLED_TEXT = deepFreeze(V5_R01_SETTLED_D
  *   4. the elements are distinct, so six copies of one id cannot pass a count;
  *   5. the sorted elements equal this slice's sorted ids, compared one index at
  *      a time with no joining anywhere.
+ *
+ * AND ALL FIVE STEPS HAPPEN BEHIND THE VOCABULARY'S BOUNDARY, which is the fifth
+ * re-review's first finding as it lands on this file. The version above read
+ * `binding.decision_ids` here — a property read on a caller's object, outside the
+ * one place in this slice that is allowed to perform one, so a Proxy with a
+ * throwing `get` trap delivered its author's own sentence out of this function
+ * with no code on it. `assertExactStringSet` takes the HOLDER and the key, copies
+ * it, and compares the copy against the list this module passes in: the expected
+ * set still belongs to this file, and no caller value ever crosses back into it.
  */
 export function assertR01DecisionBinding(...args) {
   assertArity(args, 1, "assertR01DecisionBinding");
@@ -324,30 +333,8 @@ export function assertR01DecisionBinding(...args) {
   assertObject(binding, "binding");
   assertClosedKeys(binding, ["decision_ids"], "binding");
   assertRequiredKeys(binding, ["decision_ids"], "binding");
-  if (!Array.isArray(binding.decision_ids)) {
-    fail("invalid_shape");
-  }
-  const declared = [...binding.decision_ids];
-  const mine = [...V5_R01_SETTLED_DECISION_IDS];
-  const mismatch = () => fail("decision_binding_mismatch");
-
-  for (const [index, id] of declared.entries()) {
-    if (typeof id !== "string") {
-      mismatch();
-    }
-  }
-  if (declared.length !== mine.length) {
-    mismatch();
-  }
-  if (new Set(declared).size !== declared.length) {
-    mismatch();
-  }
-  const sorted = [...declared].sort();
-  for (const [index, id] of mine.entries()) {
-    if (sorted[index] !== id) {
-      mismatch();
-    }
-  }
+  assertExactStringSet(binding, "decision_ids", V5_R01_SETTLED_DECISION_IDS,
+    "decision_binding_mismatch");
 }
 
 // ---------------------------------------------------------------------------

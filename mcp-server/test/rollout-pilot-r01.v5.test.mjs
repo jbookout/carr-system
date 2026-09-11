@@ -876,6 +876,21 @@ function isHedged(text) {
   return HEDGE_PREFIX.test(lowered) || lowered.includes(HEDGE_INFIX);
 }
 
+/**
+ * THE EXPORT-NAME HALF OF P5, THROUGH THE SAME MATCHER — the fifth re-review's
+ * second finding.
+ *
+ * `isHedged` was made case-insensitive for values and for keys, and the export-NAME
+ * check standing beside it was left as `HEDGE_PREFIX.test(name) ||
+ * name.includes(HEDGE_INFIX)`: a case-SENSITIVE infix test, so an export called
+ * `x_IF_AUTHORITATIVE` answered `false` to the one question that guard exists to
+ * ask. There is one matcher for all three positions now, it lower-cases both
+ * sides, and the two probes the reviewer used run THROUGH it rather than past it.
+ */
+function hedgedName(name) {
+  return isHedged(String(name));
+}
+
 /** The conditional tokens the classifiers answer in; none may reach src at all. */
 const CLASSIFICATION_TOKENS = Object.freeze(Object.values(CLASSIFICATIONS));
 
@@ -892,7 +907,10 @@ const CLASSIFICATION_TOKENS = Object.freeze(Object.values(CLASSIFICATIONS));
  * than costing the guard an exemption.
  */
 function containsToken(text, token) {
-  return String(text).toLowerCase().includes(token);
+  // BOTH SIDES ARE LOWER-CASED. The token side is a lower-case literal today, so
+  // this changes no verdict; it is here because the case-sensitive half of a
+  // two-sided comparison is exactly what went wrong in `hedgedName` above.
+  return String(text).toLowerCase().includes(String(token).toLowerCase());
 }
 
 /**
@@ -1130,6 +1148,13 @@ function callerShapes() {
   shapes.push("Would_allow", "x_IF_AUTHORITATIVE");
   shapes.push({ quoted_from: "allow", identifier: "allow" });
   shapes.push({}, null, undefined, "allow", 1, true, [], [{ passed: true }]);
+  // THE REGISTRY'S OWN CODES, because the class export cannot be CONSTRUCTED
+  // without one — the fifth re-review's third finding. `V5R01Error` takes exactly
+  // one registered code, so a sweep whose every shape is an unregistered value
+  // reaches the constructor's refusal and never its instance, and then reports
+  // that it swept a constructor. These shapes are what make the constructed
+  // surface exist at all.
+  for (const code of vocabulary.V5_R01_ERROR_CODES) shapes.push(code);
   return shapes;
 }
 
@@ -1184,6 +1209,49 @@ function thrownSurface(thrown) {
   return surface;
 }
 
+/**
+ * A CONSTRUCTED INSTANCE, READ BY NAME RATHER THAN BY SPREAD.
+ *
+ * THE FIFTH RE-REVIEW'S THIRD FINDING, which was two defects wearing one coat.
+ * The sweep spread the instance — `{ ...new exported(...args) }` — and a spread
+ * copies own ENUMERABLE properties only, so `Error.message`, which is
+ * non-enumerable, was never looked at on a constructed refusal. That went
+ * unnoticed because of the second half: no generated caller shape was a
+ * REGISTERED code, so the constructor never once succeeded, and the sweep's own
+ * "the class was constructed" assertion was satisfied by the refusal of its
+ * attempt. Both halves are closed: the registry's codes are swept shapes now, and
+ * every own property name is read here, the non-enumerable ones included.
+ *
+ * `stack` is recorded as a BOOLEAN rather than as its text, and that is about the
+ * machine rather than about this slice: a stack names absolute paths, and this
+ * checkout lives under a directory whose own name contains the privileged token
+ * `ok`, so sweeping it for English words would report the filesystem. The stack's
+ * real property — that it carries nothing a caller wrote — is asserted by name in
+ * the constructor test below, against both the caller marker and the hostile
+ * sentinel.
+ */
+function constructedSurface(instance) {
+  const surface = {
+    built: true,
+    built_name: instance?.name ?? null,
+    built_code: instance?.code ?? null,
+    built_message: instance?.message ?? null,
+    built_stack_is_a_string: typeof instance?.stack === "string",
+    built_own_property_names: Object.getOwnPropertyNames(instance ?? {}).sort(),
+  };
+  for (const key of Object.getOwnPropertyNames(instance ?? {})) {
+    if (key === "stack") continue;
+    surface[`own_${key}`] = instance[key];
+  }
+  return surface;
+}
+
+/** Did the sweep ever really BUILD the class, as opposed to being refused by it? */
+function constructionHappened(entries) {
+  return entries.some(entry => entry.name === "V5R01Error"
+    && typeof entry.output?.built?.built_code === "string");
+}
+
 function everyExportedValue() {
   const entries = [];
   for (const [moduleName, surface] of SWEPT_SRC_MODULES) {
@@ -1199,7 +1267,13 @@ function everyExportedValue() {
           const label = `${at}(${args.length} arg(s): ${JSON.stringify(shape)})`.slice(0, 140);
           let output;
           try {
-            output = construct ? { constructed: { ...new exported(...args) } } : exported(...args);
+            if (construct) {
+              const instance = new exported(...args);
+              CONSTRUCTED.push({ at: label, instance });
+              output = { built: constructedSurface(instance) };
+            } else {
+              output = exported(...args);
+            }
           } catch (thrown) {
             THROWN.push({ at: label, thrown });
             output = thrownSurface(thrown);
@@ -1221,6 +1295,9 @@ const SWEPT_SRC_MODULES = [
 /** Every refusal the sweep provoked, kept so the closed-code test can read them. */
 const THROWN = [];
 
+/** Every instance the sweep really BUILT, kept so the constructor test can read it. */
+const CONSTRUCTED = [];
+
 /** Computed once: the sweep is the same for every token and it is not cheap. */
 const EXPORTED_VALUES = everyExportedValue();
 
@@ -1239,12 +1316,14 @@ test("guard: the sweep is reading a real surface, and its matcher is not vacuous
         `${moduleName}#${name} was not swept`);
     }
   }
-  // The class export really was CONSTRUCTED, not merely named, and with zero,
-  // one and several arguments.
+  // THE CLASS EXPORT REALLY WAS CONSTRUCTED, not merely refused — and this
+  // assertion now fails if it was not, which is the fifth re-review's third
+  // finding. The old form accepted `thrown_code !== undefined`, and a refusal's
+  // `thrown_code` is `null` on a non-coded throw, so it passed on a sweep where
+  // every single attempt to build the class had been rejected.
   assert.equal(isClass(vocabulary.V5R01Error), true);
-  assert.ok(EXPORTED_VALUES.some(entry => entry.name === "V5R01Error"
-    && (entry.output?.constructed !== undefined || entry.output?.thrown_code !== undefined)),
-  "the error class was not constructed by the sweep");
+  assert.equal(constructionHappened(EXPORTED_VALUES), true,
+    "the error class was never successfully constructed by the sweep");
 
   // The matcher: a substring is a hit wherever it sits, and there is no family
   // table left for a rename to walk through.
@@ -1310,15 +1389,39 @@ for (const token of PRIVILEGED_TOKENS) {
   });
 }
 
-test("guard: no export of this slice shows a hedged verdict, by key or by value", () => {
+/** The P5 hits in a list of swept entries — name position and value position. */
+function hedgeHitsIn(entries) {
   const hits = [];
-  for (const entry of EXPORTED_VALUES) {
-    if (HEDGE_PREFIX.test(entry.name) || entry.name.includes(HEDGE_INFIX)) {
-      hits.push(`${entry.at} (P5 export name)`);
-    }
+  for (const entry of entries) {
+    if (hedgedName(entry.name)) hits.push(`${entry.at} (P5 export name)`);
     for (const hedge of hedgesIn(entry.output)) hits.push(`${entry.at} ${hedge}`);
   }
-  assert.deepEqual(hits, [], "a would_* or _if_authoritative string reaches a consumer");
+  return hits;
+}
+
+test("guard: no export of this slice shows a hedged verdict, by key or by value", () => {
+  assert.deepEqual(hedgeHitsIn(EXPORTED_VALUES), [],
+    "a would_* or _if_authoritative string reaches a consumer");
+
+  // NOT VACUOUS IN THE NAME POSITION, which is the half that was broken. Both of
+  // the reviewer's probes, as export NAMES, through the matcher itself and then
+  // through the whole loop body that uses it.
+  assert.equal(hedgedName("x_IF_AUTHORITATIVE"), true, "upper-case infix, as an export name");
+  assert.equal(hedgedName("Would_allow"), true, "capitalised prefix, as an export name");
+  assert.equal(hedgedName("WOULD_READ_IF_AUTHORITATIVE"), true);
+  assert.equal(hedgedName("would_complete_run_if_authoritative"), true);
+  assert.equal(hedgedName("assertR01DecisionBinding"), false, "an ordinary export name is not hedged");
+  const namedProbes = [
+    { at: "probe#x_IF_AUTHORITATIVE", name: "x_IF_AUTHORITATIVE", output: null },
+    { at: "probe#Would_allow", name: "Would_allow", output: null },
+  ];
+  assert.deepEqual(hedgeHitsIn(namedProbes).map(hit => hit.split(" ")[0]),
+    ["probe#x_IF_AUTHORITATIVE", "probe#Would_allow"],
+    "an export named for a hedged verdict must be caught whatever its capitalisation");
+  // And the exact comparison that let them through is gone: a case-sensitive
+  // infix test answers `false` on the first probe, which is the defect.
+  assert.equal("x_IF_AUTHORITATIVE".includes(HEDGE_INFIX), false,
+    "the case-sensitive infix test still misses the probe; hedgedName must not use it");
 });
 
 test("guard: the per-token sweep is not vacuous — each token is really detected", () => {
@@ -1400,25 +1503,17 @@ test("guard: a refusal carries a registered code and the fixed message for it, a
   assert.ok(THROWN.length > 100, `only ${THROWN.length} refusals were provoked`);
   const registered = new Set(vocabulary.V5_R01_ERROR_CODES);
   assert.ok(registered.size >= 20, "the error-code registry must not have quietly emptied");
-  const fixedTypeErrors = new Set([
-    "v5_r01_error_takes_exactly_one_registered_code",
-    "v5_r01_error_code_is_not_registered",
-    "v5_r01_fail_takes_exactly_one_registered_code",
-    "v5_r01_assert_arity_was_called_wrongly",
-  ]);
   let refusals = 0;
   for (const { at, thrown } of THROWN) {
-    if (!(thrown instanceof V5R01Error)) {
-      // EVERY non-refusal throw is one of this module's own fixed TypeErrors.
-      // A native engine error is no longer among them: the validators refuse
-      // their own malformed arguments first, so no engine prose reaches a
-      // consumer off this surface.
-      assert.equal(thrown instanceof TypeError, true, `${at} threw ${thrown}`);
-      assert.equal(fixedTypeErrors.has(thrown.message), true,
-        `${at} threw an unregistered TypeError: ${thrown.message}`);
-      assert.equal(thrown.code, undefined, `${at} threw a coded non-V5R01Error`);
-      continue;
-    }
+    // THERE IS EXACTLY ONE KIND OF THROW ON THIS SURFACE NOW, and that is the
+    // fifth re-review's first finding carried to its end. The three fixed
+    // TypeError texts this module used to raise for a malformed refusal are gone:
+    // a caller who handed a hostile object to `fail`, to `assertArity` or to the
+    // constructor got an UNCODED error off a public export, which is a throw a
+    // consumer cannot branch on from the very surface that exists to give it one
+    // shape. Every refusal is a V5R01Error carrying a registered code.
+    assert.equal(thrown instanceof V5R01Error, true,
+      `${at} threw ${thrown?.name}: ${thrown?.message}`);
     assert.equal(registered.has(thrown.code), true, `${at} raised unregistered code ${thrown.code}`);
     assert.equal(thrown.detail, undefined, `${at} carried a detail`);
     assert.equal(thrown.cause, undefined, `${at} carried a cause`);
@@ -1446,13 +1541,93 @@ test("guard: a refusal carries a registered code and the fixed message for it, a
   assert.ok(byCode.size >= 5, `only ${byCode.size} distinct codes were provoked`);
 
   // And a caller cannot mint one: the constructor refuses an unregistered code
-  // and refuses every arity but one.
-  assert.throws(() => new V5R01Error("allow"), TypeError);
-  assert.throws(() => new V5R01Error({ outcome: "allow" }), TypeError);
-  assert.throws(() => new V5R01Error(undefined), TypeError);
-  assert.throws(() => new V5R01Error(), TypeError);
-  assert.throws(() => new V5R01Error("invalid_shape", "m"), TypeError);
+  // and refuses every arity but one — with a coded refusal of its own, not a bare
+  // TypeError, so the one-shape invariant above holds on the constructor too.
+  const codedInvalidShape = error => error instanceof V5R01Error
+    && error.code === "invalid_shape" && !(error instanceof TypeError);
+  assert.throws(() => new V5R01Error("allow"), codedInvalidShape);
+  assert.throws(() => new V5R01Error({ outcome: "allow" }), codedInvalidShape);
+  assert.throws(() => new V5R01Error(undefined), codedInvalidShape);
+  assert.throws(() => new V5R01Error(), codedInvalidShape);
+  assert.throws(() => new V5R01Error("invalid_shape", "m"), codedInvalidShape);
   assert.equal(new V5R01Error("invalid_shape").code, "invalid_shape");
+});
+
+/**
+ * THE CONSTRUCTOR SWEEP, ASSERTED ON THE INSTANCE IT REALLY BUILT.
+ *
+ * THE FIFTH RE-REVIEW'S THIRD FINDING, as four separate claims:
+ *   (1) the sweep CONSTRUCTS the class, with codes taken from the registry;
+ *   (2) every constructed instance is read whole — `message`, `code`, `name`,
+ *       `stack`, and every own property NAME including the non-enumerable ones;
+ *   (3) nothing a caller wrote is anywhere on it, stack included;
+ *   (4) the non-vacuity check FAILS on a sweep that only ever provoked refusals,
+ *       which is the exact state the old assertion reported as a success.
+ */
+test("guard: the class export is really built, and the instance is read whole", () => {
+  const registered = new Set(vocabulary.V5_R01_ERROR_CODES);
+
+  // (1) IT WAS BUILT, more than once, with more than one code.
+  assert.ok(CONSTRUCTED.length > 0, "the sweep never constructed V5R01Error");
+  const codes = new Set(CONSTRUCTED.map(({ instance }) => instance.code));
+  assert.ok(codes.size >= 20,
+    `only ${codes.size} distinct registered codes were constructed`);
+  for (const code of vocabulary.V5_R01_ERROR_CODES) {
+    assert.equal(codes.has(code), true, `${code} was never constructed by the sweep`);
+  }
+
+  // (2) AND (3) EVERY INSTANCE, READ WHOLE.
+  for (const { at, instance } of CONSTRUCTED) {
+    assert.equal(instance instanceof V5R01Error, true, at);
+    assert.equal(registered.has(instance.code), true, `${at} carries an unregistered code`);
+    assert.equal(instance.name, "V5R01Error", at);
+    assert.equal(typeof instance.message, "string", at);
+    assert.equal(instance.message, new V5R01Error(instance.code).message,
+      `${at} does not carry the fixed message for its code`);
+    assert.equal(instance.detail, undefined, at);
+    assert.equal(instance.cause, undefined, at);
+    // EVERY OWN PROPERTY NAME, the non-enumerable ones included. `message` and
+    // `stack` are non-enumerable on an Error, which is precisely why a spread
+    // never saw them.
+    assert.deepEqual(Object.getOwnPropertyNames(instance).sort(),
+      ["code", "message", "name", "stack"], `${at} carries an unexpected property`);
+    assert.deepEqual(Object.keys(instance).sort(), ["code", "name"],
+      `${at}: the spread's blind spot is message and stack, and this names it`);
+    assert.equal(typeof instance.stack, "string", at);
+    assert.equal(instance.stack.includes(CALLER_MARKER), false,
+      `${at} carries the caller marker on its stack`);
+    assert.equal(instance.stack.includes(CALLER_SENTINEL), false,
+      `${at} carries the caller sentinel on its stack`);
+    for (const token of PRIVILEGED_TOKENS) {
+      assert.equal(containsToken(instance.message, token), false,
+        `${at} message carries "${token}"`);
+      assert.equal(containsToken(instance.code, token), false,
+        `${at} code carries "${token}"`);
+      assert.equal(containsToken(instance.name, token), false,
+        `${at} name carries "${token}"`);
+    }
+    assert.equal(isHedged(instance.message), false, at);
+    assert.equal(isHedged(instance.code), false, at);
+  }
+
+  // (4) THE NON-VACUITY CHECK REALLY FAILS when nothing was built. Both ways it
+  //     can be empty, and the old predicate beside them, which accepted the first.
+  const onlyRefused = [{ at: "control", name: "V5R01Error",
+    output: { thrown_name: "TypeError", thrown_code: null, thrown_message: "x" } }];
+  const nothingAtAll = [];
+  const builtOne = [{ at: "control", name: "V5R01Error",
+    output: { built: constructedSurface(new V5R01Error("invalid_shape")) } }];
+  assert.equal(constructionHappened(onlyRefused), false,
+    "a thrown surface must not count as a construction");
+  assert.equal(constructionHappened(nothingAtAll), false,
+    "an empty sweep must not count as a construction");
+  assert.equal(constructionHappened(builtOne), true, "a real construction must count");
+  const oldPredicate = entries => entries.some(entry => entry.name === "V5R01Error"
+    && (entry.output?.constructed !== undefined || entry.output?.thrown_code !== undefined));
+  assert.equal(oldPredicate(onlyRefused), true,
+    "the old assertion accepted a sweep that built nothing; this is the proof it was vacuous");
+  // And `thrown_code: null` is what made it pass, because `null !== undefined`.
+  assert.equal(onlyRefused[0].output.thrown_code, null);
 });
 
 test("guard: every registered code has one fixed message, clear of every privileged word", () => {
@@ -1543,142 +1718,360 @@ test("guard: no caller string reaches any returned value or any thrown property"
 });
 
 /**
- * THE FOURTH RE-REVIEW'S SIXTH FINDING: a caller's own exception, delivered to a
- * consumer through a public export of this slice.
+ * A CALLER'S OWN EXCEPTION, DELIVERED TO A CONSUMER THROUGH A PUBLIC EXPORT —
+ * the sixth finding of the fourth re-review, reopened by the fifth as a class.
  *
- * `isPlainObject` called `Object.getPrototypeOf(value)` bare, and exported
- * `assertObject` reached it. `Object.getPrototypeOf` looks total and is not: a
- * Proxy may trap it and throw whatever its author likes, and a revoked Proxy
- * throws on every operation including `Array.isArray`. The reviewer's probe threw
- * `Error("allow::CALLER_SENTINEL")` from the trap and read that exact sentence —
- * a privileged word, in a caller's own words, with no code on it — straight back
- * off this slice's public surface.
+ * THE PREVIOUS ROUND FIXED ONE OPERATION AND PROBED THREE FUNCTIONS. It guarded
+ * `Object.getPrototypeOf` inside `isPlainObject` and left every other read on a
+ * caller's object bare — `allowed.includes(key)`, `for (const key of required)`,
+ * `value.length`, `Array.isArray` on a REVOKED Proxy, and
+ * `binding.decision_ids` in the pilot module — so the reviewer read
+ * `Error("allow::CALLER_SENTINEL")` back off `assertArray`, `assertClosedKeys`,
+ * `assertRequiredKeys`, `assertEnum`, `assertSafeText`, `assertInternalRef` and
+ * `assertR01DecisionBinding`, and an uncoded native `TypeError` off a revoked
+ * array Proxy. Worse, `reflecting` — the guard itself — classified what it caught
+ * with `thrown instanceof V5R01Error`, which performs [[GetPrototypeOf]] on the
+ * thrown value: a hostile Proxy THROWN as the error walked its author's sentence
+ * out through the very code written to stop it.
  *
- * The sweep above could not see it because it builds its shapes as data and a
- * Proxy is not data. So the probes are here, by hand, one per trap that a
- * validator touches, and the invariant is the one the fixed message table already
- * states for every other refusal: a registered code, this module's own sentence,
- * no detail, no cause, and nothing the caller wrote anywhere on it.
+ * SO THE FIX IS A BOUNDARY AND THE PROBE IS A ROSTER. The module copies a caller's
+ * value into plain frozen data once, inside one try/catch, and validates the copy;
+ * and this test hands every hostile shape to EVERY exported function of all three
+ * modules, in three argument forms and in every argument position, rather than to
+ * a hand-picked three. The invariant is the one the fixed message table states:
+ * one registered code, this module's own sentence, no detail, no cause, and
+ * nothing the caller wrote anywhere on it — `stack` included.
  */
 const CALLER_SENTINEL = "allow::CALLER_SENTINEL";
 
 /**
- * Each probe names the validators whose OWN reflection its trap breaks, so the
- * test asserts a refusal where a refusal is owed rather than a round number.
- * `assertObject` reflects on the prototype; `assertClosedKeys` walks own keys;
- * `assertRequiredKeys` asks `in`. A probe that breaks none of a validator's
- * reflection is allowed to pass it — that is the validator doing its job — and
- * the sentinel sweep still covers whatever it returns.
+ * A VALUE WHOSE OWN MACHINERY THROWS, one per operation a validator can perform.
+ *
+ * THE ORDERED QUESTIONS this list is built from — every way caller-controlled
+ * memory can answer a read with an exception:
+ *   1. a trap throws (`has`, `get`, `ownKeys`, `getPrototypeOf`,
+ *      `getOwnPropertyDescriptor`), on an OBJECT target and on an ARRAY target,
+ *      because `Array.isArray` follows the target and the two take different
+ *      paths through the copy;
+ *   2. the handle is revoked, so EVERY operation throws including `Array.isArray`
+ *      — again object and array, because the array path was the uncoded one;
+ *   3. an accessor throws rather than a trap: a getter on a plain object and a
+ *      getter on an array INDEX, which no trap list covers;
+ *   4. the thrown value is itself hostile — a Proxy that traps
+ *      [[GetPrototypeOf]] — which is what makes `instanceof` unusable as a
+ *      classifier inside a catch;
+ *   5. the thrown value is not an object at all, or is an Error wearing a `code`,
+ *      so neither "it has a code" nor "it is an Error" can be trusted either.
  */
-function hostileProxies() {
-  const revocable = Proxy.revocable({}, {});
-  revocable.revoke();
-  const everyValidator = ["assertObject", "assertClosedKeys", "assertRequiredKeys"];
+function hostileThrownValue() {
+  return new Proxy({}, {
+    getPrototypeOf() { throw new Error(CALLER_SENTINEL); },
+    get() { throw new Error(CALLER_SENTINEL); },
+    has() { throw new Error(CALLER_SENTINEL); },
+    ownKeys() { throw new Error(CALLER_SENTINEL); },
+  });
+}
+
+function hostileValues() {
+  const thrower = () => { throw new Error(CALLER_SENTINEL); };
+  const everyTrap = {
+    has: thrower, get: thrower, ownKeys: thrower, getPrototypeOf: thrower,
+    getOwnPropertyDescriptor: thrower, set: thrower, deleteProperty: thrower,
+  };
+  const revokedObject = Proxy.revocable({}, {});
+  revokedObject.revoke();
+  const revokedArray = Proxy.revocable([], {});
+  revokedArray.revoke();
+  const throwingIndex = [];
+  Object.defineProperty(throwingIndex, 0, {
+    enumerable: true, configurable: true, get: thrower,
+  });
   return [
-    ["getPrototypeOf trap throws", new Proxy({}, {
-      getPrototypeOf() { throw new Error(CALLER_SENTINEL); },
-    }), everyValidator],
-    ["getPrototypeOf trap throws a V5R01Error lookalike", new Proxy({}, {
-      getPrototypeOf() { throw Object.assign(new Error(CALLER_SENTINEL), { code: CALLER_SENTINEL }); },
-    }), everyValidator],
+    ["object proxy, every trap throws", new Proxy({}, everyTrap)],
+    ["array proxy, every trap throws", new Proxy([], everyTrap)],
+    ["revoked proxy, object target", revokedObject.proxy],
+    ["revoked proxy, array target", revokedArray.proxy],
+    ["getter throws Error(sentinel)", { get decision_ids() { throw new Error(CALLER_SENTINEL); } }],
+    ["array index getter throws Error(sentinel)", throwingIndex],
+    ["getter throws a hostile proxy", { get decision_ids() { throw hostileThrownValue(); } }],
+    ["ownKeys trap throws a hostile proxy", new Proxy({}, {
+      ownKeys() { throw hostileThrownValue(); },
+      getPrototypeOf() { throw hostileThrownValue(); },
+    })],
     ["getPrototypeOf trap throws a string", new Proxy({}, {
       getPrototypeOf() { throw CALLER_SENTINEL; },
-    }), everyValidator],
-    ["ownKeys trap throws", new Proxy({}, {
-      ownKeys() { throw new Error(CALLER_SENTINEL); },
-    }), ["assertClosedKeys"]],
-    ["getOwnPropertyDescriptor trap throws", new Proxy({ a: 1 }, {
-      getOwnPropertyDescriptor() { throw new Error(CALLER_SENTINEL); },
-    }), ["assertClosedKeys"]],
-    ["has trap throws", new Proxy({}, {
-      has() { throw new Error(CALLER_SENTINEL); },
-    }), ["assertRequiredKeys"]],
-    ["revoked proxy", revocable.proxy, everyValidator],
+    })],
+    ["getPrototypeOf trap throws a V5R01Error lookalike", new Proxy({}, {
+      getPrototypeOf() {
+        throw Object.assign(new Error(CALLER_SENTINEL),
+          { code: "invalid_shape", name: "V5R01Error" });
+      },
+    })],
   ];
 }
 
-test("guard: a hostile proxy's own exception never reaches a consumer of this slice", () => {
+const HOSTILE_VALUES = hostileValues();
+
+/**
+ * THE EXPORTS THAT COPY A CALLER VALUE, so a hostile one must refuse EVERY time.
+ *
+ * This is the non-vacuity floor of the probe below. The evaluators are allowed to
+ * answer a hostile value — they never look at a request at all, which is this
+ * slice's whole claim — but a validator that takes a value and does not refuse a
+ * revoked Proxy has performed a bare read on it, and that is the defect. Every
+ * name here is checked against the real export list, so a rename cannot quietly
+ * empty the floor.
+ */
+const MUST_REFUSE_A_HOSTILE_VALUE = Object.freeze([
+  "V5R01Error", "assertArity", "assertArray", "assertBoolean", "assertCalendarDate",
+  "assertClosedKeys", "assertEnum", "assertExactStringSet", "assertInternalRef",
+  "assertObject", "assertRequiredKeys", "assertSafeText", "calendarDayOrdinal",
+  "calendarWeekday", "fail",
+]);
+
+/**
+ * Benign values for the argument positions the hostile one is not standing in, so
+ * the hostile value reaches the copy rather than being turned away by a neighbour.
+ * Position 0 is a date, 1 a path, 2 a one-element list, 3 a registered code, which
+ * between them satisfy every declared signature in the slice.
+ */
+const BENIGN_ARGUMENTS = Object.freeze(["2026-09-07", "path", ["a"], "invalid_shape"]);
+
+test("guard: a hostile caller value leaves one coded refusal and no caller text", () => {
   const registered = new Set(vocabulary.V5_R01_ERROR_CODES);
+  const everyFunction = [
+    ...Object.entries(r01), ...Object.entries(onboarding), ...Object.entries(vocabulary),
+  ].filter(([, value]) => typeof value === "function");
+  assert.ok(everyFunction.length >= 35,
+    `only ${everyFunction.length} exported functions were probed`);
+  for (const name of MUST_REFUSE_A_HOSTILE_VALUE) {
+    assert.ok(everyFunction.some(([exported]) => exported === name),
+      `${name} is on the refusal floor but is not exported any more`);
+  }
+
+  const leaks = [];
   const refusedBy = new Map();
   let refusals = 0;
   let answered = 0;
 
-  for (const [label, hostile, mustRefuse] of hostileProxies()) {
-    const calls = [
-      ["assertObject", () => vocabulary.assertObject(hostile, "path")],
-      ["assertClosedKeys", () => vocabulary.assertClosedKeys(hostile, ["a"], "path")],
-      ["assertRequiredKeys", () => vocabulary.assertRequiredKeys(hostile, ["a"], "path")],
-      ["assertArray", () => vocabulary.assertArray([], "path", hostile)],
-      ["evaluatePilotDay", () => r01.evaluatePilotDay(hostile)],
-      ["evaluatePilotRun", () => r01.evaluatePilotRun(hostile)],
-      ["evaluateRecoveryDrill", () => r01.evaluateRecoveryDrill(hostile)],
-      ["assertR01DecisionBinding", () => r01.assertR01DecisionBinding(hostile)],
-      ["onboardingProgressStatus", () => onboarding.onboardingProgressStatus(hostile)],
-      ["evaluateBetaOperability", () => onboarding.evaluateBetaOperability(hostile)],
-      ["evaluatePerSliceDellReview", () => onboarding.evaluatePerSliceDellReview(hostile)],
-    ];
-    for (const [name, call] of calls) {
-      let thrown;
-      let returned;
-      try { returned = call(); } catch (error) { thrown = error; }
+  for (const [name, fn] of everyFunction) {
+    const construct = isClass(fn);
+    const declared = vocabulary.V5_R01_DECLARED_ARITIES[name] ?? 1;
+    for (const [label, hostile] of HOSTILE_VALUES) {
+      // EVERY ARGUMENT POSITION of the declared arity, plus the two trailing
+      // forms that the third review's holder defect walked through.
+      const forms = [[hostile], [hostile, hostile], [hostile, undefined, hostile]];
+      for (let position = 0; position < Math.max(declared, 1); position += 1) {
+        const args = BENIGN_ARGUMENTS.slice(0, Math.max(declared, 1));
+        args[position] = hostile;
+        forms.push(args);
+      }
+      for (const args of forms) {
+        const at = `${name}(${label} @${args.length})`;
+        let returned;
+        let thrown;
+        try {
+          returned = construct ? new fn(...args) : fn(...args);
+        } catch (error) {
+          thrown = error;
+        }
 
-      if (thrown === undefined) {
-        assert.equal(mustRefuse.includes(name), false,
-          `${name} accepted ${label}, whose trap breaks its own reflection`);
-        // A refusal REPORT rather than a throw is equally covered: nothing the
-        // caller wrote may be anywhere in it.
-        assert.equal(JSON.stringify(returned ?? null).includes(CALLER_SENTINEL), false,
-          `${name} returned the ${label} sentinel`);
-        answered += 1;
-        continue;
+        if (thrown === undefined) {
+          answered += 1;
+          // A REFUSAL REPORT IS COVERED TOO: nothing the caller wrote may be in it.
+          const serialized = JSON.stringify(returned ?? null);
+          if (serialized.includes(CALLER_SENTINEL)) {
+            leaks.push(`${at} returned the caller sentinel`);
+          }
+          if (containsToken(serialized, "sentinel")) {
+            leaks.push(`${at} returned something of the caller's`);
+          }
+          continue;
+        }
+        refusals += 1;
+        refusedBy.set(name, (refusedBy.get(name) ?? 0) + 1);
+        // ONE SHAPE OF THROW: a V5R01Error with a registered code. Not a native
+        // TypeError off a revoked Proxy, not the caller's own Error, not a string.
+        if (!(thrown instanceof V5R01Error)) {
+          leaks.push(`${at} threw ${String(thrown?.name)}: ${String(thrown?.message).slice(0, 60)}`);
+          continue;
+        }
+        if (!registered.has(thrown.code)) {
+          leaks.push(`${at} raised the unregistered code ${String(thrown.code)}`);
+        }
+        if (thrown.detail !== undefined) leaks.push(`${at} carried a detail`);
+        if (thrown.cause !== undefined) leaks.push(`${at} carried a cause`);
+        // MESSAGE, STACK, AND EVERY OWN PROPERTY, swept for the caller's sentinel.
+        const texts = [thrown.message, thrown.stack, thrown.code, thrown.name];
+        for (const [key, value] of Object.entries(thrownSurface(thrown))) {
+          if (typeof value === "string") texts.push(value);
+          else if (value !== undefined && value !== null) texts.push(`${key}`);
+        }
+        for (const text of texts) {
+          const asText = String(text);
+          if (asText.includes(CALLER_SENTINEL)) leaks.push(`${at} carried the caller sentinel`);
+          if (asText.includes("CALLER_SENTINEL")) leaks.push(`${at} carried the sentinel marker`);
+        }
+        // And the message — which is this module's own, so it is swept for English
+        // words too — carries no privileged token. The stack is deliberately NOT
+        // swept for English: it names absolute paths, and this checkout's own
+        // directory name contains `ok`.
+        for (const token of PRIVILEGED_TOKENS) {
+          if (containsToken(thrown.message, token)) {
+            leaks.push(`${at} carried the privileged token "${token}" in its message`);
+          }
+        }
       }
-      // Never a bare engine or caller error: a registered refusal every time.
-      assert.equal(thrown instanceof V5R01Error, true,
-        `${name} on ${label} threw ${thrown?.name}: ${thrown?.message}`);
-      assert.equal(registered.has(thrown.code), true, `${name} on ${label}: ${thrown.code}`);
-      assert.equal(thrown.detail, undefined, `${name} on ${label}`);
-      assert.equal(thrown.cause, undefined, `${name} on ${label}`);
-      // The whole throw, every own property, sanitized.
-      const surface = thrownSurface(thrown);
-      for (const [key, value] of Object.entries(surface)) {
-        if (typeof value !== "string") continue;
-        assert.equal(value.includes(CALLER_SENTINEL), false,
-          `${name} on ${label} carried the caller's sentinel on ${key}`);
-        assert.equal(containsToken(value, "allow"), false,
-          `${name} on ${label} carried a privileged token on ${key}`);
-      }
-      refusals += 1;
-      refusedBy.set(name, (refusedBy.get(name) ?? 0) + 1);
     }
   }
-  // THE VALIDATORS ARE THE ONES THAT REFLECT, so every one of them must refuse
-  // every hostile proxy — that is where `Object.getPrototypeOf` and the own-key
-  // walks live, and it is the path the reviewer read the sentinel out of.
-  for (const name of ["assertObject", "assertClosedKeys", "assertRequiredKeys"]) {
-    const owed = hostileProxies().filter(([, , must]) => must.includes(name)).length;
-    assert.ok(refusedBy.get(name) >= owed,
-      `${name} refused ${refusedBy.get(name)} of the ${owed} probes that break its reflection`);
+
+  assert.deepEqual(leaks, [],
+    "a caller's own exception, or its text, reached a consumer of this slice");
+
+  // THE FLOOR: every export that copies a caller value refused every hostile
+  // value in every form it was handed, which is what "the read happens behind the
+  // boundary" means in practice.
+  const formsPerValue = HOSTILE_VALUES.length;
+  for (const name of MUST_REFUSE_A_HOSTILE_VALUE) {
+    assert.ok((refusedBy.get(name) ?? 0) >= formsPerValue,
+      `${name} refused only ${refusedBy.get(name) ?? 0} of the hostile forms it was handed`);
   }
-  assert.ok(refusals >= 21, `only ${refusals} refusals were provoked`);
-  // The evaluators mostly ANSWER rather than refuse, because they never look at
-  // the request at all — which is the slice's whole claim, and it means a hostile
-  // proxy cannot reach their reflection either. Both outcomes are swept above.
-  assert.ok(answered > 0, "no evaluator answered; the sweep proved only the refusal path");
+  assert.ok(refusals > 400, `only ${refusals} refusals were provoked`);
+  // The evaluators ANSWER rather than refuse, because they never look at the
+  // request — which is the slice's claim, and means a hostile value never reaches
+  // their reflection either. Both outcomes are swept above.
+  assert.ok(answered > 0, "no evaluator answered; the probe proved only the refusal path");
 
-  // NOT VACUOUS: the trap really does throw, and unguarded reflection really does
-  // carry the caller's sentence out. This is the defect, reproduced.
-  const [, trapped] = hostileProxies()[0];
-  assert.throws(() => Object.getPrototypeOf(trapped), error =>
-    error.message === CALLER_SENTINEL);
-  const unguarded = value => {
-    const proto = Object.getPrototypeOf(value);
-    return proto === Object.prototype;
-  };
-  assert.throws(() => unguarded(trapped), error => error.message === CALLER_SENTINEL);
+  // NOT VACUOUS (1): the hostile values really do carry the caller's sentence out
+  // of an UNGUARDED read. This is the defect, reproduced, for each read the
+  // previous round left bare.
+  const by = label => HOSTILE_VALUES.find(([name]) => name === label)[1];
+  const unguardedReads = [
+    ["Object.getPrototypeOf", () => Object.getPrototypeOf(by("object proxy, every trap throws"))],
+    ["allowed.includes", () => by("object proxy, every trap throws").includes("a")],
+    ["for..of iteration", () => [...by("object proxy, every trap throws")]],
+    ["Object.keys", () => Object.keys(by("ownKeys trap throws a hostile proxy"))],
+    ["property read", () => by("getter throws Error(sentinel)").decision_ids],
+    ["array length and item", () => by("array proxy, every trap throws").length],
+    ["array item read", () => by("array index getter throws Error(sentinel)")[0]],
+  ];
+  for (const [what, read] of unguardedReads) {
+    let escaped;
+    try { read(); } catch (error) { escaped = error; }
+    assert.notEqual(escaped, undefined, `${what} did not throw; the probe is stale`);
+  }
+  // NOT VACUOUS (2): a revoked Proxy really does make `Array.isArray` throw a
+  // NATIVE TypeError — the uncoded throw the reviewer read off the array path.
+  assert.throws(() => Array.isArray(by("revoked proxy, array target")),
+    error => error instanceof TypeError && !(error instanceof V5R01Error));
+  // NOT VACUOUS (3): `instanceof` on the thrown hostile Proxy is ITSELF a throw,
+  // which is why the guard classifies what it catches by identity now.
+  const thrownHostile = hostileThrownValue();
+  assert.throws(() => thrownHostile instanceof V5R01Error,
+    error => error.message === CALLER_SENTINEL);
+  // NOT VACUOUS (4): a caller's Error wearing a registered `code` and the right
+  // `name` is still not one of this module's refusals, so it cannot buy a
+  // pass-through.
+  const lookalike = Object.assign(new Error(CALLER_SENTINEL),
+    { code: "invalid_shape", name: "V5R01Error" });
+  assert.equal(lookalike instanceof V5R01Error, false);
+  assert.throws(() => vocabulary.assertObject(new Proxy({}, {
+    getPrototypeOf() { throw lookalike; },
+  }), "path"), error => error instanceof V5R01Error
+    && error.code === "invalid_shape" && !error.message.includes(CALLER_SENTINEL));
 
-  // And an honest object is untouched by the guard: it still passes.
+  // AND AN HONEST VALUE IS UNTOUCHED: the boundary is a boundary, not a wall.
   assert.equal(vocabulary.assertObject({ a: 1 }, "path"), undefined);
   assert.equal(vocabulary.assertClosedKeys({ a: 1 }, ["a"], "path"), undefined);
+  assert.equal(vocabulary.assertRequiredKeys({ a: 1 }, ["a"], "path"), undefined);
+  assert.equal(vocabulary.assertArray(["a"], "path"), undefined);
+  assert.equal(vocabulary.assertEnum("a", ["a"], "path"), undefined);
+  assert.equal(vocabulary.assertSafeText("a", "path"), undefined);
+  assert.equal(vocabulary.assertInternalRef("deal:1", "path"), undefined);
+  assert.equal(vocabulary.assertCalendarDate("2026-09-07", "path"), undefined);
+  assert.equal(vocabulary.calendarDayOrdinal("2026-09-07") > 0, true);
+  assert.equal(r01.assertR01DecisionBinding(
+    { decision_ids: [...V5_R01_SETTLED_DECISION_IDS] }), undefined);
+});
+
+/**
+ * THE COPY IS A COPY, AND IT IS NOT A LOOSENING — the other half of the boundary.
+ *
+ * A snapshot that accepted what the original refused would be a hole dressed as a
+ * fix, so the shapes the validators used to turn away are asserted still turned
+ * away: a class instance and a Date are not plain objects, a non-enumerable or
+ * symbol-keyed field cannot smuggle a key past a closed-key check, a getter's
+ * value is read once rather than trusted twice, and a structure too large for the
+ * copy's budget is refused with a registered code rather than copied.
+ */
+test("guard: the caller copy narrows what the validators accept, and never widens it", () => {
+  const refusal = code => error => error instanceof V5R01Error && error.code === code;
+  // A class instance, a Date and a Map are not plain objects, before or after.
+  class Exotic { constructor() { this.a = 1; } }
+  for (const value of [new Exotic(), new Date(), new Map(), () => 1, Symbol("s")]) {
+    assert.throws(() => vocabulary.assertObject(value, "path"), refusal("invalid_shape"),
+      `${String(value)} was accepted as a plain object`);
+  }
+  // A non-enumerable own property is not a field, so it cannot be smuggled past a
+  // closed-key check — and it cannot be DEMANDED by a required-key check either.
+  const hidden = {};
+  Object.defineProperty(hidden, "smuggled", { value: 1, enumerable: false });
+  assert.equal(vocabulary.assertClosedKeys(hidden, [], "path"), undefined);
+  assert.throws(() => vocabulary.assertRequiredKeys(hidden, ["smuggled"], "path"),
+    refusal("missing_field"));
+  // A symbol key is not a field either.
+  assert.equal(vocabulary.assertClosedKeys({ [Symbol("k")]: 1 }, [], "path"), undefined);
+  // A GETTER IS READ ONCE PER VALIDATOR, so a value cannot answer one way to a
+  // shape check and another way to the comparison that follows it inside the same
+  // check. The honest measurement: the copy is taken, the reads stop, and the
+  // verdict is drawn from the copy.
+  let reads = 0;
+  const settling = {
+    get decision_ids() {
+      reads += 1;
+      return reads === 1 ? [...V5_R01_SETTLED_DECISION_IDS] : 1;
+    },
+  };
+  assert.equal(vocabulary.assertExactStringSet(settling, "decision_ids",
+    V5_R01_SETTLED_DECISION_IDS, "decision_binding_mismatch"), undefined);
+  assert.equal(reads, 1, "the validator read the caller's getter more than once");
+  // ACROSS the four validators the public entry point runs, a getter that answers
+  // differently each time is refused rather than accepted — each takes its own
+  // copy, and a refusal is a refusal whichever read it drew.
+  reads = 0;
+  assert.throws(() => r01.assertR01DecisionBinding(settling),
+    error => error instanceof V5R01Error
+      && vocabulary.V5_R01_ERROR_CODES.includes(error.code));
+  assert.ok(reads > 1, "the entry point did not re-copy, so this proves nothing");
+  // A PROTOTYPE-BEARING object is not a plain object, so an inherited field can
+  // never stand in for an own one.
+  const inherited = Object.create({ decision_ids: [...V5_R01_SETTLED_DECISION_IDS] });
+  assert.throws(() => r01.assertR01DecisionBinding(inherited), refusal("invalid_shape"));
+  // And a NULL-prototype object carrying the real set is accepted, so it is the
+  // prototype above that refused rather than the copy's own bare prototype.
+  const bare = Object.create(null);
+  bare.decision_ids = [...V5_R01_SETTLED_DECISION_IDS];
+  assert.equal(r01.assertR01DecisionBinding(bare), undefined);
+  // And `__proto__` is an ordinary key on the copy rather than a setter the copy
+  // inherited, so a caller cannot reshape the copy by naming one.
+  assert.throws(() => vocabulary.assertClosedKeys(JSON.parse('{"__proto__":{"a":1}}'), [], "path"),
+    refusal("unknown_field"));
+  // A structure past the copy's budget is a registered refusal, not a hang and not
+  // a native RangeError.
+  const wide = {};
+  for (let index = 0; index < 40000; index += 1) wide[`k${index}`] = index;
+  assert.throws(() => vocabulary.assertObject(wide, "path"), refusal("too_many_entries"));
+  // PAST THE DEPTH CAP a value becomes opaque rather than trusted. It cannot
+  // refuse a field anything actually reads, because every validator is handed the
+  // value it checks as its own argument, at depth zero.
+  let nested = { leaf: "deep" };
+  for (let index = 0; index < 12; index += 1) nested = { down: nested };
+  assert.equal(vocabulary.assertClosedKeys(nested, ["down"], "path"), undefined);
+  assert.equal(vocabulary.assertSafeText("deep", "path"), undefined);
+  // A cycle terminates at the depth cap instead of recursing for ever.
+  const cyclic = {};
+  cyclic.self = cyclic;
+  assert.equal(vocabulary.assertClosedKeys(cyclic, ["self"], "path"), undefined);
 });
 
 test("guard: deepFreeze is not on any surface of this slice, by name or by behaviour", () => {
@@ -2035,12 +2428,18 @@ test("guard: the declared arity is accepted, so the boundary is a boundary and n
     error => error instanceof V5R01Error && error.code === "fail_takes_no_extra_argument");
   assert.throws(() => vocabulary.assertArity([], 0, "evaluatePilotDay", "extra"),
     error => error instanceof V5R01Error && error.code === "assertArity_takes_no_extra_argument");
-  // `fail` called with NO argument is still a fixed TypeError: there is no code to
-  // raise, because a code is the one thing it was not given.
-  assert.throws(() => vocabulary.fail(), TypeError);
-  // A validator called wrongly inside its declared arity keeps its fixed text.
-  assert.throws(() => vocabulary.assertArity([], 0, "not_a_guarded_name"), TypeError);
-  assert.throws(() => vocabulary.assertArity(undefined, 0, "evaluatePilotDay"), TypeError);
+  // AND A WRONG CALL IS A CODED REFUSAL TOO, not a bare TypeError — the fifth
+  // re-review's first finding at its last three sites. `fail` with no code,
+  // `assertArity` with a name off the roster, and `assertArity` with something
+  // that is not an argument list each used to raise this module's own fixed
+  // TypeError text, which is a throw a consumer cannot branch on; they raise
+  // `invalid_shape` now, so EVERY throw out of this slice carries a registered
+  // code.
+  const codedInvalidShape = error => error instanceof V5R01Error
+    && error.code === "invalid_shape" && !(error instanceof TypeError);
+  assert.throws(() => vocabulary.fail(), codedInvalidShape);
+  assert.throws(() => vocabulary.assertArity([], 0, "not_a_guarded_name"), codedInvalidShape);
+  assert.throws(() => vocabulary.assertArity(undefined, 0, "evaluatePilotDay"), codedInvalidShape);
   // AND THE DECLARED ARITY IS STILL ACCEPTED by both, so this is a boundary.
   assert.throws(() => vocabulary.fail("invalid_shape"),
     error => error instanceof V5R01Error && error.code === "invalid_shape");

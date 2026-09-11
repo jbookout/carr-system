@@ -68,6 +68,7 @@ export const V5_R01_DECLARED_ARITIES = Object.freeze({
   assertObject: 2,
   assertRequiredKeys: 3,
   assertArity: 3,
+  assertExactStringSet: 4,
   assertSafeText: 3,
   calendarDayOrdinal: 1,
   calendarWeekday: 1,
@@ -110,6 +111,33 @@ export const V5_R01_ERROR_CODES = Object.freeze([
 ].sort());
 
 const V5_R01_ERROR_CODE_SET = new Set(V5_R01_ERROR_CODES);
+
+/**
+ * THE BRAND, so a refusal can be recognised WITHOUT BEING TOUCHED.
+ *
+ * THE FIFTH RE-REVIEW FOUND THE CLASSIFIER ITSELF. `thrown instanceof V5R01Error`
+ * performs [[GetPrototypeOf]] on the thrown value, and a Proxy may trap that and
+ * throw whatever its author likes — so the one piece of code whose job is to stop
+ * a caller's sentence escaping was reachable by a caller's sentence, by throwing
+ * a hostile Proxy as the error. A WeakMap keyed by the instance is an IDENTITY
+ * test: it runs no trap, reads no property, and cannot be forged, because the
+ * only writer is the constructor below.
+ */
+const V5_R01_REFUSAL_CODES = new WeakMap();
+
+/**
+ * The registered code of one of THIS module's refusals, or `null` for anything
+ * else. `typeof` invokes no trap and `WeakMap.prototype.get` compares identity,
+ * so this is total on every value a caller can construct, revoked Proxies
+ * included.
+ */
+function refusalCodeOf(value) {
+  if (value === null) return null;
+  const kind = typeof value;
+  if (kind !== "object" && kind !== "function") return null;
+  const code = V5_R01_REFUSAL_CODES.get(value);
+  return typeof code === "string" && V5_R01_ERROR_CODE_SET.has(code) ? code : null;
+}
 
 /**
  * THE FIXED MESSAGE TABLE, and why a refusal no longer carries a sentence its
@@ -179,27 +207,38 @@ for (const code of Object.keys(V5_R01_FIXED_MESSAGES)) {
     throw new TypeError("v5_r01_fixed_message_for_an_unregistered_code");
   }
 }
+// THESE TWO ARE THE ONE DELIBERATE EXCEPTION to "every throw is a coded
+// V5R01Error", and it is a load-time exception rather than a surface one: they
+// fire while the message table is being checked, which is before a refusal
+// carrying a code can be trusted to have a message at all. Neither is reachable
+// from any call: a consumer that can import this module has already passed them.
 
 /**
  * A refusal, carrying a registered code and the fixed message that goes with it.
  *
  * IT TAKES ONE ARGUMENT. Not a message, not a detail, not an options bag with a
- * `cause` in it — one registered code. Every other calling form is a plain
- * TypeError whose text quotes nothing, because the refusal's own text must not
- * become a second door for caller input to leave the module.
+ * `cause` in it — one registered code.
+ *
+ * AND EVERY OTHER CALLING FORM IS ALSO A V5R01Error NOW, which is the fifth
+ * re-review's probe written as an invariant rather than as an exemption. A
+ * wrongly-built refusal used to be a bare `TypeError`, so a caller who handed a
+ * hostile object to this constructor or to `fail` got an UNCODED native error off
+ * a public surface — a throw a consumer cannot branch on, from the very surface
+ * that exists to give it one shape. There is now exactly one kind of throw in
+ * this slice: a V5R01Error carrying a registered code and the fixed message for
+ * it. The recursion terminates at one level, because `invalid_shape` is
+ * registered and a registered code takes the path below.
  */
 export class V5R01Error extends Error {
   constructor(...args) {
-    if (args.length !== 1) {
-      throw new TypeError("v5_r01_error_takes_exactly_one_registered_code");
-    }
     const [code] = args;
-    if (typeof code !== "string" || !V5_R01_ERROR_CODE_SET.has(code)) {
-      throw new TypeError("v5_r01_error_code_is_not_registered");
+    if (args.length !== 1 || typeof code !== "string" || !V5_R01_ERROR_CODE_SET.has(code)) {
+      throw new V5R01Error("invalid_shape");
     }
     super(V5_R01_FIXED_MESSAGES[code]);
     this.name = "V5R01Error";
     this.code = code;
+    V5_R01_REFUSAL_CODES.set(this, code);
     Object.freeze(this);
   }
 }
@@ -219,9 +258,7 @@ export class V5R01Error extends Error {
  */
 export function fail(...args) {
   if (args.length > 1) throw new V5R01Error("fail_takes_no_extra_argument");
-  if (args.length !== 1) {
-    throw new TypeError("v5_r01_fail_takes_exactly_one_registered_code");
-  }
+  if (args.length !== 1) throw new V5R01Error("invalid_shape");
   throw new V5R01Error(args[0]);
 }
 
@@ -253,11 +290,19 @@ function assertArgumentShape(wellFormed) {
 export function assertArity(...args) {
   if (args.length > 3) throw new V5R01Error("assertArity_takes_no_extra_argument");
   const [received, declared, name] = args;
-  if (!Array.isArray(received) || typeof declared !== "number"
-    || typeof name !== "string" || !V5_R01_ERROR_CODE_SET.has(`${name}_takes_no_extra_argument`)) {
-    throw new TypeError("v5_r01_assert_arity_was_called_wrongly");
+  // IT COUNTS, AND IT DOES NOT INGEST. Every internal caller hands its own rest
+  // tail, whose ELEMENTS may be anything at all — and this is the one validator
+  // that must not traverse them, because the evaluators call it on a request they
+  // promise not to examine. So it reads the tail's length and nothing else, and
+  // it reads even that under the guard: `assertArity(<revoked Proxy>, 1, name)`
+  // is reachable from the public surface, and `Array.isArray` on a revoked Proxy
+  // throws a native TypeError.
+  const count = reflecting(() => (Array.isArray(received) ? received.length : null));
+  if (typeof count !== "number" || typeof declared !== "number" || typeof name !== "string"
+    || !V5_R01_ERROR_CODE_SET.has(`${name}_takes_no_extra_argument`)) {
+    fail("invalid_shape");
   }
-  if (received.length > declared) fail(`${name}_takes_no_extra_argument`);
+  if (count > declared) fail(`${name}_takes_no_extra_argument`);
 }
 
 /**
@@ -280,12 +325,124 @@ function reflecting(operation) {
   try {
     return operation();
   } catch (thrown) {
-    if (thrown instanceof V5R01Error) throw thrown;
-    fail("invalid_shape");
+    // NOTHING IS READ OFF `thrown`. `instanceof` would perform
+    // [[GetPrototypeOf]] on it, and the fifth re-review threw a hostile Proxy
+    // whose trap on that operation carried a caller's own sentence back out
+    // through the classifier. `refusalCodeOf` is an identity lookup: a refusal
+    // this module raised keeps its code, and ANYTHING else — a caller's trap, a
+    // revoked Proxy, a throwing getter, a Proxy thrown as the error itself —
+    // becomes one coded refusal with this module's own fixed text.
+    const code = refusalCodeOf(thrown);
+    throw new V5R01Error(code === null ? "invalid_shape" : code);
   }
-  return undefined;
 }
 
+// ---------------------------------------------------------------------------
+// THE ONE GUARDED BOUNDARY every caller value crosses.
+// ---------------------------------------------------------------------------
+
+/**
+ * SNAPSHOT FIRST, VALIDATE SECOND — and that is the fifth re-review's first
+ * finding taken as a class rather than as five lines.
+ *
+ * The previous round guarded `Object.getPrototypeOf` and left every other
+ * operation bare, so the reviewer walked straight past it: `allowed.includes(key)`
+ * reads `includes` off a caller's Proxy, `for (const key of required)` reads
+ * `Symbol.iterator`, `value.length` reads `length`, and `Array.isArray` on a
+ * REVOKED Proxy throws a native TypeError with no code on it at all. Each of
+ * those is a property read on caller-controlled memory, which means each of them
+ * is a door a caller's own sentence can leave through — and patching them one at
+ * a time leaves the NEXT operation someone adds unguarded by default.
+ *
+ * So there is one door now. `ingest` copies a caller's value into plain frozen
+ * data inside a single try/catch, and every validator below operates ONLY on the
+ * copy. After the copy there is no Proxy, no getter, no trap and no revoked
+ * handle anywhere in the data, so the ordinary operations that follow cannot
+ * throw anything this module did not raise deliberately.
+ *
+ * THE FOUR THINGS THE COPY IS NOT, each a deliberate narrowing:
+ *   * It is not a clone. A function, a symbol, a class instance, a Date, a Map
+ *     and anything past the depth cap all become ONE opaque marker — a private
+ *     `V5R01Foreign`, which is equal to nothing, is not a plain object, and is
+ *     not an array, so every shape check that would have rejected the original
+ *     rejects the marker. The marker is private and no validator returns a value,
+ *     so it cannot reach a consumer.
+ *   * It is not a reference. The copy is frozen and unreachable by the caller, so
+ *     a validator cannot be raced by a getter that answers differently the second
+ *     time it is asked.
+ *   * It is not unbounded. A node budget and a depth cap stop a caller making a
+ *     validator expensive; exceeding the budget is `too_many_entries`, which is a
+ *     registered code like any other.
+ *   * It is not prototype-carrying. Objects are copied onto a null prototype, so
+ *     a key of `__proto__` is an ordinary own property rather than a setter the
+ *     copy inherited.
+ */
+const V5_R01_INGEST_MAX_DEPTH = 8;
+const V5_R01_INGEST_NODE_BUDGET = 20000;
+
+/** Opaque by construction: not a plain object, not an array, equal to nothing. */
+class V5R01Foreign {}
+
+function foreignValue() {
+  return Object.freeze(new V5R01Foreign());
+}
+
+function snapshotOf(value, depth, budget) {
+  if (budget.left <= 0) throw new V5R01Error("too_many_entries");
+  budget.left -= 1;
+  if (value === null) return null;
+  const kind = typeof value;
+  if (kind === "string" || kind === "number" || kind === "boolean"
+    || kind === "bigint" || kind === "undefined") {
+    return value;
+  }
+  // A function or a symbol is not data in any position this slice validates.
+  if (kind !== "object") return foreignValue();
+  if (depth >= V5_R01_INGEST_MAX_DEPTH) return foreignValue();
+  // EVERY OPERATION FROM HERE DOWN CAN THROW, which is why the only caller of
+  // this function is `ingest`, and why `ingest` is a try/catch.
+  if (Reflect.apply(Array.isArray, undefined, [value])) {
+    const length = Reflect.get(value, "length");
+    if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0) {
+      return foreignValue();
+    }
+    if (length > budget.left) throw new V5R01Error("too_many_entries");
+    const items = [];
+    for (let index = 0; index < length; index += 1) {
+      items.push(Reflect.has(value, index)
+        ? snapshotOf(Reflect.get(value, index), depth + 1, budget)
+        : undefined);
+    }
+    return Object.freeze(items);
+  }
+  const prototype = Reflect.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) return foreignValue();
+  const plain = Object.create(null);
+  for (const key of Reflect.ownKeys(value)) {
+    // Own ENUMERABLE STRING keys, which is what `Object.keys` would have read —
+    // and no more, so a symbol key or a non-enumerable own property cannot
+    // smuggle a field past a closed-key check.
+    if (typeof key !== "string") continue;
+    const descriptor = Reflect.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || descriptor.enumerable !== true) continue;
+    plain[key] = snapshotOf(Reflect.get(value, key), depth + 1, budget);
+  }
+  return Object.freeze(plain);
+}
+
+function ingest(value) {
+  return reflecting(() => snapshotOf(value, 0, { left: V5_R01_INGEST_NODE_BUDGET }));
+}
+
+/**
+ * A plain object, ASKED OF A SNAPSHOT.
+ *
+ * Its two callers are the validators below, which pass the output of `ingest`,
+ * and `deepFreeze`, which is only ever handed this module's own literals. It
+ * keeps the guard anyway: a `V5R01Foreign` marker has its own prototype and is
+ * therefore NOT a plain object, which is exactly how a Date, a Map, a class
+ * instance or anything past the depth cap keeps being refused after the copy.
+ */
 function isPlainObject(value) {
   if (value === null || typeof value !== "object") return false;
   return reflecting(() => {
@@ -328,9 +485,11 @@ function deepFreeze(value) {
  */
 export function assertClosedKeys(...args) {
   assertArity(args, 3, "assertClosedKeys");
-  const [object, allowed, path] = args;
+  const [rawObject, rawAllowed, path] = args;
+  const object = ingest(rawObject);
+  const allowed = ingest(rawAllowed);
   assertArgumentShape(isPlainObject(object) && Array.isArray(allowed) && typeof path === "string");
-  for (const key of reflecting(() => Object.keys(object))) {
+  for (const key of Object.keys(object)) {
     if (!allowed.includes(key)) {
       fail("unknown_field");
     }
@@ -339,23 +498,27 @@ export function assertClosedKeys(...args) {
 
 export function assertRequiredKeys(...args) {
   assertArity(args, 3, "assertRequiredKeys");
-  const [object, required, path] = args;
+  const [rawObject, rawRequired, path] = args;
+  const object = ingest(rawObject);
+  const required = ingest(rawRequired);
   assertArgumentShape(isPlainObject(object) && Array.isArray(required) && typeof path === "string");
   for (const key of required) {
-    if (!reflecting(() => key in object)) fail("missing_field");
+    if (!Object.hasOwn(object, key)) fail("missing_field");
   }
 }
 
 export function assertObject(...args) {
   assertArity(args, 2, "assertObject");
-  const [value, path] = args;
+  const [rawValue, path] = args;
   assertArgumentShape(typeof path === "string");
-  if (!isPlainObject(value)) fail("invalid_shape");
+  if (!isPlainObject(ingest(rawValue))) fail("invalid_shape");
 }
 
 export function assertArray(...args) {
   assertArity(args, 3, "assertArray");
-  const [value, path, options = {}] = args;
+  const [rawValue, path, rawOptions = {}] = args;
+  const value = ingest(rawValue);
+  const options = ingest(rawOptions);
   assertArgumentShape(typeof path === "string" && isPlainObject(options));
   const { min = 0, max = 512 } = options;
   if (!Array.isArray(value)) fail("invalid_shape");
@@ -374,7 +537,9 @@ const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 export function assertSafeText(...args) {
   assertArity(args, 3, "assertSafeText");
-  const [value, path, options = {}] = args;
+  const [rawValue, path, rawOptions = {}] = args;
+  const value = ingest(rawValue);
+  const options = ingest(rawOptions);
   assertArgumentShape(typeof path === "string" && isPlainObject(options));
   const { maxLength = 512 } = options;
   if (typeof value !== "string" || value.length === 0) {
@@ -393,7 +558,9 @@ export function assertSafeText(...args) {
 
 export function assertInternalRef(...args) {
   assertArity(args, 3, "assertInternalRef");
-  const [value, path, options = {}] = args;
+  const [rawValue, path, rawOptions = {}] = args;
+  const value = ingest(rawValue);
+  const options = ingest(rawOptions);
   assertArgumentShape(typeof path === "string" && isPlainObject(options));
   const { maxLength = 255 } = options;
   assertSafeText(value, path, { maxLength });
@@ -404,17 +571,60 @@ export function assertInternalRef(...args) {
 
 export function assertBoolean(...args) {
   assertArity(args, 2, "assertBoolean");
-  const [value, path] = args;
+  const [rawValue, path] = args;
   assertArgumentShape(typeof path === "string");
-  if (typeof value !== "boolean") fail("invalid_shape");
+  if (typeof ingest(rawValue) !== "boolean") fail("invalid_shape");
 }
 
 export function assertEnum(...args) {
   assertArity(args, 3, "assertEnum");
-  const [value, allowed, path] = args;
+  const [rawValue, rawAllowed, path] = args;
+  const value = ingest(rawValue);
+  const allowed = ingest(rawAllowed);
   assertArgumentShape(Array.isArray(allowed) && typeof path === "string");
+  // A SNAPSHOT OF AN EXOTIC VALUE IS EQUAL TO NOTHING, deliberately: two
+  // different Proxies are not the same registered value, and a registered value
+  // is always a string or a number here, which the copy preserves exactly.
   if (!allowed.includes(value)) {
     fail("unknown_value");
+  }
+}
+
+/**
+ * AN EXACT SET OF STRINGS HELD AT ONE KEY of a caller's object.
+ *
+ * THIS EXISTS BECAUSE OF WHERE THE READ HAS TO HAPPEN. `assertR01DecisionBinding`
+ * is the only check in this slice that must compare caller VALUES against a
+ * module's own list, and the fifth re-review found it doing so with a bare
+ * `Array.isArray(binding.decision_ids)` — a property read on a caller's Proxy,
+ * performed in the module that owns the expected set rather than behind the
+ * boundary. Moving the comparison here means the hostile-value guard has exactly
+ * one home: the owner passes its expected list IN and gets a throw or nothing
+ * back, and no caller value ever crosses back out to it.
+ *
+ * `mismatchCode` must be a registered code, so a caller cannot mint a refusal by
+ * naming one; `fail` would refuse it anyway, and the check is explicit here.
+ */
+export function assertExactStringSet(...args) {
+  assertArity(args, 4, "assertExactStringSet");
+  const [rawObject, key, rawExpected, mismatchCode] = args;
+  const object = ingest(rawObject);
+  const expected = ingest(rawExpected);
+  assertArgumentShape(isPlainObject(object) && typeof key === "string"
+    && Array.isArray(expected) && typeof mismatchCode === "string"
+    && V5_R01_ERROR_CODE_SET.has(mismatchCode));
+  const declared = Object.hasOwn(object, key) ? object[key] : undefined;
+  if (!Array.isArray(declared)) fail("invalid_shape");
+  // EACH STEP HAS ITS OWN REFUSAL, and none of them joins anything: a separator
+  // is not a delimiter unless the thing being separated cannot contain it.
+  for (const id of declared) {
+    if (typeof id !== "string") fail(mismatchCode);
+  }
+  if (declared.length !== expected.length) fail(mismatchCode);
+  if (new Set(declared).size !== declared.length) fail(mismatchCode);
+  const sorted = [...declared].sort();
+  for (const [index, id] of expected.entries()) {
+    if (sorted[index] !== id) fail(mismatchCode);
   }
 }
 
@@ -427,7 +637,8 @@ export function assertEnum(...args) {
  */
 export function assertCalendarDate(...args) {
   assertArity(args, 2, "assertCalendarDate");
-  const [value, path] = args;
+  const [rawValue, path] = args;
+  const value = ingest(rawValue);
   assertArgumentShape(typeof path === "string");
   assertSafeText(value, path, { maxLength: 10 });
   const match = ISO_DATE.exec(value);
@@ -443,7 +654,7 @@ export function assertCalendarDate(...args) {
 /** Days since the epoch, so "the next calendar day" is subtraction and not parsing. */
 export function calendarDayOrdinal(...args) {
   assertArity(args, 1, "calendarDayOrdinal");
-  const [date] = args;
+  const date = ingest(args[0]);
   if (typeof date !== "string" || !ISO_DATE.test(date)) fail("invalid_date");
   const [y, m, d] = date.split("-").map(Number);
   return Math.round(Date.UTC(y, m - 1, d) / 86400000);
@@ -452,7 +663,7 @@ export function calendarDayOrdinal(...args) {
 /** 0 = Sunday … 6 = Saturday, computed from the same ordinal. */
 export function calendarWeekday(...args) {
   assertArity(args, 1, "calendarWeekday");
-  const [date] = args;
+  const date = ingest(args[0]);
   if (typeof date !== "string" || !ISO_DATE.test(date)) fail("invalid_date");
   return (((calendarDayOrdinal(date) + 4) % 7) + 7) % 7;
 }
