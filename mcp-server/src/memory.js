@@ -79,9 +79,26 @@ export function memoryTools({ withEnvelope, writeEvent, ToolError, assertNoCalle
         const evidence = args.evidence;
         if (!evidence || typeof evidence !== "object") throw new ToolError({ error: "memory_evidence_required" });
         const scope = sponsorFor(actor, ToolError);
-        const owner = args.scope === "personal" ? scope.sponsor : null;
-        if (args.scope === "personal" && !owner)
+        const ownerSlug = args.scope === "personal" ? scope.sponsor : null;
+        if (args.scope === "personal" && !ownerSlug)
           throw new ToolError({ error: "personal_memory_scope_unavailable", hint: "a personal memory requires a verified partner sponsor" });
+        // memory_item.owner_actor_id is a uuid FK to actor(id), NOT a slug.
+        // Until 2026-09-11 the sponsor SLUG was bound straight into it, so
+        // every personal-scope observation died at the driver with
+        // 'invalid input syntax for type uuid: "joe"' and personal scope was
+        // unreachable for both partners. The sibling column on this same
+        // insert always resolved its slug; this one never did. Resolved here
+        // rather than as an inline sub-select so a sponsor with no actor row
+        // names itself instead of returning null and tripping the
+        // scope/owner CHECK with a constraint error that explains nothing.
+        let owner = null;
+        if (ownerSlug !== null) {
+          const ownerRow = await c.query("select id from actor where slug=$1", [ownerSlug]);
+          if (!ownerRow.rows.length)
+            throw new ToolError({ error: "actor_not_provisioned", slug: ownerSlug,
+              hint: "the sponsoring partner has no actor row, so a personal memory cannot be owned" });
+          owner = ownerRow.rows[0].id;
+        }
         const confidence = args.confidence === undefined ? 0.5 : Number(args.confidence);
         if (!Number.isFinite(confidence) || confidence < 0 || confidence > 1)
           throw new ToolError({ error: "memory_confidence_invalid" });
