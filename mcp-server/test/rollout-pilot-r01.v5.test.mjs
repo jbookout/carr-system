@@ -677,6 +677,58 @@ test("decisions: the slice binds exactly its six catalog decisions", () => {
   error => error instanceof V5R01Error && error.code === "decision_binding_mismatch");
 });
 
+test("decisions: a binding is checked element by element, never as one joined string", () => {
+  // THE DEFECT THE THIRD REVIEW REPRODUCED. The check was
+  // `sorted.join("|") === mine.join("|")`, and these two values produce the same
+  // string, so a caller could declare a binding of ONE meaningless element and be
+  // told it matched this slice's six settled decisions. A separator is not a
+  // delimiter unless the separated values cannot contain it, and a caller string
+  // can contain anything.
+  const mismatch = error => error instanceof V5R01Error
+    && error.code === "decision_binding_mismatch";
+  const forged = [[...V5_R01_SETTLED_DECISION_IDS].join("|")];
+  assert.equal(forged.length, 1, "the forgery is a one-element array");
+  assert.equal(forged.sort().join("|"), [...V5_R01_SETTLED_DECISION_IDS].join("|"),
+    "the premise has changed: the forgery no longer collides under a join");
+  assert.throws(() => assertR01DecisionBinding({ decision_ids: forged }), mismatch,
+    "a one-element array of the six ids glued together was accepted");
+
+  // The same collision with a different glue, so the fix is not a ban on one
+  // character: any joining at all reintroduces it.
+  for (const glue of ["|", ",", "", " "]) {
+    assert.throws(() => assertR01DecisionBinding({
+      decision_ids: [[...V5_R01_SETTLED_DECISION_IDS].join(glue)] }), mismatch, glue);
+  }
+
+  // ELEMENTS. A nested array stringifies to its contents under a join, so six
+  // ids arriving as five strings and one array used to pass.
+  assert.throws(() => assertR01DecisionBinding({
+    decision_ids: [["Q009.D1"], "Q010.D1", "Q019.D1", "Q061.D1", "Q104.D1", "Q145.D1"] }),
+  mismatch, "an element that is not a string was accepted");
+  for (const element of [null, 1, true, {}, undefined, ["Q009.D1"]]) {
+    assert.throws(() => assertR01DecisionBinding({
+      decision_ids: [element, "Q010.D1", "Q019.D1", "Q061.D1", "Q104.D1", "Q145.D1"] }),
+    mismatch, String(element));
+  }
+
+  // CARDINALITY, in both directions, at the exact boundaries.
+  assert.throws(() => assertR01DecisionBinding({
+    decision_ids: [...V5_R01_SETTLED_DECISION_IDS].slice(0, 5) }), mismatch, "five of six");
+  assert.throws(() => assertR01DecisionBinding({ decision_ids: [] }), mismatch, "none of six");
+
+  // UNIQUENESS. Six entries, the right count, one id repeated.
+  assert.throws(() => assertR01DecisionBinding({
+    decision_ids: ["Q009.D1", "Q009.D1", "Q010.D1", "Q019.D1", "Q061.D1", "Q104.D1"] }),
+  mismatch, "a repeated id filled the count");
+
+  // AND THE HONEST BINDING STILL PASSES, in any order, so the checks above are
+  // not simply an always-red validator.
+  assert.equal(assertR01DecisionBinding({
+    decision_ids: [...V5_R01_SETTLED_DECISION_IDS].reverse() }), true);
+  assert.equal(assertR01DecisionBinding({
+    decision_ids: [...V5_R01_SETTLED_DECISION_IDS] }), true);
+});
+
 test("decisions: the two that were read carry their settled text, the four that were not say so", () => {
   assert.deepEqual([...V5_R01_DECISIONS_WITH_SETTLED_TEXT], ["Q009.D1", "Q010.D1"]);
   assert.deepEqual([...V5_R01_DECISIONS_WITHOUT_SETTLED_TEXT],
