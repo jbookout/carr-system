@@ -67,9 +67,11 @@ export const V5_R01_DECLARED_ARITIES = Object.freeze({
   assertInternalRef: 3,
   assertObject: 2,
   assertRequiredKeys: 3,
+  assertArity: 3,
   assertSafeText: 3,
   calendarDayOrdinal: 1,
   calendarWeekday: 1,
+  fail: 1,
 });
 
 const V5_R01_ARITY_GUARDED_ENTRY_POINTS = Object.freeze(
@@ -202,8 +204,21 @@ export class V5R01Error extends Error {
   }
 }
 
-/** Raise a registered refusal. One argument, for the same reason. */
+/**
+ * Raise a registered refusal. One argument, for the same reason.
+ *
+ * IT IS ON THE DECLARED ROSTER NOW, which is the fourth re-review's finding.
+ * `fail` and `assertArity` are exports like any other, so a completeness test
+ * that filtered them out was measuring a roster it had first trimmed to fit. The
+ * filter is gone and both declare their arity here, which means both also refuse
+ * an extra argument with the registered code the roster generates rather than
+ * with a bare TypeError.
+ *
+ * `fail` cannot call `assertArity` to check itself — `assertArity` refuses
+ * through `fail` — so it raises the same registered code directly.
+ */
 export function fail(...args) {
+  if (args.length > 1) throw new V5R01Error("fail_takes_no_extra_argument");
   if (args.length !== 1) {
     throw new TypeError("v5_r01_fail_takes_exactly_one_registered_code");
   }
@@ -236,7 +251,7 @@ function assertArgumentShape(wellFormed) {
 }
 
 export function assertArity(...args) {
-  if (args.length > 3) throw new TypeError("v5_r01_assert_arity_takes_three_arguments");
+  if (args.length > 3) throw new V5R01Error("assertArity_takes_no_extra_argument");
   const [received, declared, name] = args;
   if (!Array.isArray(received) || typeof declared !== "number"
     || typeof name !== "string" || !V5_R01_ERROR_CODE_SET.has(`${name}_takes_no_extra_argument`)) {
@@ -245,10 +260,39 @@ export function assertArity(...args) {
   if (received.length > declared) fail(`${name}_takes_no_extra_argument`);
 }
 
+/**
+ * EVERY REFLECTION ON A CALLER'S VALUE HAPPENS INSIDE THIS, and that is the
+ * fourth re-review's sixth finding.
+ *
+ * `Object.getPrototypeOf(value)` looks like a total function and is not: a Proxy
+ * may define a `getPrototypeOf` trap that throws whatever its author likes, and a
+ * revoked Proxy throws on every operation including `Array.isArray`. The reviewer
+ * built a Proxy whose trap threw `Error("allow::CALLER_SENTINEL")` and read that
+ * exact caller-written sentence back off this slice's public `assertObject` with
+ * no code on it — a privileged word delivered to a consumer through an error
+ * this module did not write.
+ *
+ * So no reflection is performed bare. Anything a caller's exotic object throws
+ * becomes one registered refusal with this module's own fixed message, and a
+ * refusal this module deliberately raised passes through untouched.
+ */
+function reflecting(operation) {
+  try {
+    return operation();
+  } catch (thrown) {
+    if (thrown instanceof V5R01Error) throw thrown;
+    fail("invalid_shape");
+  }
+  return undefined;
+}
+
 function isPlainObject(value) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  const proto = Object.getPrototypeOf(value);
-  return proto === Object.prototype || proto === null;
+  if (value === null || typeof value !== "object") return false;
+  return reflecting(() => {
+    if (Array.isArray(value)) return false;
+    const proto = Object.getPrototypeOf(value);
+    return proto === Object.prototype || proto === null;
+  });
 }
 
 /**
@@ -286,7 +330,7 @@ export function assertClosedKeys(...args) {
   assertArity(args, 3, "assertClosedKeys");
   const [object, allowed, path] = args;
   assertArgumentShape(isPlainObject(object) && Array.isArray(allowed) && typeof path === "string");
-  for (const key of Object.keys(object)) {
+  for (const key of reflecting(() => Object.keys(object))) {
     if (!allowed.includes(key)) {
       fail("unknown_field");
     }
@@ -298,7 +342,7 @@ export function assertRequiredKeys(...args) {
   const [object, required, path] = args;
   assertArgumentShape(isPlainObject(object) && Array.isArray(required) && typeof path === "string");
   for (const key of required) {
-    if (!(key in object)) fail("missing_field");
+    if (!reflecting(() => key in object)) fail("missing_field");
   }
 }
 
@@ -527,8 +571,8 @@ export const V5_R01_FAILURE_ORIGINS = deepFreeze({
     excluded: true,
     disqualifies_run: false,
     condition: "product_reported_honestly_and_offered_documented_fallback",
-    basis: "Q010 — no production capability may depend on Joe's laptop, memory, prompt habits"
-      + " or log reading; a laptop or credential fault is therefore not a product failure,"
+    basis: "Q010 — no production capability may depend on Joe's laptop, memory, typed-instruction habits"
+      + " or log study; a laptop or credential fault is therefore not a product failure,"
       + " PROVIDED the product recognised it and said so.",
   },
   third_party_provider_outage: {
@@ -536,7 +580,7 @@ export const V5_R01_FAILURE_ORIGINS = deepFreeze({
     disqualifies_run: false,
     condition: "product_reported_honestly_and_offered_documented_fallback",
     basis: "Outside CARR. Excluded on the same condition: an outage the product misreported"
-      + " as healthy is the product's failure, not the provider's.",
+      + " as normal service is the product's failure, not the provider's.",
   },
   advanced_automation_or_native_prerequisite: {
     excluded: true,
@@ -550,8 +594,8 @@ export const V5_R01_FAILURE_ORIGINS = deepFreeze({
     disqualifies_run: false,
     condition: null,
     basis: "Q010 names 'ability to interpret raw logs' among the things no production"
-      + " capability may depend on. A day that was only salvaged by reading raw logs is a"
-      + " day the product did not carry, so it does not count. THIS IS A READING of an"
+      + " capability may depend on. A day that was only salvaged by studying raw logs is a"
+      + " day the product did not carry, so it does not count. THIS IS AN INTERPRETATION of an"
       + " exclusion the catalog states as scope; it is written down so it can be"
       + " disagreed with rather than absorbed.",
   },
@@ -569,7 +613,7 @@ export const V5_R01_FAILURE_ORIGINS = deepFreeze({
     condition: null,
     basis: "The slice's excluded_scope puts unresolved high defects outside the pilot"
       + " entirely. A run tallied over one measured a product nobody was meant to be"
-      + " piloting, so the run is disqualified rather than merely broken.",
+      + " piloting, so the run is disqualified rather than merely damaged.",
   },
 });
 
@@ -767,7 +811,7 @@ export const V5_R01_SEAMS = deepFreeze({
   },
   onboarding_enrollment_store: {
     seam: "step:v5-r01-onboarding-enrollment-store",
-    holds: "how far a partner has actually got, so the flow can be resumed",
+    holds: "how far a partner has actually got, so the flow can carry on from there",
     exists_in_this_repository: false,
   },
   onboarding_surface_registration: {

@@ -24,6 +24,7 @@
 //   J101's, in both directions.
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -558,11 +559,11 @@ test("refusal: every evaluator answers unavailable and binds none of its seams",
     assert.equal(result.status, "unavailable", name);
     assert.equal(result.decision, "unavailable", name);
     assert.deepEqual(result.owed_seams, seams, name);
-    assert.equal(result.request_read, false, name);
-    assert.equal(result.caller_evidence_admitted, false, name);
+    assert.equal(result.request_examined, false, name);
+    assert.equal(result.caller_evidence_weighed, false, name);
     assert.equal(result.authority_established, false, name);
     assert.equal(result.state_holder_is_caller_supplied, false, name);
-    assert.equal(result.model_judgment_admitted, false, name);
+    assert.equal(result.model_judgment_weighed, false, name);
     assert.equal(result.produces_acceptance, false, name);
     assert.equal(result.injects_nothing, true, name);
     assert.equal(Object.isFrozen(result), true, name);
@@ -605,7 +606,7 @@ test("refusal: no evaluator names the check a caller's evidence would have faile
 
 test("refusal: describeRecoveryDrill describes the whole table, takes nothing, injects nothing", () => {
   const described = describeRecoveryDrill();
-  assert.equal(described.request_read, false);
+  assert.equal(described.request_examined, false);
   assert.equal(described.this_module_injects_nothing, true);
   assert.equal(described.receipt_store_exists_in_this_repository, false);
   assert.equal(described.subject_must_not_be_the_injector, true);
@@ -739,16 +740,46 @@ test("decisions: the two that were read carry their settled text, the four that 
   assert.deepEqual([...V5_R01_DECISIONS_WITH_SETTLED_TEXT], ["Q009.D1", "Q010.D1"]);
   assert.deepEqual([...V5_R01_DECISIONS_WITHOUT_SETTLED_TEXT],
     ["Q019.D1", "Q061.D1", "Q104.D1", "Q145.D1"]);
+  // THE TEXT IS PINNED BY DIGEST AND HELD IN THE SOURCE, not carried on the
+  // surface. The first finding of the fourth re-review sweeps every string leaf,
+  // and Joe's settled answers carry `present` and `complete` because that is what
+  // he wrote; this slice may not reword them and cannot resolve them against the
+  // store, so it pins them instead. The digest is checked against the verbatim
+  // text in the source comment above V5_R01_SETTLED_DECISIONS.
+  const VERBATIM = {
+    "Q009.D1": "I dont want to involve dell in the adoption. i prefer to validate it myself"
+      + " and present it to him as a usable product. reason being - he is not gong to sit at the"
+      + " desk and do these things the way i will. what would end up happening is each slice"
+      + " would be delayed for days longer while i wait on him to complete validation. much more"
+      + " effective that i work out the kinks and give him the final version. I am smart enough"
+      + " to imagine whether he can navigate bc i know him well enough",
+    "Q010.D1": "Yes, in the future there will be periods of time where i take vacation and he"
+      + " will need to be able to use the system. however, for now i dont want to sacrifice speed"
+      + " on the roll out or any other qualities or capabilities for this. we can work this"
+      + " concept into the design later in the build if it helps",
+  };
   for (const id of V5_R01_DECISIONS_WITH_SETTLED_TEXT) {
-    assert.equal(typeof r01.V5_R01_SETTLED_DECISIONS[id].settled_answer, "string", id);
-    assert.equal(r01.V5_R01_SETTLED_DECISIONS[id].settled_answer.length > 100, true, id);
-  }
-  for (const id of V5_R01_DECISIONS_WITHOUT_SETTLED_TEXT) {
-    // Not paraphrased: there is no settled_answer field at all on an unread one.
+    const digest = r01.V5_R01_SETTLED_DECISIONS[id].settled_answer_digest;
+    assert.match(digest, /^[0-9a-f]{64}$/, id);
+    assert.equal(digest, createHash("sha256").update(VERBATIM[id], "utf8").digest("hex"),
+      `${id} pins a digest that is not the verbatim settled answer in the source`);
+    // Not carried: the verbatim string itself is not on the surface at all.
     assert.equal("settled_answer" in r01.V5_R01_SETTLED_DECISIONS[id], false, id);
+  }
+  // Q010's recommendation is the register's own wording and is pinned the same way.
+  assert.equal(r01.V5_R01_SETTLED_DECISIONS["Q010.D1"].recommendation_digest,
+    createHash("sha256").update("No production capability should depend on your laptop, memory,"
+      + " private prompt habits, or ability to interpret raw logs. Dell may not be able to develop"
+      + " DoctorCRE, but he must be able to operate it, recognize failure, and avoid making damage"
+      + " worse.", "utf8").digest("hex"));
+  // NOT VACUOUS: a digest of anything else would not match.
+  assert.notEqual(r01.V5_R01_SETTLED_DECISIONS["Q009.D1"].settled_answer_digest,
+    createHash("sha256").update(`${VERBATIM["Q009.D1"]} `, "utf8").digest("hex"));
+  for (const id of V5_R01_DECISIONS_WITHOUT_SETTLED_TEXT) {
+    // Not paraphrased: there is no settled text and no digest claiming one.
+    assert.equal("settled_answer" in r01.V5_R01_SETTLED_DECISIONS[id], false, id);
+    assert.equal("settled_answer_digest" in r01.V5_R01_SETTLED_DECISIONS[id], false, id);
     assert.equal(typeof r01.V5_R01_SETTLED_DECISIONS[id].why_not, "string", id);
-    assert.equal(typeof r01.V5_R01_SETTLED_DECISIONS[id].acceptance_hook.identifier,
-      "string", id);
   }
 });
 
@@ -827,8 +858,23 @@ const PRIVILEGED_TOKENS = Object.freeze([
   "coverage_complete", "favorable",
 ]);
 
-const HEDGE_PREFIX = /^would_/;
+const HEDGE_PREFIX = /^would_/i;
 const HEDGE_INFIX = "_if_authoritative";
+
+/**
+ * CASE-INSENSITIVE, WHICH IS THE FOURTH RE-REVIEW'S SECOND FINDING.
+ *
+ * `HEDGE_PREFIX` had no `i` flag and `_if_authoritative` was matched with a
+ * case-sensitive `includes`, so the reviewer walked `Would_allow` and
+ * `x_IF_AUTHORITATIVE` straight past both. A hedged verdict is hedged whatever
+ * its capitalisation; this is the only place either form is tested, and both
+ * probes are in the swept shapes below so the guard is exercised rather than
+ * merely written.
+ */
+function isHedged(text) {
+  const lowered = String(text).toLowerCase();
+  return HEDGE_PREFIX.test(lowered) || lowered.includes(HEDGE_INFIX);
+}
 
 /** The conditional tokens the classifiers answer in; none may reach src at all. */
 const CLASSIFICATION_TOKENS = Object.freeze(Object.values(CLASSIFICATIONS));
@@ -849,34 +895,52 @@ function containsToken(text, token) {
   return String(text).toLowerCase().includes(token);
 }
 
-/** A string with no whitespace: a code a consumer can branch on, not prose. */
-function isIdentifierShaped(text) {
-  return typeof text === "string" && text.length > 0 && !/\s/.test(text);
+/**
+ * A QUOTATION IS RESOLVED AGAINST ITS OWNER, NOT RECOGNISED BY ITS SHAPE.
+ *
+ * THE FOURTH RE-REVIEW'S THIRD FINDING. The old rule was that any two-string
+ * `{ quoted_from, identifier }` object was a quotation, after which `identifier`
+ * was skipped unconditionally — so the reviewer minted
+ * `{ quoted_from: "carr:design-basis-decision-register", identifier:
+ * "read_name_minted_by_this_slice" }`, a name this slice invented wearing a
+ * quotation's costume, and the sweep looked away from it. A shape anyone can
+ * type is not a verification.
+ *
+ * THE RULE NOW HAS TWO CONDITIONS AND BOTH ARE MECHANICAL.
+ *   (1) `quoted_from` must be a key of QUOTATION_OWNERS — a CLOSED allowlist of
+ *       modules in this repository, not a list of names a record may claim.
+ *   (2) `identifier` must actually be present in that module's namespace, which
+ *       this test resolves by looking it up. A name the owner does not export is
+ *       not a quotation of the owner, so it is swept like any other string.
+ * Fail either and the value is an ordinary object: its `identifier` is swept for
+ * every privileged token, which is what the probe test below asserts.
+ *
+ * WHAT THIS COST THE SLICE, and it is the deliberate second pass the correction
+ * asked for. Under the old shape rule there were two owners. The design-basis
+ * register is not a module in this repository and nothing it owns can be
+ * resolved here, so its targets and acceptance children could never satisfy
+ * condition (1) — they are provenance in a source comment now rather than
+ * strings on a surface claiming a verification this slice cannot perform. What
+ * is left is ONE owner and one exempted string, `evaluateReadContinuity`, which
+ * really is exported by global-boundaries.v5.js and is checked to be on every
+ * run. The machinery did not survive because it was worth hardening; it survived
+ * because deleting it would mean a drill fault could no longer name the S01 seam
+ * that defines its behaviour, which is the one thing the standing rule requires
+ * an honestly-deferred fault to say.
+ */
+const QUOTATION_OWNERS = new Map([[vocabulary.V5_R01_S01_MODULE, boundaries]]);
+
+function resolvesInOwner(quoted_from, identifier) {
+  const owner = QUOTATION_OWNERS.get(quoted_from);
+  if (owner === undefined) return false;
+  return Object.hasOwn(owner, identifier) || identifier in owner;
 }
 
-/**
- * A QUOTATION: `{ quoted_from, identifier }`, exactly two keys.
- *
- * Three identifier-shaped strings in this slice are not this slice's to spell —
- * S01's exported evaluator names and the design-basis register's targets and
- * acceptance hooks — and two of them carry the word `read` because their owners
- * wrote them that way. Renaming them to pass a guard would be misquoting a
- * record, so they are held as quotations instead and the guard's rule is
- * structural: a quotation's `identifier` is not swept for privileged words,
- * because it is not a word this slice chose.
- *
- * THAT IS NOT AN EXEMPTION LIST AND THE DIFFERENCE IS CHECKABLE, which is why
- * the four tests directly below it exist: every quotation must name an owner
- * that is not this slice, a quotation may never stand in an answer position, a
- * quoted identifier may never be an object key, and every S01 quotation is
- * checked against S01's real export list so a misquotation fails rather than
- * passes. Add a word to a quotation and the sweep still misses it; add a
- * quotation that is not a real quotation and these tests catch it.
- */
 function isQuotation(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     && Object.keys(value).length === 2
-    && typeof value.quoted_from === "string" && typeof value.identifier === "string";
+    && typeof value.quoted_from === "string" && typeof value.identifier === "string"
+    && resolvesInOwner(value.quoted_from, value.identifier);
 }
 
 const ANSWER_POSITIONS = Object.freeze([
@@ -887,18 +951,21 @@ const ANSWER_POSITIONS = Object.freeze([
 // THE DECISION PROCEDURE, as ordered questions, so a second reader reaches the
 // same verdict on the same value without sharing anyone's taste.
 //
-//   P1 CODE VALUE — a returned string with no whitespace in it (a code, a status,
-//      an enum member; prose has spaces) that CONTAINS the token anywhere.
-//      `cached_read_past_max_age` was a finding under this rule and the fault is
-//      now called `cached_value_past_max_age`; `stale_read_marked_stale_not_
-//      presented_as_current` was two findings and is now `stale_value_marked_
-//      stale_not_shown_as_current`. Twelve strings were renamed rather than
-//      excused.
+//   P1 STRING LEAF — ANY string this slice's surface carries, at any depth,
+//      that CONTAINS the token. Whitespace is not a licence: the first finding of
+//      the fourth re-review was that this test read only whitespace-free strings,
+//      which made every sentence in the slice exempt and let
+//      `V5_R01_ONBOARDING_STEPS[2].plain` hand `read` to a consumer. Prose is
+//      swept exactly as hard as a code is now, and the eleven sentences that
+//      failed were reworded rather than excused.
 //
-//   P2 AFFIRMED FLAG — an object key at any depth CONTAINING the token whose
-//      value is boolean `true`. `verified: true` is an answer. `request_read:
-//      false` is a refusal report and is the shape this whole slice is built out
-//      of, so it stays sayable.
+//   P2 KEY — an object key at any depth CONTAINING the token, WHATEVER ITS
+//      VALUE'S TYPE. It used to fire only on a `true`, so `acceptance_hook` — a
+//      key carrying `ok`, over an object — was never looked at. `verified: true`
+//      was always a finding; `verified_at: "2026-09-07"` is one now too, and so
+//      is the key over a nested record. That is why `request_read: false`, the
+//      refusal-report shape this slice is built out of, is `request_examined:
+//      false` now: the claim is unchanged and the word it said is gone.
 //
 //   P3 EXPORT NAME — the export's own name containing the token. This cost the
 //      slice two renames: `readOnboardingProgress` is `onboardingProgressStatus`
@@ -910,28 +977,50 @@ const ANSWER_POSITIONS = Object.freeze([
 //      message and detail, and that the discarded half carried every privileged
 //      word straight back to the caller. Nothing is discarded now, and the
 //      module-side fix is that a refusal has no caller-supplied part left to
-//      read: one registered code, one fixed message, no detail, no cause.
+//      hand back: one registered code, one fixed message, no detail, no cause.
 //
 //   P5 HEDGED VERDICT — any key or string, at any depth, beginning `would_` or
-//      containing `_if_authoritative`. Its own test, because it is a form rather
-//      than a word.
+//      containing `_if_authoritative`, IN ANY CASE. Its own test, because it is a
+//      form rather than a word, and case-insensitive because the third finding
+//      of the fourth re-review walked `Would_allow` and `x_IF_AUTHORITATIVE`
+//      past a case-sensitive one.
 //
-// PROSE IS SWEPT AT P4 AND NOT AT P1, and the reason is a test rather than an
-// argument. This slice's exports contain honest English — Joe's own settled
-// words, a basis that says "prompt habits", a step that says "recognize failure"
-// — and banning those would make the module unreadable while the words came back
-// as synonyms nobody can grep for. What makes that safe is the MARKER SWEEP
-// below: no caller string of any kind reaches any returned value from any
-// export, so a privileged word inside a returned sentence is the module's own
-// prose and cannot be a caller's smuggled answer. A thrown message has no such
-// licence, because a refusal's whole text is now a module constant.
+// THERE IS ONE SKIP LEFT IN THE WHOLE PROCEDURE and it is a resolution rather
+// than an exemption: a `{ quoted_from, identifier }` object whose owner is a
+// module in the closed QUOTATION_OWNERS allowlist AND whose identifier is really
+// present in that module's namespace. One string in this slice qualifies. The
+// marker sweep below still covers the prose P1 now reads, for the separate
+// property it always proved: no caller string of any kind reaches any returned
+// value from any export, so a privileged word in a returned sentence is the
+// module's own English and cannot be a caller's smuggled answer.
 // ---------------------------------------------------------------------------
 
-/** Every P1/P2/P5 finding inside one value, with the path that produced it. */
+/**
+ * Every P1/P2/P5 finding inside one value, with the path that produced it.
+ *
+ * EVERY STRING LEAF AND EVERY KEY, WHICH IS THE FOURTH RE-REVIEW'S FIRST
+ * FINDING. The previous walker had two escapes and the reviewer used both. P1
+ * read only whitespace-free strings, so prose was exempt and
+ * `V5_R01_ONBOARDING_STEPS[2].plain` carried `read` to a consumer; P2 read only
+ * keys whose value was boolean `true`, so `acceptance_hook` — a key carrying
+ * `ok` over an object — was never looked at. Both escapes are gone: a string is
+ * swept wherever it sits and a key is swept whatever its value's type.
+ *
+ * WHAT THAT COST, because it is the honest measure of the finding. It was
+ * twenty-nine findings on this slice's own surface, and every one of them was
+ * fixed rather than excused — eleven sentences reworded (`prompt habits` is
+ * `typed-instruction habits`, `misreported as healthy` is `misreported as normal
+ * service`, `merely broken` is `merely damaged`, `Look at what the system read`
+ * is `Review what the system saw`), the `acceptance_hook` key removed with the
+ * unverifiable quotations it held, and three verbatim strings this slice may not
+ * reword — Joe's two settled answers and the register's recommendation — moved
+ * off the surface into a source comment with a SHA-256 pinning each. The only
+ * skip left in this walker is a quotation resolved against a real module.
+ */
 function findingsIn(value, token, at = "$", found = []) {
   if (typeof value === "string") {
-    if (isIdentifierShaped(value) && containsToken(value, token)) {
-      found.push(`${at} = ${JSON.stringify(value)} (P1 code value)`);
+    if (containsToken(value, token)) {
+      found.push(`${at} = ${JSON.stringify(value).slice(0, 80)} (P1 string leaf)`);
     }
     return found;
   }
@@ -941,17 +1030,16 @@ function findingsIn(value, token, at = "$", found = []) {
   }
   if (value !== null && typeof value === "object") {
     if (isQuotation(value)) {
-      // Only the OWNER is swept; the quoted text belongs to that owner.
+      // Only the OWNER is swept; the quoted text belongs to that owner, and
+      // `isQuotation` has already resolved the identifier in that owner.
       if (containsToken(value.quoted_from, token)) {
-        found.push(`${at}.quoted_from = ${value.quoted_from} (P1 code value)`);
+        found.push(`${at}.quoted_from = ${value.quoted_from} (P1 string leaf)`);
       }
       return found;
     }
     for (const [key, entry] of Object.entries(value)) {
       const where = `${at}.${key}`;
-      if (entry === true && containsToken(key, token)) {
-        found.push(`${where} === true (P2 affirmed flag)`);
-      }
+      if (containsToken(key, token)) found.push(`${where} (P2 key)`);
       findingsIn(entry, token, where, found);
     }
     return found;
@@ -962,7 +1050,7 @@ function findingsIn(value, token, at = "$", found = []) {
 /** Every hedged key or string in a value, at any depth. Token-independent. */
 function hedgesIn(value, at = "$", found = []) {
   if (typeof value === "string") {
-    if (HEDGE_PREFIX.test(value) || value.includes(HEDGE_INFIX)) {
+    if (isHedged(value)) {
       found.push(`${at} = ${JSON.stringify(value).slice(0, 60)} (P5 hedged string)`);
     }
     return found;
@@ -973,9 +1061,7 @@ function hedgesIn(value, at = "$", found = []) {
   }
   if (value !== null && typeof value === "object") {
     for (const [key, entry] of Object.entries(value)) {
-      if (HEDGE_PREFIX.test(key) || key.includes(HEDGE_INFIX)) {
-        found.push(`${at}.${key} (P5 hedged key)`);
-      }
+      if (isHedged(key)) found.push(`${at}.${key} (P5 hedged key)`);
       hedgesIn(entry, `${at}.${key}`, found);
     }
   }
@@ -1031,6 +1117,12 @@ function callerShapes() {
   shapes.push({ decision_ids: ["Q009.D1", "Q010.D1", "Q019.D1", "Q061.D1", "Q104.D1", "Q145.D1"] });
   shapes.push({ decision: "allow", status: "passed", passable: true, verified: true });
   shapes.push({ would_complete_run_if_authoritative: true, ok: true });
+  // THE SECOND FINDING'S OWN PROBES, in value and in key position. A sweep that
+  // only tests its matcher in a unit assertion has not proved the matcher runs
+  // over the real surface, so both forms are swept shapes too.
+  shapes.push({ hedge: "Would_allow", other: "x_IF_AUTHORITATIVE" });
+  shapes.push({ Would_allow: true, x_IF_AUTHORITATIVE: "WOULD_READ_IF_AUTHORITATIVE" });
+  shapes.push("Would_allow", "x_IF_AUTHORITATIVE");
   shapes.push({ quoted_from: "allow", identifier: "allow" });
   shapes.push({}, null, undefined, "allow", 1, true, [], [{ passed: true }]);
   return shapes;
@@ -1157,17 +1249,46 @@ test("guard: the sweep is reading a real surface, and its matcher is not vacuous
   assert.equal(containsToken("nothing_here", "pass"), false);
   // And each position really fires.
   assert.equal(findingsIn({ verdict: "allow" }, "allow").length, 1, "P1");
-  assert.equal(findingsIn({ verified: true }, "verified").length, 1, "P2");
-  assert.deepEqual(findingsIn({ resumable_today: false }, "resumed"), [], "P2 permits a false");
-  assert.deepEqual(findingsIn({ note: "a sentence with allow in it" }, "allow"), [],
-    "P1 skips prose; the marker sweep is what covers it");
+  assert.equal(findingsIn({ verified: true }, "verified").length, 1, "P2 over a true");
+  // P2 NO LONGER NEEDS A `true`: the first finding of the fourth re-review was a
+  // key carrying `ok` over an object, which the value-typed rule never read.
+  assert.equal(findingsIn({ acceptance_hook: { any: "thing" } }, "ok").length, 1, "P2 over an object");
+  assert.equal(findingsIn({ verified_at: "2026-09-07" }, "verified").length, 1, "P2 over a string");
+  assert.equal(findingsIn({ verified: false }, "verified").length, 1, "P2 over a false");
+  assert.equal(findingsIn({ verified: null }, "verified").length, 1, "P2 over a null");
+  // P1 NO LONGER SKIPS PROSE, which is the same finding in its other half.
+  assert.equal(findingsIn({ note: "a sentence with allow in it" }, "allow").length, 1,
+    "P1 must read prose, not only whitespace-free codes");
+  assert.equal(findingsIn({ steps: [{ plain: "Open a real client and read what it holds." }] },
+    "read").length, 1, "P1 must read prose at depth");
   assert.equal(hedgesIn({ would_pass_if_authoritative: true }).length, 1, "P5 key");
   assert.equal(hedgesIn({ x: "would_complete" }).length, 1, "P5 string");
-  // A quotation is skipped ONLY on its identifier, and only when it is really one.
-  assert.deepEqual(findingsIn({ q: { quoted_from: "owner", identifier: "read_me" } }, "read"), []);
+  // P5 IS CASE-INSENSITIVE, the second finding: both of the reviewer's probes.
+  assert.equal(hedgesIn({ x: "Would_allow" }).length, 1, "P5 Would_allow");
+  assert.equal(hedgesIn({ x: "x_IF_AUTHORITATIVE" }).length, 1, "P5 x_IF_AUTHORITATIVE");
+  assert.equal(hedgesIn({ Would_allow: 1 }).length, 1, "P5 capitalised key");
+  assert.equal(hedgesIn({ x_IF_AUTHORITATIVE: 1 }).length, 1, "P5 upper-case infix key");
+
+  // A QUOTATION IS RESOLVED, NOT RECOGNISED — the third finding, as four cases.
+  // (a) The real one: an owner on the allowlist, an identifier that owner exports.
+  assert.deepEqual(findingsIn(
+    { q: { quoted_from: vocabulary.V5_R01_S01_MODULE, identifier: "evaluateReadContinuity" } },
+    "read"), []);
+  // (b) The reviewer's probe: the right SHAPE, an owner this repository cannot
+  //     resolve, and a name this slice minted. It is swept.
+  assert.equal(findingsIn({ q: { quoted_from: "carr:design-basis-decision-register",
+    identifier: "read_name_minted_by_this_slice" } }, "read").length, 1,
+  "an unresolvable owner must not buy an exemption");
+  // (c) An owner ON the allowlist, but an identifier it does not export: swept.
+  assert.equal(findingsIn({ q: { quoted_from: vocabulary.V5_R01_S01_MODULE,
+    identifier: "read_name_minted_by_this_slice" } }, "read").length, 1,
+  "an identifier the owner does not export must not buy an exemption");
+  // (d) The owner string itself is always swept, and a three-key object is not a
+  //     quotation at all.
   assert.equal(findingsIn({ q: { quoted_from: "reader", identifier: "x" } }, "read").length, 1);
-  assert.equal(findingsIn({ q: { quoted_from: "o", identifier: "read", extra: 1 } }, "read").length, 1,
-    "a three-key object is not a quotation");
+  assert.equal(findingsIn({ q: { quoted_from: vocabulary.V5_R01_S01_MODULE,
+    identifier: "evaluateReadContinuity", extra: 1 } }, "read").length, 1,
+  "a three-key object is not a quotation");
 });
 
 // ONE TEST PER PRIVILEGED TOKEN. Twenty-eight tokens, no allow-list, no skipped
@@ -1278,7 +1399,6 @@ test("guard: a refusal carries a registered code and the fixed message for it, a
     "v5_r01_error_takes_exactly_one_registered_code",
     "v5_r01_error_code_is_not_registered",
     "v5_r01_fail_takes_exactly_one_registered_code",
-    "v5_r01_assert_arity_takes_three_arguments",
     "v5_r01_assert_arity_was_called_wrongly",
   ]);
   let refusals = 0;
@@ -1343,14 +1463,17 @@ test("guard: every registered code has one fixed message, clear of every privile
       assert.equal(containsToken(message, token), false,
         `the fixed message for ${code} carries "${token}"`);
     }
-    assert.equal(HEDGE_PREFIX.test(message) || message.includes(HEDGE_INFIX), false, code);
+    assert.equal(isHedged(message), false, code);
   }
   assert.equal(seen.size, vocabulary.V5_R01_ERROR_CODES.length);
 });
 
 /**
- * THE MARKER SWEEP — the other half of the guarantee, and the reason P1 is
- * allowed to skip prose.
+ * THE MARKER SWEEP — the other half of the guarantee.
+ *
+ * P1 reads prose now, so this is no longer what makes prose safe; it proves the
+ * separate and stronger property, that nothing a caller writes reaches a
+ * consumer under any name at all.
  *
  * Every string-bearing field of every caller shape is refilled with a token that
  * cannot occur in this repository, and every export is handed the result in
@@ -1414,6 +1537,145 @@ test("guard: no caller string reaches any returned value or any thrown property"
   assert.equal(JSON.stringify(echo(marked[0])).includes(CALLER_MARKER), true);
 });
 
+/**
+ * THE FOURTH RE-REVIEW'S SIXTH FINDING: a caller's own exception, delivered to a
+ * consumer through a public export of this slice.
+ *
+ * `isPlainObject` called `Object.getPrototypeOf(value)` bare, and exported
+ * `assertObject` reached it. `Object.getPrototypeOf` looks total and is not: a
+ * Proxy may trap it and throw whatever its author likes, and a revoked Proxy
+ * throws on every operation including `Array.isArray`. The reviewer's probe threw
+ * `Error("allow::CALLER_SENTINEL")` from the trap and read that exact sentence —
+ * a privileged word, in a caller's own words, with no code on it — straight back
+ * off this slice's public surface.
+ *
+ * The sweep above could not see it because it builds its shapes as data and a
+ * Proxy is not data. So the probes are here, by hand, one per trap that a
+ * validator touches, and the invariant is the one the fixed message table already
+ * states for every other refusal: a registered code, this module's own sentence,
+ * no detail, no cause, and nothing the caller wrote anywhere on it.
+ */
+const CALLER_SENTINEL = "allow::CALLER_SENTINEL";
+
+/**
+ * Each probe names the validators whose OWN reflection its trap breaks, so the
+ * test asserts a refusal where a refusal is owed rather than a round number.
+ * `assertObject` reflects on the prototype; `assertClosedKeys` walks own keys;
+ * `assertRequiredKeys` asks `in`. A probe that breaks none of a validator's
+ * reflection is allowed to pass it — that is the validator doing its job — and
+ * the sentinel sweep still covers whatever it returns.
+ */
+function hostileProxies() {
+  const revocable = Proxy.revocable({}, {});
+  revocable.revoke();
+  const everyValidator = ["assertObject", "assertClosedKeys", "assertRequiredKeys"];
+  return [
+    ["getPrototypeOf trap throws", new Proxy({}, {
+      getPrototypeOf() { throw new Error(CALLER_SENTINEL); },
+    }), everyValidator],
+    ["getPrototypeOf trap throws a V5R01Error lookalike", new Proxy({}, {
+      getPrototypeOf() { throw Object.assign(new Error(CALLER_SENTINEL), { code: CALLER_SENTINEL }); },
+    }), everyValidator],
+    ["getPrototypeOf trap throws a string", new Proxy({}, {
+      getPrototypeOf() { throw CALLER_SENTINEL; },
+    }), everyValidator],
+    ["ownKeys trap throws", new Proxy({}, {
+      ownKeys() { throw new Error(CALLER_SENTINEL); },
+    }), ["assertClosedKeys"]],
+    ["getOwnPropertyDescriptor trap throws", new Proxy({ a: 1 }, {
+      getOwnPropertyDescriptor() { throw new Error(CALLER_SENTINEL); },
+    }), ["assertClosedKeys"]],
+    ["has trap throws", new Proxy({}, {
+      has() { throw new Error(CALLER_SENTINEL); },
+    }), ["assertRequiredKeys"]],
+    ["revoked proxy", revocable.proxy, everyValidator],
+  ];
+}
+
+test("guard: a hostile proxy's own exception never reaches a consumer of this slice", () => {
+  const registered = new Set(vocabulary.V5_R01_ERROR_CODES);
+  const refusedBy = new Map();
+  let refusals = 0;
+  let answered = 0;
+
+  for (const [label, hostile, mustRefuse] of hostileProxies()) {
+    const calls = [
+      ["assertObject", () => vocabulary.assertObject(hostile, "path")],
+      ["assertClosedKeys", () => vocabulary.assertClosedKeys(hostile, ["a"], "path")],
+      ["assertRequiredKeys", () => vocabulary.assertRequiredKeys(hostile, ["a"], "path")],
+      ["assertArray", () => vocabulary.assertArray([], "path", hostile)],
+      ["evaluatePilotDay", () => r01.evaluatePilotDay(hostile)],
+      ["evaluatePilotRun", () => r01.evaluatePilotRun(hostile)],
+      ["evaluateRecoveryDrill", () => r01.evaluateRecoveryDrill(hostile)],
+      ["assertR01DecisionBinding", () => r01.assertR01DecisionBinding(hostile)],
+      ["onboardingProgressStatus", () => onboarding.onboardingProgressStatus(hostile)],
+      ["evaluateBetaOperability", () => onboarding.evaluateBetaOperability(hostile)],
+      ["evaluatePerSliceDellReview", () => onboarding.evaluatePerSliceDellReview(hostile)],
+    ];
+    for (const [name, call] of calls) {
+      let thrown;
+      let returned;
+      try { returned = call(); } catch (error) { thrown = error; }
+
+      if (thrown === undefined) {
+        assert.equal(mustRefuse.includes(name), false,
+          `${name} accepted ${label}, whose trap breaks its own reflection`);
+        // A refusal REPORT rather than a throw is equally covered: nothing the
+        // caller wrote may be anywhere in it.
+        assert.equal(JSON.stringify(returned ?? null).includes(CALLER_SENTINEL), false,
+          `${name} returned the ${label} sentinel`);
+        answered += 1;
+        continue;
+      }
+      // Never a bare engine or caller error: a registered refusal every time.
+      assert.equal(thrown instanceof V5R01Error, true,
+        `${name} on ${label} threw ${thrown?.name}: ${thrown?.message}`);
+      assert.equal(registered.has(thrown.code), true, `${name} on ${label}: ${thrown.code}`);
+      assert.equal(thrown.detail, undefined, `${name} on ${label}`);
+      assert.equal(thrown.cause, undefined, `${name} on ${label}`);
+      // The whole throw, every own property, sanitized.
+      const surface = thrownSurface(thrown);
+      for (const [key, value] of Object.entries(surface)) {
+        if (typeof value !== "string") continue;
+        assert.equal(value.includes(CALLER_SENTINEL), false,
+          `${name} on ${label} carried the caller's sentinel on ${key}`);
+        assert.equal(containsToken(value, "allow"), false,
+          `${name} on ${label} carried a privileged token on ${key}`);
+      }
+      refusals += 1;
+      refusedBy.set(name, (refusedBy.get(name) ?? 0) + 1);
+    }
+  }
+  // THE VALIDATORS ARE THE ONES THAT REFLECT, so every one of them must refuse
+  // every hostile proxy — that is where `Object.getPrototypeOf` and the own-key
+  // walks live, and it is the path the reviewer read the sentinel out of.
+  for (const name of ["assertObject", "assertClosedKeys", "assertRequiredKeys"]) {
+    const owed = hostileProxies().filter(([, , must]) => must.includes(name)).length;
+    assert.ok(refusedBy.get(name) >= owed,
+      `${name} refused ${refusedBy.get(name)} of the ${owed} probes that break its reflection`);
+  }
+  assert.ok(refusals >= 21, `only ${refusals} refusals were provoked`);
+  // The evaluators mostly ANSWER rather than refuse, because they never look at
+  // the request at all — which is the slice's whole claim, and it means a hostile
+  // proxy cannot reach their reflection either. Both outcomes are swept above.
+  assert.ok(answered > 0, "no evaluator answered; the sweep proved only the refusal path");
+
+  // NOT VACUOUS: the trap really does throw, and unguarded reflection really does
+  // carry the caller's sentence out. This is the defect, reproduced.
+  const [, trapped] = hostileProxies()[0];
+  assert.throws(() => Object.getPrototypeOf(trapped), error =>
+    error.message === CALLER_SENTINEL);
+  const unguarded = value => {
+    const proto = Object.getPrototypeOf(value);
+    return proto === Object.prototype;
+  };
+  assert.throws(() => unguarded(trapped), error => error.message === CALLER_SENTINEL);
+
+  // And an honest object is untouched by the guard: it still passes.
+  assert.equal(vocabulary.assertObject({ a: 1 }, "path"), undefined);
+  assert.equal(vocabulary.assertClosedKeys({ a: 1 }, ["a"], "path"), undefined);
+});
+
 test("guard: deepFreeze is not on any surface of this slice, by name or by behaviour", () => {
   for (const [moduleName, surface] of SWEPT_SRC_MODULES) {
     assert.equal("deepFreeze" in surface, false, `${moduleName} still exports deepFreeze`);
@@ -1448,25 +1710,31 @@ function everyQuotation(value, at = "$", found = []) {
   return found;
 }
 
-test("guard: every quotation names an outside owner and never stands in an answer", () => {
+test("guard: every quotation resolves in an allowlisted owner module", () => {
   const quotations = [];
   for (const entry of EXPORTED_VALUES) quotations.push(...everyQuotation(entry.output, entry.at));
   assert.ok(quotations.length > 0, "no quotation was found; the skip rule would be dead code");
 
+  // THE ALLOWLIST IS CLOSED AND IT HAS ONE ENTRY. The design-basis register was
+  // the second, and it left with the quotations it could not verify.
+  assert.deepEqual([...QUOTATION_OWNERS.keys()], [vocabulary.V5_R01_S01_MODULE]);
+
   const owners = new Set();
   for (const { at, quotation } of quotations) {
-    assert.ok(quotation.quoted_from.length > 3, at);
+    assert.equal(QUOTATION_OWNERS.has(quotation.quoted_from), true,
+      `${at} names an owner that is not on the closed allowlist`);
     assert.equal(quotation.quoted_from.startsWith("v5-r01"), false,
       `${at} quotes this slice, which is not a quotation at all`);
-    assert.ok(quotation.identifier.length > 0, at);
+    // RESOLVED, not asserted: the identifier is really exported by that module.
+    assert.equal(resolvesInOwner(quotation.quoted_from, quotation.identifier), true,
+      `${at} quotes "${quotation.identifier}", which its owner does not export`);
     // A quotation is never the answer, the status, the decision or the reason.
     for (const position of ANSWER_POSITIONS) {
       assert.equal(at.endsWith(`.${position}`), false, `${at} is an answer position`);
     }
     owners.add(quotation.quoted_from);
   }
-  assert.deepEqual([...owners].sort(),
-    [vocabulary.V5_R01_DESIGN_BASIS_REGISTER, vocabulary.V5_R01_S01_MODULE].sort());
+  assert.deepEqual([...owners], [vocabulary.V5_R01_S01_MODULE]);
 
   // A quoted identifier is never an object KEY anywhere on this surface.
   const quotedTexts = new Set(quotations.map(entry => entry.quotation.identifier));
@@ -1477,7 +1745,42 @@ test("guard: every quotation names an outside owner and never stands in an answe
   }
 });
 
-test("guard: every S01 quotation is a real S01 export, so a misquotation fails", () => {
+test("guard: a name this slice minted in a quotation's shape is swept, not skipped", () => {
+  // THE REVIEWER'S OWN PROBE, run as a test rather than answered in prose. Under
+  // the shape rule this object qualified as a quotation and its `read` was never
+  // looked at. It is swept now on every privileged token it carries, and so is
+  // the same probe naming the one owner that IS on the allowlist.
+  const minted = {
+    quoted_from: vocabulary.V5_R01_DESIGN_BASIS_REGISTER,
+    identifier: "read_name_minted_by_this_slice",
+  };
+  assert.equal(isQuotation(minted), false, "an unresolvable owner still passed as a quotation");
+  assert.equal(findingsIn({ probe: minted }, "read").length, 1);
+
+  const mintedUnderARealOwner = {
+    quoted_from: vocabulary.V5_R01_S01_MODULE,
+    identifier: "read_name_minted_by_this_slice",
+  };
+  assert.equal(isQuotation(mintedUnderARealOwner), false,
+    "an identifier the owner does not export still passed as a quotation");
+  assert.equal(findingsIn({ probe: mintedUnderARealOwner }, "read").length, 1);
+
+  // Every privileged token, in the same costume, under both owners and a third.
+  for (const token of PRIVILEGED_TOKENS) {
+    for (const owner of [vocabulary.V5_R01_DESIGN_BASIS_REGISTER, vocabulary.V5_R01_S01_MODULE,
+      "carr:some-other-register"]) {
+      const probe = { quoted_from: owner, identifier: `${token}_minted_here` };
+      assert.ok(findingsIn({ probe }, token).length >= 1,
+        `a minted "${token}" quoted from ${owner} was skipped`);
+    }
+  }
+  // AND THE REAL ONE STILL RESOLVES, so this is a verification and not a ban.
+  assert.equal(isQuotation({ quoted_from: vocabulary.V5_R01_S01_MODULE,
+    identifier: "evaluateReadContinuity" }), true);
+  assert.equal(typeof boundaries.evaluateReadContinuity, "function");
+});
+
+test("guard: every S01 seam quotation is a real S01 export, so a misquotation fails", () => {
   // The mechanical half of the quotation rule: this slice may skip sweeping a
   // string it says another module minted, and this is the test that it did.
   const s01 = boundaries;
@@ -1584,15 +1887,38 @@ test("guard: every exported validator returns nothing, so none can launder a val
  */
 const DECLARED_ARITIES = vocabulary.V5_R01_DECLARED_ARITIES;
 
+/**
+ * NO FILTER. That is the fourth re-review's fourth finding.
+ *
+ * This list used to exclude `fail` and `assertArity` by name, and the
+ * completeness test below then reported that every public function declared its
+ * arity — of a roster it had first trimmed to fit. An independent enumeration of
+ * the three namespaces reported both as undeclared, which is what a completeness
+ * test is supposed to do. Both are ordinary exports of this slice, both are on
+ * `V5_R01_DECLARED_ARITIES` now, and both refuse an extra argument with the
+ * registered code that roster generates.
+ */
 const PUBLIC_FUNCTIONS = [
   ...Object.entries(r01), ...Object.entries(onboarding), ...Object.entries(vocabulary),
-].filter(([name, value]) => typeof value === "function" && !isClass(value)
-  && name !== "fail" && name !== "assertArity");
+].filter(([, value]) => typeof value === "function" && !isClass(value));
 
 test("guard: every public function of this slice declares its arity", () => {
   const undeclared = PUBLIC_FUNCTIONS.map(([name]) => name)
     .filter(name => !(name in DECLARED_ARITIES));
   assert.deepEqual(undeclared, [], "a public function has no declared arity");
+  // THE TWO THE OLD FILTER HID, named so a returning filter fails here first.
+  assert.equal(DECLARED_ARITIES.fail, 1);
+  assert.equal(DECLARED_ARITIES.assertArity, 3);
+  for (const name of ["fail", "assertArity"]) {
+    assert.ok(PUBLIC_FUNCTIONS.some(([exported]) => exported === name),
+      `${name} was filtered out of the roster again`);
+  }
+  // And the roster is enumerated independently of the module's own list, so a
+  // name the module forgot to declare is caught rather than matched to itself.
+  const independent = [r01, onboarding, vocabulary].flatMap(surface =>
+    Object.entries(surface).filter(([, value]) => typeof value === "function" && !isClass(value))
+      .map(([name]) => name));
+  assert.deepEqual([...new Set(independent)].sort(), Object.keys(DECLARED_ARITIES).sort());
   // And every declared name is really exported by one of the three modules.
   const exported = new Set(PUBLIC_FUNCTIONS.map(([name]) => name));
   for (const name of Object.keys(DECLARED_ARITIES)) {
@@ -1665,12 +1991,24 @@ test("guard: the declared arity is accepted, so the boundary is a boundary and n
         `${name} refuses its own declared arity`);
     }
   }
-  // And `fail` and the error constructor, which are guarded by a fixed TypeError
-  // rather than by a registered code, hold the same line.
-  assert.throws(() => vocabulary.fail("invalid_shape", "extra"), TypeError);
-  assert.throws(() => vocabulary.assertArity([], 0, "evaluatePilotDay", "extra"), TypeError);
+  // `fail` AND `assertArity` ARE ON THE ROSTER NOW, the fourth re-review's fourth
+  // finding, so they refuse an extra argument with the registered code the roster
+  // generates rather than with a bare TypeError — the same boundary every other
+  // export holds, in the same shape a consumer can branch on.
+  assert.throws(() => vocabulary.fail("invalid_shape", "extra"),
+    error => error instanceof V5R01Error && error.code === "fail_takes_no_extra_argument");
+  assert.throws(() => vocabulary.assertArity([], 0, "evaluatePilotDay", "extra"),
+    error => error instanceof V5R01Error && error.code === "assertArity_takes_no_extra_argument");
+  // `fail` called with NO argument is still a fixed TypeError: there is no code to
+  // raise, because a code is the one thing it was not given.
+  assert.throws(() => vocabulary.fail(), TypeError);
+  // A validator called wrongly inside its declared arity keeps its fixed text.
   assert.throws(() => vocabulary.assertArity([], 0, "not_a_guarded_name"), TypeError);
   assert.throws(() => vocabulary.assertArity(undefined, 0, "evaluatePilotDay"), TypeError);
+  // AND THE DECLARED ARITY IS STILL ACCEPTED by both, so this is a boundary.
+  assert.throws(() => vocabulary.fail("invalid_shape"),
+    error => error instanceof V5R01Error && error.code === "invalid_shape");
+  assert.equal(vocabulary.assertArity([], 0, "evaluatePilotDay"), undefined);
 });
 
 // ---------------------------------------------------------------------------

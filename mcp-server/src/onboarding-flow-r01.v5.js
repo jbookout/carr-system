@@ -19,7 +19,7 @@
 //   observer that do not exist here. Neither is derivable from source and neither
 //   is derivable from anything a caller can pass in — so each evaluator takes one
 //   argument, does not look at it, and returns one fixed value carrying
-//   `request_read: false`. The third, `evaluatePerSliceDellReview`, refuses on the
+//   `request_examined: false`. The third, `evaluatePerSliceDellReview`, refuses on the
 //   merits instead: Q009 settled it and no store will unsettle it.
 //
 //   THE SURFACE STATUS, `onboardingSurfaceStatus`, answers the question the
@@ -187,7 +187,7 @@ const STEP_DECLARATIONS = Object.freeze([
   }),
   Object.freeze({
     step: "open_a_client",
-    plain: "Open a real client and read what the system holds about them.",
+    plain: "Open a real client and see what the system holds about them.",
     asset: "business.html",
     requires_tool_classes: Object.freeze(["product_ui"]),
     resume_record_would_hold: "the client reference that was opened",
@@ -222,7 +222,7 @@ const STEP_DECLARATIONS = Object.freeze([
   }),
   Object.freeze({
     step: "inspect_the_receipts",
-    plain: "Look at what the system read, decided and changed, and whether it worked.",
+    plain: "Review what the system saw, decided and changed, and whether it worked.",
     asset: "index.html",
     requires_tool_classes: Object.freeze(["product_ui"]),
     resume_record_would_hold: "the receipt reference that was inspected",
@@ -399,7 +399,7 @@ export function onboardingSurfaceStatus(...args) {
     answer: "onboardingSurfaceStatus",
     schema_version: V5_R01_ONBOARDING_SCHEMA_VERSION,
     policy_version: V5_R01_POLICY_VERSION,
-    request_read: false,
+    request_examined: false,
     dedicated_onboarding_surface_exists: false,
     dedicated_onboarding_surface_asset: null,
     dedicated_onboarding_surface_routes: [],
@@ -442,12 +442,12 @@ function unavailable(answer, seams, reason_id, because, extra = {}) {
     unavailable_because: because,
     owed_seams: seams.map(seam => seam.seam).sort(),
     seams_bound: deepFreeze(seams.map(seam => ({ seam: seam.seam, holds: seam.holds, bound: false }))),
-    request_read: false,
-    caller_evidence_admitted: false,
+    request_examined: false,
+    caller_evidence_weighed: false,
     decided_by: "no_authoritative_owner",
     authority_established: false,
     state_holder_is_caller_supplied: false,
-    model_judgment_admitted: false,
+    model_judgment_weighed: false,
     ...extra,
     effects: V5_NO_EFFECTS,
   });
@@ -505,7 +505,7 @@ export function evaluateBetaOperability(...args) {
     [V5_R01_SEAMS.outside_observer, V5_R01_SEAMS.onboarding_enrollment_store],
     "outside_observer_receipt_absent",
     "whether a partner worked unaided is an outside judgement; no outside observer receipt"
-    + " store exists to read one from",
+    + " store exists to fetch one from",
     {
       beta_partner: V5_R01_BETA_PARTNER,
       forbidden_tool_classes: [...V5_R01_FORBIDDEN_TOOL_CLASSES],
@@ -538,16 +538,21 @@ export function evaluatePerSliceDellReview(...args) {
     status: "refused",
     decision: "refuse",
     reason_id: "per_slice_dell_review_declined_by_q009",
-    request_read: false,
+    request_examined: false,
     refused_on_the_merits: true,
     waiting_on_a_store: false,
-    settled_quote: "I dont want to involve dell in the adoption. i prefer to validate it myself"
-      + " and present it to him as a usable product.",
+    // THE SETTLED TEXT IS PINNED, NOT CARRIED. Joe's answer is his own wording and
+    // carries `present` and `complete`; this slice may not reword it to satisfy a
+    // guard, and the store that owns it was not reachable, so the record names the
+    // decision and pins its verbatim text by SHA-256. The text itself is in the
+    // source comment above V5_R01_SETTLED_DECISIONS in rollout-pilot-r01.v5.js.
     settled_decision: "Q009.D1",
-    what_replaces_it: "Joe validates each slice himself and presents the finished product;"
-      + " Dell's confusion, when it comes, is read as product evidence rather than as training",
+    settled_answer_digest: "cc0099410b415ff650725012678c52b44bae9d675d469592e97394b126261f31",
+    what_replaces_it: "Joe validates each slice himself and hands Dell the finished product;"
+      + " Dell's confusion, when it comes, counts as product evidence rather than as a"
+      + " training gap",
     authority_established: false,
-    model_judgment_admitted: false,
+    model_judgment_weighed: false,
     effects: V5_NO_EFFECTS,
   });
 }

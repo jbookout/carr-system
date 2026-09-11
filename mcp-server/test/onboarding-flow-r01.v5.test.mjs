@@ -17,6 +17,7 @@
 //   suite does: nobody completes their own onboarding by saying they did.
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
@@ -69,29 +70,29 @@ const PRIVILEGED_OUTCOMES = Object.freeze([
   "coverage_complete", "favorable",
 ]);
 
-/** A string with no whitespace: a code a consumer can branch on, not prose. */
-function isCodeShaped(text) {
-  return typeof text === "string" && text.length > 0 && !/\s/.test(text);
-}
-
 /**
  * THE TWO POSITIONS A CONSUMER READS AN OUTCOME IN, the same two the pilot suite
  * names, so the two suites cannot disagree about what counts.
  *
- *   A CODE VALUE — a returned string with no whitespace containing the word.
- *   AN AFFIRMED KEY — a key containing the word whose value is boolean `true`.
+ *   A STRING LEAF — ANY string this surface carries, at any depth, containing
+ *     the word. Whitespace is not a licence.
+ *   A KEY — any object key containing the word, WHATEVER ITS VALUE'S TYPE.
  *
- * A key whose value is `false` or `null` is a refusal report, and this slice is
- * built out of those: `request_read: false` is the claim that no field of the
- * request was looked at, and it has to stay sayable or the module cannot state
- * its own boundary. `request_read: true` would be a finding, and the sweep says
- * so.
+ * BOTH OF THOSE USED TO BE NARROWER AND THE FOURTH RE-REVIEW BROKE BOTH, one
+ * file over, in exactly the same shape this file had them. A string was read
+ * only if it had no whitespace, so every sentence the module returned was
+ * exempt; a key was read only over a boolean `true`, so a key carrying a word
+ * over an object, a string or a `false` was never looked at.
+ *
+ * `request_read: false` used to be the standing justification for the second
+ * narrowing — a refusal report, and this slice is built out of those. It was
+ * still a key saying `read` on a public surface, and the honest fix was to
+ * rename the claim rather than to keep an exemption for it: the field is
+ * `request_examined: false` now and says the same thing.
  */
 function outcomeFindings(value, word, at = "$", found = []) {
   if (typeof value === "string") {
-    if (isCodeShaped(value) && value.toLowerCase().includes(word)) {
-      found.push(`${at} = ${value}`);
-    }
+    if (value.toLowerCase().includes(word)) found.push(`${at} = ${value.slice(0, 80)}`);
     return found;
   }
   if (Array.isArray(value)) {
@@ -100,7 +101,7 @@ function outcomeFindings(value, word, at = "$", found = []) {
   }
   if (value !== null && typeof value === "object") {
     for (const [key, entry] of Object.entries(value)) {
-      if (entry === true && key.toLowerCase().includes(word)) found.push(`${at}.${key} === true`);
+      if (key.toLowerCase().includes(word)) found.push(`${at}.${key} (key)`);
       outcomeFindings(entry, word, `${at}.${key}`, found);
     }
   }
@@ -356,6 +357,39 @@ test("ladder: a walkthrough with no realistic work is not independent operation"
   assert.equal(verdict.blocking_check, "no_realistic_work_performed");
 });
 
+test("ladder: a malformed intervention count refuses with a code, not a TypeError", () => {
+  // THE FOURTH RE-REVIEW'S FIFTH FINDING, and it was invisible because nothing
+  // exercised this branch. Production `fail` has taken exactly one registered
+  // code since the third round; this call still passed three, so the only path
+  // that reaches it threw an uncoded `TypeError` whose message was
+  // "v5_r01_fail_takes_exactly_one_registered_code" instead of the intended
+  // `invalid_shape` refusal. Otherwise-valid input, one bad field.
+  const withInterventions = interventions => () => classifyBetaOperabilityIfAuthoritative({
+    partner: V5_R01_BETA_PARTNER,
+    onboarding_classification: CLASSIFICATIONS.onboarding,
+    realistic_work_items: ["deal:2001"],
+    author_interventions: interventions,
+    tool_classes_used: ["product_ui"],
+  });
+
+  for (const malformed of [-1, -12, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "0", "1", null,
+    true, [], {}, undefined]) {
+    let thrown;
+    try { withInterventions(malformed)(); } catch (error) { thrown = error; }
+    assert.ok(thrown !== undefined, `${JSON.stringify(malformed)} was accepted`);
+    assert.equal(thrown instanceof TypeError, false,
+      `${JSON.stringify(malformed)} raised a TypeError: ${thrown.message}`);
+    assert.equal(thrown.code, "invalid_shape", JSON.stringify(malformed));
+    // And the refusal carries nothing the caller wrote.
+    assert.equal(thrown.detail, undefined);
+    assert.equal(thrown.cause, undefined);
+    assert.equal(thrown.message.includes("author_interventions"), false);
+  }
+  // NOT VACUOUS: the honest counts still reach an answer rather than a refusal.
+  assert.equal(withInterventions(0)().classification, CLASSIFICATIONS.beta);
+  assert.equal(withInterventions(3)().classification, CLASSIFICATIONS.refuse);
+});
+
 test("ladder: a caller passing the onboarding classification as a word does not get past it", () => {
   // The classification is a chained input here, so the one string that would
   // unlock it is checked by exact identity, and nothing else is accepted.
@@ -410,8 +444,8 @@ test("refusal: onboarding progress is unavailable and names the enrollment store
   assert.equal(result.status, "unavailable");
   assert.equal(result.decision, "unavailable");
   assert.deepEqual(result.owed_seams, [V5_R01_SEAMS.onboarding_enrollment_store.seam]);
-  assert.equal(result.request_read, false);
-  assert.equal(result.caller_evidence_admitted, false);
+  assert.equal(result.request_examined, false);
+  assert.equal(result.caller_evidence_weighed, false);
   assert.equal(result.authority_established, false);
   assert.equal(result.state_holder_is_caller_supplied, false);
   assert.equal(result.flow_is_saved_today, false);
@@ -470,10 +504,20 @@ test("refusal: a per-slice Dell review is refused ON THE MERITS, not for want of
   assert.equal(result.reason_id, "per_slice_dell_review_declined_by_q009");
   assert.equal(result.refused_on_the_merits, true);
   assert.equal(result.waiting_on_a_store, false);
-  assert.equal(result.request_read, false);
+  assert.equal(result.request_examined, false);
   assert.equal(result.settled_decision, "Q009.D1");
-  assert.equal(result.settled_quote.includes("present it to him as a usable product"), true,
-    "the ruling travels with the refusal so a reader sees it was ruled, not overlooked");
+  // THE RULING TRAVELS WITH THE REFUSAL AS A DIGEST, so a reader still sees it
+  // was ruled rather than overlooked, and the verbatim text this slice may not
+  // reword stays off a surface that sweeps every string leaf.
+  assert.equal(result.settled_answer_digest,
+    createHash("sha256").update("I dont want to involve dell in the adoption. i prefer to"
+      + " validate it myself and present it to him as a usable product. reason being - he is not"
+      + " gong to sit at the desk and do these things the way i will. what would end up happening"
+      + " is each slice would be delayed for days longer while i wait on him to complete"
+      + " validation. much more effective that i work out the kinks and give him the final"
+      + " version. I am smart enough to imagine whether he can navigate bc i know him well"
+      + " enough", "utf8").digest("hex"));
+  assert.equal("settled_quote" in result, false, "the verbatim text is pinned, not carried");
   assert.equal(result.what_replaces_it.includes("product evidence"), true);
 });
 
@@ -493,7 +537,7 @@ test("surface: the flow has no product surface of its own, and says what it woul
     V5_R01_SEAMS.onboarding_enrollment_store.seam,
     V5_R01_SEAMS.onboarding_surface_registration.seam,
   ].sort());
-  assert.equal(status.request_read, false);
+  assert.equal(status.request_examined, false);
   assert.equal(status.steps_a_partner_would_walk, V5_R01_ONBOARDING_STEPS.length);
 });
 
@@ -588,9 +632,15 @@ test("guard: the onboarding word sweep is not vacuous", () => {
   for (const word of PRIVILEGED_OUTCOMES) {
     assert.equal(outcomeFindings({ verdict: `run_${word}` }, word).length, 1, word);
     assert.equal(outcomeFindings({ [`${word}_here`]: true }, word).length, 1, word);
-    assert.deepEqual(outcomeFindings({ [`${word}_here`]: false }, word), [], word);
+    // A KEY IS A FINDING WHATEVER ITS VALUE'S TYPE, which is the half of the
+    // first finding this file carried too.
+    assert.equal(outcomeFindings({ [`${word}_here`]: false }, word).length, 1, word);
+    assert.equal(outcomeFindings({ [`${word}_here`]: { nested: 1 } }, word).length, 1, word);
+    assert.equal(outcomeFindings({ [`${word}_at`]: "2026-09-07" }, word).length, 1, word);
+    // AND PROSE IS A FINDING, which is the other half.
+    assert.equal(outcomeFindings({ note: `a sentence with ${word} in it` }, word).length, 1, word);
+    assert.equal(outcomeFindings([[{ deep: `x ${word} y` }]], word).length, 1, word);
   }
-  assert.deepEqual(outcomeFindings({ note: "a sentence with allow in it" }, "allow"), []);
   // An echoing export would be caught: this is the case the input exemption hid.
   const echo = value => value;
   assert.equal(outcomeFindings(echo({ outcome: "allow" }), "allow").length, 1);
@@ -604,12 +654,15 @@ test("guard: a partner cannot finish his own onboarding by declaring every step 
   assert.equal(complete.decision, "unavailable");
   assert.equal(JSON.stringify(complete), JSON.stringify(empty),
     "a complete claim and an empty one must be indistinguishable in the answer");
+  // EVERY STRING, prose included — no code-shape filter, which is where the
+  // fourth re-review's first finding lived in this file.
   for (const value of collectStrings(complete)) {
-    if (!isCodeShaped(value)) continue;
     for (const word of PRIVILEGED_OUTCOMES) {
       assert.equal(value.toLowerCase().includes(word), false, `${value} carries ${word}`);
     }
   }
+  // And every key, at any depth, whatever it holds.
+  assert.deepEqual(PRIVILEGED_OUTCOMES.flatMap(word => outcomeFindings(complete, word)), []);
 });
 
 test("guard: no evaluator accepts a store, registry or observer as a second argument", () => {

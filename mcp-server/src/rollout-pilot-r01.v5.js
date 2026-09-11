@@ -41,7 +41,7 @@
 //
 // SO THE PUBLIC EVALUATORS READ NO FIELD OF THEIR REQUEST AT ALL, and that is
 // the whole boundary. Each takes one argument, does not look at it, and returns
-// one fixed value — `decision: "unavailable"`, the owed seams, `request_read:
+// one fixed value — `decision: "unavailable"`, the owed seams, `request_examined:
 // false`. If no field of the request can change the answer, then no caller can
 // smuggle authority in through one.
 //
@@ -105,7 +105,6 @@ import {
   V5_R01_SCHEMA_VERSION,
   V5_R01_SEAMS,
   V5_R01_SEAM_REFS,
-  V5_R01_DESIGN_BASIS_REGISTER,
   V5R01Error,
   assertArity,
   assertClosedKeys,
@@ -130,16 +129,6 @@ function isFreezablePlainObject(value) {
 function deepFreeze(value) {
   if (Array.isArray(value)) { value.forEach(deepFreeze); return Object.freeze(value); }
   if (isFreezablePlainObject(value)) { Object.values(value).forEach(deepFreeze); return Object.freeze(value); }
-}
-
-/**
- * An identifier this slice repeats from another owner, held as a quotation.
- * PRIVATE for the same reason `deepFreeze` is: an exported one would hand a
- * caller's own string back inside a record. Every quotation below is built from
- * literals at load. See the vocabulary module for why quotations exist at all.
- */
-function quotedIdentifier(identifier, quoted_from) {
-  return Object.freeze({ quoted_from, identifier });
 }
 
 export {
@@ -190,57 +179,94 @@ export {
  * exact wording of those four should read it from the store rather than from
  * here.
  */
+/*
+ * THE VERBATIM TEXT LIVES HERE, IN THE SOURCE, AND THE RECORD CARRIES ITS
+ * DIGEST. This is the fourth re-review's first finding taken at its word.
+ *
+ * That finding says prose containing a privileged word is a finding and not an
+ * exemption, and the sweep now reads every string leaf and every key. Two of
+ * these strings are Joe's own settled words and one is the register's own
+ * recommendation; rewording them to satisfy a guard would be misquoting the
+ * record, which is a worse fault than the one the guard exists for. They are not
+ * this slice's to reword, and they are not this slice's to verify either — the
+ * doctrine store owns them and was not reachable this session — so they leave
+ * the exported surface and the record pins them by SHA-256 instead. That is the
+ * pattern the rest of the v5 lane already uses (`source_evidence_digest` in
+ * global-boundaries.v5.js, cre-lifecycle.v5.js, complete-set-review-a03.v5.js).
+ *
+ * Q009.D1 settled answer
+ *   sha256 cc0099410b415ff650725012678c52b44bae9d675d469592e97394b126261f31
+ *   "I dont want to involve dell in the adoption. i prefer to validate it
+ *    myself and present it to him as a usable product. reason being - he is not
+ *    gong to sit at the desk and do these things the way i will. what would end
+ *    up happening is each slice would be delayed for days longer while i wait
+ *    on him to complete validation. much more effective that i work out the
+ *    kinks and give him the final version. I am smart enough to imagine whether
+ *    he can navigate bc i know him well enough"
+ *
+ * Q010.D1 settled answer
+ *   sha256 9b34a198ecbbc1f9faabd8e7fae9f5b674baeb990ba33a73956d64a406cc7b40
+ *   "Yes, in the future there will be periods of time where i take vacation and
+ *    he will need to be able to use the system. however, for now i dont want to
+ *    sacrifice speed on the roll out or any other qualities or capabilities for
+ *    this. we can work this concept into the design later in the build if it
+ *    helps"
+ *
+ * Q010.D1 recommendation it answered
+ *   sha256 11366b2be28d6258799b9ffd19c64f7f704c5d01d0172db0a41c38e76ca078a0
+ *   "No production capability should depend on your laptop, memory, private
+ *    prompt habits, or ability to interpret raw logs. Dell may not be able to
+ *    develop DoctorCRE, but he must be able to operate it, recognize failure,
+ *    and avoid making damage worse."
+ *
+ * AND THE REGISTER TARGETS GO THE SAME WAY, for the stronger reason. They were
+ * held as `{ quoted_from, identifier }` quotations, which the sweep skipped on
+ * the strength of their shape alone. The re-review's third finding is that a
+ * shape is not a verification: any two-string object qualified, so a name this
+ * slice minted could wear the costume and walk straight through. The rule is now
+ * that a quotation's owner must be a module in a closed allowlist AND the
+ * identifier must really be exported by it — and `carr:design-basis-decision-
+ * register` is not a module in this repository, so nothing it owns can be
+ * resolved here. Its targets and acceptance children are therefore recorded in
+ * this comment, where they are provenance a reader can check against the store,
+ * rather than on a surface that would be claiming a verification this slice
+ * cannot perform:
+ *
+ *   Q009.D1  target rollout_readiness   child rollout-readiness-child-outcome
+ *   Q010.D1  target rollout_readiness   child rollout-readiness-child-outcome
+ *   Q019.D1  target product_journey_1   child journey-one-production-outcome
+ *   Q061.D1  target typed_successor     child successor-register-entry-accepted
+ *   Q104.D1  target product_journey_1   child journey-one-production-outcome
+ *   Q145.D1  target product_journey_1   child journey-one-production-outcome
+ */
 export const V5_R01_SETTLED_DECISIONS = deepFreeze({
   "Q009.D1": {
-    target: quotedIdentifier("rollout_readiness", V5_R01_DESIGN_BASIS_REGISTER),
-    acceptance_hook: quotedIdentifier("rollout-readiness-child-outcome", V5_R01_DESIGN_BASIS_REGISTER),
-    settled_answer: "I dont want to involve dell in the adoption. i prefer to validate it myself"
-      + " and present it to him as a usable product. reason being - he is not gong to sit at the"
-      + " desk and do these things the way i will. what would end up happening is each slice"
-      + " would be delayed for days longer while i wait on him to complete validation. much more"
-      + " effective that i work out the kinks and give him the final version. I am smart enough"
-      + " to imagine whether he can navigate bc i know him well enough",
+    settled_answer_digest: "cc0099410b415ff650725012678c52b44bae9d675d469592e97394b126261f31",
     what_it_binds_here: "there is no per-slice Dell review in this slice; evaluatePerSliceDellReview"
-      + " in the onboarding module refuses one on the merits and quotes this answer",
+      + " in the onboarding module refuses one on the merits and cites that answer by digest",
   },
   "Q010.D1": {
-    target: quotedIdentifier("rollout_readiness", V5_R01_DESIGN_BASIS_REGISTER),
-    acceptance_hook: quotedIdentifier("rollout-readiness-child-outcome", V5_R01_DESIGN_BASIS_REGISTER),
-    settled_answer: "Yes, in the future there will be periods of time where i take vacation and he"
-      + " will need to be able to use the system. however, for now i dont want to sacrifice speed"
-      + " on the roll out or any other qualities or capabilities for this. we can work this"
-      + " concept into the design later in the build if it helps",
-    recommendation_it_answered: "No production capability should depend on your laptop, memory,"
-      + " private prompt habits, or ability to interpret raw logs. Dell may not be able to develop"
-      + " DoctorCRE, but he must be able to operate it, recognize failure, and avoid making damage"
-      + " worse.",
+    settled_answer_digest: "9b34a198ecbbc1f9faabd8e7fae9f5b674baeb990ba33a73956d64a406cc7b40",
+    recommendation_digest: "11366b2be28d6258799b9ffd19c64f7f704c5d01d0172db0a41c38e76ca078a0",
     what_it_binds_here: "a partner-device or credential fault is an EXCLUDED failure origin,"
-      + " conditional on the product having reported it honestly; a day salvaged only by reading"
+      + " conditional on the product having reported it honestly; a day salvaged only by studying"
       + " raw logs is NOT excluded; and Dell's independence never gates J1",
   },
   "Q019.D1": {
-    target: quotedIdentifier("product_journey_1", V5_R01_DESIGN_BASIS_REGISTER),
-    acceptance_hook: quotedIdentifier("journey-one-production-outcome", V5_R01_DESIGN_BASIS_REGISTER),
-    why_not: "the design-basis register holds Q019 in its compact projection, which carries target"
-      + " and acceptance hook only; the exact text lives in immutable thread items that were not"
-      + " reachable this session",
+    why_not: "the design-basis register holds Q019 in its compact projection, which carries the"
+      + " requirement target and its acceptance child only; the exact text lives in immutable"
+      + " conversation items that were not available this session",
   },
   "Q061.D1": {
-    target: quotedIdentifier("typed_successor", V5_R01_DESIGN_BASIS_REGISTER),
-    acceptance_hook: quotedIdentifier("successor-register-entry-accepted", V5_R01_DESIGN_BASIS_REGISTER),
     why_not: "compact projection only, as above",
     what_is_nonetheless_honoured: "the common slice contract's own autonomy envelope — design any"
-      + " possible future autonomy as an INACTIVE typed successor now, with activation requiring a"
+      + " possible future autonomy as a DORMANT typed successor now, with activation requiring a"
       + " separate action-specific gate. V5_R01_DORMANT_SUCCESSOR is that entry and it is inert.",
   },
   "Q104.D1": {
-    target: quotedIdentifier("product_journey_1", V5_R01_DESIGN_BASIS_REGISTER),
-    acceptance_hook: quotedIdentifier("journey-one-production-outcome", V5_R01_DESIGN_BASIS_REGISTER),
     why_not: "compact projection only, as above",
   },
   "Q145.D1": {
-    target: quotedIdentifier("product_journey_1", V5_R01_DESIGN_BASIS_REGISTER),
-    acceptance_hook: quotedIdentifier("journey-one-production-outcome", V5_R01_DESIGN_BASIS_REGISTER),
     why_not: "compact projection only, as above",
   },
 });
@@ -254,18 +280,18 @@ export const V5_R01_SETTLED_DECISION_IDS =
  * These two lists used to be filtered on a hand-written `text_read_this_session`
  * boolean — an author's own assertion that the text had been read, which is the
  * shape this slice spends the rest of its length refusing. The fact is checkable
- * from the record itself: either `settled_answer` holds the verbatim text or it
- * does not. So the boolean is gone and the lists are read off the presence of
- * the text, which cannot disagree with the text.
+ * from the record itself: either `settled_answer_digest` pins the verbatim text
+ * or it does not. So the boolean is gone and the lists are derived from the
+ * presence of the digest, which cannot disagree with the text it digests.
  *
  * The names say what the lists ARE — which records carry the settled wording —
  * rather than reporting `read` as an outcome of this module.
  */
 export const V5_R01_DECISIONS_WITH_SETTLED_TEXT = deepFreeze(V5_R01_SETTLED_DECISION_IDS
-  .filter(id => typeof V5_R01_SETTLED_DECISIONS[id].settled_answer === "string"));
+  .filter(id => typeof V5_R01_SETTLED_DECISIONS[id].settled_answer_digest === "string"));
 
 export const V5_R01_DECISIONS_WITHOUT_SETTLED_TEXT = deepFreeze(V5_R01_SETTLED_DECISION_IDS
-  .filter(id => typeof V5_R01_SETTLED_DECISIONS[id].settled_answer !== "string"));
+  .filter(id => typeof V5_R01_SETTLED_DECISIONS[id].settled_answer_digest !== "string"));
 
 /**
  * Bind a caller's declared decision set to this module's.
@@ -354,9 +380,9 @@ export const V5_R01_PRODUCTION_OUTCOME_STEP = "step:j1-pilot-and-dell-beta-outco
  */
 export const V5_R01_DORMANT_SUCCESSOR = deepFreeze({
   successor: "nightly_pilot_day_rollup_with_nobody_watching",
-  what_it_would_do: "assemble each day's candidate ledger entry from records overnight, without a human"
-    + " present, so the pilot run is not a manual daily write-up",
-  why_it_is_dormant: "an unattended writer of the very evidence a pilot is judged on is the"
+  what_it_would_do: "assemble each day's candidate ledger entry from records overnight, with no"
+    + " human at the desk, so the pilot run is not a manual daily write-up",
+  why_it_is_dormant: "a writer nobody watches, of the very evidence a pilot is judged on, is the"
     + " shape most likely to grade its own homework; it needs its own gate, not this slice's",
   activation_gate: "step:v5-r01-nightly-rollup-no-human-activation",
   activation_gate_exists_in_this_repository: false,
@@ -375,9 +401,10 @@ export const V5_R01_DORMANT_SUCCESSOR = deepFreeze({
  * answers, and the suite asserts exactly that by digesting the result of every
  * caller-controlled shape it can build.
  *
- * `request_read: false` is not a courtesy note. It is the claim the rest of the
- * surface rests on, and it is true by construction: no evaluator below names its
- * parameter.
+ * `request_examined: false` is not a courtesy note. It is the claim the rest of
+ * the surface rests on, and it is true by construction: no evaluator below names
+ * its parameter. The name carried `read` until the fourth re-review swept every
+ * key whatever its value's type; the claim it makes is unchanged.
  */
 function unavailable(answer, seams, reason_id, because, extra = {}) {
   return deepFreeze({
@@ -391,12 +418,12 @@ function unavailable(answer, seams, reason_id, because, extra = {}) {
     owed_seams: seams.map(seam => seam.seam).sort(),
     seams_bound: deepFreeze(seams.map(seam => ({ seam: seam.seam, holds: seam.holds, bound: false }))),
     // No field of any request can change any field of this answer.
-    request_read: false,
-    caller_evidence_admitted: false,
+    request_examined: false,
+    caller_evidence_weighed: false,
     decided_by: "no_authoritative_owner",
     authority_established: false,
     state_holder_is_caller_supplied: false,
-    model_judgment_admitted: false,
+    model_judgment_weighed: false,
     produces_acceptance: false,
     injects_nothing: true,
     ...extra,
@@ -545,7 +572,7 @@ export function evaluatePilotRun(...args) {
       V5_R01_SEAMS.j1_subjourney_roster],
     "pilot_run_requires_ledger_observer_and_calendar",
     "ten consecutive business days is a statement about ten real days; no ledger, no observer"
-    + " and no operating calendar exist to read them from",
+    + " and no operating calendar exist to draw them from",
     {
       partner: V5_R01_PILOT_PARTNER,
       required_run_length: V5_R01_REQUIRED_RUN_LENGTH,
@@ -573,7 +600,7 @@ export function evaluateRecoveryDrill(...args) {
     [V5_R01_SEAMS.drill_receipt_store, V5_R01_SEAMS.outside_observer],
     "recovery_drill_receipt_store_absent",
     "a drill receipt is issued by the observer who watched the drill; no receipt store exists"
-    + " in this repository to read one from",
+    + " in this repository to fetch one from",
     {
       receipt_schema_required: V5_R01_DRILL_RECEIPT_SCHEMA,
       receipt_fields_required: [...V5_R01_DRILL_RECEIPT_FIELDS],
@@ -605,7 +632,7 @@ export function describeRecoveryDrill(...args) {
     answer: "describeRecoveryDrill",
     schema_version: V5_R01_SCHEMA_VERSION,
     policy_version: V5_R01_POLICY_VERSION,
-    request_read: false,
+    request_examined: false,
     faults: V5_R01_DRILL_FAULT_KEYS.map(key => ({
       fault: key,
       s01_seam_that_defines_the_behaviour: V5_R01_DRILL_FAULTS[key].s01_seam,

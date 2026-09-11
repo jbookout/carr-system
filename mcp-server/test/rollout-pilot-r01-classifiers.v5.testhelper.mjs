@@ -664,8 +664,12 @@ export function classifyBetaOperabilityIfAuthoritative(request) {
   request.realistic_work_items.forEach((item, index) =>
     assertInternalRef(item, `request.realistic_work_items[${index}]`));
   if (!Number.isInteger(request.author_interventions) || request.author_interventions < 0) {
-    fail("invalid_shape", "request.author_interventions must be a non-negative integer",
-      { path: "request.author_interventions" });
+    // ONE ARGUMENT. Production `fail` has taken exactly one registered code since
+    // the third round; this call still passed three, so the only path that
+    // reaches it — a non-integer or negative `author_interventions` — raised an
+    // uncoded TypeError instead of the `invalid_shape` refusal it intended. The
+    // fourth re-review's fifth finding, and the test for it is in the suite.
+    fail("invalid_shape");
   }
   assertArray(request.tool_classes_used, "request.tool_classes_used", { max: 32 });
   request.tool_classes_used.forEach((tool, index) =>
