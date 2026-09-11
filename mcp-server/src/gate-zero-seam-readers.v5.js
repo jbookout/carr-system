@@ -269,6 +269,35 @@ const OUTCOME_HASH = /^sha256:[0-9a-f]{64}$/;
 const SCHEDULER_SOURCE_KIND = "wrapper";
 const SCHEDULER_SOURCE_REF = "bin/run-scheduled.sh";
 
+/**
+ * THE SAME TWO FACTS, IN THE FORM THE STORE HANDS THEM OVER. A ledger row's
+ * source kind and source ref are free-form control-plane text, so the store
+ * digests them rather than carrying a word it did not write; the clause is still
+ * "written by the wrapper", asked as an equality against the digest of this
+ * module's own constant. The constants above stay spelled out because they are
+ * what a human checks against bin/run-scheduled.sh, and because a digest nobody
+ * can read is not a specification.
+ */
+const SCHEDULER_SOURCE_KIND_DIGEST = digest(SCHEDULER_SOURCE_KIND);
+const SCHEDULER_SOURCE_REF_DIGEST = digest(SCHEDULER_SOURCE_REF);
+
+/**
+ * A check run that GitHub says has finished. Same reasoning: the store digests
+ * the wire's status word — "completed" carries a privileged substring and is
+ * text GitHub chose besides — and the comparison happens here, against this
+ * module's own copy of the word.
+ */
+const COMPLETED_STATUS = "completed";
+const COMPLETED_STATUS_DIGEST = digest(COMPLETED_STATUS);
+
+/**
+ * The digest of each documented conclusion, in the same order. A conclusion
+ * reaches a consumer by its digest MATCHING one of these and the consumer being
+ * handed GITHUB_CONCLUSIONS[index] — this module's own constant — so a word
+ * GitHub has not documented cannot appear in an answer even as a substring.
+ */
+const GITHUB_CONCLUSION_DIGESTS = Object.freeze(GITHUB_CONCLUSIONS.map(one => digest(one)));
+
 // ---------------------------------------------------------------------------
 // Small, total helpers.
 // ---------------------------------------------------------------------------
@@ -428,8 +457,11 @@ function derived(id, facts) {
 //   1. A row's `status` is exactly "accepted". "pending_human_acceptance" is not
 //      a near miss; a proposal nobody signed is not an outcome.
 //   2. The row is COMPLETE: an acceptance receipt whose matching card detail is
-//      absent is a missing row, and a missing row refuses. The store marks this
-//      rather than synthesizing a null-outcome row that looks accepted.
+//      absent is a missing row, and a missing row refuses. The store COUNTS the
+//      card rows it found for the receipt rather than synthesizing a
+//      null-outcome row that looks accepted — and it is a count rather than the
+//      boolean it shipped as, because a bare `true` out of an exported function
+//      is the shape the standing rule closes over.
 //   3. That row's ACCEPTANCE RECEIPT hash equals the outcome hash this reader
 //      was asked about. Not the proposal's `feedback_hash` — the receipt's,
 //      because the receipt is the row a human's acceptance wrote and the
@@ -447,7 +479,7 @@ function derivePredecessorOutcome(rows, outcomeHash) {
   counts.accepted_rows_seen = accepted.length;
   if (accepted.length === 0)
     return derived("predecessor_outcome_not_accepted", { ...counts, hash_match: FAILED });
-  const incomplete = accepted.filter(row => row?.detail_present !== true);
+  const incomplete = accepted.filter(row => row?.detail_row_count !== 1);
   if (incomplete.length > 0)
     return derived("predecessor_outcome_detail_absent", { ...counts, hash_match: FAILED });
   const asked = typeof outcomeHash === "string" && OUTCOME_HASH.test(outcomeHash) ? outcomeHash : null;
@@ -466,16 +498,20 @@ function derivePredecessorOutcome(rows, outcomeHash) {
 // THE THREE CLAUSES GATE ZERO NAMES, each answered from a real ops.run row and
 // its timestamps, and a missing row refusing rather than defaulting.
 //
-//   receipt_binding             the dispatch row names its receipt: `evidence_ref`
-//                               is present, and `source_kind`/`source_ref` are the
-//                               ones bin/run-scheduled.sh writes — `wrapper` and
-//                               the script's own path — not a hand-run's
-//                               `operator` row and not a probe's `collector` row.
+//   receipt_binding             the dispatch row names its receipt: its evidence
+//                               ref is there at all, and its source kind and
+//                               source ref are the ones bin/run-scheduled.sh
+//                               writes — `wrapper` and the script's own path —
+//                               not a hand-run's `operator` row and not a probe's
+//                               `collector` row. Every one of those five fields
+//                               arrives as a digest, and every question asked of
+//                               them is an equality, so the clause is unchanged
+//                               and no ledger text is in the answer.
 //   observation_after_dispatch  the observation's `observed_at` is STRICTLY after
 //                               the dispatch row's `started_at`. Equal instants
 //                               fail: rows written in one transaction share now().
 //   canary_match                the observation is an observation OF THIS canary —
-//                               same `run_key`, same `evidence_ref`.
+//                               same run key, same evidence ref.
 //
 // The dispatch row is the one with the latest `started_at`; the observation is
 // the one with the latest `observed_at` among rows that also ENDED, because an
@@ -486,13 +522,13 @@ function derivePredecessorOutcome(rows, outcomeHash) {
 // caller sees which clause failed rather than only that one did.
 function deriveSchedulerCanary(rows) {
   const all = Array.isArray(rows) ? rows : [];
-  const serviceRows = all.filter(row => text(row?.service_key) !== null);
+  const serviceRows = all.filter(row => text(row?.service_key_digest) !== null);
   const blank = {
     service_rows_seen: serviceRows.length, run_rows_seen: 0,
     receipt_binding: UNKNOWN, observation_after_dispatch: UNKNOWN, canary_match: UNKNOWN,
   };
   if (serviceRows.length === 0) return derived("scheduler_service_row_absent", blank);
-  const runRows = serviceRows.filter(row => text(row?.run_key) !== null);
+  const runRows = serviceRows.filter(row => text(row?.run_key_digest) !== null);
   blank.run_rows_seen = runRows.length;
   const dispatched = runRows.filter(row => instant(row?.started_at) !== null);
   if (dispatched.length === 0) return derived("scheduler_dispatch_row_absent", { ...blank });
@@ -501,14 +537,14 @@ function deriveSchedulerCanary(rows) {
   if (observed.length === 0) return derived("scheduler_observation_absent", { ...blank });
   const observation = observed.reduce((a, b) => (instant(b.observed_at) > instant(a.observed_at) ? b : a));
 
-  const boundToReceipt = text(dispatch.evidence_ref) !== null
-    && text(dispatch.source_kind) === SCHEDULER_SOURCE_KIND
-    && text(dispatch.source_ref) === SCHEDULER_SOURCE_REF;
+  const boundToReceipt = text(dispatch.evidence_ref_digest) !== null
+    && text(dispatch.source_kind_digest) === SCHEDULER_SOURCE_KIND_DIGEST
+    && text(dispatch.source_ref_digest) === SCHEDULER_SOURCE_REF_DIGEST;
   const afterDispatch = instant(observation.observed_at) > instant(dispatch.started_at);
-  const canaryMatch = text(observation.run_key) !== null
-    && text(observation.run_key) === text(dispatch.run_key)
-    && text(observation.evidence_ref) !== null
-    && text(observation.evidence_ref) === text(dispatch.evidence_ref);
+  const canaryMatch = text(observation.run_key_digest) !== null
+    && text(observation.run_key_digest) === text(dispatch.run_key_digest)
+    && text(observation.evidence_ref_digest) !== null
+    && text(observation.evidence_ref_digest) === text(dispatch.evidence_ref_digest);
 
   const facts = {
     service_rows_seen: serviceRows.length,
@@ -538,18 +574,23 @@ function deriveSchedulerCanary(rows) {
 // text off the wire. Whatever consumes a gate conclusion decides what a
 // conclusion means; a reader that translated one would be that consumer wearing
 // a reader's name.
+//
+// THE EQUALITY IS ON DIGESTS, because the store no longer carries the wire's own
+// words at all: it hands over the digest of the status and the digest of the
+// conclusion, and the word a consumer receives is GITHUB_CONCLUSIONS[index] —
+// this module's constant, reached by its digest having matched.
 function deriveGateConclusion(rows, headSha) {
   const all = Array.isArray(rows) ? rows : [];
   const completed = all.filter(row =>
-    text(row?.status) === "completed"
-    && text(row?.conclusion) !== null
+    text(row?.status_digest) === COMPLETED_STATUS_DIGEST
+    && text(row?.conclusion_digest) !== null
     && text(row?.head_sha) === headSha);
   const counts = { check_runs_seen: all.length, completed_runs_seen: completed.length };
   if (completed.length === 0)
     return derived("gate_conclusion_check_absent", { ...counts, conclusion: null });
   const latest = completed.reduce((a, b) =>
-    ((instant(b.completed_at) ?? 0) > (instant(a.completed_at) ?? 0) ? b : a));
-  const index = GITHUB_CONCLUSIONS.indexOf(text(latest.conclusion));
+    ((instant(b.ended_at) ?? 0) > (instant(a.ended_at) ?? 0) ? b : a));
+  const index = GITHUB_CONCLUSION_DIGESTS.indexOf(text(latest.conclusion_digest));
   if (index < 0) return derived("gate_conclusion_unrecognized", { ...counts, conclusion: null });
   return derived("gate_conclusion_observed", { ...counts, conclusion: GITHUB_CONCLUSIONS[index] });
 }
@@ -567,7 +608,7 @@ function deriveGateConclusion(rows, headSha) {
  * compared against that row's hash and never echoed. A forged hash therefore
  * fails to match a signature, not merely a proposal — and it fails closed.
  */
-export async function readPredecessorOutcomeEvidence(query) {
+async function predecessorOutcomeEvidence(query) {
   const ruling = ruledCard(CARD_11);
   if (ruling === null) return readGateZeroPredecessorJoin();
 
@@ -609,7 +650,7 @@ export async function readPredecessorOutcomeEvidence(query) {
  * The caller says WHICH service and WHICH run key. It cannot say what the rows
  * contain, and it cannot make a row exist: no row, no answer.
  */
-export async function readSchedulerCanaryEvidence(query) {
+async function schedulerCanaryEvidence(query) {
   const ruling = ruledCard(CARD_12);
   if (ruling === null) return readGateZeroPredecessorJoin();
 
@@ -639,7 +680,7 @@ export async function readSchedulerCanaryEvidence(query) {
  * not turned into green, passing or ok — deciding what a conclusion MEANS is
  * the consuming gate's job, and a reader that did it would be that gate.
  */
-export async function readGateConclusionEvidence(query) {
+async function gateConclusionEvidence(query) {
   const ruling = ruledCard(CARD_13);
   if (ruling === null) return readGateGraphAssurance();
 
@@ -656,3 +697,42 @@ export async function readGateConclusionEvidence(query) {
   if (got.refusal !== undefined) return got.refusal;
   return report(CARD_13, ruling, queryDigest, deriveGateConclusion(got.rows, headSha), {});
 }
+
+// ---------------------------------------------------------------------------
+// THE PUBLIC SURFACE, AND THE ONE GUARDED BOUNDARY IT PASSES THROUGH.
+//
+// A reader's contract is that it ANSWERS. It never throws, and a caller reading
+// a refusal never has to catch one — which is only true if there is a boundary
+// that makes it true, rather than three implementations each remembering not to
+// let anything escape. `reason()` and `finding()` raise on an unregistered id;
+// the derivations index into rows; `fetchOrRefuse` reads a property off whatever
+// a store handed back. Any of those can throw, and a native throw carries an
+// ENGINE-BUILT STACK — a list of the caller's own frame names and file paths,
+// bytes this module did not write. A caller function named `green` calling a
+// reader that threw got `at green` handed back to it.
+//
+// So every export is the same wrapper over a module-private implementation, and
+// what it answers when anything at all is thrown is the GATE'S OWN ANSWER for
+// that card — the identical object the reader returns while the card is unruled.
+// That is fail-closed by construction: the worst a thrown value can do is make a
+// ruled reader as unavailable as an unruled one. Nothing is re-thrown, so no
+// stack, no message and no caller byte leaves this surface by the throwing door
+// at all.
+// ---------------------------------------------------------------------------
+
+function guarded(gateAnswer, read) {
+  return async function guardedRead(query) {
+    try {
+      return await read(query);
+    } catch {
+      return gateAnswer();
+    }
+  };
+}
+
+export const readPredecessorOutcomeEvidence =
+  guarded(readGateZeroPredecessorJoin, predecessorOutcomeEvidence);
+export const readSchedulerCanaryEvidence =
+  guarded(readGateZeroPredecessorJoin, schedulerCanaryEvidence);
+export const readGateConclusionEvidence =
+  guarded(readGateGraphAssurance, gateConclusionEvidence);

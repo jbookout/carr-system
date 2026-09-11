@@ -107,7 +107,7 @@ const SEAM_RULINGS = Object.freeze({
  *
  * Today it returns null for all three, because all three decision ids are null.
  */
-export function seamRulingRef(cardRef) {
+function seamRulingRefOf(cardRef) {
   if (typeof cardRef !== "string") return null;
   if (!Object.hasOwn(SEAM_RULINGS, cardRef)) return null;
   const entry = SEAM_RULINGS[cardRef];
@@ -115,4 +115,23 @@ export function seamRulingRef(cardRef) {
   if (typeof id !== "string" || !DECISION_ID.test(id)) return null;
   if (!STORE_REFS.includes(entry.store_ref)) return null;
   return Object.freeze({ decision_ref: id, store_ref: entry.store_ref });
+}
+
+/**
+ * THE SAME GUARDED BOUNDARY THE OTHER TWO SEAM MODULES USE, and it is here for
+ * the same reason rather than because this lookup is expected to throw.
+ * `Object.hasOwn` on a frozen literal and a regular expression over a string
+ * have no throwing path today — but "today" is a property of this one
+ * implementation, and the invariant a caller relies on is a property of the
+ * SURFACE: nothing this module exports lets an engine-built error out, so no
+ * caller's frame name can ever come back in a stack. Not-ruled is the only thing
+ * this lookup can say when it cannot say anything, and it is the fail-closed
+ * answer: a null here shuts the seam.
+ */
+export function seamRulingRef(cardRef) {
+  try {
+    return seamRulingRefOf(cardRef);
+  } catch {
+    return null;
+  }
 }

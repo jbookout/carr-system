@@ -25,12 +25,37 @@
 // supplies is only WHERE the ruled store lives — the same read-only DSN and the
 // same GitHub credentials every other ops-side reader in this repository uses.
 // An absent DSN is not a fallback and not a degraded mode: it throws, the reader
-// reports unreachable, and nothing optimistic is returned.
+// reports unreachable, and nothing optimistic is returned. WHICH REPOSITORY the
+// checks store serves is NOT part of that: see AUTHORITATIVE_REPOSITORY below.
 //
 // THESE RUN OPS-SIDE, NOT IN THE WORKER. Gate Zero is a control-plane gate; its
 // readers run in the ops/CI process, where `process.env` and a Postgres socket
 // exist. `pg` is imported DYNAMICALLY inside the two database functions so the
 // Worker bundle never pulls it in through this module's import graph.
+//
+// ---------------------------------------------------------------------------
+// THE TWO INVARIANTS THIS FILE OWES ITS CALLERS, both of them whole-file rules
+// rather than a habit applied where somebody remembered.
+//
+// (1) NO STORE TEXT REACHES A CALLER. Every value in every row this file returns
+//     is one of exactly three things: a CONSTANT written in this file, a value
+//     that MATCHED A TOTAL PATTERN owned by this file, or a DIGEST of store
+//     text. Nothing else travels. A row read out of Postgres or off the GitHub
+//     wire is text nobody here controls — a service key, a check name, an
+//     evidence ref, a status word — and a reader that put it in an answer would
+//     be handing a consumer a word the store chose. Equality still works, which
+//     is all any derivation asks of these fields: two digests are equal exactly
+//     when the two strings were.
+//
+// (2) NOTHING BUT A REGISTERED REFUSAL LEAVES AN EXPORT. Every exported callable
+//     here is wrapped by `guarded`, one boundary, applied in one place. Whatever
+//     is thrown underneath it — a native TypeError with the CALLER'S frames in
+//     its stack, `throw "allow"`, `throw true`, a Proxy whose traps throw — is
+//     caught and replaced by a SeamStoreUnreachable carrying a registered store
+//     token and a registered reason, whose own fields are non-writable data
+//     properties and whose `stack` is a fixed string this file wrote. A caller
+//     function named `green` therefore never appears anywhere in what comes
+//     back out, because no engine-produced stack ever does.
 
 /**
  * THE TWO CLOSED REGISTRIES, AND WHY NEITHER IS EXPORTED.
@@ -53,6 +78,7 @@
  * can say reads this file; an importer that could enumerate the set could
  * assemble a message out of it and hand it back in.
  */
+import { digest } from "./artifact-trust.js";
 import { ORGANIZATION_TENANT_ID } from "./identity.js";
 
 const STORE_TOKENS = Object.freeze({
@@ -70,6 +96,10 @@ const UNREACHABLE_REASONS = Object.freeze({
   clientNotAvailable: "the database client is not available in this process",
   targetNotConfigured: "the connection target for this store is not configured in this process",
   queryDidNotFinish: "the query did not finish",
+  queryNotAddressed: "the query did not address a row",
+  foreignRepository: "the configured checks repository is not the one this file serves",
+  callDidNotFinish: "the call did not finish",
+  typeIsFinal: "this error type is final",
   notRegistered: "the reason this store was unreachable is not a registered one",
 });
 
@@ -100,7 +130,7 @@ const CAUSE_KINDS = Object.freeze({
 function causeKind(cause) {
   try {
     if (cause === undefined || cause === null) return CAUSE_KINDS.none;
-    if (cause instanceof SeamStoreUnreachable) return CAUSE_KINDS.seamStore;
+    if (cause instanceof SeamStoreUnreachableType) return CAUSE_KINDS.seamStore;
     if (cause instanceof Error) return CAUSE_KINDS.error;
     return CAUSE_KINDS.other;
   } catch {
@@ -120,14 +150,18 @@ function own(target, key, value, enumerable) {
   Object.defineProperty(target, key, { value, writable: false, enumerable, configurable: false });
 }
 
-export class SeamStoreUnreachable extends Error {
+class SeamStoreUnreachableType extends Error {
   constructor(storeRef, because, cause) {
     // SUBCLASSING IS REFUSED, BEFORE ANY WORK HAPPENS. A subclass runs its own
     // constructor after this one and can install anything it likes — including
     // the caller's text under these exact names — while still passing an
     // `instanceof` check. `new.target` is the only moment that is visible.
-    if (new.target !== SeamStoreUnreachable)
-      throw new TypeError("this error type is final and cannot be extended");
+    //
+    // The refusal is one of THESE errors and not a native TypeError: a native
+    // one is built by the engine, and its stack is a list of the caller's own
+    // frame names and file paths — bytes this file did not write, leaving an
+    // exported callable.
+    if (new.target !== SeamStoreUnreachableType) throw finalTypeRefusal();
     const store = REGISTERED_STORE_TOKENS.includes(storeRef) ? storeRef : STORE_TOKENS.unregistered;
     const reason = REGISTERED_REASONS.includes(because) ? because : UNREACHABLE_REASONS.notRegistered;
     const message = `${store}: ${reason}`;
@@ -146,8 +180,69 @@ export class SeamStoreUnreachable extends Error {
   }
 }
 
+function finalTypeRefusal() {
+  return new SeamStoreUnreachableType(STORE_TOKENS.unregistered, UNREACHABLE_REASONS.typeIsFinal);
+}
+
 /**
- * One addressed field out of a query, or a refusal with a FIXED message.
+ * THE EXPORTED BINDING IS A PROXY, AND THE ONE TRAP THAT MATTERS IS `apply`.
+ *
+ * Calling a class without `new` is refused by the ENGINE, before a line of this
+ * file runs — and the engine's TypeError carries a real stack, so a caller
+ * function named `green` calling `SeamStoreUnreachable()` got `at green` handed
+ * back to it out of an exported callable. That is the third review round's
+ * finding in its purest form, and no amount of care inside the constructor
+ * closes it, because the constructor never runs.
+ *
+ * So the call is intercepted and answered with one of this file's own refusals.
+ * `construct` forwards unchanged, except that a `new` through the proxy is
+ * retargeted to the class itself — otherwise the `new.target` check would see
+ * the proxy and refuse every legitimate construction. Everything else keeps its
+ * own new.target and is therefore still refused: a subclass, a foreign
+ * new.target, a Reflect.construct with somebody else's third argument.
+ */
+export const SeamStoreUnreachable = new Proxy(SeamStoreUnreachableType, {
+  apply() { throw finalTypeRefusal(); },
+  construct(target, args, newTarget) {
+    return Reflect.construct(target, args, newTarget === SeamStoreUnreachable ? target : newTarget);
+  },
+});
+
+/**
+ * THE ONE GUARDED BOUNDARY, applied to every export of this module in one place
+ * at the bottom of the file. Invariant (2) of the header lives here.
+ *
+ * `await call(query)` is inside the try, so a rejected promise is caught by the
+ * same clause as a synchronous throw. What is re-thrown is this module's own
+ * refusal unless the thrown value ALREADY is one — in which case the specific
+ * registered reason it carries is worth more to a reader than a generic one,
+ * and it is already a conforming value, so it passes through unchanged.
+ *
+ * `instanceof` is not a safe read on a value a caller may have shaped, so the
+ * test is wrapped: a Proxy whose getPrototypeOf trap throws answers "no", and
+ * the generic refusal is what leaves.
+ */
+function isOwnRefusal(value) {
+  try {
+    return value instanceof SeamStoreUnreachableType;
+  } catch {
+    return false;
+  }
+}
+
+function guarded(storeRef, call) {
+  return async function guardedStoreCall(query) {
+    try {
+      return await call(query);
+    } catch (thrown) {
+      if (isOwnRefusal(thrown)) throw thrown;
+      throw new SeamStoreUnreachableType(storeRef, UNREACHABLE_REASONS.callDidNotFinish);
+    }
+  };
+}
+
+/**
+ * One addressed field out of a query, or a refusal with a REGISTERED reason.
  *
  * The three fetchers below are exported, so they can be called by anything with
  * anything — including nothing. Two ways a caller's object writes its own text
@@ -159,27 +254,63 @@ export class SeamStoreUnreachable extends Error {
  *     property read with the ENGINE's message or the CALLER's. Node's own text
  *     for a revoked proxy carries a privileged substring, which is how this was
  *     found, and a throwing getter would carry whatever the caller wrote.
- *
- * So the read is caught and the shape is checked here, and what comes back on a
- * bad call is one sentence written in this file.
  */
-function addressed(query, key) {
-  let value;
+function cell(holder, key) {
   try {
-    value = query === null || query === undefined ? undefined : Reflect.get(Object(query), key);
+    return holder === null || holder === undefined ? undefined : Reflect.get(Object(holder), key);
   } catch {
-    value = undefined;
+    return undefined;
   }
+}
+
+function addressed(storeRef, query, key) {
+  const value = cell(query, key);
   if (typeof value !== "string" || value.length === 0)
-    throw new TypeError("this store takes an addressed query");
+    throw new SeamStoreUnreachableType(storeRef, UNREACHABLE_REASONS.queryNotAddressed);
   return value;
 }
 
 function configured(name, storeRef, because) {
   const env = globalThis.process?.env;
   const value = env && typeof env[name] === "string" ? env[name].trim() : "";
-  if (!value) throw new SeamStoreUnreachable(storeRef, because);
+  if (!value) throw new SeamStoreUnreachableType(storeRef, because);
   return value;
+}
+
+// ---------------------------------------------------------------------------
+// THE THREE WAYS A VALUE IS ALLOWED TO LEAVE THIS FILE. Header invariant (1).
+// ---------------------------------------------------------------------------
+
+/** A hash the record layer writes, in the one shape it writes them. */
+const OUTCOME_HASH = /^sha256:[0-9a-f]{64}$/;
+/** A commit sha, in the one shape GitHub writes them. */
+const HEAD_SHA = /^[0-9a-f]{40}$/;
+
+/** A value that matched a total pattern owned here, or nothing. */
+function matchedText(value, pattern) {
+  return typeof value === "string" && pattern.test(value) ? value : null;
+}
+
+/**
+ * Store text, reduced to a value only equality can be asked of. Two digests are
+ * equal exactly when the two strings were, which is everything the derivations
+ * ask of a service key, a run key, an evidence ref or a status word — and it
+ * carries no byte the store chose. An empty or non-string cell is absence, and
+ * absence stays distinguishable from any value.
+ */
+function opaque(value) {
+  return typeof value === "string" && value.length > 0 ? digest(value) : null;
+}
+
+/** An instant, re-serialized by this file, or nothing. */
+function instantText(value) {
+  try {
+    const parsed = value instanceof Date ? value.getTime()
+      : typeof value === "string" ? Date.parse(value) : Number.NaN;
+    return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -195,7 +326,7 @@ async function readOnlyStatements(storeRef, statements) {
   try {
     ({ default: pg } = await import("pg"));
   } catch (cause) {
-    throw new SeamStoreUnreachable(storeRef, UNREACHABLE_REASONS.clientNotAvailable, cause);
+    throw new SeamStoreUnreachableType(storeRef, UNREACHABLE_REASONS.clientNotAvailable, cause);
   }
   const pool = new pg.Pool({ connectionString, max: 1, statement_timeout: 15000 });
   try {
@@ -210,8 +341,8 @@ async function readOnlyStatements(storeRef, statements) {
       client.release();
     }
   } catch (cause) {
-    if (cause instanceof SeamStoreUnreachable) throw cause;
-    throw new SeamStoreUnreachable(storeRef, UNREACHABLE_REASONS.queryDidNotFinish, cause);
+    if (isOwnRefusal(cause)) throw cause;
+    throw new SeamStoreUnreachableType(storeRef, UNREACHABLE_REASONS.queryDidNotFinish, cause);
   } finally {
     await pool.end().catch(() => {});
   }
@@ -220,6 +351,18 @@ async function readOnlyStatements(storeRef, statements) {
 // ---------------------------------------------------------------------------
 // Card 11's store — the record layer's own outcome feedback.
 // ---------------------------------------------------------------------------
+
+/**
+ * The two statuses a predecessor row can carry, and BOTH ARE CONSTANTS OUT OF
+ * THIS FILE rather than the status column's text. Which one a row gets is
+ * decided by WHICH QUERY FOUND IT — the acceptance-receipt table holds accepted
+ * rows and the pending view holds unsigned ones — not by a word the database
+ * chose. That is a fact about the query, not a judgment about the row.
+ */
+const OUTCOME_STATUS = Object.freeze({
+  accepted: "accepted",
+  pending: "pending_human_acceptance",
+});
 
 /**
  * A Work Request's outcome feedback, through the three doors the record layer
@@ -253,53 +396,63 @@ async function readOnlyStatements(storeRef, statements) {
  * AND A RECEIPT WITHOUT ITS CARD DETAIL IS A MISSING ROW, NOT AN ACCEPTED ONE.
  * An earlier draft synthesized the absent detail as nulls, so a receipt the card
  * did not carry came back looking accepted with a null outcome and could still be
- * admitted. It is now marked `detail_present: false` and the derivation refuses
- * on it. Nothing is invented to fill a row the store did not have.
+ * admitted. It is now counted by `detail_row_count` and the derivation refuses
+ * unless that count is one. Nothing is invented to fill a row the store did not
+ * have.
+ *
+ * IT IS A COUNT AND NOT A BOOLEAN, and that is the second review round's finding
+ * rather than a style choice: the field shipped as `detail_present: entry !==
+ * undefined`, so an exported function's successful path returned a bare `true` —
+ * the exact shape the standing rule closes over, under a key that carries a
+ * privileged word besides.
  */
-export async function fetchPredecessorOutcomeRows(query) {
+async function predecessorOutcomeRows(query) {
   const storeRef = STORE_TOKENS.predecessorOutcome;
-  const workRequestRef = addressed(query, "workRequestRef");
+  const workRequestRef = addressed(storeRef, query, "workRequestRef");
   const [receipts, cards, pending] = await readOnlyStatements(storeRef, [
-    { text: `select r.feedback_hash as accepted_feedback_hash, r.accepted_at
+    { text: `select r.feedback_hash as accepted_feedback_hash
                from ops.sourced_work_request_outcome_feedback_acceptance_receipt r
                join ops.work_request w on w.id = r.work_request_id
               where w.ref = $1
               order by r.accepted_at desc`, params: [workRequestRef] },
-    { text: `select outcome_feedback, outcome_feedback_history, accepted_feedback_count
+    { text: `select outcome_feedback, outcome_feedback_history
                from ops.work_request_card($1::text, $2::text)`,
       params: [workRequestRef, ORGANIZATION_TENANT_ID] },
-    { text: `select feedback_ref, feedback_hash, outcome, status
+    { text: `select feedback_hash
                from ops.pending_sourced_work_request_outcome_feedback($1::text, $2::text)`,
       params: [workRequestRef, ORGANIZATION_TENANT_ID] },
   ]);
 
-  const card = cards[0] ?? {};
+  const card = cell(cards, 0);
+  const history = cell(card, "outcome_feedback_history");
   const detail = new Map();
-  for (const entry of [card.outcome_feedback, ...(Array.isArray(card.outcome_feedback_history)
-    ? card.outcome_feedback_history : [])])
-    if (entry && typeof entry === "object" && typeof entry.feedback_hash === "string")
-      detail.set(entry.feedback_hash, entry);
+  for (const entry of [cell(card, "outcome_feedback"), ...(Array.isArray(history) ? history : [])]) {
+    const hash = matchedText(cell(entry, "feedback_hash"), OUTCOME_HASH);
+    if (hash !== null) detail.set(hash, hash);
+  }
 
-  // NOTHING FREE-FORM TRAVELS. A row carries a status, the two hashes that are
-  // compared, and whether the card actually held the detail for this receipt.
-  // The feedback ref, the stored outcome and the acceptance timestamp are read
-  // and deliberately dropped here: no store text reaches an answer, so no store
-  // text can carry a word into one.
-  const rows = receipts.map(receipt => {
-    const entry = detail.get(receipt.accepted_feedback_hash);
+  // NOTHING FREE-FORM TRAVELS. A row carries a status this file wrote, the two
+  // hashes that are compared — each of which had to match this file's own
+  // pattern to survive — and a count of the card rows found for the receipt.
+  // The feedback ref, the stored outcome and the acceptance timestamp are not
+  // even selected: no store text reaches an answer, so no store text can carry a
+  // word into one.
+  const rows = (Array.isArray(receipts) ? receipts : []).map(receipt => {
+    const acceptedHash = matchedText(cell(receipt, "accepted_feedback_hash"), OUTCOME_HASH);
+    const matchingDetail = acceptedHash === null ? undefined : detail.get(acceptedHash);
     return {
-      status: "accepted",
-      detail_present: entry !== undefined,
-      accepted_feedback_hash: receipt.accepted_feedback_hash,
-      feedback_hash: entry?.feedback_hash ?? null,
+      status: OUTCOME_STATUS.accepted,
+      detail_row_count: matchingDetail === undefined ? 0 : 1,
+      accepted_feedback_hash: acceptedHash,
+      feedback_hash: matchingDetail ?? null,
     };
   });
-  for (const proposal of pending)
+  for (const proposal of Array.isArray(pending) ? pending : [])
     rows.push({
-      status: proposal.status ?? "pending_human_acceptance",
-      detail_present: true,
+      status: OUTCOME_STATUS.pending,
+      detail_row_count: 1,
       accepted_feedback_hash: null,
-      feedback_hash: proposal.feedback_hash ?? null,
+      feedback_hash: matchedText(cell(proposal, "feedback_hash"), OUTCOME_HASH),
     });
   return { store_ref: storeRef, rows };
 }
@@ -312,24 +465,25 @@ export async function fetchPredecessorOutcomeRows(query) {
  * The service row for a scheduled canary and every run row the scheduler wrote
  * for it, newest observation first.
  *
- * TIMESTAMPS ARE THE WHOLE POINT of this query, so all four the clauses need are
- * selected and none is computed here: `started_at` is dispatch, `ended_at` and
- * `observed_at` are readback, and `registered_at`/`retired_at` say whether the
- * ledger still carries the service at all. Ordering by `observed_at desc` is a
+ * TIMESTAMPS ARE THE WHOLE POINT of this query, so the three the clauses need
+ * are selected and none is computed here: `started_at` is dispatch, `ended_at`
+ * and `observed_at` are readback. Ordering by `observed_at desc` is a
  * presentation choice; the reader compares instants and never trusts position.
+ *
+ * THE FIVE IDENTIFIERS COME BACK AS DIGESTS. A service key, a run key, an
+ * evidence ref, a source kind and a source ref are all free-form ledger text,
+ * and the derivation asks nothing of them but equality — is this observation of
+ * the same run as that dispatch, was this row written by the wrapper. Digesting
+ * answers exactly those questions and answers nothing else, so a service someone
+ * names `release-canary` cannot put a privileged word into an answer.
  */
-export async function fetchSchedulerLedgerRows(query) {
+async function schedulerLedgerRows(query) {
   const storeRef = STORE_TOKENS.schedulerLedger;
-  const serviceKey = addressed(query, "serviceKey");
-  const canaryRunKey = addressed(query, "canaryRunKey");
-  const [rows] = await readOnlyStatements(storeRef, [{ text: `
+  const serviceKey = addressed(storeRef, query, "serviceKey");
+  const canaryRunKey = addressed(storeRef, query, "canaryRunKey");
+  const [raw] = await readOnlyStatements(storeRef, [{ text: `
     select s.key            as service_key,
-           s.registered_at  as service_registered_at,
-           s.retired_at     as service_retired_at,
            r.run_key,
-           r.state,
-           r.exit_code,
-           r.attempt,
            r.started_at,
            r.ended_at,
            r.observed_at,
@@ -340,6 +494,16 @@ export async function fetchSchedulerLedgerRows(query) {
       left join ops.run r on r.service_id = s.id and r.run_key = $2
      where s.key = $1
      order by r.observed_at desc nulls last`, params: [serviceKey, canaryRunKey] }]);
+  const rows = (Array.isArray(raw) ? raw : []).map(row => ({
+    service_key_digest: opaque(cell(row, "service_key")),
+    run_key_digest: opaque(cell(row, "run_key")),
+    evidence_ref_digest: opaque(cell(row, "evidence_ref")),
+    source_kind_digest: opaque(cell(row, "source_kind")),
+    source_ref_digest: opaque(cell(row, "source_ref")),
+    started_at: instantText(cell(row, "started_at")),
+    ended_at: instantText(cell(row, "ended_at")),
+    observed_at: instantText(cell(row, "observed_at")),
+  }));
   return { store_ref: storeRef, rows };
 }
 
@@ -348,20 +512,58 @@ export async function fetchSchedulerLedgerRows(query) {
 // ---------------------------------------------------------------------------
 
 /**
+ * THE ONE REPOSITORY THIS FILE SERVES, and it is a constant rather than a
+ * setting.
+ *
+ * The earlier draft read `GITHUB_REPOSITORY` and built the URL out of it, so
+ * whoever set that variable chose which repository's check runs would be
+ * reported under the label `github:checks` — a foreign repository whose checks
+ * the caller controls answers just as readily as this one, and Gate Zero cannot
+ * tell the difference. Anything that disagrees with this constant is refused
+ * with a registered reason, whether it arrived in the environment or in the
+ * query: an unset variable is the supported state, a matching one is harmless,
+ * and a different one is a misconfiguration loud enough to stop on.
+ */
+const AUTHORITATIVE_REPOSITORY = "jbookout/carr-system";
+
+/** Every place a repository could be named from outside this file. */
+const REPOSITORY_FIELDS = Object.freeze(["repository", "repo", "owner", "GITHUB_REPOSITORY"]);
+
+function authoritativeRepository(query) {
+  const env = globalThis.process?.env;
+  const named = REPOSITORY_FIELDS.map(field =>
+    field === "GITHUB_REPOSITORY" ? cell(env, field) : cell(query, field));
+  for (const candidate of named) {
+    if (typeof candidate !== "string") continue;
+    const trimmed = candidate.trim();
+    if (trimmed.length > 0 && trimmed !== AUTHORITATIVE_REPOSITORY)
+      throw new SeamStoreUnreachableType(STORE_TOKENS.checkConclusion,
+        UNREACHABLE_REASONS.foreignRepository);
+  }
+  return AUTHORITATIVE_REPOSITORY;
+}
+
+/**
  * Every check run GitHub holds for one commit under one check name.
  *
  * The head sha and the check name ADDRESS the query and are validated by the
- * reader before they reach here. The repository is read from the environment,
- * not from the caller: a caller who could name the repository could name a
- * repository whose checks it controls.
+ * reader before they reach here. The repository is NOT addressable at all.
+ *
+ * WHAT COMES BACK IS FOUR FIELDS AND NOT SEVEN. The check run's `name` and
+ * `html_url` are wire text no derivation reads, so they are dropped rather than
+ * carried; `status` and `conclusion` are wire text two derivations compare, so
+ * they are digested; `completed_at` is re-serialized by this file under the same
+ * name the ledger store uses for the same instant. A conclusion word GitHub has
+ * not documented therefore cannot reach a consumer even as a substring — the
+ * reader recognizes the digest of each documented word and reports its OWN copy
+ * of that word, or reports the conclusion as unrecognized.
  */
-export async function fetchCheckConclusionRows(query) {
+async function checkConclusionRows(query) {
   const storeRef = STORE_TOKENS.checkConclusion;
-  const headSha = addressed(query, "headSha");
-  const checkName = addressed(query, "checkName");
-  const missing = UNREACHABLE_REASONS.credentialsNotConfigured;
-  const token = configured("GITHUB_TOKEN", storeRef, missing);
-  const repository = configured("GITHUB_REPOSITORY", storeRef, missing);
+  const headSha = addressed(storeRef, query, "headSha");
+  const checkName = addressed(storeRef, query, "checkName");
+  const repository = authoritativeRepository(query);
+  const token = configured("GITHUB_TOKEN", storeRef, UNREACHABLE_REASONS.credentialsNotConfigured);
   const url = `https://api.github.com/repos/${repository}/commits/${headSha}/check-runs`
     + `?check_name=${encodeURIComponent(checkName)}&per_page=100`;
   let response;
@@ -375,28 +577,37 @@ export async function fetchCheckConclusionRows(query) {
       },
     });
   } catch (cause) {
-    throw new SeamStoreUnreachable(storeRef, UNREACHABLE_REASONS.sourceNotReachable, cause);
+    throw new SeamStoreUnreachableType(storeRef, UNREACHABLE_REASONS.sourceNotReachable, cause);
   }
-  if (!response.ok)
-    throw new SeamStoreUnreachable(storeRef, UNREACHABLE_REASONS.sourceRefused,
-      new Error(`http ${response.status}`));
+  if (cell(response, "ok") !== true)
+    throw new SeamStoreUnreachableType(storeRef, UNREACHABLE_REASONS.sourceRefused);
   let body;
   try {
     body = await response.json();
   } catch (cause) {
-    throw new SeamStoreUnreachable(storeRef, UNREACHABLE_REASONS.answerDidNotParse, cause);
+    throw new SeamStoreUnreachableType(storeRef, UNREACHABLE_REASONS.answerDidNotParse, cause);
   }
-  const runs = Array.isArray(body?.check_runs) ? body.check_runs : [];
+  const runs = cell(body, "check_runs");
   return {
     store_ref: storeRef,
-    rows: runs.map(run => ({
-      name: run?.name ?? null,
-      head_sha: run?.head_sha ?? null,
-      status: run?.status ?? null,
-      conclusion: run?.conclusion ?? null,
-      started_at: run?.started_at ?? null,
-      completed_at: run?.completed_at ?? null,
-      html_url: run?.html_url ?? null,
+    rows: (Array.isArray(runs) ? runs : []).map(run => ({
+      head_sha: matchedText(cell(run, "head_sha"), HEAD_SHA),
+      status_digest: opaque(cell(run, "status")),
+      conclusion_digest: opaque(cell(run, "conclusion")),
+      ended_at: instantText(cell(run, "completed_at")),
     })),
   };
 }
+
+// ---------------------------------------------------------------------------
+// THE PUBLIC SURFACE. Three fetchers and one error type, and every fetcher
+// passes through the same boundary — there is no second copy of it to forget to
+// apply, and no export that bypasses it.
+// ---------------------------------------------------------------------------
+
+export const fetchPredecessorOutcomeRows =
+  guarded(STORE_TOKENS.predecessorOutcome, predecessorOutcomeRows);
+export const fetchSchedulerLedgerRows =
+  guarded(STORE_TOKENS.schedulerLedger, schedulerLedgerRows);
+export const fetchCheckConclusionRows =
+  guarded(STORE_TOKENS.checkConclusion, checkConclusionRows);

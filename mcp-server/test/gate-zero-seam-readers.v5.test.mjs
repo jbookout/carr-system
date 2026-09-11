@@ -74,7 +74,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 
@@ -101,6 +101,52 @@ const RECEIPT_STORE_FILE = fileURLToPath(new URL("./gate-zero-seam-stores.v5.rec
 const RULINGS_FILE = "gate-zero-seam-rulings.v5.js";
 const READERS_FILE = "gate-zero-seam-readers.v5.js";
 const STORES_FILE = "gate-zero-seam-stores.v5.js";
+const FAKE_PG_FILE = fileURLToPath(new URL("./gate-zero-seam-pg.v5.fake.cjs", import.meta.url));
+
+/** The repository the checks store serves, and the only one it will serve. */
+const AUTHORITATIVE_REPOSITORY = "jbookout/carr-system";
+
+/**
+ * THE STORE'S CLOSED REASON SET, restated here because it is a CONTRACT rather
+ * than an implementation detail: a reader puts one of these straight into an
+ * answer, and the guarded boundary may re-throw nothing else. The test below
+ * reads the module's own registry back out of its source and asserts the two
+ * agree, so adding a reason in src without adding it here is red.
+ */
+const STORE_UNREACHABLE_REASONS = Object.freeze([
+  "the checks source answer did not parse",
+  "the checks source credentials are not configured in this process",
+  "the checks source refused the request",
+  "the checks source was not reachable",
+  "the database client is not available in this process",
+  "the connection target for this store is not configured in this process",
+  "the query did not finish",
+  "the query did not address a row",
+  "the configured checks repository is not the one this file serves",
+  "the call did not finish",
+  "this error type is final",
+  "the reason this store was unreachable is not a registered one",
+]);
+
+const SWEPT_NAMESPACES = () => [["readers", readers], ["rulings", rulings], ["stores", stores]];
+
+const STORE_CREDENTIALS = ["DATABASE_URL_READER", "GITHUB_TOKEN", "GITHUB_REPOSITORY"];
+
+function saveEnv(names) {
+  const saved = {};
+  for (const name of names) {
+    saved[name] = process.env[name];
+    delete process.env[name];
+  }
+  return saved;
+}
+
+function restoreEnv(saved) {
+  for (const [name, value] of Object.entries(saved)) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+}
 
 /** The line the ruling goes on. If this string stops matching, nothing is proved. */
 const DECISION_ID_LINE = "    decision_id: null,\n";
@@ -323,6 +369,120 @@ function safeLabel(value) {
   try { return JSON.stringify(value) ?? String(value); } catch { return "<unserializable>"; }
 }
 
+// ---------------------------------------------------------------------------
+// THE THROWN VALUE IS SWEPT AS A WHOLE, not as a `.message` and a `.because`.
+//
+// The third review round found the hole with a probe worth restating: it called
+// an export from a caller function named `green`, the export threw a native
+// TypeError, and the error's STACK — a list of the caller's own frame names —
+// came back carrying `at green`. The sweep at the time read `.message` and
+// `.because` and nothing else, so it saw nothing. It also could not have seen
+// `throw "allow"`, `throw true`, or an object built to read as a verdict,
+// because none of those has either field.
+//
+// So everything about the thrown value is inspected: what it IS, every own
+// property including the non-enumerable ones Error keeps, and the five names a
+// consumer would reach for. And the SHAPE is asserted as well as the words: a
+// value that leaves by the throwing door has to be one of the module's own
+// refusals, which means a fixed `stack` of exactly `${name}: ${message}`, no
+// retained cause, non-writable non-configurable data properties, frozen, and a
+// code out of the module's closed registry. A stack with frames in it fails on
+// the equality before the word sweep ever has to catch the frame name.
+// ---------------------------------------------------------------------------
+
+function safeRead(holder, key) {
+  try { return Reflect.get(Object(holder), key); } catch { return "<threw on read>"; }
+}
+
+function safeOwnKeys(value) {
+  try { return Reflect.ownKeys(Object(value)); } catch { return []; }
+}
+
+function thrownFacets(thrown) {
+  const facets = [["value", thrown]];
+  if (thrown === null || (typeof thrown !== "object" && typeof thrown !== "function"))
+    return facets;
+  for (const key of safeOwnKeys(thrown))
+    facets.push([`own.${String(key)}`,
+      typeof key === "symbol" ? String(key) : safeRead(thrown, key)]);
+  for (const key of ["name", "message", "stack", "cause", "code", "because", "store_ref"])
+    facets.push([key, safeRead(thrown, key)]);
+  return facets;
+}
+
+/** One thrown value, against every clause the surface owes for one. */
+function assertNothingRaw(at, thrown) {
+  for (const [facet, value] of thrownFacets(thrown)) assertSwept(`${at}.${facet}`, value);
+  assert.ok(!safeLabel(thrownFacets(thrown).map(([, value]) => value)).includes(HOSTILE_MARKER),
+    `${at} threw the caller's own text back`);
+
+  assert.ok(thrown !== null && typeof thrown === "object",
+    `${at} threw a bare ${typeof thrown}: ${safeLabel(thrown)}`);
+  const name = safeRead(thrown, "name");
+  const message = safeRead(thrown, "message");
+  assert.equal(typeof name, "string", `${at} threw a value with no name`);
+  assert.equal(typeof message, "string", `${at} threw a value with no message`);
+  assert.equal(safeRead(thrown, "stack"), `${name}: ${message}`,
+    `${at} carries an engine-built stack, which is the caller's own frames`);
+  assert.equal(safeRead(thrown, "cause"), undefined, `${at} retained a cause`);
+  assert.ok(Object.isFrozen(thrown), `${at} is not frozen`);
+  for (const key of safeOwnKeys(thrown)) {
+    const where = `${at}.${String(key)}`;
+    const descriptor = Object.getOwnPropertyDescriptor(thrown, key);
+    assert.ok(Object.hasOwn(descriptor, "value"), `${where} is an accessor, not a data property`);
+    assert.equal(descriptor.writable, false, `${where} is writable`);
+    assert.equal(descriptor.configurable, false, `${where} is configurable`);
+  }
+  assert.ok(STORE_UNREACHABLE_REASONS.includes(safeRead(thrown, "because")),
+    `${at} carries a code the module never registered: ${safeLabel(safeRead(thrown, "because"))}`);
+}
+
+/**
+ * Callers whose FRAME NAME is a privileged word. A named function expression is
+ * the only way to put a chosen name in an engine stack, and that is exactly the
+ * probe the re-review used.
+ */
+function privilegedCallers() {
+  return [
+    function green(call, argument) { return call(argument); },
+    function allow(call, argument) { return call(argument); },
+    function ok(call, argument) { return call(argument); },
+    function verified(call, argument) { return call(argument); },
+  ];
+}
+
+/** One invocation: whatever it returns is swept, whatever it throws is swept harder. */
+async function assertNothingRawEscapes(at, invoke) {
+  let outcome;
+  try {
+    outcome = await invoke();
+  } catch (thrown) {
+    assertNothingRaw(at, thrown);
+    return;
+  }
+  assertSwept(`${at}.returned`, outcome);
+  assert.ok(!safeLabel(outcome).includes(HOSTILE_MARKER), `${at} returned the caller's own text`);
+}
+
+/**
+ * Every export, invoked every way it can be invoked, from every privileged
+ * caller, with every hostile argument. ONE function, so the credential-less run
+ * and the run over real rows ask exactly the same question.
+ */
+async function sweepEveryInvocation(label, namespace) {
+  for (const [name, value] of Object.entries(namespace)) {
+    const at = `${label}.${name}`;
+    if (typeof value !== "function") { assertSwept(at, value); continue; }
+    for (const caller of privilegedCallers())
+      for (const argument of [undefined, ...hostileArguments()]) {
+        await assertNothingRawEscapes(`${at}<-${caller.name}`, () => caller(value, argument));
+        if (isConstructor(value))
+          await assertNothingRawEscapes(`${at}<-new`,
+            () => Reflect.construct(value, [argument, argument, argument]));
+      }
+  }
+}
+
 test("SWEEP: the sweep itself catches a privileged outcome when one is planted", () => {
   // A sweep nobody has seen fail is a sweep nobody has tested. One plant per
   // mechanism, so a broken mechanism cannot hide behind a working one.
@@ -542,7 +702,15 @@ function sweepConstruction(at, constructorUnderTest) {
  * consumer reads as facts has to refuse to be one.
  */
 function sweepClassConstructor(at, classUnderTest) {
-  assert.throws(() => classUnderTest(), TypeError, `${at} is callable without new`);
+  // CALLED WITHOUT `new`, AND THE REFUSAL IS SWEPT LIKE ANY OTHER. A bare class
+  // is refused by the ENGINE here, before a line of the module runs — and the
+  // engine's TypeError carries a real stack, so a caller function named `green`
+  // got `at green` handed back out of an exported callable. That the call is
+  // refused was always asserted; that the refusal says nothing was not.
+  let called = "did not throw";
+  try { classUnderTest(); } catch (thrown) { called = thrown; }
+  assert.notEqual(called, "did not throw", `${at} is callable without new`);
+  assertNothingRaw(`${at}.called-without-new`, called);
   sweepConstruction(at, classUnderTest);
 
   class Subclass extends classUnderTest {
@@ -817,6 +985,94 @@ test("SWEEP CONTROL: each assertion the constructor sweep makes has been seen to
     "an ordinary function is constructible, and the sweep must not assume otherwise");
 });
 
+test("SWEEP: the module's registered reason set is the one this file restates", () => {
+  // The reason set is module-private on purpose — an importer that could
+  // enumerate it could assemble a message out of it and hand it back in. So the
+  // contract is restated here and checked against the source, which is the only
+  // honest way to have both.
+  const source = readFileSync(join(SRC, STORES_FILE), "utf8");
+  const registry = /const UNREACHABLE_REASONS = Object\.freeze\(\{([\s\S]*?)\}\);/.exec(source);
+  assert.ok(registry, "the store's reason registry is no longer where this test reads it");
+  const declared = [...registry[1].matchAll(/"([^"]+)"/g)].map(one => one[1]);
+  assert.deepEqual([...declared].sort(), [...STORE_UNREACHABLE_REASONS].sort(),
+    "a store-unreachable reason was added or removed without the contract following it");
+});
+
+test("SWEEP: a native error or a raw thrown value never leaves an export", async () => {
+  // FINDING 1 OF THE THIRD RE-REVIEW. Nothing here is new about the arguments —
+  // it is the same hostile set — and everything is new about what is looked at:
+  // the call goes through a caller whose frame name is a privileged word, and
+  // whatever comes back out of the throwing door is inspected whole.
+  const saved = saveEnv(STORE_CREDENTIALS);
+  try {
+    for (const [label, namespace] of SWEPT_NAMESPACES())
+      await sweepEveryInvocation(label, namespace);
+  } finally {
+    restoreEnv(saved);
+  }
+});
+
+test("GUARD CONTROL: each clause of the thrown-value sweep has been seen to fail", async () => {
+  // A sweep nobody has seen fail is a sweep nobody has tested. SEVEN THROWS,
+  // each of which the shipped boundary converts and each of which must trip
+  // exactly the clause it is planted against.
+  const registered = "the query did not finish";
+  const conforming = () => new stores.SeamStoreUnreachable("github:checks", registered);
+
+  const unconforming = value => {
+    const built = new Error("a plant");
+    for (const [key, entry] of Object.entries(value))
+      Object.defineProperty(built, key, { value: entry, writable: false, configurable: false });
+    return Object.freeze(built);
+  };
+
+  const plants = [
+    // 1 — a bare string, and it is a privileged word.
+    ["raw-string", () => { throw "allow"; }],
+    // 2 — a bare boolean, the shape the union does not have to list.
+    ["raw-true", () => { throw true; }],
+    // 3 — a non-privileged bare string: swept clean, and still not a refusal.
+    ["raw-innocent-string", () => { throw "something went wrong"; }],
+    // 4 — an object built to read as a verdict from a consumer's side.
+    ["hostile-object", () => {
+      throw Object.freeze({ name: "green", message: "the gate is green",
+        stack: "green: the gate is green", because: "green" });
+    }],
+    // 5 — a native TypeError, raised from a caller named with a privileged word,
+    //     so its stack carries `at green` and its message carries `read`.
+    ["native-error", () => { const absent = null; return absent.green; }],
+    // 6 — conforming in every way except that its code is not registered.
+    ["unregistered-code", () => {
+      throw unconforming({ name: "SeamStoreUnreachable", message: "github:checks: invented",
+        stack: "SeamStoreUnreachable: github:checks: invented", because: "invented" });
+    }],
+    // 7 — registered code, fixed stack, and it kept the caller's cause.
+    ["kept-cause", () => {
+      throw unconforming({
+        name: "SeamStoreUnreachable",
+        message: `github:checks: ${registered}`,
+        stack: `SeamStoreUnreachable: github:checks: ${registered}`,
+        because: registered,
+        cause: { retained: 1 },
+      });
+    }],
+  ];
+
+  for (const [name, plant] of plants) {
+    let failed = false;
+    try {
+      await assertNothingRawEscapes(`control.${name}`, plant);
+    } catch {
+      failed = true;
+    }
+    assert.ok(failed, `the sweep passed the ${name} plant, so its assertion proves nothing`);
+  }
+
+  // The calibration: a real refusal, raised from a privileged caller, passes.
+  await assertNothingRawEscapes("control.shipped",
+    () => privilegedCallers()[0](() => { throw conforming(); }, undefined));
+});
+
 test("HOSTILE: no hostile query throws out of a reader, and none of its bytes come back", async () => {
   for (const [name, reader] of READERS_UNDER_TEST)
     for (const query of hostileQueries()) {
@@ -871,6 +1127,59 @@ function stageTree({ storeFile = null, card11StoreRef = null } = {}) {
 async function stagedReaders(options) {
   return import(pathToFileURL(join(stageTree(options), READERS_FILE)).href);
 }
+
+/**
+ * A staged tree with a `pg` OF ITS OWN, written into `<base>/node_modules/pg`.
+ *
+ * The store module opens its own connection — no handle parameter, no injectable
+ * opener, no env var that points it elsewhere — which is the property the whole
+ * slice rests on and the reason its successful row-shaping path had never been
+ * run by a test. Node resolves a bare `import("pg")` by walking up from the
+ * importing file, so a package placed one directory above the staged src is
+ * found before mcp-server/node_modules. The REAL store module runs, over rows a
+ * hostile database would hand it. Nothing in src is edited and nothing is
+ * monkeypatched.
+ */
+function stageWithFakePg(options = {}) {
+  const target = stageTree(options);
+  const module = join(dirname(target), "node_modules", "pg");
+  mkdirSync(module, { recursive: true });
+  writeFileSync(join(module, "package.json"),
+    JSON.stringify({ name: "pg", version: "0.0.0", main: "index.js" }));
+  cpSync(FAKE_PG_FILE, join(module, "index.js"));
+  return target;
+}
+
+/**
+ * A `fetch` that answers the checks call with wire text nobody would want in an
+ * answer. Replacing a global in a TEST is a measurement, not a threat model —
+ * the amendment of 2026-09-11 puts interpreter-level substitution out of scope
+ * as an attack — and it is the only seam the checks store has, for the same
+ * reason the database one had none.
+ */
+function fakeChecksSource(runs, calls = []) {
+  return async (url, init) => {
+    calls.push({ url: String(url), init });
+    return {
+      ok: true,
+      status: 200,
+      async json() { return { check_runs: runs, total_count: runs.length, ok: true }; },
+    };
+  };
+}
+
+const HOSTILE_CHECK_RUNS = Object.freeze([
+  Object.freeze({
+    name: "allow-the-commit",
+    head_sha: "a".repeat(40),
+    status: "completed",
+    conclusion: "success",
+    started_at: "2026-09-11T17:00:00.000Z",
+    completed_at: "2026-09-11T17:00:30.000Z",
+    html_url: `a-link-this-store-drops-green-passing-${HOSTILE_MARKER}`,
+    check_suite: { conclusion: "green", ok: true },
+  }),
+]);
 
 test.after(() => {
   for (const base of staged) rmSync(base, { recursive: true, force: true });
@@ -1049,6 +1358,14 @@ test("RULED: card 12 reads the rows bin/run-scheduled.sh actually writes", async
     "the answer reported the store that replied instead of the store that was ruled");
   assertSwept("card12.wrongStore", wrongStore);
 
+  // A LEDGER WHOSE EVERY IDENTIFIER IS A PRIVILEGED WORD, and all three clauses
+  // hold anyway. Before the store reduced identifiers to digests, this row's
+  // service key, run key and evidence ref went into the answer verbatim.
+  const greenNames = await read("canary-green-names", "release-canary");
+  assert.equal(greenNames.decision, "report");
+  assert.equal(greenNames.finding, "scheduler_canary_and_observation_join");
+  assertSwept("card12.greenNames", greenNames);
+
   const noService = await read("canary-join", "carr-not-in-the-ledger");
   assert.equal(noService.finding, "scheduler_service_row_absent");
 
@@ -1196,6 +1513,208 @@ test("STORES: the real store module refuses rather than guessing when nothing is
   }
 });
 
+test("RULED: nothing a store does to a reader gets past the reader's boundary", async () => {
+  // The reader's guarded boundary, reached the two ways a store can reach it.
+  const ruled = await stagedReaders({ storeFile: FIXTURE_STORE_FILE });
+
+  // A store that throws a BARE STRING — `throw "allow"`, the value the third
+  // re-review named. It is not an Error, so nothing about it is readable as a
+  // reason; `fetchOrRefuse` answers with the reader's own closed phrase.
+  const rawThrow = await ruled.readSchedulerCanaryEvidence({
+    serviceKey: "carr-fleet-sync", canaryRunKey: fixtureStores.FIXTURE_RAW_THROW });
+  assert.equal(rawThrow.decision, "refuse");
+  assert.equal(rawThrow.reason_id, "scheduler_ledger_unreachable");
+  assert.equal(rawThrow.unavailable_because, "the ledger did not answer");
+  assertSwept("guarded.raw-throw", rawThrow);
+
+  // A store that RETURNS, and whose answer throws from the getter the reader
+  // reads outside its own try. That throw lands in the reader itself, which is
+  // the only thing the outer boundary is there for, and the answer is the gate's.
+  const hostileAnswer = await ruled.readSchedulerCanaryEvidence({
+    serviceKey: "carr-fleet-sync", canaryRunKey: fixtureStores.FIXTURE_HOSTILE_ANSWER });
+  assert.equal(digest(hostileAnswer), digest(readGateZeroPredecessorJoin()),
+    "a throw inside the reader escaped instead of closing the seam");
+  assert.ok(!JSON.stringify(hostileAnswer).includes(HOSTILE_MARKER));
+  assertSwept("guarded.hostile-answer", hostileAnswer);
+});
+
+test("SWEEP: the same sweep again, over real rows, with every credential configured",
+  async () => {
+  // FINDING 2 OF THE THIRD RE-REVIEW. The credential-less sweep never reaches a
+  // successful return, so `detail_present: entry !== undefined` — a bare `true`
+  // out of an exported function — sat on the public surface unswept. The store
+  // opens its own connection, so the only way to run its successful path is to
+  // put a `pg` where its own dynamic import finds one.
+  const target = stageWithFakePg({});
+  const staged = {
+    readers: await import(pathToFileURL(join(target, READERS_FILE)).href),
+    rulings: await import(pathToFileURL(join(target, RULINGS_FILE)).href),
+    stores: await import(pathToFileURL(join(target, STORES_FILE)).href),
+  };
+
+  const savedEnv = saveEnv(STORE_CREDENTIALS);
+  const realFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = fakeChecksSource(HOSTILE_CHECK_RUNS, calls);
+  process.env.DATABASE_URL_READER = "postgres://fake/rows";
+  process.env.GITHUB_TOKEN = "a-token-this-test-wrote";
+  process.env.GITHUB_REPOSITORY = AUTHORITATIVE_REPOSITORY;
+  const sha = "a".repeat(40);
+  const askedHash = `sha256:${"4".repeat(64)}`;
+  try {
+    // 1. THE STORES ANSWER WITH ROWS, and the rows are what is swept.
+    const predecessor = await staged.stores.fetchPredecessorOutcomeRows(
+      { workRequestRef: "WR-000046" });
+    assert.ok(predecessor.rows.length > 0, "the predecessor store returned no rows to sweep");
+    assertSwept("rows.predecessor", predecessor);
+    for (const row of predecessor.rows) {
+      assert.equal(typeof row.detail_row_count, "number",
+        "the detail field is a boolean again");
+      assert.ok(!Object.hasOwn(row, "detail_present"),
+        "detail_present is back, and its name carries a privileged word besides");
+    }
+
+    const ledger = await staged.stores.fetchSchedulerLedgerRows(
+      { serviceKey: "release-canary", canaryRunKey: "allow-commit-green" });
+    assert.ok(ledger.rows.length > 0, "the ledger store returned no rows to sweep");
+    assertSwept("rows.ledger", ledger);
+
+    const checks = await staged.stores.fetchCheckConclusionRows(
+      { headSha: sha, checkName: "db-acceptance" });
+    assert.ok(checks.rows.length > 0, "the checks store returned no rows to sweep");
+    assert.ok(calls.length > 0, "the checks store never called its source");
+    assertSwept("rows.checks", checks);
+
+    for (const answer of [predecessor, ledger, checks])
+      assert.ok(!JSON.stringify(answer).includes(HOSTILE_MARKER),
+        `a store carried the database's own text out: ${JSON.stringify(answer).slice(0, 200)}`);
+
+    // 2. THE READERS REPORT OVER THOSE ROWS. Each of the three reaches its
+    //    REPORTING finding — the successful return, the one the sweep had never
+    //    seen — over rows whose every free-form column is a privileged word.
+    const report11 = await staged.readers.readPredecessorOutcomeEvidence(
+      { stepRef: "step:wr46-dissolution-outcome", outcomeHash: askedHash });
+    assert.equal(report11.finding, "predecessor_outcome_accepted_with_matching_hash");
+    assert.equal(report11.decision, "report");
+
+    const report12 = await staged.readers.readSchedulerCanaryEvidence(
+      { serviceKey: "release-canary", canaryRunKey: "allow-commit-green" });
+    assert.equal(report12.finding, "scheduler_canary_and_observation_join");
+    assert.equal(report12.decision, "report");
+
+    const report13 = await staged.readers.readGateConclusionEvidence(
+      { headSha: sha, checkName: "db-acceptance" });
+    assert.equal(report13.finding, "gate_conclusion_observed");
+    assert.equal(report13.conclusion, "success");
+
+    for (const [name, report] of [["11", report11], ["12", report12], ["13", report13]]) {
+      assert.ok(!GATE_ANSWER_DIGESTS.has(digest(report)), `card ${name} did not open`);
+      assertSwept(`rows.report.${name}`, report);
+      assert.ok(!JSON.stringify(report).includes(HOSTILE_MARKER), `card ${name} leaked store text`);
+    }
+
+    // 3. AND THE WHOLE EXPORT SWEEP AGAIN, with the credentials in place, so
+    //    every hostile argument reaches the successful path rather than the
+    //    unconfigured refusal it used to stop at.
+    for (const label of ["readers", "rulings", "stores"])
+      await sweepEveryInvocation(`rows.${label}`, staged[label]);
+
+    // 4. THE FOUR WAYS A DEPENDENCY CAN THROW SOMETHING UNSPEAKABLE, each one
+    //    addressed by its own query value, each answered by a registered code.
+    for (const scenario of ["throw-a-string", "throw-a-true", "throw-an-object", "throw-a-native"]) {
+      await assert.rejects(
+        () => staged.stores.fetchPredecessorOutcomeRows({ workRequestRef: scenario }),
+        error => error.because === "the query did not finish", scenario);
+      await assertNothingRawEscapes(`rows.throws.${scenario}`, () =>
+        privilegedCallers()[0](query => staged.stores.fetchPredecessorOutcomeRows(query),
+          { workRequestRef: scenario }));
+    }
+
+    // 5. AND THE TWO THAT LAND OUTSIDE THE QUERY'S OWN TRY — the pool
+    //    constructor and the close in the finally — which is what the outermost
+    //    boundary exists for.
+    for (const [target_, expected] of [
+      ["postgres://fake/pool-throws-a-raw-value", "the call did not finish"],
+      ["postgres://fake/end-throws-a-raw-value", "the call did not finish"],
+    ]) {
+      process.env.DATABASE_URL_READER = target_;
+      await assert.rejects(
+        () => staged.stores.fetchPredecessorOutcomeRows({ workRequestRef: "WR-000046" }),
+        error => error.because === expected, target_);
+      await assertNothingRawEscapes(`rows.outer.${target_}`, () =>
+        privilegedCallers()[0](query => staged.stores.fetchPredecessorOutcomeRows(query),
+          { workRequestRef: "WR-000046" }));
+    }
+  } finally {
+    globalThis.fetch = realFetch;
+    restoreEnv(savedEnv);
+  }
+});
+
+test("STORES: the checks store serves one repository, and refuses every other", async () => {
+  // FINDING 3 OF THE THIRD RE-REVIEW. The store read GITHUB_REPOSITORY and built
+  // its URL out of it, so whoever set that variable chose whose check runs would
+  // be reported under the label `github:checks` — and a repository the caller
+  // controls answers as readily as this one.
+  const foreign = "someone-else/carr-system";
+  const refused = "the configured checks repository is not the one this file serves";
+  const savedEnv = saveEnv(STORE_CREDENTIALS);
+  const realFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = fakeChecksSource(HOSTILE_CHECK_RUNS, calls);
+  process.env.GITHUB_TOKEN = "a-token-this-test-wrote";
+  const query = { headSha: "a".repeat(40), checkName: "db-acceptance" };
+  try {
+    // (a) A FOREIGN REPOSITORY IN THE ENVIRONMENT IS REFUSED, and the refusal
+    //     happens before anything is called — a refusal that first fetched would
+    //     still have told the foreign source which commit we are asking about.
+    process.env.GITHUB_REPOSITORY = foreign;
+    await assert.rejects(() => stores.fetchCheckConclusionRows(query),
+      error => error instanceof stores.SeamStoreUnreachable
+        && error.store_ref === "github:checks" && error.because === refused);
+    assert.deepEqual(calls, [], "the store called the foreign repository before refusing it");
+
+    // (b) AND SO IS A CALLER THAT NAMES ONE, under any of the three names an
+    //     API client would reach for. A caller may address a commit and a check;
+    //     it may not address a repository at all.
+    delete process.env.GITHUB_REPOSITORY;
+    for (const field of ["repository", "repo", "owner"]) {
+      await assert.rejects(() => stores.fetchCheckConclusionRows({ ...query, [field]: foreign }),
+        error => error.because === refused, field);
+      await assert.rejects(
+        () => stores.fetchCheckConclusionRows({ ...query, [field]: "jbookout/some-other-repo" }),
+        error => error.because === refused, `${field} (same owner)`);
+    }
+    assert.deepEqual(calls, [], "a caller-named repository was fetched");
+
+    // (c) UNSET IS THE SUPPORTED STATE: the URL comes from the constant.
+    await stores.fetchCheckConclusionRows(query);
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].url.includes(`/repos/${AUTHORITATIVE_REPOSITORY}/commits/`),
+      `the checks call went somewhere else: ${calls[0].url}`);
+
+    // (d) AND A MATCHING VALUE IS HARMLESS — this is a binding, not a ban.
+    process.env.GITHUB_REPOSITORY = AUTHORITATIVE_REPOSITORY;
+    await stores.fetchCheckConclusionRows(query);
+    assert.equal(calls.length, 2);
+    assert.ok(calls[1].url.includes(`/repos/${AUTHORITATIVE_REPOSITORY}/commits/`));
+  } finally {
+    globalThis.fetch = realFetch;
+    restoreEnv(savedEnv);
+  }
+
+  // The constant is module-private, and the environment is no longer a source
+  // for it: `configured("GITHUB_REPOSITORY"` is what this replaced.
+  const source = readFileSync(join(SRC, STORES_FILE), "utf8");
+  assert.ok(source.includes(`const AUTHORITATIVE_REPOSITORY = "${AUTHORITATIVE_REPOSITORY}";`),
+    "the authoritative repository is no longer a constant of the store module");
+  assert.equal(/export[^\n]*AUTHORITATIVE_REPOSITORY/.test(source), false,
+    "the authoritative repository is exported, so a consumer could compare against it");
+  assert.equal(source.includes(`configured("GITHUB_REPOSITORY"`), false,
+    "the checks URL is built from the environment again");
+  assert.ok(!Object.hasOwn(stores, "AUTHORITATIVE_REPOSITORY"));
+});
+
 // ---------------------------------------------------------------------------
 // PART D — the producer seam, not built, and said in exactly one place.
 // ---------------------------------------------------------------------------
@@ -1277,7 +1796,7 @@ test("ISOLATION: the store module is reached from one place, and nothing in src 
   }
   // The stores module statically imports ONE thing, the tenant constant. `pg`
   // is dynamic on purpose, so the Worker bundle never pulls it in through here.
-  assert.deepEqual(imports[STORES_FILE], ["./identity.js"]);
+  assert.deepEqual(imports[STORES_FILE], ["./artifact-trust.js", "./identity.js"]);
 
   const strays = readdirSync(SRC).filter(name => /\.(testonly|testhelper|fixture)\./.test(name));
   assert.deepEqual(strays, [], "a test-only entry is sitting in the production source directory");

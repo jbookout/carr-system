@@ -30,6 +30,10 @@ const REGISTERED_REASONS = Object.freeze([
   "the database client is not available in this process",
   "the connection target for this store is not configured in this process",
   "the query did not finish",
+  "the query did not address a row",
+  "the configured checks repository is not the one this file serves",
+  "the call did not finish",
+  "this error type is final",
   "the reason this store was unreachable is not a registered one",
 ]);
 
@@ -93,17 +97,17 @@ export const FIXTURE_OTHER_HASH = `sha256:${"7".repeat(64)}`;
  */
 const PREDECESSOR_ROWS = Object.freeze({
   "WR-000046": Object.freeze([Object.freeze({
-    status: "accepted", detail_present: true,
+    status: "accepted", detail_row_count: 1,
     accepted_feedback_hash: FIXTURE_ASKED_HASH,
     feedback_hash: FIXTURE_OTHER_HASH,
   })]),
   "WR-000040": Object.freeze([Object.freeze({
-    status: "accepted", detail_present: true,
+    status: "accepted", detail_row_count: 1,
     accepted_feedback_hash: null,
     feedback_hash: FIXTURE_ASKED_HASH,
   })]),
   "WR-000054": Object.freeze([Object.freeze({
-    status: "accepted", detail_present: false,
+    status: "accepted", detail_row_count: 0,
     accepted_feedback_hash: FIXTURE_ASKED_HASH,
     feedback_hash: null,
   })]),

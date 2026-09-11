@@ -26,8 +26,19 @@
 // bin/run-scheduled.sh:275 actually writes, and there is one negative row for
 // each field the receipt-binding clause reads.
 //
+// AND THEY GO THROUGH THE SAME TWO REDUCTIONS THE REAL STORE APPLIES. The real
+// module carries no store text out to a caller: an identifier leaves as a
+// digest, an instant leaves re-serialized, a status leaves as a constant or a
+// count. The raw rows below are written the way the ledger and the wire write
+// them — that is what makes them readable as a specification — and `ledgerRow`
+// and `checkRow` reduce them exactly as the real store does. A fixture that
+// skipped the reduction would hand the reader a shape production never produces,
+// and every clause proved over it would be proved against fiction.
+//
 // Every fixture case is addressed by a query value, so one module covers the
 // whole clause table and no case can leak into another.
+
+import { createHash } from "node:crypto";
 
 // Re-declared, not imported: substituting the module file means the copied
 // reader must get its error class and its closed reason set from HERE, and the
@@ -45,6 +56,10 @@ const REGISTERED_REASONS = Object.freeze([
   "the database client is not available in this process",
   "the connection target for this store is not configured in this process",
   "the query did not finish",
+  "the query did not address a row",
+  "the configured checks repository is not the one this file serves",
+  "the call did not finish",
+  "this error type is final",
   "the reason this store was unreachable is not a registered one",
 ]);
 
@@ -90,6 +105,27 @@ export class SeamStoreUnreachable extends Error {
   }
 }
 
+/**
+ * The same reductions the real store applies, spelled the same way. `digest` is
+ * re-implemented rather than imported for the reason the error class is: this
+ * file is copied over src/gate-zero-seam-stores.v5.js, so a relative import that
+ * resolved from test/ would not resolve from the staged src/. The format is
+ * artifact-trust.js's, because the reader compares against digests it computes
+ * with that function.
+ */
+function digest(value) {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+function opaque(value) {
+  return typeof value === "string" && value.length > 0 ? digest(value) : null;
+}
+
+function instantText(value) {
+  const parsed = typeof value === "string" ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+}
+
 /** The acceptance-receipt hash the fixture's accepted WR-000046 row carries. */
 export const FIXTURE_ACCEPTED_HASH = `sha256:${"4".repeat(64)}`;
 /** A well-formed hash that no fixture row carries. A forgery, in other words. */
@@ -103,24 +139,29 @@ const T1 = "2026-09-11T17:00:30.000Z";
 const T2 = "2026-09-11T17:00:31.000Z";
 
 /**
- * Rows in the shape fetchPredecessorOutcomeRows builds them: a status, the two
- * hashes that are compared, and whether the work_request_card actually carried
- * the detail for this receipt. No feedback ref, no stored outcome and no
- * timestamp — the real store drops those before a reader sees them.
+ * Rows in the shape fetchPredecessorOutcomeRows builds them: a status that is a
+ * constant of the store module, the two hashes that are compared, and a COUNT of
+ * the work_request_card rows found for the receipt. No feedback ref, no stored
+ * outcome and no timestamp — the real store does not even select those.
+ *
+ * The count is a count and not a boolean because a bare `true` out of an
+ * exported function is the shape the standing rule closes over; `detail_present:
+ * true` is what the second review round found on the real store's successful
+ * path, and this file carried the same shape.
  */
 const PREDECESSOR_ROWS = Object.freeze({
   // Accepted, complete, with a receipt whose hash is FIXTURE_ACCEPTED_HASH. In
   // production the proposal hash equals the receipt hash, and it does here.
   "WR-000046": Object.freeze([Object.freeze({
     status: "accepted",
-    detail_present: true,
+    detail_row_count: 1,
     accepted_feedback_hash: FIXTURE_ACCEPTED_HASH,
     feedback_hash: FIXTURE_ACCEPTED_HASH,
   })]),
   // Proposed and never signed. The near miss that must not pass.
   "WR-000040": Object.freeze([Object.freeze({
     status: "pending_human_acceptance",
-    detail_present: true,
+    detail_row_count: 1,
     accepted_feedback_hash: null,
     feedback_hash: `sha256:${"5".repeat(64)}`,
   })]),
@@ -129,7 +170,8 @@ const PREDECESSOR_ROWS = Object.freeze({
 });
 
 /**
- * ops.run rows exactly as bin/run-scheduled.sh writes them.
+ * ops.run rows exactly as bin/run-scheduled.sh writes them, BEFORE the store's
+ * reduction — which is what makes the negative cases legible.
  *
  *   source_kind  `wrapper` — one of collector|registry|wrapper|operator, the
  *                closed set db/schema.sql permits. There is no "scheduler".
@@ -142,110 +184,136 @@ const PREDECESSOR_ROWS = Object.freeze({
  * reading a field fails on exactly one case rather than on none.
  */
 const RUN = Object.freeze({
-  service_key: "carr-fleet-sync", service_registered_at: T0, service_retired_at: null,
-  state: "succeeded", exit_code: 0, attempt: 1,
+  service_key: "carr-fleet-sync",
   started_at: T0, ended_at: T1, observed_at: T2,
   source_kind: "wrapper", source_ref: "bin/run-scheduled.sh",
 });
 
+/** The real store's card 12 mapping, applied to a raw ledger row. */
+function ledgerRow(raw) {
+  return Object.freeze({
+    service_key_digest: opaque(raw.service_key),
+    run_key_digest: opaque(raw.run_key),
+    evidence_ref_digest: opaque(raw.evidence_ref),
+    source_kind_digest: opaque(raw.source_kind),
+    source_ref_digest: opaque(raw.source_ref),
+    started_at: instantText(raw.started_at),
+    ended_at: instantText(raw.ended_at),
+    observed_at: instantText(raw.observed_at),
+  });
+}
+
 const SCHEDULER_ROWS = Object.freeze({
   // All three clauses hold: the wrapper's own row, carrying a receipt.
-  "canary-join": Object.freeze([Object.freeze({ ...RUN,
+  "canary-join": Object.freeze([ledgerRow({ ...RUN,
     run_key: "canary-join", evidence_ref: "ops.run:carr-fleet-sync.canary-join" })]),
 
   // NEGATIVE, evidence_ref — and this is not a hypothetical. It is the row
   // bin/run-scheduled.sh writes TODAY, because it passes no --evidence-ref. A
   // ruling landing this afternoon would get exactly this answer from a live
   // scheduled job, and the answer is a refusal that names the owed change.
-  "canary-today": Object.freeze([Object.freeze({ ...RUN,
+  "canary-today": Object.freeze([ledgerRow({ ...RUN,
     run_key: "canary-today", evidence_ref: null })]),
 
   // NEGATIVE, source_kind — an `operator` row is a hand-run, not a dispatch.
-  "canary-hand-run": Object.freeze([Object.freeze({ ...RUN,
+  "canary-hand-run": Object.freeze([ledgerRow({ ...RUN,
     run_key: "canary-hand-run", source_kind: "operator",
     evidence_ref: "ops.run:carr-fleet-sync.canary-hand-run" })]),
 
   // NEGATIVE, source_kind — a `collector` row is a probe writing about a job,
   // not the wrapper that dispatched it.
-  "canary-probe": Object.freeze([Object.freeze({ ...RUN,
+  "canary-probe": Object.freeze([ledgerRow({ ...RUN,
     run_key: "canary-probe", source_kind: "collector",
     source_ref: "bin/probe-keepalive.py",
     evidence_ref: "ops.run:carr-fleet-sync.canary-probe" })]),
 
   // NEGATIVE, source_ref — the right kind, written by a different wrapper.
-  "canary-foreign-wrapper": Object.freeze([Object.freeze({ ...RUN,
+  "canary-foreign-wrapper": Object.freeze([ledgerRow({ ...RUN,
     run_key: "canary-foreign-wrapper", source_ref: "bin/deploy-worker.sh",
     evidence_ref: "ops.run:carr-fleet-sync.canary-foreign-wrapper" })]),
 
   // Dispatch and observation share one instant — rows written in one transaction.
-  "canary-same-instant": Object.freeze([Object.freeze({ ...RUN,
+  "canary-same-instant": Object.freeze([ledgerRow({ ...RUN,
     run_key: "canary-same-instant", ended_at: T0, observed_at: T0,
     evidence_ref: "ops.run:carr-fleet-sync.canary-same-instant" })]),
 
   // The observation is of a different receipt than the dispatch named.
   "canary-mismatch": Object.freeze([
-    Object.freeze({ ...RUN,
-      run_key: "canary-mismatch", state: "running", exit_code: null,
-      ended_at: null, observed_at: T0,
+    ledgerRow({ ...RUN,
+      run_key: "canary-mismatch", ended_at: null, observed_at: T0,
       evidence_ref: "ops.run:carr-fleet-sync.canary-mismatch.1" }),
-    Object.freeze({ ...RUN,
+    ledgerRow({ ...RUN,
       run_key: "canary-mismatch", started_at: T0, ended_at: T1, observed_at: T1,
       evidence_ref: "ops.run:carr-fleet-sync.some-other-run" }),
   ]),
 
   // Dispatched and still in flight: nothing has ended, so nothing is observed.
-  "canary-inflight": Object.freeze([Object.freeze({ ...RUN,
-    run_key: "canary-inflight", state: "running", exit_code: null,
-    ended_at: null, observed_at: T0,
+  "canary-inflight": Object.freeze([ledgerRow({ ...RUN,
+    run_key: "canary-inflight", ended_at: null, observed_at: T0,
     evidence_ref: "ops.run:carr-fleet-sync.canary-inflight" })]),
 
   // The left join found the service and no run: the canary never ran.
-  "canary-never-ran": Object.freeze([Object.freeze({
-    service_key: "carr-fleet-sync", service_registered_at: T0, service_retired_at: null,
-    run_key: null, state: null, exit_code: null, attempt: null,
-    started_at: null, ended_at: null, observed_at: null,
+  "canary-never-ran": Object.freeze([ledgerRow({
+    service_key: "carr-fleet-sync",
+    run_key: null, started_at: null, ended_at: null, observed_at: null,
     evidence_ref: null, source_kind: null, source_ref: null,
   })]),
+
+  // A LEDGER FULL OF PRIVILEGED WORDS, and every clause still holds. Nothing
+  // here is a hypothetical either: a service someone names `release-canary`
+  // writing an evidence ref that says the run passed is an ordinary naming
+  // choice, and under the pre-reduction store every one of these strings went
+  // into an answer. The finding this case produces must be the joining one, and
+  // the answer must still carry no privileged word.
+  "canary-green-names": Object.freeze([ledgerRow({ ...RUN,
+    service_key: "release-canary",
+    run_key: "allow-commit-green",
+    evidence_ref: "ops.run:release-canary.passing-and-complete",
+    source_kind: "wrapper", source_ref: "bin/run-scheduled.sh" })]),
 });
 
+/** The real store's card 13 mapping, applied to a raw check run off the wire. */
+function checkRow(raw) {
+  return Object.freeze({
+    head_sha: /^[0-9a-f]{40}$/.test(raw.head_sha ?? "") ? raw.head_sha : null,
+    status_digest: opaque(raw.status),
+    conclusion_digest: opaque(raw.conclusion),
+    ended_at: instantText(raw.completed_at),
+  });
+}
+
 const CHECK_ROWS = Object.freeze({
-  "db-acceptance": Object.freeze([Object.freeze({
+  "db-acceptance": Object.freeze([checkRow({
     name: "db-acceptance", head_sha: FIXTURE_COMMIT_SHA, status: "completed",
-    conclusion: "success", started_at: T0, completed_at: T1,
-    html_url: "https://github.test/run/1",
+    conclusion: "success", completed_at: T1, html_url: "https://github.test/run/1",
   })]),
   // A re-run: two completed runs, and the later one is what the merge gate acts on.
   "rerun-check": Object.freeze([
-    Object.freeze({
+    checkRow({
       name: "rerun-check", head_sha: FIXTURE_COMMIT_SHA, status: "completed",
-      conclusion: "success", started_at: T0, completed_at: T0,
-      html_url: "https://github.test/run/2",
+      conclusion: "success", completed_at: T0, html_url: "https://github.test/run/2",
     }),
-    Object.freeze({
+    checkRow({
       name: "rerun-check", head_sha: FIXTURE_COMMIT_SHA, status: "completed",
-      conclusion: "failure", started_at: T0, completed_at: T1,
-      html_url: "https://github.test/run/3",
+      conclusion: "failure", completed_at: T1, html_url: "https://github.test/run/3",
     }),
   ]),
   // Still queued: no conclusion exists, so none is reported.
-  "queued-check": Object.freeze([Object.freeze({
+  "queued-check": Object.freeze([checkRow({
     name: "queued-check", head_sha: FIXTURE_COMMIT_SHA, status: "queued",
-    conclusion: null, started_at: null, completed_at: null,
-    html_url: "https://github.test/run/4",
+    conclusion: null, completed_at: null, html_url: "https://github.test/run/4",
   })]),
   // A completed run that belongs to a DIFFERENT commit than the one asked about.
-  "wrong-commit": Object.freeze([Object.freeze({
+  "wrong-commit": Object.freeze([checkRow({
     name: "wrong-commit", head_sha: FIXTURE_OTHER_COMMIT_SHA, status: "completed",
-    conclusion: "success", started_at: T0, completed_at: T1,
-    html_url: "https://github.test/run/5",
+    conclusion: "success", completed_at: T1, html_url: "https://github.test/run/5",
   })]),
   // A word GitHub's API does not document. Not passed through: reported as
   // unrecognized, so the only conclusion strings a consumer ever sees are the
   // constants in the reader module.
-  "invented-conclusion": Object.freeze([Object.freeze({
+  "invented-conclusion": Object.freeze([checkRow({
     name: "invented-conclusion", head_sha: FIXTURE_COMMIT_SHA, status: "completed",
-    conclusion: "everything is fine", started_at: T0, completed_at: T1,
-    html_url: "https://github.test/run/6",
+    conclusion: "everything is fine", completed_at: T1, html_url: "https://github.test/run/6",
   })]),
 });
 
@@ -259,6 +327,32 @@ export const FIXTURE_UNREACHABLE = "unreachable";
  * rather than merely written.
  */
 export const FIXTURE_WRONG_STORE = "canary-from-another-store";
+
+/**
+ * THE TWO CASES THAT MAKE THE READER'S OWN GUARDED BOUNDARY REACHABLE.
+ *
+ * A store that refuses with SeamStoreUnreachable is caught by `fetchOrRefuse`,
+ * which is the ordinary path and proves nothing about the boundary. These two
+ * are the shapes `fetchOrRefuse` cannot answer for:
+ *
+ *   FIXTURE_RAW_THROW     the store throws a bare string — `throw "allow"`, the
+ *                         value the third review round named. It is not an Error
+ *                         at all, so nothing about it is readable as a reason.
+ *   FIXTURE_HOSTILE_ANSWER  the store RETURNS, and the object it returns throws
+ *                         from the getter for `store_ref` — which is read
+ *                         outside the try, so the throw lands in the reader
+ *                         itself rather than in its fetch.
+ *
+ * Both must come back as the gate's own unavailable answer, with no byte of
+ * either escaping.
+ */
+export const FIXTURE_RAW_THROW = "canary-that-throws-a-raw-value";
+export const FIXTURE_HOSTILE_ANSWER = "canary-whose-answer-is-hostile";
+
+const HOSTILE_ANSWER = {
+  get store_ref() { throw new Error("HOSTILEMARKERTEXT-from-a-store-answer"); },
+  get rows() { throw new Error("HOSTILEMARKERTEXT-from-a-store-answer"); },
+};
 
 export async function fetchPredecessorOutcomeRows(query) {
   const workRequestRef = query?.workRequestRef;
@@ -274,9 +368,12 @@ export async function fetchSchedulerLedgerRows(query) {
   const storeRef = "control-plane:ops.service+ops.run";
   if (canaryRunKey === FIXTURE_UNREACHABLE)
     throw new SeamStoreUnreachable(storeRef, "the query did not finish");
+  if (canaryRunKey === FIXTURE_RAW_THROW) throw "allow";
+  if (canaryRunKey === FIXTURE_HOSTILE_ANSWER) return HOSTILE_ANSWER;
   if (canaryRunKey === FIXTURE_WRONG_STORE)
     return { store_ref: "github:checks", rows: SCHEDULER_ROWS["canary-join"] };
-  if (serviceKey !== "carr-fleet-sync") return { store_ref: storeRef, rows: [] };
+  if (serviceKey !== "carr-fleet-sync" && serviceKey !== "release-canary")
+    return { store_ref: storeRef, rows: [] };
   return { store_ref: storeRef, rows: SCHEDULER_ROWS[canaryRunKey] ?? [] };
 }
 
