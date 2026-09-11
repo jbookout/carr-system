@@ -1504,6 +1504,197 @@ export function v5J102TransitionContract(transition_id) {
 }
 
 // ---------------------------------------------------------------------------
+// Q082 — THE TRANSITION TRUTH TABLE.
+//
+// The table above DECLARES what must already be true; the evaluator below
+// ENFORCES it. This is the third thing, and the one that was missing: the
+// COMPLETE enumeration of every value each of the four ordered guards can be
+// shown, and what that guard does with it.
+//
+// WHY IT IS SOURCE AND NOT A FIXTURE. A declaration and an enforcer can disagree
+// at any cell nobody thought to write a fixture for, and hand-picked refusal
+// fixtures are exactly a list of the cells somebody thought of. Enumerating the
+// cells from the vocabularies themselves is the only form of the check that
+// grows when a state axis grows, and it is a reviewable artifact rather than a
+// property of a test run — a reader can see the whole matrix without executing
+// anything.
+//
+// WHAT A CELL CLAIMS, exactly, because it is the one thing here that can be
+// over-read. `guard_admits` says THIS GUARD DOES NOT REFUSE THIS VALUE. It does
+// NOT say the transition allows: a transition still needs its declared evidence,
+// its loaded related subjects and its declared choices, and every one of those
+// is decided after all four guards have passed. The table says this on itself
+// rather than only here.
+//
+// THE ORDER IS PART OF THE TABLE, not decoration. The evaluator returns on the
+// FIRST guard that refuses, and the prerequisite guard additionally returns on
+// the first unmet AXIS in declaration order. Each prerequisite cell therefore
+// carries its axis's position, so a fixture driving that cell knows which axes
+// must be held in range for the refusal under test to be the one that fires
+// rather than a refusal from an earlier axis wearing the same reason_id.
+//
+// NOTHING HERE DECIDES ANYTHING. Every value comes from the vocabularies the
+// subject shapes already register and from TRANSITIONS itself. A second
+// authority for a bound this module already holds would be a defect, so this
+// function holds none: it reads, enumerates and freezes.
+// ---------------------------------------------------------------------------
+
+export const V5_J102_TRUTH_TABLE_SCHEMA_VERSION =
+  "doctorcre-v5-j102-lifecycle-transition-truth-table.v1";
+
+/**
+ * The four guards that decide a transition on the SUBJECT AND THE ACTOR ALONE,
+ * in the order evaluateLifecycleTransition applies them.
+ *
+ * These four are separated from everything else the evaluator does because they
+ * are the ones a truth table can be complete about: each reads a single value
+ * out of a CLOSED vocabulary and compares it against a list the transition
+ * declares. The checks that follow — evidence, bindings, loaded related
+ * subjects, declared choices — are not enumerable in the same way, and this
+ * table says nothing about them rather than pretending to cover them.
+ */
+export const V5_J102_TRANSITION_GUARDS = deepFreeze([
+  {
+    guard: "subject_kind",
+    position: 0,
+    refusal_reason_id: "subject_kind_mismatch",
+    declared_by: "subject_kind",
+    vocabulary: "V5_J102_SUBJECT_KINDS",
+  },
+  {
+    guard: "actor_class",
+    position: 1,
+    refusal_reason_id: "actor_class_not_permitted",
+    declared_by: "permitted_actor_classes",
+    vocabulary: "V5_J102_ACTOR_CLASSES",
+  },
+  {
+    guard: "prerequisite",
+    position: 2,
+    refusal_reason_id: "prerequisite_not_met",
+    declared_by: "prerequisites",
+    vocabulary: "the registered states of the axis the entry names",
+  },
+  {
+    guard: "instrument_kind",
+    position: 3,
+    refusal_reason_id: "instrument_kind_not_permitted",
+    declared_by: "instrument_kinds",
+    vocabulary: "V5_J102_INSTRUMENT_KINDS",
+  },
+  {
+    // THE ONE GUARD WHOSE CELL IS A QUESTION ABOUT A SET rather than about a
+    // value, and its question is narrowed to the only form that enumerates
+    // cleanly: does THIS evidence kind, supplied ON ITS OWN and with nothing
+    // else, satisfy exactly one declared alternative? A transition whose only
+    // alternative names two kinds together is admitted by no single kind, which
+    // is the right answer rather than a gap — the table reports the whole
+    // vocabulary refusing, and a fixture supplying the pair is the separate
+    // thing the `not_enumerated` list still names.
+    guard: "required_evidence",
+    position: 4,
+    refusal_reason_id: "required_evidence_absent",
+    declared_by: "required_evidence_alternatives",
+    vocabulary: "V5_J102_EVIDENCE_KINDS",
+    cell_asks: "does this evidence kind, supplied alone, satisfy exactly one declared alternative",
+  },
+]);
+
+export const V5_J102_TRUTH_TABLE_GUARD_ORDER =
+  deepFreeze(V5_J102_TRANSITION_GUARDS.map(g => g.guard));
+
+const GUARD_REFUSAL_REASONS = Object.freeze(Object.fromEntries(
+  V5_J102_TRANSITION_GUARDS.map(g => [g.guard, g.refusal_reason_id])));
+
+function truthTableCells(transition_id) {
+  const t = TRANSITIONS[transition_id];
+  const cells = [];
+  const cell = (guard, axis, value, guard_admits, axis_position) => cells.push({
+    transition_id,
+    guard,
+    axis,
+    value,
+    guard_admits,
+    refusal_reason_id: guard_admits ? null : GUARD_REFUSAL_REASONS[guard],
+    // Null wherever the guard reads ONE axis, so a reader is never invited to
+    // compare positions that are not in the same ordering.
+    axis_position,
+  });
+
+  for (const kind of V5_J102_SUBJECT_KINDS) {
+    cell("subject_kind", "subject_kind", kind, kind === t.subject_kind, null);
+  }
+  for (const actor_class of V5_J102_ACTOR_CLASSES) {
+    cell("actor_class", "authorization_class", actor_class,
+      t.permitted_actor_classes.includes(actor_class), null);
+  }
+  if (t.from !== undefined) {
+    Object.entries(t.from).forEach(([axis, permitted], axis_position) => {
+      for (const value of SUBJECT_ENUMS[t.subject_kind][axis]) {
+        cell("prerequisite", axis, value, permitted.includes(value), axis_position);
+      }
+    });
+  }
+  if (t.instrument_kinds !== undefined) {
+    for (const instrument_kind of V5_J102_INSTRUMENT_KINDS) {
+      cell("instrument_kind", "instrument_kind", instrument_kind,
+        t.instrument_kinds.includes(instrument_kind), null);
+    }
+  }
+  for (const evidence_kind of V5_J102_EVIDENCE_KINDS) {
+    // A one-element supply satisfies alternative S exactly when S IS that one
+    // element, so "exactly one alternative equals [kind]" is the whole of the
+    // question and holds for any alternative structure, including one this table
+    // has never seen.
+    const satisfies = t.evidence_alternatives
+      .filter(set => set.length === 1 && set[0] === evidence_kind).length;
+    cell("required_evidence", "evidence_kind", evidence_kind, satisfies === 1, null);
+  }
+  return cells;
+}
+
+/** The whole matrix: every guard of every transition against every value it can see. */
+export function v5J102TransitionTruthTable() {
+  const cells = V5_J102_TRANSITION_IDS.flatMap(id => truthTableCells(id));
+  return deepFreeze({
+    schema_version: V5_J102_TRUTH_TABLE_SCHEMA_VERSION,
+    tenant: ORGANIZATION_TENANT_ID,
+    guard_order: [...V5_J102_TRUTH_TABLE_GUARD_ORDER],
+    guards: V5_J102_TRANSITION_GUARDS.map(g => ({ ...g })),
+    guard_admits_means:
+      "this guard does not refuse this value; the transition still requires its " +
+      "declared evidence, its bound subject, its loaded related subjects and its " +
+      "declared choices, every one of which is decided after all four guards pass",
+    cells,
+    cell_count: cells.length,
+    admitting_cell_count: cells.filter(c => c.guard_admits).length,
+    refusing_cell_count: cells.filter(c => !c.guard_admits).length,
+    by_transition: Object.fromEntries(V5_J102_TRANSITION_IDS.map(id => {
+      const own = cells.filter(c => c.transition_id === id);
+      return [id, {
+        subject_kind: TRANSITIONS[id].subject_kind,
+        guards_declared: V5_J102_TRUTH_TABLE_GUARD_ORDER
+          .filter(g => own.some(c => c.guard === g)),
+        cell_count: own.length,
+        admitting_cell_count: own.filter(c => c.guard_admits).length,
+        refusing_cell_count: own.filter(c => !c.guard_admits).length,
+      }];
+    })),
+    // This table enumerates the four guards and nothing else, and a reader
+    // comparing it against the evaluator should see the boundary stated rather
+    // than infer it from what is absent.
+    not_enumerated: deepFreeze([
+      "evidence supplied as a SET: the ambiguous-basis and unexpected-extra branches, and any alternative naming two kinds together",
+      "the server-derived subject binding on each evidence record",
+      "the document, record, artifact and approval state each evidence kind requires of its own source",
+      "the loaded related subjects each transition re-checks",
+      "the declared choices (mandate scope, instrument kind, return phase, payment level, diligence result)",
+    ]),
+    effects: V5_NO_EFFECTS,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // The evaluator.
 // ---------------------------------------------------------------------------
 
@@ -3715,6 +3906,12 @@ export function v5J102Projection() {
     ...preimage,
     policy_digest: digest(preimage),
     user_corrections: V5_J102_USER_CORRECTIONS.map(c => ({ ...c })),
+    // THE MATRIX TRAVELS WITH THE CONTRACT IT DESCRIBES. It is a pure
+    // derivative of `transitions` above and adds no information to the policy,
+    // so it is deliberately NOT in the preimage: putting it there would move the
+    // policy digest for a restatement, and the digest is meant to move when the
+    // policy does.
+    transition_truth_table: v5J102TransitionTruthTable(),
     settled_decisions: V5_J102_SETTLED_DECISION_IDS.map(id => ({
       decision_id: id, ...V5_J102_SETTLED_DECISIONS[id],
     })),
@@ -3773,6 +3970,33 @@ for (const [transition_id, t] of Object.entries(TRANSITIONS)) {
             `${transition_id} names unregistered state "${value}" on ${axis}`);
         }
       }
+    }
+  }
+}
+
+// THE TRUTH TABLE'S GUARDS ARE ALL LIVE, IN BOTH DIRECTIONS.
+//
+// A guard that admits every value it can see is not a guard — it is a branch no
+// input reaches, and the matrix would report it as covered while proving
+// nothing. A guard that refuses every value is the opposite failure and worse:
+// every transition it covers would be unreachable. Neither is visible by reading
+// the transition table, because both arise from the RELATIONSHIP between a
+// declared list and the vocabulary it draws from, and both fail at import here.
+{
+  const cells = v5J102TransitionTruthTable().cells;
+  for (const guard of V5_J102_TRANSITION_GUARDS) {
+    const own = cells.filter(c => c.guard === guard.guard);
+    if (own.length === 0) {
+      throw new V5J102Error("contract_self_check_failed",
+        `the truth table enumerates no cell for the "${guard.guard}" guard`);
+    }
+    if (!own.some(c => c.guard_admits)) {
+      throw new V5J102Error("contract_self_check_failed",
+        `the "${guard.guard}" guard admits no value; every transition it covers would be unreachable`);
+    }
+    if (!own.some(c => !c.guard_admits)) {
+      throw new V5J102Error("contract_self_check_failed",
+        `the "${guard.guard}" guard refuses no value, so it is not a guard`);
     }
   }
 }
