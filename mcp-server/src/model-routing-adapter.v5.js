@@ -68,6 +68,7 @@
 // The ledger below is an explicitly process-local guard, not a record store.
 
 import { digest } from "./artifact-trust.js";
+import { ENGINEERING_TYPED_UNCERTAINTY_CLASSES } from "./engineering-runtime.js";
 import { ORGANIZATION_TENANT_ID } from "./identity.js";
 import { V5_NO_EFFECTS, V5_CANONICAL_AUTHORITY } from "./global-boundaries.v5.js";
 import {
@@ -564,14 +565,16 @@ const RESPONSE_REQUIRED = Object.freeze([
 const TYPED_PROPOSAL_KEYS = Object.freeze(["proposal_id", "uncertainty_class", "label", "note"]);
 
 /**
- * The typed-uncertainty vocabulary, mirroring the one the V5-F03 execution
- * contract already accepts for model judgment steps. Restated rather than
- * imported because that set is private to engineering-runtime.js; it is
- * deliberately the same vocabulary, not a second one.
+ * The typed-uncertainty vocabulary the V5-F03 execution contract accepts for
+ * model judgment steps. This is that authority itself, re-exported under the
+ * name this module's callers use -- not a copy of it. The six names used to be
+ * restated here, under a comment saying they were "deliberately the same
+ * vocabulary, not a second one" with nothing anywhere asserting it, so the two
+ * could drift apart silently. There is now exactly one definition in the tree
+ * (engineering-runtime.js ENGINEERING_TYPED_UNCERTAINTY_CLASSES) and this is a
+ * binding to it, which is what "not a second one" has to mean to be checkable.
  */
-export const V5_MODEL_UNCERTAINTY_CLASSES = Object.freeze([
-  "classification", "extraction", "summarization", "ranking", "drafting", "disambiguation",
-]);
+export const V5_MODEL_UNCERTAINTY_CLASSES = ENGINEERING_TYPED_UNCERTAINTY_CLASSES;
 export const V5_RESPONSE_FINISH_REASONS = Object.freeze([
   "complete", "truncated", "refused_by_model", "error",
 ]);
