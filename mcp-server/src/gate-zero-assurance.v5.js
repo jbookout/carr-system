@@ -8,6 +8,22 @@
 // `step:gate-zero-read-only-outcome`. benchmark-minimum.v5.js:52-67 (slice
 // V5-A00) says so in its own words and refuses to invent one.
 //
+// WHAT CHANGED ON 2026-09-11, AND WHAT DID NOT. Decision
+// `20c83902-f150-4d59-beca-915c5c871f95` adopts Option B PROVISIONALLY: the
+// producer ROLE, oracle, output schema, gate id, pass rule and retry policy are
+// now decided, and gate-zero-producer-registration.v5.js carries them in r7's
+// own registry shape. Five fields of the refusal below therefore stop being
+// null and start naming what was ruled — which is the honest report, because
+// a reader who sees null concludes nobody has decided, and somebody has.
+//
+// NOTHING ELSE MOVED, and the list of what did not is longer than the list of
+// what did. r7 itself still has no entry, so the ruling is a copy held here and
+// not the packet's own word. No seat holds the oracle. No predecessor-outcome
+// reader, scheduler reader or gate-conclusion reader exists. So the producer
+// SEAM is still unbound, `producer_bound` is still false, `passable` is still
+// false for every caller on every input, and there is still no join. Deciding
+// who should sign is not the same as somebody signing.
+//
 // (2) THE EVIDENCE. There is no authoritative predecessor-outcome reader, no
 // scheduler reader and no gate-conclusion reader in this repository either. A
 // caller object describing four accepted outcomes, a canary, a readback and a
@@ -46,9 +62,11 @@
 // enforced today at tools/doctorcre-v5-review.cjs:1234-1244, which asserts that
 // `step:gate-zero-read-only-outcome`'s `depends_on` is exactly
 // {wr46-dissolution, wr40-repository, wr54-backup-recovery, scheduler-active}.
-// They are restated here because that validator is CommonJS plan-shape code that
-// this module cannot import, and gate-zero-assurance.v5.test.mjs reads that file
-// and asserts the two lists are identical — so a change to the frozen plan turns
+// They are restated ONCE, in gate-zero-producer-registration.v5.js beside the
+// registration they stamp, because that validator is CommonJS plan-shape code no
+// ESM module can import; this module re-exports that one list rather than
+// keeping a second. gate-zero-assurance.v5.test.mjs reads the validator and
+// asserts the two lists are identical — so a change to the frozen plan turns
 // this module's test red instead of letting the two drift apart in silence.
 //
 // TWO KINDS OF NO, inherited unchanged from global-boundaries.v5.js:
@@ -74,6 +92,14 @@ import { canonicalJson, digest } from "./artifact-trust.js";
 import { V5BoundaryError, V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 import { ORGANIZATION_TENANT_ID } from "./identity.js";
 import { GATE_ZERO_STEP_REF } from "./benchmark-minimum.v5.js";
+import {
+  V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS,
+  V5_A02_GATE_ZERO_PRODUCER_DECISION_REF,
+  V5_A02_GATE_ZERO_PRODUCER_REGISTRATION,
+  V5_A02_GATE_ZERO_PRODUCER_REGISTRATION_STATUS,
+  V5_A02_GATE_ZERO_R7_ENTRY_PRESENT,
+  V5_A02_SCHEDULER_STEP_REF,
+} from "./gate-zero-producer-registration.v5.js";
 
 export { GATE_ZERO_STEP_REF, V5_NO_EFFECTS };
 
@@ -109,20 +135,21 @@ function fail(code, message, detail) {
 // ---------------------------------------------------------------------------
 
 /**
- * Exactly the `depends_on` set that tools/doctorcre-v5-review.cjs:1234-1244
- * asserts on `step:gate-zero-read-only-outcome`, C-sorted so two readers
- * enumerate it identically. A member absent here is not admissible evidence for
- * Gate Zero; a member present here is mandatory.
+ * The four predecessors and the scheduler among them, re-exported from
+ * gate-zero-producer-registration.v5.js — which holds them as a hard-bound
+ * literal beside the registration they stamp. This module does not restate
+ * them: two copies would be two authorities. A member absent there is not
+ * admissible evidence for Gate Zero; a member present there is mandatory.
+ *
+ * The provisionally-ruled producer registration comes from the same module as
+ * ONE frozen constant. There is no builder to call and no predecessor set to
+ * hand in. It names a role; it staffs nobody and binds nothing.
  */
-export const V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS = deepFreeze([
-  "step:scheduler-active-receipt",
-  "step:wr40-repository-outcome",
-  "step:wr46-dissolution-outcome",
-  "step:wr54-backup-recovery-outcome",
-].sort());
-
-/** The one predecessor the scheduler canary must itself be bound to. */
-export const V5_A02_SCHEDULER_STEP_REF = "step:scheduler-active-receipt";
+export {
+  V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS,
+  V5_A02_GATE_ZERO_PRODUCER_REGISTRATION,
+  V5_A02_SCHEDULER_STEP_REF,
+};
 
 /** What an observation says it saw. "pending" and "absent" are both "no". */
 export const V5_A02_OBSERVATION_STATES = deepFreeze(["absent", "observed", "pending"]);
@@ -335,29 +362,38 @@ export function emitGateZeroOutcome(request) {
       "emitGateZeroOutcome takes one request; the producer is bound by this module",
       { arguments_received: arguments.length, required_seam: V5_A02_GATE_ZERO_PRODUCER_SEAM });
 
+  const entry = V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.registry_entry;
   return unavailable(
     "gate_zero_outcome_emission",
     "gate_zero_producer_seam_unavailable",
-    "r7 registers no producer for the Gate Zero outcome, and no reader exists for the evidence one would stand on",
+    "the producer role is ruled provisionally but r7 carries no entry, no seat holds the oracle, and no reader exists for the evidence one would stand on",
     [...V5_A02_GATE_ZERO_OWED_SEAMS],
     {
       decision_ids: [...V5_A02_DECISION_IDS],
       // FIXED. Not derived from a join, not derived from the request, not
-      // derivable by any caller.
+      // derivable by any caller, and NOT derived from the registration either:
+      // a ruled role is not a signature.
       passable: false,
-      not_passable_because: "producer undecided, and no authoritative predecessor, scheduler or gate reader exists",
+      not_passable_because:
+        "the ruled producer role is unstaffed and unregistered in r7, and no authoritative predecessor, scheduler or gate reader exists",
       producer_seam: V5_A02_GATE_ZERO_PRODUCER_SEAM,
       producer_bound: boundSeam(V5_A02_GATE_ZERO_PRODUCER_SEAM, "emitOutcome") !== null,
       producer_is_caller_supplied: false,
-      // r7 declares none of these for this step. Null is the honest value; a
-      // placeholder string here would be the invention this slice exists to
-      // refuse.
-      producer_role: null,
-      oracle_ref: null,
-      output_schema_ref: null,
-      evidence_scope: null,
-      produced_gate_id: null,
-      // The outcome fields a consumer would need. Null for the same reason.
+      // What decision 20c83902 ruled, reported as ruled. These are NOT read
+      // from r7 — `producer_registration.r7_entry_present` says so in the same
+      // breath — and the four fields the ruling could not settle are still
+      // null inside the registration's own `unresolved_without_r7`.
+      producer_role: entry.producer_role,
+      oracle_ref: entry.oracle_ref,
+      output_schema_ref: entry.output_schema_ref,
+      evidence_scope: entry.evidence_scope,
+      produced_gate_id: entry.produces_gate_ids[0],
+      producer_registration: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION,
+      producer_registration_status: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION_STATUS,
+      producer_registration_decision_ref: V5_A02_GATE_ZERO_PRODUCER_DECISION_REF,
+      r7_entry_present: V5_A02_GATE_ZERO_R7_ENTRY_PRESENT,
+      // The outcome fields a consumer would need. Null because no run has
+      // happened and no seat could have run it.
       outcome_digest: null,
       observed_at: null,
       // AND the join fields. Null because there is no join to report, not
@@ -365,11 +401,12 @@ export function emitGateZeroOutcome(request) {
       join: null,
       join_unavailable_because: "no authoritative predecessor-outcome or scheduler reader exists to join",
       predecessor_evidence_read: null,
+      // The four the ruling answered are gone from this list and reported
+      // above instead. What is left is what is still genuinely open, plus the
+      // two the ruling created by deciding a role nothing holds.
       undecided_governance_questions: deepFreeze([
-        "who or what issues the Gate Zero outcome",
-        "the closed field set the outcome carries",
-        "the pass rule over that field set",
-        "whether a failed Gate Zero run is retryable",
+        "which independent seat holds oracle:gate-producer:gate-zero-read-only",
+        "whether r7 itself carries the registration, which today it does not",
         "which store an accepted predecessor outcome is read from",
         "which scheduler surface a canary and its readback are read from",
         "which surface a gate's own conclusion is read from",
@@ -402,6 +439,7 @@ export function v5A02GateZeroPolicyPreimage() {
     reason_ids: [...V5_A02_GATE_ZERO_REASON_IDS].sort(),
     owed_seams: [...V5_A02_GATE_ZERO_OWED_SEAMS],
     producer_seam: V5_A02_GATE_ZERO_PRODUCER_SEAM,
+    producer_registration: V5_A02_GATE_ZERO_PRODUCER_REGISTRATION,
     producer_bound: false,
     authoritative_readers_bound: false,
     public_surface_answers: "unavailable",
