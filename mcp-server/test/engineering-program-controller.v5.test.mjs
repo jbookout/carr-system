@@ -10,9 +10,11 @@
 // granted width itself; there is no width answer a test could hand it, which is
 // the point — see "a forged width answer".
 //
-// The release suite builds a real content-addressed receipt store: each
-// reference is the digest of the bytes the holder returns, so a test that edits
-// a receipt after citing it is testing the same thing a forger would try.
+// The release suite proves a NEGATIVE first: the release decision cannot reach
+// allow, because the authoritative receipt store it reads does not exist and no
+// caller can supply one. The clauses that decision will be made of are proved
+// separately as pure predicates over fixture receipt shapes — and a predicate,
+// unlike a decision, cannot be handed a counterfeit ledger.
 //
 //   node --test mcp-server/test/engineering-program-controller.v5.test.mjs
 
@@ -41,6 +43,8 @@ import {
   V5_CHECKPOINT_CHECKS,
   V5_RELEASE_CHECKS,
   V5_RELEASE_RECEIPT_KINDS,
+  V5_RELEASE_CHECK_RECEIPT_KINDS,
+  V5_RELEASE_STATE_HOLDER_SEAM,
   V5_PRE_MERGE_RELEASE_CHECKS,
   V5_PROGRAM_CONTROLLER_REASON_IDS,
   V5_AUTO_RELEASE_UPSTREAM_STEPS,
@@ -48,10 +52,14 @@ import {
   evaluateSliceAdmission,
   evaluateCheckpointResume,
   evaluateReleaseEligibility,
+  evaluateReleaseCheck,
+  verifyReleaseReceipt,
   v5ProgramControllerPolicyPreimage,
   v5ProgramControllerPolicyDigest,
   v5ProgramControllerPolicyCanonicalBytes,
 } from "../src/engineering-program-controller.v5.js";
+// The whole export surface, to prove nothing on it binds a release state holder.
+import * as controller from "../src/engineering-program-controller.v5.js";
 
 const MAIN = "52fe8c39033547b806cd35a3ddb4c2d0f36eb42b";
 const OLD_MAIN = "36ba65c9a1b2c3d4e5f60718293a4b5c6d7e8f90";
@@ -200,34 +208,57 @@ const releaseBodies = () => copy({
   },
 });
 
+/** The release these fixture receipts are receipts OF. */
+const RELEASE_BINDING = { slice_ref: "slice:v5-f02", head_sha: HEAD };
+
 /**
- * A content-addressed receipt store standing in for the authoritative one: the
- * reference IS the digest of the bytes, so citing a receipt and then changing
- * it breaks the citation. That is the property the module checks, and a fixture
- * that faked the reference would prove nothing.
+ * A release request: six content-addressed references and nothing else. The
+ * reference IS the digest of the bytes it names, so a fixture that edits a body
+ * after citing it breaks its own citation — which is the property
+ * verifyReleaseReceipt checks.
+ *
+ * There is no holder here, and there is no holder ANYWHERE in this file: the
+ * module binds its own, and a test that built one would be testing a door the
+ * module does not have.
  */
 function releaseCase(mutateBodies = () => {}, mutateRequest = () => {}) {
   const bodies = releaseBodies();
   mutateBodies(bodies);
-  const store = new Map();
   const receipts = {};
-  for (const kind of V5_RELEASE_RECEIPT_KINDS) {
-    const receiptRef = `receipt:${digest(bodies[kind])}`;
-    store.set(receiptRef, bodies[kind]);
-    receipts[kind] = receiptRef;
-  }
-  const holder = { resolveReceipt: receiptRef => store.get(receiptRef) ?? null };
+  for (const kind of V5_RELEASE_RECEIPT_KINDS) receipts[kind] = `receipt:${digest(bodies[kind])}`;
   const request = {
     slice_ref: "slice:v5-f02", head_sha: HEAD, receipts, auto_release_requested: false,
   };
-  mutateRequest(request, store, holder);
-  return { request, holder, store, bodies };
+  mutateRequest(request, bodies);
+  return { request, bodies, receipts };
 }
 
-const release = (mutateBodies, mutateRequest) => {
-  const { request, holder } = releaseCase(mutateBodies, mutateRequest);
-  return evaluateReleaseEligibility(request, holder);
+const release = (mutateBodies, mutateRequest) =>
+  evaluateReleaseEligibility(releaseCase(mutateBodies, mutateRequest).request);
+
+/** One check decided from its own fixture receipt body — the pure predicate. */
+const releaseCheck = (check, mutateBodies = () => {}, binding = RELEASE_BINDING) => {
+  const bodies = releaseBodies();
+  mutateBodies(bodies);
+  return evaluateReleaseCheck(check, bodies[V5_RELEASE_CHECK_RECEIPT_KINDS[check]], binding);
 };
+
+/** One receipt verified against the reference that cited it — the pure check. */
+function releaseReceiptVerification(kind, {
+  mutateBodies = () => {}, citedRef = null, servedBody = undefined, binding = RELEASE_BINDING,
+} = {}) {
+  const bodies = releaseBodies();
+  const cited = citedRef ?? `receipt:${digest(bodies[kind])}`;
+  mutateBodies(bodies);
+  return verifyReleaseReceipt(kind, cited,
+    servedBody === undefined ? bodies[kind] : servedBody, binding);
+}
+
+function checkRefusal(outcome, reasonId) {
+  assert.equal(outcome.state, "refused");
+  assert.equal(outcome.reason_id, reasonId);
+  return outcome;
+}
 
 function refusalOf(answer, reasonId, blockingCheck) {
   assert.equal(answer.decision, "refuse");
@@ -748,180 +779,122 @@ test("resume: a catalog-sourced census refuses here too, before any checkpoint f
 // 4. Release.
 // ---------------------------------------------------------------------------
 
-test("release: review, green checks, exact head, a free merge slot and a readback", () => {
-  const answer = release();
-  assert.equal(answer.decision, "allow");
-  assert.equal(answer.reason_id, "release_complete_after_serialized_merge_and_readback");
-  assert.equal(answer.released, true);
-  assert.equal(answer.merge_admitted, true);
-  assert.deepEqual(answer.checks_satisfied, [...V5_RELEASE_CHECKS]);
-  assert.equal(answer.state_holder_bound, true);
-  assert.equal(answer.caller_stated_release_facts, false);
-  assert.equal(answer.observed_head_sha, HEAD);
-  assert.equal(answer.receipt_refs_verified.length, V5_RELEASE_RECEIPT_KINDS.length,
-    "every fact this release rests on was resolved and verified");
-  assert.equal(answer.performs_merge, false);
-  assert.equal(answer.performs_deployment, false);
-  assert.deepEqual(answer.effects, V5_NO_EFFECTS);
-});
+// THE DECISION. There is exactly one thing to prove about the release decision
+// as it stands: it cannot say yes. The facts it decides on live in an
+// authoritative receipt store that does not exist in this repository, the
+// module binds that seam itself, and no caller can supply one — so every check
+// refuses, naming the seam that is owed.
+//
+// THE CLAUSES. Everything the decision WILL be made of the day that seam exists
+// is proved below as pure predicates over fixture receipt shapes:
+// verifyReleaseReceipt (is this receipt the one that was cited, of the right
+// kind, for this slice and this head) and evaluateReleaseCheck (review, CI,
+// exact head, serialized merge slot, descendant revalidation, readback). A
+// predicate takes a receipt body, never a ledger, so proving one proves a
+// clause and can never manufacture a release.
 
-test("release: with no state holder bound, nothing is decided and the first check says so", () => {
-  const { request } = releaseCase();
-  const answer = evaluateReleaseEligibility(request);
-  refusalOf(answer, "release_state_holder_unavailable", "independent_review");
-  assert.equal(answer.state_holder_bound, false);
+test("release: the decision cannot reach allow, and names the seam it is owed", () => {
+  const answer = release();
+  assert.equal(answer.decision, "refuse");
+  assert.equal(answer.reason_id, "release_state_holder_unavailable");
+  assert.equal(answer.blocking_check, V5_RELEASE_CHECKS[0]);
   assert.equal(answer.released, false);
   assert.equal(answer.merge_admitted, false);
-  assert.equal(answer.observed_head_sha, null, "an unverified observation is never restated as a fact");
+  assert.equal(answer.state_holder_bound, false);
+  assert.equal(answer.state_holder_is_caller_supplied, false);
+  assert.equal(answer.release_state_holder_seam, V5_RELEASE_STATE_HOLDER_SEAM);
+  assert.equal(answer.check_states[V5_RELEASE_CHECKS[0]].detail.required_seam,
+    V5_RELEASE_STATE_HOLDER_SEAM);
+  assert.equal(answer.observed_head_sha, null, "no observation is restated as a fact");
   assert.deepEqual(answer.receipt_refs_verified, []);
+  assert.equal(answer.caller_stated_release_facts, false);
   assert.deepEqual(answer.checks_not_reached, V5_RELEASE_CHECKS.slice(1));
-  // A holder that is an object but cannot resolve anything is not a holder.
-  refusalOf(evaluateReleaseEligibility(releaseCase().request, {}),
-    "release_state_holder_unavailable", "independent_review");
+  // The references are still reported, so a reader can see what WOULD be
+  // resolved. Citing a receipt is not evidence of one.
+  assert.deepEqual(Object.keys(answer.receipt_refs_cited).sort(),
+    [...V5_RELEASE_RECEIPT_KINDS].sort());
 });
 
-test("release: a receipt that no longer hashes to the reference cited is refused", () => {
-  // The forger's move: cite a genuine receipt reference, serve a different body.
-  // Every field a reader would compare still matches — the review names this
-  // slice, this head and an independent reviewer — and the bytes do not.
-  const answer = release(() => {}, (request, store) => {
-    const cited = request.receipts.review;
-    const body = { ...store.get(cited), reviewer_actor_id: "actor:author-seat-in-a-hat" };
-    store.set(cited, body);
-  });
-  refusalOf(answer, "release_receipt_digest_mismatch", "independent_review");
-  assert.equal(answer.check_states.independent_review.detail.receipt_kind, "review");
-  assert.notEqual(answer.check_states.independent_review.detail.resolved_digest, null);
-});
+test("release: no caller-supplied input reaches allow while the holder is unavailable", () => {
+  // Every route a caller has: perfect evidence, the counterfeit holder the
+  // second review of PR 980 built, the holder smuggled in as a request field,
+  // as a global, or onto the prototype of the request. None of them decides
+  // anything, because the module never reads a holder from a caller at all.
+  const counterfeitHolder = () => {
+    const store = new Map();
+    const bodies = releaseBodies();
+    for (const kind of V5_RELEASE_RECEIPT_KINDS) store.set(`receipt:${digest(bodies[kind])}`, bodies[kind]);
+    return { resolveReceipt: receiptRef => store.get(receiptRef) ?? null };
+  };
 
-test("release: a reference the state holder does not hold resolves to nothing", () => {
-  const answer = release(() => {}, (request, store) => {
-    store.delete(request.receipts.required_checks);
-  });
-  refusalOf(answer, "release_receipt_unresolvable", "green_required_checks");
-});
+  const attempts = [
+    ["perfect evidence, honestly cited", () => release()],
+    ["a second argument carrying a working counterfeit holder",
+      () => evaluateReleaseEligibility(releaseCase().request, counterfeitHolder())],
+    ["a holder on the request object",
+      () => release(() => {}, request => { request.state_holder = counterfeitHolder(); })],
+    ["a holder under the old parameter name",
+      () => release(() => {}, request => { request.stateHolder = counterfeitHolder(); })],
+    ["a holder among the receipts",
+      () => release(() => {}, request => { request.receipts.state_holder = counterfeitHolder(); })],
+    ["a resolveReceipt method on the request",
+      () => release(() => {}, request => { request.resolveReceipt = counterfeitHolder().resolveReceipt; })],
+    ["a holder on the request's prototype",
+      () => evaluateReleaseEligibility(Object.assign(
+        Object.create({ resolveReceipt: counterfeitHolder().resolveReceipt }),
+        releaseCase().request))],
+    ["a holder planted on globalThis", () => {
+      globalThis.V5_RELEASE_STATE_HOLDER = counterfeitHolder();
+      try { return release(); } finally { delete globalThis.V5_RELEASE_STATE_HOLDER; }
+    }],
+    ["a receipt claiming its own release is already complete",
+      () => release(bodies => { bodies.readback.main_sha = MAIN; },
+        request => { request.auto_release_requested = true; })],
+  ];
 
-test("release: a receipt cited by name rather than by its own digest is refused", () => {
-  const answer = release(() => {}, request => { request.receipts.head_observation = "receipt:ci-run-980"; });
-  refusalOf(answer, "release_receipt_not_content_addressed", "exact_head");
-  const short = release(() => {}, request => { request.receipts.head_observation = `receipt:sha256:${"a".repeat(63)}`; });
-  refusalOf(short, "release_receipt_not_content_addressed", "exact_head");
-});
-
-test("release: a receipt of another kind does not answer the check it was filed under", () => {
-  const answer = release(() => {}, request => { request.receipts.merge_slot = request.receipts.review; });
-  refusalOf(answer, "release_receipt_kind_mismatch", "serialized_merge_slot");
-  assert.equal(answer.check_states.serialized_merge_slot.detail.resolved_kind, "review");
-});
-
-test("release: a receipt bound to another slice or another head proves nothing about this one", () => {
-  const otherSlice = release(bodies => { bodies.review.slice_ref = "slice:v5-a04"; });
-  refusalOf(otherSlice, "release_receipt_bound_to_other_slice", "independent_review");
-  assert.equal(otherSlice.check_states.independent_review.detail.receipt_slice_ref, "slice:v5-a04");
-
-  const otherHead = release(bodies => { bodies.review.head_sha = OTHER_HEAD; });
-  refusalOf(otherHead, "release_receipt_bound_to_other_head", "independent_review");
-  assert.equal(otherHead.check_states.independent_review.detail.receipt_head_sha, OTHER_HEAD);
-});
-
-test("release: before the merge, the merge is admitted and the release is not", () => {
-  const answer = release(bodies => {
-    bodies.readback = {
-      kind: "readback", slice_ref: "slice:v5-f02", head_sha: HEAD, state: "pending",
-      main_sha: null, delivered_source_digest: null, expected_source_digest: null,
-    };
-  });
-  refusalOf(answer, "release_readback_not_verified", "merged_readback");
-  assert.equal(answer.merge_admitted, true, "every pre-merge gate passed");
-  assert.equal(answer.released, false);
-  assert.deepEqual(answer.checks_satisfied, [...V5_PRE_MERGE_RELEASE_CHECKS]);
-});
-
-test("release: an absent or rejecting review refuses", () => {
-  const absent = release(bodies => {
-    bodies.review.state = "absent";
-    bodies.review.reviewer_actor_id = null;
-    bodies.review.reviewed_head_sha = null;
-  });
-  refusalOf(absent, "release_review_not_accepted", "independent_review");
-  assert.equal(absent.merge_admitted, false);
-
-  const changes = release(bodies => { bodies.review.state = "requested_changes"; });
-  refusalOf(changes, "release_review_not_accepted", "independent_review");
-});
-
-test("release: the maker may not be the reviewer", () => {
-  const answer = release(bodies => { bodies.review.reviewer_actor_id = bodies.review.maker_actor_id; });
-  refusalOf(answer, "release_reviewer_not_independent", "independent_review");
-});
-
-test("release: a review of another head is not a review of this one", () => {
-  const answer = release(bodies => { bodies.review.reviewed_head_sha = OTHER_HEAD; });
-  refusalOf(answer, "release_review_bound_to_other_head", "independent_review");
-});
-
-test("release: every required check must be green, and there must be one", () => {
-  for (const conclusion of ["failure", "pending", "cancelled"]) {
-    const answer = release(bodies => { bodies.required_checks.checks[1].conclusion = conclusion; });
-    refusalOf(answer, "release_required_check_not_green", "green_required_checks");
-    assert.deepEqual(answer.check_states.green_required_checks.detail.not_green, ["unit"]);
+  for (const [what, attempt] of attempts) {
+    let answer = null;
+    try {
+      answer = attempt();
+    } catch (error) {
+      // Refusing to READ the input is also not an allow; it must be the
+      // module's own boundary error and not a crash.
+      assert.ok(error instanceof V5BoundaryError, `${what}: ${error}`);
+      continue;
+    }
+    assert.equal(answer.decision, "refuse", `${what} produced a decision other than refuse`);
+    assert.equal(answer.reason_id, "release_state_holder_unavailable", what);
+    assert.equal(answer.released, false, what);
+    assert.equal(answer.merge_admitted, false, what);
+    assert.equal(answer.state_holder_bound, false, what);
+    assert.deepEqual(answer.receipt_refs_verified, [], what);
   }
-  const none = release(bodies => { bodies.required_checks.checks = []; });
-  refusalOf(none, "release_required_check_not_green", "green_required_checks");
 });
 
-test("release: a green check on another head proves nothing about this one", () => {
-  const answer = release(bodies => { bodies.required_checks.checks[0].head_sha = OTHER_HEAD; });
-  refusalOf(answer, "release_required_check_bound_to_other_head", "green_required_checks");
-  assert.deepEqual(answer.check_states.green_required_checks.detail.bound_to_other_head, ["gates"]);
-});
-
-test("release: a branch that moved after review refuses on the exact head", () => {
-  const answer = release(bodies => { bodies.head_observation.observed_head_sha = OTHER_HEAD; });
-  refusalOf(answer, "release_head_moved", "exact_head");
-});
-
-test("release: merge is serialized — another slice holding the slot refuses", () => {
-  const held = release(bodies => {
-    bodies.merge_slot.state = "held";
-    bodies.merge_slot.held_by_slice_ref = "slice:v5-a04";
-  });
-  refusalOf(held, "serialized_merge_slot_held", "serialized_merge_slot");
-
-  const mine = release(bodies => {
-    bodies.merge_slot.state = "held";
-    bodies.merge_slot.held_by_slice_ref = "slice:v5-f02";
-  });
-  assert.equal(mine.decision, "allow", "holding one's own slot is not contention");
-});
-
-test("release: an affected descendant is rebased and revalidated before its delivery", () => {
-  const notRevalidated = release(bodies => { bodies.revalidation.required = true; });
-  refusalOf(notRevalidated, "descendant_revalidation_required", "descendant_revalidation");
-  assert.equal(notRevalidated.merge_admitted, false);
-
-  const stale = release(bodies => {
-    bodies.revalidation.required = true;
-    bodies.revalidation.revalidated_against_sha = OLD_MAIN;
-  });
-  refusalOf(stale, "descendant_revalidation_required", "descendant_revalidation");
-
-  const revalidated = release(bodies => {
-    bodies.revalidation.required = true;
-    bodies.revalidation.revalidated_against_sha = MAIN;
-  });
-  assert.equal(revalidated.decision, "allow");
-});
-
-test("release: what landed on main must be what was reviewed", () => {
-  const answer = release(bodies => { bodies.readback.delivered_source_digest = "sha256:bb"; });
-  refusalOf(answer, "release_readback_digest_mismatch", "merged_readback");
+test("release: the state holder is not an argument, and nothing exported binds one", () => {
+  assert.equal(evaluateReleaseEligibility.length, 1);
+  throwsWith(() => evaluateReleaseEligibility(releaseCase().request, { resolveReceipt: () => null }),
+    "release_state_holder_is_not_an_argument");
+  // Even a second argument that is plainly not a holder is unreadable: the
+  // module refuses the SHAPE of being handed one, not a particular fake.
+  throwsWith(() => evaluateReleaseEligibility(releaseCase().request, null),
+    "release_state_holder_is_not_an_argument");
+  // The seam is a name, and the only exported thing about the holder. No
+  // exported function offers to bind, set or inject one.
+  assert.equal(typeof V5_RELEASE_STATE_HOLDER_SEAM, "string");
+  assert.match(V5_RELEASE_STATE_HOLDER_SEAM, /^seam:[a-z0-9-]+$/);
+  const binders = Object.entries(controller)
+    .filter(([name, value]) => typeof value === "function" && /holder|ledger|inject/i.test(name));
+  assert.deepEqual(binders.map(([name]) => name), [],
+    "an exported function naming the holder would be a door back into the hole");
+  assert.equal(v5ProgramControllerPolicyPreimage().release_allow_reachable, false);
+  assert.equal(v5ProgramControllerPolicyPreimage().caller_may_supply_release_state_holder, false);
+  assert.equal(v5ProgramControllerPolicyPreimage().release_state_holder_available, false);
 });
 
 test("release: auto-release is unavailable and names the receipts it waits on", () => {
   for (const requested of [false, true]) {
     const answer = release(() => {}, request => { request.auto_release_requested = requested; });
-    assert.equal(answer.decision, "allow", "a fully evidenced release is still a release");
     assert.equal(answer.auto_release_state, "unavailable");
     assert.equal(answer.auto_release_decided, false);
     assert.equal(answer.auto_release_unavailable_reason_id, "auto_release_upstream_receipt_absent");
@@ -931,27 +904,216 @@ test("release: auto-release is unavailable and names the receipts it waits on", 
 });
 
 test("release: a caller cannot assert the upstream receipts it does not have", () => {
-  const { request, holder } = releaseCase();
+  const { request } = releaseCase();
   request.gate_zero_receipt = { accepted: true };
-  throwsWith(() => evaluateReleaseEligibility(request, holder), "unknown_field");
+  throwsWith(() => evaluateReleaseEligibility(request), "unknown_field");
 
   const extra = releaseCase();
   extra.request.receipts.gate_zero = "receipt:sha256:00";
-  throwsWith(() => evaluateReleaseEligibility(extra.request, extra.holder), "unknown_field");
+  throwsWith(() => evaluateReleaseEligibility(extra.request), "unknown_field");
 });
 
-test("release: a free merge slot may not name a holder, and an absent review may not name a reviewer", () => {
-  assert.throws(() => release(bodies => { bodies.merge_slot.held_by_slice_ref = "slice:v5-a04"; }),
+// ---------------------------------------------------------------------------
+// The receipt-verification clause, as a pure predicate over fixture shapes.
+// ---------------------------------------------------------------------------
+
+test("receipt: a receipt cited by its own digest, for this slice and this head, verifies", () => {
+  for (const kind of V5_RELEASE_RECEIPT_KINDS) {
+    const outcome = releaseReceiptVerification(kind);
+    assert.equal(outcome.ok, true, `${kind} did not verify`);
+    assert.equal(outcome.body.kind, kind);
+  }
+});
+
+test("receipt: a receipt that no longer hashes to the reference cited is refused", () => {
+  // The forger's move: cite a genuine receipt reference, serve a different body.
+  // Every field a reader would compare still matches; the bytes do not.
+  const outcome = releaseReceiptVerification("review", {
+    mutateBodies: bodies => { bodies.review.reviewer_actor_id = "actor:author-seat-in-a-hat"; },
+  });
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.reasonId, "release_receipt_digest_mismatch");
+  assert.equal(outcome.detail.receipt_kind, "review");
+  assert.notEqual(outcome.detail.resolved_digest, null);
+});
+
+test("receipt: a reference the state holder does not hold resolves to nothing", () => {
+  for (const servedBody of [null, "a receipt, honest", [], 42, new Map()]) {
+    const outcome = releaseReceiptVerification("required_checks", { servedBody });
+    assert.equal(outcome.ok, false);
+    assert.equal(outcome.reasonId, "release_receipt_unresolvable");
+  }
+});
+
+test("receipt: a receipt cited by name rather than by its own digest is refused", () => {
+  for (const citedRef of [
+    "receipt:ci-run-980", `receipt:sha256:${"a".repeat(63)}`, `receipt:sha256:${"A".repeat(64)}`,
+    `sha256:${"a".repeat(64)}`, "", 17, `receipt:sha256:${"a".repeat(65)}`,
+  ]) {
+    const outcome = releaseReceiptVerification("head_observation", { citedRef });
+    assert.equal(outcome.ok, false, `${citedRef} was accepted as a reference`);
+    assert.equal(outcome.reasonId, "release_receipt_not_content_addressed");
+  }
+});
+
+test("receipt: a receipt of another kind does not answer the check it was filed under", () => {
+  const bodies = releaseBodies();
+  const outcome = verifyReleaseReceipt("merge_slot", `receipt:${digest(bodies.review)}`,
+    bodies.review, RELEASE_BINDING);
+  assert.equal(outcome.ok, false);
+  assert.equal(outcome.reasonId, "release_receipt_kind_mismatch");
+  assert.equal(outcome.detail.resolved_kind, "review");
+});
+
+test("receipt: a receipt bound to another slice or another head proves nothing about this one", () => {
+  const otherSlice = releaseReceiptVerification("review", {
+    binding: { slice_ref: "slice:v5-a04", head_sha: HEAD },
+  });
+  assert.equal(otherSlice.reasonId, "release_receipt_bound_to_other_slice");
+  assert.equal(otherSlice.detail.receipt_slice_ref, "slice:v5-f02");
+
+  const otherHead = releaseReceiptVerification("review", {
+    binding: { slice_ref: "slice:v5-f02", head_sha: OTHER_HEAD },
+  });
+  assert.equal(otherHead.reasonId, "release_receipt_bound_to_other_head");
+  assert.equal(otherHead.detail.receipt_head_sha, HEAD);
+});
+
+test("receipt: a receipt the module cannot read fails closed rather than deciding", () => {
+  // The body must genuinely hash to the reference that cites it, or the digest
+  // check answers first and the shape is never reached. So a receipt the store
+  // really holds, that this module cannot read, is the case under test.
+  const unreadable = mutate => {
+    const bodies = releaseBodies();
+    mutate(bodies);
+    return () => verifyReleaseReceipt("review", `receipt:${digest(bodies.review)}`,
+      bodies.review, RELEASE_BINDING);
+  };
+  throwsWith(unreadable(bodies => { delete bodies.review.maker_actor_id; }), "missing_field");
+  throwsWith(unreadable(bodies => { bodies.review.approved = true; }), "unknown_field");
+  throwsWith(unreadable(bodies => { bodies.review.state = "rubber_stamped"; }), "unknown_enum_member");
+  throwsWith(() => verifyReleaseReceipt("deploy_approval", `receipt:sha256:${"0".repeat(64)}`,
+    {}, RELEASE_BINDING), "unknown_enum_member");
+});
+
+// ---------------------------------------------------------------------------
+// The six release clauses, as pure predicates over fixture receipt shapes.
+// Deciding a clause is not deciding a release: see the decision tests above.
+// ---------------------------------------------------------------------------
+
+test("clause: every release check is decided from its own kind of receipt", () => {
+  assert.deepEqual(Object.keys(V5_RELEASE_CHECK_RECEIPT_KINDS).sort(), [...V5_RELEASE_CHECKS].sort());
+  assert.deepEqual([...new Set(Object.values(V5_RELEASE_CHECK_RECEIPT_KINDS))].sort(),
+    [...V5_RELEASE_RECEIPT_KINDS].sort());
+  for (const check of V5_RELEASE_CHECKS) {
+    const outcome = releaseCheck(check);
+    assert.equal(outcome.state, "satisfied", `${check} refused a clean receipt`);
+    assert.equal(outcome.check, check);
+  }
+});
+
+test("clause: an absent or rejecting review refuses, and the maker may not be the reviewer", () => {
+  const absent = releaseCheck("independent_review", bodies => {
+    bodies.review.state = "absent";
+    bodies.review.reviewer_actor_id = null;
+    bodies.review.reviewed_head_sha = null;
+  });
+  checkRefusal(absent, "release_review_not_accepted");
+  assert.equal(absent.detail.review_state, "absent");
+
+  checkRefusal(releaseCheck("independent_review", bodies => { bodies.review.state = "requested_changes"; }),
+    "release_review_not_accepted");
+  checkRefusal(releaseCheck("independent_review",
+    bodies => { bodies.review.reviewer_actor_id = bodies.review.maker_actor_id; }),
+    "release_reviewer_not_independent");
+  checkRefusal(releaseCheck("independent_review", bodies => { bodies.review.reviewed_head_sha = OTHER_HEAD; }),
+    "release_review_bound_to_other_head");
+});
+
+test("clause: every required check must be green, on this head, and there must be one", () => {
+  for (const conclusion of ["failure", "cancelled", "pending"]) {
+    checkRefusal(releaseCheck("green_required_checks",
+      bodies => { bodies.required_checks.checks[1].conclusion = conclusion; }),
+      "release_required_check_not_green");
+  }
+  const none = checkRefusal(releaseCheck("green_required_checks",
+    bodies => { bodies.required_checks.checks = []; }), "release_required_check_not_green");
+  assert.deepEqual(none.detail.required_checks, []);
+
+  const otherHead = checkRefusal(releaseCheck("green_required_checks",
+    bodies => { bodies.required_checks.checks[0].head_sha = OTHER_HEAD; }),
+    "release_required_check_bound_to_other_head");
+  assert.deepEqual(otherHead.detail.bound_to_other_head, ["gates"]);
+});
+
+test("clause: a branch that moved after review refuses on the exact head", () => {
+  const moved = checkRefusal(releaseCheck("exact_head",
+    bodies => { bodies.head_observation.observed_head_sha = OTHER_HEAD; }), "release_head_moved");
+  assert.equal(moved.detail.observed_head_sha, OTHER_HEAD);
+});
+
+test("clause: merge is serialized — another slice holding the slot refuses", () => {
+  const held = checkRefusal(releaseCheck("serialized_merge_slot", bodies => {
+    bodies.merge_slot.state = "held";
+    bodies.merge_slot.held_by_slice_ref = "slice:v5-a04";
+  }), "serialized_merge_slot_held");
+  assert.equal(held.detail.held_by_slice_ref, "slice:v5-a04");
+
+  const mine = releaseCheck("serialized_merge_slot", bodies => {
+    bodies.merge_slot.state = "held";
+    bodies.merge_slot.held_by_slice_ref = "slice:v5-f02";
+  });
+  assert.equal(mine.state, "satisfied", "holding one's own slot is not contention");
+});
+
+test("clause: an affected descendant is rebased and revalidated before its delivery", () => {
+  checkRefusal(releaseCheck("descendant_revalidation",
+    bodies => { bodies.revalidation.required = true; }), "descendant_revalidation_required");
+  checkRefusal(releaseCheck("descendant_revalidation", bodies => {
+    bodies.revalidation.required = true;
+    bodies.revalidation.revalidated_against_sha = OLD_MAIN;
+  }), "descendant_revalidation_required");
+  assert.equal(releaseCheck("descendant_revalidation", bodies => {
+    bodies.revalidation.required = true;
+    bodies.revalidation.revalidated_against_sha = MAIN;
+  }).state, "satisfied");
+});
+
+test("clause: a merge is not a delivery until what landed is read back from main", () => {
+  for (const state of ["absent", "pending"]) {
+    checkRefusal(releaseCheck("merged_readback", bodies => {
+      bodies.readback.state = state;
+      bodies.readback.main_sha = null;
+      bodies.readback.delivered_source_digest = null;
+      bodies.readback.expected_source_digest = null;
+    }), "release_readback_not_verified");
+  }
+  const mismatch = checkRefusal(releaseCheck("merged_readback",
+    bodies => { bodies.readback.delivered_source_digest = "sha256:bb"; }),
+    "release_readback_digest_mismatch");
+  assert.equal(mismatch.detail.delivered_source_digest, "sha256:bb");
+});
+
+test("clause: a receipt shape the module cannot read fails closed rather than deciding", () => {
+  throwsWith(() => evaluateReleaseCheck("merged_readback", releaseBodies().review, RELEASE_BINDING),
+    "unknown_field");
+  throwsWith(() => releaseCheck("independent_review", bodies => { bodies.review.approved = true; }),
+    "unknown_field");
+  throwsWith(() => releaseCheck("independent_review", bodies => { delete bodies.review.maker_actor_id; }),
+    "missing_field");
+  throwsWith(() => evaluateReleaseCheck("deploy_it", releaseBodies().review, RELEASE_BINDING),
+    "unknown_enum_member");
+  throwsWith(() => releaseCheck("independent_review", () => {}, { slice_ref: "slice:v5-f02" }),
+    "missing_field");
+  throwsWith(() => releaseCheck("independent_review", () => {},
+    { slice_ref: "slice:v5-f02", head_sha: HEAD, actor: "joe" }), "unknown_field");
+  assert.throws(() => releaseCheck("serialized_merge_slot",
+    bodies => { bodies.merge_slot.held_by_slice_ref = "slice:v5-a04"; }),
     error => error instanceof V5BoundaryError && error.code === "free_slot_names_a_holder");
-  assert.throws(() => release(bodies => { bodies.review.state = "absent"; bodies.review.reviewed_head_sha = null; }),
-    error => error instanceof V5BoundaryError && error.code === "absent_review_states_a_reviewer");
-});
-
-test("release: a receipt the module cannot read fails closed rather than deciding", () => {
-  assert.throws(() => release(bodies => { delete bodies.review.maker_actor_id; }),
-    error => error instanceof V5BoundaryError && error.code === "missing_field");
-  assert.throws(() => release(bodies => { bodies.review.approved = true; }),
-    error => error instanceof V5BoundaryError && error.code === "unknown_field");
+  assert.throws(() => releaseCheck("independent_review", bodies => {
+    bodies.review.state = "absent";
+    bodies.review.reviewed_head_sha = null;
+  }), error => error instanceof V5BoundaryError && error.code === "absent_review_states_a_reviewer");
 });
 
 // ---------------------------------------------------------------------------

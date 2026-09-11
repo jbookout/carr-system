@@ -42,12 +42,24 @@
 //   * RELEASE ELIGIBILITY. (a) NO. There is no Deployment Controller in this
 //     repository — the only occurrence of the phrase is this file. (b) NO. No
 //     store here holds hosted-CI conclusions, a merge slot or a post-merge
-//     readback. MISSING SEAM: a Deployment Controller and the receipt store this
-//     module's state-holder port is written against.
+//     readback. MISSING SEAM: `seam:deployment-controller-release-receipt-store`
+//     (V5_RELEASE_STATE_HOLDER_SEAM), the authoritative holder of release
+//     receipts. Because it does not exist, evaluateReleaseEligibility CANNOT
+//     RETURN AN ALLOW AT ALL: it refuses every check with
+//     `release_state_holder_unavailable`, naming the seam it is owed. The
+//     deterministic clauses are still real and still proved — as PURE
+//     PREDICATES over receipt shapes (verifyReleaseReceipt,
+//     evaluateReleaseCheck), which is the honest thing a module can prove
+//     before its ledger exists.
 //
 // So the decision layer is built, closed and proved against its own contract,
 // and it is not yet load-bearing. Saying so is the point: a controller claimed
 // to gate work it does not gate is worse than one that says it gates nothing.
+// The same reasoning forbids a hole a caller can climb through in the meantime:
+// an earlier correction let the caller PASS IN the release receipt store, which
+// made release authority forgeable by anyone who could write a plausible object.
+// A missing authority is answered by naming it, never by accepting a substitute
+// from the party being decided about.
 //
 // TWO KINDS OF NO, inherited from global-boundaries.v5.js and unchanged here:
 //   * A POLICY ANSWER is RETURNED — `decision` is "allow" or "refuse" with a
@@ -1020,21 +1032,39 @@ export function evaluateCheckpointResume(request) {
 // merge or a post-merge readback, and a controller that decides on facts the
 // decided party wrote is a rubber stamp with a reason_id.
 //
-// So the request carries REFERENCES, and the facts are RESOLVED through a state
-// holder port. Every reference is CONTENT-ADDRESSED: `receipt:sha256:<hex>` of
-// the canonical bytes of the receipt it names. The module rehashes what comes
-// back and refuses unless the bytes hash to the reference that was cited, then
-// refuses again unless the receipt binds THIS slice and THIS head. A receipt
-// body that has been edited keeps neither property, and a reference invented to
-// look right resolves to nothing.
+// So the request carries REFERENCES ONLY, and the facts are RESOLVED from the
+// authoritative state holder. Every reference is CONTENT-ADDRESSED:
+// `receipt:sha256:<hex>` of the canonical bytes of the receipt it names, so a
+// receipt body that has been edited no longer hashes to the reference that
+// cited it, and a reference invented to look right resolves to nothing.
 //
-// WHAT THAT DOES AND DOES NOT BUY. It makes a release fact unforgeable relative
-// to the receipt store: a caller can no longer state one, and cannot mutate one
-// it was given. It does NOT authenticate the state holder itself — this module
-// is handed a port and cannot prove the port is the real ledger. That is an
-// integration property, and it belongs to whoever wires the port. It is stated
-// here rather than implied, because THERE IS NO SUCH CALLER IN THIS REPOSITORY
-// YET: see the seam note in the file header.
+// AND THE STATE HOLDER IS NOT AN ARGUMENT. The correction that first answered
+// the review took the holder as a second parameter — a port the caller passed
+// in. The SECOND independent review of PR 980 named what that leaves standing:
+// content addressing catches altered bytes, not a counterfeit holder. A caller
+// that builds its own holder and fills it with self-consistent counterfeit
+// receipts satisfies every one of those checks and walks out with an `allow`.
+// A decided party that supplies the ledger is still deciding its own case.
+//
+// So there is NO INJECTABLE PORT. The holder is bound by this module, under the
+// name V5_RELEASE_STATE_HOLDER_SEAM, and that seam DOES NOT EXIST IN THIS
+// REPOSITORY: there is no Deployment Controller and no release receipt store
+// (the file header's seam census gives the search that establishes it). So the
+// binding is `null`, every check refuses `release_state_holder_unavailable`
+// naming the owed seam, and `evaluateReleaseEligibility` CANNOT RETURN AN ALLOW
+// FROM ANY INPUT — it takes exactly one argument, a request of references, and
+// a second argument is unreadable rather than a port. This is the same honest
+// shape defect 2 was deferred in: the decision is not proven because the thing
+// it must read does not exist yet, and the module says which thing.
+//
+// THE DETERMINISTIC CLAUSES ARE STILL REAL CODE, and they are what the seam
+// will be judged by the day it exists: `verifyReleaseReceipt` (content address,
+// resolvability, rehash, kind, slice and head binding) and
+// `evaluateReleaseCheck` (review, CI, exact head, serialized merge slot,
+// descendant revalidation, readback) are pure predicates over a receipt SHAPE,
+// exported and proved against fixture receipt bodies below. Being pure is the
+// point: a predicate cannot be handed a ledger, so proving one proves a clause
+// and never a release.
 // ---------------------------------------------------------------------------
 
 /** The six facts a release decision is made of. One receipt each. */
@@ -1133,23 +1163,61 @@ function validateReceiptShape(kind, body, path) {
 }
 
 /**
- * Resolve one receipt and verify it, in the order a forger has to survive:
- * the reference is content-addressed, the holder knows it, the bytes hash to
- * the reference, it is the kind that was asked for, and it binds this slice and
- * this head. Returns `{ ok: true, body }` or the refusal that stopped it.
+ * THE AUTHORITATIVE RELEASE STATE HOLDER, NAMED BY THIS MODULE.
+ *
+ * The seam a release fact may be read from. It is a NAME, not a port: nothing a
+ * caller passes can become this, because the module never accepts a holder as
+ * an argument and exports no way to bind one.
  */
-function resolveVerifiedReceipt(stateHolder, request, kind) {
-  const receiptRef = request.receipts[kind];
+export const V5_RELEASE_STATE_HOLDER_SEAM = "seam:deployment-controller-release-receipt-store";
+
+/**
+ * And here is the binding: `null`, because the seam above does not exist. There
+ * is no Deployment Controller in this repository and no release receipt store —
+ * see the seam census in the file header for the search that establishes it.
+ * When that seam is built, this constant is the single place it binds, and the
+ * day it does, `verifyReleaseReceipt` and `evaluateReleaseCheck` below are the
+ * clauses it will be read through.
+ */
+const V5_RELEASE_STATE_HOLDER = null;
+
+/** The bound holder, or null when the seam is unavailable. Takes no input. */
+function authoritativeReleaseStateHolder() {
+  const holder = V5_RELEASE_STATE_HOLDER;
+  return isPlainObject(holder) && typeof holder.resolveReceipt === "function" ? holder : null;
+}
+
+/** Which receipt each release check is decided from. */
+export const V5_RELEASE_CHECK_RECEIPT_KINDS = deepFreeze({
+  independent_review: "review",
+  green_required_checks: "required_checks",
+  exact_head: "head_observation",
+  serialized_merge_slot: "merge_slot",
+  descendant_revalidation: "revalidation",
+  merged_readback: "readback",
+});
+
+/**
+ * Verify one receipt BODY against the reference that cited it, in the order a
+ * forger has to survive: the reference is content-addressed, something came
+ * back, the bytes hash to the reference, it is the kind that was asked for, and
+ * it binds this slice and this head. Returns `{ ok: true, body }` or the
+ * refusal that stopped it.
+ *
+ * PURE, and deliberately so. It takes the body as an argument rather than a
+ * holder to fetch it from, so it can be proved against fixture receipt shapes
+ * without any caller ever getting to supply the ledger. Verifying a shape is
+ * not deciding a release: only `evaluateReleaseEligibility` decides, and it
+ * reads bodies from the module-bound seam alone.
+ *
+ * `binding` is `{ slice_ref, head_sha }` — the release this receipt must be OF.
+ */
+export function verifyReleaseReceipt(kind, receiptRef, body, binding) {
+  member(kind, V5_RELEASE_RECEIPT_KINDS, "kind");
   const detail = { receipt_kind: kind, receipt_ref: receiptRef };
-  if (!RELEASE_RECEIPT_REF.test(receiptRef))
+  if (typeof receiptRef !== "string" || !RELEASE_RECEIPT_REF.test(receiptRef))
     return { ok: false, reasonId: "release_receipt_not_content_addressed",
       note: "a release receipt is cited by the digest of its own bytes, not by a name", detail };
-  let body = null;
-  try {
-    body = stateHolder.resolveReceipt(receiptRef);
-  } catch {
-    body = null;
-  }
   if (!isPlainObject(body))
     return { ok: false, reasonId: "release_receipt_unresolvable",
       note: "the authoritative state holder does not hold this receipt", detail };
@@ -1163,15 +1231,124 @@ function resolveVerifiedReceipt(stateHolder, request, kind) {
       note: "a receipt of another kind does not answer this check",
       detail: { ...detail, resolved_kind: typeof body.kind === "string" ? body.kind : null } };
   validateReceiptShape(kind, body, `receipt(${kind})`);
-  if (body.slice_ref !== request.slice_ref)
+  const { slice_ref: sliceRef, head_sha: headSha } = releaseBinding(binding);
+  if (body.slice_ref !== sliceRef)
     return { ok: false, reasonId: "release_receipt_bound_to_other_slice",
       note: "a receipt bound to another slice proves nothing about this one",
-      detail: { ...detail, receipt_slice_ref: body.slice_ref, slice_ref: request.slice_ref } };
-  if (body.head_sha !== request.head_sha)
+      detail: { ...detail, receipt_slice_ref: body.slice_ref, slice_ref: sliceRef } };
+  if (body.head_sha !== headSha)
     return { ok: false, reasonId: "release_receipt_bound_to_other_head",
       note: "a receipt bound to another head proves nothing about this one",
-      detail: { ...detail, receipt_head_sha: body.head_sha, head_sha: request.head_sha } };
+      detail: { ...detail, receipt_head_sha: body.head_sha, head_sha: headSha } };
   return { ok: true, body };
+}
+
+/** The release a receipt must be OF: exactly a slice ref and a head. */
+function releaseBinding(binding) {
+  exact(binding, ["slice_ref", "head_sha"], "binding");
+  ref(binding.slice_ref, "binding.slice_ref");
+  commitSha(binding.head_sha, "binding.head_sha");
+  return binding;
+}
+
+/**
+ * Decide ONE release check from its verified receipt body. Pure: no holder, no
+ * request, no release answer — a check outcome, `satisfied()` or `refused()`.
+ * These are the five deterministic clauses the catalog names (independent
+ * review, green required checks, exact head, serialized merge slot, descendant
+ * revalidation) plus the post-merge readback.
+ */
+export function evaluateReleaseCheck(check, body, binding) {
+  member(check, V5_RELEASE_CHECKS, "check");
+  const kind = V5_RELEASE_CHECK_RECEIPT_KINDS[check];
+  validateReceiptShape(kind, object(body, "body"), `receipt(${kind})`);
+  const { head_sha: headSha } = releaseBinding(binding);
+  switch (check) {
+    case "independent_review": {
+      if (body.state !== "accepted")
+        return refused(check, "release_review_not_accepted",
+          "release requires an accepted independent review", { review_state: body.state });
+      if (body.reviewer_actor_id === body.maker_actor_id)
+        return refused(check, "release_reviewer_not_independent",
+          "the maker may not be the reviewer", { actor_id: body.maker_actor_id });
+      if (body.reviewed_head_sha !== headSha)
+        return refused(check, "release_review_bound_to_other_head",
+          "a review of another head is not a review of this one",
+          { reviewed_head_sha: body.reviewed_head_sha, head_sha: headSha });
+      return satisfied(check, "accepted by an independent reviewer on this exact head");
+    }
+    case "green_required_checks": {
+      const checks = body.checks;
+      const notGreen = checks.filter(one => one.conclusion !== "success");
+      const otherHead = checks.filter(one => one.head_sha !== headSha);
+      if (checks.length === 0)
+        return refused(check, "release_required_check_not_green",
+          "a release with no required check is a release with no evidence", { required_checks: [] });
+      if (notGreen.length)
+        return refused(check, "release_required_check_not_green",
+          "every required check must be green", { not_green: notGreen.map(one => one.name).sort() });
+      if (otherHead.length)
+        return refused(check, "release_required_check_bound_to_other_head",
+          "a green check on another head proves nothing about this one",
+          { bound_to_other_head: otherHead.map(one => one.name).sort(), head_sha: headSha });
+      return satisfied(check, `${checks.length} required check(s) green on this head`);
+    }
+    case "exact_head":
+      return body.observed_head_sha === headSha
+        ? satisfied(check, "the branch head is still the reviewed and tested head")
+        : refused(check, "release_head_moved",
+          "the branch moved after review; the evidence describes a head that is no longer there",
+          { head_sha: headSha, observed_head_sha: body.observed_head_sha });
+    case "serialized_merge_slot":
+      return (body.state === "free" || body.held_by_slice_ref === binding.slice_ref)
+        ? satisfied(check, "one eligible slice merges at a time and this is it")
+        : refused(check, "serialized_merge_slot_held",
+          "merge is serialized; another slice holds the slot",
+          { held_by_slice_ref: body.held_by_slice_ref });
+    case "descendant_revalidation":
+      if (!body.required)
+        return satisfied(check, "no preceding merge affects this slice");
+      if (body.revalidated_against_sha === body.current_main_sha)
+        return satisfied(check, "rebased and revalidated against current main");
+      return refused(check, "descendant_revalidation_required",
+        "after each merge every affected descendant is rebased and revalidated before its delivery",
+        { revalidated_against_sha: body.revalidated_against_sha, current_main_sha: body.current_main_sha });
+    case "merged_readback":
+      if (body.state !== "verified")
+        return refused(check, "release_readback_not_verified",
+          "a merge is not a delivery until the delivered source is read back from main",
+          { readback_state: body.state });
+      if (body.delivered_source_digest !== body.expected_source_digest)
+        return refused(check, "release_readback_digest_mismatch",
+          "what landed on main is not what was reviewed",
+          { delivered_source_digest: body.delivered_source_digest, expected_source_digest: body.expected_source_digest });
+      return satisfied(check, `read back from main at ${body.main_sha}`);
+    /* c8 ignore next 2 -- unreachable: `check` is a closed vocabulary above. */
+    default:
+      return fail("unreachable_release_check", `${check} has no clause`, { check });
+  }
+}
+
+/**
+ * The ONLY door from a release check to a release fact. It asks the module for
+ * its bound state holder and gets `null`, because the seam named above does not
+ * exist — so every check refuses, naming the seam that is owed. No argument
+ * reaches this function that could change that answer.
+ */
+function resolveReleaseFact(kind, request) {
+  const holder = authoritativeReleaseStateHolder();
+  if (holder === null)
+    return { ok: false, reasonId: "release_state_holder_unavailable",
+      note: "a release fact is read only from the authoritative state holder this module binds, and that seam does not exist yet",
+      detail: { receipt_kind: kind, required_seam: V5_RELEASE_STATE_HOLDER_SEAM } };
+  let body = null;
+  try {
+    body = holder.resolveReceipt(request.receipts[kind]);
+  } catch {
+    body = null;
+  }
+  return verifyReleaseReceipt(kind, request.receipts[kind], body,
+    { slice_ref: request.slice_ref, head_sha: request.head_sha });
 }
 
 /**
@@ -1183,95 +1360,39 @@ function resolveVerifiedReceipt(stateHolder, request, kind) {
  * the true thing: you may take the merge slot, and you may not yet call this
  * released.
  *
- * `stateHolder` is the port to the authoritative receipt store: an object with
- * `resolveReceipt(ref)`. Without it every check refuses — a controller with no
- * way to check a fact does not get to assume one.
+ * THERE IS NO STATE-HOLDER ARGUMENT. Release facts come from the module-bound
+ * seam V5_RELEASE_STATE_HOLDER_SEAM and from nowhere else; that seam does not
+ * exist yet, so every check refuses and this function cannot return an allow
+ * from any input. A second argument is a contract violation, not a port: a
+ * caller offering its own ledger is a caller deciding its own case.
  */
-export function evaluateReleaseEligibility(request, stateHolder = null) {
+export function evaluateReleaseEligibility(request) {
+  // eslint-disable-next-line prefer-rest-params -- the arity IS the boundary.
+  if (arguments.length > 1)
+    fail("release_state_holder_is_not_an_argument",
+      "evaluateReleaseEligibility takes one request; the release state holder is bound by this module",
+      { arguments_received: arguments.length, required_seam: V5_RELEASE_STATE_HOLDER_SEAM });
   normalizeReleaseRequest(request);
-  const holderBound = isPlainObject(stateHolder) && typeof stateHolder.resolveReceipt === "function";
+  const holderBound = authoritativeReleaseStateHolder() !== null;
   const resolved = new Map();
   const verifiedRefs = [];
 
-  /** Resolve once per kind, then hand the body to the check that needs it. */
-  const withReceipt = (check, kind, use) => {
-    if (!holderBound)
-      return refused(check, "release_state_holder_unavailable",
-        "release facts are resolved from the authoritative state holder; none was bound",
-        { receipt_kind: kind });
+  /** Resolve once per kind, then decide that check from the verified body. */
+  const fromReceipt = check => {
+    const kind = V5_RELEASE_CHECK_RECEIPT_KINDS[check];
     if (!resolved.has(kind)) {
-      const outcome = resolveVerifiedReceipt(stateHolder, request, kind);
+      const outcome = resolveReleaseFact(kind, request);
       resolved.set(kind, outcome);
       if (outcome.ok) verifiedRefs.push(request.receipts[kind]);
     }
     const outcome = resolved.get(kind);
     if (!outcome.ok) return refused(check, outcome.reasonId, outcome.note, outcome.detail);
-    return use(outcome.body);
+    return evaluateReleaseCheck(check, outcome.body,
+      { slice_ref: request.slice_ref, head_sha: request.head_sha });
   };
 
-  const { states, satisfiedChecks, notReached, blocking } = runChecks(V5_RELEASE_CHECKS, {
-    independent_review: () => withReceipt("independent_review", "review", review => {
-      if (review.state !== "accepted")
-        return refused("independent_review", "release_review_not_accepted",
-          "release requires an accepted independent review", { review_state: review.state });
-      if (review.reviewer_actor_id === review.maker_actor_id)
-        return refused("independent_review", "release_reviewer_not_independent",
-          "the maker may not be the reviewer", { actor_id: review.maker_actor_id });
-      if (review.reviewed_head_sha !== request.head_sha)
-        return refused("independent_review", "release_review_bound_to_other_head",
-          "a review of another head is not a review of this one",
-          { reviewed_head_sha: review.reviewed_head_sha, head_sha: request.head_sha });
-      return satisfied("independent_review", "accepted by an independent reviewer on this exact head");
-    }),
-    green_required_checks: () => withReceipt("green_required_checks", "required_checks", receipt => {
-      const checks = receipt.checks;
-      const notGreen = checks.filter(check => check.conclusion !== "success");
-      const otherHead = checks.filter(check => check.head_sha !== request.head_sha);
-      if (checks.length === 0)
-        return refused("green_required_checks", "release_required_check_not_green",
-          "a release with no required check is a release with no evidence", { required_checks: [] });
-      if (notGreen.length)
-        return refused("green_required_checks", "release_required_check_not_green",
-          "every required check must be green", { not_green: notGreen.map(check => check.name).sort() });
-      if (otherHead.length)
-        return refused("green_required_checks", "release_required_check_bound_to_other_head",
-          "a green check on another head proves nothing about this one",
-          { bound_to_other_head: otherHead.map(check => check.name).sort(), head_sha: request.head_sha });
-      return satisfied("green_required_checks", `${checks.length} required check(s) green on this head`);
-    }),
-    exact_head: () => withReceipt("exact_head", "head_observation", observation =>
-      observation.observed_head_sha === request.head_sha
-        ? satisfied("exact_head", "the branch head is still the reviewed and tested head")
-        : refused("exact_head", "release_head_moved",
-          "the branch moved after review; the evidence describes a head that is no longer there",
-          { head_sha: request.head_sha, observed_head_sha: observation.observed_head_sha })),
-    serialized_merge_slot: () => withReceipt("serialized_merge_slot", "merge_slot", slot =>
-      (slot.state === "free" || slot.held_by_slice_ref === request.slice_ref)
-        ? satisfied("serialized_merge_slot", "one eligible slice merges at a time and this is it")
-        : refused("serialized_merge_slot", "serialized_merge_slot_held",
-          "merge is serialized; another slice holds the slot",
-          { held_by_slice_ref: slot.held_by_slice_ref })),
-    descendant_revalidation: () => withReceipt("descendant_revalidation", "revalidation", revalidation => {
-      if (!revalidation.required)
-        return satisfied("descendant_revalidation", "no preceding merge affects this slice");
-      if (revalidation.revalidated_against_sha === revalidation.current_main_sha)
-        return satisfied("descendant_revalidation", "rebased and revalidated against current main");
-      return refused("descendant_revalidation", "descendant_revalidation_required",
-        "after each merge every affected descendant is rebased and revalidated before its delivery",
-        { revalidated_against_sha: revalidation.revalidated_against_sha, current_main_sha: revalidation.current_main_sha });
-    }),
-    merged_readback: () => withReceipt("merged_readback", "readback", readback => {
-      if (readback.state !== "verified")
-        return refused("merged_readback", "release_readback_not_verified",
-          "a merge is not a delivery until the delivered source is read back from main",
-          { readback_state: readback.state });
-      if (readback.delivered_source_digest !== readback.expected_source_digest)
-        return refused("merged_readback", "release_readback_digest_mismatch",
-          "what landed on main is not what was reviewed",
-          { delivered_source_digest: readback.delivered_source_digest, expected_source_digest: readback.expected_source_digest });
-      return satisfied("merged_readback", `read back from main at ${readback.main_sha}`);
-    }),
-  });
+  const { states, satisfiedChecks, notReached, blocking } = runChecks(V5_RELEASE_CHECKS,
+    Object.fromEntries(V5_RELEASE_CHECKS.map(check => [check, () => fromReceipt(check)])));
 
   const released = blocking === null;
   const mergeAdmitted = V5_PRE_MERGE_RELEASE_CHECKS.every(check => states[check].state === "satisfied");
@@ -1292,7 +1413,11 @@ export function evaluateReleaseEligibility(request, stateHolder = null) {
     observed_head_sha: headObservation?.ok ? headObservation.body.observed_head_sha : null,
     merge_admitted: mergeAdmitted,
     released,
+    // The seam this decision reads from, and whether it was there. False today,
+    // for every caller, on every input: the seam does not exist.
+    release_state_holder_seam: V5_RELEASE_STATE_HOLDER_SEAM,
     state_holder_bound: holderBound,
+    state_holder_is_caller_supplied: false,
     receipt_refs_cited: Object.fromEntries(
       V5_RELEASE_RECEIPT_KINDS.map(kind => [kind, request.receipts[kind]])),
     receipt_refs_verified: [...verifiedRefs].sort(),
@@ -1365,6 +1490,8 @@ export function v5ProgramControllerPolicyPreimage() {
     reconstruction_sources: [...RECONSTRUCTION_SOURCES].sort(),
     release_receipt_kinds: [...V5_RELEASE_RECEIPT_KINDS].sort(),
     release_receipt_ref_pattern: RELEASE_RECEIPT_REF.source,
+    release_state_holder_seam: V5_RELEASE_STATE_HOLDER_SEAM,
+    release_state_holder_available: authoritativeReleaseStateHolder() !== null,
     reason_ids: [...V5_PROGRAM_CONTROLLER_REASON_IDS].sort(),
     repository_actions: [...ENGINEERING_REPOSITORY_ACTIONS].sort(),
     auto_release_state: "unavailable",
@@ -1377,6 +1504,10 @@ export function v5ProgramControllerPolicyPreimage() {
     caller_may_assert_granted_width: false,
     caller_may_state_release_fact: false,
     release_facts_resolved_from_state_holder: true,
+    // And the property the SECOND review of PR 980 proved absent: the holder
+    // itself is not a caller input, so no injected ledger reaches an allow.
+    caller_may_supply_release_state_holder: false,
+    release_allow_reachable: authoritativeReleaseStateHolder() !== null,
     width_derived_from_evidence_at_admission: true,
     checkpoint_worktree_must_match_active_lease: true,
     path_overlap_is_segment_wise: true,
