@@ -1,9 +1,14 @@
-// DoctorCRE v5 slice V5-R01 — INTERNAL classifiers. NOT A PUBLIC SURFACE.
+// V5-R01 DETERMINISTIC CLASSIFIERS — THE TEST-ONLY ENTRY.
 //
-// WHY THIS FILE EXISTS, said first, because a second file is exactly the kind of
-// thing a reviewer should be suspicious of.
+// READ THIS FIRST, BECAUSE THE LOCATION IS THE CONTRACT. Nothing in this file is
+// part of any public surface. It lives under mcp-server/test/, no module in
+// mcp-server/src imports it, and rollout-pilot-r01.v5.test.mjs proves that with
+// a real parser over every module in src — static imports, dynamic imports,
+// require calls and the call sites the parser could not fold — rather than with
+// a promise. The only importers are the two suites.
 //
-// All three of this slice's done clauses are RUNTIME outcomes:
+// WHY IT EXISTS AT ALL. All three of this slice's done clauses are RUNTIME
+// outcomes:
 //
 //   1. Joe uses complete J1 on ten consecutive business days meeting the exact
 //      failure exclusions.
@@ -13,51 +18,51 @@
 // None of the three can be produced from source, and the five owners that would
 // settle them — the operating calendar, the pilot-day ledger, the independent
 // observer, the drill receipt store and the onboarding enrollment store — do not
-// exist in this repository. So every public evaluator refuses, on every input,
-// always. That is the honest answer and it is also a trap: a layer that only
-// says no cannot be shown to have decided anything, and on the day its stores
-// arrive nobody will know whether the ladder underneath was ever right.
+// exist in this repository. So every public evaluator answers `unavailable` on
+// every input and reads no field of its request at all. That is the honest
+// answer and it is also a trap: a layer that only says no cannot be shown to
+// have decided anything, and on the day its stores arrive nobody will know
+// whether the ladder underneath was ever right.
 //
-// The ladder therefore lives here, as one classifier per clause, and the public
-// modules CALL it to name the check that would have blocked. The classifiers are
-// load-bearing inside the refusal — the public answer reports `blocking_check`
-// from exactly these functions — and they are directly testable. What they must
-// never be is an authorization.
+// The ladder therefore lives HERE, as one classifier per clause, reachable only
+// from the test tree. The previous round of this slice kept it in src as
+// `rollout-pilot-r01.internal.v5.js` and had the public evaluators call it, so
+// the classification rode back out inside the refusal as
+// `would_complete_run_if_authoritative`. The review of PR 992 named that: an
+// accompanying `decision: "unavailable"` does not make a caller-derived
+// classification unreachable, and naming a file `internal` is not an access
+// boundary. Both are fixed by this file's address.
 //
-// THE THREE PROPERTIES THAT KEEP THEM FROM BECOMING ONE:
+// THE THREE PROPERTIES THAT KEEP A CLASSIFIER FROM BECOMING AN AUTHORIZATION:
 //
-//   1. NO PRIVILEGED WORD IS EVER RETURNED. A classifier returns `classification`
-//      from V5_R01_CLASSIFICATIONS, whose every value begins "would_" and none of
-//      which is in V5_R01_PRIVILEGED_OUTCOMES. `pass`, `passed`, `counted`,
-//      `completed`, `succeeded`, `operable`, `independent` and `allow` are not
-//      producible here. A consumer mistaking `would_count_day_if_authoritative`
-//      for a counted day would be reading a word that says, in itself, that it is
-//      not one.
+//   1. NO PRIVILEGED WORD IS EVER RETURNED. A classifier answers with a value
+//      from CLASSIFICATIONS below, every one of which begins "would_" and names
+//      a hypothetical. `pass`, `passed`, `counted`, `completed`, `succeeded`,
+//      `operable`, `independent` and `allow` are not producible here.
 //
-//   2. NOT REACHABLE THROUGH EITHER PUBLIC SURFACE. Nothing here is re-exported
-//      by rollout-pilot-r01.v5.js or onboarding-flow-r01.v5.js. The suite proves
-//      that with Node's own module parser (vm.SourceTextModule) over the whole
-//      tree, not with a regex.
+//   2. UNREACHABLE FROM PRODUCTION. Not re-exported, not imported, not
+//      importable — the guard is the parser scan named above, and it covers the
+//      dynamic form as well as the static one.
 //
 //   3. THE ANSWER IS NOT THE DECISION. `would_count_day_if_authoritative` means
-//      "the deterministic checks this slice can run found nothing wrong with what
-//      you told me". It says nothing about whether what you told me is TRUE,
-//      because the ledger and the observer that would say so are missing — and in
-//      this slice that gap is unusually wide, since the single most load-bearing
-//      input (why a day failed) is a judgement an outside observer makes, not a
-//      value a caller may assert.
+//      "the deterministic checks this slice can run found nothing wrong with
+//      what you told me". It says nothing about whether what you told me is
+//      TRUE, because the ledger and the observer that would say so are missing —
+//      and in this slice that gap is unusually wide, since the single most
+//      load-bearing input (why a day failed) is a judgement an outside observer
+//      makes, not a value a caller may assert.
 //
 // PURE, like the rest of the lane: no filesystem, no network, no database, no
 // clock, no environment, and no state between calls.
 
 import {
   V5_R01_BREAKING_FAILURE_ORIGINS,
-  V5_R01_CLASSIFICATIONS,
   V5_R01_DAY_CHECKS,
   V5_R01_DISQUALIFYING_FAILURE_ORIGINS,
   V5_R01_DRILL_CORRECT_TERMINAL_STATES,
   V5_R01_DRILL_FAULTS,
   V5_R01_DRILL_FAULT_KEYS,
+  V5_R01_DRILL_RECEIPT_FIELDS,
   V5_R01_DRILL_TERMINAL_STATES,
   V5_R01_FAILURE_ORIGINS,
   V5_R01_FAILURE_ORIGIN_KEYS,
@@ -77,13 +82,77 @@ import {
   calendarWeekday,
   deepFreeze,
   fail,
-} from "./rollout-pilot-r01.vocabulary.v5.js";
+} from "../src/rollout-pilot-r01.vocabulary.v5.js";
 
 /** Saturday and Sunday, by weekday ordinal. The only part of the calendar that is arithmetic. */
 const WEEKEND = Object.freeze([0, 6]);
 
+/**
+ * What each verdict is called once it leaves a classifier.
+ *
+ * THIS VOCABULARY LIVES HERE AND NOWHERE ELSE. It used to sit in the production
+ * vocabulary module, which meant a `would_` token was an exported production
+ * string that a consumer could match on. No module in mcp-server/src carries one
+ * now, and the suite asserts that by reading the source of every src file.
+ *
+ * Every value begins "would_" and names a hypothetical; none of them is one of
+ * the words a consumer acts on.
+ */
+export const CLASSIFICATIONS = deepFreeze({
+  refuse: "would_refuse",
+  day: "would_count_day_if_authoritative",
+  run: "would_complete_run_if_authoritative",
+  drill: "would_succeed_drill_if_authoritative",
+  onboarding: "would_complete_onboarding_if_authoritative",
+  beta: "would_be_beta_operable_if_authoritative",
+});
+
+for (const value of Object.values(CLASSIFICATIONS)) {
+  if (!value.startsWith("would_")) {
+    fail("classification_is_not_conditional",
+      `classification "${value}" does not name a hypothetical`, { value });
+  }
+}
+
+/** Said on every result, so a value that escaped still reads as "not authority". */
+export const CLASSIFIER_EVIDENCE_SOURCE = "caller_supplied_shapes_not_authority";
+
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
+
+/**
+ * An ISO-8601 UTC instant, and the epoch milliseconds it names.
+ *
+ * A receipt carries two of them and their ORDER is a real check, so the value has
+ * to be comparable rather than merely well-shaped: a string that matches the
+ * pattern but is not a date the engine can read (2026-02-30) is refused here
+ * rather than silently becoming NaN in a comparison downstream.
+ */
+function assertInstant(value, path) {
+  if (typeof value !== "string" || !ISO_INSTANT.test(value)) {
+    fail("not_an_instant", `${path} must be an ISO-8601 UTC instant`, { path, value });
+  }
+  const epoch = Date.parse(value);
+  if (!Number.isFinite(epoch)) {
+    fail("not_an_instant", `${path} is not a readable instant`, { path, value });
+  }
+  // A DATE THAT ROLLS OVER IS NOT THE DATE THAT WAS WRITTEN. Date.parse happily
+  // reads 2026-02-30 and hands back March 2, so a finite epoch proves only that
+  // the engine made something of the string. The round trip is the real check:
+  // the instant the engine produced must spell the same instant back.
+  if (new Date(epoch).toISOString().slice(0, 19) !== value.replace(/\.\d{1,3}Z$/, "Z").slice(0, 19)) {
+    fail("not_an_instant", `${path} names no such instant`, { path, value });
+  }
+  return epoch;
+}
+
 function classified(classification, blocking_check, detail = {}) {
-  return deepFreeze({ classification, blocking_check, ...detail });
+  return deepFreeze({
+    classification,
+    blocking_check,
+    is_not_authority: true,
+    evidence_source: CLASSIFIER_EVIDENCE_SOURCE,
+    ...detail,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -145,7 +214,7 @@ export function classifyPilotDayIfAuthoritative(day) {
 
   // Check 1 — the run-level disqualifier, asked before anything else.
   if (day.high_defect_open_against_j1) {
-    return classified(V5_R01_CLASSIFICATIONS.refuse, V5_R01_DAY_CHECKS[0], {
+    return classified(CLASSIFICATIONS.refuse, V5_R01_DAY_CHECKS[0], {
       date: day.date, disqualifies_run: true,
       disqualifying_origin: "unresolved_high_defect",
     });
@@ -154,7 +223,7 @@ export function classifyPilotDayIfAuthoritative(day) {
   // Check 2 — all three subjourneys. Counted DISTINCTLY: three references to the
   // same subjourney is one subjourney done three times, which is not the clause.
   if (distinctSubjourneys.size !== V5_R01_J1_SUBJOURNEY_COUNT) {
-    return classified(V5_R01_CLASSIFICATIONS.refuse, V5_R01_DAY_CHECKS[1], {
+    return classified(CLASSIFICATIONS.refuse, V5_R01_DAY_CHECKS[1], {
       date: day.date, disqualifies_run: false,
       distinct_subjourneys: distinctSubjourneys.size,
       required_subjourneys: V5_R01_J1_SUBJOURNEY_COUNT,
@@ -163,7 +232,7 @@ export function classifyPilotDayIfAuthoritative(day) {
 
   // Check 3 — real work, not a walkthrough.
   if (day.real_business_actions.length === 0) {
-    return classified(V5_R01_CLASSIFICATIONS.refuse, V5_R01_DAY_CHECKS[2], {
+    return classified(CLASSIFICATIONS.refuse, V5_R01_DAY_CHECKS[2], {
       date: day.date, disqualifies_run: false,
     });
   }
@@ -174,14 +243,14 @@ export function classifyPilotDayIfAuthoritative(day) {
   for (const failure of day.failures) {
     const origin = V5_R01_FAILURE_ORIGINS[failure.observed_origin];
     if (origin.disqualifies_run) {
-      return classified(V5_R01_CLASSIFICATIONS.refuse, V5_R01_DAY_CHECKS[3], {
+      return classified(CLASSIFICATIONS.refuse, V5_R01_DAY_CHECKS[3], {
         date: day.date, disqualifies_run: true,
         disqualifying_origin: failure.observed_origin,
         failure_ref: failure.failure_ref,
       });
     }
     if (!origin.excluded) {
-      return classified(V5_R01_CLASSIFICATIONS.refuse, V5_R01_DAY_CHECKS[3], {
+      return classified(CLASSIFICATIONS.refuse, V5_R01_DAY_CHECKS[3], {
         date: day.date, disqualifies_run: false,
         breaking_origin: failure.observed_origin,
         failure_ref: failure.failure_ref,
@@ -192,7 +261,7 @@ export function classifyPilotDayIfAuthoritative(day) {
     // announced it is not excused when the product claimed to be healthy.
     if (origin.condition === "product_reported_honestly_and_offered_documented_fallback"
       && !(failure.product_reported_honestly && failure.documented_fallback_offered)) {
-      return classified(V5_R01_CLASSIFICATIONS.refuse, V5_R01_DAY_CHECKS[3], {
+      return classified(CLASSIFICATIONS.refuse, V5_R01_DAY_CHECKS[3], {
         date: day.date, disqualifies_run: false,
         breaking_origin: failure.observed_origin,
         exclusion_condition_unmet: origin.condition,
@@ -201,7 +270,7 @@ export function classifyPilotDayIfAuthoritative(day) {
     }
   }
 
-  return classified(V5_R01_CLASSIFICATIONS.day, null, {
+  return classified(CLASSIFICATIONS.day, null, {
     date: day.date, disqualifies_run: false,
     excluded_failures: day.failures.map(f => f.failure_ref).sort(),
   });
@@ -257,7 +326,7 @@ export function classifyPilotRunIfAuthoritative(request) {
 
   const disqualified = verdicts.find(v => v.disqualifies_run === true);
   if (disqualified) {
-    return classified(V5_R01_CLASSIFICATIONS.refuse, "run_disqualified_by_open_high_defect", {
+    return classified(CLASSIFICATIONS.refuse, "run_disqualified_by_open_high_defect", {
       run_disqualified: true,
       disqualifying_date: disqualified.date,
       disqualifying_origin: disqualified.disqualifying_origin,
@@ -267,7 +336,7 @@ export function classifyPilotRunIfAuthoritative(request) {
   }
 
   const counted = new Set(
-    verdicts.filter(v => v.classification === V5_R01_CLASSIFICATIONS.day).map(v => v.date));
+    verdicts.filter(v => v.classification === CLASSIFICATIONS.day).map(v => v.date));
 
   // The calendar walk. From the earliest to the latest date the ledger mentions,
   // one calendar day at a time.
@@ -295,14 +364,14 @@ export function classifyPilotRunIfAuthoritative(request) {
   }
 
   if (longest < V5_R01_REQUIRED_RUN_LENGTH) {
-    return classified(V5_R01_CLASSIFICATIONS.refuse, "run_shorter_than_required", {
+    return classified(CLASSIFICATIONS.refuse, "run_shorter_than_required", {
       run_disqualified: false,
       longest_run: longest,
       required_run_length: V5_R01_REQUIRED_RUN_LENGTH,
     });
   }
 
-  return classified(V5_R01_CLASSIFICATIONS.run, null, {
+  return classified(CLASSIFICATIONS.run, null, {
     run_disqualified: false,
     longest_run: longest,
     required_run_length: V5_R01_REQUIRED_RUN_LENGTH,
@@ -315,22 +384,34 @@ export function classifyPilotRunIfAuthoritative(request) {
 // CLAUSE TWO — the injected recovery drill.
 // ---------------------------------------------------------------------------
 
-const DRILL_KEYS = Object.freeze([
-  "drill_ref",
-  "fault_injected",
-  "subject_partner",
-  "observed_partner_visible_signal",
-  "terminal_state_reached",
-  "aids_used",
-  "injected_by_identity_ref",
-  "observer_identity_ref",
-]);
+/**
+ * THE RECEIPT SCHEMA, TAKEN FROM THE REGISTRY RATHER THAN RETYPED.
+ *
+ * The previous round declared twelve fields in V5_R01_DRILL_RECEIPT_FIELDS and
+ * then validated eight, so a complete receipt built to the published schema was
+ * rejected as carrying four unknown fields — `injected_at`, `recovered_at`,
+ * `producer_step_ref` and `recovery_path_taken`. The review of PR 992
+ * reproduced it. Binding this list to the exported constant is the fix that
+ * cannot drift back: a field added to the registry is a field this classifier
+ * must then read, because `assertRequiredKeys` will demand it.
+ */
+const DRILL_KEYS = V5_R01_DRILL_RECEIPT_FIELDS;
 
 /**
  * Did the injected recovery go the way the drill requires?
  *
- * FOUR CHECKS, IN ORDER, and the order says what the drill is actually for.
+ * THE RECEIPT IS THE REGISTERED TWELVE-FIELD ONE. `DRILL_KEYS` IS
+ * `V5_R01_DRILL_RECEIPT_FIELDS` itself, so the schema this reads and the schema
+ * the slice publishes are one list rather than two that agreed once.
  *
+ * SEVEN CHECKS, IN ORDER, and the order says what the drill is actually for.
+ *
+ *   0. THREE ROLES, THREE PEOPLE. The subject may not be the injector, the
+ *      subject may not be the observer, and the injector may not be the
+ *      observer. All three pairs, each reported by name. Someone who broke it,
+ *      watched it and recovered it has run a demonstration rather than a drill.
+ *   0b. The recovery followed the injection. An interval that runs backwards
+ *      describes no drill.
  *   1. The fault has to be one the product has DECLARED a behaviour for. A drill
  *      that injects something S01 never modelled is measuring an undefined case.
  *   2. The product's visible signal has to be the declared one. This is checked
@@ -339,13 +420,10 @@ const DRILL_KEYS = Object.freeze([
  *      Q010's requirement is that the product let him RECOGNIZE failure.
  *   3. No forbidden aid. A recovery that needed a terminal, a raw log or the
  *      author's explanation is the exact dependency Q010 forbids.
- *   4. Only then, the terminal state — and two of the four states are correct.
+ *   4. The path out was the declared one for that fault.
+ *   5. Only then, the terminal state — and two of the four states are correct.
  *      Stopping safely counts: Q010 asks that the partner "avoid making damage
  *      worse", not that he fix everything.
- *
- * THE INJECTOR AND THE OBSERVER MUST BE DIFFERENT PEOPLE, and neither may be the
- * subject. Someone who broke it, watched it and recovered it has run a
- * demonstration rather than a drill.
  */
 export function classifyRecoveryDrillIfAuthoritative(drill) {
   assertObject(drill, "drill");
@@ -361,17 +439,53 @@ export function classifyRecoveryDrillIfAuthoritative(drill) {
   drill.aids_used.forEach((aid, index) => assertInternalRef(aid, `drill.aids_used[${index}]`));
   assertInternalRef(drill.injected_by_identity_ref, "drill.injected_by_identity_ref");
   assertInternalRef(drill.observer_identity_ref, "drill.observer_identity_ref");
+  assertInternalRef(drill.producer_step_ref, "drill.producer_step_ref");
+  assertInternalRef(drill.recovery_path_taken, "drill.recovery_path_taken");
+  const injectedAt = assertInstant(drill.injected_at, "drill.injected_at");
+  const recoveredAt = assertInstant(drill.recovered_at, "drill.recovered_at");
 
   const fault = V5_R01_DRILL_FAULTS[drill.fault_injected];
 
+  // Check 0 — THREE ROLES, THREE PEOPLE, and all three pairs are checked.
+  //
+  // The definition has always said that neither the injector nor the observer may
+  // be the partner recovering, and the previous round compared only the injector
+  // with the observer. So a receipt naming the subject as its own injector, or as
+  // its own observer, reached the end of the ladder — someone who broke it and
+  // recovered it, or recovered it and vouched for himself, ran a demonstration
+  // rather than a drill. Each pair is reported under its own name, because
+  // "someone was wearing two hats" is not as useful as which two.
+  if (drill.subject_partner === drill.injected_by_identity_ref) {
+    return classified(CLASSIFICATIONS.refuse, "subject_injected_its_own_fault", {
+      drill_ref: drill.drill_ref,
+      subject_partner: drill.subject_partner,
+    });
+  }
+  if (drill.subject_partner === drill.observer_identity_ref) {
+    return classified(CLASSIFICATIONS.refuse, "subject_observed_its_own_recovery", {
+      drill_ref: drill.drill_ref,
+      subject_partner: drill.subject_partner,
+    });
+  }
   if (drill.injected_by_identity_ref === drill.observer_identity_ref) {
-    return classified(V5_R01_CLASSIFICATIONS.refuse, "injector_and_observer_are_the_same_identity", {
+    return classified(CLASSIFICATIONS.refuse, "injector_and_observer_are_the_same_identity", {
       drill_ref: drill.drill_ref,
     });
   }
 
+  // Check 0b — a recovery cannot precede the fault it recovered from. The two
+  // instants are in the receipt because the drill is a thing that happened over
+  // an interval, and an interval that runs backwards describes no drill at all.
+  if (recoveredAt <= injectedAt) {
+    return classified(CLASSIFICATIONS.refuse, "recovery_does_not_follow_the_injection", {
+      drill_ref: drill.drill_ref,
+      injected_at: drill.injected_at,
+      recovered_at: drill.recovered_at,
+    });
+  }
+
   if (drill.observed_partner_visible_signal !== fault.expected_partner_visible_signal) {
-    return classified(V5_R01_CLASSIFICATIONS.refuse, "product_did_not_show_the_declared_signal", {
+    return classified(CLASSIFICATIONS.refuse, "product_did_not_show_the_declared_signal", {
       drill_ref: drill.drill_ref,
       expected_signal: fault.expected_partner_visible_signal,
       observed_signal: drill.observed_partner_visible_signal,
@@ -380,23 +494,38 @@ export function classifyRecoveryDrillIfAuthoritative(drill) {
 
   const forbidden = drill.aids_used.filter(aid => V5_R01_FORBIDDEN_DRILL_AIDS.includes(aid)).sort();
   if (forbidden.length > 0) {
-    return classified(V5_R01_CLASSIFICATIONS.refuse, "recovery_required_a_forbidden_aid", {
+    return classified(CLASSIFICATIONS.refuse, "recovery_required_a_forbidden_aid", {
       drill_ref: drill.drill_ref,
       forbidden_aids_used: deepFreeze(forbidden),
     });
   }
 
+  // Check 4 — the path out was the one the product declares for this fault. The
+  // fault table names a `recovery_is` per fault, and a receipt describing some
+  // other route describes a partner who got out of it some other way. That may
+  // well be resourceful; it is not evidence that the declared recovery works.
+  if (drill.recovery_path_taken !== fault.recovery_is) {
+    return classified(CLASSIFICATIONS.refuse, "recovery_path_was_not_the_declared_one", {
+      drill_ref: drill.drill_ref,
+      declared_recovery_path: fault.recovery_is,
+      recovery_path_taken: drill.recovery_path_taken,
+    });
+  }
+
   if (!V5_R01_DRILL_CORRECT_TERMINAL_STATES.includes(drill.terminal_state_reached)) {
-    return classified(V5_R01_CLASSIFICATIONS.refuse, "drill_ended_in_an_incorrect_terminal_state", {
+    return classified(CLASSIFICATIONS.refuse, "drill_ended_in_an_incorrect_terminal_state", {
       drill_ref: drill.drill_ref,
       terminal_state_reached: drill.terminal_state_reached,
     });
   }
 
-  return classified(V5_R01_CLASSIFICATIONS.drill, null, {
+  return classified(CLASSIFICATIONS.drill, null, {
     drill_ref: drill.drill_ref,
     fault_injected: drill.fault_injected,
     terminal_state_reached: drill.terminal_state_reached,
+    producer_step_ref: drill.producer_step_ref,
+    injected_at: drill.injected_at,
+    recovered_at: drill.recovered_at,
   });
 }
 
@@ -433,7 +562,7 @@ export function classifyOnboardingIfAuthoritative(progress, roster) {
   const developerTools =
     progress.tool_classes_used.filter(tool => V5_R01_FORBIDDEN_TOOL_CLASSES.includes(tool)).sort();
   if (developerTools.length > 0) {
-    return classified(V5_R01_CLASSIFICATIONS.refuse, "onboarding_used_a_developer_tool", {
+    return classified(CLASSIFICATIONS.refuse, "onboarding_used_a_developer_tool", {
       partner: progress.partner,
       developer_tools_used: deepFreeze(developerTools),
     });
@@ -442,7 +571,7 @@ export function classifyOnboardingIfAuthoritative(progress, roster) {
   const done = new Set(progress.steps_completed);
   const missing = roster.filter(step => !done.has(step)).sort();
   if (missing.length > 0) {
-    return classified(V5_R01_CLASSIFICATIONS.refuse, "onboarding_steps_outstanding", {
+    return classified(CLASSIFICATIONS.refuse, "onboarding_steps_outstanding", {
       partner: progress.partner,
       outstanding_steps: deepFreeze(missing),
     });
@@ -450,13 +579,13 @@ export function classifyOnboardingIfAuthoritative(progress, roster) {
 
   const unknown = [...done].filter(step => !roster.includes(step)).sort();
   if (unknown.length > 0) {
-    return classified(V5_R01_CLASSIFICATIONS.refuse, "onboarding_claims_an_unregistered_step", {
+    return classified(CLASSIFICATIONS.refuse, "onboarding_claims_an_unregistered_step", {
       partner: progress.partner,
       unregistered_steps: deepFreeze(unknown),
     });
   }
 
-  return classified(V5_R01_CLASSIFICATIONS.onboarding, null, { partner: progress.partner });
+  return classified(CLASSIFICATIONS.onboarding, null, { partner: progress.partner });
 }
 
 const BETA_KEYS = Object.freeze([
@@ -493,32 +622,32 @@ export function classifyBetaOperabilityIfAuthoritative(request) {
   request.tool_classes_used.forEach((tool, index) =>
     assertInternalRef(tool, `request.tool_classes_used[${index}]`));
 
-  if (request.onboarding_classification !== V5_R01_CLASSIFICATIONS.onboarding) {
-    return classified(V5_R01_CLASSIFICATIONS.refuse, "onboarding_not_classified_complete", {
+  if (request.onboarding_classification !== CLASSIFICATIONS.onboarding) {
+    return classified(CLASSIFICATIONS.refuse, "onboarding_not_classified_complete", {
       partner: request.partner,
     });
   }
   if (request.realistic_work_items.length === 0) {
-    return classified(V5_R01_CLASSIFICATIONS.refuse, "no_realistic_work_performed", {
+    return classified(CLASSIFICATIONS.refuse, "no_realistic_work_performed", {
       partner: request.partner,
     });
   }
   const developerTools =
     request.tool_classes_used.filter(tool => V5_R01_FORBIDDEN_TOOL_CLASSES.includes(tool)).sort();
   if (developerTools.length > 0) {
-    return classified(V5_R01_CLASSIFICATIONS.refuse, "beta_work_used_a_developer_tool", {
+    return classified(CLASSIFICATIONS.refuse, "beta_work_used_a_developer_tool", {
       partner: request.partner,
       developer_tools_used: deepFreeze(developerTools),
     });
   }
   if (request.author_interventions !== 0) {
-    return classified(V5_R01_CLASSIFICATIONS.refuse, "author_explained_the_system", {
+    return classified(CLASSIFICATIONS.refuse, "author_explained_the_system", {
       partner: request.partner,
       author_interventions: request.author_interventions,
     });
   }
 
-  return classified(V5_R01_CLASSIFICATIONS.beta, null, {
+  return classified(CLASSIFICATIONS.beta, null, {
     partner: request.partner,
     realistic_work_item_count: request.realistic_work_items.length,
   });

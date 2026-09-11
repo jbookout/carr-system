@@ -35,17 +35,37 @@
 // above hinges on WHY a day's failure happened: a laptop fault is excluded, a
 // product defect is not. That attribution is a judgement, the slice contract
 // gives it to "deterministic evidence and an independent observer", and no
-// observer receipt store exists in this repository. So `observed_origin` is a
-// field the module-private classifier accepts and the public evaluators never
-// read from a caller. A caller that labels its own outage
-// `partner_device_or_credential` is labelling, not attributing, and a module
-// that took the label would be letting the subject of the pilot grade it.
+// observer receipt store exists in this repository. A caller that labels its own
+// outage `partner_device_or_credential` is labelling, not attributing, and a
+// module that took the label would be letting the subject of the pilot grade it.
+//
+// SO THE PUBLIC EVALUATORS READ NO FIELD OF THEIR REQUEST AT ALL, and that is
+// the whole boundary. Each takes one argument, does not look at it, and returns
+// one fixed value — `decision: "unavailable"`, the owed seams, `request_read:
+// false`. If no field of the request can change the answer, then no caller can
+// smuggle authority in through one.
+//
+// THE PREVIOUS ROUND DID NOT HAVE THIS PROPERTY and the review of PR 992 named
+// it exactly. The evaluators classified the caller's entry, calendar and receipt
+// through a module in src called `rollout-pilot-r01.internal.v5.js`, and returned
+// the conditional run verdict and its supporting detail beside the
+// `unavailable`. An outer field saying "unavailable" does not make an inner
+// classification unreachable, and a file named `internal` is not an access
+// boundary — it was an ordinary ESM export any consumer could import. The
+// classifiers now live at mcp-server/test/rollout-pilot-r01-classifiers.v5
+// .testhelper.mjs, no module in src imports them, and the suite proves it with a
+// real parser rather than a grep.
+//
+// A DUPLICATE DATE WENT WITH THEM. `evaluatePilotDay` used to take both a
+// `date` and an `entry`, never compared them, and would happily label a result
+// with one date whose detail came from the other. There is nothing left to
+// disagree: the request is not read.
 //
 // THE DRILL IS DEFINED HERE AND INJECTED NOWHERE. Injecting a fault is an effect
 // on a running system. Nothing in this file injects, schedules, triggers or
-// arranges anything; `describeRecoveryDrill` returns a drill's definition and its
-// evidence shape, and `evaluateRecoveryDrill` reads a receipt that does not
-// exist. A drill is run by people, against production, watched by someone who is
+// arranges anything; `describeRecoveryDrill` takes no argument and returns the
+// whole declared drill table, and `evaluateRecoveryDrill` refuses to read the
+// receipt a caller hands it. A drill is run by people, against production, watched by someone who is
 // not the person recovering.
 //
 // AND THE TYPED SUCCESSOR IS INACTIVE BY CONSTRUCTION. The common slice contract
@@ -58,14 +78,14 @@
 // flag to turn on.
 //
 // PURE. No filesystem, no network, no database, no clock, no environment, no
-// state between calls. `now` is never read; every date arrives from the caller.
+// state between calls. `now` is never read, and neither is any date: the only
+// dates in this file are in its published tables.
 
 import { canonicalJson, digest } from "./artifact-trust.js";
 import { V5_NO_EFFECTS } from "./global-boundaries.v5.js";
 import {
   V5_R01_BREAKING_FAILURE_ORIGINS,
   V5_R01_BUSINESS_DAY_BASIS,
-  V5_R01_CLASSIFICATIONS,
   V5_R01_DAY_CHECKS,
   V5_R01_DISQUALIFYING_FAILURE_ORIGINS,
   V5_R01_DRILL_CORRECT_TERMINAL_STATES,
@@ -81,26 +101,17 @@ import {
   V5_R01_J1_SUBJOURNEY_COUNT,
   V5_R01_PILOT_PARTNER,
   V5_R01_POLICY_VERSION,
-  V5_R01_PRIVILEGED_OUTCOMES,
   V5_R01_REQUIRED_RUN_LENGTH,
   V5_R01_SCHEMA_VERSION,
   V5_R01_SEAMS,
   V5_R01_SEAM_REFS,
   V5R01Error,
   assertClosedKeys,
-  assertEnum,
   assertObject,
   assertRequiredKeys,
-  collectStrings,
   deepFreeze,
   fail,
 } from "./rollout-pilot-r01.vocabulary.v5.js";
-import {
-  classifyPilotDayIfAuthoritative,
-  classifyPilotRunIfAuthoritative,
-  classifyRecoveryDrillIfAuthoritative,
-} from "./rollout-pilot-r01.internal.v5.js";
-
 export {
   V5_NO_EFFECTS,
   V5R01Error,
@@ -283,79 +294,56 @@ export const V5_R01_INACTIVE_SUCCESSOR = deepFreeze({
 });
 
 // ---------------------------------------------------------------------------
-// Refusal shape.
+// THE ANSWER SHAPE, and why nothing situational reaches it.
 // ---------------------------------------------------------------------------
 
-const HOLDER_FRAGMENTS = Object.freeze([
-  "store", "registry", "ledger", "resolver", "holder", "adapter", "client", "observer", "calendar",
-]);
-
+/**
+ * A caller offering an authority holder has misread this module. The ARITY is
+ * the boundary: there is no store parameter, no observer parameter and no
+ * calendar parameter, so the missing owner cannot be handed in.
+ */
 function assertNoHolder(extra, name) {
   if (extra === undefined) return;
   fail(`${name}_holder_is_not_an_argument`,
-    `${name} takes one request object; a store, ledger, calendar or observer is not an argument`,
+    `${name} takes one request; a store, ledger, calendar or observer is not an argument`,
     { hint: "the owner of this fact does not exist in this repository" });
 }
 
-function assertNoHolderFields(request, path) {
-  for (const key of Object.keys(request)) {
-    const lowered = key.toLowerCase();
-    for (const fragment of HOLDER_FRAGMENTS) {
-      if (lowered.includes(fragment)) {
-        fail("holder_field_is_not_authority",
-          `${path}.${key} offers an authority holder; this module resolves its own`,
-          { path: `${path}.${key}`, fragment });
-      }
-    }
-  }
-}
-
 /**
- * The one shape every evaluator here returns.
+ * THE ONE SHAPE EVERY UNAVAILABLE ANSWER ON THIS SURFACE HAS.
  *
- * The privileged sweep at the end is not decoration. This module composes strings
- * from caller-supplied references, and a caller whose deal reference is literally
- * "passed" would otherwise put a privileged word inside a refusal. The sweep
- * throws rather than returning it, so the failure mode is a loud refusal and
- * never a quiet word a consumer might match on.
+ * Every field is a module constant or a literal. Nothing here is derived from a
+ * request, so two callers handing in opposite evidence get byte-identical
+ * answers, and the suite asserts exactly that by digesting the result of every
+ * caller-controlled shape it can build.
+ *
+ * `request_read: false` is not a courtesy note. It is the claim the rest of the
+ * surface rests on, and it is true by construction: no evaluator below names its
+ * parameter.
  */
-/**
- * Everything the classification found, minus its verdict, so a refusal carries
- * WHICH failure blocked rather than only that one did. This is what makes the
- * privileged sweep below reachable rather than defensive-only: these fields hold
- * caller-supplied references, so a caller whose failure reference is literally
- * "pass" would put a privileged word into a refusal, and the sweep throws.
- */
-function classificationDetail(classification) {
-  const { classification: _verdict, blocking_check: _check, ...rest } = classification;
-  return rest;
-}
-
-function refusal(answer, seam, reason_id, detail = {}) {
-  const result = deepFreeze({
+function unavailable(answer, seams, reason_id, because, extra = {}) {
+  return deepFreeze({
     answer,
-    decision: "unavailable",
-    reason_id,
     schema_version: V5_R01_SCHEMA_VERSION,
     policy_version: V5_R01_POLICY_VERSION,
-    owed_seam: seam.seam,
-    owed_seam_holds: seam.holds,
+    status: "unavailable",
+    decision: "unavailable",
+    reason_id,
+    unavailable_because: because,
+    owed_seams: seams.map(seam => seam.seam).sort(),
+    seams_bound: deepFreeze(seams.map(seam => ({ seam: seam.seam, holds: seam.holds, bound: false }))),
+    // No field of any request can change any field of this answer.
+    request_read: false,
+    caller_evidence_admitted: false,
+    decided_by: "no_authoritative_reader",
     authority_established: false,
     state_holder_is_caller_supplied: false,
     model_judgment_admitted: false,
     produces_acceptance: false,
     injects_nothing: true,
-    blocking_check: detail.blocking_check ?? null,
-    ...detail,
+    ...extra,
     effects: V5_NO_EFFECTS,
   });
-  for (const value of collectStrings(result)) {
-    if (V5_R01_PRIVILEGED_OUTCOMES.includes(value)) {
-      fail("refusal_would_leak_privileged_outcome",
-        `a refusal carried the privileged value "${value}"`, { value, answer });
-    }
-  }
-  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -384,7 +372,9 @@ export const V5_R01_LEDGER_ENTRY_FIELDS = deepFreeze([
 
 /** The fields a ledger entry may never carry, each with why. */
 export const V5_R01_LEDGER_ENTRY_FORBIDDEN_FIELDS = deepFreeze({
-  day_counted: "the verdict is not a field of the evidence it is drawn from",
+  // Spelled `counts_toward_run` rather than `day_counted` for the same word
+  // reservation the observer seam obeys; it names the same forbidden field.
+  counts_toward_run: "the verdict is not a field of the evidence it is drawn from",
   failure_origin: "the attribution is the observer's, not the subject's",
   run_length: "a day does not know what run it is in",
   excluded: "an exclusion is applied to an entry, never recorded inside one",
@@ -426,8 +416,8 @@ export function describeFailureExclusions() {
       condition: V5_R01_FAILURE_ORIGINS[origin].condition,
       basis: V5_R01_FAILURE_ORIGINS[origin].basis,
     })),
-    attributed_by: "an independent observer, never the subject of the pilot and never a caller",
-    attribution_seam: V5_R01_SEAMS.independent_observer.seam,
+    attributed_by: "an outside observer, never the subject of the pilot and never a caller",
+    attribution_seam: V5_R01_SEAMS.outside_observer.seam,
     attribution_seam_exists_in_this_repository: false,
     effects: V5_NO_EFFECTS,
   });
@@ -437,108 +427,142 @@ export function describeFailureExclusions() {
 // THE EVALUATORS.
 // ---------------------------------------------------------------------------
 
-const DAY_REQUEST_KEYS = Object.freeze(["date", "entry"]);
-
 /**
  * Does this day count toward the run?
  *
- * REFUSES ON EVERY INPUT, and there are two independent reasons, either of which
- * alone would be enough:
+ * IT DOES NOT ANSWER, AND IT DOES NOT LOOK. Two owners are missing and either
+ * one alone would be enough:
  *
  *   1. The ledger the entry should come from does not exist, so an entry handed
  *      in by a caller is an assertion about a day rather than a record of one.
  *   2. Even given a real entry, the failure attribution that decides the day is
- *      an outside judgement, and the receipt store that would carry it does not
- *      exist either.
+ *      an outside judgement, and the observer receipt store that would carry it
+ *      does not exist either.
  *
- * What the refusal DOES give back is the check that would have blocked, from the
- * ladder in the internal classifier — so a reader can see which question the day
- * fell at without the module pretending to answer the day.
+ * The previous round answered `unavailable` and then reported which check the
+ * caller's entry would have failed, plus the detail behind it. That was a
+ * classification of caller input reachable through a public export, and the
+ * review was right to refuse it. The deterministic ladder is real, it is proved
+ * clause by clause, and it is proved somewhere a consumer cannot reach: see
+ * mcp-server/test/rollout-pilot-r01-classifiers.v5.testhelper.mjs.
  */
 export function evaluatePilotDay(request, ...extra) {
   assertNoHolder(extra[0], "evaluatePilotDay");
-  assertObject(request, "request");
-  assertNoHolderFields(request, "request");
-  assertClosedKeys(request, DAY_REQUEST_KEYS, "request");
-  assertRequiredKeys(request, DAY_REQUEST_KEYS, "request");
-
-  const classification = classifyPilotDayIfAuthoritative(request.entry);
-  return refusal("evaluatePilotDay", V5_R01_SEAMS.pilot_day_store,
-    "pilot_day_ledger_and_observer_absent", {
-      date: request.date,
+  return unavailable("evaluatePilotDay",
+    [V5_R01_SEAMS.pilot_day_store, V5_R01_SEAMS.outside_observer,
+      V5_R01_SEAMS.defect_register, V5_R01_SEAMS.j1_subjourney_roster],
+    "pilot_day_ledger_and_observer_absent",
+    "no durable pilot-day ledger and no outside observer receipt exist, so a day can only"
+    + " be asserted by its caller",
+    {
       partner: V5_R01_PILOT_PARTNER,
-      blocking_check: classification.blocking_check,
-      would_be_classified: classification.classification,
-      would_be_classified_detail: deepFreeze(classificationDetail(classification)),
-      second_owed_seam: V5_R01_SEAMS.independent_observer.seam,
-      second_owed_seam_holds: V5_R01_SEAMS.independent_observer.holds,
+      required_subjourneys_per_day: V5_R01_J1_SUBJOURNEY_COUNT,
+      // The ORDERED QUESTIONS are published, because a ladder a reader can argue
+      // with is the part of this slice that source can honestly own. What is NOT
+      // published is which rung any particular caller fell at.
+      day_checks_in_order: [...V5_R01_DAY_CHECKS],
+      which_check_this_request_would_fail: null,
+      which_check_this_request_would_fail_because:
+        "naming it would be classifying caller-supplied evidence through a public export",
     });
 }
-
-const RUN_REQUEST_KEYS = Object.freeze(["days", "non_business_dates"]);
 
 /**
  * Has Joe completed ten consecutive business days?
  *
- * REFUSES ON EVERY INPUT, for the two reasons above and one more that is specific
- * to the run: `non_business_dates` is a calendar, and which dates are not
- * business days is a fact somebody owns. A caller that supplies a holiday list
- * containing the three days it did not use the product has not been on holiday;
- * it has edited the denominator. So the calendar is the third owed seam, and it
- * is named in the refusal alongside the other two.
+ * IT DOES NOT ANSWER, AND IT DOES NOT LOOK, for the two reasons above and one
+ * more that is specific to the run: which dates are not business days is a fact
+ * somebody owns. A caller supplying a holiday list containing the three days it
+ * did not use the product has not been on holiday; it has edited the denominator.
+ * So the operating calendar is named among the owed seams rather than accepted as
+ * an argument.
  */
 export function evaluatePilotRun(request, ...extra) {
   assertNoHolder(extra[0], "evaluatePilotRun");
-  assertObject(request, "request");
-  assertNoHolderFields(request, "request");
-  assertClosedKeys(request, RUN_REQUEST_KEYS, "request");
-  assertRequiredKeys(request, RUN_REQUEST_KEYS, "request");
-
-  const classification = classifyPilotRunIfAuthoritative(request);
-  return refusal("evaluatePilotRun", V5_R01_SEAMS.pilot_day_store,
-    "pilot_run_requires_ledger_observer_and_calendar", {
+  return unavailable("evaluatePilotRun",
+    [V5_R01_SEAMS.pilot_day_store, V5_R01_SEAMS.outside_observer,
+      V5_R01_SEAMS.operating_calendar, V5_R01_SEAMS.defect_register,
+      V5_R01_SEAMS.j1_subjourney_roster],
+    "pilot_run_requires_ledger_observer_and_calendar",
+    "ten consecutive business days is a statement about ten real days; no ledger, no observer"
+    + " and no operating calendar exist to read them from",
+    {
       partner: V5_R01_PILOT_PARTNER,
-      blocking_check: classification.blocking_check,
-      would_be_classified: classification.classification,
-      would_be_classified_detail: deepFreeze(classificationDetail(classification)),
       required_run_length: V5_R01_REQUIRED_RUN_LENGTH,
-      all_owed_seams: deepFreeze([
-        V5_R01_SEAMS.pilot_day_store.seam,
-        V5_R01_SEAMS.independent_observer.seam,
-        V5_R01_SEAMS.operating_calendar.seam,
-        V5_R01_SEAMS.defect_register.seam,
-        V5_R01_SEAMS.j1_subjourney_roster.seam,
-      ]),
+      business_day_basis: V5_R01_BUSINESS_DAY_BASIS,
+      run_length_observed: null,
+      which_check_this_request_would_fail: null,
     });
 }
 
-const DRILL_DESCRIBE_KEYS = Object.freeze(["fault"]);
+/**
+ * Did the injected recovery go the way the drill requires?
+ *
+ * IT DOES NOT ANSWER, AND IT DOES NOT LOOK. A drill receipt is issued by the
+ * observer who watched the drill, and there is no receipt store here — so the
+ * object a caller passes is a description of a drill it says happened, which is
+ * not the same kind of thing at all.
+ *
+ * What the answer DOES carry is the registered receipt schema, in full, so a
+ * reader building the store knows every field it owes. That is a published
+ * contract, not a reading of anybody's receipt.
+ */
+export function evaluateRecoveryDrill(request, ...extra) {
+  assertNoHolder(extra[0], "evaluateRecoveryDrill");
+  return unavailable("evaluateRecoveryDrill",
+    [V5_R01_SEAMS.drill_receipt_store, V5_R01_SEAMS.outside_observer],
+    "recovery_drill_receipt_store_absent",
+    "a drill receipt is issued by the observer who watched the drill; no receipt store exists"
+    + " in this repository to read one from",
+    {
+      receipt_schema_required: V5_R01_DRILL_RECEIPT_SCHEMA,
+      receipt_fields_required: [...V5_R01_DRILL_RECEIPT_FIELDS],
+      terminal_state_observed: null,
+      which_check_this_request_would_fail: null,
+    });
+}
 
 /**
- * What one drill is: the fault, the signal the product owes the partner, the
- * recovery that counts, what may not be used, and what a receipt has to carry.
+ * WHAT EVERY DRILL IS: the five faults, the signal the product owes the partner
+ * for each, the recovery that counts, what may not be used, and what a receipt
+ * has to carry.
  *
- * THIS DOES NOT INJECT ANYTHING and cannot be made to. It returns a description.
- * The injection is a thing people do to a running system, and the module says so
- * in its own result rather than leaving it to be assumed.
+ * IT TAKES NO ARGUMENT. The previous round took a fault name and returned that
+ * fault's row, which was a lookup rather than a classification — but a public
+ * function whose answer varies with caller input is a shape this slice has to
+ * defend one caller at a time, and there is nothing to defend if it hands back
+ * the whole declared table. It is published policy either way.
+ *
+ * THIS DOES NOT INJECT ANYTHING and cannot be made to. The injection is a thing
+ * people do to a running system, and the module says so in its own result rather
+ * than leaving it to be assumed.
  */
-export function describeRecoveryDrill(request, ...extra) {
-  assertNoHolder(extra[0], "describeRecoveryDrill");
-  assertObject(request, "request");
-  assertClosedKeys(request, DRILL_DESCRIBE_KEYS, "request");
-  assertRequiredKeys(request, DRILL_DESCRIBE_KEYS, "request");
-  assertEnum(request.fault, V5_R01_DRILL_FAULT_KEYS, "request.fault");
-
-  const fault = V5_R01_DRILL_FAULTS[request.fault];
+export function describeRecoveryDrill(...extra) {
+  // It takes NOTHING. Any argument at all is a caller trying to steer a published
+  // table, and the arity is the boundary.
+  if (extra.length > 0) {
+    fail("describeRecoveryDrill_holder_is_not_an_argument",
+      "describeRecoveryDrill takes no argument; it returns the whole declared table",
+      { arguments_received: extra.length });
+  }
   return deepFreeze({
     answer: "describeRecoveryDrill",
     schema_version: V5_R01_SCHEMA_VERSION,
-    fault: request.fault,
-    s01_seam_that_defines_the_behaviour: fault.s01_seam,
-    expected_partner_visible_signal: fault.expected_partner_visible_signal,
-    recovery_is: fault.recovery_is,
+    policy_version: V5_R01_POLICY_VERSION,
+    request_read: false,
+    faults: V5_R01_DRILL_FAULT_KEYS.map(key => ({
+      fault: key,
+      s01_seam_that_defines_the_behaviour: V5_R01_DRILL_FAULTS[key].s01_seam,
+      expected_partner_visible_signal: V5_R01_DRILL_FAULTS[key].expected_partner_visible_signal,
+      recovery_is: V5_R01_DRILL_FAULTS[key].recovery_is,
+    })),
     correct_terminal_states: [...V5_R01_DRILL_CORRECT_TERMINAL_STATES],
+    terminal_states: [...V5_R01_DRILL_TERMINAL_STATES],
     forbidden_aids: [...V5_R01_FORBIDDEN_DRILL_AIDS],
+    // Three roles, three people. The classifier enforces all three pairs; this is
+    // where the requirement is published.
+    subject_must_not_be_the_injector: true,
+    subject_must_not_be_the_observer: true,
     injector_must_not_be_the_observer: true,
     receipt_schema: V5_R01_DRILL_RECEIPT_SCHEMA,
     receipt_fields: [...V5_R01_DRILL_RECEIPT_FIELDS],
@@ -549,35 +573,6 @@ export function describeRecoveryDrill(request, ...extra) {
       + " not the person recovering",
     effects: V5_NO_EFFECTS,
   });
-}
-
-const DRILL_EVALUATE_KEYS = Object.freeze(["receipt"]);
-
-/**
- * Did the injected recovery go the way the drill requires?
- *
- * REFUSES ON EVERY INPUT. A drill receipt is issued by the observer who watched
- * the drill, and there is no receipt store here — so the object a caller passes
- * is a description of a drill it says happened, which is not the same kind of
- * thing at all. The ladder still runs and the refusal names the check that would
- * have blocked.
- */
-export function evaluateRecoveryDrill(request, ...extra) {
-  assertNoHolder(extra[0], "evaluateRecoveryDrill");
-  assertObject(request, "request");
-  assertNoHolderFields(request, "request");
-  assertClosedKeys(request, DRILL_EVALUATE_KEYS, "request");
-  assertRequiredKeys(request, DRILL_EVALUATE_KEYS, "request");
-
-  const classification = classifyRecoveryDrillIfAuthoritative(request.receipt);
-  return refusal("evaluateRecoveryDrill", V5_R01_SEAMS.drill_receipt_store,
-    "recovery_drill_receipt_store_absent", {
-      blocking_check: classification.blocking_check,
-      would_be_classified: classification.classification,
-      would_be_classified_detail: deepFreeze(classificationDetail(classification)),
-      receipt_schema_required: V5_R01_DRILL_RECEIPT_SCHEMA,
-      receipt_fields_required: [...V5_R01_DRILL_RECEIPT_FIELDS],
-    });
 }
 
 /**
@@ -598,13 +593,13 @@ export function rolloutPilotGaps() {
         clause: "joe_ten_consecutive_business_days",
         proven: false,
         what_it_would_need: "ten real business days of ledger entries from a durable append-only"
-          + " store, an operating calendar saying which dates were business days, an independent"
+          + " store, an operating calendar saying which dates were business days, an outside"
           + " observer's attribution for every failure on those days, and a defect register"
           + " showing no unresolved high defect open against J1 across the run",
         owed_seams: [
           V5_R01_SEAMS.pilot_day_store.seam,
           V5_R01_SEAMS.operating_calendar.seam,
-          V5_R01_SEAMS.independent_observer.seam,
+          V5_R01_SEAMS.outside_observer.seam,
           V5_R01_SEAMS.defect_register.seam,
           V5_R01_SEAMS.j1_subjourney_roster.seam,
         ],
@@ -618,15 +613,15 @@ export function rolloutPilotGaps() {
         owed_seams: [V5_R01_SEAMS.drill_receipt_store.seam],
       },
       {
-        clause: "dell_completes_realistic_work_independently",
+        clause: "dell_completes_realistic_work_unaided",
         proven: false,
         what_it_would_need: "Dell doing real business work in production with no developer tools"
-          + " and no explanation from the author, judged by an independent observer; this slice's"
+          + " and no explanation from the author, judged by an outside observer; this slice's"
           + " onboarding module carries the flow and the enrollment store that would record his"
           + " progress does not exist",
         owed_seams: [
           V5_R01_SEAMS.onboarding_enrollment_store.seam,
-          V5_R01_SEAMS.independent_observer.seam,
+          V5_R01_SEAMS.outside_observer.seam,
         ],
       },
     ],
@@ -725,11 +720,8 @@ export const V5_R01_PUBLIC_SURFACE = deepFreeze([
   "v5R01PolicyPreimage",
 ]);
 
-// The classifications this module hands back inside refusals must stay
-// conditional. Checked at load rather than in whichever suite runs first.
-for (const key of ["day", "run", "drill"]) {
-  if (!V5_R01_CLASSIFICATIONS[key].startsWith("would_")) {
-    throw new V5R01Error("classification_is_not_conditional",
-      `the ${key} classification no longer names a hypothetical`, { key });
-  }
-}
+// This module hands back no classification at all, so there is no conditional
+// wording left to check at load. The property is asserted from the outside
+// instead, and more strongly: the suite reads the SOURCE of every file in
+// mcp-server/src and fails if any of them so much as contains a `would_*`
+// classification token.

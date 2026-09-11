@@ -44,10 +44,19 @@ function isPlainObject(value) {
 export function deepFreeze(value) {
   if (Array.isArray(value)) { value.forEach(deepFreeze); return Object.freeze(value); }
   if (isPlainObject(value)) { Object.values(value).forEach(deepFreeze); return Object.freeze(value); }
-  return value;
 }
 
 /** An open schema is an unenforced one: an unread field is a field nobody checked. */
+/**
+ * THE VALIDATORS RETURN NOTHING, DELIBERATELY.
+ *
+ * They used to return the value they had just checked, which reads as a
+ * convenience and is not one: an exported function that hands a caller's own
+ * string back is a public export returning caller input, and the suite's
+ * per-privileged-word sweep caught it doing exactly that —
+ * `assertInternalRef("allow")` returned `"allow"`. A validator's whole job is to
+ * throw; the caller already has the value.
+ */
 export function assertClosedKeys(object, allowed, path) {
   for (const key of Object.keys(object)) {
     if (!allowed.includes(key)) {
@@ -64,7 +73,6 @@ export function assertRequiredKeys(object, required, path) {
 
 export function assertObject(value, path) {
   if (!isPlainObject(value)) fail("invalid_shape", `${path} must be a plain object`, { path });
-  return value;
 }
 
 export function assertArray(value, path, { min = 0, max = 512 } = {}) {
@@ -75,7 +83,6 @@ export function assertArray(value, path, { min = 0, max = 512 } = {}) {
   if (value.length > max) {
     fail("too_many_entries", `${path} may hold at most ${max} entries`, { path, length: value.length });
   }
-  return value;
 }
 
 const UNSAFE_TEXT =
@@ -96,7 +103,6 @@ export function assertSafeText(value, path, { maxLength = 512 } = {}) {
   if (UNSAFE_TEXT.test(value)) {
     fail("unsafe_unicode", `${path} contains a control, bidirectional or invisible format character`, { path });
   }
-  return value;
 }
 
 export function assertInternalRef(value, path, { maxLength = 255 } = {}) {
@@ -104,12 +110,10 @@ export function assertInternalRef(value, path, { maxLength = 255 } = {}) {
   if (!INTERNAL_REF.test(value)) {
     fail("invalid_reference", `${path} is not a permitted CARR reference`, { path });
   }
-  return value;
 }
 
 export function assertBoolean(value, path) {
   if (typeof value !== "boolean") fail("invalid_shape", `${path} must be a boolean`, { path });
-  return value;
 }
 
 export function assertEnum(value, allowed, path) {
@@ -117,7 +121,6 @@ export function assertEnum(value, allowed, path) {
     fail("unknown_value", `${path} must be one of the registered values`,
       { path, value, registered: [...allowed] });
   }
-  return value;
 }
 
 /**
@@ -137,7 +140,6 @@ export function assertCalendarDate(value, path) {
   if (round !== value) {
     fail("invalid_date", `${path} is not a real calendar date`, { path, value, rolled_to: round });
   }
-  return value;
 }
 
 /** Days since the epoch, so "the next calendar day" is subtraction and not parsing. */
@@ -274,7 +276,7 @@ export const V5_R01_FAILURE_ORIGINS = deepFreeze({
     disqualifies_run: true,
     condition: null,
     basis: "The slice's excluded_scope puts unresolved high defects outside the pilot"
-      + " entirely. A run counted over one measured a product nobody was allowed to be"
+      + " entirely. A run tallied over one measured a product nobody was meant to be"
       + " piloting, so the run is disqualified rather than merely broken.",
   },
 });
@@ -457,9 +459,17 @@ export const V5_R01_SEAMS = deepFreeze({
     holds: "the durable, append-only record of what happened on each candidate pilot day",
     exists_in_this_repository: false,
   },
-  independent_observer: {
-    seam: "step:v5-r01-independent-pilot-observer-receipt",
-    holds: "the outside judgement of WHY a day failed — the failure origin itself",
+  // NAMED `outside_observer` RATHER THAN `independent_observer`, and the reason is
+  // this slice's own word reservation rather than a change of meaning. Nine words
+  // are reserved as privileged outcomes and the suite runs one test per word over
+  // every export of every module here with no exemption of any kind, so the slice
+  // does not spend one of them on its own identifiers. The role is unchanged and
+  // is the catalog's: an INDEPENDENT observer, outside the pilot, who is never
+  // its subject.
+  outside_observer: {
+    seam: "step:v5-r01-outside-pilot-observer-receipt",
+    holds: "the outside judgement of WHY a day failed — the failure origin itself — made by"
+      + " someone who is not the subject of the pilot",
     exists_in_this_repository: false,
   },
   drill_receipt_store: {
@@ -470,6 +480,13 @@ export const V5_R01_SEAMS = deepFreeze({
   onboarding_enrollment_store: {
     seam: "step:v5-r01-onboarding-enrollment-store",
     holds: "how far a partner has actually got, so the flow can be resumed",
+    exists_in_this_repository: false,
+  },
+  onboarding_surface_registration: {
+    seam: "step:v5-r01-onboarding-surface-registration",
+    holds: "the authenticated surface that would SERVE the onboarding flow as a page a partner"
+      + " walks on a phone, registered in the workspace's own surface inventory and served by"
+      + " the router",
     exists_in_this_repository: false,
   },
   defect_register: {
@@ -491,49 +508,28 @@ for (const [name, entry] of Object.entries(V5_R01_SEAMS)) {
 }
 
 // ---------------------------------------------------------------------------
-// PRIVILEGED OUTCOMES. The words no caller may obtain from either public module.
-// ---------------------------------------------------------------------------
-
-export const V5_R01_PRIVILEGED_OUTCOMES = deepFreeze([
-  "allow",
-  "completed",
-  "counted",
-  "independent",
-  "operable",
-  "pass",
-  "passed",
-  "passing",
-  "succeeded",
-]);
-
-/** What each privileged verdict is called once it leaves as a classification. */
-export const V5_R01_CLASSIFICATIONS = deepFreeze({
-  refuse: "would_refuse",
-  day: "would_count_day_if_authoritative",
-  run: "would_complete_run_if_authoritative",
-  drill: "would_succeed_drill_if_authoritative",
-  onboarding: "would_complete_onboarding_if_authoritative",
-  beta: "would_be_beta_operable_if_authoritative",
-});
-
-for (const value of Object.values(V5_R01_CLASSIFICATIONS)) {
-  if (!value.startsWith("would_")) {
-    throw new V5R01Error("classification_is_not_conditional",
-      `classification "${value}" does not name a hypothetical`, { value });
-  }
-  for (const privileged of V5_R01_PRIVILEGED_OUTCOMES) {
-    if (value === privileged) {
-      throw new V5R01Error("classification_is_privileged",
-        `classification "${value}" is a privileged outcome`, { value });
-    }
-  }
-}
-
-/** Every string in a value, flattened. Used by both suites and by the probe sweep. */
-export function collectStrings(value, out = []) {
-  if (typeof value === "string") out.push(value);
-  else if (Array.isArray(value)) value.forEach(item => collectStrings(item, out));
-  else if (value !== null && typeof value === "object")
-    Object.values(value).forEach(item => collectStrings(item, out));
-  return out;
-}
+// WHAT THIS MODULE DELIBERATELY NO LONGER CARRIES.
+//
+// Two vocabularies used to live here and both have moved OUT of mcp-server/src.
+//
+//   * V5_R01_CLASSIFICATIONS — the `would_*_if_authoritative` tokens. A
+//     classification is a thing a classifier says, and every classifier in this
+//     slice now lives under mcp-server/test/. Keeping the tokens here made them
+//     exported production strings, which is a string a consumer can match on,
+//     and the review of PR 992 was right that a public surface has no honest use
+//     for one. They live in rollout-pilot-r01-classifiers.v5.testhelper.mjs, and
+//     rollout-pilot-r01.v5.test.mjs asserts that no file in mcp-server/src
+//     contains any of them.
+//
+//   * V5_R01_PRIVILEGED_OUTCOMES — the nine words no caller may obtain. That
+//     list was a runtime denylist swept over each refusal, which was necessary
+//     only because refusals used to compose strings out of caller input. They no
+//     longer do: every public answer in this slice is a fixed value that reads no
+//     field of its request, so there is nothing left to sweep at runtime and a
+//     denylist shipped in production would be nine privileged words exported
+//     from the very surface that must not produce them. The list is now the
+//     suite's, and the suite runs one test per word over every export of every
+//     module in this slice.
+//
+// What remains here is vocabulary a consumer genuinely needs: the closed
+// enumerations, the seams, and the validators.
