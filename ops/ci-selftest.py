@@ -187,9 +187,9 @@ def _recover_stale_journal():
     restored = _restore_from_journal(data)
     SEED_JOURNAL.unlink(missing_ok=True)
     # THE SHAPE OF THIS OUTPUT IS LOAD-BEARING, not decoration. ops/ci.sh's
-    # gates class runs each suite quietly and, on failure, prints only
-    # `tail -12` of its log. So a recovery and a genuinely broken check reach
-    # the terminal looking identical, and telling them apart is the difference
+    # gates class runs each suite quietly and, on failure, prints the whole of
+    # a short log or its last 80 lines. So a recovery and a genuinely broken
+    # check reach the terminal looking identical, and telling them apart is the difference
     # between a thirty-second re-run and another evening like 2026-08-13. The
     # banner is repeated at the END as well as the start, because the tail is
     # what gets shown, and the last line is the ACTION rather than the diagnosis.
@@ -1207,7 +1207,7 @@ def test_the_paired_move_no_longer_invents_a_gate_that_does_not_exist():
     violation that could not exist.
 
     The fallback line matters as much as the silence: a suite with no gate still
-    has a remedy, and it is in its own 12-line tail.
+    has a remedy, and it is in its own captured output.
     """
     orphans = [p.name for p in sorted((REPO / "ops").glob("*-selftest.py"))
                if not (REPO / "hooks" / f"{p.name[:-len('-selftest.py')]}.py").exists()]
