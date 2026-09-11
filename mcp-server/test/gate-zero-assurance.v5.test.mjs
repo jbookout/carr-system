@@ -37,6 +37,7 @@ import { V5BoundaryError, V5_NO_EFFECTS } from "../src/global-boundaries.v5.js";
 import { GATE_ZERO_STEP_REF } from "../src/benchmark-minimum.v5.js";
 
 import * as surface from "../src/gate-zero-assurance.v5.js";
+import * as producerModule from "../src/gate-zero-producer-registration.v5.js";
 import {
   V5_A02_GATE_ZERO_SCHEMA_VERSION,
   V5_A02_POLICY_VERSION,
@@ -49,6 +50,7 @@ import {
   V5_A02_GATE_CONCLUSIONS,
   V5_A02_GATE_ZERO_REASON_IDS,
   V5_A02_GATE_ZERO_PRODUCER_SEAM,
+  V5_A02_GATE_ZERO_PRODUCER_REGISTRATION,
   V5_A02_GATE_ZERO_OWED_SEAMS,
   V5_A02_PREDECESSOR_OUTCOME_READER_SEAM,
   V5_A02_SCHEDULER_READER_SEAM,
@@ -155,6 +157,7 @@ const EXPECTED_PUBLIC_EXPORTS = [
   "V5_A02_GATE_CONCLUSION_READER_SEAM",
   "V5_A02_GATE_ZERO_OWED_SEAMS",
   "V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS",
+  "V5_A02_GATE_ZERO_PRODUCER_REGISTRATION",
   "V5_A02_GATE_ZERO_PRODUCER_SEAM",
   "V5_A02_GATE_ZERO_REASON_IDS",
   "V5_A02_GATE_ZERO_SCHEMA_VERSION",
@@ -267,6 +270,85 @@ test("SURFACE: the public export list is exactly the unavailable surface", () =>
   }
 });
 
+/**
+ * Exactly what the producer registration module may export. The authority-
+ * bearing record is ONE frozen constant over four hard-bound predecessors; the
+ * rest are the pure constants it is assembled from. There is no builder, so
+ * there is no argument, so there is no caller-supplied predecessor set — which
+ * was the PR 990 defect: an exported builder handed back an authority-stamped
+ * provisional registration over whatever references the caller passed in.
+ */
+const EXPECTED_PRODUCER_EXPORTS = [
+  "GATE_ZERO_STEP_REF",
+  "UNRESOLVED_WITHOUT_R7",
+  "V5_A02_GATE_ZERO_COMBINER",
+  "V5_A02_GATE_ZERO_GATE_ID",
+  "V5_A02_GATE_ZERO_ORACLE_REF",
+  "V5_A02_GATE_ZERO_ORACLE_VERSION",
+  "V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS",
+  "V5_A02_GATE_ZERO_PRODUCER_DECISION_REF",
+  "V5_A02_GATE_ZERO_PRODUCER_REGISTRATION",
+  "V5_A02_GATE_ZERO_PRODUCER_REGISTRATION_STATUS",
+  "V5_A02_GATE_ZERO_PRODUCER_ROLE",
+  "V5_A02_GATE_ZERO_R7_ENTRY_PRESENT",
+  "V5_A02_GATE_ZERO_RECEIPT_REF",
+  "V5_A02_GATE_ZERO_RETRY_POLICY",
+  "V5_A02_PRODUCER_REGISTRATION_SCHEMA_VERSION",
+  "V5_A02_SCHEDULER_STEP_REF",
+];
+
+test("PRODUCER: the registration module exports the frozen record and pure readers only", () => {
+  assert.deepEqual(Object.keys(producerModule).sort(), EXPECTED_PRODUCER_EXPORTS);
+  // Not one export is callable. A builder is the only shape that could take a
+  // predecessor argument, and the module has none — proved by value, not by name.
+  const callable = Object.entries(producerModule)
+    .filter(([, value]) => typeof value === "function").map(([name]) => name);
+  assert.deepEqual(callable, [],
+    "an exported builder can be handed caller-supplied predecessor references");
+  // And proved again in the source, so a future `export function` is red on
+  // sight rather than red only once someone adds it to the list above.
+  const source = readFileSync(
+    fileURLToPath(new URL("../src/gate-zero-producer-registration.v5.js", import.meta.url)), "utf8");
+  for (const shape of [/\bexport\s+function\b/, /\bexport\s+default\b/,
+    /\bexport\s+(?:const|let|var)\s+\w+\s*=\s*(?:async\s*)?(?:function\b|\()/])
+    assert.equal(shape.test(source), false,
+      `the registration module exports a callable: ${shape}`);
+});
+
+test("PRODUCER: the four canonical predecessors are hard-bound into the frozen registration", () => {
+  const registration = producerModule.V5_A02_GATE_ZERO_PRODUCER_REGISTRATION;
+  assert.deepEqual([...registration.registry_entry.depends_on_step_refs],
+    [...producerModule.V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS]);
+  assert.deepEqual([...producerModule.V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS], [
+    "step:scheduler-active-receipt",
+    "step:wr40-repository-outcome",
+    "step:wr46-dissolution-outcome",
+    "step:wr54-backup-recovery-outcome",
+  ]);
+  // Frozen all the way down: no caller can edit the record in place either.
+  assert.ok(Object.isFrozen(registration));
+  assert.ok(Object.isFrozen(registration.registry_entry));
+  assert.ok(Object.isFrozen(registration.registry_entry.depends_on_step_refs));
+  assert.ok(Object.isFrozen(producerModule.V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS));
+  assert.throws(() => { registration.registry_entry.depends_on_step_refs.push("step:mine"); },
+    TypeError);
+});
+
+test("PRODUCER: the checker's binding constant IS the frozen registration", () => {
+  // Same object, not an equal copy — the checker cannot be reading a second
+  // registration built over some other predecessor set.
+  assert.equal(surface.V5_A02_GATE_ZERO_PRODUCER_REGISTRATION,
+    producerModule.V5_A02_GATE_ZERO_PRODUCER_REGISTRATION);
+  assert.equal(surface.V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS,
+    producerModule.V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS);
+  assert.equal(surface.V5_A02_SCHEDULER_STEP_REF, producerModule.V5_A02_SCHEDULER_STEP_REF);
+  // And what the checker reports comes from that one record.
+  const result = emitGateZeroOutcome(cleanJoin());
+  assert.equal(result.producer_role,
+    producerModule.V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.registry_entry.producer_role);
+  assert.equal(result.producer_registration, surface.V5_A02_GATE_ZERO_PRODUCER_REGISTRATION);
+});
+
 test("SURFACE: no caller-controlled shape produces a privileged outcome", () => {
   const shapes = callerControlledShapes();
   assert.ok(shapes.length >= 40, "the sweep must cover the caller-controlled domain");
@@ -311,14 +393,48 @@ test("SURFACE: the Gate Zero outcome is not passable and carries no join", () =>
   }
 });
 
-test("SURFACE: r7 registers no producer contract, so every such field is null", () => {
+test("SURFACE: the producer contract is reported as RULED, never as read from r7", () => {
   const result = emitGateZeroOutcome(cleanJoin());
-  for (const field of ["producer_role", "oracle_ref", "output_schema_ref", "evidence_scope",
-    "produced_gate_id", "outcome_digest", "observed_at"]) {
+  // The five the 2026-09-11 ruling settled are reported, and each one matches
+  // the registration rather than a literal typed twice.
+  const entry = V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.registry_entry;
+  assert.equal(result.producer_role, entry.producer_role);
+  assert.equal(result.oracle_ref, entry.oracle_ref);
+  assert.equal(result.output_schema_ref, entry.output_schema_ref);
+  assert.equal(result.evidence_scope, entry.evidence_scope);
+  assert.equal(result.produced_gate_id, entry.produces_gate_ids[0]);
+  // And each one is reported beside the fact that r7 does not carry it.
+  assert.equal(result.producer_registration_status, "provisional");
+  assert.equal(result.producer_registration_decision_ref,
+    "20c83902-f150-4d59-beca-915c5c871f95");
+  assert.equal(result.r7_entry_present, false);
+  assert.equal(result.producer_registration.oracle_seat_bound, false);
+  // No run has happened, so no outcome exists to report.
+  for (const field of ["outcome_digest", "observed_at"])
     assert.equal(result[field], null, `${field} must be null, not invented`);
-  }
+  // The three fields the ruling could not settle stay null and stay named.
+  for (const field of ["consumes_gate_ids", "target_dag", "causal_phase"])
+    assert.equal(entry[field], null, `${field} is not knowable here and must stay null`);
+  assert.deepEqual(
+    V5_A02_GATE_ZERO_PRODUCER_REGISTRATION.unresolved_without_r7.map(item => item.field).sort(),
+    ["causal_phase", "consumes_gate_ids", "produces_gate_ids[0]", "target_dag"]);
   assert.ok(result.undecided_governance_questions.includes(
     "which store an accepted predecessor outcome is read from"));
+  assert.ok(result.undecided_governance_questions.includes(
+    "whether r7 itself carries the registration, which today it does not"));
+});
+
+test("SURFACE: a ruled producer role does not make the gate passable", () => {
+  // The exact confusion this PR could have introduced: five fields stop being
+  // null, so a reader might take the gate for decided-and-therefore-runnable.
+  const result = emitGateZeroOutcome(cleanJoin());
+  assert.equal(result.passable, false);
+  assert.equal(result.producer_bound, false);
+  assert.equal(result.status, "unavailable");
+  assert.equal(result.decision, "refuse");
+  assert.equal(result.join, null);
+  assert.deepEqual(result.owed_seams, [...V5_A02_GATE_ZERO_OWED_SEAMS]);
+  assert.equal(v5A02GateZeroPolicyPreimage().gate_zero_passable, false);
 });
 
 test("SURFACE: every unavailable answer names the seams it is owed and binds none", () => {
@@ -393,10 +509,14 @@ test("ISOLATION: src holds no test-only entry, and none of it reaches the test t
     .map(([name]) => name);
   assert.deepEqual(offenders, [], "a production module reached into the test directory");
 
-  // And specifically: the public surface imports four modules, none of them this
-  // slice's classifiers.
+  // And specifically: the public surface imports five modules, none of them this
+  // slice's classifiers. The fifth is the producer registration, which is a
+  // frozen constant table and reaches nothing.
   assert.deepEqual(imports["gate-zero-assurance.v5.js"],
-    ["./artifact-trust.js", "./global-boundaries.v5.js", "./identity.js", "./benchmark-minimum.v5.js"]);
+    ["./artifact-trust.js", "./global-boundaries.v5.js", "./identity.js",
+      "./benchmark-minimum.v5.js", "./gate-zero-producer-registration.v5.js"]);
+  assert.deepEqual(imports["gate-zero-producer-registration.v5.js"],
+    ["./benchmark-minimum.v5.js"]);
 });
 
 /**
