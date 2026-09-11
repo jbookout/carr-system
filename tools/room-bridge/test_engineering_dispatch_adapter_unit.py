@@ -118,8 +118,10 @@ while (remaining > 0) {{
   remaining = JSON.parse(output[output.length - 1]).remaining;
 }}
 process.stdout.write(JSON.stringify(output));'''
+    # Fed on stdin, not as `-e`: Linux caps a single argv element at 128KiB
+    # (MAX_ARG_STRLEN) and this harness embeds the whole fixture, prefix included.
     run = subprocess.run(
-        ["node", "--input-type=module", "-e", harness],
+        ["node", "--input-type=module"], input=harness,
         capture_output=True, text=True, timeout=10, check=False)
     assert run.returncode == 0, run.stderr
     return [json.loads(value) if isinstance(value, str) else value
