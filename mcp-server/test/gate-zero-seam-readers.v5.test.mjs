@@ -1,52 +1,63 @@
 // V5-A02, the seam half — the three evidence readers Gate Zero is owed, proved
 // in four parts that must not be confused with each other.
 //
-// PART A, THE RULING GATE IS SHUT. Each reader returns the gate's OWN frozen
-// refusal object — proved by `Object.is`, not by deep-equality on a lookalike —
-// so "identical refusal" is a fact about object identity rather than a claim
-// about two similar shapes. No store is touched: the real store module throws
-// without a DSN, and Part A passes with no DSN set, which is the observable
-// proof that nothing was opened.
+// PART A, THE RULING GATE IS SHUT. Each reader returns the gate's OWN answer,
+// pinned by the repository's canonical digest rather than by a field-by-field
+// comparison against a shape that happens to match today. No store is touched:
+// the real store module throws without a DSN, and Part A passes with no DSN set,
+// which is the observable proof that nothing was opened.
 //
-// PART B, THE PUBLIC SURFACE. The export list is exactly enumerated; every
-// export is swept for the closed union of privileged words, as exact value, as
-// token, AND as raw substring; and every caller-controlled shape — Proxies whose
-// traps throw, throwing getters, revoked Proxies, null prototypes, and plain
-// hostile text — is asserted to produce no throw and to leave none of its own
-// bytes in the answer.
+// PART B, THE PUBLIC SURFACE, AND THE SWEEP HAS NO EXEMPTIONS. The export list
+// of all three modules is exactly enumerated. EVERY export is swept — constants
+// by value, and callables by CALLING them, with no argument and with each
+// hostile argument, and sweeping what comes back or what they throw. The sweep
+// looks for the closed union of privileged words as exact value, as token, AND
+// as raw substring; for any `would_*` or `*_if_authoritative` key; and for the
+// boolean `true` anywhere at all, under any key.
 //
-// THE ONE CARVE-OUT IN THE SUBSTRING SWEEP, and it is computed rather than
-// written down. `seam:gate-zero-read-only-outcome-producer`,
-// `step:gate-zero-read-only-outcome`, `step:scheduler-active-receipt`,
-// `scheduler_readback_absent` and the gate's own refusal prose all contain a
-// privileged word as a substring — "read" in "read-only" and "readback",
-// "active" in "scheduler-active-receipt". They must appear, because the refusal
-// these readers return IS the gate's refusal and the reason ids they reuse ARE
-// the gate's reason ids. So the carve-out is derived at test time from the gate
-// surface's own live answers and exported constants: a string the gate already
-// says is not a new leak. Anything else is.
+// THE STRING ALLOWLIST THE EARLIER DRAFT CARRIED IS DELETED. It existed because
+// the reader module reused the gate's own seam names and reason ids verbatim,
+// and those contain "read" ("read-only", "readback") and "active"
+// ("scheduler-active-receipt"). The module no longer emits any of them: seams
+// are addressed by opaque card tokens, and its findings are its own words. So
+// there is nothing left to exempt and nothing is exempted.
+//
+// WHAT REPLACES IT IS NOT AN ALLOWLIST BUT AN IDENTITY. While no seam is ruled,
+// a reader's answer IS the gate's answer — the object `readGateZeroPredecessorJoin`
+// or `readGateGraphAssurance` built, returned unmodified. That object is main's,
+// not this slice's, and its strings are Gate Zero's live refusal: renaming them
+// would change what Gate Zero says to every caller, which this PR must not do.
+// So a returned value that is digest-identical to a gate answer is asserted to
+// BE that answer rather than swept for words. Identity is the stronger check —
+// a word sweep permits any new string that dodges the union, and identity
+// permits no new string at all.
 //
 // PART C, THE RULED PATH, ON A STAGED TREE. mcp-server/src is copied into a
 // scratch directory, a fixture decision id is pasted onto each of the three
 // `decision_id:` lines — the exact lines Joe will paste onto — and the copied
-// reader is imported. Two stagings:
+// reader is imported. Four stagings:
 //
 //   * with the store module REPLACED by ./gate-zero-seam-stores.v5.fixture.mjs,
-//     which proves every clause against known rows, including a forged hash and
-//     a proposal nobody signed;
+//     whose rows are shaped exactly as production writes them, which proves
+//     every clause including one negative row per field of card 12's
+//     receipt-binding clause;
+//   * with ./gate-zero-seam-stores.v5.receipt-fixture.mjs, which pulls the
+//     acceptance receipt's hash apart from the proposal's — the one thing no
+//     production row can do, and the clause mutation testing found unproved;
+//   * with card 11's `store_ref:` line changed to a store its reader does not
+//     serve, which must refuse with the gate's own answer and must NOT fetch;
 //   * with the REAL store module kept and no connection configured, which proves
-//     the unreachable refusals are the real code's, not the fixture's.
+//     the unreachable refusals are the real code's, not a fixture's.
 //
-// What runs in both is the real reader, the real ruling gate and the real
+// What runs in all four is the real reader, the real ruling gate and the real
 // derivation. The staging is how a ruling is simulated without a ruling, and it
 // doubles as proof that the paste procedure in the seams report actually works:
 // if the three lines ever stop being three lines of that exact shape, Part C
 // fails on the anchor count rather than silently proving nothing.
 //
-// PART D, THE PRODUCER SEAM IS NOT BUILT. Its refusal is a written-out constant,
-// and the test asserts the written words are byte-identical to what a live
-// `emitGateZeroOutcome()` returns — so the copy cannot rot, and no reader for it
-// exists to find.
+// PART D, THE PRODUCER SEAM IS NOT BUILT, AND IS NOT COPIED. Cards 9 and 10 have
+// no ruling line, no reader and no restatement of their refusal anywhere in this
+// slice — `emitGateZeroOutcome()` still says it, once.
 //
 //   node --test mcp-server/test/gate-zero-seam-readers.v5.test.mjs
 
@@ -59,14 +70,9 @@ import { spawnSync } from "node:child_process";
 
 import { digest } from "../src/artifact-trust.js";
 import {
-  GATE_ZERO_STEP_REF,
-  V5_A02_GATE_CONCLUSION_READER_SEAM,
   V5_A02_GATE_ZERO_OWED_SEAMS,
   V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS,
   V5_A02_GATE_ZERO_PRODUCER_SEAM,
-  V5_A02_GATE_ZERO_REASON_IDS,
-  V5_A02_PREDECESSOR_OUTCOME_READER_SEAM,
-  V5_A02_SCHEDULER_READER_SEAM,
   V5_A02_SCHEDULER_STEP_REF,
   emitGateZeroOutcome,
   readGateGraphAssurance,
@@ -75,23 +81,28 @@ import {
 
 import * as readers from "../src/gate-zero-seam-readers.v5.js";
 import * as rulings from "../src/gate-zero-seam-rulings.v5.js";
-import * as evidence from "../src/gate-zero-seam-evidence.v5.js";
 import * as stores from "../src/gate-zero-seam-stores.v5.js";
 import * as fixtureStores from "./gate-zero-seam-stores.v5.fixture.mjs";
+import * as receiptStores from "./gate-zero-seam-stores.v5.receipt-fixture.mjs";
 
 const SRC = fileURLToPath(new URL("../src", import.meta.url));
 const FIXTURE_STORE_FILE = fileURLToPath(new URL("./gate-zero-seam-stores.v5.fixture.mjs", import.meta.url));
+const RECEIPT_STORE_FILE = fileURLToPath(new URL("./gate-zero-seam-stores.v5.receipt-fixture.mjs", import.meta.url));
 const RULINGS_FILE = "gate-zero-seam-rulings.v5.js";
+const READERS_FILE = "gate-zero-seam-readers.v5.js";
 const STORES_FILE = "gate-zero-seam-stores.v5.js";
 
 /** The line the ruling goes on. If this string stops matching, nothing is proved. */
 const DECISION_ID_LINE = "    decision_id: null,\n";
 
+/** Card 11's store line, the anchor for the wrong-store staging. */
+const CARD_11_STORE_LINE = `    store_ref: "record-layer:work-request-outcome-feedback",\n`;
+
 /**
  * Three distinct well-formed ids, in the order the `decision_id:` lines appear
- * in the ruling table — predecessor, scheduler, conclusion. Distinct on purpose:
- * each reader is asserted to come back with ITS OWN seam's id, so a reader that
- * looked up the wrong seam fails here instead of reading the wrong store later.
+ * in the ruling table — card 11, card 12, card 13. Distinct on purpose: each
+ * reader is asserted to come back with ITS OWN card's id, so a reader that
+ * looked up the wrong card fails here instead of reading the wrong store later.
  */
 const FIXTURE_DECISION_IDS = Object.freeze([
   "11111111-1111-4111-8111-111111111111",
@@ -100,7 +111,7 @@ const FIXTURE_DECISION_IDS = Object.freeze([
 ]);
 
 // ---------------------------------------------------------------------------
-// PART A — the ruling gate is shut, and the refusal is the gate's own object.
+// PART A — the ruling gate is shut, and the refusal is the gate's own answer.
 // ---------------------------------------------------------------------------
 
 const READERS_UNDER_TEST = [
@@ -109,18 +120,31 @@ const READERS_UNDER_TEST = [
   ["readGateConclusionEvidence", readers.readGateConclusionEvidence, readGateGraphAssurance],
 ];
 
-test("RULING: every seam's decision id is null, so no seam is ruled", () => {
-  const seams = Object.keys(rulings.GATE_ZERO_SEAM_RULINGS).sort();
-  assert.deepEqual(seams, [...readers.GATE_ZERO_SEAM_READER_SEAMS]);
-  for (const seam of seams) {
-    const entry = rulings.GATE_ZERO_SEAM_RULINGS[seam];
-    assert.equal(entry.decision_id, null, `${seam} carries a decision id`);
-    assert.equal(rulings.seamRulingDecisionRef(entry), null, seam);
-    assert.ok(rulings.GATE_ZERO_SEAM_STORE_REFS.includes(entry.store_ref), seam);
-    assert.ok(Object.isFrozen(entry), seam);
-  }
-  for (const row of readers.gateZeroSeamRulingStatus())
-    assert.equal(row.ruling_on_record, false, row.seam);
+/** The two answers main's gate gives. Nothing in this slice may alter either. */
+const GATE_ANSWER_DIGESTS = new Set([
+  digest(readGateZeroPredecessorJoin()),
+  digest(readGateGraphAssurance()),
+]);
+
+test("RULING: no card is ruled, and the lookup is the only way to ask", () => {
+  // The table is not exported: `seamRulingRef` is the whole surface, and today
+  // it answers null for every card because every decision id is null.
+  assert.deepEqual(Object.keys(rulings).sort(), ["seamRulingRef"]);
+  for (const card of ["card:11", "card:12", "card:13"])
+    assert.equal(rulings.seamRulingRef(card), null, card);
+});
+
+test("RULING: the lookup takes a card token and never a decision id", () => {
+  // Arity is the boundary, and so is the vocabulary: there is no argument that
+  // could carry a ruling, and a well-formed decision id handed in as the card
+  // token is not a card token.
+  assert.equal(rulings.seamRulingRef.length, 1);
+  const hostiles = [undefined, null, {}, [], 0, true, Symbol("x"),
+    FIXTURE_DECISION_IDS[0], "card:14", "__proto__", "constructor", "toString",
+    { decision_id: FIXTURE_DECISION_IDS[0] }, ...hostileQueries()];
+  // Indexed, not stringified: one of these throws from its own toString.
+  hostiles.forEach((hostile, index) =>
+    assert.equal(rulings.seamRulingRef(hostile), null, `hostile argument ${index}`));
 });
 
 test("RULING: the three decision_id lines are exactly three lines of the pasted shape", () => {
@@ -129,15 +153,17 @@ test("RULING: the three decision_id lines are exactly three lines of the pasted 
   const source = readFileSync(join(SRC, RULINGS_FILE), "utf8");
   assert.equal(source.split(DECISION_ID_LINE).length - 1, 3,
     "the ruling table no longer holds exactly three `decision_id: null,` lines");
+  assert.equal(source.split(CARD_11_STORE_LINE).length - 1, 1,
+    "card 11's store_ref line is no longer the single line the staging edits");
 });
 
-test("RULING SHUT: each reader returns the gate's own refusal, field for field and byte for byte", async () => {
+test("RULING SHUT: each reader returns the gate's own answer, byte for byte", async () => {
   // The gate builds a fresh frozen object per call, so identity is not available
   // to assert. What IS available is stronger than deep-equality on its own: the
-  // refusal is byte-identical under the repository's own canonical digest, AND
+  // answer is byte-identical under the repository's own canonical digest, AND
   // the reader's source returns the gate function's result directly rather than
   // assembling a shape that happens to match today.
-  const source = readFileSync(join(SRC, "gate-zero-seam-readers.v5.js"), "utf8");
+  const source = readFileSync(join(SRC, READERS_FILE), "utf8");
   assert.equal((source.match(/return readGateZeroPredecessorJoin\(\);/g) ?? []).length, 2,
     "a reader stopped delegating its refusal to the gate");
   assert.equal((source.match(/return readGateGraphAssurance\(\);/g) ?? []).length, 1,
@@ -148,22 +174,23 @@ test("RULING SHUT: each reader returns the gate's own refusal, field for field a
     const got = await reader({ stepRef: "step:wr46-dissolution-outcome" });
     assert.deepEqual(got, expected, `${name} returned a different refusal than the gate's`);
     assert.ok(Object.isFrozen(got), name);
+    assert.equal(digest(got), digest(expected), name);
     assert.equal(got.status, "unavailable", name);
     assert.equal(got.decision, "refuse", name);
-    assert.equal(got.reason_id, expected.reason_id, name);
-    assert.deepEqual([...got.owed_seams], [...expected.owed_seams], name);
     assert.equal(got.caller_evidence_admitted, false, name);
-    assert.equal(digest(got), digest(expected), name);
   }
   // And the reason ids are the ones the gate refuses with today, not new words.
   assert.equal(readGateZeroPredecessorJoin().reason_id, "predecessor_outcome_reader_unavailable");
   assert.equal(readGateGraphAssurance().reason_id, "gate_conclusion_reader_unavailable");
-  assert.deepEqual([...readGateZeroPredecessorJoin().owed_seams],
-    [V5_A02_PREDECESSOR_OUTCOME_READER_SEAM, V5_A02_SCHEDULER_READER_SEAM].sort());
-  assert.deepEqual([...readGateGraphAssurance().owed_seams], [V5_A02_GATE_CONCLUSION_READER_SEAM]);
 });
 
-test("RULING SHUT: the refusal does not move for any query, valid or not", async () => {
+/**
+ * REQUIREMENT (4), AND IT IS THE WHOLE POINT OF SHIPPING THIS UNRULED: with the
+ * three decision ids null, every caller of every reader gets, byte for byte, the
+ * JSON main's Gate Zero already returns. There is no input — well formed,
+ * malformed, hostile or absent — for which that is not true.
+ */
+test("BYTE-IDENTICAL TO MAIN: the answer does not move for any query, valid or not", async () => {
   const queries = [
     undefined, null, {}, [], "step:wr46-dissolution-outcome", 1, true,
     { stepRef: "step:wr40-repository-outcome", outcomeHash: `sha256:${"a".repeat(64)}` },
@@ -171,46 +198,53 @@ test("RULING SHUT: the refusal does not move for any query, valid or not", async
     { headSha: "a".repeat(40), checkName: "db-acceptance" },
     { decision_id: FIXTURE_DECISION_IDS[0], stepRef: "step:wr46-dissolution-outcome" },
     { ruling_decision_ref: FIXTURE_DECISION_IDS[0] },
-    { store_ref: "github:checks", finding: "predecessor_outcome_accepted_with_matching_hash" },
+    { card_ref: "card:11", store_ref: "github:checks", finding: "gate_conclusion_observed" },
+    ...hostileQueries(),
   ];
   for (const [name, reader, gateFn] of READERS_UNDER_TEST) {
     const baseline = digest(gateFn());
-    for (const query of queries)
-      assert.equal(digest(await reader(query)), baseline,
-        `${name} answered differently for ${JSON.stringify(query) ?? "undefined"}`);
+    for (const query of queries) {
+      const got = await reader(query);
+      assert.equal(digest(got), baseline,
+        `${name} answered differently for ${safeLabel(query)}`);
+      assert.ok(GATE_ANSWER_DIGESTS.has(digest(got)), name);
+    }
   }
 });
 
-test("RULING SHUT: a caller-supplied decision id is not a parameter anywhere", () => {
-  // Arity is the boundary: each reader takes one query. A second argument cannot
-  // carry a ruling because there is no second argument to carry it.
+test("RULING SHUT: nothing in the reader or the ruling table reaches the environment", () => {
+  // A seam an env var could open is a seam any shell could open. Only the store
+  // layer reads the environment, and only for WHERE a ruled store lives.
+  for (const file of [RULINGS_FILE, READERS_FILE]) {
+    const source = readFileSync(join(SRC, file), "utf8");
+    assert.equal(/process\s*\.\s*env/.test(source), false, `${file} names the process environment`);
+  }
+  // And each reader takes one query. A second argument cannot carry a ruling
+  // because there is no second argument to carry it.
   for (const [name, reader] of READERS_UNDER_TEST)
     assert.equal(reader.length, 1, `${name} takes more than the query`);
-  // And nothing in the module or its ruling table reaches the environment.
-  // And nothing in the reader or its ruling table reaches the process
-  // environment: only the store layer does, and only for WHERE a ruled store
-  // lives. A seam an env var could open is a seam any shell could open.
-  for (const file of [RULINGS_FILE, "gate-zero-seam-readers.v5.js"]) {
-    const source = readFileSync(join(SRC, file), "utf8");
-    assert.equal(/process\s*\.\s*env/.test(source), false,
-      `${file} names the process environment`);
-  }
 });
 
 // ---------------------------------------------------------------------------
 // PART B — the public surface, and the privileged-word sweep.
 // ---------------------------------------------------------------------------
 
-const EXPECTED_READER_EXPORTS = [
-  "GATE_ZERO_PRODUCER_SEAM_NOT_BUILT",
-  "GATE_ZERO_SEAM_READERS_SCHEMA_VERSION",
-  "GATE_ZERO_SEAM_READER_REASON_IDS",
-  "GATE_ZERO_SEAM_READER_SEAMS",
-  "gateZeroSeamRulingStatus",
-  "readGateConclusionEvidence",
-  "readPredecessorOutcomeEvidence",
-  "readSchedulerCanaryEvidence",
-].sort();
+const EXPECTED_EXPORTS = Object.freeze({
+  readers: [
+    "GATE_ZERO_SEAM_READERS_SCHEMA_VERSION",
+    "readGateConclusionEvidence",
+    "readPredecessorOutcomeEvidence",
+    "readSchedulerCanaryEvidence",
+  ],
+  rulings: ["seamRulingRef"],
+  stores: [
+    "SEAM_STORE_UNREACHABLE_REASONS",
+    "SeamStoreUnreachable",
+    "fetchCheckConclusionRows",
+    "fetchPredecessorOutcomeRows",
+    "fetchSchedulerLedgerRows",
+  ],
+});
 
 /** The closed union, verbatim from the standing rule of 2026-09-11. */
 const PRIVILEGED_WORDS = Object.freeze([
@@ -221,43 +255,22 @@ const PRIVILEGED_WORDS = Object.freeze([
 ]);
 
 /**
- * Every string the GATE itself already says, collected from its own live answers
- * and its own exported constants. A substring hit inside one of these is the
- * gate's word, not a new leak — and the readers are required to say some of them,
- * because the refusal they return is the gate's and the reason ids they reuse are
- * the gate's. Computed, so it cannot quietly grow into an allowlist.
- */
-function gateOwnStrings() {
-  const found = new Set();
-  const walk = value => {
-    if (typeof value === "string") { found.add(value); return; }
-    if (Array.isArray(value)) { value.forEach(walk); return; }
-    if (value !== null && typeof value === "object") Object.values(value).forEach(walk);
-  };
-  walk(readGateZeroPredecessorJoin());
-  walk(readGateGraphAssurance());
-  walk(emitGateZeroOutcome());
-  walk([...V5_A02_GATE_ZERO_REASON_IDS]);
-  walk([...V5_A02_GATE_ZERO_OWED_SEAMS]);
-  walk([...V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS]);
-  walk([GATE_ZERO_STEP_REF, V5_A02_SCHEDULER_STEP_REF, V5_A02_GATE_ZERO_PRODUCER_SEAM]);
-  return found;
-}
-
-const GATE_OWN_STRINGS = gateOwnStrings();
-
-/**
- * Three sweeps over one value, in order of strictness.
+ * Four sweeps over one value, in order of strictness, AND NO CARVE-OUT OF ANY
+ * KIND. There is no set of blessed strings in this file.
  *
  *   exact      the whole string IS a privileged word.
  *   token      a word of the string, split on every non-alphanumeric run, IS one.
  *   substring  the privileged word appears anywhere in the string.
+ *   shape      any `would_*` or `*_if_authoritative` key, and the boolean `true`
+ *              anywhere at all, under any key, at any depth.
  *
- * Plus the key checks: a privileged key that is literally `true`, and any
- * `would_*` or `*_if_authoritative` key, which belong to the module-private
- * conditional layer and must never surface.
+ * The boolean rule is wider than the standing rule's "a privileged key that is
+ * literally true", on purpose: a clause result is reported as "held", "failed" or
+ * "unknown", so a `true` on this surface means someone reintroduced a yes/no
+ * answer under a name the union does not happen to list.
  */
 function privilegedFindings(value, path = "$", found = []) {
+  if (value === true) { found.push(`${path} is the boolean true`); return found; }
   if (Array.isArray(value)) {
     value.forEach((entry, index) => privilegedFindings(entry, `${path}[${index}]`, found));
     return found;
@@ -265,21 +278,13 @@ function privilegedFindings(value, path = "$", found = []) {
   if (value !== null && typeof value === "object") {
     for (const [key, entry] of Object.entries(value)) {
       const at = `${path}.${key}`;
-      if (entry === true && PRIVILEGED_WORDS.includes(key)) found.push(`${at} === true`);
-      if (/^would_/.test(key)) found.push(`${at} is a conditional key on the public surface`);
-      if (key.includes("_if_authoritative")) found.push(`${at} is a conditional key on the public surface`);
+      if (/^would_/.test(key) || key.includes("_if_authoritative"))
+        found.push(`${at} is a conditional key on the public surface`);
       privilegedFindings(entry, at, found);
     }
     return found;
   }
   if (typeof value !== "string") return found;
-  // A string the GATE itself already says is not a new leak — and some of them
-  // must appear, because these readers return the gate's own refusal and reuse
-  // the gate's own reason ids. `step:scheduler-active-receipt` carries "active";
-  // `scheduler_readback_absent` carries "read". The carve-out is whole-string
-  // identity against what the gate says, so a word smuggled into a NEW string is
-  // still caught.
-  if (GATE_OWN_STRINGS.has(value)) return found;
   const tokens = value.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
   for (const word of PRIVILEGED_WORDS) {
     if (value === word) found.push(`${path} is the privileged word ${word}`);
@@ -289,49 +294,68 @@ function privilegedFindings(value, path = "$", found = []) {
   return found;
 }
 
+/**
+ * The sweep, applied to one value.
+ *
+ * THE ONE STRUCTURAL FACT, and it is an identity rather than an allowlist: while
+ * no seam is ruled, a reader returns the GATE'S answer, unmodified. That object
+ * belongs to gate-zero-assurance.v5.js on main; its strings are Gate Zero's live
+ * refusal, and renaming them would change what the gate says to every caller,
+ * which this change must not do. So a value that is digest-identical to a gate
+ * answer is asserted to BE one — which admits no new string at all, privileged or
+ * otherwise — and everything else is swept with no exemption whatsoever.
+ */
+function assertSwept(label, value) {
+  if (value !== null && typeof value === "object" && GATE_ANSWER_DIGESTS.has(digest(value))) return;
+  assert.deepEqual(privilegedFindings(value, label), [], `${label} carries a privileged outcome`);
+}
+
+function safeLabel(value) {
+  try { return JSON.stringify(value) ?? String(value); } catch { return "<unserializable>"; }
+}
+
 test("SWEEP: the sweep itself catches a privileged outcome when one is planted", () => {
-  // A sweep nobody has seen fail is a sweep nobody has tested. Four plants, one
-  // per mechanism, so a broken mechanism cannot hide behind a working one.
+  // A sweep nobody has seen fail is a sweep nobody has tested. One plant per
+  // mechanism, so a broken mechanism cannot hide behind a working one.
   assert.ok(privilegedFindings({ ok: true }).length > 0);
+  assert.ok(privilegedFindings({ receipt_binding: true }).length > 0,
+    "the boolean rule missed a true under a name the union does not list");
   assert.ok(privilegedFindings({ status: "green" }).length > 0);
   assert.ok(privilegedFindings({ status: "the gate is green now" }).length > 0);
   assert.ok(privilegedFindings({ would_allow_if_authoritative: false }).length > 0);
   assert.ok(privilegedFindings({ note: "committed" }).length > 0,
     "the substring sweep missed a privileged word inside a longer one");
-  // And the carve-out is exactly "a string the gate already says", nothing wider.
-  assert.ok(GATE_OWN_STRINGS.has(V5_A02_GATE_ZERO_PRODUCER_SEAM));
-  assert.ok(GATE_OWN_STRINGS.has("scheduler_readback_absent"));
-  assert.ok(!GATE_OWN_STRINGS.has("committed"));
-  assert.ok(!GATE_OWN_STRINGS.has("green"), "the carve-out must not hold a bare privileged word");
-  assert.ok(privilegedFindings({ note: "step:scheduler-active-receipt is fine on its own" }).length > 0,
-    "a gate word smuggled into a new sentence must still be caught");
-  assert.ok(GATE_OWN_STRINGS.size > 20 && GATE_OWN_STRINGS.size < 200,
-    "the carve-out is the wrong size to be the gate's own words");
+  // And the gate's own strings are NOT blessed as strings: only a whole object
+  // that IS a gate answer is. A gate word lifted into a new sentence is caught.
+  assert.ok(privilegedFindings({ note: V5_A02_GATE_ZERO_PRODUCER_SEAM }).length > 0,
+    "a gate seam name pasted into a new value must still be caught");
+  assert.ok(privilegedFindings({ note: V5_A02_SCHEDULER_STEP_REF }).length > 0);
+  assert.throws(() => assertSwept("planted", { conclusion: "green" }));
 });
 
-test("SURFACE: the export list is exactly the three readers and their constants", () => {
-  assert.deepEqual(Object.keys(readers).sort(), EXPECTED_READER_EXPORTS);
-  for (const name of Object.keys(readers)) {
-    assert.ok(!/^(classify|evaluate|derive|bind|create|set)/.test(name),
-      `${name} is a binder or classifier name on the public surface`);
-    assert.ok(!/would_|_if_authoritative/.test(name), `${name} is a conditional name on the surface`);
-  }
-  // The conditional layer is a separate module and stays out of this one's
-  // surface: its names are `would*`, and none of them is re-exported here.
-  for (const name of Object.keys(evidence))
-    if (/^would/.test(name)) assert.ok(!Object.hasOwn(readers, name), `${name} leaked onto the reader surface`);
-});
-
-test("SWEEP: no export of any of the four seam modules carries a privileged outcome", () => {
-  for (const [label, namespace] of [["readers", readers], ["rulings", rulings],
-    ["evidence", evidence], ["stores", stores]]) {
-    for (const [name, value] of Object.entries(namespace)) {
-      if (typeof value === "function") continue;
-      assert.deepEqual(privilegedFindings(value, `${label}.${name}`), [],
-        `${label}.${name} carries a privileged outcome`);
+test("SURFACE: the export list of all three modules is exactly enumerated", () => {
+  for (const [label, namespace] of [["readers", readers], ["rulings", rulings], ["stores", stores]])
+    assert.deepEqual(Object.keys(namespace).sort(), [...EXPECTED_EXPORTS[label]].sort(), label);
+  // No classifier, no binder, no conditional name anywhere on the surface.
+  for (const [label, namespace] of [["readers", readers], ["rulings", rulings], ["stores", stores]])
+    for (const name of Object.keys(namespace)) {
+      assert.ok(!/^(classify|evaluate|derive|bind|create|set|would)/.test(name),
+        `${label}.${name} is a binder or classifier name on the public surface`);
+      assert.ok(!/would_|_if_authoritative/.test(name), `${label}.${name} is a conditional name`);
     }
+  // The ruling table, the findings vocabulary, the reason ids, the seam list and
+  // the producer restatement are all gone from the surface. Naming them here
+  // means a future edit that re-exports one fails on this line.
+  for (const gone of ["GATE_ZERO_SEAM_RULINGS", "GATE_ZERO_SEAM_STORE_REFS", "seamRulingDecisionRef",
+    "DECISION_ID", "GATE_ZERO_SEAM_FINDINGS", "GATE_ZERO_SEAM_READER_REASON_IDS",
+    "GATE_ZERO_SEAM_READER_SEAMS", "GATE_ZERO_PRODUCER_SEAM_NOT_BUILT", "gateZeroSeamRulingStatus",
+    "wouldAdmitPredecessorOutcome", "wouldReportSchedulerCanary", "wouldReportGateConclusion"]) {
+    assert.ok(!Object.hasOwn(readers, gone), `${gone} is back on the reader surface`);
+    assert.ok(!Object.hasOwn(rulings, gone), `${gone} is back on the ruling surface`);
   }
-  assert.deepEqual(privilegedFindings(readers.gateZeroSeamRulingStatus(), "rulingStatus"), []);
+  // And the module that held the exported classifiers is gone, not hidden.
+  assert.ok(!readdirSync(SRC).includes("gate-zero-seam-evidence.v5.js"),
+    "the exported-classifier module is still in src");
 });
 
 /** Objects built to break a reader that reaches into them naively. */
@@ -355,27 +379,76 @@ function hostileQueries() {
       get serviceKey() { throw new Error(`${HOSTILE_MARKER}-getter`); },
       get canaryRunKey() { throw new Error(`${HOSTILE_MARKER}-getter`); },
       get headSha() { throw new Error(`${HOSTILE_MARKER}-getter`); },
-      get checkName() { throw new Error(`${HOSTILE_MARKER}-getter`); } },
+      get checkName() { throw new Error(`${HOSTILE_MARKER}-getter`); },
+      get workRequestRef() { throw new Error(`${HOSTILE_MARKER}-getter`); },
+      get commitSha() { throw new Error(`${HOSTILE_MARKER}-getter`); } },
     { stepRef: `${HOSTILE_MARKER}-step`, outcomeHash: `${HOSTILE_MARKER}-hash`,
       serviceKey: `${HOSTILE_MARKER}-service`, canaryRunKey: `${HOSTILE_MARKER}-run`,
-      headSha: `${HOSTILE_MARKER}-sha`, checkName: `${HOSTILE_MARKER}-check` },
+      headSha: `${HOSTILE_MARKER}-sha`, checkName: `${HOSTILE_MARKER}-check`,
+      workRequestRef: `${HOSTILE_MARKER}-wr`, commitSha: `${HOSTILE_MARKER}-commit` },
     { stepRef: { toString() { throw new Error(`${HOSTILE_MARKER}-tostring`); } } },
     { stepRef: Symbol(`${HOSTILE_MARKER}-symbol`) },
     { stepRef: ["step:wr46-dissolution-outcome"], outcomeHash: [`sha256:${"a".repeat(64)}`] },
+    { stepRef: "green", outcomeHash: "ok", serviceKey: "allow", canaryRunKey: "passing",
+      headSha: "complete", checkName: "verified" },
   ];
 }
 
-test("HOSTILE: no hostile query throws, and none of its bytes come back", async () => {
-  for (const [name, reader] of READERS_UNDER_TEST) {
+test("SWEEP: every export of every seam module, constants and callables alike", async () => {
+  const saved = {};
+  for (const name of ["DATABASE_URL_READER", "GITHUB_TOKEN", "GITHUB_REPOSITORY"]) {
+    saved[name] = process.env[name];
+    delete process.env[name];
+  }
+  try {
+    for (const [label, namespace] of [["readers", readers], ["rulings", rulings], ["stores", stores]]) {
+      for (const [name, value] of Object.entries(namespace)) {
+        const at = `${label}.${name}`;
+        if (typeof value !== "function") { assertSwept(at, value); continue; }
+        // A CALLABLE IS SWEPT BY CALLING IT — with no argument, and with every
+        // hostile shape — and what it returns or throws is swept in turn. A
+        // constructor is swept by constructing it with its own closed reasons.
+        if (name === "SeamStoreUnreachable") {
+          for (const because of stores.SEAM_STORE_UNREACHABLE_REASONS) {
+            const error = new value("github:checks", because);
+            assertSwept(`${at}.message`, error.message);
+            assertSwept(`${at}.because`, error.because);
+            assertSwept(`${at}.store_ref`, error.store_ref);
+          }
+          assert.throws(() => new value("github:checks", "because I said so"), TypeError);
+          continue;
+        }
+        for (const argument of [undefined, ...hostileQueries()]) {
+          let outcome;
+          try {
+            outcome = await value(argument);
+          } catch (error) {
+            assertSwept(`${at}.throw.message`, error?.message ?? null);
+            assertSwept(`${at}.throw.because`, error?.because ?? null);
+            continue;
+          }
+          assertSwept(`${at}(${safeLabel(argument)})`, outcome);
+          assert.ok(!JSON.stringify(outcome ?? null).includes(HOSTILE_MARKER),
+            `${at} leaked caller text`);
+        }
+      }
+    }
+  } finally {
+    for (const [name, value] of Object.entries(saved))
+      if (value !== undefined) process.env[name] = value;
+  }
+});
+
+test("HOSTILE: no hostile query throws out of a reader, and none of its bytes come back", async () => {
+  for (const [name, reader] of READERS_UNDER_TEST)
     for (const query of hostileQueries()) {
       const result = await reader(query);
       const serialized = JSON.stringify(result);
       assert.ok(!serialized.includes(HOSTILE_MARKER),
         `${name} leaked caller text: ${serialized.slice(0, 200)}`);
       assert.equal(result.decision, "refuse", name);
-      assert.deepEqual(privilegedFindings(result), [], name);
+      assert.ok(GATE_ANSWER_DIGESTS.has(digest(result)), name);
     }
-  }
 });
 
 // ---------------------------------------------------------------------------
@@ -390,7 +463,7 @@ const staged = [];
  * other dependency still resolve by walking up, and so nothing untracked lands
  * in the working tree.
  */
-function stageTree({ substituteStores }) {
+function stageTree({ storeFile = null, card11StoreRef = null } = {}) {
   const cache = fileURLToPath(new URL("../node_modules/.cache/", import.meta.url));
   mkdirSync(cache, { recursive: true });
   const base = mkdtempSync(join(cache, "gate-zero-seam-"));
@@ -403,63 +476,77 @@ function stageTree({ substituteStores }) {
   assert.equal(source.split(DECISION_ID_LINE).length - 1, 3,
     "the staging anchor no longer matches the ruling table");
   let pasted = 0;
-  const ruled = source.replaceAll(DECISION_ID_LINE,
+  let ruled = source.replaceAll(DECISION_ID_LINE,
     () => `    decision_id: "${FIXTURE_DECISION_IDS[pasted++]}",\n`);
   assert.equal(pasted, 3, "the staging pasted the wrong number of rulings");
   assert.ok(!ruled.includes(DECISION_ID_LINE), "a null decision id survived the staging");
+  if (card11StoreRef !== null) {
+    assert.ok(ruled.includes(CARD_11_STORE_LINE), "card 11's store line moved");
+    ruled = ruled.replace(CARD_11_STORE_LINE, `    store_ref: "${card11StoreRef}",\n`);
+  }
   writeFileSync(path, ruled);
 
-  if (substituteStores) cpSync(FIXTURE_STORE_FILE, join(target, STORES_FILE));
+  if (storeFile !== null) cpSync(storeFile, join(target, STORES_FILE));
   return target;
 }
 
 async function stagedReaders(options) {
-  return import(pathToFileURL(join(stageTree(options), "gate-zero-seam-readers.v5.js")).href);
+  return import(pathToFileURL(join(stageTree(options), READERS_FILE)).href);
 }
 
 test.after(() => {
   for (const base of staged) rmSync(base, { recursive: true, force: true });
 });
 
-test("STAGING: the fixture store module covers every export the real one has", () => {
+test("STAGING: both fixture store modules cover every export the real one has", () => {
   const real = Object.keys(stores).sort();
-  const fixture = new Set(Object.keys(fixtureStores));
-  for (const name of real)
-    assert.ok(fixture.has(name), `the fixture store is missing ${name}, so a path would go unproved`);
-  for (const name of [...fixture].sort())
-    if (!real.includes(name))
-      assert.ok(name.startsWith("FIXTURE_"), `${name} is a fixture-only export that is not named as one`);
+  for (const [label, fixture] of [["fixture", fixtureStores], ["receipt", receiptStores]]) {
+    const names = new Set(Object.keys(fixture));
+    for (const name of real)
+      assert.ok(names.has(name), `the ${label} store is missing ${name}, so a path would go unproved`);
+    for (const name of [...names].sort())
+      if (!real.includes(name))
+        assert.ok(name.startsWith("FIXTURE_"), `${label}.${name} is a fixture-only export not named as one`);
+  }
 });
 
 test("RULED: a pasted decision id is what opens the seam, and nothing else", async () => {
-  const ruled = await stagedReaders({ substituteStores: true });
-  const status = ruled.gateZeroSeamRulingStatus();
-  assert.equal(status.length, 3);
-  for (const row of status) assert.equal(row.ruling_on_record, true, row.seam);
+  const ruled = await stagedReaders({ storeFile: FIXTURE_STORE_FILE });
+  const opened = await ruled.readPredecessorOutcomeEvidence({
+    stepRef: "step:wr46-dissolution-outcome", outcomeHash: fixtureStores.FIXTURE_ACCEPTED_HASH });
+  assert.ok(!GATE_ANSWER_DIGESTS.has(digest(opened)), "the staged ruling did not open the seam");
   // The unruled module in this same process is untouched by the staging.
-  for (const row of readers.gateZeroSeamRulingStatus()) assert.equal(row.ruling_on_record, false);
+  const shut = await readers.readPredecessorOutcomeEvidence({
+    stepRef: "step:wr46-dissolution-outcome", outcomeHash: fixtureStores.FIXTURE_ACCEPTED_HASH });
+  assert.equal(digest(shut), digest(readGateZeroPredecessorJoin()));
 });
 
 test("RULED: the predecessor reader admits only an accepted outcome whose receipt hash matches", async () => {
-  const ruled = await stagedReaders({ substituteStores: true });
+  const ruled = await stagedReaders({ storeFile: FIXTURE_STORE_FILE });
   const accepted = await ruled.readPredecessorOutcomeEvidence({
     stepRef: "step:wr46-dissolution-outcome", outcomeHash: fixtureStores.FIXTURE_ACCEPTED_HASH });
   assert.equal(accepted.status, "evidence_returned");
   assert.equal(accepted.decision, "report");
   assert.equal(accepted.finding, "predecessor_outcome_accepted_with_matching_hash");
-  assert.equal(accepted.hash_matches, true);
+  assert.equal(accepted.hash_match, "held");
   assert.equal(accepted.work_request_ref, "WR-000046");
+  assert.equal(accepted.card_ref, "card:11");
   assert.equal(accepted.ruling_decision_ref, FIXTURE_DECISION_IDS[0],
-    "the predecessor seam took the wrong seam's ruling");
+    "card 11 took the wrong card's ruling");
   assert.equal(accepted.store_ref, "record-layer:work-request-outcome-feedback");
-  assert.deepEqual(privilegedFindings(accepted), []);
+  assertSwept("card11.accepted", accepted);
+  // No caller byte and no store byte: the step ref the caller named is not in
+  // the answer, and neither is a feedback ref, an outcome or a timestamp.
+  assert.ok(!Object.hasOwn(accepted, "step_ref"));
+  for (const gone of ["feedback_ref", "stored_outcome", "accepted_at", "outcome"])
+    assert.ok(!Object.hasOwn(accepted, gone), `${gone} is echoed into the answer`);
 
   // A forged hash — well-formed, and no row carries it.
   const forged = await ruled.readPredecessorOutcomeEvidence({
     stepRef: "step:wr46-dissolution-outcome", outcomeHash: fixtureStores.FIXTURE_FORGED_HASH });
   assert.equal(forged.decision, "refuse");
   assert.equal(forged.finding, "predecessor_outcome_acceptance_receipt_hash_mismatch");
-  assert.equal(forged.hash_matches, false);
+  assert.equal(forged.hash_match, "failed");
 
   // A proposal nobody signed. The near miss, and it refuses before the hash.
   const pending = await ruled.readPredecessorOutcomeEvidence({
@@ -478,6 +565,7 @@ test("RULED: the predecessor reader admits only an accepted outcome whose receip
     stepRef: V5_A02_SCHEDULER_STEP_REF, outcomeHash: fixtureStores.FIXTURE_ACCEPTED_HASH });
   assert.equal(scheduler.decision, "refuse");
   assert.equal(scheduler.reason_id, "scheduler_predecessor_not_outcome_backed");
+  assertSwept("card11.scheduler", scheduler);
 
   // A step outside the frozen four, and a malformed hash.
   const unknown = await ruled.readPredecessorOutcomeEvidence({
@@ -489,87 +577,99 @@ test("RULED: the predecessor reader admits only an accepted outcome whose receip
   assert.equal(badHash.invalid_field, "outcomeHash");
 });
 
-test("DERIVATION: the receipt's hash is the one consulted, not the proposal's", async () => {
-  // Found by mutation: in the fixture store an accepted row's proposal hash and
-  // its receipt hash are the same value, because in production
-  // ops.accept_sourced_work_request_outcome_feedback writes them equal. So
-  // swapping `accepted_feedback_hash` for `feedback_hash` changed nothing any
-  // store-level test could see, and the most load-bearing clause in the slice was
-  // unproved. These two rows separate the fields, which no production row does.
-  const asked = `sha256:${"4".repeat(64)}`;
-  const other = `sha256:${"7".repeat(64)}`;
+test("RULED: the receipt's hash is the one consulted, not the proposal's", async () => {
+  // Found by mutation: in production ops.accept_sourced_work_request_outcome_feedback
+  // writes the proposal hash and the receipt hash equal, so swapping the two
+  // fields changed nothing any test could see, and the most load-bearing clause
+  // in the slice was unproved. This staging's rows separate them, which no
+  // production row does.
+  const ruled = await stagedReaders({ storeFile: RECEIPT_STORE_FILE });
+  const asked = receiptStores.FIXTURE_ASKED_HASH;
 
-  // A row that CLAIMS acceptance and carries no receipt hash. Refuses, because
-  // the hash is taken from the receipt and there is none.
-  const noReceipt = evidence.wouldAdmitPredecessorOutcome([{
-    feedback_ref: "OUTCOME-claims-acceptance", status: "accepted",
-    feedback_hash: asked, accepted_feedback_hash: null, outcome: "criteria_met",
-  }], { outcomeHash: asked });
-  assert.equal(noReceipt.conditional_finding,
-    "predecessor_outcome_acceptance_receipt_hash_mismatch",
+  // The receipt carries the asked-about hash; the proposal carries another.
+  const receiptMatches = await ruled.readPredecessorOutcomeEvidence({
+    stepRef: "step:wr46-dissolution-outcome", outcomeHash: asked });
+  assert.equal(receiptMatches.finding, "predecessor_outcome_accepted_with_matching_hash",
+    "the reader stopped consulting the acceptance receipt's hash");
+  assert.equal(receiptMatches.hash_match, "held");
+
+  // The mirror: the PROPOSAL carries the asked-about hash and no receipt does.
+  const proposalOnly = await ruled.readPredecessorOutcomeEvidence({
+    stepRef: "step:wr40-repository-outcome", outcomeHash: asked });
+  assert.equal(proposalOnly.finding, "predecessor_outcome_acceptance_receipt_hash_mismatch",
     "a row matched on its proposal hash instead of its receipt hash");
-  assert.equal(noReceipt.would_admit_if_rows_were_authoritative, false);
+  assert.equal(proposalOnly.decision, "refuse");
 
-  // And the mirror: the receipt carries the asked-about hash while the proposal
-  // carries a different one. Admits, which proves WHICH field was consulted.
-  const receiptMatches = evidence.wouldAdmitPredecessorOutcome([{
-    feedback_ref: "OUTCOME-receipt-matches", status: "accepted",
-    feedback_hash: other, accepted_feedback_hash: asked, outcome: "criteria_met",
-  }], { outcomeHash: asked });
-  assert.equal(receiptMatches.conditional_finding,
-    "predecessor_outcome_accepted_with_matching_hash");
-  assert.equal(receiptMatches.hash_matches, true);
-
-  // The derivation answers in the conditional and never in the asserted form:
-  // only the reader, which knows where the rows came from, says `finding`.
-  for (const result of [noReceipt, receiptMatches]) {
-    assert.ok(Object.hasOwn(result, "would_admit_if_rows_were_authoritative"));
-    assert.ok(!Object.hasOwn(result, "finding"),
-      "the derivation asserted a finding without provenance");
-    assert.equal(result.evidence_basis, "rows_supplied_to_this_function");
-  }
+  // A receipt whose work_request_card detail is absent is a MISSING ROW. The
+  // earlier store synthesized it as accepted with a null outcome and it could
+  // still be admitted.
+  const detailAbsent = await ruled.readPredecessorOutcomeEvidence({
+    stepRef: "step:wr54-backup-recovery-outcome", outcomeHash: asked });
+  assert.equal(detailAbsent.finding, "predecessor_outcome_detail_absent");
+  assert.equal(detailAbsent.decision, "refuse");
+  for (const result of [receiptMatches, proposalOnly, detailAbsent]) assertSwept("receipt", result);
 });
 
-test("RULED: the scheduler reader answers all three clauses from ledger rows, and refuses a missing row", async () => {
-  const ruled = await stagedReaders({ substituteStores: true });
+test("RULED: card 12 reads the rows bin/run-scheduled.sh actually writes", async () => {
+  const ruled = await stagedReaders({ storeFile: FIXTURE_STORE_FILE });
   const read = (canaryRunKey, serviceKey = "carr-fleet-sync") =>
     ruled.readSchedulerCanaryEvidence({ serviceKey, canaryRunKey });
 
   const joined = await read("canary-join");
   assert.equal(joined.decision, "report");
   assert.equal(joined.finding, "scheduler_canary_and_observation_join");
-  assert.equal(joined.bound_to_receipt, true);
-  assert.equal(joined.readback_after_dispatch, true);
-  assert.equal(joined.canary_match, true);
-  assert.equal(joined.scheduler_step_ref, V5_A02_SCHEDULER_STEP_REF);
+  assert.equal(joined.receipt_binding, "held");
+  assert.equal(joined.observation_after_dispatch, "held");
+  assert.equal(joined.canary_match, "held");
+  assert.equal(joined.card_ref, "card:12");
   assert.equal(joined.ruling_decision_ref, FIXTURE_DECISION_IDS[1]);
-  assert.deepEqual(privilegedFindings(joined), []);
+  assert.equal(joined.store_ref, "control-plane:ops.service+ops.run");
+  assertSwept("card12.joined", joined);
+  for (const gone of ["dispatched_at", "observed_at", "scheduler_step_ref"])
+    assert.ok(!Object.hasOwn(joined, gone), `${gone} is echoed into the answer`);
 
-  const unbound = await read("canary-unbound");
-  assert.equal(unbound.decision, "refuse");
-  assert.equal(unbound.finding, "scheduler_canary_not_bound_to_receipt");
-  assert.equal(unbound.bound_to_receipt, false);
+  // ONE NEGATIVE ROW PER FIELD the receipt-binding clause reads. Each changes a
+  // single field of the row the wrapper writes, so a clause that stopped reading
+  // one field fails on exactly one case.
+  for (const key of ["canary-today", "canary-hand-run", "canary-probe", "canary-foreign-wrapper"]) {
+    const result = await read(key);
+    assert.equal(result.decision, "refuse", key);
+    assert.equal(result.finding, "scheduler_canary_not_bound_to_receipt", key);
+    assert.equal(result.receipt_binding, "failed", key);
+    assertSwept(`card12.${key}`, result);
+  }
 
   // Dispatch and observation share one instant: strictly-after is strict.
   const sameInstant = await read("canary-same-instant");
   assert.equal(sameInstant.decision, "refuse");
-  assert.equal(sameInstant.finding, "scheduler_readback_not_after_dispatch");
-  assert.equal(sameInstant.readback_after_dispatch, false);
+  assert.equal(sameInstant.finding, "scheduler_observation_not_after_dispatch");
+  assert.equal(sameInstant.observation_after_dispatch, "failed");
 
   const mismatch = await read("canary-mismatch");
   assert.equal(mismatch.decision, "refuse");
-  assert.equal(mismatch.finding, "scheduler_readback_canary_mismatch");
-  assert.equal(mismatch.canary_match, false);
+  assert.equal(mismatch.finding, "scheduler_observation_canary_mismatch");
+  assert.equal(mismatch.canary_match, "failed");
 
-  for (const [key, finding] of [
-    ["canary-inflight", "scheduler_readback_absent"],
+  for (const [key, expected] of [
+    ["canary-inflight", "scheduler_observation_absent"],
     ["canary-never-ran", "scheduler_dispatch_row_absent"],
   ]) {
     const result = await read(key);
     assert.equal(result.decision, "refuse", key);
-    assert.equal(result.finding, finding, key);
-    assert.equal(result.bound_to_receipt, null, `${key} guessed a clause with no row to read it from`);
+    assert.equal(result.finding, expected, key);
+    assert.equal(result.receipt_binding, "unknown",
+      `${key} guessed a clause with no row to read it from`);
   }
+
+  // A store that answers about a DIFFERENT store than the one the ruling names
+  // is not answered over. These rows would otherwise join cleanly.
+  const wrongStore = await read(fixtureStores.FIXTURE_WRONG_STORE);
+  assert.equal(wrongStore.decision, "refuse");
+  assert.equal(wrongStore.reason_id, "store_ref_not_the_ruled_one");
+  assert.equal(wrongStore.finding, null);
+  assert.equal(wrongStore.store_ref, "control-plane:ops.service+ops.run",
+    "the answer reported the store that replied instead of the store that was ruled");
+  assertSwept("card12.wrongStore", wrongStore);
 
   const noService = await read("canary-join", "carr-not-in-the-ledger");
   assert.equal(noService.finding, "scheduler_service_row_absent");
@@ -579,8 +679,31 @@ test("RULED: the scheduler reader answers all three clauses from ledger rows, an
   assert.equal(badQuery.invalid_field, "serviceKey");
 });
 
+test("SCHEMA: the source_kind the clause requires is one db/schema.sql permits", () => {
+  // The defect this replaces: the clause required `source_kind === "scheduler"`,
+  // which ops.run's own check constraint forbids, so it could never have matched
+  // a real row. Both halves are read from the files that define them.
+  const repo = fileURLToPath(new URL("../..", import.meta.url));
+  const schema = readFileSync(join(repo, "db/schema.sql"), "utf8");
+  const constraint = /run_source_kind_check CHECK \(\(source_kind = ANY \(ARRAY\[([^\]]*)\]\)\)\)/.exec(schema);
+  assert.ok(constraint, "ops.run's source_kind constraint is no longer where this test reads it");
+  const permitted = [...constraint[1].matchAll(/'([a-z_]+)'::text/g)].map(one => one[1]);
+  assert.deepEqual(permitted.sort(), ["collector", "operator", "registry", "wrapper"]);
+  assert.ok(!permitted.includes("scheduler"), "ops.run permits a scheduler source_kind after all");
+
+  const wrapper = readFileSync(join(repo, "bin/run-scheduled.sh"), "utf8");
+  assert.ok(/--source-kind wrapper --source-ref bin\/run-scheduled\.sh/.test(wrapper),
+    "bin/run-scheduled.sh no longer writes the source kind and ref the clause binds to");
+  // And the clause binds to those exact two strings, not to an invented one.
+  const source = readFileSync(join(SRC, READERS_FILE), "utf8");
+  assert.ok(/const SCHEDULER_SOURCE_KIND = "wrapper";/.test(source));
+  assert.ok(/const SCHEDULER_SOURCE_REF = "bin\/run-scheduled\.sh";/.test(source));
+  assert.equal(/source_kind[^\n]*===\s*"scheduler"/.test(source), false,
+    "the reader still compares source_kind against an impossible value");
+});
+
 test("RULED: the conclusion reader returns GitHub's own word, and translates nothing", async () => {
-  const ruled = await stagedReaders({ substituteStores: true });
+  const ruled = await stagedReaders({ storeFile: FIXTURE_STORE_FILE });
   const sha = fixtureStores.FIXTURE_COMMIT_SHA;
 
   const success = await ruled.readGateConclusionEvidence({ headSha: sha, checkName: "db-acceptance" });
@@ -588,11 +711,9 @@ test("RULED: the conclusion reader returns GitHub's own word, and translates not
   assert.equal(success.finding, "gate_conclusion_observed");
   assert.equal(success.conclusion, "success");
   assert.equal(success.store_ref, "github:checks");
+  assert.equal(success.card_ref, "card:13");
   assert.equal(success.ruling_decision_ref, FIXTURE_DECISION_IDS[2]);
-  // The word is GitHub's and is not turned into one a gate would act on.
-  assert.ok(!Object.hasOwn(success, "green"));
-  assert.ok(!Object.hasOwn(success, "passable"));
-  assert.deepEqual(privilegedFindings(success), []);
+  assertSwept("card13.success", success);
 
   // A re-run: the later conclusion is the one reported, and the count is visible.
   const rerun = await ruled.readGateConclusionEvidence({ headSha: sha, checkName: "rerun-check" });
@@ -613,30 +734,48 @@ test("RULED: the conclusion reader returns GitHub's own word, and translates not
   assert.equal(wrongCommit.check_runs_seen, 1,
     "the row was seen and still did not answer, which is the point");
 
+  // A word GitHub does not document is not passed through: the only conclusion
+  // strings a consumer sees are constants out of the reader module.
+  const invented = await ruled.readGateConclusionEvidence({ headSha: sha, checkName: "invented-conclusion" });
+  assert.equal(invented.finding, "gate_conclusion_unrecognized");
+  assert.equal(invented.conclusion, null);
+  assert.equal(invented.decision, "refuse");
+  assertSwept("card13.invented", invented);
+
   const badQuery = await ruled.readGateConclusionEvidence({ headSha: "nope", checkName: "db-acceptance" });
   assert.equal(badQuery.reason_id, "gate_conclusion_query_invalid");
   assert.equal(badQuery.invalid_field, "headSha");
 });
 
-test("RULED: hostile queries stay harmless once the seam is open", async () => {
-  const ruled = await stagedReaders({ substituteStores: true });
-  const under = [
-    ["readPredecessorOutcomeEvidence", ruled.readPredecessorOutcomeEvidence],
-    ["readSchedulerCanaryEvidence", ruled.readSchedulerCanaryEvidence],
-    ["readGateConclusionEvidence", ruled.readGateConclusionEvidence],
-  ];
-  for (const [name, reader] of under) {
-    for (const query of hostileQueries()) {
-      const result = await reader(query);
-      assert.ok(!JSON.stringify(result).includes(HOSTILE_MARKER), `${name} leaked caller text`);
-      assert.equal(result.decision, "refuse", name);
-      assert.deepEqual(privilegedFindings(result), [], name);
-    }
+test("RULED: a ruling naming a store this reader does not serve opens nothing", async () => {
+  // Criterion (c). The earlier reader checked only that the ruled ref was a
+  // member of a global union, then called its own hard-coded fetcher and
+  // reported the ruled ref regardless — so a ruling naming `github:checks` for
+  // card 11 still queried the database and said github:checks.
+  //
+  // The REAL store module is staged here with no DSN configured: if a row were
+  // fetched the answer would be `predecessor_outcome_store_unreachable`. It is
+  // the gate's own refusal instead, so nothing was opened.
+  const ruled = await stagedReaders({ card11StoreRef: "github:checks" });
+  const saved = process.env.DATABASE_URL_READER;
+  delete process.env.DATABASE_URL_READER;
+  try {
+    const result = await ruled.readPredecessorOutcomeEvidence({
+      stepRef: "step:wr46-dissolution-outcome", outcomeHash: `sha256:${"4".repeat(64)}` });
+    assert.equal(digest(result), digest(readGateZeroPredecessorJoin()),
+      "a ruling naming the wrong store opened the seam anyway");
+    // The other two cards are ruled normally in this same staging and do open.
+    const scheduler = await ruled.readSchedulerCanaryEvidence({
+      serviceKey: "carr-fleet-sync", canaryRunKey: "canary-join" });
+    assert.equal(scheduler.reason_id, "scheduler_ledger_unreachable",
+      "card 12 did not open, so the staging proved nothing about card 11");
+  } finally {
+    if (saved !== undefined) process.env.DATABASE_URL_READER = saved;
   }
 });
 
 test("RULED: with the real stores and nothing configured, every seam reports unreachable", async () => {
-  const ruled = await stagedReaders({ substituteStores: false });
+  const ruled = await stagedReaders({});
   const saved = {};
   for (const name of ["DATABASE_URL_READER", "GITHUB_TOKEN", "GITHUB_REPOSITORY"]) {
     saved[name] = process.env[name];
@@ -660,8 +799,7 @@ test("RULED: with the real stores and nothing configured, every seam reports unr
     assert.equal(conclusion.unavailable_because,
       "the checks source credentials are not configured in this process");
 
-    for (const result of [predecessor, scheduler, conclusion])
-      assert.deepEqual(privilegedFindings(result), []);
+    for (const result of [predecessor, scheduler, conclusion]) assertSwept("unreachable", result);
   } finally {
     for (const [name, value] of Object.entries(saved))
       if (value !== undefined) process.env[name] = value;
@@ -678,33 +816,31 @@ test("STORES: the real store module refuses rather than guessing when nothing is
   } finally {
     if (saved !== undefined) process.env.DATABASE_URL_READER = saved;
   }
-  // And the reason set is closed: an unregistered phrase cannot be constructed.
-  assert.throws(() => new stores.SeamStoreUnreachable("github:checks", "because I said so"), TypeError);
 });
 
 // ---------------------------------------------------------------------------
-// PART D — the producer seam, not built, and its refusal kept exact.
+// PART D — the producer seam, not built, and said in exactly one place.
 // ---------------------------------------------------------------------------
 
-test("PRODUCER: the not-built refusal is byte-identical to the gate's own", () => {
+test("PRODUCER: cards 9 and 10 have no ruling line, no reader and no restatement", () => {
   const live = emitGateZeroOutcome();
-  const copy = readers.GATE_ZERO_PRODUCER_SEAM_NOT_BUILT;
-  assert.equal(copy.built, false);
-  assert.deepEqual([...copy.cards], [9, 10]);
-  assert.equal(copy.seam, V5_A02_GATE_ZERO_PRODUCER_SEAM);
-  assert.equal(copy.reason_id, live.reason_id);
-  assert.equal(copy.unavailable_because, live.unavailable_because);
-  assert.equal(copy.not_passable_because, live.not_passable_because);
-  assert.ok(live.owed_seams.includes(copy.seam));
   assert.equal(live.passable, false);
   assert.equal(live.producer_bound, false);
-  // No reader exists for it, and the reason set does not name one.
-  assert.ok(!readers.GATE_ZERO_SEAM_READER_SEAMS.includes(copy.seam));
-  assert.ok(!Object.hasOwn(rulings.GATE_ZERO_SEAM_RULINGS, copy.seam),
-    "the producer seam has a ruling line, which would imply it is buildable by ruling");
+  assert.ok(live.owed_seams.includes(V5_A02_GATE_ZERO_PRODUCER_SEAM));
+
+  // No ruling line: the lookup has no entry for it, so no paste could open it.
+  assert.equal(rulings.seamRulingRef(V5_A02_GATE_ZERO_PRODUCER_SEAM), null);
+  const rulingSource = readFileSync(join(SRC, RULINGS_FILE), "utf8");
+  assert.equal(/^\s*"seam:/m.test(rulingSource), false,
+    "the ruling table keys on seam names again, so the producer seam could take a line");
+
+  // No restatement: the earlier draft exported a written-out copy of this
+  // refusal, which had to be kept in sync. The gate says it once.
+  const readerSource = readFileSync(join(SRC, READERS_FILE), "utf8");
+  for (const phrase of [live.unavailable_because, live.not_passable_because])
+    assert.ok(!readerSource.includes(phrase), "the producer refusal is copied into the reader module");
   for (const name of Object.keys(readers))
-    assert.ok(!/producer.*read|read.*producer/i.test(name) || name === "GATE_ZERO_PRODUCER_SEAM_NOT_BUILT",
-      `${name} looks like a producer reader`);
+    assert.ok(!/producer/i.test(name), `${name} names the producer seam on the reader surface`);
 });
 
 test("PRODUCER: binding the gate's own answer still does not move, now that readers exist", () => {
@@ -713,6 +849,7 @@ test("PRODUCER: binding the gate's own answer still does not move, now that read
   assert.equal(emitGateZeroOutcome().passable, false);
   assert.equal(emitGateZeroOutcome().join, null);
   assert.deepEqual([...emitGateZeroOutcome().owed_seams], [...V5_A02_GATE_ZERO_OWED_SEAMS]);
+  assert.deepEqual([...V5_A02_GATE_ZERO_PREDECESSOR_STEP_REFS].length > 0, true);
 });
 
 // ---------------------------------------------------------------------------
@@ -740,10 +877,10 @@ function moduleImports(directory) {
   return JSON.parse(run.stdout);
 }
 
-test("ISOLATION: the store module is reached from one place, and nothing in src reaches the fixture", () => {
+test("ISOLATION: the store module is reached from one place, and nothing in src reaches a fixture", () => {
   const imports = moduleImports(SRC);
   assert.ok(Object.keys(imports).length > 100, "every module in src must have been parsed");
-  assert.ok(Object.hasOwn(imports, "gate-zero-seam-readers.v5.js"));
+  assert.ok(Object.hasOwn(imports, READERS_FILE));
 
   const offenders = Object.entries(imports)
     .filter(([, specifiers]) => specifiers.some(one =>
@@ -751,19 +888,15 @@ test("ISOLATION: the store module is reached from one place, and nothing in src 
     .map(([name]) => name);
   assert.deepEqual(offenders, [], "a production module reached into the test directory");
 
-  // The reader is the only module that imports the stores or the derivation, so
-  // a second consumer of either is red on sight rather than red after an incident.
-  for (const module of [STORES_FILE, "gate-zero-seam-evidence.v5.js"]) {
+  // The reader is the only module that imports the stores or the ruling table,
+  // so a second consumer of either is red on sight rather than red after an
+  // incident.
+  for (const module of [STORES_FILE, RULINGS_FILE]) {
     const importers = Object.entries(imports)
       .filter(([, specifiers]) => specifiers.includes(`./${module}`))
       .map(([name]) => name);
-    assert.deepEqual(importers, ["gate-zero-seam-readers.v5.js"],
-      `${module} has an importer other than the reader`);
+    assert.deepEqual(importers, [READERS_FILE], `${module} has an importer other than the reader`);
   }
-  // And the ruling table is read by the reader only: nothing else may consult it.
-  assert.deepEqual(Object.entries(imports)
-    .filter(([, specifiers]) => specifiers.includes(`./${RULINGS_FILE}`)).map(([name]) => name),
-  ["gate-zero-seam-readers.v5.js"]);
   // The stores module statically imports ONE thing, the tenant constant. `pg`
   // is dynamic on purpose, so the Worker bundle never pulls it in through here.
   assert.deepEqual(imports[STORES_FILE], ["./identity.js"]);

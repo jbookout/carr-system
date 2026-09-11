@@ -17,6 +17,15 @@
 // so a store function added or renamed in src turns this red instead of silently
 // leaving a path unproved.
 //
+// THE ROWS ARE SHAPED AS PRODUCTION WRITES THEM, and that is not decoration.
+// An earlier fixture invented `source_kind: "scheduler"` for card 12, a value
+// db/schema.sql's `run_source_kind_check` does not permit and no writer in this
+// repository emits. The reader was written against the invention, so the passing
+// test proved a clause that could never have matched a real ops.run row. The
+// card 12 rows below carry `wrapper` / `bin/run-scheduled.sh`, which is what
+// bin/run-scheduled.sh:275 actually writes, and there is one negative row for
+// each field the receipt-binding clause reads.
+//
 // Every fixture case is addressed by a query value, so one module covers the
 // whole clause table and no case can leak into another.
 
@@ -29,8 +38,8 @@ export const SEAM_STORE_UNREACHABLE_REASONS = Object.freeze([
   "the checks source refused the request",
   "the checks source was not reachable",
   "the database client is not available in this process",
-  "the query did not finish",
   "the connection target for this store is not configured in this process",
+  "the query did not finish",
 ].sort());
 
 export class SeamStoreUnreachable extends Error {
@@ -54,79 +63,106 @@ export const FIXTURE_OTHER_COMMIT_SHA = "b".repeat(40);
 
 const T0 = "2026-09-11T17:00:00.000Z";
 const T1 = "2026-09-11T17:00:30.000Z";
+const T2 = "2026-09-11T17:00:31.000Z";
 
+/**
+ * Rows in the shape fetchPredecessorOutcomeRows builds them: a status, the two
+ * hashes that are compared, and whether the work_request_card actually carried
+ * the detail for this receipt. No feedback ref, no stored outcome and no
+ * timestamp — the real store drops those before a reader sees them.
+ */
 const PREDECESSOR_ROWS = Object.freeze({
-  // Accepted, with a receipt whose hash is FIXTURE_ACCEPTED_HASH.
+  // Accepted, complete, with a receipt whose hash is FIXTURE_ACCEPTED_HASH. In
+  // production the proposal hash equals the receipt hash, and it does here.
   "WR-000046": Object.freeze([Object.freeze({
-    feedback_ref: "OUTCOME-61382a72d992-v1",
-    feedback_hash: FIXTURE_ACCEPTED_HASH,
-    feedback_version: 1,
-    outcome: "criteria_met",
-    created_at: "2026-09-06T16:00:00.000Z",
     status: "accepted",
+    detail_present: true,
     accepted_feedback_hash: FIXTURE_ACCEPTED_HASH,
-    accepted_at: "2026-09-06T16:03:09.000Z",
+    feedback_hash: FIXTURE_ACCEPTED_HASH,
   })]),
   // Proposed and never signed. The near miss that must not pass.
   "WR-000040": Object.freeze([Object.freeze({
-    feedback_ref: "OUTCOME-51decafef96d-v2",
-    feedback_hash: `sha256:${"5".repeat(64)}`,
-    feedback_version: 2,
-    outcome: "criteria_not_met",
-    created_at: "2026-09-11T18:00:00.000Z",
     status: "pending_human_acceptance",
+    detail_present: true,
     accepted_feedback_hash: null,
-    accepted_at: null,
+    feedback_hash: `sha256:${"5".repeat(64)}`,
   })]),
   // No outcome rows at all.
   "WR-000054": Object.freeze([]),
 });
 
+/**
+ * ops.run rows exactly as bin/run-scheduled.sh writes them.
+ *
+ *   source_kind  `wrapper` — one of collector|registry|wrapper|operator, the
+ *                closed set db/schema.sql permits. There is no "scheduler".
+ *   source_ref   `bin/run-scheduled.sh` — the wrapper's own path.
+ *   one row      per run, carrying started_at, ended_at and an observed_at
+ *                stamped when the row lands. Dispatch and observation are the
+ *                same row in production, and the derivation handles that.
+ *
+ * The negative cases below change ONE field each, so a clause that stopped
+ * reading a field fails on exactly one case rather than on none.
+ */
+const RUN = Object.freeze({
+  service_key: "carr-fleet-sync", service_registered_at: T0, service_retired_at: null,
+  state: "succeeded", exit_code: 0, attempt: 1,
+  started_at: T0, ended_at: T1, observed_at: T2,
+  source_kind: "wrapper", source_ref: "bin/run-scheduled.sh",
+});
+
 const SCHEDULER_ROWS = Object.freeze({
-  // All three clauses hold.
-  "canary-join": Object.freeze([Object.freeze({
-    service_key: "carr-fleet-sync", service_registered_at: T0, service_retired_at: null,
-    run_key: "canary-join", state: "succeeded", exit_code: 0, attempt: 1,
-    started_at: T0, ended_at: T1, observed_at: T1,
-    evidence_ref: "receipt:canary-join", source_kind: "scheduler", source_ref: "bin/run-scheduled.sh",
-  })]),
-  // The canary names no receipt.
-  "canary-unbound": Object.freeze([Object.freeze({
-    service_key: "carr-fleet-sync", service_registered_at: T0, service_retired_at: null,
-    run_key: "canary-unbound", state: "succeeded", exit_code: 0, attempt: 1,
-    started_at: T0, ended_at: T1, observed_at: T1,
-    evidence_ref: null, source_kind: "scheduler", source_ref: "bin/run-scheduled.sh",
-  })]),
-  // Dispatch and readback share one instant — rows written in one transaction.
-  "canary-same-instant": Object.freeze([Object.freeze({
-    service_key: "carr-fleet-sync", service_registered_at: T0, service_retired_at: null,
-    run_key: "canary-same-instant", state: "succeeded", exit_code: 0, attempt: 1,
-    started_at: T0, ended_at: T0, observed_at: T0,
-    evidence_ref: "receipt:same-instant", source_kind: "scheduler", source_ref: "bin/run-scheduled.sh",
-  })]),
-  // The readback observes a different receipt than the dispatch named.
+  // All three clauses hold: the wrapper's own row, carrying a receipt.
+  "canary-join": Object.freeze([Object.freeze({ ...RUN,
+    run_key: "canary-join", evidence_ref: "ops.run:carr-fleet-sync.canary-join" })]),
+
+  // NEGATIVE, evidence_ref — and this is not a hypothetical. It is the row
+  // bin/run-scheduled.sh writes TODAY, because it passes no --evidence-ref. A
+  // ruling landing this afternoon would get exactly this answer from a live
+  // scheduled job, and the answer is a refusal that names the owed change.
+  "canary-today": Object.freeze([Object.freeze({ ...RUN,
+    run_key: "canary-today", evidence_ref: null })]),
+
+  // NEGATIVE, source_kind — an `operator` row is a hand-run, not a dispatch.
+  "canary-hand-run": Object.freeze([Object.freeze({ ...RUN,
+    run_key: "canary-hand-run", source_kind: "operator",
+    evidence_ref: "ops.run:carr-fleet-sync.canary-hand-run" })]),
+
+  // NEGATIVE, source_kind — a `collector` row is a probe writing about a job,
+  // not the wrapper that dispatched it.
+  "canary-probe": Object.freeze([Object.freeze({ ...RUN,
+    run_key: "canary-probe", source_kind: "collector",
+    source_ref: "bin/probe-keepalive.py",
+    evidence_ref: "ops.run:carr-fleet-sync.canary-probe" })]),
+
+  // NEGATIVE, source_ref — the right kind, written by a different wrapper.
+  "canary-foreign-wrapper": Object.freeze([Object.freeze({ ...RUN,
+    run_key: "canary-foreign-wrapper", source_ref: "bin/deploy-worker.sh",
+    evidence_ref: "ops.run:carr-fleet-sync.canary-foreign-wrapper" })]),
+
+  // Dispatch and observation share one instant — rows written in one transaction.
+  "canary-same-instant": Object.freeze([Object.freeze({ ...RUN,
+    run_key: "canary-same-instant", ended_at: T0, observed_at: T0,
+    evidence_ref: "ops.run:carr-fleet-sync.canary-same-instant" })]),
+
+  // The observation is of a different receipt than the dispatch named.
   "canary-mismatch": Object.freeze([
-    Object.freeze({
-      service_key: "carr-fleet-sync", service_registered_at: T0, service_retired_at: null,
-      run_key: "canary-mismatch", state: "running", exit_code: null, attempt: 1,
-      started_at: T0, ended_at: null, observed_at: T0,
-      evidence_ref: "receipt:dispatched", source_kind: "scheduler", source_ref: "bin/run-scheduled.sh",
-    }),
-    Object.freeze({
-      service_key: "carr-fleet-sync", service_registered_at: T0, service_retired_at: null,
-      run_key: "canary-mismatch", state: "succeeded", exit_code: 0, attempt: 1,
-      started_at: T0, ended_at: T1, observed_at: T1,
-      evidence_ref: "receipt:some-other-run", source_kind: "scheduler", source_ref: "bin/run-scheduled.sh",
-    }),
+    Object.freeze({ ...RUN,
+      run_key: "canary-mismatch", state: "running", exit_code: null,
+      ended_at: null, observed_at: T0,
+      evidence_ref: "ops.run:carr-fleet-sync.canary-mismatch.1" }),
+    Object.freeze({ ...RUN,
+      run_key: "canary-mismatch", started_at: T0, ended_at: T1, observed_at: T1,
+      evidence_ref: "ops.run:carr-fleet-sync.some-other-run" }),
   ]),
-  // Dispatched and still in flight: no readback row.
-  "canary-inflight": Object.freeze([Object.freeze({
-    service_key: "carr-fleet-sync", service_registered_at: T0, service_retired_at: null,
-    run_key: "canary-inflight", state: "running", exit_code: null, attempt: 1,
-    started_at: T0, ended_at: null, observed_at: T0,
-    evidence_ref: "receipt:inflight", source_kind: "scheduler", source_ref: "bin/run-scheduled.sh",
-  })]),
-  // The service is in the ledger and the canary never ran.
+
+  // Dispatched and still in flight: nothing has ended, so nothing is observed.
+  "canary-inflight": Object.freeze([Object.freeze({ ...RUN,
+    run_key: "canary-inflight", state: "running", exit_code: null,
+    ended_at: null, observed_at: T0,
+    evidence_ref: "ops.run:carr-fleet-sync.canary-inflight" })]),
+
+  // The left join found the service and no run: the canary never ran.
   "canary-never-ran": Object.freeze([Object.freeze({
     service_key: "carr-fleet-sync", service_registered_at: T0, service_retired_at: null,
     run_key: null, state: null, exit_code: null, attempt: null,
@@ -166,30 +202,51 @@ const CHECK_ROWS = Object.freeze({
     conclusion: "success", started_at: T0, completed_at: T1,
     html_url: "https://github.test/run/5",
   })]),
+  // A word GitHub's API does not document. Not passed through: reported as
+  // unrecognized, so the only conclusion strings a consumer ever sees are the
+  // constants in the reader module.
+  "invented-conclusion": Object.freeze([Object.freeze({
+    name: "invented-conclusion", head_sha: FIXTURE_COMMIT_SHA, status: "completed",
+    conclusion: "everything is fine", started_at: T0, completed_at: T1,
+    html_url: "https://github.test/run/6",
+  })]),
 });
 
 /** The one query value that makes a fixture store unreachable, on every store. */
 export const FIXTURE_UNREACHABLE = "unreachable";
 
-export async function fetchPredecessorOutcomeRows({ workRequestRef }) {
+/**
+ * The one canary key for which this store answers about a DIFFERENT store than
+ * the one it was asked for. Not a thing a real store does — it is how the
+ * reader's post-fetch identity check is made reachable, so that check is proved
+ * rather than merely written.
+ */
+export const FIXTURE_WRONG_STORE = "canary-from-another-store";
+
+export async function fetchPredecessorOutcomeRows(query) {
+  const workRequestRef = query?.workRequestRef;
   const storeRef = "record-layer:work-request-outcome-feedback";
   if (workRequestRef === FIXTURE_UNREACHABLE)
     throw new SeamStoreUnreachable(storeRef, "the query did not finish");
   return { store_ref: storeRef, rows: PREDECESSOR_ROWS[workRequestRef] ?? [] };
 }
 
-export async function fetchSchedulerLedgerRows({ serviceKey, canaryRunKey }) {
+export async function fetchSchedulerLedgerRows(query) {
+  const serviceKey = query?.serviceKey;
+  const canaryRunKey = query?.canaryRunKey;
   const storeRef = "control-plane:ops.service+ops.run";
   if (canaryRunKey === FIXTURE_UNREACHABLE)
     throw new SeamStoreUnreachable(storeRef, "the query did not finish");
+  if (canaryRunKey === FIXTURE_WRONG_STORE)
+    return { store_ref: "github:checks", rows: SCHEDULER_ROWS["canary-join"] };
   if (serviceKey !== "carr-fleet-sync") return { store_ref: storeRef, rows: [] };
   return { store_ref: storeRef, rows: SCHEDULER_ROWS[canaryRunKey] ?? [] };
 }
 
-export async function fetchCheckConclusionRows({ commitSha, checkName }) {
+export async function fetchCheckConclusionRows(query) {
+  const checkName = query?.checkName;
   const storeRef = "github:checks";
   if (checkName === FIXTURE_UNREACHABLE)
     throw new SeamStoreUnreachable(storeRef, "the checks source was not reachable");
-  void commitSha;
   return { store_ref: storeRef, rows: CHECK_ROWS[checkName] ?? [] };
 }

@@ -4,16 +4,14 @@
 // the rows a store actually holds for one addressed query, or throws
 // SeamStoreUnreachable naming what it could not reach. It contains no
 // classification, no comparison, no threshold and no vocabulary a consumer could
-// act on — those live in gate-zero-seam-evidence.v5.js, which never touches a
-// store, and the two halves are kept apart so that neither can quietly become
-// the other.
+// act on — those live as MODULE-PRIVATE functions inside
+// gate-zero-seam-readers.v5.js, which is the only module that imports this one.
 //
 // WHY THE SPLIT IS THE POINT. The defect this slice exists to prevent is a
 // function that turns a description of evidence into an outcome. A fetcher that
-// also judges can be handed a fabricated connection and will judge it; a judge
-// that cannot fetch can only ever be given rows by the one caller that is
-// allowed to fetch them. So: I/O here, judgment there, and the reader module is
-// the only thing that holds both.
+// also judges can be handed a fabricated connection and will judge it. So the
+// I/O is here, exported and judgment-free; the judgment is private to the reader
+// that fetched the rows, and is exported by nothing.
 //
 // NO CALLER EVER SUPPLIES A CONNECTION. There is no handle parameter, no client
 // parameter, no `env` parameter and no injectable opener. The query arguments
@@ -63,6 +61,35 @@ export class SeamStoreUnreachable extends Error {
     this.store_ref = storeRef;
     this.because = because;
   }
+}
+
+/**
+ * One addressed field out of a query, or a refusal with a FIXED message.
+ *
+ * The three fetchers below are exported, so they can be called by anything with
+ * anything — including nothing. Two ways a caller's object writes its own text
+ * into an error are closed here:
+ *
+ *   * DESTRUCTURING IN THE SIGNATURE answered a missing argument with the
+ *     engine's own TypeError, whose text names the parameter.
+ *   * A REVOKED PROXY, a throwing getter or a throwing trap answers a plain
+ *     property read with the ENGINE's message or the CALLER's. Node's own text
+ *     for a revoked proxy carries a privileged substring, which is how this was
+ *     found, and a throwing getter would carry whatever the caller wrote.
+ *
+ * So the read is caught and the shape is checked here, and what comes back on a
+ * bad call is one sentence written in this file.
+ */
+function addressed(query, key) {
+  let value;
+  try {
+    value = query === null || query === undefined ? undefined : Reflect.get(Object(query), key);
+  } catch {
+    value = undefined;
+  }
+  if (typeof value !== "string" || value.length === 0)
+    throw new TypeError("this store takes an addressed query");
+  return value;
 }
 
 function configured(name, storeRef, because) {
@@ -139,9 +166,16 @@ async function readOnlyStatements(storeRef, statements) {
  * name. They are equal in production, which is exactly why they must not be the
  * same field here: a reader that matched on the proposal's hash would look
  * correct for as long as nothing ever went wrong.
+ *
+ * AND A RECEIPT WITHOUT ITS CARD DETAIL IS A MISSING ROW, NOT AN ACCEPTED ONE.
+ * An earlier draft synthesized the absent detail as nulls, so a receipt the card
+ * did not carry came back looking accepted with a null outcome and could still be
+ * admitted. It is now marked `detail_present: false` and the derivation refuses
+ * on it. Nothing is invented to fill a row the store did not have.
  */
-export async function fetchPredecessorOutcomeRows({ workRequestRef }) {
+export async function fetchPredecessorOutcomeRows(query) {
   const storeRef = "record-layer:work-request-outcome-feedback";
+  const workRequestRef = addressed(query, "workRequestRef");
   const [receipts, cards, pending] = await readOnlyStatements(storeRef, [
     { text: `select r.feedback_hash as accepted_feedback_hash, r.accepted_at
                from ops.sourced_work_request_outcome_feedback_acceptance_receipt r
@@ -163,25 +197,26 @@ export async function fetchPredecessorOutcomeRows({ workRequestRef }) {
     if (entry && typeof entry === "object" && typeof entry.feedback_hash === "string")
       detail.set(entry.feedback_hash, entry);
 
+  // NOTHING FREE-FORM TRAVELS. A row carries a status, the two hashes that are
+  // compared, and whether the card actually held the detail for this receipt.
+  // The feedback ref, the stored outcome and the acceptance timestamp are read
+  // and deliberately dropped here: no store text reaches an answer, so no store
+  // text can carry a word into one.
   const rows = receipts.map(receipt => {
-    const entry = detail.get(receipt.accepted_feedback_hash) ?? {};
+    const entry = detail.get(receipt.accepted_feedback_hash);
     return {
       status: "accepted",
+      detail_present: entry !== undefined,
       accepted_feedback_hash: receipt.accepted_feedback_hash,
-      accepted_at: receipt.accepted_at,
-      feedback_ref: entry.feedback_ref ?? null,
-      feedback_hash: entry.feedback_hash ?? null,
-      outcome: entry.outcome ?? null,
+      feedback_hash: entry?.feedback_hash ?? null,
     };
   });
   for (const proposal of pending)
     rows.push({
       status: proposal.status ?? "pending_human_acceptance",
+      detail_present: true,
       accepted_feedback_hash: null,
-      accepted_at: null,
-      feedback_ref: proposal.feedback_ref ?? null,
       feedback_hash: proposal.feedback_hash ?? null,
-      outcome: proposal.outcome ?? null,
     });
   return { store_ref: storeRef, rows };
 }
@@ -200,8 +235,10 @@ export async function fetchPredecessorOutcomeRows({ workRequestRef }) {
  * ledger still carries the service at all. Ordering by `observed_at desc` is a
  * presentation choice; the reader compares instants and never trusts position.
  */
-export async function fetchSchedulerLedgerRows({ serviceKey, canaryRunKey }) {
+export async function fetchSchedulerLedgerRows(query) {
   const storeRef = "control-plane:ops.service+ops.run";
+  const serviceKey = addressed(query, "serviceKey");
+  const canaryRunKey = addressed(query, "canaryRunKey");
   const [rows] = await readOnlyStatements(storeRef, [{ text: `
     select s.key            as service_key,
            s.registered_at  as service_registered_at,
@@ -230,17 +267,19 @@ export async function fetchSchedulerLedgerRows({ serviceKey, canaryRunKey }) {
 /**
  * Every check run GitHub holds for one commit under one check name.
  *
- * The commit sha and the check name ADDRESS the query and are validated by the
+ * The head sha and the check name ADDRESS the query and are validated by the
  * reader before they reach here. The repository is read from the environment,
  * not from the caller: a caller who could name the repository could name a
  * repository whose checks it controls.
  */
-export async function fetchCheckConclusionRows({ commitSha, checkName }) {
+export async function fetchCheckConclusionRows(query) {
   const storeRef = "github:checks";
+  const headSha = addressed(query, "headSha");
+  const checkName = addressed(query, "checkName");
   const missing = "the checks source credentials are not configured in this process";
   const token = configured("GITHUB_TOKEN", storeRef, missing);
   const repository = configured("GITHUB_REPOSITORY", storeRef, missing);
-  const url = `https://api.github.com/repos/${repository}/commits/${commitSha}/check-runs`
+  const url = `https://api.github.com/repos/${repository}/commits/${headSha}/check-runs`
     + `?check_name=${encodeURIComponent(checkName)}&per_page=100`;
   let response;
   try {
