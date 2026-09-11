@@ -557,7 +557,21 @@ test("the projection tells the same story the evaluators do", () => {
   assert.equal(projection.navigation_handoff_reachable_today, false);
   assert.equal(projection.admission_reachable_today, false);
   assert.equal(projection.admission_reason_id, "map_contract_receipt_unavailable");
-  assert.deepEqual([...projection.command_verbs], [...V5_J301_COMMAND_INTENDED_VERBS]);
+  assert.equal(projection.navigation_handoff_reason_id, "promotion_receipt_reader_unavailable");
+  // THE CLAIM THAT WAS WRONG, and the narrower ones that replaced it.
+  assert.equal(projection.every_command_traverses_a_deployed_verb, false);
+  assert.equal(projection.every_named_verb_resolves_in_the_deployed_registry, true);
+  assert.equal(projection.commands_with_a_bound_verb_adapter, 0);
+  assert.deepEqual([...projection.commands_naming_no_verb], ["hand_off_native_navigation"]);
+  assert.equal(projection.verb_adapter_seam, V5_J301_COMMAND_VERB_ADAPTER_SEAM);
+  assert.equal(projection.promotion_receipt_authority.store_exists_here, true);
+  assert.equal(projection.promotion_receipt_authority.reader_exists_here, false);
+  // The projection's per-command gaps are the registry's, not a second copy.
+  for (const name of V5_J301_COMMAND_NAMES) {
+    assert.deepEqual([...projection.verb_argument_gaps[name].required_by_verb_not_supplied],
+      [...V5_J301_MAP_COMMANDS[name].verb_required_not_supplied], name);
+  }
+  assert.deepEqual([...projection.command_intended_verbs], [...V5_J301_COMMAND_INTENDED_VERBS]);
   assert.equal(projection.public_projection_here, false);
   assert.equal(projection.share_grant_issuance_here, false);
   assert.equal(projection.pdf_render_request_here, false);

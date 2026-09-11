@@ -646,7 +646,8 @@ export function v5J301CommandPolicyPreimage() {
       ...V5_J301_MAP_COMMANDS[name],
       governed_arguments: [...V5_J301_MAP_COMMANDS[name].governed_arguments],
     }])),
-    command_verbs: [...V5_J301_COMMAND_INTENDED_VERBS],
+    command_intended_verbs: [...V5_J301_COMMAND_INTENDED_VERBS],
+    commands_without_a_verb: [...V5_J301_COMMANDS_WITHOUT_A_VERB],
     position_roles: [...V5_J301_POSITION_ROLES],
     navigation_platforms: [...V5_J301_NAVIGATION_PLATFORMS],
     travel_modes: [...V5_J301_TRAVEL_MODES],
@@ -680,8 +681,21 @@ export function v5J301MapCommandProjection() {
     origin_is_part_of_command_identity: false,
     commands: [...V5_J301_COMMAND_NAMES],
     axes: [...V5_J301_COMMAND_AXES],
-    every_command_traverses_a_deployed_verb: true,
-    command_verbs: [...V5_J301_COMMAND_INTENDED_VERBS],
+    // THE CLAIM THAT WAS WRONG. This said every command TRAVERSES a deployed
+    // verb. It does not: three of the four NAME one, the named verbs do resolve
+    // in the deployed registry, and the arguments emitted do not satisfy their
+    // schemas. All three facts are separate fields now, because collapsing them
+    // into one true-sounding boolean is how the overstatement happened.
+    every_command_traverses_a_deployed_verb: false,
+    every_named_verb_resolves_in_the_deployed_registry: true,
+    commands_with_a_bound_verb_adapter: 0,
+    commands_naming_no_verb: [...V5_J301_COMMANDS_WITHOUT_A_VERB],
+    verb_adapter_seam: V5_J301_COMMAND_VERB_ADAPTER_SEAM,
+    verb_argument_gaps: Object.fromEntries(V5_J301_COMMAND_NAMES.map(name => [name, {
+      required_by_verb_not_supplied: [...V5_J301_MAP_COMMANDS[name].verb_required_not_supplied],
+      supplied_not_in_verb_schema: [...V5_J301_MAP_COMMANDS[name].supplied_not_in_verb_schema],
+    }])),
+    command_intended_verbs: [...V5_J301_COMMAND_INTENDED_VERBS],
     journey_one_map_commands_permitted: false,
     navigation_handoff_reachable_today: false,
     navigation_handoff_reason_id: "promotion_receipt_reader_unavailable",
