@@ -14,11 +14,40 @@
 // typed observations the caller supplies, in the shape of
 // command-supervisor-admission.v5.js: every result is a frozen answer carrying
 // `effects: V5_NO_EFFECTS`, and an `allow` says the registered negatives did
-// not fire on the facts as reported. The executing seams already exist —
-// engineering-runtime.js holds the envelope/session/receipt ledger and
-// tools/room-bridge/engineering_dispatch_adapter.py holds the dispatch door —
-// and this module deliberately adds a decision layer above them rather than a
-// second queue, a second authority or a second identity.
+// not fire on the facts as reported.
+//
+// NOTHING IN THIS REPOSITORY CALLS THESE FOUR FUNCTIONS YET, AND THAT IS THE
+// HONEST STATE, not an oversight to be papered over with a fabricated caller.
+// The independent review of PR 980 named it, and the seam census below is the
+// answer, one decision at a time. The test is: (a) does a code path here
+// PERFORM the action being gated, (b) does that path hold the facts the
+// decision consumes from a source other than the party being gated, and (c) can
+// the call be made without a new migration, table, entrypoint or registry seal?
+//
+//   * SLICE ADMISSION. (a) YES — admitEngineeringSlice in engineering-runtime.js
+//     is the door that issues the execution envelope authorizing a slice to be
+//     worked, and a refusal there is a hard stop before any edit. (b) NO. That
+//     door decides over Work Requests, accepted slice plans, envelopes and agent
+//     sessions. It has no source-path lease, no worktree path, no per-slice base
+//     commit (it writes a sentinel, ENGINEERING_SESSION_SOURCE) and no
+//     width-evidence record. No relation in db/schema.sql stores a live lease
+//     census. Building that request from what the door holds would mean
+//     inventing the very facts this module refuses to let a caller invent.
+//     MISSING SEAM: a live worktree/source-path lease census and an earned-width
+//     evidence ledger.
+//   * CHECKPOINT RESUME. (a) NO. There is no resume-admission door. The nearest
+//     relative, isCanonicalResetReconstruction in engineering-runtime.js, checks
+//     a receipt AFTER the work, which is a different decision at a different
+//     time. MISSING SEAM: a resume door that reads a durable checkpoint record.
+//   * RELEASE ELIGIBILITY. (a) NO. There is no Deployment Controller in this
+//     repository — the only occurrence of the phrase is this file. (b) NO. No
+//     store here holds hosted-CI conclusions, a merge slot or a post-merge
+//     readback. MISSING SEAM: a Deployment Controller and the receipt store this
+//     module's state-holder port is written against.
+//
+// So the decision layer is built, closed and proved against its own contract,
+// and it is not yet load-bearing. Saying so is the point: a controller claimed
+// to gate work it does not gate is worse than one that says it gates nothing.
 //
 // TWO KINDS OF NO, inherited from global-boundaries.v5.js and unchanged here:
 //   * A POLICY ANSWER is RETURNED — `decision` is "allow" or "refuse" with a
@@ -368,6 +397,7 @@ export const V5_PROGRAM_CONTROLLER_REASON_IDS = deepFreeze([
   "checkpoint_lease_not_held",
   "checkpoint_next_step_already_complete",
   "checkpoint_resume_requires_record_evidence",
+  "checkpoint_worktree_not_held",
   "database_disposition_refused",
   "database_resource_overlap_denied",
   "descendant_revalidation_required",
@@ -379,11 +409,18 @@ export const V5_PROGRAM_CONTROLLER_REASON_IDS = deepFreeze([
   "release_head_moved",
   "release_readback_digest_mismatch",
   "release_readback_not_verified",
+  "release_receipt_bound_to_other_head",
+  "release_receipt_bound_to_other_slice",
+  "release_receipt_digest_mismatch",
+  "release_receipt_kind_mismatch",
+  "release_receipt_not_content_addressed",
+  "release_receipt_unresolvable",
   "release_required_check_bound_to_other_head",
   "release_required_check_not_green",
   "release_review_bound_to_other_head",
   "release_review_not_accepted",
   "release_reviewer_not_independent",
+  "release_state_holder_unavailable",
   "resumes_from_recorded_checkpoint",
   "serialized_merge_slot_held",
   "serialized_surface_single_owner_required",
@@ -566,7 +603,13 @@ export function evaluateProgramWidth(request) {
 // ---------------------------------------------------------------------------
 
 const CENSUS_FIELDS = ["source", "observed_at", "origin_main_sha", "repository_root", "active_leases"];
-const ACTIVE_LEASE_FIELDS = ["slice_ref", "worktree_path", "source_paths", "database_resources", "serialized_surfaces"];
+// A lease names its worktree TWICE, and the two are not interchangeable.
+// worktree_path is where the tree is on one machine; worktree_ref is the stable
+// identity the checkpoint recorded. Resume compares the REF, because a slice
+// that lost its tree and was re-admitted into a new one still holds a lease
+// under the same slice_ref -- and "some lease exists for this slice" was never
+// the question. See evaluateCheckpointResume's checkpoint_lease_held.
+const ACTIVE_LEASE_FIELDS = ["slice_ref", "worktree_ref", "worktree_path", "source_paths", "database_resources", "serialized_surfaces"];
 
 function normalizeCensus(census, path) {
   exact(census, CENSUS_FIELDS, path);
@@ -579,6 +622,7 @@ function normalizeCensus(census, path) {
     const at = `${path}.active_leases[${index}]`;
     exact(lease, ACTIVE_LEASE_FIELDS, at);
     ref(lease.slice_ref, `${at}.slice_ref`);
+    ref(lease.worktree_ref, `${at}.worktree_ref`);
     str(lease.worktree_path, `${at}.worktree_path`);
     sortedUnique(lease.source_paths, `${at}.source_paths`, str);
     sortedUnique(lease.database_resources, `${at}.database_resources`, ref);
@@ -614,23 +658,46 @@ function censusProvenance(check, census, observedAtMs) {
 // ---------------------------------------------------------------------------
 
 const ADMISSION_REQUEST_FIELDS = [
-  "slice_ref", "observed_at", "reuse_disposition", "model_roles", "lease", "census", "width_answer",
+  "slice_ref", "observed_at", "reuse_disposition", "model_roles", "lease", "census", "width",
 ];
 const LEASE_FIELDS = [
   "worktree_ref", "worktree_path", "branch_ref", "base_sha", "source_paths",
   "database_disposition", "database_resources", "serialized_surfaces", "repository_actions",
 ];
 
-function normalizeWidthAnswer(value, path) {
-  object(value, path);
-  if (value.schema_version !== V5_PROGRAM_CONTROLLER_SCHEMA_VERSION
-    || value.policy_version !== V5_PROGRAM_CONTROLLER_POLICY_VERSION
-    || value.answer !== "program_width")
-    fail("width_answer_not_this_policy",
-      `${path} must be an answer produced by evaluateProgramWidth at this policy version`,
-      { path, schema_version: value.schema_version ?? null, policy_version: value.policy_version ?? null });
-  widthMember(value.granted_width, `${path}.granted_width`);
-  return value;
+/**
+ * Width is DERIVED at admission, never accepted from the caller.
+ *
+ * The first version of this took a width ANSWER -- an object the caller said
+ * evaluateProgramWidth had produced -- and checked its schema version, policy
+ * version, answer name and granted_width. Every one of those four is a field
+ * the caller writes, so a request carrying `granted_width: 3` and the three
+ * correct labels bought three lanes with no evidence at all. The independent
+ * review of PR 980 proved exactly that, and the test named
+ * "admission: a forged width answer with every checked field correct is not an
+ * answer" is the one that would have caught it.
+ *
+ * So admission takes the width REQUEST -- the program's current and requested
+ * width and the six evidence classes -- and calls evaluateProgramWidth itself.
+ * There is no field through which a granted width can arrive. The base is not
+ * the caller's either: it is the census's origin/main, so "current evidence"
+ * means current against the same head this admission is computed on, and a
+ * caller cannot pair stale evidence with a base that flatters it.
+ */
+const ADMISSION_WIDTH_FIELDS = ["program_ref", "current_width", "requested_width", "evidence"];
+
+function admissionWidthAnswer(request) {
+  const width = exact(request.width, ADMISSION_WIDTH_FIELDS, "request.width");
+  return evaluateProgramWidth({
+    program_ref: width.program_ref,
+    current_width: width.current_width,
+    requested_width: width.requested_width,
+    base: {
+      origin_main_sha: request.census.origin_main_sha,
+      observed_at: request.census.observed_at,
+    },
+    evidence: width.evidence,
+  });
 }
 
 function normalizeAdmissionRequest(request) {
@@ -655,7 +722,7 @@ function normalizeAdmissionRequest(request) {
     (value, path) => member(value, V5_SERIALIZED_SURFACES, path));
   sortedUnique(lease.repository_actions, "request.lease.repository_actions", str);
   normalizeCensus(request.census, "request.census");
-  normalizeWidthAnswer(request.width_answer, "request.width_answer");
+  object(request.width, "request.width");
   return observedAtMs;
 }
 
@@ -698,7 +765,8 @@ export function evaluateSliceAdmission(request) {
   const observedAtMs = normalizeAdmissionRequest(request);
   const { lease, census, slice_ref: sliceRef } = request;
   const peers = peerLeases(census, sliceRef);
-  const grantedWidth = request.width_answer.granted_width;
+  const widthAnswer = admissionWidthAnswer(request);
+  const grantedWidth = widthAnswer.granted_width;
 
   const stagingProblem = lease.source_paths
     .map(path => ({ path, problem: stagingViolation(path) }))
@@ -708,7 +776,9 @@ export function evaluateSliceAdmission(request) {
   const surfaceConflict = firstSurfaceConflict(lease, peers);
   const foreignActions = lease.repository_actions
     .filter(action => !ENGINEERING_REPOSITORY_ACTIONS.includes(action));
-  const sharedTree = peers.find(peer => peer.worktree_path === lease.worktree_path) ?? null;
+  // Either identity being shared is the same defect: one tree, two writers.
+  const sharedTree = peers.find(peer =>
+    peer.worktree_path === lease.worktree_path || peer.worktree_ref === lease.worktree_ref) ?? null;
   const activeAfterAdmission = peers.length + 1;
 
   const { states, satisfiedChecks, notReached, blocking } = runChecks(V5_ADMISSION_CHECKS, {
@@ -726,7 +796,8 @@ export function evaluateSliceAdmission(request) {
       if (sharedTree)
         return refused("owned_worktree", "writer_tree_shared_with_active_lease",
           "never share a writer tree",
-          { worktree_path: lease.worktree_path, conflicting_slice_ref: sharedTree.slice_ref });
+          { worktree_ref: lease.worktree_ref, worktree_path: lease.worktree_path,
+            conflicting_slice_ref: sharedTree.slice_ref });
       return satisfied("owned_worktree", "an owned worktree no other active lease holds");
     },
     explicit_path_staging: () => stagingProblem === null
@@ -793,6 +864,18 @@ export function evaluateSliceAdmission(request) {
       origin_main_sha: census.origin_main_sha,
       active_peer_slice_refs: peers.map(peer => peer.slice_ref).sort(),
     },
+    // The width decision this admission MADE, not one it was handed. A reader
+    // can see which evidence was missing or stale without a second call.
+    width_binding: {
+      program_ref: widthAnswer.program_ref,
+      current_width: widthAnswer.current_width,
+      requested_width: widthAnswer.requested_width,
+      decision: widthAnswer.decision,
+      reason_id: widthAnswer.reason_id,
+      missing_evidence_classes: [...widthAnswer.missing_evidence_classes],
+      stale_evidence_classes: [...widthAnswer.stale_evidence_classes],
+    },
+    width_derived_by_controller: true,
     granted_width: grantedWidth,
     active_after_admission: activeAfterAdmission,
     checks_required: [...V5_ADMISSION_CHECKS],
@@ -853,7 +936,9 @@ function normalizeResumeRequest(request) {
 export function evaluateCheckpointResume(request) {
   const observedAtMs = normalizeResumeRequest(request);
   const { checkpoint, census, reconstruction } = request;
-  const heldWorktree = census.active_leases
+  // The slice's own live lease, if it still has one. Holding A lease is not
+  // holding THIS checkpoint's tree -- see checkpoint_lease_held below.
+  const heldLease = census.active_leases
     .find(lease => lease.slice_ref === request.slice_ref) ?? null;
 
   const { states, satisfiedChecks, notReached, blocking } = runChecks(V5_CHECKPOINT_CHECKS, {
@@ -875,11 +960,23 @@ export function evaluateCheckpointResume(request) {
       : refused("checkpoint_base_current", "checkpoint_base_moved_revalidation_required",
         "main moved under this checkpoint; rebase and revalidate before resuming",
         { checkpoint_base_sha: checkpoint.base_sha, origin_main_sha: census.origin_main_sha }),
-    checkpoint_lease_held: () => heldWorktree !== null
-      ? satisfied("checkpoint_lease_held", "the slice still holds an active lease")
-      : refused("checkpoint_lease_held", "checkpoint_lease_not_held",
-        "the slice holds no active lease in the live census; re-admit before resuming",
-        { slice_ref: request.slice_ref, worktree_ref: checkpoint.worktree_ref }),
+    // TWO facts, in order, because the first version conflated them: a live
+    // lease EXISTS for this slice, and it is the SAME TREE the checkpoint was
+    // written in. Matching on slice_ref alone let a slice resume into whatever
+    // tree it had been re-admitted to, replaying a checkpoint written somewhere
+    // else -- the exact defect the independent review of PR 980 named.
+    checkpoint_lease_held: () => {
+      if (heldLease === null)
+        return refused("checkpoint_lease_held", "checkpoint_lease_not_held",
+          "the slice holds no active lease in the live census; re-admit before resuming",
+          { slice_ref: request.slice_ref, worktree_ref: checkpoint.worktree_ref });
+      if (heldLease.worktree_ref !== checkpoint.worktree_ref)
+        return refused("checkpoint_lease_held", "checkpoint_worktree_not_held",
+          "the slice holds a lease on a different tree than the one this checkpoint was written in",
+          { slice_ref: request.slice_ref, checkpoint_worktree_ref: checkpoint.worktree_ref,
+            held_worktree_ref: heldLease.worktree_ref });
+      return satisfied("checkpoint_lease_held", "the slice still holds the tree this checkpoint was written in");
+    },
     checkpoint_next_step: () => !checkpoint.completed_step_refs.includes(checkpoint.next_step_ref)
       ? satisfied("checkpoint_next_step", `resumes at ${checkpoint.next_step_ref}`)
       : refused("checkpoint_next_step", "checkpoint_next_step_already_complete",
@@ -896,6 +993,7 @@ export function evaluateCheckpointResume(request) {
     reason_id: resumes ? reason("resumes_from_recorded_checkpoint") : states[blocking].reason_id,
     slice_ref: request.slice_ref,
     checkpoint_ref: checkpoint.checkpoint_ref,
+    worktree_ref: checkpoint.worktree_ref,
     resumes_from_records: resumes,
     next_step_ref: resumes ? checkpoint.next_step_ref : null,
     completed_step_refs: [...checkpoint.completed_step_refs],
@@ -913,68 +1011,167 @@ export function evaluateCheckpointResume(request) {
 
 // ---------------------------------------------------------------------------
 // 4. Release eligibility.
+//
+// NO RELEASE FACT IS TAKEN FROM THE CALLER. The first version of this evaluator
+// read the review state, the check conclusions, the merge-slot holder, the
+// revalidation base and the readback digests straight off the request. The
+// independent review of PR 980 named that for what it is: a matching string is
+// not evidence of an independent review, a green hosted check, a serialized
+// merge or a post-merge readback, and a controller that decides on facts the
+// decided party wrote is a rubber stamp with a reason_id.
+//
+// So the request carries REFERENCES, and the facts are RESOLVED through a state
+// holder port. Every reference is CONTENT-ADDRESSED: `receipt:sha256:<hex>` of
+// the canonical bytes of the receipt it names. The module rehashes what comes
+// back and refuses unless the bytes hash to the reference that was cited, then
+// refuses again unless the receipt binds THIS slice and THIS head. A receipt
+// body that has been edited keeps neither property, and a reference invented to
+// look right resolves to nothing.
+//
+// WHAT THAT DOES AND DOES NOT BUY. It makes a release fact unforgeable relative
+// to the receipt store: a caller can no longer state one, and cannot mutate one
+// it was given. It does NOT authenticate the state holder itself — this module
+// is handed a port and cannot prove the port is the real ledger. That is an
+// integration property, and it belongs to whoever wires the port. It is stated
+// here rather than implied, because THERE IS NO SUCH CALLER IN THIS REPOSITORY
+// YET: see the seam note in the file header.
 // ---------------------------------------------------------------------------
 
-const RELEASE_REQUEST_FIELDS = [
-  "slice_ref", "head_sha", "observed_head_sha", "review", "required_checks",
-  "merge_slot", "revalidation", "readback", "auto_release_requested",
-];
-const REVIEW_FIELDS = ["state", "reviewer_actor_id", "maker_actor_id", "reviewed_head_sha"];
+/** The six facts a release decision is made of. One receipt each. */
+export const V5_RELEASE_RECEIPT_KINDS = deepFreeze([
+  "head_observation", "merge_slot", "readback", "required_checks", "revalidation", "review",
+]);
+
+/** `receipt:` + the digest() of the receipt's own canonical bytes. */
+const RELEASE_RECEIPT_REF = /^receipt:sha256:[0-9a-f]{64}$/;
+const RELEASE_RECEIPT_REF_PREFIX = "receipt:";
+
+const RELEASE_RECEIPT_FIELDS = deepFreeze({
+  head_observation: ["kind", "slice_ref", "head_sha", "observed_head_sha"],
+  merge_slot: ["kind", "slice_ref", "head_sha", "state", "held_by_slice_ref"],
+  readback: ["kind", "slice_ref", "head_sha", "state", "main_sha",
+    "delivered_source_digest", "expected_source_digest"],
+  required_checks: ["kind", "slice_ref", "head_sha", "checks"],
+  revalidation: ["kind", "slice_ref", "head_sha", "required",
+    "revalidated_against_sha", "current_main_sha"],
+  review: ["kind", "slice_ref", "head_sha", "state", "reviewer_actor_id",
+    "maker_actor_id", "reviewed_head_sha"],
+});
+
 const CHECK_FIELDS = ["name", "conclusion", "head_sha"];
-const MERGE_SLOT_FIELDS = ["state", "held_by_slice_ref"];
-const REVALIDATION_FIELDS = ["required", "revalidated_against_sha", "current_main_sha"];
-const READBACK_FIELDS = ["state", "main_sha", "delivered_source_digest", "expected_source_digest"];
+const RELEASE_REQUEST_FIELDS = ["slice_ref", "head_sha", "receipts", "auto_release_requested"];
 
 function normalizeReleaseRequest(request) {
   exact(request, RELEASE_REQUEST_FIELDS, "request");
   ref(request.slice_ref, "request.slice_ref");
   commitSha(request.head_sha, "request.head_sha");
-  commitSha(request.observed_head_sha, "request.observed_head_sha");
-
-  const review = exact(request.review, REVIEW_FIELDS, "request.review");
-  member(review.state, V5_REVIEW_STATES, "request.review.state");
-  if (review.state === "absent") {
-    // An absent review states no reviewer and no head; forcing a caller to
-    // invent one would make "absent" indistinguishable from "not yet read".
-    for (const key of ["reviewer_actor_id", "reviewed_head_sha"])
-      if (review[key] !== null) fail("absent_review_states_a_reviewer", `request.review.${key} must be null when the review is absent`, { key });
-  } else {
-    str(review.reviewer_actor_id, "request.review.reviewer_actor_id");
-    commitSha(review.reviewed_head_sha, "request.review.reviewed_head_sha");
-  }
-  str(review.maker_actor_id, "request.review.maker_actor_id");
-
-  list(request.required_checks, "request.required_checks");
-  request.required_checks.forEach((check, index) => {
-    const path = `request.required_checks[${index}]`;
-    exact(check, CHECK_FIELDS, path);
-    str(check.name, `${path}.name`);
-    member(check.conclusion, V5_CHECK_CONCLUSIONS, `${path}.conclusion`);
-    commitSha(check.head_sha, `${path}.head_sha`);
-  });
-
-  const slot = exact(request.merge_slot, MERGE_SLOT_FIELDS, "request.merge_slot");
-  member(slot.state, V5_MERGE_SLOT_STATES, "request.merge_slot.state");
-  if (slot.state === "held") ref(slot.held_by_slice_ref, "request.merge_slot.held_by_slice_ref");
-  else if (slot.held_by_slice_ref !== null)
-    fail("free_slot_names_a_holder", "request.merge_slot.held_by_slice_ref must be null when the slot is free");
-
-  const revalidation = exact(request.revalidation, REVALIDATION_FIELDS, "request.revalidation");
-  bool(revalidation.required, "request.revalidation.required");
-  commitSha(revalidation.current_main_sha, "request.revalidation.current_main_sha");
-  if (revalidation.revalidated_against_sha !== null)
-    commitSha(revalidation.revalidated_against_sha, "request.revalidation.revalidated_against_sha");
-
-  const readback = exact(request.readback, READBACK_FIELDS, "request.readback");
-  member(readback.state, V5_READBACK_STATES, "request.readback.state");
-  if (readback.state === "verified") {
-    commitSha(readback.main_sha, "request.readback.main_sha");
-    str(readback.delivered_source_digest, "request.readback.delivered_source_digest");
-    str(readback.expected_source_digest, "request.readback.expected_source_digest");
-  }
-
+  // Each receipt reference is a STRING here, not a validated ref: a reference
+  // that is not content-addressed is a policy refusal with a named reason, not
+  // an unreadable request. The caller is allowed to be wrong about a receipt.
+  const receipts = exact(request.receipts, V5_RELEASE_RECEIPT_KINDS, "request.receipts");
+  for (const kind of V5_RELEASE_RECEIPT_KINDS) str(receipts[kind], `request.receipts.${kind}`);
   bool(request.auto_release_requested, "request.auto_release_requested");
   return request;
+}
+
+/**
+ * The SHAPE of a resolved receipt is a contract violation when wrong, the same
+ * as any other unreadable input: the module cannot read it, so it fails closed.
+ * Its BINDINGS — kind, slice, head — are policy, and refuse by name.
+ */
+function validateReceiptShape(kind, body, path) {
+  exact(body, RELEASE_RECEIPT_FIELDS[kind], path);
+  str(body.kind, `${path}.kind`);
+  ref(body.slice_ref, `${path}.slice_ref`);
+  commitSha(body.head_sha, `${path}.head_sha`);
+  if (kind === "head_observation") commitSha(body.observed_head_sha, `${path}.observed_head_sha`);
+  if (kind === "review") {
+    member(body.state, V5_REVIEW_STATES, `${path}.state`);
+    str(body.maker_actor_id, `${path}.maker_actor_id`);
+    if (body.state === "absent") {
+      // An absent review states no reviewer and no head; forcing one to be
+      // invented would make "absent" indistinguishable from "not yet read".
+      for (const key of ["reviewer_actor_id", "reviewed_head_sha"])
+        if (body[key] !== null)
+          fail("absent_review_states_a_reviewer", `${path}.${key} must be null when the review is absent`, { path, key });
+    } else {
+      str(body.reviewer_actor_id, `${path}.reviewer_actor_id`);
+      commitSha(body.reviewed_head_sha, `${path}.reviewed_head_sha`);
+    }
+  }
+  if (kind === "required_checks") {
+    list(body.checks, `${path}.checks`);
+    body.checks.forEach((check, index) => {
+      const at = `${path}.checks[${index}]`;
+      exact(check, CHECK_FIELDS, at);
+      str(check.name, `${at}.name`);
+      member(check.conclusion, V5_CHECK_CONCLUSIONS, `${at}.conclusion`);
+      commitSha(check.head_sha, `${at}.head_sha`);
+    });
+  }
+  if (kind === "merge_slot") {
+    member(body.state, V5_MERGE_SLOT_STATES, `${path}.state`);
+    if (body.state === "held") ref(body.held_by_slice_ref, `${path}.held_by_slice_ref`);
+    else if (body.held_by_slice_ref !== null)
+      fail("free_slot_names_a_holder", `${path}.held_by_slice_ref must be null when the slot is free`, { path });
+  }
+  if (kind === "revalidation") {
+    bool(body.required, `${path}.required`);
+    commitSha(body.current_main_sha, `${path}.current_main_sha`);
+    if (body.revalidated_against_sha !== null)
+      commitSha(body.revalidated_against_sha, `${path}.revalidated_against_sha`);
+  }
+  if (kind === "readback") {
+    member(body.state, V5_READBACK_STATES, `${path}.state`);
+    if (body.state === "verified") {
+      commitSha(body.main_sha, `${path}.main_sha`);
+      str(body.delivered_source_digest, `${path}.delivered_source_digest`);
+      str(body.expected_source_digest, `${path}.expected_source_digest`);
+    }
+  }
+  return body;
+}
+
+/**
+ * Resolve one receipt and verify it, in the order a forger has to survive:
+ * the reference is content-addressed, the holder knows it, the bytes hash to
+ * the reference, it is the kind that was asked for, and it binds this slice and
+ * this head. Returns `{ ok: true, body }` or the refusal that stopped it.
+ */
+function resolveVerifiedReceipt(stateHolder, request, kind) {
+  const receiptRef = request.receipts[kind];
+  const detail = { receipt_kind: kind, receipt_ref: receiptRef };
+  if (!RELEASE_RECEIPT_REF.test(receiptRef))
+    return { ok: false, reasonId: "release_receipt_not_content_addressed",
+      note: "a release receipt is cited by the digest of its own bytes, not by a name", detail };
+  let body = null;
+  try {
+    body = stateHolder.resolveReceipt(receiptRef);
+  } catch {
+    body = null;
+  }
+  if (!isPlainObject(body))
+    return { ok: false, reasonId: "release_receipt_unresolvable",
+      note: "the authoritative state holder does not hold this receipt", detail };
+  const bodyDigest = digest(body);
+  if (bodyDigest !== receiptRef.slice(RELEASE_RECEIPT_REF_PREFIX.length))
+    return { ok: false, reasonId: "release_receipt_digest_mismatch",
+      note: "what came back is not the receipt that was cited",
+      detail: { ...detail, resolved_digest: bodyDigest } };
+  if (body.kind !== kind)
+    return { ok: false, reasonId: "release_receipt_kind_mismatch",
+      note: "a receipt of another kind does not answer this check",
+      detail: { ...detail, resolved_kind: typeof body.kind === "string" ? body.kind : null } };
+  validateReceiptShape(kind, body, `receipt(${kind})`);
+  if (body.slice_ref !== request.slice_ref)
+    return { ok: false, reasonId: "release_receipt_bound_to_other_slice",
+      note: "a receipt bound to another slice proves nothing about this one",
+      detail: { ...detail, receipt_slice_ref: body.slice_ref, slice_ref: request.slice_ref } };
+  if (body.head_sha !== request.head_sha)
+    return { ok: false, reasonId: "release_receipt_bound_to_other_head",
+      note: "a receipt bound to another head proves nothing about this one",
+      detail: { ...detail, receipt_head_sha: body.head_sha, head_sha: request.head_sha } };
+  return { ok: true, body };
 }
 
 /**
@@ -985,15 +1182,35 @@ function normalizeReleaseRequest(request) {
  * that can only exist after the merge. So a pre-merge caller is told exactly
  * the true thing: you may take the merge slot, and you may not yet call this
  * released.
+ *
+ * `stateHolder` is the port to the authoritative receipt store: an object with
+ * `resolveReceipt(ref)`. Without it every check refuses — a controller with no
+ * way to check a fact does not get to assume one.
  */
-export function evaluateReleaseEligibility(request) {
+export function evaluateReleaseEligibility(request, stateHolder = null) {
   normalizeReleaseRequest(request);
-  const { review, merge_slot: slot, revalidation, readback } = request;
-  const notGreen = request.required_checks.filter(check => check.conclusion !== "success");
-  const otherHead = request.required_checks.filter(check => check.head_sha !== request.head_sha);
+  const holderBound = isPlainObject(stateHolder) && typeof stateHolder.resolveReceipt === "function";
+  const resolved = new Map();
+  const verifiedRefs = [];
+
+  /** Resolve once per kind, then hand the body to the check that needs it. */
+  const withReceipt = (check, kind, use) => {
+    if (!holderBound)
+      return refused(check, "release_state_holder_unavailable",
+        "release facts are resolved from the authoritative state holder; none was bound",
+        { receipt_kind: kind });
+    if (!resolved.has(kind)) {
+      const outcome = resolveVerifiedReceipt(stateHolder, request, kind);
+      resolved.set(kind, outcome);
+      if (outcome.ok) verifiedRefs.push(request.receipts[kind]);
+    }
+    const outcome = resolved.get(kind);
+    if (!outcome.ok) return refused(check, outcome.reasonId, outcome.note, outcome.detail);
+    return use(outcome.body);
+  };
 
   const { states, satisfiedChecks, notReached, blocking } = runChecks(V5_RELEASE_CHECKS, {
-    independent_review: () => {
+    independent_review: () => withReceipt("independent_review", "review", review => {
       if (review.state !== "accepted")
         return refused("independent_review", "release_review_not_accepted",
           "release requires an accepted independent review", { review_state: review.state });
@@ -1005,9 +1222,12 @@ export function evaluateReleaseEligibility(request) {
           "a review of another head is not a review of this one",
           { reviewed_head_sha: review.reviewed_head_sha, head_sha: request.head_sha });
       return satisfied("independent_review", "accepted by an independent reviewer on this exact head");
-    },
-    green_required_checks: () => {
-      if (request.required_checks.length === 0)
+    }),
+    green_required_checks: () => withReceipt("green_required_checks", "required_checks", receipt => {
+      const checks = receipt.checks;
+      const notGreen = checks.filter(check => check.conclusion !== "success");
+      const otherHead = checks.filter(check => check.head_sha !== request.head_sha);
+      if (checks.length === 0)
         return refused("green_required_checks", "release_required_check_not_green",
           "a release with no required check is a release with no evidence", { required_checks: [] });
       if (notGreen.length)
@@ -1017,19 +1237,21 @@ export function evaluateReleaseEligibility(request) {
         return refused("green_required_checks", "release_required_check_bound_to_other_head",
           "a green check on another head proves nothing about this one",
           { bound_to_other_head: otherHead.map(check => check.name).sort(), head_sha: request.head_sha });
-      return satisfied("green_required_checks", `${request.required_checks.length} required check(s) green on this head`);
-    },
-    exact_head: () => request.observed_head_sha === request.head_sha
-      ? satisfied("exact_head", "the branch head is still the reviewed and tested head")
-      : refused("exact_head", "release_head_moved",
-        "the branch moved after review; the evidence describes a head that is no longer there",
-        { head_sha: request.head_sha, observed_head_sha: request.observed_head_sha }),
-    serialized_merge_slot: () => (slot.state === "free" || slot.held_by_slice_ref === request.slice_ref)
-      ? satisfied("serialized_merge_slot", "one eligible slice merges at a time and this is it")
-      : refused("serialized_merge_slot", "serialized_merge_slot_held",
-        "merge is serialized; another slice holds the slot",
-        { held_by_slice_ref: slot.held_by_slice_ref }),
-    descendant_revalidation: () => {
+      return satisfied("green_required_checks", `${checks.length} required check(s) green on this head`);
+    }),
+    exact_head: () => withReceipt("exact_head", "head_observation", observation =>
+      observation.observed_head_sha === request.head_sha
+        ? satisfied("exact_head", "the branch head is still the reviewed and tested head")
+        : refused("exact_head", "release_head_moved",
+          "the branch moved after review; the evidence describes a head that is no longer there",
+          { head_sha: request.head_sha, observed_head_sha: observation.observed_head_sha })),
+    serialized_merge_slot: () => withReceipt("serialized_merge_slot", "merge_slot", slot =>
+      (slot.state === "free" || slot.held_by_slice_ref === request.slice_ref)
+        ? satisfied("serialized_merge_slot", "one eligible slice merges at a time and this is it")
+        : refused("serialized_merge_slot", "serialized_merge_slot_held",
+          "merge is serialized; another slice holds the slot",
+          { held_by_slice_ref: slot.held_by_slice_ref })),
+    descendant_revalidation: () => withReceipt("descendant_revalidation", "revalidation", revalidation => {
       if (!revalidation.required)
         return satisfied("descendant_revalidation", "no preceding merge affects this slice");
       if (revalidation.revalidated_against_sha === revalidation.current_main_sha)
@@ -1037,8 +1259,8 @@ export function evaluateReleaseEligibility(request) {
       return refused("descendant_revalidation", "descendant_revalidation_required",
         "after each merge every affected descendant is rebased and revalidated before its delivery",
         { revalidated_against_sha: revalidation.revalidated_against_sha, current_main_sha: revalidation.current_main_sha });
-    },
-    merged_readback: () => {
+    }),
+    merged_readback: () => withReceipt("merged_readback", "readback", readback => {
       if (readback.state !== "verified")
         return refused("merged_readback", "release_readback_not_verified",
           "a merge is not a delivery until the delivered source is read back from main",
@@ -1048,11 +1270,12 @@ export function evaluateReleaseEligibility(request) {
           "what landed on main is not what was reviewed",
           { delivered_source_digest: readback.delivered_source_digest, expected_source_digest: readback.expected_source_digest });
       return satisfied("merged_readback", `read back from main at ${readback.main_sha}`);
-    },
+    }),
   });
 
   const released = blocking === null;
   const mergeAdmitted = V5_PRE_MERGE_RELEASE_CHECKS.every(check => states[check].state === "satisfied");
+  const headObservation = resolved.get("head_observation");
 
   return deepFreeze({
     schema_version: V5_PROGRAM_CONTROLLER_SCHEMA_VERSION,
@@ -1064,8 +1287,16 @@ export function evaluateReleaseEligibility(request) {
       : states[blocking].reason_id,
     slice_ref: request.slice_ref,
     head_sha: request.head_sha,
+    // Null until a verified head-observation receipt says otherwise. The
+    // controller never restates an unverified observation as a fact.
+    observed_head_sha: headObservation?.ok ? headObservation.body.observed_head_sha : null,
     merge_admitted: mergeAdmitted,
     released,
+    state_holder_bound: holderBound,
+    receipt_refs_cited: Object.fromEntries(
+      V5_RELEASE_RECEIPT_KINDS.map(kind => [kind, request.receipts[kind]])),
+    receipt_refs_verified: [...verifiedRefs].sort(),
+    caller_stated_release_facts: false,
     // The honest unavailable. There is no field on this request that can assert
     // either upstream receipt, so no caller can talk its way into an auto
     // release; the state is derived from steps this repository does not
@@ -1130,6 +1361,8 @@ export function v5ProgramControllerPolicyPreimage() {
     check_conclusions: [...V5_CHECK_CONCLUSIONS].sort(),
     readback_states: [...V5_READBACK_STATES].sort(),
     reconstruction_sources: [...RECONSTRUCTION_SOURCES].sort(),
+    release_receipt_kinds: [...V5_RELEASE_RECEIPT_KINDS].sort(),
+    release_receipt_ref_pattern: RELEASE_RECEIPT_REF.source,
     reason_ids: [...V5_PROGRAM_CONTROLLER_REASON_IDS].sort(),
     repository_actions: [...ENGINEERING_REPOSITORY_ACTIONS].sort(),
     auto_release_state: "unavailable",
@@ -1138,6 +1371,12 @@ export function v5ProgramControllerPolicyPreimage() {
     caller_may_select_checks: false,
     caller_may_assert_upstream_receipt: false,
     caller_may_claim_catalog_disjointness: false,
+    // The three properties the independent review of PR 980 proved absent.
+    caller_may_assert_granted_width: false,
+    caller_may_state_release_fact: false,
+    release_facts_resolved_from_state_holder: true,
+    width_derived_from_evidence_at_admission: true,
+    checkpoint_worktree_must_match_active_lease: true,
     path_overlap_is_segment_wise: true,
     unsorted_or_repeating_lease_is_unreadable: true,
     width_earned_one_step_at_a_time: true,
