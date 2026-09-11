@@ -2192,6 +2192,221 @@ def _health_surface_sections() -> tuple[str, list[str]]:
     return proc.stdout + proc.stderr, section_lines
 
 
+# THE ROUTE, BY NAME.  Every function in tools/health-check.py that this slice
+# owns: the two sections that print it, and -- added by the twelfth correction --
+# the store-derived contradiction alarm, its predicate, the frozen-answer builder
+# and the unexported test hook.  Every string literal in each of them is swept,
+# docstrings excepted (see below), so a privileged word cannot enter the alarm's
+# vocabulary without failing this suite.
+ROUTE_FUNCTIONS = (
+    "_canonical_workflow_truth",
+    "_canonical_assurance_health",
+    "_contradiction_groups",
+    "_alarm_answer",
+    "_workflow_truth_contradiction_alarm",
+    "_hypothetical_contradiction_alarm",
+    "_canonical_contradiction_alarm",
+)
+
+# The seeded row sets the alarm's test hook is driven with.  These are ROWS, the
+# shape ops.workflow_acceptance and ops.legacy_schedule_observation_receipt hold,
+# not a census and not a projection: the alarm's whole design is that its input
+# is the store and nothing else, so the only way to test its predicate is to hand
+# the unexported hook rows that a store could have held.
+ALARM_SEEDS: dict[str, Any] = {
+    "an acceptance subject that is both accepted and rejected": {
+        "acceptance_rows": [
+            {"workflow_key": "seeded-subject", "workflow_version": 1,
+             "mode": "shadow", "status": "accepted"},
+            {"workflow_key": "seeded-subject", "workflow_version": 1,
+             "mode": "shadow", "status": "rejected"}],
+        "schedule_rows": []},
+    "two surfaces of one workflow disagreeing about the schedule": {
+        "acceptance_rows": [],
+        "schedule_rows": [
+            {"workflow_key": "seeded-subject", "workflow_version": 1,
+             "surface_id": "seeded-subject.launchd.v1", "scheduler_state": "enabled"},
+            {"workflow_key": "seeded-subject", "workflow_version": 1,
+             "surface_id": "seeded-subject.claude-code.v1",
+             "scheduler_state": "disabled"}]},
+    # THE MUTATION CONTROL, and it is the same set with ONE row taken out.  If
+    # the verdict came from the shape of the seed rather than from the
+    # contradiction inside it, this would still be red.
+    "the same acceptance subject with the contradicting row taken out": {
+        "acceptance_rows": [
+            {"workflow_key": "seeded-subject", "workflow_version": 1,
+             "mode": "shadow", "status": "accepted"}],
+        "schedule_rows": []},
+    "one workflow whose two surfaces agree": {
+        "acceptance_rows": [],
+        "schedule_rows": [
+            {"workflow_key": "seeded-subject", "workflow_version": 1,
+             "surface_id": "seeded-subject.launchd.v1", "scheduler_state": "enabled"},
+            {"workflow_key": "seeded-subject", "workflow_version": 1,
+             "surface_id": "seeded-subject.claude-code.v1",
+             "scheduler_state": "enabled"}]},
+    "a store holding no rows at all": {"acceptance_rows": [], "schedule_rows": []},
+}
+
+RED_SEEDS = ("an acceptance subject that is both accepted and rejected",
+             "two surfaces of one workflow disagreeing about the schedule")
+
+# The alarm's route is defined to take NO input, so the only way to put chosen
+# rows in front of its predicate is to reach the unexported hook inside a child
+# interpreter.  tools/health-check.py is a SCRIPT -- importing it runs the whole
+# health surface -- so the probe executes the real file with the tap refused, and
+# keeps the namespace the run left behind.  Nothing is retyped here: the hook,
+# the predicate and the literals are the file's own objects.
+_ALARM_HOOK_PROBE = r"""
+import json, subprocess, sys, tempfile
+
+REPO, seeds_path = sys.argv[1], sys.argv[2]
+sys.path.insert(0, REPO)
+sys.path.insert(0, REPO + "/tools")
+
+
+class _Refused:
+    returncode, stdout, stderr = 1, "", "no database tap in this hermetic run"
+
+
+subprocess.run = lambda *a, **k: _Refused()
+
+with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+    json.dump({"observed_at": "2026-09-09T12:00:00+00:00", "exports": None,
+               "errors": [], "job_definitions": [], "jobs": []}, fh)
+    fixture = fh.name
+sys.argv = ["health-check.py", "--section", "jobs", "--fixture", fixture]
+
+path = REPO + "/tools/health-check.py"
+namespace = {"__name__": "__main__", "__file__": path}
+with open(path, encoding="utf-8") as handle:
+    source = handle.read()
+try:
+    exec(compile(source, path, "exec"), namespace)
+except SystemExit:
+    pass
+
+with open(seeds_path, encoding="utf-8") as handle:
+    seeds = json.load(handle)
+hook = namespace["_hypothetical_contradiction_alarm"]
+answers = {label: hook(rows) for label, rows in seeds.items()}
+# The REAL route as well, called the only way it can be called -- with nothing --
+# so its own answer is swept beside the hypotheticals.
+answers["the route itself, with the tap refused"] = dict(
+    namespace["_workflow_truth_contradiction_alarm"]())
+answers["the route's parameter count"] = len(
+    __import__("inspect").signature(
+        namespace["_workflow_truth_contradiction_alarm"]).parameters)
+print("ALARM_HOOK_JSON=" + json.dumps(answers))
+"""
+
+_ALARM_ANSWERS: dict[str, Any] | None = None
+
+
+def _alarm_hook_answers() -> dict[str, Any]:
+    """Drive the alarm's unexported hook over every seeded row set, once."""
+    global _ALARM_ANSWERS
+    if _ALARM_ANSWERS is not None:
+        return _ALARM_ANSWERS
+    import os
+    import subprocess
+    import tempfile
+
+    directory = tempfile.mkdtemp(prefix="assurance-health-alarm-probe-")
+    probe = os.path.join(directory, "probe.py")
+    seeds = os.path.join(directory, "seeds.json")
+    try:
+        with open(probe, "w", encoding="utf-8") as fh:
+            fh.write(_ALARM_HOOK_PROBE)
+        with open(seeds, "w", encoding="utf-8") as fh:
+            json.dump(ALARM_SEEDS, fh)
+        proc = subprocess.run([sys.executable, probe, str(REPO), seeds],
+                              cwd=str(REPO), text=True, capture_output=True,
+                              timeout=180)
+    finally:
+        for path in (probe, seeds):
+            if os.path.exists(path):
+                os.unlink(path)
+        os.rmdir(directory)
+    answers: dict[str, Any] = {}
+    for line in (proc.stdout + proc.stderr).splitlines():
+        if line.startswith("ALARM_HOOK_JSON="):
+            answers = json.loads(line.split("=", 1)[1])
+    _ALARM_ANSWERS = answers
+    return answers
+
+
+def contradiction_alarm_checks() -> None:
+    """THE ALARM THE TENTH ROUND REMOVED WITHOUT SAYING SO, AND ITS CONTROLS.
+
+    WHAT IT IS.  ``run.sh health`` goes RED when the control plane's own durable
+    rows contradict themselves -- a (workflow, version, mode) both accepted and
+    rejected in ops.workflow_acceptance, or two registered surfaces of one
+    workflow whose latest receipts disagree about the native schedule.  The tenth
+    correction deleted the census route that used to carry that signal and the
+    signal went with it; the eleventh round filed defect 26c1e6d8 rather than
+    blessing the loss, and this is the restoration.
+
+    WHY IT IS NOT THE ROUTE THAT WAS DELETED.  The deleted one rendered a census
+    a caller could compose.  This one takes no argument at all, so there is no
+    shape to forge: the verdict comes out of one read-only statement against the
+    store and is one of two module-level literals.  What is tested here is the
+    PREDICATE, reached through the unexported hook with rows this suite composed,
+    plus the route's own answer with no tap in front of it.
+
+    THE CONTROLS, because a red-on-red test proves nothing on its own: each
+    contradictory seed has a sibling that differs by exactly one row, and the
+    sibling must come back not-red.  A predicate that answered red for any set of
+    two rows, or that had gone dead and answered not-red for everything, fails
+    here rather than passing quietly.
+    """
+    answers = _alarm_hook_answers()
+    check("the alarm's hook answered every seeded row set",
+          set(answers) == set(ALARM_SEEDS) | {"the route itself, with the tap refused",
+                                              "the route's parameter count"},
+          json.dumps(sorted(answers)))
+    for label in RED_SEEDS:
+        answer = answers.get(label) or {}
+        check(f"the alarm is RED on a seeded contradiction: {label}",
+              answer.get("hypothetical-alarm") == "red"
+              and answer.get("hypothetical-group-count") == 1
+              and bool(answer.get("hypothetical-groups"))
+              and all("seeded-subject" in name
+                      for name in answer["hypothetical-groups"]),
+              json.dumps(answer))
+    for label in sorted(set(ALARM_SEEDS) - set(RED_SEEDS)):
+        answer = answers.get(label) or {}
+        check(f"the alarm stays NOT RED on a set that does not contradict itself: "
+              f"{label}",
+              answer.get("hypothetical-alarm") == "not_red"
+              and answer.get("hypothetical-group-count") == 0
+              and answer.get("hypothetical-groups") == [],
+              json.dumps(answer))
+    check("the route takes no argument, so there is no caller input to forge",
+          answers.get("the route's parameter count") == 0,
+          json.dumps(answers.get("the route's parameter count")))
+    refused = answers.get("the route itself, with the tap refused") or {}
+    check("with the store out of reach the route says unavailable, never not-red, "
+          "and counts nothing",
+          refused.get("alarm") == "unavailable"
+          and refused.get("reason") == "store_unreachable"
+          and refused.get("groups") == 0 and refused.get("group_names") == [],
+          json.dumps(refused))
+
+    # ---- no public name anywhere on the alarm route -------------------------
+    import ast
+
+    tree = ast.parse((REPO / "tools" / "health-check.py").read_text(encoding="utf-8"))
+    alarm_names = sorted(
+        node.name for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and ("contradiction" in node.name or "alarm" in node.name))
+    check("every function on the alarm route is module-private; there is no "
+          "exported classifier",
+          bool(alarm_names) and all(name.startswith("_") for name in alarm_names)
+          and len(alarm_names) >= 4, json.dumps(alarm_names))
+
+
 def _route_source_strings() -> list[tuple[str, str]]:
     """Every string a section function can EMIT, which is every string constant in
     its body except its own docstring.
@@ -2211,8 +2426,7 @@ def _route_source_strings() -> list[tuple[str, str]]:
     tree = ast.parse((REPO / "tools" / "health-check.py").read_text(encoding="utf-8"))
     out: list[tuple[str, str]] = []
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name in (
-                "_canonical_workflow_truth", "_canonical_assurance_health"):
+        if isinstance(node, ast.FunctionDef) and node.name in ROUTE_FUNCTIONS:
             body = node.body
             if (body and isinstance(body[0], ast.Expr)
                     and isinstance(body[0].value, ast.Constant)
@@ -2426,13 +2640,28 @@ def closed_union_sweep_checks() -> None:
     for index, line in enumerate(section_lines):
         observed.append(("tools/health-check.py::section", f"line{index}", line))
     route_strings = _route_source_strings()
-    check("the sweep found the string literals of both section functions",
+    check("the sweep found the string literals of every function on this route, "
+          "the alarm's four included",
           len(route_strings) >= 8
-          and {name for name, _ in route_strings} == {"_canonical_workflow_truth",
-                                                      "_canonical_assurance_health"},
+          and {name for name, _ in route_strings} == set(ROUTE_FUNCTIONS),
           json.dumps(sorted({name for name, _ in route_strings})))
     for name, text in route_strings:
         observed.append((f"tools/health-check.py::{name}", name, text))
+
+    # (4) THE ALARM'S OUTPUTS, through its unexported hook.  The twelfth
+    # correction's route answers a question no other surface here answers, so its
+    # answers are swept on the same footing as every export: keys and values, over
+    # every seeded row set, plus the real route's own answer with the tap refused.
+    alarm_answers = _alarm_hook_answers()
+    check("the sweep reached the alarm's answers as well",
+          len(alarm_answers) >= len(ALARM_SEEDS) + 1
+          and any(isinstance(value, dict) and "hypothetical-alarm" in value
+                  for value in alarm_answers.values()),
+          json.dumps(sorted(alarm_answers)))
+    for label, answer in sorted(alarm_answers.items()):
+        observed.append((f"tools/health-check.py::alarm", label, label))
+        for key, scalar in _outcome_scalars(answer):
+            observed.append((f"tools/health-check.py::alarm", key, scalar))
 
     scalars = [(key, scalar) for _, key, scalar in observed]
     by_call = {label for label, _, _ in observed}
@@ -3015,6 +3244,7 @@ def main() -> int:
     source_adapter_checks()
     sources_public_surface_guard_checks(health)
     label_route_fallback_checks()
+    contradiction_alarm_checks()
     closed_union_sweep_checks()
     surface_wiring_checks()
     census_route_invariance_checks()

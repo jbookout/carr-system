@@ -19,6 +19,7 @@ brand-new task is never mistaken for a broken one. See the scheduler section bel
 """
 import json, os, sys, glob, time, re, subprocess, calendar
 from datetime import datetime, timedelta, timezone
+from types import MappingProxyType
 from zoneinfo import ZoneInfo
 import health_submodule as _health_sub
 
@@ -353,6 +354,199 @@ def _canonical_assurance_health():
     print(f"  -- assurance health   UNAVAILABLE — {result['reason']}; item carried as "
           f"{result['item_disposition']}")
     print(f"  -- OWED SEAM {result['owed_seam']}")
+
+
+# ── the workflow-truth contradiction alarm (twelfth correction, 2026-09-11) ──
+# WHAT THE TENTH ROUND TOOK OUT WITHOUT SAYING SO.  Before that round this file
+# read the F09 census and turned `run.sh health` RED when the control plane's own
+# workflow evidence contradicted itself.  The census route was deleted because a
+# caller sharing the process could put its own census behind it -- and the alarm
+# went out with it, silently.  That is a product regression: a contradiction in
+# the control plane is exactly the condition operations must be told about, and
+# `run.sh health` stopped saying it.
+#
+# WHY THIS ROUTE IS NOT THE ROUTE THAT WAS DELETED.  The deleted one derived a
+# rendered CENSUS -- a projection over a manifest, a registry file, a freshness
+# window and a handle -- and handed it to a consumer that printed it.  This one
+# answers one yes/no question out of rows the store itself holds:
+#
+#   * ops.workflow_acceptance says a (workflow, version, mode) is BOTH accepted
+#     and rejected, and
+#   * ops.legacy_schedule_observation_receipt's latest receipt per surface has
+#     two surfaces of one workflow disagreeing about the native schedule.
+#
+# Both are contradictions in the durable rows, not in anybody's projection of
+# them.  There is no argument on the route, no module global read at call time,
+# no handle, no reader object, no fixture and no manifest: the function takes
+# nothing, runs ONE read-only statement (therefore one transaction) through the
+# canonical tap, and returns a frozen mapping whose verdict is one of two
+# module-level literals.  Nothing a caller passes anywhere in this process can
+# reach it, because there is nowhere to pass anything.
+#
+# THE ONE CLASS THIS ALARM DOES NOT COVER, NAMED RATHER THAN OMITTED.  The
+# Completion Register's own conflicting lifecycle lives in
+# ops.completion_projection, which derives its tenant from a server setting and
+# RAISES without one (`completion register requires a server-derived tenant`).
+# Reading it would need a second call with session setup, so the whole read would
+# stop being one transaction and would refuse outright on every machine that has
+# no tenant set.  So this alarm covers the two contradiction classes that live in
+# plain durable rows, and a completion contradiction is still carried by the
+# Completion Register's own surfaces.  Widening it is a seam, not a silence.
+#
+# WHAT "UNAVAILABLE" MEANS HERE, since it is a third answer and not a quiet
+# green.  If the statement cannot be run or its answer cannot be parsed, the
+# alarm says so in its own line and claims NOTHING about consistency; it does not
+# report not-red.  A normal run whose tap is broken is already red through the
+# snapshot's own source_unreadable finding, so an unreadable alarm does not need
+# to double-count it -- but it must never be mistaken for an all-clear.
+_ALARM_RED = "red"
+_ALARM_NOT_RED = "not_red"
+_ALARM_UNAVAILABLE = "unavailable"
+
+# ONE STATEMENT, therefore one implicit read-only transaction (the tap opens its
+# session with default_transaction_read_only=on).  Kept at module level rather
+# than inside the function so the acceptance suite's closed-union sweep reads the
+# function's own emitted strings and not the column vocabulary of the schema.
+_CONTRADICTION_STATEMENT = """select json_build_object(
+  'acceptance_rows', coalesce((select json_agg(json_build_object(
+       'workflow_key', a.workflow_key, 'workflow_version', a.workflow_version,
+       'mode', a.mode, 'status', a.status)
+     order by a.workflow_key, a.workflow_version, a.mode, a.status)
+     from ops.workflow_acceptance a), '[]'::json),
+  'schedule_rows', coalesce((select json_agg(json_build_object(
+       'workflow_key', o.workflow_key, 'workflow_version', o.workflow_version,
+       'surface_id', o.surface_id, 'scheduler_state', o.scheduler_state)
+     order by o.workflow_key, o.workflow_version, o.surface_id)
+     from (select distinct on (surface_id) surface_id, workflow_key, workflow_version,
+                  scheduler_state
+             from ops.legacy_schedule_observation_receipt
+            order by surface_id, observed_at desc, id desc) o), '[]'::json)
+)::text"""
+
+
+def _contradiction_groups(rows):
+    """Name every group of store rows that contradicts itself.
+
+    The predicate, and it is deliberately the whole of the decision: a group is
+    contradictory when the durable rows themselves state two things that cannot
+    both be so.  Latest-receipt-per-surface is applied in the statement, so a
+    schedule that was switched off yesterday is a change and not a contradiction;
+    two surfaces of ONE workflow disagreeing today is a contradiction.
+
+    Malformed rows raise rather than being guessed at.  On the real route that
+    refusal becomes an unavailable alarm, never a not-red one.
+    """
+    groups = []
+    acceptance = {}
+    for row in rows.get("acceptance_rows") or []:
+        subject = (str(row["workflow_key"]), int(row["workflow_version"]),
+                   str(row["mode"]))
+        acceptance.setdefault(subject, set()).add(str(row["status"]))
+    for (key, version, mode), seen in acceptance.items():
+        if "accepted" in seen and "rejected" in seen:
+            groups.append(f"acceptance/{key}@v{version}/{mode}")
+    schedule = {}
+    for row in rows.get("schedule_rows") or []:
+        subject = (str(row["workflow_key"]), int(row["workflow_version"]))
+        schedule.setdefault(subject, set()).add(str(row["scheduler_state"]))
+    for (key, version), seen in schedule.items():
+        if len(seen) > 1:
+            groups.append(f"schedule/{key}@v{version}")
+    return tuple(sorted(groups))
+
+
+def _alarm_answer(verdict, groups=(), reason=None):
+    """Freeze one alarm answer: the verdict literal, the count, and the names."""
+    return MappingProxyType({
+        "alarm": verdict,
+        "groups": len(groups),
+        "group_names": tuple(groups),
+        "reason": reason,
+    })
+
+
+def _workflow_truth_contradiction_alarm():
+    """Ask the control plane's own rows whether they contradict themselves.
+
+    NO ARGUMENT, NO GLOBAL STATE READ AT CALL TIME, NO CALLER OBJECT.  The only
+    input is the store, reached through the canonical tap in one statement.  The
+    answer is a frozen mapping carrying one of three literals defined above and
+    the count; there is no exported classifier anywhere on this route and nothing
+    here is reachable with caller-supplied input.
+    """
+    venv = os.path.join(REPO_ROOT, ".venv/bin/python")
+    try:
+        proc = subprocess.run(
+            [venv if os.path.exists(venv) else sys.executable,
+             os.path.join(REPO_ROOT, "tools/db-tap.py"), "sql", "/dev/stdin"],
+            input=_CONTRADICTION_STATEMENT, cwd=REPO_ROOT, text=True,
+            capture_output=True, timeout=120,
+            env={k: v for k, v in os.environ.items() if k != "CARR_VAULT"},
+        )
+    except Exception:
+        return _alarm_answer(_ALARM_UNAVAILABLE, reason="store_unreachable")
+    if getattr(proc, "returncode", 1):
+        return _alarm_answer(_ALARM_UNAVAILABLE, reason="store_unreachable")
+    rows = None
+    for line in reversed((getattr(proc, "stdout", "") or "").splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                rows = json.loads(line)
+            except ValueError:
+                return _alarm_answer(_ALARM_UNAVAILABLE, reason="answer_unparseable")
+            break
+    if not isinstance(rows, dict):
+        return _alarm_answer(_ALARM_UNAVAILABLE, reason="answer_unparseable")
+    try:
+        groups = _contradiction_groups(rows)
+    except Exception:
+        return _alarm_answer(_ALARM_UNAVAILABLE, reason="answer_shape_refused")
+    return _alarm_answer(_ALARM_RED if groups else _ALARM_NOT_RED, groups=groups)
+
+
+def _hypothetical_contradiction_alarm(rows):
+    """THE TEST HOOK, and it is not a route: it classifies rows a caller composed.
+
+    The standing rule's shape, applied: the decision lives in
+    ``_contradiction_groups`` and in the real route above, both module-private,
+    and a test reaches the classification only through this unexported hook, which
+    returns it under names no consumer would take for the alarm's own keys
+    (``hypothetical-alarm``, never ``alarm``).
+
+    WHY NOT THE RULE'S OWN EXAMPLE SPELLING.  The rule offers
+    ``would_read_if_authoritative`` as the shape for such a hook, and the adapter's
+    older hook is spelled that way -- but the same rule makes ``^would_`` and
+    ``_if_authoritative`` privileged PATTERNS, and this route's functions are
+    swept BY NAME as well as by output (see ROUTE_FUNCTIONS in
+    ops/assurance-health-selftest.py).  Sweeping more is the fail-safe half of
+    that pair, so the hook takes a name that is distinct from the route's without
+    spelling a pattern the sweep forbids.  Nothing in this repository calls it
+    outside the acceptance suites.
+    """
+    groups = _contradiction_groups(rows)
+    return {"hypothetical-alarm": _ALARM_RED if groups else _ALARM_NOT_RED,
+            "hypothetical-groups": list(groups),
+            "hypothetical-group-count": len(groups)}
+
+
+def _canonical_contradiction_alarm():
+    """Print the alarm and return 1 when the control plane contradicts itself."""
+    answer = _workflow_truth_contradiction_alarm()
+    verdict = answer["alarm"]
+    if verdict == _ALARM_RED:
+        detail = (f"{answer['groups']} self-contradicting group(s) in the control "
+                  f"plane's own rows: " + ", ".join(answer["group_names"]))
+        print(f"  \u26a0\ufe0e workflow contradiction alarm   RED \u2014 {detail}")
+        _canonical_finding("workflow_truth_conflict", detail)
+        return 1
+    if verdict == _ALARM_NOT_RED:
+        print(f"  -- workflow contradiction alarm   NOT RED \u2014 {answer['groups']} "
+              "self-contradicting group(s) in the control plane's own rows")
+        return 0
+    print(f"  -- workflow contradiction alarm   UNAVAILABLE \u2014 {answer['reason']}; "
+          "this run says nothing either way about the control plane's consistency")
+    return 0
 
 
 def _print_assurance_layer_gaps(projection):
@@ -912,11 +1106,21 @@ def _canonical_health():
             else:
                 print(f"  OK {len(live_jobs)} live job(s), every due window present; "
                       "no terminal failure, stuck state, or unreceipted success")
-        # NEITHER SECTION CAN TURN THIS PROCESS RED, and neither returns a code:
-        # both report that their route cannot be proven, which is a standing fact
-        # about this repository rather than a fault of today's run. The fixture
-        # door is the one caller-fed path and it is labelled as a test door.
+        # NEITHER OF THE TWO CENSUS SECTIONS CAN TURN THIS PROCESS RED, and
+        # neither returns a code: both report that their route cannot be proven,
+        # which is a standing fact about this repository rather than a fault of
+        # today's run. The fixture door is the one caller-fed path and it is
+        # labelled as a test door.
+        #
+        # THE ALARM BELOW IS THE EXCEPTION AND IT IS NOT FED BY ANY OF THAT. It
+        # takes no argument, ignores the fixture entirely, and reads the store
+        # itself; a contradiction in the control plane's own rows is the one
+        # condition on this slice that still turns health red. It runs on the
+        # fixture path too, because a caller must not be able to quiet it by
+        # choosing a door.
         _canonical_workflow_truth()
+        if _canonical_contradiction_alarm():
+            rc = 1
         if CANONICAL_FIXTURE:
             _fixture_assurance_health(snap)
         else:
