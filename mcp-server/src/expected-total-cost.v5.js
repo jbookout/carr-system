@@ -323,7 +323,7 @@ function assertSelfCertificationFree(value, path) {
     fail("invalid_partition", "a cost component is placed in more than one routing bucket",
       { placed: sorted });
   }
-  if (sorted.join(" ") !== [...V5_COST_COMPONENTS].join(" ")) {
+  if (sorted.join(" ") !== [...V5_COST_COMPONENTS].join(" ")) {
     fail("invalid_partition",
       "the routing-bucket partition must cover every declared cost component exactly once",
       { placed: sorted, components: [...V5_COST_COMPONENTS] });
